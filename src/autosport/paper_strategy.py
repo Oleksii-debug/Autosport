@@ -248,6 +248,73 @@ class PaperValueAgent:
         if estimate.expected_profit_per_unit < self.minimum_edge:
             return
 
+        # PaperValueAgent may decide/propose, but it no longer owns fill truth.
+        # Any material PAPER exposure must traverse the canonical #623 runtime.
+        runtime = context.paper_execution
+        provider_accounts = dict(context.paper_provider_accounts)
+        account_id = provider_accounts.get(event.source_id)
+        if runtime is None or account_id is None:
+            context.notes.append(
+                "paper-value material action withheld: canonical #623 execution "
+                "runtime/account authority is unavailable"
+            )
+            return
+
+        goal = self.risk_policy.economic_goal
+        if goal is not None and context.decision_ledger is None:
+            return
+
+        material_action_id = self._material_action_id(context, event)
+        persisted = None
+        chosen_stake: Decimal | None = None
+        if goal is not None:
+            ledger = context.decision_ledger
+            assert ledger is not None
+            if getattr(ledger, "path", None) is not None and ledger.path.exists():
+                persisted = ledger.verified_economic_decision_for_material_action(
+                    material_action_id,
+                    goal,
+                    risk_policy=self.risk_policy,
+                )
+            if persisted is not None:
+                payload = persisted.payload
+                if (
+                    persisted.replay_run_id != context.replay_run_id
+                    or persisted.agent != self.name
+                    or persisted.action != _MATERIAL_ACTION_NAME
+                    or persisted.observed_ts != event.observed_ts
+                    or payload.get("material_action_id") != material_action_id
+                    or payload.get("quote_key") != event.quote_key
+                ):
+                    raise PaperDecisionReconciliationRequired(
+                        "durable paper-value decision identity changed across restart"
+                    )
+                try:
+                    chosen_stake = Decimal(str(payload["requested_stake"]))
+                except Exception as exc:
+                    raise PaperDecisionReconciliationRequired(
+                        "durable paper-value decision lacks canonical requested stake"
+                    ) from exc
+                if not chosen_stake.is_finite() or chosen_stake <= 0:
+                    raise PaperDecisionReconciliationRequired(
+                        "durable paper-value requested stake is invalid"
+                    )
+
+        if chosen_stake is None:
+            chosen_stake = (
+                self.stake
+                if goal is None
+                else self._derive_goal_stake(
+                    context,
+                    estimate.expected_profit_per_unit,
+                )
+            )
+            if chosen_stake is None:
+                return
+
+        if paper_quote_rejection_reason(event, chosen_stake) is not None:
+            return
+
         leg = TicketLeg(
             event.event_id,
             event.market_id,
@@ -255,92 +322,56 @@ class PaperValueAgent:
             event.decimal_odds,
             sport=event.sport,
         )
-        goal = self.risk_policy.economic_goal
-        if goal is not None and context.decision_ledger is None:
-            return
-
-        material_action_id: str | None = None
-        if goal is not None:
-            material_action_id = self._material_action_id(context, event)
-            # Reconcile before deriving a fresh stake. The durable ticket itself
-            # changes current exposure, so re-sizing first could turn a valid
-            # redelivery into ZERO or a different amount.
-            if self._reconcile_existing_economic_action(
-                event,
-                context,
-                goal,
-                material_action_id,
-            ):
-                return
-
-        chosen_stake = (
-            self.stake
-            if goal is None
-            else self._derive_goal_stake(
-                context,
-                estimate.expected_profit_per_unit,
-            )
-        )
-        if chosen_stake is None:
-            return
-        if paper_quote_rejection_reason(event, chosen_stake) is not None:
-            return
-
         proposal_context = None
         if goal is not None:
             proposal_context = ProposedTicketRiskContext(
                 legs=(leg,),
                 quotes=(event,),
+                provider_accounts=((event.source_id, account_id),),
                 bankroll_id=goal.bankroll_id,
                 currency=goal.currency,
                 proposal_ts=event.observed_ts,
             )
 
-        risk = self.risk_policy.evaluate(
-            context.paper_book,
-            chosen_stake,
-            context=proposal_context,
-        )
-        if not risk.allowed:
-            return
-
-        reason = (
-            self._strategy_reason(
-                forecast,
-                estimate.expected_profit_per_unit,
-                material_action_id,
+        # A recovered durable decision has already passed the exact historical
+        # risk gate. Re-evaluating after an accepted/partial ticket would resize
+        # against changed exposure and could mint a different #623 plan.
+        if persisted is None:
+            risk = self.risk_policy.evaluate(
+                context.paper_book,
+                chosen_stake,
+                context=proposal_context,
             )
-            if material_action_id is not None
-            else f"paper forecast {forecast.model_id}; EV/unit={estimate.expected_profit_per_unit}"
+            if not risk.allowed:
+                return
+
+        prepared = runtime.prepare_paper_value_action(
+            event=event,
+            stake=chosen_stake,
+            decision_id=material_action_id,
+            account_id=account_id,
+            bankroll_id=(goal.bankroll_id if goal is not None else None),
+            currency=(goal.currency if goal is not None else None),
         )
-        balance_before = context.paper_book.balance
-        lifecycle_len_before = len(context.paper_book._lifecycle)
-        ticket = context.paper_book.open_ticket(
-            [leg],
-            chosen_stake,
-            reason=reason,
-            placed_at=event.observed_ts,
-            provider_source_ids=(
-                tuple(sorted(proposal_context.source_ids))
-                if proposal_context is not None
-                else ()
-            ),
-            bankroll_id=goal.bankroll_id if goal is not None else None,
-            currency=goal.currency if goal is not None else None,
-        )
-        record: DecisionRecord | None = None
-        try:
-            if context.decision_ledger:
+        expected_run_id = runtime.expected_run_id(prepared, material_action_id)
+
+        if goal is not None:
+            ledger = context.decision_ledger
+            assert ledger is not None
+            if persisted is None:
                 payload = {
-                    "ticket_id": ticket.ticket_id,
                     "quote_key": event.quote_key,
                     "forecast_model": forecast.model_id,
                     "probability": str(forecast.probability),
                     "expected_profit_per_unit": str(estimate.expected_profit_per_unit),
-                    "stake": str(ticket.stake),
+                    "stake": str(chosen_stake),
+                    "requested_stake": str(chosen_stake),
+                    "material_action_id": material_action_id,
+                    "execution_plan_id": prepared.execution_plan.plan_id,
+                    "execution_plan_fingerprint": prepared.execution_plan.fingerprint,
+                    "execution_run_id": expected_run_id,
+                    "execution_authority_json": prepared.intent_evidence_json,
                 }
-                if material_action_id is not None:
-                    payload["material_action_id"] = material_action_id
                 if isinstance(forecast, ForecastRecord):
                     payload.update(
                         {
@@ -363,18 +394,52 @@ class PaperValueAgent:
                     action=_MATERIAL_ACTION_NAME,
                     payload=payload,
                     context_hash=context.market_context_hash(),
-                    decision_kind=(ECONOMIC_DECISION_KIND if goal is not None else "GENERAL"),
+                    decision_id=material_action_id,
+                    decision_kind=ECONOMIC_DECISION_KIND,
                 )
-                if goal is None:
-                    context.decision_ledger.append(record)
-                else:
-                    context.decision_ledger.append_economic(
+                try:
+                    ledger.append_economic(
                         record,
                         EconomicDecisionAuthority(goal, self.risk_policy),
                     )
-        except Exception:
-            if record is not None and self._decision_is_durable(context, record, goal):
-                self._acted.add(event.quote_key)
+                except Exception:
+                    if not self._decision_is_durable(context, record, goal):
+                        raise
+                persisted = ledger.verified_economic_decision_for_material_action(
+                    material_action_id,
+                    goal,
+                    risk_policy=self.risk_policy,
+                )
+                if persisted is None:
+                    raise PaperDecisionReconciliationRequired(
+                        "paper-value decision append did not become durable"
+                    )
+            payload = persisted.payload
+            if (
+                payload.get("requested_stake") != str(chosen_stake)
+                or payload.get("execution_plan_id") != prepared.execution_plan.plan_id
+                or payload.get("execution_plan_fingerprint")
+                != prepared.execution_plan.fingerprint
+                or payload.get("execution_run_id") != expected_run_id
+                or payload.get("execution_authority_json")
+                != prepared.intent_evidence_json
+            ):
+                raise PaperDecisionReconciliationRequired(
+                    "durable paper-value decision conflicts with #623 execution plan"
+                )
+
+        result = runtime.execute(
+            prepared=prepared,
+            trigger_id=material_action_id,
+            started_at=event.observed_ts,
+            materialize_exposure=True,
+        )
+        if result.run.run_id != expected_run_id:
+            raise PaperDecisionReconciliationRequired(
+                "paper-value execution resolved a different durable #623 run"
+            )
+
+        self._acted.add(event.quote_key)
                 return
             self._rollback_uncommitted_ticket(
                 context,

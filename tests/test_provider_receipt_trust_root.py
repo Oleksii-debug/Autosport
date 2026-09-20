@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 
 import pytest
 
@@ -114,3 +115,40 @@ def test_caller_selected_generic_root_cannot_supply_provider_receipt_trust(tmp_p
             workspace,
             authority_root=caller_root,
         ).load(forged.evidence_sha256)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX permission bits are not authoritative on Windows")
+def test_provider_receipt_key_with_broad_permissions_fails_closed(tmp_path, monkeypatch) -> None:
+    product_root = (tmp_path / "product-machine-authority").resolve()
+    monkeypatch.setenv("AUTOSPORT_MONOTONIC_AUTHORITY_ROOT", str(product_root))
+    store = CompleteGameBoardEvidenceStore((tmp_path / "workspace").resolve())
+
+    store._read_receipt_key(create=True)
+    key_path = store._key_path()
+    key_path.chmod(0o644)
+
+    with pytest.raises(
+        ProviderObservationIntegrityError,
+        match="permissions are too broad",
+    ):
+        store._read_receipt_key(create=False)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="symlink creation is not a portable Windows test primitive")
+def test_provider_receipt_key_symlink_fails_closed(tmp_path, monkeypatch) -> None:
+    product_root = (tmp_path / "product-machine-authority").resolve()
+    monkeypatch.setenv("AUTOSPORT_MONOTONIC_AUTHORITY_ROOT", str(product_root))
+    store = CompleteGameBoardEvidenceStore((tmp_path / "workspace").resolve())
+
+    key_path = store._key_path()
+    key_path.parent.mkdir(parents=True, exist_ok=True)
+    target = tmp_path / "attacker-key"
+    target.write_text((b"attacker-controlled-provider-key!"[:32]).hex(), encoding="ascii")
+    target.chmod(0o600)
+    key_path.symlink_to(target)
+
+    with pytest.raises(
+        ProviderObservationIntegrityError,
+        match="must be a regular file",
+    ):
+        store._read_receipt_key(create=False)

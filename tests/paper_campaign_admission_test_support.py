@@ -119,7 +119,11 @@ class AdmissionFixture:
         book = PaperBook("100")
         book.save(self.workspace / "paper_book.json")
         self.execution_ledger_path = self.workspace / "paper-execution.jsonl"
-        execution_ledger = PaperExecutionLedger(self.execution_ledger_path)
+        with patch.dict(
+            os.environ,
+            {"AUTOSPORT_PAPER_EXECUTION_WITNESS_DIR": str(self.authority)},
+        ):
+            execution_ledger = PaperExecutionLedger(self.execution_ledger_path)
         execution_config = _config()
         execution_runtime = PaperExecutionAdoptionRuntime(
             book=book,

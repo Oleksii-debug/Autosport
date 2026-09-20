@@ -146,6 +146,24 @@ class SupportedProductEntrypointTests(unittest.TestCase):
                 )
             self.assertFalse(workspace.exists())
 
+    def test_non_finite_poll_interval_fails_before_workspace_creation(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for index, poll_seconds in enumerate((float("nan"), float("inf"))):
+                workspace = root / f"must-not-exist-{index}"
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "finite non-negative",
+                ):
+                    run_product(
+                        workspace=workspace,
+                        source_factory="not-even-loaded:factory",
+                        max_cycles=1,
+                        poll_seconds=poll_seconds,
+                        install_signal_handlers=False,
+                    )
+                self.assertFalse(workspace.exists())
+
 
 if __name__ == "__main__":
     unittest.main()

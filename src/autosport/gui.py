@@ -446,6 +446,12 @@ class AutosportApp(tk.Tk):
             return text("ui.status.evidence_export.already_busy")
         return None
 
+    def _evidence_export_workspace(self) -> Path | None:
+        value = self.__dict__.get("_active_workspace")
+        if value is None:
+            value = self.__dict__.get("workspace")
+        return None if value is None else Path(value)
+
     def _dataset_selection_blocker(self) -> str | None:
         if self._dataset_busy:
             return text("ui.status.dataset.validation_busy")
@@ -694,7 +700,12 @@ class AutosportApp(tk.Tk):
             self._append_log(blocker)
             return
 
-        workspace = Path(self.__dict__.get("_active_workspace", self.workspace))
+        workspace = self._evidence_export_workspace()
+        if workspace is None:
+            message_text = text("ui.status.evidence_export.start_failed")
+            self.status.set(message_text)
+            self._append_log(message_text)
+            return
         output = filedialog.asksaveasfilename(
             title=text("ui.dialog.evidence_export.choose_title"),
             initialdir=str(workspace.parent),
@@ -707,8 +718,8 @@ class AutosportApp(tk.Tk):
 
         # File dialogs run a nested Tk loop. Recheck workspace identity and every
         # mutating worker after the user returns so Ctrl+E cannot race recovery.
-        current_workspace = Path(self.__dict__.get("_active_workspace", self.workspace))
-        if current_workspace != workspace:
+        current_workspace = self._evidence_export_workspace()
+        if current_workspace is None or current_workspace != workspace:
             message_text = text("ui.status.evidence_export.workspace_changed")
             self.status.set(message_text)
             self._append_log(message_text)

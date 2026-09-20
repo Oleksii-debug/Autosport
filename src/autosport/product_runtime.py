@@ -207,6 +207,7 @@ def build_autonomous_product_runtime(
     mirror = MarketMirror()
     invalidations = BoundedMirrorInvalidationBuffer(mirror)
 
+    # Rebuild volatile mirror truth from the canonical durable current projection.
     try:
         for event in market_store.current_by_source().values():
             invalidations.accept_persisted(event)
@@ -214,6 +215,9 @@ def build_autonomous_product_runtime(
         market_store.close()
         raise
 
+    # Future mirror updates are downstream of the canonical market bus so they are
+    # delivered only after SQLite persistence. If a subscriber fails after persistence,
+    # canonical desktop application recovery can safely replay from durable truth.
     market_bus = MarketEventBus(market_store)
     market_bus.subscribe(invalidations.accept_persisted)
     source_health = SourceHealthStore(root / "source_health.json")

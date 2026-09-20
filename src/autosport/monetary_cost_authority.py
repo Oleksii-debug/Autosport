@@ -427,8 +427,17 @@ class MonetaryCostAuthority:
             raise MonetaryAuthorityError(
                 "source cannot have competing allocations"
             )
-        self._allocations.setdefault(allocation.sha256, allocation)
-        self._persist()
+        existing = self._allocations.get(allocation.sha256)
+        if existing is not None:
+            if existing != allocation:
+                raise MonetaryAuthorityError("immutable allocation identity changed")
+            return allocation.ref
+        self._allocations[allocation.sha256] = allocation
+        try:
+            self._persist()
+        except Exception:
+            del self._allocations[allocation.sha256]
+            raise
         return allocation.ref
 
     def resolve_source(
@@ -491,10 +500,10 @@ class MonetaryCostAuthority:
         self._sources[key] = record
         try:
             self._validate_correction_graph()
+            self._persist()
         except Exception:
             del self._sources[key]
             raise
-        self._persist()
 
     def _validate_correction_graph(self) -> None:
         """Apply the same correction invariants to live and durable state."""

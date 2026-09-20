@@ -99,13 +99,21 @@ def _canonical_instance_id(value: object) -> str:
 
 
 def _workspace_locator(workspace: Path) -> str:
-    try:
-        resolved = workspace.resolve(strict=False)
-    except OSError as exc:
+    """Return the stable lexical path identity without following reparses/symlinks.
+
+    The machine path receipt exists specifically to reserve a previously used
+    workspace location even when the local workspace is later deleted. Resolving
+    the path through the filesystem would let the same lexical location select a
+    new receipt merely by recreating it as a symlink/junction to another target.
+    Trust-root disjointness is still checked separately against resolved paths by
+    ``resolve_monotonic_authority_root``.
+    """
+
+    if not workspace.is_absolute():
         raise WorkspaceBindingIntegrityError(
-            "cannot resolve workspace path for identity binding"
-        ) from exc
-    return os.path.normcase(str(resolved))
+            "workspace path for identity binding must be absolute"
+        )
+    return os.path.normcase(os.path.normpath(str(workspace)))
 
 
 def _fsync_directory(path: Path) -> None:

@@ -120,6 +120,7 @@ class PaperExecutionAdoptionTests(unittest.TestCase):
             ledger=ledger,
             config=model or config(),
             max_quote_age=__import__("datetime").timedelta(seconds=5),
+            paper_book_path=Path(tmp) / "paper-book.json",
         )
         return book, ledger, runtime
 
@@ -218,7 +219,8 @@ class PaperExecutionAdoptionTests(unittest.TestCase):
 
     def test_attempt_before_ticket_restart_materializes_same_attempt(self):
         with tempfile.TemporaryDirectory() as tmp:
-            book, _ledger, runtime = self.runtime(tmp)
+            book, ledger, runtime = self.runtime(tmp)
+            book_path = Path(tmp) / "paper-book.json"
             current_prepared = prepared(action("a1"))
             shadow = runtime.execute(
                 prepared=current_prepared,
@@ -227,23 +229,46 @@ class PaperExecutionAdoptionTests(unittest.TestCase):
                 materialize_exposure=False,
             )
             self.assertEqual(book.tickets, {})
+            self.assertEqual(PaperBook.load(book_path).tickets, {})
 
-            resumed = runtime.execute(
+            # Simulate a fresh process after the durable #623 attempt but before
+            # any exposure was published.
+            reloaded_book = PaperBook.load(book_path)
+            restarted = PaperExecutionAdoptionRuntime(
+                book=reloaded_book,
+                ledger=ledger,
+                config=runtime.config,
+                max_quote_age=runtime.max_quote_age,
+                paper_book_path=book_path,
+            )
+            resumed = restarted.execute(
                 prepared=current_prepared,
                 trigger_id="trigger-crash-window",
                 started_at=STARTED_AT,
                 materialize_exposure=True,
             )
             self.assertEqual(shadow.run, resumed.run)
-            self.assertEqual(len(book.tickets), 1)
-            again = runtime.execute(
+            self.assertEqual(len(reloaded_book.tickets), 1)
+
+            # Simulate a second fresh process after durable PaperBook publication
+            # but before the caller could publish its own COMMITTED progress.
+            committed_book = PaperBook.load(book_path)
+            restarted_again = PaperExecutionAdoptionRuntime(
+                book=committed_book,
+                ledger=ledger,
+                config=runtime.config,
+                max_quote_age=runtime.max_quote_age,
+                paper_book_path=book_path,
+            )
+            again = restarted_again.execute(
                 prepared=current_prepared,
                 trigger_id="trigger-crash-window",
                 started_at=STARTED_AT,
                 materialize_exposure=True,
             )
             self.assertEqual(resumed.ticket_ids, again.ticket_ids)
-            self.assertEqual(len(book.tickets), 1)
+            self.assertEqual(len(committed_book.tickets), 1)
+            self.assertEqual(PaperBook.load(book_path).tickets, committed_book.tickets)
 
     def test_second_action_rejection_keeps_only_first_accepted_exposure(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -315,6 +340,50 @@ class PaperExecutionAdoptionTests(unittest.TestCase):
             self.assertTrue(result.run.attempts[0].suspended)
             self.assertEqual(result.ticket_ids, ())
             self.assertEqual(book.tickets, {})
+
+    def test_duplicate_attempt_marker_fails_closed_after_reload(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            book, ledger, runtime = self.runtime(tmp)
+            book_path = Path(tmp) / "paper-book.json"
+            current_prepared = prepared(action("a1"))
+            first = runtime.execute(
+                prepared=current_prepared,
+                trigger_id="trigger-marker-conflict",
+                started_at=STARTED_AT,
+                materialize_exposure=True,
+            )
+            self.assertEqual(len(first.ticket_ids), 1)
+            original = next(iter(book.tickets.values()))
+            book.open_ticket(
+                original.legs,
+                original.stake,
+                reason=original.strategy_reason,
+                placed_at=original.placed_at,
+                provider_source_ids=original.provider_source_ids,
+                provider_accounts=original.provider_accounts,
+                bankroll_id=original.bankroll_id,
+                currency=original.currency,
+            )
+            book.save(book_path)
+
+            reloaded = PaperBook.load(book_path)
+            restarted = PaperExecutionAdoptionRuntime(
+                book=reloaded,
+                ledger=ledger,
+                config=runtime.config,
+                max_quote_age=runtime.max_quote_age,
+                paper_book_path=book_path,
+            )
+            with self.assertRaisesRegex(
+                Exception,
+                "duplicate exposure",
+            ):
+                restarted.execute(
+                    prepared=current_prepared,
+                    trigger_id="trigger-marker-conflict",
+                    started_at=STARTED_AT,
+                    materialize_exposure=True,
+                )
 
     def test_shadow_execution_keeps_attempt_evidence_without_ticket(self):
         with tempfile.TemporaryDirectory() as tmp:

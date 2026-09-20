@@ -2,6 +2,9 @@ from __future__ import annotations
 
 import pytest
 
+from autosport import (
+    _dataset_snapshot_lineage_publication_trust_root as lineage_trust_root,
+)
 from autosport.dataset_snapshot_lineage import (
     DatasetSnapshotLineageAuthority,
     membership_manifest_sha256,
@@ -25,6 +28,18 @@ def _snapshot(snapshot_id: str) -> DatasetSnapshot:
         license_identity="terms:v1",
         causal_cutoff="2026-09-20T10:00:00Z",
         available_at_utc="2026-09-20T10:01:00Z",
+    )
+
+
+@pytest.fixture(autouse=True)
+def _use_isolated_product_authority_root(tmp_path, monkeypatch):
+    product_root = (
+        tmp_path.parent / f"{tmp_path.name}-lineage-authority"
+    ).resolve(strict=False)
+    monkeypatch.setattr(
+        lineage_trust_root,
+        "_machine_account_authority_root",
+        lambda: product_root,
     )
 
 

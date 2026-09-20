@@ -14,6 +14,10 @@ from . import _historical_capture_authority_guard as _historical_capture_authori
 # not retain a second caller-authored point-in-time authority family.
 from . import _collector_point_in_time_authority_guard as _collector_point_in_time_authority_guard  # noqa: F401,E402
 
+# The canonical provider source identity is reserved independently of caller-
+# selected witness-kind spelling; generic PIT authority cannot impersonate it.
+from . import _provider_point_in_time_source_guard as _provider_point_in_time_source_guard  # noqa: F401,E402
+
 # Provider completeness is positive only for an exact live canonical acquisition.
 # Local persisted bytes/journals remain integrity evidence and fail closed across
 # restart because the current provider contract supplies no non-caller-mintable

@@ -75,7 +75,7 @@ _CRITICAL_GUI_KEYS = {
 def test_critical_gui_catalog_is_complete_and_ukrainian_first() -> None:
     require_keys(_CRITICAL_GUI_KEYS)
 
-    assert text("ui.app.title") == "Автоспорт — V1 лабораторія паперового моделювання для Windows"
+    assert text("ui.app.title") == "Автоспорт — аналітична програма для Windows"
     assert text("ui.button.choose_dataset") == "Вибрати набір даних"
     assert text("ui.button.run_replay") == "Запустити паперовий повтор"
     assert text("ui.button.repair_workspace") == "Відновити робочу область"

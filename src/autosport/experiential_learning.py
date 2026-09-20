@@ -16,7 +16,10 @@ from .policy_evaluation import (
     PolicyEvaluationConfig,
     evaluate_policy_pair,
 )
-from .policy_update_authority import UtilityBoundUpdateEvidence
+from .policy_update_authority import (
+    UtilityBoundUpdateEvidence,
+    _validate_canonical_causal_witnesses,
+)
 from .strategy_model_factory import (
     ExperimentRunner,
     FactoryCandidateSpec,
@@ -121,6 +124,25 @@ def _validate_exact_policy_successor(
         raise ValueError("challenger policy must advance exactly one action estimate")
 
 
+def _validate_causal_witness_binding(
+    predecessor_policy: BanditPolicyState,
+    update_evidence: PolicyUpdateEvidence,
+) -> None:
+    """Validate causal witness identity without replaying the raw-reward update."""
+
+    action = update_evidence.action
+    reward = update_evidence.reward
+    transition = update_evidence.transition
+    if action is None or reward is None or transition is None:
+        raise ValueError("policy update evidence lacks complete canonical causal witnesses")
+    _validate_canonical_causal_witnesses(
+        policy=predecessor_policy,
+        action=action,
+        reward=reward,
+        transition=transition,
+    )
+
+
 def _validate_causal_policy_successor(
     predecessor_policy: BanditPolicyState,
     challenger_policy: BanditPolicyState,
@@ -128,11 +150,11 @@ def _validate_causal_policy_successor(
 ) -> None:
     """Recompute the exact update from its immutable causal witnesses."""
 
+    _validate_causal_witness_binding(predecessor_policy, update_evidence)
     action = update_evidence.action
     reward = update_evidence.reward
     transition = update_evidence.transition
-    if action is None or reward is None or transition is None:
-        raise ValueError("policy update evidence lacks complete canonical causal witnesses")
+    assert action is not None and reward is not None and transition is not None
 
     expected_challenger, expected_evidence = predecessor_policy.update(
         action=action,
@@ -155,8 +177,8 @@ def _validate_product_utility_update_authority(
 
     if utility_update_evidence is None:
         raise ValueError("product policy retest requires utility-bound update provenance")
-    if not isinstance(utility_update_evidence, UtilityBoundUpdateEvidence):
-        raise TypeError("utility_update_evidence must be UtilityBoundUpdateEvidence")
+    if type(utility_update_evidence) is not UtilityBoundUpdateEvidence:
+        raise TypeError("utility_update_evidence must be exact UtilityBoundUpdateEvidence")
     if utility_update_evidence.environment_id != predecessor_policy.environment_id:
         raise ValueError("utility-bound update environment mismatch")
     if utility_update_evidence.predecessor_policy_id != predecessor_policy.policy_id:
@@ -216,6 +238,9 @@ def run_policy_retest(
         if getattr(update_evidence, name) != getattr(challenger_policy, name):
             raise ValueError(f"policy update evidence {name} mismatch")
     _validate_exact_policy_successor(predecessor_policy, challenger_policy, update_evidence)
+    # Preserve cheap pre-registry causal falsification without recreating a raw-reward
+    # successor before owner-utility authority has admitted the product update.
+    _validate_causal_witness_binding(predecessor_policy, update_evidence)
 
     protocol = runner.registry.get("ResearchProtocol", challenger_policy.protocol_id)
     if protocol is None:

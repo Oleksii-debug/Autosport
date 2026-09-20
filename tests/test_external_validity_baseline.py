@@ -89,6 +89,7 @@ def _protocol(
         candidate_id="candidate:complex",
         candidate_artifact_sha256=SHA_F,
         evaluation_semantics="paper-net-utility",
+        evaluation_contract_sha256=_hash("paper-net-utility-contract:v1"),
         primary_metric="net_utility",
         uncertainty_method="frozen-bootstrap-v1",
         baselines=_definitions(mutate_market_config=mutate_market_config),
@@ -117,6 +118,7 @@ def _result(
         evidence_scope_sha256=actual_scope.identity_sha256,
         cohort_sha256=actual_scope.cohort_sha256,
         primary_metric=protocol.primary_metric,
+        evaluated_at="2026-01-03T00:00:00+00:00",
         metric_value=metric,
         uncertainty_low=low,
         uncertainty_high=high,
@@ -376,9 +378,38 @@ def test_protocol_requires_all_baseline_kinds_in_canonical_order():
             candidate_id="candidate:complex",
             candidate_artifact_sha256=SHA_F,
             evaluation_semantics="paper-net-utility",
+            evaluation_contract_sha256=_hash("paper-net-utility-contract:v1"),
             primary_metric="net_utility",
             uncertainty_method="frozen-bootstrap-v1",
             baselines=definitions[:-1],
+        )
+
+
+def test_evaluation_before_protocol_freeze_fails_closed():
+    protocol = _protocol()
+    candidate = PolicyEvaluation(
+        policy_id=protocol.candidate_id,
+        policy_artifact_sha256=protocol.candidate_artifact_sha256,
+        protocol_sha256=protocol.identity_sha256,
+        evidence_scope_sha256=protocol.evidence_scope.identity_sha256,
+        cohort_sha256=protocol.evidence_scope.cohort_sha256,
+        primary_metric=protocol.primary_metric,
+        evaluated_at="2026-01-01T12:00:00+00:00",
+        metric_value="0.05",
+        uncertainty_low="0.01",
+        uncertainty_high="0.10",
+        observed_count=3,
+        scored_count=2,
+        abstention_count=1,
+        total_cost="0",
+        evaluation_bundle_sha256=SHA_A,
+    )
+
+    with pytest.raises(ExternalValidityError, match="predates frozen protocol"):
+        build_external_validity_report(
+            protocol,
+            candidate,
+            _supported_results(protocol),
         )
 
 
@@ -395,6 +426,7 @@ def test_policy_evaluation_requires_complete_observed_funnel_accounting():
             evidence_scope_sha256=protocol.evidence_scope.identity_sha256,
             cohort_sha256=protocol.evidence_scope.cohort_sha256,
             primary_metric=protocol.primary_metric,
+            evaluated_at="2026-01-03T00:00:00+00:00",
             metric_value="0.05",
             uncertainty_low="0.01",
             uncertainty_high="0.10",

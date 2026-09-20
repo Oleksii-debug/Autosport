@@ -35,9 +35,16 @@ from .workspace_lock import WorkspaceEconomicLock
 
 _HEX: Final = frozenset("0123456789abcdef")
 _SOURCE_AUTHORITY_SCHEMA: Final = "autosport.point_in_time_source_authority"
-_SOURCE_AUTHORITY_SCHEMA_VERSION: Final = 1
+_SOURCE_AUTHORITY_SCHEMA_VERSION: Final = 2
 _SOURCE_AUTHORITY_ROOT_KEYS: Final = frozenset(
-    {"schema", "schema_version", "policies", "revisions"}
+    {
+        "schema",
+        "schema_version",
+        "policies",
+        "witnesses",
+        "feature_memberships",
+        "revisions",
+    }
 )
 _POLICY_KEYS: Final = frozenset(
     {
@@ -47,6 +54,33 @@ _POLICY_KEYS: Final = frozenset(
         "policy_content_sha256",
         "witness_kind",
         "frozen_at",
+        "record_sha256",
+    }
+)
+_WITNESS_KEYS: Final = frozenset(
+    {
+        "availability_witness_id",
+        "source_identity",
+        "source_revision",
+        "source_revision_sha256",
+        "witness_kind",
+        "witness_content_sha256",
+        "source_as_of",
+        "available_at",
+        "recorded_at",
+        "record_sha256",
+    }
+)
+_FEATURE_MEMBERSHIP_KEYS: Final = frozenset(
+    {
+        "feature_membership_id",
+        "feature_set_id",
+        "feature_set_version",
+        "feature_definition_sha256",
+        "feature_source_sha256",
+        "feature_name",
+        "member_definition_sha256",
+        "available_at",
         "record_sha256",
     }
 )
@@ -60,6 +94,7 @@ _REVISION_KEYS: Final = frozenset(
         "revision_policy_record_sha256",
         "availability_witness_id",
         "availability_witness_sha256",
+        "availability_witness_record_sha256",
         "witness_kind",
         "source_as_of",
         "available_at",
@@ -259,6 +294,215 @@ class RevisionPolicyAuthority:
 
 
 @dataclass(frozen=True, slots=True)
+class AvailabilityWitnessAuthority:
+    """Immutable content-bearing witness for one source revision availability claim."""
+
+    availability_witness_id: str
+    source_identity: str
+    source_revision: str
+    source_revision_sha256: str
+    witness_kind: str
+    witness_content_sha256: str
+    source_as_of: datetime
+    available_at: datetime
+    recorded_at: datetime
+
+    def __post_init__(self) -> None:
+        for name in (
+            "availability_witness_id",
+            "source_identity",
+            "source_revision",
+            "witness_kind",
+        ):
+            _text(getattr(self, name), name)
+        for name in ("source_revision_sha256", "witness_content_sha256"):
+            object.__setattr__(self, name, _sha256(getattr(self, name), name))
+        for name in ("source_as_of", "available_at", "recorded_at"):
+            object.__setattr__(self, name, _aware_utc(getattr(self, name), name))
+        if self.source_as_of > self.available_at:
+            raise SourceRevisionAuthorityError(
+                "availability witness cannot precede its source as-of instant"
+            )
+        if self.available_at > self.recorded_at:
+            raise SourceRevisionAuthorityError(
+                "availability witness cannot be recorded before availability"
+            )
+
+    def to_payload(self) -> dict[str, object]:
+        return {
+            "availability_witness_id": self.availability_witness_id,
+            "source_identity": self.source_identity,
+            "source_revision": self.source_revision,
+            "source_revision_sha256": self.source_revision_sha256,
+            "witness_kind": self.witness_kind,
+            "witness_content_sha256": self.witness_content_sha256,
+            "source_as_of": _iso(self.source_as_of),
+            "available_at": _iso(self.available_at),
+            "recorded_at": _iso(self.recorded_at),
+        }
+
+    @property
+    def authority_sha256(self) -> str:
+        return _digest(self.to_payload())
+
+    @classmethod
+    def from_payload(cls, payload: object) -> "AvailabilityWitnessAuthority":
+        if not isinstance(payload, dict) or not all(
+            isinstance(key, str) for key in payload
+        ):
+            raise SourceRevisionAuthorityError(
+                "availability witness must be a JSON object"
+            )
+        body: dict[str, object] = payload
+        if frozenset(body) != _WITNESS_KEYS:
+            raise SourceRevisionAuthorityError("availability witness fields mismatch")
+        record_sha256 = _sha256(body["record_sha256"], "record_sha256")
+        witness = cls(
+            availability_witness_id=body["availability_witness_id"],
+            source_identity=body["source_identity"],
+            source_revision=body["source_revision"],
+            source_revision_sha256=body["source_revision_sha256"],
+            witness_kind=body["witness_kind"],
+            witness_content_sha256=body["witness_content_sha256"],
+            source_as_of=_instant(body["source_as_of"], "source_as_of"),
+            available_at=_instant(body["available_at"], "available_at"),
+            recorded_at=_instant(body["recorded_at"], "recorded_at"),
+        )
+        if witness.authority_sha256 != record_sha256:
+            raise SourceRevisionAuthorityError(
+                "availability witness record digest mismatch"
+            )
+        return witness
+
+
+@dataclass(frozen=True, slots=True)
+class FeatureMembershipAuthority:
+    """Immutable binding of one named feature to one exact FeatureSet definition."""
+
+    feature_membership_id: str
+    feature_set_id: str
+    feature_set_version: str
+    feature_definition_sha256: str
+    feature_source_sha256: str
+    feature_name: str
+    member_definition_sha256: str
+    available_at: datetime
+
+    def __post_init__(self) -> None:
+        for name in ("feature_set_id", "feature_set_version", "feature_name"):
+            _text(getattr(self, name), name)
+        for name in (
+            "feature_membership_id",
+            "feature_definition_sha256",
+            "feature_source_sha256",
+            "member_definition_sha256",
+        ):
+            object.__setattr__(self, name, _sha256(getattr(self, name), name))
+        object.__setattr__(
+            self,
+            "available_at",
+            _aware_utc(self.available_at, "available_at"),
+        )
+        expected_id = _digest(self.semantic_payload())
+        if self.feature_membership_id != expected_id:
+            raise SourceRevisionAuthorityError(
+                "feature membership identity does not match semantic binding"
+            )
+
+    def semantic_payload(self) -> dict[str, object]:
+        return {
+            "schema_version": 1,
+            "feature_set_id": self.feature_set_id,
+            "feature_set_version": self.feature_set_version,
+            "feature_definition_sha256": self.feature_definition_sha256,
+            "feature_source_sha256": self.feature_source_sha256,
+            "feature_name": self.feature_name,
+            "member_definition_sha256": self.member_definition_sha256,
+            "available_at": _iso(self.available_at),
+        }
+
+    def to_payload(self) -> dict[str, object]:
+        return {
+            "feature_membership_id": self.feature_membership_id,
+            **self.semantic_payload(),
+        }
+
+    @property
+    def authority_sha256(self) -> str:
+        return _digest(self.to_payload())
+
+    @classmethod
+    def create(
+        cls,
+        *,
+        feature_set_id: str,
+        feature_set_version: str,
+        feature_definition_sha256: str,
+        feature_source_sha256: str,
+        feature_name: str,
+        member_definition_sha256: str,
+        available_at: datetime,
+    ) -> "FeatureMembershipAuthority":
+        semantic = {
+            "schema_version": 1,
+            "feature_set_id": _text(feature_set_id, "feature_set_id"),
+            "feature_set_version": _text(feature_set_version, "feature_set_version"),
+            "feature_definition_sha256": _sha256(
+                feature_definition_sha256,
+                "feature_definition_sha256",
+            ),
+            "feature_source_sha256": _sha256(
+                feature_source_sha256,
+                "feature_source_sha256",
+            ),
+            "feature_name": _text(feature_name, "feature_name"),
+            "member_definition_sha256": _sha256(
+                member_definition_sha256,
+                "member_definition_sha256",
+            ),
+            "available_at": _iso(_aware_utc(available_at, "available_at")),
+        }
+        return cls(
+            feature_membership_id=_digest(semantic),
+            feature_set_id=semantic["feature_set_id"],
+            feature_set_version=semantic["feature_set_version"],
+            feature_definition_sha256=semantic["feature_definition_sha256"],
+            feature_source_sha256=semantic["feature_source_sha256"],
+            feature_name=semantic["feature_name"],
+            member_definition_sha256=semantic["member_definition_sha256"],
+            available_at=_instant(semantic["available_at"], "available_at"),
+        )
+
+    @classmethod
+    def from_payload(cls, payload: object) -> "FeatureMembershipAuthority":
+        if not isinstance(payload, dict) or not all(
+            isinstance(key, str) for key in payload
+        ):
+            raise SourceRevisionAuthorityError(
+                "feature membership must be a JSON object"
+            )
+        body: dict[str, object] = payload
+        if frozenset(body) != _FEATURE_MEMBERSHIP_KEYS:
+            raise SourceRevisionAuthorityError("feature membership fields mismatch")
+        record_sha256 = _sha256(body["record_sha256"], "record_sha256")
+        membership = cls(
+            feature_membership_id=body["feature_membership_id"],
+            feature_set_id=body["feature_set_id"],
+            feature_set_version=body["feature_set_version"],
+            feature_definition_sha256=body["feature_definition_sha256"],
+            feature_source_sha256=body["feature_source_sha256"],
+            feature_name=body["feature_name"],
+            member_definition_sha256=body["member_definition_sha256"],
+            available_at=_instant(body["available_at"], "available_at"),
+        )
+        if membership.authority_sha256 != record_sha256:
+            raise SourceRevisionAuthorityError(
+                "feature membership record digest mismatch"
+            )
+        return membership
+
+
+@dataclass(frozen=True, slots=True)
 class SourceRevisionAuthority:
     """Immutable authority binding one exact source revision to availability evidence."""
 
@@ -270,6 +514,7 @@ class SourceRevisionAuthority:
     revision_policy_record_sha256: str
     availability_witness_id: str
     availability_witness_sha256: str
+    availability_witness_record_sha256: str
     witness_kind: str
     source_as_of: datetime
     available_at: datetime
@@ -289,6 +534,7 @@ class SourceRevisionAuthority:
             "source_revision_sha256",
             "revision_policy_record_sha256",
             "availability_witness_sha256",
+            "availability_witness_record_sha256",
         ):
             object.__setattr__(self, name, _sha256(getattr(self, name), name))
         for name in ("source_as_of", "available_at", "recorded_at"):
@@ -312,6 +558,7 @@ class SourceRevisionAuthority:
             "revision_policy_record_sha256": self.revision_policy_record_sha256,
             "availability_witness_id": self.availability_witness_id,
             "availability_witness_sha256": self.availability_witness_sha256,
+            "availability_witness_record_sha256": self.availability_witness_record_sha256,
             "witness_kind": self.witness_kind,
             "source_as_of": _iso(self.source_as_of),
             "available_at": _iso(self.available_at),
@@ -342,6 +589,9 @@ class SourceRevisionAuthority:
             revision_policy_record_sha256=body["revision_policy_record_sha256"],
             availability_witness_id=body["availability_witness_id"],
             availability_witness_sha256=body["availability_witness_sha256"],
+            availability_witness_record_sha256=body[
+                "availability_witness_record_sha256"
+            ],
             witness_kind=body["witness_kind"],
             source_as_of=_instant(body["source_as_of"], "source_as_of"),
             available_at=_instant(body["available_at"], "available_at"),
@@ -380,6 +630,8 @@ class SourceRevisionAuthorityStore:
                         "schema": _SOURCE_AUTHORITY_SCHEMA,
                         "schema_version": _SOURCE_AUTHORITY_SCHEMA_VERSION,
                         "policies": [],
+                        "witnesses": [],
+                        "feature_memberships": [],
                         "revisions": [],
                     },
                 )
@@ -389,6 +641,22 @@ class SourceRevisionAuthorityStore:
     def _stored_policy(policy: RevisionPolicyAuthority) -> dict[str, object]:
         payload = policy.to_payload()
         payload["record_sha256"] = policy.authority_sha256
+        return payload
+
+    @staticmethod
+    def _stored_witness(
+        witness: AvailabilityWitnessAuthority,
+    ) -> dict[str, object]:
+        payload = witness.to_payload()
+        payload["record_sha256"] = witness.authority_sha256
+        return payload
+
+    @staticmethod
+    def _stored_feature_membership(
+        membership: FeatureMembershipAuthority,
+    ) -> dict[str, object]:
+        payload = membership.to_payload()
+        payload["record_sha256"] = membership.authority_sha256
         return payload
 
     @staticmethod
@@ -421,14 +689,21 @@ class SourceRevisionAuthorityStore:
             raise SourceRevisionAuthorityError(
                 "unsupported source revision authority schema_version"
             )
-        if not isinstance(state["policies"], list) or not isinstance(
-            state["revisions"], list
-        ):
-            raise SourceRevisionAuthorityError(
-                "source revision authority collections must be arrays"
-            )
+        for field in ("policies", "witnesses", "feature_memberships", "revisions"):
+            if not isinstance(state[field], list):
+                raise SourceRevisionAuthorityError(
+                    "source revision authority collections must be arrays"
+                )
         policies = [
             RevisionPolicyAuthority.from_payload(item) for item in state["policies"]
+        ]
+        witnesses = [
+            AvailabilityWitnessAuthority.from_payload(item)
+            for item in state["witnesses"]
+        ]
+        feature_memberships = [
+            FeatureMembershipAuthority.from_payload(item)
+            for item in state["feature_memberships"]
         ]
         revisions = [
             SourceRevisionAuthority.from_payload(item) for item in state["revisions"]
@@ -440,6 +715,27 @@ class SourceRevisionAuthorityStore:
                     "duplicate revision policy identity"
                 )
             policy_ids.add(policy.revision_policy_id)
+        witness_ids: set[str] = set()
+        for witness in witnesses:
+            if witness.availability_witness_id in witness_ids:
+                raise SourceRevisionAuthorityError(
+                    "duplicate availability witness identity"
+                )
+            witness_ids.add(witness.availability_witness_id)
+        membership_ids: set[str] = set()
+        membership_keys: set[tuple[str, str]] = set()
+        for membership in feature_memberships:
+            if membership.feature_membership_id in membership_ids:
+                raise SourceRevisionAuthorityError(
+                    "duplicate feature membership identity"
+                )
+            membership_ids.add(membership.feature_membership_id)
+            key = (membership.feature_set_id, membership.feature_name)
+            if key in membership_keys:
+                raise SourceRevisionAuthorityError(
+                    "conflicting feature membership authority"
+                )
+            membership_keys.add(key)
         revision_ids: set[str] = set()
         for revision in revisions:
             if revision.source_revision_authority_id in revision_ids:
@@ -448,6 +744,9 @@ class SourceRevisionAuthorityStore:
                 )
             revision_ids.add(revision.source_revision_authority_id)
         policy_by_id = {policy.revision_policy_id: policy for policy in policies}
+        witness_by_id = {
+            witness.availability_witness_id: witness for witness in witnesses
+        }
         for revision in revisions:
             policy = policy_by_id.get(revision.revision_policy_id)
             if policy is None:
@@ -469,6 +768,39 @@ class SourceRevisionAuthorityStore:
             if policy.frozen_at > revision.recorded_at:
                 raise SourceRevisionAuthorityError(
                     "revision policy was not frozen before authority recording"
+                )
+            witness = witness_by_id.get(revision.availability_witness_id)
+            if witness is None:
+                raise SourceRevisionAuthorityError(
+                    "source revision references unknown availability witness"
+                )
+            if revision.availability_witness_record_sha256 != witness.authority_sha256:
+                raise SourceRevisionAuthorityError(
+                    "source revision availability witness record digest mismatch"
+                )
+            if revision.availability_witness_sha256 != witness.witness_content_sha256:
+                raise SourceRevisionAuthorityError(
+                    "source revision availability witness content digest mismatch"
+                )
+            if (
+                revision.source_identity != witness.source_identity
+                or revision.source_revision != witness.source_revision
+                or revision.source_revision_sha256 != witness.source_revision_sha256
+                or revision.witness_kind != witness.witness_kind
+            ):
+                raise SourceRevisionAuthorityError(
+                    "source revision availability witness identity mismatch"
+                )
+            if (
+                revision.source_as_of != witness.source_as_of
+                or revision.available_at != witness.available_at
+            ):
+                raise SourceRevisionAuthorityError(
+                    "source revision availability witness time mismatch"
+                )
+            if witness.recorded_at > revision.recorded_at:
+                raise SourceRevisionAuthorityError(
+                    "source revision predates its availability witness record"
                 )
         return state
 
@@ -497,6 +829,8 @@ class SourceRevisionAuthorityStore:
                     "schema": _SOURCE_AUTHORITY_SCHEMA,
                     "schema_version": _SOURCE_AUTHORITY_SCHEMA_VERSION,
                     "policies": policies,
+                    "witnesses": list(state["witnesses"]),
+                    "feature_memberships": list(state["feature_memberships"]),
                     "revisions": list(state["revisions"]),
                 },
             )
@@ -524,6 +858,121 @@ class SourceRevisionAuthorityStore:
                     )
                 return policy
         raise SourceRevisionAuthorityError("unknown revision policy authority")
+
+    def register_witness(self, witness: AvailabilityWitnessAuthority) -> str:
+        if not isinstance(witness, AvailabilityWitnessAuthority):
+            raise SourceRevisionAuthorityError(
+                "witness must be an AvailabilityWitnessAuthority"
+            )
+        with WorkspaceEconomicLock(self.workspace):
+            state = self._read()
+            stored = self._stored_witness(witness)
+            for raw in state["witnesses"]:
+                current = AvailabilityWitnessAuthority.from_payload(raw)
+                if current.availability_witness_id != witness.availability_witness_id:
+                    continue
+                if current.authority_sha256 != witness.authority_sha256:
+                    raise SourceRevisionAuthorityError(
+                        "conflicting immutable availability witness identity"
+                    )
+                return current.authority_sha256
+            witnesses = list(state["witnesses"])
+            witnesses.append(stored)
+            atomic_write_json(
+                self.path,
+                {
+                    "schema": _SOURCE_AUTHORITY_SCHEMA,
+                    "schema_version": _SOURCE_AUTHORITY_SCHEMA_VERSION,
+                    "policies": list(state["policies"]),
+                    "witnesses": witnesses,
+                    "feature_memberships": list(state["feature_memberships"]),
+                    "revisions": list(state["revisions"]),
+                },
+            )
+        return witness.authority_sha256
+
+    def resolve_witness(
+        self,
+        availability_witness_id: str,
+        *,
+        expected_sha256: str | None = None,
+    ) -> AvailabilityWitnessAuthority:
+        wanted = _text(availability_witness_id, "availability_witness_id")
+        expected = (
+            None
+            if expected_sha256 is None
+            else _sha256(expected_sha256, "expected_sha256")
+        )
+        state = self._read()
+        for raw in state["witnesses"]:
+            witness = AvailabilityWitnessAuthority.from_payload(raw)
+            if witness.availability_witness_id == wanted:
+                if expected is not None and witness.authority_sha256 != expected:
+                    raise SourceRevisionAuthorityError(
+                        "availability witness authority digest mismatch"
+                    )
+                return witness
+        raise SourceRevisionAuthorityError("unknown availability witness authority")
+
+    def register_feature_membership(
+        self,
+        membership: FeatureMembershipAuthority,
+    ) -> str:
+        if not isinstance(membership, FeatureMembershipAuthority):
+            raise SourceRevisionAuthorityError(
+                "membership must be a FeatureMembershipAuthority"
+            )
+        with WorkspaceEconomicLock(self.workspace):
+            state = self._read()
+            stored = self._stored_feature_membership(membership)
+            for raw in state["feature_memberships"]:
+                current = FeatureMembershipAuthority.from_payload(raw)
+                if (
+                    current.feature_set_id == membership.feature_set_id
+                    and current.feature_name == membership.feature_name
+                ):
+                    if current.authority_sha256 != membership.authority_sha256:
+                        raise SourceRevisionAuthorityError(
+                            "conflicting immutable feature membership authority"
+                        )
+                    return current.authority_sha256
+            memberships = list(state["feature_memberships"])
+            memberships.append(stored)
+            atomic_write_json(
+                self.path,
+                {
+                    "schema": _SOURCE_AUTHORITY_SCHEMA,
+                    "schema_version": _SOURCE_AUTHORITY_SCHEMA_VERSION,
+                    "policies": list(state["policies"]),
+                    "witnesses": list(state["witnesses"]),
+                    "feature_memberships": memberships,
+                    "revisions": list(state["revisions"]),
+                },
+            )
+        return membership.authority_sha256
+
+    def resolve_feature_membership(
+        self,
+        *,
+        feature_set_id: str,
+        feature_name: str,
+    ) -> FeatureMembershipAuthority:
+        wanted_set = _text(feature_set_id, "feature_set_id")
+        wanted_name = _text(feature_name, "feature_name")
+        state = self._read()
+        matches = []
+        for raw in state["feature_memberships"]:
+            membership = FeatureMembershipAuthority.from_payload(raw)
+            if (
+                membership.feature_set_id == wanted_set
+                and membership.feature_name == wanted_name
+            ):
+                matches.append(membership)
+        if len(matches) != 1:
+            raise SourceRevisionAuthorityError(
+                "feature membership authority cannot be resolved uniquely"
+            )
+        return matches[0]
 
     def register_revision(self, revision: SourceRevisionAuthority) -> str:
         if not isinstance(revision, SourceRevisionAuthority):
@@ -564,6 +1013,51 @@ class SourceRevisionAuthorityStore:
                 raise SourceRevisionAuthorityError(
                     "revision policy was not frozen before authority recording"
                 )
+            witnesses = [
+                AvailabilityWitnessAuthority.from_payload(item)
+                for item in state["witnesses"]
+            ]
+            witness = next(
+                (
+                    item
+                    for item in witnesses
+                    if item.availability_witness_id
+                    == revision.availability_witness_id
+                ),
+                None,
+            )
+            if witness is None:
+                raise SourceRevisionAuthorityError(
+                    "source revision references unknown availability witness"
+                )
+            if revision.availability_witness_record_sha256 != witness.authority_sha256:
+                raise SourceRevisionAuthorityError(
+                    "source revision availability witness record digest mismatch"
+                )
+            if revision.availability_witness_sha256 != witness.witness_content_sha256:
+                raise SourceRevisionAuthorityError(
+                    "source revision availability witness content digest mismatch"
+                )
+            if (
+                revision.source_identity != witness.source_identity
+                or revision.source_revision != witness.source_revision
+                or revision.source_revision_sha256 != witness.source_revision_sha256
+                or revision.witness_kind != witness.witness_kind
+            ):
+                raise SourceRevisionAuthorityError(
+                    "source revision availability witness identity mismatch"
+                )
+            if (
+                revision.source_as_of != witness.source_as_of
+                or revision.available_at != witness.available_at
+            ):
+                raise SourceRevisionAuthorityError(
+                    "source revision availability witness time mismatch"
+                )
+            if witness.recorded_at > revision.recorded_at:
+                raise SourceRevisionAuthorityError(
+                    "source revision predates its availability witness record"
+                )
             for raw in state["revisions"]:
                 current = SourceRevisionAuthority.from_payload(raw)
                 if (
@@ -584,6 +1078,8 @@ class SourceRevisionAuthorityStore:
                     "schema": _SOURCE_AUTHORITY_SCHEMA,
                     "schema_version": _SOURCE_AUTHORITY_SCHEMA_VERSION,
                     "policies": list(state["policies"]),
+                    "witnesses": list(state["witnesses"]),
+                    "feature_memberships": list(state["feature_memberships"]),
                     "revisions": revisions,
                 },
             )
@@ -677,6 +1173,9 @@ class FeatureAvailabilityEvidence:
     feature_definition_sha256: str
     feature_source_sha256: str
     feature_set_available_at: datetime
+    feature_membership_id: str
+    feature_membership_sha256: str
+    feature_member_definition_sha256: str
     feature_name: str
     source_revision_authority_id: str
     source_revision_authority_sha256: str
@@ -686,6 +1185,7 @@ class FeatureAvailabilityEvidence:
     revision_policy_sha256: str
     availability_witness_id: str
     availability_witness_sha256: str
+    availability_witness_record_sha256: str
     witness_kind: str
     source_as_of: datetime
     available_at: datetime
@@ -711,10 +1211,14 @@ class FeatureAvailabilityEvidence:
             "feature_record_sha256",
             "feature_definition_sha256",
             "feature_source_sha256",
+            "feature_membership_id",
+            "feature_membership_sha256",
+            "feature_member_definition_sha256",
             "source_revision_authority_sha256",
             "source_revision_sha256",
             "revision_policy_sha256",
             "availability_witness_sha256",
+            "availability_witness_record_sha256",
         ):
             object.__setattr__(self, name, _sha256(getattr(self, name), name))
         for name in (
@@ -783,9 +1287,17 @@ class FeatureAvailabilityEvidence:
                 revision.revision_policy_id,
                 expected_sha256=revision.revision_policy_record_sha256,
             )
+            witness = source_authority_store.resolve_witness(
+                revision.availability_witness_id,
+                expected_sha256=revision.availability_witness_record_sha256,
+            )
+            membership = source_authority_store.resolve_feature_membership(
+                feature_set_id=feature_entry.record_id,
+                feature_name=feature_name,
+            )
         except SourceRevisionAuthorityError as exc:
             raise FeatureAvailabilityError(
-                "source revision authority cannot be resolved"
+                "source revision or feature membership authority cannot be resolved"
             ) from exc
 
         dataset = dataset_entry.payload
@@ -801,6 +1313,31 @@ class FeatureAvailabilityEvidence:
         if policy.witness_kind != revision.witness_kind:
             raise FeatureAvailabilityError(
                 "revision policy does not authorize the availability witness kind"
+            )
+        if (
+            witness.source_identity != revision.source_identity
+            or witness.source_revision != revision.source_revision
+            or witness.source_revision_sha256 != revision.source_revision_sha256
+            or witness.witness_kind != revision.witness_kind
+            or witness.witness_content_sha256 != revision.availability_witness_sha256
+            or witness.source_as_of != revision.source_as_of
+            or witness.available_at != revision.available_at
+        ):
+            raise FeatureAvailabilityError(
+                "availability witness does not prove the resolved source revision"
+            )
+        feature_available_at = _instant(
+            feature["available_at"],
+            "FeatureSet.available_at",
+        )
+        if (
+            membership.feature_set_version != feature["version"]
+            or membership.feature_definition_sha256 != feature["definition_sha256"]
+            or membership.feature_source_sha256 != feature["source_sha256"]
+            or membership.available_at != feature_available_at
+        ):
+            raise FeatureAvailabilityError(
+                "feature membership authority does not match registered FeatureSet"
             )
         return cls(
             dataset_snapshot_id=dataset_entry.record_id,
@@ -820,11 +1357,11 @@ class FeatureAvailabilityEvidence:
             feature_record_sha256=feature_entry.record_sha256,
             feature_definition_sha256=feature["definition_sha256"],
             feature_source_sha256=feature["source_sha256"],
-            feature_set_available_at=_instant(
-                feature["available_at"],
-                "FeatureSet.available_at",
-            ),
-            feature_name=feature_name,
+            feature_set_available_at=feature_available_at,
+            feature_membership_id=membership.feature_membership_id,
+            feature_membership_sha256=membership.authority_sha256,
+            feature_member_definition_sha256=membership.member_definition_sha256,
+            feature_name=membership.feature_name,
             source_revision_authority_id=revision.source_revision_authority_id,
             source_revision_authority_sha256=revision.authority_sha256,
             source_revision=revision.source_revision,
@@ -833,6 +1370,7 @@ class FeatureAvailabilityEvidence:
             revision_policy_sha256=policy.authority_sha256,
             availability_witness_id=revision.availability_witness_id,
             availability_witness_sha256=revision.availability_witness_sha256,
+            availability_witness_record_sha256=witness.authority_sha256,
             witness_kind=revision.witness_kind,
             source_as_of=revision.source_as_of,
             available_at=revision.available_at,
@@ -842,7 +1380,7 @@ class FeatureAvailabilityEvidence:
     def to_payload(self) -> dict[str, object]:
         return {
             "schema": "autosport.feature_availability_evidence",
-            "schema_version": 2,
+            "schema_version": 3,
             "dataset_snapshot_id": self.dataset_snapshot_id,
             "dataset_record_sha256": self.dataset_record_sha256,
             "dataset_manifest_sha256": self.dataset_manifest_sha256,
@@ -855,6 +1393,9 @@ class FeatureAvailabilityEvidence:
             "feature_definition_sha256": self.feature_definition_sha256,
             "feature_source_sha256": self.feature_source_sha256,
             "feature_set_available_at": _iso(self.feature_set_available_at),
+            "feature_membership_id": self.feature_membership_id,
+            "feature_membership_sha256": self.feature_membership_sha256,
+            "feature_member_definition_sha256": self.feature_member_definition_sha256,
             "feature_name": self.feature_name,
             "source_revision_authority_id": self.source_revision_authority_id,
             "source_revision_authority_sha256": self.source_revision_authority_sha256,
@@ -864,6 +1405,7 @@ class FeatureAvailabilityEvidence:
             "revision_policy_sha256": self.revision_policy_sha256,
             "availability_witness_id": self.availability_witness_id,
             "availability_witness_sha256": self.availability_witness_sha256,
+            "availability_witness_record_sha256": self.availability_witness_record_sha256,
             "witness_kind": self.witness_kind,
             "source_as_of": _iso(self.source_as_of),
             "available_at": _iso(self.available_at),
@@ -1364,7 +1906,9 @@ class HoldoutConsumptionLedger:
 
 
 __all__ = [
+    "AvailabilityWitnessAuthority",
     "FeatureAvailabilityError",
+    "FeatureMembershipAuthority",
     "FeatureAvailabilityEvidence",
     "HoldoutAlreadyConsumedError",
     "HoldoutConsumptionError",

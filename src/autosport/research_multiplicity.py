@@ -552,8 +552,10 @@ class SequentialMultiplicityEvidenceStore:
     SCHEMA_VERSION = 1
     WORKSPACE_SCHEMA_VERSION = 1
     ENROLLMENT_SCHEMA_VERSION = 2
+    BOOTSTRAP_MARKER_SCHEMA_VERSION = 1
     WORKSPACE_AUTHORITY_FILE = ".research-multiplicity-workspace.json"
     ENROLLMENT_FILE = ".research-multiplicity-enrollment.json"
+    BOOTSTRAP_MARKER_FILE = ".research-multiplicity-bootstrap.json"
 
     def __init__(
         self,
@@ -572,6 +574,44 @@ class SequentialMultiplicityEvidenceStore:
     @classmethod
     def _enrollment_path(cls, workspace: Path) -> Path:
         return workspace / cls.ENROLLMENT_FILE
+
+    @classmethod
+    def _bootstrap_marker_path(cls, workspace: Path) -> Path:
+        return workspace / cls.BOOTSTRAP_MARKER_FILE
+
+    @classmethod
+    def _read_bootstrap_marker(cls, workspace: Path) -> None:
+        marker_path = cls._bootstrap_marker_path(workspace)
+        try:
+            raw = marker_path.read_text(encoding="utf-8")
+        except FileNotFoundError as exc:
+            raise ValueError("multiplicity workspace bootstrap marker is missing") from exc
+        try:
+            state = json.loads(
+                raw,
+                object_pairs_hook=_reject_duplicate_keys,
+                parse_constant=_reject_nonfinite,
+            )
+        except json.JSONDecodeError as exc:
+            raise ValueError(
+                "multiplicity workspace bootstrap marker must be valid UTF-8 JSON"
+            ) from exc
+        if type(state) is not dict or set(state) != {"schema_version", "authority_kind"}:
+            raise ValueError("multiplicity workspace bootstrap marker fields mismatch")
+        if state["schema_version"] != cls.BOOTSTRAP_MARKER_SCHEMA_VERSION:
+            raise ValueError("multiplicity workspace bootstrap marker schema_version mismatch")
+        if state["authority_kind"] != "autosport.research-multiplicity-bootstrap.v1":
+            raise ValueError("multiplicity workspace bootstrap marker kind mismatch")
+
+    @classmethod
+    def _write_bootstrap_marker(cls, workspace: Path) -> None:
+        atomic_write_json(
+            cls._bootstrap_marker_path(workspace),
+            {
+                "schema_version": cls.BOOTSTRAP_MARKER_SCHEMA_VERSION,
+                "authority_kind": "autosport.research-multiplicity-bootstrap.v1",
+            },
+        )
 
     @classmethod
     def _read_workspace_authority(cls, workspace: Path) -> None:
@@ -636,6 +676,9 @@ class SequentialMultiplicityEvidenceStore:
                 raise ValueError("workspace_root does not match canonical multiplicity authority")
         cls._read_workspace_authority(root)
         cls._read_workspace_enrollments(root)
+        marker_path = cls._bootstrap_marker_path(root)
+        if marker_path.exists():
+            cls._read_bootstrap_marker(root)
         return root
 
     @classmethod
@@ -643,7 +686,11 @@ class SequentialMultiplicityEvidenceStore:
         for candidate in workspace.rglob("*"):
             if not candidate.is_file():
                 continue
-            if candidate.name in {cls.WORKSPACE_AUTHORITY_FILE, cls.ENROLLMENT_FILE}:
+            if candidate.name in {
+                cls.WORKSPACE_AUTHORITY_FILE,
+                cls.ENROLLMENT_FILE,
+                cls.BOOTSTRAP_MARKER_FILE,
+            }:
                 continue
             try:
                 raw = candidate.read_text(encoding="utf-8")
@@ -737,12 +784,16 @@ class SequentialMultiplicityEvidenceStore:
             ancestor
             for ancestor in workspace.parents
             if cls._workspace_authority_path(ancestor).exists()
+            or cls._bootstrap_marker_path(ancestor).exists()
         )
         if ancestor_roots:
             raise ValueError("nested multiplicity workspace authorities are forbidden")
         descendant_roots = tuple(
             path.parent
-            for path in workspace.rglob(cls.WORKSPACE_AUTHORITY_FILE)
+            for path in (
+                *workspace.rglob(cls.WORKSPACE_AUTHORITY_FILE),
+                *workspace.rglob(cls.BOOTSTRAP_MARKER_FILE),
+            )
             if path.parent != workspace
         )
         if descendant_roots:
@@ -750,19 +801,31 @@ class SequentialMultiplicityEvidenceStore:
 
         authority_path = cls._workspace_authority_path(workspace)
         enrollment_path = cls._enrollment_path(workspace)
+        marker_path = cls._bootstrap_marker_path(workspace)
         with WorkspaceEconomicLock(workspace):
             authority_exists = authority_path.exists()
             enrollment_exists = enrollment_path.exists()
+            marker_exists = marker_path.exists()
             if authority_exists != enrollment_exists:
                 raise ValueError("multiplicity workspace authority is incomplete")
             if authority_exists:
                 cls._read_workspace_authority(workspace)
                 cls._read_workspace_enrollments(workspace)
+                if marker_exists:
+                    cls._read_bootstrap_marker(workspace)
+                else:
+                    cls._write_bootstrap_marker(workspace)
                 return workspace
+            if marker_exists:
+                cls._read_bootstrap_marker(workspace)
+                raise ValueError(
+                    "multiplicity workspace bootstrap marker prevents authority rebootstrap"
+                )
             if cls._contains_existing_store(workspace):
                 raise ValueError(
                     "existing multiplicity evidence prevents workspace authority rebootstrap"
                 )
+            cls._write_bootstrap_marker(workspace)
             atomic_write_json(
                 authority_path,
                 {
@@ -913,7 +976,11 @@ class SequentialMultiplicityEvidenceStore:
         workspace_root: str | Path | None = None,
     ) -> "SequentialMultiplicityEvidenceStore":
         target = Path(path).resolve(strict=False)
-        if target.name in {cls.ENROLLMENT_FILE, cls.WORKSPACE_AUTHORITY_FILE}:
+        if target.name in {
+            cls.ENROLLMENT_FILE,
+            cls.WORKSPACE_AUTHORITY_FILE,
+            cls.BOOTSTRAP_MARKER_FILE,
+        }:
             raise ValueError("multiplicity store path conflicts with workspace authority")
         workspace = cls._resolve_workspace_root(target, workspace_root)
         target.parent.mkdir(parents=True, exist_ok=True)

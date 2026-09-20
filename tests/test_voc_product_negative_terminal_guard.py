@@ -58,6 +58,8 @@ class VOCProductNegativeTerminalGuardTests(unittest.TestCase):
             as_of=_FIXTURE.T2,
         )
         self.assertIs(execution.disposition, ExecutionDisposition.REJECTED_IDENTITY)
+        self.assertEqual(execution.actual_cost, Decimal("0.2"))
+        self.assertEqual(execution.actual_latency_seconds, Decimal("2"))
 
         closed = orchestrator.close_pair_negative_terminal(
             request_id="request-1",
@@ -76,11 +78,11 @@ class VOCProductNegativeTerminalGuardTests(unittest.TestCase):
             ["VOC_ROUTE_CONTEXT", "VOC_PAIRED_ADMISSION", "VOC_PAIRED_TERMINAL"],
         )
         terminal = records[-1].payload["voc_terminal"]
+        self.assertEqual(terminal["schema_version"], 3)
         self.assertEqual(terminal["status"], "failed")
         self.assertEqual(terminal["execution_id"], execution.execution_id)
-        self.assertEqual(terminal["actual_cost"], "0.2")
-        self.assertEqual(terminal["actual_latency_seconds"], "2")
         self.assertEqual(terminal["execution_record_sha256"], execution.execution_record_sha256)
+        self.assertEqual(len(terminal["authority_recorded_at"]), 27)
 
         reopened = ModelComputeRouterStore(fixture.router_path)
         restarted = VOCProductionOrchestrator(

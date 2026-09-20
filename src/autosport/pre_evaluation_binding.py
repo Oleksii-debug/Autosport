@@ -14,6 +14,7 @@ import os
 from pathlib import Path
 from typing import Iterable, Mapping
 
+from .decision_ledger import JsonlDecisionLedger
 from .pre_evaluation_evidence import (
     PreEvaluationEvidenceStore,
     PreEvaluationSessionEvidence,
@@ -164,6 +165,8 @@ class BoundPreEvaluationSession:
     context: PreEvaluationDenominatorContext
     evidence: PreEvaluationSessionEvidence
     members: tuple[BoundPreEvaluationMember, ...]
+    decision_ledger_prefix_sha256: str | None = None
+    decision_ledger_prefix_record_count: int | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.context, PreEvaluationDenominatorContext):
@@ -172,6 +175,23 @@ class BoundPreEvaluationSession:
             raise TypeError("evidence must be PreEvaluationSessionEvidence")
         if self.evidence.session_id != self.context.session_id:
             raise ValueError("session evidence is bound to a different session")
+
+        prefix_sha = self.decision_ledger_prefix_sha256
+        prefix_count = self.decision_ledger_prefix_record_count
+        if (prefix_sha is None) != (prefix_count is None):
+            raise ValueError(
+                "decision-ledger prefix sha256 and record_count must be supplied together"
+            )
+        if prefix_sha is not None:
+            object.__setattr__(
+                self,
+                "decision_ledger_prefix_sha256",
+                _sha("decision_ledger_prefix_sha256", prefix_sha),
+            )
+            if type(prefix_count) is not int or prefix_count < 0:
+                raise ValueError(
+                    "decision_ledger_prefix_record_count must be a non-negative integer"
+                )
 
         row_keys = tuple(member.row_key for member in self.members)
         if row_keys != tuple(sorted(row_keys)):
@@ -192,6 +212,14 @@ class BoundPreEvaluationSession:
                     f"slot evidence digest mismatch for row_key {member.row_key}"
                 )
 
+    def _ledger_prefix_payload(self) -> dict[str, object] | None:
+        if self.decision_ledger_prefix_sha256 is None:
+            return None
+        return {
+            "sha256": self.decision_ledger_prefix_sha256,
+            "record_count": self.decision_ledger_prefix_record_count,
+        }
+
     @property
     def authority_digest(self) -> str:
         return _digest(self.to_payload())
@@ -208,15 +236,17 @@ class BoundPreEvaluationSession:
         member = next((item for item in self.members if item.row_key == row_key), None)
         if member is None:
             raise KeyError(row_key)
-        return _digest(
-            {
-                "authority_family": AUTHORITY_FAMILY,
-                "schema_version": SCHEMA_VERSION,
-                "context_digest": self.context.digest,
-                "session_authority_digest": self.evidence.authority_digest,
-                **member.to_payload(),
-            }
-        )
+        payload: dict[str, object] = {
+            "authority_family": AUTHORITY_FAMILY,
+            "schema_version": SCHEMA_VERSION,
+            "context_digest": self.context.digest,
+            "session_authority_digest": self.evidence.authority_digest,
+            **member.to_payload(),
+        }
+        ledger_prefix = self._ledger_prefix_payload()
+        if ledger_prefix is not None:
+            payload["decision_ledger_prefix"] = ledger_prefix
+        return _digest(payload)
 
     @property
     def member_authority_sha256(self) -> tuple[tuple[str, str], ...]:
@@ -233,7 +263,7 @@ class BoundPreEvaluationSession:
         raise KeyError(row_key)
 
     def to_payload(self) -> dict[str, object]:
-        return {
+        payload: dict[str, object] = {
             "schema_version": SCHEMA_VERSION,
             "authority_family": AUTHORITY_FAMILY,
             "context": self.context.to_payload(),
@@ -246,6 +276,10 @@ class BoundPreEvaluationSession:
                 [row_key, digest] for row_key, digest in self.member_authority_sha256
             ],
         }
+        ledger_prefix = self._ledger_prefix_payload()
+        if ledger_prefix is not None:
+            payload["decision_ledger_prefix"] = ledger_prefix
+        return payload
 
 
 def bind_pre_evaluation_session(
@@ -253,11 +287,14 @@ def bind_pre_evaluation_session(
     *,
     context: PreEvaluationDenominatorContext,
     provider_members: Iterable[ProviderMemberIdentity],
+    ledger: JsonlDecisionLedger | None = None,
 ) -> BoundPreEvaluationSession:
     if not isinstance(evidence, PreEvaluationSessionEvidence):
         raise TypeError("evidence must be PreEvaluationSessionEvidence")
     if not isinstance(context, PreEvaluationDenominatorContext):
         raise TypeError("context must be PreEvaluationDenominatorContext")
+    if ledger is not None and not isinstance(ledger, JsonlDecisionLedger):
+        raise TypeError("ledger must be JsonlDecisionLedger or None")
 
     member_by_key: dict[str, ProviderMemberIdentity] = {}
     for member in provider_members:
@@ -281,7 +318,19 @@ def bind_pre_evaluation_session(
         )
         for row_key in sorted(member_by_key)
     )
-    return BoundPreEvaluationSession(context=context, evidence=evidence, members=members)
+    prefix_sha256 = None
+    prefix_record_count = None
+    if ledger is not None:
+        prefix = ledger.verified_snapshot()
+        prefix_sha256 = prefix.sha256
+        prefix_record_count = prefix.record_count
+    return BoundPreEvaluationSession(
+        context=context,
+        evidence=evidence,
+        members=members,
+        decision_ledger_prefix_sha256=prefix_sha256,
+        decision_ledger_prefix_record_count=prefix_record_count,
+    )
 
 
 class BoundPreEvaluationEvidenceStore:
@@ -379,7 +428,7 @@ class BoundPreEvaluationEvidenceStore:
 
     @staticmethod
     def _from_payload(payload: Mapping[str, object]) -> BoundPreEvaluationSession:
-        expected = {
+        base_expected = {
             "schema_version",
             "authority_family",
             "context",
@@ -390,7 +439,11 @@ class BoundPreEvaluationEvidenceStore:
             "members",
             "member_authority_sha256",
         }
-        if set(payload) != expected:
+        allowed = (
+            frozenset(base_expected),
+            frozenset(base_expected | {"decision_ledger_prefix"}),
+        )
+        if frozenset(payload) not in allowed:
             raise ValueError("pre-evaluation binding payload has unexpected fields")
         if payload["schema_version"] != SCHEMA_VERSION:
             raise ValueError("unsupported pre-evaluation binding payload schema")
@@ -434,8 +487,26 @@ class BoundPreEvaluationEvidenceStore:
                 )
             )
 
+        prefix_sha256 = None
+        prefix_record_count = None
+        raw_prefix = payload.get("decision_ledger_prefix")
+        if raw_prefix is not None:
+            if type(raw_prefix) is not dict or set(raw_prefix) != {"sha256", "record_count"}:
+                raise ValueError("decision_ledger_prefix has unexpected fields")
+            prefix_sha256 = _sha("decision_ledger_prefix.sha256", raw_prefix["sha256"])
+            raw_count = raw_prefix["record_count"]
+            if type(raw_count) is not int or raw_count < 0:
+                raise ValueError(
+                    "decision_ledger_prefix.record_count must be a non-negative integer"
+                )
+            prefix_record_count = raw_count
+
         bound = BoundPreEvaluationSession(
-            context=context, evidence=evidence, members=tuple(members)
+            context=context,
+            evidence=evidence,
+            members=tuple(members),
+            decision_ledger_prefix_sha256=prefix_sha256,
+            decision_ledger_prefix_record_count=prefix_record_count,
         )
         expected_member_digests = [
             [row_key, digest] for row_key, digest in bound.member_authority_sha256

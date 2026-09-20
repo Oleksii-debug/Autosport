@@ -338,16 +338,20 @@ class VOCPrecomputeAdmissionTests(unittest.TestCase):
     def test_terminal_binds_canonical_execution_and_survives_restart(self) -> None:
         admission_sha = self._admit()
         execution = self._record_timeout_execution()
-        terminal_sha = append_paired_voc_terminal(
-            self.ledger,
-            compute_execution_store=self.router,
-            admission_sha256=admission_sha,
-            status="timeout",
-            execution_id=execution.execution_id,
-            replay_run_id="replay-terminal",
-            agent="voc-admission-test",
-            recorded_at=T_TIMEOUT,
-        )
+        with patch(
+            "autosport.voc_outcome_scoring._authority_now",
+            return_value=T_TIMEOUT,
+        ):
+            terminal_sha = append_paired_voc_terminal(
+                self.ledger,
+                compute_execution_store=self.router,
+                admission_sha256=admission_sha,
+                status="timeout",
+                execution_id=execution.execution_id,
+                replay_run_id="replay-terminal",
+                agent="voc-admission-test",
+                recorded_at=T_TIMEOUT,
+            )
 
         records = JsonlDecisionLedger(self.path).verified_records()
         self.assertEqual(
@@ -364,7 +368,8 @@ class VOCPrecomputeAdmissionTests(unittest.TestCase):
         self.assertNotIn("challenger_output_sha256", admission)
 
         terminal = records[2].payload["voc_terminal"]
-        self.assertEqual(terminal["schema_version"], 2)
+        self.assertEqual(terminal["schema_version"], 3)
+        self.assertEqual(terminal["authority_recorded_at"], T_TIMEOUT)
         self.assertEqual(terminal["admission_sha256"], admission_sha)
         self.assertEqual(terminal["status"], "timeout")
         self.assertEqual(terminal["execution_id"], execution.execution_id)
@@ -390,6 +395,28 @@ class VOCPrecomputeAdmissionTests(unittest.TestCase):
         self.assertEqual(
             reopened.total_actual_cost("request-1"), Decimal("0.25")
         )
+
+    def test_terminal_physical_authority_cannot_predate_logical_terminal(self) -> None:
+        admission_sha = self._admit()
+        execution = self._record_timeout_execution()
+        with patch(
+            "autosport.voc_outcome_scoring._authority_now",
+            return_value=T_DECISION,
+        ):
+            with self.assertRaisesRegex(
+                VOCEvaluationError,
+                "physical authority predates logical terminal time",
+            ):
+                append_paired_voc_terminal(
+                    self.ledger,
+                    compute_execution_store=self.router,
+                    admission_sha256=admission_sha,
+                    status="timeout",
+                    execution_id=execution.execution_id,
+                    replay_run_id="replay-terminal-posthoc",
+                    agent="voc-admission-test",
+                    recorded_at=T_TIMEOUT,
+                )
 
     def test_missing_or_forged_zero_measurement_cannot_terminalize(self) -> None:
         admission_sha = self._admit()

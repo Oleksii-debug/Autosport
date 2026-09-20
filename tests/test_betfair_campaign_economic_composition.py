@@ -2,11 +2,13 @@ from __future__ import annotations
 
 from dataclasses import replace
 from decimal import Decimal
+from pathlib import Path
 
 import pytest
 
 import autosport.betfair_commission_cost_evidence as commission_bridge
 from autosport.betfair_campaign_economic_composition import (
+    BetfairCampaignEconomicEvidenceStore,
     derive_campaign_economics_with_betfair_commission,
 )
 from autosport.campaign_cost_evidence import (
@@ -16,6 +18,7 @@ from autosport.campaign_cost_evidence import (
     EconomicCompleteness,
     derive_campaign_economics,
 )
+from autosport.campaign_economic_store import CampaignEconomicStoreError
 from test_betfair_commission_cost_evidence import NOW, _authorities, _receipt, _scope
 
 
@@ -164,6 +167,62 @@ def test_one_verified_receipt_cannot_launder_other_same_class_cost(
     assert UNRESOLVED in product.incomplete_reasons
     assert product.net_after_known_costs is None
     assert product.completeness is EconomicCompleteness.INCOMPLETE_NET_ECONOMICS
+
+
+def test_source_qualified_store_requires_live_admission_then_survives_restart(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    receipt = _receipt()
+    source, campaign, _ = _authorities(monkeypatch, receipt=receipt)
+    provider_scope = _scope()
+    workspace = tmp_path / "economic-workspace"
+    authority_root = tmp_path / "external-monotonic-authority"
+    store = BetfairCampaignEconomicEvidenceStore(
+        workspace,
+        campaign=campaign,
+        source=source,
+        provider_scope=provider_scope,
+        authority_root=authority_root,
+    )
+
+    qualified = store.derive_betfair_commission(
+        receipt_id=receipt.receipt_id,
+        record_sha256=receipt.record_sha256,
+        as_of=NOW,
+    )
+    with pytest.raises(
+        CampaignEconomicStoreError,
+        match="lacks live verification or durable publication authority",
+    ):
+        store.append(qualified)
+    assert store.latest() is None
+
+    version_id = store.append_betfair_commission(
+        receipt_id=receipt.receipt_id,
+        record_sha256=receipt.record_sha256,
+        as_of=NOW,
+    )
+    assert version_id == qualified.version_id
+    assert store.latest() == qualified
+
+    restarted = BetfairCampaignEconomicEvidenceStore(
+        workspace,
+        campaign=campaign,
+        source=source,
+        provider_scope=provider_scope,
+        authority_root=authority_root,
+    )
+    assert restarted.latest() == qualified
+    assert restarted.verify_chain() == (qualified,)
+    assert (
+        restarted.append_betfair_commission(
+            receipt_id=receipt.receipt_id,
+            record_sha256=receipt.record_sha256,
+            as_of=NOW,
+        )
+        == qualified.version_id
+    )
 
 
 def test_previous_version_requires_exact_capability(

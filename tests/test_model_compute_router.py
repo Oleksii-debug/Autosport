@@ -299,6 +299,9 @@ def voc(**overrides):
             challenger_backend_id=values["challenger_backend_id"],
             challenger_model_id=values["challenger_model_id"],
             challenger_config_sha256=values["challenger_config_sha256"],
+            decision_context_sha256=hashlib.sha256(
+                ("source-context:" + values["evidence_id"]).encode("utf-8")
+            ).hexdigest(),
             decision_evidence_sha256=SHA_C,
             baseline_output_sha256=SHA_A,
             challenger_output_sha256=SHA_B,
@@ -404,9 +407,22 @@ class _FixtureCanonicalVOCResolver:
 
     def __init__(self):
         self._records = {}
+        self._contexts = {}
 
     def publish(self, value):
         self._records[value.evaluation_id] = value
+        self._contexts[value.decision_context_sha256] = {
+            "request_id": f"source:{value.evaluation_id}",
+            "task_class": value.task_class,
+            "sport_id": value.sport_id,
+            "league_id": value.league_id,
+            "regime_id": value.regime_id,
+            "urgency_id": value.urgency_id,
+            "contradiction_state": value.contradiction_state,
+        }
+
+    def publish_context(self, context_sha256, context):
+        self._contexts[context_sha256] = dict(context)
 
     def resolve(self, evaluation, *, as_of):
         value = self._records.get(evaluation.evaluation_id)
@@ -415,6 +431,10 @@ class _FixtureCanonicalVOCResolver:
         if value.payload() != evaluation.payload():
             return None
         return value
+
+    def resolve_decision_context(self, context_sha256, *, as_of):
+        value = self._contexts.get(context_sha256)
+        return None if value is None else dict(value)
 
 
 class ModelComputeRouterTests(unittest.TestCase):
@@ -445,9 +465,62 @@ class ModelComputeRouterTests(unittest.TestCase):
             self.voc_store.record(evidence.evaluation)
         return evidence
 
+    def canonical_request(
+        self,
+        value,
+        observation,
+        *,
+        context_overrides=None,
+        publish=True,
+    ):
+        context = {
+            "request_id": value.request_id,
+            "task_class": value.required_capability,
+            "sport_id": observation.sport_id,
+            "league_id": observation.league_id,
+            "regime_id": value.voc_regime_id,
+            "urgency_id": value.voc_urgency_id,
+            "contradiction_state": value.voc_contradiction_state,
+        }
+        if context_overrides:
+            context.update(context_overrides)
+        digest = hashlib.sha256(
+            json.dumps(
+                context,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()
+        if publish:
+            self._canonical_voc.publish_context(digest, context)
+        return replace(value, decision_evidence_sha256=digest)
+
     def route_compute(self, *args, **kwargs):
+        bind_current_context = kwargs.pop("bind_current_context", True)
         kwargs.setdefault("voc_evaluation_store", self.voc_store)
+        if args and bind_current_context:
+            value = args[0]
+            observation = kwargs.get("domain_observation")
+            if (
+                isinstance(value, ComputeRouteRequest)
+                and value.decision_evidence_sha256 is not None
+                and isinstance(observation, SportDomainFitnessObservation)
+            ):
+                value = self.canonical_request(value, observation)
+                args = (value, *args[1:])
         return route_compute(*args, **kwargs)
+
+    def store_route(self, store, value, candidates, policy_value, **kwargs):
+        bind_current_context = kwargs.pop("bind_current_context", True)
+        observation = kwargs.get("domain_observation")
+        if (
+            bind_current_context
+            and value.decision_evidence_sha256 is not None
+            and isinstance(observation, SportDomainFitnessObservation)
+        ):
+            value = self.canonical_request(value, observation)
+        return store.route(value, candidates, policy_value, **kwargs)
 
     def router_store(self, path):
         return ModelComputeRouterStore(
@@ -575,8 +648,7 @@ class ModelComputeRouterTests(unittest.TestCase):
 
         source_decision = self.route_compute(
             request(
-                request_id="req-source-context",
-                decision_evidence_sha256=SHA_C,
+                request_id="source:voc-route-scope",
             ),
             self.candidates,
             policy(),
@@ -613,7 +685,41 @@ class ModelComputeRouterTests(unittest.TestCase):
             domain_observation=slow_observation(),
         )
         self.assertEqual(missing_context.tier, ComputeTier.LOCAL)
-        self.assertIn("missing canonical decision-evidence route identity", missing_context.reason)
+        self.assertIn("missing canonical current decision-context identity", missing_context.reason)
+
+        caller_only = self.route_compute(
+            request(
+                request_id="req-caller-only-context",
+                decision_evidence_sha256="e" * 64,
+            ),
+            self.candidates,
+            policy(),
+            as_of=T1,
+            voc_evidence=evidence,
+            domain_observation=slow_observation(),
+            bind_current_context=False,
+        )
+        self.assertEqual(caller_only.tier, ComputeTier.LOCAL)
+        self.assertIn("canonical current VOC decision context", caller_only.reason)
+
+        mismatched_request = request(request_id="req-canonical-context-mismatch")
+        observation = slow_observation()
+        mismatched_request = self.canonical_request(
+            mismatched_request,
+            observation,
+            context_overrides={"urgency_id": "urgent"},
+        )
+        canonical_mismatch = self.route_compute(
+            mismatched_request,
+            self.candidates,
+            policy(),
+            as_of=T1,
+            voc_evidence=evidence,
+            domain_observation=observation,
+            bind_current_context=False,
+        )
+        self.assertEqual(canonical_mismatch.tier, ComputeTier.LOCAL)
+        self.assertIn("does not match the current request", canonical_mismatch.reason)
 
     def test_voc_exact_compute_identity_cannot_be_reused_under_same_candidate_ids(self):
         mismatched = self.qualified_voc(
@@ -626,7 +732,7 @@ class ModelComputeRouterTests(unittest.TestCase):
             path = Path(tmp) / "router-mismatched-voc.json"
             req = request(request_id="req-voc-old-compute-identity")
             store = self.router_store(path)
-            rejected = store.route(
+            rejected = self.store_route(store, 
                 req,
                 self.candidates,
                 policy(),
@@ -639,7 +745,7 @@ class ModelComputeRouterTests(unittest.TestCase):
             self.assertIn("exact compute identity", rejected.reason)
 
             reopened = self.router_store(path)
-            readback = reopened.route(
+            readback = self.store_route(reopened, 
                 req,
                 self.candidates,
                 policy(),
@@ -668,7 +774,7 @@ class ModelComputeRouterTests(unittest.TestCase):
             req = request(request_id="req-voc-identity-restart")
             evidence = self.qualified_voc(evidence_id="voc-identity-restart")
             store = self.router_store(path)
-            first = store.route(
+            first = self.store_route(store, 
                 req,
                 self.candidates,
                 policy(),
@@ -679,7 +785,7 @@ class ModelComputeRouterTests(unittest.TestCase):
             self.assertEqual(first.tier, ComputeTier.CLOUD)
 
             reopened = self.router_store(path)
-            readback = reopened.route(
+            readback = self.store_route(reopened, 
                 req,
                 self.candidates,
                 policy(),
@@ -697,7 +803,7 @@ class ModelComputeRouterTests(unittest.TestCase):
                 ModelComputeRouterError,
                 "immutable request id conflicts",
             ):
-                reopened.route(
+                self.store_route(reopened, 
                     req,
                     self.candidates,
                     policy(),
@@ -817,7 +923,7 @@ class ModelComputeRouterTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "router.json"
             store = self.router_store(path)
-            decision = store.route(
+            decision = self.store_route(store, 
                 request(),
                 self.candidates,
                 policy(),
@@ -850,7 +956,7 @@ class ModelComputeRouterTests(unittest.TestCase):
             store = self.router_store(path)
 
             cloud_request = request(request_id="req-route-cloud")
-            cloud_decision = store.route(
+            cloud_decision = self.store_route(store, 
                 cloud_request,
                 self.candidates,
                 policy(),
@@ -865,7 +971,7 @@ class ModelComputeRouterTests(unittest.TestCase):
                 allow_cloud=False,
                 cloud_candidate_id=None,
             )
-            local_decision = store.route(
+            local_decision = self.store_route(store, 
                 local_request,
                 self.candidates,
                 policy(),
@@ -944,7 +1050,7 @@ class ModelComputeRouterTests(unittest.TestCase):
             path = Path(tmp) / "router.json"
             store = self.router_store(path)
             cloud_request = request(request_id="req-cloud-authority")
-            decision = store.route(
+            decision = self.store_route(store, 
                 cloud_request,
                 self.candidates,
                 policy(),
@@ -1050,7 +1156,7 @@ class ModelComputeRouterTests(unittest.TestCase):
                     **constraints,
                 )
                 route_policy = policy()
-                decision = store.route(
+                decision = self.store_route(store, 
                     req,
                     self.candidates,
                     route_policy,
@@ -1094,7 +1200,7 @@ class ModelComputeRouterTests(unittest.TestCase):
                 cloud_candidate_id=None,
                 max_cost=Decimal("2"),
             )
-            local_decision = store.route(
+            local_decision = self.store_route(store, 
                 local_request,
                 self.candidates,
                 policy(),
@@ -1124,7 +1230,7 @@ class ModelComputeRouterTests(unittest.TestCase):
                 max_cost=Decimal("20"),
             )
             cloud_policy = policy(max_cloud_cost=Decimal("10"))
-            cloud_decision = store.route(
+            cloud_decision = self.store_route(store, 
                 cloud_request,
                 self.candidates,
                 cloud_policy,
@@ -1215,7 +1321,7 @@ class ModelComputeRouterTests(unittest.TestCase):
                 cloud_candidate_id=None,
                 max_cost=Decimal("2"),
             )
-            store.route(
+            self.store_route(store, 
                 req,
                 self.candidates,
                 policy(),
@@ -1263,7 +1369,7 @@ class ModelComputeRouterTests(unittest.TestCase):
                 max_cost=Decimal("2"),
                 response_ttl_seconds=Decimal("5"),
             )
-            store.route(
+            self.store_route(store, 
                 stale_req,
                 self.candidates,
                 policy(),
@@ -1374,7 +1480,7 @@ class ModelComputeRouterTests(unittest.TestCase):
                 cloud_candidate_id=None,
                 max_cost=Decimal("2"),
             )
-            store.route(
+            self.store_route(store, 
                 req,
                 self.candidates,
                 policy(),
@@ -1440,7 +1546,7 @@ class ModelComputeRouterTests(unittest.TestCase):
             route_policy = policy(
                 max_cloud_cost=Decimal("10")
             )
-            store.route(
+            self.store_route(store, 
                 req,
                 self.candidates,
                 route_policy,
@@ -1511,7 +1617,7 @@ class ModelComputeRouterTests(unittest.TestCase):
                 cloud_candidate_id=None,
                 max_cost=Decimal("3"),
             )
-            decision = store.route(
+            decision = self.store_route(store, 
                 req,
                 self.candidates,
                 policy(),
@@ -1533,7 +1639,7 @@ class ModelComputeRouterTests(unittest.TestCase):
 
             reopened = self.router_store(path)
             self.assertEqual(
-                reopened.route(
+                self.store_route(reopened, 
                     req,
                     self.candidates,
                     policy(),
@@ -1579,7 +1685,7 @@ class ModelComputeRouterTests(unittest.TestCase):
                 cloud_candidate_id=None,
                 max_cost=Decimal("3"),
             )
-            reopened.route(fresh, self.candidates, policy(), as_of=T1)
+            self.store_route(reopened, fresh, self.candidates, policy(), as_of=T1)
             accepted = reopened.record_execution(
                 execution_id="exec-restart-fresh-1",
                 request_id=fresh.request_id,
@@ -1640,7 +1746,7 @@ class ModelComputeRouterTests(unittest.TestCase):
                 with tempfile.TemporaryDirectory() as tmp:
                     path = Path(tmp) / "router.json"
                     store = self.router_store(path)
-                    store.route(
+                    self.store_route(store, 
                         case["request"],
                         self.candidates,
                         case["policy"],
@@ -1737,7 +1843,7 @@ class ModelComputeRouterTests(unittest.TestCase):
                 cloud_candidate_id=None,
                 max_cost=Decimal("3"),
             )
-            store.route(req, self.candidates, policy(), as_of=T1)
+            self.store_route(store, req, self.candidates, policy(), as_of=T1)
             original_persist = store._persist
 
             def interrupted_persist(*args, **kwargs):
@@ -1817,7 +1923,7 @@ class ModelComputeRouterTests(unittest.TestCase):
                 allow_cloud=False,
                 cloud_candidate_id=None,
             )
-            store.route(req, self.candidates, policy(), as_of=T1)
+            self.store_route(store, req, self.candidates, policy(), as_of=T1)
             store.record_execution(
                 execution_id="exec-authority-corrupt-tail",
                 request_id=req.request_id,
@@ -1858,7 +1964,7 @@ class ModelComputeRouterTests(unittest.TestCase):
     def test_immutable_request_id_cannot_be_reused_with_changed_policy_or_input(self):
         with tempfile.TemporaryDirectory() as tmp:
             store = self.router_store(Path(tmp) / "router.json")
-            store.route(
+            self.store_route(store, 
                 request(),
                 self.candidates,
                 policy(),
@@ -1870,7 +1976,7 @@ class ModelComputeRouterTests(unittest.TestCase):
                 ModelComputeRouterError,
                 "immutable request id",
             ):
-                store.route(
+                self.store_route(store, 
                     request(max_cost=Decimal("19")),
                     self.candidates,
                     policy(),
@@ -1887,7 +1993,7 @@ class ModelComputeRouterTests(unittest.TestCase):
                 request_id="req-exec",
                 allow_cloud=False,
             )
-            decision = store.route(
+            decision = self.store_route(store, 
                 local_only,
                 self.candidates,
                 policy(),
@@ -1918,7 +2024,7 @@ class ModelComputeRouterTests(unittest.TestCase):
                 allow_cloud=False,
                 response_ttl_seconds=Decimal("30"),
             )
-            store.route(
+            self.store_route(store, 
                 availability_late_request,
                 self.candidates,
                 policy(),
@@ -2013,7 +2119,7 @@ class ModelComputeRouterTests(unittest.TestCase):
                 request_id="req-predecision-execution",
                 allow_cloud=False,
             )
-            decision = store.route(
+            decision = self.store_route(store, 
                 req,
                 self.candidates,
                 policy(),
@@ -2063,7 +2169,7 @@ class ModelComputeRouterTests(unittest.TestCase):
                 allow_cloud=False,
                 max_cost=Decimal("2"),
             )
-            local_decision = store.route(
+            local_decision = self.store_route(store, 
                 local_request,
                 self.candidates,
                 policy(),
@@ -2094,7 +2200,7 @@ class ModelComputeRouterTests(unittest.TestCase):
                 max_cost=Decimal("20"),
             )
             cloud_policy = policy(max_cloud_cost=Decimal("10"))
-            cloud_decision = store.route(
+            cloud_decision = self.store_route(store, 
                 cloud_request,
                 self.candidates,
                 cloud_policy,
@@ -2142,7 +2248,7 @@ class ModelComputeRouterTests(unittest.TestCase):
                 allow_cloud=False,
                 max_cost=Decimal("2"),
             )
-            store.route(
+            self.store_route(store, 
                 local_request,
                 self.candidates,
                 policy(),
@@ -2196,7 +2302,7 @@ class ModelComputeRouterTests(unittest.TestCase):
                 max_cost=Decimal("20"),
             )
             cloud_policy = policy(max_cloud_cost=Decimal("10"))
-            store.route(
+            self.store_route(store, 
                 cloud_request,
                 self.candidates,
                 cloud_policy,
@@ -2310,7 +2416,7 @@ class ModelComputeRouterTests(unittest.TestCase):
                 allow_cloud=False,
                 max_cost=Decimal("2"),
             )
-            store.route(
+            self.store_route(store, 
                 local_request,
                 self.candidates,
                 policy(),
@@ -2351,7 +2457,7 @@ class ModelComputeRouterTests(unittest.TestCase):
                 request_id="req-truncated-cloud-tail",
                 max_cost=Decimal("20"),
             )
-            store.route(
+            self.store_route(store, 
                 cloud_request,
                 self.candidates,
                 policy(max_cloud_cost=Decimal("10")),
@@ -2415,7 +2521,7 @@ class ModelComputeRouterTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "router.json"
             store = self.router_store(path)
-            store.route(
+            self.store_route(store, 
                 request(request_id="req-malformed-execution-head"),
                 self.candidates,
                 policy(),

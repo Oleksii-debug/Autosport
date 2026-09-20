@@ -28,7 +28,7 @@ from .voc_evaluation import (
 )
 
 _SCHEMA = "autosport.model_compute_router"
-_VERSION = 5
+_VERSION = 6
 _EXECUTION_AUTHORITY_SCHEMA = (
     "autosport.model_compute_router.execution_authority"
 )
@@ -1579,15 +1579,7 @@ def route_compute(
                     )
                 elif request.decision_evidence_sha256 is None:
                     baseline_reason = (
-                        "missing canonical decision-evidence route identity"
-                    )
-                elif (
-                    resolved_evaluation.decision_evidence_sha256
-                    == request.decision_evidence_sha256
-                ):
-                    baseline_reason = (
-                        "historical VOC evidence cannot authorize its "
-                        "source decision"
+                        "missing canonical current decision-context identity"
                     )
                 elif (
                     request.voc_regime_id is None
@@ -1597,28 +1589,74 @@ def route_compute(
                     baseline_reason = (
                         "missing canonical VOC routing stratum"
                     )
-                elif (
-                    (
-                        request.required_capability,
-                        domain_observation.sport_id,
-                        domain_observation.league_id,
-                        request.voc_regime_id,
-                        request.voc_urgency_id,
-                        request.voc_contradiction_state,
-                    )
-                    != (
-                        resolved_evaluation.task_class,
-                        resolved_evaluation.sport_id,
-                        resolved_evaluation.league_id,
-                        resolved_evaluation.regime_id,
-                        resolved_evaluation.urgency_id,
-                        resolved_evaluation.contradiction_state,
-                    )
-                ):
-                    baseline_reason = (
-                        "qualified VOC routing stratum does not match "
-                        "the current request"
-                    )
+                else:
+                    try:
+                        current_context = (
+                            voc_evaluation_store.require_decision_context(
+                                request.decision_evidence_sha256,
+                                as_of=request.created_at,
+                            )
+                        )
+                        source_context = (
+                            voc_evaluation_store.require_decision_context(
+                                resolved_evaluation.decision_context_sha256,
+                                as_of=resolved_evaluation.decision_at,
+                            )
+                        )
+                    except VOCEvaluationError as exc:
+                        baseline_reason = (
+                            "canonical current VOC decision context rejected: "
+                            + str(exc)
+                        )
+                    else:
+                        expected_current_context = {
+                            "request_id": request.request_id,
+                            "task_class": request.required_capability,
+                            "sport_id": domain_observation.sport_id,
+                            "league_id": domain_observation.league_id,
+                            "regime_id": request.voc_regime_id,
+                            "urgency_id": request.voc_urgency_id,
+                            "contradiction_state": (
+                                request.voc_contradiction_state
+                            ),
+                        }
+                        if current_context != expected_current_context:
+                            baseline_reason = (
+                                "canonical current VOC decision context "
+                                "does not match the current request"
+                            )
+                        elif (
+                            resolved_evaluation.decision_context_sha256
+                            == request.decision_evidence_sha256
+                            or source_context["request_id"]
+                            == current_context["request_id"]
+                        ):
+                            baseline_reason = (
+                                "historical VOC evidence cannot authorize its "
+                                "source decision"
+                            )
+                        elif (
+                            (
+                                request.required_capability,
+                                domain_observation.sport_id,
+                                domain_observation.league_id,
+                                request.voc_regime_id,
+                                request.voc_urgency_id,
+                                request.voc_contradiction_state,
+                            )
+                            != (
+                                resolved_evaluation.task_class,
+                                resolved_evaluation.sport_id,
+                                resolved_evaluation.league_id,
+                                resolved_evaluation.regime_id,
+                                resolved_evaluation.urgency_id,
+                                resolved_evaluation.contradiction_state,
+                            )
+                        ):
+                            baseline_reason = (
+                                "qualified VOC routing stratum does not match "
+                                "the current request"
+                            )
 
     if baseline_reason is not None:
         return ComputeRouteDecision.build(

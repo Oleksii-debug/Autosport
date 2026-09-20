@@ -25,7 +25,7 @@ from autosport.sport_domain_fitness import (
     MetricEvidence,
     SportDomainFitnessObservation,
 )
-from autosport.decision_ledger import DecisionRecord
+from autosport.decision_ledger import DecisionRecord, JsonlDecisionLedger
 from autosport.voc_evaluation import (
     CanonicalVOCAuthorityResolver,
     OutcomeDerivedVOCScore,
@@ -65,6 +65,9 @@ def evaluation(**overrides):
         challenger_backend_id="cloud-backend",
         challenger_model_id="challenger-v2",
         challenger_config_sha256=SHA_B,
+        decision_context_sha256=hashlib.sha256(
+            b"default-source-voc-context"
+        ).hexdigest(),
         decision_evidence_sha256=SHA_C,
         baseline_output_sha256=SHA_A,
         challenger_output_sha256=SHA_B,
@@ -133,9 +136,19 @@ class FixtureCanonicalAuthorityResolver:
 
     def __init__(self):
         self._records = {}
+        self._contexts = {}
 
     def register(self, value):
         self._records[value.evaluation_id] = value
+        self._contexts[value.decision_context_sha256] = {
+            "request_id": f"source:{value.evaluation_id}",
+            "task_class": value.task_class,
+            "sport_id": value.sport_id,
+            "league_id": value.league_id,
+            "regime_id": value.regime_id,
+            "urgency_id": value.urgency_id,
+            "contradiction_state": value.contradiction_state,
+        }
 
     def resolve(self, evaluation, *, as_of):
         canonical = self._records.get(evaluation.evaluation_id)
@@ -144,6 +157,10 @@ class FixtureCanonicalAuthorityResolver:
         if canonical.evaluated_at > as_of:
             return None
         return canonical
+
+    def resolve_decision_context(self, context_sha256, *, as_of):
+        value = self._contexts.get(context_sha256)
+        return None if value is None else dict(value)
 
 def candidates():
     return (
@@ -245,15 +262,32 @@ class _FixtureCanonicalVOCResolver:
 
     def __init__(self):
         self._records = {}
+        self._contexts = {}
 
     def publish(self, value):
         self._records[value.evaluation_id] = value
+        self._contexts[value.decision_context_sha256] = {
+            "request_id": f"source:{value.evaluation_id}",
+            "task_class": value.task_class,
+            "sport_id": value.sport_id,
+            "league_id": value.league_id,
+            "regime_id": value.regime_id,
+            "urgency_id": value.urgency_id,
+            "contradiction_state": value.contradiction_state,
+        }
+
+    def publish_context(self, context_sha256, context):
+        self._contexts[context_sha256] = dict(context)
 
     def resolve(self, evaluation, *, as_of):
         value = self._records.get(evaluation.evaluation_id)
         if value is None:
             return None
         return value
+
+    def resolve_decision_context(self, context_sha256, *, as_of):
+        value = self._contexts.get(context_sha256)
+        return None if value is None else dict(value)
 
 
 class _FixtureOutcomeScoreAuthority:
@@ -310,8 +344,33 @@ class PairedVOCEvaluationTests(unittest.TestCase):
     ):
         paired = evaluation() if value is None else value
 
+        source_context = {
+            "request_id": f"source:{paired.evaluation_id}",
+            "task_class": paired.task_class,
+            "sport_id": paired.sport_id,
+            "league_id": paired.league_id,
+            "regime_id": paired.regime_id,
+            "urgency_id": paired.urgency_id,
+            "contradiction_state": paired.contradiction_state,
+        }
+        source_context_record = DecisionRecord(
+            replay_run_id="replay-voc-context",
+            agent="voc-test",
+            observed_ts=T0,
+            action="VOC_ROUTE_CONTEXT",
+            payload={"voc_current_context": source_context},
+            context_hash=SHA_A,
+            decision_id="decision-voc-context",
+            recorded_at=T0,
+        )
+        ledger = JsonlDecisionLedger(
+            Path(self._router_tmp.name) / "canonical-decision-ledger.jsonl"
+        )
+        context_digest = ledger.append(source_context_record)
+
         decision_payload = {
             "voc_binding": {
+                "decision_context_sha256": context_digest,
                 "baseline_candidate_id": paired.baseline_candidate_id,
                 "baseline_backend_id": paired.baseline_backend_id,
                 "baseline_model_id": paired.baseline_model_id,
@@ -343,14 +402,7 @@ class PairedVOCEvaluationTests(unittest.TestCase):
             decision_id="decision-voc",
             recorded_at=decision_recorded_at,
         )
-        decision_digest = hashlib.sha256(
-            json.dumps(
-                decision_record.to_dict(),
-                ensure_ascii=False,
-                sort_keys=True,
-                separators=(",", ":"),
-            ).encode("utf-8")
-        ).hexdigest()
+        decision_digest = ledger.append(decision_record)
 
         scoring_payload = {"kind": "net-utility-v1", "metric": "incremental_value"}
         scoring_digest = hashlib.sha256(
@@ -453,8 +505,6 @@ class PairedVOCEvaluationTests(unittest.TestCase):
             authority_sha256=SHA_D,
             assert_available_as_of=lambda _: None,
         )
-        ledger = SimpleNamespace(verified_records=lambda: (decision_record,))
-
         def registry_get(record_type, record_id):
             if (
                 record_type == "PairedVOCEvaluation"
@@ -548,6 +598,7 @@ class PairedVOCEvaluationTests(unittest.TestCase):
         resolver.outcome_authority = outcome_authority
         paired = replace(
             paired,
+            decision_context_sha256=context_digest,
             decision_evidence_sha256=decision_digest,
             scoring_rule_sha256=scoring_digest,
             multiple_comparison_control_sha256=multiple_control_digest,
@@ -697,7 +748,13 @@ class PairedVOCEvaluationTests(unittest.TestCase):
 
     def test_production_resolver_rejects_mismatched_decision_binding(self):
         resolver, paired = self._production_resolver_fixture()
-        record = resolver.decision_ledger.verified_records()[0]
+        records = resolver.decision_ledger.verified_records()
+        source_context_record = next(
+            item for item in records if item.action == "VOC_ROUTE_CONTEXT"
+        )
+        record = next(
+            item for item in records if "voc_binding" in item.payload
+        )
         binding = dict(record.payload["voc_binding"])
         binding["challenger_action"] = "WRONG"
         wrong_payload = dict(record.payload)
@@ -712,9 +769,12 @@ class PairedVOCEvaluationTests(unittest.TestCase):
             decision_id=record.decision_id,
             recorded_at=record.recorded_at,
         )
-        resolver.decision_ledger = SimpleNamespace(
-            verified_records=lambda: (wrong_record,)
+        wrong_ledger = JsonlDecisionLedger(
+            Path(self._router_tmp.name) / "wrong-decision-ledger.jsonl"
         )
+        wrong_ledger.append(source_context_record)
+        wrong_ledger.append(wrong_record)
+        resolver.decision_ledger = wrong_ledger
         with self.assertRaisesRegex(
             VOCEvaluationError,
             "canonical DecisionLedger",
@@ -737,8 +797,42 @@ class PairedVOCEvaluationTests(unittest.TestCase):
             self.voc_store.record(evidence.evaluation)
         return evidence
 
+    def canonical_request(self, value, observation, *, context_overrides=None):
+        context = {
+            "request_id": value.request_id,
+            "task_class": value.required_capability,
+            "sport_id": observation.sport_id,
+            "league_id": observation.league_id,
+            "regime_id": value.voc_regime_id,
+            "urgency_id": value.voc_urgency_id,
+            "contradiction_state": value.voc_contradiction_state,
+        }
+        if context_overrides:
+            context.update(context_overrides)
+        digest = hashlib.sha256(
+            json.dumps(
+                context,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()
+        self._canonical_voc.publish_context(digest, context)
+        return replace(value, decision_evidence_sha256=digest)
+
     def route_compute(self, *args, **kwargs):
+        bind_current_context = kwargs.pop("bind_current_context", True)
         kwargs.setdefault("voc_evaluation_store", self.voc_store)
+        if args and bind_current_context:
+            value = args[0]
+            observation = kwargs.get("domain_observation")
+            if (
+                isinstance(value, ComputeRouteRequest)
+                and value.decision_evidence_sha256 is not None
+                and isinstance(observation, SportDomainFitnessObservation)
+            ):
+                value = self.canonical_request(value, observation)
+                args = (value, *args[1:])
         return route_compute(*args, **kwargs)
 
     def test_cloud_requires_independent_canonical_authority(self):
@@ -767,6 +861,32 @@ class PairedVOCEvaluationTests(unittest.TestCase):
         )
         production_store.record(paired)
         production_request = request()
+        production_context = {
+            "request_id": production_request.request_id,
+            "task_class": production_request.required_capability,
+            "sport_id": "table-tennis",
+            "league_id": "league-1",
+            "regime_id": production_request.voc_regime_id,
+            "urgency_id": production_request.voc_urgency_id,
+            "contradiction_state": production_request.voc_contradiction_state,
+        }
+        production_context_record = DecisionRecord(
+            replay_run_id="replay-current-voc",
+            agent="voc-test",
+            observed_ts=T2,
+            action="VOC_ROUTE_CONTEXT",
+            payload={"voc_current_context": production_context},
+            context_hash=SHA_A,
+            decision_id="decision-current-voc",
+            recorded_at=T2,
+        )
+        current_context_digest = resolver.decision_ledger.append(
+            production_context_record
+        )
+        production_request = replace(
+            production_request,
+            decision_evidence_sha256=current_context_digest,
+        )
         decision = route_compute(
             production_request,
             candidates(),
@@ -783,8 +903,7 @@ class PairedVOCEvaluationTests(unittest.TestCase):
         evidence = self.qualified_voc(paired)
         source_request = replace(
             request(),
-            request_id="req-source-decision",
-            decision_evidence_sha256=paired.decision_evidence_sha256,
+            request_id=f"source:{paired.evaluation_id}",
         )
         decision = self.route_compute(
             source_request,

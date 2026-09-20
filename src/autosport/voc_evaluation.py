@@ -21,6 +21,19 @@ _SCHEMA = "autosport.voc_evaluation"
 _VERSION = 2
 _ZERO = Decimal("0")
 _ONE = Decimal("1")
+VOC_CURRENT_CONTEXT_ACTION = "VOC_ROUTE_CONTEXT"
+VOC_CURRENT_CONTEXT_PAYLOAD_KEY = "voc_current_context"
+_VOC_CURRENT_CONTEXT_FIELDS = frozenset(
+    {
+        "request_id",
+        "task_class",
+        "sport_id",
+        "league_id",
+        "regime_id",
+        "urgency_id",
+        "contradiction_state",
+    }
+)
 
 
 class VOCEvaluationError(ValueError):
@@ -95,6 +108,57 @@ def _canonical_digest(payload: object) -> str:
     return hashlib.sha256(encoded).hexdigest()
 
 
+def resolve_voc_decision_context(
+    decision_ledger: JsonlDecisionLedger,
+    *,
+    context_sha256: str,
+    as_of: str,
+) -> dict[str, str]:
+    """Resolve one pre-request VOC context from the verified DecisionLedger."""
+    if not isinstance(decision_ledger, JsonlDecisionLedger):
+        raise TypeError("decision_ledger must be JsonlDecisionLedger")
+    expected_digest = _sha256("context_sha256", context_sha256)
+    cutoff = _instant("as_of", as_of)
+    try:
+        records = decision_ledger.verified_records()
+    except DecisionLedgerIntegrityError as exc:
+        raise VOCEvaluationError(
+            "canonical current VOC DecisionLedger verification failed"
+        ) from exc
+    matches = [
+        record
+        for record in records
+        if _canonical_digest(record.to_dict()) == expected_digest
+    ]
+    if not matches:
+        raise VOCEvaluationError("canonical current VOC decision context is missing")
+    if len(matches) != 1:
+        raise VOCEvaluationError("canonical current VOC decision context is ambiguous")
+    record = matches[0]
+    if record.action != VOC_CURRENT_CONTEXT_ACTION:
+        raise VOCEvaluationError("canonical current VOC decision context action is invalid")
+    if _instant("recorded_at", record.recorded_at) > cutoff:
+        raise VOCEvaluationError(
+            "canonical current VOC decision context was recorded after the causal boundary"
+        )
+    if _instant("observed_ts", record.observed_ts) > cutoff:
+        raise VOCEvaluationError(
+            "canonical current VOC decision context observation is from the future"
+        )
+    payload = record.payload
+    if not isinstance(payload, Mapping):
+        raise VOCEvaluationError("canonical current VOC decision payload is invalid")
+    context = payload.get(VOC_CURRENT_CONTEXT_PAYLOAD_KEY)
+    if not isinstance(context, Mapping) or set(context) != _VOC_CURRENT_CONTEXT_FIELDS:
+        raise VOCEvaluationError("canonical current VOC decision context schema is invalid")
+    resolved: dict[str, str] = {}
+    for field in sorted(_VOC_CURRENT_CONTEXT_FIELDS):
+        resolved[field] = _text(
+            f"canonical current VOC context {field}", context.get(field)
+        )
+    return resolved
+
+
 @dataclass(frozen=True, slots=True)
 class PairedVOCEvaluation:
     """One post-outcome paired baseline/challenger evaluation.
@@ -120,6 +184,7 @@ class PairedVOCEvaluation:
     challenger_backend_id: str
     challenger_model_id: str
     challenger_config_sha256: str
+    decision_context_sha256: str
     decision_evidence_sha256: str
     baseline_output_sha256: str
     challenger_output_sha256: str
@@ -177,6 +242,7 @@ class PairedVOCEvaluation:
         for name in (
             "baseline_config_sha256",
             "challenger_config_sha256",
+            "decision_context_sha256",
             "decision_evidence_sha256",
             "baseline_output_sha256",
             "challenger_output_sha256",
@@ -186,6 +252,10 @@ class PairedVOCEvaluation:
             "multiple_comparison_control_sha256",
         ):
             _sha256(name, getattr(self, name))
+        if self.decision_context_sha256 == self.decision_evidence_sha256:
+            raise VOCEvaluationError(
+                "pre-request decision context must differ from post-output VOC binding"
+            )
         if self.baseline_candidate_id == self.challenger_candidate_id:
             raise VOCEvaluationError("paired VOC candidates must be distinct")
         if type(self.baseline_abstained) is not bool or type(self.challenger_abstained) is not bool:
@@ -280,6 +350,7 @@ class PairedVOCEvaluation:
             "challenger_backend_id": self.challenger_backend_id,
             "challenger_model_id": self.challenger_model_id,
             "challenger_config_sha256": self.challenger_config_sha256,
+            "decision_context_sha256": self.decision_context_sha256,
             "decision_evidence_sha256": self.decision_evidence_sha256,
             "baseline_output_sha256": self.baseline_output_sha256,
             "challenger_output_sha256": self.challenger_output_sha256,
@@ -380,6 +451,7 @@ class PairedVOCEvaluation:
                 challenger_backend_id=raw["challenger_backend_id"],
                 challenger_model_id=raw["challenger_model_id"],
                 challenger_config_sha256=raw["challenger_config_sha256"],
+                decision_context_sha256=raw["decision_context_sha256"],
                 decision_evidence_sha256=raw["decision_evidence_sha256"],
                 baseline_output_sha256=raw["baseline_output_sha256"],
                 challenger_output_sha256=raw["challenger_output_sha256"],
@@ -576,6 +648,13 @@ class VOCCanonicalAuthorityResolver(Protocol):
         as_of: str,
     ) -> PairedVOCEvaluation | None: ...
 
+    def resolve_decision_context(
+        self,
+        context_sha256: str,
+        *,
+        as_of: str,
+    ) -> Mapping[str, str] | None: ...
+
 
 class CanonicalVOCAuthorityResolver:
     """Resolve VOC only from durable canonical decision/protocol/outcome authorities."""
@@ -610,12 +689,43 @@ class CanonicalVOCAuthorityResolver:
             raise VOCEvaluationError("canonical decision record is invalid") from exc
         return _canonical_digest(payload)
 
+    def resolve_decision_context(
+        self,
+        context_sha256: str,
+        *,
+        as_of: str,
+    ) -> Mapping[str, str] | None:
+        return resolve_voc_decision_context(
+            self.decision_ledger,
+            context_sha256=context_sha256,
+            as_of=as_of,
+        )
+
     def _require_decision(self, evaluation: PairedVOCEvaluation) -> None:
         try:
             records = self.decision_ledger.verified_records()
         except DecisionLedgerIntegrityError as exc:
             raise VOCEvaluationError("canonical DecisionLedger verification failed") from exc
+        context = self.resolve_decision_context(
+            evaluation.decision_context_sha256,
+            as_of=evaluation.decision_at,
+        )
+        if context is None:
+            raise VOCEvaluationError("canonical source VOC decision context is missing")
+        expected_context = {
+            "task_class": evaluation.task_class,
+            "sport_id": evaluation.sport_id,
+            "league_id": evaluation.league_id,
+            "regime_id": evaluation.regime_id,
+            "urgency_id": evaluation.urgency_id,
+            "contradiction_state": evaluation.contradiction_state,
+        }
+        if any(context.get(key) != value for key, value in expected_context.items()):
+            raise VOCEvaluationError(
+                "canonical source VOC decision context does not match paired evaluation"
+            )
         expected_binding = {
+            "decision_context_sha256": evaluation.decision_context_sha256,
             "baseline_candidate_id": evaluation.baseline_candidate_id,
             "baseline_backend_id": evaluation.baseline_backend_id,
             "baseline_model_id": evaluation.baseline_model_id,
@@ -1254,6 +1364,26 @@ class VOCEvaluationStore:
     def get(self, evaluation_id: str) -> PairedVOCEvaluation | None:
         wanted = _text("evaluation_id", evaluation_id)
         return self._load().get(wanted)
+
+    def require_decision_context(
+        self,
+        context_sha256: str,
+        *,
+        as_of: str,
+    ) -> dict[str, str]:
+        expected = _sha256("context_sha256", context_sha256)
+        resolver = self._canonical_authority_resolver
+        if resolver is None:
+            raise VOCEvaluationError("missing canonical VOC authority resolver")
+        resolved = resolver.resolve_decision_context(expected, as_of=as_of)
+        if resolved is None:
+            raise VOCEvaluationError("canonical current VOC decision context is missing")
+        if not isinstance(resolved, Mapping) or set(resolved) != _VOC_CURRENT_CONTEXT_FIELDS:
+            raise VOCEvaluationError("canonical current VOC decision context schema is invalid")
+        return {
+            field: _text(f"canonical current VOC context {field}", resolved.get(field))
+            for field in sorted(_VOC_CURRENT_CONTEXT_FIELDS)
+        }
 
     def require(
         self,

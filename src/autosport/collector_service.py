@@ -501,6 +501,11 @@ class HeadlessCollectorService:
             source_id=source_id,
             started_at=started_at,
         )
+        self.delta_store.activate_runtime_stream_epoch(
+            source_id=source_id,
+            stream_epoch=stream_epoch,
+            activated_at=started_at,
+        )
 
     @property
     def source_id(self) -> str:
@@ -574,6 +579,19 @@ class HeadlessCollectorService:
         _CollectorServiceState._instant(attempt_at, "attempt_at")
         self._state.record_attempt(at=attempt_at)
         try:
+            cycle_stream_epoch = getattr(self.source, "stream_epoch", None)
+            if (
+                not isinstance(cycle_stream_epoch, str)
+                or not cycle_stream_epoch.strip()
+            ):
+                raise CollectorServiceError(
+                    "source.stream_epoch must remain a non-empty string"
+                )
+            self.delta_store.activate_runtime_stream_epoch(
+                source_id=self.source_id,
+                stream_epoch=cycle_stream_epoch,
+                activated_at=attempt_at,
+            )
             self._check_storage_budget()
             catalog_changes = self._bounded_provider_call(
                 lambda: self.lifecycle.refresh_once(
@@ -590,7 +608,7 @@ class HeadlessCollectorService:
                 if item.source_id == self.source_id
             )
             checkpoint = self.delta_store.stream_checkpoint(
-                self.source_id, self.source.stream_epoch
+                self.source_id, cycle_stream_epoch
             )
             raw_deltas = self._bounded_provider_call(
                 lambda: self.source.fetch_deltas(
@@ -619,7 +637,7 @@ class HeadlessCollectorService:
                     raise CollectorServiceError(
                         "collector source returned a delta for another source_id"
                     )
-                if delta.stream_epoch != self.source.stream_epoch:
+                if delta.stream_epoch != cycle_stream_epoch:
                     raise CollectorServiceError(
                         "collector source returned a delta for another stream_epoch"
                     )

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from decimal import Decimal
+from pathlib import Path
 
 import pytest
 
@@ -14,6 +15,7 @@ from autosport.research_multiplicity import (
     SequentialMultiplicityEvidenceStore,
 )
 from autosport.scientific_registry import ResearchOutcome
+from autosport.workspace_lock import WorkspaceEconomicLock
 
 
 def test_parseable_plan_shape_corruption_cannot_reset_consumed_workspace(tmp_path) -> None:
@@ -66,3 +68,24 @@ def test_parseable_plan_shape_corruption_cannot_reset_consumed_workspace(tmp_pat
 
     with pytest.raises(ValueError, match="recognizable multiplicity evidence is invalid"):
         SequentialMultiplicityEvidenceStore.initialize_workspace(tmp_path)
+
+
+def test_bootstrap_discovery_does_not_read_workspace_economic_lock(
+    tmp_path, monkeypatch
+) -> None:
+    lock_path = tmp_path / WorkspaceEconomicLock.FILE_NAME
+    lock_path.write_bytes(b"\0")
+    original_read_text = Path.read_text
+
+    def _windows_locked_read(path: Path, *args, **kwargs):
+        if path.name == WorkspaceEconomicLock.FILE_NAME:
+            raise PermissionError("simulated Windows lock sharing denial")
+        return original_read_text(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", _windows_locked_read)
+
+    assert (
+        SequentialMultiplicityEvidenceStore.initialize_workspace(tmp_path)
+        == tmp_path.resolve(strict=False)
+    )
+

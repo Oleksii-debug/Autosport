@@ -3,8 +3,10 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from decimal import Decimal
 
+from . import _betfair_market_commission_origin_binding as _source_origin
 from . import _campaign_provider_scope_devapp_identity as _devapp
 from . import campaign_provider_scope_authority as _scope
+from .betfair_account_readonly import BetfairReadOnlyClient
 from .betfair_market_commission_authority import (
     SOURCE_FAMILY as BETFAIR_COMMISSION_SOURCE_FAMILY,
     BetfairMarketCommissionAuthority,
@@ -38,19 +40,21 @@ def issue_betfair_commission_cost_evidence(
     record_sha256: str,
     as_of: datetime,
 ) -> CostEvidence:
-    """Issue one source-owned incurred commission item for an exact campaign slice.
+    """Issue source-owned incurred commission evidence for an exact campaign slice.
 
     The monetary amount, currency, settlement time and immutable source identity are
     re-resolved from ``BetfairMarketCommissionAuthority``. Campaign applicability is
-    accepted only from the canonical campaign/provider-scope resolver. The two
-    authorities are joined through a fresh source-owned stable Betfair account
-    discriminator plus exact market identity.
+    accepted only from the canonical campaign/provider-scope resolver. The source
+    resolver also returns the exact client origin that acquired/reacquired this
+    receipt; stable Betfair account identity is read from that bound client rather
+    than from mutable ``source._client`` state.
 
-    The result deliberately remains ``INFORMATIONAL``. The current campaign gross
-    P&L contract does not prove whether Betfair commission is already embedded in
-    gross P&L, so this adapter must not guess ``SUBTRACT_FROM_GROSS`` versus
-    ``EMBEDDED_IN_GROSS``. It therefore advances authoritative incurred-cost truth
-    without falsely promoting COMPLETE net economics.
+    Betfair's MARKET rollup can cover more than one execution/campaign. Therefore
+    the result is explicitly a shared source and remains ``INFORMATIONAL`` until a
+    separate allocation/accounting authority proves both the campaign share and
+    whether commission is subtractive or already embedded in gross P&L. This path
+    advances authoritative incurred-source truth without claiming complete net
+    economics.
     """
 
     if type(source) is not BetfairMarketCommissionAuthority:
@@ -88,10 +92,30 @@ def issue_betfair_commission_cost_evidence(
         )
 
     try:
-        stable_account_id, account_observed = _stable_source_account_identity(source)
+        receipt, origin_client = _source_origin.resolve_bound_receipt(
+            source,
+            receipt_id=receipt_id,
+            record_sha256=record_sha256,
+            as_of=as_of,
+        )
     except Exception as exc:
         raise BetfairCommissionCostEvidenceError(
-            "stable authenticated Betfair account identity is unavailable"
+            "Betfair commission receipt lacks current source-origin authority"
+        ) from exc
+    if type(receipt) is not BetfairMarketCommissionReceipt:
+        raise BetfairCommissionCostEvidenceError(
+            "commission source returned non-canonical receipt"
+        )
+    if type(origin_client) is not BetfairReadOnlyClient:
+        raise BetfairCommissionCostEvidenceError(
+            "commission source returned non-canonical client origin"
+        )
+
+    try:
+        stable_account_id, account_observed = _stable_client_account_identity(origin_client)
+    except Exception as exc:
+        raise BetfairCommissionCostEvidenceError(
+            "stable authenticated Betfair receipt account identity is unavailable"
         ) from exc
     if account_observed > as_of:
         raise BetfairCommissionCostEvidenceError(
@@ -99,23 +123,9 @@ def issue_betfair_commission_cost_evidence(
         )
     if stable_account_id != provider_scope.authenticated_account_id:
         raise BetfairCommissionCostEvidenceError(
-            "commission source account is outside campaign provider scope"
+            "commission receipt account is outside campaign provider scope"
         )
 
-    try:
-        receipt = source.resolve(
-            receipt_id=receipt_id,
-            record_sha256=record_sha256,
-            as_of=as_of,
-        )
-    except Exception as exc:
-        raise BetfairCommissionCostEvidenceError(
-            "Betfair commission receipt is not current source authority"
-        ) from exc
-    if type(receipt) is not BetfairMarketCommissionReceipt:
-        raise BetfairCommissionCostEvidenceError(
-            "commission source returned non-canonical receipt"
-        )
     if receipt.venue_id != provider_scope.venue_id:
         raise BetfairCommissionCostEvidenceError(
             "commission venue is outside campaign provider scope"
@@ -160,6 +170,7 @@ def issue_betfair_commission_cost_evidence(
         observed_at=observed_at,
         available_at=available_at,
         incurred_at=receipt.settled_at,
+        shared_source=True,
     )
 
 
@@ -189,20 +200,16 @@ def verify_betfair_commission_cost_evidence(
     return evidence == expected
 
 
-def _stable_source_account_identity(
-    source: BetfairMarketCommissionAuthority,
+def _stable_client_account_identity(
+    client: BetfairReadOnlyClient,
 ) -> tuple[str, datetime]:
-    """Derive stable account identity and its real source-observation time.
+    """Re-verify stable account identity from the receipt's bound client origin."""
 
-    ``BetfairMarketCommissionAuthority`` constructs this client internally and does
-    not accept injected transport/clock. The developer-app identity helper itself
-    rejects non-canonical origins, so ordinary callers cannot relabel one receipt as
-    another Betfair account by passing an account string. Its observation time is
-    carried into CostEvidence availability so later re-verification cannot be
-    backdated into an earlier economic snapshot.
-    """
-
-    identity = _devapp._read_developer_account_identity(source._client)
+    if type(client) is not BetfairReadOnlyClient:
+        raise BetfairCommissionCostEvidenceError(
+            "receipt client origin must be canonical BetfairReadOnlyClient"
+        )
+    identity = _devapp._read_developer_account_identity(client)
     return (
         f"betfair-account-evidence:{identity.account_identity_sha256}",
         _instant(identity.observed_at, "stable account observed_at"),

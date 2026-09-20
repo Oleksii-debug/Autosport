@@ -13,20 +13,31 @@ from . import _paper_execution_freshness as _paper_execution_freshness  # noqa: 
 # remote/OS attestation that could truthfully recreate provider origin.
 from . import _provider_receipt_trust_root as _provider_receipt_trust_root  # noqa: F401,E402
 
+# Authenticated complete-board acquisition must never follow an HTTP redirect:
+# doing so could forward X-API-Key to another origin before response validation.
+from . import _provider_transport_origin as _provider_transport_origin  # noqa: F401,E402
+
 # Autosport-owned v1 provider evidence/request envelopes are exact schemas. Keep
 # provider frame JSON extensible/content-bound, but reject unknown local envelope
 # fields before normalization or monotonic integrity validation.
 from . import _provider_observation_payload_strictness as _provider_observation_payload_strictness  # noqa: F401,E402
 
-# Positive pre-evaluation evidence must come from the product-owned, capability-
-# guarded derivation path. Reject direct public construction of the exact evidence
-# and binding classes before callers can mint self-consistent authoritative facts.
-from . import _pre_evaluation_fact_gate as _pre_evaluation_fact_gate  # noqa: F401,E402
+# Install the fail-closed predictive runtime authority bridge before callers import
+# decision modules.  The import is intentionally private; public APIs remain in the
+# owning opportunity/predictive modules.
+from . import predictive_authority as _predictive_authority  # noqa: E402,F401
+from . import _predictive_authority_type_fence as _predictive_authority_type_fence  # noqa: E402,F401
 
-# The product-origin bridge must not be callable with caller-created lookalikes for
-# provider snapshots, provider selection bindings or durable economic evidence.
-# Install this after the fact-construction gate so both authorities compose.
-from . import _pre_evaluation_provider_origin_gate as _pre_evaluation_provider_origin_gate  # noqa: F401,E402
+# Product chrome describes one finished Autosport product. Keep internal/versioned
+# strategy and evidence identities intact while removing legacy V1 product framing.
+from . import _whole_product_title_guard as _whole_product_title_guard  # noqa: F401,E402
+
+# Preserve immutable schema-v1 DatasetSnapshot ancestry proof identities while
+# requiring an authority-owned causal re-observation witness before those proofs
+# may authorize a later-session activation.
+from . import _dataset_snapshot_lineage_publication as _dataset_snapshot_lineage_publication  # noqa: F401,E402
+from . import _dataset_snapshot_lineage_publication_provenance as _dataset_snapshot_lineage_publication_provenance  # noqa: F401,E402
+from . import _dataset_snapshot_lineage_publication_trust_root as _dataset_snapshot_lineage_publication_trust_root  # noqa: F401,E402
 
 # Structural cursor/range witnesses are useful legacy intake evidence but are not
 # production provider-completeness authority. Install the fail-closed public gate;

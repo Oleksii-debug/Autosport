@@ -14,7 +14,8 @@ from typing import Any, Mapping
 from .real_execution_ledger import ExecutionAction, ExecutionPlan
 
 
-_SCHEMA_VERSION = 1
+_SCHEMA_VERSION = 2
+_ANCHOR_SCHEMA_VERSION = 1
 
 
 class PaperExecutionRealityError(RuntimeError):
@@ -109,7 +110,7 @@ def _digest(value: Any) -> str:
     return hashlib.sha256(_canonical(value).encode("utf-8")).hexdigest()
 
 
-def _parse_json_line(raw: str) -> dict[str, Any]:
+def _parse_json_object(raw: str, *, what: str) -> dict[str, Any]:
     def pairs(items: list[tuple[str, Any]]) -> dict[str, Any]:
         result: dict[str, Any] = {}
         for key, value in items:
@@ -131,9 +132,9 @@ def _parse_json_line(raw: str) -> dict[str, Any]:
     except PaperExecutionIntegrityError:
         raise
     except (json.JSONDecodeError, UnicodeDecodeError) as exc:
-        raise PaperExecutionIntegrityError("invalid JSONL event") from exc
+        raise PaperExecutionIntegrityError(f"invalid {what} JSON") from exc
     if type(value) is not dict:
-        raise PaperExecutionIntegrityError("ledger event must be a JSON object")
+        raise PaperExecutionIntegrityError(f"{what} must be a JSON object")
     return value
 
 
@@ -145,8 +146,6 @@ def _milliseconds(delta: timedelta, name: str) -> int:
     )
     if microseconds < 0:
         raise ValueError(f"{name} must be non-negative")
-    # Persist millisecond evidence deterministically while accepting ordinary
-    # ISO-8601 timestamps with finer-than-millisecond precision.
     return microseconds // 1000
 
 
@@ -228,12 +227,166 @@ class PaperExecutionModelConfig:
 
 
 @dataclass(frozen=True, slots=True)
+class PaperExecutionEvidenceRecord:
+    action_id: str
+    bookmaker_id: str
+    account_id: str
+    event_id: str
+    market_id: str
+    selection_id: str
+    side: str
+    quote_id: str
+    outcome: PaperAttemptOutcome
+    observed_at: str
+    evidence_grade: EvidenceGrade
+    evidence_source: str
+    accepted_odds: Decimal | str | int | None = None
+    accepted_stake: Decimal | str | int | None = None
+    suspended: bool = False
+    reason: str = "observed execution evidence"
+
+    def __post_init__(self) -> None:
+        for name in (
+            "action_id",
+            "bookmaker_id",
+            "account_id",
+            "event_id",
+            "market_id",
+            "selection_id",
+            "side",
+            "quote_id",
+            "evidence_source",
+            "reason",
+        ):
+            _text(getattr(self, name), name)
+        _timestamp(self.observed_at, "observed_at")
+        if not isinstance(self.outcome, PaperAttemptOutcome):
+            raise ValueError("outcome must be PaperAttemptOutcome")
+        if self.evidence_grade not in {EvidenceGrade.CONFIGURED, EvidenceGrade.EMPIRICAL}:
+            raise ValueError("registered execution evidence must be CONFIGURED or EMPIRICAL")
+        if type(self.suspended) is not bool:
+            raise ValueError("suspended must be bool")
+        if self.outcome in {PaperAttemptOutcome.ACCEPTED, PaperAttemptOutcome.PARTIAL}:
+            if self.accepted_odds is None or self.accepted_stake is None:
+                raise ValueError("accepted/partial evidence requires odds and stake")
+            odds = _decimal(self.accepted_odds, "accepted_odds")
+            stake = _decimal(self.accepted_stake, "accepted_stake")
+            if odds <= 1:
+                raise ValueError("accepted_odds must be > 1")
+            object.__setattr__(self, "accepted_odds", odds)
+            object.__setattr__(self, "accepted_stake", stake)
+        elif self.accepted_odds is not None or self.accepted_stake is not None:
+            raise ValueError("rejected/unknown evidence cannot claim accepted odds/stake")
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "action_id": self.action_id,
+            "bookmaker_id": self.bookmaker_id,
+            "account_id": self.account_id,
+            "event_id": self.event_id,
+            "market_id": self.market_id,
+            "selection_id": self.selection_id,
+            "side": self.side,
+            "quote_id": self.quote_id,
+            "outcome": self.outcome.value,
+            "observed_at": self.observed_at,
+            "evidence_grade": self.evidence_grade.value,
+            "evidence_source": self.evidence_source,
+            "accepted_odds": (
+                None if self.accepted_odds is None else _decimal_text(self.accepted_odds)
+            ),
+            "accepted_stake": (
+                None if self.accepted_stake is None else _decimal_text(self.accepted_stake)
+            ),
+            "suspended": self.suspended,
+            "reason": self.reason,
+        }
+
+    @property
+    def evidence_sha256(self) -> str:
+        return _digest(
+            {
+                "schema": "autosport.paper_execution_observation_evidence",
+                "schema_version": 1,
+                "record": self.to_dict(),
+            }
+        )
+
+    @property
+    def evidence_id(self) -> str:
+        return "paper-exec-evidence-v1-" + self.evidence_sha256
+
+    def as_observation(self) -> "ObservedPaperExecution":
+        return ObservedPaperExecution(
+            action_id=self.action_id,
+            outcome=self.outcome,
+            observed_at=self.observed_at,
+            evidence_grade=self.evidence_grade,
+            evidence_source=self.evidence_source,
+            evidence_id=self.evidence_id,
+            evidence_sha256=self.evidence_sha256,
+            accepted_odds=self.accepted_odds,
+            accepted_stake=self.accepted_stake,
+            suspended=self.suspended,
+            reason=self.reason,
+        )
+
+    @classmethod
+    def from_dict(cls, raw: object) -> "PaperExecutionEvidenceRecord":
+        if type(raw) is not dict:
+            raise PaperExecutionIntegrityError("evidence record must be an object")
+        expected = {
+            "action_id",
+            "bookmaker_id",
+            "account_id",
+            "event_id",
+            "market_id",
+            "selection_id",
+            "side",
+            "quote_id",
+            "outcome",
+            "observed_at",
+            "evidence_grade",
+            "evidence_source",
+            "accepted_odds",
+            "accepted_stake",
+            "suspended",
+            "reason",
+        }
+        if set(raw) != expected:
+            raise PaperExecutionIntegrityError("evidence record schema is invalid")
+        try:
+            return cls(
+                action_id=raw["action_id"],
+                bookmaker_id=raw["bookmaker_id"],
+                account_id=raw["account_id"],
+                event_id=raw["event_id"],
+                market_id=raw["market_id"],
+                selection_id=raw["selection_id"],
+                side=raw["side"],
+                quote_id=raw["quote_id"],
+                outcome=PaperAttemptOutcome(raw["outcome"]),
+                observed_at=raw["observed_at"],
+                evidence_grade=EvidenceGrade(raw["evidence_grade"]),
+                evidence_source=raw["evidence_source"],
+                accepted_odds=raw["accepted_odds"],
+                accepted_stake=raw["accepted_stake"],
+                suspended=raw["suspended"],
+                reason=raw["reason"],
+            )
+        except (KeyError, ValueError, InvalidOperation, TypeError) as exc:
+            raise PaperExecutionIntegrityError("invalid evidence record") from exc
+
+
+@dataclass(frozen=True, slots=True)
 class ObservedPaperExecution:
     action_id: str
     outcome: PaperAttemptOutcome
     observed_at: str
     evidence_grade: EvidenceGrade
     evidence_source: str
+    evidence_id: str
+    evidence_sha256: str
     accepted_odds: Decimal | str | int | None = None
     accepted_stake: Decimal | str | int | None = None
     suspended: bool = False
@@ -247,6 +400,10 @@ class ObservedPaperExecution:
         if self.evidence_grade not in {EvidenceGrade.CONFIGURED, EvidenceGrade.EMPIRICAL}:
             raise ValueError("observed execution evidence must be CONFIGURED or EMPIRICAL")
         _text(self.evidence_source, "evidence_source")
+        _text(self.evidence_id, "evidence_id")
+        digest = _text(self.evidence_sha256, "evidence_sha256")
+        if len(digest) != 64 or any(ch not in "0123456789abcdef" for ch in digest):
+            raise ValueError("evidence_sha256 must be lowercase SHA-256 hex")
         _text(self.reason, "reason")
         if type(self.suspended) is not bool:
             raise ValueError("suspended must be bool")
@@ -289,6 +446,8 @@ class PaperLegAttempt:
     suspended: bool
     evidence_grade: EvidenceGrade
     evidence_source: str
+    evidence_id: str | None
+    evidence_sha256: str | None
     model_fingerprint: str
     reason: str
 
@@ -335,6 +494,14 @@ class PaperLegAttempt:
             raise ValueError("suspended must be bool")
         if not isinstance(self.evidence_grade, EvidenceGrade):
             raise ValueError("evidence_grade must be EvidenceGrade")
+        if self.evidence_grade is EvidenceGrade.SYNTHETIC:
+            if self.evidence_id is not None or self.evidence_sha256 is not None:
+                raise ValueError("synthetic attempt cannot claim registered evidence identity")
+        else:
+            _text(self.evidence_id, "evidence_id")
+            digest = _text(self.evidence_sha256, "evidence_sha256")
+            if len(digest) != 64:
+                raise ValueError("evidence_sha256 must be SHA-256 hex")
         if self.outcome in {PaperAttemptOutcome.ACCEPTED, PaperAttemptOutcome.PARTIAL}:
             if self.execution_odds is None or self.execution_stake is None:
                 raise ValueError("accepted/partial attempt requires execution odds and stake")
@@ -344,15 +511,9 @@ class PaperLegAttempt:
             execution_stake = _decimal(self.execution_stake, "execution_stake")
             if execution_stake > self.requested_stake:
                 raise ValueError("execution_stake cannot exceed requested_stake")
-            if (
-                self.outcome is PaperAttemptOutcome.ACCEPTED
-                and execution_stake != self.requested_stake
-            ):
+            if self.outcome is PaperAttemptOutcome.ACCEPTED and execution_stake != self.requested_stake:
                 raise ValueError("ACCEPTED attempt must fill the requested stake")
-            if (
-                self.outcome is PaperAttemptOutcome.PARTIAL
-                and execution_stake >= self.requested_stake
-            ):
+            if self.outcome is PaperAttemptOutcome.PARTIAL and execution_stake >= self.requested_stake:
                 raise ValueError("PARTIAL attempt must fill less than requested stake")
             object.__setattr__(self, "execution_odds", execution_odds)
             object.__setattr__(self, "execution_stake", execution_stake)
@@ -384,13 +545,13 @@ class PaperLegAttempt:
                 None if self.execution_odds is None else _decimal_text(self.execution_odds)
             ),
             "execution_stake": (
-                None
-                if self.execution_stake is None
-                else _decimal_text(self.execution_stake)
+                None if self.execution_stake is None else _decimal_text(self.execution_stake)
             ),
             "suspended": self.suspended,
             "evidence_grade": self.evidence_grade.value,
             "evidence_source": self.evidence_source,
+            "evidence_id": self.evidence_id,
+            "evidence_sha256": self.evidence_sha256,
             "model_fingerprint": self.model_fingerprint,
             "reason": self.reason,
         }
@@ -400,32 +561,13 @@ class PaperLegAttempt:
         if type(raw) is not dict:
             raise PaperExecutionIntegrityError("attempt payload must be an object")
         expected = {
-            "attempt_id",
-            "run_id",
-            "plan_id",
-            "action_id",
-            "sequence",
-            "bookmaker_id",
-            "account_id",
-            "event_id",
-            "market_id",
-            "selection_id",
-            "side",
-            "decision_quote_id",
-            "decision_odds",
-            "requested_stake",
-            "decision_observed_at",
-            "execution_observed_at",
-            "delay_ms",
-            "quote_age_ms",
-            "outcome",
-            "execution_odds",
-            "execution_stake",
-            "suspended",
-            "evidence_grade",
-            "evidence_source",
-            "model_fingerprint",
-            "reason",
+            "attempt_id", "run_id", "plan_id", "action_id", "sequence",
+            "bookmaker_id", "account_id", "event_id", "market_id", "selection_id",
+            "side", "decision_quote_id", "decision_odds", "requested_stake",
+            "decision_observed_at", "execution_observed_at", "delay_ms", "quote_age_ms",
+            "outcome", "execution_odds", "execution_stake", "suspended",
+            "evidence_grade", "evidence_source", "evidence_id", "evidence_sha256",
+            "model_fingerprint", "reason",
         }
         if set(raw) != expected:
             raise PaperExecutionIntegrityError("attempt payload schema is invalid")
@@ -450,19 +592,13 @@ class PaperLegAttempt:
                 delay_ms=raw["delay_ms"],
                 quote_age_ms=raw["quote_age_ms"],
                 outcome=PaperAttemptOutcome(raw["outcome"]),
-                execution_odds=(
-                    None
-                    if raw["execution_odds"] is None
-                    else Decimal(raw["execution_odds"])
-                ),
-                execution_stake=(
-                    None
-                    if raw["execution_stake"] is None
-                    else Decimal(raw["execution_stake"])
-                ),
+                execution_odds=None if raw["execution_odds"] is None else Decimal(raw["execution_odds"]),
+                execution_stake=None if raw["execution_stake"] is None else Decimal(raw["execution_stake"]),
                 suspended=raw["suspended"],
                 evidence_grade=EvidenceGrade(raw["evidence_grade"]),
                 evidence_source=raw["evidence_source"],
+                evidence_id=raw["evidence_id"],
+                evidence_sha256=raw["evidence_sha256"],
                 model_fingerprint=raw["model_fingerprint"],
                 reason=raw["reason"],
             )
@@ -485,13 +621,7 @@ class PaperExecutionRun:
     completed: bool
 
     def __post_init__(self) -> None:
-        for name in (
-            "run_id",
-            "trigger_id",
-            "plan_id",
-            "plan_fingerprint",
-            "model_fingerprint",
-        ):
+        for name in ("run_id", "trigger_id", "plan_id", "plan_fingerprint", "model_fingerprint"):
             _text(getattr(self, name), name)
         _timestamp(self.started_at, "started_at")
         if not all(isinstance(item, PaperLegAttempt) for item in self.attempts):
@@ -521,12 +651,13 @@ class PaperExecutionRun:
 
 
 class PaperExecutionLedger:
-    """Append-only PAPER execution evidence with restart-safe exactly-once events."""
+    """Append-only PAPER evidence with a chained log and durable latest-root anchor."""
 
     def __init__(self, path: str | Path) -> None:
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._lock_path = self.path.with_name(self.path.name + ".writer.lock")
+        self._anchor_path = self.path.with_name(self.path.name + ".anchor.json")
         self._lock = threading.RLock()
         self._path_durable = False
 
@@ -578,52 +709,127 @@ class PaperExecutionLedger:
                     pass
 
     @staticmethod
-    def _event(event_type: str, run_id: str, key: str, payload: dict[str, Any]) -> dict[str, Any]:
+    def _event(
+        *,
+        event_type: str,
+        run_id: str,
+        key: str,
+        payload: dict[str, Any],
+        sequence: int,
+        previous_sha256: str | None,
+    ) -> dict[str, Any]:
         body = {
             "schema_version": _SCHEMA_VERSION,
             "event_type": _text(event_type, "event_type"),
             "run_id": _text(run_id, "run_id"),
             "event_key": _text(key, "event_key"),
+            "sequence": sequence,
+            "previous_sha256": previous_sha256,
             "payload": payload,
         }
         return {**body, "event_sha256": _digest(body)}
 
+    def _read_anchor_unlocked(self) -> dict[str, Any] | None:
+        if not self._anchor_path.exists():
+            return None
+        try:
+            raw = self._anchor_path.read_text(encoding="utf-8")
+        except (OSError, UnicodeError) as exc:
+            raise PaperExecutionIntegrityError("cannot read PAPER execution anchor") from exc
+        anchor = _parse_json_object(raw, what="ledger anchor")
+        expected = {
+            "anchor_schema_version", "ledger_schema_version", "event_count",
+            "ledger_root_sha256", "anchor_sha256",
+        }
+        if set(anchor) != expected:
+            raise PaperExecutionIntegrityError("ledger anchor schema is invalid")
+        body = {key: anchor[key] for key in expected if key != "anchor_sha256"}
+        if anchor["anchor_sha256"] != _digest(body):
+            raise PaperExecutionIntegrityError("ledger anchor digest mismatch")
+        return anchor
+
+    def _write_anchor_unlocked(self, events: list[dict[str, Any]]) -> None:
+        root = None if not events else events[-1]["event_sha256"]
+        body = {
+            "anchor_schema_version": _ANCHOR_SCHEMA_VERSION,
+            "ledger_schema_version": _SCHEMA_VERSION,
+            "event_count": len(events),
+            "ledger_root_sha256": root,
+        }
+        anchor = {**body, "anchor_sha256": _digest(body)}
+        tmp = self._anchor_path.with_name(
+            self._anchor_path.name + f".tmp-{os.getpid()}-{threading.get_ident()}"
+        )
+        try:
+            with tmp.open("w", encoding="utf-8", newline="\n") as handle:
+                handle.write(_canonical(anchor) + "\n")
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(tmp, self._anchor_path)
+            self._sync_parent_directory()
+        except OSError as exc:
+            try:
+                tmp.unlink()
+            except FileNotFoundError:
+                pass
+            raise PaperExecutionIntegrityError(
+                "PAPER execution anchor durability barrier failed"
+            ) from exc
+
     def _load_unlocked(self) -> list[dict[str, Any]]:
         if not self.path.exists():
+            if self._anchor_path.exists():
+                anchor = self._read_anchor_unlocked()
+                if anchor is None or anchor["event_count"] != 0:
+                    raise PaperExecutionIntegrityError("ledger is missing but anchor claims history")
             return []
-        events: list[dict[str, Any]] = []
-        seen: dict[str, dict[str, Any]] = {}
         try:
             lines = self.path.read_text(encoding="utf-8").splitlines()
         except (OSError, UnicodeError) as exc:
             raise PaperExecutionIntegrityError("cannot read PAPER execution ledger") from exc
-        for raw in lines:
+
+        events: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        previous_sha256: str | None = None
+        expected_keys = {
+            "schema_version", "event_type", "run_id", "event_key", "sequence",
+            "previous_sha256", "payload", "event_sha256",
+        }
+        for sequence, raw in enumerate(lines):
             if not raw:
                 raise PaperExecutionIntegrityError("ledger contains blank event line")
-            event = _parse_json_line(raw)
-            expected = {
-                "schema_version",
-                "event_type",
-                "run_id",
-                "event_key",
-                "payload",
-                "event_sha256",
-            }
-            if set(event) != expected or event["schema_version"] != _SCHEMA_VERSION:
+            event = _parse_json_object(raw, what="ledger event")
+            if set(event) != expected_keys or event["schema_version"] != _SCHEMA_VERSION:
                 raise PaperExecutionIntegrityError("ledger event schema is invalid")
-            body = {key: event[key] for key in expected if key != "event_sha256"}
+            if event["sequence"] != sequence:
+                raise PaperExecutionIntegrityError("ledger event sequence is not contiguous")
+            if event["previous_sha256"] != previous_sha256:
+                raise PaperExecutionIntegrityError("ledger event chain predecessor mismatch")
+            body = {key: event[key] for key in expected_keys if key != "event_sha256"}
             if event["event_sha256"] != _digest(body):
                 raise PaperExecutionIntegrityError("ledger event digest mismatch")
             key = event["event_key"]
             if type(key) is not str or not key:
                 raise PaperExecutionIntegrityError("ledger event_key is invalid")
-            prior = seen.get(key)
-            if prior is not None:
-                if prior != event:
-                    raise PaperExecutionIntegrityError("conflicting duplicate event_key")
-                continue
-            seen[key] = event
+            if key in seen:
+                raise PaperExecutionIntegrityError("duplicate event_key in durable ledger")
+            seen.add(key)
             events.append(event)
+            previous_sha256 = event["event_sha256"]
+
+        anchor = self._read_anchor_unlocked()
+        if events and anchor is None:
+            raise PaperExecutionIntegrityError("non-empty ledger is missing latest-root anchor")
+        if anchor is not None:
+            if anchor["anchor_schema_version"] != _ANCHOR_SCHEMA_VERSION:
+                raise PaperExecutionIntegrityError("unsupported ledger anchor schema")
+            if anchor["ledger_schema_version"] != _SCHEMA_VERSION:
+                raise PaperExecutionIntegrityError("ledger/anchor schema mismatch")
+            if anchor["event_count"] != len(events):
+                raise PaperExecutionIntegrityError("ledger event count does not match durable anchor")
+            expected_root = None if not events else events[-1]["event_sha256"]
+            if anchor["ledger_root_sha256"] != expected_root:
+                raise PaperExecutionIntegrityError("ledger root does not match durable anchor")
         return events
 
     def events(self, run_id: str | None = None) -> tuple[dict[str, Any], ...]:
@@ -634,14 +840,39 @@ class PaperExecutionLedger:
             _text(run_id, "run_id")
             return tuple(event for event in events if event["run_id"] == run_id)
 
-    def append(self, event: dict[str, Any]) -> None:
+    def _append_event(
+        self,
+        *,
+        event_type: str,
+        run_id: str,
+        key: str,
+        payload: dict[str, Any],
+    ) -> None:
         def mutate() -> None:
             self._ensure_existing_path_durable()
             events = self._load_unlocked()
             by_key = {item["event_key"]: item for item in events}
-            prior = by_key.get(event["event_key"])
+            prior = by_key.get(key)
+            sequence = len(events)
+            previous_sha256 = None if not events else events[-1]["event_sha256"]
+            event = self._event(
+                event_type=event_type,
+                run_id=run_id,
+                key=key,
+                payload=payload,
+                sequence=sequence,
+                previous_sha256=previous_sha256,
+            )
             if prior is not None:
-                if prior != event:
+                comparable = dict(prior)
+                comparable.pop("sequence", None)
+                comparable.pop("previous_sha256", None)
+                comparable.pop("event_sha256", None)
+                proposed = dict(event)
+                proposed.pop("sequence", None)
+                proposed.pop("previous_sha256", None)
+                proposed.pop("event_sha256", None)
+                if comparable != proposed:
                     raise PaperExecutionIntegrityError(
                         "event_key already has different payload"
                     )
@@ -655,6 +886,7 @@ class PaperExecutionLedger:
                     os.fsync(handle.fileno())
                 if not path_existed_before or not self._path_durable:
                     self._sync_parent_directory()
+                self._write_anchor_unlocked(events + [event])
             except OSError as exc:
                 self._path_durable = False
                 raise PaperExecutionIntegrityError(
@@ -664,6 +896,47 @@ class PaperExecutionLedger:
 
         self._with_writer_lock(mutate)
 
+    def register_observation_evidence(
+        self, record: PaperExecutionEvidenceRecord
+    ) -> None:
+        if not isinstance(record, PaperExecutionEvidenceRecord):
+            raise TypeError("record must be PaperExecutionEvidenceRecord")
+        payload = {
+            "evidence_id": record.evidence_id,
+            "evidence_sha256": record.evidence_sha256,
+            "record": record.to_dict(),
+        }
+        self._append_event(
+            event_type="OBSERVATION_EVIDENCE_REGISTERED",
+            run_id=record.evidence_id,
+            key=f"evidence:{record.evidence_id}",
+            payload=payload,
+        )
+
+    def resolve_observation_evidence(
+        self, evidence_id: str
+    ) -> PaperExecutionEvidenceRecord:
+        evidence_id = _text(evidence_id, "evidence_id")
+        matches = [
+            event
+            for event in self.events()
+            if event["event_type"] == "OBSERVATION_EVIDENCE_REGISTERED"
+            and event["payload"].get("evidence_id") == evidence_id
+        ]
+        if len(matches) != 1:
+            raise PaperExecutionStateError(
+                "observed execution evidence is unknown to durable registry"
+            )
+        payload = matches[0]["payload"]
+        if set(payload) != {"evidence_id", "evidence_sha256", "record"}:
+            raise PaperExecutionIntegrityError("registered evidence payload schema is invalid")
+        record = PaperExecutionEvidenceRecord.from_dict(payload["record"])
+        if payload["evidence_id"] != record.evidence_id:
+            raise PaperExecutionIntegrityError("registered evidence id mismatch")
+        if payload["evidence_sha256"] != record.evidence_sha256:
+            raise PaperExecutionIntegrityError("registered evidence digest mismatch")
+        return record
+
     def reserve_run(
         self,
         *,
@@ -672,6 +945,7 @@ class PaperExecutionLedger:
         plan: ExecutionPlan,
         config: PaperExecutionModelConfig,
         started_at: str,
+        observation_evidence_ids: Mapping[str, str],
     ) -> None:
         payload = {
             "trigger_id": trigger_id,
@@ -680,17 +954,21 @@ class PaperExecutionLedger:
             "model_fingerprint": config.fingerprint,
             "started_at": started_at,
             "action_ids": [action.action_id for action in plan.actions],
+            "observation_evidence_ids": dict(sorted(observation_evidence_ids.items())),
         }
-        self.append(self._event("RUN_RESERVED", run_id, f"{run_id}:reserve", payload))
+        self._append_event(
+            event_type="RUN_RESERVED",
+            run_id=run_id,
+            key=f"{run_id}:reserve",
+            payload=payload,
+        )
 
     def record_attempt(self, attempt: PaperLegAttempt) -> None:
-        self.append(
-            self._event(
-                "ATTEMPT_RECORDED",
-                attempt.run_id,
-                f"{attempt.run_id}:attempt:{attempt.sequence}",
-                attempt.to_dict(),
-            )
+        self._append_event(
+            event_type="ATTEMPT_RECORDED",
+            run_id=attempt.run_id,
+            key=f"{attempt.run_id}:attempt:{attempt.sequence}",
+            payload=attempt.to_dict(),
         )
 
     def complete_run(
@@ -706,7 +984,12 @@ class PaperExecutionLedger:
             "recovery_decision": recovery_decision.value,
             "worst_case_exposure": _decimal_text(worst_case_exposure),
         }
-        self.append(self._event("RUN_COMPLETED", run_id, f"{run_id}:complete", payload))
+        self._append_event(
+            event_type="RUN_COMPLETED",
+            run_id=run_id,
+            key=f"{run_id}:complete",
+            payload=payload,
+        )
 
     def load_run(
         self,
@@ -716,6 +999,7 @@ class PaperExecutionLedger:
         plan: ExecutionPlan,
         config: PaperExecutionModelConfig,
         started_at: str,
+        observation_evidence_ids: Mapping[str, str],
     ) -> PaperExecutionRun | None:
         events = self.events(run_id)
         if not events:
@@ -730,6 +1014,7 @@ class PaperExecutionLedger:
             "model_fingerprint": config.fingerprint,
             "started_at": started_at,
             "action_ids": [action.action_id for action in plan.actions],
+            "observation_evidence_ids": dict(sorted(observation_evidence_ids.items())),
         }
         if reserve[0]["payload"] != expected_reserve:
             raise PaperExecutionStateError("run identity conflicts with durable reservation")
@@ -798,12 +1083,28 @@ class PaperExecutionLedger:
         )
 
 
+class PaperExecutionEvidenceRegistry:
+    """Immutable resolver for configured/empirical PAPER execution observations."""
+
+    def __init__(self, ledger: PaperExecutionLedger) -> None:
+        if not isinstance(ledger, PaperExecutionLedger):
+            raise TypeError("ledger must be PaperExecutionLedger")
+        self._ledger = ledger
+
+    def register(self, record: PaperExecutionEvidenceRecord) -> str:
+        self._ledger.register_observation_evidence(record)
+        return record.evidence_id
+
+    def resolve(self, evidence_id: str) -> PaperExecutionEvidenceRecord:
+        return self._ledger.resolve_observation_evidence(evidence_id)
+
+
 def _run_id(
     plan: ExecutionPlan,
     trigger_id: str,
     config: PaperExecutionModelConfig,
 ) -> str:
-    return "paper-exec-v1-" + _digest(
+    return "paper-exec-v2-" + _digest(
         {
             "plan_fingerprint": plan.fingerprint,
             "trigger_id": _text(trigger_id, "trigger_id"),
@@ -813,7 +1114,7 @@ def _run_id(
 
 
 def _attempt_id(run_id: str, action: ExecutionAction, sequence: int) -> str:
-    return "paper-attempt-v1-" + _digest(
+    return "paper-attempt-v2-" + _digest(
         {
             "run_id": run_id,
             "action_id": action.action_id,
@@ -895,8 +1196,7 @@ def _synthetic_attempt(
             )
             odds_margin = action.requested_odds - Decimal("1")
             execution_odds = Decimal("1") + (
-                odds_margin
-                * (Decimal(10_000 - slippage_bps) / Decimal(10_000))
+                odds_margin * (Decimal(10_000 - slippage_bps) / Decimal(10_000))
             )
             execution_stake = action.requested_stake
             if outcome is PaperAttemptOutcome.PARTIAL:
@@ -929,11 +1229,46 @@ def _synthetic_attempt(
         execution_odds=execution_odds,
         execution_stake=execution_stake,
         suspended=suspended,
-        evidence_grade=config.evidence_grade,
+        evidence_grade=EvidenceGrade.SYNTHETIC,
         evidence_source=config.evidence_source,
+        evidence_id=None,
+        evidence_sha256=None,
         model_fingerprint=config.fingerprint,
         reason=reason,
     )
+
+
+def _verify_observation_authority(
+    *,
+    action: ExecutionAction,
+    observation: ObservedPaperExecution,
+    registry: PaperExecutionEvidenceRegistry,
+) -> PaperExecutionEvidenceRecord:
+    if not isinstance(observation, ObservedPaperExecution):
+        raise TypeError("observation values must be ObservedPaperExecution")
+    record = registry.resolve(observation.evidence_id)
+    if observation.evidence_sha256 != record.evidence_sha256:
+        raise PaperExecutionStateError("observation evidence digest mismatch")
+    expected = record.as_observation()
+    if observation != expected:
+        raise PaperExecutionStateError(
+            "observation does not match immutable registered evidence"
+        )
+    exact_action = (
+        record.action_id == action.action_id
+        and record.bookmaker_id == action.bookmaker_id
+        and record.account_id == action.account_id
+        and record.event_id == action.event_id
+        and record.market_id == action.market_id
+        and record.selection_id == action.selection_id
+        and record.side == action.side
+        and record.quote_id == action.quote_id
+    )
+    if not exact_action:
+        raise PaperExecutionStateError(
+            "registered observation evidence does not bind exact action/quote/provider/account"
+        )
+    return record
 
 
 def _observed_attempt(
@@ -1002,6 +1337,8 @@ def _observed_attempt(
         suspended=observation.suspended,
         evidence_grade=observation.evidence_grade,
         evidence_source=observation.evidence_source,
+        evidence_id=observation.evidence_id,
+        evidence_sha256=observation.evidence_sha256,
         model_fingerprint=config.fingerprint,
         reason=observation.reason,
     )
@@ -1015,15 +1352,10 @@ def execute_paper_plan(
     ledger: PaperExecutionLedger,
     started_at: str,
     observations: Mapping[str, ObservedPaperExecution] | None = None,
+    evidence_registry: PaperExecutionEvidenceRegistry | None = None,
     suspended_action_ids: frozenset[str] = frozenset(),
 ) -> PaperExecutionRun:
-    """Execute or resume one PAPER/SHADOW execution-reality run.
-
-    The function never talks to a provider and never moves real money. Missing
-    observations are simulated only under the explicitly labelled model config.
-    Any PARTIAL/REJECTED/UNKNOWN leg stops the remaining multi-leg sequence so a
-    caller must make a separate recovery/hedge decision rather than blindly retry.
-    """
+    """Execute/resume one PAPER/SHADOW run without provider writes or real money."""
     if not isinstance(plan, ExecutionPlan):
         raise TypeError("plan must be ExecutionPlan")
     if not isinstance(config, PaperExecutionModelConfig):
@@ -1036,12 +1368,27 @@ def execute_paper_plan(
         observations = {}
     if not isinstance(observations, Mapping):
         raise TypeError("observations must be a mapping")
-    unknown_observation_ids = set(observations) - {action.action_id for action in plan.actions}
+    action_by_id = {action.action_id: action for action in plan.actions}
+    unknown_observation_ids = set(observations) - set(action_by_id)
     if unknown_observation_ids:
         raise PaperExecutionStateError("observations contain action outside execution plan")
-    unknown_suspended = set(suspended_action_ids) - {action.action_id for action in plan.actions}
+    unknown_suspended = set(suspended_action_ids) - set(action_by_id)
     if unknown_suspended:
         raise PaperExecutionStateError("suspended_action_ids contain action outside execution plan")
+    if observations and not isinstance(evidence_registry, PaperExecutionEvidenceRegistry):
+        raise PaperExecutionStateError(
+            "configured/empirical observations require a durable evidence registry"
+        )
+
+    observation_evidence_ids: dict[str, str] = {}
+    for action_id, observation in observations.items():
+        assert evidence_registry is not None
+        _verify_observation_authority(
+            action=action_by_id[action_id],
+            observation=observation,
+            registry=evidence_registry,
+        )
+        observation_evidence_ids[action_id] = observation.evidence_id
 
     run_id = _run_id(plan, trigger_id, config)
     ledger.reserve_run(
@@ -1050,6 +1397,7 @@ def execute_paper_plan(
         plan=plan,
         config=config,
         started_at=started_at,
+        observation_evidence_ids=observation_evidence_ids,
     )
     existing = ledger.load_run(
         run_id=run_id,
@@ -1057,6 +1405,7 @@ def execute_paper_plan(
         plan=plan,
         config=config,
         started_at=started_at,
+        observation_evidence_ids=observation_evidence_ids,
     )
     assert existing is not None
     if existing.completed:
@@ -1083,6 +1432,7 @@ def execute_paper_plan(
             plan=plan,
             config=config,
             started_at=started_at,
+            observation_evidence_ids=observation_evidence_ids,
         )
         assert result is not None
         return result
@@ -1104,8 +1454,6 @@ def execute_paper_plan(
             )
         observation = observations.get(action.action_id)
         if observation is not None:
-            if not isinstance(observation, ObservedPaperExecution):
-                raise TypeError("observation values must be ObservedPaperExecution")
             attempt = _observed_attempt(
                 run_id=run_id,
                 plan=plan,
@@ -1160,6 +1508,7 @@ def execute_paper_plan(
                 plan=plan,
                 config=config,
                 started_at=started_at,
+                observation_evidence_ids=observation_evidence_ids,
             )
             assert result is not None
             return result
@@ -1176,6 +1525,7 @@ def execute_paper_plan(
         plan=plan,
         config=config,
         started_at=started_at,
+        observation_evidence_ids=observation_evidence_ids,
     )
     assert result is not None
     return result

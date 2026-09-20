@@ -162,6 +162,74 @@ def _digest(payload: Mapping[str, Any] | Sequence[Any]) -> str:
     return hashlib.sha256(encoded).hexdigest()
 
 
+def canonical_evaluation_contract(
+    family: EvaluationContractFamily,
+) -> dict[str, object]:
+    """Resolve one immutable built-in evaluation contract for a typed family.
+
+    The returned mapping is a fresh value derived from source constants every
+    time. Callers cannot mint a new authoritative contract by supplying a
+    plausible family label plus arbitrary metric/semantics strings or a random
+    digest: ``FrozenBaselineProtocol`` recomputes this record and requires an
+    exact match.
+    """
+
+    if not isinstance(family, EvaluationContractFamily):
+        raise ExternalValidityError(
+            "evaluation contract family must use EvaluationContractFamily"
+        )
+    specs: dict[EvaluationContractFamily, tuple[str, str, str, str]] = {
+        EvaluationContractFamily.PREDICTIVE_FORECAST_VALUE: (
+            "autosport.external-validity.predictive-forecast-value.v1",
+            "causal-predictive-forecast-value-on-frozen-decision-evidence",
+            "predictive_net_utility",
+            "paired-block-bootstrap-v1",
+        ),
+        EvaluationContractFamily.LIVE_PRICE_EXECUTION: (
+            "autosport.external-validity.live-price-execution.v1",
+            "realized-executable-price-movement-after-cost-and-freshness",
+            "realized_price_capture_after_cost",
+            "paired-execution-bootstrap-v1",
+        ),
+        EvaluationContractFamily.ARBITRAGE_EXECUTION: (
+            "autosport.external-validity.arbitrage-execution.v1",
+            "realized-executable-arbitrage-lock-after-slippage-and-cost",
+            "realized_locked_edge_after_cost",
+            "paired-execution-bootstrap-v1",
+        ),
+        EvaluationContractFamily.DUTCHING_EXECUTION: (
+            "autosport.external-validity.dutching-execution.v1",
+            "realized-dutching-portfolio-execution-after-cost",
+            "realized_dutching_portfolio_value",
+            "paired-execution-bootstrap-v1",
+        ),
+        EvaluationContractFamily.HEDGE_PORTFOLIO_RISK: (
+            "autosport.external-validity.hedge-portfolio-risk.v1",
+            "realized-hedge-portfolio-risk-reduction-after-cost",
+            "risk_adjusted_hedge_value",
+            "paired-portfolio-bootstrap-v1",
+        ),
+        EvaluationContractFamily.HYBRID_COMPOSITE: (
+            "autosport.external-validity.hybrid-composite.v1",
+            "predeclared-composite-of-strategy-specific-causal-components",
+            "composite_net_utility",
+            "paired-block-bootstrap-v1",
+        ),
+    }
+    contract_id, semantics, primary_metric, uncertainty_method = specs[family]
+    payload: dict[str, object] = {
+        "schema_version": 1,
+        "kind": "autosport_external_validity_evaluation_contract",
+        "family": family.value,
+        "contract_id": contract_id,
+        "evaluation_semantics": semantics,
+        "primary_metric": primary_metric,
+        "uncertainty_method": uncertainty_method,
+    }
+    payload["evaluation_contract_sha256"] = _digest(payload)
+    return payload
+
+
 @dataclass(frozen=True, slots=True)
 class FrozenEvidenceScope:
     """Exact evidence universe shared by every policy in one comparison."""
@@ -289,7 +357,7 @@ class FrozenBaselineProtocol:
     uncertainty_method: str
     baselines: tuple[BaselineDefinition, ...]
 
-    SCHEMA_VERSION = 2
+    SCHEMA_VERSION = 3
 
     def __post_init__(self) -> None:
         _text(self.protocol_id, "protocol_id")
@@ -321,6 +389,17 @@ class FrozenBaselineProtocol:
         )
         _text(self.primary_metric, "primary_metric")
         _text(self.uncertainty_method, "uncertainty_method")
+        contract = canonical_evaluation_contract(self.evaluation_contract_family)
+        if (
+            self.evaluation_semantics != contract["evaluation_semantics"]
+            or self.evaluation_contract_sha256
+            != contract["evaluation_contract_sha256"]
+            or self.primary_metric != contract["primary_metric"]
+            or self.uncertainty_method != contract["uncertainty_method"]
+        ):
+            raise ExternalValidityError(
+                "evaluation contract details do not match canonical family authority"
+            )
         if type(self.baselines) is not tuple:
             raise ExternalValidityError("baselines must be a canonical tuple")
         if any(not isinstance(item, BaselineDefinition) for item in self.baselines):
@@ -341,6 +420,7 @@ class FrozenBaselineProtocol:
         return _digest(self.to_payload(include_identity=False))
 
     def to_payload(self, *, include_identity: bool = True) -> dict[str, object]:
+        contract = canonical_evaluation_contract(self.evaluation_contract_family)
         payload: dict[str, object] = {
             "schema_version": self.SCHEMA_VERSION,
             "kind": "autosport_frozen_external_validity_protocol",
@@ -352,6 +432,8 @@ class FrozenBaselineProtocol:
             "candidate_artifact_sha256": self.candidate_artifact_sha256,
             "strategy_class": self.strategy_class.value,
             "evaluation_contract_family": self.evaluation_contract_family.value,
+            "evaluation_contract_id": contract["contract_id"],
+            "evaluation_contract_schema_version": contract["schema_version"],
             "evaluation_semantics": self.evaluation_semantics,
             "evaluation_contract_sha256": self.evaluation_contract_sha256,
             "primary_metric": self.primary_metric,

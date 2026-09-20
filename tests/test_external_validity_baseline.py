@@ -15,6 +15,7 @@ from autosport.external_validity_baseline import (
     PolicyEvaluation,
     REQUIRED_BASELINE_KINDS,
     build_external_validity_report,
+    canonical_evaluation_contract,
 )
 from autosport.opportunity import StrategyClass
 
@@ -89,6 +90,7 @@ def _protocol(
         EvaluationContractFamily.PREDICTIVE_FORECAST_VALUE
     ),
 ) -> FrozenBaselineProtocol:
+    contract = canonical_evaluation_contract(evaluation_contract_family)
     return FrozenBaselineProtocol(
         protocol_id="extval:test:v1",
         frozen_at="2026-01-02T00:00:00+00:00",
@@ -97,10 +99,10 @@ def _protocol(
         candidate_artifact_sha256=SHA_F,
         strategy_class=strategy_class,
         evaluation_contract_family=evaluation_contract_family,
-        evaluation_semantics="paper-net-utility",
-        evaluation_contract_sha256=_hash("paper-net-utility-contract:v1"),
-        primary_metric="net_utility",
-        uncertainty_method="frozen-bootstrap-v1",
+        evaluation_semantics=contract["evaluation_semantics"],
+        evaluation_contract_sha256=contract["evaluation_contract_sha256"],
+        primary_metric=contract["primary_metric"],
+        uncertainty_method=contract["uncertainty_method"],
         baselines=_definitions(mutate_market_config=mutate_market_config),
     )
 
@@ -379,6 +381,8 @@ def test_unsupported_baseline_cannot_receive_fabricated_result():
 
 def test_protocol_requires_all_baseline_kinds_in_canonical_order():
     definitions = _definitions()
+    family = EvaluationContractFamily.PREDICTIVE_FORECAST_VALUE
+    contract = canonical_evaluation_contract(family)
     with pytest.raises(ExternalValidityError, match="every required kind"):
         FrozenBaselineProtocol(
             protocol_id="extval:test:v1",
@@ -387,13 +391,11 @@ def test_protocol_requires_all_baseline_kinds_in_canonical_order():
             candidate_id="candidate:complex",
             candidate_artifact_sha256=SHA_F,
             strategy_class=StrategyClass.PREDICTIVE_EDGE,
-            evaluation_contract_family=(
-                EvaluationContractFamily.PREDICTIVE_FORECAST_VALUE
-            ),
-            evaluation_semantics="paper-net-utility",
-            evaluation_contract_sha256=_hash("paper-net-utility-contract:v1"),
-            primary_metric="net_utility",
-            uncertainty_method="frozen-bootstrap-v1",
+            evaluation_contract_family=family,
+            evaluation_semantics=contract["evaluation_semantics"],
+            evaluation_contract_sha256=contract["evaluation_contract_sha256"],
+            primary_metric=contract["primary_metric"],
+            uncertainty_method=contract["uncertainty_method"],
             baselines=definitions[:-1],
         )
 
@@ -426,11 +428,16 @@ def test_protocol_binds_canonical_strategy_to_evaluation_contract_family(
         strategy_class=strategy_class,
         evaluation_contract_family=evaluation_contract_family,
     )
+    contract = canonical_evaluation_contract(evaluation_contract_family)
 
     payload = protocol.to_payload()
-    assert payload["schema_version"] == 2
+    assert payload["schema_version"] == 3
     assert payload["strategy_class"] == strategy_class.value
     assert payload["evaluation_contract_family"] == evaluation_contract_family.value
+    assert payload["evaluation_contract_id"] == contract["contract_id"]
+    assert payload["evaluation_contract_sha256"] == contract["evaluation_contract_sha256"]
+    assert payload["primary_metric"] == contract["primary_metric"]
+    assert payload["uncertainty_method"] == contract["uncertainty_method"]
 
 
 @pytest.mark.parametrize(
@@ -470,6 +477,68 @@ def test_strategy_evaluation_contract_family_mismatch_fails_closed(
         _protocol(
             strategy_class=strategy_class,
             evaluation_contract_family=wrong_family,
+        )
+
+
+def test_arbitrage_family_rejects_predictive_contract_details():
+    family = EvaluationContractFamily.ARBITRAGE_EXECUTION
+    predictive = canonical_evaluation_contract(
+        EvaluationContractFamily.PREDICTIVE_FORECAST_VALUE
+    )
+    with pytest.raises(ExternalValidityError, match="canonical family authority"):
+        FrozenBaselineProtocol(
+            protocol_id="extval:arb-wrong-contract:v1",
+            frozen_at="2026-01-02T00:00:00+00:00",
+            evidence_scope=_scope(),
+            candidate_id="candidate:arbitrage",
+            candidate_artifact_sha256=SHA_F,
+            strategy_class=StrategyClass.ARBITRAGE,
+            evaluation_contract_family=family,
+            evaluation_semantics=predictive["evaluation_semantics"],
+            evaluation_contract_sha256=predictive["evaluation_contract_sha256"],
+            primary_metric=predictive["primary_metric"],
+            uncertainty_method=predictive["uncertainty_method"],
+            baselines=_definitions(),
+        )
+
+
+def test_predictive_family_rejects_execution_only_contract_details():
+    family = EvaluationContractFamily.PREDICTIVE_FORECAST_VALUE
+    execution = canonical_evaluation_contract(EvaluationContractFamily.ARBITRAGE_EXECUTION)
+    with pytest.raises(ExternalValidityError, match="canonical family authority"):
+        FrozenBaselineProtocol(
+            protocol_id="extval:predictive-wrong-contract:v1",
+            frozen_at="2026-01-02T00:00:00+00:00",
+            evidence_scope=_scope(),
+            candidate_id="candidate:predictive",
+            candidate_artifact_sha256=SHA_F,
+            strategy_class=StrategyClass.PREDICTIVE_EDGE,
+            evaluation_contract_family=family,
+            evaluation_semantics=execution["evaluation_semantics"],
+            evaluation_contract_sha256=execution["evaluation_contract_sha256"],
+            primary_metric=execution["primary_metric"],
+            uncertainty_method=execution["uncertainty_method"],
+            baselines=_definitions(),
+        )
+
+
+def test_correct_family_rejects_unknown_contract_digest():
+    family = EvaluationContractFamily.ARBITRAGE_EXECUTION
+    contract = canonical_evaluation_contract(family)
+    with pytest.raises(ExternalValidityError, match="canonical family authority"):
+        FrozenBaselineProtocol(
+            protocol_id="extval:arb-forged-digest:v1",
+            frozen_at="2026-01-02T00:00:00+00:00",
+            evidence_scope=_scope(),
+            candidate_id="candidate:arbitrage",
+            candidate_artifact_sha256=SHA_F,
+            strategy_class=StrategyClass.ARBITRAGE,
+            evaluation_contract_family=family,
+            evaluation_semantics=contract["evaluation_semantics"],
+            evaluation_contract_sha256=_hash("forged-contract"),
+            primary_metric=contract["primary_metric"],
+            uncertainty_method=contract["uncertainty_method"],
+            baselines=_definitions(),
         )
 
 
@@ -562,16 +631,9 @@ def test_decimal_evidence_and_report_identity_ignore_ambient_decimal_context():
         low_precision[0]["metric_value"]
         == "1.2345678901234567890123456789012345"
     )
-    assert (
-        low_precision[0]["uncertainty_low"]
-        == "1.1"
-    )
-    assert (
-        low_precision[0]["uncertainty_high"]
-        == "1.3"
-    )
+    assert low_precision[0]["uncertainty_low"] == "1.1"
+    assert low_precision[0]["uncertainty_high"] == "1.3"
     assert (
         low_precision[0]["total_cost"]
         == "0.0100000000000000000000000000000001"
     )
-

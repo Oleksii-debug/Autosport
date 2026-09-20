@@ -1,13 +1,16 @@
 from __future__ import annotations
 
+import hashlib
 import os
+from pathlib import Path
 from typing import Any
 
 from . import _paper_execution_reality_legacy as _impl
 
 
-_WITNESS_SCHEMA_VERSION = 1
+_WITNESS_SCHEMA_VERSION = 2
 _WITNESS_SUFFIX = ".monotonic-witness.jsonl"
+_WITNESS_DIR_ENV = "AUTOSPORT_PAPER_EXECUTION_WITNESS_DIR"
 
 
 _ORIGINAL_INIT = _impl.PaperExecutionLedger.__init__
@@ -15,12 +18,66 @@ _ORIGINAL_LOAD_UNLOCKED = _impl.PaperExecutionLedger._load_unlocked
 _ORIGINAL_WRITE_ANCHOR_UNLOCKED = _impl.PaperExecutionLedger._write_anchor_unlocked
 
 
-def _witness_path(self) -> Any:
+def _ledger_identity(path: Path) -> str:
+    normalized = os.path.normcase(os.path.abspath(os.fspath(path)))
+    return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+
+
+def _authority_root() -> Path:
+    configured = os.environ.get(_WITNESS_DIR_ENV)
+    if configured:
+        root = Path(configured).expanduser()
+    elif os.name == "nt":
+        base = os.environ.get("LOCALAPPDATA")
+        root = (
+            Path(base)
+            if base
+            else Path.home() / "AppData" / "Local"
+        ) / "Autosport" / "state" / "paper-execution-reality"
+    else:
+        base = os.environ.get("XDG_STATE_HOME")
+        root = (
+            Path(base).expanduser()
+            if base
+            else Path.home() / ".local" / "state"
+        ) / "autosport" / "paper-execution-reality"
+    try:
+        root = root.resolve(strict=False)
+        root.mkdir(parents=True, exist_ok=True, mode=0o700)
+    except OSError as exc:
+        raise _impl.PaperExecutionIntegrityError(
+            "cannot establish independent PAPER execution monotonic authority"
+        ) from exc
+    return root
+
+
+def _sync_authority_directory(path: Path) -> None:
+    if os.name == "nt":
+        return
+    flags = os.O_RDONLY
+    if hasattr(os, "O_DIRECTORY"):
+        flags |= os.O_DIRECTORY
+    fd: int | None = None
+    try:
+        fd = os.open(path, flags)
+        os.fsync(fd)
+    except OSError as exc:
+        raise _impl.PaperExecutionIntegrityError(
+            "PAPER execution monotonic authority directory sync failed"
+        ) from exc
+    finally:
+        if fd is not None:
+            os.close(fd)
+
+
+def _witness_path(self) -> Path:
     path = getattr(self, "_monotonic_witness_path", None)
     if path is None:
-        path = self.path.with_name(self.path.name + _WITNESS_SUFFIX)
+        identity = _ledger_identity(self.path)
+        path = _authority_root() / f"{identity}{_WITNESS_SUFFIX}"
         self._monotonic_witness_path = path
-    return path
+        self._monotonic_witness_ledger_identity = identity
+    return Path(path)
 
 
 def _validate_root(root: object, *, allow_none: bool) -> str | None:
@@ -51,9 +108,11 @@ def _read_witnesses_unlocked(self) -> list[dict[str, Any]]:
     records: list[dict[str, Any]] = []
     previous_witness_sha256: str | None = None
     previous_event_count = 0
+    expected_identity = _ledger_identity(self.path)
     expected_keys = {
         "witness_schema_version",
         "generation",
+        "ledger_identity",
         "ledger_name",
         "event_count",
         "ledger_root_sha256",
@@ -80,6 +139,10 @@ def _read_witnesses_unlocked(self) -> list[dict[str, Any]]:
         if record["generation"] != index:
             raise _impl.PaperExecutionIntegrityError(
                 "PAPER execution monotonic witness generation is not contiguous"
+            )
+        if record["ledger_identity"] != expected_identity:
+            raise _impl.PaperExecutionIntegrityError(
+                "PAPER execution monotonic witness belongs to another ledger identity"
             )
         if record["ledger_name"] != self.path.name:
             raise _impl.PaperExecutionIntegrityError(
@@ -141,9 +204,11 @@ def _append_witness_unlocked(self, events: list[dict[str, Any]]) -> None:
     else:
         previous_witness_sha256 = None
 
+    identity = _ledger_identity(self.path)
     body = {
         "witness_schema_version": _WITNESS_SCHEMA_VERSION,
         "generation": len(records) + 1,
+        "ledger_identity": identity,
         "ledger_name": self.path.name,
         "event_count": event_count,
         "ledger_root_sha256": root,
@@ -158,7 +223,7 @@ def _append_witness_unlocked(self, events: list[dict[str, Any]]) -> None:
             handle.flush()
             os.fsync(handle.fileno())
         if not path_existed_before:
-            self._sync_parent_directory()
+            _sync_authority_directory(path.parent)
     except OSError as exc:
         raise _impl.PaperExecutionIntegrityError(
             "PAPER execution monotonic witness durability barrier failed"
@@ -167,15 +232,17 @@ def _append_witness_unlocked(self, events: list[dict[str, Any]]) -> None:
 
 def _patched_init(self, path) -> None:
     _ORIGINAL_INIT(self, path)
-    self._monotonic_witness_path = self.path.with_name(
-        self.path.name + _WITNESS_SUFFIX
+    identity = _ledger_identity(self.path)
+    self._monotonic_witness_ledger_identity = identity
+    self._monotonic_witness_path = (
+        _authority_root() / f"{identity}{_WITNESS_SUFFIX}"
     )
 
 
 def _patched_write_anchor_unlocked(self, events: list[dict[str, Any]]) -> None:
-    # Publish the independent append-only witness before replacing the mutable
-    # latest-root anchor. If the following anchor publication crashes, restart
-    # fails closed because the witnessed generation is ahead of the pair.
+    # Publish the authority outside the workspace rollback domain before
+    # replacing the mutable latest-root anchor. If anchor publication crashes,
+    # restart fails closed because the external authority is ahead of local state.
     _append_witness_unlocked(self, events)
     _ORIGINAL_WRITE_ANCHOR_UNLOCKED(self, events)
 
@@ -188,7 +255,7 @@ def _patched_load_unlocked(self) -> list[dict[str, Any]]:
     if not records:
         if events or pair_exists:
             raise _impl.PaperExecutionIntegrityError(
-                "PAPER execution history is missing monotonic witness authority"
+                "PAPER execution history is missing independent monotonic authority"
             )
         return events
 

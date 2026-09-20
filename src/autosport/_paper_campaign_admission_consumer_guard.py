@@ -11,6 +11,7 @@ redirect durable execution or decision history.
 
 from __future__ import annotations
 
+from pathlib import Path
 from threading import RLock
 from weakref import WeakKeyDictionary
 
@@ -51,6 +52,20 @@ def _reject_instance_shadow(value: object, method_name: str, label: str) -> None
 def _reject_runtime_shadows(runtime: PaperCampaignRuntime) -> None:
     for method_name in _RUNTIME_METHODS:
         _reject_instance_shadow(runtime, method_name, "PAPER campaign runtime")
+
+
+def _canonical_decision_path(state_path: object) -> Path:
+    return (Path(state_path).parent / "decisions.jsonl").resolve(strict=False)
+
+
+def _assert_decision_ledger_path(
+    decision_ledger: JsonlDecisionLedger,
+    expected_path: Path,
+) -> None:
+    if decision_ledger.path.resolve(strict=False) != expected_path:
+        raise PaperCampaignAdmissionError(
+            "Decision Ledger must be the canonical workspace decisions.jsonl"
+        )
 
 
 class _ExactDecisionLedgerReadView:
@@ -115,7 +130,9 @@ def _guarded_init(
     if type(runtime) is not PaperCampaignRuntime:
         raise TypeError("runtime must be exact PaperCampaignRuntime")
     _reject_runtime_shadows(runtime)
+    expected_decision_path = _canonical_decision_path(state_path)
     if type(decision_ledger) is JsonlDecisionLedger:
+        _assert_decision_ledger_path(decision_ledger, expected_decision_path)
         _reject_instance_shadow(
             decision_ledger,
             "verified_records",
@@ -139,6 +156,7 @@ def _guarded_init(
         _AUTHORITY_BINDINGS[self] = (
             decision_ledger,
             execution_ledger,
+            expected_decision_path,
             runtime,
             runtime.settlement_bridge,
             RLock(),
@@ -146,13 +164,21 @@ def _guarded_init(
 
 
 def _guarded_resolved_execution_decision_id(self, *args, **kwargs):
-    decision_ledger, _execution_ledger, runtime, settlement_bridge, lock = _binding_for(self)
+    (
+        decision_ledger,
+        _execution_ledger,
+        expected_decision_path,
+        runtime,
+        settlement_bridge,
+        lock,
+    ) = _binding_for(self)
     with lock:
         _assert_runtime_binding(self, runtime, settlement_bridge)
         if self.decision_ledger is not decision_ledger:
             raise PaperCampaignAdmissionError(
                 "Decision Ledger authority changed after admission construction"
             )
+        _assert_decision_ledger_path(decision_ledger, expected_decision_path)
         _reject_instance_shadow(
             decision_ledger,
             "verified_records",
@@ -166,7 +192,14 @@ def _guarded_resolved_execution_decision_id(self, *args, **kwargs):
 
 
 def _guarded_execution_attempt(self, *args, **kwargs):
-    _decision_ledger, execution_ledger, runtime, settlement_bridge, lock = _binding_for(self)
+    (
+        _decision_ledger,
+        execution_ledger,
+        _expected_decision_path,
+        runtime,
+        settlement_bridge,
+        lock,
+    ) = _binding_for(self)
     with lock:
         _assert_runtime_binding(self, runtime, settlement_bridge)
         if self.execution_ledger is not execution_ledger:

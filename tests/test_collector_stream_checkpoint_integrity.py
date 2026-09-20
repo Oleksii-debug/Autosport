@@ -138,6 +138,85 @@ def test_deleted_source_checkpoint_cannot_be_laundered_as_new_epoch(
         assert reopened.get(first.delta_id) == first
 
 
+def test_corrupted_surviving_checkpoint_cannot_authorize_new_epoch() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "collector.json"
+        store = CollectorDeltaStore(path)
+        first = _delta(delta_id="d1", cursor_position=1)
+        second = _delta(delta_id="d2", cursor_position=2)
+        assert store.append(first)
+        assert store.append(second)
+
+        connection = sqlite3.connect(path)
+        try:
+            connection.execute(
+                "UPDATE collector_streams "
+                "SET last_cursor=?, last_position=?, last_delta_id=? "
+                "WHERE source_id=? AND stream_epoch=?",
+                ("1", 1, "d1", "source-x", "epoch-1"),
+            )
+            connection.commit()
+        finally:
+            connection.close()
+
+        reopened = CollectorDeltaStore(path)
+        successor = _delta(
+            delta_id="d3",
+            cursor_position=0,
+            stream_epoch="epoch-2",
+            sync_state=SyncState.EPOCH_CHANGED,
+        )
+        with pytest.raises(
+            ValueError,
+            match="stream checkpoint conflicts with immutable delta history",
+        ):
+            reopened.append(successor)
+
+        assert reopened.get(successor.delta_id) is None
+        assert reopened.get(first.delta_id) == first
+        assert reopened.get(second.delta_id) == second
+
+
+def test_foreign_surviving_checkpoint_cannot_hide_deleted_epoch() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "collector.json"
+        store = CollectorDeltaStore(path)
+        first = _delta(delta_id="d1", cursor_position=1)
+        assert store.append(first)
+
+        connection = sqlite3.connect(path)
+        try:
+            connection.execute(
+                "DELETE FROM collector_streams WHERE source_id=?",
+                ("source-x",),
+            )
+            connection.execute(
+                "INSERT INTO collector_streams("
+                "source_id, stream_epoch, last_cursor, last_position, last_delta_id"
+                ") VALUES(?,?,?,?,?)",
+                ("source-x", "epoch-foreign", "1", 1, "d1"),
+            )
+            connection.commit()
+        finally:
+            connection.close()
+
+        reopened = CollectorDeltaStore(path)
+        successor = _delta(
+            delta_id="d2",
+            cursor_position=0,
+            stream_epoch="epoch-2",
+            sync_state=SyncState.CURSOR_RESET,
+        )
+        with pytest.raises(
+            ValueError,
+            match="stream checkpoint conflicts with immutable delta history",
+        ):
+            reopened.append(successor)
+
+        assert reopened.get(successor.delta_id) is None
+        assert reopened.get(first.delta_id) == first
+
+
 def test_legitimate_new_epoch_is_allowed_when_prior_checkpoint_survives() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         path = Path(tmp) / "collector.json"

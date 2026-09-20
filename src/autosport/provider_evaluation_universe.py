@@ -17,6 +17,11 @@ from .evaluation_universe import (
     EvaluationUniverseStore,
     SlotState,
 )
+from .event_lifecycle import (
+    ContinuousEventLifecycle,
+    EventPhase,
+    canonical_event_identity,
+)
 from .provider_observation_authority import (
     CompleteGameBoardSnapshot,
     assert_complete_game_board_authoritative,
@@ -24,7 +29,8 @@ from .provider_observation_authority import (
 
 
 _PROVIDER_ID = "parlayapi"
-_CONSUMER_KIND = "parlay-complete-game-board-evaluation-v1"
+_CONSUMER_KIND = "parlay-complete-game-board-evaluation-v2"
+_REVEAL_AUTHORITY_KIND = "continuous-event-lifecycle-scheduled-start-v1"
 _MAX_ISSUED_UNIVERSES = 256
 _ISSUED_UNIVERSES: dict[int, tuple[EvaluationUniverse, str, str]] = {}
 
@@ -76,6 +82,20 @@ def _digest(value: object) -> str:
 
 
 @dataclass(frozen=True, slots=True)
+class _EventRevealBinding:
+    event_id: str
+    authority_id: str
+    authority_sha256: str
+    outcome_reveal_not_before: str
+
+    def __post_init__(self) -> None:
+        _text(self.event_id, "event_id")
+        _text(self.authority_id, "reveal authority_id")
+        _sha(self.authority_sha256, "reveal authority_sha256")
+        _instant(self.outcome_reveal_not_before, "outcome_reveal_not_before")
+
+
+@dataclass(frozen=True, slots=True)
 class CompleteBoardMemberSpec:
     """One deterministic selection member of an authoritative complete game board."""
 
@@ -85,6 +105,9 @@ class CompleteBoardMemberSpec:
     market_id: str | None
     selection_id: str | None
     source_at: str
+    reveal_authority_id: str | None = None
+    reveal_authority_sha256: str | None = None
+    outcome_reveal_not_before: str | None = None
 
     def __post_init__(self) -> None:
         _text(self.row_key, "row_key")
@@ -96,7 +119,24 @@ class CompleteBoardMemberSpec:
         if self.selection_id is not None:
             _text(self.selection_id, "selection_id")
         _instant(self.source_at, "source_at")
-
+        reveal_values = (
+            self.reveal_authority_id,
+            self.reveal_authority_sha256,
+            self.outcome_reveal_not_before,
+        )
+        if self.event_id is None:
+            if any(value is not None for value in reveal_values):
+                raise ProviderEvaluationUniverseError(
+                    "empty-board member cannot carry event reveal authority"
+                )
+        elif any(value is None for value in reveal_values):
+            raise ProviderEvaluationUniverseError(
+                "event member requires exact reveal authority identity, digest and boundary"
+            )
+        else:
+            _text(self.reveal_authority_id, "reveal_authority_id")
+            _sha(self.reveal_authority_sha256, "reveal_authority_sha256")
+            _instant(self.outcome_reveal_not_before, "outcome_reveal_not_before")
 
 
 def _selection_labels(market_key: str) -> tuple[str, str]:
@@ -109,10 +149,82 @@ def _selection_labels(market_key: str) -> tuple[str, str]:
     )
 
 
+def _resolve_event_reveal_binding(
+    *,
+    snapshot: CompleteGameBoardSnapshot,
+    event_id: str,
+    event_lifecycle: ContinuousEventLifecycle,
+) -> _EventRevealBinding:
+    """Resolve one conservative pre-result boundary from the canonical lifecycle store.
+
+    The builder deliberately accepts no caller-authored reveal timestamp. A positive
+    path exists only when the existing lifecycle authority had already observed the
+    exact event as PRE_MATCH no later than the provider snapshot and had already bound
+    an immutable scheduled_start_at. Anything later/ambiguous fails closed.
+    """
+
+    if type(event_lifecycle) is not ContinuousEventLifecycle:
+        raise ProviderEvaluationUniverseError(
+            "complete-board reveal boundary requires canonical ContinuousEventLifecycle"
+        )
+    identity = canonical_event_identity(
+        source_id=snapshot.request.source_id,
+        sport=snapshot.request.sport_key,
+        event_id=event_id,
+    )
+    record = event_lifecycle.get(identity)
+    if record is None:
+        raise ProviderEvaluationUniverseError(
+            "canonical event lifecycle has no exact provider event reveal authority"
+        )
+    if (
+        record.identity != identity
+        or record.source_id != snapshot.request.source_id
+        or record.sport != snapshot.request.sport_key
+        or record.event_id != event_id
+    ):
+        raise ProviderEvaluationUniverseError(
+            "event lifecycle reveal authority identity mismatch"
+        )
+    if record.phase is not EventPhase.PRE_MATCH:
+        raise ProviderEvaluationUniverseError(
+            "complete-board evaluation requires canonical PRE_MATCH lifecycle evidence"
+        )
+    if record.scheduled_start_at is None or record.last_discovered_at is None:
+        raise ProviderEvaluationUniverseError(
+            "event lifecycle lacks an immutable pre-result scheduled-start boundary"
+        )
+    captured = _instant(snapshot.captured_at, "provider captured_at")
+    discovered = _instant(record.last_discovered_at, "lifecycle last_discovered_at")
+    reveal = _instant(record.scheduled_start_at, "lifecycle scheduled_start_at")
+    if discovered > captured:
+        raise ProviderEvaluationUniverseError(
+            "event reveal authority was discovered after the provider snapshot"
+        )
+    if reveal <= captured:
+        raise ProviderEvaluationUniverseError(
+            "provider snapshot is not strictly before the canonical event reveal boundary"
+        )
+    authority_sha256 = _digest(
+        {
+            "kind": _REVEAL_AUTHORITY_KIND,
+            "record": record.to_dict(),
+        }
+    )
+    return _EventRevealBinding(
+        event_id=event_id,
+        authority_id=f"{_REVEAL_AUTHORITY_KIND}:{identity}",
+        authority_sha256=authority_sha256,
+        outcome_reveal_not_before=record.scheduled_start_at,
+    )
+
+
 def complete_game_board_member_specs(
     snapshot: CompleteGameBoardSnapshot,
+    *,
+    event_lifecycle: ContinuousEventLifecycle | None = None,
 ) -> tuple[CompleteBoardMemberSpec, ...]:
-    """Derive every selection slot from the exact live canonical provider capability."""
+    """Derive every selection slot and bind each event to canonical reveal evidence."""
 
     assert_complete_game_board_authoritative(snapshot)
     frame = snapshot.frame
@@ -141,7 +253,13 @@ def complete_game_board_member_specs(
         )
         return tuple(members)
 
+    if type(event_lifecycle) is not ContinuousEventLifecycle:
+        raise ProviderEvaluationUniverseError(
+            "non-empty complete board requires canonical event lifecycle reveal authority"
+        )
+
     seen: set[str] = set()
+    bindings: dict[str, _EventRevealBinding] = {}
     for raw in raw_rows:
         if not isinstance(raw, Mapping):
             raise ProviderEvaluationUniverseError("provider board row must be an object")
@@ -151,6 +269,15 @@ def complete_game_board_member_specs(
         source_at_raw = raw.get("last_update", snapshot.captured_at)
         source_at = _text(source_at_raw, "provider last_update")
         _instant(source_at, "provider last_update")
+        binding = bindings.get(event_id)
+        if binding is None:
+            assert event_lifecycle is not None
+            binding = _resolve_event_reveal_binding(
+                snapshot=snapshot,
+                event_id=event_id,
+                event_lifecycle=event_lifecycle,
+            )
+            bindings[event_id] = binding
         market_id = f"{bookmaker}:{market_key}"
         provider_row_sha256 = _digest(dict(raw))
         for label in _selection_labels(market_key):
@@ -163,9 +290,16 @@ def complete_game_board_member_specs(
                     "bookmaker": bookmaker,
                     "market_key": market_key,
                     "selection": label,
+                    "reveal_authority_id": binding.authority_id,
+                    "reveal_authority_sha256": binding.authority_sha256,
+                    "outcome_reveal_not_before": binding.outcome_reveal_not_before,
                 }
             )
-            row_key = f"parlay-board:{member_sha256}"
+            # The row key itself carries the exact authority digest, so every persisted
+            # EvaluationRow mechanically binds to the lifecycle evidence used to mint it.
+            row_key = (
+                f"parlay-board:{member_sha256}:reveal:{binding.authority_sha256}"
+            )
             if row_key in seen:
                 raise ProviderEvaluationUniverseError(
                     "provider complete board produced duplicate selection membership"
@@ -179,6 +313,9 @@ def complete_game_board_member_specs(
                     market_id=market_id,
                     selection_id=f"{bookmaker}:{market_key}:{label}",
                     source_at=source_at,
+                    reveal_authority_id=binding.authority_id,
+                    reveal_authority_sha256=binding.authority_sha256,
+                    outcome_reveal_not_before=binding.outcome_reveal_not_before,
                 )
             )
     return tuple(sorted(members, key=lambda item: item.row_key))
@@ -190,7 +327,6 @@ def _validate_row_against_member(
     member: CompleteBoardMemberSpec,
     snapshot: CompleteGameBoardSnapshot,
     evaluation_not_before: str,
-    outcome_reveal_not_before: str,
 ) -> None:
     expected = (
         _PROVIDER_ID,
@@ -237,22 +373,31 @@ def _validate_row_against_member(
         raise ProviderEvaluationUniverseError(
             "row decision cannot precede complete provider membership authority"
         )
-    if row.outcome_reveal_not_before is None or _instant(
-        row.outcome_reveal_not_before,
-        "row outcome_reveal_not_before",
-    ) != _instant(outcome_reveal_not_before, "outcome_reveal_not_before"):
-        raise ProviderEvaluationUniverseError(
-            "row reveal boundary must equal the frozen pre-result provider consumer boundary"
-        )
     if member.event_id is None:
+        if row.outcome_reveal_not_before is not None:
+            raise ProviderEvaluationUniverseError(
+                "empty-board row cannot carry a caller-authored outcome reveal boundary"
+            )
         if row.slot_state is not SlotState.NO_EVENT:
             raise ProviderEvaluationUniverseError(
                 "an authoritative empty complete board requires an explicit NO_EVENT denominator row"
             )
-    elif row.slot_state in {SlotState.NO_EVENT, SlotState.SOURCE_OUTAGE}:
-        raise ProviderEvaluationUniverseError(
-            "provider-present selection membership cannot be labelled NO_EVENT or SOURCE_OUTAGE"
-        )
+    else:
+        assert member.outcome_reveal_not_before is not None
+        if row.outcome_reveal_not_before is None or _instant(
+            row.outcome_reveal_not_before,
+            "row outcome_reveal_not_before",
+        ) != _instant(
+            member.outcome_reveal_not_before,
+            "authoritative outcome_reveal_not_before",
+        ):
+            raise ProviderEvaluationUniverseError(
+                "row reveal boundary must equal canonical per-event lifecycle authority"
+            )
+        if row.slot_state in {SlotState.NO_EVENT, SlotState.SOURCE_OUTAGE}:
+            raise ProviderEvaluationUniverseError(
+                "provider-present selection membership cannot be labelled NO_EVENT or SOURCE_OUTAGE"
+            )
 
 
 def _remember_issued(
@@ -287,6 +432,7 @@ def _assert_issued(
 def build_frozen_universe_from_complete_game_board(
     *,
     snapshot: CompleteGameBoardSnapshot,
+    event_lifecycle: ContinuousEventLifecycle | None,
     authority_id: str,
     session_id: str,
     universe_id: str,
@@ -294,11 +440,10 @@ def build_frozen_universe_from_complete_game_board(
     research_protocol_id: str,
     protocol_sha256: str,
     evaluation_not_before: str,
-    outcome_reveal_not_before: str,
     frozen_at: str,
     rows: Iterable[EvaluationRow],
 ) -> EvaluationUniverse:
-    """Freeze every provider selection slot while the exact live provider capability exists."""
+    """Freeze every provider slot with immutable per-event pre-result authority."""
 
     assert_complete_game_board_authoritative(snapshot)
     authority_id = _text(authority_id, "authority_id")
@@ -309,22 +454,36 @@ def build_frozen_universe_from_complete_game_board(
     protocol_sha256 = _sha(protocol_sha256, "protocol_sha256")
     captured = _instant(snapshot.captured_at, "provider captured_at")
     evaluation = _instant(evaluation_not_before, "evaluation_not_before")
-    reveal = _instant(outcome_reveal_not_before, "outcome_reveal_not_before")
     frozen = _instant(frozen_at, "frozen_at")
     if evaluation < captured:
         raise ProviderEvaluationUniverseError(
             "evaluation boundary cannot precede complete provider capture"
         )
-    if reveal <= evaluation:
+    if frozen < evaluation:
         raise ProviderEvaluationUniverseError(
-            "outcome reveal must be strictly after evaluation boundary"
-        )
-    if frozen < evaluation or frozen >= reveal:
-        raise ProviderEvaluationUniverseError(
-            "frozen_at must be after complete membership authority and before result reveal"
+            "frozen_at cannot precede complete membership authority"
         )
 
-    members = complete_game_board_member_specs(snapshot)
+    members = complete_game_board_member_specs(
+        snapshot,
+        event_lifecycle=event_lifecycle,
+    )
+    for member in members:
+        if member.outcome_reveal_not_before is None:
+            continue
+        reveal = _instant(
+            member.outcome_reveal_not_before,
+            "authoritative outcome_reveal_not_before",
+        )
+        if reveal <= evaluation:
+            raise ProviderEvaluationUniverseError(
+                "canonical event reveal boundary must be strictly after evaluation"
+            )
+        if frozen >= reveal:
+            raise ProviderEvaluationUniverseError(
+                "frozen_at must be strictly before every canonical event reveal boundary"
+            )
+
     materialized = tuple(rows)
     if not materialized:
         raise ProviderEvaluationUniverseError(
@@ -344,7 +503,6 @@ def build_frozen_universe_from_complete_game_board(
             member=member,
             snapshot=snapshot,
             evaluation_not_before=evaluation_not_before,
-            outcome_reveal_not_before=outcome_reveal_not_before,
         )
 
     root_sha256 = _digest(
@@ -362,11 +520,13 @@ def build_frozen_universe_from_complete_game_board(
                     "market_id": item.market_id,
                     "selection_id": item.selection_id,
                     "source_at": item.source_at,
+                    "reveal_authority_id": item.reveal_authority_id,
+                    "reveal_authority_sha256": item.reveal_authority_sha256,
+                    "outcome_reveal_not_before": item.outcome_reveal_not_before,
                 }
                 for item in members
             ],
             "evaluation_not_before": evaluation_not_before,
-            "outcome_reveal_not_before": outcome_reveal_not_before,
         }
     )
     intake_snapshot = ObservationIntakeSnapshot(

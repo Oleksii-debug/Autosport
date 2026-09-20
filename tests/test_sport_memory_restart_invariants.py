@@ -23,7 +23,7 @@ SHA_A = "a" * 64
 SHA_B = "b" * 64
 SHA_C = "c" * 64
 SHA_D = "d" * 64
-SHA_E = "e" * 64
+SHA_E = "055373d2d5916d7245990454c54ab62817bf787538ca4475c73a310b556aabef"
 SHA_F = "f" * 64
 SHA_1 = "1" * 64
 SHA_2 = "2" * 64
@@ -224,4 +224,41 @@ def test_restart_rejects_effective_sample_not_bounded_opponent_support_after_rec
     path.write_text(json.dumps(raw, sort_keys=True) + "\n", encoding="utf-8")
 
     with pytest.raises(SportMemoryError, match="effective_sample must equal bounded opponent support"):
+        SportMemoryRuntime(path, _Authority(), authority_generation_sha256=SHA_3)
+
+
+def test_restart_rejects_input_digest_drift_after_recomputed_memory_id(tmp_path):
+    path, _, _ = _runtime(tmp_path)
+    raw = json.loads(path.read_text(encoding="utf-8"))
+    artifact = raw["artifacts"][0]
+    artifact["input_digest"] = "9" * 64
+    artifact["memory_id"] = _digest({k: v for k, v in artifact.items() if k != "memory_id"})
+    path.write_text(json.dumps(raw, sort_keys=True) + "\n", encoding="utf-8")
+
+    with pytest.raises(SportMemoryError, match="input_digest does not match input performance ids"):
+        SportMemoryRuntime(path, _Authority(), authority_generation_sha256=SHA_3)
+
+
+def test_restart_rejects_duplicate_input_ids_after_recomputed_memory_id(tmp_path):
+    path, _, _ = _runtime(tmp_path)
+    raw = json.loads(path.read_text(encoding="utf-8"))
+    artifact = raw["artifacts"][0]
+    artifact["input_performance_ids"] = [SHA_1, SHA_1]
+    artifact["input_digest"] = _digest(artifact["input_performance_ids"])
+    artifact["memory_id"] = _digest({k: v for k, v in artifact.items() if k != "memory_id"})
+    path.write_text(json.dumps(raw, sort_keys=True) + "\n", encoding="utf-8")
+
+    with pytest.raises(SportMemoryError, match="input_performance_ids must be unique"):
+        SportMemoryRuntime(path, _Authority(), authority_generation_sha256=SHA_3)
+
+
+def test_restart_rejects_age_drift_after_recomputed_memory_id(tmp_path):
+    path, _, _ = _runtime(tmp_path)
+    raw = json.loads(path.read_text(encoding="utf-8"))
+    artifact = raw["artifacts"][0]
+    artifact["age_seconds"] = 1
+    artifact["memory_id"] = _digest({k: v for k, v in artifact.items() if k != "memory_id"})
+    path.write_text(json.dumps(raw, sort_keys=True) + "\n", encoding="utf-8")
+
+    with pytest.raises(SportMemoryError, match="age_seconds does not match causal cutoff"):
         SportMemoryRuntime(path, _Authority(), authority_generation_sha256=SHA_3)

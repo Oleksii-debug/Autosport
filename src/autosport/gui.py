@@ -694,7 +694,9 @@ class AutosportApp(tk.Tk):
             self._append_log(blocker)
             return
 
-        workspace = Path(self.__dict__.get("_active_workspace", self.workspace))
+        workspace = Path(
+            self.__dict__.get("_active_workspace", self.__dict__.get("workspace"))
+        )
         output = filedialog.asksaveasfilename(
             title=text("ui.dialog.evidence_export.choose_title"),
             initialdir=str(workspace.parent),
@@ -707,7 +709,9 @@ class AutosportApp(tk.Tk):
 
         # File dialogs run a nested Tk loop. Recheck workspace identity and every
         # mutating worker after the user returns so Ctrl+E cannot race recovery.
-        current_workspace = Path(self.__dict__.get("_active_workspace", self.workspace))
+        current_workspace = Path(
+            self.__dict__.get("_active_workspace", self.__dict__.get("workspace"))
+        )
         if current_workspace != workspace:
             message_text = text("ui.status.evidence_export.workspace_changed")
             self.status.set(message_text)

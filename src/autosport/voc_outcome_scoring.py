@@ -492,6 +492,190 @@ class CanonicalOutcomeDerivedVOCScoreAuthority(
             and binding.get("decision_context_sha256") == context_sha
         )
 
+    def _decision_scoring_evidence(
+        self,
+        evaluation: _base.PairedVOCEvaluation,
+    ) -> tuple[Mapping[str, Any], str]:
+        evidence, record_sha = super()._decision_scoring_evidence(evaluation)
+        store = self.compute_execution_store
+        if store is None:
+            return evidence, record_sha
+
+        _, by_sha, _ = _ledger_records(self.decision_ledger)
+        context_record = by_sha.get(evaluation.decision_context_sha256)
+        if context_record is None:
+            raise _base.VOCEvaluationError(
+                "canonical VOC scoring route context is missing"
+            )
+        context_payload = getattr(context_record, "payload", None)
+        context = (
+            context_payload.get(_CONTEXT_KEY)
+            if isinstance(context_payload, Mapping)
+            else None
+        )
+        if not isinstance(context, Mapping):
+            raise _base.VOCEvaluationError(
+                "canonical VOC scoring route context is invalid"
+            )
+        request_id = _base._text(
+            context.get("request_id"), field="VOC scoring request_id"
+        )
+        precompute = store.get_voc_precompute_admission(request_id)
+        # A compute store may coexist with historical legacy cohorts. Only an
+        # immutable router precommit opts an episode into the stronger explicit
+        # production authority contract.
+        if precompute is None:
+            return evidence, record_sha
+
+        reveal_at = _base._instant(
+            evaluation.outcome_revealed_at,
+            field="VOC outcome_revealed_at",
+        )
+        precompute_recorded_at = _base._instant(
+            precompute.get("authority_recorded_at"),
+            field="router VOC precompute authority_recorded_at",
+        )
+        if precompute_recorded_at >= reveal_at:
+            raise _base.VOCEvaluationError(
+                "router VOC precompute authority was not physically recorded before outcome reveal"
+            )
+
+        expected_identity = {
+            "baseline": {
+                "candidate_id": evaluation.baseline_candidate_id,
+                "backend_id": evaluation.baseline_backend_id,
+                "model_id": evaluation.baseline_model_id,
+                "config_sha256": evaluation.baseline_config_sha256,
+            },
+            "challenger": {
+                "candidate_id": evaluation.challenger_candidate_id,
+                "backend_id": evaluation.challenger_backend_id,
+                "model_id": evaluation.challenger_model_id,
+                "config_sha256": evaluation.challenger_config_sha256,
+            },
+        }
+        shadows: dict[str, Mapping[str, Any]] = {}
+        for role in ("baseline", "challenger"):
+            if precompute.get(f"{role}_compute_identity") != expected_identity[role]:
+                raise _base.VOCEvaluationError(
+                    "router VOC precompute compute identity does not match paired evaluation"
+                )
+            shadow = store.get_voc_shadow_execution(request_id, role)
+            if shadow is None:
+                raise _base.VOCEvaluationError(
+                    "positive VOC score lacks canonical router shadow execution"
+                )
+            if shadow.get("candidate_identity") != expected_identity[role]:
+                raise _base.VOCEvaluationError(
+                    "canonical router shadow execution identity mismatch"
+                )
+            shadow_recorded_at = _base._instant(
+                shadow.get("authority_recorded_at"),
+                field=f"{role} shadow authority_recorded_at",
+            )
+            if shadow_recorded_at >= reveal_at:
+                raise _base.VOCEvaluationError(
+                    "canonical router shadow execution was not physically recorded before outcome reveal"
+                )
+            shadows[role] = shadow
+
+        expected_output = {
+            "baseline": evaluation.baseline_output_sha256,
+            "challenger": evaluation.challenger_output_sha256,
+        }
+        expected_action = {
+            "baseline": evaluation.baseline_action,
+            "challenger": evaluation.challenger_action,
+        }
+        expected_abstained = {
+            "baseline": evaluation.baseline_abstained,
+            "challenger": evaluation.challenger_abstained,
+        }
+        expected_completed = {
+            "baseline": _base._instant(
+                evaluation.baseline_completed_at,
+                field="baseline_completed_at",
+            ),
+            "challenger": _base._instant(
+                evaluation.challenger_completed_at,
+                field="challenger_completed_at",
+            ),
+        }
+        for role, shadow in shadows.items():
+            if (
+                shadow.get("output_sha256") != expected_output[role]
+                or shadow.get("action") != expected_action[role]
+                or shadow.get("abstained") is not expected_abstained[role]
+                or _base._instant(
+                    shadow.get("completed_at"),
+                    field=f"{role} shadow completed_at",
+                )
+                != expected_completed[role]
+            ):
+                raise _base.VOCEvaluationError(
+                    "canonical router shadow execution does not match scored paired output"
+                )
+
+        samples = evidence.get("samples")
+        if type(samples) is not list or not samples:
+            raise _base.VOCEvaluationError(
+                "canonical VOC scoring samples are missing"
+            )
+        baseline_cost = _base._decimal(
+            shadows["baseline"].get("actual_cost"),
+            field="baseline canonical shadow actual_cost",
+            nonnegative=True,
+        )
+        challenger_cost = _base._decimal(
+            shadows["challenger"].get("actual_cost"),
+            field="challenger canonical shadow actual_cost",
+            nonnegative=True,
+        )
+        for sample in samples:
+            if not isinstance(sample, Mapping):
+                raise _base.VOCEvaluationError(
+                    "canonical VOC scoring sample is invalid"
+                )
+            if (
+                _base._decimal(
+                    sample.get("baseline_compute_cost"),
+                    field="baseline sample compute cost",
+                    nonnegative=True,
+                )
+                != baseline_cost
+                or _base._decimal(
+                    sample.get("challenger_compute_cost"),
+                    field="challenger sample compute cost",
+                    nonnegative=True,
+                )
+                != challenger_cost
+                or _base._instant(
+                    sample.get("baseline_completed_at"),
+                    field="baseline sample completed_at",
+                )
+                != expected_completed["baseline"]
+                or _base._instant(
+                    sample.get("challenger_completed_at"),
+                    field="challenger sample completed_at",
+                )
+                != expected_completed["challenger"]
+            ):
+                raise _base.VOCEvaluationError(
+                    "scored VOC cost/timing is not bound to canonical router shadow execution"
+                )
+
+        if challenger_cost < baseline_cost:
+            raise _base.VOCEvaluationError(
+                "canonical challenger shadow cost is below baseline cost"
+            )
+        with localcontext(_base._ARITHMETIC_CONTEXT):
+            measured_extra_cost = +(challenger_cost - baseline_cost)
+        if evaluation.measured_compute_cost != measured_extra_cost:
+            raise _base.VOCEvaluationError(
+                "paired evaluation measured compute cost is not canonical router cost delta"
+            )
+        return evidence, record_sha
+
     def _explicit_admissions(
         self,
         *,
@@ -732,6 +916,10 @@ class CanonicalOutcomeDerivedVOCScoreAuthority(
         context_recorded_at = _base._instant(
             getattr(context_record, "recorded_at"),
             field="VOC route context recorded_at",
+        )
+        _base._instant(
+            authority.get("authority_recorded_at"),
+            field="router VOC precompute authority_recorded_at",
         )
         router_admitted_at = _base._instant(
             authority.get("admitted_at"),

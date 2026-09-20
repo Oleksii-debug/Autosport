@@ -208,7 +208,7 @@ class PaperAbstentionLearningTests(unittest.TestCase):
             )
             with self.assertRaisesRegex(
                 PaperAbstentionLearningError,
-                "canonical authorities rejected abstention action",
+                "canonical environment rejected abstention intent",
             ):
                 runtime.begin_abstention(
                     observation=observation,

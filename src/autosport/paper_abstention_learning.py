@@ -487,6 +487,14 @@ class PaperAbstentionLearningRuntime:
             raise PaperAbstentionLearningError(
                 "abstention finalization predates reward availability"
             )
+        if outcome.truth is not reward.truth:
+            raise PaperAbstentionLearningError(
+                "abstention outcome/reward truth labels differ"
+            )
+        if outcome.simulation_model_id != reward.simulation_model_id:
+            raise PaperAbstentionLearningError(
+                "abstention outcome/reward simulation models differ"
+            )
 
         snapshot = self.agent_loop.snapshot()
         if snapshot.action_id != action.action_id:

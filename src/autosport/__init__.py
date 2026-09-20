@@ -12,3 +12,8 @@ from . import _paper_execution_freshness as _paper_execution_freshness  # noqa: 
 # restart because the current provider contract supplies no non-caller-mintable
 # remote/OS attestation that could truthfully recreate provider origin.
 from . import _provider_receipt_trust_root as _provider_receipt_trust_root  # noqa: F401,E402
+
+# Autosport-owned v1 provider evidence/request envelopes are exact schemas. Keep
+# provider frame JSON extensible/content-bound, but reject unknown local envelope
+# fields before normalization or monotonic integrity validation.
+from . import _provider_observation_payload_strictness as _provider_observation_payload_strictness  # noqa: F401,E402

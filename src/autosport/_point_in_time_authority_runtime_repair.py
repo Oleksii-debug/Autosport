@@ -23,6 +23,32 @@ _ORIGINAL_BIND = evidence.PointInTimeFeatureAuthority.bind
 _ORIGINAL_LOAD = evidence.HoldoutConsumptionLedger._load
 
 
+def _reject_instance_method_shadows(
+    instance: object,
+    concrete_type: type,
+    *,
+    authority_name: str,
+) -> None:
+    """Fail closed when an exact capability shadows trusted class methods.
+
+    Exact-type checks prevent subclass dispatch, but both accepted authority classes
+    intentionally carry mutable instance state.  A caller must not be able to place a
+    same-named callable in ``__dict__`` (for example ``record``, ``get`` or an
+    internal read/verify method) and thereby redirect the later authority call while
+    still satisfying ``type(instance) is concrete_type``.
+    """
+
+    shadowed = sorted(
+        name
+        for name in vars(instance)
+        if callable(getattr(concrete_type, name, None))
+    )
+    if shadowed:
+        raise evidence.PointInTimeEvidenceError(
+            f"{authority_name} shadows trusted concrete authority method: {shadowed[0]}"
+        )
+
+
 def _bind_exact_lineage_authority(*, lineage_authority, **kwargs):
     """Reject caller-polymorphic lineage/registry authority before any positive read."""
 
@@ -34,6 +60,16 @@ def _bind_exact_lineage_authority(*, lineage_authority, **kwargs):
         raise evidence.PointInTimeEvidenceError(
             "lineage_authority.registry must be an exact ScientificRegistry"
         )
+    _reject_instance_method_shadows(
+        lineage_authority,
+        DatasetSnapshotLineageAuthority,
+        authority_name="lineage_authority",
+    )
+    _reject_instance_method_shadows(
+        lineage_authority.registry,
+        ScientificRegistry,
+        authority_name="lineage_authority.registry",
+    )
     return _ORIGINAL_BIND(lineage_authority=lineage_authority, **kwargs)
 
 

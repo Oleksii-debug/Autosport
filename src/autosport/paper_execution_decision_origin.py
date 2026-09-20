@@ -24,7 +24,6 @@ from .paper_execution_reality import (
     ObservedPaperExecution,
     PaperExecutionEvidenceRegistry,
     PaperExecutionLedger,
-    PaperExecutionStateError,
 )
 
 _DECISION_ORIGIN_EVENT = "DECISION_ORIGIN_BOUND"
@@ -195,15 +194,12 @@ def execute_with_decision_origin(
         prepared=prepared,
         trigger_id=trigger_id,
     )
-    try:
-        return runtime.execute(
-            prepared=prepared,
-            trigger_id=trigger_id,
-            started_at=started_at,
-            materialize_exposure=materialize_exposure,
-            observations=observations,
-            evidence_registry=evidence_registry,
-            suspended_action_ids=suspended_action_ids,
-        )
-    except PaperExecutionStateError:
-        raise
+    return runtime.execute(
+        prepared=prepared,
+        trigger_id=trigger_id,
+        started_at=started_at,
+        materialize_exposure=materialize_exposure,
+        observations=observations,
+        evidence_registry=evidence_registry,
+        suspended_action_ids=suspended_action_ids,
+    )

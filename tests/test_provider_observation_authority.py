@@ -102,6 +102,13 @@ def _complete_frame() -> dict[str, object]:
     }
 
 
+def _store(tmp_path) -> CompleteGameBoardEvidenceStore:
+    return CompleteGameBoardEvidenceStore(
+        tmp_path / "workspace",
+        authority_root=tmp_path / "machine-authority",
+    )
+
+
 def _install_fake_sse(
     monkeypatch,
     frame: dict[str, object],
@@ -163,11 +170,11 @@ def test_capture_mints_authority_only_for_exact_complete_provider_frame(tmp_path
     assert "secret-value" not in json.dumps(snapshot.to_payload(), sort_keys=True)
     assert_complete_game_board_authoritative(snapshot)
 
-    store = CompleteGameBoardEvidenceStore(tmp_path)
+    store = _store(tmp_path)
     path = store.save(snapshot)
     assert path.name == f"{snapshot.evidence_sha256}.json"
 
-    restarted = CompleteGameBoardEvidenceStore(tmp_path).load(snapshot.evidence_sha256)
+    restarted = _store(tmp_path).load(snapshot.evidence_sha256)
     assert restarted.to_payload() == snapshot.to_payload()
     assert restarted is not snapshot
     assert_complete_game_board_authoritative(restarted)
@@ -193,7 +200,30 @@ def test_store_rejects_caller_constructed_lookalike(tmp_path):
         frame_json=json.dumps(_complete_frame()),
     )
     with pytest.raises(ProviderObservationUnsupportedError):
-        CompleteGameBoardEvidenceStore(tmp_path).save(snapshot)
+        _store(tmp_path).save(snapshot)
+
+
+def test_manually_written_self_consistent_bytes_cannot_regain_authority(tmp_path):
+    forged = CompleteGameBoardSnapshot(
+        request=_request(),
+        captured_at=CAPTURED_AT,
+        frame_json=json.dumps(_complete_frame()),
+    )
+    store = _store(tmp_path)
+    forged_path = store.root / f"{forged.evidence_sha256}.json"
+    forged_path.parent.mkdir(parents=True, exist_ok=True)
+    forged_path.write_text(
+        json.dumps(forged.to_payload(), indent=2, sort_keys=True),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(
+        ProviderObservationIntegrityError,
+        match="not proven by independent machine-state acquisition authority",
+    ):
+        _store(tmp_path).load(forged.evidence_sha256)
+    with pytest.raises(ProviderObservationUnsupportedError):
+        assert_complete_game_board_authoritative(forged)
 
 
 @pytest.mark.parametrize(
@@ -205,6 +235,7 @@ def test_store_rejects_caller_constructed_lookalike(tmp_path):
         ({"resume_mode": "diff"}, "replacement semantics"),
         ({"partial": True}, "partial provider snapshot"),
         ({"partial": "false"}, "partial provider snapshot"),
+        ({"partial_reason": "upstream_gap"}, "partial_reason"),
         ({"missing_books": ["bovada"]}, "missing_books"),
         ({"truncated_books": ["tenbet"]}, "truncated_books"),
         ({"snapshot_partial_reasons": ["fetch_cap"]}, "snapshot_partial_reasons"),
@@ -294,7 +325,7 @@ def test_only_documented_complete_game_line_scope_is_admitted():
 
 def test_persisted_digest_tamper_is_rejected(tmp_path, monkeypatch):
     snapshot = _capture(monkeypatch)
-    store = CompleteGameBoardEvidenceStore(tmp_path)
+    store = _store(tmp_path)
     path = store.save(snapshot)
     payload = json.loads(path.read_text(encoding="utf-8"))
     payload["frame_sha256"] = "0" * 64
@@ -303,4 +334,4 @@ def test_persisted_digest_tamper_is_rejected(tmp_path, monkeypatch):
         ProviderObservationIntegrityError,
         match="frame_sha256 does not bind exact provider frame",
     ):
-        CompleteGameBoardEvidenceStore(tmp_path).load(snapshot.evidence_sha256)
+        _store(tmp_path).load(snapshot.evidence_sha256)

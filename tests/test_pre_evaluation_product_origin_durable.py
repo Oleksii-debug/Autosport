@@ -82,7 +82,7 @@ def _risk_policy() -> PaperRiskPolicy:
     )
 
 
-def _snapshot() -> CompleteGameBoardSnapshot:
+def _snapshot(monkeypatch) -> CompleteGameBoardSnapshot:
     request = CompleteGameBoardRequest(
         sport_key="soccer",
         bookmakers=("bookmaker-1",),
@@ -106,12 +106,19 @@ def _snapshot() -> CompleteGameBoardSnapshot:
         ],
         "count": 1,
     }
-    return provider_observation_authority._remember(
-        CompleteGameBoardSnapshot(
-            request=request,
-            captured_at="2026-09-18T13:19:59Z",
-            frame_json=json.dumps(frame),
-        )
+    monkeypatch.setattr(
+        provider_observation_authority,
+        "_read_production_initial_state",
+        lambda capture_request, *, api_key, timeout_seconds: frame,
+    )
+    monkeypatch.setattr(
+        provider_observation_authority,
+        "_default_clock",
+        lambda: "2026-09-18T13:19:59Z",
+    )
+    return provider_observation_authority.capture_parlay_complete_game_board(
+        api_key="fixture-key",
+        request=request,
     )
 
 
@@ -243,8 +250,9 @@ def _persist_intent_authority(
 
 def test_durable_product_origin_survives_restart_and_rejects_forged_intent(
     tmp_path: Path,
+    monkeypatch,
 ) -> None:
-    snapshot = _snapshot()
+    snapshot = _snapshot(monkeypatch)
     provider = _provider(snapshot)
     intent = _intent(snapshot)
     book = PaperBook("10000")

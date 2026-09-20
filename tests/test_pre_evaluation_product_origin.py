@@ -27,6 +27,7 @@ from autosport.pre_evaluation_semantics import ProviderSelectionBinding
 from autosport.provider_observation_authority import (
     CompleteGameBoardRequest,
     CompleteGameBoardSnapshot,
+    capture_parlay_complete_game_board,
 )
 from autosport import provider_observation_authority
 from autosport.risk import PaperRiskPolicy
@@ -92,6 +93,24 @@ def _snapshot() -> CompleteGameBoardSnapshot:
         request=request,
         captured_at="2026-09-18T13:19:59Z",
         frame_json=json.dumps(frame),
+    )
+
+
+def _issued_snapshot(monkeypatch) -> CompleteGameBoardSnapshot:
+    raw = _snapshot()
+    monkeypatch.setattr(
+        provider_observation_authority,
+        "_read_production_initial_state",
+        lambda request, *, api_key, timeout_seconds: raw.frame,
+    )
+    monkeypatch.setattr(
+        provider_observation_authority,
+        "_default_clock",
+        lambda: raw.captured_at,
+    )
+    return capture_parlay_complete_game_board(
+        api_key="fixture-key",
+        request=raw.request,
     )
 
 
@@ -186,8 +205,9 @@ def test_structurally_valid_but_unissued_provider_snapshot_cannot_mint_origin(
 
 def test_issued_provider_snapshot_cannot_authorize_absent_selection(
     tmp_path: Path,
+    monkeypatch,
 ) -> None:
-    snapshot = provider_observation_authority._remember(_snapshot())
+    snapshot = _issued_snapshot(monkeypatch)
     provider = _provider(snapshot, selection_id="bookmaker-1:h2h:draw")
     inputs = _resolution_inputs(snapshot, provider)
 

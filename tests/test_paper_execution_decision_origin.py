@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from decimal import Decimal
+from types import SimpleNamespace
 
 import pytest
 
@@ -193,3 +194,21 @@ def test_origin_bound_reservation_rejects_polymorphic_execution_ledger(tmp_path)
             _reserve(forged, _plan())
     finally:
         origin_module._DECISION_ORIGIN.reset(token)
+
+
+def test_caller_shaped_context_frame_cannot_mint_product_origin(tmp_path) -> None:
+    decision_ledger = JsonlDecisionLedger(tmp_path / "decision.jsonl")
+    decision_ledger.append(_record())
+    runtime = object()
+    context = SimpleNamespace(
+        paper_execution=runtime,
+        decision_ledger=decision_ledger,
+    )
+
+    def attacker_frame():
+        # Keep an exact-looking `context` local on the stack. Product origin must
+        # still require an integrated producer's exact code object.
+        assert context.paper_execution is runtime
+        return origin_module._resolve_product_origin_from_stack(runtime, DECISION_ID)
+
+    assert attacker_frame() is None

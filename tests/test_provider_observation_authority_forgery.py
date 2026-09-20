@@ -9,7 +9,7 @@ from autosport.provider_observation_authority import (
     CompleteGameBoardEvidenceStore,
     CompleteGameBoardRequest,
     CompleteGameBoardSnapshot,
-    ProviderObservationIntegrityError,
+    ProviderObservationUnsupportedError,
 )
 
 
@@ -49,7 +49,7 @@ def _forged_snapshot() -> CompleteGameBoardSnapshot:
     )
 
 
-def test_generic_monotonic_authority_cannot_forge_provider_acquisition_receipt(tmp_path) -> None:
+def test_generic_monotonic_authority_cannot_restore_provider_origin(tmp_path) -> None:
     workspace = tmp_path / "workspace"
     authority_root = tmp_path / "machine-authority"
     store = CompleteGameBoardEvidenceStore(
@@ -65,9 +65,8 @@ def test_generic_monotonic_authority_cannot_forge_provider_acquisition_receipt(t
         encoding="utf-8",
     )
 
-    # Reproduce the exact semantic blocker from independent review: an ordinary
-    # caller can construct the generic monotonic authority with the public domain,
-    # key and semantic binding, and can therefore mint a fully matching history.
+    # Reproduce the exact generic continuity witness a caller can legitimately mint.
+    # It can prove local state continuity, but it can never recreate remote origin.
     generic = MonotonicWorkspaceAuthority(
         workspace=workspace,
         domain=store.AUTHORITY_DOMAIN,
@@ -89,11 +88,9 @@ def test_generic_monotonic_authority_cannot_forge_provider_acquisition_receipt(t
         semantic_binding_sha256=binding,
     )
 
-    # The generic history is no longer sufficient. Only save() of the exact object
-    # issued by the fixed production acquisition boundary can mint durable origin proof.
     with pytest.raises(
-        ProviderObservationIntegrityError,
-        match=r"production(?:-owned)? acquisition",
+        ProviderObservationUnsupportedError,
+        match="restart cannot reissue provider-origin authority",
     ):
         CompleteGameBoardEvidenceStore(
             workspace,

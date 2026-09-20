@@ -75,14 +75,23 @@ class PaperCampaignRuntimeTests(_legacy.PaperCampaignRuntimeTests):
             # The reflection policy was already bound into the Action at T2.
             # Reward truth first exists at T4, so T4 is the first causal time at
             # which attribution/postmortem may use both pieces of evidence.
-            self.assertEqual(state["attributions"][0]["attributed_at"], _legacy.T4)
+            self.assertEqual(
+                state["attributions"][0]["attributed_at"],
+                _legacy.T4.replace("+00:00", "Z"),
+            )
             self.assertEqual(
                 state["attributions"][0]["findings"][0]["evidence_available_at"],
-                _legacy.T4,
+                _legacy.T4.replace("+00:00", "Z"),
             )
-            self.assertEqual(state["postmortems"][0]["created_at"], _legacy.T4)
+            self.assertEqual(
+                state["postmortems"][0]["created_at"],
+                _legacy.T4.replace("+00:00", "Z"),
+            )
             # The external research request is still made at the real T5 call.
-            self.assertEqual(state["research_handoffs"][0]["requested_at"], _legacy.T5)
+            self.assertEqual(
+                state["research_handoffs"][0]["requested_at"],
+                _legacy.T5.replace("+00:00", "Z"),
+            )
             self.assertEqual(len(state["research_handoffs"]), 1)
             durable = json.loads(
                 (root / "paper-learning-bridge.json.campaign.json").read_text(
@@ -91,7 +100,7 @@ class PaperCampaignRuntimeTests(_legacy.PaperCampaignRuntimeTests):
             )
             self.assertEqual(
                 durable["plans"][ticket_id]["reflection_available_at"],
-                _legacy.T4,
+                _legacy.T4.replace("+00:00", "Z"),
             )
 
     def test_deleted_campaign_sidecar_cannot_replace_anchored_plan(self) -> None:
@@ -167,13 +176,16 @@ class PaperCampaignRuntimeTests(_legacy.PaperCampaignRuntimeTests):
             raw = json.loads(
                 (root / "agent-loop.json").read_text(encoding="utf-8")
             )
-            self.assertEqual(raw["attributions"][0]["attributed_at"], _legacy.T4)
+            self.assertEqual(
+                raw["attributions"][0]["attributed_at"],
+                _legacy.T4.replace("+00:00", "Z"),
+            )
             durable = json.loads(
                 same_plan.state_path.read_text(encoding="utf-8")
             )
             self.assertEqual(
                 durable["plans"][ticket_id]["reflection_available_at"],
-                _legacy.T4,
+                _legacy.T4.replace("+00:00", "Z"),
             )
 
     def test_paired_bridge_and_campaign_rollback_cannot_substitute_plan(self) -> None:
@@ -259,11 +271,14 @@ class PaperCampaignRuntimeTests(_legacy.PaperCampaignRuntimeTests):
             final_state = json.loads(
                 (root / "agent-loop.json").read_text(encoding="utf-8")
             )
-            self.assertEqual(final_state["attributions"][0]["attributed_at"], _legacy.T4)
+            self.assertEqual(
+                final_state["attributions"][0]["attributed_at"],
+                _legacy.T4.replace("+00:00", "Z"),
+            )
             durable = json.loads(campaign_path.read_text(encoding="utf-8"))
             self.assertEqual(
                 durable["plans"][ticket_id]["reflection_available_at"],
-                _legacy.T4,
+                _legacy.T4.replace("+00:00", "Z"),
             )
 
     def test_post_deadline_restart_after_durable_handoff_commits_checkpoint(self) -> None:

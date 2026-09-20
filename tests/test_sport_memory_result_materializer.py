@@ -18,7 +18,10 @@ from autosport.event_lifecycle import (
 )
 from autosport.domain import MarketEvent
 from autosport.opponent_intelligence import OpponentIntelligenceStore
-from autosport.product_runtime import build_autonomous_product_runtime
+from autosport.product_runtime import (
+    ProductCompositionError,
+    build_autonomous_product_runtime,
+)
 from autosport.participant_identity import (
     AliasRecord,
     EntityIdentity,
@@ -302,19 +305,8 @@ def test_cold_process_can_import_result_materializer() -> None:
 
 def test_arbitrary_protocol_resolver_is_not_a_materializer_capability(tmp_path):
     _, store, market_store, materializer = _authorities(tmp_path)
-    binding = _binding(materializer, market_store)
+    _binding(materializer, market_store)
     attacker = _AttackerAuthority()
-    forged = SettlementResolution(
-        event_identity=binding.event_identity,
-        settlement_ref="settlement-1",
-        quote_outcomes={
-            binding.subject_quote_key: "loss",
-            binding.opponent_quote_key: "win",
-        },
-        evidence_id="attacker-result",
-        evidence_sha256=SHA_C,
-        available_at=T2,
-    )
 
     with pytest.raises(
         TypeError,
@@ -329,7 +321,7 @@ def test_arbitrary_protocol_resolver_is_not_a_materializer_capability(tmp_path):
 def test_public_product_builder_rejects_detached_outcome_resolver(tmp_path):
     source = _ProductSource()
     with pytest.raises(
-        Exception,
+        ProductCompositionError,
         match="settlement outcome authority must be owned by the configured product source",
     ):
         build_autonomous_product_runtime(
@@ -352,7 +344,7 @@ def test_restart_rejects_settlement_authority_identity_substitution(tmp_path):
 
     replacement = _ReplacementProductSource()
     with pytest.raises(
-        Exception,
+        ProductCompositionError,
         match="settlement authority identity conflicts with durable product composition",
     ):
         build_autonomous_product_runtime(

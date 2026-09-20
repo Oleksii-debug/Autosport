@@ -4,6 +4,7 @@ import hashlib
 import json
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from decimal import Decimal
 from weakref import ref
 
 from .betfair_account_readonly import (
@@ -13,8 +14,17 @@ from .betfair_account_readonly import (
 )
 from .bookmaker_capability import BookmakerCapabilityProfile
 from .campaign_economic_authority import FinalizedCampaignAuthority
-from .decision_ledger import JsonlDecisionLedger, MATERIAL_ACTION_ID_PAYLOAD_KEY
+from .decision_ledger import ECONOMIC_DECISION_KIND, JsonlDecisionLedger
 from .real_execution_ledger import ExecutionAction, ExecutionPlan, RealExecutionLedger
+from .opportunity import Opportunity, OpportunityContractError
+from .portfolio_plan import (
+    PortfolioPlan,
+    _PORTFOLIO_INTENT_EVIDENCE_JSON_PAYLOAD_KEY,
+    _PORTFOLIO_PLAN_DECISION_ACTION,
+    _PORTFOLIO_PLAN_DECISION_AGENT,
+    _PORTFOLIO_PLAN_JSON_PAYLOAD_KEY,
+    _PORTFOLIO_PLAN_SHA256_PAYLOAD_KEY,
+)
 from .supervised_provider_evidence import (
     ProviderEvidenceError,
     VerifiedProviderEffectEvidence,
@@ -525,6 +535,244 @@ def _execution_plan_action(
     return plan, actions[0], plan_event
 
 
+def _canonical_json_document(value: object, name: str) -> dict[str, object]:
+    text = _text(value, name)
+    try:
+        decoded = json.loads(text)
+    except (json.JSONDecodeError, UnicodeError) as exc:
+        raise CampaignProviderScopeError(
+            f"{name} must be canonical JSON"
+        ) from exc
+    if type(decoded) is not dict or _canonical_json(decoded) != text:
+        raise CampaignProviderScopeError(
+            f"{name} must be a canonical JSON object"
+        )
+    return decoded
+
+
+def _portfolio_execution_membership(
+    records: tuple[object, ...] | list[object],
+    execution_plan: ExecutionPlan,
+):
+    if not isinstance(execution_plan, ExecutionPlan):
+        raise CampaignProviderScopeError(
+            "execution membership requires canonical ExecutionPlan"
+        )
+    parts = execution_plan.decision_id.split(":")
+    if (
+        len(parts) != 4
+        or parts[0] != "portfolio"
+        or parts[2] != "intent"
+    ):
+        raise CampaignProviderScopeError(
+            "execution decision identity is not canonical portfolio/intent authority"
+        )
+    plan_sha256 = _sha(parts[1], "execution portfolio plan_sha256")
+    intent_sha256 = _sha(parts[3], "execution intent_sha256")
+    expected_decision_id = (
+        f"portfolio:{plan_sha256}:intent:{intent_sha256}"
+    )
+    if execution_plan.decision_id != expected_decision_id:
+        raise CampaignProviderScopeError(
+            "execution decision identity is not canonical"
+        )
+
+    matches = []
+    for record in records:
+        payload = getattr(record, "payload", None)
+        if (
+            getattr(record, "agent", None) == _PORTFOLIO_PLAN_DECISION_AGENT
+            and getattr(record, "action", None) == _PORTFOLIO_PLAN_DECISION_ACTION
+            and getattr(record, "decision_kind", None) == ECONOMIC_DECISION_KIND
+            and type(payload) is dict
+            and payload.get(_PORTFOLIO_PLAN_SHA256_PAYLOAD_KEY)
+            == plan_sha256
+        ):
+            matches.append(record)
+    if len(matches) != 1:
+        raise CampaignProviderScopeError(
+            "execution plan lacks exact frozen PortfolioPlan decision membership"
+        )
+    decision = matches[0]
+    payload = decision.payload
+
+    try:
+        portfolio_raw = _canonical_json_document(
+            payload.get(_PORTFOLIO_PLAN_JSON_PAYLOAD_KEY),
+            "portfolio_plan_json",
+        )
+        portfolio_plan = PortfolioPlan.from_dict(portfolio_raw)
+    except (TypeError, ValueError) as exc:
+        raise CampaignProviderScopeError(
+            "frozen PortfolioPlan evidence cannot be reconstructed"
+        ) from exc
+    if portfolio_plan.plan_sha256 != plan_sha256:
+        raise CampaignProviderScopeError(
+            "frozen PortfolioPlan identity drifted"
+        )
+    if getattr(decision, "observed_ts", None) != portfolio_plan.decision_ts:
+        raise CampaignProviderScopeError(
+            "PortfolioPlan decision timestamp drifted"
+        )
+
+    intent_document = _canonical_json_document(
+        payload.get(_PORTFOLIO_INTENT_EVIDENCE_JSON_PAYLOAD_KEY),
+        "portfolio_intent_evidence_json",
+    )
+    if set(intent_document) != {"schema", "schema_version", "intents"}:
+        raise CampaignProviderScopeError(
+            "portfolio intent evidence fields are not canonical"
+        )
+    if (
+        intent_document.get("schema")
+        != "autosport.portfolio_plan_intent_evidence"
+        or intent_document.get("schema_version") != 1
+    ):
+        raise CampaignProviderScopeError(
+            "portfolio intent evidence schema is unsupported"
+        )
+    intent_rows = intent_document.get("intents")
+    if type(intent_rows) is not list or len(intent_rows) != len(
+        portfolio_plan.intent_sha256s
+    ):
+        raise CampaignProviderScopeError(
+            "portfolio intent evidence vector cardinality drifted"
+        )
+
+    selected_indexes = [
+        index
+        for index, expected_sha in enumerate(portfolio_plan.intent_sha256s)
+        if expected_sha == intent_sha256
+    ]
+    if len(selected_indexes) != 1:
+        raise CampaignProviderScopeError(
+            "execution intent is not unique frozen PortfolioPlan membership"
+        )
+    selected_index = selected_indexes[0]
+    selected_stake = portfolio_plan.stakes[selected_index]
+    if selected_stake <= 0:
+        raise CampaignProviderScopeError(
+            "execution intent has no positive PortfolioPlan stake authority"
+        )
+
+    selected_row: dict[str, object] | None = None
+    for index, raw in enumerate(intent_rows):
+        if type(raw) is not dict:
+            raise CampaignProviderScopeError(
+                "portfolio intent evidence member is not canonical"
+            )
+        if (
+            raw.get("intent_id") != portfolio_plan.intent_ids[index]
+            or raw.get("intent_sha256")
+            != portfolio_plan.intent_sha256s[index]
+        ):
+            raise CampaignProviderScopeError(
+                "portfolio intent evidence vector identity drifted"
+            )
+        if index == selected_index:
+            selected_row = raw
+    if selected_row is None:
+        raise CampaignProviderScopeError(
+            "selected portfolio intent evidence is unavailable"
+        )
+
+    try:
+        opportunity = Opportunity.from_dict(selected_row.get("opportunity"))
+    except (OpportunityContractError, TypeError, ValueError) as exc:
+        raise CampaignProviderScopeError(
+            "selected frozen Opportunity evidence is invalid"
+        ) from exc
+    if (
+        opportunity.strategy_class.value
+        != portfolio_plan.opportunity_classes[selected_index]
+    ):
+        raise CampaignProviderScopeError(
+            "selected Opportunity class drifted from PortfolioPlan"
+        )
+
+    risk_context = selected_row.get("risk_context")
+    if type(risk_context) is not dict:
+        raise CampaignProviderScopeError(
+            "selected intent lacks frozen risk context"
+        )
+    expected_risk_fields = {
+        "provider_accounts",
+        "bankroll_id",
+        "currency",
+        "measurement_window_start",
+        "measurement_window_end",
+        "proposal_ts",
+    }
+    if set(risk_context) != expected_risk_fields:
+        raise CampaignProviderScopeError(
+            "selected intent risk context fields are not canonical"
+        )
+    raw_accounts = risk_context.get("provider_accounts")
+    if type(raw_accounts) is not list:
+        raise CampaignProviderScopeError(
+            "selected intent provider accounts are not canonical"
+        )
+    provider_accounts: set[tuple[str, str]] = set()
+    for binding in raw_accounts:
+        if type(binding) is not list or len(binding) != 2:
+            raise CampaignProviderScopeError(
+                "selected intent provider account binding is invalid"
+            )
+        pair = (
+            _text(binding[0], "provider venue_id"),
+            _text(binding[1], "provider account_id"),
+        )
+        if pair in provider_accounts:
+            raise CampaignProviderScopeError(
+                "selected intent provider account bindings are duplicated"
+            )
+        provider_accounts.add(pair)
+
+    if _instant(execution_plan.created_at, "execution plan created_at") < _instant(
+        portfolio_plan.decision_ts,
+        "portfolio decision_ts",
+    ):
+        raise CampaignProviderScopeError(
+            "execution plan predates frozen PortfolioPlan decision"
+        )
+
+    total_stake = Decimal("0")
+    for action in execution_plan.actions:
+        if (action.bookmaker_id, action.account_id) not in provider_accounts:
+            raise CampaignProviderScopeError(
+                "execution action provider account is outside frozen intent"
+            )
+        quote_matches = [
+            quote
+            for quote in opportunity.quotes
+            if (
+                quote.source_id == action.bookmaker_id
+                and quote.event_id == action.event_id
+                and quote.market_id == action.market_id
+                and quote.selection_id == action.selection_id
+                and quote.decimal_odds == action.requested_odds
+                and _canonical_instant(
+                    quote.observed_ts,
+                    "frozen quote observed_ts",
+                )
+                == _canonical_instant(
+                    action.quote_observed_at,
+                    "execution quote_observed_at",
+                )
+            )
+        ]
+        if len(quote_matches) != 1:
+            raise CampaignProviderScopeError(
+                "execution action is not exact frozen Opportunity quote membership"
+            )
+        total_stake += action.requested_stake
+    if total_stake > selected_stake:
+        raise CampaignProviderScopeError(
+            "execution action vector exceeds frozen PortfolioPlan stake"
+        )
+    return decision, portfolio_plan
+
+
 def _resolve_campaign_provider_scope_raw(
     authority: FinalizedCampaignAuthority,
     *,
@@ -579,21 +827,15 @@ def _resolve_campaign_provider_scope_raw(
         action_id=capture.action_id,
         attempt_id=attempt_id,
     )
-    matches = [
+    run_records = [
         record
         for record in records
-        if record.replay_run_id == session.run_id
-        and (
-            record.decision_id == plan.decision_id
-            or record.payload.get(MATERIAL_ACTION_ID_PAYLOAD_KEY)
-            == plan.decision_id
-        )
+        if getattr(record, "replay_run_id", None) == session.run_id
     ]
-    if len(matches) != 1:
-        raise CampaignProviderScopeError(
-            "execution plan lacks exact canonical campaign run decision membership"
-        )
-    decision = matches[0]
+    decision, _portfolio_plan = _portfolio_execution_membership(
+        run_records,
+        plan,
+    )
 
     if (
         action.bookmaker_id != capture.venue_id

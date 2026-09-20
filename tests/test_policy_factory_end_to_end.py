@@ -7,13 +7,14 @@ from dataclasses import replace
 from decimal import Decimal
 
 from autosport.champion_policy import persist_policy_state
-from autosport.experiential_learning import PolicyRetestSpec, run_policy_retest
+from autosport.experiential_learning import PolicyRetestSpec
 from autosport.learning_environment import Action, EvidenceTruth, RewardEvidence, Transition
 from autosport.policy_evaluation import (
     PolicyEvaluationCase,
     PolicyEvaluationConfig,
     QualifiedCounterfactualAuthority,
     PolicyRewardMode,
+    evaluate_policy_pair,
     policy_evaluation_cases_manifest_sha256,
 )
 from autosport.scientific_registry import (
@@ -432,6 +433,83 @@ def _spec(
     )
 
 
+def _run_nongoverned_factory_retest(
+    runner: ExperimentRunner,
+    *,
+    predecessor_policy: BanditPolicyState,
+    challenger_policy: BanditPolicyState,
+    update_evidence,
+    spec: PolicyRetestSpec,
+    points=(),
+    rule: PromotionRule,
+    evaluation_cases=None,
+):
+    """Exercise the lower-level factory/evaluation seam without product utility authority.
+
+    These legacy scientific/factory regressions intentionally test qualification,
+    materialization, promotion and restart invariants below the governed product update
+    boundary. They must not mint a fake positive UtilityBoundUpdateEvidence merely to
+    reach those lower-level invariants.
+    """
+    if points:
+        raise ValueError("baseline TrainingPoint evidence cannot authorize a learned policy retest")
+    if update_evidence.predecessor_policy_id != predecessor_policy.policy_id:
+        raise ValueError("policy update predecessor identity mismatch")
+    if update_evidence.successor_policy_id != challenger_policy.policy_id:
+        raise ValueError("policy update successor identity mismatch")
+
+    protocol = runner.registry.get("ResearchProtocol", challenger_policy.protocol_id)
+    if protocol is None:
+        raise ValueError("challenger policy research protocol is missing from ScientificRegistry")
+    binding = protocol.payload.get("binding")
+    if type(binding) is not dict:
+        raise ValueError("challenger policy research protocol lacks frozen binding")
+    if evaluation_cases is None:
+        raise ValueError("policy-specific causal evaluation cases are required for learned policy retest")
+
+    factory_spec = spec.factory_spec(challenger_policy)
+    evaluation_config = PolicyEvaluationConfig.from_frozen_text(
+        binding.get("evaluation_design")
+    )
+    authority = evaluation_config.counterfactual_authority
+    if (
+        authority is not None
+        and authority.evaluator_source_sha256 != spec.evaluator_source_sha256.lower()
+    ):
+        raise ValueError(
+            "counterfactual authority evaluator identity does not match factory spec"
+        )
+    evaluation = evaluate_policy_pair(
+        predecessor_policy,
+        challenger_policy,
+        evaluation_cases,
+        completed_at=spec.completed_at,
+        abstain_action=evaluation_config.abstain_action,
+        counterfactual_authority=authority,
+    )
+    if evaluation.dataset_manifest_sha256 != protocol.payload.get(
+        "dataset_manifest_sha256"
+    ):
+        raise ValueError(
+            "policy evaluation cohort does not match frozen research protocol dataset"
+        )
+    if spec.predecessor_strategy_version_id != predecessor_policy.policy_id:
+        raise ValueError(
+            "policy retest rollback strategy must be the exact evaluated predecessor policy"
+        )
+
+    persist_policy_state(runner.artifact_store, predecessor_policy)
+    challenger_artifact_sha256 = persist_policy_state(
+        runner.artifact_store, challenger_policy
+    )
+    return runner.run_policy_candidate(
+        factory_spec,
+        evaluation,
+        rule=rule,
+        policy_artifact_sha256=challenger_artifact_sha256,
+    )
+
+
 def test_policy_factory_promotes_evaluated_policy_and_verifies_restart(tmp_path):
     (
         registry,
@@ -465,7 +543,7 @@ def test_policy_factory_promotes_evaluated_policy_and_verifies_restart(tmp_path)
         decided_at=CHALLENGER_DECIDED,
     )
 
-    result = run_policy_retest(
+    result = _run_nongoverned_factory_retest(
         runner,
         predecessor_policy=predecessor,
         challenger_policy=challenger,
@@ -545,7 +623,7 @@ def test_policy_retest_rejects_mismatched_counterfactual_evaluator_before_publis
     import pytest
 
     with pytest.raises(ValueError, match="authority evaluator identity"):
-        run_policy_retest(
+        _run_nongoverned_factory_retest(
             runner,
             predecessor_policy=predecessor,
             challenger_policy=challenger,
@@ -604,7 +682,7 @@ def test_policy_retest_rejects_self_asserted_authority_without_qualification_art
         ValueError,
         match="counterfactual-qualification",
     ):
-        run_policy_retest(
+        _run_nongoverned_factory_retest(
             ExperimentRunner(registry, store),
             predecessor_policy=predecessor,
             challenger_policy=challenger,
@@ -658,7 +736,7 @@ def test_policy_retest_rejects_unqualified_case_digest_before_publish(tmp_path):
     import pytest
 
     with pytest.raises(ValueError, match="receipt does not match evaluated case"):
-        run_policy_retest(
+        _run_nongoverned_factory_retest(
             ExperimentRunner(registry, store),
             predecessor_policy=predecessor,
             challenger_policy=challenger,
@@ -683,7 +761,7 @@ def test_policy_retest_rejects_backdated_qualification_appended_after_freeze(tmp
     spec=_spec(experiment_id="experiment-backdated-qualification",model_id="model-backdated-qualification",evaluation_id="evaluation-backdated-qualification",promotion_id="promotion-backdated-qualification",predecessor_policy_id=predecessor.policy_id,predecessor_model_id=predecessor_model_id,created_at=CHALLENGER_CREATED,completed_at=CHALLENGER_COMPLETED,decided_at=CHALLENGER_DECIDED)
     import pytest
     with pytest.raises(ValueError,match="registered after protocol freeze"):
-        run_policy_retest(ExperimentRunner(registry,store),predecessor_policy=predecessor,challenger_policy=challenger,update_evidence=update,spec=spec,evaluation_cases=cases,rule=rule)
+        _run_nongoverned_factory_retest(ExperimentRunner(registry,store),predecessor_policy=predecessor,challenger_policy=challenger,update_evidence=update,spec=spec,evaluation_cases=cases,rule=rule)
 
 
 def test_policy_retest_rejects_revoked_counterfactual_authority(tmp_path):
@@ -696,7 +774,7 @@ def test_policy_retest_rejects_revoked_counterfactual_authority(tmp_path):
     spec=_spec(experiment_id="experiment-revoked-authority",model_id="model-revoked-authority",evaluation_id="evaluation-revoked-authority",promotion_id="promotion-revoked-authority",predecessor_policy_id=predecessor.policy_id,predecessor_model_id=predecessor_model_id,created_at=CHALLENGER_CREATED,completed_at=CHALLENGER_COMPLETED,decided_at=CHALLENGER_DECIDED)
     import pytest
     with pytest.raises(ValueError,match="does not match frozen authority"):
-        run_policy_retest(ExperimentRunner(registry,store),predecessor_policy=predecessor,challenger_policy=challenger,update_evidence=update,spec=spec,evaluation_cases=cases,rule=rule)
+        _run_nongoverned_factory_retest(ExperimentRunner(registry,store),predecessor_policy=predecessor,challenger_policy=challenger,update_evidence=update,spec=spec,evaluation_cases=cases,rule=rule)
 
 
 def test_policy_retest_rejects_missing_post_reveal_materialization_receipt(tmp_path):
@@ -707,7 +785,7 @@ def test_policy_retest_rejects_missing_post_reveal_materialization_receipt(tmp_p
     spec=_spec(experiment_id="experiment-missing-receipt",model_id="model-missing-receipt",evaluation_id="evaluation-missing-receipt",promotion_id="promotion-missing-receipt",predecessor_policy_id=predecessor.policy_id,predecessor_model_id=predecessor_model_id,created_at=CHALLENGER_CREATED,completed_at=CHALLENGER_COMPLETED,decided_at=CHALLENGER_DECIDED)
     import pytest
     with pytest.raises(ValueError,match="materialization receipt"):
-        run_policy_retest(ExperimentRunner(registry,store),predecessor_policy=predecessor,challenger_policy=challenger,update_evidence=update,spec=spec,evaluation_cases=cases,rule=rule)
+        _run_nongoverned_factory_retest(ExperimentRunner(registry,store),predecessor_policy=predecessor,challenger_policy=challenger,update_evidence=update,spec=spec,evaluation_cases=cases,rule=rule)
 
 
 
@@ -776,7 +854,7 @@ def test_policy_retest_rejects_tampered_materialization_ledger(tmp_path):
     import pytest
 
     with pytest.raises(ValueError, match="materialization ledger record digest mismatch"):
-        run_policy_retest(
+        _run_nongoverned_factory_retest(
             ExperimentRunner(registry, store),
             predecessor_policy=predecessor,
             challenger_policy=challenger,
@@ -838,7 +916,7 @@ def test_policy_retest_rejects_store_materialization_after_evaluation_completion
     import pytest
 
     with pytest.raises(ValueError, match="materialized after evaluation completion"):
-        run_policy_retest(
+        _run_nongoverned_factory_retest(
             ExperimentRunner(registry, store),
             predecessor_policy=predecessor,
             challenger_policy=challenger,
@@ -883,7 +961,7 @@ def test_second_policy_attempt_cannot_reuse_same_confirmation_holdout(tmp_path):
         completed_at=CHALLENGER_COMPLETED,
         decided_at=CHALLENGER_DECIDED,
     )
-    first = run_policy_retest(
+    first = _run_nongoverned_factory_retest(
         runner,
         predecessor_policy=predecessor,
         challenger_policy=challenger,
@@ -915,7 +993,7 @@ def test_second_policy_attempt_cannot_reuse_same_confirmation_holdout(tmp_path):
         completed_at=SECOND_COMPLETED,
         decided_at=SECOND_DECIDED,
     )
-    repeated = run_policy_retest(
+    repeated = _run_nongoverned_factory_retest(
         runner,
         predecessor_policy=challenger,
         challenger_policy=second,

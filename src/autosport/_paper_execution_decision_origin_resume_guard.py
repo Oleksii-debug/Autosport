@@ -132,6 +132,17 @@ def _paper_value_on_market_event_with_durable_origin(
 ) -> None:
     """Bind an already-durable decision origin across the whole recovery read path."""
 
+    # Product entry is an authority boundary. ContextVars are process-local ambient
+    # state, so callers must not be able to pre-seed either token and have a
+    # canonical paper-value producer inherit it as if it had minted the capability.
+    if (
+        _origin._DECISION_ORIGIN.get() is not None
+        or _instance_guard._PRODUCT_ORIGIN_RUNTIME.get() is not None
+    ):
+        raise _origin.PaperExecutionDecisionOriginError(
+            "caller-supplied decision-origin context cannot enter paper-value execution"
+        )
+
     runtime = getattr(context, "paper_execution", None)
     if runtime is None or event.quote_key in self._acted:
         return _STABLE_PAPER_VALUE_ON_MARKET_EVENT(self, event, context)

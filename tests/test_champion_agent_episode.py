@@ -1,5 +1,3 @@
-import json
-from dataclasses import replace
 from decimal import Decimal
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -19,7 +17,6 @@ from autosport.agent_loop import (
 from autosport.champion_agent_episode import (
     ChampionAgentEpisode,
     ChampionAgentEpisodeError,
-    _mint_canonical_cross_session_authority,
 )
 from autosport.champion_policy import persist_policy_state
 from autosport.learning_environment import (
@@ -32,13 +29,7 @@ from autosport.learning_environment import (
     RewardEvidence,
     Transition,
 )
-from autosport.policy_deployment import (
-    ActivationBinding,
-    DeploymentScope,
-    PolicyDeploymentError,
-    deployment_authority_path,
-    load_deployment_authority,
-)
+from autosport.policy_deployment import ActivationBinding, DeploymentScope
 from autosport.scientific_registry import ScientificRegistry
 from autosport.strategy_model_factory import FactoryArtifactStore
 from autosport.transparent_bandit_policy import BanditPolicyState
@@ -111,7 +102,7 @@ def _activation_authority(policy):
             "environment_sha256": policy.environment_id,
             "config_sha256": policy.config_sha256,
             "model_version_id": MODEL_ID,
-        }
+        },
     )
     model = SimpleNamespace(
         record_type="ModelVersion",
@@ -124,7 +115,7 @@ def _activation_authority(policy):
             "config_sha256": policy.config_sha256,
             "research_protocol_id": policy.protocol_id,
             "seed": policy.seed,
-        }
+        },
     )
     promotion = SimpleNamespace(
         record_type="PromotionDecision",
@@ -371,6 +362,7 @@ def test_champion_evidence_cannot_arrive_after_agent_loop_start(tmp_path):
             at=T2,
         )
 
+
 def test_resume_rejects_checkpoint_older_than_durable_agent_loop(tmp_path):
     identity = EnvironmentIdentity(
         "lawful-provider:paper",
@@ -523,116 +515,48 @@ def test_resume_rejects_checkpoint_older_than_durable_agent_loop(tmp_path):
             )
 
 
-
-
-def _deployment_authority(policy, training_identity, deployment_identity):
-    strategy, model, promotion, evaluation = _activation_authority(policy)
-    promotion.payload["promotion_evidence_id"] = "5" * 64
-    evaluation.payload["dataset_snapshot_id"] = training_identity.data_id
-    training_snapshot = SimpleNamespace(
-        record_type="DatasetSnapshot",
-        record_id=training_identity.data_id,
-        record_sha256="1" * 64,
-        available_at=T1,
-        payload={
-            "dataset_snapshot_id": training_identity.data_id,
-            "manifest_sha256": "a" * 64,
-            "source_identity": "lawful-provider:paper",
-            "license_identity": "paper-test-license-v1",
-            "causal_cutoff": training_identity.cutoff_ts,
-            "available_at": T1,
-            "outcome_reveal_after": None,
-        },
+def test_direct_cross_session_call_cannot_self_authorize_scope_and_binding(tmp_path):
+    training = EnvironmentIdentity(
+        "lawful-provider:paper",
+        "champion-agent-config-v1",
+        "paper-dataset-training-v1",
+        PROTOCOL_ID,
+        T1,
+        17,
     )
-    deployment_snapshot = SimpleNamespace(
-        record_type="DatasetSnapshot",
-        record_id=deployment_identity.data_id,
-        record_sha256="2" * 64,
-        available_at=T3,
-        payload={
-            "dataset_snapshot_id": deployment_identity.data_id,
-            "manifest_sha256": "b" * 64,
-            "source_identity": "lawful-provider:paper",
-            "license_identity": "paper-test-license-v1",
-            "causal_cutoff": deployment_identity.cutoff_ts,
-            "available_at": T3,
-            "outcome_reveal_after": None,
-        },
+    deployment = EnvironmentIdentity(
+        "lawful-provider:paper",
+        "champion-agent-config-v1",
+        "paper-dataset-later-v2",
+        PROTOCOL_ID,
+        T3,
+        17,
     )
-    evidence = SimpleNamespace(
-        record_type="PromotionEvidence",
-        record_id="5" * 64,
-        record_sha256="4" * 64,
-        available_at=T1,
-        payload={
-            "promotion_evidence_id": "5" * 64,
-            "candidate_strategy_version_id": policy.policy_id,
-            "evaluation_bundle_id": evaluation.record_id,
-            "evaluation_bundle_sha256": "f" * 64,
-            "research_protocol_id": policy.protocol_id,
-            "dataset_snapshot_id": training_identity.data_id,
-            "validity": "ELIGIBLE",
-        },
-    )
-    records = {
-        ("StrategyVersion", strategy.record_id): strategy,
-        ("ModelVersion", model.record_id): model,
-        ("PromotionDecision", promotion.record_id): promotion,
-        ("PromotionEvidence", evidence.record_id): evidence,
-        ("EvaluationBundle", evaluation.record_id): evaluation,
-        ("DatasetSnapshot", training_snapshot.record_id): training_snapshot,
-        ("DatasetSnapshot", deployment_snapshot.record_id): deployment_snapshot,
-    }
-
-    def get(_self, kind, record_id):
-        return records.get((kind, record_id))
-
-    def causal_records(_self, kind, *, as_of):
-        return tuple(
-            record
-            for (record_type, _), record in records.items()
-            if record_type == kind
-        )
-
-    return records, (
-        patch.object(
-            ScientificRegistry,
-            "champion_strategy",
-            autospec=True,
-            return_value=policy.policy_id,
-        ),
-        patch.object(ScientificRegistry, "get", autospec=True, side_effect=get),
-        patch.object(
-            ScientificRegistry,
-            "causal_records",
-            autospec=True,
-            side_effect=causal_records,
-        ),
-    )
-
-
-def _deployment_contract(policy, store, training_identity, deployment_identity):
+    _, champion = _learned_champion(training)
+    registry = ScientificRegistry.initialize_pristine(tmp_path / "registry.json")
+    store = FactoryArtifactStore(tmp_path / "artifacts")
+    persist_policy_state(store, champion)
     scope = DeploymentScope(
         canonical_strategy_id=STRATEGY_ID,
         sport_domain="football",
-        competition_scope="league:test",
-        market_semantics_id="match-odds-v1",
-        provider_source_class="lawful-provider",
-        feature_schema_id="paper-features-v1",
+        competition_scope="caller-invented-league",
+        market_semantics_id="caller-invented-market",
+        provider_source_class="caller-provider",
+        feature_schema_id="caller-features",
         protocol_id=PROTOCOL_ID,
-        action_semantics_id="paper-actions-v1",
-        reward_definition_id="paper-reward-v1",
+        action_semantics_id="caller-actions",
+        reward_definition_id="caller-reward",
         config_sha256=CONFIG_SHA256,
     )
     binding = ActivationBinding(
-        policy_id=policy.policy_id,
+        policy_id=champion.policy_id,
         policy_artifact_sha256=store.sha256(
-            "transparent-bandit-policy", policy.policy_id
+            "transparent-bandit-policy", champion.policy_id
         ),
-        training_environment_id=training_identity.environment_id,
-        training_data_id=training_identity.data_id,
+        training_environment_id=training.environment_id,
+        training_data_id=training.data_id,
         training_dataset_record_sha256="1" * 64,
-        training_cutoff_ts=training_identity.cutoff_ts,
+        training_cutoff_ts=training.cutoff_ts,
         promotion_decision_id="promotion-champion-agent-v1",
         promotion_decision_record_sha256="6" * 64,
         promotion_evidence_id="5" * 64,
@@ -640,332 +564,33 @@ def _deployment_contract(policy, store, training_identity, deployment_identity):
         evaluation_bundle_id="evaluation-champion-agent-v1",
         evaluation_bundle_record_sha256="7" * 64,
         deployment_scope_id=scope.scope_id,
-        deployment_environment_id=deployment_identity.environment_id,
-        deployment_data_id=deployment_identity.data_id,
+        deployment_environment_id=deployment.environment_id,
+        deployment_data_id=deployment.data_id,
         deployment_dataset_record_sha256="2" * 64,
-        deployment_cutoff_ts=deployment_identity.cutoff_ts,
+        dataset_lineage_proof_sha256="9" * 64,
+        deployment_cutoff_ts=deployment.cutoff_ts,
         snapshot_available_at=T3,
         activation_at=T4,
         admissible_actions=("WAIT",),
         economic_goal_fingerprint=GOAL_SHA256,
         risk_fingerprint=RISK_SHA256,
     )
-    return scope, binding
 
-
-def test_public_legacy_cross_session_entrypoints_require_canonical_semantic_authority(tmp_path):
-    training = EnvironmentIdentity(
-        "lawful-provider:paper",
-        "champion-agent-config-v1",
-        "paper-dataset-training-v1",
-        PROTOCOL_ID,
-        T1,
-        17,
-    )
-    deployment = EnvironmentIdentity(
-        "lawful-provider:paper",
-        "champion-agent-config-v1",
-        "paper-dataset-later-v2",
-        PROTOCOL_ID,
-        T3,
-        17,
-    )
-    _, champion = _learned_champion(training)
-    registry = ScientificRegistry.initialize_pristine(tmp_path / "registry.json")
-    store = FactoryArtifactStore(tmp_path / "artifacts")
-    persist_policy_state(store, champion)
-    scope, binding = _deployment_contract(champion, store, training, deployment)
-    _, patches = _deployment_authority(champion, training, deployment)
-    path = tmp_path / "legacy-bypass-loop.json"
-
-    with patches[0], patches[1], patches[2]:
-        with pytest.raises(
-            ChampionAgentEpisodeError,
-            match="cross-session activation requires canonical semantic entrypoint",
-        ):
-            ChampionAgentEpisode.initialize_pristine(
-                path,
-                registry,
-                store,
-                identity=deployment,
-                as_of=T4,
-                canonical_strategy_id=STRATEGY_ID,
-                config_sha256=CONFIG_SHA256,
-                episode_key="legacy-bypass",
-                admissible_actions=frozenset({"WAIT"}),
-                loop_id="legacy-bypass-loop",
-                economic_goal_fingerprint=GOAL_SHA256,
-                risk_fingerprint=RISK_SHA256,
-                source_sha256=SOURCE_SHA256,
-                at=T4,
-                training_identity=training,
-                deployment_scope=scope,
-                activation_binding=binding,
-            )
-    assert not path.exists()
-
-    canonical_authority = _mint_canonical_cross_session_authority(
-        activation_binding=binding,
-        deployment_identity=deployment,
-        deployment_scope=scope,
-    )
-    _, patches = _deployment_authority(champion, training, deployment)
-    with patches[0], patches[1], patches[2]:
-        session = ChampionAgentEpisode.initialize_pristine(
-            path,
-            registry,
-            store,
-            identity=deployment,
-            as_of=T4,
-            canonical_strategy_id=STRATEGY_ID,
-            config_sha256=CONFIG_SHA256,
-            episode_key="legacy-bypass",
-            admissible_actions=frozenset({"WAIT"}),
-            loop_id="legacy-bypass-loop",
-            economic_goal_fingerprint=GOAL_SHA256,
-            risk_fingerprint=RISK_SHA256,
-            source_sha256=SOURCE_SHA256,
-            at=T4,
-            training_identity=training,
-            deployment_scope=scope,
-            activation_binding=binding,
-            _canonical_cross_session_authority=canonical_authority,
-        )
-    checkpoint = session.environment.checkpoint()
-
-    _, patches = _deployment_authority(champion, training, deployment)
-    with patches[0], patches[1], patches[2]:
-        with pytest.raises(
-            ChampionAgentEpisodeError,
-            match="cross-session activation requires canonical semantic entrypoint",
-        ):
-            ChampionAgentEpisode.resume(
-                path,
-                registry,
-                store,
-                identity=deployment,
-                checkpoint=checkpoint,
-                as_of=T4,
-                canonical_strategy_id=STRATEGY_ID,
-                config_sha256=CONFIG_SHA256,
-                episode_key="legacy-bypass",
-                admissible_actions=frozenset({"WAIT"}),
-            )
-
-
-def test_champion_deploys_to_later_compatible_session_and_binds_restart(tmp_path):
-    training = EnvironmentIdentity(
-        "lawful-provider:paper",
-        "champion-agent-config-v1",
-        "paper-dataset-training-v1",
-        PROTOCOL_ID,
-        T1,
-        17,
-    )
-    deployment = EnvironmentIdentity(
-        "lawful-provider:paper",
-        "champion-agent-config-v1",
-        "paper-dataset-later-v2",
-        PROTOCOL_ID,
-        T3,
-        17,
-    )
-    _, champion = _learned_champion(training)
-    registry = ScientificRegistry.initialize_pristine(tmp_path / "registry.json")
-    store = FactoryArtifactStore(tmp_path / "artifacts")
-    persist_policy_state(store, champion)
-    scope, binding = _deployment_contract(champion, store, training, deployment)
-    canonical_authority = _mint_canonical_cross_session_authority(
-        activation_binding=binding,
-        deployment_identity=deployment,
-        deployment_scope=scope,
-    )
-    _, patches = _deployment_authority(champion, training, deployment)
-    path = tmp_path / "agent-loop.json"
-
-    with patches[0], patches[1], patches[2]:
-        session = ChampionAgentEpisode.initialize_pristine(
-            path,
-            registry,
-            store,
-            identity=deployment,
-            as_of=T4,
-            canonical_strategy_id=STRATEGY_ID,
-            config_sha256=CONFIG_SHA256,
-            episode_key="later-paper-episode",
-            admissible_actions=frozenset({"WAIT"}),
-            loop_id="cross-session-agent-loop-v1",
-            economic_goal_fingerprint=GOAL_SHA256,
-            risk_fingerprint=RISK_SHA256,
-            source_sha256=SOURCE_SHA256,
-            at=T4,
-            training_identity=training,
-            deployment_scope=scope,
-            activation_binding=binding,
-            _canonical_cross_session_authority=canonical_authority,
-        )
-
-    assert session.policy.policy_id == champion.policy_id
-    assert session.policy.environment_id == training.environment_id
-    assert session.environment.environment_id == deployment.environment_id
-    assert session.agent_loop.snapshot().activation_binding_id == binding.binding_id
-    authority = load_deployment_authority(
-        path, expected_binding_id=binding.binding_id
-    )
-    assert authority.scope == scope
-    assert authority.binding == binding
-    assert authority.training_identity == training
-    assert authority.deployment_identity == deployment
-
-    checkpoint = session.environment.checkpoint()
-    observation = Observation(
-        deployment.environment_id,
-        T3,
-        T3,
-        (("market_state", "later-causal-paper-snapshot"),),
-    )
-    session.agent_loop.begin_observation(
-        observation,
-        environment_identity=deployment,
-        at=T4,
-    )
-    for phase in (
-        AgentLoopPhase.OBSERVE,
-        AgentLoopPhase.ASSESS,
-        AgentLoopPhase.PLAN,
-        AgentLoopPhase.DECIDE,
+    with pytest.raises(
+        ChampionAgentEpisodeError,
+        match="requires canonical semantic resolver inputs",
     ):
-        session.agent_loop.advance(expected=phase, at=T4)
-    action = session.decide(observation, decision_at=T4)
-    assert ("activation_binding_id", binding.binding_id) in action.parameters
-    receipt = session.agent_loop.commit_action(
-        action,
-        episode=session.environment.episode,
-        observation=observation,
-        effect_state=ExternalEffectState.NONE,
-        at=T4,
-    )
-    assert receipt.newly_committed is True
-
-    _, patches = _deployment_authority(champion, training, deployment)
-    with patches[0], patches[1], patches[2]:
-        reopened = ChampionAgentEpisode.resume(
-            path,
-            registry,
-            store,
-            identity=deployment,
-            checkpoint=checkpoint,
-            as_of=T4,
-            canonical_strategy_id=STRATEGY_ID,
-            config_sha256=CONFIG_SHA256,
-            episode_key="later-paper-episode",
-            admissible_actions=frozenset({"WAIT"}),
-            _canonical_cross_session_authority=canonical_authority,
-        )
-    assert reopened.policy.environment_id == training.environment_id
-    assert reopened.environment.environment_id == deployment.environment_id
-    assert reopened.agent_loop.snapshot().activation_binding_id == binding.binding_id
-    assert reopened.training_identity == training
-    assert reopened.deployment_scope == scope
-    assert reopened.activation_binding == binding
-
-
-def test_cross_session_scope_mismatch_fails_closed(tmp_path):
-    training = EnvironmentIdentity(
-        "lawful-provider:paper",
-        "champion-agent-config-v1",
-        "paper-dataset-training-v1",
-        PROTOCOL_ID,
-        T1,
-        17,
-    )
-    deployment = EnvironmentIdentity(
-        "lawful-provider:paper",
-        "champion-agent-config-v1",
-        "paper-dataset-later-v2",
-        PROTOCOL_ID,
-        T3,
-        17,
-    )
-    _, champion = _learned_champion(training)
-    registry = ScientificRegistry.initialize_pristine(tmp_path / "registry.json")
-    store = FactoryArtifactStore(tmp_path / "artifacts")
-    persist_policy_state(store, champion)
-    scope, binding = _deployment_contract(champion, store, training, deployment)
-    wrong_scope = replace(scope, competition_scope="another-league")
-    canonical_authority = _mint_canonical_cross_session_authority(
-        activation_binding=binding,
-        deployment_identity=deployment,
-        deployment_scope=wrong_scope,
-    )
-    _, patches = _deployment_authority(champion, training, deployment)
-
-    with patches[0], patches[1], patches[2]:
-        with pytest.raises(PolicyDeploymentError, match="scope hash mismatch"):
-            ChampionAgentEpisode.initialize_pristine(
-                tmp_path / "wrong-scope-loop.json",
-                registry,
-                store,
-                identity=deployment,
-                as_of=T4,
-                canonical_strategy_id=STRATEGY_ID,
-                config_sha256=CONFIG_SHA256,
-                episode_key="wrong-scope",
-                admissible_actions=frozenset({"WAIT"}),
-                loop_id="wrong-scope-loop",
-                economic_goal_fingerprint=GOAL_SHA256,
-                risk_fingerprint=RISK_SHA256,
-                source_sha256=SOURCE_SHA256,
-                at=T4,
-                training_identity=training,
-                deployment_scope=wrong_scope,
-                activation_binding=binding,
-                _canonical_cross_session_authority=canonical_authority,
-            )
-
-
-def test_cross_session_resume_rejects_tampered_binding(tmp_path):
-    training = EnvironmentIdentity(
-        "lawful-provider:paper",
-        "champion-agent-config-v1",
-        "paper-dataset-training-v1",
-        PROTOCOL_ID,
-        T1,
-        17,
-    )
-    deployment = EnvironmentIdentity(
-        "lawful-provider:paper",
-        "champion-agent-config-v1",
-        "paper-dataset-later-v2",
-        PROTOCOL_ID,
-        T3,
-        17,
-    )
-    _, champion = _learned_champion(training)
-    registry = ScientificRegistry.initialize_pristine(tmp_path / "registry.json")
-    store = FactoryArtifactStore(tmp_path / "artifacts")
-    persist_policy_state(store, champion)
-    scope, binding = _deployment_contract(champion, store, training, deployment)
-    canonical_authority = _mint_canonical_cross_session_authority(
-        activation_binding=binding,
-        deployment_identity=deployment,
-        deployment_scope=scope,
-    )
-    _, patches = _deployment_authority(champion, training, deployment)
-    path = tmp_path / "binding-loop.json"
-
-    with patches[0], patches[1], patches[2]:
-        session = ChampionAgentEpisode.initialize_pristine(
-            path,
+        ChampionAgentEpisode.initialize_pristine(
+            tmp_path / "caller-bypass-loop.json",
             registry,
             store,
             identity=deployment,
             as_of=T4,
             canonical_strategy_id=STRATEGY_ID,
             config_sha256=CONFIG_SHA256,
-            episode_key="binding-episode",
+            episode_key="caller-bypass",
             admissible_actions=frozenset({"WAIT"}),
-            loop_id="binding-loop",
+            loop_id="caller-bypass-loop",
             economic_goal_fingerprint=GOAL_SHA256,
             risk_fingerprint=RISK_SHA256,
             source_sha256=SOURCE_SHA256,
@@ -973,111 +598,4 @@ def test_cross_session_resume_rejects_tampered_binding(tmp_path):
             training_identity=training,
             deployment_scope=scope,
             activation_binding=binding,
-            _canonical_cross_session_authority=canonical_authority,
         )
-    checkpoint = session.environment.checkpoint()
-    tampered = replace(binding, risk_fingerprint="d" * 64)
-    _, patches = _deployment_authority(champion, training, deployment)
-    with patches[0], patches[1], patches[2]:
-        with pytest.raises(
-            ChampionAgentEpisodeError,
-            match="caller deployment authority conflicts with durable record",
-        ):
-            ChampionAgentEpisode.resume(
-                path,
-                registry,
-                store,
-                identity=deployment,
-                checkpoint=checkpoint,
-                as_of=T4,
-                canonical_strategy_id=STRATEGY_ID,
-                config_sha256=CONFIG_SHA256,
-                episode_key="binding-episode",
-                admissible_actions=frozenset({"WAIT"}),
-                training_identity=training,
-                deployment_scope=scope,
-                activation_binding=tampered,
-                _canonical_cross_session_authority=canonical_authority,
-            )
-
-
-def test_cross_session_resume_rejects_tampered_durable_authority(tmp_path):
-    training = EnvironmentIdentity(
-        "lawful-provider:paper",
-        "champion-agent-config-v1",
-        "paper-dataset-training-v1",
-        PROTOCOL_ID,
-        T1,
-        17,
-    )
-    deployment = EnvironmentIdentity(
-        "lawful-provider:paper",
-        "champion-agent-config-v1",
-        "paper-dataset-later-v2",
-        PROTOCOL_ID,
-        T3,
-        17,
-    )
-    _, champion = _learned_champion(training)
-    registry = ScientificRegistry.initialize_pristine(tmp_path / "registry.json")
-    store = FactoryArtifactStore(tmp_path / "artifacts")
-    persist_policy_state(store, champion)
-    scope, binding = _deployment_contract(champion, store, training, deployment)
-    canonical_authority = _mint_canonical_cross_session_authority(
-        activation_binding=binding,
-        deployment_identity=deployment,
-        deployment_scope=scope,
-    )
-    _, patches = _deployment_authority(champion, training, deployment)
-    path = tmp_path / "tampered-authority-loop.json"
-
-    with patches[0], patches[1], patches[2]:
-        session = ChampionAgentEpisode.initialize_pristine(
-            path,
-            registry,
-            store,
-            identity=deployment,
-            as_of=T4,
-            canonical_strategy_id=STRATEGY_ID,
-            config_sha256=CONFIG_SHA256,
-            episode_key="tampered-authority-episode",
-            admissible_actions=frozenset({"WAIT"}),
-            loop_id="tampered-authority-loop",
-            economic_goal_fingerprint=GOAL_SHA256,
-            risk_fingerprint=RISK_SHA256,
-            source_sha256=SOURCE_SHA256,
-            at=T4,
-            training_identity=training,
-            deployment_scope=scope,
-            activation_binding=binding,
-            _canonical_cross_session_authority=canonical_authority,
-        )
-    checkpoint = session.environment.checkpoint()
-    authority_path = deployment_authority_path(path)
-    payload = json.loads(authority_path.read_text(encoding="utf-8"))
-    payload["activation_binding"]["risk_fingerprint"] = "d" * 64
-    authority_path.write_text(
-        json.dumps(payload, ensure_ascii=False, sort_keys=True),
-        encoding="utf-8",
-    )
-
-    _, patches = _deployment_authority(champion, training, deployment)
-    with patches[0], patches[1], patches[2]:
-        with pytest.raises(
-            PolicyDeploymentError,
-            match="durable deployment authority digest mismatch",
-        ):
-            ChampionAgentEpisode.resume(
-                path,
-                registry,
-                store,
-                identity=deployment,
-                checkpoint=checkpoint,
-                as_of=T4,
-                canonical_strategy_id=STRATEGY_ID,
-                config_sha256=CONFIG_SHA256,
-                episode_key="tampered-authority-episode",
-                admissible_actions=frozenset({"WAIT"}),
-                _canonical_cross_session_authority=canonical_authority,
-            )
-

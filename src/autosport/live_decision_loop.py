@@ -33,6 +33,10 @@ from .market_mirror_runtime import (
     FocusedMirrorDependencyIndex,
 )
 from .paper import PaperBook
+from .paper_execution_adoption import (
+    PaperExecutionAdoptionRuntime,
+    PreparedPaperExecution,
+)
 from .portfolio_plan import (
     PortfolioDependencyGraph,
     PortfolioPlan,
@@ -76,6 +80,8 @@ class LiveCycleResult:
     plan: PortfolioPlan | None = None
     decision_id: str | None = None
     detail: str = ""
+    paper_execution_run_id: str | None = None
+    paper_execution_attempt_ids: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -684,6 +690,7 @@ class PersistentLiveDecisionLoop:
         scientific_registry: ScientificRegistry,
         provider: MarketProvider | None = None,
         decision_ledger: JsonlDecisionLedger | None = None,
+        paper_execution: PaperExecutionAdoptionRuntime | None = None,
         ingestion_policy: IngestionPolicy | None = None,
         max_quote_age: timedelta | None = None,
         bounds: LiveLoopBounds | None = None,
@@ -743,6 +750,16 @@ class PersistentLiveDecisionLoop:
         self.decision_ledger = decision_ledger or JsonlDecisionLedger(
             self.workspace / "decisions.jsonl"
         )
+        if paper_execution is not None:
+            if not isinstance(paper_execution, PaperExecutionAdoptionRuntime):
+                raise TypeError(
+                    "paper_execution must be PaperExecutionAdoptionRuntime or None"
+                )
+            if paper_execution.book is not book:
+                raise ValueError(
+                    "paper_execution must materialize into the live loop PaperBook"
+                )
+        self.paper_execution = paper_execution
         self.ingestion_policy = ingestion_policy
         self.max_quote_age = max_quote_age
         self.bounds = bounds or LiveLoopBounds()
@@ -1155,6 +1172,7 @@ class PersistentLiveDecisionLoop:
         )
         result = self._persist_plan(
             plan=plan,
+            intents=intents,
             market_state_sha256=current_market_sha,
             affected_input_ids=affected,
             gate=_GATE_NORMAL,
@@ -1280,6 +1298,7 @@ class PersistentLiveDecisionLoop:
         )
         result = self._persist_plan(
             plan=plan,
+            intents=intents,
             market_state_sha256=progress.market_state_sha256,
             affected_input_ids=progress.affected_input_ids,
             gate=progress.gate,
@@ -1490,6 +1509,7 @@ class PersistentLiveDecisionLoop:
         )
         result = self._persist_plan(
             plan=plan,
+            intents=(),
             market_state_sha256=market_sha,
             affected_input_ids=affected,
             gate=_GATE_PROVIDER_GAP,
@@ -1510,6 +1530,7 @@ class PersistentLiveDecisionLoop:
         self,
         *,
         plan: PortfolioPlan,
+        intents: tuple[object, ...],
         market_state_sha256: str,
         affected_input_ids: tuple[str, ...],
         gate: str,
@@ -1532,33 +1553,54 @@ class PersistentLiveDecisionLoop:
         }
         context_hash = _canonical_json_sha256(context_payload)
         decision_id = f"live-{context_hash}"
+        prepared_execution: PreparedPaperExecution | None = None
+        if self.paper_execution is not None:
+            prepared_execution = self.paper_execution.prepare(
+                plan=plan,
+                intents=intents,
+                decision_id=decision_id,
+            )
+
+        record_payload = {
+            "schema": "autosport.persistent_live_decision",
+            "schema_version": 2,
+            "loop_id": self.loop_id,
+            "mode": self.mode.value,
+            "gate": gate,
+            "market_state_sha256": market_state_sha256,
+            "decision_context_sha256": decision_context_sha256,
+            "intent_strategy_version_id": provenance.strategy_version_id,
+            "intent_model_version_id": provenance.model_version_id,
+            "intent_provenance_sha256": provenance.provenance_sha256,
+            "affected_input_ids": list(affected_input_ids),
+            "plan_sha256": plan.plan_sha256,
+            "plan": plan.to_dict(),
+            MATERIAL_ACTION_ID_PAYLOAD_KEY: decision_id,
+        }
+        if prepared_execution is not None:
+            record_payload["schema_version"] = 3
+            record_payload["paper_execution"] = {
+                "schema": "autosport.paper_execution_adoption",
+                "schema_version": 1,
+                "plan_id": prepared_execution.execution_plan.plan_id,
+                "plan_fingerprint": prepared_execution.execution_plan.fingerprint,
+                "model_fingerprint": self.paper_execution.config.fingerprint,
+                "intent_evidence_json": prepared_execution.intent_evidence_json,
+            }
+
         record = DecisionRecord(
             replay_run_id=f"live:{self.loop_id}",
             agent=self.AGENT_ID,
             observed_ts=plan.decision_ts,
             action=f"LIVE_{plan.action.value.upper()}",
-            payload={
-                "schema": "autosport.persistent_live_decision",
-                "schema_version": 2,
-                "loop_id": self.loop_id,
-                "mode": self.mode.value,
-                "gate": gate,
-                "market_state_sha256": market_state_sha256,
-                "decision_context_sha256": decision_context_sha256,
-                "intent_strategy_version_id": provenance.strategy_version_id,
-                "intent_model_version_id": provenance.model_version_id,
-                "intent_provenance_sha256": provenance.provenance_sha256,
-                "affected_input_ids": list(affected_input_ids),
-                "plan_sha256": plan.plan_sha256,
-                "plan": plan.to_dict(),
-                MATERIAL_ACTION_ID_PAYLOAD_KEY: decision_id,
-            },
+            payload=record_payload,
             context_hash=context_hash,
             decision_id=decision_id,
             decision_kind=ECONOMIC_DECISION_KIND,
         )
 
         duplicate = False
+        execution_result = None
         with WorkspaceEconomicLock(self.workspace):
             durable_progress = self._load_progress()
             if (
@@ -1652,11 +1694,39 @@ class PersistentLiveDecisionLoop:
                     raise DecisionLedgerIntegrityError(
                         "reserved live decision identity conflicts with durable evidence"
                     )
+                expected_execution_payload = (
+                    None
+                    if prepared_execution is None
+                    else {
+                        "schema": "autosport.paper_execution_adoption",
+                        "schema_version": 1,
+                        "plan_id": prepared_execution.execution_plan.plan_id,
+                        "plan_fingerprint": prepared_execution.execution_plan.fingerprint,
+                        "model_fingerprint": self.paper_execution.config.fingerprint,
+                        "intent_evidence_json": prepared_execution.intent_evidence_json,
+                    }
+                )
+                if existing.payload.get("paper_execution") != expected_execution_payload:
+                    raise DecisionLedgerIntegrityError(
+                        "durable live decision execution-adoption evidence changed"
+                    )
                 duplicate = True
             else:
                 self.decision_ledger.append_economic(record, self.authority)
                 if self.post_append_hook is not None:
                     self.post_append_hook()
+
+            # Execution attempts are durable before progress becomes COMMITTED.
+            # A crash after the #623 attempt but before PaperBook materialization
+            # therefore re-enters this same append-pending identity and resumes
+            # the exact run instead of fabricating a fresh fill.
+            if prepared_execution is not None:
+                execution_result = self.paper_execution.execute(
+                    prepared=prepared_execution,
+                    trigger_id=decision_id,
+                    started_at=plan.decision_ts,
+                    materialize_exposure=(self.mode is LiveDecisionMode.PAPER),
+                )
 
             committed = _Progress(
                 loop_id=self.loop_id,
@@ -1680,6 +1750,16 @@ class PersistentLiveDecisionLoop:
             plan=plan,
             decision_id=decision_id,
             detail=detail,
+            paper_execution_run_id=(
+                None if execution_result is None else execution_result.run.run_id
+            ),
+            paper_execution_attempt_ids=(
+                ()
+                if execution_result is None
+                else tuple(
+                    attempt.attempt_id for attempt in execution_result.run.attempts
+                )
+            ),
         )
 
     def _write_pending(

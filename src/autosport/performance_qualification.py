@@ -264,6 +264,32 @@ def _expected_check_roster(budget: PerformanceBudget) -> dict[str, tuple[str, in
     return roster
 
 
+def _validate_check_roster(
+    budget: PerformanceBudget, checks: tuple[MetricQualification, ...]
+) -> None:
+    if type(checks) is not tuple or not checks:
+        raise PerformanceQualificationError("checks must be a non-empty tuple")
+    if any(not isinstance(check, MetricQualification) for check in checks):
+        raise PerformanceQualificationError("checks must contain MetricQualification values")
+
+    expected_roster = _expected_check_roster(budget)
+    actual_metrics: set[str] = set()
+    for check in checks:
+        if check.metric in actual_metrics:
+            raise PerformanceQualificationError("checks contain duplicate performance metric")
+        expected = expected_roster.get(check.metric)
+        if expected is None:
+            raise PerformanceQualificationError("checks contain unconstrained performance metric")
+        expected_comparator, expected_threshold = expected
+        if check.comparator != expected_comparator:
+            raise PerformanceQualificationError("check comparator does not match performance budget")
+        if type(check.threshold) is not type(expected_threshold) or check.threshold != expected_threshold:
+            raise PerformanceQualificationError("check threshold does not match performance budget")
+        actual_metrics.add(check.metric)
+    if actual_metrics != set(expected_roster):
+        raise PerformanceQualificationError("checks do not exactly cover performance budget")
+
+
 @dataclass(frozen=True, slots=True, init=False)
 class PerformanceQualification:
     source_sha: str
@@ -280,69 +306,6 @@ class PerformanceQualification:
         raise PerformanceQualificationError(
             "PerformanceQualification must be created by qualify_endurance_report"
         )
-
-    @classmethod
-    def _from_validated(
-        cls,
-        *,
-        source_sha: str,
-        machine_profile: str,
-        report_sha256: str,
-        budget: PerformanceBudget,
-        checks: tuple[MetricQualification, ...],
-    ) -> "PerformanceQualification":
-        instance = object.__new__(cls)
-        object.__setattr__(instance, "source_sha", source_sha)
-        object.__setattr__(instance, "machine_profile", machine_profile)
-        object.__setattr__(instance, "report_sha256", report_sha256)
-        object.__setattr__(instance, "budget", budget)
-        object.__setattr__(instance, "checks", checks)
-        object.__setattr__(instance, "target_machine_acceptance", False)
-        instance._validate_and_finalize()
-        return instance
-
-    def _validate_and_finalize(self) -> None:
-        canonical_source_sha = _source_sha(self.source_sha)
-        canonical_machine_profile = _text(self.machine_profile, "machine_profile")
-        canonical_report_sha256 = _sha256_hex(self.report_sha256, "report_sha256")
-        if not isinstance(self.budget, PerformanceBudget):
-            raise PerformanceQualificationError("budget must be PerformanceBudget")
-        if type(self.checks) is not tuple or not self.checks:
-            raise PerformanceQualificationError("checks must be a non-empty tuple")
-        if any(not isinstance(check, MetricQualification) for check in self.checks):
-            raise PerformanceQualificationError("checks must contain MetricQualification values")
-
-        expected_roster = _expected_check_roster(self.budget)
-        actual_metrics: set[str] = set()
-        for check in self.checks:
-            if check.metric in actual_metrics:
-                raise PerformanceQualificationError("checks contain duplicate performance metric")
-            expected = expected_roster.get(check.metric)
-            if expected is None:
-                raise PerformanceQualificationError("checks contain unconstrained performance metric")
-            expected_comparator, expected_threshold = expected
-            if check.comparator != expected_comparator:
-                raise PerformanceQualificationError("check comparator does not match performance budget")
-            if type(check.threshold) is not type(expected_threshold) or check.threshold != expected_threshold:
-                raise PerformanceQualificationError("check threshold does not match performance budget")
-            actual_metrics.add(check.metric)
-        if actual_metrics != set(expected_roster):
-            raise PerformanceQualificationError("checks do not exactly cover performance budget")
-
-        status = "PASS" if all(check.status == "PASS" for check in self.checks) else "FAIL"
-        identity_payload = _qualification_identity_payload(
-            source_sha=canonical_source_sha,
-            machine_profile=canonical_machine_profile,
-            report_sha256=canonical_report_sha256,
-            budget=self.budget,
-            checks=self.checks,
-            status=status,
-        )
-        object.__setattr__(self, "source_sha", canonical_source_sha)
-        object.__setattr__(self, "machine_profile", canonical_machine_profile)
-        object.__setattr__(self, "report_sha256", canonical_report_sha256)
-        object.__setattr__(self, "status", status)
-        object.__setattr__(self, "qualification_id", _digest(identity_payload))
 
     @property
     def failures(self) -> tuple[str, ...]:
@@ -514,10 +477,25 @@ def qualify_endurance_report(
     maximum("replay_elapsed_seconds", budget.max_replay_elapsed_seconds)
     maximum("restart_elapsed_seconds", budget.max_restart_elapsed_seconds)
 
-    return PerformanceQualification._from_validated(
+    frozen_checks = tuple(checks)
+    _validate_check_roster(budget, frozen_checks)
+    status = "PASS" if all(check.status == "PASS" for check in frozen_checks) else "FAIL"
+    identity_payload = _qualification_identity_payload(
         source_sha=canonical_source_sha,
         machine_profile=canonical_machine_profile,
         report_sha256=report_sha256,
         budget=budget,
-        checks=tuple(checks),
+        checks=frozen_checks,
+        status=status,
     )
+
+    qualification = object.__new__(PerformanceQualification)
+    object.__setattr__(qualification, "source_sha", canonical_source_sha)
+    object.__setattr__(qualification, "machine_profile", canonical_machine_profile)
+    object.__setattr__(qualification, "report_sha256", report_sha256)
+    object.__setattr__(qualification, "budget", budget)
+    object.__setattr__(qualification, "checks", frozen_checks)
+    object.__setattr__(qualification, "status", status)
+    object.__setattr__(qualification, "qualification_id", _digest(identity_payload))
+    object.__setattr__(qualification, "target_machine_acceptance", False)
+    return qualification

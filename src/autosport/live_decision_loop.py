@@ -759,6 +759,11 @@ class PersistentLiveDecisionLoop:
                 raise ValueError(
                     "paper_execution must materialize into the live loop PaperBook"
                 )
+            canonical_book_path = self.workspace / "paper_book.json"
+            if paper_execution.paper_book_path != canonical_book_path:
+                raise ValueError(
+                    "paper_execution must persist the canonical live workspace PaperBook"
+                )
         self.paper_execution = paper_execution
         self.ingestion_policy = ingestion_policy
         self.max_quote_age = max_quote_age

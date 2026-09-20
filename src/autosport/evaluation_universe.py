@@ -932,7 +932,7 @@ class EvaluationUniverseLedger:
             when = frozen
             attempt_id: str | None = None
             canonical_attempt: PaperLegAttempt | None = None
-            terminal_ids: set[str] = set()
+            terminal_tip_id: str | None = None
             for event in events:
                 event_at = _instant(event.event_at, "event_at")
                 if event_at < frozen:
@@ -942,20 +942,20 @@ class EvaluationUniverseLedger:
                 if event_at < when:
                     raise EvaluationUniverseError("funnel event time cannot move backwards")
                 if event.correction_of is not None:
-                    corrected = by_id.get(event.correction_of)
-                    if (
-                        corrected is None
-                        or corrected.row_id != row_id
-                        or corrected.event_id not in terminal_ids
-                    ):
+                    if terminal_tip_id is None or event.correction_of != terminal_tip_id:
                         raise EvaluationUniverseError(
-                            "terminal correction must reference earlier terminal event for same row"
+                            "terminal correction must extend exact current terminal tip for same row"
+                        )
+                    corrected = by_id.get(terminal_tip_id)
+                    if corrected is None or corrected.row_id != row_id:
+                        raise EvaluationUniverseIntegrityError(
+                            "current terminal tip is missing from the same row"
                         )
                     if event_at < _instant(corrected.event_at, "corrected event_at"):
                         raise EvaluationUniverseError(
                             "terminal correction cannot predate corrected evidence"
                         )
-                    terminal_ids.add(event.event_id)
+                    terminal_tip_id = event.event_id
                     stage, when = event.stage, event_at
                     continue
                 if not _advance(stage, event.stage):
@@ -1012,7 +1012,7 @@ class EvaluationUniverseLedger:
                         raise EvaluationUniverseError(
                             "terminal outcome cannot attach before authoritative reveal time"
                         )
-                    terminal_ids.add(event.event_id)
+                    terminal_tip_id = event.event_id
                 stage, when = event.stage, event_at
 
     @property
@@ -1266,6 +1266,14 @@ def _validate_canonical_intake_rows(
             "supplied rows do not equal canonical pre-result intake membership"
         )
     frozen = _instant(frozen_at, "frozen_at")
+    complete_evaluation_not_before = _instant(
+        snapshot.evaluation_not_before,
+        "snapshot evaluation_not_before",
+    )
+    if complete_evaluation_not_before > frozen:
+        raise EvaluationUniverseError(
+            "canonical intake evaluation boundary is after universe freeze"
+        )
     for row in rows:
         record = intake_ledger.record_for_row(row.row_key)
         if record.identity != snapshot.identity:
@@ -1288,14 +1296,14 @@ def _validate_canonical_intake_rows(
         if row.detection_at is not None and _instant(
             row.detection_at,
             "detection_at",
-        ) < evaluation_not_before:
+        ) < complete_evaluation_not_before:
             raise EvaluationUniverseError(
                 "row detection began before complete intake membership was immutable"
             )
         if row.decision_at is not None and _instant(
             row.decision_at,
             "decision_at",
-        ) < evaluation_not_before:
+        ) < complete_evaluation_not_before:
             raise EvaluationUniverseError(
                 "row decision began before complete intake membership was immutable"
             )

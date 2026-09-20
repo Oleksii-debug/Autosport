@@ -1320,7 +1320,8 @@ class PersistentLiveDecisionLoop:
             and not self._same_book_state(self.book, pre_action_book)
         ):
             raise LiveDecisionProgressError(
-                "unfinished live decision PaperBook changed before durable decision"
+                "unfinished live decision runtime context changed: "
+                "PaperBook changed before durable decision"
             )
 
         if progress.gate == _GATE_NORMAL:

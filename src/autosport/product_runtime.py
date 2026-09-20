@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import json
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -55,12 +57,20 @@ class ProductCollectorSource(CollectorServiceSource, Protocol):
 class ProductCompositionManifest:
     source_id: str
     initial_bankroll: str
+    settlement_authority_identity: str | None = None
 
 
 class _ManifestStore:
     _SCHEMA = "autosport.autonomous_product_composition"
-    _VERSION = 1
-    _FIELDS = {"schema", "schema_version", "source_id", "initial_bankroll"}
+    _VERSION = 2
+    _V1_FIELDS = {"schema", "schema_version", "source_id", "initial_bankroll"}
+    _FIELDS = {
+        "schema",
+        "schema_version",
+        "source_id",
+        "initial_bankroll",
+        "settlement_authority_identity",
+    }
 
     def __init__(self, path: Path) -> None:
         self.path = path
@@ -76,15 +86,34 @@ class _ManifestStore:
             raw = strict_json_loads(self.path.read_text(encoding="utf-8"))
         except (OSError, TypeError, ValueError) as exc:
             raise ProductCompositionError("cannot verify product composition manifest") from exc
-        if (
-            type(raw) is not dict
-            or set(raw) != self._FIELDS
-            or raw.get("schema") != self._SCHEMA
-            or raw.get("schema_version") != self._VERSION
-        ):
+        if type(raw) is not dict or raw.get("schema") != self._SCHEMA:
+            raise ProductCompositionError("product composition manifest schema mismatch")
+        version = raw.get("schema_version")
+        if version == 1 and set(raw) == self._V1_FIELDS:
+            self._text(raw.get("source_id"), "source_id")
+            self._text(raw.get("initial_bankroll"), "initial_bankroll")
+            return {
+                **raw,
+                "settlement_authority_identity": None,
+            }
+        if version != self._VERSION or set(raw) != self._FIELDS:
             raise ProductCompositionError("product composition manifest schema mismatch")
         self._text(raw.get("source_id"), "source_id")
         self._text(raw.get("initial_bankroll"), "initial_bankroll")
+        authority_identity = raw.get("settlement_authority_identity")
+        if authority_identity is not None:
+            identity = self._text(
+                authority_identity,
+                "settlement_authority_identity",
+            )
+            if (
+                len(identity) != 64
+                or identity != identity.lower()
+                or any(character not in "0123456789abcdef" for character in identity)
+            ):
+                raise ProductCompositionError(
+                    "settlement_authority_identity must be lowercase SHA-256 hex"
+                )
         return raw
 
     def load_or_create(
@@ -92,9 +121,15 @@ class _ManifestStore:
         *,
         source_id: str,
         initial_bankroll: str,
+        settlement_authority_identity: str | None,
     ) -> ProductCompositionManifest:
         source_id = self._text(source_id, "source_id")
         initial_bankroll = self._text(initial_bankroll, "initial_bankroll")
+        if settlement_authority_identity is not None:
+            settlement_authority_identity = self._text(
+                settlement_authority_identity,
+                "settlement_authority_identity",
+            )
         self.path.parent.mkdir(parents=True, exist_ok=True)
         if not self.path.exists():
             atomic_write_json(
@@ -104,6 +139,7 @@ class _ManifestStore:
                     "schema_version": self._VERSION,
                     "source_id": source_id,
                     "initial_bankroll": initial_bankroll,
+                    "settlement_authority_identity": settlement_authority_identity,
                 },
             )
         raw = self._read_raw()
@@ -115,10 +151,69 @@ class _ManifestStore:
             raise ProductCompositionError(
                 "configured initial_bankroll conflicts with durable product composition"
             )
+        if raw["settlement_authority_identity"] != settlement_authority_identity:
+            raise ProductCompositionError(
+                "settlement authority identity conflicts with durable product composition"
+            )
         return ProductCompositionManifest(
             source_id=source_id,
             initial_bankroll=initial_bankroll,
+            settlement_authority_identity=settlement_authority_identity,
         )
+
+
+def _settlement_authority_identity(
+    *,
+    source: ProductCollectorSource,
+    source_id: str,
+    outcome_authority: SettlementOutcomeAuthority | None,
+) -> str | None:
+    if outcome_authority is None:
+        return None
+    if outcome_authority is not source:
+        raise ProductCompositionError(
+            "settlement outcome authority must be owned by the configured product source"
+        )
+    if not callable(getattr(source, "resolve", None)):
+        raise ProductCompositionError(
+            "source-owned settlement authority must expose resolve(record, as_of)"
+        )
+    authority_id = _ManifestStore._text(
+        getattr(source, "settlement_authority_id", None),
+        "settlement_authority_id",
+    )
+    configuration_sha256 = _ManifestStore._text(
+        getattr(source, "settlement_configuration_sha256", None),
+        "settlement_configuration_sha256",
+    )
+    if (
+        len(configuration_sha256) != 64
+        or configuration_sha256 != configuration_sha256.lower()
+        or any(
+            character not in "0123456789abcdef"
+            for character in configuration_sha256
+        )
+    ):
+        raise ProductCompositionError(
+            "settlement_configuration_sha256 must be lowercase SHA-256 hex"
+        )
+    implementation = (
+        f"{type(source).__module__}.{type(source).__qualname__}"
+    )
+    payload = {
+        "source_id": source_id,
+        "authority_id": authority_id,
+        "configuration_sha256": configuration_sha256,
+        "implementation": implementation,
+    }
+    encoded = json.dumps(
+        payload,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
 
 
 @dataclass(slots=True)
@@ -197,9 +292,15 @@ def build_autonomous_product_runtime(
     root.mkdir(parents=True, exist_ok=True)
     resolved_clock = clock or (lambda: datetime.now(timezone.utc).isoformat())
 
+    settlement_authority_identity = _settlement_authority_identity(
+        source=source,
+        source_id=source_id,
+        outcome_authority=outcome_authority,
+    )
     manifest = _ManifestStore(root / "product_composition.json").load_or_create(
         source_id=source_id,
         initial_bankroll=normalized_bankroll,
+        settlement_authority_identity=settlement_authority_identity,
     )
 
     lifecycle = ContinuousEventLifecycle(root / "catalog.json")

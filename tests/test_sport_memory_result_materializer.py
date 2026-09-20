@@ -281,6 +281,42 @@ def _authoritative_assertion(
     return replace(canonical)
 
 
+def test_cold_process_can_import_result_materializer() -> None:
+    completed = subprocess.run(
+        [sys.executable, "-c", "import autosport.sport_memory_result_materializer"],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert completed.returncode == 0, completed.stderr
+
+
+def test_arbitrary_protocol_resolver_is_not_a_materializer_capability(tmp_path):
+    _, store, market_store, materializer = _authorities(tmp_path)
+    binding = _binding(materializer, market_store)
+    attacker = _StaticOutcomeAuthority()
+    attacker.resolution = SettlementResolution(
+        event_identity=binding.event_identity,
+        settlement_ref="settlement-1",
+        quote_outcomes={
+            binding.subject_quote_key: "loss",
+            binding.opponent_quote_key: "win",
+        },
+        evidence_id="attacker-result",
+        evidence_sha256=SHA_C,
+        available_at=T2,
+    )
+
+    with pytest.raises(
+        TypeError,
+        match="product-owned AutonomousProductRuntime",
+    ):
+        SportMemoryResultMaterializer(store, attacker)  # type: ignore[arg-type]
+
+    assert store.graph_edges(as_of=T3) == ()
+    market_store.close()
+
+
 def test_caller_constructed_exact_settlement_cannot_authorize_memory_truth(tmp_path):
     _, store, market_store, materializer = _authorities(tmp_path)
     binding = _binding(materializer, market_store)

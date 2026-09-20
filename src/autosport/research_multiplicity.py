@@ -541,13 +541,137 @@ class SequentialMultiplicityEvidenceStore:
     Every accepted look is persisted, including null/negative/harmful outcomes.
     This store does not mint promotion authority; it provides reproducible
     multiplicity/sequential evidence for later canonical registry binding.
+
+    Stores in one workspace directory share an immutable member-enrollment
+    authority. A semantic member may have exactly one canonical family/store in
+    that workspace, so changing a filename cannot reset allocated alpha or
+    consumed evidence.
     """
 
     SCHEMA_VERSION = 1
+    ENROLLMENT_SCHEMA_VERSION = 1
+    ENROLLMENT_FILE = ".research-multiplicity-enrollment.json"
 
     def __init__(self, path: str | Path) -> None:
         self.path = Path(path)
         self._read_state()
+
+    @classmethod
+    def _enrollment_path(cls, workspace: Path) -> Path:
+        return workspace / cls.ENROLLMENT_FILE
+
+    @classmethod
+    def _read_workspace_enrollments(
+        cls,
+        workspace: Path,
+    ) -> dict[str, dict[str, str]] | None:
+        enrollment_path = cls._enrollment_path(workspace)
+        try:
+            raw = enrollment_path.read_text(encoding="utf-8")
+        except FileNotFoundError:
+            return None
+        try:
+            state = json.loads(
+                raw,
+                object_pairs_hook=_reject_duplicate_keys,
+                parse_constant=_reject_nonfinite,
+            )
+        except json.JSONDecodeError as exc:
+            raise ValueError(
+                "multiplicity workspace enrollment authority must be valid UTF-8 JSON"
+            ) from exc
+        if type(state) is not dict or set(state) != {"schema_version", "members"}:
+            raise ValueError("multiplicity workspace enrollment authority fields mismatch")
+        if state["schema_version"] != cls.ENROLLMENT_SCHEMA_VERSION:
+            raise ValueError(
+                "multiplicity workspace enrollment authority schema_version mismatch"
+            )
+        members = state["members"]
+        if type(members) is not dict:
+            raise ValueError("multiplicity workspace enrollment members must be an object")
+
+        required = {
+            "family_id",
+            "family_plan_sha256",
+            "research_protocol_id",
+            "protocol_sha256",
+            "research_question_id",
+            "store_name",
+        }
+        normalized: dict[str, dict[str, str]] = {}
+        for raw_authority_id, raw_record in members.items():
+            authority_id = _sha256(raw_authority_id, "member_authority_id")
+            if type(raw_record) is not dict or set(raw_record) != required:
+                raise ValueError(
+                    "multiplicity workspace enrollment member fields mismatch"
+                )
+            normalized[authority_id] = {
+                "family_id": _text(raw_record["family_id"], "family_id"),
+                "family_plan_sha256": _sha256(
+                    raw_record["family_plan_sha256"], "family_plan_sha256"
+                ),
+                "research_protocol_id": _text(
+                    raw_record["research_protocol_id"], "research_protocol_id"
+                ),
+                "protocol_sha256": _sha256(
+                    raw_record["protocol_sha256"], "protocol_sha256"
+                ),
+                "research_question_id": _text(
+                    raw_record["research_question_id"], "research_question_id"
+                ),
+                "store_name": _text(raw_record["store_name"], "store_name"),
+            }
+        return normalized
+
+    @staticmethod
+    def _expected_enrollment(
+        target: Path,
+        plan: ExperimentFamilyPlan,
+    ) -> dict[str, str]:
+        return {
+            "family_id": plan.family_id,
+            "family_plan_sha256": plan.plan_sha256,
+            "research_protocol_id": plan.research_protocol_id,
+            "protocol_sha256": plan.protocol_sha256.lower(),
+            "research_question_id": plan.research_question_id,
+            "store_name": target.name,
+        }
+
+    @classmethod
+    def _next_workspace_enrollment_state(
+        cls,
+        target: Path,
+        plan: ExperimentFamilyPlan,
+    ) -> dict[str, Any]:
+        current = cls._read_workspace_enrollments(target.parent)
+        enrollments = {} if current is None else dict(current)
+        expected = cls._expected_enrollment(target, plan)
+        for member in plan.members:
+            prior = enrollments.get(member.member_authority_id)
+            if prior is not None:
+                if prior == expected:
+                    raise ValueError(
+                        "enrolled multiplicity store is missing; refusing pristine reset"
+                    )
+                raise ValueError(
+                    "semantic member is already enrolled in another family plan or store"
+                )
+            enrollments[member.member_authority_id] = dict(expected)
+        return {
+            "schema_version": cls.ENROLLMENT_SCHEMA_VERSION,
+            "members": enrollments,
+        }
+
+    def _validate_workspace_enrollment(self, plan: ExperimentFamilyPlan) -> None:
+        enrollments = self._read_workspace_enrollments(self.path.parent)
+        if enrollments is None:
+            raise ValueError("multiplicity workspace enrollment authority is missing")
+        expected = self._expected_enrollment(self.path, plan)
+        for member in plan.members:
+            if enrollments.get(member.member_authority_id) != expected:
+                raise ValueError(
+                    "multiplicity workspace enrollment does not match frozen family/store"
+                )
 
     @classmethod
     def initialize_pristine(
@@ -556,6 +680,8 @@ class SequentialMultiplicityEvidenceStore:
         plan: ExperimentFamilyPlan,
     ) -> "SequentialMultiplicityEvidenceStore":
         target = Path(path)
+        if target.name == cls.ENROLLMENT_FILE:
+            raise ValueError("multiplicity store path conflicts with enrollment authority")
         target.parent.mkdir(parents=True, exist_ok=True)
         with WorkspaceEconomicLock(target.parent):
             if target.exists():
@@ -563,6 +689,11 @@ class SequentialMultiplicityEvidenceStore:
                 if store.plan.plan_sha256 != plan.plan_sha256:
                     raise ValueError("existing multiplicity store is bound to another family plan")
                 return store
+
+            next_enrollments = cls._next_workspace_enrollment_state(target, plan)
+            # Publish the journal before its enrollment. If the second write fails,
+            # restart sees an unusable orphan and fails closed instead of silently
+            # treating a pre-existing family as pristine.
             atomic_write_json(
                 target,
                 {
@@ -570,6 +701,10 @@ class SequentialMultiplicityEvidenceStore:
                     "plan": plan.to_payload(),
                     "records": [],
                 },
+            )
+            atomic_write_json(
+                cls._enrollment_path(target.parent),
+                next_enrollments,
             )
         return cls(target)
 
@@ -591,6 +726,7 @@ class SequentialMultiplicityEvidenceStore:
         if state["schema_version"] != self.SCHEMA_VERSION:
             raise ValueError("multiplicity evidence store schema_version mismatch")
         plan = ExperimentFamilyPlan.from_payload(state["plan"])
+        self._validate_workspace_enrollment(plan)
         records = state["records"]
         if type(records) is not list:
             raise ValueError("multiplicity evidence records must be a list")

@@ -12,7 +12,7 @@ from autosport.predictive_qualification import (
 from autosport.scientific_registry import ScientificRegistry
 
 
-def _policy() -> PredictiveAdmissionPolicy:
+def _policy(*, frozen_at: str = "2026-09-20T00:57:00Z") -> PredictiveAdmissionPolicy:
     return PredictiveAdmissionPolicy(
         policy_id="paper-predictive-v2",
         canonical_strategy_id="predictive-edge",
@@ -24,6 +24,7 @@ def _policy() -> PredictiveAdmissionPolicy:
         minimum_selective_coverage=Decimal("0.35"),
         maximum_selective_risk=Decimal("0.20"),
         maximum_evidence_age_seconds=86400,
+        frozen_at=frozen_at,
     )
 
 
@@ -79,6 +80,7 @@ def test_predictive_policy_and_calibration_artifact_digests_are_canonical() -> N
     assert policy.to_dict()["schema_version"] == 2
     assert policy.to_dict()["maximum_uncertainty"] == "0.08"
     assert policy.to_dict()["maximum_calibration_error_upper"] == "0.04"
+    assert policy.to_dict()["frozen_at"] == "2026-09-20T00:57:00Z"
     assert qualification.to_dict()["calibration_error_upper"] == "0.03"
     assert policy.sha256 == _policy().sha256
     assert qualification.sha256 == _qualification().sha256
@@ -90,6 +92,21 @@ def test_calibration_artifact_rejects_nonconservative_interval() -> None:
         match="calibration_error_upper must not be below calibration_error",
     ):
         _qualification(calibration_error_upper=Decimal("0.01"))
+
+
+def test_policy_frozen_after_forecast_generation_fails_closed(tmp_path) -> None:
+    registry = ScientificRegistry.initialize_pristine(tmp_path / "scientific.json")
+    with pytest.raises(
+        PredictiveQualificationError,
+        match="policy was frozen after forecast generation",
+    ):
+        resolve_predictive_eligibility(
+            registry,
+            _forecast(),
+            decision_time="2026-09-20T01:01:00Z",
+            policy=_policy(frozen_at="2026-09-20T01:00:01Z"),
+            qualification=_qualification(),
+        )
 
 
 def test_empty_scientific_registry_fails_closed(tmp_path) -> None:
@@ -155,18 +172,18 @@ def test_selective_prediction_thresholds_fail_closed_before_registry_lookup(
         )
 
 
-def test_future_calibration_qualification_fails_closed(tmp_path) -> None:
+def test_calibration_qualification_after_forecast_generation_fails_closed(tmp_path) -> None:
     registry = ScientificRegistry.initialize_pristine(tmp_path / "scientific.json")
     with pytest.raises(
         PredictiveQualificationError,
-        match="calibration qualification was not causally available",
+        match="calibration qualification was not available before forecast generation",
     ):
         resolve_predictive_eligibility(
             registry,
             _forecast(),
             decision_time="2026-09-20T01:01:00Z",
             policy=_policy(),
-            qualification=_qualification(available_at="2026-09-20T01:02:00Z"),
+            qualification=_qualification(available_at="2026-09-20T01:00:01Z"),
         )
 
 

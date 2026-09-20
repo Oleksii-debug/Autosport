@@ -177,6 +177,7 @@ class ExperimentFamilyMember:
 
     def authority_payload(self) -> dict[str, Any]:
         return {
+            "hypothesis_id": self.hypothesis_id,
             "hypothesis_sha256": self.hypothesis_sha256.lower(),
             "semantic_variant_sha256": self.semantic_variant_sha256.lower(),
         }
@@ -509,6 +510,10 @@ def assess_sequential_look(
 ) -> SequentialAssessment:
     if evidence.family_plan_sha256 != plan.plan_sha256:
         raise ValueError("look evidence is bound to a different experiment family plan")
+    if datetime.fromisoformat(evidence.observed_at.replace("Z", "+00:00")) < datetime.fromisoformat(
+        plan.frozen_at.replace("Z", "+00:00")
+    ):
+        raise ValueError("look evidence predates the frozen experiment family plan")
     member = plan.member(evidence.member_authority_id)
     if evidence.hypothesis_id != member.hypothesis_id:
         raise ValueError("look evidence hypothesis_id does not match frozen family member")
@@ -590,6 +595,7 @@ class SequentialMultiplicityEvidenceStore:
         by_member: dict[str, list[SequentialAssessment]] = {}
         experiment_ids: set[str] = set()
         bundle_hashes: set[str] = set()
+        bundle_ids: dict[str, str] = {}
         for raw_record in records:
             evidence = SequentialLookEvidence.from_payload(raw_record)
             assessment = assess_sequential_look(plan, evidence)
@@ -599,12 +605,26 @@ class SequentialMultiplicityEvidenceStore:
                 raise ValueError("persisted sequential look order is invalid")
             if history and history[-1].terminal:
                 raise ValueError("persisted evidence continues after a terminal sequential decision")
+            if history and datetime.fromisoformat(
+                evidence.observed_at.replace("Z", "+00:00")
+            ) < datetime.fromisoformat(
+                history[-1].evidence.observed_at.replace("Z", "+00:00")
+            ):
+                raise ValueError("persisted sequential look timestamps are not monotonic")
             if evidence.experiment_id in experiment_ids:
                 raise ValueError("experiment_id cannot be reused for another sequential look")
+            prior_bundle_hash = bundle_ids.get(evidence.evaluation_bundle_id)
+            if prior_bundle_hash is not None:
+                if prior_bundle_hash != evidence.evaluation_bundle_sha256:
+                    raise ValueError(
+                        "evaluation_bundle_id cannot resolve to a different immutable digest"
+                    )
+                raise ValueError("evaluation_bundle_id has already been consumed")
             if evidence.evaluation_bundle_sha256 in bundle_hashes:
                 raise ValueError("evaluation bundle evidence cannot be reused across looks")
             experiment_ids.add(evidence.experiment_id)
             bundle_hashes.add(evidence.evaluation_bundle_sha256)
+            bundle_ids[evidence.evaluation_bundle_id] = evidence.evaluation_bundle_sha256
             history.append(assessment)
         return {"state": state, "plan": plan, "by_member": by_member}
 
@@ -640,6 +660,12 @@ class SequentialMultiplicityEvidenceStore:
             )
             if history and history[-1].terminal:
                 raise ValueError("cannot append after a terminal sequential decision")
+            if history and datetime.fromisoformat(
+                evidence.observed_at.replace("Z", "+00:00")
+            ) < datetime.fromisoformat(
+                history[-1].evidence.observed_at.replace("Z", "+00:00")
+            ):
+                raise ValueError("sequential look timestamps must be monotonic")
             if evidence.look_index != len(history) + 1:
                 raise ValueError("look_index must be the next predeclared sequential look")
             records: list[dict[str, Any]] = loaded["state"]["records"]
@@ -648,6 +674,16 @@ class SequentialMultiplicityEvidenceStore:
                 for raw_record in records
             ):
                 raise ValueError("experiment_id has already been consumed")
+            for raw_record in records:
+                if raw_record["evaluation_bundle_id"] == evidence.evaluation_bundle_id:
+                    if (
+                        raw_record["evaluation_bundle_sha256"]
+                        != evidence.evaluation_bundle_sha256.lower()
+                    ):
+                        raise ValueError(
+                            "evaluation_bundle_id cannot resolve to a different immutable digest"
+                        )
+                    raise ValueError("evaluation_bundle_id has already been consumed")
             if any(
                 raw_record["evaluation_bundle_sha256"]
                 == evidence.evaluation_bundle_sha256.lower()

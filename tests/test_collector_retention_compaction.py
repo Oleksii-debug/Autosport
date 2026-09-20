@@ -92,6 +92,7 @@ class CollectorRetentionCompactionTests(unittest.TestCase):
     def make_history(self, root: str):
         path = Path(root) / "collector.sqlite"
         collector = CollectorDeltaStore(path)
+        activation = make_delta(delta_id="epoch1-activation", position=0)
         first = make_delta(delta_id="d1", position=1)
         terminal = make_delta(delta_id="d2", position=2)
         next_epoch = make_delta(
@@ -100,10 +101,12 @@ class CollectorRetentionCompactionTests(unittest.TestCase):
             epoch="epoch-2",
             sync_state=SyncState.EPOCH_CHANGED,
         )
+        self.assertTrue(collector.append(activation))
         self.assertTrue(collector.append(first))
         self.assertTrue(collector.append(terminal))
         self.assertTrue(collector.append(next_epoch))
         desktop = DesktopDeltaCheckpointStore(Path(root) / "desktop.json")
+        acknowledge(desktop, activation)
         return collector, desktop, first, terminal, next_epoch
 
     def test_acknowledged_inactive_epoch_compacts_but_keeps_checkpoint_anchor(self):
@@ -119,7 +122,10 @@ class CollectorRetentionCompactionTests(unittest.TestCase):
                 desktop_checkpoint=desktop,
             )
             self.assertEqual(plan.delete_delta_ids, ("d1",))
-            self.assertEqual(plan.retained_delta_ids, ("d2",))
+            self.assertEqual(
+                plan.retained_delta_ids, ("epoch1-activation", "d2")
+            )
+            self.assertEqual(plan.epoch_activation_delta_id, "epoch1-activation")
             self.assertEqual(plan.terminal_checkpoint_delta_id, "d2")
             self.assertEqual(plan.desktop_transport_anchor_delta_id, "d2")
 
@@ -150,7 +156,7 @@ class CollectorRetentionCompactionTests(unittest.TestCase):
             )
             self.assertEqual(
                 [item.delta_id for item in reopened.deltas_after_commit(source_id="source-x")],
-                ["d2", "e2-d0"],
+                ["epoch1-activation", "d2", "e2-d0"],
             )
 
     def test_unacknowledged_history_is_never_deleted(self):

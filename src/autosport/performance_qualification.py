@@ -73,7 +73,12 @@ def _nonnegative_int(value: object, name: str) -> int:
 def _positive_float(value: object, name: str) -> float:
     if type(value) not in (int, float):
         raise PerformanceQualificationError(f"{name} must be a finite positive number")
-    number = float(value)
+    try:
+        number = float(value)
+    except (OverflowError, TypeError, ValueError) as exc:
+        raise PerformanceQualificationError(
+            f"{name} must be a finite positive number"
+        ) from exc
     if not math.isfinite(number) or number <= 0:
         raise PerformanceQualificationError(f"{name} must be a finite positive number")
     return number
@@ -193,8 +198,13 @@ class MetricQualification:
             raise PerformanceQualificationError("metric comparator must be >= or <=")
         if type(self.observed) not in (int, float) or type(self.threshold) not in (int, float):
             raise PerformanceQualificationError("metric observed/threshold must be numbers")
-        observed = float(self.observed)
-        threshold = float(self.threshold)
+        try:
+            observed = float(self.observed)
+            threshold = float(self.threshold)
+        except (OverflowError, TypeError, ValueError) as exc:
+            raise PerformanceQualificationError(
+                "metric observed/threshold must be finite"
+            ) from exc
         if not math.isfinite(observed) or not math.isfinite(threshold):
             raise PerformanceQualificationError("metric observed/threshold must be finite")
         expected = (

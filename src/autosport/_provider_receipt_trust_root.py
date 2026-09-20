@@ -1,28 +1,25 @@
 from __future__ import annotations
 
-"""Seal complete-board provider authority behind canonical acquisition boundaries.
+"""Install the non-self-attesting complete-board authority boundary.
 
-The generic monotonic authority is caller-constructible and remains only a rollback
-fence. Provider origin is a separate trust decision: an in-process capability is
-minted only by the fixed production capture path or after restart verification of an
-already-authenticated durable receipt plus monotonic history. Durable receipt signing
-is then gated by that exact-object capability.
+A local HMAC/file secret cannot prove remote provider origin against code running as
+the same OS user. This guard therefore does not pretend that a restart can recreate
+provider provenance from locally writable bytes. Positive authority is an ephemeral,
+exact-object capability minted only by the fixed production acquisition entrypoint.
+Canonical evidence may be persisted with the generic monotonic journal for integrity
+and rollback detection, but a restarted process must reacquire from the provider
+before it can regain positive completeness authority.
 
-Consumer code cannot mutate the capability registry, call the former ``_remember``
-issuer, obtain receipt signing material, invoke a generic receipt signer, or select
-the provider credential root. The public/test-configurable generic monotonic root
-continues to fence rollback only.
+Threat/control contract: this is an application authority boundary against
+caller-created objects, structural witnesses, consumer API misuse, and persisted-byte
+forgery. It is not an OS sandbox against arbitrary code injection/monkeypatch inside
+the trusted Autosport process; such code can replace Python functions themselves.
+That stronger boundary would require provider-signed evidence or an isolated OS/service
+issuer, neither of which the current provider contract supplies.
 """
 
-import hashlib
-import hmac
-import os
-import secrets
-import stat
 import weakref
-from pathlib import Path
 from types import MappingProxyType
-from typing import Mapping
 
 from . import provider_observation_authority as provider
 from .integrity import atomic_write_json
@@ -30,18 +27,9 @@ from .integrity import atomic_write_json
 
 def _install_guard() -> None:
     store_type = provider.CompleteGameBoardEvidenceStore
-    if getattr(store_type._write_receipt, "_sealed_provider_receipt_issuer", False):
+    if getattr(store_type.save, "_ephemeral_provider_origin_guard", False):
         return
 
-    # ------------------------------------------------------------------
-    # Ephemeral exact-object authority.
-    #
-    # The predecessor kept both its issuer (_remember) and mutable registry
-    # (_ISSUED) in module globals. Either was enough for ordinary consumer code to
-    # manufacture an in-process capability for a caller-created snapshot. Keep the
-    # mutable registry and issuer only in this lexical scope; expose at most a
-    # read-only diagnostic view of membership.
-    # ------------------------------------------------------------------
     issued: dict[int, tuple[weakref.ReferenceType, str]] = {}
 
     def forget_issued(snapshot_id: int, reference: weakref.ReferenceType) -> None:
@@ -112,184 +100,66 @@ def _install_guard() -> None:
         )
         return issue_snapshot(snapshot)
 
-    # ------------------------------------------------------------------
-    # Durable provider-origin receipt.
-    # ------------------------------------------------------------------
-    def receipt_root(store) -> Path:
-        # Do not call default/resolve_monotonic_authority_root here. In particular,
-        # AUTOSPORT_MONOTONIC_AUTHORITY_ROOT is an intentional caller/test seam for
-        # the generic journal and therefore cannot select provider-origin trust.
-        try:
-            home = Path.home().resolve(strict=False)
-            workspace = store.workspace.resolve(strict=False)
-        except (OSError, RuntimeError) as exc:
-            raise provider.ProviderObservationIntegrityError(
-                "provider acquisition receipt trust root is unsafe"
-            ) from exc
-        if not home.is_absolute() or not workspace.is_absolute():
-            raise provider.ProviderObservationIntegrityError(
-                "provider acquisition receipt trust root is unsafe"
-            )
+    def save_authoritative(store, snapshot: provider.CompleteGameBoardSnapshot):
+        """Persist a live canonical capture without claiming restart origin proof."""
 
-        if os.name == "nt":
-            base = (
-                home
-                / "AppData"
-                / "Local"
-                / "Autosport"
-                / "application-state"
-                / "provider-origin-receipt-v1"
-            )
-        else:
-            base = home / ".local" / "state" / "autosport" / "provider-origin-receipt-v1"
-        try:
-            root = base.resolve(strict=False)
-        except OSError as exc:
-            raise provider.ProviderObservationIntegrityError(
-                "provider acquisition receipt trust root is unsafe"
-            ) from exc
-        if (
-            root == workspace
-            or root.is_relative_to(workspace)
-            or workspace.is_relative_to(root)
-        ):
-            raise provider.ProviderObservationIntegrityError(
-                "provider acquisition receipt trust root must be disjoint from workspace"
-            )
-        if root.exists() and not root.is_dir():
-            raise provider.ProviderObservationIntegrityError(
-                "provider acquisition receipt trust root must be a directory"
-            )
-        return root / store._workspace_sha256()
-
-    def key_path(store) -> Path:
-        return receipt_root(store) / "receipt.key"
-
-    def receipt_path(store, evidence_sha256: str) -> Path:
-        digest = provider._sha(evidence_sha256, "evidence_sha256")
-        return receipt_root(store) / "receipts" / f"{digest}.json"
-
-    def unsigned_receipt(store, snapshot) -> dict[str, object]:
-        return {
-            "schema": provider._RECEIPT_SCHEMA,
-            "schema_version": provider._RECEIPT_SCHEMA_VERSION,
-            "workspace_sha256": store._workspace_sha256(),
-            "evidence_sha256": snapshot.evidence_sha256,
-            "state_sha256": store._state_sha256(snapshot),
-            "semantic_binding_sha256": store._semantic_binding_sha256(snapshot),
-        }
-
-    def receipt_hmac(key: bytes, payload: Mapping[str, object]) -> str:
-        return hmac.new(
-            key,
-            provider._canonical_json(dict(payload)).encode("utf-8"),
-            hashlib.sha256,
-        ).hexdigest()
-
-    def secure_existing_key(path: Path) -> bytes:
-        try:
-            info = path.stat(follow_symlinks=False)
-        except OSError as exc:
-            raise provider.ProviderObservationIntegrityError(
-                "provider evidence is not proven by production-owned acquisition receipt"
-            ) from exc
-        if not stat.S_ISREG(info.st_mode):
-            raise provider.ProviderObservationIntegrityError(
-                "provider acquisition receipt key must be a regular file"
-            )
-        if os.name != "nt" and info.st_mode & (stat.S_IRWXG | stat.S_IRWXO):
-            raise provider.ProviderObservationIntegrityError(
-                "provider acquisition receipt key permissions are too broad"
-            )
-        try:
-            raw = path.read_text(encoding="ascii").strip()
-        except OSError as exc:
-            raise provider.ProviderObservationIntegrityError(
-                "provider evidence is not proven by production-owned acquisition receipt"
-            ) from exc
-        if len(raw) != provider._RECEIPT_KEY_BYTES * 2 or any(
-            character not in provider._HEX for character in raw
-        ):
-            raise provider.ProviderObservationIntegrityError(
-                "provider acquisition receipt key is malformed"
-            )
-        key = bytes.fromhex(raw)
-        if len(key) != provider._RECEIPT_KEY_BYTES:
-            raise provider.ProviderObservationIntegrityError(
-                "provider acquisition receipt key is malformed"
-            )
-        return key
-
-    def load_key(store, *, create: bool) -> bytes:
-        path = key_path(store)
-        if create:
-            path.parent.mkdir(parents=True, exist_ok=True)
-            value = secrets.token_bytes(provider._RECEIPT_KEY_BYTES)
-            flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0)
-            if os.name != "nt":
-                flags |= getattr(os, "O_NOFOLLOW", 0)
-            descriptor: int | None = None
-            created = False
-            try:
-                descriptor = os.open(path, flags, 0o600)
-                created = True
-                with os.fdopen(descriptor, "w", encoding="ascii") as handle:
-                    descriptor = None
-                    handle.write(value.hex())
-                    handle.flush()
-                    os.fsync(handle.fileno())
-            except FileExistsError:
-                if descriptor is not None:
-                    os.close(descriptor)
-            except BaseException:
-                if descriptor is not None:
-                    os.close(descriptor)
-                if created:
-                    try:
-                        path.unlink()
-                    except OSError:
-                        pass
-                raise
-        return secure_existing_key(path)
-
-    def write_receipt(store, snapshot) -> None:
         assert_authoritative(snapshot)
-        unsigned = unsigned_receipt(store, snapshot)
-        key = load_key(store, create=True)
-        receipt = dict(unsigned)
-        receipt["hmac_sha256"] = receipt_hmac(key, unsigned)
-        path = receipt_path(store, snapshot.evidence_sha256)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        atomic_write_json(path, receipt)
+        path = store._path(snapshot.evidence_sha256)
+        authority = store._authority(snapshot.evidence_sha256)
+        intended = store._state_sha256(snapshot)
+        binding = store._semantic_binding_sha256(snapshot)
 
-    def verify_receipt(store, snapshot) -> None:
-        path = receipt_path(store, snapshot.evidence_sha256)
-        try:
-            raw = provider.strict_json_loads(path.read_text(encoding="utf-8"))
-        except (OSError, TypeError, ValueError) as exc:
-            raise provider.ProviderObservationIntegrityError(
-                "provider evidence is not proven by production-owned acquisition receipt"
-            ) from exc
-        if not isinstance(raw, dict) or set(raw) != provider._RECEIPT_KEYS:
-            raise provider.ProviderObservationIntegrityError(
-                "provider acquisition receipt is malformed"
-            )
-        expected_unsigned = unsigned_receipt(store, snapshot)
-        for name, expected in expected_unsigned.items():
-            if raw.get(name) != expected:
+        with provider.WorkspaceEconomicLock(store.workspace):
+            existing = store._read_path(path) if path.exists() else None
+            history = authority.read_history()
+            if history:
+                store._recover_provenance(authority, existing)
+                history = authority.read_history()
+                if existing is not None:
+                    if existing.to_payload() != snapshot.to_payload():
+                        raise provider.ProviderObservationIntegrityError(
+                            "content-addressed provider evidence conflicts with proven bytes"
+                        )
+                    return path
+            elif existing is not None and existing.to_payload() != snapshot.to_payload():
                 raise provider.ProviderObservationIntegrityError(
-                    "provider acquisition receipt does not bind exact persisted evidence"
+                    "unproven local provider evidence conflicts with production capture"
                 )
-        supplied_hmac = provider._sha(raw.get("hmac_sha256"), "hmac_sha256")
-        key = load_key(store, create=False)
-        expected_hmac = receipt_hmac(key, expected_unsigned)
-        if not hmac.compare_digest(supplied_hmac, expected_hmac):
-            raise provider.ProviderObservationIntegrityError(
-                "provider acquisition receipt authentication failed"
-            )
 
-    def load_authoritative(store, evidence_sha256: str):
-        """Re-issue only after durable receipt and rollback-fence verification."""
+            observed = (
+                None
+                if not history
+                else history[-1].intended_state_sha256
+                if history[-1].phase is provider.AuthorityPhase.COMMIT
+                else None
+            )
+            tx_id = store._next_tx_id(authority, intended)
+            try:
+                authority.prepare(
+                    tx_id=tx_id,
+                    observed_state_sha256=observed,
+                    intended_state_sha256=intended,
+                    semantic_binding_sha256=binding,
+                )
+                atomic_write_json(path, snapshot.to_payload())
+                published = store._read_path(path)
+                if store._state_sha256(published) != intended:
+                    raise provider.ProviderObservationIntegrityError(
+                        "published provider evidence does not match intended capture digest"
+                    )
+                authority.commit(
+                    tx_id=tx_id,
+                    observed_state_sha256=intended,
+                    semantic_binding_sha256=binding,
+                )
+            except provider.MonotonicWorkspaceAuthorityError as exc:
+                raise provider.ProviderObservationIntegrityError(
+                    "provider acquisition provenance publication failed closed"
+                ) from exc
+        return path
+
+    def load_non_authoritative(store, evidence_sha256: str):
+        """Validate durable integrity, then fail closed instead of recreating origin."""
 
         path = store._path(evidence_sha256)
         with provider.WorkspaceEconomicLock(store.workspace):
@@ -300,38 +170,40 @@ def _install_guard() -> None:
                 raise provider.ProviderObservationIntegrityError(
                     "content-addressed provider evidence path does not match payload"
                 )
-            verify_receipt(store, snapshot)
             authority = store._authority(snapshot.evidence_sha256)
             store._recover_provenance(authority, snapshot)
-        return issue_snapshot(snapshot)
-
-    def deny_consumer_credential_access(*args, **kwargs):
-        del args, kwargs
         raise provider.ProviderObservationUnsupportedError(
-            "provider receipt signing material is not a consumer API"
+            "restart cannot reissue provider-origin authority; reacquire canonical provider evidence"
         )
 
-    setattr(write_receipt, "_sealed_provider_receipt_issuer", True)
-    setattr(verify_receipt, "_sealed_provider_receipt_verifier", True)
-    setattr(capture_parlay_complete_game_board, "_sealed_provider_capture_issuer", True)
-    setattr(load_authoritative, "_sealed_provider_restart_issuer", True)
+    def deny_local_receipt_authority(*args, **kwargs):
+        del args, kwargs
+        raise provider.ProviderObservationUnsupportedError(
+            "local receipt signing is not provider-origin authority"
+        )
 
-    # Replace every ordinary consumer issuance/signing primitive. The methods that
-    # remain callable either perform the fixed production network acquisition or
-    # first verify the durable origin receipt plus generic rollback history.
+    setattr(save_authoritative, "_ephemeral_provider_origin_guard", True)
+    setattr(capture_parlay_complete_game_board, "_sealed_provider_capture_issuer", True)
+    setattr(load_non_authoritative, "_restart_provider_origin_fails_closed", True)
+
+    # Read-only diagnostics are permitted; mutation/issuance is lexical only.
     provider._ISSUED = MappingProxyType(issued)
     provider._remember = deny_direct_issuance
     provider.assert_complete_game_board_authoritative = assert_authoritative
     provider.capture_parlay_complete_game_board = capture_parlay_complete_game_board
-    store_type.load = load_authoritative
-    store_type._write_receipt = write_receipt
-    store_type._verify_receipt = verify_receipt
-    store_type._receipt_root = deny_consumer_credential_access
-    store_type._receipt_path = deny_consumer_credential_access
-    store_type._key_path = deny_consumer_credential_access
-    store_type._read_receipt_key = deny_consumer_credential_access
-    store_type._unsigned_receipt = deny_consumer_credential_access
-    store_type._receipt_hmac = staticmethod(deny_consumer_credential_access)
+
+    # Durable local files remain integrity evidence only. No local key/HMAC is
+    # allowed to turn them back into provider-origin authority after restart.
+    store_type.save = save_authoritative
+    store_type.load = load_non_authoritative
+    store_type._write_receipt = deny_local_receipt_authority
+    store_type._verify_receipt = deny_local_receipt_authority
+    store_type._receipt_root = deny_local_receipt_authority
+    store_type._receipt_path = deny_local_receipt_authority
+    store_type._key_path = deny_local_receipt_authority
+    store_type._read_receipt_key = deny_local_receipt_authority
+    store_type._unsigned_receipt = deny_local_receipt_authority
+    store_type._receipt_hmac = staticmethod(deny_local_receipt_authority)
 
 
 _install_guard()

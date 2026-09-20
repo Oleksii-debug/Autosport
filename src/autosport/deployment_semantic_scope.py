@@ -1,23 +1,28 @@
 """Immutable semantic compatibility authority for cross-session PAPER deployment.
 
-The compatibility identity is derived from durable runtime/scientific authority rather
-than caller-authored scientific records. Exact dataset/cutoff/decision evidence remains
-in the authority witness while ``scope_id`` excludes monotonic snapshot dimensions that
-may advance across later PAPER sessions.
+The resolver accepts only durable authority handles for runtime/scientific evidence:
+``SQLiteMarketStore`` for normalized market events, ``ScientificRegistry`` for frozen
+scientific records, and ``DeploymentRuntimeAuthorityStore`` for environment/episode/
+action meanings. Caller-authored objects cannot authorize deployment compatibility.
 """
 
 from __future__ import annotations
 
 import hashlib
 import json
+import sqlite3
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Final, Mapping
 
+from .deployment_runtime_authority import (
+    DeploymentRuntimeAuthorityError,
+    DeploymentRuntimeAuthorityStore,
+)
 from .domain import MarketEvent
-from .learning_environment import EnvironmentIdentity, Episode
 from .paper_settlement_learning import REWARD_RULE
 from .scientific_registry import RegistryEntry, ScientificRegistry
+from .storage import SQLiteMarketStore
 
 
 SCHEMA: Final = "autosport.deployment_semantic_scope"
@@ -124,6 +129,27 @@ def _canonical_registry_record(
     return record
 
 
+def _canonical_market_event(
+    market_store: SQLiteMarketStore,
+    *,
+    dedupe_key: str,
+) -> MarketEvent:
+    if not isinstance(market_store, SQLiteMarketStore):
+        raise DeploymentSemanticScopeError("market_store must be SQLiteMarketStore")
+    identity = _text(dedupe_key, "market_event_dedupe_key")
+    try:
+        matches = [event for event in market_store.events() if event.dedupe_key == identity]
+    except (OSError, RuntimeError, ValueError, sqlite3.Error) as exc:
+        raise DeploymentSemanticScopeError("cannot read canonical market-event history") from exc
+    if not matches:
+        raise DeploymentSemanticScopeError(
+            f"canonical market-event history lacks dedupe key {identity}"
+        )
+    if len(matches) != 1:
+        raise DeploymentSemanticScopeError("canonical market-event history is ambiguous")
+    return matches[0]
+
+
 @dataclass(frozen=True, slots=True)
 class ActionSemanticsDefinition:
     """Versioned meanings for the externally admissible learning actions."""
@@ -149,8 +175,8 @@ class ActionSemanticsDefinition:
             )
         if tuple(normalized) != tuple(sorted(normalized)):
             raise DeploymentSemanticScopeError("action semantics meanings must be sorted")
-        action_types = tuple(action for action, _ in normalized)
-        if len(action_types) != len(set(action_types)):
+        names = tuple(name for name, _meaning in normalized)
+        if len(names) != len(set(names)):
             raise DeploymentSemanticScopeError("action semantics action names must be unique")
 
     @property
@@ -331,10 +357,12 @@ class DeploymentSemanticScope:
 
 @dataclass(frozen=True, slots=True)
 class DeploymentSemanticAuthority:
-    """Exact causal/scientific witness used to resolve one compatibility scope."""
+    """Exact causal/durable witness used to resolve one compatibility scope."""
 
     scope: DeploymentSemanticScope
     decision_ts: str
+    market_event_dedupe_key: str
+    market_event_payload_sha256: str
     event_quote_key: str
     provider_source_id: str
     event_observed_ts: str
@@ -347,19 +375,30 @@ class DeploymentSemanticAuthority:
     feature_available_at: str
     protocol_record_sha256: str
     protocol_available_at: str
+    runtime_authority_id: str
+    runtime_record_sha256: str
+    runtime_available_at: str
     environment_id: str
     episode_id: str
 
     def __post_init__(self) -> None:
         if not isinstance(self.scope, DeploymentSemanticScope):
             raise DeploymentSemanticScopeError("scope must be DeploymentSemanticScope")
-        for name in ("event_quote_key", "provider_source_id", "dataset_snapshot_id"):
+        for name in (
+            "market_event_dedupe_key",
+            "event_quote_key",
+            "provider_source_id",
+            "dataset_snapshot_id",
+        ):
             _text(getattr(self, name), name)
         for name in (
+            "market_event_payload_sha256",
             "dataset_record_sha256",
             "dataset_manifest_sha256",
             "feature_record_sha256",
             "protocol_record_sha256",
+            "runtime_authority_id",
+            "runtime_record_sha256",
             "environment_id",
             "episode_id",
         ):
@@ -371,6 +410,7 @@ class DeploymentSemanticAuthority:
             "dataset_available_at",
             "feature_available_at",
             "protocol_available_at",
+            "runtime_available_at",
         ):
             _instant(getattr(self, name), name)
 
@@ -382,6 +422,8 @@ class DeploymentSemanticAuthority:
                 "schema_version": 1,
                 "scope_id": self.scope.scope_id,
                 "decision_ts": _instant_id(self.decision_ts, "decision_ts"),
+                "market_event_dedupe_key": self.market_event_dedupe_key,
+                "market_event_payload_sha256": self.market_event_payload_sha256,
                 "event_quote_key": self.event_quote_key,
                 "provider_source_id": self.provider_source_id,
                 "event_observed_ts": _instant_id(self.event_observed_ts, "event_observed_ts"),
@@ -402,6 +444,11 @@ class DeploymentSemanticAuthority:
                 "protocol_available_at": _instant_id(
                     self.protocol_available_at, "protocol_available_at"
                 ),
+                "runtime_authority_id": self.runtime_authority_id,
+                "runtime_record_sha256": self.runtime_record_sha256,
+                "runtime_available_at": _instant_id(
+                    self.runtime_available_at, "runtime_available_at"
+                ),
                 "environment_id": self.environment_id,
                 "episode_id": self.episode_id,
             }
@@ -410,37 +457,51 @@ class DeploymentSemanticAuthority:
 
 def resolve_deployment_semantic_scope(
     *,
-    event: MarketEvent,
+    market_store: SQLiteMarketStore,
+    market_event_dedupe_key: str,
     scientific_registry: ScientificRegistry,
     dataset_snapshot_id: str,
     feature_set_id: str,
     research_protocol_id: str,
-    environment: EnvironmentIdentity,
-    episode: Episode,
-    action_semantics: ActionSemanticsDefinition,
+    runtime_authority_store: DeploymentRuntimeAuthorityStore,
+    runtime_authority_id: str,
     decision_ts: str,
     reward_definition_id: str = REWARD_RULE,
 ) -> DeploymentSemanticAuthority:
-    """Resolve a fail-closed semantic authority from durable canonical evidence.
-
-    Scientific identities are accepted only as lookup keys. Their contents are reloaded
-    from the append-only ``ScientificRegistry`` and must have been available by
-    ``decision_ts``. This prevents a caller from authorizing a fabricated but internally
-    self-consistent DatasetSnapshot/FeatureSet/ResearchProtocol graph.
-    """
-
-    for expected_type, value, name in (
-        (MarketEvent, event, "event"),
-        (EnvironmentIdentity, environment, "environment"),
-        (Episode, episode, "episode"),
-        (ActionSemanticsDefinition, action_semantics, "action_semantics"),
-    ):
-        if not isinstance(value, expected_type):
-            raise DeploymentSemanticScopeError(f"{name} has wrong authority type")
+    """Resolve deployment semantics exclusively from canonical durable evidence."""
 
     decision_id = _instant_id(decision_ts, "decision_ts")
+    event = _canonical_market_event(market_store, dedupe_key=market_event_dedupe_key)
     if _instant(event.observed_ts, "event observed_ts") > _instant(decision_id, "decision_ts"):
         raise DeploymentSemanticScopeError("event was not observed at decision time")
+
+    if not isinstance(runtime_authority_store, DeploymentRuntimeAuthorityStore):
+        raise DeploymentSemanticScopeError(
+            "runtime_authority_store must be DeploymentRuntimeAuthorityStore"
+        )
+    runtime_id = _sha(runtime_authority_id, "runtime_authority_id")
+    try:
+        runtime = runtime_authority_store.get(runtime_id)
+    except (OSError, RuntimeError, ValueError, DeploymentRuntimeAuthorityError) as exc:
+        raise DeploymentSemanticScopeError("cannot read canonical runtime authority") from exc
+    if runtime is None:
+        raise DeploymentSemanticScopeError(
+            f"canonical runtime authority store lacks {runtime_id}"
+        )
+    if _instant(runtime.available_at, "runtime_authority.available_at") > _instant(
+        decision_id, "decision_ts"
+    ):
+        raise DeploymentSemanticScopeError("runtime authority was not available at decision time")
+    environment = runtime.environment
+    episode = runtime.episode
+    action_semantics = ActionSemanticsDefinition(
+        version=runtime.action_semantics_version,
+        meanings=runtime.action_semantics_meanings,
+    )
+    if action_semantics.definition_sha256 != runtime.action_semantics_definition_sha256:
+        raise DeploymentSemanticScopeError("runtime action-semantics definition mismatch")
+    if action_semantics.action_semantics_id != runtime.action_semantics_id:
+        raise DeploymentSemanticScopeError("runtime action-semantics identity mismatch")
 
     dataset = _canonical_registry_record(
         scientific_registry,
@@ -525,7 +586,7 @@ def resolve_deployment_semantic_scope(
     if episode.environment_id != environment.environment_id:
         raise DeploymentSemanticScopeError("episode environment identity mismatch")
 
-    semantic_actions = tuple(action for action, _ in action_semantics.meanings)
+    semantic_actions = tuple(action for action, _meaning in action_semantics.meanings)
     if semantic_actions != episode.admissible_actions:
         raise DeploymentSemanticScopeError(
             "action semantics must bind the exact sorted admissible action universe"
@@ -559,6 +620,8 @@ def resolve_deployment_semantic_scope(
     return DeploymentSemanticAuthority(
         scope=scope,
         decision_ts=decision_id,
+        market_event_dedupe_key=event.dedupe_key,
+        market_event_payload_sha256=_digest(event.to_dict()),
         event_quote_key=event.quote_key,
         provider_source_id=event.source_id,
         event_observed_ts=event.observed_ts,
@@ -571,6 +634,9 @@ def resolve_deployment_semantic_scope(
         feature_available_at=feature.available_at,
         protocol_record_sha256=_sha(protocol.record_sha256, "ResearchProtocol.record_sha256"),
         protocol_available_at=protocol.available_at,
+        runtime_authority_id=runtime.runtime_authority_id,
+        runtime_record_sha256=runtime.record_sha256,
+        runtime_available_at=runtime.available_at,
         environment_id=environment.environment_id,
         episode_id=episode.episode_id,
     )

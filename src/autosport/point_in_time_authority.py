@@ -418,23 +418,48 @@ class HoldoutConsumptionLedger(_legacy.HoldoutConsumptionLedger):
             return None
         return state.ledger_sha256
 
-    @staticmethod
-    def _latest_transaction(
+    def _authority_history_unlocked(self):
+        try:
+            return self.monotonic_authority.read_history()
+        except MonotonicWorkspaceAuthorityError as exc:
+            raise _legacy.HoldoutConsumptionError(
+                "cannot read independent holdout monotonic authority"
+            ) from exc
+
+    def _recovery_transaction_unlocked(
+        self,
         state: _legacy._LedgerState,
     ) -> tuple[str | None, str | None]:
         if not state.receipts:
             return None, None
-        receipt = state.receipts[-1]
-        return (
-            f"holdout-consumption:{receipt.receipt_sha256}",
-            receipt.receipt_sha256,
-        )
+        binding = state.receipts[-1].receipt_sha256
+        history = self._authority_history_unlocked()
+        if not history:
+            return None, binding
+        latest = history[-1]
+        if (
+            latest.phase.value == "PREPARE"
+            and latest.intended_state_sha256 == self._authority_state_sha256(state)
+            and latest.semantic_binding_sha256 == binding
+        ):
+            return latest.tx_id, binding
+        return None, binding
+
+    def _new_transaction_id_unlocked(self, receipt_sha256: str) -> str:
+        # Authority transaction identity is an attempt identity, not the semantic
+        # receipt identity.  A PREPARE that was durably ABORTed must never be
+        # reused on an exact semantic retry, because shared authority correctly
+        # refuses to COMMIT a terminal ABORT.  The append-only history length is
+        # stable under the enclosing workspace writer lock and gives each retry a
+        # fresh deterministic attempt id without weakening receipt idempotency.
+        next_record = len(self._authority_history_unlocked()) + 1
+        return f"holdout-consumption:{next_record}:{receipt_sha256}"
 
     def _recover_authority_unlocked(
         self,
         state: _legacy._LedgerState,
     ) -> None:
-        tx_id, binding = self._latest_transaction(state)
+        tx_id, binding = self._recovery_transaction_unlocked(state)
         try:
             self.monotonic_authority.recover(
                 observed_state_sha256=self._authority_state_sha256(state),
@@ -537,7 +562,7 @@ class HoldoutConsumptionLedger(_legacy.HoldoutConsumptionLedger):
                 generation=current.generation + 1,
                 ledger_sha256=next_payload["ledger_sha256"],
             )
-            tx_id = f"holdout-consumption:{receipt.receipt_sha256}"
+            tx_id = self._new_transaction_id_unlocked(receipt.receipt_sha256)
             binding = receipt.receipt_sha256
 
             try:
@@ -568,8 +593,9 @@ class HoldoutConsumptionLedger(_legacy.HoldoutConsumptionLedger):
                 )
             except MonotonicWorkspaceAuthorityError as exc:
                 # The complete local pair is intentionally left intact.  On
-                # restart, recover() can commit this exact prepared digest only
-                # when the final receipt proves the same tx/binding.
+                # restart, recover() identifies the exact pending attempt from
+                # the external history and can commit only its matching digest
+                # and receipt binding.
                 raise _legacy.HoldoutConsumptionError(
                     "holdout ledger published but monotonic commit was not completed"
                 ) from exc

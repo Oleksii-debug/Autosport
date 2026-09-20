@@ -2264,6 +2264,10 @@ class ModelComputeRouterStore:
                 raise ModelComputeRouterError(
                     "VOC shadow execution predates precompute admission"
                 )
+            if completed_at < precompute_recorded_at:
+                raise ModelComputeRouterError(
+                    "VOC shadow execution predates physical precompute authority"
+                )
             if available_at < completed_at:
                 raise ModelComputeRouterError(
                     "VOC shadow execution availability predates completion"
@@ -3432,6 +3436,10 @@ class ModelComputeRouterStore:
         admitted_at = _instant(
             "VOC precompute admitted_at", precompute["admitted_at"]
         )
+        precompute_recorded_at = _instant(
+            "VOC precompute authority_recorded_at",
+            precompute["authority_recorded_at"],
+        )
         completed = _instant(
             "VOC shadow completed_at", completed_at
         )
@@ -3441,6 +3449,10 @@ class ModelComputeRouterStore:
         if completed < admitted_at:
             raise ModelComputeRouterError(
                 "VOC shadow execution predates precompute admission"
+            )
+        if completed < precompute_recorded_at:
+            raise ModelComputeRouterError(
+                "VOC shadow execution predates physical precompute authority"
             )
         if available < completed:
             raise ModelComputeRouterError(

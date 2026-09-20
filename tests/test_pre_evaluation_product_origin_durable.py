@@ -189,7 +189,11 @@ def _intent(snapshot: CompleteGameBoardSnapshot) -> OpportunityIntent:
     )
 
 
-def _bound(snapshot: CompleteGameBoardSnapshot, provider: ProviderSelectionBinding):
+def _bound(
+    snapshot: CompleteGameBoardSnapshot,
+    provider: ProviderSelectionBinding,
+    ledger: JsonlDecisionLedger,
+):
     evidence = PreEvaluationEvidenceAuthority(
         PreEvaluationPolicy(max_age_ns=200)
     ).evaluate_session(
@@ -209,6 +213,7 @@ def _bound(snapshot: CompleteGameBoardSnapshot, provider: ProviderSelectionBindi
         evidence,
         context=context,
         provider_members=(provider.identity,),
+        ledger=ledger,
     )
 
 
@@ -248,10 +253,7 @@ def _persist_intent_authority(
     )
 
 
-def test_durable_cost_selection_survives_ledger_reopen_and_rejects_forged_intent(
-    tmp_path: Path,
-    monkeypatch,
-) -> None:
+def _setup_authorities(tmp_path: Path, monkeypatch):
     snapshot = _snapshot(monkeypatch)
     provider = _provider(snapshot)
     intent = _intent(snapshot)
@@ -267,16 +269,35 @@ def test_durable_cost_selection_survives_ledger_reopen_and_rejects_forged_intent
         risk_policy=risk_policy,
         graph=graph,
     )
+    return snapshot, provider, intent, book, risk_policy, graph, ledger_path, ledger
+
+
+def test_durable_cost_selection_survives_ledger_reopen_and_rejects_forged_intent(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    (
+        snapshot,
+        provider,
+        intent,
+        book,
+        risk_policy,
+        graph,
+        ledger_path,
+        ledger,
+    ) = _setup_authorities(tmp_path, monkeypatch)
     contract = PreEvaluationCostContract(contract_id="cost-v1", max_cost_micros=10)
-    persist_pre_evaluation_cost_contract_authority(
+    selection = persist_pre_evaluation_cost_contract_authority(
         ledger=ledger,
         material_action_id="pre-evaluation-origin-1",
         risk_policy=risk_policy,
         contract=contract,
     )
+    assert selection.payload["selection_available_record_count"] == ledger.verified_snapshot().record_count
+    bound = _bound(snapshot, provider, ledger)
     kwargs = {
         "snapshot": snapshot,
-        "bound": _bound(snapshot, provider),
+        "bound": bound,
         "provider_selections": (provider,),
         "intents": (intent,),
         "risk_policy": risk_policy,
@@ -333,4 +354,53 @@ def test_durable_cost_selection_survives_ledger_reopen_and_rejects_forged_intent
                 "dependency_graph": forged_graph,
             },
             ledger=JsonlDecisionLedger(ledger_path),
+        )
+
+
+def test_cost_selection_appended_after_freeze_fails_on_restart(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    (
+        snapshot,
+        provider,
+        intent,
+        book,
+        risk_policy,
+        graph,
+        ledger_path,
+        ledger,
+    ) = _setup_authorities(tmp_path, monkeypatch)
+
+    bound = _bound(snapshot, provider, ledger)
+    frozen_count = bound.decision_ledger_prefix_record_count
+    frozen_sha = bound.decision_ledger_prefix_sha256
+    assert frozen_count == ledger.verified_snapshot().record_count
+    assert frozen_sha == ledger.verified_snapshot().sha256
+
+    contract = PreEvaluationCostContract(contract_id="cost-late", max_cost_micros=10)
+    selection = persist_pre_evaluation_cost_contract_authority(
+        ledger=ledger,
+        material_action_id="pre-evaluation-origin-1",
+        risk_policy=risk_policy,
+        contract=contract,
+    )
+    assert selection.payload["selection_predecessor_record_count"] == frozen_count
+    assert selection.payload["selection_available_record_count"] == frozen_count + 1
+    assert selection.payload["selection_predecessor_prefix_sha256"] == frozen_sha
+
+    with pytest.raises(
+        PreEvaluationProductOriginError,
+        match="not durable before pre-evaluation freeze",
+    ):
+        derive_product_owned_pre_evaluation_session(
+            snapshot=snapshot,
+            bound=bound,
+            provider_selections=(provider,),
+            intents=(intent,),
+            risk_policy=risk_policy,
+            book=book,
+            dependency_graph=graph,
+            ledger=JsonlDecisionLedger(ledger_path),
+            material_action_id="pre-evaluation-origin-1",
         )

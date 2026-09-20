@@ -674,6 +674,7 @@ class PersistentLiveDecisionLoop:
     """
 
     PROGRESS_FILE_NAME = "live_decision_progress.json"
+    PRE_ACTION_BOOK_FILE_NAME = "live_decision_pre_action_book.json"
     CONTROL_FILE_NAME = "live_decision_control.json"
     INPUTS_FILE_NAME = "live_decision_inputs.json"
     AGENT_ID = "persistent-live-decision-loop"
@@ -867,6 +868,7 @@ class PersistentLiveDecisionLoop:
             self._observe = observation_runner
 
         self.progress_path = self.workspace / self.PROGRESS_FILE_NAME
+        self.pre_action_book_path = self.workspace / self.PRE_ACTION_BOOK_FILE_NAME
         self.control_path = self.workspace / self.CONTROL_FILE_NAME
         self._progress = self._load_progress()
         if self._progress is not None and self._progress.loop_id != self.loop_id:
@@ -1226,13 +1228,32 @@ class PersistentLiveDecisionLoop:
                 "live intent factory strategy-version provenance changed"
             )
 
-    def _decision_context_sha256(self) -> str:
+    @staticmethod
+    def _same_book_state(left: PaperBook, right: PaperBook) -> bool:
+        return (
+            left.initial_bankroll == right.initial_bankroll
+            and left.balance == right.balance
+            and left.tickets == right.tickets
+            and left._lifecycle == right._lifecycle
+            and left._settlement_times == right._settlement_times
+        )
+
+    def _decision_context_sha256_for_book(self, book: PaperBook) -> str:
         self._verify_intent_factory_provenance()
+        if not isinstance(book, PaperBook):
+            raise TypeError("book must be PaperBook")
+        book_state_sha256 = self.authority.risk_policy.risk_of_ruin_portfolio_sha256(
+            book
+        )
+        if book_state_sha256 is None:
+            raise LiveDecisionProgressError(
+                "cannot derive canonical PaperBook decision context"
+            )
         provenance = self.intent_provenance
         return _canonical_json_sha256(
             {
                 "schema": "autosport.live_decision_runtime_context",
-                "schema_version": 3,
+                "schema_version": 2,
                 "mode": self.mode.value,
                 "intent_strategy_version_id": provenance.strategy_version_id,
                 "intent_model_version_id": provenance.model_version_id,
@@ -1241,16 +1262,15 @@ class PersistentLiveDecisionLoop:
                     self.authority.contract
                 ).contract_sha256,
                 "risk_policy_sha256": self.authority.risk_policy.provenance_sha256,
-                # The exact pre-action PaperBook identity is already bound by
-                # PortfolioPlan.portfolio_sha256. Keeping mutable book state in
-                # this runtime/config digest made a valid accepted execution
-                # unrecoverable after the durable book publish but before
-                # progress COMMITTED.
+                "book_state_sha256": book_state_sha256,
                 "max_quote_age_seconds": str(
                     _timedelta_decimal_seconds(self.max_quote_age)
                 ),
             }
         )
+
+    def _decision_context_sha256(self) -> str:
+        return self._decision_context_sha256_for_book(self.book)
 
     def _recover_unfinished_progress(self) -> LiveCycleResult:
         progress = self._progress
@@ -1270,10 +1290,39 @@ class PersistentLiveDecisionLoop:
             progress.decision_ts,
         )
         self.intent_provenance.assert_available_at(decision_time)
-        if progress.decision_context_sha256 != self._decision_context_sha256():
+
+        # PENDING publication persists the exact pre-action PaperBook separately
+        # from the crash cursor. That snapshot remains the decision/risk authority
+        # even when #623 has already durably materialized accepted exposure into
+        # the canonical PaperBook before progress reaches COMMITTED.
+        if self.pre_action_book_path.exists():
+            try:
+                pre_action_book = PaperBook.load(self.pre_action_book_path)
+            except (OSError, TypeError, ValueError) as exc:
+                raise LiveDecisionProgressError(
+                    "unfinished live decision pre-action PaperBook is unreadable"
+                ) from exc
+        else:
+            # Compatibility with progress written before the snapshot seam:
+            # recovery is permitted only while the current book still proves the
+            # original decision context.
+            pre_action_book = self.book
+
+        if (
+            progress.decision_context_sha256
+            != self._decision_context_sha256_for_book(pre_action_book)
+        ):
             raise LiveDecisionProgressError(
                 "unfinished live decision runtime context changed across restart"
             )
+        if (
+            progress.phase == _PHASE_PENDING
+            and not self._same_book_state(self.book, pre_action_book)
+        ):
+            raise LiveDecisionProgressError(
+                "unfinished live decision PaperBook changed before durable decision"
+            )
+
         if progress.gate == _GATE_NORMAL:
             self._refresh_intents_from_replay(
                 progress.registered_input_ids,
@@ -1285,10 +1334,10 @@ class PersistentLiveDecisionLoop:
             intents = ()
 
         # Once the exact economic DecisionRecord is durable, it is the immutable
-        # pre-action plan authority.  In particular, an accepted #623 attempt may
-        # already have atomically published its PaperBook exposure while progress
-        # is still APPEND_PENDING. Rebuilding the plan from that post-action book
-        # would re-size/re-decide economics and can never be a valid recovery.
+        # pre-action plan authority. In particular, an accepted #623 attempt may
+        # already have published the canonical PaperBook while progress is still
+        # APPEND_PENDING; never re-size/re-decide economics from that post-action
+        # state.
         durable_record = None
         if (
             progress.phase == _PHASE_APPEND_PENDING
@@ -1357,16 +1406,17 @@ class PersistentLiveDecisionLoop:
             graph = (
                 None
                 if not intents
-                else PortfolioDependencyGraph.for_inputs(self.book, intents)
+                else PortfolioDependencyGraph.for_inputs(pre_action_book, intents)
             )
             plan = build_portfolio_plan(
-                self.book,
+                pre_action_book,
                 intents,
                 self.authority.risk_policy,
                 decision_ts,
                 dependency_graph=graph,
                 market_outcome_authorities=(),
             )
+
         result = self._persist_plan(
             plan=plan,
             intents=intents,
@@ -1376,6 +1426,7 @@ class PersistentLiveDecisionLoop:
             detail=(
                 "recovered unfinished durable live decision before provider polling"
             ),
+            decision_context_sha256_override=progress.decision_context_sha256,
         )
         self._pending_affected.clear()
         self._needs_cache_rebuild = True
@@ -1606,8 +1657,15 @@ class PersistentLiveDecisionLoop:
         affected_input_ids: tuple[str, ...],
         gate: str,
         detail: str = "",
+        decision_context_sha256_override: str | None = None,
     ) -> LiveCycleResult:
-        decision_context_sha256 = self._decision_context_sha256()
+        if decision_context_sha256_override is None:
+            decision_context_sha256 = self._decision_context_sha256()
+        else:
+            decision_context_sha256 = _canonical_sha256(
+                "recovery decision_context_sha256",
+                decision_context_sha256_override,
+            )
         provenance = self.intent_provenance
         context_payload = {
             "schema": "autosport.live_decision_context",
@@ -1850,20 +1908,31 @@ class PersistentLiveDecisionLoop:
     ) -> None:
         _, decision_time = _canonical_timestamp("decision_ts", decision_ts)
         self.intent_provenance.assert_available_at(decision_time)
-        pending = _Progress(
-            loop_id=self.loop_id,
-            phase=_PHASE_PENDING,
-            decision_ts=decision_ts,
-            market_state_sha256=market_state_sha256,
-            decision_context_sha256=self._decision_context_sha256(),
-            affected_input_ids=affected_input_ids,
-            registered_input_ids=self.dependencies.input_ids,
-            decision_id=None,
-            plan_sha256=None,
-            ledger_offset=None,
-            gate=gate,
-        )
         with WorkspaceEconomicLock(self.workspace):
+            # The snapshot is written before the cursor: a crash before cursor
+            # publication leaves only ignorable stale snapshot bytes, while every
+            # visible PENDING cursor has an exact pre-action portfolio witness.
+            self.book.save(self.pre_action_book_path)
+            durable_pre_action = PaperBook.load(self.pre_action_book_path)
+            if not self._same_book_state(durable_pre_action, self.book):
+                raise LiveDecisionProgressError(
+                    "pre-action PaperBook durability verification failed"
+                )
+            pending = _Progress(
+                loop_id=self.loop_id,
+                phase=_PHASE_PENDING,
+                decision_ts=decision_ts,
+                market_state_sha256=market_state_sha256,
+                decision_context_sha256=self._decision_context_sha256_for_book(
+                    durable_pre_action
+                ),
+                affected_input_ids=affected_input_ids,
+                registered_input_ids=self.dependencies.input_ids,
+                decision_id=None,
+                plan_sha256=None,
+                ledger_offset=None,
+                gate=gate,
+            )
             atomic_write_json(self.progress_path, pending.to_dict())
         self._progress = pending
 

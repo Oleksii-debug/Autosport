@@ -362,17 +362,25 @@ class SportMemoryResultMaterializer:
             raise TypeError("outcome_authority.resolve must be callable")
         self.opponent_store = opponent_store
         self.market_store = market_store
-        self.lifecycle = lifecycle
-        self.outcome_authority = outcome_authority
+        self._lifecycle = lifecycle
+        self._outcome_authority = outcome_authority
+
+    @property
+    def lifecycle(self) -> ContinuousEventLifecycle:
+        return self._lifecycle
+
+    @property
+    def outcome_authority(self) -> SettlementOutcomeAuthority:
+        return self._outcome_authority
 
     def _require_canonical_stores(self) -> ParticipantIdentityRegistry:
         if type(self.opponent_store) is not OpponentIntelligenceStore:
             raise TypeError("opponent_store capability changed after construction")
         if type(self.market_store) is not SQLiteMarketStore:
             raise TypeError("market_store capability changed after construction")
-        if type(self.lifecycle) is not ContinuousEventLifecycle:
+        if type(self._lifecycle) is not ContinuousEventLifecycle:
             raise TypeError("lifecycle capability changed after construction")
-        if not callable(getattr(self.outcome_authority, "resolve", None)):
+        if not callable(getattr(self._outcome_authority, "resolve", None)):
             raise TypeError("outcome_authority capability changed after construction")
         registry = self.opponent_store.identity_registry
         if type(registry) is not ParticipantIdentityRegistry:
@@ -944,9 +952,19 @@ class SportMemoryResultMaterializer:
         """Re-resolve product-owned outcome truth; caller DTO is assertion-only."""
 
         self._require_canonical_stores()
+        if asserted.event_identity != binding.event_identity:
+            raise SportMemoryResultMaterializationError(
+                "settlement event does not match frozen result binding"
+            )
+        try:
+            SettlementResolution.validate(asserted, as_of=as_of)
+        except (TypeError, ValueError) as exc:
+            raise SportMemoryResultMaterializationError(
+                "settlement assertion is malformed or not causally available"
+            ) from exc
         try:
             record = ContinuousEventLifecycle.get(
-                self.lifecycle,
+                self._lifecycle,
                 binding.event_identity,
             )
         except (CatalogLifecycleError, OSError, TypeError, ValueError) as exc:
@@ -970,7 +988,7 @@ class SportMemoryResultMaterializer:
             )
 
         try:
-            canonical = self.outcome_authority.resolve(record, as_of=as_of)
+            canonical = self._outcome_authority.resolve(record, as_of=as_of)
         except Exception as exc:
             raise SportMemoryResultMaterializationError(
                 "product-owned outcome authority could not resolve settlement"
@@ -992,7 +1010,23 @@ class SportMemoryResultMaterializer:
             raise SportMemoryResultMaterializationError(
                 "product-owned settlement does not match canonical lifecycle evidence"
             )
-        if asserted != canonical:
+        asserted_payload = (
+            asserted.event_identity,
+            asserted.settlement_ref,
+            asserted.quote_outcomes.copy(),
+            asserted.evidence_id,
+            asserted.evidence_sha256,
+            asserted.available_at,
+        )
+        canonical_payload = (
+            canonical.event_identity,
+            canonical.settlement_ref,
+            canonical.quote_outcomes.copy(),
+            canonical.evidence_id,
+            canonical.evidence_sha256,
+            canonical.available_at,
+        )
+        if asserted_payload != canonical_payload:
             raise SportMemoryResultMaterializationError(
                 "settlement assertion differs from product-owned outcome authority"
             )

@@ -42,6 +42,12 @@ class CollectorStorageLimitError(CollectorServiceError):
     """Raised when the configured durable collector storage budget is exhausted."""
 
 
+class CollectorRetentionRequiredError(CollectorStorageLimitError):
+    """Recoverable backpressure requiring safe retention before more intake."""
+
+    code = "RETENTION_REQUIRED"
+
+
 class CollectorServiceStoppedError(CollectorServiceError):
     """Raised when a durably stopped run is used without explicit resume."""
 
@@ -558,8 +564,9 @@ class HeadlessCollectorService:
         except FileNotFoundError:
             size = 0
         if size >= self.config.max_store_bytes:
-            raise CollectorStorageLimitError(
-                "collector durable store reached configured byte budget"
+            raise CollectorRetentionRequiredError(
+                "RETENTION_REQUIRED: collector durable store reached configured byte budget; "
+                "run explicit pin-aware compaction or enlarge the budget, then retry"
             )
 
     def run_cycle(self) -> CollectorCycleResult:

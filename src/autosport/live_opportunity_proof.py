@@ -97,11 +97,11 @@ def _sha256_payload(payload: object) -> str:
 
 @dataclass(frozen=True, slots=True)
 class ApplicableCostCoverage:
-    """Source-owned cost witness consumed only as a proof downgrade fence.
+    """Caller-visible cost assertion used only as a downgrade fence.
 
-    This type does not resolve or mint economic costs.  Upstream product authority must
-    derive the amount and evidence digest.  Incomplete coverage can only prevent a
-    guaranteed classification; it can never upgrade one.
+    This value is not source authority.  Until product-owned economic authority can be
+    re-resolved for the exact intent, its amount/completeness can never authorize the
+    OUTCOME_INDEPENDENT_POSITIVE classification.
     """
 
     intent_sha256: str
@@ -134,7 +134,7 @@ class ApplicableCostCoverage:
 
 @dataclass(frozen=True, slots=True)
 class LiveFreshnessFence:
-    """Externally resolved quote-freshness window for the exact opportunity intent."""
+    """Caller-visible freshness assertion used only as a downgrade fence."""
 
     intent_sha256: str
     valid_until: str
@@ -219,6 +219,20 @@ class ExecutableOpportunityProof:
         )
 
 
+def _product_positive_authority_resolved() -> bool:
+    """Return whether the three positive-proof authorities are mechanically resolved.
+
+    Current main does not yet expose one composition capability that re-resolves the
+    exact intent-bound scenario origin, complete applicable costs, and quote freshness.
+    Caller-constructible DTOs therefore remain assertions only.  Keeping this gate
+    false makes the strongest economic claim unreachable instead of laundering caller
+    assertions into product truth.  A later same-authority composition change must
+    replace this gate with real product-owned re-resolution before returning True.
+    """
+
+    return False
+
+
 def classify_executable_opportunity(
     intent: OpportunityIntent,
     scenario: ScenarioSearchReport,
@@ -229,10 +243,11 @@ def classify_executable_opportunity(
 ) -> ExecutableOpportunityProof:
     """Classify one existing opportunity without creating execution authority.
 
-    The positive outcome-independent label is deliberately narrower than a positive
-    mathematical screen.  It is available only to exact ARBITRAGE/DUTCHING evidence
-    after complete costs, exact terminal-space proof, freshness and explicit execution
-    feasibility are all present.  Every missing predicate downgrades the result.
+    Scenario/cost/freshness values accepted here are assertion/audit inputs, not proof
+    issuance capabilities.  Until product-owned authorities can all be re-resolved and
+    bound to this exact intent, the OUTCOME_INDEPENDENT_POSITIVE label is mechanically
+    unreachable.  Missing or caller-only authority therefore downgrades rather than
+    fabricating a guarantee.
     """
 
     if type(intent) is not OpportunityIntent:
@@ -321,7 +336,7 @@ def classify_executable_opportunity(
     elif after_cost <= 0:
         if gross_min > 0:
             classification = OpportunityProofClassification.THEORETICAL_ARBITRAGE_ONLY
-            reason = "gross minimum P&L is positive but complete costs remove the positive floor"
+            reason = "gross minimum P&L is positive but asserted costs remove the positive floor"
         else:
             classification = OpportunityProofClassification.RISKED_PORTFOLIO
             reason = "exact minimum terminal P&L is not positive"
@@ -333,9 +348,15 @@ def classify_executable_opportunity(
             reason = "exact positive economics is not execution-feasible"
         else:
             reason = "exact positive economics is stale at the decision timestamp"
+    elif not _product_positive_authority_resolved():
+        classification = OpportunityProofClassification.THEORETICAL_ARBITRAGE_ONLY
+        reason = (
+            "scenario, complete costs, and freshness are caller assertions until exact "
+            "product-owned authorities are re-resolved for this intent"
+        )
     else:
         classification = OpportunityProofClassification.OUTCOME_INDEPENDENT_POSITIVE
-        reason = "complete exact after-cost terminal P&L is positive and execution evidence is current"
+        reason = "complete exact after-cost terminal P&L is positive and product authority is current"
 
     return ExecutableOpportunityProof(
         intent_sha256=intent.intent_sha256,

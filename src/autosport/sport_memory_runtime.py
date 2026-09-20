@@ -17,7 +17,7 @@ class SportMemoryError(ValueError):
 
 def _text(name: str, value: object) -> str:
     if type(value) is not str or not value or value != value.strip() or "\x00" in value:
-        raise SportMemoryError(f"{name} must be a non-empty canonical string")
+        raise SportMemoryError(f"{name} must be canonical non-empty string")
     value.encode("utf-8")
     return value
 

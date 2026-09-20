@@ -11,6 +11,7 @@ from autosport.dataset_snapshot_lineage import (
     DatasetSnapshotUnprovenError,
     membership_manifest_sha256,
 )
+from autosport.monotonic_workspace_authority import MonotonicAuthorityRollbackError
 from autosport.scientific_registry import DatasetSnapshot, ScientificRegistry
 
 
@@ -24,6 +25,10 @@ def _members(*values: str) -> tuple[str, ...]:
 
 def _registry(tmp_path: Path) -> ScientificRegistry:
     return ScientificRegistry.initialize_pristine(tmp_path / "scientific-registry.json")
+
+
+def _machine_root(tmp_path: Path) -> Path:
+    return tmp_path.parent / f"{tmp_path.name}-lineage-machine-state"
 
 
 def _append_snapshot(
@@ -52,14 +57,31 @@ def _append_snapshot(
     )
 
 
-def _authority(tmp_path: Path, registry: ScientificRegistry) -> DatasetSnapshotLineageAuthority:
+def _authority(
+    tmp_path: Path,
+    registry: ScientificRegistry,
+) -> DatasetSnapshotLineageAuthority:
     return DatasetSnapshotLineageAuthority.initialize_pristine(
         tmp_path / "dataset-snapshot-lineage.json",
         registry,
+        authority_root=_machine_root(tmp_path),
     )
 
 
-def test_true_append_is_restart_safe_and_resolves_non_parent_ancestor(tmp_path: Path) -> None:
+def _restart(
+    authority: DatasetSnapshotLineageAuthority,
+    registry: ScientificRegistry,
+) -> DatasetSnapshotLineageAuthority:
+    return DatasetSnapshotLineageAuthority(
+        authority.path,
+        registry,
+        authority_root=authority.monotonic_authority.authority_root,
+    )
+
+
+def test_true_append_is_restart_safe_and_resolves_non_parent_ancestor(
+    tmp_path: Path,
+) -> None:
     registry = _registry(tmp_path)
     a = _members("a", "b")
     b = _members("a", "b", "c")
@@ -96,12 +118,14 @@ def test_true_append_is_restart_safe_and_resolves_non_parent_ancestor(tmp_path: 
     assert second.parent_proof_sha256 == root.proof_sha256
     assert third.parent_proof_sha256 == second.proof_sha256
     assert authority.proves_descendant(
-        descendant_snapshot_id="snapshot-c", ancestor_snapshot_id="snapshot-a"
+        descendant_snapshot_id="snapshot-c",
+        ancestor_snapshot_id="snapshot-a",
     )
 
-    restarted = DatasetSnapshotLineageAuthority(authority.path, registry)
+    restarted = _restart(authority, registry)
     resolved = restarted.require_descendant(
-        descendant_snapshot_id="snapshot-c", ancestor_snapshot_id="snapshot-a"
+        descendant_snapshot_id="snapshot-c",
+        ancestor_snapshot_id="snapshot-a",
     )
     assert resolved.proof_sha256 == third.proof_sha256
     assert restarted.register(
@@ -136,7 +160,10 @@ def test_rewrite_delete_or_reorder_cannot_prove_append_only_ancestry(
     authority = _authority(tmp_path, registry)
     authority.register(snapshot_id="parent", member_sha256=parent_members)
 
-    with pytest.raises(DatasetSnapshotUnprovenError, match="preserve the parent prefix"):
+    with pytest.raises(
+        DatasetSnapshotUnprovenError,
+        match="preserve the parent prefix",
+    ):
         authority.register(
             snapshot_id="child",
             member_sha256=child_members,
@@ -144,7 +171,9 @@ def test_rewrite_delete_or_reorder_cannot_prove_append_only_ancestry(
         )
 
 
-def test_same_source_license_and_later_cutoff_do_not_replace_membership_proof(tmp_path: Path) -> None:
+def test_same_source_license_and_later_cutoff_do_not_replace_membership_proof(
+    tmp_path: Path,
+) -> None:
     registry = _registry(tmp_path)
     parent_members = _members("a", "b", "c")
     rewritten_members = _members("x", "y", "z")
@@ -167,6 +196,35 @@ def test_same_source_license_and_later_cutoff_do_not_replace_membership_proof(tm
         )
 
 
+def test_caller_prefix_cannot_hide_unrelated_registry_manifest(
+    tmp_path: Path,
+) -> None:
+    registry = _registry(tmp_path)
+    parent_members = _members("a", "b")
+    claimed_child_members = _members("a", "b", "c")
+    unrelated_manifest_members = _members("x", "y", "z")
+    _append_snapshot(registry, snapshot_id="parent", members=parent_members)
+    _append_snapshot(
+        registry,
+        snapshot_id="unrelated",
+        members=unrelated_manifest_members,
+        cutoff="2026-09-02T00:00:00Z",
+        available_at="2026-09-02T00:01:00Z",
+    )
+    authority = _authority(tmp_path, registry)
+    authority.register(snapshot_id="parent", member_sha256=parent_members)
+
+    with pytest.raises(
+        DatasetSnapshotUnprovenError,
+        match="canonical typed membership",
+    ):
+        authority.register(
+            snapshot_id="unrelated",
+            member_sha256=claimed_child_members,
+            parent_snapshot_id="parent",
+        )
+
+
 def test_legacy_or_untyped_manifest_stays_unproven(tmp_path: Path) -> None:
     registry = _registry(tmp_path)
     members = _members("a", "b")
@@ -177,11 +235,16 @@ def test_legacy_or_untyped_manifest_stays_unproven(tmp_path: Path) -> None:
     )
     authority = _authority(tmp_path, registry)
 
-    with pytest.raises(DatasetSnapshotUnprovenError, match="canonical typed membership"):
+    with pytest.raises(
+        DatasetSnapshotUnprovenError,
+        match="canonical typed membership",
+    ):
         authority.register(snapshot_id="legacy", member_sha256=members)
 
 
-def test_parent_must_be_current_tip_so_branch_substitution_fails(tmp_path: Path) -> None:
+def test_parent_must_be_current_tip_so_branch_substitution_fails(
+    tmp_path: Path,
+) -> None:
     registry = _registry(tmp_path)
     root_members = _members("a")
     child_members = _members("a", "b")
@@ -204,10 +267,15 @@ def test_parent_must_be_current_tip_so_branch_substitution_fails(tmp_path: Path)
     authority = _authority(tmp_path, registry)
     authority.register(snapshot_id="root", member_sha256=root_members)
     authority.register(
-        snapshot_id="child", member_sha256=child_members, parent_snapshot_id="root"
+        snapshot_id="child",
+        member_sha256=child_members,
+        parent_snapshot_id="root",
     )
 
-    with pytest.raises(DatasetSnapshotUnprovenError, match="exact current tip"):
+    with pytest.raises(
+        DatasetSnapshotUnprovenError,
+        match="exact current tip",
+    ):
         authority.register(
             snapshot_id="branch",
             member_sha256=branch_members,
@@ -242,8 +310,16 @@ def test_source_or_license_identity_cannot_cross_lineages(tmp_path: Path) -> Non
 @pytest.mark.parametrize(
     ("cutoff", "available_at", "match"),
     [
-        ("2026-08-31T23:59:59Z", "2026-09-02T00:01:00Z", "cutoff moved backwards"),
-        ("2026-09-02T00:00:00Z", "2026-08-31T23:59:59Z", "availability moved backwards"),
+        (
+            "2026-08-31T23:59:59Z",
+            "2026-09-02T00:01:00Z",
+            "cutoff moved backwards",
+        ),
+        (
+            "2026-09-02T00:00:00Z",
+            "2026-08-31T23:59:59Z",
+            "availability moved backwards",
+        ),
     ],
 )
 def test_cutoff_and_availability_must_be_monotonic(
@@ -289,7 +365,9 @@ def test_tampered_parent_digest_fails_closed_on_restart(tmp_path: Path) -> None:
     authority = _authority(tmp_path, registry)
     authority.register(snapshot_id="parent", member_sha256=parent_members)
     authority.register(
-        snapshot_id="child", member_sha256=child_members, parent_snapshot_id="parent"
+        snapshot_id="child",
+        member_sha256=child_members,
+        parent_snapshot_id="parent",
     )
 
     state = json.loads(authority.path.read_text(encoding="utf-8"))
@@ -297,19 +375,23 @@ def test_tampered_parent_digest_fails_closed_on_restart(tmp_path: Path) -> None:
     authority.path.write_text(json.dumps(state), encoding="utf-8")
 
     with pytest.raises(ValueError, match="proof digest mismatch"):
-        DatasetSnapshotLineageAuthority(authority.path, registry)
+        _restart(authority, registry)
 
 
 def test_duplicate_json_keys_and_corrupt_state_fail_closed(tmp_path: Path) -> None:
     registry = _registry(tmp_path)
     path = tmp_path / "dataset-snapshot-lineage.json"
-    path.write_text('{"schema_version":1,"schema_version":1,"records":[]}', encoding="utf-8")
+    root = _machine_root(tmp_path)
+    path.write_text(
+        '{"schema_version":1,"schema_version":1,"records":[]}',
+        encoding="utf-8",
+    )
     with pytest.raises(ValueError, match="duplicate JSON object key"):
-        DatasetSnapshotLineageAuthority(path, registry)
+        DatasetSnapshotLineageAuthority(path, registry, authority_root=root)
 
     path.write_text('{"schema_version":1,"records":', encoding="utf-8")
     with pytest.raises(ValueError, match="valid UTF-8 JSON"):
-        DatasetSnapshotLineageAuthority(path, registry)
+        DatasetSnapshotLineageAuthority(path, registry, authority_root=root)
 
 
 def test_missing_parent_and_unproven_snapshot_fail_closed(tmp_path: Path) -> None:
@@ -319,11 +401,201 @@ def test_missing_parent_and_unproven_snapshot_fail_closed(tmp_path: Path) -> Non
     authority = _authority(tmp_path, registry)
 
     assert not authority.proves_descendant(
-        descendant_snapshot_id="child", ancestor_snapshot_id="missing"
+        descendant_snapshot_id="child",
+        ancestor_snapshot_id="missing",
     )
-    with pytest.raises(DatasetSnapshotUnprovenError, match="parent DatasetSnapshot"):
+    with pytest.raises(
+        DatasetSnapshotUnprovenError,
+        match="parent DatasetSnapshot",
+    ):
         authority.register(
             snapshot_id="child",
             member_sha256=child_members,
             parent_snapshot_id="missing",
         )
+
+
+def test_valid_old_prefix_restore_after_three_generations_is_rejected(
+    tmp_path: Path,
+) -> None:
+    registry = _registry(tmp_path)
+    root_members = _members("a")
+    child_members = _members("a", "b")
+    grandchild_members = _members("a", "b", "c")
+    _append_snapshot(registry, snapshot_id="root", members=root_members)
+    _append_snapshot(
+        registry,
+        snapshot_id="child",
+        members=child_members,
+        cutoff="2026-09-02T00:00:00Z",
+        available_at="2026-09-02T00:01:00Z",
+    )
+    _append_snapshot(
+        registry,
+        snapshot_id="grandchild",
+        members=grandchild_members,
+        cutoff="2026-09-03T00:00:00Z",
+        available_at="2026-09-03T00:01:00Z",
+    )
+    authority = _authority(tmp_path, registry)
+    authority.register(snapshot_id="root", member_sha256=root_members)
+    authority.register(
+        snapshot_id="child",
+        member_sha256=child_members,
+        parent_snapshot_id="root",
+    )
+    valid_old_prefix = authority.path.read_bytes()
+    authority.register(
+        snapshot_id="grandchild",
+        member_sha256=grandchild_members,
+        parent_snapshot_id="child",
+    )
+
+    authority.path.write_bytes(valid_old_prefix)
+
+    with pytest.raises(MonotonicAuthorityRollbackError):
+        _restart(authority, registry)
+
+
+def test_deleted_lineage_file_cannot_rebootstrap_after_committed_history(
+    tmp_path: Path,
+) -> None:
+    registry = _registry(tmp_path)
+    members = _members("a")
+    _append_snapshot(registry, snapshot_id="root", members=members)
+    authority = _authority(tmp_path, registry)
+    authority.register(snapshot_id="root", member_sha256=members)
+    authority.path.unlink()
+
+    with pytest.raises(MonotonicAuthorityRollbackError):
+        DatasetSnapshotLineageAuthority.initialize_pristine(
+            authority.path,
+            registry,
+            authority_root=authority.monotonic_authority.authority_root,
+        )
+
+
+def test_old_tip_restore_cannot_remint_a_conflicting_branch(tmp_path: Path) -> None:
+    registry = _registry(tmp_path)
+    root_members = _members("a")
+    child_members = _members("a", "b")
+    branch_members = _members("a", "c")
+    _append_snapshot(registry, snapshot_id="root", members=root_members)
+    _append_snapshot(
+        registry,
+        snapshot_id="child",
+        members=child_members,
+        cutoff="2026-09-02T00:00:00Z",
+        available_at="2026-09-02T00:01:00Z",
+    )
+    _append_snapshot(
+        registry,
+        snapshot_id="branch",
+        members=branch_members,
+        cutoff="2026-09-03T00:00:00Z",
+        available_at="2026-09-03T00:01:00Z",
+    )
+    authority = _authority(tmp_path, registry)
+    authority.register(snapshot_id="root", member_sha256=root_members)
+    root_only = authority.path.read_bytes()
+    authority.register(
+        snapshot_id="child",
+        member_sha256=child_members,
+        parent_snapshot_id="root",
+    )
+    authority.path.write_bytes(root_only)
+
+    with pytest.raises(MonotonicAuthorityRollbackError):
+        rolled_back = _restart(authority, registry)
+        rolled_back.register(
+            snapshot_id="branch",
+            member_sha256=branch_members,
+            parent_snapshot_id="root",
+        )
+
+
+def test_prepare_before_local_publish_is_aborted_and_normal_progress_resumes(
+    tmp_path: Path,
+) -> None:
+    registry = _registry(tmp_path)
+    root_members = _members("a")
+    child_members = _members("a", "b")
+    _append_snapshot(registry, snapshot_id="root", members=root_members)
+    _append_snapshot(
+        registry,
+        snapshot_id="child",
+        members=child_members,
+        cutoff="2026-09-02T00:00:00Z",
+        available_at="2026-09-02T00:01:00Z",
+    )
+    authority = _authority(tmp_path, registry)
+    authority.register(snapshot_id="root", member_sha256=root_members)
+    current_records = authority._read()
+    current_state = authority._state_sha256(current_records)
+
+    authority.monotonic_authority.prepare(
+        tx_id="simulated-crash-before-local-publish",
+        observed_state_sha256=current_state,
+        intended_state_sha256=_sha("not-published"),
+        semantic_binding_sha256=_sha("simulated-binding"),
+    )
+
+    restarted = _restart(authority, registry)
+    child = restarted.register(
+        snapshot_id="child",
+        member_sha256=child_members,
+        parent_snapshot_id="root",
+    )
+    assert child.snapshot_id == "child"
+    assert restarted.require_descendant(
+        descendant_snapshot_id="child",
+        ancestor_snapshot_id="root",
+    ) == child
+
+
+def test_local_publish_before_commit_is_recovered_with_exact_semantic_proof(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    registry = _registry(tmp_path)
+    root_members = _members("a")
+    child_members = _members("a", "b")
+    _append_snapshot(registry, snapshot_id="root", members=root_members)
+    _append_snapshot(
+        registry,
+        snapshot_id="child",
+        members=child_members,
+        cutoff="2026-09-02T00:00:00Z",
+        available_at="2026-09-02T00:01:00Z",
+    )
+    authority = _authority(tmp_path, registry)
+    authority.register(snapshot_id="root", member_sha256=root_members)
+
+    def _crash_instead_of_commit(**_: object) -> None:
+        raise RuntimeError("simulated crash before monotonic COMMIT")
+
+    monkeypatch.setattr(
+        authority.monotonic_authority,
+        "commit",
+        _crash_instead_of_commit,
+    )
+    with pytest.raises(RuntimeError, match="simulated crash"):
+        authority.register(
+            snapshot_id="child",
+            member_sha256=child_members,
+            parent_snapshot_id="root",
+        )
+
+    restarted = _restart(authority, registry)
+    child = restarted.require_descendant(
+        descendant_snapshot_id="child",
+        ancestor_snapshot_id="root",
+    )
+    assert child.snapshot_id == "child"
+    state = restarted._state_sha256(restarted._read())
+    assert (
+        restarted.monotonic_authority.recover(
+            observed_state_sha256=state
+        ).committed_state_sha256
+        == state
+    )

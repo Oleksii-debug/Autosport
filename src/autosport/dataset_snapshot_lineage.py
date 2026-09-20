@@ -2,12 +2,17 @@ from __future__ import annotations
 
 import hashlib
 import json
+import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Mapping
 
 from .integrity import atomic_write_json
+from .monotonic_workspace_authority import (
+    MonotonicAuthorityRecoveryRequiredError,
+    MonotonicWorkspaceAuthority,
+)
 from .scientific_registry import RegistryEntry, ScientificRegistry
 from .workspace_lock import WorkspaceEconomicLock
 
@@ -15,6 +20,9 @@ from .workspace_lock import WorkspaceEconomicLock
 _HEX = frozenset("0123456789abcdef")
 _MANIFEST_KIND = "autosport-dataset-membership-manifest-v1"
 _PROOF_KIND = "autosport-dataset-snapshot-lineage-proof-v1"
+_MONOTONIC_DOMAIN = "dataset-snapshot-lineage"
+_MONOTONIC_KEY = "append-only-ancestry-v1"
+_MONOTONIC_BINDING_KIND = "autosport-dataset-snapshot-lineage-state-v1"
 
 
 def _text(value: object, name: str) -> str:
@@ -37,7 +45,7 @@ def _instant(value: object, name: str) -> datetime:
         parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
     except ValueError as exc:
         raise ValueError(f"{name} must be an ISO-8601 timestamp") from exc
-    if parsed.tzinfo is None:
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
         raise ValueError(f"{name} must include a timezone")
     return parsed.astimezone(timezone.utc)
 
@@ -81,7 +89,7 @@ def _members(value: object, name: str = "member_sha256") -> tuple[str, ...]:
 def membership_manifest_sha256(member_sha256: tuple[str, ...]) -> str:
     """Hash one versioned ordered dataset membership manifest.
 
-    Existing/legacy DatasetSnapshot manifests are deliberately not guessed.  A snapshot
+    Existing/legacy DatasetSnapshot manifests are deliberately not guessed. A snapshot
     is ancestry-provable only when its immutable ``manifest_sha256`` equals this typed
     membership commitment.
     """
@@ -175,39 +183,148 @@ class ConflictingDatasetSnapshotLineageError(DatasetSnapshotLineageError):
 class DatasetSnapshotLineageAuthority:
     """Durable proof that DatasetSnapshot membership advances append-only.
 
-    ScientificRegistry remains the sole owner of DatasetSnapshot identity.  This
-    authority only binds a typed membership manifest to the exact immutable registry
+    ScientificRegistry remains the sole owner of DatasetSnapshot identity. This
+    authority binds a typed membership manifest to the exact immutable registry
     record and records one non-branching append-only ancestry chain per exact
-    source/license identity.
+    source/license identity. Its current state digest is independently fenced by the
+    shared MonotonicWorkspaceAuthority, so restoring/deleting only the workspace-local
+    lineage file cannot silently erase a later committed tip.
     """
 
     SCHEMA_VERSION = 1
 
-    def __init__(self, path: str | Path, registry: ScientificRegistry) -> None:
+    def __init__(
+        self,
+        path: str | Path,
+        registry: ScientificRegistry,
+        *,
+        authority_root: str | Path | None = None,
+        workspace_instance_id: str | None = None,
+    ) -> None:
         if not isinstance(registry, ScientificRegistry):
             raise ValueError("registry must be a ScientificRegistry")
-        self.path = Path(path)
+        self.path = Path(path).expanduser().resolve(strict=False)
         self.registry = registry
+        self.monotonic_authority = self._make_monotonic_authority(
+            self.path,
+            authority_root=authority_root,
+            workspace_instance_id=workspace_instance_id,
+        )
         try:
             self._read_and_verify()
         except FileNotFoundError as exc:
+            self._recover_monotonic(None)
             raise ValueError("dataset snapshot lineage authority is missing") from exc
+
+    @staticmethod
+    def _make_monotonic_authority(
+        path: Path,
+        *,
+        authority_root: str | Path | None,
+        workspace_instance_id: str | None,
+    ) -> MonotonicWorkspaceAuthority:
+        return MonotonicWorkspaceAuthority(
+            workspace=path.parent.resolve(strict=False),
+            workspace_instance_id=workspace_instance_id,
+            domain=_MONOTONIC_DOMAIN,
+            key=_MONOTONIC_KEY,
+            authority_root=authority_root,
+        )
 
     @classmethod
     def initialize_pristine(
         cls,
         path: str | Path,
         registry: ScientificRegistry,
+        *,
+        authority_root: str | Path | None = None,
+        workspace_instance_id: str | None = None,
     ) -> "DatasetSnapshotLineageAuthority":
-        target = Path(path)
+        if not isinstance(registry, ScientificRegistry):
+            raise ValueError("registry must be a ScientificRegistry")
+        target = Path(path).expanduser().resolve(strict=False)
         target.parent.mkdir(parents=True, exist_ok=True)
+        machine = cls._make_monotonic_authority(
+            target,
+            authority_root=authority_root,
+            workspace_instance_id=workspace_instance_id,
+        )
         with WorkspaceEconomicLock(target.parent):
             if not target.exists():
-                atomic_write_json(
-                    target,
-                    {"schema_version": cls.SCHEMA_VERSION, "records": []},
+                machine.recover(observed_state_sha256=None)
+                records: tuple[DatasetSnapshotLineageRecord, ...] = ()
+                intended = cls._state_sha256(records)
+                binding = cls._semantic_binding_sha256(intended)
+                machine.prepare(
+                    tx_id=cls._new_tx_id("bootstrap"),
+                    observed_state_sha256=None,
+                    intended_state_sha256=intended,
+                    semantic_binding_sha256=binding,
                 )
-        return cls(target, registry)
+                atomic_write_json(target, cls._state_payload(records))
+        return cls(
+            target,
+            registry,
+            authority_root=machine.authority_root,
+            workspace_instance_id=machine.workspace_instance_id,
+        )
+
+    @staticmethod
+    def _new_tx_id(label: str) -> str:
+        clean = _text(label, "transaction label")
+        return f"dataset-lineage-{clean}-{uuid.uuid4().hex}"
+
+    @staticmethod
+    def _state_payload(
+        records: tuple[DatasetSnapshotLineageRecord, ...],
+    ) -> dict[str, Any]:
+        return {
+            "schema_version": DatasetSnapshotLineageAuthority.SCHEMA_VERSION,
+            "records": [record.to_payload() for record in records],
+        }
+
+    @staticmethod
+    def _state_sha256(
+        records: tuple[DatasetSnapshotLineageRecord, ...],
+    ) -> str:
+        return _digest(DatasetSnapshotLineageAuthority._state_payload(records))
+
+    @staticmethod
+    def _semantic_binding_sha256(state_sha256: str) -> str:
+        return _digest(
+            {
+                "kind": _MONOTONIC_BINDING_KIND,
+                "schema_version": 1,
+                "state_sha256": _sha256(state_sha256, "state_sha256"),
+            }
+        )
+
+    def _recover_monotonic(
+        self,
+        records: tuple[DatasetSnapshotLineageRecord, ...] | None,
+    ) -> None:
+        observed = None if records is None else self._state_sha256(records)
+        try:
+            self.monotonic_authority.recover(observed_state_sha256=observed)
+            return
+        except MonotonicAuthorityRecoveryRequiredError:
+            if observed is None:
+                raise
+            history = self.monotonic_authority.read_history()
+            if not history:
+                raise
+            pending = history[-1]
+            expected_binding = self._semantic_binding_sha256(observed)
+            if (
+                pending.intended_state_sha256 != observed
+                or pending.semantic_binding_sha256 != expected_binding
+            ):
+                raise
+            self.monotonic_authority.recover(
+                observed_state_sha256=observed,
+                tx_id=pending.tx_id,
+                semantic_binding_sha256=expected_binding,
+            )
 
     @staticmethod
     def _record_from_raw(raw: object) -> DatasetSnapshotLineageRecord:
@@ -278,7 +395,9 @@ class DatasetSnapshotLineageAuthority:
         return records
 
     @staticmethod
-    def _validate_graph(records: tuple[DatasetSnapshotLineageRecord, ...]) -> None:
+    def _validate_graph(
+        records: tuple[DatasetSnapshotLineageRecord, ...],
+    ) -> None:
         by_id: dict[str, DatasetSnapshotLineageRecord] = {}
         roots: dict[tuple[str, str], str] = {}
         child_by_parent: dict[str, str] = {}
@@ -367,10 +486,17 @@ class DatasetSnapshotLineageAuthority:
                 f"DatasetSnapshot:{record.snapshot_id} no longer matches lineage proof"
             )
 
-    def _read_and_verify(self) -> tuple[DatasetSnapshotLineageRecord, ...]:
-        records = self._read()
+    def _verify_registry_records(
+        self,
+        records: tuple[DatasetSnapshotLineageRecord, ...],
+    ) -> None:
         for record in records:
             self._verify_registry_record(record)
+
+    def _read_and_verify(self) -> tuple[DatasetSnapshotLineageRecord, ...]:
+        records = self._read()
+        self._recover_monotonic(records)
+        self._verify_registry_records(records)
         return records
 
     @staticmethod
@@ -499,13 +625,32 @@ class DatasetSnapshotLineageAuthority:
                 ):
                     raise DatasetSnapshotUnprovenError("candidate availability moved backwards")
 
-            durable = {
-                "schema_version": self.SCHEMA_VERSION,
-                "records": [record.to_payload() for record in (*records, candidate)],
-            }
-            atomic_write_json(self.path, durable)
-            verified = self._read_and_verify()
-            return next(record for record in verified if record.snapshot_id == wanted_id)
+            updated = (*records, candidate)
+            observed = self._state_sha256(records)
+            intended = self._state_sha256(updated)
+            binding = self._semantic_binding_sha256(intended)
+            tx_id = self._new_tx_id(candidate.snapshot_id)
+            self.monotonic_authority.prepare(
+                tx_id=tx_id,
+                observed_state_sha256=observed,
+                intended_state_sha256=intended,
+                semantic_binding_sha256=binding,
+            )
+            atomic_write_json(self.path, self._state_payload(updated))
+
+            verified = self._read()
+            self._verify_registry_records(verified)
+            if self._state_sha256(verified) != intended:
+                raise DatasetSnapshotLineageError(
+                    "published dataset lineage state digest mismatch"
+                )
+            self.monotonic_authority.commit(
+                tx_id=tx_id,
+                observed_state_sha256=intended,
+                semantic_binding_sha256=binding,
+            )
+            final = self._read_and_verify()
+            return next(record for record in final if record.snapshot_id == wanted_id)
 
     def record(self, snapshot_id: str) -> DatasetSnapshotLineageRecord | None:
         wanted = _text(snapshot_id, "snapshot_id")
@@ -545,8 +690,8 @@ class DatasetSnapshotLineageAuthority:
             ancestor_snapshot_id=ancestor_snapshot_id,
         ):
             raise DatasetSnapshotUnprovenError(
-                f"DatasetSnapshot:{descendant_snapshot_id} is not a proven append-only descendant "
-                f"of DatasetSnapshot:{ancestor_snapshot_id}"
+                f"DatasetSnapshot:{descendant_snapshot_id} is not a proven append-only "
+                f"descendant of DatasetSnapshot:{ancestor_snapshot_id}"
             )
         record = self.record(descendant_snapshot_id)
         assert record is not None

@@ -204,29 +204,6 @@ class PaperCampaignRuntime(_base.PaperCampaignRuntime):
                 "AgentLoop checkpoint differs from active environment"
             )
 
-        if snapshot.phase in {AgentLoopPhase.BOOTSTRAP, AgentLoopPhase.CHECKPOINT}:
-            self.agent_loop.begin_observation(
-                observation,
-                environment_identity=self.environment.identity,
-                at=now,
-            )
-            for phase in (
-                AgentLoopPhase.OBSERVE,
-                AgentLoopPhase.ASSESS,
-                AgentLoopPhase.PLAN,
-                AgentLoopPhase.DECIDE,
-            ):
-                self.agent_loop.advance(expected=phase, at=now)
-        elif snapshot.phase is AgentLoopPhase.ACT_OR_ABSTAIN:
-            if snapshot.observation_id != observation.observation_id:
-                raise PaperCampaignRuntimeError(
-                    "abstention retry does not bind current observation"
-                )
-        else:
-            raise PaperCampaignRuntimeError(
-                "abstention requires BOOTSTRAP, CHECKPOINT, or retryable ACT_OR_ABSTAIN"
-            )
-
         bound_parameters = tuple(
             sorted((*parameters, (_ABSTENTION_REASON_PARAMETER, reason)))
         )
@@ -237,6 +214,37 @@ class PaperCampaignRuntime(_base.PaperCampaignRuntime):
             decided_at=decision_at,
             parameters=bound_parameters,
         )
+
+        exact_checkpoint_retry = (
+            snapshot.phase is AgentLoopPhase.CHECKPOINT
+            and snapshot.observation_id == observation.observation_id
+            and snapshot.action_id is not None
+            and snapshot.transition_id is None
+        )
+        if not exact_checkpoint_retry:
+            if snapshot.phase in {AgentLoopPhase.BOOTSTRAP, AgentLoopPhase.CHECKPOINT}:
+                self.agent_loop.begin_observation(
+                    observation,
+                    environment_identity=self.environment.identity,
+                    at=now,
+                )
+                for phase in (
+                    AgentLoopPhase.OBSERVE,
+                    AgentLoopPhase.ASSESS,
+                    AgentLoopPhase.PLAN,
+                    AgentLoopPhase.DECIDE,
+                ):
+                    self.agent_loop.advance(expected=phase, at=now)
+            elif snapshot.phase is AgentLoopPhase.ACT_OR_ABSTAIN:
+                if snapshot.observation_id != observation.observation_id:
+                    raise PaperCampaignRuntimeError(
+                        "abstention retry does not bind current observation"
+                    )
+            else:
+                raise PaperCampaignRuntimeError(
+                    "abstention requires BOOTSTRAP, CHECKPOINT, or retryable ACT_OR_ABSTAIN"
+                )
+
         try:
             commit = self.agent_loop.commit_abstention(
                 action,

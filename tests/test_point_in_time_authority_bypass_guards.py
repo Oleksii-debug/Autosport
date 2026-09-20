@@ -229,30 +229,20 @@ def test_preexisting_generic_positive_authority_blocks_collector_source_reservat
         _reserve_collector_source(reopened)
 
 
-def test_restart_fails_closed_if_parent_store_injects_generic_path_for_reserved_source(
+def test_parent_store_fails_immediately_on_generic_write_for_reserved_source(
     tmp_path: Path,
 ) -> None:
     store = _collector_store(tmp_path)
     _reserve_collector_source(store)
 
-    # Simulate a caller bypassing the collector subclass and mutating the shared
-    # generic authority store directly after the source family was reserved.
     parent = SourceRevisionAuthorityStore(tmp_path / "pit")
     policy = _generic_policy()
     witness = _generic_witness()
     revision = _generic_revision(policy, witness)
-    parent.register_policy(policy)
-    parent.register_witness(witness)
-    parent.register_revision(revision)
 
-    with pytest.raises(
-        SourceRevisionAuthorityError,
-        match="reserved collector source has alternate generic",
-    ):
-        CollectorPointInTimeSourceRevisionAuthorityStore(
-            tmp_path / "pit",
-            collector_store=CollectorDeltaStore(tmp_path / "collector.json"),
-            checkpoint_store=DesktopDeltaCheckpointStore(
-                tmp_path / "desktop-checkpoint.json"
-            ),
-        )
+    with pytest.raises(SourceRevisionAuthorityError, match="reserved collector source"):
+        parent.register_policy(policy)
+    with pytest.raises(SourceRevisionAuthorityError, match="reserved collector source"):
+        parent.register_witness(witness)
+    with pytest.raises(SourceRevisionAuthorityError, match="reserved collector source"):
+        parent.register_revision(revision)

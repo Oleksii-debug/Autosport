@@ -438,6 +438,7 @@ def test_policy_evaluation_requires_complete_observed_funnel_accounting():
             evaluation_bundle_sha256=SHA_A,
         )
 
+
 def test_decimal_evidence_and_report_identity_ignore_ambient_decimal_context():
     def build_at_precision(precision: int):
         with localcontext() as context:

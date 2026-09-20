@@ -8,6 +8,7 @@ from dataclasses import dataclass, replace
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Iterable
+from weakref import ref
 from urllib.parse import urlencode
 
 from .domain import MarketEvent
@@ -23,7 +24,7 @@ from .providers import CanonicalNormalizer, ProviderQuote
 TERMS_REFERENCE = "https://parlay-api.com/terms"
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True, slots=True, weakref_slot=True)
 class HistoricalSnapshotCapture:
     requested_at: str
     snapshot_at: str
@@ -205,6 +206,91 @@ def capture_historical_snapshot(
         output_path=str(output),
         evidence_path=str(evidence),
     )
+
+
+def _historical_snapshot_capture_fingerprint(
+    capture: HistoricalSnapshotCapture,
+) -> str:
+    payload = {
+        "requested_at": capture.requested_at,
+        "snapshot_at": capture.snapshot_at,
+        "captured_at": capture.captured_at,
+        "previous_snapshot_at": capture.previous_snapshot_at,
+        "next_snapshot_at": capture.next_snapshot_at,
+        "response_sha256": capture.response_sha256,
+        "market_sha256": capture.market_sha256,
+        "quote_count": capture.quote_count,
+        "snapshot_timestamp_fallback_count": capture.snapshot_timestamp_fallback_count,
+        "market_types": list(capture.market_types),
+        "bookmaker_keys": list(capture.bookmaker_keys),
+        "output_path": capture.output_path,
+        "evidence_path": capture.evidence_path,
+    }
+    canonical = json.dumps(
+        payload,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    )
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def _install_historical_snapshot_capture_authority() -> None:
+    """Make successful provider capture an in-process capability, not a dataclass claim."""
+
+    issued: dict[int, tuple[object, str]] = {}
+    raw_capture = capture_historical_snapshot
+
+    def authoritative_capture(
+        provider: ParlayApiTableTennisProvider,
+        *,
+        requested_at: str,
+        output_path: str | Path,
+        evidence_path: str | Path | None = None,
+    ) -> HistoricalSnapshotCapture:
+        capture = raw_capture(
+            provider,
+            requested_at=requested_at,
+            output_path=output_path,
+            evidence_path=evidence_path,
+        )
+        key = id(capture)
+
+        def forget(_weakref: object, *, capture_key: int = key) -> None:
+            issued.pop(capture_key, None)
+
+        issued[key] = (
+            ref(capture, forget),
+            _historical_snapshot_capture_fingerprint(capture),
+        )
+        return capture
+
+    def assert_historical_snapshot_capture_authoritative(
+        capture: HistoricalSnapshotCapture,
+    ) -> None:
+        if not isinstance(capture, HistoricalSnapshotCapture):
+            raise ProviderPayloadError(
+                "historical snapshot evidence type is not canonical"
+            )
+        record = issued.get(id(capture))
+        if record is None or record[0]() is not capture:
+            raise ProviderPayloadError(
+                "historical snapshot capture was not issued by canonical provider capture"
+            )
+        if record[1] != _historical_snapshot_capture_fingerprint(capture):
+            raise ProviderPayloadError(
+                "historical snapshot capture changed after canonical provider capture"
+            )
+
+    globals()["capture_historical_snapshot"] = authoritative_capture
+    globals()[
+        "assert_historical_snapshot_capture_authoritative"
+    ] = assert_historical_snapshot_capture_authoritative
+
+
+_install_historical_snapshot_capture_authority()
+del _install_historical_snapshot_capture_authority
 
 
 def _bind_quote_to_snapshot(

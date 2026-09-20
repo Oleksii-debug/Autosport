@@ -247,6 +247,34 @@ class CollectorRetentionCompactionTests(unittest.TestCase):
                 )
             self.assertEqual(collector.get(first.delta_id), first)
 
+    def test_retention_requires_product_owned_active_epoch_witness(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            collector = CollectorDeltaStore(Path(tmp) / "collector.sqlite")
+            first = make_delta(delta_id="d1", position=1)
+            terminal = make_delta(delta_id="d2", position=2)
+            next_epoch = make_delta(
+                delta_id="e2-d0",
+                position=0,
+                epoch="epoch-2",
+                sync_state=SyncState.EPOCH_CHANGED,
+            )
+            for delta in (first, terminal, next_epoch):
+                collector.append(delta)
+            desktop = DesktopDeltaCheckpointStore(Path(tmp) / "desktop.json")
+            acknowledge(desktop, first)
+            acknowledge(desktop, terminal)
+            manager = CollectorRetentionManager(collector)
+            with self.assertRaisesRegex(
+                CollectorRetentionError,
+                "no product-owned active stream epoch",
+            ):
+                manager.preview(
+                    source_id="source-x",
+                    stream_epoch="epoch-1",
+                    desktop_checkpoint=desktop,
+                )
+            self.assertEqual(manager.compaction_journal(), ())
+
     def test_current_epoch_is_product_resolved_and_cannot_be_faked(self):
         with tempfile.TemporaryDirectory() as tmp:
             collector, desktop, first, terminal, next_epoch = self.make_history(tmp)
@@ -307,6 +335,23 @@ class CollectorRetentionCompactionTests(unittest.TestCase):
                 CollectorRetentionError,
                 "current collector stream epoch cannot be compacted",
             ):
+                manager.compact(
+                    old_plan,
+                    desktop_checkpoint=desktop,
+                    compacted_at="2026-01-02T00:00:00+00:00",
+                )
+            self.assertEqual(collector.get(first.delta_id), first)
+            self.assertEqual(manager.compaction_journal(), ())
+
+            # Even if the current epoch returns to the same value as preview, the
+            # monotonic generation makes the ABA transition stale.
+            generation = collector._record_runtime_stream_epoch_from_service(
+                source_id="source-x",
+                stream_epoch="epoch-2",
+                activated_at="2026-01-01T00:00:11+00:00",
+            )
+            self.assertEqual(generation, 4)
+            with self.assertRaises(CollectorRetentionPlanStaleError):
                 manager.compact(
                     old_plan,
                     desktop_checkpoint=desktop,

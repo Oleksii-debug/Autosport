@@ -156,6 +156,67 @@ class VOCProductionOrchestratorTests(unittest.TestCase):
         )
         self.assertEqual(calls, {"baseline": 1, "challenger": 1})
 
+    def test_restart_reconciles_receipt_after_authority_was_published(self) -> None:
+        orchestrator = VOCProductionOrchestrator(
+            self.router,
+            self.receipt_path,
+        )
+        calls = 0
+
+        def baseline_invoke() -> VOCBackendResult:
+            nonlocal calls
+            calls += 1
+            return self.result(SHA_A, "LOCAL_ACTION", "0.1")
+
+        original_persist = orchestrator._persist_map
+        persist_calls = 0
+
+        def interrupt_final_receipt(values: object) -> None:
+            nonlocal persist_calls
+            persist_calls += 1
+            if persist_calls == 3:
+                raise RuntimeError("receipt publication interrupted")
+            original_persist(values)  # type: ignore[arg-type]
+
+        with (
+            patch.object(
+                orchestrator,
+                "_persist_map",
+                side_effect=interrupt_final_receipt,
+            ),
+            patch(
+                "autosport.model_compute_router._authority_now",
+                return_value=T3,
+            ),
+            self.assertRaisesRegex(RuntimeError, "receipt publication interrupted"),
+        ):
+            orchestrator.run_role(
+                request_id="request-1",
+                role="baseline",
+                invoke=baseline_invoke,
+            )
+
+        self.assertEqual(calls, 1)
+        published = self.router.get_voc_shadow_execution("request-1", "baseline")
+        self.assertIsNotNone(published)
+        receipts = orchestrator._load()
+        self.assertEqual(receipts[("request-1", "baseline")]["state"], "SUCCEEDED")
+
+        reopened = ModelComputeRouterStore(self.router_path)
+        restarted = VOCProductionOrchestrator(reopened, self.receipt_path)
+        recovered = restarted.run_role(
+            request_id="request-1",
+            role="baseline",
+            invoke=baseline_invoke,
+        )
+
+        self.assertEqual(calls, 1)
+        self.assertEqual(recovered, published)
+        receipts = restarted._load()
+        receipt = receipts[("request-1", "baseline")]
+        self.assertEqual(receipt["state"], "PUBLISHED")
+        self.assertEqual(receipt["authority_sha256"], recovered["authority_sha256"])
+
     def test_uncertain_backend_failure_is_durable_and_never_blindly_resent(self) -> None:
         orchestrator = VOCProductionOrchestrator(
             self.router,

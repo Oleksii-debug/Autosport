@@ -143,6 +143,98 @@ def test_successor_retry_recovers_crash_after_version_before_head(
         fixture.doCleanups()
 
 
+def test_successor_retry_rotates_aborted_prepare_before_version_publish(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fixture, authority = _fixture_authority()
+    try:
+        workspace, authority_root = _paths(tmp_path)
+        first_cost = _cost(authority, amount=Decimal("2"))
+        first = derive_campaign_economics(
+            campaign=authority,
+            costs=(first_cost,),
+            as_of=T1,
+        )
+        replacement = _cost(
+            authority,
+            source_digit="c",
+            amount=Decimal("4"),
+            available_at=T2,
+            supersedes=(first_cost.cost_evidence_id,),
+        )
+        second = derive_campaign_economics(
+            campaign=authority,
+            costs=(replacement,),
+            as_of=T2,
+            previous=first,
+        )
+        store = CampaignEconomicEvidenceStore(
+            workspace,
+            campaign=authority,
+            authority_root=authority_root,
+        )
+        store.append(first)
+
+        original_exclusive_create = economic_store_module._exclusive_create
+        crashed = False
+
+        def crash_before_successor_version(path: Path, raw: bytes) -> None:
+            nonlocal crashed
+            if not crashed and path.name == f"{second.version_id}.json":
+                crashed = True
+                raise RuntimeError("injected crash after authority prepare")
+            original_exclusive_create(path, raw)
+
+        monkeypatch.setattr(
+            economic_store_module,
+            "_exclusive_create",
+            crash_before_successor_version,
+        )
+        with pytest.raises(RuntimeError, match="injected crash"):
+            store.append(second)
+        monkeypatch.setattr(
+            economic_store_module,
+            "_exclusive_create",
+            original_exclusive_create,
+        )
+
+        pending = store._authority.read_history()[-1]
+        assert pending.phase.value == "PREPARE"
+        assert pending.intended_state_sha256 == second.version_id
+        aborted_tx_id = pending.tx_id
+
+        restarted = CampaignEconomicEvidenceStore(
+            workspace,
+            campaign=authority,
+            authority_root=authority_root,
+        )
+        forged = replace(second, known_cost_total=Decimal("999"))
+        with pytest.raises(CampaignEconomicStoreError, match="forged"):
+            restarted.append(forged)
+
+        assert restarted.append(second) == second.version_id
+        assert restarted.latest() == second
+        assert restarted.verify_chain() == (first, second)
+
+        target_history = [
+            record
+            for record in restarted._authority.read_history()
+            if record.intended_state_sha256 == second.version_id
+        ]
+        committed_tx_ids = {
+            record.tx_id for record in target_history if record.phase.value == "COMMIT"
+        }
+        aborted_tx_ids = {
+            record.tx_id for record in target_history if record.phase.value == "ABORT"
+        }
+        assert aborted_tx_id in aborted_tx_ids
+        assert len(committed_tx_ids) == 1
+        assert aborted_tx_ids.isdisjoint(committed_tx_ids)
+        assert len({record.tx_id for record in target_history}) == 2
+    finally:
+        fixture.doCleanups()
+
+
 def test_store_rederives_and_rejects_forged_complete_version(tmp_path: Path) -> None:
     fixture, authority = _fixture_authority()
     try:

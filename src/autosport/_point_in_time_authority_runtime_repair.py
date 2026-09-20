@@ -10,8 +10,11 @@ created while the workspace was pristine can safely observe a later valid bindin
 
 from __future__ import annotations
 
+import importlib.abc
+import importlib.machinery
 import os
 from pathlib import Path
+import sys
 
 from . import point_in_time_evidence as evidence
 from .dataset_snapshot_lineage import DatasetSnapshotLineageAuthority
@@ -133,12 +136,70 @@ def _load_with_fresh_authority(self: evidence.HoldoutConsumptionLedger) -> None:
     _ORIGINAL_LOAD(self)
 
 
+def _install_runtime_guards() -> None:
+    """Reinstall every authority-bearing point-in-time patch on the live module.
+
+    ``importlib.reload`` re-executes a submodule without re-executing package
+    ``__init__`` or already-cached guard modules.  Without an explicit reinstall, a
+    reload of ``point_in_time_evidence`` can therefore resurrect its legacy
+    caller-constructible feature bind.  Keep the reload target fail-closed by restoring
+    the canonical provenance classes and exact capability fences immediately after
+    the underlying source module executes.
+    """
+
+    from . import _point_in_time_feature_provenance_guard as provenance_guard
+
+    evidence.FeatureArtifactProvenance = provenance_guard.FeatureArtifactProvenance
+    evidence.FeatureAvailabilityEvidence = provenance_guard.FeatureAvailabilityEvidence
+    evidence.PointInTimeFeatureAuthority.bind = staticmethod(
+        _bind_exact_lineage_authority
+    )
+    evidence.HoldoutConsumptionLedger._load = _load_with_fresh_authority
+    evidence._fsync_directory = _fsync_directory_fail_closed
+
+
+class _PointInTimeReloadLoader(importlib.abc.Loader):
+    """Wrap only reload execution of the point-in-time authority module."""
+
+    def __init__(self, wrapped: importlib.abc.Loader) -> None:
+        self._wrapped = wrapped
+
+    def create_module(self, spec):
+        create = getattr(self._wrapped, "create_module", None)
+        if create is None:
+            return None
+        return create(spec)
+
+    def exec_module(self, module) -> None:
+        self._wrapped.exec_module(module)
+        if module is evidence:
+            _install_runtime_guards()
+
+
+class _PointInTimeReloadFinder(importlib.abc.MetaPathFinder):
+    """Intercept only explicit reload of the already-loaded authority submodule."""
+
+    def find_spec(self, fullname, path, target=None):
+        if fullname != evidence.__name__ or target is not evidence:
+            return None
+        spec = importlib.machinery.PathFinder.find_spec(fullname, path)
+        if spec is None or spec.loader is None:
+            return spec
+        spec.loader = _PointInTimeReloadLoader(spec.loader)
+        return spec
+
+
+def _install_reload_finder() -> None:
+    if any(isinstance(finder, _PointInTimeReloadFinder) for finder in sys.meta_path):
+        return
+    sys.meta_path.insert(0, _PointInTimeReloadFinder())
+
+
 # The provenance guard is imported first by autosport.__init__, so wrapping here
 # preserves all of its canonical DatasetSnapshot/FeatureSet/provenance/publication
 # checks while fencing the capabilities before they can dispatch to caller code.
-evidence.PointInTimeFeatureAuthority.bind = staticmethod(_bind_exact_lineage_authority)
-evidence.HoldoutConsumptionLedger._load = _load_with_fresh_authority
-evidence._fsync_directory = _fsync_directory_fail_closed
+_install_runtime_guards()
+_install_reload_finder()
 
 
 __all__: list[str] = []

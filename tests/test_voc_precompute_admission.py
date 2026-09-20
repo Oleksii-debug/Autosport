@@ -5,6 +5,7 @@ import json
 import tempfile
 import unittest
 from decimal import Decimal
+from unittest.mock import patch
 from pathlib import Path
 
 from autosport.decision_ledger import DecisionRecord, JsonlDecisionLedger
@@ -121,21 +122,25 @@ class VOCPrecomputeAdmissionTests(unittest.TestCase):
             policy_version=1,
             cloud_enabled=False,
         )
-        self.router.route(
-            request,
-            self.candidates,
-            policy,
-            as_of=T_DECISION,
-            voc_precompute_admission={
-                "admission_id": "admission-1",
-                "research_protocol_id": "protocol-1",
-                "cohort_id": "cohort-1",
-                "baseline_candidate_id": "baseline",
-                "challenger_candidate_id": "challenger",
-                "sport_id": "table_tennis",
-                "league_id": "league-voc",
-            },
-        )
+        with patch(
+            "autosport.model_compute_router._authority_now",
+            return_value=T_DECISION,
+        ):
+            self.router.route(
+                request,
+                self.candidates,
+                policy,
+                as_of=T_DECISION,
+                voc_precompute_admission={
+                    "admission_id": "admission-1",
+                    "research_protocol_id": "protocol-1",
+                    "cohort_id": "cohort-1",
+                    "baseline_candidate_id": "baseline",
+                    "challenger_candidate_id": "challenger",
+                    "sport_id": "table_tennis",
+                    "league_id": "league-voc",
+                },
+            )
         self.request = request
         self.policy = policy
 
@@ -183,6 +188,68 @@ class VOCPrecomputeAdmissionTests(unittest.TestCase):
                     "sport_id": "table_tennis",
                     "league_id": "league-voc",
                 },
+            )
+
+    def test_shadow_execution_authority_is_append_only_and_restart_safe(self) -> None:
+        with patch(
+            "autosport.model_compute_router._authority_now",
+            side_effect=[
+                "2026-09-20T00:00:05Z",
+                "2026-09-20T00:00:06Z",
+            ],
+        ):
+            baseline = self.router.record_voc_shadow_execution(
+                request_id="request-1",
+                role="baseline",
+                output_sha256=SHA_A,
+                action="BASE",
+                abstained=False,
+                completed_at="2026-09-20T00:00:05Z",
+                available_at="2026-09-20T00:00:05Z",
+                actual_cost=Decimal("0.10"),
+                evidence_sha256=SHA_A,
+            )
+            challenger = self.router.record_voc_shadow_execution(
+                request_id="request-1",
+                role="challenger",
+                output_sha256=SHA_B,
+                action="CLOUD",
+                abstained=False,
+                completed_at="2026-09-20T00:00:06Z",
+                available_at="2026-09-20T00:00:06Z",
+                actual_cost=Decimal("0.20"),
+                evidence_sha256=SHA_B,
+            )
+        self.assertEqual(baseline["authority_sequence"], 1)
+        self.assertEqual(challenger["authority_sequence"], 2)
+        self.assertEqual(
+            challenger["previous_authority_sha256"],
+            baseline["authority_sha256"],
+        )
+
+        reopened = ModelComputeRouterStore(self.router_path)
+        self.assertEqual(
+            reopened.get_voc_shadow_execution("request-1", "baseline"),
+            baseline,
+        )
+        self.assertEqual(
+            reopened.get_voc_shadow_execution("request-1", "challenger"),
+            challenger,
+        )
+        with self.assertRaisesRegex(
+            ModelComputeRouterError,
+            "historical/restarted requests cannot be backfilled",
+        ):
+            reopened.record_voc_shadow_execution(
+                request_id="request-1",
+                role="baseline",
+                output_sha256=SHA_A,
+                action="BASE",
+                abstained=False,
+                completed_at="2026-09-20T00:00:05Z",
+                available_at="2026-09-20T00:00:05Z",
+                actual_cost=Decimal("0.10"),
+                evidence_sha256=SHA_A,
             )
 
     def _admit(self) -> str:

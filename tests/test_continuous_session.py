@@ -509,15 +509,22 @@ class ContinuousSessionCoordinatorTests(unittest.TestCase):
             book.save(root / "paper_book.json")
 
             ledger = JsonlDecisionLedger(root / "decisions.jsonl")
+            decision_action = "OPEN_PAPER_VALUE_TICKET"
             decision = DecisionRecord(
                 replay_run_id="paper-learning-run",
                 agent="paper-learning-fixture",
                 observed_ts="2026-09-19T21:19:00+00:00",
-                action="OPEN_PAPER_VALUE_TICKET",
+                action=decision_action,
                 payload={
                     "ticket_id": ticket.ticket_id,
                     "quote_key": leg.quote_key,
                     "stake": str(ticket.stake),
+                    "agent_action_binding": {
+                        "schema": "autosport.paper_settlement_decision_action_binding",
+                        "schema_version": 1,
+                        "decision_action": decision_action,
+                        "agent_action_type": "PAPER_PROPOSAL",
+                    },
                 },
                 context_hash="paper-learning-context",
                 decision_id="paper-learning-decision-1",

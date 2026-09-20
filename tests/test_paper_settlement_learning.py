@@ -40,6 +40,7 @@ def _fixture(
     placed_at: str = "2026-09-19T21:19:10+00:00",
     effect_state: ExternalEffectState = ExternalEffectState.PAPER_ONLY,
     bind_action_to_decision: bool = True,
+    decision_agent_action_type: str | None = None,
 ):
     goal = EconomicGoalContract(
         goal_id="bridge-goal",
@@ -60,9 +61,16 @@ def _fixture(
 
     ledger = JsonlDecisionLedger(root / "decisions.jsonl")
     quote_keys = tuple(sorted(leg.quote_key for leg in legs))
+    decision_action = "OPEN_PAPER_TICKET"
     payload = {
         "ticket_id": ticket.ticket_id,
         "stake": str(ticket.stake),
+        "agent_action_binding": {
+            "schema": "autosport.paper_settlement_decision_action_binding",
+            "schema_version": 1,
+            "decision_action": decision_action,
+            "agent_action_type": decision_agent_action_type or action_type,
+        },
     }
     if len(quote_keys) == 1:
         payload["quote_key"] = quote_keys[0]
@@ -72,7 +80,7 @@ def _fixture(
         replay_run_id="bridge-run",
         agent="bridge-fixture",
         observed_ts="2026-09-19T21:19:00+00:00",
-        action="OPEN_PAPER_TICKET",
+        action=decision_action,
         payload=payload,
         context_hash="bridge-context",
         decision_id="bridge-decision",
@@ -973,6 +981,55 @@ class PaperSettlementLearningBridgeTests(unittest.TestCase):
             with self.assertRaisesRegex(
                 PaperSettlementLearningBridgeError,
                 "AgentLoop action is not bound to supplied economic decision and PaperTicket",
+            ):
+                bridge.bind_ticket(
+                    ticket_id=ticket.ticket_id,
+                    decision_id=decision.decision_id,
+                    environment=environment,
+                    observation=observation,
+                    action=action,
+                    baseline_checkpoint=baseline,
+                )
+            self.assertIs(runtime.snapshot().phase, AgentLoopPhase.WAIT_OUTCOME)
+            self.assertIsNone(runtime.snapshot().transition_id)
+            durable = json.loads(
+                (root / "paper_learning_bridge.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(durable["bindings"], {})
+
+
+    def test_different_non_abstain_action_type_with_same_ids_cannot_bind_reward(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            leg = TicketLeg(
+                event_id="event-1",
+                market_id="winner",
+                selection_id="home",
+                locked_odds=Decimal("2.00"),
+                sport="table_tennis",
+            )
+            (
+                _goal,
+                _risk,
+                ticket,
+                decision,
+                environment,
+                baseline,
+                runtime,
+                observation,
+                action,
+                bridge,
+            ) = _fixture(
+                root,
+                legs=(leg,),
+                action_type="HEDGE_PROPOSAL",
+                decision_agent_action_type="PAPER_PROPOSAL",
+            )
+            self.assertEqual(dict(action.parameters)["economic_decision_id"], decision.decision_id)
+            self.assertEqual(dict(action.parameters)["paper_ticket_id"], ticket.ticket_id)
+            with self.assertRaisesRegex(
+                PaperSettlementLearningBridgeError,
+                "economic decision action is not semantically bound to AgentLoop action_type",
             ):
                 bridge.bind_ticket(
                     ticket_id=ticket.ticket_id,

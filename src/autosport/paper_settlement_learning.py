@@ -7,6 +7,7 @@ minimum decision/ticket binding plus learner outbox/ack needed for crash recover
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 import hashlib
 import json
 import os
@@ -49,6 +50,12 @@ _HEX: Final = frozenset("0123456789abcdef")
 _ABSTAIN: Final = frozenset({"WAIT", "NO_BET", "ABSTAIN"})
 _ACTION_DECISION_ID_PARAMETER: Final = "economic_decision_id"
 _ACTION_TICKET_ID_PARAMETER: Final = "paper_ticket_id"
+_ACTION_SEMANTIC_BINDING_PAYLOAD_KEY: Final = "agent_action_binding"
+_ACTION_SEMANTIC_BINDING_SCHEMA: Final = "autosport.paper_settlement_decision_action_binding"
+_ACTION_SEMANTIC_BINDING_VERSION: Final = 1
+_ACTION_SEMANTIC_BINDING_FIELDS: Final = frozenset(
+    {"schema", "schema_version", "decision_action", "agent_action_type"}
+)
 
 
 class PaperSettlementLearningBridgeError(RuntimeError):
@@ -421,6 +428,32 @@ class PaperSettlementLearningBridge:
     def _decision_matches(record: DecisionRecord, ticket: PaperTicket, action: Action) -> None:
         payload = record.payload
         action_parameters = dict(action.parameters)
+        semantic_binding = payload.get(_ACTION_SEMANTIC_BINDING_PAYLOAD_KEY)
+        if (
+            not isinstance(semantic_binding, Mapping)
+            or set(semantic_binding) != _ACTION_SEMANTIC_BINDING_FIELDS
+            or semantic_binding.get("schema") != _ACTION_SEMANTIC_BINDING_SCHEMA
+            or semantic_binding.get("schema_version") != _ACTION_SEMANTIC_BINDING_VERSION
+        ):
+            raise PaperSettlementLearningBridgeError(
+                "economic decision lacks canonical AgentLoop action semantic binding"
+            )
+        decision_action = _text(record.action, "economic decision action")
+        bound_decision_action = _text(
+            semantic_binding.get("decision_action"),
+            "bound economic decision action",
+        )
+        bound_agent_action_type = _text(
+            semantic_binding.get("agent_action_type"),
+            "bound AgentLoop action_type",
+        )
+        if (
+            bound_decision_action != decision_action
+            or bound_agent_action_type != action.action_type
+        ):
+            raise PaperSettlementLearningBridgeError(
+                "economic decision action is not semantically bound to AgentLoop action_type"
+            )
         if (
             action_parameters.get(_ACTION_DECISION_ID_PARAMETER) != record.decision_id
             or action_parameters.get(_ACTION_TICKET_ID_PARAMETER) != ticket.ticket_id

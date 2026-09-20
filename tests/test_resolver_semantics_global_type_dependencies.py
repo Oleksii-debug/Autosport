@@ -147,6 +147,9 @@ class _InheritedGlobalResolverBase:
     def resolve_inherited(cls, record: EventLifecycleRecord, *, as_of: str):
         return cls._semantic_helper(record, as_of=as_of)
 
+    def resolve_instance(self, record: EventLifecycleRecord, *, as_of: str):
+        return self._semantic_helper(record, as_of=as_of)
+
 
 class _InheritedGlobalResolverChild(_InheritedGlobalResolverBase):
     pass
@@ -169,6 +172,13 @@ class _InheritedClassHelperProductSource(_ProductSource):
         return _InheritedGlobalResolverChild.resolve_inherited(record, as_of=as_of)
 
 
+class _InheritedInstanceHelperProductSource(_ProductSource):
+    settlement_resolver_implementation_id = "provider-a-inherited-global-instance-helper-v1"
+
+    def resolve(self, record: EventLifecycleRecord, *, as_of: str):
+        return _InheritedGlobalResolverChild().resolve_instance(record, as_of=as_of)
+
+
 def test_inherited_global_classmethod_binds_concrete_runtime_owner_and_restart_fails(
     tmp_path,
 ) -> None:
@@ -188,6 +198,45 @@ def test_inherited_global_classmethod_binds_concrete_runtime_owner_and_restart_f
             _replacement_inherited_helper
         )
         rebound_source = _InheritedClassHelperProductSource()
+        rebound_identity = _settlement_authority_identity(
+            source=rebound_source,
+            source_id=rebound_source.source_id,
+            outcome_authority=rebound_source,
+        )
+        assert rebound_identity != expected_identity
+        with pytest.raises(
+            ProductCompositionError,
+            match="settlement authority identity conflicts with durable product composition",
+        ):
+            build_autonomous_product_runtime(
+                workspace=tmp_path,
+                source=rebound_source,
+                clock=lambda: NOW,
+                outcome_authority=rebound_source,
+            )
+    finally:
+        delattr(_InheritedGlobalResolverChild, "_semantic_helper")
+
+
+def test_inherited_global_ordinary_method_binds_concrete_runtime_owner_and_restart_fails(
+    tmp_path,
+) -> None:
+    source = _InheritedInstanceHelperProductSource()
+    runtime = build_autonomous_product_runtime(
+        workspace=tmp_path,
+        source=source,
+        clock=lambda: NOW,
+        outcome_authority=source,
+    )
+    expected_identity = runtime.manifest.settlement_authority_identity
+    runtime.close()
+
+    assert "_semantic_helper" not in vars(_InheritedGlobalResolverChild)
+    try:
+        _InheritedGlobalResolverChild._semantic_helper = staticmethod(
+            _replacement_inherited_helper
+        )
+        rebound_source = _InheritedInstanceHelperProductSource()
         rebound_identity = _settlement_authority_identity(
             source=rebound_source,
             source_id=rebound_source.source_id,

@@ -18,10 +18,10 @@ from .campaign_cost_evidence import (
     CostUnit,
     REQUIRED_COST_CLASSES,
 )
-from .opportunity import PortfolioPlan
+from .portfolio_plan import OpportunityIntent
 
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _CURRENCY_RE = re.compile(r"^[A-Z]{3}$")
 
@@ -40,6 +40,18 @@ def _utc(value: datetime, field: str) -> None:
         raise ProspectiveApplicableCostError(f"{field} must be timezone-aware")
     if value.utcoffset() != timezone.utc.utcoffset(value):
         raise ProspectiveApplicableCostError(f"{field} must be UTC")
+
+
+def _iso_datetime(value: str, field: str) -> datetime:
+    if type(value) is not str or not value or value != value.strip():
+        raise ProspectiveApplicableCostError(f"{field} must be canonical ISO-8601 text")
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise ProspectiveApplicableCostError(f"{field} must be valid ISO-8601") from exc
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        raise ProspectiveApplicableCostError(f"{field} must be timezone-aware")
+    return parsed.astimezone(timezone.utc)
 
 
 def _sha256(value: str, field: str) -> None:
@@ -73,9 +85,15 @@ def _digest(payload: Any) -> str:
 
 @dataclass(frozen=True, slots=True)
 class CostApplicabilityEvidence:
-    """Product-owned authority saying whether one cost class applies to one plan."""
+    """Intent-bound candidate applicability evidence.
 
-    plan_id: str
+    The resolver validates this object but deliberately does not treat a caller-created
+    instance as product-owned positive authority.  That prevents a forged ``False``
+    applicability claim from laundering a missing economic cost into COMPLETE coverage.
+    """
+
+    intent_sha256: str
+    opportunity_id: str
     cost_class: CostClass
     applicable: bool
     basis: CostBasis
@@ -85,7 +103,8 @@ class CostApplicabilityEvidence:
     valid_until: datetime
 
     def __post_init__(self) -> None:
-        _sha256(self.plan_id, "plan_id")
+        _sha256(self.intent_sha256, "intent_sha256")
+        _sha256(self.opportunity_id, "opportunity_id")
         if type(self.applicable) is not bool:
             raise ProspectiveApplicableCostError("applicable must be a bool")
         if not isinstance(self.cost_class, CostClass):
@@ -116,7 +135,8 @@ class CostApplicabilityEvidence:
         return {
             "schema": "autosport.prospective_cost_applicability",
             "schema_version": SCHEMA_VERSION,
-            "plan_id": self.plan_id,
+            "intent_sha256": self.intent_sha256,
+            "opportunity_id": self.opportunity_id,
             "cost_class": self.cost_class.value,
             "applicable": self.applicable,
             "basis": self.basis.value,
@@ -129,9 +149,15 @@ class CostApplicabilityEvidence:
 
 @dataclass(frozen=True, slots=True)
 class ProspectiveCostEvidence:
-    """Exact prospective monetary evidence for one applicable plan cost class."""
+    """Intent-bound candidate monetary evidence for one live cost class.
 
-    plan_id: str
+    Exact amount syntax and causal timing are necessary but not sufficient for positive
+    authority: the resolver still requires a product-owned source adapter before COMPLETE
+    can become reachable.
+    """
+
+    intent_sha256: str
+    opportunity_id: str
     cost_class: CostClass
     truth: CostTruth
     basis: CostBasis
@@ -145,7 +171,8 @@ class ProspectiveCostEvidence:
     valid_until: datetime
 
     def __post_init__(self) -> None:
-        _sha256(self.plan_id, "plan_id")
+        _sha256(self.intent_sha256, "intent_sha256")
+        _sha256(self.opportunity_id, "opportunity_id")
         if not isinstance(self.cost_class, CostClass):
             raise ProspectiveApplicableCostError("cost_class must be CostClass")
         if self.truth not in {CostTruth.KNOWN_ZERO, CostTruth.KNOWN_AMOUNT}:
@@ -195,7 +222,8 @@ class ProspectiveCostEvidence:
         return {
             "schema": "autosport.prospective_cost_evidence",
             "schema_version": SCHEMA_VERSION,
-            "plan_id": self.plan_id,
+            "intent_sha256": self.intent_sha256,
+            "opportunity_id": self.opportunity_id,
             "cost_class": self.cost_class.value,
             "truth": self.truth.value,
             "basis": self.basis.value,
@@ -210,15 +238,29 @@ class ProspectiveCostEvidence:
         }
 
 
+def _product_owned_live_cost_authority_resolved(_cost_class: CostClass) -> bool:
+    """Return whether current main owns positive live cost authority for this class.
+
+    Campaign cost evidence is settlement/campaign accounting authority, not prospective
+    execution authority for an exact OpportunityIntent.  No current product adapter can
+    re-resolve exact intent-bound provider/model/fixed/execution costs at decision time.
+    Therefore caller-constructible DTOs above are downgrade/audit inputs only.  A future
+    adapter must replace this gate class-by-class with real source re-resolution; until
+    then COMPLETE is intentionally unreachable rather than forgeable.
+    """
+
+    return False
+
+
 _RESOLUTION_TOKEN = object()
 
 
 @dataclass(frozen=True, slots=True, init=False)
 class ProspectiveApplicableCostResolution:
-    """Resolver-sealed result; callers cannot pass a completeness verdict directly."""
+    """Resolver-sealed decision-time applicable-cost result."""
 
-    plan_id: str
-    opportunity_set_id: str
+    intent_sha256: str
+    opportunity_id: str
     decision_at: datetime
     currency: str
     applicability_evidence_ids: tuple[str, ...]
@@ -237,8 +279,8 @@ class ProspectiveApplicableCostResolution:
     def _from_resolver(
         cls,
         *,
-        plan_id: str,
-        opportunity_set_id: str,
+        intent_sha256: str,
+        opportunity_id: str,
         decision_at: datetime,
         currency: str,
         applicability_evidence_ids: tuple[str, ...],
@@ -251,8 +293,8 @@ class ProspectiveApplicableCostResolution:
         if _token is not _RESOLUTION_TOKEN:
             raise ProspectiveApplicableCostError("invalid resolution authority token")
         item = object.__new__(cls)
-        object.__setattr__(item, "plan_id", plan_id)
-        object.__setattr__(item, "opportunity_set_id", opportunity_set_id)
+        object.__setattr__(item, "intent_sha256", intent_sha256)
+        object.__setattr__(item, "opportunity_id", opportunity_id)
         object.__setattr__(item, "decision_at", decision_at)
         object.__setattr__(item, "currency", currency)
         object.__setattr__(
@@ -268,8 +310,8 @@ class ProspectiveApplicableCostResolution:
         return item
 
     def _validate(self) -> None:
-        _sha256(self.plan_id, "plan_id")
-        _sha256(self.opportunity_set_id, "opportunity_set_id")
+        _sha256(self.intent_sha256, "intent_sha256")
+        _sha256(self.opportunity_id, "opportunity_id")
         _utc(self.decision_at, "decision_at")
         if _CURRENCY_RE.fullmatch(self.currency) is None:
             raise ProspectiveApplicableCostError(
@@ -302,11 +344,10 @@ class ProspectiveApplicableCostResolution:
                 raise ProspectiveApplicableCostError(
                     "complete resolution cannot carry incomplete reasons"
                 )
-        else:
-            if self.total_subtractable_amount is not None:
-                raise ProspectiveApplicableCostError(
-                    "incomplete resolution cannot expose a trusted total"
-                )
+        elif self.total_subtractable_amount is not None:
+            raise ProspectiveApplicableCostError(
+                "incomplete resolution cannot expose a trusted total"
+            )
 
     @property
     def proof_id(self) -> str:
@@ -316,8 +357,8 @@ class ProspectiveApplicableCostResolution:
         payload: dict[str, Any] = {
             "schema": "autosport.prospective_applicable_cost_resolution",
             "schema_version": SCHEMA_VERSION,
-            "plan_id": self.plan_id,
-            "opportunity_set_id": self.opportunity_set_id,
+            "intent_sha256": self.intent_sha256,
+            "opportunity_id": self.opportunity_id,
             "decision_at": _datetime_text(self.decision_at),
             "currency": self.currency,
             "applicability_evidence_ids": list(self.applicability_evidence_ids),
@@ -337,23 +378,33 @@ class ProspectiveApplicableCostResolution:
 
 def resolve_prospective_applicable_costs(
     *,
-    plan: PortfolioPlan,
+    intent: OpportunityIntent,
     decision_at: datetime,
-    currency: str,
     applicability: Sequence[CostApplicabilityEvidence],
     costs: Sequence[ProspectiveCostEvidence],
 ) -> ProspectiveApplicableCostResolution:
-    """Resolve exact decision-time cost coverage without accepting caller completeness."""
+    """Resolve exact intent-bound coverage while refusing caller-minted authority."""
 
-    if not isinstance(plan, PortfolioPlan):
-        raise ProspectiveApplicableCostError("plan must be a canonical PortfolioPlan")
-    _utc(decision_at, "decision_at")
-    if not isinstance(currency, str) or _CURRENCY_RE.fullmatch(currency) is None:
+    if type(intent) is not OpportunityIntent:
         raise ProspectiveApplicableCostError(
-            "currency must be an uppercase three-letter currency"
+            "intent must be exact canonical OpportunityIntent"
+        )
+    _utc(decision_at, "decision_at")
+    observed_at = _iso_datetime(intent.evidence.observed_at, "intent observed_at")
+    causal_cutoff = _iso_datetime(intent.evidence.causal_cutoff, "intent causal_cutoff")
+    proposal_at = _iso_datetime(intent.risk_context.proposal_ts, "intent proposal_ts")
+    if decision_at < max(observed_at, causal_cutoff, proposal_at):
+        raise ProspectiveApplicableCostError(
+            "decision_at cannot precede intent observation, causal cutoff, or proposal"
         )
 
-    plan_id = plan.plan_id
+    currency = intent.risk_context.currency
+    if not isinstance(currency, str) or _CURRENCY_RE.fullmatch(currency) is None:
+        raise ProspectiveApplicableCostError(
+            "intent currency must be an uppercase three-letter currency"
+        )
+    intent_sha256 = intent.intent_sha256
+    opportunity_id = intent.opportunity.opportunity_id
     reasons: set[str] = set()
     applicability_by_class: dict[CostClass, list[CostApplicabilityEvidence]] = {}
     costs_by_class: dict[CostClass, list[ProspectiveCostEvidence]] = {}
@@ -364,8 +415,10 @@ def resolve_prospective_applicable_costs(
                 "applicability must contain CostApplicabilityEvidence values"
             )
         applicability_by_class.setdefault(item.cost_class, []).append(item)
-        if item.plan_id != plan_id:
-            reasons.add(f"applicability-plan-mismatch:{item.cost_class.value}")
+        if item.intent_sha256 != intent_sha256:
+            reasons.add(f"applicability-intent-mismatch:{item.cost_class.value}")
+        if item.opportunity_id != opportunity_id:
+            reasons.add(f"applicability-opportunity-mismatch:{item.cost_class.value}")
 
     for item in costs:
         if not isinstance(item, ProspectiveCostEvidence):
@@ -373,10 +426,12 @@ def resolve_prospective_applicable_costs(
                 "costs must contain ProspectiveCostEvidence values"
             )
         costs_by_class.setdefault(item.cost_class, []).append(item)
-        if item.plan_id != plan_id:
-            reasons.add(f"cost-plan-mismatch:{item.cost_class.value}")
+        if item.intent_sha256 != intent_sha256:
+            reasons.add(f"cost-intent-mismatch:{item.cost_class.value}")
+        if item.opportunity_id != opportunity_id:
+            reasons.add(f"cost-opportunity-mismatch:{item.cost_class.value}")
 
-    subtractable_total = Decimal("0")
+    asserted_subtractable_total = Decimal("0")
     applicability_ids: list[str] = []
     cost_ids: list[str] = []
 
@@ -399,12 +454,19 @@ def resolve_prospective_applicable_costs(
         ):
             reasons.add(f"stale-or-future-applicability:{cost_class.value}")
             continue
+        if (
+            applicability_item.intent_sha256 != intent_sha256
+            or applicability_item.opportunity_id != opportunity_id
+        ):
+            continue
 
         class_costs = costs_by_class.get(cost_class, [])
         if not applicability_item.applicable:
             if class_costs:
                 reasons.add(f"cost-for-not-applicable:{cost_class.value}")
                 cost_ids.extend(item.evidence_id for item in class_costs)
+            if not _product_owned_live_cost_authority_resolved(cost_class):
+                reasons.add(f"product-owned-applicability-unresolved:{cost_class.value}")
             continue
 
         if len(class_costs) == 0:
@@ -417,7 +479,7 @@ def resolve_prospective_applicable_costs(
 
         cost = class_costs[0]
         cost_ids.append(cost.evidence_id)
-        if cost.plan_id != plan_id:
+        if cost.intent_sha256 != intent_sha256 or cost.opportunity_id != opportunity_id:
             continue
         if not (
             cost.observed_at <= decision_at
@@ -436,18 +498,12 @@ def resolve_prospective_applicable_costs(
             reasons.add(f"non-economic-treatment:{cost_class.value}")
             continue
         if cost.treatment is CostTreatment.SUBTRACT_FROM_GROSS:
-            subtractable_total += cost.amount
-        elif cost.treatment is CostTreatment.EMBEDDED_IN_GROSS:
-            pass
-        else:  # defensive against future enum expansion
+            asserted_subtractable_total += cost.amount
+        elif cost.treatment is not CostTreatment.EMBEDDED_IN_GROSS:
             reasons.add(f"unsupported-treatment:{cost_class.value}")
-
-    unexpected_applicability = set(applicability_by_class) - set(REQUIRED_COST_CLASSES)
-    unexpected_costs = set(costs_by_class) - set(REQUIRED_COST_CLASSES)
-    for cost_class in unexpected_applicability:
-        reasons.add(f"unexpected-applicability:{cost_class.value}")
-    for cost_class in unexpected_costs:
-        reasons.add(f"unexpected-cost:{cost_class.value}")
+            continue
+        if not _product_owned_live_cost_authority_resolved(cost_class):
+            reasons.add(f"product-owned-cost-source-unresolved:{cost_class.value}")
 
     incomplete_reasons = tuple(sorted(reasons))
     completeness = (
@@ -456,14 +512,14 @@ def resolve_prospective_applicable_costs(
         else ProspectiveCostCompleteness.INCOMPLETE
     )
     return ProspectiveApplicableCostResolution._from_resolver(
-        plan_id=plan_id,
-        opportunity_set_id=plan.opportunity_set.opportunity_set_id,
+        intent_sha256=intent_sha256,
+        opportunity_id=opportunity_id,
         decision_at=decision_at,
         currency=currency,
         applicability_evidence_ids=tuple(sorted(set(applicability_ids))),
         cost_evidence_ids=tuple(sorted(set(cost_ids))),
         total_subtractable_amount=(
-            subtractable_total
+            asserted_subtractable_total
             if completeness is ProspectiveCostCompleteness.COMPLETE
             else None
         ),

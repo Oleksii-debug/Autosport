@@ -17,6 +17,12 @@ from .paper_execution_reality import (
 _VERIFIED_SNAPSHOT_SENTINEL = "_autosport_decision_origin_pristine_verified_snapshot"
 _RESERVE_SENTINEL = "_autosport_decision_origin_pristine_reserve_run"
 _APPEND_SENTINEL = "_autosport_decision_origin_pristine_append_event"
+_RUNTIME_EXECUTE_CODE_SENTINEL = (
+    "_autosport_decision_origin_instance_guard_pristine_runtime_execute_code"
+)
+_EXECUTE_PLAN_CODE_SENTINEL = (
+    "_autosport_decision_origin_instance_guard_pristine_execute_plan_code"
+)
 
 # A verified DecisionRecordOrigin is evidence, not capability. Only the exact
 # canonical product execute wrapper may arm this runtime identity while it calls
@@ -25,8 +31,29 @@ _PRODUCT_ORIGIN_RUNTIME: ContextVar[PaperExecutionAdoptionRuntime | None] = Cont
     "autosport_paper_execution_product_origin_runtime",
     default=None,
 )
-_EXECUTE_PAPER_PLAN_CODE = _paper_reality.execute_paper_plan.__code__
-_STABLE_RUNTIME_EXECUTE_CODE = _origin._ORIGINAL_RUNTIME_EXECUTE.__code__
+
+# Freeze executable identities once. Guard-module reloads must never recapture an
+# already-wrapped runtime method or redefine the authority path from mutable code.
+if not hasattr(PaperExecutionAdoptionRuntime, _RUNTIME_EXECUTE_CODE_SENTINEL):
+    setattr(
+        PaperExecutionAdoptionRuntime,
+        _RUNTIME_EXECUTE_CODE_SENTINEL,
+        _origin._ORIGINAL_RUNTIME_EXECUTE.__code__,
+    )
+if not hasattr(PaperExecutionAdoptionRuntime, _EXECUTE_PLAN_CODE_SENTINEL):
+    setattr(
+        PaperExecutionAdoptionRuntime,
+        _EXECUTE_PLAN_CODE_SENTINEL,
+        _paper_reality.execute_paper_plan.__code__,
+    )
+_STABLE_RUNTIME_EXECUTE_CODE = getattr(
+    PaperExecutionAdoptionRuntime,
+    _RUNTIME_EXECUTE_CODE_SENTINEL,
+)
+_EXECUTE_PAPER_PLAN_CODE = getattr(
+    PaperExecutionAdoptionRuntime,
+    _EXECUTE_PLAN_CODE_SENTINEL,
+)
 
 # Preserve the exact pre-origin authority methods once. Re-importing/reloading guard
 # modules must never capture an already-installed wrapper as its own "original".

@@ -16,6 +16,7 @@ from .policy_evaluation import (
     PolicyEvaluationConfig,
     evaluate_policy_pair,
 )
+from .policy_update_authority import UtilityBoundUpdateEvidence
 from .strategy_model_factory import (
     ExperimentRunner,
     FactoryCandidateSpec,
@@ -144,6 +145,39 @@ def _validate_causal_policy_successor(
         raise ValueError("policy update evidence does not match the exact causal policy update")
 
 
+def _validate_product_utility_update_authority(
+    predecessor_policy: BanditPolicyState,
+    challenger_policy: BanditPolicyState,
+    update_evidence: PolicyUpdateEvidence,
+    utility_update_evidence: UtilityBoundUpdateEvidence | None,
+) -> None:
+    """Reject generic raw-reward successors at the governed product boundary."""
+
+    if utility_update_evidence is None:
+        raise ValueError("product policy retest requires utility-bound update provenance")
+    if not isinstance(utility_update_evidence, UtilityBoundUpdateEvidence):
+        raise TypeError("utility_update_evidence must be UtilityBoundUpdateEvidence")
+    if utility_update_evidence.environment_id != predecessor_policy.environment_id:
+        raise ValueError("utility-bound update environment mismatch")
+    if utility_update_evidence.predecessor_policy_id != predecessor_policy.policy_id:
+        raise ValueError("utility-bound update predecessor identity mismatch")
+    if utility_update_evidence.action_id != update_evidence.action_id:
+        raise ValueError("utility-bound update action identity mismatch")
+    if utility_update_evidence.reward_id != update_evidence.reward_id:
+        raise ValueError("utility-bound update reward identity mismatch")
+    if utility_update_evidence.transition_id != update_evidence.transition_id:
+        raise ValueError("utility-bound update transition identity mismatch")
+    transition = update_evidence.transition
+    if transition is None:
+        raise ValueError("policy update evidence lacks canonical transition witness")
+    if utility_update_evidence.episode_id != transition.episode_id:
+        raise ValueError("utility-bound update episode identity mismatch")
+    if utility_update_evidence.successor_policy_id != challenger_policy.policy_id:
+        raise ValueError("utility-bound update did not authorize challenger policy mutation")
+    if utility_update_evidence.reason_codes:
+        raise ValueError("blocked utility-bound update cannot authorize product policy retest")
+
+
 def run_policy_retest(
     runner: ExperimentRunner,
     *,
@@ -153,9 +187,10 @@ def run_policy_retest(
     spec: PolicyRetestSpec,
     points: Sequence[TrainingPoint] = (),
     rule: PromotionRule,
+    utility_update_evidence: UtilityBoundUpdateEvidence | None = None,
     evaluation_cases: Sequence[PolicyEvaluationCase] | None = None,
 ) -> FactoryRunResult:
-    """Retest one exact policy successor through the canonical factory/evidence path."""
+    """Retest one exact utility-authorized policy successor through the factory path."""
     if not isinstance(runner, ExperimentRunner):
         raise TypeError("runner must be ExperimentRunner")
     if not isinstance(predecessor_policy, BanditPolicyState):
@@ -212,6 +247,13 @@ def run_policy_retest(
         raise ValueError(
             "policy-specific causal evaluation cases are required for learned policy retest"
         )
+    _validate_product_utility_update_authority(
+        predecessor_policy,
+        challenger_policy,
+        update_evidence,
+        utility_update_evidence,
+    )
+
     evaluation_config = PolicyEvaluationConfig.from_frozen_text(
         binding.get("evaluation_design")
     )

@@ -10,6 +10,9 @@ created while the workspace was pristine can safely observe a later valid bindin
 
 from __future__ import annotations
 
+import os
+from pathlib import Path
+
 from . import point_in_time_evidence as evidence
 from .dataset_snapshot_lineage import DatasetSnapshotLineageAuthority
 from .monotonic_workspace_authority import (
@@ -21,6 +24,28 @@ from .scientific_registry import ScientificRegistry
 
 _ORIGINAL_BIND = evidence.PointInTimeFeatureAuthority.bind
 _ORIGINAL_LOAD = evidence.HoldoutConsumptionLedger._load
+
+
+def _fsync_directory_fail_closed(path: Path) -> None:
+    """Require rename-directory durability on supported non-Windows filesystems."""
+
+    if os.name == "nt":
+        return
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+    try:
+        descriptor = os.open(path, flags)
+    except OSError as exc:
+        raise evidence.EvidenceLedgerCorruptError(
+            "cannot open holdout ledger directory for durability"
+        ) from exc
+    try:
+        os.fsync(descriptor)
+    except OSError as exc:
+        raise evidence.EvidenceLedgerCorruptError(
+            "cannot fsync holdout ledger directory for durability"
+        ) from exc
+    finally:
+        os.close(descriptor)
 
 
 def _reject_instance_method_shadows(
@@ -113,6 +138,7 @@ def _load_with_fresh_authority(self: evidence.HoldoutConsumptionLedger) -> None:
 # checks while fencing the capabilities before they can dispatch to caller code.
 evidence.PointInTimeFeatureAuthority.bind = staticmethod(_bind_exact_lineage_authority)
 evidence.HoldoutConsumptionLedger._load = _load_with_fresh_authority
+evidence._fsync_directory = _fsync_directory_fail_closed
 
 
 __all__: list[str] = []

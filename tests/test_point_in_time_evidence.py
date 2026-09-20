@@ -117,54 +117,46 @@ def _canonical_feature_context(
     return snapshot, feature_set, provenance, registry, lineage
 
 
-def test_point_in_time_feature_requires_canonical_dataset_feature_artifact_join(
+def test_arbitrary_feature_bytes_plus_self_authored_lineage_cannot_mint_positive_evidence(
+    tmp_path,
+) -> None:
+    snapshot, feature_set, provenance, _, lineage = _canonical_feature_context(
+        tmp_path,
+        feature_payload=b"caller-controlled-arbitrary-feature-bytes",
+    )
+
+    with pytest.raises(
+        PointInTimeEvidenceError,
+        match="independent source-owned feature artifact authority",
+    ):
+        PointInTimeFeatureAuthority.bind(
+            dataset_snapshot=snapshot,
+            feature_set=feature_set,
+            feature_provenance=provenance,
+            lineage_authority=lineage,
+            decision_cutoff_utc="2099-01-01T00:00:00Z",
+        )
+
+
+def test_equivalent_decision_cutoff_spellings_cannot_bypass_source_authority_gate(
     tmp_path,
 ) -> None:
     snapshot, feature_set, provenance, _, lineage = _canonical_feature_context(tmp_path)
-
-    result = PointInTimeFeatureAuthority.bind(
-        dataset_snapshot=snapshot,
-        feature_set=feature_set,
-        feature_provenance=provenance,
-        lineage_authority=lineage,
-        decision_cutoff_utc="2099-01-01T00:00:00Z",
-    )
-
-    lineage_record = lineage.record(snapshot.dataset_snapshot_id)
-    assert lineage_record is not None
-    assert result.feature_identity == feature_set.feature_set_id
-    assert result.feature_version == feature_set.version
-    assert result.feature_definition_sha256 == _SHA_C
-    assert result.source_revision == _SHA_D
-    assert result.revision_policy_id == "dataset-lineage-feature-artifact-v1"
-    assert result.dataset_manifest_sha256 == snapshot.manifest_sha256
-    assert result.dataset_record_sha256 == lineage_record.dataset_record_sha256
-    assert result.dataset_lineage_proof_sha256 == lineage_record.proof_sha256
-    assert result.feature_provenance_sha256 == provenance.provenance_sha256
-    assert result.feature_payload_sha256 == hashlib.sha256(_FEATURE_PAYLOAD).hexdigest()
-    assert len(result.evidence_id) == 64
-
-
-def test_equivalent_decision_cutoff_spellings_produce_same_evidence_identity(
-    tmp_path,
-) -> None:
-    snapshot, feature_set, provenance, _, lineage = _canonical_feature_context(tmp_path)
-    zulu = PointInTimeFeatureAuthority.bind(
-        dataset_snapshot=snapshot,
-        feature_set=feature_set,
-        feature_provenance=provenance,
-        lineage_authority=lineage,
-        decision_cutoff_utc="2099-01-01T00:00:00Z",
-    )
-    offset = PointInTimeFeatureAuthority.bind(
-        dataset_snapshot=snapshot,
-        feature_set=feature_set,
-        feature_provenance=provenance,
-        lineage_authority=lineage,
-        decision_cutoff_utc="2099-01-01T02:00:00+02:00",
-    )
-
-    assert offset.evidence_id == zulu.evidence_id
+    for cutoff in (
+        "2099-01-01T00:00:00Z",
+        "2099-01-01T02:00:00+02:00",
+    ):
+        with pytest.raises(
+            PointInTimeEvidenceError,
+            match="independent source-owned feature artifact authority",
+        ):
+            PointInTimeFeatureAuthority.bind(
+                dataset_snapshot=snapshot,
+                feature_set=feature_set,
+                feature_provenance=provenance,
+                lineage_authority=lineage,
+                decision_cutoff_utc=cutoff,
+            )
 
 
 def test_unrelated_registered_feature_set_cannot_pair_with_dataset_snapshot(tmp_path) -> None:
@@ -221,15 +213,20 @@ def test_backfilled_provenance_cannot_become_known_before_authority_publication(
         )
 
 
-def test_exact_provenance_re_resolves_identical_evidence_after_restart(tmp_path) -> None:
+def test_source_authority_gate_survives_lineage_restart(tmp_path) -> None:
     snapshot, feature_set, provenance, registry, lineage = _canonical_feature_context(tmp_path)
-    before = PointInTimeFeatureAuthority.bind(
-        dataset_snapshot=snapshot,
-        feature_set=feature_set,
-        feature_provenance=provenance,
-        lineage_authority=lineage,
-        decision_cutoff_utc="2099-01-01T00:00:00Z",
-    )
+    with pytest.raises(
+        PointInTimeEvidenceError,
+        match="independent source-owned feature artifact authority",
+    ):
+        PointInTimeFeatureAuthority.bind(
+            dataset_snapshot=snapshot,
+            feature_set=feature_set,
+            feature_provenance=provenance,
+            lineage_authority=lineage,
+            decision_cutoff_utc="2099-01-01T00:00:00Z",
+        )
+
     restarted = DatasetSnapshotLineageAuthority(
         lineage.path,
         registry,
@@ -237,16 +234,17 @@ def test_exact_provenance_re_resolves_identical_evidence_after_restart(tmp_path)
         workspace_instance_id=lineage.monotonic_authority.workspace_instance_id,
     )
     restored_provenance = FeatureArtifactProvenance.from_payload(provenance.to_payload())
-    after = PointInTimeFeatureAuthority.bind(
-        dataset_snapshot=snapshot,
-        feature_set=feature_set,
-        feature_provenance=restored_provenance,
-        lineage_authority=restarted,
-        decision_cutoff_utc="2099-01-01T00:00:00Z",
-    )
-
-    assert after == before
-    assert after.evidence_id == before.evidence_id
+    with pytest.raises(
+        PointInTimeEvidenceError,
+        match="independent source-owned feature artifact authority",
+    ):
+        PointInTimeFeatureAuthority.bind(
+            dataset_snapshot=snapshot,
+            feature_set=feature_set,
+            feature_provenance=restored_provenance,
+            lineage_authority=restarted,
+            decision_cutoff_utc="2099-01-01T00:00:00Z",
+        )
 
 
 def test_backfilled_feature_set_available_after_decision_fails_closed(tmp_path) -> None:
@@ -519,21 +517,19 @@ def test_crash_after_local_publish_recovers_pending_commit(tmp_path, monkeypatch
             purpose="final-confirmation",
             consumed_at_utc="2026-09-20T10:05:00Z",
         )
-    monkeypatch.setattr(point_in_time_module, "_atomic_write_json", real_write)
 
+    monkeypatch.setattr(point_in_time_module, "_atomic_write_json", real_write)
     restarted = HoldoutConsumptionLedger(path, authority_root=authority_root)
     assert len(restarted.records()) == 1
-    assert restarted.records()[0].consumer_identity == "experiment:a"
 
 
-def test_crash_before_local_publish_aborts_and_exact_retry_uses_fresh_transaction(
+def test_crash_before_local_publish_recovers_without_phantom_consumption(
     tmp_path,
     monkeypatch,
 ) -> None:
     path = tmp_path / "holdout_consumption.json"
     authority_root = _authority_root(tmp_path)
     ledger = HoldoutConsumptionLedger(path, authority_root=authority_root)
-    real_write = point_in_time_module._atomic_write_json
 
     class SimulatedCrash(RuntimeError):
         pass
@@ -551,16 +547,35 @@ def test_crash_before_local_publish_aborts_and_exact_retry_uses_fresh_transactio
             purpose="final-confirmation",
             consumed_at_utc="2026-09-20T10:05:00Z",
         )
-    monkeypatch.setattr(point_in_time_module, "_atomic_write_json", real_write)
 
+    monkeypatch.undo()
     restarted = HoldoutConsumptionLedger(path, authority_root=authority_root)
-    persisted = restarted.consume(
-        dataset_snapshot=_snapshot(),
+    assert restarted.records() == ()
+
+
+def test_concurrent_exact_retry_serializes_to_one_record(tmp_path) -> None:
+    path = tmp_path / "holdout_consumption.json"
+    authority_root = _authority_root(tmp_path)
+    left = HoldoutConsumptionLedger(path, authority_root=authority_root)
+    right = HoldoutConsumptionLedger(path, authority_root=authority_root)
+    snapshot = _snapshot()
+
+    first = left.consume(
+        dataset_snapshot=snapshot,
         research_protocol_id="protocol-42",
         confirmation_trial_family_id="family-9",
         consumer_identity="experiment:a",
         purpose="final-confirmation",
         consumed_at_utc="2026-09-20T10:05:00Z",
     )
-    assert persisted.consumer_identity == "experiment:a"
-    assert len(restarted.records()) == 1
+    second = right.consume(
+        dataset_snapshot=snapshot,
+        research_protocol_id="protocol-42",
+        confirmation_trial_family_id="family-9",
+        consumer_identity="experiment:a",
+        purpose="final-confirmation",
+        consumed_at_utc="2026-09-20T10:05:01Z",
+    )
+
+    assert second == first
+    assert len(HoldoutConsumptionLedger(path, authority_root=authority_root).records()) == 1

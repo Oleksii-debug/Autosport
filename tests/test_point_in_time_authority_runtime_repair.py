@@ -9,6 +9,9 @@ from unittest.mock import patch
 import pytest
 
 from autosport import point_in_time_evidence as evidence
+from autosport import (
+    _dataset_snapshot_lineage_publication_trust_root as lineage_trust_root,
+)
 from autosport.dataset_snapshot_lineage import DatasetSnapshotLineageAuthority
 from autosport.point_in_time_evidence import (
     EvidenceLedgerCorruptError,
@@ -129,31 +132,38 @@ def test_feature_authority_rejects_exact_registry_instance_method_shadow() -> No
 
 
 def _make_lineage_authority(
-    root: Path,
-    name: str,
+    workspace: Path,
+    *,
+    authority_root: Path,
 ) -> DatasetSnapshotLineageAuthority:
-    workspace = root / name
     workspace.mkdir(parents=True, exist_ok=True)
     registry = ScientificRegistry.initialize_pristine(workspace / "registry.json")
     return DatasetSnapshotLineageAuthority.initialize_pristine(
         workspace / "lineage.json",
         registry,
-        authority_root=root / "lineage-authority",
+        authority_root=authority_root,
     )
 
 
 def test_holdout_lineage_identity_persists_and_rejects_different_reopen(
     tmp_path: Path,
+    monkeypatch,
 ) -> None:
-    lineage = _make_lineage_authority(tmp_path, "canonical")
-    holdout_workspace = tmp_path / "holdout-workspace"
-    holdout_workspace.mkdir()
-    holdout_path = holdout_workspace / "holdout.json"
-    holdout_authority_root = tmp_path / "holdout-authority"
+    product_root = (tmp_path / "product-machine-authority").resolve(strict=False)
+    monkeypatch.setattr(
+        lineage_trust_root,
+        "_machine_account_authority_root",
+        lambda: product_root,
+    )
+    workspace = tmp_path / "holdout-workspace"
+    lineage = _make_lineage_authority(
+        workspace,
+        authority_root=product_root,
+    )
+    holdout_path = workspace / "holdout.json"
 
     first = evidence.HoldoutConsumptionLedger(
         holdout_path,
-        authority_root=holdout_authority_root,
         lineage_authority=lineage,
     )
     assert first.records() == ()
@@ -161,37 +171,76 @@ def test_holdout_lineage_identity_persists_and_rejects_different_reopen(
     restarted_lineage = DatasetSnapshotLineageAuthority(
         lineage.path,
         ScientificRegistry(lineage.registry.path),
-        authority_root=tmp_path / "lineage-authority",
+        authority_root=product_root,
     )
     restarted = evidence.HoldoutConsumptionLedger(
         holdout_path,
-        authority_root=holdout_authority_root,
         lineage_authority=restarted_lineage,
     )
     assert restarted.records() == ()
 
-    alternate = _make_lineage_authority(tmp_path, "alternate")
+    alternate = _make_lineage_authority(
+        tmp_path / "alternate-workspace",
+        authority_root=product_root,
+    )
     with pytest.raises(
-        EvidenceLedgerCorruptError,
-        match="canonical dataset lineage identity does not match its durable binding",
+        PointInTimeEvidenceError,
+        match="canonical holdout workspace",
     ):
         evidence.HoldoutConsumptionLedger(
             holdout_path,
-            authority_root=holdout_authority_root,
+            lineage_authority=alternate,
+        )
+
+
+def test_holdout_rejects_initial_lineage_outside_product_composition(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    product_root = (tmp_path / "product-machine-authority").resolve(strict=False)
+    monkeypatch.setattr(
+        lineage_trust_root,
+        "_machine_account_authority_root",
+        lambda: product_root,
+    )
+    holdout_workspace = tmp_path / "holdout-workspace"
+    holdout_workspace.mkdir()
+    alternate = _make_lineage_authority(
+        tmp_path / "caller-selected-workspace",
+        authority_root=product_root,
+    )
+
+    with pytest.raises(
+        PointInTimeEvidenceError,
+        match="canonical holdout workspace",
+    ):
+        evidence.HoldoutConsumptionLedger(
+            holdout_workspace / "holdout.json",
             lineage_authority=alternate,
         )
 
 
 def test_holdout_rejects_post_construction_lineage_replacement_before_dispatch(
     tmp_path: Path,
+    monkeypatch,
 ) -> None:
-    canonical = _make_lineage_authority(tmp_path, "canonical")
-    alternate = _make_lineage_authority(tmp_path, "alternate")
-    holdout_workspace = tmp_path / "holdout-workspace"
-    holdout_workspace.mkdir()
+    product_root = (tmp_path / "product-machine-authority").resolve(strict=False)
+    monkeypatch.setattr(
+        lineage_trust_root,
+        "_machine_account_authority_root",
+        lambda: product_root,
+    )
+    workspace = tmp_path / "holdout-workspace"
+    canonical = _make_lineage_authority(
+        workspace,
+        authority_root=product_root,
+    )
+    alternate = _make_lineage_authority(
+        tmp_path / "alternate-workspace",
+        authority_root=product_root,
+    )
     ledger = evidence.HoldoutConsumptionLedger(
-        holdout_workspace / "holdout.json",
-        authority_root=tmp_path / "holdout-authority",
+        workspace / "holdout.json",
         lineage_authority=canonical,
     )
 

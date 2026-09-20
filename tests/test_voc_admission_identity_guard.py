@@ -71,12 +71,14 @@ class VOCAdmissionIdentityGuardTests(unittest.TestCase):
         *,
         protocol_id: str,
         cohort_id: str,
+        router=None,
     ):
-        router = fixture._precommit_router(
-            target,
-            protocol_id=protocol_id,
-            cohort_id=cohort_id,
-        )
+        if router is None:
+            router = fixture._precommit_router(
+                target,
+                protocol_id=protocol_id,
+                cohort_id=cohort_id,
+            )
         append_paired_voc_admission(
             fixture.ledger,
             admission_id=f"explicit:{target.evaluation_id}",
@@ -94,6 +96,29 @@ class VOCAdmissionIdentityGuardTests(unittest.TestCase):
             recorded_at=_FIXTURE.T_DECISION,
         )
         return router
+
+    def test_router_precompute_episode_cannot_be_omitted_from_explicit_cohort(self) -> None:
+        fixture, target = self._fixture()
+        router = fixture._precommit_router(
+            target,
+            include_omitted_request=True,
+        )
+        self._append_explicit_admission(
+            fixture,
+            target,
+            protocol_id=target.research_protocol_id,
+            cohort_id="voc-cohort-derived",
+            router=router,
+        )
+
+        with self.assertRaisesRegex(
+            VOCEvaluationError,
+            "canonical router VOC precompute admission is missing from DecisionLedger",
+        ):
+            fixture._authority(compute_execution_store=router).resolve(
+                target.evaluation_id,
+                as_of=_FIXTURE.T_AS_OF,
+            )
 
     def test_foreign_protocol_cannot_enter_target_scored_denominator(self) -> None:
         fixture, target = self._fixture()

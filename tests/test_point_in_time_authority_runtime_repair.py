@@ -137,9 +137,9 @@ def _make_lineage_authority(
     authority_root: Path,
 ) -> DatasetSnapshotLineageAuthority:
     workspace.mkdir(parents=True, exist_ok=True)
-    registry = ScientificRegistry.initialize_pristine(workspace / "registry.json")
+    registry = ScientificRegistry.initialize_pristine(workspace / "scientific-registry.json")
     return DatasetSnapshotLineageAuthority.initialize_pristine(
-        workspace / "lineage.json",
+        workspace / "dataset-snapshot-lineage.json",
         registry,
         authority_root=authority_root,
     )
@@ -216,6 +216,36 @@ def test_holdout_rejects_initial_lineage_outside_product_composition(
     ):
         evidence.HoldoutConsumptionLedger(
             holdout_workspace / "holdout.json",
+            lineage_authority=alternate,
+        )
+
+
+def test_holdout_rejects_initial_lineage_path_substitution(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    product_root = (tmp_path / "product-machine-authority").resolve(strict=False)
+    monkeypatch.setattr(
+        lineage_trust_root,
+        "_machine_account_authority_root",
+        lambda: product_root,
+    )
+    workspace = tmp_path / "holdout-workspace"
+    canonical = _make_lineage_authority(
+        workspace,
+        authority_root=product_root,
+    )
+    alternate = object.__new__(DatasetSnapshotLineageAuthority)
+    alternate.path = workspace / "caller-selected-lineage.json"
+    alternate.registry = canonical.registry
+    alternate.monotonic_authority = canonical.monotonic_authority
+
+    with pytest.raises(
+        PointInTimeEvidenceError,
+        match="canonical product lineage path",
+    ):
+        evidence.HoldoutConsumptionLedger(
+            workspace / "holdout.json",
             lineage_authority=alternate,
         )
 

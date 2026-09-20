@@ -24,6 +24,7 @@ from autosport.point_in_time_authority import (
     SourceRevisionAuthorityError,
     SourceRevisionAuthorityStore,
 )
+from autosport.workspace_lock import WorkspaceEconomicLockBusyError
 
 
 BASE = datetime(2026, 1, 1, tzinfo=UTC)
@@ -198,11 +199,17 @@ def test_collector_reservation_and_generic_write_are_serialized_without_toctou(
     barrier = threading.Barrier(3)
     outcomes: list[tuple[str, str]] = []
 
+    # WorkspaceEconomicLock is deliberately non-blocking.  Under a simultaneous
+    # writer race, losing the canonical writer lock is itself the serialized
+    # rejection outcome; it must be observed rather than escaping the thread as
+    # an unhandled warning.
+    rejected = (SourceRevisionAuthorityError, WorkspaceEconomicLockBusyError)
+
     def register_generic() -> None:
         barrier.wait()
         try:
             parent.register_policy(generic)
-        except SourceRevisionAuthorityError:
+        except rejected:
             outcomes.append(("generic", "rejected"))
         else:
             outcomes.append(("generic", "accepted"))
@@ -211,7 +218,7 @@ def test_collector_reservation_and_generic_write_are_serialized_without_toctou(
         barrier.wait()
         try:
             _reserve_collector_source(collector)
-        except SourceRevisionAuthorityError:
+        except rejected:
             outcomes.append(("collector", "rejected"))
         else:
             outcomes.append(("collector", "accepted"))

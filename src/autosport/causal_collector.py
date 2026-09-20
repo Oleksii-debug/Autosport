@@ -20,6 +20,14 @@ for _name, _value in vars(_legacy).items():
             pass
 
 from .collector_sqlite_active_store import CollectorDeltaStore as CollectorDeltaStore
+from .collector_retention import (
+    CollectorCompactionResult,
+    CollectorRetentionError,
+    CollectorRetentionManager,
+    CollectorRetentionPlan,
+    CollectorRetentionPlanStaleError,
+    RetentionPinKind,
+)
 
 # Preserve the established public import/pickle identity for the replacement class.
 CollectorDeltaStore.__module__ = __name__

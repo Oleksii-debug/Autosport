@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import inspect
+from pathlib import Path
 from types import FrameType
 
 from . import _paper_execution_decision_origin as _origin
@@ -53,6 +54,31 @@ if not hasattr(PaperExecutionAdoptionRuntime, _CALLSITE_IDENTITY_SENTINEL):
 ) = getattr(PaperExecutionAdoptionRuntime, _CALLSITE_IDENTITY_SENTINEL)
 
 
+def _resolved_path(value: object) -> Path:
+    try:
+        return Path(value).resolve(strict=False)  # type: ignore[arg-type]
+    except (OSError, RuntimeError, TypeError, ValueError) as exc:
+        raise _origin.PaperExecutionDecisionOriginError(
+            "product DecisionLedger path is not a canonical filesystem identity"
+        ) from exc
+
+
+def _require_workspace_decision_ledger(
+    ledger: JsonlDecisionLedger,
+    workspace: object,
+    *,
+    producer: str,
+) -> None:
+    """Fail closed unless authority comes from this product workspace's ledger."""
+
+    expected = _resolved_path(Path(workspace) / "decisions.jsonl")  # type: ignore[arg-type]
+    actual = _resolved_path(getattr(ledger, "path", None))
+    if actual != expected:
+        raise _origin.PaperExecutionDecisionOriginError(
+            f"{producer} decision origin requires canonical workspace decisions.jsonl"
+        )
+
+
 def _origin_from_direct_caller(
     runtime: PaperExecutionAdoptionRuntime,
     decision_id: str,
@@ -76,6 +102,11 @@ def _origin_from_direct_caller(
             raise _origin.PaperExecutionDecisionOriginError(
                 "live decision origin requires exact JsonlDecisionLedger authority"
             )
+        _require_workspace_decision_ledger(
+            ledger,
+            getattr(owner, "workspace", None),
+            producer="live",
+        )
         if local.get("decision_id") != decision_id:
             raise _origin.PaperExecutionDecisionOriginError(
                 "live decision call-site identity does not match execution plan"
@@ -98,6 +129,11 @@ def _origin_from_direct_caller(
                 "paper-value decision call-site identity does not match execution plan"
             )
         ledger = _origin._exact_context_ledger(runtime, context)
+        _require_workspace_decision_ledger(
+            ledger,
+            _resolved_path(getattr(runtime, "paper_book_path", None)).parent,
+            producer="paper-value",
+        )
         return _instance_guard._verified_decision_origin_without_instance_dispatch(
             ledger,
             decision_id,
@@ -111,6 +147,11 @@ def _origin_from_direct_caller(
                 "paper-value recovery call-site identity does not match execution plan"
             )
         ledger = _origin._exact_context_ledger(runtime, context)
+        _require_workspace_decision_ledger(
+            ledger,
+            _resolved_path(getattr(runtime, "paper_book_path", None)).parent,
+            producer="paper-value",
+        )
         return _instance_guard._verified_decision_origin_without_instance_dispatch(
             ledger,
             decision_id,

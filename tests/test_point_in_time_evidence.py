@@ -6,6 +6,9 @@ import json
 import pytest
 
 import autosport.point_in_time_evidence as point_in_time_module
+from autosport import (
+    _dataset_snapshot_lineage_publication_trust_root as lineage_trust_root,
+)
 from autosport.dataset_snapshot_lineage import (
     DatasetSnapshotLineageAuthority,
     membership_manifest_sha256,
@@ -72,6 +75,16 @@ def _authority_root(tmp_path):
     return tmp_path.parent / f"{tmp_path.name}-machine-authority"
 
 
+@pytest.fixture(autouse=True)
+def _use_isolated_product_authority_root(tmp_path, monkeypatch):
+    product_root = _authority_root(tmp_path).resolve(strict=False)
+    monkeypatch.setattr(
+        lineage_trust_root,
+        "_machine_account_authority_root",
+        lambda: product_root,
+    )
+
+
 def _members_for_manifest(manifest_sha256: str) -> tuple[str, ...]:
     if manifest_sha256 == _HOLDOUT_MANIFEST_A:
         return (_SHA_A,)
@@ -89,7 +102,7 @@ def _holdout_lineage(tmp_path, *snapshots: DatasetSnapshot) -> DatasetSnapshotLi
     lineage = DatasetSnapshotLineageAuthority.initialize_pristine(
         tmp_path / "holdout-dataset-snapshot-lineage.json",
         registry,
-        authority_root=_authority_root(tmp_path) / "holdout-dataset-lineage",
+        authority_root=_authority_root(tmp_path),
     )
     parent_snapshot_id: str | None = None
     for snapshot in snapshots:

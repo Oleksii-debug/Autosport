@@ -6,8 +6,8 @@ The production orchestrator already owns pre-output admission and durable backen
 publication.  This guard closes the next causal seam: after both shadow outputs are
 published, it derives the exact pre-outcome scoring DecisionRecord from those
 canonical router authorities instead of accepting caller-authored output/cost/time
-claims.  The record is idempotent across restart and refuses to coexist with any
-other terminal for the same admitted attempt.
+claims.  The first freeze timestamp is product-owned rather than caller supplied;
+a later restart reuses the durable record without restamping it.
 """
 
 from collections.abc import Mapping
@@ -89,19 +89,18 @@ def _install() -> None:
         *,
         request_id: str,
         quote_keys: tuple[str, ...],
-        recorded_at: str,
         evaluation_id: str | None = None,
     ) -> dict[str, str]:
         """Freeze exact product-owned paired output/cost/timing evidence once.
 
-        This method intentionally does not consume an outcome and does not compute
-        utility.  Outcome reveal and scoring remain in the canonical VOC authority.
+        The caller cannot choose the first-freeze timestamp.  That timestamp is
+        sampled from the product clock only after the exact durable authorities are
+        re-resolved under the workspace lock.  On restart, an exact existing record
+        is returned without consulting the clock again.
         """
 
         request = production._text("request_id", request_id)
         keys = _quote_keys(quote_keys)
-        frozen_at_text = production._text("recorded_at", recorded_at)
-        frozen_at = production._instant("recorded_at", frozen_at_text)
         ledger = self.decision_ledger
         if ledger is None:
             raise ModelComputeRouterError(
@@ -132,6 +131,7 @@ def _install() -> None:
         )
 
         shadows: dict[str, Mapping[str, Any]] = {}
+        shadow_ready_at = []
         for role in ("baseline", "challenger"):
             shadow = self.router_store.get_voc_shadow_execution(request, role)
             if shadow is None:
@@ -159,10 +159,7 @@ def _install() -> None:
                 raise ModelComputeRouterError(
                     "positive paired VOC scoring evidence cannot freeze a deadline-late shadow"
                 )
-            if frozen_at < max(completed_at, available_at, authority_at):
-                raise ModelComputeRouterError(
-                    "paired VOC scoring evidence predates canonical shadow availability"
-                )
+            shadow_ready_at.extend((completed_at, available_at, authority_at))
             production._sha(f"{role} output_sha256", shadow.get("output_sha256"))
             production._text(f"{role} action", shadow.get("action"))
             if type(shadow.get("abstained")) is not bool:
@@ -173,6 +170,7 @@ def _install() -> None:
                 f"{role} authority_sha256", shadow.get("authority_sha256")
             )
             shadows[role] = shadow
+        latest_shadow_ready_at = max(shadow_ready_at)
 
         scope = precompute.get("scope")
         expected_scope = {
@@ -244,20 +242,13 @@ def _install() -> None:
                 for index, quote_key in enumerate(keys, start=1)
             ],
         }
-        expected = DecisionRecord(
-            replay_run_id=f"voc-production-scoring:{request}",
-            agent="voc-production-orchestrator",
-            observed_ts=frozen_at_text,
-            action=_SCORING_ACTION,
-            payload={
-                _BINDING_KEY: binding,
-                _SCORING_KEY: scoring_evidence,
-            },
-            context_hash=decision_input_sha,
-            decision_id=f"voc-scoring:{admission_sha}",
-            recorded_at=frozen_at_text,
-        )
-        expected_sha = _record_sha(expected)
+        payload = {
+            _BINDING_KEY: binding,
+            _SCORING_KEY: scoring_evidence,
+        }
+        replay_run_id = f"voc-production-scoring:{request}"
+        agent = "voc-production-orchestrator"
+        decision_id = f"voc-scoring:{admission_sha}"
 
         with WorkspaceEconomicLock(self.path.parent):
             ledger.verified_snapshot()
@@ -290,23 +281,31 @@ def _install() -> None:
                     "paired VOC scoring evidence route context no longer matches precompute authority"
                 )
 
-            same_id = [
-                record
-                for record in records
-                if record.decision_id == expected.decision_id
-            ]
+            same_id = [record for record in records if record.decision_id == decision_id]
             if len(same_id) > 1:
                 raise ModelComputeRouterError(
                     "paired VOC scoring evidence identity is ambiguous"
                 )
             if same_id:
-                if same_id[0].to_dict() != expected.to_dict():
+                existing = same_id[0]
+                existing_at = production._instant(
+                    "durable scoring recorded_at", existing.recorded_at
+                )
+                if (
+                    existing.replay_run_id != replay_run_id
+                    or existing.agent != agent
+                    or existing.observed_ts != existing.recorded_at
+                    or existing.action != _SCORING_ACTION
+                    or existing.payload != payload
+                    or existing.context_hash != decision_input_sha
+                    or existing_at < latest_shadow_ready_at
+                ):
                     raise ModelComputeRouterError(
                         "paired VOC scoring evidence conflicts with durable product authority"
                     )
                 return {
                     "evaluation_id": identity,
-                    "decision_evidence_sha256": expected_sha,
+                    "decision_evidence_sha256": _record_sha(existing),
                     "admission_sha256": admission_sha,
                 }
 
@@ -319,6 +318,24 @@ def _install() -> None:
                 raise ModelComputeRouterError(
                     "paired VOC admission already has a different terminal record"
                 )
+
+            frozen_at_text = production._text("product freeze time", production._now())
+            frozen_at = production._instant("product freeze time", frozen_at_text)
+            if frozen_at < latest_shadow_ready_at:
+                raise ModelComputeRouterError(
+                    "product clock predates canonical shadow availability"
+                )
+            expected = DecisionRecord(
+                replay_run_id=replay_run_id,
+                agent=agent,
+                observed_ts=frozen_at_text,
+                action=_SCORING_ACTION,
+                payload=payload,
+                context_hash=decision_input_sha,
+                decision_id=decision_id,
+                recorded_at=frozen_at_text,
+            )
+            expected_sha = _record_sha(expected)
             appended_sha = ledger.append(expected)
             if appended_sha != expected_sha:
                 raise ModelComputeRouterError(
@@ -339,7 +356,6 @@ def _install() -> None:
         baseline_invoke,
         challenger_invoke,
         quote_keys: tuple[str, ...],
-        recorded_at: str,
         evaluation_id: str | None = None,
     ) -> tuple[dict[str, Any], dict[str, Any], dict[str, str]]:
         """Run the exact admitted pair and freeze its canonical pre-outcome record."""
@@ -354,7 +370,6 @@ def _install() -> None:
             self,
             request_id=request_id,
             quote_keys=quote_keys,
-            recorded_at=recorded_at,
             evaluation_id=evaluation_id,
         )
         return baseline, challenger, frozen

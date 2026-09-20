@@ -245,7 +245,9 @@ class CanonicalOutcomeDerivedVOCScoreAuthority:
         evaluation: PairedVOCEvaluation,
     ) -> tuple[Mapping[str, Any], str]:
         try:
-            snapshot = self.decision_ledger.verified_snapshot()
+            # Full-ledger verification remains an integrity gate, but the mutable
+            # future ledger tip is not part of historical VOC score identity.
+            self.decision_ledger.verified_snapshot()
             records = self.decision_ledger.verified_records()
         except DecisionLedgerIntegrityError as exc:
             raise VOCEvaluationError("canonical DecisionLedger verification failed") from exc
@@ -296,7 +298,29 @@ class CanonicalOutcomeDerivedVOCScoreAuthority:
                 raise VOCEvaluationError(
                     f"canonical VOC scoring evidence {field} does not match paired outputs"
                 )
-        return evidence, snapshot.sha256
+
+        raw_samples = evidence.get("samples")
+        if not isinstance(raw_samples, (list, tuple)) or not raw_samples:
+            raise VOCEvaluationError("canonical VOC scoring evidence samples are missing")
+        for index, raw in enumerate(raw_samples, start=1):
+            if not isinstance(raw, Mapping) or set(raw) != _SAMPLE_FIELDS:
+                raise VOCEvaluationError(
+                    f"canonical VOC scoring sample {index} schema is invalid"
+                )
+            baseline_completed = _instant(
+                raw.get("baseline_completed_at"),
+                field=f"VOC sample {index} baseline_completed_at",
+            )
+            challenger_completed = _instant(
+                raw.get("challenger_completed_at"),
+                field=f"VOC sample {index} challenger_completed_at",
+            )
+            if baseline_completed > recorded_at or challenger_completed > recorded_at:
+                raise VOCEvaluationError(
+                    "VOC scoring sample completion was not frozen by DecisionRecord"
+                )
+
+        return evidence, evaluation.decision_evidence_sha256
 
     def _scoring_rule(
         self,
@@ -451,7 +475,7 @@ class CanonicalOutcomeDerivedVOCScoreAuthority:
         *,
         evaluation: PairedVOCEvaluation,
         evidence: Mapping[str, Any],
-        ledger_sha256: str,
+        decision_record_sha256: str,
         rule: Mapping[str, Any],
         outcomes: Mapping[str, str],
         outcome_source_sha256: str,
@@ -567,10 +591,10 @@ class CanonicalOutcomeDerivedVOCScoreAuthority:
         source_artifact_sha256 = _digest(
             {
                 "schema": "autosport.canonical_voc_score_sources",
-                "schema_version": 1,
+                "schema_version": 2,
                 "evaluation_id": evaluation.evaluation_id,
                 "decision_evidence_sha256": evaluation.decision_evidence_sha256,
-                "decision_ledger_sha256": ledger_sha256,
+                "decision_record_sha256": decision_record_sha256,
                 "outcome_source_record_sha256": outcome_source_sha256,
                 "outcome_authority_sha256": self.outcome_authority.authority_sha256,
                 "scoring_rule_sha256": evaluation.scoring_rule_sha256,
@@ -615,7 +639,7 @@ class CanonicalOutcomeDerivedVOCScoreAuthority:
             return None
         if _instant(evaluation.evaluated_at, field="evaluated_at") > cutoff:
             return None
-        evidence, ledger_sha256 = self._decision_scoring_evidence(evaluation)
+        evidence, decision_record_sha256 = self._decision_scoring_evidence(evaluation)
         rule = self._scoring_rule(evaluation)
         outcomes, _, outcome_source_sha256 = self._revealed_outcomes(
             evaluation,
@@ -624,7 +648,7 @@ class CanonicalOutcomeDerivedVOCScoreAuthority:
         return self._derive_score(
             evaluation=evaluation,
             evidence=evidence,
-            ledger_sha256=ledger_sha256,
+            decision_record_sha256=decision_record_sha256,
             rule=rule,
             outcomes=outcomes,
             outcome_source_sha256=outcome_source_sha256,

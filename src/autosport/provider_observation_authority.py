@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import hashlib
+import hmac
 import json
 import math
+import os
+import secrets
 import weakref
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -17,6 +20,7 @@ from .monotonic_workspace_authority import (
     AuthorityPhase,
     MonotonicWorkspaceAuthority,
     MonotonicWorkspaceAuthorityError,
+    resolve_monotonic_authority_root,
 )
 from .workspace_lock import WorkspaceEconomicLock
 
@@ -29,6 +33,21 @@ GAME_LINE_MARKETS = ("h2h", "spreads", "totals")
 _MAX_SSE_BYTES = 16 * 1024 * 1024
 _HEX = frozenset("0123456789abcdef")
 _IDENTITY_CHARS = frozenset("abcdefghijklmnopqrstuvwxyz0123456789_-")
+_RECEIPT_SCHEMA = "autosport.provider_acquisition_receipt"
+_RECEIPT_SCHEMA_VERSION = 1
+_RECEIPT_ROOT_NAME = "provider-acquisition-receipt-v1"
+_RECEIPT_KEY_BYTES = 32
+_RECEIPT_KEYS = frozenset(
+    {
+        "schema",
+        "schema_version",
+        "workspace_sha256",
+        "evidence_sha256",
+        "state_sha256",
+        "semantic_binding_sha256",
+        "hmac_sha256",
+    }
+)
 
 
 class ProviderObservationAuthorityError(RuntimeError):
@@ -193,9 +212,7 @@ class CompleteGameBoardSnapshot:
 
     def __post_init__(self) -> None:
         if not isinstance(self.request, CompleteGameBoardRequest):
-            raise ProviderObservationIntegrityError(
-                "request must be CompleteGameBoardRequest"
-            )
+            raise ProviderObservationIntegrityError("request must be CompleteGameBoardRequest")
         object.__setattr__(self, "captured_at", _instant(self.captured_at, "captured_at"))
         if not isinstance(self.frame_json, str):
             raise ProviderObservationIntegrityError("frame_json must be text")
@@ -357,10 +374,6 @@ class CompleteGameBoardSnapshot:
         return snapshot
 
 
-# Exact-object issuance closes the structural-protocol hole: a caller can construct a
-# lookalike evidence value for inspection, but it cannot authorize production intake.
-# Weak references keep the capability exact-object scoped without pinning every large
-# provider frame for the lifetime of a persistent 24/7 process.
 _ISSUED: dict[int, tuple[weakref.ReferenceType, str]] = {}
 
 
@@ -435,9 +448,7 @@ def _read_production_initial_state(
     try:
         with urlopen(request, timeout=timeout_seconds) as response:  # nosec B310 - fixed HTTPS origin
             if int(getattr(response, "status", 0)) != 200:
-                raise ProviderObservationUnsupportedError(
-                    "provider SSE did not return HTTP 200"
-                )
+                raise ProviderObservationUnsupportedError("provider SSE did not return HTTP 200")
             headers = getattr(response, "headers", None)
             content_type = None if headers is None else headers.get("Content-Type")
             if not isinstance(content_type, str) or "text/event-stream" not in content_type.lower():
@@ -489,11 +500,7 @@ def capture_parlay_complete_game_board(
     request: CompleteGameBoardRequest,
     timeout_seconds: float = 10.0,
 ) -> CompleteGameBoardSnapshot:
-    """Acquire and authorize one documented complete replacement baseline.
-
-    The network origin and transport are deliberately not caller-injectable. Credentials
-    are sent only as a request header and are never persisted in evidence.
-    """
+    """Acquire and authorize one documented complete replacement baseline."""
 
     if not isinstance(api_key, str) or not api_key or api_key != api_key.strip():
         raise ValueError("api_key must be non-empty trimmed text")
@@ -520,7 +527,7 @@ def capture_parlay_complete_game_board(
 
 
 class CompleteGameBoardEvidenceStore:
-    """Immutable provider evidence anchored to the independent machine-state authority."""
+    """Immutable provider evidence anchored by acquisition receipt and machine authority."""
 
     DIRECTORY = "provider-complete-game-board"
     AUTHORITY_DOMAIN = "provider-complete-game-board-capture"
@@ -545,6 +552,61 @@ class CompleteGameBoardEvidenceStore:
             key=_sha(evidence_sha256, "evidence_sha256"),
             authority_root=self.authority_root,
         )
+
+    def _workspace_sha256(self) -> str:
+        return hashlib.sha256(str(self.workspace).encode("utf-8")).hexdigest()
+
+    def _receipt_root(self) -> Path:
+        try:
+            root = resolve_monotonic_authority_root(self.workspace, self.authority_root)
+        except MonotonicWorkspaceAuthorityError as exc:
+            raise ProviderObservationIntegrityError(
+                "provider acquisition receipt trust root is unsafe"
+            ) from exc
+        return root / _RECEIPT_ROOT_NAME / self._workspace_sha256()
+
+    def _receipt_path(self, evidence_sha256: str) -> Path:
+        digest = _sha(evidence_sha256, "evidence_sha256")
+        return self._receipt_root() / "receipts" / f"{digest}.json"
+
+    def _key_path(self) -> Path:
+        return self._receipt_root() / "receipt.key"
+
+    def _read_receipt_key(self, *, create: bool) -> bytes:
+        path = self._key_path()
+        if create:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            key = secrets.token_bytes(_RECEIPT_KEY_BYTES)
+            try:
+                descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            except FileExistsError:
+                pass
+            except OSError as exc:
+                raise ProviderObservationIntegrityError(
+                    "cannot create provider acquisition receipt key"
+                ) from exc
+            else:
+                try:
+                    with os.fdopen(descriptor, "w", encoding="ascii") as handle:
+                        handle.write(key.hex())
+                        handle.flush()
+                        os.fsync(handle.fileno())
+                except OSError as exc:
+                    raise ProviderObservationIntegrityError(
+                        "cannot persist provider acquisition receipt key"
+                    ) from exc
+        try:
+            raw = path.read_text(encoding="ascii").strip()
+        except OSError as exc:
+            raise ProviderObservationIntegrityError(
+                "provider evidence is not proven by production-owned acquisition receipt"
+            ) from exc
+        if len(raw) != _RECEIPT_KEY_BYTES * 2 or any(character not in _HEX for character in raw):
+            raise ProviderObservationIntegrityError("provider acquisition receipt key is malformed")
+        key = bytes.fromhex(raw)
+        if len(key) != _RECEIPT_KEY_BYTES:
+            raise ProviderObservationIntegrityError("provider acquisition receipt key is malformed")
+        return key
 
     @staticmethod
     def _state_sha256(snapshot: CompleteGameBoardSnapshot) -> str:
@@ -575,6 +637,58 @@ class CompleteGameBoardEvidenceStore:
                 "complete provider evidence must be a JSON object"
             )
         return CompleteGameBoardSnapshot.from_payload(raw)
+
+    def _unsigned_receipt(self, snapshot: CompleteGameBoardSnapshot) -> dict[str, object]:
+        return {
+            "schema": _RECEIPT_SCHEMA,
+            "schema_version": _RECEIPT_SCHEMA_VERSION,
+            "workspace_sha256": self._workspace_sha256(),
+            "evidence_sha256": snapshot.evidence_sha256,
+            "state_sha256": self._state_sha256(snapshot),
+            "semantic_binding_sha256": self._semantic_binding_sha256(snapshot),
+        }
+
+    @staticmethod
+    def _receipt_hmac(key: bytes, payload: Mapping[str, object]) -> str:
+        return hmac.new(
+            key,
+            _canonical_json(dict(payload)).encode("utf-8"),
+            hashlib.sha256,
+        ).hexdigest()
+
+    def _write_receipt(self, snapshot: CompleteGameBoardSnapshot) -> None:
+        assert_complete_game_board_authoritative(snapshot)
+        unsigned = self._unsigned_receipt(snapshot)
+        key = self._read_receipt_key(create=True)
+        receipt = dict(unsigned)
+        receipt["hmac_sha256"] = self._receipt_hmac(key, unsigned)
+        path = self._receipt_path(snapshot.evidence_sha256)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        atomic_write_json(path, receipt)
+
+    def _verify_receipt(self, snapshot: CompleteGameBoardSnapshot) -> None:
+        path = self._receipt_path(snapshot.evidence_sha256)
+        try:
+            raw = strict_json_loads(path.read_text(encoding="utf-8"))
+        except (OSError, TypeError, ValueError) as exc:
+            raise ProviderObservationIntegrityError(
+                "provider evidence is not proven by production-owned acquisition receipt"
+            ) from exc
+        if not isinstance(raw, dict) or set(raw) != _RECEIPT_KEYS:
+            raise ProviderObservationIntegrityError("provider acquisition receipt is malformed")
+        expected_unsigned = self._unsigned_receipt(snapshot)
+        for name, expected in expected_unsigned.items():
+            if raw.get(name) != expected:
+                raise ProviderObservationIntegrityError(
+                    "provider acquisition receipt does not bind exact persisted evidence"
+                )
+        supplied_hmac = _sha(raw.get("hmac_sha256"), "hmac_sha256")
+        key = self._read_receipt_key(create=False)
+        expected_hmac = self._receipt_hmac(key, expected_unsigned)
+        if not hmac.compare_digest(supplied_hmac, expected_hmac):
+            raise ProviderObservationIntegrityError(
+                "provider acquisition receipt authentication failed"
+            )
 
     def _recover_provenance(
         self,
@@ -619,7 +733,7 @@ class CompleteGameBoardEvidenceStore:
         return f"provider-complete-board:{attempt}:{intended_state_sha256[:32]}"
 
     def save(self, snapshot: CompleteGameBoardSnapshot) -> Path:
-        """Persist only an in-process production capture and anchor its provenance."""
+        """Persist only a production capture and bind both independent trust roots."""
 
         assert_complete_game_board_authoritative(snapshot)
         path = self._path(snapshot.evidence_sha256)
@@ -631,6 +745,8 @@ class CompleteGameBoardEvidenceStore:
             existing = self._read_path(path) if path.exists() else None
             history = authority.read_history()
             if history:
+                if existing is not None:
+                    self._verify_receipt(existing)
                 self._recover_provenance(authority, existing)
                 history = authority.read_history()
                 if existing is not None:
@@ -659,12 +775,14 @@ class CompleteGameBoardEvidenceStore:
                     intended_state_sha256=intended,
                     semantic_binding_sha256=binding,
                 )
+                self._write_receipt(snapshot)
                 atomic_write_json(path, snapshot.to_payload())
                 published = self._read_path(path)
                 if self._state_sha256(published) != intended:
                     raise ProviderObservationIntegrityError(
                         "published provider evidence does not match intended capture digest"
                     )
+                self._verify_receipt(published)
                 authority.commit(
                     tx_id=tx_id,
                     observed_state_sha256=intended,
@@ -677,7 +795,7 @@ class CompleteGameBoardEvidenceStore:
         return path
 
     def load(self, evidence_sha256: str) -> CompleteGameBoardSnapshot:
-        """Load only evidence with surviving independent acquisition provenance."""
+        """Load only evidence proven by receipt plus independent monotonic authority."""
 
         path = self._path(evidence_sha256)
         with WorkspaceEconomicLock(self.workspace):
@@ -686,6 +804,7 @@ class CompleteGameBoardEvidenceStore:
                 raise ProviderObservationIntegrityError(
                     "content-addressed provider evidence path does not match payload"
                 )
+            self._verify_receipt(snapshot)
             authority = self._authority(snapshot.evidence_sha256)
             self._recover_provenance(authority, snapshot)
         return _remember(snapshot)

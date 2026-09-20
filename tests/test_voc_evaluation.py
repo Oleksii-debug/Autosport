@@ -296,7 +296,12 @@ def outcome_score(value):
 
 
 class PairedVOCEvaluationTests(unittest.TestCase):
-    def _production_resolver_fixture(self, value=None):
+    def _production_resolver_fixture(
+        self,
+        value=None,
+        *,
+        decision_recorded_at=T1,
+    ):
         paired = evaluation() if value is None else value
 
         decision_payload = {
@@ -328,7 +333,7 @@ class PairedVOCEvaluationTests(unittest.TestCase):
             payload=decision_payload,
             context_hash=SHA_A,
             decision_id="decision-voc",
-            recorded_at=T0,
+            recorded_at=decision_recorded_at,
         )
         decision_digest = hashlib.sha256(
             json.dumps(
@@ -547,6 +552,26 @@ class PairedVOCEvaluationTests(unittest.TestCase):
     def test_production_resolver_binds_decision_protocol_and_outcome_scope(self):
         resolver, paired = self._production_resolver_fixture()
         self.assertEqual(resolver.resolve(paired, as_of=T2), paired)
+
+    def test_production_resolver_rejects_binding_before_paired_outputs(self):
+        resolver, paired = self._production_resolver_fixture(
+            decision_recorded_at=T0,
+        )
+        with self.assertRaisesRegex(
+            VOCEvaluationError,
+            "predates paired candidate outputs",
+        ):
+            resolver.resolve(paired, as_of=T2)
+
+    def test_production_resolver_rejects_binding_at_outcome_reveal(self):
+        resolver, paired = self._production_resolver_fixture(
+            decision_recorded_at=T2,
+        )
+        with self.assertRaisesRegex(
+            VOCEvaluationError,
+            "not durably recorded before outcome reveal",
+        ):
+            resolver.resolve(paired, as_of=T2)
 
     def test_production_resolver_rejects_unbound_utility_statistics(self):
         resolver, paired = self._production_resolver_fixture()

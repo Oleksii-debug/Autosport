@@ -64,6 +64,7 @@ def _witness(index: int, row: EvaluationRow) -> ObservationEnumerationWitness:
         end_cursor=f"cursor-{index}",
         acquisition_sha256=H3,
         row_keys=(row.row_key,),
+        row_evidence_sha256=((row.row_key, row.row_id),),
         exhaustive=True,
         gap_free=True,
         committed_at="2026-09-20T00:00:02.500000Z",

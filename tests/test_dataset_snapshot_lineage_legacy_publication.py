@@ -5,6 +5,9 @@ import hashlib
 import pytest
 
 from autosport import _dataset_snapshot_lineage_publication as publication_module
+from autosport import (
+    _dataset_snapshot_lineage_publication_provenance as provenance_module,
+)
 from autosport.dataset_snapshot_lineage import (
     DatasetSnapshotLineageAuthority,
     DatasetSnapshotUnprovenError,
@@ -43,7 +46,18 @@ def _append_snapshot(
     )
 
 
-def _install_legacy_v1_chain(tmp_path):
+def _install_legacy_v1_chain(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    custom_authority_root=None,
+):
+    production_root = tmp_path.parent / f"{tmp_path.name}-production-machine"
+    monkeypatch.setenv(
+        "AUTOSPORT_MONOTONIC_AUTHORITY_ROOT",
+        str(production_root.resolve(strict=False)),
+    )
+
     registry = ScientificRegistry.initialize_pristine(tmp_path / "registry.json")
     root_members = _members("a")
     child_members = _members("a", "b")
@@ -62,12 +76,17 @@ def _install_legacy_v1_chain(tmp_path):
         available_at="2026-09-20T02:01:00Z",
     )
     path = tmp_path / "dataset-snapshot-lineage.json"
-    machine_root = tmp_path.parent / f"{tmp_path.name}-legacy-lineage-machine"
-    authority = DatasetSnapshotLineageAuthority.initialize_pristine(
-        path,
-        registry,
-        authority_root=machine_root,
-    )
+    if custom_authority_root is None:
+        authority = DatasetSnapshotLineageAuthority.initialize_pristine(
+            path,
+            registry,
+        )
+    else:
+        authority = DatasetSnapshotLineageAuthority.initialize_pristine(
+            path,
+            registry,
+            authority_root=custom_authority_root,
+        )
     assert authority._read_and_verify() == ()
 
     root_entry = registry.get("DatasetSnapshot", "training")
@@ -103,19 +122,24 @@ def _install_legacy_v1_chain(tmp_path):
         observed_state_sha256=intended,
         semantic_binding_sha256=binding,
     )
-    restarted = DatasetSnapshotLineageAuthority(
-        authority.path,
-        registry,
-        authority_root=authority.monotonic_authority.authority_root,
-        workspace_instance_id=authority.monotonic_authority.workspace_instance_id,
-    )
+    if custom_authority_root is None:
+        restarted = DatasetSnapshotLineageAuthority(authority.path, registry)
+    else:
+        restarted = DatasetSnapshotLineageAuthority(
+            authority.path,
+            registry,
+            authority_root=custom_authority_root,
+            workspace_instance_id=authority.monotonic_authority.workspace_instance_id,
+        )
     return restarted, root, child, root_members, child_members
 
 
 def test_v1_proof_never_retro_authorizes_but_exact_reobservation_unblocks_future(
     tmp_path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    authority, root, child, _, child_members = _install_legacy_v1_chain(tmp_path)
+    authority, root, child, _, child_members = _install_legacy_v1_chain(
+        tmp_path, monkeypatch
+    )
 
     with pytest.raises(
         DatasetSnapshotUnprovenError,
@@ -163,7 +187,9 @@ def test_v1_proof_never_retro_authorizes_but_exact_reobservation_unblocks_future
 def test_legacy_reobservation_retry_is_idempotent_and_keeps_first_witness_time(
     tmp_path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    authority, _, child, _, child_members = _install_legacy_v1_chain(tmp_path)
+    authority, _, child, _, child_members = _install_legacy_v1_chain(
+        tmp_path, monkeypatch
+    )
     monkeypatch.setattr(
         publication_module,
         "_authority_now_utc",
@@ -199,7 +225,9 @@ def test_legacy_reobservation_retry_is_idempotent_and_keeps_first_witness_time(
 def test_deleting_legacy_publication_witness_fails_closed_under_machine_authority(
     tmp_path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    authority, _, _, _, child_members = _install_legacy_v1_chain(tmp_path)
+    authority, _, _, _, child_members = _install_legacy_v1_chain(
+        tmp_path, monkeypatch
+    )
     monkeypatch.setattr(
         publication_module,
         "_authority_now_utc",
@@ -224,7 +252,9 @@ def test_deleting_legacy_publication_witness_fails_closed_under_machine_authorit
 def test_forged_backdated_witness_and_matching_generic_journal_cannot_authorize(
     tmp_path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    authority, root, child, _, child_members = _install_legacy_v1_chain(tmp_path)
+    authority, root, child, _, child_members = _install_legacy_v1_chain(
+        tmp_path, monkeypatch
+    )
     publication = publication_module.LegacyLineagePublicationAuthority.initialize_pristine(
         authority
     )
@@ -299,3 +329,74 @@ def test_forged_backdated_witness_and_matching_generic_journal_cannot_authorize(
         ancestor_snapshot_id="training",
         as_of="2026-09-20T03:00:00Z",
     ).proof_sha256 == child.proof_sha256
+
+
+def test_injected_root_cannot_authorize_even_with_matching_hmac_issuance(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    attacker_root = tmp_path.parent / f"{tmp_path.name}-attacker-machine"
+    authority, root, child, _, _ = _install_legacy_v1_chain(
+        tmp_path,
+        monkeypatch,
+        custom_authority_root=attacker_root,
+    )
+    publication = publication_module.LegacyLineagePublicationAuthority.initialize_pristine(
+        authority
+    )
+    existing = publication._read_and_recover()
+    assert existing == ()
+
+    forged = (
+        publication_module.LegacyLineagePublicationWitness(
+            snapshot_id=root.snapshot_id,
+            proof_sha256=root.proof_sha256,
+            dataset_record_sha256=root.dataset_record_sha256,
+            registered_at="2026-09-20T01:01:00Z",
+        ),
+        publication_module.LegacyLineagePublicationWitness(
+            snapshot_id=child.snapshot_id,
+            proof_sha256=child.proof_sha256,
+            dataset_record_sha256=child.dataset_record_sha256,
+            registered_at="2026-09-20T02:01:00Z",
+        ),
+    )
+    observed = publication._state_sha256(existing)
+    intended = publication._state_sha256(forged)
+    binding = publication._semantic_binding_sha256(intended)
+    publication.monotonic_authority.prepare(
+        tx_id="attacker-generic-publication",
+        observed_state_sha256=observed,
+        intended_state_sha256=intended,
+        semantic_binding_sha256=binding,
+    )
+    atomic_write_json(publication.path, publication._state_payload(forged))
+    publication.monotonic_authority.commit(
+        tx_id="attacker-generic-publication",
+        observed_state_sha256=intended,
+        semantic_binding_sha256=binding,
+    )
+
+    # Exercise the previous exact bypass all the way through the same imported
+    # signing helpers: even a correctly signed record written into the production
+    # credential location cannot promote a lineage whose generic root was injected.
+    key = provenance_module._load_or_create_key(publication)
+    issued = tuple(
+        provenance_module._IssuanceRecord.issue(
+            publication,
+            witness,
+            published_at=witness.registered_at,
+            key=key,
+        )
+        for witness in forged
+    )
+    provenance_module._write_issuances(publication, issued)
+
+    with pytest.raises(
+        DatasetSnapshotUnprovenError,
+        match="lacks authority-owned publication evidence",
+    ):
+        authority.require_descendant_as_of(
+            descendant_snapshot_id="deployment",
+            ancestor_snapshot_id="training",
+            as_of="2026-09-20T02:30:00Z",
+        )

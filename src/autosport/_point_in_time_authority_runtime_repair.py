@@ -36,6 +36,8 @@ if "_PRISTINE_LOAD" not in globals():
 _PROVENANCE_GUARD_MODULE_NAME = (
     f"{__package__}._point_in_time_feature_provenance_guard"
 )
+# Diagnostic only.  Installation/deduplication below never trusts this public
+# marker as possession proof; the exact first finder object is the authority.
 _RELOAD_FINDER_MARKER = "_autosport_point_in_time_reload_finder_v1"
 
 
@@ -161,7 +163,8 @@ class _PointInTimeReloadLoader(importlib.abc.Loader):
 class _PointInTimeReloadFinder(importlib.abc.MetaPathFinder):
     """Intercept explicit reload of either already-loaded authority submodule."""
 
-    # Stable marker survives runtime-repair class redefinition on self-reload.
+    # Exposed only for diagnostics/tests.  A caller can forge this attribute, so
+    # canonical installation is fenced by exact finder object identity instead.
     _autosport_point_in_time_reload_finder_v1 = True
 
     def find_spec(self, fullname, path, target=None):
@@ -179,13 +182,18 @@ class _PointInTimeReloadFinder(importlib.abc.MetaPathFinder):
         return spec
 
 
+# Keep the first real finder instance across ``importlib.reload``.  Its methods
+# resolve globals through this reused module dictionary, so the old object safely
+# dispatches to the newest loader/guard implementations.  Object identity cannot
+# be pre-seeded by a caller before the module has executed.
+if "_CANONICAL_RELOAD_FINDER" not in globals():
+    _CANONICAL_RELOAD_FINDER = _PointInTimeReloadFinder()
+
+
 def _install_reload_finder() -> None:
-    if any(
-        getattr(finder, _RELOAD_FINDER_MARKER, False)
-        for finder in sys.meta_path
-    ):
+    if any(finder is _CANONICAL_RELOAD_FINDER for finder in sys.meta_path):
         return
-    sys.meta_path.insert(0, _PointInTimeReloadFinder())
+    sys.meta_path.insert(0, _CANONICAL_RELOAD_FINDER)
 
 
 # The provenance guard is imported first by autosport.__init__, so wrapping here

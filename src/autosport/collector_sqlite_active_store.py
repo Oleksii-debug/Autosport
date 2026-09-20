@@ -12,7 +12,7 @@ _SQLITE_HEADER = b"SQLite format 3\x00"
 
 
 class CollectorDeltaStore(_SQLiteCollectorDeltaStore):
-    """Canonical SQLite store plus compatibility fault-injection boundary."""
+    """Canonical indexed SQLite store with bounded product-compatible durability."""
 
     def __init__(self, path: str | Path) -> None:
         self.path = Path(path)
@@ -31,6 +31,28 @@ class CollectorDeltaStore(_SQLiteCollectorDeltaStore):
             self._initialize_sqlite(self.path, wal=False)
         self._activate_wal()
         self._verify_sqlite_schema()
+
+    def _activate_wal(self) -> None:
+        """Keep rollback-journal durability so the existing byte budget stays exact.
+
+        The headless collector's production backpressure authority measures the
+        canonical store path itself. A steady-state WAL would move committed bytes
+        into sidecars and could therefore admit data beyond ``max_store_bytes``.
+        Indexed SQLite removes the quadratic rewrite without weakening that existing
+        safety boundary, so normal operation deliberately uses DELETE + FULL.
+        """
+        connection = self._connect()
+        try:
+            selected = connection.execute("PRAGMA journal_mode=DELETE").fetchone()[0]
+            if str(selected).lower() != "delete":
+                raise ValueError(
+                    "collector SQLite rollback journal mode could not be established"
+                )
+            connection.execute("PRAGMA synchronous=FULL")
+        except sqlite3.DatabaseError as exc:
+            raise ValueError("invalid causal collector store") from exc
+        finally:
+            connection.close()
 
     def _write(self, raw: dict[str, Any]) -> None:
         """Retain the legacy pre-commit fault-injection seam without rewriting state.

@@ -657,8 +657,8 @@ class CanonicalPaperExecutionResolver:
     """Resolve immutable #623 PAPER attempt evidence without reimplementing execution semantics."""
 
     def __init__(self, ledger: PaperExecutionLedger) -> None:
-        if not isinstance(ledger, PaperExecutionLedger):
-            raise TypeError("ledger must be PaperExecutionLedger")
+        if type(ledger) is not PaperExecutionLedger:
+            raise TypeError("ledger must be exact PaperExecutionLedger")
         self.ledger = ledger
 
     def resolve(
@@ -901,12 +901,12 @@ class EvaluationUniverseLedger:
             tuple,
         ):
             raise EvaluationUniverseError("universe/events have invalid type")
-        if self.paper_resolver is not None and not isinstance(
-            self.paper_resolver,
-            CanonicalPaperExecutionResolver,
+        if (
+            self.paper_resolver is not None
+            and type(self.paper_resolver) is not CanonicalPaperExecutionResolver
         ):
             raise EvaluationUniverseError(
-                "paper_resolver must be CanonicalPaperExecutionResolver"
+                "paper_resolver must be exact CanonicalPaperExecutionResolver"
             )
         row_map = {row.row_id: row for row in self.universe.rows}
         unique: list[FunnelEvent] = []

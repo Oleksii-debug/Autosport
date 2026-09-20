@@ -372,6 +372,16 @@ def _paper_attempt(
     )
 
 
+class _ForgedCanonicalPaperExecutionResolver(CanonicalPaperExecutionResolver):
+    def resolve(self, **kwargs):
+        raise AssertionError("forged resolver must never become PAPER authority")
+
+
+class _ForgedPaperExecutionLedger(PaperExecutionLedger):
+    def events(self):
+        return ()
+
+
 def _resolver(workspace, attempt: PaperLegAttempt):
     paper = PaperExecutionLedger(workspace / "paper-execution.json")
     paper.record_attempt(attempt)
@@ -381,6 +391,25 @@ def _resolver(workspace, attempt: PaperLegAttempt):
         if item["event_type"] == "ATTEMPT_RECORDED"
     )
     return CanonicalPaperExecutionResolver(paper), event["event_sha256"]
+
+
+def test_paper_resolver_subclass_is_rejected_before_authority_use(tmp_path):
+    row, frozen = _universe(tmp_path / "intake", (_row(),))
+    paper = PaperExecutionLedger(tmp_path / "paper-subclass.json")
+    forged = _ForgedCanonicalPaperExecutionResolver(paper)
+
+    with pytest.raises(
+        EvaluationUniverseError,
+        match="exact CanonicalPaperExecutionResolver",
+    ):
+        EvaluationUniverseLedger(frozen, paper_resolver=forged)
+
+
+def test_paper_execution_ledger_subclass_is_rejected_before_event_reads(tmp_path):
+    forged = _ForgedPaperExecutionLedger(tmp_path / "forged-paper-ledger.json")
+
+    with pytest.raises(TypeError, match="exact PaperExecutionLedger"):
+        CanonicalPaperExecutionResolver(forged)
 
 
 def _attempted(row: EvaluationRow, attempt_id: str = "attempt-1") -> FunnelEvent:

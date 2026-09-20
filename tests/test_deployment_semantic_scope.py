@@ -173,6 +173,7 @@ def _resolve(
     feature_set_id: str | None = None,
     persist_event: bool = True,
     register_runtime: bool = True,
+    runtime_observed_at: str = "2026-08-01T00:00:00Z",
 ):
     event = event or _event()
     dataset = dataset or _dataset()
@@ -194,7 +195,8 @@ def _resolve(
 
         market_store = SQLiteMarketStore(root / "market.db")
         runtime_store = DeploymentRuntimeAuthorityStore.initialize_pristine(
-            root / "runtime-authority.json"
+            root / "runtime-authority.json",
+            clock=lambda: runtime_observed_at,
         )
         try:
             if persist_event:
@@ -205,7 +207,6 @@ def _resolve(
                     episode=_episode(environment),
                     action_semantics_version=actions.version,
                     action_semantics_meanings=actions.meanings,
-                    available_at="2026-08-01T00:00:00Z",
                 )
                 runtime_authority_id = runtime.runtime_authority_id
             else:
@@ -289,13 +290,15 @@ def test_durable_authorities_reresolve_identically_across_restart() -> None:
         registry.append(protocol)
         market_store = SQLiteMarketStore(market_path)
         market_store.append(event)
-        runtime_store = DeploymentRuntimeAuthorityStore.initialize_pristine(runtime_path)
+        runtime_store = DeploymentRuntimeAuthorityStore.initialize_pristine(
+            runtime_path,
+            clock=lambda: "2026-08-01T00:00:00Z",
+        )
         runtime = runtime_store.append(
             environment=environment,
             episode=episode,
             action_semantics_version=actions.version,
             action_semantics_meanings=actions.meanings,
-            available_at="2026-08-01T00:00:00Z",
         )
         first = resolve_deployment_semantic_scope(
             market_store=market_store,
@@ -329,6 +332,46 @@ def test_durable_authorities_reresolve_identically_across_restart() -> None:
     assert second == first
     assert second.scope.scope_id == first.scope.scope_id
     assert second.authority_id == first.authority_id
+
+
+def test_runtime_first_seen_time_is_store_owned_and_retry_immutable() -> None:
+    environment = _environment()
+    episode = _episode(environment)
+    actions = _action_semantics()
+    observed_times = iter(("2026-08-01T00:00:00Z", "2026-07-01T00:00:00Z"))
+
+    with tempfile.TemporaryDirectory() as directory:
+        runtime_store = DeploymentRuntimeAuthorityStore.initialize_pristine(
+            Path(directory) / "runtime-authority.json",
+            clock=lambda: next(observed_times),
+        )
+        first = runtime_store.append(
+            environment=environment,
+            episode=episode,
+            action_semantics_version=actions.version,
+            action_semantics_meanings=actions.meanings,
+        )
+        retry = runtime_store.append(
+            environment=environment,
+            episode=episode,
+            action_semantics_version=actions.version,
+            action_semantics_meanings=actions.meanings,
+        )
+
+        assert first.available_at == "2026-08-01T00:00:00Z"
+        assert retry == first
+        assert runtime_store.records() == (first,)
+
+
+def test_runtime_appended_after_decision_cannot_claim_historical_availability() -> None:
+    with pytest.raises(
+        DeploymentSemanticScopeError,
+        match="runtime authority was not available at decision time",
+    ):
+        _resolve(
+            decision_ts="2026-09-02T00:00:00Z",
+            runtime_observed_at="2026-09-03T00:00:00Z",
+        )
 
 
 def test_later_append_only_snapshot_keeps_scope_but_changes_exact_authority() -> None:

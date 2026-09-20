@@ -1,11 +1,11 @@
 """Fail closed on mutable PAPER-admission authority objects.
 
-Exact concrete ledger types prevent subclass-based authority forgery, but their
+Exact concrete ledger/runtime types prevent subclass-based authority forgery, but
 non-data-descriptor methods can still be replaced per instance through ``__dict__``.
-The coordinator itself can also be pointed at a different exact ledger after
-construction.  Admission therefore pins the original authority objects outside the
+The coordinator itself can also be pointed at different exact authorities after
+construction. Admission therefore pins the original authority objects outside the
 coordinator instance, rejects replacement/shadowing immediately before every read,
-and performs the read through an exact-class view so a racing mutation cannot
+and performs ledger reads through exact-class views so a racing mutation cannot
 redirect durable execution or decision history.
 """
 
@@ -19,9 +19,10 @@ from .paper_campaign_admission import (
     PaperCampaignAdmissionCoordinator,
     PaperCampaignAdmissionError,
 )
+from .paper_campaign_runtime import PaperCampaignRuntime
 from .paper_execution_reality import PaperExecutionLedger
 
-_GUARD_MARKER = "__autosport_exact_admission_authority_guard_v3__"
+_GUARD_MARKER = "__autosport_exact_admission_authority_guard_v4__"
 _ORIGINAL_INIT = PaperCampaignAdmissionCoordinator.__init__
 _ORIGINAL_RESOLVED_EXECUTION_DECISION_ID = (
     PaperCampaignAdmissionCoordinator._resolved_execution_decision_id
@@ -29,6 +30,10 @@ _ORIGINAL_RESOLVED_EXECUTION_DECISION_ID = (
 _ORIGINAL_EXECUTION_ATTEMPT = PaperCampaignAdmissionCoordinator._execution_attempt
 _AUTHORITY_BINDINGS = WeakKeyDictionary()
 _AUTHORITY_BINDINGS_LOCK = RLock()
+_RUNTIME_METHODS = (
+    "_parameters_with_reflection_commitment",
+    "begin_and_bind_paper_ticket",
+)
 
 
 def _has_instance_shadow(value: object, method_name: str) -> bool:
@@ -41,6 +46,11 @@ def _reject_instance_shadow(value: object, method_name: str, label: str) -> None
         raise PaperCampaignAdmissionError(
             f"{label} authority method is shadowed on the exact instance"
         )
+
+
+def _reject_runtime_shadows(runtime: PaperCampaignRuntime) -> None:
+    for method_name in _RUNTIME_METHODS:
+        _reject_instance_shadow(runtime, method_name, "PAPER campaign runtime")
 
 
 class _ExactDecisionLedgerReadView:
@@ -73,6 +83,26 @@ def _binding_for(self: PaperCampaignAdmissionCoordinator):
     return binding
 
 
+def _assert_runtime_binding(
+    self: PaperCampaignAdmissionCoordinator,
+    runtime: PaperCampaignRuntime,
+    settlement_bridge: object,
+) -> None:
+    if self.runtime is not runtime:
+        raise PaperCampaignAdmissionError(
+            "PAPER campaign runtime authority changed after admission construction"
+        )
+    if type(runtime) is not PaperCampaignRuntime:
+        raise PaperCampaignAdmissionError(
+            "PAPER campaign runtime must remain exact PaperCampaignRuntime"
+        )
+    if runtime.settlement_bridge is not settlement_bridge:
+        raise PaperCampaignAdmissionError(
+            "PAPER campaign settlement authority changed after admission construction"
+        )
+    _reject_runtime_shadows(runtime)
+
+
 def _guarded_init(
     self: PaperCampaignAdmissionCoordinator,
     state_path,
@@ -82,6 +112,9 @@ def _guarded_init(
     runtime,
     execution_ledger: PaperExecutionLedger,
 ) -> None:
+    if type(runtime) is not PaperCampaignRuntime:
+        raise TypeError("runtime must be exact PaperCampaignRuntime")
+    _reject_runtime_shadows(runtime)
     if type(decision_ledger) is JsonlDecisionLedger:
         _reject_instance_shadow(
             decision_ledger,
@@ -103,12 +136,19 @@ def _guarded_init(
         execution_ledger=execution_ledger,
     )
     with _AUTHORITY_BINDINGS_LOCK:
-        _AUTHORITY_BINDINGS[self] = (decision_ledger, execution_ledger, RLock())
+        _AUTHORITY_BINDINGS[self] = (
+            decision_ledger,
+            execution_ledger,
+            runtime,
+            runtime.settlement_bridge,
+            RLock(),
+        )
 
 
 def _guarded_resolved_execution_decision_id(self, *args, **kwargs):
-    decision_ledger, _execution_ledger, lock = _binding_for(self)
+    decision_ledger, _execution_ledger, runtime, settlement_bridge, lock = _binding_for(self)
     with lock:
+        _assert_runtime_binding(self, runtime, settlement_bridge)
         if self.decision_ledger is not decision_ledger:
             raise PaperCampaignAdmissionError(
                 "Decision Ledger authority changed after admission construction"
@@ -126,8 +166,9 @@ def _guarded_resolved_execution_decision_id(self, *args, **kwargs):
 
 
 def _guarded_execution_attempt(self, *args, **kwargs):
-    _decision_ledger, execution_ledger, lock = _binding_for(self)
+    _decision_ledger, execution_ledger, runtime, settlement_bridge, lock = _binding_for(self)
     with lock:
+        _assert_runtime_binding(self, runtime, settlement_bridge)
         if self.execution_ledger is not execution_ledger:
             raise PaperCampaignAdmissionError(
                 "PAPER execution authority changed after admission construction"

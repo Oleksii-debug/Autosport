@@ -64,19 +64,21 @@ def _look(
     classification: ResearchOutcome = ResearchOutcome.NULL,
     experiment_id: str | None = None,
     bundle_char: str = "f",
+    bundle_id: str | None = None,
     label: str | None = None,
+    observed_at: str | None = None,
 ) -> SequentialLookEvidence:
     return SequentialLookEvidence(
         family_plan_sha256=plan.plan_sha256,
         member_authority_id=member.member_authority_id,
         hypothesis_id=member.hypothesis_id,
         experiment_id=experiment_id or f"exp-{member.member_authority_id[:8]}-{index}",
-        evaluation_bundle_id=f"bundle-{bundle_char}-{index}",
+        evaluation_bundle_id=bundle_id or f"bundle-{bundle_char}-{index}",
         evaluation_bundle_sha256=_sha(bundle_char),
         look_index=index,
         observed_p_value=Decimal(p),
         classification=classification,
-        observed_at=f"2026-09-20T03:0{index}:00Z",
+        observed_at=observed_at or f"2026-09-20T03:0{index}:00Z",
         candidate_label=label or member.candidate_label,
     )
 
@@ -258,3 +260,92 @@ def test_persisted_family_tamper_is_detected_on_restart(tmp_path) -> None:
     path.write_text(json.dumps(raw), encoding="utf-8")
     with pytest.raises(ValueError, match="plan identity mismatch"):
         SequentialMultiplicityEvidenceStore(path)
+
+
+def test_significant_look_before_family_freeze_is_rejected(tmp_path) -> None:
+    plan = _plan()
+    member = plan.members[0]
+    store = SequentialMultiplicityEvidenceStore.initialize_pristine(
+        tmp_path / "multiplicity.json", plan
+    )
+    with pytest.raises(ValueError, match="predates the frozen"):
+        store.append(
+            _look(
+                plan,
+                member,
+                index=1,
+                p="0.001",
+                bundle_char="c",
+                observed_at="2026-09-20T02:59:59Z",
+            )
+        )
+
+
+def test_same_evaluation_bundle_id_cannot_change_digest_after_restart(tmp_path) -> None:
+    path = tmp_path / "multiplicity.json"
+    plan = _plan()
+    member = plan.members[0]
+    store = SequentialMultiplicityEvidenceStore.initialize_pristine(path, plan)
+    store.append(
+        _look(
+            plan,
+            member,
+            index=1,
+            p="0.5",
+            bundle_char="c",
+            bundle_id="canonical-evaluation-1",
+        )
+    )
+
+    reopened = SequentialMultiplicityEvidenceStore(path)
+    with pytest.raises(ValueError, match="different immutable digest"):
+        reopened.append(
+            _look(
+                plan,
+                member,
+                index=2,
+                p="0.5",
+                bundle_char="d",
+                bundle_id="canonical-evaluation-1",
+            )
+        )
+
+
+def test_hypothesis_id_tamper_changes_frozen_member_authority(tmp_path) -> None:
+    path = tmp_path / "multiplicity.json"
+    plan = _plan()
+    SequentialMultiplicityEvidenceStore.initialize_pristine(path, plan)
+    raw = json.loads(path.read_text(encoding="utf-8"))
+    raw["plan"]["members"][0]["hypothesis_id"] = "hyp-alias"
+    path.write_text(json.dumps(raw), encoding="utf-8")
+    with pytest.raises(ValueError, match="family member authority identity mismatch"):
+        SequentialMultiplicityEvidenceStore(path)
+
+
+def test_sequential_look_timestamps_cannot_move_backwards(tmp_path) -> None:
+    plan = _plan()
+    member = plan.members[0]
+    store = SequentialMultiplicityEvidenceStore.initialize_pristine(
+        tmp_path / "multiplicity.json", plan
+    )
+    store.append(
+        _look(
+            plan,
+            member,
+            index=1,
+            p="0.5",
+            bundle_char="c",
+            observed_at="2026-09-20T03:05:00Z",
+        )
+    )
+    with pytest.raises(ValueError, match="timestamps must be monotonic"):
+        store.append(
+            _look(
+                plan,
+                member,
+                index=2,
+                p="0.5",
+                bundle_char="d",
+                observed_at="2026-09-20T03:04:00Z",
+            )
+        )

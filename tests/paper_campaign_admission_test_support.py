@@ -23,6 +23,7 @@ from autosport.paper_execution_adoption import (
     PaperExposureBinding,
     PreparedPaperExecution,
 )
+from autosport.paper_execution_decision_origin import execute_with_decision_origin
 from autosport.paper_execution_reality import (
     EvidenceGrade,
     PaperAttemptOutcome,
@@ -167,6 +168,16 @@ class AdmissionFixture:
                 intent_evidence_json='{"schema":"admission-test-execution"}',
             )
         )
+        self._prepared = prepared
+        self._execution_config = execution_config
+        self.execution_run_id = execution_runtime.expected_run_id(
+            prepared, self.execution_decision_id
+        )
+        if seed_execution_decision:
+            self.append_execution_decision(
+                plan_fingerprint=decision_plan_fingerprint
+            )
+
         evidence = PaperExecutionEvidenceRecord(
             action_id=action.action_id,
             bookmaker_id=action.bookmaker_id,
@@ -193,55 +204,67 @@ class AdmissionFixture:
         )
         registry = PaperExecutionEvidenceRegistry(execution_ledger)
         registry.register(evidence)
-        result = execution_runtime.execute(
-            prepared=prepared,
-            trigger_id=self.execution_decision_id,
-            started_at=T3,
-            materialize_exposure=True,
-            observations={action.action_id: evidence.as_observation()},
-            evidence_registry=registry,
-        )
-        self.execution_run_id = result.run.run_id
+        if seed_execution_decision:
+            result = execute_with_decision_origin(
+                runtime=execution_runtime,
+                decision_ledger=JsonlDecisionLedger(self.workspace / "decisions.jsonl"),
+                prepared=prepared,
+                trigger_id=self.execution_decision_id,
+                started_at=T3,
+                materialize_exposure=True,
+                observations={action.action_id: evidence.as_observation()},
+                evidence_registry=registry,
+            )
+        else:
+            result = execution_runtime.execute(
+                prepared=prepared,
+                trigger_id=self.execution_decision_id,
+                started_at=T3,
+                materialize_exposure=True,
+                observations={action.action_id: evidence.as_observation()},
+                evidence_registry=registry,
+            )
+        if result.run.run_id != self.execution_run_id:
+            raise AssertionError("fixture expected deterministic PAPER execution run identity")
         self.execution_attempt_id = result.run.attempts[0].attempt_id
         self.execution_ticket_id = (
             result.ticket_ids[0] if result.ticket_ids else "missing-execution-ticket"
         )
         self.execution_outcome = outcome
 
-        if seed_execution_decision:
-            plan_fingerprint = (
-                decision_plan_fingerprint
-                if decision_plan_fingerprint is not None
-                else prepared.execution_plan.fingerprint
-            )
-            decision_ledger = JsonlDecisionLedger(self.workspace / "decisions.jsonl")
-            decision_ledger.append_economic(
-                DecisionRecord(
-                    replay_run_id="live:admission-fixture",
-                    agent="persistent-live-decision-loop",
-                    observed_ts=T2,
-                    action="LIVE_OPEN",
-                    payload={
-                        "schema": "autosport.persistent_live_decision",
-                        "schema_version": 2,
-                        "material_action_id": self.execution_decision_id,
-                        "paper_execution": {
-                            "schema": "autosport.paper_execution_adoption",
-                            "schema_version": 1,
-                            "plan_id": prepared.execution_plan.plan_id,
-                            "plan_fingerprint": plan_fingerprint,
-                            "model_fingerprint": execution_config.fingerprint,
-                            "run_id": self.execution_run_id,
-                            "intent_evidence_json": prepared.intent_evidence_json,
-                        },
+    def append_execution_decision(self, *, plan_fingerprint: str | None = None) -> str:
+        decision_ledger = JsonlDecisionLedger(self.workspace / "decisions.jsonl")
+        return decision_ledger.append_economic(
+            DecisionRecord(
+                replay_run_id="live:admission-fixture",
+                agent="persistent-live-decision-loop",
+                observed_ts=T2,
+                action="LIVE_OPEN",
+                payload={
+                    "schema": "autosport.persistent_live_decision",
+                    "schema_version": 2,
+                    "material_action_id": self.execution_decision_id,
+                    "paper_execution": {
+                        "schema": "autosport.paper_execution_adoption",
+                        "schema_version": 1,
+                        "plan_id": self._prepared.execution_plan.plan_id,
+                        "plan_fingerprint": (
+                            plan_fingerprint
+                            if plan_fingerprint is not None
+                            else self._prepared.execution_plan.fingerprint
+                        ),
+                        "model_fingerprint": self._execution_config.fingerprint,
+                        "run_id": self.execution_run_id,
+                        "intent_evidence_json": self._prepared.intent_evidence_json,
                     },
-                    context_hash="a" * 64,
-                    decision_id=self.execution_decision_id,
-                    decision_kind=ECONOMIC_DECISION_KIND,
-                ),
-                self.goal,
-                risk_policy=self.risk,
-            )
+                },
+                context_hash="a" * 64,
+                decision_id=self.execution_decision_id,
+                decision_kind=ECONOMIC_DECISION_KIND,
+            ),
+            self.goal,
+            risk_policy=self.risk,
+        )
 
     def coordinator(
         self,

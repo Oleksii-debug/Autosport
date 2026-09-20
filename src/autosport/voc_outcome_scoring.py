@@ -1,11 +1,12 @@
-"""Canonical realized-VOC authority with fail-closed cohort terminality.
+"""Canonical realized-VOC authority with pre-output denominator admission.
 
-The prior implementation is retained byte-for-byte in
-``_voc_outcome_scoring_base``.  This narrow wrapper closes one causal selection
-bias: cohort eligibility is derived from pre-outcome ``voc_binding`` admission,
-not from the later presence of successful ``voc_scoring_evidence``.  Therefore a
-matching admitted paired attempt that times out, fails, abstains, or otherwise
-never emits scoring evidence cannot silently disappear from the denominator.
+The statistically qualified scorer remains in ``_voc_outcome_scoring_base``.
+This wrapper narrows only cohort-completeness semantics: a matching canonical
+``VOC_ROUTE_CONTEXT`` inside the frozen protocol window is a pre-output paired
+admission.  Denominator membership therefore exists before either candidate
+produces an output.  Every admission must resolve to exactly one terminal paired
+record; a missing/failed/timed-out result cannot disappear merely because no
+``voc_binding`` or ``voc_scoring_evidence`` was produced.
 """
 
 from __future__ import annotations
@@ -13,20 +14,50 @@ from __future__ import annotations
 from collections.abc import Mapping
 from datetime import datetime
 from pathlib import Path
+from typing import Any
 
 from . import _voc_outcome_scoring_base as _base
 
 # Preserve the existing public module surface while overriding only the authority
-# whose denominator semantics changed.
+# whose denominator admission semantics changed.
 for _name in dir(_base):
     if not _name.startswith("_"):
         globals()[_name] = getattr(_base, _name)
+
+_CONTEXT_ACTION = "VOC_ROUTE_CONTEXT"
+_CONTEXT_KEY = "voc_current_context"
+_TERMINAL_KEY = "voc_terminal"
+_SCOPE_FIELDS = (
+    "sport_id",
+    "league_id",
+    "regime_id",
+    "urgency_id",
+    "contradiction_state",
+)
+_TERMINAL_STATUSES = frozenset(
+    {"scored", "deadline_missed", "failed", "cancelled", "abstained", "null"}
+)
+
+
+def _scope(payload: Mapping[str, Any]) -> dict[str, object]:
+    return {field: payload.get(field) for field in _SCOPE_FIELDS}
+
+
+def _compute_identity(
+    payload: Mapping[str, Any], *, prefix: str
+) -> dict[str, object]:
+    return {
+        "candidate_id": payload.get(f"{prefix}_candidate_id"),
+        "backend_id": payload.get(f"{prefix}_backend_id"),
+        "model_id": payload.get(f"{prefix}_model_id"),
+        "config_sha256": payload.get(f"{prefix}_config_sha256"),
+    }
 
 
 class CanonicalOutcomeDerivedVOCScoreAuthority(
     _base.CanonicalOutcomeDerivedVOCScoreAuthority
 ):
-    """Realized-VOC scorer whose cohort denominator starts at paired admission."""
+    """Realized-VOC scorer whose cohort denominator starts before computation."""
 
     def _eligible_cohort_decisions(
         self,
@@ -47,101 +78,175 @@ class CanonicalOutcomeDerivedVOCScoreAuthority(
             ) from exc
 
         by_sha = {_base._digest(record.to_dict()): record for record in records}
-        eligible: dict[str, str] = {}
+
+        # Admission is independent of whether baseline/challenger later succeed.
+        # The frozen protocol already fixes task/scope and the cohort record fixes
+        # the baseline/challenger compute identities.  A matching route context in
+        # its precommitted window is therefore an admitted paired attempt.
+        admissions: dict[str, tuple[str, str]] = {}
+        request_ids: set[str] = set()
         for record_sha, record in by_sha.items():
             recorded_at = _base._instant(
                 record.recorded_at,
-                field="VOC cohort DecisionRecord.recorded_at",
+                field="VOC cohort admission recorded_at",
             )
             if recorded_at < recorded_from or recorded_at > recorded_through:
                 continue
+            if record.action != _CONTEXT_ACTION:
+                continue
             payload = record.payload
             if not isinstance(payload, Mapping):
-                continue
-
-            # Admission is the authority for denominator membership.  Scoring
-            # evidence is a later terminal product and must never decide whether
-            # this attempt existed.
-            binding = payload.get("voc_binding")
-            if not isinstance(binding, Mapping):
-                continue
-            binding_scope = {
-                "sport_id": binding.get("sport_id"),
-                "league_id": binding.get("league_id"),
-                "regime_id": binding.get("regime_id"),
-                "urgency_id": binding.get("urgency_id"),
-                "contradiction_state": binding.get("contradiction_state"),
-            }
-            binding_baseline = {
-                "candidate_id": binding.get("baseline_candidate_id"),
-                "backend_id": binding.get("baseline_backend_id"),
-                "model_id": binding.get("baseline_model_id"),
-                "config_sha256": binding.get("baseline_config_sha256"),
-            }
-            binding_challenger = {
-                "candidate_id": binding.get("challenger_candidate_id"),
-                "backend_id": binding.get("challenger_backend_id"),
-                "model_id": binding.get("challenger_model_id"),
-                "config_sha256": binding.get("challenger_config_sha256"),
-            }
+                raise _base.VOCEvaluationError(
+                    "canonical VOC admission payload is invalid"
+                )
+            context = payload.get(_CONTEXT_KEY)
+            if not isinstance(context, Mapping):
+                raise _base.VOCEvaluationError(
+                    "canonical VOC admission context is missing"
+                )
             if (
-                binding_scope != dict(expected_scope)
-                or binding_baseline != dict(expected_baseline)
-                or binding_challenger != dict(expected_challenger)
+                context.get("task_class") != expected_task_class
+                or _scope(context) != dict(expected_scope)
             ):
                 continue
-
-            context_sha = _base._sha256(
-                binding.get("decision_context_sha256"),
-                field="eligible VOC decision_context_sha256",
+            request_id = _base._text(
+                context.get("request_id"), field="VOC admission request_id"
             )
-            context_record = by_sha.get(context_sha)
-            if context_record is None or not isinstance(
-                context_record.payload, Mapping
-            ):
-                raise _base.VOCEvaluationError(
-                    "eligible VOC decision is missing canonical decision context"
-                )
-            current_context = context_record.payload.get("voc_current_context")
-            if not isinstance(current_context, Mapping):
-                raise _base.VOCEvaluationError(
-                    "eligible VOC decision context is missing canonical scope"
-                )
-            context_scope = {
-                "sport_id": current_context.get("sport_id"),
-                "league_id": current_context.get("league_id"),
-                "regime_id": current_context.get("regime_id"),
-                "urgency_id": current_context.get("urgency_id"),
-                "contradiction_state": current_context.get(
-                    "contradiction_state"
-                ),
-            }
-            if (
-                current_context.get("task_class") != expected_task_class
-                or context_scope != dict(expected_scope)
-            ):
-                continue
-
-            evidence = payload.get(_base._SCORING_EVIDENCE_KEY)
-            if not isinstance(evidence, Mapping):
-                raise _base.VOCEvaluationError(
-                    "eligible VOC decision lacks terminal scoring evidence"
-                )
-            evaluation_id = _base._text(
-                evidence.get("evaluation_id"),
-                field="eligible VOC evaluation_id",
+            decision_input_sha256 = _base._sha256(
+                context.get("decision_input_sha256"),
+                field="VOC admission decision_input_sha256",
             )
-            prior = eligible.get(evaluation_id)
-            if prior is not None and prior != record_sha:
+            if record.context_hash != decision_input_sha256:
                 raise _base.VOCEvaluationError(
-                    "precommitted VOC eligibility range contains duplicate evaluation identity"
+                    "canonical VOC admission context hash does not match decision input"
                 )
-            eligible[evaluation_id] = record_sha
+            if request_id in request_ids:
+                raise _base.VOCEvaluationError(
+                    "precommitted VOC eligibility range reuses request identity"
+                )
+            request_ids.add(request_id)
+            admissions[record_sha] = (request_id, decision_input_sha256)
 
-        if not eligible:
+        if not admissions:
             raise _base.VOCEvaluationError(
-                "precommitted VOC eligibility range contains no canonical decisions"
+                "precommitted VOC eligibility range contains no canonical admissions"
             )
+
+        eligible: dict[str, str] = {}
+        for context_sha, (_, decision_input_sha256) in admissions.items():
+            terminals: list[tuple[str, object, Mapping[str, Any]]] = []
+            for record_sha, record in by_sha.items():
+                payload = record.payload
+                if not isinstance(payload, Mapping):
+                    continue
+                binding = payload.get("voc_binding")
+                explicit_terminal = payload.get(_TERMINAL_KEY)
+                binding_matches = (
+                    isinstance(binding, Mapping)
+                    and binding.get("decision_context_sha256") == context_sha
+                )
+                explicit_matches = (
+                    isinstance(explicit_terminal, Mapping)
+                    and explicit_terminal.get("decision_context_sha256") == context_sha
+                )
+                if binding_matches or explicit_matches:
+                    terminals.append((record_sha, record, payload))
+
+            if not terminals:
+                raise _base.VOCEvaluationError(
+                    "eligible VOC admission lacks terminal paired record"
+                )
+            if len(terminals) != 1:
+                raise _base.VOCEvaluationError(
+                    "eligible VOC admission has ambiguous terminal paired records"
+                )
+
+            record_sha, terminal_record, payload = terminals[0]
+            binding = payload.get("voc_binding")
+            evidence = payload.get(_base._SCORING_EVIDENCE_KEY)
+            explicit_terminal = payload.get(_TERMINAL_KEY)
+
+            if isinstance(binding, Mapping):
+                if binding.get("decision_input_sha256") != decision_input_sha256:
+                    raise _base.VOCEvaluationError(
+                        "eligible VOC terminal decision input does not match admission"
+                    )
+                if _scope(binding) != dict(expected_scope):
+                    raise _base.VOCEvaluationError(
+                        "eligible VOC terminal scope does not match admission cohort"
+                    )
+                if _compute_identity(binding, prefix="baseline") != dict(
+                    expected_baseline
+                ) or _compute_identity(binding, prefix="challenger") != dict(
+                    expected_challenger
+                ):
+                    raise _base.VOCEvaluationError(
+                        "eligible VOC terminal compute identity does not match frozen cohort"
+                    )
+
+                # A binding without scoring evidence is a durable terminal failure,
+                # not grounds to erase the pre-output admission from the population.
+                # Qualification fails closed until that terminal has an explicit
+                # protocol-supported non-positive score representation.
+                if not isinstance(evidence, Mapping):
+                    status = payload.get("voc_terminal_status")
+                    if status is not None:
+                        status_text = _base._text(
+                            status, field="VOC terminal status"
+                        )
+                        if status_text not in _TERMINAL_STATUSES:
+                            raise _base.VOCEvaluationError(
+                                "eligible VOC terminal status is unsupported"
+                            )
+                    raise _base.VOCEvaluationError(
+                        "eligible VOC decision lacks terminal scoring evidence"
+                    )
+
+                evaluation_id = _base._text(
+                    evidence.get("evaluation_id"),
+                    field="eligible VOC evaluation_id",
+                )
+                if evidence.get("decision_input_sha256") != decision_input_sha256:
+                    raise _base.VOCEvaluationError(
+                        "eligible VOC scoring evidence does not match admission input"
+                    )
+                if _base._instant(
+                    terminal_record.recorded_at,
+                    field="VOC terminal recorded_at",
+                ) < _base._instant(
+                    by_sha[context_sha].recorded_at,
+                    field="VOC admission recorded_at",
+                ):
+                    raise _base.VOCEvaluationError(
+                        "eligible VOC terminal predates its admission"
+                    )
+                prior = eligible.get(evaluation_id)
+                if prior is not None and prior != record_sha:
+                    raise _base.VOCEvaluationError(
+                        "precommitted VOC eligibility range contains duplicate evaluation identity"
+                    )
+                eligible[evaluation_id] = record_sha
+                continue
+
+            if not isinstance(explicit_terminal, Mapping):
+                raise _base.VOCEvaluationError(
+                    "eligible VOC admission has malformed terminal record"
+                )
+            status = _base._text(
+                explicit_terminal.get("status"), field="VOC terminal status"
+            )
+            if status not in _TERMINAL_STATUSES:
+                raise _base.VOCEvaluationError(
+                    "eligible VOC terminal status is unsupported"
+                )
+            # Non-scored terminal attempts stay in the denominator by making the
+            # cohort ineligible for positive qualification instead of disappearing.
+            # A future protocol may encode an explicit conservative score for such
+            # a terminal, but it may never be silently promoted as success.
+            raise _base.VOCEvaluationError(
+                f"eligible VOC admission terminated without score: {status}"
+            )
+
         return dict(sorted(eligible.items()))
 
 
@@ -155,7 +260,7 @@ def build_canonical_voc_authority_resolver(
     source_record_sha256: str,
     additional_outcome_sources: tuple[_base.CanonicalVOCOutcomeSource, ...] = (),
 ) -> _base.CanonicalVOCAuthorityResolver:
-    """Build the production resolver with admission-derived denominator authority."""
+    """Build the production resolver with pre-output denominator authority."""
 
     score_authority = CanonicalOutcomeDerivedVOCScoreAuthority(
         decision_ledger=decision_ledger,

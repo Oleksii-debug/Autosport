@@ -28,6 +28,7 @@ from autosport.sport_domain_fitness import (
 from autosport.decision_ledger import DecisionRecord
 from autosport.voc_evaluation import (
     CanonicalVOCAuthorityResolver,
+    OutcomeDerivedVOCScore,
     PairedVOCEvaluation,
     VOCEvaluationError,
     VOCEvaluationProvenance,
@@ -249,6 +250,51 @@ class _FixtureCanonicalVOCResolver:
         return value
 
 
+class _FixtureOutcomeScoreAuthority:
+    """Test authority whose records are independent from routed evaluations."""
+
+    def __init__(self):
+        self._records = {}
+
+    def publish(self, value):
+        self._records[value.evaluation_id] = value
+
+    def resolve(self, evaluation_id, *, as_of):
+        value = self._records.get(evaluation_id)
+        if value is None or value.available_at > as_of:
+            return None
+        return value
+
+
+def outcome_score(value):
+    return OutcomeDerivedVOCScore(
+        evaluation_id=value.evaluation_id,
+        available_at=value.evaluated_at,
+        outcome_evidence_sha256=value.outcome_evidence_sha256,
+        scoring_rule_sha256=value.scoring_rule_sha256,
+        research_protocol_sha256=value.research_protocol_sha256,
+        holdout_access_id=value.holdout_access_id,
+        multiple_comparison_control_sha256=(
+            value.multiple_comparison_control_sha256
+        ),
+        baseline_utility=value.baseline_utility,
+        challenger_utility=value.challenger_utility,
+        compute_cost_penalty=value.compute_cost_penalty,
+        latency_opportunity_cost_penalty=(
+            value.latency_opportunity_cost_penalty
+        ),
+        measured_compute_cost=value.measured_compute_cost,
+        paired_sample_count=value.paired_sample_count,
+        effective_sample_size=value.effective_sample_size,
+        support_fraction=value.support_fraction,
+        incremental_value_interval_low=value.incremental_value_interval_low,
+        incremental_value_interval_high=value.incremental_value_interval_high,
+        source_artifact_sha256=hashlib.sha256(
+            ("outcome-score:" + value.evaluation_id).encode("utf-8")
+        ).hexdigest(),
+    )
+
+
 class PairedVOCEvaluationTests(unittest.TestCase):
     def _production_resolver_fixture(self, value=None):
         paired = evaluation() if value is None else value
@@ -423,9 +469,10 @@ class PairedVOCEvaluationTests(unittest.TestCase):
                         "dataset_snapshot_id": dataset_snapshot_id,
                         "protocol_sha256": paired.research_protocol_sha256,
                         "artifact_hashes": [
-                            CanonicalVOCAuthorityResolver._scientific_score_artifact_sha256(
-                                paired
-                            )
+                            score_authority.resolve(
+                                paired.evaluation_id,
+                                as_of=paired.evaluated_at,
+                            ).score_sha256
                         ],
                         "effective_sample_size": paired.effective_sample_size,
                         "effect_interval_low": str(
@@ -492,6 +539,9 @@ class PairedVOCEvaluationTests(unittest.TestCase):
             holdout_access_id=holdout_digest,
             outcome_evidence_sha256=SHA_D,
         )
+        score_authority = _FixtureOutcomeScoreAuthority()
+        score_authority.publish(outcome_score(paired))
+        resolver.outcome_score_authority = score_authority
         return resolver, paired
 
     def test_production_resolver_binds_decision_protocol_and_outcome_scope(self):
@@ -523,7 +573,90 @@ class PairedVOCEvaluationTests(unittest.TestCase):
         )
         with self.assertRaisesRegex(
             VOCEvaluationError,
-            "canonical scientific VOC statistics",
+            "canonical outcome-derived VOC score",
+        ):
+            resolver.resolve(forged, as_of=T2)
+
+    def test_forged_registry_statistics_cannot_mint_outcome_score_authority(self):
+        resolver, paired = self._production_resolver_fixture()
+        forged = replace(
+            paired,
+            baseline_utility=Decimal("0.5"),
+            challenger_utility=Decimal("3"),
+            incremental_value_interval_low=Decimal("1.8"),
+            incremental_value_interval_high=Decimal("2.7"),
+        )
+        canonical_registry = resolver.scientific_registry
+        canonical_score = resolver.outcome_score_authority.resolve(
+            paired.evaluation_id,
+            as_of=T2,
+        )
+
+        def forged_get(record_type, record_id):
+            if (
+                record_type == "PairedVOCEvaluation"
+                and record_id == forged.evaluation_id
+            ):
+                return SimpleNamespace(
+                    available_at=forged.evaluated_at,
+                    payload=forged.payload(),
+                )
+            if record_type == "EvaluationBundle" and record_id == "voc-bundle-1":
+                original = canonical_registry.get(record_type, record_id)
+                payload = dict(original.payload)
+                payload.update(
+                    {
+                        "effective_sample_size": forged.effective_sample_size,
+                        "effect_interval_low": str(
+                            forged.incremental_value_interval_low
+                        ),
+                        "effect_interval_high": str(
+                            forged.incremental_value_interval_high
+                        ),
+                        "practical_improvement": str(forged.net_value),
+                        "artifact_hashes": [canonical_score.score_sha256],
+                    }
+                )
+                return SimpleNamespace(
+                    available_at=forged.evaluated_at,
+                    payload=payload,
+                )
+            return canonical_registry.get(record_type, record_id)
+
+        def forged_causal_records(record_type, *, as_of):
+            if record_type != "PromotionEvidence":
+                return canonical_registry.causal_records(record_type, as_of=as_of)
+            original = canonical_registry.causal_records(
+                record_type,
+                as_of=as_of,
+            )[0]
+            payload = dict(original.payload)
+            payload.update(
+                {
+                    "effective_sample_size": forged.effective_sample_size,
+                    "effect_interval_low": str(
+                        forged.incremental_value_interval_low
+                    ),
+                    "effect_interval_high": str(
+                        forged.incremental_value_interval_high
+                    ),
+                    "practical_improvement": str(forged.net_value),
+                }
+            )
+            return (
+                SimpleNamespace(
+                    available_at=forged.evaluated_at,
+                    payload=payload,
+                ),
+            )
+
+        resolver.scientific_registry = SimpleNamespace(
+            get=forged_get,
+            causal_records=forged_causal_records,
+        )
+        with self.assertRaisesRegex(
+            VOCEvaluationError,
+            "canonical outcome-derived VOC score",
         ):
             resolver.resolve(forged, as_of=T2)
 

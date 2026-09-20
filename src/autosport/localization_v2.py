@@ -85,7 +85,7 @@ _UK_UA = MappingProxyType(
         "ui.status.research_plan.bound": (
             "План дослідження перевірено і прив’язано до {strategy_id}; SHA-256={sha_short}…"
         ),
-        "ui.status.research_plan.identity_suffix": "; plan={sha_suffix}",
+        "ui.status.research_plan.identity_suffix": "; план={sha_suffix}",
         "ui.status.bank.recovery_required": (
             "Віртуальний банк: недоступний до успішного відновлення; робоча область: {workspace}"
         ),
@@ -96,7 +96,7 @@ _UK_UA = MappingProxyType(
         ),
         "ui.status.bank.quarantined": (
             "Віртуальний банк: недоступний до підтвердженого завершального стану/відновлення; "
-            "робоча область={workspace}"
+            "робоча область: {workspace}"
         ),
         "ui.status.dataset.validation_busy": "Перевірка набору даних уже виконується; дочекайтеся завершального результату.",
         "ui.status.dataset.replay_busy": (

@@ -219,3 +219,83 @@ def test_deleting_legacy_publication_witness_fails_closed_under_machine_authorit
             ancestor_snapshot_id="training",
             as_of="2026-09-20T04:00:00Z",
         )
+
+
+def test_forged_backdated_witness_and_matching_generic_journal_cannot_authorize(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    authority, root, child, _, child_members = _install_legacy_v1_chain(tmp_path)
+    publication = publication_module.LegacyLineagePublicationAuthority.initialize_pristine(
+        authority
+    )
+    existing = publication._read_and_recover()
+    assert existing == ()
+
+    # Model the exact falsifier: a caller writes structurally valid, backdated witness
+    # bytes and also mints the matching generic monotonic PREPARE/COMMIT history.
+    forged = (
+        publication_module.LegacyLineagePublicationWitness(
+            snapshot_id=root.snapshot_id,
+            proof_sha256=root.proof_sha256,
+            dataset_record_sha256=root.dataset_record_sha256,
+            registered_at="2026-09-20T01:01:00Z",
+        ),
+        publication_module.LegacyLineagePublicationWitness(
+            snapshot_id=child.snapshot_id,
+            proof_sha256=child.proof_sha256,
+            dataset_record_sha256=child.dataset_record_sha256,
+            registered_at="2026-09-20T02:01:00Z",
+        ),
+    )
+    observed = publication._state_sha256(existing)
+    intended = publication._state_sha256(forged)
+    binding = publication._semantic_binding_sha256(intended)
+    tx_id = "caller-forged-legacy-publication"
+    publication.monotonic_authority.prepare(
+        tx_id=tx_id,
+        observed_state_sha256=observed,
+        intended_state_sha256=intended,
+        semantic_binding_sha256=binding,
+    )
+    atomic_write_json(publication.path, publication._state_payload(forged))
+    publication.monotonic_authority.commit(
+        tx_id=tx_id,
+        observed_state_sha256=intended,
+        semantic_binding_sha256=binding,
+    )
+
+    with pytest.raises(
+        DatasetSnapshotUnprovenError,
+        match="lacks authority-owned publication evidence",
+    ):
+        authority.require_descendant_as_of(
+            descendant_snapshot_id="deployment",
+            ancestor_snapshot_id="training",
+            as_of="2026-09-20T02:30:00Z",
+        )
+
+    # A real exact re-observation can recover availability, but only from NOW onward;
+    # it must never inherit the forged earlier timestamp.
+    monkeypatch.setattr(
+        publication_module,
+        "_authority_now_utc",
+        lambda: "2026-09-20T03:00:00Z",
+    )
+    reobserved = authority.register(
+        snapshot_id="deployment",
+        member_sha256=child_members,
+        parent_snapshot_id="training",
+    )
+    assert reobserved.proof_sha256 == child.proof_sha256
+
+    with pytest.raises(DatasetSnapshotUnprovenError, match="not causally available"):
+        authority.require_descendant_as_of(
+            descendant_snapshot_id="deployment",
+            ancestor_snapshot_id="training",
+            as_of="2026-09-20T02:59:59Z",
+        )
+    assert authority.require_descendant_as_of(
+        descendant_snapshot_id="deployment",
+        ancestor_snapshot_id="training",
+        as_of="2026-09-20T03:00:00Z",
+    ).proof_sha256 == child.proof_sha256

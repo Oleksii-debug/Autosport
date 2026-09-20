@@ -25,7 +25,6 @@ from . import policy_utility_evidence as _utility
 
 _MODULE_NAME = _utility.__name__
 _FENCE_MARKER = "__autosport_policy_utility_exact_type_fence__"
-_FINDER_MARKER = "__autosport_policy_utility_reload_finder__"
 
 
 def _install_exact_type_fence(module: ModuleType) -> None:
@@ -63,8 +62,6 @@ class _PolicyUtilityReloadLoader(Loader):
 
 
 class _PolicyUtilityReloadFinder(MetaPathFinder):
-    __autosport_policy_utility_reload_finder__ = True
-
     def find_spec(self, fullname: str, path, target=None):
         if fullname != _MODULE_NAME or target is None:
             return None
@@ -77,7 +74,11 @@ class _PolicyUtilityReloadFinder(MetaPathFinder):
 
 
 def _install_reload_finder() -> None:
-    if any(getattr(finder, _FINDER_MARKER, False) for finder in sys.meta_path):
+    # Never trust a caller-defined marker or duck type here. A process may populate
+    # sys.meta_path before importing autosport, so only this exact private class can
+    # satisfy the installed-finder check. The canonical instance is inserted first;
+    # unrelated/fake finders remain ordinary import machinery behind it.
+    if any(type(finder) is _PolicyUtilityReloadFinder for finder in sys.meta_path):
         return
     sys.meta_path.insert(0, _PolicyUtilityReloadFinder())
 

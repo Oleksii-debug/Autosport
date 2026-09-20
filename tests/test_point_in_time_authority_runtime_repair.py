@@ -284,6 +284,31 @@ def assert_exact_capability_fences():
         raise AssertionError("reload order removed exact-instance method-shadow fence")
     assert shadow_dispatched is False
 
+    registry_shadow_dispatched = False
+
+    def forged_get(record_type: str, record_id: str):
+        nonlocal registry_shadow_dispatched
+        registry_shadow_dispatched = True
+        raise AssertionError("registry instance shadow must never dispatch")
+
+    registry = object.__new__(ScientificRegistry)
+    registry.get = forged_get
+    nested_shadow = object.__new__(DatasetSnapshotLineageAuthority)
+    nested_shadow.registry = registry
+    try:
+        evidence.PointInTimeFeatureAuthority.bind(
+            dataset_snapshot=object(),
+            feature_set=object(),
+            feature_provenance=object(),
+            lineage_authority=nested_shadow,
+            decision_cutoff_utc="2099-01-01T00:00:00Z",
+        )
+    except evidence.PointInTimeEvidenceError as exc:
+        assert "shadows trusted concrete authority method: get" in str(exc)
+    else:
+        raise AssertionError("reload order removed registry instance-shadow fence")
+    assert registry_shadow_dispatched is False
+
 
 assert_exact_capability_fences()
 
@@ -297,6 +322,118 @@ assert_exact_capability_fences()
 provenance_guard = importlib.reload(provenance_guard)
 evidence = importlib.reload(evidence)
 assert_exact_capability_fences()
+'''
+    completed = subprocess.run(
+        [sys.executable, "-c", script],
+        cwd=Path(__file__).resolve().parents[1],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+
+
+def test_runtime_repair_self_reload_keeps_pristine_delegates_and_one_finder() -> None:
+    script = r'''
+import importlib
+from pathlib import Path
+import sys
+import tempfile
+
+import autosport._point_in_time_authority_runtime_repair as repair
+import autosport._point_in_time_feature_provenance_guard as provenance_guard
+import autosport.point_in_time_evidence as evidence
+from autosport.dataset_snapshot_lineage import (
+    DatasetSnapshotLineageAuthority,
+    membership_manifest_sha256,
+)
+from autosport.scientific_registry import DatasetSnapshot, FeatureSet, ScientificRegistry
+
+MARKER = "_autosport_point_in_time_reload_finder_v1"
+
+
+def finder_count():
+    return sum(bool(getattr(finder, MARKER, False)) for finder in sys.meta_path)
+
+
+def assert_positive_bind_and_holdout_load(root: Path):
+    workspace = root / "feature-workspace"
+    workspace.mkdir(parents=True, exist_ok=True)
+    feature_set = FeatureSet(
+        feature_set_id="self-reload.feature.v1",
+        version="v1",
+        definition_sha256="b" * 64,
+        source_sha256="c" * 64,
+        available_at_utc="2026-09-20T10:01:30Z",
+    )
+    provisional = DatasetSnapshot(
+        dataset_snapshot_id="self-reload-snapshot",
+        manifest_sha256="a" * 64,
+        source_identity="provider:self-reload",
+        license_identity="terms:v1",
+        causal_cutoff="2026-09-20T10:00:00Z",
+        available_at_utc="2026-09-20T10:01:00Z",
+    )
+    provenance = evidence.FeatureArtifactProvenance.issue(
+        dataset_snapshot=provisional,
+        feature_set=feature_set,
+        feature_payload=b"self-reload-canonical-payload",
+    )
+    members = (provenance.provenance_sha256,)
+    snapshot = DatasetSnapshot(
+        dataset_snapshot_id=provisional.dataset_snapshot_id,
+        manifest_sha256=membership_manifest_sha256(members),
+        source_identity=provisional.source_identity,
+        license_identity=provisional.license_identity,
+        causal_cutoff=provisional.causal_cutoff,
+        available_at_utc=provisional.available_at_utc,
+    )
+    registry = ScientificRegistry.initialize_pristine(workspace / "registry.json")
+    registry.append(snapshot)
+    registry.append(feature_set)
+    lineage = DatasetSnapshotLineageAuthority.initialize_pristine(
+        workspace / "lineage.json",
+        registry,
+        authority_root=root / "lineage-authority",
+    )
+    lineage.register(snapshot_id=snapshot.dataset_snapshot_id, member_sha256=members)
+    result = evidence.PointInTimeFeatureAuthority.bind(
+        dataset_snapshot=snapshot,
+        feature_set=feature_set,
+        feature_provenance=provenance,
+        lineage_authority=lineage,
+        decision_cutoff_utc="2099-01-01T00:00:00Z",
+    )
+    assert result.feature_provenance_sha256 == provenance.provenance_sha256
+
+    holdout_workspace = root / "holdout-workspace"
+    holdout_workspace.mkdir(parents=True, exist_ok=True)
+    ledger = evidence.HoldoutConsumptionLedger(
+        holdout_workspace / "holdout.json",
+        authority_root=root / "holdout-authority",
+    )
+    assert ledger.records() == ()
+
+
+assert finder_count() == 1
+repair = importlib.reload(repair)
+assert finder_count() == 1
+repair = importlib.reload(repair)
+assert finder_count() == 1
+
+with tempfile.TemporaryDirectory() as directory:
+    assert_positive_bind_and_holdout_load(Path(directory))
+
+# The sibling reload hooks still have exactly one effective meta-path owner after
+# runtime-repair self-reload.  Repeating both orders must not stack a second hook.
+evidence = importlib.reload(evidence)
+provenance_guard = importlib.reload(provenance_guard)
+assert finder_count() == 1
+provenance_guard = importlib.reload(provenance_guard)
+evidence = importlib.reload(evidence)
+assert finder_count() == 1
+repair = importlib.reload(repair)
+assert finder_count() == 1
 '''
     completed = subprocess.run(
         [sys.executable, "-c", script],

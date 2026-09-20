@@ -20,13 +20,43 @@ from .sport_domain_fitness import (
     SportDomainFitnessObservation,
     recommend_route,
 )
+from .voc_evaluation import (
+    PairedVOCEvaluation,
+    VOCEvaluationError,
+    VOCEvaluationProvenance,
+    VOCEvaluationStore,
+)
 
 _SCHEMA = "autosport.model_compute_router"
-_VERSION = 3
+_VERSION = 6
 _EXECUTION_AUTHORITY_SCHEMA = (
     "autosport.model_compute_router.execution_authority"
 )
 _EXECUTION_AUTHORITY_VERSION = 2
+_VOC_SHADOW_AUTHORITY_SCHEMA = (
+    "autosport.model_compute_router.voc_shadow_execution_authority"
+)
+_VOC_SHADOW_AUTHORITY_VERSION = 1
+_VOC_SHADOW_AUTHORITY_FIELDS = {
+    "schema",
+    "version",
+    "authority_sequence",
+    "previous_authority_sha256",
+    "authority_recorded_at",
+    "request_id",
+    "role",
+    "route_record_sha256",
+    "candidate_identity",
+    "output_sha256",
+    "action",
+    "abstained",
+    "completed_at",
+    "available_at",
+    "actual_cost",
+    "actual_latency_seconds",
+    "evidence_sha256",
+    "authority_sha256",
+}
 _ZERO = Decimal("0")
 
 
@@ -84,6 +114,12 @@ def _instant(name: str, value: object) -> datetime:
 
 def _time(name: str, value: object) -> str:
     return _instant(name, value).isoformat().replace("+00:00", "Z")
+
+
+def _authority_now() -> str:
+    """Production-owned wall-clock stamp; tests may patch this private seam."""
+
+    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
 def _decimal(name: str, value: object) -> Decimal:
@@ -235,6 +271,11 @@ class ComputeRouteRequest:
     response_ttl_seconds: Decimal
     baseline_candidate_id: str
     cloud_candidate_id: str | None = None
+    decision_input_sha256: str | None = None
+    decision_evidence_sha256: str | None = None
+    voc_regime_id: str | None = None
+    voc_urgency_id: str | None = None
+    voc_contradiction_state: str | None = None
 
     def __post_init__(self) -> None:
         _text("request_id", self.request_id)
@@ -258,6 +299,18 @@ class ComputeRouteRequest:
                 raise ModelComputeRouterError(
                     "cloud candidate must differ from baseline"
                 )
+        if self.decision_input_sha256 is not None:
+            _sha256("decision_input_sha256", self.decision_input_sha256)
+        if self.decision_evidence_sha256 is not None:
+            _sha256("decision_evidence_sha256", self.decision_evidence_sha256)
+        for name in (
+            "voc_regime_id",
+            "voc_urgency_id",
+            "voc_contradiction_state",
+        ):
+            value = getattr(self, name)
+            if value is not None:
+                _text(name, value)
 
     def payload(self) -> dict[str, Any]:
         return {
@@ -273,6 +326,11 @@ class ComputeRouteRequest:
             "response_ttl_seconds": str(self.response_ttl_seconds),
             "baseline_candidate_id": self.baseline_candidate_id,
             "cloud_candidate_id": self.cloud_candidate_id,
+            "decision_input_sha256": self.decision_input_sha256,
+            "decision_evidence_sha256": self.decision_evidence_sha256,
+            "voc_regime_id": self.voc_regime_id,
+            "voc_urgency_id": self.voc_urgency_id,
+            "voc_contradiction_state": self.voc_contradiction_state,
         }
 
     @classmethod
@@ -291,6 +349,11 @@ class ComputeRouteRequest:
                 response_ttl_seconds=Decimal(raw["response_ttl_seconds"]),
                 baseline_candidate_id=raw["baseline_candidate_id"],
                 cloud_candidate_id=raw.get("cloud_candidate_id"),
+                decision_input_sha256=raw.get("decision_input_sha256"),
+                decision_evidence_sha256=raw.get("decision_evidence_sha256"),
+                voc_regime_id=raw.get("voc_regime_id"),
+                voc_urgency_id=raw.get("voc_urgency_id"),
+                voc_contradiction_state=raw.get("voc_contradiction_state"),
             )
         except (KeyError, TypeError, InvalidOperation, ValueError) as exc:
             if isinstance(exc, ModelComputeRouterError):
@@ -305,6 +368,7 @@ class ComputeRoutingPolicy:
     cloud_enabled: bool = False
     max_cloud_cost: Decimal = Decimal("0")
     voc_max_age_seconds: Decimal = Decimal("0")
+    voc_min_effective_sample_size: int = 1
 
     def __post_init__(self) -> None:
         _text("policy_id", self.policy_id)
@@ -316,6 +380,14 @@ class ComputeRoutingPolicy:
             raise ModelComputeRouterError("cloud_enabled must be bool")
         _nonnegative("max_cloud_cost", self.max_cloud_cost)
         _nonnegative("voc_max_age_seconds", self.voc_max_age_seconds)
+        if (
+            isinstance(self.voc_min_effective_sample_size, bool)
+            or not isinstance(self.voc_min_effective_sample_size, int)
+            or self.voc_min_effective_sample_size < 1
+        ):
+            raise ModelComputeRouterError(
+                "voc_min_effective_sample_size must be a positive integer"
+            )
         if self.cloud_enabled:
             _positive("voc_max_age_seconds", self.voc_max_age_seconds)
 
@@ -326,6 +398,7 @@ class ComputeRoutingPolicy:
             "cloud_enabled": self.cloud_enabled,
             "max_cloud_cost": str(self.max_cloud_cost),
             "voc_max_age_seconds": str(self.voc_max_age_seconds),
+            "voc_min_effective_sample_size": self.voc_min_effective_sample_size,
         }
 
     @classmethod
@@ -337,6 +410,9 @@ class ComputeRoutingPolicy:
                 cloud_enabled=raw["cloud_enabled"],
                 max_cloud_cost=Decimal(raw["max_cloud_cost"]),
                 voc_max_age_seconds=Decimal(raw["voc_max_age_seconds"]),
+                voc_min_effective_sample_size=raw.get(
+                    "voc_min_effective_sample_size", 1
+                ),
             )
         except (KeyError, TypeError, InvalidOperation, ValueError) as exc:
             if isinstance(exc, ModelComputeRouterError):
@@ -366,6 +442,7 @@ class ValueOfComputationEvidence:
     latency_opportunity_cost_penalty: Decimal
     measured_compute_cost: Decimal
     evaluation_sha256: str
+    evaluation: PairedVOCEvaluation | None = None
 
     def __post_init__(self) -> None:
         _text("evidence_id", self.evidence_id)
@@ -400,6 +477,80 @@ class ValueOfComputationEvidence:
         )
         _nonnegative("measured_compute_cost", self.measured_compute_cost)
         _sha256("evaluation_sha256", self.evaluation_sha256)
+        if self.evaluation is not None:
+            if not isinstance(self.evaluation, PairedVOCEvaluation):
+                raise ModelComputeRouterError(
+                    "evaluation must be PairedVOCEvaluation"
+                )
+            evaluation = self.evaluation
+            if evaluation.evaluation_id != self.evidence_id:
+                raise ModelComputeRouterError(
+                    "VOC evaluation identity does not match evidence_id"
+                )
+            if evaluation.evaluation_sha256 != self.evaluation_sha256:
+                raise ModelComputeRouterError(
+                    "VOC evaluation digest does not match durable paired evaluation"
+                )
+            expected_identity = (
+                self.baseline_candidate_id,
+                self.baseline_backend_id,
+                self.baseline_model_id,
+                self.baseline_config_sha256,
+                self.challenger_candidate_id,
+                self.challenger_backend_id,
+                self.challenger_model_id,
+                self.challenger_config_sha256,
+            )
+            actual_identity = (
+                evaluation.baseline_candidate_id,
+                evaluation.baseline_backend_id,
+                evaluation.baseline_model_id,
+                evaluation.baseline_config_sha256,
+                evaluation.challenger_candidate_id,
+                evaluation.challenger_backend_id,
+                evaluation.challenger_model_id,
+                evaluation.challenger_config_sha256,
+            )
+            if actual_identity != expected_identity:
+                raise ModelComputeRouterError(
+                    "VOC evaluation compute identity does not match evidence"
+                )
+            expected_values = (
+                self.baseline_utility,
+                self.challenger_utility,
+                self.compute_cost_penalty,
+                self.latency_opportunity_cost_penalty,
+                self.measured_compute_cost,
+            )
+            actual_values = (
+                evaluation.baseline_utility,
+                evaluation.challenger_utility,
+                evaluation.compute_cost_penalty,
+                evaluation.latency_opportunity_cost_penalty,
+                evaluation.measured_compute_cost,
+            )
+            if actual_values != expected_values:
+                raise ModelComputeRouterError(
+                    "VOC evaluation utility/cost values do not match evidence"
+                )
+            if _instant("measured_at", self.measured_at) != _instant(
+                "evaluated_at", evaluation.evaluated_at
+            ):
+                raise ModelComputeRouterError(
+                    "VOC measured_at does not match paired evaluation time"
+                )
+            if (
+                self.provenance is VOCEvidenceProvenance.MEASURED_SHADOW
+                and evaluation.provenance
+                is not VOCEvaluationProvenance.MEASURED_SHADOW
+            ) or (
+                self.provenance is VOCEvidenceProvenance.SIMULATED
+                and evaluation.provenance
+                is not VOCEvaluationProvenance.SIMULATED
+            ):
+                raise ModelComputeRouterError(
+                    "VOC evaluation provenance does not match evidence"
+                )
 
     @property
     def net_value(self) -> Decimal:
@@ -448,6 +599,9 @@ class ValueOfComputationEvidence:
             ),
             "measured_compute_cost": str(self.measured_compute_cost),
             "evaluation_sha256": self.evaluation_sha256,
+            "evaluation": (
+                None if self.evaluation is None else self.evaluation.payload()
+            ),
         }
 
     @classmethod
@@ -476,6 +630,11 @@ class ValueOfComputationEvidence:
                 ),
                 measured_compute_cost=Decimal(raw["measured_compute_cost"]),
                 evaluation_sha256=raw["evaluation_sha256"],
+                evaluation=(
+                    None
+                    if raw.get("evaluation") is None
+                    else PairedVOCEvaluation.from_payload(raw["evaluation"])
+                ),
             )
         except (KeyError, TypeError, InvalidOperation, ValueError) as exc:
             if isinstance(exc, ModelComputeRouterError):
@@ -1209,6 +1368,7 @@ def route_compute(
     *,
     as_of: str,
     voc_evidence: ValueOfComputationEvidence | None = None,
+    voc_evaluation_store: VOCEvaluationStore | None = None,
     domain_observation: SportDomainFitnessObservation | None = None,
     domain_route: RouteRecommendation | None = None,
 ) -> ComputeRouteDecision:
@@ -1345,6 +1505,10 @@ def route_compute(
         baseline_reason = (
             "missing paired measured value-of-computation evidence"
         )
+    elif voc_evidence.evaluation is None:
+        baseline_reason = (
+            "missing qualified paired outcome evaluation for VOC evidence"
+        )
     else:
         if not voc_evidence.matches_candidates(baseline, cloud):
             baseline_reason = (
@@ -1382,26 +1546,174 @@ def route_compute(
             > policy.voc_max_age_seconds
         ):
             baseline_reason = "VOC evidence is stale"
-        elif (
-            voc_evidence.measured_compute_cost
-            > request.max_cost
-        ):
+        elif voc_evaluation_store is None:
             baseline_reason = (
-                "measured VOC compute cost exceeds "
-                "request budget"
+                "missing durable VOC evaluation authority"
             )
-        elif (
-            voc_evidence.measured_compute_cost
-            > policy.max_cloud_cost
-        ):
-            baseline_reason = (
-                "measured VOC compute cost exceeds "
-                "policy cloud-cost limit"
+        elif not isinstance(voc_evaluation_store, VOCEvaluationStore):
+            raise TypeError(
+                "voc_evaluation_store must be VOCEvaluationStore"
             )
-        elif voc_evidence.net_value <= _ZERO:
-            baseline_reason = (
-                "measured value of computation is non-positive"
-            )
+        else:
+            try:
+                resolved_evaluation = voc_evaluation_store.require(
+                    voc_evidence.evidence_id,
+                    evaluation_sha256=voc_evidence.evaluation_sha256,
+                    as_of=as_of,
+                )
+                resolved_score = voc_evaluation_store.require_score(
+                    voc_evidence.evidence_id,
+                    evaluation_sha256=voc_evidence.evaluation_sha256,
+                    as_of=as_of,
+                )
+            except VOCEvaluationError as exc:
+                baseline_reason = (
+                    "durable VOC evaluation authority rejected evidence: "
+                    + str(exc)
+                )
+            else:
+                score_available_at = _instant(
+                    "canonical VOC score available_at",
+                    resolved_score.available_at,
+                )
+                evaluation_reason = None
+                if resolved_evaluation.deadline_missed:
+                    evaluation_reason = (
+                        "challenger compute missed the frozen decision deadline"
+                    )
+                elif (
+                    resolved_score.effective_sample_size
+                    < policy.voc_min_effective_sample_size
+                ):
+                    evaluation_reason = (
+                        "VOC evaluation effective sample size is insufficient"
+                    )
+                elif resolved_score.net_value <= _ZERO:
+                    evaluation_reason = "measured value of computation is non-positive"
+                elif resolved_score.incremental_value_interval_low <= _ZERO:
+                    evaluation_reason = (
+                        "VOC uncertainty interval does not establish positive incremental value"
+                    )
+                elif not resolved_evaluation.action_changed:
+                    evaluation_reason = (
+                        "extra computation did not change action or abstention"
+                    )
+                elif score_available_at > now:
+                    evaluation_reason = "VOC cohort score is not causally available"
+                elif _seconds(now, score_available_at) > policy.voc_max_age_seconds:
+                    evaluation_reason = "VOC cohort score is stale"
+                elif resolved_score.measured_compute_cost > request.max_cost:
+                    evaluation_reason = (
+                        "measured VOC compute cost exceeds request budget"
+                    )
+                elif resolved_score.measured_compute_cost > policy.max_cloud_cost:
+                    evaluation_reason = (
+                        "measured VOC compute cost exceeds policy cloud-cost limit"
+                    )
+                if (
+                    resolved_evaluation.payload()
+                    != voc_evidence.evaluation.payload()
+                ):
+                    baseline_reason = (
+                        "durable VOC evaluation differs from routed evidence"
+                    )
+                elif evaluation_reason is not None:
+                    baseline_reason = evaluation_reason
+                elif (
+                    _instant("available_at", voc_evidence.available_at)
+                    > _instant("created_at", request.created_at)
+                ):
+                    baseline_reason = (
+                        "qualified VOC evidence was not available when "
+                        "the current request began"
+                    )
+                elif request.decision_input_sha256 is None:
+                    baseline_reason = (
+                        "missing canonical current decision-input identity"
+                    )
+                elif request.decision_evidence_sha256 is None:
+                    baseline_reason = (
+                        "missing canonical current decision-context identity"
+                    )
+                elif (
+                    request.voc_regime_id is None
+                    or request.voc_urgency_id is None
+                    or request.voc_contradiction_state is None
+                ):
+                    baseline_reason = (
+                        "missing canonical VOC routing stratum"
+                    )
+                else:
+                    try:
+                        current_context = (
+                            voc_evaluation_store.require_decision_context(
+                                request.decision_evidence_sha256,
+                                as_of=request.created_at,
+                            )
+                        )
+                        source_context = (
+                            voc_evaluation_store.require_decision_context(
+                                resolved_evaluation.decision_context_sha256,
+                                as_of=resolved_evaluation.decision_at,
+                            )
+                        )
+                    except VOCEvaluationError as exc:
+                        baseline_reason = (
+                            "canonical current VOC decision context rejected: "
+                            + str(exc)
+                        )
+                    else:
+                        expected_current_context = {
+                            "request_id": request.request_id,
+                            "decision_input_sha256": request.decision_input_sha256,
+                            "task_class": request.required_capability,
+                            "sport_id": domain_observation.sport_id,
+                            "league_id": domain_observation.league_id,
+                            "regime_id": request.voc_regime_id,
+                            "urgency_id": request.voc_urgency_id,
+                            "contradiction_state": (
+                                request.voc_contradiction_state
+                            ),
+                        }
+                        if current_context != expected_current_context:
+                            baseline_reason = (
+                                "canonical current VOC decision context "
+                                "does not match the current request"
+                            )
+                        elif (
+                            resolved_evaluation.decision_context_sha256
+                            == request.decision_evidence_sha256
+                            or source_context["decision_input_sha256"]
+                            == current_context["decision_input_sha256"]
+                            or source_context["request_id"]
+                            == current_context["request_id"]
+                        ):
+                            baseline_reason = (
+                                "historical VOC evidence cannot authorize its "
+                                "source decision"
+                            )
+                        elif (
+                            (
+                                request.required_capability,
+                                domain_observation.sport_id,
+                                domain_observation.league_id,
+                                request.voc_regime_id,
+                                request.voc_urgency_id,
+                                request.voc_contradiction_state,
+                            )
+                            != (
+                                resolved_evaluation.task_class,
+                                resolved_evaluation.sport_id,
+                                resolved_evaluation.league_id,
+                                resolved_evaluation.regime_id,
+                                resolved_evaluation.urgency_id,
+                                resolved_evaluation.contradiction_state,
+                            )
+                        ):
+                            baseline_reason = (
+                                "qualified VOC routing stratum does not match "
+                                "the current request"
+                            )
 
     if baseline_reason is not None:
         return ComputeRouteDecision.build(
@@ -1443,13 +1755,391 @@ def route_compute(
     )
 
 
+def _validated_voc_shadow_identity(value: object) -> dict[str, str]:
+    if type(value) is not dict or set(value) != {
+        "candidate_id",
+        "backend_id",
+        "model_id",
+        "config_sha256",
+    }:
+        raise ModelComputeRouterError(
+            "VOC shadow execution candidate identity is invalid"
+        )
+    return {
+        "candidate_id": _text("candidate_id", value["candidate_id"]),
+        "backend_id": _text("backend_id", value["backend_id"]),
+        "model_id": _text("model_id", value["model_id"]),
+        "config_sha256": _sha256(
+            "config_sha256", value["config_sha256"]
+        ),
+    }
+
+
+def _validate_voc_shadow_authority_record(
+    raw: object,
+) -> dict[str, Any]:
+    if type(raw) is not dict or set(raw) != _VOC_SHADOW_AUTHORITY_FIELDS:
+        raise ModelComputeRouterError(
+            "VOC shadow execution authority schema is invalid"
+        )
+    if (
+        raw.get("schema") != _VOC_SHADOW_AUTHORITY_SCHEMA
+        or raw.get("version") != _VOC_SHADOW_AUTHORITY_VERSION
+    ):
+        raise ModelComputeRouterError(
+            "VOC shadow execution authority version is unsupported"
+        )
+    sequence = raw.get("authority_sequence")
+    if type(sequence) is not int or sequence < 1:
+        raise ModelComputeRouterError(
+            "VOC shadow execution authority sequence is invalid"
+        )
+    previous = raw.get("previous_authority_sha256")
+    if previous is not None:
+        _sha256("previous_authority_sha256", previous)
+    _time("authority_recorded_at", raw.get("authority_recorded_at"))
+    _text("request_id", raw.get("request_id"))
+    role = _text("role", raw.get("role"))
+    if role not in {"baseline", "challenger"}:
+        raise ModelComputeRouterError(
+            "VOC shadow execution role is invalid"
+        )
+    _sha256("route_record_sha256", raw.get("route_record_sha256"))
+    _validated_voc_shadow_identity(raw.get("candidate_identity"))
+    _sha256("output_sha256", raw.get("output_sha256"))
+    _text("action", raw.get("action"))
+    if type(raw.get("abstained")) is not bool:
+        raise ModelComputeRouterError(
+            "VOC shadow execution abstained must be bool"
+        )
+    _time("completed_at", raw.get("completed_at"))
+    _time("available_at", raw.get("available_at"))
+    try:
+        actual_cost = Decimal(raw.get("actual_cost"))
+        actual_latency = Decimal(raw.get("actual_latency_seconds"))
+    except (InvalidOperation, TypeError, ValueError) as exc:
+        raise ModelComputeRouterError(
+            "VOC shadow execution measurements are invalid"
+        ) from exc
+    _nonnegative("actual_cost", actual_cost)
+    _nonnegative("actual_latency_seconds", actual_latency)
+    _sha256("evidence_sha256", raw.get("evidence_sha256"))
+    authority_sha = _sha256(
+        "authority_sha256", raw.get("authority_sha256")
+    )
+    unsigned = {
+        key: raw[key]
+        for key in _VOC_SHADOW_AUTHORITY_FIELDS
+        if key != "authority_sha256"
+    }
+    if authority_sha != _canonical_digest(unsigned):
+        raise ModelComputeRouterError(
+            "VOC shadow execution authority SHA-256 mismatch"
+        )
+    return dict(raw)
+
+
+def _voc_shadow_authority_record(
+    *,
+    authority_sequence: int,
+    previous_authority_sha256: str | None,
+    authority_recorded_at: str,
+    request_id: str,
+    role: str,
+    route_record_sha256: str,
+    candidate_identity: Mapping[str, str],
+    output_sha256: str,
+    action: str,
+    abstained: bool,
+    completed_at: str,
+    available_at: str,
+    actual_cost: Decimal,
+    actual_latency_seconds: Decimal,
+    evidence_sha256: str,
+) -> dict[str, Any]:
+    unsigned = {
+        "schema": _VOC_SHADOW_AUTHORITY_SCHEMA,
+        "version": _VOC_SHADOW_AUTHORITY_VERSION,
+        "authority_sequence": authority_sequence,
+        "previous_authority_sha256": previous_authority_sha256,
+        "authority_recorded_at": _time(
+            "authority_recorded_at", authority_recorded_at
+        ),
+        "request_id": _text("request_id", request_id),
+        "role": _text("role", role),
+        "route_record_sha256": _sha256(
+            "route_record_sha256", route_record_sha256
+        ),
+        "candidate_identity": _validated_voc_shadow_identity(
+            dict(candidate_identity)
+        ),
+        "output_sha256": _sha256("output_sha256", output_sha256),
+        "action": _text("action", action),
+        "abstained": abstained,
+        "completed_at": _time("completed_at", completed_at),
+        "available_at": _time("available_at", available_at),
+        "actual_cost": str(_nonnegative("actual_cost", actual_cost)),
+        "actual_latency_seconds": str(
+            _nonnegative(
+                "actual_latency_seconds", actual_latency_seconds
+            )
+        ),
+        "evidence_sha256": _sha256(
+            "evidence_sha256", evidence_sha256
+        ),
+    }
+    if role not in {"baseline", "challenger"}:
+        raise ModelComputeRouterError(
+            "VOC shadow execution role is invalid"
+        )
+    if type(abstained) is not bool:
+        raise ModelComputeRouterError(
+            "VOC shadow execution abstained must be bool"
+        )
+    return {
+        **unsigned,
+        "authority_sha256": _canonical_digest(unsigned),
+    }
+
+
+_VOC_PRECOMPUTE_CONTROL_FIELDS = {
+    "admission_id",
+    "research_protocol_id",
+    "cohort_id",
+    "baseline_candidate_id",
+    "challenger_candidate_id",
+    "sport_id",
+    "league_id",
+}
+_VOC_PRECOMPUTE_FIELDS = {
+    "schema_version",
+    "admission_id",
+    "request_id",
+    "decision_id",
+    "decision_input_sha256",
+    "decision_context_sha256",
+    "decision_deadline",
+    "admitted_at",
+    "authority_recorded_at",
+    "research_protocol_id",
+    "cohort_id",
+    "task_class",
+    "scope",
+    "baseline_compute_identity",
+    "challenger_compute_identity",
+}
+
+
+def _voc_compute_identity(candidate: ComputeCandidate) -> dict[str, str]:
+    return {
+        "candidate_id": candidate.candidate_id,
+        "backend_id": candidate.backend_id,
+        "model_id": candidate.model_id,
+        "config_sha256": candidate.config_sha256,
+    }
+
+
+def _build_voc_precompute_admission(
+    *,
+    request: ComputeRouteRequest,
+    candidates: Sequence[ComputeCandidate],
+    decision: ComputeRouteDecision,
+    domain_observation: SportDomainFitnessObservation | None,
+    control: Mapping[str, Any],
+    authority_recorded_at: str | None = None,
+) -> dict[str, Any]:
+    """Derive one immutable paired-shadow enrollment from canonical route inputs."""
+
+    if type(control) is not dict or set(control) != _VOC_PRECOMPUTE_CONTROL_FIELDS:
+        raise ModelComputeRouterError(
+            "voc_precompute_admission control fields are invalid"
+        )
+    if request.decision_input_sha256 is None:
+        raise ModelComputeRouterError(
+            "VOC precompute admission requires decision_input_sha256"
+        )
+    if request.decision_evidence_sha256 is None:
+        raise ModelComputeRouterError(
+            "VOC precompute admission requires canonical decision context evidence"
+        )
+    sport_id = _text(
+        "voc_precompute_admission sport_id", control["sport_id"]
+    )
+    league_id = _text(
+        "voc_precompute_admission league_id", control["league_id"]
+    )
+    if domain_observation is not None and (
+        domain_observation.sport_id != sport_id
+        or domain_observation.league_id != league_id
+    ):
+        raise ModelComputeRouterError(
+            "VOC precompute admission scope does not match canonical domain observation"
+        )
+    for name in (
+        "voc_regime_id",
+        "voc_urgency_id",
+        "voc_contradiction_state",
+    ):
+        if getattr(request, name) is None:
+            raise ModelComputeRouterError(
+                f"VOC precompute admission requires {name}"
+            )
+
+    by_id = _candidate_map(candidates)
+    baseline_id = _text(
+        "voc_precompute_admission baseline_candidate_id",
+        control["baseline_candidate_id"],
+    )
+    baseline = by_id.get(baseline_id)
+    challenger_id = _text(
+        "voc_precompute_admission challenger_candidate_id",
+        control["challenger_candidate_id"],
+    )
+    challenger = by_id.get(challenger_id)
+    if baseline is None or challenger is None:
+        raise ModelComputeRouterError(
+            "VOC precompute admission candidates must exist in canonical route inputs"
+        )
+    if baseline.candidate_id == challenger.candidate_id:
+        raise ModelComputeRouterError(
+            "VOC precompute admission candidates must be distinct"
+        )
+    if (
+        request.required_capability not in baseline.capabilities
+        or request.required_capability not in challenger.capabilities
+    ):
+        raise ModelComputeRouterError(
+            "VOC precompute admission candidates must support the routed task"
+        )
+
+    recorded_at = _time(
+        "voc_precompute authority_recorded_at",
+        _authority_now()
+        if authority_recorded_at is None
+        else authority_recorded_at,
+    )
+    if _instant("voc_precompute authority_recorded_at", recorded_at) < _instant(
+        "decision.decided_at", decision.decided_at
+    ):
+        raise ModelComputeRouterError(
+            "VOC precompute authority cannot predate canonical route decision"
+        )
+
+    return {
+        "schema_version": 1,
+        "admission_id": _text(
+            "voc_precompute_admission admission_id",
+            control["admission_id"],
+        ),
+        "request_id": request.request_id,
+        "decision_id": decision.decision_id,
+        "decision_input_sha256": request.decision_input_sha256,
+        "decision_context_sha256": request.decision_evidence_sha256,
+        "decision_deadline": _time(
+            "decision_deadline", request.decision_deadline
+        ),
+        "admitted_at": _time("decision.decided_at", decision.decided_at),
+        "authority_recorded_at": recorded_at,
+        "research_protocol_id": _text(
+            "voc_precompute_admission research_protocol_id",
+            control["research_protocol_id"],
+        ),
+        "cohort_id": _text(
+            "voc_precompute_admission cohort_id",
+            control["cohort_id"],
+        ),
+        "task_class": request.required_capability,
+        "scope": {
+            "sport_id": sport_id,
+            "league_id": league_id,
+            "regime_id": request.voc_regime_id,
+            "urgency_id": request.voc_urgency_id,
+            "contradiction_state": request.voc_contradiction_state,
+        },
+        "baseline_compute_identity": _voc_compute_identity(baseline),
+        "challenger_compute_identity": _voc_compute_identity(challenger),
+    }
+
+
+def _validate_persisted_voc_precompute_admission(
+    *,
+    request: ComputeRouteRequest,
+    candidates: Sequence[ComputeCandidate],
+    decision: ComputeRouteDecision,
+    domain_observation: SportDomainFitnessObservation | None,
+    raw: object,
+) -> dict[str, Any]:
+    if type(raw) is not dict or set(raw) != _VOC_PRECOMPUTE_FIELDS:
+        raise ModelComputeRouterError(
+            "persisted VOC precompute admission schema is invalid"
+        )
+    if raw.get("schema_version") != 1:
+        raise ModelComputeRouterError(
+            "persisted VOC precompute admission schema version is unsupported"
+        )
+    challenger = raw.get("challenger_compute_identity")
+    if type(challenger) is not dict:
+        raise ModelComputeRouterError(
+            "persisted VOC challenger compute identity is invalid"
+        )
+    expected = _build_voc_precompute_admission(
+        request=request,
+        candidates=candidates,
+        decision=decision,
+        domain_observation=domain_observation,
+        control={
+            "admission_id": raw.get("admission_id"),
+            "research_protocol_id": raw.get("research_protocol_id"),
+            "cohort_id": raw.get("cohort_id"),
+            "baseline_candidate_id": (
+                raw.get("baseline_compute_identity", {}).get("candidate_id")
+                if isinstance(raw.get("baseline_compute_identity"), Mapping)
+                else None
+            ),
+            "challenger_candidate_id": challenger.get("candidate_id"),
+            "sport_id": (
+                raw.get("scope", {}).get("sport_id")
+                if isinstance(raw.get("scope"), Mapping)
+                else None
+            ),
+            "league_id": (
+                raw.get("scope", {}).get("league_id")
+                if isinstance(raw.get("scope"), Mapping)
+                else None
+            ),
+        },
+        authority_recorded_at=raw.get("authority_recorded_at"),
+    )
+    if raw != expected:
+        raise ModelComputeRouterError(
+            "persisted VOC precompute admission is not derived from canonical route inputs"
+        )
+    return expected
+
+
 class ModelComputeRouterStore:
     """Restart-safe route/cost ledger with separate execution authority."""
 
-    def __init__(self, path: str | Path) -> None:
+    def __init__(
+        self,
+        path: str | Path,
+        *,
+        voc_evaluation_store: VOCEvaluationStore | None = None,
+    ) -> None:
+        if (
+            voc_evaluation_store is not None
+            and not isinstance(voc_evaluation_store, VOCEvaluationStore)
+        ):
+            raise TypeError(
+                "voc_evaluation_store must be VOCEvaluationStore or None"
+            )
         self.path = Path(path)
+        self._voc_evaluation_store = voc_evaluation_store
         self._execution_authority_path = self.path.with_name(
             f"{self.path.name}.execution-authority.jsonl"
+        )
+        self._voc_shadow_authority_path = self.path.with_name(
+            f"{self.path.name}.voc-shadow-authority.jsonl"
         )
         self._routes: dict[str, dict[str, Any]] = {}
         self._executions: dict[
@@ -1459,12 +2149,178 @@ class ModelComputeRouterStore:
         self._execution_authority_records: list[
             dict[str, Any]
         ] = []
+        self._voc_shadow_authority_records: list[
+            dict[str, Any]
+        ] = []
         self._live_request_ids: set[str] = set()
         self._publication_interrupted = False
         if self.path.exists():
             self._load()
         else:
             self._persist()
+        self._voc_shadow_authority_records = (
+            self._validate_voc_shadow_authority_records(
+                self._read_voc_shadow_authority_records()
+            )
+        )
+
+    def _read_voc_shadow_authority_records(
+        self,
+    ) -> list[dict[str, Any]]:
+        if not self._voc_shadow_authority_path.exists():
+            return []
+        try:
+            lines = self._voc_shadow_authority_path.read_text(
+                encoding="utf-8"
+            ).splitlines()
+        except (OSError, UnicodeDecodeError) as exc:
+            raise ModelComputeRouterError(
+                "VOC shadow execution authority journal is unreadable"
+            ) from exc
+        records: list[dict[str, Any]] = []
+        previous_sha256: str | None = None
+        for expected_sequence, line in enumerate(lines, start=1):
+            if not line:
+                raise ModelComputeRouterError(
+                    "VOC shadow execution authority journal contains a blank record"
+                )
+            try:
+                raw = json.loads(line)
+            except json.JSONDecodeError as exc:
+                raise ModelComputeRouterError(
+                    "VOC shadow execution authority journal contains invalid JSON"
+                ) from exc
+            record = _validate_voc_shadow_authority_record(raw)
+            if record["authority_sequence"] != expected_sequence:
+                raise ModelComputeRouterError(
+                    "VOC shadow execution authority sequence is not contiguous"
+                )
+            if record["previous_authority_sha256"] != previous_sha256:
+                raise ModelComputeRouterError(
+                    "VOC shadow execution authority predecessor mismatch"
+                )
+            records.append(record)
+            previous_sha256 = record["authority_sha256"]
+        return records
+
+    def _validate_voc_shadow_authority_records(
+        self,
+        records: Sequence[Mapping[str, Any]],
+    ) -> list[dict[str, Any]]:
+        validated: list[dict[str, Any]] = []
+        seen: set[tuple[str, str]] = set()
+        for source in records:
+            record = _validate_voc_shadow_authority_record(dict(source))
+            request_id = record["request_id"]
+            role = record["role"]
+            key = (request_id, role)
+            if key in seen:
+                raise ModelComputeRouterError(
+                    "VOC shadow execution authority duplicates request role"
+                )
+            seen.add(key)
+            precompute = self.get_voc_precompute_admission(request_id)
+            if precompute is None:
+                raise ModelComputeRouterError(
+                    "VOC shadow execution authority lacks canonical precompute admission"
+                )
+            if (
+                record["route_record_sha256"]
+                != precompute["route_record_sha256"]
+            ):
+                raise ModelComputeRouterError(
+                    "VOC shadow execution authority route digest mismatch"
+                )
+            expected_identity = precompute[
+                f"{role}_compute_identity"
+            ]
+            if record["candidate_identity"] != expected_identity:
+                raise ModelComputeRouterError(
+                    "VOC shadow execution authority candidate identity mismatch"
+                )
+            admitted_at = _instant(
+                "VOC precompute admitted_at",
+                precompute["admitted_at"],
+            )
+            completed_at = _instant(
+                "VOC shadow completed_at", record["completed_at"]
+            )
+            available_at = _instant(
+                "VOC shadow available_at", record["available_at"]
+            )
+            authority_recorded_at = _instant(
+                "VOC shadow authority_recorded_at",
+                record["authority_recorded_at"],
+            )
+            precompute_recorded_at = _instant(
+                "VOC precompute authority_recorded_at",
+                precompute["authority_recorded_at"],
+            )
+            deadline = _instant(
+                "VOC precompute decision_deadline",
+                precompute["decision_deadline"],
+            )
+            if completed_at < admitted_at:
+                raise ModelComputeRouterError(
+                    "VOC shadow execution predates precompute admission"
+                )
+            if completed_at < precompute_recorded_at:
+                raise ModelComputeRouterError(
+                    "VOC shadow execution predates physical precompute authority"
+                )
+            if available_at < completed_at:
+                raise ModelComputeRouterError(
+                    "VOC shadow execution availability predates completion"
+                )
+            if available_at > deadline and completed_at <= deadline:
+                raise ModelComputeRouterError(
+                    "VOC shadow execution completed on time but was unavailable by deadline"
+                )
+            if authority_recorded_at < available_at:
+                raise ModelComputeRouterError(
+                    "VOC shadow execution authority predates evidence availability"
+                )
+            if authority_recorded_at < precompute_recorded_at:
+                raise ModelComputeRouterError(
+                    "VOC shadow execution authority predates precompute authority"
+                )
+            expected_latency = _seconds(completed_at, admitted_at)
+            if Decimal(record["actual_latency_seconds"]) != expected_latency:
+                raise ModelComputeRouterError(
+                    "VOC shadow execution latency is not derived from canonical timestamps"
+                )
+            validated.append(record)
+        return validated
+
+    def _append_voc_shadow_authority(
+        self,
+        record: Mapping[str, Any],
+    ) -> None:
+        encoded = json.dumps(
+            record,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        )
+        self._voc_shadow_authority_path.parent.mkdir(
+            parents=True, exist_ok=True
+        )
+        try:
+            with self._voc_shadow_authority_path.open(
+                "a",
+                encoding="utf-8",
+                newline="\n",
+            ) as handle:
+                handle.write(encoded)
+                handle.write("\n")
+                handle.flush()
+                os.fsync(handle.fileno())
+        except OSError as exc:
+            raise ModelComputeRouterError(
+                "VOC shadow execution authority journal is unwritable"
+            ) from exc
+        self._voc_shadow_authority_records.append(dict(record))
 
     def _read_execution_authority_records(
         self,
@@ -2049,12 +2905,24 @@ class ModelComputeRouterStore:
                     "persisted domain route is not derived from "
                     "the bound observation evidence"
                 )
+            persisted_voc_precompute = item.get("voc_precompute_admission")
+            if persisted_voc_precompute is not None:
+                persisted_voc_precompute = (
+                    _validate_persisted_voc_precompute_admission(
+                        request=request,
+                        candidates=candidates,
+                        decision=decision,
+                        domain_observation=domain_observation,
+                        raw=persisted_voc_precompute,
+                    )
+                )
             replayed_decision = route_compute(
                 request,
                 candidates,
                 policy,
                 as_of=decision.decided_at,
                 voc_evidence=voc,
+                voc_evaluation_store=self._voc_evaluation_store,
                 domain_observation=domain_observation,
             )
             if replayed_decision.payload() != decision.payload():
@@ -2081,6 +2949,8 @@ class ModelComputeRouterStore:
                     verified_domain_route
                 ),
             }
+            if persisted_voc_precompute is not None:
+                unsigned["voc_precompute_admission"] = persisted_voc_precompute
             if (
                 _sha256(
                     "record_sha256",
@@ -2325,6 +3195,7 @@ class ModelComputeRouterStore:
         voc_evidence: ValueOfComputationEvidence | None = None,
         domain_observation: SportDomainFitnessObservation | None = None,
         domain_route: RouteRecommendation | None = None,
+        voc_precompute_admission: Mapping[str, Any] | None = None,
     ) -> ComputeRouteDecision:
         if self._publication_interrupted:
             raise ModelComputeRouterError(
@@ -2337,6 +3208,7 @@ class ModelComputeRouterStore:
             policy,
             as_of=as_of,
             voc_evidence=voc_evidence,
+            voc_evaluation_store=self._voc_evaluation_store,
             domain_observation=domain_observation,
             domain_route=domain_route,
         )
@@ -2351,6 +3223,17 @@ class ModelComputeRouterStore:
         )
         domain_route_payload = _domain_route_payload(
             verified_domain_route
+        )
+        canonical_voc_precompute = (
+            None
+            if voc_precompute_admission is None
+            else _build_voc_precompute_admission(
+                request=request,
+                candidates=candidates,
+                decision=decision,
+                domain_observation=domain_observation,
+                control=voc_precompute_admission,
+            )
         )
         unsigned = {
             "request": request.payload(),
@@ -2368,6 +3251,8 @@ class ModelComputeRouterStore:
             "domain_observation": domain_observation_payload,
             "domain_route": domain_route_payload,
         }
+        if canonical_voc_precompute is not None:
+            unsigned["voc_precompute_admission"] = canonical_voc_precompute
         record = {
             **unsigned,
             "record_sha256": _canonical_digest(unsigned),
@@ -2409,6 +3294,228 @@ class ModelComputeRouterStore:
                 record["decision"]
             )
         )
+
+    def get_voc_precompute_admission(
+        self, request_id: str
+    ) -> dict[str, Any] | None:
+        """Resolve immutable router-owned paired-shadow enrollment evidence."""
+
+        _text("request_id", request_id)
+        record = self._routes.get(request_id)
+        if record is None:
+            return None
+        raw = record.get("voc_precompute_admission")
+        if raw is None:
+            return None
+        # _load()/route() already canonicalize this payload. Return detached
+        # JSON data plus the immutable route-record digest that owns it.
+        return {
+            **json.loads(
+                json.dumps(
+                    raw,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                    allow_nan=False,
+                )
+            ),
+            "route_record_sha256": record["record_sha256"],
+        }
+
+    def voc_precompute_admissions(self) -> tuple[dict[str, Any], ...]:
+        """Return the complete immutable paired-shadow enrollment universe."""
+
+        values: list[dict[str, Any]] = []
+        for request_id in sorted(self._routes):
+            resolved = self.get_voc_precompute_admission(request_id)
+            if resolved is not None:
+                values.append(resolved)
+        return tuple(values)
+
+    def get_voc_shadow_execution(
+        self,
+        request_id: str,
+        role: str,
+    ) -> dict[str, Any] | None:
+        request = _text("request_id", request_id)
+        role_text = _text("role", role)
+        if role_text not in {"baseline", "challenger"}:
+            raise ModelComputeRouterError(
+                "VOC shadow execution role is invalid"
+            )
+        matches = [
+            record
+            for record in self._voc_shadow_authority_records
+            if (
+                record["request_id"] == request
+                and record["role"] == role_text
+            )
+        ]
+        if len(matches) > 1:
+            raise ModelComputeRouterError(
+                "VOC shadow execution authority is ambiguous"
+            )
+        if not matches:
+            return None
+        return json.loads(
+            json.dumps(
+                matches[0],
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+                allow_nan=False,
+            )
+        )
+
+    def record_voc_shadow_execution(
+        self,
+        *,
+        request_id: str,
+        role: str,
+        output_sha256: str,
+        action: str,
+        abstained: bool,
+        completed_at: str,
+        available_at: str,
+        actual_cost: Decimal,
+        evidence_sha256: str,
+    ) -> dict[str, Any]:
+        """Append production-owned paired-shadow execution evidence once."""
+
+        request = _text("request_id", request_id)
+        role_text = _text("role", role)
+        if role_text not in {"baseline", "challenger"}:
+            raise ModelComputeRouterError(
+                "VOC shadow execution role is invalid"
+            )
+        if request not in self._live_request_ids:
+            raise ModelComputeRouterError(
+                "VOC shadow execution requires a live precompute route; "
+                "historical/restarted requests cannot be backfilled"
+            )
+        precompute = self.get_voc_precompute_admission(request)
+        if precompute is None:
+            raise ModelComputeRouterError(
+                "VOC shadow execution requires canonical precompute admission"
+            )
+        existing = self.get_voc_shadow_execution(request, role_text)
+        if existing is not None:
+            candidate = _voc_shadow_authority_record(
+                authority_sequence=existing["authority_sequence"],
+                previous_authority_sha256=existing[
+                    "previous_authority_sha256"
+                ],
+                authority_recorded_at=existing[
+                    "authority_recorded_at"
+                ],
+                request_id=request,
+                role=role_text,
+                route_record_sha256=precompute[
+                    "route_record_sha256"
+                ],
+                candidate_identity=precompute[
+                    f"{role_text}_compute_identity"
+                ],
+                output_sha256=output_sha256,
+                action=action,
+                abstained=abstained,
+                completed_at=completed_at,
+                available_at=available_at,
+                actual_cost=actual_cost,
+                actual_latency_seconds=Decimal(
+                    existing["actual_latency_seconds"]
+                ),
+                evidence_sha256=evidence_sha256,
+            )
+            if candidate != existing:
+                raise ModelComputeRouterError(
+                    "immutable VOC shadow execution conflicts with stored authority"
+                )
+            return existing
+
+        admitted_at = _instant(
+            "VOC precompute admitted_at", precompute["admitted_at"]
+        )
+        precompute_recorded_at = _instant(
+            "VOC precompute authority_recorded_at",
+            precompute["authority_recorded_at"],
+        )
+        completed = _instant(
+            "VOC shadow completed_at", completed_at
+        )
+        available = _instant(
+            "VOC shadow available_at", available_at
+        )
+        if completed < admitted_at:
+            raise ModelComputeRouterError(
+                "VOC shadow execution predates precompute admission"
+            )
+        if completed < precompute_recorded_at:
+            raise ModelComputeRouterError(
+                "VOC shadow execution predates physical precompute authority"
+            )
+        if available < completed:
+            raise ModelComputeRouterError(
+                "VOC shadow execution availability predates completion"
+            )
+        deadline = _instant(
+            "VOC precompute decision_deadline",
+            precompute["decision_deadline"],
+        )
+        if available > deadline and completed <= deadline:
+            raise ModelComputeRouterError(
+                "VOC shadow execution completed on time but was unavailable by deadline"
+            )
+        authority_recorded_at = _time(
+            "VOC shadow authority_recorded_at", _authority_now()
+        )
+        if _instant(
+            "VOC shadow authority_recorded_at",
+            authority_recorded_at,
+        ) < available:
+            raise ModelComputeRouterError(
+                "VOC shadow execution authority predates evidence availability"
+            )
+        prior_sha = (
+            None
+            if not self._voc_shadow_authority_records
+            else self._voc_shadow_authority_records[-1][
+                "authority_sha256"
+            ]
+        )
+        record = _voc_shadow_authority_record(
+            authority_sequence=len(
+                self._voc_shadow_authority_records
+            )
+            + 1,
+            previous_authority_sha256=prior_sha,
+            authority_recorded_at=authority_recorded_at,
+            request_id=request,
+            role=role_text,
+            route_record_sha256=precompute[
+                "route_record_sha256"
+            ],
+            candidate_identity=precompute[
+                f"{role_text}_compute_identity"
+            ],
+            output_sha256=output_sha256,
+            action=action,
+            abstained=abstained,
+            completed_at=completed_at,
+            available_at=available_at,
+            actual_cost=actual_cost,
+            actual_latency_seconds=_seconds(
+                completed, admitted_at
+            ),
+            evidence_sha256=evidence_sha256,
+        )
+        self._append_voc_shadow_authority(record)
+        # Revalidate the append against the same durable route authority before
+        # returning it to the caller.
+        self._validate_voc_shadow_authority_records(
+            self._voc_shadow_authority_records
+        )
+        return self.get_voc_shadow_execution(request, role_text) or record
 
     def record_execution(
         self,

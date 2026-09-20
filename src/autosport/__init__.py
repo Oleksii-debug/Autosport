@@ -17,3 +17,8 @@ from . import _provider_receipt_trust_root as _provider_receipt_trust_root  # no
 # provider frame JSON extensible/content-bound, but reject unknown local envelope
 # fields before normalization or monotonic integrity validation.
 from . import _provider_observation_payload_strictness as _provider_observation_payload_strictness  # noqa: F401,E402
+
+# Structural cursor/range witnesses are useful legacy intake evidence but are not
+# production provider-completeness authority. Install the fail-closed public gate;
+# the supported denominator path consumes the exact live CompleteGameBoardSnapshot.
+from . import _evaluation_universe_structural_gate as _evaluation_universe_structural_gate  # noqa: F401,E402

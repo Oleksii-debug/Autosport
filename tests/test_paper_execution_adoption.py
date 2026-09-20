@@ -282,6 +282,40 @@ class PaperExecutionAdoptionTests(unittest.TestCase):
                 (),
             )
 
+    def test_stale_quote_attempt_is_durable_rejection_without_ticket(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            book, _ledger, runtime = self.runtime(tmp)
+            result = runtime.execute(
+                prepared=prepared(action("a1")),
+                trigger_id="trigger-stale",
+                started_at="2026-09-20T06:00:06+00:00",
+                materialize_exposure=True,
+            )
+            self.assertEqual(
+                result.run.attempts[0].outcome,
+                PaperAttemptOutcome.REJECTED,
+            )
+            self.assertEqual(result.ticket_ids, ())
+            self.assertEqual(book.tickets, {})
+
+    def test_suspended_action_is_durable_rejection_without_ticket(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            book, _ledger, runtime = self.runtime(tmp)
+            result = runtime.execute(
+                prepared=prepared(action("a1")),
+                trigger_id="trigger-suspended",
+                started_at=STARTED_AT,
+                materialize_exposure=True,
+                suspended_action_ids=frozenset({"a1"}),
+            )
+            self.assertEqual(
+                result.run.attempts[0].outcome,
+                PaperAttemptOutcome.REJECTED,
+            )
+            self.assertTrue(result.run.attempts[0].suspended)
+            self.assertEqual(result.ticket_ids, ())
+            self.assertEqual(book.tickets, {})
+
     def test_shadow_execution_keeps_attempt_evidence_without_ticket(self):
         with tempfile.TemporaryDirectory() as tmp:
             book, _ledger, runtime = self.runtime(tmp)

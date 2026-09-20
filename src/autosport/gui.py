@@ -9,6 +9,10 @@ import tk_uia
 
 from .dataset import ReplayDataset, load_dataset
 from .dataset_worker import OneShotDatasetValidationWorker
+from .gui_evidence_export import (
+    OneShotEvidenceExportWorker,
+    resolve_evidence_output_destination,
+)
 from .live_observation import OneShotObservationWorker, observe_workspace_once
 from .localization import text
 from .parlayapi_provider import ParlayApiTableTennisProvider
@@ -68,6 +72,7 @@ AUTOMATION_IDS = {
     "strategy": 106,
     "research_plan": 107,
     "repair_workspace": 108,
+    "export_evidence": 109,
     "tickets": 201,
     "log": 202,
     "live_quotes": 203,
@@ -118,6 +123,7 @@ class AutosportApp(tk.Tk):
         self.replay_worker = OneShotReplayWorker()
         self.live_worker = OneShotObservationWorker()
         self.dataset_worker = OneShotDatasetValidationWorker()
+        self.evidence_export_worker = OneShotEvidenceExportWorker()
         self._pending_dataset_path: Path | None = None
         self._active_strategy_id = "baseline-v1"
         self._active_research_plan: ResearchStrategyPlan | None = None
@@ -184,6 +190,12 @@ class AutosportApp(tk.Tk):
             command=self.repair_workspace,
         )
         self.repair_button.pack(side="left", padx=(0, 8))
+        self.export_evidence_button = ttk.Button(
+            controls,
+            text=text("ui.button.export_evidence"),
+            command=self.export_evidence,
+        )
+        self.export_evidence_button.pack(side="left", padx=(0, 8))
         self.speed_label = ttk.Label(controls, text=text("ui.label.speed"))
         self.speed_label.pack(side="left", padx=(8, 4))
         self.speed = ttk.Combobox(
@@ -250,6 +262,7 @@ class AutosportApp(tk.Tk):
         self.bind("<Control-o>", lambda _event: self.choose_dataset())
         self.bind("<Control-r>", lambda _event: self.run_dataset())
         self.bind("<Control-Shift-R>", lambda _event: self.repair_workspace())
+        self.bind("<Control-e>", lambda _event: self.export_evidence())
         self.bind("<Control-l>", lambda _event: self.refresh_live_snapshot())
         self.bind("<F6>", lambda _event: self.tickets.focus_set())
         self.bind("<F7>", lambda _event: self.live_quotes.focus_set())
@@ -264,6 +277,7 @@ class AutosportApp(tk.Tk):
             (self.choose_button, text("ui.accessibility.choose_dataset.name"), text("ui.accessibility.choose_dataset.description"), AUTOMATION_IDS["choose_dataset"]),
             (self.run_button, text("ui.accessibility.run_replay.name"), text("ui.accessibility.run_replay.description"), AUTOMATION_IDS["run_replay"]),
             (self.repair_button, text("ui.accessibility.repair_workspace.name"), text("ui.accessibility.repair_workspace.description"), AUTOMATION_IDS["repair_workspace"]),
+            (self.export_evidence_button, text("ui.accessibility.export_evidence.name"), text("ui.accessibility.export_evidence.description"), AUTOMATION_IDS["export_evidence"]),
             (self.speed, text("ui.accessibility.replay_speed.name"), text("ui.accessibility.replay_speed.description"), AUTOMATION_IDS["replay_speed"]),
             (self.live_mode, text("ui.accessibility.live_mode.name"), text("ui.accessibility.live_mode.description"), AUTOMATION_IDS["live_mode"]),
             (self.live_refresh_button, text("ui.accessibility.live_refresh.name"), text("ui.accessibility.live_refresh.description"), AUTOMATION_IDS["live_refresh"]),
@@ -409,6 +423,35 @@ class AutosportApp(tk.Tk):
         worker = self.__dict__.get("dataset_worker")
         return bool(worker is not None and worker.busy)
 
+    @property
+    def _evidence_export_busy(self) -> bool:
+        # Tests and recovery contracts intentionally build partial Tk instances.
+        # Never fall through tkinter.Misc.__getattr__ for an optional worker.
+        worker = self.__dict__.get("evidence_export_worker")
+        return bool(worker is not None and worker.busy)
+
+    def _evidence_export_blocker(self) -> str | None:
+        if self._dataset_busy:
+            return text("ui.status.evidence_export.operation_busy")
+        replay_worker = self.__dict__.get("replay_worker")
+        if replay_worker is not None and replay_worker.busy:
+            return text("ui.status.evidence_export.operation_busy")
+        live_worker = self.__dict__.get("live_worker")
+        if live_worker is not None and live_worker.busy:
+            return text("ui.status.evidence_export.operation_busy")
+        recovery_worker = self.__dict__.get("recovery_worker")
+        if recovery_worker is not None and recovery_worker.busy:
+            return text("ui.status.evidence_export.recovery_busy")
+        if self._evidence_export_busy:
+            return text("ui.status.evidence_export.already_busy")
+        return None
+
+    def _evidence_export_workspace(self) -> Path | None:
+        value = self.__dict__.get("_active_workspace")
+        if value is None:
+            value = self.__dict__.get("workspace")
+        return None if value is None else Path(value)
+
     def _dataset_selection_blocker(self) -> str | None:
         if self._dataset_busy:
             return text("ui.status.dataset.validation_busy")
@@ -416,6 +459,8 @@ class AutosportApp(tk.Tk):
             return text("ui.status.dataset.replay_busy")
         if self.live_worker.busy:
             return text("ui.status.dataset.live_busy")
+        if self._evidence_export_busy:
+            return text("ui.status.evidence_export.in_progress")
         recovery_worker = self.__dict__.get("recovery_worker")
         if recovery_worker is not None and recovery_worker.busy:
             return text("ui.status.dataset.recovery_busy")
@@ -553,6 +598,9 @@ class AutosportApp(tk.Tk):
         if self.replay_worker.busy:
             self.live_status.set(text("ui.status.live.replay_busy"))
             return
+        if self._evidence_export_busy:
+            self.live_status.set(text("ui.status.evidence_export.in_progress"))
+            return
         mode = self.live_mode_text.get()
         public_preview = _LIVE_MODES.get(mode)
         if public_preview is None:
@@ -619,12 +667,15 @@ class AutosportApp(tk.Tk):
         self.log_value.set(value[-12000:])
 
     def _set_replay_controls_busy(self, busy: bool) -> None:
-        if busy or self._dataset_busy:
+        export_button = self.__dict__.get("export_evidence_button")
+        if busy or self._dataset_busy or self._evidence_export_busy:
             self.strategy.configure(state="disabled")
             self.research_plan_button.state(["disabled"])
             self.choose_button.state(["disabled"])
             self.run_button.state(["disabled"])
             self.repair_button.state(["disabled"])
+            if export_button is not None:
+                export_button.state(["disabled"])
             self.speed.configure(state="disabled")
             self.live_mode.configure(state="disabled")
             self.live_refresh_button.state(["disabled"])
@@ -634,9 +685,101 @@ class AutosportApp(tk.Tk):
         self.choose_button.state(["!disabled"])
         self.run_button.state(["!disabled"])
         self.repair_button.state(["!disabled"])
+        if export_button is not None:
+            export_button.state(["!disabled"])
         self.speed.configure(state="readonly")
         self.live_mode.configure(state="readonly")
         self.live_refresh_button.state(["!disabled"])
+
+    def export_evidence(self) -> None:
+        if self.__dict__.get("_closing", False):
+            return
+        blocker = self._evidence_export_blocker()
+        if blocker is not None:
+            self.status.set(blocker)
+            self._append_log(blocker)
+            return
+
+        workspace = self._evidence_export_workspace()
+        if workspace is None:
+            message_text = text("ui.status.evidence_export.start_failed")
+            self.status.set(message_text)
+            self._append_log(message_text)
+            return
+        output = filedialog.asksaveasfilename(
+            title=text("ui.dialog.evidence_export.choose_title"),
+            initialdir=str(workspace.parent),
+            initialfile="autosport-evidence.json",
+            defaultextension=".json",
+            filetypes=((text("ui.filetype.json"), "*.json"), (text("ui.filetype.all"), "*.*")),
+        )
+        if not output:
+            return
+        if self.__dict__.get("_closing", False):
+            return
+
+        # File dialogs run a nested Tk loop. Recheck workspace identity and every
+        # mutating worker after the user returns so Ctrl+E cannot race recovery.
+        current_workspace = self._evidence_export_workspace()
+        if current_workspace is None or current_workspace != workspace:
+            message_text = text("ui.status.evidence_export.workspace_changed")
+            self.status.set(message_text)
+            self._append_log(message_text)
+            return
+        blocker = self._evidence_export_blocker()
+        if blocker is not None:
+            self.status.set(blocker)
+            self._append_log(blocker)
+            return
+
+        try:
+            output_path = resolve_evidence_output_destination(workspace, Path(output))
+        except (OSError, ValueError):
+            message_text = text("ui.status.evidence_export.destination_invalid")
+            self.status.set(message_text)
+            self._append_log(message_text)
+            messagebox.showerror(text("ui.dialog.title"), message_text)
+            return
+
+        worker = self.__dict__.get("evidence_export_worker")
+        if worker is None or not worker.start(workspace, output_path):
+            message_text = text("ui.status.evidence_export.start_failed")
+            self.status.set(message_text)
+            self._append_log(message_text)
+            return
+
+        self._set_replay_controls_busy(True)
+        message_text = text("ui.status.evidence_export.running")
+        self.status.set(message_text)
+        self._append_log(message_text)
+        self.after(100, self._poll_evidence_export_worker)
+
+    def _poll_evidence_export_worker(self) -> None:
+        if self.__dict__.get("_closing", False):
+            return
+        worker = self.__dict__.get("evidence_export_worker")
+        if worker is None:
+            self._set_replay_controls_busy(False)
+            message_text = text("ui.status.evidence_export.start_failed")
+            self.status.set(message_text)
+            self._append_log(message_text)
+            return
+        message = worker.poll()
+        if message is None:
+            self.after(100, self._poll_evidence_export_worker)
+            return
+
+        self._set_replay_controls_busy(False)
+        if message.error is not None:
+            message_text = text("ui.error.evidence_export.failed", error=message.error)
+            self.status.set(message_text)
+            self._append_log(message_text)
+            messagebox.showerror(text("ui.dialog.title"), message_text)
+            return
+
+        message_text = text("ui.status.evidence_export.complete")
+        self.status.set(message_text)
+        self._append_log(message_text)
 
     def repair_workspace(self) -> None:
         if self._closing:
@@ -649,6 +792,9 @@ class AutosportApp(tk.Tk):
             return
         if self.live_worker.busy:
             self.status.set(text("ui.status.recovery.live_busy"))
+            return
+        if self._evidence_export_busy:
+            self.status.set(text("ui.status.evidence_export.in_progress"))
             return
         try:
             strategy_id, research_plan = self._selected_replay_configuration()
@@ -738,6 +884,9 @@ class AutosportApp(tk.Tk):
             return
         if self.live_worker.busy:
             self.status.set(text("ui.status.replay.live_busy"))
+            return
+        if self._evidence_export_busy:
+            self.status.set(text("ui.status.evidence_export.in_progress"))
             return
         try:
             strategy_id, research_plan = self._selected_replay_configuration()
@@ -893,6 +1042,12 @@ class AutosportApp(tk.Tk):
         if self.live_worker.busy:
             close_message = text("ui.status.close.live_busy")
             self.live_status.set(close_message)
+            self.status.set(close_message)
+            self._append_log(close_message)
+            self.bell()
+            return
+        if self._evidence_export_busy:
+            close_message = text("ui.status.close.evidence_export_busy")
             self.status.set(close_message)
             self._append_log(close_message)
             self.bell()

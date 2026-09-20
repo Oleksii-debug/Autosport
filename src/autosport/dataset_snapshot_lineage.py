@@ -50,6 +50,14 @@ def _instant(value: object, name: str) -> datetime:
     return parsed.astimezone(timezone.utc)
 
 
+def _authority_now_utc() -> str:
+    return (
+        datetime.now(timezone.utc)
+        .isoformat(timespec="microseconds")
+        .replace("+00:00", "Z")
+    )
+
+
 def _canonical_json(payload: Mapping[str, Any]) -> str:
     return json.dumps(
         payload,
@@ -113,6 +121,7 @@ class DatasetSnapshotLineageRecord:
     license_identity: str
     causal_cutoff: str
     available_at: str
+    proof_registered_at: str | None
     member_sha256: tuple[str, ...]
     parent_snapshot_id: str | None
     parent_dataset_record_sha256: str | None
@@ -126,7 +135,13 @@ class DatasetSnapshotLineageRecord:
         _text(self.source_identity, "source_identity")
         _text(self.license_identity, "license_identity")
         _instant(self.causal_cutoff, "causal_cutoff")
-        _instant(self.available_at, "available_at")
+        available = _instant(self.available_at, "available_at")
+        if self.proof_registered_at is not None:
+            registered = _instant(self.proof_registered_at, "proof_registered_at")
+            if registered < available:
+                raise ValueError(
+                    "dataset lineage proof publication predates DatasetSnapshot availability"
+                )
         _members(self.member_sha256)
         parent_values = (
             self.parent_snapshot_id,
@@ -146,9 +161,9 @@ class DatasetSnapshotLineageRecord:
         _sha256(self.proof_sha256, "proof_sha256")
 
     def proof_payload(self) -> dict[str, Any]:
-        return {
+        payload: dict[str, Any] = {
             "kind": _PROOF_KIND,
-            "schema_version": 1,
+            "schema_version": 2 if self.proof_registered_at is not None else 1,
             "snapshot_id": self.snapshot_id,
             "dataset_record_sha256": self.dataset_record_sha256,
             "manifest_sha256": self.manifest_sha256,
@@ -161,6 +176,9 @@ class DatasetSnapshotLineageRecord:
             "parent_dataset_record_sha256": self.parent_dataset_record_sha256,
             "parent_proof_sha256": self.parent_proof_sha256,
         }
+        if self.proof_registered_at is not None:
+            payload["proof_registered_at"] = self.proof_registered_at
+        return payload
 
     def to_payload(self) -> dict[str, Any]:
         payload = self.proof_payload()
@@ -346,9 +364,18 @@ class DatasetSnapshotLineageAuthority:
             "parent_proof_sha256",
             "proof_sha256",
         }
-        if set(raw) != required:
-            raise ValueError("dataset snapshot lineage record fields mismatch")
-        if raw.get("kind") != _PROOF_KIND or raw.get("schema_version") != 1:
+        schema_version = raw.get("schema_version")
+        if raw.get("kind") != _PROOF_KIND:
+            raise ValueError("dataset snapshot lineage proof schema mismatch")
+        if schema_version == 1:
+            if set(raw) != required:
+                raise ValueError("dataset snapshot lineage record fields mismatch")
+            proof_registered_at = None
+        elif schema_version == 2:
+            if set(raw) != required | {"proof_registered_at"}:
+                raise ValueError("dataset snapshot lineage record fields mismatch")
+            proof_registered_at = raw["proof_registered_at"]
+        else:
             raise ValueError("dataset snapshot lineage proof schema mismatch")
         raw_members = raw.get("member_sha256")
         if type(raw_members) is not list:
@@ -361,6 +388,7 @@ class DatasetSnapshotLineageAuthority:
             license_identity=raw["license_identity"],
             causal_cutoff=raw["causal_cutoff"],
             available_at=raw["available_at"],
+            proof_registered_at=proof_registered_at,
             member_sha256=tuple(raw_members),
             parent_snapshot_id=raw["parent_snapshot_id"],
             parent_dataset_record_sha256=raw["parent_dataset_record_sha256"],
@@ -504,11 +532,26 @@ class DatasetSnapshotLineageAuthority:
         entry: RegistryEntry,
         members: tuple[str, ...],
         parent: DatasetSnapshotLineageRecord | None,
+        *,
+        proof_registered_at: str | None,
     ) -> DatasetSnapshotLineageRecord:
         payload = entry.payload
-        base = {
+        if proof_registered_at is not None:
+            registered = _instant(proof_registered_at, "proof_registered_at")
+            if registered < _instant(entry.available_at, "DatasetSnapshot available_at"):
+                raise DatasetSnapshotUnprovenError(
+                    "dataset lineage proof publication predates DatasetSnapshot availability"
+                )
+            if parent is not None and parent.proof_registered_at is not None:
+                if registered < _instant(
+                    parent.proof_registered_at, "parent proof_registered_at"
+                ):
+                    raise DatasetSnapshotUnprovenError(
+                        "dataset lineage proof publication moved backwards"
+                    )
+        base: dict[str, Any] = {
             "kind": _PROOF_KIND,
-            "schema_version": 1,
+            "schema_version": 2 if proof_registered_at is not None else 1,
             "snapshot_id": entry.record_id,
             "dataset_record_sha256": entry.record_sha256,
             "manifest_sha256": _sha256(payload.get("manifest_sha256"), "manifest_sha256"),
@@ -523,6 +566,8 @@ class DatasetSnapshotLineageAuthority:
             ),
             "parent_proof_sha256": parent.proof_sha256 if parent is not None else None,
         }
+        if proof_registered_at is not None:
+            base["proof_registered_at"] = proof_registered_at
         return DatasetSnapshotLineageRecord(
             snapshot_id=base["snapshot_id"],
             dataset_record_sha256=base["dataset_record_sha256"],
@@ -531,6 +576,7 @@ class DatasetSnapshotLineageAuthority:
             license_identity=base["license_identity"],
             causal_cutoff=base["causal_cutoff"],
             available_at=base["available_at"],
+            proof_registered_at=proof_registered_at,
             member_sha256=tuple(base["member_sha256"]),
             parent_snapshot_id=base["parent_snapshot_id"],
             parent_dataset_record_sha256=base["parent_dataset_record_sha256"],
@@ -571,14 +617,25 @@ class DatasetSnapshotLineageAuthority:
             if parent_snapshot_id is not None and parent is None:
                 raise DatasetSnapshotUnprovenError("parent DatasetSnapshot is not ancestry-proven")
 
-            candidate = self._new_record(entry, members, parent)
             if existing is not None:
+                candidate = self._new_record(
+                    entry,
+                    members,
+                    parent,
+                    proof_registered_at=existing.proof_registered_at,
+                )
                 if existing == candidate:
                     return existing
                 raise ConflictingDatasetSnapshotLineageError(
                     f"conflicting immutable ancestry proof for DatasetSnapshot:{wanted_id}"
                 )
 
+            candidate = self._new_record(
+                entry,
+                members,
+                parent,
+                proof_registered_at=_authority_now_utc(),
+            )
             same_lineage = [
                 record
                 for record in records
@@ -696,3 +753,43 @@ class DatasetSnapshotLineageAuthority:
         record = self.record(descendant_snapshot_id)
         assert record is not None
         return record
+
+
+    def require_descendant_as_of(
+        self,
+        *,
+        descendant_snapshot_id: str,
+        ancestor_snapshot_id: str,
+        as_of: str,
+    ) -> DatasetSnapshotLineageRecord:
+        """Require exact ancestry whose full proof chain existed by one causal instant."""
+
+        descendant = _text(descendant_snapshot_id, "descendant_snapshot_id")
+        ancestor = _text(ancestor_snapshot_id, "ancestor_snapshot_id")
+        boundary = _instant(as_of, "as_of")
+        records = self._read_and_verify()
+        by_id = {record.snapshot_id: record for record in records}
+        current = by_id.get(descendant)
+        if current is None or ancestor not in by_id:
+            raise DatasetSnapshotUnprovenError(
+                f"DatasetSnapshot:{descendant} is not a proven append-only "
+                f"descendant of DatasetSnapshot:{ancestor}"
+            )
+        resolved = current
+        while True:
+            if current.proof_registered_at is None:
+                raise DatasetSnapshotUnprovenError(
+                    "dataset lineage proof lacks authority-owned publication evidence"
+                )
+            if _instant(current.proof_registered_at, "proof_registered_at") > boundary:
+                raise DatasetSnapshotUnprovenError(
+                    "dataset lineage proof was not causally available at the requested instant"
+                )
+            if current.snapshot_id == ancestor:
+                return resolved
+            if current.parent_snapshot_id is None:
+                raise DatasetSnapshotUnprovenError(
+                    f"DatasetSnapshot:{descendant} is not a proven append-only "
+                    f"descendant of DatasetSnapshot:{ancestor}"
+                )
+            current = by_id[current.parent_snapshot_id]

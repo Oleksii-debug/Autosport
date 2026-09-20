@@ -1,14 +1,50 @@
 from __future__ import annotations
 
 from dataclasses import replace
+from decimal import Decimal
+from pathlib import Path
 
 import pytest
 
 from autosport.betfair_account_readonly import ADAPTER_ID, ADAPTER_VERSION
+from autosport.bookmaker_capability import (
+    BookmakerCapability,
+    BookmakerCapabilityFact,
+    BookmakerCapabilityProfile,
+    BookmakerCapabilityState,
+)
+from autosport.bookmaker_routing import VenueQuote
+from autosport.bookmaker_routing_plan import plan_equal_split_residual
+from autosport.decision_ledger import JsonlDecisionLedger
+from autosport.domain import MarketEvent, TicketLeg
+from autosport.economic_goal import EconomicGoalContract
+from autosport.opportunity import (
+    Opportunity,
+    OpportunityDecision,
+    QuoteRef,
+    StrategyClass,
+)
+from autosport.paper import PaperBook
+from autosport.portfolio_plan import (
+    OpportunityEvidence,
+    OpportunityIntent,
+    PortfolioDependencyGraph,
+    build_portfolio_plan,
+    persist_portfolio_plan_decision,
+)
+from autosport.real_execution_ledger import ExecutionAction
+from autosport.risk import PaperRiskPolicy, ProposedTicketRiskContext
+from autosport.supervised_execution import (
+    ExecutionLegConstraint,
+    SupervisedApproval,
+    build_supervised_execution_plan,
+    supervised_execution_terms_sha256,
+)
 from autosport.campaign_provider_scope_authority import (
     CampaignProviderScopeError,
     CampaignProviderScopeProjection,
     VerifiedBetfairProviderScopeCapture,
+    assert_campaign_provider_scope_authoritative,
     assert_provider_scope_capture_authoritative,
 )
 
@@ -196,3 +232,303 @@ def test_projection_provider_key_accepts_only_exact_source_scope() -> None:
             match="is not applicable to campaign",
         ):
             projection.assert_provider_key(**kwargs)
+
+
+DECISION_TS = "2026-09-18T13:20:00+00:00"
+APPROVED_AT = "2026-09-18T13:20:01+00:00"
+CREATED_AT = "2026-09-18T13:20:02+00:00"
+QUOTE_EXPIRES_AT = "2026-09-18T13:21:00+00:00"
+APPROVAL_EXPIRES_AT = "2026-09-18T13:25:00+00:00"
+
+
+def _goal() -> EconomicGoalContract:
+    return EconomicGoalContract(
+        goal_id="goal-provider-scope-test",
+        revision=1,
+        bankroll_id="paper-bankroll",
+        currency="USD",
+        max_stake_fraction=Decimal("0.10"),
+        max_session_loss_fraction=Decimal("1"),
+        max_day_loss_fraction=Decimal("1"),
+        max_drawdown_fraction=Decimal("1"),
+        max_capital_at_risk_fraction=Decimal("1"),
+        max_turnover_fraction=Decimal("1000"),
+        max_risk_of_ruin=Decimal("1"),
+        max_execution_slippage_fraction=Decimal("0.05"),
+        max_quote_age_seconds=Decimal("3600"),
+        max_concurrent_positions=10,
+    )
+
+
+def _canonical_bound_fixture():
+    goal = _goal()
+    policy = PaperRiskPolicy(
+        max_ticket_fraction=Decimal("1"),
+        max_committed_fraction=Decimal("1"),
+        minimum_cash_reserve_fraction=Decimal("0"),
+        economic_goal=goal,
+    )
+    leg = TicketLeg(
+        "event-1",
+        "1.23456789",
+        "42",
+        Decimal("2.00"),
+        sport="soccer",
+    )
+    quote_event = MarketEvent(
+        event_id=leg.event_id,
+        market_id=leg.market_id,
+        selection_id=leg.selection_id,
+        decimal_odds=leg.locked_odds,
+        observed_ts="2026-09-18T13:19:59+00:00",
+        source_id="betfair",
+        sequence=1,
+        source_ts="2026-09-18T13:19:59+00:00",
+        ingest_ts="2026-09-18T13:19:59+00:00",
+        sport="soccer",
+    )
+    context = ProposedTicketRiskContext(
+        legs=(leg,),
+        quotes=(quote_event,),
+        provider_accounts=(("betfair", "acct-1"),),
+        bankroll_id=goal.bankroll_id,
+        currency=goal.currency,
+        proposal_ts=DECISION_TS,
+    )
+    quote = QuoteRef.from_market_event(
+        quote_event,
+        market_snapshot_hash="9" * 64,
+    )
+    opportunity = Opportunity(
+        strategy_class=StrategyClass.LIVE_PRICE_MOVEMENT,
+        decision=OpportunityDecision.ACTIONABLE,
+        quotes=(quote,),
+        claims_probability_edge=False,
+        forecasts=(),
+    )
+    intent = OpportunityIntent(
+        intent_id="intent-live-1",
+        opportunity=opportunity,
+        evidence=OpportunityEvidence(
+            evidence_id="evidence-live-1",
+            observed_at="2026-09-18T13:19:59+00:00",
+            causal_cutoff="2026-09-18T13:19:58+00:00",
+            reproducibility_sha256="8" * 64,
+        ),
+        risk_context=context,
+        signal_strength=Decimal("0.05"),
+        strategy_id="strategy-live-1",
+        config_sha256="7" * 64,
+    )
+    book = PaperBook("1000")
+    graph = PortfolioDependencyGraph.for_inputs(book, (intent,))
+    portfolio = build_portfolio_plan(
+        book,
+        (intent,),
+        policy,
+        DECISION_TS,
+        dependency_graph=graph,
+    )
+    assert portfolio.stakes[0] > 0
+
+    venue = VenueQuote(
+        "betfair",
+        "acct-1",
+        intent.opportunity.quotes[0],
+        Decimal("1000"),
+    )
+    route = plan_equal_split_residual(
+        portfolio.stakes[0],
+        (venue,),
+        routing_request_id="route-provider-scope-test",
+        parent_plan_id=portfolio.plan_sha256,
+        stake_quantum=Decimal("0.01"),
+    )
+    constraint = ExecutionLegConstraint(
+        leg_id=route.legs[0].leg_id,
+        side="BACK",
+        quote_expires_at=QUOTE_EXPIRES_AT,
+        max_slippage_fraction=Decimal("0.05"),
+    )
+    approval = SupervisedApproval(
+        approval_id="approval-provider-scope-test",
+        portfolio_plan_sha256=portfolio.plan_sha256,
+        intent_id=intent.intent_id,
+        routing_request_id=route.routing_request_id,
+        execution_terms_sha256=supervised_execution_terms_sha256(
+            route,
+            (constraint,),
+        ),
+        approved_at=APPROVED_AT,
+        expires_at=APPROVAL_EXPIRES_AT,
+        evidence_sha256="6" * 64,
+    )
+    profile = BookmakerCapabilityProfile(
+        venue_id="betfair",
+        account_id="acct-1",
+        adapter_id="betfair-exchange-jsonrpc-readonly",
+        adapter_version="1",
+        profile_version=1,
+        facts=(
+            BookmakerCapabilityFact(
+                BookmakerCapability.BET_READBACK,
+                BookmakerCapabilityState.SUPPORTED,
+            ),
+        ),
+        observed_at=DECISION_TS,
+        source_ref="betfair://profile/provider-scope-test",
+        source_payload_sha256="5" * 64,
+    )
+    bound = build_supervised_execution_plan(
+        portfolio,
+        (intent,),
+        route,
+        (profile,),
+        approval,
+        (constraint,),
+        created_at=CREATED_AT,
+    )
+    return bound, portfolio, intent, policy
+
+
+def _frozen_portfolio_record(
+    tmp_path: Path,
+    portfolio,
+    intent,
+    policy,
+):
+    ledger = JsonlDecisionLedger(tmp_path / "decision-ledger.jsonl")
+    return persist_portfolio_plan_decision(
+        ledger,
+        portfolio,
+        (intent,),
+        policy,
+        initialize_ledger=True,
+        replay_run_id="run-1",
+        material_action_id="deliberately-different-material-action",
+    )
+
+
+def test_campaign_projection_constructor_cannot_mint_authority() -> None:
+    forged = _projection()
+    with pytest.raises(
+        CampaignProviderScopeError,
+        match="was not issued by canonical resolver",
+    ):
+        assert_campaign_provider_scope_authoritative(forged)
+
+
+def test_frozen_portfolio_join_ignores_unrelated_material_action_label(
+    tmp_path: Path,
+) -> None:
+    bound, portfolio, intent, policy = _canonical_bound_fixture()
+    record = _frozen_portfolio_record(
+        tmp_path,
+        portfolio,
+        intent,
+        policy,
+    )
+
+    decision, restored = scope._portfolio_execution_membership(
+        [record],
+        bound.execution_plan,
+    )
+
+    assert decision.decision_id == record.decision_id
+    assert restored.plan_sha256 == portfolio.plan_sha256
+    assert (
+        bound.execution_plan.decision_id
+        == f"portfolio:{portfolio.plan_sha256}:intent:{intent.intent_sha256}"
+    )
+    assert (
+        record.payload["material_action_id"]
+        == "deliberately-different-material-action"
+    )
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "message"),
+    (
+        (
+            "market_id",
+            "1.99999999",
+            "exact frozen Opportunity quote membership",
+        ),
+        (
+            "account_id",
+            "acct-other",
+            "provider account is outside frozen intent",
+        ),
+    ),
+)
+def test_frozen_portfolio_join_rejects_market_or_account_swap(
+    tmp_path: Path,
+    field: str,
+    value: str,
+    message: str,
+) -> None:
+    bound, portfolio, intent, policy = _canonical_bound_fixture()
+    record = _frozen_portfolio_record(
+        tmp_path,
+        portfolio,
+        intent,
+        policy,
+    )
+    action = bound.execution_plan.actions[0]
+    changed_action = replace(action, **{field: value})
+    changed_plan = replace(
+        bound.execution_plan,
+        actions=(changed_action,),
+    )
+
+    with pytest.raises(CampaignProviderScopeError, match=message):
+        scope._portfolio_execution_membership([record], changed_plan)
+
+
+def test_frozen_portfolio_join_rejects_aggregate_stake_overflow(
+    tmp_path: Path,
+) -> None:
+    bound, portfolio, intent, policy = _canonical_bound_fixture()
+    record = _frozen_portfolio_record(
+        tmp_path,
+        portfolio,
+        intent,
+        policy,
+    )
+    action = bound.execution_plan.actions[0]
+    overflow = replace(
+        action,
+        requested_stake=portfolio.stakes[0] + Decimal("0.01"),
+    )
+    changed_plan = replace(bound.execution_plan, actions=(overflow,))
+
+    with pytest.raises(
+        CampaignProviderScopeError,
+        match="action vector exceeds frozen PortfolioPlan stake",
+    ):
+        scope._portfolio_execution_membership([record], changed_plan)
+
+
+def test_frozen_portfolio_join_rejects_forged_decision_identity(
+    tmp_path: Path,
+) -> None:
+    bound, portfolio, intent, policy = _canonical_bound_fixture()
+    record = _frozen_portfolio_record(
+        tmp_path,
+        portfolio,
+        intent,
+        policy,
+    )
+    changed_plan = replace(
+        bound.execution_plan,
+        decision_id=(
+            f"portfolio:{portfolio.plan_sha256}:intent:"
+            + "f" * 64
+        ),
+    )
+
+    with pytest.raises(
+        CampaignProviderScopeError,
+        match="execution intent is not unique frozen PortfolioPlan membership",
+    ):
+        scope._portfolio_execution_membership([record], changed_plan)

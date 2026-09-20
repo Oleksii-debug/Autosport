@@ -119,6 +119,11 @@ def _quote(
 class _ProductSource:
     source_id = "provider-a"
     stream_epoch = "epoch-1"
+    settlement_authority_id = "provider-a-results-v1"
+    settlement_configuration_sha256 = SHA_A
+
+    def __init__(self) -> None:
+        self.resolution: SettlementResolution | None = None
 
     def fetch_catalog_page(self, checkpoint):
         return CatalogPage(
@@ -135,11 +140,6 @@ class _ProductSource:
     def resolve_event(self, delta):
         raise AssertionError("result-materializer tests do not consume collector deltas")
 
-
-class _StaticOutcomeAuthority:
-    def __init__(self) -> None:
-        self.resolution: SettlementResolution | None = None
-
     def resolve(
         self,
         record: EventLifecycleRecord,
@@ -147,6 +147,15 @@ class _StaticOutcomeAuthority:
         as_of: str,
     ) -> SettlementResolution | None:
         return self.resolution
+
+
+class _ReplacementProductSource(_ProductSource):
+    settlement_authority_id = "provider-a-results-v2"
+
+
+class _AttackerAuthority:
+    def resolve(self, record, *, as_of: str):
+        raise AssertionError("attacker resolver must never become product authority")
 
 
 def _authorities(
@@ -179,12 +188,12 @@ def _authorities(
         root / "opponents.json",
         identities,
     )
-    authority = _StaticOutcomeAuthority()
+    source = _ProductSource()
     runtime = build_autonomous_product_runtime(
         workspace=root,
-        source=_ProductSource(),
+        source=source,
         clock=lambda: T2,
-        outcome_authority=authority,
+        outcome_authority=source,
     )
     market_store = runtime.market_store
     market_store.append(_quote("sel-alex-17", 1))
@@ -276,7 +285,7 @@ def _authoritative_assertion(
     canonical: SettlementResolution,
 ) -> SettlementResolution:
     authority = materializer.runtime.coordinator.outcome_authority
-    assert isinstance(authority, _StaticOutcomeAuthority)
+    assert isinstance(authority, _ProductSource)
     authority.resolution = canonical
     return replace(canonical)
 
@@ -294,8 +303,8 @@ def test_cold_process_can_import_result_materializer() -> None:
 def test_arbitrary_protocol_resolver_is_not_a_materializer_capability(tmp_path):
     _, store, market_store, materializer = _authorities(tmp_path)
     binding = _binding(materializer, market_store)
-    attacker = _StaticOutcomeAuthority()
-    attacker.resolution = SettlementResolution(
+    attacker = _AttackerAuthority()
+    forged = SettlementResolution(
         event_identity=binding.event_identity,
         settlement_ref="settlement-1",
         quote_outcomes={
@@ -315,6 +324,43 @@ def test_arbitrary_protocol_resolver_is_not_a_materializer_capability(tmp_path):
 
     assert store.graph_edges(as_of=T3) == ()
     market_store.close()
+
+
+def test_public_product_builder_rejects_detached_outcome_resolver(tmp_path):
+    source = _ProductSource()
+    with pytest.raises(
+        Exception,
+        match="settlement outcome authority must be owned by the configured product source",
+    ):
+        build_autonomous_product_runtime(
+            workspace=tmp_path / "detached-authority",
+            source=source,
+            outcome_authority=_AttackerAuthority(),
+            clock=lambda: T2,
+        )
+
+
+def test_restart_rejects_settlement_authority_identity_substitution(tmp_path):
+    first_source = _ProductSource()
+    runtime = build_autonomous_product_runtime(
+        workspace=tmp_path,
+        source=first_source,
+        outcome_authority=first_source,
+        clock=lambda: T2,
+    )
+    runtime.close()
+
+    replacement = _ReplacementProductSource()
+    with pytest.raises(
+        Exception,
+        match="settlement authority identity conflicts with durable product composition",
+    ):
+        build_autonomous_product_runtime(
+            workspace=tmp_path,
+            source=replacement,
+            outcome_authority=replacement,
+            clock=lambda: T3,
+        )
 
 
 def test_caller_constructed_exact_settlement_cannot_authorize_memory_truth(tmp_path):
@@ -550,11 +596,12 @@ def test_result_projection_is_exactly_once_across_restart_and_causally_hidden_be
         tmp_path / "opponents.json",
         ParticipantIdentityRegistry(tmp_path / "identity.json"),
     )
+    reopened_source = _ProductSource()
     reopened_runtime = build_autonomous_product_runtime(
         workspace=tmp_path,
-        source=_ProductSource(),
+        source=reopened_source,
         clock=lambda: T3,
-        outcome_authority=_StaticOutcomeAuthority(),
+        outcome_authority=reopened_source,
     )
     reopened_market = reopened_runtime.market_store
     reopened = SportMemoryResultMaterializer(
@@ -927,11 +974,12 @@ def test_win_to_void_correction_retires_performance_across_restart_without_fake_
         tmp_path / "opponents.json",
         ParticipantIdentityRegistry(tmp_path / "identity.json"),
     )
+    reopened_source = _ProductSource()
     reopened_runtime = build_autonomous_product_runtime(
         workspace=tmp_path,
-        source=_ProductSource(),
+        source=reopened_source,
         clock=lambda: T3,
-        outcome_authority=_StaticOutcomeAuthority(),
+        outcome_authority=reopened_source,
     )
     reopened_market = reopened_runtime.market_store
     reopened = SportMemoryResultMaterializer(

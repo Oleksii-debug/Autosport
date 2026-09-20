@@ -3,9 +3,9 @@ from __future__ import annotations
 """Causal collector public surface with durable indexed delta persistence.
 
 The original module body is retained verbatim in ``causal_collector_legacy`` so the
-large established collector/desktop API remains byte-for-byte stable.  This module
+large established collector/desktop API remains byte-for-byte stable. This module
 re-exports that surface and replaces only ``CollectorDeltaStore`` with the bounded
-SQLite-backed implementation from ``collector_sqlite_store``.
+SQLite-backed implementation.
 """
 
 from . import causal_collector_legacy as _legacy
@@ -19,6 +19,6 @@ for _name, _value in vars(_legacy).items():
         except (AttributeError, TypeError):
             pass
 
-from .collector_sqlite_store import CollectorDeltaStore as CollectorDeltaStore
+from .collector_sqlite_active_store import CollectorDeltaStore as CollectorDeltaStore
 
 del _name, _value

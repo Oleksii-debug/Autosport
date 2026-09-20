@@ -197,3 +197,93 @@ def test_restart_rejects_rehashed_allocation_with_forged_campaign_coverage(tmp_p
             source_resolvers={MonetarySourceClass.FIXED_ADMIN: resolver},
             allocation_resolver=AllocationResolver({"allocation": allocation}),
         )
+
+
+def test_failed_source_persist_rolls_back_before_retry_and_restart(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    source = _snapshot(evidence_id="price-1", amount="10", digest_char="a")
+    resolver = Resolver({"source": source})
+    authority = MonetaryCostAuthority(
+        tmp_path,
+        source_resolvers={MonetarySourceClass.PROVIDER_BILLING: resolver},
+    )
+    real_persist = authority._persist
+
+    def fail_persist() -> None:
+        raise OSError("injected persistence failure")
+
+    monkeypatch.setattr(authority, "_persist", fail_persist)
+    with pytest.raises(OSError, match="injected persistence failure"):
+        authority.capture_source(
+            MonetarySourceClass.PROVIDER_BILLING,
+            "source",
+            as_of=T1,
+        )
+
+    monkeypatch.setattr(authority, "_persist", real_persist)
+    source_ref = authority.capture_source(
+        MonetarySourceClass.PROVIDER_BILLING,
+        "source",
+        as_of=T1,
+    )
+    restarted = MonetaryCostAuthority(
+        tmp_path,
+        source_resolvers={MonetarySourceClass.PROVIDER_BILLING: resolver},
+    )
+    assert restarted.resolve_source(source_ref, as_of=T1).snapshot == source
+
+
+def test_failed_allocation_persist_rolls_back_before_retry_and_restart(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    source = _snapshot(evidence_id="price-1", amount="10", digest_char="a")
+    resolver = Resolver({"source": source})
+    bootstrap = MonetaryCostAuthority(
+        tmp_path,
+        source_resolvers={MonetarySourceClass.FIXED_ADMIN: resolver},
+    )
+    source_ref = bootstrap.capture_source(
+        MonetarySourceClass.FIXED_ADMIN,
+        "source",
+        as_of=T1,
+    )
+    allocation = SharedAllocationSnapshot(
+        authority_id="allocation-ledger-cache",
+        evidence_id="allocation-1",
+        content_sha256="d" * 64,
+        source_ref=source_ref,
+        shares=(("campaign-a", Decimal("1")),),
+        observed_at=T0,
+        available_at=T1,
+        provenance="resolver:non-authoritative-allocation",
+    )
+    allocation_resolver = AllocationResolver({"allocation": allocation})
+    authority = MonetaryCostAuthority(
+        tmp_path,
+        source_resolvers={MonetarySourceClass.FIXED_ADMIN: resolver},
+        allocation_resolver=allocation_resolver,
+    )
+    real_persist = authority._persist
+
+    def fail_persist() -> None:
+        raise OSError("injected persistence failure")
+
+    monkeypatch.setattr(authority, "_persist", fail_persist)
+    with pytest.raises(OSError, match="injected persistence failure"):
+        authority.capture_allocation("allocation", as_of=T1)
+
+    monkeypatch.setattr(authority, "_persist", real_persist)
+    authority.capture_allocation("allocation", as_of=T1)
+    restarted = MonetaryCostAuthority(
+        tmp_path,
+        source_resolvers={MonetarySourceClass.FIXED_ADMIN: resolver},
+        allocation_resolver=allocation_resolver,
+    )
+    raw = json.loads(
+        (tmp_path / "monetary-cost-authority.json").read_text(encoding="utf-8")
+    )
+    assert len(raw["allocations"]) == 1
+    assert restarted.resolve_source(source_ref, as_of=T1).snapshot == source

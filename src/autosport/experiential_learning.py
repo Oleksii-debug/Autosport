@@ -238,9 +238,13 @@ def run_policy_retest(
         if getattr(update_evidence, name) != getattr(challenger_policy, name):
             raise ValueError(f"policy update evidence {name} mismatch")
     _validate_exact_policy_successor(predecessor_policy, challenger_policy, update_evidence)
-    # Preserve cheap pre-registry causal falsification without recreating a raw-reward
-    # successor before owner-utility authority has admitted the product update.
-    _validate_causal_witness_binding(predecessor_policy, update_evidence)
+    # Exact causal-successor recomputation is validation-only: it mutates no durable
+    # state and must reject forged policy arithmetic before any registry access.
+    _validate_causal_policy_successor(
+        predecessor_policy,
+        challenger_policy,
+        update_evidence,
+    )
 
     protocol = runner.registry.get("ResearchProtocol", challenger_policy.protocol_id)
     if protocol is None:
@@ -277,10 +281,6 @@ def run_policy_retest(
         update_evidence,
         utility_update_evidence,
     )
-    # Generic raw-reward replay is intentionally downstream of the owner-utility gate.
-    # Schema v1 cannot pass that gate, so product code cannot recreate a challenger from
-    # raw reward before economic authority has admitted the update.
-    _validate_causal_policy_successor(predecessor_policy, challenger_policy, update_evidence)
 
     evaluation_config = PolicyEvaluationConfig.from_frozen_text(
         binding.get("evaluation_design")

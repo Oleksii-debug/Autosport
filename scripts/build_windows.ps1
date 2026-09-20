@@ -14,23 +14,17 @@ if (-not $SkipTests) {
 }
 
 # The production builder remains byte-identical to the proven pre-optimization
-# script.  The opt-in candidate path removes only its one duplicate full-suite
-# gate from the in-memory script text.  This is deliberately fail-closed: any
-# future builder edit that changes, removes, or duplicates the exact gate makes
-# -SkipTests fail before any build work rather than silently weakening coverage.
+# script. The opt-in candidate path removes only its one duplicate full-suite
+# gate from in-memory script text. The transform is exact and fail-closed: any
+# future builder edit that changes, removes, or duplicates that gate aborts the
+# candidate before build work instead of silently weakening coverage.
+$skipGateHelper = Join-Path $PSScriptRoot 'windows_build_skip_gate.ps1'
+if (-not (Test-Path -LiteralPath $skipGateHelper -PathType Leaf)) {
+  throw 'Windows candidate skip-gate helper is missing'
+}
+. $skipGateHelper
+
 $coreText = [System.IO.File]::ReadAllText($coreScript)
-$pytestGatePattern = '(?m)^python -m pytest -v tests\r?\nif \(\$LASTEXITCODE -ne 0\) \{ throw "Full pytest gate exited \$LASTEXITCODE" \}\r?\n'
-$pytestGateRegex = [regex]::new($pytestGatePattern)
-$pytestGateMatches = $pytestGateRegex.Matches($coreText)
-if ($pytestGateMatches.Count -ne 1) {
-  throw "-SkipTests requires exactly one canonical builder-local pytest gate; observed $($pytestGateMatches.Count)"
-}
-
-$replacement = "Write-Host 'BUILDER_LOCAL_PYTEST=SKIPPED_BY_EXPLICIT_CALLER'`n"
-$candidateCoreText = $pytestGateRegex.Replace($coreText, $replacement, 1)
-if ($candidateCoreText -eq $coreText -or $candidateCoreText.Contains('python -m pytest -v tests')) {
-  throw '-SkipTests failed to remove exactly the canonical builder-local pytest invocation'
-}
-
+$candidateCoreText = ConvertTo-WindowsCandidateCoreText -CoreText $coreText
 $candidateCore = [scriptblock]::Create($candidateCoreText)
 & $candidateCore

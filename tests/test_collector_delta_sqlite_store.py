@@ -1,4 +1,5 @@
 import json
+import multiprocessing
 import sqlite3
 import tempfile
 import threading
@@ -70,6 +71,22 @@ def make_delta(
         gap_state=GapState.NONE,
         sync_state=SyncState.READY,
     )
+
+
+def _delayed_migration_worker(path_text, ready, proceed, result_queue):
+    class DelayedMigrationStore(CollectorDeltaStore):
+        def _migration_candidate_ready(self):
+            ready.set()
+            if not proceed.wait(15):
+                raise TimeoutError("migration race test release was not signaled")
+
+    try:
+        DelayedMigrationStore(Path(path_text))
+    except BaseException as exc:
+        result_queue.put(("error", f"{type(exc).__name__}: {exc}"))
+    else:
+        result_queue.put(("ok", ""))
+
 
 
 class CollectorSQLiteStoreTests(unittest.TestCase):
@@ -193,13 +210,142 @@ class CollectorSQLiteStoreTests(unittest.TestCase):
             path = Path(tmp) / "collector.json"
             delta = make_delta()
             CollectorDeltaStore(path).append(delta)
-            with sqlite3.connect(path) as connection:
+            connection = sqlite3.connect(path)
+            try:
                 connection.execute(
                     "UPDATE collector_deltas SET payload_json=? WHERE delta_id=?",
                     ("{}", delta.delta_id),
                 )
+                connection.commit()
+            finally:
+                connection.close()
             with self.assertRaises(ValueError):
                 CollectorDeltaStore(path).get(delta.delta_id)
+
+    def test_delayed_second_migrator_preserves_winner_append(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "collector.json"
+            first = make_delta(delta_id="d1", cursor_position=1)
+            checkpoint = StreamCheckpoint(
+                source_id="source-x",
+                stream_epoch="epoch-1",
+                last_cursor="1",
+                last_position=1,
+                last_delta_id="d1",
+            )
+            source = json.dumps(
+                {
+                    "schema_version": 1,
+                    "deltas": [first.to_dict()],
+                    "streams": {"source-x|epoch-1": asdict(checkpoint)},
+                },
+                ensure_ascii=False,
+                sort_keys=True,
+                indent=2,
+                allow_nan=False,
+            ) + "\n"
+            path.write_text(source, encoding="utf-8")
+
+            ctx = multiprocessing.get_context("spawn")
+            ready = ctx.Event()
+            proceed = ctx.Event()
+            result_queue = ctx.Queue()
+            process = ctx.Process(
+                target=_delayed_migration_worker,
+                args=(str(path), ready, proceed, result_queue),
+            )
+            process.start()
+            try:
+                self.assertTrue(ready.wait(15), "delayed migrator did not reach switch")
+                winner = CollectorDeltaStore(path)
+                second = make_delta(delta_id="d2", cursor_position=2)
+                self.assertTrue(winner.append(second))
+                proceed.set()
+                process.join(15)
+                self.assertFalse(process.is_alive(), "delayed migrator did not exit")
+                self.assertEqual(process.exitcode, 0)
+                self.assertEqual(result_queue.get(timeout=5), ("ok", ""))
+
+                reopened = CollectorDeltaStore(path)
+                self.assertEqual(reopened.get("d1"), first)
+                self.assertEqual(reopened.get("d2"), second)
+                self.assertEqual(
+                    reopened.stream_checkpoint("source-x", "epoch-1").last_delta_id,
+                    "d2",
+                )
+                self.assertEqual(
+                    path.with_name("collector.json.legacy-v1.json").read_text(
+                        encoding="utf-8"
+                    ),
+                    source,
+                )
+            finally:
+                proceed.set()
+                if process.is_alive():
+                    process.terminate()
+                process.join(5)
+                result_queue.close()
+                result_queue.join_thread()
+
+    def test_indexed_projection_tamper_fails_closed(self):
+        projections = {
+            "delta_id": "forged-delta",
+            "source_id": "forged-source",
+            "stream_epoch": "forged-epoch",
+            "cursor_position": 77,
+            "revision_number": 9,
+            "desktop_available_at": "2026-01-01T00:00:05+00:00",
+            "collector_committed_at": "2026-01-01T00:00:06+00:00",
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            for column, forged in projections.items():
+                with self.subTest(column=column):
+                    path = Path(tmp) / f"{column}.sqlite"
+                    delta = make_delta()
+                    CollectorDeltaStore(path).append(delta)
+                    connection = sqlite3.connect(path)
+                    try:
+                        connection.execute(
+                            f"UPDATE collector_deltas SET {column}=? WHERE delta_id=?",
+                            (forged, delta.delta_id),
+                        )
+                        connection.commit()
+                    finally:
+                        connection.close()
+                    lookup_id = "forged-delta" if column == "delta_id" else delta.delta_id
+                    with self.assertRaisesRegex(
+                        ValueError,
+                        "indexed projection conflicts with canonical payload",
+                    ):
+                        CollectorDeltaStore(path).get(lookup_id)
+
+    def test_source_projection_tamper_cannot_route_delivery_or_causal_view(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "collector.json"
+            delta = make_delta()
+            CollectorDeltaStore(path).append(delta)
+            connection = sqlite3.connect(path)
+            try:
+                connection.execute(
+                    "UPDATE collector_deltas SET source_id=? WHERE delta_id=?",
+                    ("forged-source", delta.delta_id),
+                )
+                connection.commit()
+            finally:
+                connection.close()
+
+            store = CollectorDeltaStore(path)
+            with self.assertRaises(ValueError):
+                store.deltas_after_commit(source_id="forged-source")
+            with self.assertRaises(ValueError):
+                store.deltas_after_commit(
+                    source_id="forged-source",
+                    after_delta_id=delta.delta_id,
+                )
+            with self.assertRaises(ValueError):
+                store.deltas_available_through(
+                    as_of="2026-01-01T00:01:00+00:00"
+                )
 
     def test_concurrent_same_delta_admission_is_exactly_once_without_sleep(self):
         with tempfile.TemporaryDirectory() as tmp:

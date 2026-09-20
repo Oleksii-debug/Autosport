@@ -43,26 +43,31 @@ def action(action_id: str, *, odds: str = "2.50", stake: str = "10.00"):
     )
 
 
-def prepared(*actions: ExecutionAction) -> PreparedPaperExecution:
-    return PreparedPaperExecution(
-        execution_plan=ExecutionPlan(
-            plan_id="adoption-plan-1",
-            bookmaker_profile_version="paper-profile-v1",
-            decision_id="decision-1",
-            approval_id="paper-only-no-real-money",
-            created_at=QUOTE_AT,
-            actions=tuple(actions),
-        ),
-        exposure_bindings=tuple(
-            PaperExposureBinding(
-                action_id=item.action_id,
-                sport="soccer",
-                bankroll_id="paper-bankroll",
-                currency="EUR",
-            )
-            for item in actions
-        ),
-        intent_evidence_json='{"schema":"test-intent-evidence"}',
+def prepared(
+    runtime: PaperExecutionAdoptionRuntime,
+    *actions: ExecutionAction,
+) -> PreparedPaperExecution:
+    return runtime._mint_prepared(
+        PreparedPaperExecution(
+            execution_plan=ExecutionPlan(
+                plan_id="adoption-plan-1",
+                bookmaker_profile_version="paper-profile-v1",
+                decision_id="decision-1",
+                approval_id="paper-only-no-real-money",
+                created_at=QUOTE_AT,
+                actions=tuple(actions),
+            ),
+            exposure_bindings=tuple(
+                PaperExposureBinding(
+                    action_id=item.action_id,
+                    sport="soccer",
+                    bankroll_id="paper-bankroll",
+                    currency="EUR",
+                )
+                for item in actions
+            ),
+            intent_evidence_json='{"schema":"test-intent-evidence"}',
+        )
     )
 
 
@@ -128,7 +133,7 @@ class PaperExecutionAdoptionTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             book, ledger, runtime = self.runtime(tmp)
             current = action("a1", odds="2.50", stake="10.00")
-            current_prepared = prepared(current)
+            current_prepared = prepared(runtime, current)
             registered = evidence(
                 current,
                 PaperAttemptOutcome.ACCEPTED,
@@ -171,7 +176,7 @@ class PaperExecutionAdoptionTests(unittest.TestCase):
         ):
             with self.subTest(outcome=outcome), tempfile.TemporaryDirectory() as tmp:
                 book, _ledger, runtime = self.runtime(tmp, model=config(**override))
-                current_prepared = prepared(action("a1"))
+                current_prepared = prepared(runtime, action("a1"))
                 first = runtime.execute(
                     prepared=current_prepared,
                     trigger_id=f"trigger-{outcome.value}",
@@ -203,7 +208,7 @@ class PaperExecutionAdoptionTests(unittest.TestCase):
             registry = PaperExecutionEvidenceRegistry(ledger)
             registry.register(registered)
             result = runtime.execute(
-                prepared=prepared(current),
+                prepared=prepared(runtime, current),
                 trigger_id="trigger-partial",
                 started_at=STARTED_AT,
                 materialize_exposure=True,
@@ -221,7 +226,8 @@ class PaperExecutionAdoptionTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             book, ledger, runtime = self.runtime(tmp)
             book_path = Path(tmp) / "paper-book.json"
-            current_prepared = prepared(action("a1"))
+            current_action = action("a1")
+            current_prepared = prepared(runtime, current_action)
             shadow = runtime.execute(
                 prepared=current_prepared,
                 trigger_id="trigger-crash-window",
@@ -232,7 +238,8 @@ class PaperExecutionAdoptionTests(unittest.TestCase):
             self.assertEqual(PaperBook.load(book_path).tickets, {})
 
             # Simulate a fresh process after the durable #623 attempt but before
-            # any exposure was published.
+            # any exposure was published. Restart must re-mint authority from the
+            # same canonical action instead of reusing an in-process capability.
             reloaded_book = PaperBook.load(book_path)
             restarted = PaperExecutionAdoptionRuntime(
                 book=reloaded_book,
@@ -241,8 +248,9 @@ class PaperExecutionAdoptionTests(unittest.TestCase):
                 max_quote_age=runtime.max_quote_age,
                 paper_book_path=book_path,
             )
+            restarted_prepared = prepared(restarted, current_action)
             resumed = restarted.execute(
-                prepared=current_prepared,
+                prepared=restarted_prepared,
                 trigger_id="trigger-crash-window",
                 started_at=STARTED_AT,
                 materialize_exposure=True,
@@ -260,8 +268,9 @@ class PaperExecutionAdoptionTests(unittest.TestCase):
                 max_quote_age=runtime.max_quote_age,
                 paper_book_path=book_path,
             )
+            restarted_again_prepared = prepared(restarted_again, current_action)
             again = restarted_again.execute(
-                prepared=current_prepared,
+                prepared=restarted_again_prepared,
                 trigger_id="trigger-crash-window",
                 started_at=STARTED_AT,
                 materialize_exposure=True,
@@ -285,7 +294,7 @@ class PaperExecutionAdoptionTests(unittest.TestCase):
             registry.register(e1)
             registry.register(e2)
             result = runtime.execute(
-                prepared=prepared(a1, a2),
+                prepared=prepared(runtime, a1, a2),
                 trigger_id="trigger-second-reject",
                 started_at=STARTED_AT,
                 materialize_exposure=True,
@@ -311,7 +320,7 @@ class PaperExecutionAdoptionTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             book, _ledger, runtime = self.runtime(tmp)
             result = runtime.execute(
-                prepared=prepared(action("a1")),
+                prepared=prepared(runtime, action("a1")),
                 trigger_id="trigger-stale",
                 started_at="2026-09-20T06:00:06+00:00",
                 materialize_exposure=True,
@@ -327,7 +336,7 @@ class PaperExecutionAdoptionTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             book, _ledger, runtime = self.runtime(tmp)
             result = runtime.execute(
-                prepared=prepared(action("a1")),
+                prepared=prepared(runtime, action("a1")),
                 trigger_id="trigger-suspended",
                 started_at=STARTED_AT,
                 materialize_exposure=True,
@@ -345,7 +354,8 @@ class PaperExecutionAdoptionTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             book, ledger, runtime = self.runtime(tmp)
             book_path = Path(tmp) / "paper-book.json"
-            current_prepared = prepared(action("a1"))
+            current_action = action("a1")
+            current_prepared = prepared(runtime, current_action)
             first = runtime.execute(
                 prepared=current_prepared,
                 trigger_id="trigger-marker-conflict",
@@ -374,12 +384,13 @@ class PaperExecutionAdoptionTests(unittest.TestCase):
                 max_quote_age=runtime.max_quote_age,
                 paper_book_path=book_path,
             )
+            restarted_prepared = prepared(restarted, current_action)
             with self.assertRaisesRegex(
                 Exception,
                 "duplicate exposure",
             ):
                 restarted.execute(
-                    prepared=current_prepared,
+                    prepared=restarted_prepared,
                     trigger_id="trigger-marker-conflict",
                     started_at=STARTED_AT,
                     materialize_exposure=True,
@@ -389,7 +400,7 @@ class PaperExecutionAdoptionTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             book, _ledger, runtime = self.runtime(tmp)
             result = runtime.execute(
-                prepared=prepared(action("a1")),
+                prepared=prepared(runtime, action("a1")),
                 trigger_id="trigger-shadow",
                 started_at=STARTED_AT,
                 materialize_exposure=False,

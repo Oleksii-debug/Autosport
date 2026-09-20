@@ -159,13 +159,14 @@ def _validate_product_semantic_authority(
 ) -> tuple[dict[str, str], ...]:
     from . import provider_evaluation_universe as provider_consumer
 
-    if not isinstance(
-        pre_evaluation_authority, ProductOwnedPreEvaluationSemanticSession
-    ):
+    # Capability wrappers are authority-bearing objects, not extension points.  Exact
+    # concrete types prevent a subclass from retaining a genuine issued origin while
+    # overriding slots/context/members with forged denominator semantics.
+    if type(pre_evaluation_authority) is not ProductOwnedPreEvaluationSemanticSession:
         raise provider_consumer.ProviderEvaluationUniverseError(
             "complete-board denominator requires product-owned pre-evaluation semantic authority"
         )
-    if not isinstance(pre_evaluation_bound, BoundPreEvaluationSession):
+    if type(pre_evaluation_bound) is not BoundPreEvaluationSession:
         raise provider_consumer.ProviderEvaluationUniverseError(
             "complete-board denominator requires exact bound pre-evaluation session"
         )
@@ -218,8 +219,9 @@ def _validate_product_semantic_authority(
         raise provider_consumer.ProviderEvaluationUniverseError(
             "provider evaluation row_key values must be unique"
         )
-    slot_by_key = {slot.row_key: slot for slot in authority.slots}
-    if len(slot_by_key) != len(authority.slots):
+    semantic_slots = pre_evaluation_authority.session.slots
+    slot_by_key = {slot.row_key: slot for slot in semantic_slots}
+    if len(slot_by_key) != len(semantic_slots):
         raise provider_consumer.ProviderEvaluationUniverseError(
             "product-owned semantic authority contains duplicate row keys"
         )

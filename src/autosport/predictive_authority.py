@@ -191,24 +191,30 @@ def resolve_predictive_eligibility(
     policy: _qualification.PredictiveAdmissionPolicy,
     qualification: _qualification.ForecastCalibrationQualification,
 ) -> _qualification.ResolvedPredictiveEligibility:
-    """Resolve eligibility only from precommitted policy + immutable registry truth."""
+    """Resolve eligibility from science, then require precommitted policy authority.
+
+    The underlying resolver is read-only. Running it first preserves its deterministic
+    fail-closed validation errors for malformed/future/under-supported inputs; no
+    positive authority is returned until the independent ResearchProtocol policy
+    commitment is verified below.
+    """
 
     if not isinstance(registry, ScientificRegistry):
         raise _qualification.PredictiveQualificationError(
             "registry must be ScientificRegistry"
         )
-    _policy_commitment_from_protocol(
-        registry,
-        qualification=qualification,
-        forecast=forecast,
-        policy=policy,
-    )
     resolved = _ORIGINAL_RESOLVE_PREDICTIVE_ELIGIBILITY(
         _PromotionBundleDigestRegistry(registry),
         forecast,
         decision_time=decision_time,
         policy=policy,
         qualification=qualification,
+    )
+    _policy_commitment_from_protocol(
+        registry,
+        qualification=qualification,
+        forecast=forecast,
+        policy=policy,
     )
     bundle = registry.get("EvaluationBundle", resolved.evaluation_bundle_id)
     if bundle is None:
@@ -271,9 +277,6 @@ def _install_runtime_authority() -> Callable[..., ForecastRef]:
         *,
         expected_model_id: str | None,
     ) -> str | None:
-        # Positive runtime authority is intentionally exact-type.  A subclass may
-        # override the public method, so the portfolio-facing Opportunity guard below
-        # calls this closure directly rather than dispatching through the forecast.
         if type(self) is not ForecastRef:
             return _AUTHORITY_MISSING_REASON
         reason = _ORIGINAL_FORECAST_ELIGIBILITY_REASON(
@@ -303,8 +306,6 @@ def _install_runtime_authority() -> Callable[..., ForecastRef]:
         if not self.claims_probability_edge:
             return None
         for forecast in self.forecasts:
-            # Deliberately bypass virtual ForecastRef method dispatch.  This is the
-            # final predictive admission check consumed by portfolio planning.
             reason = guarded_reason(
                 forecast,
                 decision_time,

@@ -201,3 +201,27 @@ def test_restart_replays_consumption_causality_after_recomputed_id(tmp_path):
 
     with pytest.raises(SportMemoryError, match="cannot precede decision cutoff"):
         SportMemoryRuntime(path, _Authority(), authority_generation_sha256=SHA_3)
+
+
+def test_restart_rejects_support_not_equal_to_input_count_after_recomputed_id(tmp_path):
+    path, _, _ = _runtime(tmp_path)
+    raw = json.loads(path.read_text(encoding="utf-8"))
+    artifact = raw["artifacts"][0]
+    artifact["support"] = 3
+    artifact["memory_id"] = _digest({k: v for k, v in artifact.items() if k != "memory_id"})
+    path.write_text(json.dumps(raw, sort_keys=True) + "\n", encoding="utf-8")
+
+    with pytest.raises(SportMemoryError, match="support must equal input performance count"):
+        SportMemoryRuntime(path, _Authority(), authority_generation_sha256=SHA_3)
+
+
+def test_restart_rejects_effective_sample_not_bounded_opponent_support_after_recomputed_id(tmp_path):
+    path, _, _ = _runtime(tmp_path)
+    raw = json.loads(path.read_text(encoding="utf-8"))
+    artifact = raw["artifacts"][0]
+    artifact["effective_sample"] = 1
+    artifact["memory_id"] = _digest({k: v for k, v in artifact.items() if k != "memory_id"})
+    path.write_text(json.dumps(raw, sort_keys=True) + "\n", encoding="utf-8")
+
+    with pytest.raises(SportMemoryError, match="effective_sample must equal bounded opponent support"):
+        SportMemoryRuntime(path, _Authority(), authority_generation_sha256=SHA_3)

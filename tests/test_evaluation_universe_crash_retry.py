@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+from dataclasses import replace
+
 import pytest
 
+import autosport.provider_observation_authority as provider_module
 import autosport.evaluation_universe as evaluation_universe_module
 from autosport.evaluation_intake import (
     ObservationEnumerationWitness,
@@ -17,12 +20,152 @@ from autosport.evaluation_universe import (
     SlotState,
     build_frozen_universe,
 )
+from autosport.event_lifecycle import (
+    CatalogEvent,
+    CatalogPage,
+    ContinuousEventLifecycle,
+    EventPhase,
+)
+from autosport.provider_evaluation_universe import (
+    ProviderEvaluationUniverseStore,
+    build_frozen_universe_from_complete_game_board,
+    complete_game_board_member_specs,
+)
+from autosport.provider_observation_authority import (
+    CompleteGameBoardRequest,
+    capture_parlay_complete_game_board,
+)
 from autosport.monotonic_workspace_authority import MonotonicAuthorityConflictError
 
 
 H1 = "a" * 64
 H2 = "b" * 64
 H3 = "c" * 64
+
+
+PROVIDER_CAPTURED_AT = "2026-09-20T00:00:01Z"
+PROVIDER_EVALUATION_AT = "2026-09-20T00:00:03Z"
+PROVIDER_FROZEN_AT = "2026-09-20T00:05:00Z"
+PROVIDER_REVEAL_AT = "2026-09-20T00:10:00Z"
+
+
+def _provider_request() -> CompleteGameBoardRequest:
+    return CompleteGameBoardRequest(
+        sport_key="football",
+        bookmakers=("bovada",),
+        max_age_s=600,
+    )
+
+
+def _provider_frame() -> dict[str, object]:
+    return {
+        "type": "initial_state",
+        "sport_key": "football",
+        "snapshot_scope": "current_game_board",
+        "snapshot_complete": True,
+        "truncated": False,
+        "resume_mode": "replace",
+        "partial": False,
+        "missing_books": [],
+        "truncated_books": [],
+        "snapshot_partial_reasons": [],
+        "count": 1,
+        "timestamp": 1789862401,
+        "data": [
+            {
+                "event_id": "event-1",
+                "bookmaker": "bovada",
+                "kind": "game",
+                "market_key": "h2h",
+                "home_ml": -110,
+                "away_ml": 105,
+                "last_update": "2026-09-20T00:00:00Z",
+            }
+        ],
+    }
+
+
+def _capture_provider_board():
+    patcher = pytest.MonkeyPatch()
+    patcher.setattr(
+        provider_module,
+        "_read_production_initial_state",
+        lambda request_scope, *, api_key, timeout_seconds: _provider_frame(),
+    )
+    patcher.setattr(provider_module, "_default_clock", lambda: PROVIDER_CAPTURED_AT)
+    try:
+        return capture_parlay_complete_game_board(
+            api_key="test-key",
+            request=_provider_request(),
+            timeout_seconds=1.0,
+        )
+    finally:
+        patcher.undo()
+
+
+def _provider_lifecycle(workspace) -> ContinuousEventLifecycle:
+    workspace.mkdir(parents=True, exist_ok=True)
+    request = _provider_request()
+    lifecycle = ContinuousEventLifecycle(workspace / "event-lifecycle.json")
+    lifecycle.apply_page(
+        CatalogPage(
+            source_id=request.source_id,
+            stream_epoch="epoch-1",
+            cursor="cursor-1",
+            position=0,
+            events=(
+                CatalogEvent(
+                    source_id=request.source_id,
+                    sport=request.sport_key,
+                    event_id="event-1",
+                    phase=EventPhase.PRE_MATCH,
+                    available_at="2026-09-20T00:00:00Z",
+                    scheduled_start_at=PROVIDER_REVEAL_AT,
+                ),
+            ),
+        ),
+        discovered_at=PROVIDER_CAPTURED_AT,
+    )
+    return lifecycle
+
+
+def _providerize_row(template: EvaluationRow, snapshot, member) -> EvaluationRow:
+    return replace(
+        template,
+        row_key=member.row_key,
+        sport=snapshot.request.sport_key,
+        provider_id="parlayapi",
+        source_id=snapshot.request.source_id,
+        event_id=member.event_id,
+        market_id=member.market_id,
+        selection_id=member.selection_id,
+        source_at=member.source_at,
+        received_at=PROVIDER_CAPTURED_AT,
+        committed_at="2026-09-20T00:00:02Z",
+        detection_at=PROVIDER_EVALUATION_AT if template.detection_at is not None else None,
+        decision_at="2026-09-20T00:00:04Z" if template.decision_at is not None else None,
+        execution_run_id=(
+            f"{template.execution_run_id}:{member.selection_id}"
+            if template.execution_run_id is not None
+            else None
+        ),
+        execution_plan_id=(
+            f"{template.execution_plan_id}:{member.selection_id}"
+            if template.execution_plan_id is not None
+            else None
+        ),
+        execution_action_id=(
+            f"{template.execution_action_id}:{member.selection_id}"
+            if template.execution_action_id is not None
+            else None
+        ),
+        decision_quote_id=(
+            f"{template.decision_quote_id}:{member.selection_id}"
+            if template.decision_quote_id is not None
+            else None
+        ),
+        outcome_reveal_not_before=member.outcome_reveal_not_before,
+    )
 
 
 class _Resolver:
@@ -84,43 +227,24 @@ def _row() -> EvaluationRow:
 def _build(tmp_path):
     workspace = tmp_path / "workspace"
     authority_root = tmp_path / "authority"
-    item = _row()
-    witness = ObservationEnumerationWitness(
-        enumeration_id="enumeration-1",
+    snapshot = _capture_provider_board()
+    lifecycle = _provider_lifecycle(workspace)
+    template = _row()
+    members = complete_game_board_member_specs(snapshot, event_lifecycle=lifecycle)
+    rows = tuple(_providerize_row(template, snapshot, member) for member in members)
+    item = rows[0]
+    frozen = build_frozen_universe_from_complete_game_board(
+        snapshot=snapshot,
+        event_lifecycle=lifecycle,
+        authority_id="provider-intake-1",
         session_id="session-1",
-        source_id="source-1",
-        campaign_id="campaign-1",
-        research_protocol_id="protocol-1",
-        protocol_sha256=H1,
-        universe_id="universe-1",
-        cycle_index=1,
-        source_range_id="range-1",
-        stream_epoch="epoch-1",
-        start_cursor="cursor-0",
-        end_cursor="cursor-1",
-        acquisition_sha256=H3,
-        row_keys=(item.row_key,),
-        row_evidence_sha256=((item.row_key, item.row_id),),
-        exhaustive=True,
-        gap_free=True,
-        committed_at="2026-09-20T00:00:02.500000Z",
-        evaluation_not_before="2026-09-20T00:00:03Z",
-        outcome_reveal_not_before=item.outcome_reveal_not_before,
-    )
-    intake = ObservationIntakeLedger(
-        workspace,
-        authority_id="intake-1",
-        enumeration_resolver=_Resolver(witness),
-    )
-    intake.append_cycle(enumeration_id=witness.enumeration_id)
-    frozen = build_frozen_universe(
-        intake_ledger=intake,
         universe_id="universe-1",
         campaign_id="campaign-1",
         research_protocol_id="protocol-1",
         protocol_sha256=H1,
-        frozen_at="2026-09-20T00:05:00Z",
-        rows=(item,),
+        evaluation_not_before=PROVIDER_EVALUATION_AT,
+        frozen_at=PROVIDER_FROZEN_AT,
+        rows=rows,
     )
     first = EvaluationUniverseLedger(frozen)
     second = first.append(
@@ -132,15 +256,18 @@ def _build(tmp_path):
             execution_attempt_id="attempt-1",
         )
     )
-    return workspace, authority_root, intake, first, second
-
+    store_kwargs = {
+        "authority_id": "provider-intake-1",
+        "source_id": snapshot.request.source_id,
+        "authority_root": authority_root,
+    }
+    return workspace, store_kwargs, first, second
 
 def test_aborted_prepare_does_not_brick_exact_retry(tmp_path, monkeypatch):
-    workspace, authority_root, intake, first, second = _build(tmp_path)
-    store = EvaluationUniverseStore(
+    workspace, store_kwargs, first, second = _build(tmp_path)
+    store = ProviderEvaluationUniverseStore(
         workspace,
-        intake_ledger=intake,
-        authority_root=authority_root,
+        **store_kwargs,
     )
     store.save(first)
 
@@ -159,10 +286,9 @@ def test_aborted_prepare_does_not_brick_exact_retry(tmp_path, monkeypatch):
         store.save(second)
 
     monkeypatch.setattr(evaluation_universe_module, "atomic_write_json", real_write)
-    restarted = EvaluationUniverseStore(
+    restarted = ProviderEvaluationUniverseStore(
         workspace,
-        intake_ledger=intake,
-        authority_root=authority_root,
+        **store_kwargs,
     )
     recovered = restarted.load()
     assert recovered is not None
@@ -175,11 +301,10 @@ def test_aborted_prepare_does_not_brick_exact_retry(tmp_path, monkeypatch):
 
 
 def test_published_prepare_is_committed_on_restart(tmp_path, monkeypatch):
-    workspace, authority_root, intake, first, second = _build(tmp_path)
-    store = EvaluationUniverseStore(
+    workspace, store_kwargs, first, second = _build(tmp_path)
+    store = ProviderEvaluationUniverseStore(
         workspace,
-        intake_ledger=intake,
-        authority_root=authority_root,
+        **store_kwargs,
     )
     store.save(first)
 
@@ -187,17 +312,16 @@ def test_published_prepare_is_committed_on_restart(tmp_path, monkeypatch):
         del kwargs
         raise MonotonicAuthorityConflictError("simulated crash before COMMIT")
 
-    monkeypatch.setattr(store.monotonic_authority, "commit", crash_before_commit)
+    monkeypatch.setattr(store._store.monotonic_authority, "commit", crash_before_commit)
     with pytest.raises(
         EvaluationUniverseIntegrityError,
         match="monotonic evaluation-universe publication failed closed",
     ):
         store.save(second)
 
-    restarted = EvaluationUniverseStore(
+    restarted = ProviderEvaluationUniverseStore(
         workspace,
-        intake_ledger=intake,
-        authority_root=authority_root,
+        **store_kwargs,
     )
     recovered = restarted.load()
     assert recovered is not None

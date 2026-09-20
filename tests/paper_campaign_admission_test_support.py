@@ -7,7 +7,11 @@ from pathlib import Path
 from unittest.mock import patch
 
 from autosport.agent_loop import AgentLoopRuntime
-from autosport.decision_ledger import JsonlDecisionLedger
+from autosport.decision_ledger import (
+    ECONOMIC_DECISION_KIND,
+    DecisionRecord,
+    JsonlDecisionLedger,
+)
 from autosport.economic_goal import EconomicGoalContract
 from autosport.economic_goal_provenance import provenance_for
 from autosport.learning_environment import CausalLearningEnvironment, EnvironmentIdentity, Observation
@@ -64,6 +68,8 @@ class AdmissionFixture:
         outcome: PaperAttemptOutcome = PaperAttemptOutcome.ACCEPTED,
         execution_odds: str = "2.00",
         execution_stake: str = "10.00",
+        seed_execution_decision: bool = True,
+        decision_plan_fingerprint: str | None = None,
     ) -> None:
         self.workspace = base / "workspace"
         self.workspace.mkdir()
@@ -114,10 +120,11 @@ class AdmissionFixture:
         book.save(self.workspace / "paper_book.json")
         self.execution_ledger_path = self.workspace / "paper-execution.jsonl"
         execution_ledger = PaperExecutionLedger(self.execution_ledger_path)
+        execution_config = _config()
         execution_runtime = PaperExecutionAdoptionRuntime(
             book=book,
             ledger=execution_ledger,
-            config=_config(),
+            config=execution_config,
             max_quote_age=timedelta(seconds=60),
             paper_book_path=self.workspace / "paper_book.json",
         )
@@ -169,14 +176,22 @@ class AdmissionFixture:
             observed_at=T3,
             evidence_grade=EvidenceGrade.CONFIGURED,
             evidence_source="admission-fixture-evidence",
-            accepted_odds=(execution_odds if outcome in {PaperAttemptOutcome.ACCEPTED, PaperAttemptOutcome.PARTIAL} else None),
-            accepted_stake=(execution_stake if outcome in {PaperAttemptOutcome.ACCEPTED, PaperAttemptOutcome.PARTIAL} else None),
+            accepted_odds=(
+                execution_odds
+                if outcome in {PaperAttemptOutcome.ACCEPTED, PaperAttemptOutcome.PARTIAL}
+                else None
+            ),
+            accepted_stake=(
+                execution_stake
+                if outcome in {PaperAttemptOutcome.ACCEPTED, PaperAttemptOutcome.PARTIAL}
+                else None
+            ),
         )
         registry = PaperExecutionEvidenceRegistry(execution_ledger)
         registry.register(evidence)
         result = execution_runtime.execute(
             prepared=prepared,
-            trigger_id="admission-execution-trigger",
+            trigger_id=self.execution_decision_id,
             started_at=T3,
             materialize_exposure=True,
             observations={action.action_id: evidence.as_observation()},
@@ -189,7 +204,47 @@ class AdmissionFixture:
         )
         self.execution_outcome = outcome
 
-    def coordinator(self, *, resumed: bool = False) -> PaperCampaignAdmissionCoordinator:
+        if seed_execution_decision:
+            plan_fingerprint = (
+                decision_plan_fingerprint
+                if decision_plan_fingerprint is not None
+                else prepared.execution_plan.fingerprint
+            )
+            decision_ledger = JsonlDecisionLedger(self.workspace / "decisions.jsonl")
+            decision_ledger.append_economic(
+                DecisionRecord(
+                    replay_run_id="live:admission-fixture",
+                    agent="persistent-live-decision-loop",
+                    observed_ts=T2,
+                    action="LIVE_OPEN",
+                    payload={
+                        "schema": "autosport.persistent_live_decision",
+                        "schema_version": 2,
+                        "material_action_id": self.execution_decision_id,
+                        "paper_execution": {
+                            "schema": "autosport.paper_execution_adoption",
+                            "schema_version": 1,
+                            "plan_id": prepared.execution_plan.plan_id,
+                            "plan_fingerprint": plan_fingerprint,
+                            "model_fingerprint": execution_config.fingerprint,
+                            "run_id": self.execution_run_id,
+                            "intent_evidence_json": prepared.intent_evidence_json,
+                        },
+                    },
+                    context_hash="a" * 64,
+                    decision_id=self.execution_decision_id,
+                    decision_kind=ECONOMIC_DECISION_KIND,
+                ),
+                self.goal,
+                risk_policy=self.risk,
+            )
+
+    def coordinator(
+        self,
+        *,
+        resumed: bool = False,
+        execution_ledger: PaperExecutionLedger | None = None,
+    ) -> PaperCampaignAdmissionCoordinator:
         environment = (
             CausalLearningEnvironment.resume(
                 self.identity,
@@ -220,7 +275,11 @@ class AdmissionFixture:
                 paper_book_path=self.workspace / "paper_book.json",
                 decision_ledger=decision_ledger,
                 runtime=runtime,
-                execution_ledger=PaperExecutionLedger(self.execution_ledger_path),
+                execution_ledger=(
+                    execution_ledger
+                    if execution_ledger is not None
+                    else PaperExecutionLedger(self.execution_ledger_path)
+                ),
             )
 
     def admit(self, coordinator: PaperCampaignAdmissionCoordinator, **overrides):

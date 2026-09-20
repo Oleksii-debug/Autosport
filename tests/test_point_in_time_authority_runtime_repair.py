@@ -15,7 +15,7 @@ from autosport.point_in_time_evidence import (
     PointInTimeEvidenceError,
     PointInTimeFeatureAuthority,
 )
-from autosport.scientific_registry import ScientificRegistry
+from autosport.scientific_registry import DatasetSnapshot, ScientificRegistry
 
 
 def test_feature_authority_rejects_lineage_subclass_before_authority_dispatch() -> None:
@@ -123,6 +123,103 @@ def test_feature_authority_rejects_exact_registry_instance_method_shadow() -> No
             feature_provenance=object(),
             lineage_authority=lineage,
             decision_cutoff_utc="2099-01-01T00:00:00Z",
+        )
+
+    assert dispatched is False
+
+
+def _make_lineage_authority(
+    root: Path,
+    name: str,
+) -> DatasetSnapshotLineageAuthority:
+    workspace = root / name
+    workspace.mkdir(parents=True, exist_ok=True)
+    registry = ScientificRegistry.initialize_pristine(workspace / "registry.json")
+    return DatasetSnapshotLineageAuthority.initialize_pristine(
+        workspace / "lineage.json",
+        registry,
+        authority_root=root / "lineage-authority",
+    )
+
+
+def test_holdout_lineage_identity_persists_and_rejects_different_reopen(
+    tmp_path: Path,
+) -> None:
+    lineage = _make_lineage_authority(tmp_path, "canonical")
+    holdout_workspace = tmp_path / "holdout-workspace"
+    holdout_workspace.mkdir()
+    holdout_path = holdout_workspace / "holdout.json"
+    holdout_authority_root = tmp_path / "holdout-authority"
+
+    first = evidence.HoldoutConsumptionLedger(
+        holdout_path,
+        authority_root=holdout_authority_root,
+        lineage_authority=lineage,
+    )
+    assert first.records() == ()
+
+    restarted_lineage = DatasetSnapshotLineageAuthority(
+        lineage.path,
+        ScientificRegistry(lineage.registry.path),
+        authority_root=tmp_path / "lineage-authority",
+    )
+    restarted = evidence.HoldoutConsumptionLedger(
+        holdout_path,
+        authority_root=holdout_authority_root,
+        lineage_authority=restarted_lineage,
+    )
+    assert restarted.records() == ()
+
+    alternate = _make_lineage_authority(tmp_path, "alternate")
+    with pytest.raises(
+        EvidenceLedgerCorruptError,
+        match="canonical dataset lineage identity does not match its durable binding",
+    ):
+        evidence.HoldoutConsumptionLedger(
+            holdout_path,
+            authority_root=holdout_authority_root,
+            lineage_authority=alternate,
+        )
+
+
+def test_holdout_rejects_post_construction_lineage_replacement_before_dispatch(
+    tmp_path: Path,
+) -> None:
+    canonical = _make_lineage_authority(tmp_path, "canonical")
+    alternate = _make_lineage_authority(tmp_path, "alternate")
+    holdout_workspace = tmp_path / "holdout-workspace"
+    holdout_workspace.mkdir()
+    ledger = evidence.HoldoutConsumptionLedger(
+        holdout_workspace / "holdout.json",
+        authority_root=tmp_path / "holdout-authority",
+        lineage_authority=canonical,
+    )
+
+    dispatched = False
+
+    def forged_record(snapshot_id: str):
+        nonlocal dispatched
+        dispatched = True
+        raise AssertionError("replacement lineage record() must never execute")
+
+    alternate.record = forged_record
+    ledger._dataset_lineage_authority = alternate
+    snapshot = DatasetSnapshot(
+        dataset_snapshot_id="replacement-falsifier",
+        manifest_sha256="a" * 64,
+        source_identity="provider:replacement-falsifier",
+        license_identity="terms:v1",
+        causal_cutoff="2026-09-20T10:00:00Z",
+        available_at_utc="2026-09-20T10:01:00Z",
+    )
+
+    with pytest.raises(
+        PointInTimeEvidenceError,
+        match="canonical dataset lineage authority was replaced after construction",
+    ):
+        ledger.freshness_id(
+            dataset_snapshot=snapshot,
+            confirmation_trial_family_id="family-v1",
         )
 
     assert dispatched is False

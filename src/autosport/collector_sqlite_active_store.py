@@ -1,10 +1,8 @@
 from __future__ import annotations
 
-import os
 import sqlite3
-from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any
 
 from .causal_collector_legacy import (
     CollectorDelta,
@@ -35,36 +33,6 @@ _DELTA_SELECT_COLUMNS = ", ".join(
 )
 
 
-@contextmanager
-def _exclusive_process_file_lock(path: Path) -> Iterator[None]:
-    """Crash-releasing cross-process lock using only the standard library."""
-
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("a+b") as handle:
-        handle.seek(0, os.SEEK_END)
-        if handle.tell() == 0:
-            handle.write(b"\0")
-            handle.flush()
-        handle.seek(0)
-
-        if os.name == "nt":
-            import msvcrt
-
-            msvcrt.locking(handle.fileno(), msvcrt.LK_LOCK, 1)
-            try:
-                yield
-            finally:
-                handle.seek(0)
-                msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
-        else:
-            import fcntl
-
-            fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
-            try:
-                yield
-            finally:
-                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
-
 
 class CollectorDeltaStore(_SQLiteCollectorDeltaStore):
     """Canonical indexed SQLite store with bounded product-compatible durability."""
@@ -89,26 +57,15 @@ class CollectorDeltaStore(_SQLiteCollectorDeltaStore):
         self._ensure_projection_integrity_guard()
 
     def _migrate_legacy_json(self) -> None:
-        """Serialize the one-time JSON->SQLite authority switch across processes.
+        """Delegate migration to the canonical stale-winner-fenced switch.
 
-        A loser must re-read the canonical path *inside* the lock. If another process
-        already completed migration, this instance adopts that winner instead of
-        replacing it with a stale temp database built from the former JSON snapshot.
-        OS file locks are released automatically if the owning process exits/crashes.
+        The base store deliberately builds a candidate before taking its
+        crash-releasing WorkspaceEconomicLock, then re-reads the canonical path
+        inside that lock immediately before the authority switch. Keeping a second
+        outer process lock here would serialize candidate construction too and
+        prevent the deterministic delayed-loser race that the switch must survive.
         """
-
-        lock_path = self.path.with_name(f".{self.path.name}.sqlite-migration.lock")
-        with _exclusive_process_file_lock(lock_path):
-            if self.path.exists():
-                try:
-                    with self.path.open("rb") as handle:
-                        prefix = handle.read(len(_SQLITE_HEADER))
-                except OSError as exc:
-                    raise ValueError("invalid causal collector store") from exc
-                if prefix == _SQLITE_HEADER:
-                    self._verify_sqlite_schema()
-                    return
-            super()._migrate_legacy_json()
+        super()._migrate_legacy_json()
 
     def _activate_wal(self) -> None:
         """Keep rollback-journal durability so the existing byte budget stays exact.

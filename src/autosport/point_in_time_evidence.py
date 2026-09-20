@@ -10,12 +10,18 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Mapping
 
+from .monotonic_workspace_authority import (
+    MonotonicWorkspaceAuthority,
+    MonotonicWorkspaceAuthorityError,
+)
 from .scientific_registry import DatasetSnapshot, FeatureSet, promotion_holdout_access_id
 from .workspace_lock import WorkspaceEconomicLock
 
 
 _SCHEMA_VERSION = 1
 _FEATURE_REVISION_POLICY_ID = "scientific-registry-feature-set-v1"
+_HOLDOUT_AUTHORITY_DOMAIN = "data.point-in-time-holdout-consumption-v1"
+_HOLDOUT_TRANSITION_SCHEMA = "autosport.holdout-consumption-transition-v1"
 _HEX = frozenset("0123456789abcdef")
 
 
@@ -32,7 +38,7 @@ class HoldoutAlreadyConsumedError(PointInTimeEvidenceError):
 
 
 class EvidenceLedgerCorruptError(PointInTimeEvidenceError):
-    """Durable holdout evidence failed structural or digest validation."""
+    """Durable holdout evidence failed structural, digest, or freshness validation."""
 
 
 class _HoldoutLedgerLock(WorkspaceEconomicLock):
@@ -53,6 +59,12 @@ def _sha256(value: object, name: str) -> str:
     if len(text) != 64 or any(char not in _HEX for char in text):
         raise PointInTimeEvidenceError(f"{name} must be a canonical SHA-256 hex string")
     return text
+
+
+def _optional_sha256(value: object, name: str) -> str | None:
+    if value is None:
+        return None
+    return _sha256(value, name)
 
 
 def _instant(value: object, name: str) -> datetime:
@@ -101,6 +113,27 @@ def _holdout_freshness_id(
             "confirmation_trial_family_id": _text(
                 confirmation_trial_family_id, "confirmation_trial_family_id"
             ),
+        }
+    )
+
+
+def _transition_tx_id(consumption_id: str) -> str:
+    return f"holdout-consumption:{_sha256(consumption_id, 'consumption_id')}"
+
+
+def _transition_binding(
+    *,
+    previous_state_sha256: str | None,
+    consumption_id: str,
+) -> str:
+    return _digest(
+        {
+            "schema": _HOLDOUT_TRANSITION_SCHEMA,
+            "schema_version": _SCHEMA_VERSION,
+            "previous_state_sha256": _optional_sha256(
+                previous_state_sha256, "previous_state_sha256"
+            ),
+            "consumption_id": _sha256(consumption_id, "consumption_id"),
         }
     )
 
@@ -342,15 +375,34 @@ class HoldoutConsumptionLedger:
     Freshness deliberately excludes both ``dataset_snapshot_id`` and
     ``research_protocol_id``. Renaming/reloading the same immutable bytes or wrapping
     them in a new protocol therefore cannot manufacture a fresh confirmation set.
-    Mutations reload under a dedicated cross-process lock before deciding whether the
-    holdout is unused, preventing stale ledger instances from losing a concurrent use.
+
+    Every workspace-local ledger version is fenced by the shared, workspace-external
+    ``MonotonicWorkspaceAuthority``. A valid older JSON file or a deleted ledger is
+    therefore rejected while the independent machine-state authority survives. The
+    writer order is workspace lock -> PREPARE -> local atomic publish -> re-read ->
+    COMMIT, so both supported crash prefixes recover deterministically.
     """
 
-    def __init__(self, path: str | Path) -> None:
+    def __init__(
+        self,
+        path: str | Path,
+        *,
+        authority_root: str | Path | None = None,
+    ) -> None:
         self._path = Path(path)
+        self._workspace = self._path.parent.resolve(strict=False)
         self._lock = threading.RLock()
         self._records: dict[str, HoldoutConsumption] = {}
-        self._load()
+        self._state_sha256: str | None = None
+        self._authority = MonotonicWorkspaceAuthority(
+            workspace=self._workspace,
+            domain=_HOLDOUT_AUTHORITY_DOMAIN,
+            key=f"holdout-ledger:{self._path.name}",
+            authority_root=authority_root,
+        )
+        with self._lock:
+            with _HoldoutLedgerLock(self._path.parent):
+                self._load()
 
     @property
     def path(self) -> Path:
@@ -362,9 +414,29 @@ class HoldoutConsumptionLedger:
                 self._load()
                 return tuple(self._records[key] for key in sorted(self._records))
 
+    def _recover_authority(
+        self,
+        *,
+        observed_state_sha256: str | None,
+        tx_id: str | None = None,
+        semantic_binding_sha256: str | None = None,
+    ) -> None:
+        try:
+            self._authority.recover(
+                observed_state_sha256=observed_state_sha256,
+                tx_id=tx_id,
+                semantic_binding_sha256=semantic_binding_sha256,
+            )
+        except MonotonicWorkspaceAuthorityError as exc:
+            raise EvidenceLedgerCorruptError(
+                "holdout ledger failed independent monotonic authority validation"
+            ) from exc
+
     def _load(self) -> None:
         if not self._path.exists():
+            self._recover_authority(observed_state_sha256=None)
             self._records = {}
+            self._state_sha256 = None
             return
         try:
             raw = self._path.read_text(encoding="utf-8")
@@ -374,28 +446,83 @@ class HoldoutConsumptionLedger:
         if type(payload) is not dict or payload.get("schema_version") != _SCHEMA_VERSION:
             raise EvidenceLedgerCorruptError("holdout ledger schema is unsupported")
         records_payload = payload.get("records")
-        if type(records_payload) is not list:
-            raise EvidenceLedgerCorruptError("holdout ledger records must be a list")
+        if type(records_payload) is not list or not records_payload:
+            raise EvidenceLedgerCorruptError("holdout ledger records must be a non-empty list")
         declared_digest = payload.get("records_sha256")
         if type(declared_digest) is not str or declared_digest != _digest({"records": records_payload}):
             raise EvidenceLedgerCorruptError("holdout ledger digest mismatch")
 
+        try:
+            previous_state_sha256 = _optional_sha256(
+                payload.get("authority_previous_state_sha256"),
+                "authority_previous_state_sha256",
+            )
+            authority_consumption_id = _sha256(
+                payload.get("authority_consumption_id"), "authority_consumption_id"
+            )
+            authority_tx_id = _text(payload.get("authority_tx_id"), "authority_tx_id")
+            authority_binding = _sha256(
+                payload.get("authority_semantic_binding_sha256"),
+                "authority_semantic_binding_sha256",
+            )
+        except PointInTimeEvidenceError as exc:
+            raise EvidenceLedgerCorruptError("invalid monotonic authority metadata") from exc
+
+        if authority_tx_id != _transition_tx_id(authority_consumption_id):
+            raise EvidenceLedgerCorruptError("holdout ledger authority transaction identity mismatch")
+        expected_binding = _transition_binding(
+            previous_state_sha256=previous_state_sha256,
+            consumption_id=authority_consumption_id,
+        )
+        if authority_binding != expected_binding:
+            raise EvidenceLedgerCorruptError("holdout ledger authority semantic binding mismatch")
+
         restored: dict[str, HoldoutConsumption] = {}
+        authority_record_found = False
         for item in records_payload:
             record = HoldoutConsumption.from_payload(item)
             if record.holdout_freshness_id in restored:
                 raise EvidenceLedgerCorruptError("duplicate canonical holdout freshness identity")
             restored[record.holdout_freshness_id] = record
-        self._records = restored
+            if record.consumption_id == authority_consumption_id:
+                authority_record_found = True
+        if not authority_record_found:
+            raise EvidenceLedgerCorruptError(
+                "holdout ledger authority transition does not name a persisted consumption"
+            )
 
-    def _persist(self) -> None:
+        state_sha256 = _digest(payload)
+        self._recover_authority(
+            observed_state_sha256=state_sha256,
+            tx_id=authority_tx_id,
+            semantic_binding_sha256=authority_binding,
+        )
+        self._records = restored
+        self._state_sha256 = state_sha256
+
+    def _payload_for_transition(
+        self,
+        *,
+        added_record: HoldoutConsumption,
+        previous_state_sha256: str | None,
+    ) -> tuple[dict[str, Any], str, str]:
+        consumption_id = added_record.consumption_id
+        tx_id = _transition_tx_id(consumption_id)
+        semantic_binding = _transition_binding(
+            previous_state_sha256=previous_state_sha256,
+            consumption_id=consumption_id,
+        )
         records_payload = [self._records[key].to_payload() for key in sorted(self._records)]
         payload = {
             "schema_version": _SCHEMA_VERSION,
             "records": records_payload,
             "records_sha256": _digest({"records": records_payload}),
+            "authority_previous_state_sha256": previous_state_sha256,
+            "authority_consumption_id": consumption_id,
+            "authority_tx_id": tx_id,
+            "authority_semantic_binding_sha256": semantic_binding,
         }
-        _atomic_write_json(self._path, payload)
+        return payload, tx_id, semantic_binding
 
     @staticmethod
     def access_id(
@@ -514,10 +641,36 @@ class HoldoutConsumptionLedger:
                         f"holdout {existing.holdout_access_id} was already consumed by "
                         f"{existing.consumer_identity}"
                     )
+
+                previous_state_sha256 = self._state_sha256
                 self._records[freshness_id] = record
+                payload, tx_id, semantic_binding = self._payload_for_transition(
+                    added_record=record,
+                    previous_state_sha256=previous_state_sha256,
+                )
+                intended_state_sha256 = _digest(payload)
                 try:
-                    self._persist()
+                    self._authority.prepare(
+                        tx_id=tx_id,
+                        observed_state_sha256=previous_state_sha256,
+                        intended_state_sha256=intended_state_sha256,
+                        semantic_binding_sha256=semantic_binding,
+                    )
+                    _atomic_write_json(self._path, payload)
+                    self._load()
+                except MonotonicWorkspaceAuthorityError as exc:
+                    self._records.pop(freshness_id, None)
+                    self._state_sha256 = previous_state_sha256
+                    raise EvidenceLedgerCorruptError(
+                        "holdout ledger monotonic transition was rejected"
+                    ) from exc
                 except BaseException:
-                    del self._records[freshness_id]
+                    self._records.pop(freshness_id, None)
+                    self._state_sha256 = previous_state_sha256
                     raise
-                return record
+                persisted = self._records.get(freshness_id)
+                if persisted != record:
+                    raise EvidenceLedgerCorruptError(
+                        "holdout ledger publish did not re-resolve the intended consumption"
+                    )
+                return persisted

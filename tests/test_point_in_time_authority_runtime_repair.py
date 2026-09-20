@@ -445,6 +445,81 @@ assert finder_count() == 1
     assert completed.returncode == 0, completed.stdout + completed.stderr
 
 
+def test_preimport_marker_spoof_cannot_suppress_canonical_reload_finder() -> None:
+    script = r'''
+import importlib
+import importlib.abc
+import inspect
+import sys
+
+MARKER = "_autosport_point_in_time_reload_finder_v1"
+
+class SpoofFinder(importlib.abc.MetaPathFinder):
+    _autosport_point_in_time_reload_finder_v1 = True
+
+    def find_spec(self, fullname, path=None, target=None):
+        return None
+
+spoof = SpoofFinder()
+sys.meta_path.insert(0, spoof)
+
+import autosport._point_in_time_authority_runtime_repair as repair
+import autosport._point_in_time_feature_provenance_guard as provenance_guard
+import autosport.point_in_time_evidence as evidence
+from autosport.dataset_snapshot_lineage import DatasetSnapshotLineageAuthority
+
+canonical = repair._CANONICAL_RELOAD_FINDER
+assert canonical is not spoof
+assert any(finder is canonical for finder in sys.meta_path)
+assert sum(finder is canonical for finder in sys.meta_path) == 1
+# The forged marker remains visible, proving marker count/attribute is not used as
+# possession authority by the installer.
+assert sum(bool(getattr(finder, MARKER, False)) for finder in sys.meta_path) >= 2
+
+
+def assert_guarded():
+    parameters = inspect.signature(evidence.PointInTimeFeatureAuthority.bind).parameters
+    assert "lineage_authority" in parameters
+
+    class ForgedLineageAuthority(DatasetSnapshotLineageAuthority):
+        pass
+
+    forged = object.__new__(ForgedLineageAuthority)
+    try:
+        evidence.PointInTimeFeatureAuthority.bind(
+            dataset_snapshot=object(),
+            feature_set=object(),
+            feature_provenance=object(),
+            lineage_authority=forged,
+            decision_cutoff_utc="2099-01-01T00:00:00Z",
+        )
+    except evidence.PointInTimeEvidenceError as exc:
+        assert "lineage_authority must be an exact DatasetSnapshotLineageAuthority" in str(exc)
+    else:
+        raise AssertionError("marker spoof weakened the exact lineage capability fence")
+
+
+assert_guarded()
+evidence = importlib.reload(evidence)
+assert_guarded()
+provenance_guard = importlib.reload(provenance_guard)
+assert_guarded()
+repair = importlib.reload(repair)
+assert repair._CANONICAL_RELOAD_FINDER is canonical
+assert sum(finder is canonical for finder in sys.meta_path) == 1
+evidence = importlib.reload(evidence)
+assert_guarded()
+'''
+    completed = subprocess.run(
+        [sys.executable, "-c", script],
+        cwd=Path(__file__).resolve().parents[1],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+
+
 @pytest.mark.skipif(os.name == "nt", reason="Windows intentionally has no directory fsync contract")
 def test_holdout_atomic_publication_fails_when_directory_open_for_sync_is_unavailable(
     tmp_path: Path,

@@ -414,6 +414,144 @@ class PairedVOCEvaluation:
         return value
 
 
+@dataclass(frozen=True, slots=True)
+class OutcomeDerivedVOCScore:
+    """Outcome-derived VOC arithmetic resolved independently of routed evidence.
+
+    This artifact is deliberately separate from ScientificRegistry records. Its
+    authority implementation must compute or resolve the values from immutable
+    causal outcome observations; a PairedVOCEvaluation cannot mint its own score.
+    """
+
+    evaluation_id: str
+    available_at: str
+    outcome_evidence_sha256: str
+    scoring_rule_sha256: str
+    research_protocol_sha256: str
+    holdout_access_id: str
+    multiple_comparison_control_sha256: str
+    baseline_utility: Decimal
+    challenger_utility: Decimal
+    compute_cost_penalty: Decimal
+    latency_opportunity_cost_penalty: Decimal
+    measured_compute_cost: Decimal
+    paired_sample_count: int
+    effective_sample_size: int
+    support_fraction: Decimal
+    incremental_value_interval_low: Decimal
+    incremental_value_interval_high: Decimal
+    source_artifact_sha256: str
+
+    def __post_init__(self) -> None:
+        _text("evaluation_id", self.evaluation_id)
+        _time("available_at", self.available_at)
+        for name in (
+            "outcome_evidence_sha256",
+            "scoring_rule_sha256",
+            "research_protocol_sha256",
+            "multiple_comparison_control_sha256",
+            "source_artifact_sha256",
+        ):
+            _sha256(name, getattr(self, name))
+        _text("holdout_access_id", self.holdout_access_id)
+        _decimal("baseline_utility", self.baseline_utility)
+        _decimal("challenger_utility", self.challenger_utility)
+        _nonnegative("compute_cost_penalty", self.compute_cost_penalty)
+        _nonnegative(
+            "latency_opportunity_cost_penalty",
+            self.latency_opportunity_cost_penalty,
+        )
+        _nonnegative("measured_compute_cost", self.measured_compute_cost)
+        if (
+            isinstance(self.paired_sample_count, bool)
+            or not isinstance(self.paired_sample_count, int)
+            or self.paired_sample_count < 1
+        ):
+            raise VOCEvaluationError("paired_sample_count must be positive")
+        if (
+            isinstance(self.effective_sample_size, bool)
+            or not isinstance(self.effective_sample_size, int)
+            or self.effective_sample_size < 1
+            or self.effective_sample_size > self.paired_sample_count
+        ):
+            raise VOCEvaluationError(
+                "effective_sample_size must be positive and no larger than paired_sample_count"
+            )
+        _fraction("support_fraction", self.support_fraction)
+        low = _decimal(
+            "incremental_value_interval_low",
+            self.incremental_value_interval_low,
+        )
+        high = _decimal(
+            "incremental_value_interval_high",
+            self.incremental_value_interval_high,
+        )
+        if low > high:
+            raise VOCEvaluationError(
+                "incremental value interval low must not exceed high"
+            )
+
+    @property
+    def net_value(self) -> Decimal:
+        return (
+            self.challenger_utility
+            - self.baseline_utility
+            - self.compute_cost_penalty
+            - self.latency_opportunity_cost_penalty
+        )
+
+    def payload(self) -> dict[str, Any]:
+        return {
+            "schema": "autosport.outcome_derived_voc_score",
+            "schema_version": 1,
+            "evaluation_id": self.evaluation_id,
+            "available_at": _time("available_at", self.available_at),
+            "outcome_evidence_sha256": self.outcome_evidence_sha256,
+            "scoring_rule_sha256": self.scoring_rule_sha256,
+            "research_protocol_sha256": self.research_protocol_sha256,
+            "holdout_access_id": self.holdout_access_id,
+            "multiple_comparison_control_sha256": self.multiple_comparison_control_sha256,
+            "baseline_utility": str(self.baseline_utility),
+            "challenger_utility": str(self.challenger_utility),
+            "compute_cost_penalty": str(self.compute_cost_penalty),
+            "latency_opportunity_cost_penalty": str(
+                self.latency_opportunity_cost_penalty
+            ),
+            "measured_compute_cost": str(self.measured_compute_cost),
+            "paired_sample_count": self.paired_sample_count,
+            "effective_sample_size": self.effective_sample_size,
+            "support_fraction": str(self.support_fraction),
+            "incremental_value_interval_low": str(
+                self.incremental_value_interval_low
+            ),
+            "incremental_value_interval_high": str(
+                self.incremental_value_interval_high
+            ),
+            "net_value": str(self.net_value),
+            "source_artifact_sha256": self.source_artifact_sha256,
+        }
+
+    @property
+    def score_sha256(self) -> str:
+        return _canonical_digest(self.payload())
+
+
+@runtime_checkable
+class OutcomeDerivedVOCScoreAuthority(Protocol):
+    """Resolve a score from canonical outcome observations, never routed values.
+
+    Implementations receive only evaluation identity plus a causal cutoff. They MUST
+    NOT accept a PairedVOCEvaluation as an input or derive the score from one.
+    """
+
+    def resolve(
+        self,
+        evaluation_id: str,
+        *,
+        as_of: str,
+    ) -> OutcomeDerivedVOCScore | None: ...
+
+
 @runtime_checkable
 class VOCCanonicalAuthorityResolver(Protocol):
     """Resolve a VOC record from canonical decision/outcome/protocol authorities.
@@ -439,6 +577,7 @@ class CanonicalVOCAuthorityResolver:
         decision_ledger: JsonlDecisionLedger,
         scientific_registry: ScientificRegistry,
         outcome_authority: MarketSettlementOutcomeAuthority,
+        outcome_score_authority: OutcomeDerivedVOCScoreAuthority,
     ) -> None:
         if not isinstance(decision_ledger, JsonlDecisionLedger):
             raise TypeError("decision_ledger must be JsonlDecisionLedger")
@@ -446,9 +585,14 @@ class CanonicalVOCAuthorityResolver:
             raise TypeError("scientific_registry must be ScientificRegistry")
         if not isinstance(outcome_authority, MarketSettlementOutcomeAuthority):
             raise TypeError("outcome_authority must be MarketSettlementOutcomeAuthority")
+        if not isinstance(outcome_score_authority, OutcomeDerivedVOCScoreAuthority):
+            raise TypeError(
+                "outcome_score_authority must implement OutcomeDerivedVOCScoreAuthority"
+            )
         self.decision_ledger = decision_ledger
         self.scientific_registry = scientific_registry
         self.outcome_authority = outcome_authority
+        self.outcome_score_authority = outcome_score_authority
 
     @staticmethod
     def _decision_digest(record: object) -> str:
@@ -648,57 +792,95 @@ class CanonicalVOCAuthorityResolver:
                     "canonical outcome authority identity does not match research scope"
                 )
 
-    @staticmethod
-    def _scientific_score_artifact_sha256(
+    def _require_outcome_score(
+        self,
         evaluation: PairedVOCEvaluation,
-    ) -> str:
-        """Bind all routed VOC arithmetic to one immutable evaluation artifact."""
+    ) -> OutcomeDerivedVOCScore:
+        """Resolve arithmetic from an authority that cannot echo routed values."""
 
-        return _canonical_digest(
-            {
-                "schema": "autosport.voc_scientific_score_artifact",
-                "schema_version": 1,
-                "evaluation_id": evaluation.evaluation_id,
-                "outcome_evidence_sha256": evaluation.outcome_evidence_sha256,
-                "scoring_rule_id": evaluation.scoring_rule_id,
-                "scoring_rule_sha256": evaluation.scoring_rule_sha256,
-                "research_protocol_id": evaluation.research_protocol_id,
-                "research_protocol_sha256": evaluation.research_protocol_sha256,
-                "holdout_access_id": evaluation.holdout_access_id,
-                "multiple_comparison_control_sha256": (
-                    evaluation.multiple_comparison_control_sha256
-                ),
-                "baseline_output_sha256": evaluation.baseline_output_sha256,
-                "challenger_output_sha256": evaluation.challenger_output_sha256,
-                "baseline_action": evaluation.baseline_action,
-                "challenger_action": evaluation.challenger_action,
-                "baseline_abstained": evaluation.baseline_abstained,
-                "challenger_abstained": evaluation.challenger_abstained,
-                "baseline_utility": str(evaluation.baseline_utility),
-                "challenger_utility": str(evaluation.challenger_utility),
-                "compute_cost_penalty": str(evaluation.compute_cost_penalty),
-                "latency_opportunity_cost_penalty": str(
-                    evaluation.latency_opportunity_cost_penalty
-                ),
-                "measured_compute_cost": str(evaluation.measured_compute_cost),
-                "paired_sample_count": evaluation.paired_sample_count,
-                "effective_sample_size": evaluation.effective_sample_size,
-                "support_fraction": str(evaluation.support_fraction),
-                "incremental_value_interval_low": str(
-                    evaluation.incremental_value_interval_low
-                ),
-                "incremental_value_interval_high": str(
-                    evaluation.incremental_value_interval_high
-                ),
-                "net_value": str(evaluation.net_value),
-            }
+        score = self.outcome_score_authority.resolve(
+            evaluation.evaluation_id,
+            as_of=evaluation.evaluated_at,
         )
+        if score is None:
+            raise VOCEvaluationError(
+                "canonical outcome-derived VOC score is missing"
+            )
+        if not isinstance(score, OutcomeDerivedVOCScore):
+            raise VOCEvaluationError(
+                "canonical outcome-derived VOC score is invalid"
+            )
+        available_at = _instant("score.available_at", score.available_at)
+        if available_at < _instant(
+            "outcome_revealed_at",
+            evaluation.outcome_revealed_at,
+        ):
+            raise VOCEvaluationError(
+                "canonical outcome-derived VOC score predates outcome reveal"
+            )
+        if available_at > _instant("evaluated_at", evaluation.evaluated_at):
+            raise VOCEvaluationError(
+                "canonical outcome-derived VOC score is not causally available"
+            )
+        expected_identity = (
+            evaluation.evaluation_id,
+            evaluation.outcome_evidence_sha256,
+            evaluation.scoring_rule_sha256,
+            evaluation.research_protocol_sha256,
+            evaluation.holdout_access_id,
+            evaluation.multiple_comparison_control_sha256,
+        )
+        actual_identity = (
+            score.evaluation_id,
+            score.outcome_evidence_sha256,
+            score.scoring_rule_sha256,
+            score.research_protocol_sha256,
+            score.holdout_access_id,
+            score.multiple_comparison_control_sha256,
+        )
+        if actual_identity != expected_identity:
+            raise VOCEvaluationError(
+                "canonical outcome-derived VOC score identity mismatch"
+            )
+        expected_values = (
+            evaluation.baseline_utility,
+            evaluation.challenger_utility,
+            evaluation.compute_cost_penalty,
+            evaluation.latency_opportunity_cost_penalty,
+            evaluation.measured_compute_cost,
+            evaluation.paired_sample_count,
+            evaluation.effective_sample_size,
+            evaluation.support_fraction,
+            evaluation.incremental_value_interval_low,
+            evaluation.incremental_value_interval_high,
+            evaluation.net_value,
+        )
+        actual_values = (
+            score.baseline_utility,
+            score.challenger_utility,
+            score.compute_cost_penalty,
+            score.latency_opportunity_cost_penalty,
+            score.measured_compute_cost,
+            score.paired_sample_count,
+            score.effective_sample_size,
+            score.support_fraction,
+            score.incremental_value_interval_low,
+            score.incremental_value_interval_high,
+            score.net_value,
+        )
+        if actual_values != expected_values:
+            raise VOCEvaluationError(
+                "canonical outcome-derived VOC score does not match routed evaluation"
+            )
+        return score
 
     def _require_scientific_statistics(
         self,
         evaluation: PairedVOCEvaluation,
     ) -> None:
-        """Fail closed unless #367 memory independently binds routed VOC statistics."""
+        """Fail closed unless outcome authority and #367 memory bind VOC statistics."""
+
+        score = self._require_outcome_score(evaluation)
 
         protocol_entry = self.scientific_registry.get(
             "ResearchProtocol",
@@ -900,13 +1082,12 @@ class CanonicalVOCAuthorityResolver:
             )
 
         artifact_hashes = bundle.get("artifact_hashes")
-        score_artifact = self._scientific_score_artifact_sha256(evaluation)
         if (
             type(artifact_hashes) is not list
-            or score_artifact not in artifact_hashes
+            or score.score_sha256 not in artifact_hashes
         ):
             raise VOCEvaluationError(
-                "canonical VOC score decomposition artifact is missing"
+                "canonical outcome-derived VOC score artifact is missing"
             )
 
     def _require_registry_result(

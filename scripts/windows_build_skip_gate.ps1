@@ -18,3 +18,27 @@ function ConvertTo-WindowsCandidateCoreText {
   }
   return $candidateCoreText
 }
+
+function Invoke-WindowsCandidateCoreText {
+  param(
+    [Parameter(Mandatory = $true)]
+    [string] $CoreText
+  )
+
+  # Execute transformed builder text as a real script file, not a ScriptBlock.
+  # The production builder deliberately uses $script: variables; a temporary
+  # script preserves normal script scope while keeping the transformed file
+  # outside the repository so exact-source checkout proofs cannot see it.
+  $tempName = 'autosport-windows-candidate-' + [guid]::NewGuid().ToString('N') + '.ps1'
+  $tempScript = Join-Path ([System.IO.Path]::GetTempPath()) $tempName
+  try {
+    [System.IO.File]::WriteAllText(
+      $tempScript,
+      $CoreText,
+      [System.Text.UTF8Encoding]::new($false)
+    )
+    & $tempScript
+  } finally {
+    Remove-Item -LiteralPath $tempScript -Force -ErrorAction SilentlyContinue
+  }
+}

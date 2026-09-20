@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import copy
 import hashlib
+import tempfile
 from decimal import Decimal
+from pathlib import Path
 
 import pytest
 
@@ -15,7 +17,12 @@ from autosport.deployment_semantic_scope import (
 from autosport.domain import MarketEvent, MarketType
 from autosport.learning_environment import EnvironmentIdentity, Episode
 from autosport.paper_settlement_learning import REWARD_RULE
-from autosport.scientific_registry import DatasetSnapshot, FeatureSet, ResearchProtocol
+from autosport.scientific_registry import (
+    DatasetSnapshot,
+    FeatureSet,
+    ResearchProtocol,
+    ScientificRegistry,
+)
 from autosport.strategy_experiment import ScientificProtocolBinding
 
 
@@ -23,7 +30,12 @@ def _sha(label: str) -> str:
     return hashlib.sha256(label.encode("utf-8")).hexdigest()
 
 
-def _protocol(*, dataset_manifest_sha256: str = _sha("dataset-manifest")) -> ResearchProtocol:
+def _protocol(
+    *,
+    dataset_manifest_sha256: str = _sha("dataset-manifest"),
+    available_at: str = "2026-08-01T00:00:00Z",
+    feature_set_version: str = "features-v1",
+) -> ResearchProtocol:
     binding = ScientificProtocolBinding(
         research_protocol_id="protocol-v1",
         research_question_id="question-v1",
@@ -35,7 +47,7 @@ def _protocol(*, dataset_manifest_sha256: str = _sha("dataset-manifest")) -> Res
         lawful_source_requirements="lawful immutable source evidence",
         causal_cutoff="2026-09-01T00:00:00Z",
         evaluation_design="walk-forward holdout",
-        feature_set_version="features-v1",
+        feature_set_version=feature_set_version,
         uncertainty_method="bootstrap-v1",
         multiple_comparison_control="holm-v1",
         robustness_checks=("regime-split",),
@@ -51,17 +63,17 @@ def _protocol(*, dataset_manifest_sha256: str = _sha("dataset-manifest")) -> Res
         source_sha256=_sha("protocol-source"),
         environment_sha256=_sha("protocol-environment"),
         dataset_manifest_sha256=dataset_manifest_sha256,
-        available_at_utc="2026-08-01T00:00:00Z",
+        available_at_utc=available_at,
     )
 
 
-def _feature_set() -> FeatureSet:
+def _feature_set(*, available_at: str = "2026-08-01T00:00:00Z") -> FeatureSet:
     return FeatureSet(
         feature_set_id="features-main",
         version="features-v1",
         definition_sha256=_sha("feature-definition"),
         source_sha256=_sha("feature-source"),
-        available_at_utc="2026-08-01T00:00:00Z",
+        available_at_utc=available_at,
     )
 
 
@@ -70,20 +82,27 @@ def _dataset(
     snapshot_id: str = "dataset-001",
     manifest_sha256: str = _sha("dataset-manifest"),
     cutoff: str = "2026-09-01T00:00:00Z",
+    available_at: str | None = None,
+    source_identity: str = "canonical-market-store",
 ) -> DatasetSnapshot:
     return DatasetSnapshot(
         dataset_snapshot_id=snapshot_id,
         manifest_sha256=manifest_sha256,
-        source_identity="canonical-market-store",
+        source_identity=source_identity,
         license_identity="lawful-paper-source-v1",
         causal_cutoff=cutoff,
-        available_at_utc=cutoff,
+        available_at_utc=available_at or cutoff,
     )
 
 
-def _environment(*, snapshot_id: str = "dataset-001", cutoff: str = "2026-09-01T00:00:00Z") -> EnvironmentIdentity:
+def _environment(
+    *,
+    snapshot_id: str = "dataset-001",
+    cutoff: str = "2026-09-01T00:00:00Z",
+    source_id: str = "canonical-market-store",
+) -> EnvironmentIdentity:
     return EnvironmentIdentity(
-        source_id="canonical-market-store",
+        source_id=source_id,
         config_id="paper-agent-config-v1",
         data_id=snapshot_id,
         protocol_id="protocol-v1",
@@ -135,24 +154,36 @@ def _resolve(
     *,
     event: MarketEvent | None = None,
     dataset: DatasetSnapshot | None = None,
+    feature: FeatureSet | None = None,
     protocol: ResearchProtocol | None = None,
     environment: EnvironmentIdentity | None = None,
     actions: ActionSemanticsDefinition | None = None,
+    decision_ts: str = "2026-09-02T00:00:00Z",
 ):
     dataset = dataset or _dataset()
+    feature = feature or _feature_set()
+    protocol = protocol or _protocol()
     environment = environment or _environment(
         snapshot_id=dataset.dataset_snapshot_id,
         cutoff=dataset.causal_cutoff,
+        source_id=dataset.source_identity,
     )
-    return resolve_deployment_semantic_scope(
-        event=event or _event(),
-        dataset_snapshot=dataset,
-        feature_set=_feature_set(),
-        research_protocol=protocol or _protocol(dataset_manifest_sha256=dataset.manifest_sha256),
-        environment=environment,
-        episode=_episode(environment),
-        action_semantics=actions or _action_semantics(),
-    )
+    with tempfile.TemporaryDirectory() as directory:
+        registry = ScientificRegistry.initialize_pristine(Path(directory) / "scientific-registry.json")
+        registry.append(dataset)
+        registry.append(feature)
+        registry.append(protocol)
+        return resolve_deployment_semantic_scope(
+            event=event or _event(),
+            scientific_registry=registry,
+            dataset_snapshot_id=dataset.dataset_snapshot_id,
+            feature_set_id=feature.feature_set_id,
+            research_protocol_id=protocol.record_id,
+            environment=environment,
+            episode=_episode(environment),
+            action_semantics=actions or _action_semantics(),
+            decision_ts=decision_ts,
+        )
 
 
 def test_market_event_semantic_authority_round_trips_without_changing_quote_identity() -> None:
@@ -210,6 +241,7 @@ def test_later_append_only_snapshot_keeps_scope_but_changes_exact_authority() ->
         dataset=later_dataset,
         protocol=_protocol(dataset_manifest_sha256=later_dataset.manifest_sha256),
         environment=later_environment,
+        decision_ts="2026-09-09T00:00:00Z",
     )
 
     assert later.scope.scope_id == first.scope.scope_id
@@ -226,7 +258,9 @@ def test_later_append_only_snapshot_keeps_scope_but_changes_exact_authority() ->
         ({"provider_source_class": "sportsbook-v1"}, "provider_source_class"),
     ],
 )
-def test_runtime_semantic_relabel_changes_compatibility_scope(overrides: dict[str, object], field: str) -> None:
+def test_runtime_semantic_relabel_changes_compatibility_scope(
+    overrides: dict[str, object], field: str
+) -> None:
     baseline = _resolve()
     changed = _resolve(event=_event(**overrides))
 
@@ -261,17 +295,24 @@ def test_action_semantics_must_cover_exact_admissible_action_universe() -> None:
 def test_reward_rule_cannot_be_silently_redefined() -> None:
     dataset = _dataset()
     environment = _environment()
-    with pytest.raises(DeploymentSemanticScopeError, match="canonical settlement reward rule"):
-        resolve_deployment_semantic_scope(
-            event=_event(),
-            dataset_snapshot=dataset,
-            feature_set=_feature_set(),
-            research_protocol=_protocol(dataset_manifest_sha256=dataset.manifest_sha256),
-            environment=environment,
-            episode=_episode(environment),
-            action_semantics=_action_semantics(),
-            reward_definition_id="caller-invented-reward-v2",
-        )
+    with tempfile.TemporaryDirectory() as directory:
+        registry = ScientificRegistry.initialize_pristine(Path(directory) / "scientific-registry.json")
+        registry.append(dataset)
+        registry.append(_feature_set())
+        registry.append(_protocol())
+        with pytest.raises(DeploymentSemanticScopeError, match="canonical settlement reward rule"):
+            resolve_deployment_semantic_scope(
+                event=_event(),
+                scientific_registry=registry,
+                dataset_snapshot_id=dataset.dataset_snapshot_id,
+                feature_set_id="features-main",
+                research_protocol_id="protocol-v1",
+                environment=environment,
+                episode=_episode(environment),
+                action_semantics=_action_semantics(),
+                decision_ts="2026-09-02T00:00:00Z",
+                reward_definition_id="caller-invented-reward-v2",
+            )
     assert REWARD_RULE == "paper-net-payout-minus-stake-v1"
 
 
@@ -298,3 +339,89 @@ def test_semantic_identity_fields_reject_noncanonical_or_reserved_values() -> No
         _event(provider_source_class="unknown")
     with pytest.raises(ValueError, match="must use lowercase ASCII"):
         _event(market_semantics_id="winner full time")
+
+
+def test_scientific_records_are_reloaded_from_durable_registry_by_identity() -> None:
+    canonical_dataset = _dataset(source_identity="canonical-market-store")
+    environment = _environment(source_id="canonical-market-store")
+    fabricated = _dataset(source_identity="caller-fabricated-source")
+    assert fabricated.dataset_snapshot_id == canonical_dataset.dataset_snapshot_id
+
+    authority = _resolve(dataset=canonical_dataset, environment=environment)
+
+    assert authority.scope.dataset_source_identity == "canonical-market-store"
+    assert authority.scope.dataset_source_identity != fabricated.source_identity
+
+
+def test_missing_canonical_scientific_identity_fails_closed() -> None:
+    dataset = _dataset()
+    environment = _environment()
+    with tempfile.TemporaryDirectory() as directory:
+        registry = ScientificRegistry.initialize_pristine(Path(directory) / "scientific-registry.json")
+        registry.append(dataset)
+        registry.append(_feature_set())
+        registry.append(_protocol())
+        with pytest.raises(DeploymentSemanticScopeError, match="lacks FeatureSet:missing-features"):
+            resolve_deployment_semantic_scope(
+                event=_event(),
+                scientific_registry=registry,
+                dataset_snapshot_id=dataset.dataset_snapshot_id,
+                feature_set_id="missing-features",
+                research_protocol_id="protocol-v1",
+                environment=environment,
+                episode=_episode(environment),
+                action_semantics=_action_semantics(),
+                decision_ts="2026-09-02T00:00:00Z",
+            )
+
+
+@pytest.mark.parametrize(
+    ("dataset", "feature", "protocol", "message"),
+    [
+        (
+            _dataset(available_at="2026-09-03T00:00:00Z"),
+            _feature_set(),
+            _protocol(),
+            "DatasetSnapshot:dataset-001 was not available at decision time",
+        ),
+        (
+            _dataset(),
+            _feature_set(available_at="2026-09-03T00:00:00Z"),
+            _protocol(),
+            "FeatureSet:features-main was not available at decision time",
+        ),
+        (
+            _dataset(),
+            _feature_set(),
+            _protocol(available_at="2026-09-03T00:00:00Z"),
+            "ResearchProtocol:protocol-v1 was not available at decision time",
+        ),
+    ],
+)
+def test_scientific_evidence_available_only_after_decision_is_rejected(
+    dataset: DatasetSnapshot,
+    feature: FeatureSet,
+    protocol: ResearchProtocol,
+    message: str,
+) -> None:
+    with pytest.raises(DeploymentSemanticScopeError, match=message):
+        _resolve(
+            dataset=dataset,
+            feature=feature,
+            protocol=protocol,
+            decision_ts="2026-09-02T00:00:00Z",
+        )
+
+
+def test_dataset_cutoff_cannot_be_after_decision() -> None:
+    dataset = _dataset(
+        cutoff="2026-09-03T00:00:00Z",
+        available_at="2026-09-02T00:00:00Z",
+    )
+    environment = _environment(cutoff="2026-09-03T00:00:00Z")
+    with pytest.raises(DeploymentSemanticScopeError, match="causal cutoff is later than decision time"):
+        _resolve(
+            dataset=dataset,
+            environment=environment,
+            decision_ts="2026-09-02T00:00:00Z",
+        )

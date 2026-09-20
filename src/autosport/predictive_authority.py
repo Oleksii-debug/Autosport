@@ -34,6 +34,9 @@ _AUTHORITY_MISSING_REASON = (
     "predictive eligibility was not resolved from canonical "
     "ScientificRegistry authority for this decision"
 )
+_NON_CANONICAL_OPPORTUNITY_REASON = (
+    "probability-edge admission requires exact canonical Opportunity authority"
+)
 _MAX_RUNTIME_AUTHORITIES = 10_000
 
 
@@ -265,8 +268,9 @@ def _install_runtime_authority() -> Callable[..., ForecastRef]:
     token set, computable membership key, or standalone mint helper.  The public
     resolver first performs durable registry resolution and only then records the
     exact immutable ForecastRef object + decision fingerprint.  Positive portfolio
-    admission is also guarded at the canonical Opportunity boundary so a caller-
-    defined ForecastRef subclass cannot replace the authority method virtually.
+    admission is also guarded at the canonical Opportunity boundary so caller-
+    defined ForecastRef or probability-edge Opportunity subclasses cannot replace
+    the authority path virtually.
     """
 
     authorized: dict[int, tuple[ForecastRef, str]] = {}
@@ -317,6 +321,50 @@ def _install_runtime_authority() -> Callable[..., ForecastRef]:
 
     ForecastRef.predictive_eligibility_reason = guarded_reason  # type: ignore[method-assign]
     Opportunity.predictive_eligibility_reason = guarded_opportunity_reason  # type: ignore[method-assign]
+
+    # The portfolio planner historically dispatched through the concrete
+    # Opportunity instance.  That left one higher-level polymorphism seam: a caller
+    # could subclass Opportunity and override both the eligibility method and the
+    # uncertainty haircut.  Guard that boundary before the planner performs any
+    # positive predictive preflight.  Non-predictive subclasses keep their legacy
+    # structural compatibility; probability-edge authority requires the exact
+    # canonical Opportunity type whose ForecastRef path is closure-owned above.
+    from . import portfolio_plan as _portfolio_plan
+
+    original_intent_preflight_reason = _portfolio_plan._intent_preflight_reason
+
+    def guarded_intent_preflight_reason(
+        intent: Any,
+        decision_time: datetime,
+        *,
+        authoritative_terminal_model: bool = False,
+    ) -> str | None:
+        opportunity = intent.opportunity
+        if type(opportunity) is not Opportunity:
+            try:
+                canonical_probability_edge = bool(
+                    Opportunity.claims_probability_edge.__get__(
+                        opportunity,
+                        Opportunity,
+                    )
+                )
+            except (AttributeError, TypeError):
+                canonical_probability_edge = True
+            try:
+                presented_probability_edge = bool(
+                    getattr(opportunity, "claims_probability_edge")
+                )
+            except (AttributeError, TypeError, ValueError):
+                presented_probability_edge = True
+            if canonical_probability_edge or presented_probability_edge:
+                return _NON_CANONICAL_OPPORTUNITY_REASON
+        return original_intent_preflight_reason(
+            intent,
+            decision_time,
+            authoritative_terminal_model=authoritative_terminal_model,
+        )
+
+    _portfolio_plan._intent_preflight_reason = guarded_intent_preflight_reason
 
     def resolve_authoritative_forecast_ref(
         registry: ScientificRegistry,

@@ -241,6 +241,7 @@ class ComputeRouteRequest:
     response_ttl_seconds: Decimal
     baseline_candidate_id: str
     cloud_candidate_id: str | None = None
+    decision_input_sha256: str | None = None
     decision_evidence_sha256: str | None = None
     voc_regime_id: str | None = None
     voc_urgency_id: str | None = None
@@ -268,6 +269,8 @@ class ComputeRouteRequest:
                 raise ModelComputeRouterError(
                     "cloud candidate must differ from baseline"
                 )
+        if self.decision_input_sha256 is not None:
+            _sha256("decision_input_sha256", self.decision_input_sha256)
         if self.decision_evidence_sha256 is not None:
             _sha256("decision_evidence_sha256", self.decision_evidence_sha256)
         for name in (
@@ -293,6 +296,7 @@ class ComputeRouteRequest:
             "response_ttl_seconds": str(self.response_ttl_seconds),
             "baseline_candidate_id": self.baseline_candidate_id,
             "cloud_candidate_id": self.cloud_candidate_id,
+            "decision_input_sha256": self.decision_input_sha256,
             "decision_evidence_sha256": self.decision_evidence_sha256,
             "voc_regime_id": self.voc_regime_id,
             "voc_urgency_id": self.voc_urgency_id,
@@ -315,6 +319,7 @@ class ComputeRouteRequest:
                 response_ttl_seconds=Decimal(raw["response_ttl_seconds"]),
                 baseline_candidate_id=raw["baseline_candidate_id"],
                 cloud_candidate_id=raw.get("cloud_candidate_id"),
+                decision_input_sha256=raw.get("decision_input_sha256"),
                 decision_evidence_sha256=raw.get("decision_evidence_sha256"),
                 voc_regime_id=raw.get("voc_regime_id"),
                 voc_urgency_id=raw.get("voc_urgency_id"),
@@ -1577,6 +1582,10 @@ def route_compute(
                         "qualified VOC evidence was not available when "
                         "the current request began"
                     )
+                elif request.decision_input_sha256 is None:
+                    baseline_reason = (
+                        "missing canonical current decision-input identity"
+                    )
                 elif request.decision_evidence_sha256 is None:
                     baseline_reason = (
                         "missing canonical current decision-context identity"
@@ -1611,6 +1620,7 @@ def route_compute(
                     else:
                         expected_current_context = {
                             "request_id": request.request_id,
+                            "decision_input_sha256": request.decision_input_sha256,
                             "task_class": request.required_capability,
                             "sport_id": domain_observation.sport_id,
                             "league_id": domain_observation.league_id,
@@ -1628,6 +1638,8 @@ def route_compute(
                         elif (
                             resolved_evaluation.decision_context_sha256
                             == request.decision_evidence_sha256
+                            or source_context["decision_input_sha256"]
+                            == current_context["decision_input_sha256"]
                             or source_context["request_id"]
                             == current_context["request_id"]
                         ):

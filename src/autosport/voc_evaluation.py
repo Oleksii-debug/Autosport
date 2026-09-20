@@ -26,6 +26,7 @@ VOC_CURRENT_CONTEXT_PAYLOAD_KEY = "voc_current_context"
 _VOC_CURRENT_CONTEXT_FIELDS = frozenset(
     {
         "request_id",
+        "decision_input_sha256",
         "task_class",
         "sport_id",
         "league_id",
@@ -153,9 +154,15 @@ def resolve_voc_decision_context(
         raise VOCEvaluationError("canonical current VOC decision context schema is invalid")
     resolved: dict[str, str] = {}
     for field in sorted(_VOC_CURRENT_CONTEXT_FIELDS):
-        resolved[field] = _text(
-            f"canonical current VOC context {field}", context.get(field)
-        )
+        if field == "decision_input_sha256":
+            resolved[field] = _sha256(
+                "canonical current VOC context decision_input_sha256",
+                context.get(field),
+            )
+        else:
+            resolved[field] = _text(
+                f"canonical current VOC context {field}", context.get(field)
+            )
     return resolved
 
 
@@ -184,6 +191,7 @@ class PairedVOCEvaluation:
     challenger_backend_id: str
     challenger_model_id: str
     challenger_config_sha256: str
+    decision_input_sha256: str
     decision_context_sha256: str
     decision_evidence_sha256: str
     baseline_output_sha256: str
@@ -242,6 +250,7 @@ class PairedVOCEvaluation:
         for name in (
             "baseline_config_sha256",
             "challenger_config_sha256",
+            "decision_input_sha256",
             "decision_context_sha256",
             "decision_evidence_sha256",
             "baseline_output_sha256",
@@ -350,6 +359,7 @@ class PairedVOCEvaluation:
             "challenger_backend_id": self.challenger_backend_id,
             "challenger_model_id": self.challenger_model_id,
             "challenger_config_sha256": self.challenger_config_sha256,
+            "decision_input_sha256": self.decision_input_sha256,
             "decision_context_sha256": self.decision_context_sha256,
             "decision_evidence_sha256": self.decision_evidence_sha256,
             "baseline_output_sha256": self.baseline_output_sha256,
@@ -451,6 +461,7 @@ class PairedVOCEvaluation:
                 challenger_backend_id=raw["challenger_backend_id"],
                 challenger_model_id=raw["challenger_model_id"],
                 challenger_config_sha256=raw["challenger_config_sha256"],
+                decision_input_sha256=raw["decision_input_sha256"],
                 decision_context_sha256=raw["decision_context_sha256"],
                 decision_evidence_sha256=raw["decision_evidence_sha256"],
                 baseline_output_sha256=raw["baseline_output_sha256"],
@@ -713,6 +724,7 @@ class CanonicalVOCAuthorityResolver:
         if context is None:
             raise VOCEvaluationError("canonical source VOC decision context is missing")
         expected_context = {
+            "decision_input_sha256": evaluation.decision_input_sha256,
             "task_class": evaluation.task_class,
             "sport_id": evaluation.sport_id,
             "league_id": evaluation.league_id,
@@ -725,6 +737,7 @@ class CanonicalVOCAuthorityResolver:
                 "canonical source VOC decision context does not match paired evaluation"
             )
         expected_binding = {
+            "decision_input_sha256": evaluation.decision_input_sha256,
             "decision_context_sha256": evaluation.decision_context_sha256,
             "baseline_candidate_id": evaluation.baseline_candidate_id,
             "baseline_backend_id": evaluation.baseline_backend_id,

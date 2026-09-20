@@ -40,6 +40,7 @@ SHA_A = "a" * 64
 SHA_B = "b" * 64
 SHA_C = "c" * 64
 SHA_D = "d" * 64
+SHA_E = "e" * 64
 T0 = "2026-01-01T00:00:00Z"
 T1 = "2026-01-01T00:00:10Z"
 T2 = "2026-01-01T00:00:20Z"
@@ -222,6 +223,7 @@ def request(**overrides):
         response_ttl_seconds=Decimal("10"),
         baseline_candidate_id="local",
         cloud_candidate_id="cloud",
+        decision_input_sha256=SHA_D,
         decision_evidence_sha256=SHA_D,
         voc_regime_id="regime-1",
         voc_urgency_id="routine",
@@ -299,6 +301,7 @@ def voc(**overrides):
             challenger_backend_id=values["challenger_backend_id"],
             challenger_model_id=values["challenger_model_id"],
             challenger_config_sha256=values["challenger_config_sha256"],
+            decision_input_sha256=SHA_E,
             decision_context_sha256=hashlib.sha256(
                 ("source-context:" + values["evidence_id"]).encode("utf-8")
             ).hexdigest(),
@@ -413,6 +416,7 @@ class _FixtureCanonicalVOCResolver:
         self._records[value.evaluation_id] = value
         self._contexts[value.decision_context_sha256] = {
             "request_id": f"source:{value.evaluation_id}",
+            "decision_input_sha256": value.decision_input_sha256,
             "task_class": value.task_class,
             "sport_id": value.sport_id,
             "league_id": value.league_id,
@@ -475,6 +479,7 @@ class ModelComputeRouterTests(unittest.TestCase):
     ):
         context = {
             "request_id": value.request_id,
+            "decision_input_sha256": value.decision_input_sha256,
             "task_class": value.required_capability,
             "sport_id": observation.sport_id,
             "league_id": observation.league_id,
@@ -648,7 +653,8 @@ class ModelComputeRouterTests(unittest.TestCase):
 
         source_decision = self.route_compute(
             request(
-                request_id="source:voc-route-scope",
+                request_id="req-replayed-source-input",
+                decision_input_sha256=evidence.evaluation.decision_input_sha256,
             ),
             self.candidates,
             policy(),
@@ -686,6 +692,20 @@ class ModelComputeRouterTests(unittest.TestCase):
         )
         self.assertEqual(missing_context.tier, ComputeTier.LOCAL)
         self.assertIn("missing canonical current decision-context identity", missing_context.reason)
+
+        missing_input = self.route_compute(
+            request(
+                request_id="req-missing-input",
+                decision_input_sha256=None,
+            ),
+            self.candidates,
+            policy(),
+            as_of=T1,
+            voc_evidence=evidence,
+            domain_observation=slow_observation(),
+        )
+        self.assertEqual(missing_input.tier, ComputeTier.LOCAL)
+        self.assertIn("missing canonical current decision-input identity", missing_input.reason)
 
         caller_only = self.route_compute(
             request(

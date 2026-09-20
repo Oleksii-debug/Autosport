@@ -41,6 +41,7 @@ SHA_B = "b" * 64
 SHA_C = "c" * 64
 SHA_D = "d" * 64
 SHA_E = "e" * 64
+SHA_F = "f" * 64
 T0 = "2026-01-01T00:00:00Z"
 T1 = "2026-01-01T00:00:10Z"
 T2 = "2026-01-01T00:00:20Z"
@@ -65,6 +66,7 @@ def evaluation(**overrides):
         challenger_backend_id="cloud-backend",
         challenger_model_id="challenger-v2",
         challenger_config_sha256=SHA_B,
+        decision_input_sha256=SHA_E,
         decision_context_sha256=hashlib.sha256(
             b"default-source-voc-context"
         ).hexdigest(),
@@ -142,6 +144,7 @@ class FixtureCanonicalAuthorityResolver:
         self._records[value.evaluation_id] = value
         self._contexts[value.decision_context_sha256] = {
             "request_id": f"source:{value.evaluation_id}",
+            "decision_input_sha256": value.decision_input_sha256,
             "task_class": value.task_class,
             "sport_id": value.sport_id,
             "league_id": value.league_id,
@@ -199,6 +202,7 @@ def request():
         response_ttl_seconds=Decimal("30"),
         baseline_candidate_id="local",
         cloud_candidate_id="cloud",
+        decision_input_sha256=SHA_F,
         decision_evidence_sha256=SHA_E,
         voc_regime_id="regime-1",
         voc_urgency_id="routine",
@@ -268,6 +272,7 @@ class _FixtureCanonicalVOCResolver:
         self._records[value.evaluation_id] = value
         self._contexts[value.decision_context_sha256] = {
             "request_id": f"source:{value.evaluation_id}",
+            "decision_input_sha256": value.decision_input_sha256,
             "task_class": value.task_class,
             "sport_id": value.sport_id,
             "league_id": value.league_id,
@@ -346,6 +351,7 @@ class PairedVOCEvaluationTests(unittest.TestCase):
 
         source_context = {
             "request_id": f"source:{paired.evaluation_id}",
+            "decision_input_sha256": paired.decision_input_sha256,
             "task_class": paired.task_class,
             "sport_id": paired.sport_id,
             "league_id": paired.league_id,
@@ -370,6 +376,7 @@ class PairedVOCEvaluationTests(unittest.TestCase):
 
         decision_payload = {
             "voc_binding": {
+                "decision_input_sha256": paired.decision_input_sha256,
                 "decision_context_sha256": context_digest,
                 "baseline_candidate_id": paired.baseline_candidate_id,
                 "baseline_backend_id": paired.baseline_backend_id,
@@ -800,6 +807,7 @@ class PairedVOCEvaluationTests(unittest.TestCase):
     def canonical_request(self, value, observation, *, context_overrides=None):
         context = {
             "request_id": value.request_id,
+            "decision_input_sha256": value.decision_input_sha256,
             "task_class": value.required_capability,
             "sport_id": observation.sport_id,
             "league_id": observation.league_id,
@@ -863,6 +871,7 @@ class PairedVOCEvaluationTests(unittest.TestCase):
         production_request = request()
         production_context = {
             "request_id": production_request.request_id,
+            "decision_input_sha256": production_request.decision_input_sha256,
             "task_class": production_request.required_capability,
             "sport_id": "table-tennis",
             "league_id": "league-1",
@@ -903,7 +912,8 @@ class PairedVOCEvaluationTests(unittest.TestCase):
         evidence = self.qualified_voc(paired)
         source_request = replace(
             request(),
-            request_id=f"source:{paired.evaluation_id}",
+            request_id="req-replayed-source-input",
+            decision_input_sha256=paired.decision_input_sha256,
         )
         decision = self.route_compute(
             source_request,

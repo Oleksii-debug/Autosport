@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Mapping
-from datetime import datetime
+from datetime import datetime, timezone
 from decimal import Decimal, localcontext
 from pathlib import Path
 from typing import Any
@@ -63,7 +63,7 @@ _ADMISSION_FIELDS = frozenset(
         "challenger_compute_identity",
     }
 )
-_TERMINAL_FIELDS = frozenset(
+_TERMINAL_FIELDS_V2 = frozenset(
     {
         "schema_version",
         "admission_sha256",
@@ -72,9 +72,21 @@ _TERMINAL_FIELDS = frozenset(
         "execution_record_sha256",
     }
 )
+_TERMINAL_FIELDS_V3 = frozenset(
+    {
+        *_TERMINAL_FIELDS_V2,
+        "authority_recorded_at",
+    }
+)
 _NEGATIVE_TERMINAL_STATUSES = frozenset(
     {"deadline_missed", "timeout", "failed", "cancelled", "abstained", "null"}
 )
+
+
+def _authority_now() -> str:
+    """Production-owned physical stamp for durable VOC terminal authority."""
+
+    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
 def _scope(payload: Mapping[str, Any]) -> dict[str, object]:
@@ -436,12 +448,22 @@ def append_paired_voc_terminal(
         admission.get("decision_input_sha256"),
         field="VOC admission decision_input_sha256",
     )
+    authority_recorded_at = _authority_now()
+    authority_at = _base._instant(
+        authority_recorded_at,
+        field="VOC terminal authority_recorded_at",
+    )
+    if authority_at < terminal_at:
+        raise _base.VOCEvaluationError(
+            "VOC terminal physical authority predates logical terminal time"
+        )
     terminal = {
-        "schema_version": 2,
+        "schema_version": 3,
         "admission_sha256": admission_sha,
         "status": status_text,
         "execution_id": evidence.execution_id,
         "execution_record_sha256": evidence.execution_record_sha256,
+        "authority_recorded_at": authority_recorded_at,
     }
     return decision_ledger.append(
         DecisionRecord(
@@ -1113,11 +1135,22 @@ class CanonicalOutcomeDerivedVOCScoreAuthority(
             return record_sha, record, payload, kind
 
         terminal = payload.get(_TERMINAL_KEY)
-        if not isinstance(terminal, Mapping) or set(terminal) != _TERMINAL_FIELDS:
+        if not isinstance(terminal, Mapping):
             raise _base.VOCEvaluationError("VOC terminal schema is invalid")
-        if terminal.get("schema_version") != 2:
+        terminal_version = terminal.get("schema_version")
+        expected_terminal_fields = (
+            _TERMINAL_FIELDS_V2
+            if terminal_version == 2
+            else _TERMINAL_FIELDS_V3
+            if terminal_version == 3
+            else None
+        )
+        if (
+            expected_terminal_fields is None
+            or set(terminal) != expected_terminal_fields
+        ):
             raise _base.VOCEvaluationError(
-                "VOC terminal schema version is unsupported"
+                "VOC terminal schema/version is unsupported"
             )
         status = _base._text(terminal.get("status"), field="VOC terminal status")
         if status not in _NEGATIVE_TERMINAL_STATUSES:
@@ -1487,6 +1520,10 @@ class CanonicalOutcomeDerivedVOCScoreAuthority(
         frozen_at = _base._instant(
             cohort_available_at, field="VOC cohort available_at"
         )
+        outcome_revealed_at = _base._instant(
+            evaluation.outcome_revealed_at,
+            field="VOC outcome_revealed_at",
+        )
         failures: list[tuple[_base.OutcomeDerivedVOCScore, str, dict[str, str]]] = []
         failure_cluster = _base._digest(
             {
@@ -1527,6 +1564,31 @@ class CanonicalOutcomeDerivedVOCScoreAuthority(
             if context_record is None:
                 raise _base.VOCEvaluationError(
                     "VOC terminal canonical route context is missing"
+                )
+            precompute = self._router_precompute_for_admission(
+                admission_record=admission_record,
+                admission=admission,
+                context_record=context_record,
+            )
+            if terminal.get("schema_version") != 3:
+                raise _base.VOCEvaluationError(
+                    "negative VOC terminal lacks production physical authority"
+                )
+            terminal_authority_at = _base._instant(
+                terminal.get("authority_recorded_at"),
+                field="VOC terminal authority_recorded_at",
+            )
+            precompute_authority_at = _base._instant(
+                precompute.get("authority_recorded_at"),
+                field="router VOC precompute authority_recorded_at",
+            )
+            if terminal_authority_at < precompute_authority_at:
+                raise _base.VOCEvaluationError(
+                    "negative VOC terminal physical authority predates router precompute authority"
+                )
+            if terminal_authority_at >= outcome_revealed_at:
+                raise _base.VOCEvaluationError(
+                    "negative VOC terminal was not physically recorded before outcome reveal"
                 )
             execution = self._terminal_execution(
                 terminal=terminal,

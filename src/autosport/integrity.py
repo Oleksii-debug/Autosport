@@ -33,7 +33,6 @@ _SCIENTIFIC_REGISTRY_ENTRY_KEYS = frozenset(
         "record_id",
         "available_at",
         "payload",
-        "previous_record_sha256",
         "record_sha256",
     }
 )

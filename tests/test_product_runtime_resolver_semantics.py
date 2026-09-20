@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import sys
+
 import pytest
 
 from autosport.event_lifecycle import CatalogPage, EventLifecycleRecord
@@ -65,6 +67,42 @@ class _HelperProductSource(_ProductSource):
 
     def resolve(self, record: EventLifecycleRecord, *, as_of: str):
         return _provider_settlement_helper(record, as_of)
+
+
+class _RuntimeDispatchBase(_ProductSource):
+    settlement_resolver_implementation_id = "provider-a-runtime-dispatch-v1"
+
+    def _settlement_helper(self, record: EventLifecycleRecord, *, as_of: str):
+        return None
+
+    def resolve(self, record: EventLifecycleRecord, *, as_of: str):
+        return self._settlement_helper(record, as_of=as_of)
+
+
+class _RuntimeDispatchChild(_RuntimeDispatchBase):
+    def _settlement_helper(self, record: EventLifecycleRecord, *, as_of: str):
+        return None
+
+
+def _replacement_runtime_dispatch_helper(
+    self,
+    record: EventLifecycleRecord,
+    *,
+    as_of: str,
+):
+    if as_of == "never":
+        raise AssertionError("replacement runtime-dispatch helper semantics")
+    return None
+
+
+_PROVIDER_HELPER_MODULE = sys.modules[__name__]
+
+
+class _ModuleHelperProductSource(_ProductSource):
+    settlement_resolver_implementation_id = "provider-a-module-helper-v1"
+
+    def resolve(self, record: EventLifecycleRecord, *, as_of: str):
+        return _PROVIDER_HELPER_MODULE._provider_settlement_helper(record, as_of)
 
 
 def test_resolver_semantic_fingerprint_ignores_install_relocation() -> None:
@@ -164,6 +202,82 @@ def test_restart_rejects_rebinding_referenced_helper_with_same_resolver_code(
             )
     finally:
         globals()["_provider_settlement_helper"] = original_helper
+
+
+def test_runtime_owner_dispatch_helper_rebinding_changes_authority_identity(
+    tmp_path,
+) -> None:
+    source = _RuntimeDispatchChild()
+    runtime = build_autonomous_product_runtime(
+        workspace=tmp_path,
+        source=source,
+        clock=lambda: NOW,
+        outcome_authority=source,
+    )
+    expected_identity = runtime.manifest.settlement_authority_identity
+    runtime.close()
+
+    original_helper = _RuntimeDispatchChild._settlement_helper
+    try:
+        _RuntimeDispatchChild._settlement_helper = _replacement_runtime_dispatch_helper
+        rebound_source = _RuntimeDispatchChild()
+        rebound_identity = _settlement_authority_identity(
+            source=rebound_source,
+            source_id=rebound_source.source_id,
+            outcome_authority=rebound_source,
+        )
+        assert rebound_identity != expected_identity
+        with pytest.raises(
+            ProductCompositionError,
+            match="settlement authority identity conflicts with durable product composition",
+        ):
+            build_autonomous_product_runtime(
+                workspace=tmp_path,
+                source=rebound_source,
+                clock=lambda: NOW,
+                outcome_authority=rebound_source,
+            )
+    finally:
+        _RuntimeDispatchChild._settlement_helper = original_helper
+
+
+def test_module_qualified_helper_rebinding_changes_authority_identity(
+    tmp_path,
+) -> None:
+    source = _ModuleHelperProductSource()
+    runtime = build_autonomous_product_runtime(
+        workspace=tmp_path,
+        source=source,
+        clock=lambda: NOW,
+        outcome_authority=source,
+    )
+    expected_identity = runtime.manifest.settlement_authority_identity
+    runtime.close()
+
+    original_helper = _PROVIDER_HELPER_MODULE._provider_settlement_helper
+    try:
+        _PROVIDER_HELPER_MODULE._provider_settlement_helper = (
+            _replacement_settlement_helper
+        )
+        rebound_source = _ModuleHelperProductSource()
+        rebound_identity = _settlement_authority_identity(
+            source=rebound_source,
+            source_id=rebound_source.source_id,
+            outcome_authority=rebound_source,
+        )
+        assert rebound_identity != expected_identity
+        with pytest.raises(
+            ProductCompositionError,
+            match="settlement authority identity conflicts with durable product composition",
+        ):
+            build_autonomous_product_runtime(
+                workspace=tmp_path,
+                source=rebound_source,
+                clock=lambda: NOW,
+                outcome_authority=rebound_source,
+            )
+    finally:
+        _PROVIDER_HELPER_MODULE._provider_settlement_helper = original_helper
 
 
 def test_product_runtime_restart_rejects_semantic_replacement_with_same_declared_identity(

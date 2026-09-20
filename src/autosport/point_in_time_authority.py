@@ -329,14 +329,10 @@ class SourceRevisionAuthorityStore(_legacy.SourceRevisionAuthorityStore):
         revision: _legacy.SourceRevisionAuthority,
     ) -> str:
         if isinstance(revision, _legacy.SourceRevisionAuthority):
-            self.resolve_witness(
-                revision.availability_witness_id,
-                expected_sha256=revision.availability_witness_record_sha256,
-            )
-            self.resolve_policy(
-                revision.revision_policy_id,
-                expected_sha256=revision.revision_policy_record_sha256,
-            )
+            # Re-resolve the canonical provider-backed authorities first, then
+            # let the legacy registrar keep its established mismatch diagnostics.
+            self.resolve_witness(revision.availability_witness_id)
+            self.resolve_policy(revision.revision_policy_id)
         return super().register_revision(revision)
 
     def resolve_revision(

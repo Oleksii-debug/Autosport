@@ -6,7 +6,11 @@ from unittest.mock import patch
 import pytest
 
 from autosport.decision_ledger import JsonlDecisionLedger
-from autosport.paper_campaign_admission import PaperCampaignAdmissionError
+from autosport.paper_campaign_admission import (
+    PaperCampaignAdmissionCoordinator,
+    PaperCampaignAdmissionError,
+)
+from autosport.paper_campaign_runtime import PaperCampaignRuntime
 from autosport.paper_execution_reality import PaperExecutionLedger
 from paper_campaign_admission_test_support import AdmissionFixture
 
@@ -126,3 +130,73 @@ def test_execution_ledger_replacement_after_construction_fails_closed(tmp_path):
         fixture.admit(coordinator)
 
     assert not (fixture.workspace / "paper-campaign-admission.json").exists()
+
+
+def test_runtime_subclass_is_rejected_before_admission_coordinator_construction(tmp_path):
+    fixture = AdmissionFixture(tmp_path)
+    canonical = fixture.coordinator()
+
+    class RuntimeSubtype(PaperCampaignRuntime):
+        pass
+
+    runtime = RuntimeSubtype(
+        environment=canonical.runtime.environment,
+        settlement_bridge=canonical.runtime.settlement_bridge,
+    )
+    state_path = fixture.workspace / "subtype-paper-campaign-admission.json"
+
+    with pytest.raises(TypeError, match="exact PaperCampaignRuntime"):
+        PaperCampaignAdmissionCoordinator(
+            state_path,
+            paper_book_path=fixture.workspace / "paper_book.json",
+            decision_ledger=canonical.decision_ledger,
+            runtime=runtime,
+            execution_ledger=canonical.execution_ledger,
+        )
+
+    assert not state_path.exists()
+
+
+def test_runtime_replacement_after_construction_fails_before_admission_mutation(tmp_path):
+    fixture = AdmissionFixture(tmp_path)
+    coordinator = fixture.coordinator()
+    state_path = fixture.workspace / "paper-campaign-admission.json"
+    state_before = state_path.read_bytes()
+    decisions_before = (fixture.workspace / "decisions.jsonl").read_bytes()
+
+    replacement = PaperCampaignRuntime(
+        environment=coordinator.runtime.environment,
+        settlement_bridge=coordinator.runtime.settlement_bridge,
+    )
+    coordinator.runtime = replacement
+
+    with pytest.raises(PaperCampaignAdmissionError, match="runtime authority changed"):
+        fixture.admit(coordinator)
+
+    assert state_path.read_bytes() == state_before
+    assert (fixture.workspace / "decisions.jsonl").read_bytes() == decisions_before
+
+
+def test_runtime_method_shadow_after_construction_is_never_invoked(tmp_path):
+    fixture = AdmissionFixture(tmp_path)
+    coordinator = fixture.coordinator()
+    state_path = fixture.workspace / "paper-campaign-admission.json"
+    state_before = state_path.read_bytes()
+    decisions_before = (fixture.workspace / "decisions.jsonl").read_bytes()
+    attacker_called = False
+
+    def attacker_begin_and_bind_paper_ticket(**_kwargs):
+        nonlocal attacker_called
+        attacker_called = True
+        raise AssertionError("attacker runtime callback must never run")
+
+    coordinator.runtime.__dict__["begin_and_bind_paper_ticket"] = (
+        attacker_begin_and_bind_paper_ticket
+    )
+
+    with pytest.raises(PaperCampaignAdmissionError, match="runtime authority method is shadowed"):
+        fixture.admit(coordinator)
+
+    assert attacker_called is False
+    assert state_path.read_bytes() == state_before
+    assert (fixture.workspace / "decisions.jsonl").read_bytes() == decisions_before

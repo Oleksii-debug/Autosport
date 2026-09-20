@@ -111,6 +111,8 @@ def run_product(
         or poll_seconds < 0
     ):
         raise ValueError("poll_seconds must be a finite non-negative number")
+    if max_cycles is None and float(poll_seconds) == 0.0:
+        raise ValueError("unbounded product run requires a positive poll interval")
 
     # Validate the complete production source capability before the composition root
     # creates a workspace or durable manifest. Missing event resolution must never be
@@ -186,14 +188,18 @@ def run_product_command(
             poll_seconds=poll_seconds,
         )
     except Exception as exc:
+        # Product stdout is a public/machine-readable boundary. Arbitrary exception
+        # messages may contain provider credentials, response bodies or other secrets,
+        # so only stable classification is emitted here. Detailed diagnostics belong
+        # behind an explicitly secret-safe internal logging boundary.
         print(
             json.dumps(
                 {
                     "kind": "product_start_failure",
                     "paper_only": True,
                     "real_money_execution": False,
+                    "error_code": "product_start_failed",
                     "error_type": type(exc).__name__,
-                    "error": str(exc),
                 },
                 ensure_ascii=False,
                 sort_keys=True,

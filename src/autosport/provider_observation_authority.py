@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import weakref
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -182,7 +183,7 @@ class CompleteGameBoardRequest:
         return f"https://parlay-api.com/v1/sse/odds/{self.sport_key}?{query}"
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True, slots=True, weakref_slot=True)
 class CompleteGameBoardSnapshot:
     """Immutable exact response evidence; construction alone grants no authority."""
 
@@ -358,11 +359,24 @@ class CompleteGameBoardSnapshot:
 
 # Exact-object issuance closes the structural-protocol hole: a caller can construct a
 # lookalike evidence value for inspection, but it cannot authorize production intake.
-_ISSUED: dict[int, tuple[CompleteGameBoardSnapshot, str]] = {}
+# Weak references keep the capability exact-object scoped without pinning every large
+# provider frame for the lifetime of a persistent 24/7 process.
+_ISSUED: dict[int, tuple[weakref.ReferenceType, str]] = {}
+
+
+def _forget_issued(snapshot_id: int, reference: weakref.ReferenceType) -> None:
+    current = _ISSUED.get(snapshot_id)
+    if current is not None and current[0] is reference:
+        _ISSUED.pop(snapshot_id, None)
 
 
 def _remember(snapshot: CompleteGameBoardSnapshot) -> CompleteGameBoardSnapshot:
-    _ISSUED[id(snapshot)] = (snapshot, snapshot.evidence_sha256)
+    snapshot_id = id(snapshot)
+    reference = weakref.ref(
+        snapshot,
+        lambda current, snapshot_id=snapshot_id: _forget_issued(snapshot_id, current),
+    )
+    _ISSUED[snapshot_id] = (reference, snapshot.evidence_sha256)
     return snapshot
 
 
@@ -372,7 +386,7 @@ def assert_complete_game_board_authoritative(snapshot: CompleteGameBoardSnapshot
             "complete provider authority requires CompleteGameBoardSnapshot"
         )
     issued = _ISSUED.get(id(snapshot))
-    if issued is None or issued[0] is not snapshot or issued[1] != snapshot.evidence_sha256:
+    if issued is None or issued[0]() is not snapshot or issued[1] != snapshot.evidence_sha256:
         raise ProviderObservationUnsupportedError(
             "snapshot was not issued by canonical provider acquisition evidence"
         )

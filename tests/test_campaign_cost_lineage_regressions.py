@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import replace
 from decimal import Decimal
+from pathlib import Path
 
 import pytest
 
@@ -10,7 +11,8 @@ from autosport.campaign_cost_evidence import (
     CostEvidenceError,
     derive_campaign_economics,
 )
-from test_campaign_cost_evidence import T0, T1, T2, _cost, _fixture_authority
+from autosport.campaign_economic_store import CampaignEconomicEvidenceStore
+from test_campaign_cost_evidence import T1, T2, _cost, _fixture_authority
 
 
 def test_observed_incurred_known_cost_requires_incurred_timestamp() -> None:
@@ -37,7 +39,9 @@ def test_genesis_version_cannot_claim_supersession_without_predecessor() -> None
         fixture.doCleanups()
 
 
-def test_retained_correction_keeps_prior_provenance_across_later_version() -> None:
+def test_retained_correction_keeps_prior_provenance_across_restart(
+    tmp_path: Path,
+) -> None:
     fixture, authority = _fixture_authority()
     try:
         original = _cost(authority, amount=Decimal("2"))
@@ -75,6 +79,25 @@ def test_retained_correction_keeps_prior_provenance_across_later_version() -> No
         assert corrected in third.costs
         assert corrected.supersedes_cost_evidence_ids == (original.cost_evidence_id,)
         assert additional in third.costs
+
+        workspace = tmp_path / "economic-workspace"
+        authority_root = tmp_path / "external-monotonic-authority"
+        store = CampaignEconomicEvidenceStore(
+            workspace,
+            campaign=authority,
+            authority_root=authority_root,
+        )
+        assert store.append(first) == first.version_id
+        assert store.append(second) == second.version_id
+        assert store.append(third) == third.version_id
+
+        restarted = CampaignEconomicEvidenceStore(
+            workspace,
+            campaign=authority,
+            authority_root=authority_root,
+        )
+        assert restarted.latest() == third
+        assert restarted.verify_chain() == (first, second, third)
     finally:
         fixture.doCleanups()
 

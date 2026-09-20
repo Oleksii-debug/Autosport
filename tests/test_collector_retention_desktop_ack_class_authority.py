@@ -147,6 +147,63 @@ class CollectorRetentionDesktopAckClassAuthorityTests(unittest.TestCase):
         DesktopDeltaCheckpointStore.has_ack = original_has_ack
         DesktopDeltaCheckpointStore.application_receipt = original_receipt
 
+    def test_alternate_exact_checkpoint_cannot_mint_deletion_authority(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            collector, desktop, first, terminal = self._history(tmp)
+            _ack(desktop, terminal)
+            alternate = DesktopDeltaCheckpointStore(Path(tmp) / "alternate-desktop.json")
+            _ack(alternate, first)
+            _ack(alternate, terminal)
+            manager = CollectorRetentionManager(collector)
+
+            with self.assertRaisesRegex(TypeError, "exactly one canonical"):
+                manager.preview(
+                    source_id="source-x",
+                    stream_epoch="epoch-1",
+                    desktop_checkpoint=alternate,
+                )
+
+            self.assertEqual(collector.get(first.delta_id), first)
+            self.assertEqual(manager.compaction_journal(), ())
+
+    def test_checkpoint_path_substitution_after_preview_blocks_apply(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            collector, desktop, first, terminal = self._history(tmp)
+            _ack(desktop, first)
+            _ack(desktop, terminal)
+            manager = CollectorRetentionManager(collector)
+            plan = manager.preview(
+                source_id="source-x",
+                stream_epoch="epoch-1",
+                desktop_checkpoint=desktop,
+            )
+            self.assertEqual(plan.delete_delta_ids, (first.delta_id,))
+
+            original_path = desktop.path
+            alternate = DesktopDeltaCheckpointStore(Path(tmp) / "alternate" / "desktop.json")
+            _ack(alternate, first)
+            _ack(alternate, terminal)
+            desktop.path = alternate.path
+            try:
+                with self.assertRaisesRegex(TypeError, "product-owned canonical"):
+                    manager.compact(
+                        plan,
+                        desktop_checkpoint=desktop,
+                        compacted_at="2026-01-02T00:00:00+00:00",
+                    )
+                self.assertEqual(collector.get(first.delta_id), first)
+                self.assertEqual(manager.compaction_journal(), ())
+            finally:
+                desktop.path = original_path
+
+            result = manager.compact(
+                plan,
+                desktop_checkpoint=desktop,
+                compacted_at="2026-01-02T00:00:00+00:00",
+            )
+            self.assertEqual(result.deleted_delta_ids, (first.delta_id,))
+            self.assertIsNone(collector.get(first.delta_id))
+
     def test_class_rebind_cannot_mint_preview_deletion_authority(self):
         with tempfile.TemporaryDirectory() as tmp:
             collector, desktop, first, terminal = self._history(tmp)
@@ -216,6 +273,17 @@ class CollectorRetentionDesktopAckClassAuthorityTests(unittest.TestCase):
             finally:
                 self._restore_class(*originals)
                 importlib.reload(ack_guard)
+
+            # Reload after restoration must continue to dispatch to the original
+            # unwrapped build-plan implementation rather than recursively wrapping
+            # the prior guard installation.
+            plan = manager.preview(
+                source_id="source-x",
+                stream_epoch="epoch-1",
+                desktop_checkpoint=desktop,
+            )
+            self.assertEqual(plan.delete_delta_ids, ())
+            self.assertIn(first.delta_id, plan.unacknowledged_delta_ids)
 
 
 if __name__ == "__main__":

@@ -318,8 +318,21 @@ def test_hypothesis_id_tamper_changes_frozen_member_authority(tmp_path) -> None:
     raw = json.loads(path.read_text(encoding="utf-8"))
     raw["plan"]["members"][0]["hypothesis_id"] = "hyp-alias"
     path.write_text(json.dumps(raw), encoding="utf-8")
-    with pytest.raises(ValueError, match="family member authority identity mismatch"):
+    with pytest.raises(ValueError, match="plan identity mismatch"):
         SequentialMultiplicityEvidenceStore(path)
+
+
+def test_hypothesis_id_alias_cannot_mint_fresh_semantic_member() -> None:
+    original = _member("candidate original", hypothesis="a", variant="b")
+    alias = ExperimentFamilyMember(
+        hypothesis_id="hyp-alias",
+        hypothesis_sha256=original.hypothesis_sha256,
+        semantic_variant_sha256=original.semantic_variant_sha256,
+        candidate_label="candidate alias",
+    )
+    assert original.member_authority_id == alias.member_authority_id
+    with pytest.raises(ValueError, match="duplicate semantic members"):
+        _plan(members=(original, alias))
 
 
 def test_sequential_look_timestamps_cannot_move_backwards(tmp_path) -> None:

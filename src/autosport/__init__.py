@@ -11,3 +11,4 @@ from . import _paper_execution_freshness as _paper_execution_freshness  # noqa: 
 # decision modules.  The import is intentionally private; public APIs remain in the
 # owning opportunity/predictive modules.
 from . import predictive_authority as _predictive_authority  # noqa: E402,F401
+from . import _predictive_authority_type_fence as _predictive_authority_type_fence  # noqa: E402,F401

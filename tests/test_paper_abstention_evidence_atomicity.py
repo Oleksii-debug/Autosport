@@ -223,6 +223,50 @@ class PaperAbstentionEvidenceAtomicityTests(unittest.TestCase):
             )
             self.assertEqual(receipt.reward_id, valid_reward.reward_id)
 
+    def test_conflicting_restart_retry_does_not_poison_recovered_environment(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            environment, loop, observation, action, _runtime_instance = _runtime(root)
+            recovered_environment = CausalLearningEnvironment(
+                environment.identity,
+                episode_key=environment.episode.episode_key,
+                policy_id=environment.episode.policy_id,
+                admissible_actions=frozenset(environment.episode.admissible_actions),
+            )
+            recovered = PaperAbstentionLearningRuntime(
+                environment=recovered_environment,
+                agent_loop=loop,
+            )
+            before_environment = _environment_state(recovered_environment)
+            before_loop = (root / "agent-loop.json").read_bytes()
+
+            with self.assertRaisesRegex(
+                PaperAbstentionLearningError,
+                "durable abstention intent conflicts with retry payload",
+            ):
+                recovered.begin_abstention(
+                    observation=observation,
+                    action_type="WAIT",
+                    decision_at=T2,
+                    parameters=(("reason", "changed"),),
+                    at=T3,
+                )
+
+            self.assertEqual(
+                _environment_state(recovered_environment),
+                before_environment,
+            )
+            self.assertEqual((root / "agent-loop.json").read_bytes(), before_loop)
+
+            exact = recovered.begin_abstention(
+                observation=observation,
+                action_type="WAIT",
+                decision_at=T2,
+                parameters=(("reason", "no-edge"),),
+                at=T3,
+            )
+            self.assertEqual(exact.action_id, action.action_id)
+
 
 if __name__ == "__main__":
     unittest.main()

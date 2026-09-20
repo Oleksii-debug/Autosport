@@ -79,10 +79,15 @@ def _members(values: Iterable[str]) -> tuple[str, ...]:
 
 
 def membership_sha256(member_sha256s: Iterable[str]) -> str:
-    """Return the versioned commitment for one exact ordered dataset membership."""
+    """Return the canonical v1 manifest commitment for exact ordered membership."""
 
     members = _members(member_sha256s)
-    return _digest({"schema_version": 1, "member_sha256s": list(members)})
+    return _digest(
+        {
+            "kind": "autosport-dataset-snapshot-membership-v1",
+            "member_sha256s": list(members),
+        }
+    )
 
 
 class DatasetSnapshotLineageError(RuntimeError):
@@ -139,11 +144,13 @@ class DatasetSnapshotLineageRecord:
 class DatasetSnapshotLineageAuthority:
     """Durable proof that registered DatasetSnapshots form append-only chains.
 
-    ScientificRegistry remains the canonical owner of DatasetSnapshot identity. This
-    authority adds only the evidence missing from that record: exact immutable member
-    commitments and parent links. A child is valid only when the complete parent member
-    sequence is an exact prefix of the child sequence. Legacy DatasetSnapshots without a
-    record here remain deliberately unproven.
+    ScientificRegistry remains the canonical owner of DatasetSnapshot identity. A
+    lineage-enabled snapshot additionally uses ``DatasetSnapshot.manifest_sha256`` as
+    the canonical ``membership_sha256`` commitment over its exact ordered immutable
+    members. That makes membership mechanically bound to the already-immutable registry
+    record rather than being a second caller-authored claim. A child is valid only when
+    the complete parent member sequence is an exact prefix of the child sequence.
+    Legacy snapshots whose manifest is not this commitment remain deliberately unproven.
     """
 
     SCHEMA_VERSION = 1
@@ -200,7 +207,12 @@ class DatasetSnapshotLineageAuthority:
         payload = entry.payload
         if not isinstance(payload, Mapping):
             raise DatasetSnapshotLineageError("DatasetSnapshot payload is invalid")
-        for field in ("manifest_sha256", "source_identity", "license_identity", "causal_cutoff"):
+        for field in (
+            "manifest_sha256",
+            "source_identity",
+            "license_identity",
+            "causal_cutoff",
+        ):
             if field not in payload:
                 raise DatasetSnapshotLineageError(
                     f"DatasetSnapshot payload lacks required lineage field: {field}"
@@ -213,6 +225,21 @@ class DatasetSnapshotLineageAuthority:
         _instant(entry.available_at, "DatasetSnapshot.available_at")
         return entry
 
+    @staticmethod
+    def _assert_manifest_binds_members(
+        entry: RegistryEntry,
+        members: tuple[str, ...],
+    ) -> str:
+        manifest_sha256 = _sha256(
+            entry.payload["manifest_sha256"], "DatasetSnapshot.manifest_sha256"
+        )
+        commitment = membership_sha256(members)
+        if manifest_sha256 != commitment:
+            raise DatasetSnapshotLineageError(
+                "DatasetSnapshot manifest does not commit to exact lineage membership"
+            )
+        return commitment
+
     def _read(self) -> dict[str, Any]:
         raw = self.path.read_text(encoding="utf-8")
         try:
@@ -222,7 +249,9 @@ class DatasetSnapshotLineageAuthority:
                 parse_constant=_reject_nonfinite,
             )
         except json.JSONDecodeError as exc:
-            raise ValueError("dataset snapshot lineage authority must be valid UTF-8 JSON") from exc
+            raise ValueError(
+                "dataset snapshot lineage authority must be valid UTF-8 JSON"
+            ) from exc
         if type(state) is not dict:
             raise ValueError("dataset snapshot lineage authority must be a JSON object")
         if set(state) != {"schema_version", "records", "state_sha256"}:
@@ -271,9 +300,16 @@ class DatasetSnapshotLineageAuthority:
             if type(raw_members) is not list:
                 raise ValueError("member_sha256s must be a list")
             members = _members(raw_members)
-            if _sha256(raw_record["membership_sha256"], "membership_sha256") != membership_sha256(members):
+            commitment = membership_sha256(members)
+            if _sha256(raw_record["membership_sha256"], "membership_sha256") != commitment:
                 raise ValueError("dataset snapshot membership digest mismatch")
-            if _sha256(raw_record["record_sha256"], "record_sha256") != self._record_digest(raw_record):
+            if manifest_sha256 != commitment:
+                raise DatasetSnapshotLineageError(
+                    "dataset snapshot manifest is not its canonical membership commitment"
+                )
+            if _sha256(raw_record["record_sha256"], "record_sha256") != self._record_digest(
+                raw_record
+            ):
                 raise ValueError("dataset snapshot lineage record digest mismatch")
 
             entry = self._snapshot_entry(snapshot_id)
@@ -311,23 +347,29 @@ class DatasetSnapshotLineageAuthority:
                 if parent is None:
                     raise ValueError("dataset snapshot parent must precede child in authority")
                 if parent["snapshot_record_sha256"] != parent_record_sha:
-                    raise DatasetSnapshotLineageError("dataset snapshot parent record digest mismatch")
+                    raise DatasetSnapshotLineageError(
+                        "dataset snapshot parent record digest mismatch"
+                    )
                 if parent["source_identity"] != source_identity:
-                    raise DatasetSnapshotLineageError("dataset snapshot source identity changed across lineage")
+                    raise DatasetSnapshotLineageError(
+                        "dataset snapshot source identity changed across lineage"
+                    )
                 if parent["license_identity"] != license_identity:
-                    raise DatasetSnapshotLineageError("dataset snapshot license identity changed across lineage")
+                    raise DatasetSnapshotLineageError(
+                        "dataset snapshot license identity changed across lineage"
+                    )
                 if _instant(parent["causal_cutoff"], "parent causal_cutoff") > causal_cutoff:
-                    raise DatasetSnapshotLineageError("dataset snapshot causal cutoff moved backwards")
+                    raise DatasetSnapshotLineageError(
+                        "dataset snapshot causal cutoff moved backwards"
+                    )
                 if _instant(parent["available_at"], "parent available_at") > available_at:
-                    raise DatasetSnapshotLineageError("dataset snapshot availability moved backwards")
+                    raise DatasetSnapshotLineageError(
+                        "dataset snapshot availability moved backwards"
+                    )
                 parent_members = tuple(parent["member_sha256s"])
                 if members[: len(parent_members)] != parent_members:
                     raise DatasetSnapshotLineageError(
                         "dataset snapshot does not preserve complete parent membership prefix"
-                    )
-                if len(members) == len(parent_members) and manifest_sha256 != parent["manifest_sha256"]:
-                    raise DatasetSnapshotLineageError(
-                        "dataset snapshot changed manifest without appending immutable members"
                     )
             by_id[snapshot_id] = raw_record
 
@@ -372,6 +414,7 @@ class DatasetSnapshotLineageAuthority:
 
         entry = self._snapshot_entry(snapshot_id)
         payload = entry.payload
+        commitment = self._assert_manifest_binds_members(entry, members)
         with WorkspaceEconomicLock(self.path.parent):
             state = self._read()
             by_id = {record["snapshot_id"]: record for record in state["records"]}
@@ -392,7 +435,7 @@ class DatasetSnapshotLineageAuthority:
                 "causal_cutoff": payload["causal_cutoff"],
                 "available_at": entry.available_at,
                 "member_sha256s": list(members),
-                "membership_sha256": membership_sha256(members),
+                "membership_sha256": commitment,
                 "parent_snapshot_id": parent_snapshot_id,
                 "parent_snapshot_record_sha256": (
                     parent["snapshot_record_sha256"] if parent is not None else None
@@ -436,7 +479,9 @@ class DatasetSnapshotLineageAuthority:
         ancestor = by_id.get(ancestor_snapshot_id)
         descendant = by_id.get(descendant_snapshot_id)
         if ancestor is None or descendant is None:
-            raise DatasetSnapshotLineageError("both snapshots require durable lineage authority")
+            raise DatasetSnapshotLineageError(
+                "both snapshots require durable lineage authority"
+            )
 
         reverse_chain = [descendant_snapshot_id]
         current = descendant
@@ -448,7 +493,9 @@ class DatasetSnapshotLineageAuthority:
                 )
             parent = by_id.get(parent_id)
             if parent is None:
-                raise DatasetSnapshotLineageError("dataset snapshot lineage chain is incomplete")
+                raise DatasetSnapshotLineageError(
+                    "dataset snapshot lineage chain is incomplete"
+                )
             reverse_chain.append(parent_id)
             current = parent
         chain = tuple(reversed(reverse_chain))

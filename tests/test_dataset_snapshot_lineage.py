@@ -23,16 +23,17 @@ def _append_snapshot(
     registry: ScientificRegistry,
     *,
     snapshot_id: str,
-    manifest: str,
+    members: tuple[str, ...],
     cutoff: str,
     available_at: str,
     source: str = "provider:paper",
     license_identity: str = "license:v1",
+    manifest_sha256: str | None = None,
 ) -> None:
     registry.append(
         DatasetSnapshot(
             dataset_snapshot_id=snapshot_id,
-            manifest_sha256=_sha(manifest),
+            manifest_sha256=manifest_sha256 or membership_sha256(members),
             source_identity=source,
             license_identity=license_identity,
             causal_cutoff=cutoff,
@@ -63,31 +64,31 @@ def _canonical_digest(payload: object) -> str:
 
 def test_multi_generation_append_only_ancestry_survives_restart(tmp_path: Path) -> None:
     registry, authority = _authority(tmp_path)
+    first = (_sha("row-1"), _sha("row-2"))
+    second = (*first, _sha("row-3"))
+    third = (*second, _sha("row-4"))
     _append_snapshot(
         registry,
         snapshot_id="dataset-root",
-        manifest="manifest-root",
+        members=first,
         cutoff="2026-09-01T00:00:00Z",
         available_at="2026-09-01T00:01:00Z",
     )
     _append_snapshot(
         registry,
         snapshot_id="dataset-child",
-        manifest="manifest-child",
+        members=second,
         cutoff="2026-09-02T00:00:00Z",
         available_at="2026-09-02T00:01:00Z",
     )
     _append_snapshot(
         registry,
         snapshot_id="dataset-grandchild",
-        manifest="manifest-grandchild",
+        members=third,
         cutoff="2026-09-03T00:00:00Z",
         available_at="2026-09-03T00:01:00Z",
     )
 
-    first = (_sha("row-1"), _sha("row-2"))
-    second = (*first, _sha("row-3"))
-    third = (*second, _sha("row-4"))
     authority.register(snapshot_id="dataset-root", member_sha256s=first)
     authority.register(
         snapshot_id="dataset-child",
@@ -116,24 +117,23 @@ def test_multi_generation_append_only_ancestry_survives_restart(tmp_path: Path) 
 
 def test_unrelated_rewrite_with_same_source_license_and_later_cutoff_fails(tmp_path: Path) -> None:
     registry, authority = _authority(tmp_path)
+    first = (_sha("row-1"), _sha("row-2"))
+    rewritten = (_sha("row-1"), _sha("rewritten-row-2"), _sha("row-3"))
     _append_snapshot(
         registry,
         snapshot_id="dataset-root",
-        manifest="manifest-root",
+        members=first,
         cutoff="2026-09-01T00:00:00Z",
         available_at="2026-09-01T00:01:00Z",
     )
     _append_snapshot(
         registry,
         snapshot_id="dataset-rewrite",
-        manifest="manifest-rewrite",
+        members=rewritten,
         cutoff="2026-09-02T00:00:00Z",
         available_at="2026-09-02T00:01:00Z",
     )
-    authority.register(
-        snapshot_id="dataset-root",
-        member_sha256s=(_sha("row-1"), _sha("row-2")),
-    )
+    authority.register(snapshot_id="dataset-root", member_sha256s=first)
 
     with pytest.raises(
         DatasetSnapshotLineageError,
@@ -141,71 +141,117 @@ def test_unrelated_rewrite_with_same_source_license_and_later_cutoff_fails(tmp_p
     ):
         authority.register(
             snapshot_id="dataset-rewrite",
-            member_sha256s=(_sha("row-1"), _sha("rewritten-row-2"), _sha("row-3")),
+            member_sha256s=rewritten,
             parent_snapshot_id="dataset-root",
         )
 
 
 @pytest.mark.parametrize(
-    "members",
+    "child_members",
     [
-        lambda first: (first[0], _sha("row-3")),
-        lambda first: (first[1], first[0], _sha("row-3")),
-        lambda first: (first[0], _sha("replacement"), _sha("row-3")),
+        (_sha("row-1"), _sha("row-3")),
+        (_sha("row-2"), _sha("row-1"), _sha("row-3")),
+        (_sha("row-1"), _sha("replacement"), _sha("row-3")),
     ],
 )
 def test_delete_reorder_or_replace_parent_member_fails(
     tmp_path: Path,
-    members,
+    child_members: tuple[str, ...],
 ) -> None:
     registry, authority = _authority(tmp_path)
+    first = (_sha("row-1"), _sha("row-2"))
     _append_snapshot(
         registry,
         snapshot_id="dataset-root",
-        manifest="manifest-root",
+        members=first,
         cutoff="2026-09-01T00:00:00Z",
         available_at="2026-09-01T00:01:00Z",
     )
     _append_snapshot(
         registry,
         snapshot_id="dataset-child",
-        manifest="manifest-child",
+        members=child_members,
         cutoff="2026-09-02T00:00:00Z",
         available_at="2026-09-02T00:01:00Z",
     )
-    first = (_sha("row-1"), _sha("row-2"))
     authority.register(snapshot_id="dataset-root", member_sha256s=first)
 
     with pytest.raises(DatasetSnapshotLineageError):
         authority.register(
             snapshot_id="dataset-child",
-            member_sha256s=members(first),
+            member_sha256s=child_members,
             parent_snapshot_id="dataset-root",
         )
 
 
-def test_source_license_cutoff_and_manifest_semantics_fail_closed(tmp_path: Path) -> None:
+def test_caller_members_are_rejected_when_registry_manifest_commits_elsewhere(
+    tmp_path: Path,
+) -> None:
     registry, authority = _authority(tmp_path)
+    real_members = (_sha("real-row"),)
+    claimed_members = (_sha("invented-row"),)
+    _append_snapshot(
+        registry,
+        snapshot_id="snapshot",
+        members=real_members,
+        cutoff="2026-09-01T00:00:00Z",
+        available_at="2026-09-01T00:01:00Z",
+    )
+
+    with pytest.raises(
+        DatasetSnapshotLineageError,
+        match="manifest does not commit to exact lineage membership",
+    ):
+        authority.register(
+            snapshot_id="snapshot",
+            member_sha256s=claimed_members,
+        )
+
+
+def test_legacy_arbitrary_manifest_is_unproven_even_with_claimed_members(
+    tmp_path: Path,
+) -> None:
+    registry, authority = _authority(tmp_path)
+    members = (_sha("row-1"),)
+    _append_snapshot(
+        registry,
+        snapshot_id="legacy",
+        members=members,
+        manifest_sha256=_sha("legacy-unstructured-manifest"),
+        cutoff="2026-09-01T00:00:00Z",
+        available_at="2026-09-01T00:01:00Z",
+    )
+
+    with pytest.raises(
+        DatasetSnapshotLineageError,
+        match="manifest does not commit to exact lineage membership",
+    ):
+        authority.register(snapshot_id="legacy", member_sha256s=members)
+
+
+def test_source_license_and_cutoff_changes_fail_closed(tmp_path: Path) -> None:
+    registry, authority = _authority(tmp_path)
+    root_members = (_sha("row-1"),)
+    child_members = (*root_members, _sha("row-2"))
     _append_snapshot(
         registry,
         snapshot_id="root",
-        manifest="manifest-root",
+        members=root_members,
         cutoff="2026-09-02T00:00:00Z",
         available_at="2026-09-02T00:01:00Z",
     )
-    authority.register(snapshot_id="root", member_sha256s=(_sha("row-1"),))
+    authority.register(snapshot_id="root", member_sha256s=root_members)
 
     cases = (
-        ("wrong-source", "manifest-source", "2026-09-03T00:00:00Z", "provider:other", "license:v1", (_sha("row-1"), _sha("row-2"))),
-        ("wrong-license", "manifest-license", "2026-09-03T00:00:00Z", "provider:paper", "license:v2", (_sha("row-1"), _sha("row-2"))),
-        ("backwards-cutoff", "manifest-cutoff", "2026-09-01T00:00:00Z", "provider:paper", "license:v1", (_sha("row-1"), _sha("row-2"))),
-        ("changed-manifest-no-append", "manifest-no-append", "2026-09-03T00:00:00Z", "provider:paper", "license:v1", (_sha("row-1"),)),
+        ("wrong-source", "2026-09-03T00:00:00Z", "provider:other", "license:v1"),
+        ("wrong-license", "2026-09-03T00:00:00Z", "provider:paper", "license:v2"),
+        ("backwards-cutoff", "2026-09-01T00:00:00Z", "provider:paper", "license:v1"),
     )
-    for snapshot_id, manifest, cutoff, source, license_identity, child_members in cases:
+    for snapshot_id, cutoff, source, license_identity in cases:
         _append_snapshot(
             registry,
             snapshot_id=snapshot_id,
-            manifest=manifest,
+            members=child_members,
             cutoff=cutoff,
             available_at="2026-09-03T00:01:00Z",
             source=source,
@@ -221,36 +267,66 @@ def test_source_license_cutoff_and_manifest_semantics_fail_closed(tmp_path: Path
 
 def test_exact_retry_is_idempotent_and_conflicting_retry_is_rejected(tmp_path: Path) -> None:
     registry, authority = _authority(tmp_path)
+    members = (_sha("row-1"), _sha("row-2"))
     _append_snapshot(
         registry,
         snapshot_id="root",
-        manifest="manifest-root",
+        members=members,
         cutoff="2026-09-01T00:00:00Z",
         available_at="2026-09-01T00:01:00Z",
     )
-    members = (_sha("row-1"), _sha("row-2"))
 
     first = authority.register(snapshot_id="root", member_sha256s=members)
     second = authority.register(snapshot_id="root", member_sha256s=members)
     assert first == second
 
-    with pytest.raises(ConflictingDatasetSnapshotLineageError):
+    with pytest.raises(DatasetSnapshotLineageError):
         authority.register(
             snapshot_id="root",
             member_sha256s=(*members, _sha("row-3")),
         )
 
 
-def test_tampered_state_digest_fails_before_ancestry_resolution(tmp_path: Path) -> None:
+def test_conflicting_parent_retry_is_rejected(tmp_path: Path) -> None:
     registry, authority = _authority(tmp_path)
+    root_members = (_sha("row-1"),)
+    child_members = (*root_members, _sha("row-2"))
     _append_snapshot(
         registry,
         snapshot_id="root",
-        manifest="manifest-root",
+        members=root_members,
         cutoff="2026-09-01T00:00:00Z",
         available_at="2026-09-01T00:01:00Z",
     )
-    authority.register(snapshot_id="root", member_sha256s=(_sha("row-1"),))
+    _append_snapshot(
+        registry,
+        snapshot_id="child",
+        members=child_members,
+        cutoff="2026-09-02T00:00:00Z",
+        available_at="2026-09-02T00:01:00Z",
+    )
+    authority.register(snapshot_id="root", member_sha256s=root_members)
+    authority.register(
+        snapshot_id="child",
+        member_sha256s=child_members,
+        parent_snapshot_id="root",
+    )
+
+    with pytest.raises(ConflictingDatasetSnapshotLineageError):
+        authority.register(snapshot_id="child", member_sha256s=child_members)
+
+
+def test_tampered_state_digest_fails_before_ancestry_resolution(tmp_path: Path) -> None:
+    registry, authority = _authority(tmp_path)
+    members = (_sha("row-1"),)
+    _append_snapshot(
+        registry,
+        snapshot_id="root",
+        members=members,
+        cutoff="2026-09-01T00:00:00Z",
+        available_at="2026-09-01T00:01:00Z",
+    )
+    authority.register(snapshot_id="root", member_sha256s=members)
 
     path = tmp_path / "dataset-snapshot-lineage.json"
     state = json.loads(path.read_text(encoding="utf-8"))
@@ -263,24 +339,26 @@ def test_tampered_state_digest_fails_before_ancestry_resolution(tmp_path: Path) 
 
 def test_recomputed_tamper_cannot_substitute_parent_registry_record(tmp_path: Path) -> None:
     registry, authority = _authority(tmp_path)
+    root_members = (_sha("row-1"),)
+    child_members = (*root_members, _sha("row-2"))
     _append_snapshot(
         registry,
         snapshot_id="root",
-        manifest="manifest-root",
+        members=root_members,
         cutoff="2026-09-01T00:00:00Z",
         available_at="2026-09-01T00:01:00Z",
     )
     _append_snapshot(
         registry,
         snapshot_id="child",
-        manifest="manifest-child",
+        members=child_members,
         cutoff="2026-09-02T00:00:00Z",
         available_at="2026-09-02T00:01:00Z",
     )
-    authority.register(snapshot_id="root", member_sha256s=(_sha("row-1"),))
+    authority.register(snapshot_id="root", member_sha256s=root_members)
     authority.register(
         snapshot_id="child",
-        member_sha256s=(_sha("row-1"), _sha("row-2")),
+        member_sha256s=child_members,
         parent_snapshot_id="root",
     )
 
@@ -300,23 +378,25 @@ def test_recomputed_tamper_cannot_substitute_parent_registry_record(tmp_path: Pa
         DatasetSnapshotLineageAuthority(path, registry=registry)
 
 
-def test_unregistered_legacy_snapshot_remains_unproven(tmp_path: Path) -> None:
+def test_unregistered_snapshot_remains_unproven(tmp_path: Path) -> None:
     registry, authority = _authority(tmp_path)
+    first = (_sha("row-1"),)
+    second = (*first, _sha("row-2"))
     _append_snapshot(
         registry,
         snapshot_id="legacy",
-        manifest="manifest-legacy",
+        members=first,
         cutoff="2026-09-01T00:00:00Z",
         available_at="2026-09-01T00:01:00Z",
     )
     _append_snapshot(
         registry,
         snapshot_id="later",
-        manifest="manifest-later",
+        members=second,
         cutoff="2026-09-02T00:00:00Z",
         available_at="2026-09-02T00:01:00Z",
     )
-    authority.register(snapshot_id="later", member_sha256s=(_sha("row-1"),))
+    authority.register(snapshot_id="later", member_sha256s=second)
 
     with pytest.raises(
         DatasetSnapshotLineageError,

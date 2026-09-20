@@ -28,6 +28,11 @@ from . import _provider_observation_payload_strictness as _provider_observation_
 from . import predictive_authority as _predictive_authority  # noqa: E402,F401
 from . import _predictive_authority_type_fence as _predictive_authority_type_fence  # noqa: E402,F401
 
+# Sport-memory durable positive materialization is a product composition authority,
+# not a caller-mintable generation digest. Install the guard before public submodule
+# imports so direct SportMemoryRuntime use cannot bypass canonical checkpoint roots.
+from . import _sport_memory_authority_guard as _sport_memory_authority_guard  # noqa: F401,E402
+
 # Product chrome describes one finished Autosport product. Keep internal/versioned
 # strategy and evidence identities intact while removing legacy V1 product framing.
 from . import _whole_product_title_guard as _whole_product_title_guard  # noqa: F401,E402

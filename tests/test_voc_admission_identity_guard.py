@@ -5,7 +5,9 @@ import sys
 import unittest
 from pathlib import Path
 
-from autosport.voc_evaluation import VOCEvaluationError
+from autosport import _voc_outcome_scoring_base as _base
+from autosport.model_compute_router import ModelComputeRouterError, ModelComputeRouterStore
+from autosport.voc_evaluation import CanonicalVOCAuthorityResolver, VOCEvaluationError
 from autosport.voc_outcome_scoring import append_paired_voc_admission
 
 
@@ -97,6 +99,38 @@ class VOCAdmissionIdentityGuardTests(unittest.TestCase):
         )
         return router
 
+    def test_router_precompute_binds_published_protocol_semantics_and_restart(self) -> None:
+        fixture, target = self._fixture()
+        router = fixture._precommit_router(target)
+        authority = router.get_voc_precompute_admission(f"source:{target.evaluation_id}")
+        self.assertIsNotNone(authority)
+        assert authority is not None
+        protocol = fixture.registry.get("ResearchProtocol", target.research_protocol_id)
+        self.assertIsNotNone(protocol)
+        assert protocol is not None
+        self.assertEqual(authority["schema_version"], 2)
+        self.assertEqual(
+            authority["research_protocol_sha256"],
+            target.research_protocol_sha256,
+        )
+        self.assertEqual(
+            authority["research_protocol_record_sha256"],
+            protocol.record_sha256,
+        )
+        for field in (
+            "research_protocol_registry_prefix_sha256",
+            "evaluation_design_sha256",
+            "cohort_eligibility_sha256",
+        ):
+            self.assertEqual(len(authority[field]), 64)
+        self.assertGreaterEqual(authority["research_protocol_registry_index"], 0)
+
+        reopened = ModelComputeRouterStore(router.path)
+        self.assertEqual(
+            reopened.get_voc_precompute_admission(f"source:{target.evaluation_id}"),
+            authority,
+        )
+
     def test_router_precompute_episode_cannot_be_omitted_from_explicit_cohort(self) -> None:
         fixture, target = self._fixture()
         router = fixture._precommit_router(
@@ -120,40 +154,69 @@ class VOCAdmissionIdentityGuardTests(unittest.TestCase):
                 as_of=_FIXTURE.T_AS_OF,
             )
 
+    def test_missing_protocol_cannot_be_physically_preadmitted_then_backdated(self) -> None:
+        fixture, target = self._fixture()
+        with self.assertRaisesRegex(
+            ModelComputeRouterError,
+            "ResearchProtocol must exist before VOC precompute admission",
+        ):
+            fixture._precommit_router(
+                target,
+                protocol_id="post-outcome-backdated-protocol",
+                cohort_id="voc-cohort-derived",
+            )
+
     def test_foreign_protocol_cannot_enter_target_scored_denominator(self) -> None:
         fixture, target = self._fixture()
-        router = self._append_explicit_admission(
-            fixture,
-            target,
-            protocol_id="foreign-research-protocol",
-            cohort_id="voc-cohort-derived",
-        )
-
         with self.assertRaisesRegex(
-            VOCEvaluationError,
-            "protocol/cohort does not match canonical target",
+            ModelComputeRouterError,
+            "ResearchProtocol must exist before VOC precompute admission",
         ):
-            fixture._authority(compute_execution_store=router).resolve(
-                target.evaluation_id,
-                as_of=_FIXTURE.T_AS_OF,
+            self._append_explicit_admission(
+                fixture,
+                target,
+                protocol_id="foreign-research-protocol",
+                cohort_id="voc-cohort-derived",
             )
 
     def test_foreign_cohort_cannot_enter_target_scored_denominator(self) -> None:
         fixture, target = self._fixture()
-        router = self._append_explicit_admission(
-            fixture,
-            target,
-            protocol_id=target.research_protocol_id,
-            cohort_id="foreign-voc-cohort",
-        )
+        with self.assertRaisesRegex(
+            ModelComputeRouterError,
+            "cohort does not match canonical ResearchProtocol",
+        ):
+            self._append_explicit_admission(
+                fixture,
+                target,
+                protocol_id=target.research_protocol_id,
+                cohort_id="foreign-voc-cohort",
+            )
 
+    def test_unfenced_base_scorer_is_not_a_positive_authority(self) -> None:
+        fixture, target = self._fixture()
+        scorer = _base.CanonicalOutcomeDerivedVOCScoreAuthority(
+            decision_ledger=fixture.ledger,
+            scientific_registry=fixture.registry,
+            outcome_authority=fixture.outcome_authority,
+            outcome_source_root=fixture.root,
+            source_record_file=fixture.outcome_file,
+            source_record_sha256=fixture.outcome_sha256,
+        )
         with self.assertRaisesRegex(
             VOCEvaluationError,
-            "protocol/cohort does not match canonical target",
+            "unfenced legacy VOC scorer is disabled",
         ):
-            fixture._authority(compute_execution_store=router).resolve(
-                target.evaluation_id,
-                as_of=_FIXTURE.T_AS_OF,
+            scorer.resolve(target.evaluation_id, as_of=_FIXTURE.T_AS_OF)
+
+        with self.assertRaisesRegex(
+            TypeError,
+            "exact terminal-aware scorer authority",
+        ):
+            CanonicalVOCAuthorityResolver(
+                fixture.ledger,
+                fixture.registry,
+                fixture.outcome_authority,
+                scorer,
             )
 
 

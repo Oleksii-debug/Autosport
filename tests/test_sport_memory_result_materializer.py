@@ -8,11 +8,14 @@ import sys
 
 import pytest
 
-from autosport.continuous_session import (
-    SettlementResolution,
-    _resolve_authoritative_settlement,
+from autosport.continuous_session import SettlementResolution
+from autosport.event_lifecycle import (
+    CatalogEvent,
+    CatalogPage,
+    ContinuousEventLifecycle,
+    EventLifecycleRecord,
+    EventPhase,
 )
-from autosport.event_lifecycle import EventLifecycleRecord, EventPhase
 from autosport.domain import MarketEvent
 from autosport.opponent_intelligence import OpponentIntelligenceStore
 from autosport.participant_identity import (
@@ -112,6 +115,19 @@ def _quote(
     )
 
 
+class _StaticOutcomeAuthority:
+    def __init__(self) -> None:
+        self.resolution: SettlementResolution | None = None
+
+    def resolve(
+        self,
+        record: EventLifecycleRecord,
+        *,
+        as_of: str,
+    ) -> SettlementResolution | None:
+        return self.resolution
+
+
 def _authorities(
     root: Path,
 ) -> tuple[
@@ -145,7 +161,33 @@ def _authorities(
     market_store = SQLiteMarketStore(root / "market.db")
     market_store.append(_quote("sel-alex-17", 1))
     market_store.append(_quote("sel-blair-23", 2))
-    materializer = SportMemoryResultMaterializer(opponent_store, market_store)
+    lifecycle = ContinuousEventLifecycle(root / "lifecycle.json")
+    lifecycle.apply_page(
+        CatalogPage(
+            source_id="provider-a",
+            stream_epoch="epoch-1",
+            cursor="cursor-1",
+            position=0,
+            events=(
+                CatalogEvent(
+                    source_id="provider-a",
+                    sport="tennis",
+                    event_id="event-1",
+                    phase=EventPhase.COMPLETED,
+                    available_at=T2,
+                    completion_ref="completion-1",
+                    settlement_ref="settlement-1",
+                ),
+            ),
+        ),
+        discovered_at=T2,
+    )
+    materializer = SportMemoryResultMaterializer(
+        opponent_store,
+        market_store,
+        lifecycle=lifecycle,
+        outcome_authority=_StaticOutcomeAuthority(),
+    )
     return identities, opponent_store, market_store, materializer
 
 
@@ -176,51 +218,8 @@ def _binding(
     )
 
 
-class _StaticOutcomeAuthority:
-    def __init__(self, resolution: SettlementResolution) -> None:
-        self.resolution = resolution
-
-    def resolve(
-        self,
-        record: EventLifecycleRecord,
-        *,
-        as_of: str,
-    ) -> SettlementResolution:
-        assert record.identity == self.resolution.event_identity
-        assert record.settlement_ref == self.resolution.settlement_ref
-        assert as_of >= self.resolution.available_at
-        return self.resolution
-
-
-def _resolve_external_settlement(
-    resolution: SettlementResolution,
-) -> SettlementResolution:
-    source_id, provider_event_id = resolution.event_identity.split(":", 1)
-    record = EventLifecycleRecord(
-        identity=resolution.event_identity,
-        source_id=source_id,
-        sport="tennis",
-        event_id=provider_event_id,
-        phase=EventPhase.COMPLETED,
-        first_discovered_at=T0,
-        last_available_at=resolution.available_at,
-        scheduled_start_at=None,
-        completion_ref=f"completion:{resolution.settlement_ref}",
-        settlement_ref=resolution.settlement_ref,
-        completion_discovered_at=resolution.available_at,
-        settlement_discovered_at=resolution.available_at,
-        last_discovered_at=resolution.available_at,
-    )
-    resolved = _resolve_authoritative_settlement(
-        _StaticOutcomeAuthority(resolution),
-        record,
-        as_of=resolution.available_at,
-    )
-    assert resolved is not None
-    return resolved
-
-
 def _settlement(
+    materializer: SportMemoryResultMaterializer,
     binding: SportMemoryResultBinding,
     outcome: str = "win",
     *,
@@ -232,19 +231,21 @@ def _settlement(
 ) -> SettlementResolution:
     opponent_outcome = "void" if outcome == "void" else ("loss" if outcome == "win" else "win")
     assert binding.opponent_quote_key is not None
-    return _resolve_external_settlement(
-        SettlementResolution(
-            event_identity=event_identity,
-            settlement_ref=settlement_ref,
-            quote_outcomes={
-                binding.subject_quote_key: outcome,
-                binding.opponent_quote_key: opponent_outcome,
-            },
-            evidence_id=evidence_id,
-            evidence_sha256=evidence_sha256,
-            available_at=available_at,
-        )
+    canonical = SettlementResolution(
+        event_identity=event_identity,
+        settlement_ref=settlement_ref,
+        quote_outcomes={
+            binding.subject_quote_key: outcome,
+            binding.opponent_quote_key: opponent_outcome,
+        },
+        evidence_id=evidence_id,
+        evidence_sha256=evidence_sha256,
+        available_at=available_at,
     )
+    authority = materializer.outcome_authority
+    assert isinstance(authority, _StaticOutcomeAuthority)
+    authority.resolution = canonical
+    return replace(canonical)
 
 
 def test_caller_constructed_exact_settlement_cannot_authorize_memory_truth(tmp_path):
@@ -253,6 +254,8 @@ def test_caller_constructed_exact_settlement_cannot_authorize_memory_truth(tmp_p
     assert binding.opponent_quote_key is not None
 
     for outcome in ("win", "loss", "void"):
+        canonical_outcome = "loss" if outcome == "win" else "win"
+        _settlement(materializer, binding, canonical_outcome)
         opponent_outcome = (
             "void" if outcome == "void" else ("loss" if outcome == "win" else "win")
         )
@@ -269,7 +272,7 @@ def test_caller_constructed_exact_settlement_cannot_authorize_memory_truth(tmp_p
         )
         with pytest.raises(
             SportMemoryResultMaterializationError,
-            match="product-owned outcome-authority",
+            match="settlement assertion differs from product-owned outcome authority",
         ):
             materializer.materialize(binding, forged, as_of=T2)
 
@@ -277,10 +280,10 @@ def test_caller_constructed_exact_settlement_cannot_authorize_memory_truth(tmp_p
     market_store.close()
 
 
-def test_sealed_settlement_capability_is_bound_to_exact_payload(tmp_path):
+def test_caller_settlement_payload_must_equal_re_resolved_product_truth(tmp_path):
     _, store, market_store, materializer = _authorities(tmp_path)
     binding = _binding(materializer, market_store)
-    canonical = _settlement(binding, "win")
+    canonical = _settlement(materializer, binding, "win")
     assert binding.opponent_quote_key is not None
 
     forged = replace(
@@ -292,7 +295,7 @@ def test_sealed_settlement_capability_is_bound_to_exact_payload(tmp_path):
     )
     with pytest.raises(
         SportMemoryResultMaterializationError,
-        match="product-owned outcome-authority",
+        match="settlement assertion differs from product-owned outcome authority",
     ):
         materializer.materialize(binding, forged, as_of=T2)
 
@@ -328,7 +331,7 @@ def test_canonical_root_identity_tamper_fails_closed(tmp_path):
         SportMemoryResultMaterializationError,
         match="canonical pre-reveal",
     ):
-        materializer.materialize(forged, _settlement(forged), as_of=T2)
+        materializer.materialize(forged, _settlement(materializer, forged), as_of=T2)
     assert store.graph_edges(as_of=T3) == ()
     market_store.close()
 
@@ -356,7 +359,7 @@ def test_pre_reveal_provider_inference_persists_causal_cutoff(tmp_path):
 
     assert binding.opponent_selection_id == "sel-blair-23"
     assert binding.provider_inference_as_of == T1
-    receipt = materializer.materialize(binding, _settlement(binding), as_of=T2)
+    receipt = materializer.materialize(binding, _settlement(materializer, binding), as_of=T2)
     assert receipt.performance_id is not None
     assert len(store.graph_edges(as_of=T2)) == 1
     market_store.close()
@@ -421,7 +424,7 @@ def test_post_reveal_identity_correction_cannot_backdate_provider_inference(tmp_
     assert binding.frozen_at == T1
     assert binding.provider_inference_as_of == T3
 
-    settlement = _settlement(binding, available_at=T2)
+    settlement = _settlement(materializer, binding, available_at=T2)
     with pytest.raises(
         SportMemoryResultMaterializationError,
         match="provider-selection inference must predate settlement reveal",
@@ -433,7 +436,7 @@ def test_post_reveal_identity_correction_cannot_backdate_provider_inference(tmp_
         SportMemoryResultMaterializationError,
         match="canonical pre-reveal",
     ):
-        materializer.materialize(forged, _settlement(forged, available_at=T2), as_of=T3)
+        materializer.materialize(forged, _settlement(materializer, forged, available_at=T2), as_of=T3)
     assert store.graph_edges(as_of=T3) == ()
     market_store.close()
 
@@ -441,7 +444,7 @@ def test_post_reveal_identity_correction_cannot_backdate_provider_inference(tmp_
 def test_result_projection_is_exactly_once_across_restart_and_causally_hidden_before_reveal(tmp_path):
     _, store, market_store, materializer = _authorities(tmp_path)
     binding = _binding(materializer, market_store)
-    settlement = _settlement(binding)
+    settlement = _settlement(materializer, binding)
 
     first = materializer.materialize(binding, settlement, as_of=T2)
     duplicate = materializer.materialize(binding, settlement, as_of=T3)
@@ -462,7 +465,7 @@ def test_result_projection_is_exactly_once_across_restart_and_causally_hidden_be
     reopened_market = SQLiteMarketStore(tmp_path / "market.db")
     reopened = SportMemoryResultMaterializer(reopened_store, reopened_market)
     replay_binding = _binding(reopened, reopened_market)
-    replay = reopened.materialize(replay_binding, _settlement(replay_binding), as_of=T3)
+    replay = reopened.materialize(replay_binding, _settlement(reopened, replay_binding), as_of=T3)
     assert replay == first
     assert len(reopened_store.graph_edges(as_of=T3)) == 1
     reopened_market.close()
@@ -471,7 +474,7 @@ def test_result_projection_is_exactly_once_across_restart_and_causally_hidden_be
 def test_result_projection_requires_explicit_store_correction_lineage(tmp_path):
     _, store, market_store, materializer = _authorities(tmp_path)
     binding = _binding(materializer, market_store)
-    first = materializer.materialize(binding, _settlement(binding), as_of=T2)
+    first = materializer.materialize(binding, _settlement(materializer, binding), as_of=T2)
     correction = _settlement(
         binding,
         "loss",
@@ -520,7 +523,7 @@ def test_identity_retarget_between_freeze_and_reveal_fails_closed(tmp_path):
     ):
         materializer.materialize(
             binding,
-            _settlement(binding, available_at=T3),
+            _settlement(materializer, binding, available_at=T3),
             as_of=T3,
         )
     assert store.graph_edges(as_of=T3) == ()
@@ -539,7 +542,7 @@ def test_late_event_roster_correction_requires_explicit_restatement(tmp_path):
     ):
         materializer.materialize(
             binding,
-            _settlement(binding, available_at=T3),
+            _settlement(materializer, binding, available_at=T3),
             as_of=T3,
         )
     assert store.graph_edges(as_of=T3) == ()
@@ -673,14 +676,14 @@ def test_future_or_noncanonical_backdated_binding_cannot_enter_memory(tmp_path):
         SportMemoryResultMaterializationError,
         match="not causally available",
     ):
-        materializer.materialize(binding, _settlement(binding), as_of=T1)
+        materializer.materialize(binding, _settlement(materializer, binding), as_of=T1)
 
     forged = replace(binding, frozen_at=T0)
     with pytest.raises(
         SportMemoryResultMaterializationError,
         match="canonical pre-reveal|lacks canonical pre-reveal",
     ):
-        materializer.materialize(forged, _settlement(forged), as_of=T2)
+        materializer.materialize(forged, _settlement(materializer, forged), as_of=T2)
 
     post_reveal_backdate = replace(
         binding,
@@ -693,7 +696,7 @@ def test_future_or_noncanonical_backdated_binding_cannot_enter_memory(tmp_path):
     ):
         materializer.materialize(
             post_reveal_backdate,
-            _settlement(post_reveal_backdate),
+            _settlement(materializer, post_reveal_backdate),
             as_of=T2,
         )
     assert store.graph_edges(as_of=T3) == ()
@@ -715,7 +718,7 @@ def test_binding_digest_tamper_and_swapped_quote_fail_closed(tmp_path):
     ):
         materializer.materialize(
             replace(binding, evidence_sha256=SHA_C),
-            _settlement(replace(binding, evidence_sha256=SHA_C)),
+            _settlement(materializer, replace(binding, evidence_sha256=SHA_C)),
             as_of=T2,
         )
 
@@ -724,7 +727,7 @@ def test_binding_digest_tamper_and_swapped_quote_fail_closed(tmp_path):
         SportMemoryResultMaterializationError,
         match="subject quote key",
     ):
-        materializer.materialize(swapped, _settlement(swapped), as_of=T2)
+        materializer.materialize(swapped, _settlement(materializer, swapped), as_of=T2)
     assert store.graph_edges(as_of=T3) == ()
     market_store.close()
 
@@ -742,7 +745,7 @@ def test_unrelated_alias_or_market_context_cannot_reuse_valid_source_digest(tmp_
             SportMemoryResultMaterializationError,
             match="canonical pre-reveal|canonical identity|canonical participant",
         ):
-            materializer.materialize(forged, _settlement(forged), as_of=T2)
+            materializer.materialize(forged, _settlement(materializer, forged), as_of=T2)
     assert store.graph_edges(as_of=T3) == ()
     market_store.close()
 
@@ -754,7 +757,7 @@ def test_event_and_subject_quote_must_match_frozen_binding(tmp_path):
     with pytest.raises(SportMemoryResultMaterializationError, match="event does not match"):
         materializer.materialize(
             binding,
-            _settlement(binding, event_identity="provider-a:event-2"),
+            _settlement(materializer, binding, event_identity="provider-a:event-2"),
             as_of=T2,
         )
 
@@ -798,7 +801,7 @@ def test_initial_void_is_consumed_without_fabricating_performance(tmp_path):
 def test_win_to_void_correction_retires_performance_across_restart_without_fake_score(tmp_path):
     _, store, market_store, materializer = _authorities(tmp_path)
     binding = _binding(materializer, market_store)
-    win = materializer.materialize(binding, _settlement(binding), as_of=T2)
+    win = materializer.materialize(binding, _settlement(materializer, binding), as_of=T2)
     assert win.performance_id is not None
     assert len(store.graph_edges(as_of=T2)) == 1
 

@@ -5,8 +5,13 @@ import json
 
 import pytest
 
-from autosport.opponent_intelligence import OpponentIntelligenceStore
+from autosport.learning_environment import EvidenceTruth
+from autosport.opponent_intelligence import (
+    ObservedPerformance,
+    OpponentIntelligenceStore,
+)
 from autosport.participant_identity import (
+    AliasRecord,
     EntityIdentity,
     EntityKind,
     ParticipantIdentityRegistry,
@@ -17,19 +22,89 @@ from autosport.sport_memory_checkpoint import (
     load_verified_sport_memory_authority_checkpoint,
     open_bound_sport_memory_runtime,
 )
-from autosport.sport_memory_runtime import SportMemoryRuntime
+from autosport.sport_memory_runtime import SportMemoryRuntime, SportMemoryScope
 
 
 SHA_A = "a" * 64
+SHA_B = "b" * 64
+T0 = "2026-09-19T08:00:00Z"
+T1 = "2026-09-20T09:00:00Z"
+T2 = "2026-09-20T10:00:00Z"
+T3 = "2026-09-20T10:00:01Z"
 
 
-def _canonical_stores(tmp_path):
+def _entity(entity_id: str, kind: EntityKind) -> EntityIdentity:
+    return EntityIdentity(
+        entity_id,
+        kind,
+        f"provider:{entity_id}",
+        SHA_A,
+        T0,
+        T0,
+    )
+
+
+def _alias(text: str, entity_id: str) -> AliasRecord:
+    return AliasRecord(
+        "provider-a",
+        text,
+        entity_id,
+        T0,
+        None,
+        T0,
+        SHA_A,
+        T0,
+    )
+
+
+def _performance(
+    *,
+    event_id: str = "event-1",
+    opponent_alias: str = "Blair",
+    score: str = "1",
+    evidence_sha256: str = SHA_A,
+) -> ObservedPerformance:
+    return ObservedPerformance(
+        event_id=event_id,
+        source_id="provider-a",
+        subject_alias="Alex",
+        opponent_alias=opponent_alias,
+        sport_id="tennis",
+        league_alias="Tour A",
+        market_context_id="match-outcome",
+        score=score,
+        observed_at=T1,
+        available_at=T1,
+        recorded_at=T1,
+        evidence_sha256=evidence_sha256,
+        truth=EvidenceTruth.OBSERVED,
+    )
+
+
+def _canonical_stores(tmp_path, *, populated: bool = False):
     identity_path = tmp_path / "participant-identity.json"
     opponent_path = tmp_path / "opponent-intelligence.json"
     identity = ParticipantIdentityRegistry.initialize_pristine(identity_path)
+    if populated:
+        for item in (
+            _entity("p-alex", EntityKind.PARTICIPANT),
+            _entity("p-blair", EntityKind.PARTICIPANT),
+            _entity("p-casey", EntityKind.PARTICIPANT),
+            _entity("league-tour-a", EntityKind.LEAGUE),
+        ):
+            identity.add_entity(item)
+        for alias in (
+            _alias("Alex", "p-alex"),
+            _alias("Blair", "p-blair"),
+            _alias("Casey", "p-casey"),
+            _alias("Tour A", "league-tour-a"),
+        ):
+            identity.add_alias(alias)
     opponent = OpponentIntelligenceStore.initialize_pristine(
         opponent_path, identity
     )
+    if populated:
+        opponent.record_performance(_performance())
     return identity, opponent
 
 
@@ -37,6 +112,14 @@ def _paths(tmp_path):
     return (
         tmp_path / "sport-memory-authority.json",
         tmp_path / "sport-memory.json",
+    )
+
+
+def _scope() -> SportMemoryScope:
+    return SportMemoryScope(
+        sport_id="tennis",
+        league_entity_id="league-tour-a",
+        market_context_id="match-outcome",
     )
 
 
@@ -76,9 +159,9 @@ def test_bound_runtime_captures_exact_roots_and_reopens_same_generation(tmp_path
 def test_bound_runtime_consumes_fresh_authority_after_canonical_files_change(tmp_path):
     identity, opponent = _canonical_stores(tmp_path)
 
-    # Change both canonical persisted roots after the caller objects were loaded,
+    # Change both canonical persisted files after the caller objects were loaded,
     # while keeping each file independently valid. The bound runtime must not
-    # pair these newer roots with the stale caller-owned in-memory authority.
+    # pair the persisted authority with stale caller-owned in-memory objects.
     for path in (identity.path, opponent.path):
         raw = json.loads(path.read_text(encoding="utf-8"))
         path.write_text(
@@ -104,7 +187,12 @@ def test_bound_runtime_consumes_fresh_authority_after_canonical_files_change(tmp
     assert runtime.opponent_authority.identity_registry is not identity
     assert runtime.opponent_authority.path == opponent.path
     assert checkpoint.identity_root_sha256 == sha256(identity.path.read_bytes()).hexdigest()
-    assert checkpoint.opponent_root_sha256 == sha256(opponent.path.read_bytes()).hexdigest()
+    assert (
+        load_verified_sport_memory_authority_checkpoint(
+            checkpoint_path, identity, opponent
+        )
+        == checkpoint
+    )
 
 
 def test_valid_identity_rollback_is_rejected_before_sport_memory_reopen(tmp_path):
@@ -150,8 +238,41 @@ def test_valid_identity_rollback_is_rejected_before_sport_memory_reopen(tmp_path
         )
 
 
-def test_valid_opponent_file_drift_is_rejected_even_when_semantics_parse(tmp_path):
-    identity, opponent = _canonical_stores(tmp_path)
+def test_opponent_formatting_drift_does_not_redefine_source_generation(tmp_path):
+    identity, opponent = _canonical_stores(tmp_path, populated=True)
+    checkpoint_path, runtime_path = _paths(tmp_path)
+    runtime = initialize_or_open_bound_sport_memory_runtime(
+        runtime_path,
+        checkpoint_path,
+        identity,
+        opponent,
+    )
+    generation = runtime.authority_generation_sha256
+
+    # Byte-only reserialization is not a source-authority transition. The
+    # canonical source projection must remain stable even though the file hash
+    # changes, while the store still passes its own validation boundary.
+    raw = json.loads(opponent.path.read_text(encoding="utf-8"))
+    opponent.path.write_text(
+        json.dumps(raw, sort_keys=True, indent=4) + "\n",
+        encoding="utf-8",
+    )
+    reopened_identity = ParticipantIdentityRegistry(identity.path)
+    rewritten_opponent = OpponentIntelligenceStore(
+        opponent.path, reopened_identity
+    )
+    reopened = open_bound_sport_memory_runtime(
+        runtime_path,
+        checkpoint_path,
+        reopened_identity,
+        rewritten_opponent,
+    )
+
+    assert reopened.authority_generation_sha256 == generation
+
+
+def test_canonical_opponent_source_drift_is_rejected(tmp_path):
+    identity, opponent = _canonical_stores(tmp_path, populated=True)
     checkpoint_path, runtime_path = _paths(tmp_path)
     initialize_or_open_bound_sport_memory_runtime(
         runtime_path,
@@ -160,16 +281,18 @@ def test_valid_opponent_file_drift_is_rejected_even_when_semantics_parse(tmp_pat
         opponent,
     )
 
-    # Re-serialize the same valid opponent checkpoint with different bytes.
-    # Exact persisted-root identity is intentional: a rewritten upstream root
-    # must create a new common generation rather than silently reusing the old.
-    raw = json.loads(opponent.path.read_text(encoding="utf-8"))
-    opponent.path.write_text(
-        json.dumps(raw, sort_keys=True, indent=4) + "\n",
-        encoding="utf-8",
+    # A new observed performance is genuine upstream evidence. It must change the
+    # source-authority projection and cannot be consumed under the old generation.
+    opponent.record_performance(
+        _performance(
+            event_id="event-2",
+            opponent_alias="Casey",
+            score="0",
+            evidence_sha256=SHA_B,
+        )
     )
     reopened_identity = ParticipantIdentityRegistry(identity.path)
-    rewritten_opponent = OpponentIntelligenceStore(
+    changed_opponent = OpponentIntelligenceStore(
         opponent.path, reopened_identity
     )
 
@@ -181,8 +304,60 @@ def test_valid_opponent_file_drift_is_rejected_even_when_semantics_parse(tmp_pat
             runtime_path,
             checkpoint_path,
             reopened_identity,
-            rewritten_opponent,
+            changed_opponent,
         )
+
+
+def test_materialize_derived_snapshots_preserves_bound_source_generation(tmp_path):
+    identity, opponent = _canonical_stores(tmp_path, populated=True)
+    checkpoint_path, runtime_path = _paths(tmp_path)
+    runtime = initialize_or_open_bound_sport_memory_runtime(
+        runtime_path,
+        checkpoint_path,
+        identity,
+        opponent,
+    )
+    checkpoint = load_verified_sport_memory_authority_checkpoint(
+        checkpoint_path,
+        identity,
+        opponent,
+    )
+
+    artifact = runtime.materialize(
+        participant_entity_id="p-alex",
+        scope=_scope(),
+        causal_cutoff=T2,
+        published_at=T3,
+        code_sha256=SHA_A,
+        dependency_sha256=SHA_B,
+        min_support=1,
+    )
+    raw = json.loads(opponent.path.read_text(encoding="utf-8"))
+    assert raw["rating_snapshots"]
+    assert raw["feature_snapshots"]
+
+    # build_snapshots durably wrote derived cache output into the opponent file.
+    # That must not invalidate the immutable upstream generation that authorized
+    # this artifact; a fresh process must reopen the bound runtime successfully.
+    reopened_identity = ParticipantIdentityRegistry(identity.path)
+    reopened_opponent = OpponentIntelligenceStore(
+        opponent.path, reopened_identity
+    )
+    reopened = open_bound_sport_memory_runtime(
+        runtime_path,
+        checkpoint_path,
+        reopened_identity,
+        reopened_opponent,
+    )
+
+    assert reopened.authority_generation_sha256 == checkpoint.generation_sha256
+    assert reopened.get(artifact.memory_id) == artifact
+    assert (
+        load_verified_sport_memory_authority_checkpoint(
+            checkpoint_path, reopened_identity, reopened_opponent
+        )
+        == checkpoint
+    )
 
 
 def test_checkpoint_parser_rejects_unknown_fields_and_boolean_version(tmp_path):

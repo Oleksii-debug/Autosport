@@ -15,6 +15,7 @@ from autosport.research_multiplicity import (
     MultiplicityControlKind,
     SequentialDecision,
     SequentialLookEvidence,
+    SequentialMultiplicityEvidenceStore,
 )
 from autosport.scientific_registry import (
     DatasetSnapshot,
@@ -120,8 +121,8 @@ def _experiment(*, experiment_id: str = "experiment-1", protocol_id: str = "prot
     return ExperimentRecord(experiment_id, protocol_id, "dataset-1", "features-1", "strategy-1", "eval-1", 7, config_sha256, outcome, T1, model_version_id="model-1", completed_at=T3, notes="frozen result")
 
 
-def _look(plan, member, bundle, experiment, *, index=1, p="0.001") -> SequentialLookEvidence:
-    return SequentialLookEvidence(family_plan_sha256=plan.plan_sha256, member_authority_id=member.member_authority_id, hypothesis_id=member.hypothesis_id, experiment_id=experiment.experiment_id, evaluation_bundle_id=bundle.evaluation_bundle_id, evaluation_bundle_sha256=bundle.bundle_sha256, look_index=index, observed_p_value=Decimal(p), classification=experiment.outcome, observed_at=T3, candidate_label="renamable display label")
+def _look(plan, member, bundle, experiment, *, index=1, p="0.001", observed_at=T3) -> SequentialLookEvidence:
+    return SequentialLookEvidence(family_plan_sha256=plan.plan_sha256, member_authority_id=member.member_authority_id, hypothesis_id=member.hypothesis_id, experiment_id=experiment.experiment_id, evaluation_bundle_id=bundle.evaluation_bundle_id, evaluation_bundle_sha256=bundle.bundle_sha256, look_index=index, observed_p_value=Decimal(p), classification=experiment.outcome, observed_at=observed_at, candidate_label="renamable display label")
 
 
 def _promotion_evidence(*, store: TrialFamilyAccountingStore, experiment: ExperimentRecord, bundle: EvaluationBundleRef) -> PromotionEvidence:
@@ -257,6 +258,51 @@ def test_sequential_truth_is_native_store_backed_and_exact_retry_is_idempotent(t
     assert store.snapshot(as_of=T4).registered_looks == 1
     with pytest.raises(ValueError, match="look_index"):
         store.register_sequential_look(attempt_id=attempt.attempt_id, evidence=_look(plan, member, bundle, experiment, index=3, p="0.5"), registry=registry)
+
+
+def test_trial_event_cannot_backdate_durable_sequential_history(tmp_path):
+    registry, _, bundle, candidate, member, plan, store = _foundation(tmp_path)
+    attempt = store.start_attempt(semantic_attempt_id="look-first", member_authority_id=member.member_authority_id, candidate=candidate, created_at=T1)
+    experiment = _experiment(outcome=ResearchOutcome.NULL)
+    registry.append(experiment)
+    store.complete_attempt(attempt_id=attempt.attempt_id, experiment_id=experiment.experiment_id, registry=registry)
+    look = _look(plan, member, bundle, experiment, index=1, p="0.5", observed_at=T4)
+    assert store.register_sequential_look(attempt_id=attempt.attempt_id, evidence=look, registry=registry) is SequentialDecision.CONTINUE
+    with pytest.raises(ValueError, match="durable sequential history"):
+        store.start_attempt(semantic_attempt_id="backdated-after-look", member_authority_id=member.member_authority_id, candidate=candidate, created_at=T3)
+    assert store.snapshot(as_of=T4).total_attempts == 1
+
+
+def test_sequential_append_rechecks_trial_high_water_inside_workspace_lock(tmp_path, monkeypatch):
+    registry, _, bundle, candidate, member, plan, store = _foundation(tmp_path)
+    attempt = store.start_attempt(semantic_attempt_id="prepared-look", member_authority_id=member.member_authority_id, candidate=candidate, created_at=T1)
+    experiment = _experiment(outcome=ResearchOutcome.NULL)
+    registry.append(experiment)
+    store.complete_attempt(attempt_id=attempt.attempt_id, experiment_id=experiment.experiment_id, registry=registry)
+    stale_look = _look(plan, member, bundle, experiment, index=1, p="0.5", observed_at=T3)
+
+    original_append = SequentialMultiplicityEvidenceStore.append
+    injected = False
+
+    def interleaving_append(sequential_store, evidence, **kwargs):
+        nonlocal injected
+        if not injected:
+            injected = True
+            store.start_attempt(
+                semantic_attempt_id="interleaved-t4",
+                member_authority_id=member.member_authority_id,
+                candidate=candidate,
+                created_at=T4,
+            )
+        return original_append(sequential_store, evidence, **kwargs)
+
+    monkeypatch.setattr(SequentialMultiplicityEvidenceStore, "append", interleaving_append)
+    with pytest.raises(ValueError, match="must not backdate durable family history"):
+        store.register_sequential_look(attempt_id=attempt.attempt_id, evidence=stale_look, registry=registry)
+    assert injected
+    snapshot = store.snapshot(as_of=T4)
+    assert snapshot.total_attempts == 2
+    assert snapshot.registered_looks == 0
 
 
 def test_promotion_guard_requires_exact_hashes_count_registry_and_native_sequential_truth(tmp_path):

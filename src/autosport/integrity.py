@@ -1,20 +1,109 @@
 from __future__ import annotations
 
+from contextlib import contextmanager
 import hashlib
 import json
 import os
 import tempfile
 import threading
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
+
+if os.name == "nt":
+    import msvcrt
+else:
+    import fcntl
 
 
-# NamedTemporaryFile isolates serialization for concurrent writers, but Windows can
-# still reject simultaneous os.replace() calls that publish to the same destination.
-# Keep only the final same-process publication syscall serialized; JSON encoding,
-# flushing, and fsync remain independent/concurrent and cross-process RMW ownership
-# stays with the higher-level durable-state locks.
+# NamedTemporaryFile isolates serialization for concurrent writers. The final
+# publication still needs a durable per-path writer fence: otherwise a canonical
+# source writer and a derived-snapshot writer can each publish a whole-file image
+# built from different generations and silently erase the other's update.
 _ATOMIC_JSON_PUBLISH_LOCK = threading.Lock()
+_PATH_LOCKS_GUARD = threading.Lock()
+_PATH_LOCKS: dict[str, threading.RLock] = {}
+_PATH_LOCK_LOCAL = threading.local()
+
+
+def _resolved_key(path: Path) -> str:
+    try:
+        return str(path.resolve(strict=False))
+    except OSError:
+        return str(path.absolute())
+
+
+def _thread_lock_for(path: Path) -> threading.RLock:
+    key = _resolved_key(path)
+    with _PATH_LOCKS_GUARD:
+        lock = _PATH_LOCKS.get(key)
+        if lock is None:
+            lock = threading.RLock()
+            _PATH_LOCKS[key] = lock
+        return lock
+
+
+def _lock_handle(handle) -> None:
+    if os.name == "nt":
+        handle.seek(0, os.SEEK_END)
+        if handle.tell() == 0:
+            handle.write(b"\0")
+            handle.flush()
+            os.fsync(handle.fileno())
+        handle.seek(0)
+        msvcrt.locking(handle.fileno(), msvcrt.LK_LOCK, 1)
+    else:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+
+
+def _unlock_handle(handle) -> None:
+    if os.name == "nt":
+        handle.seek(0)
+        msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+    else:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
+
+@contextmanager
+def durable_path_lock(path: str | Path) -> Iterator[None]:
+    """Serialize canonical read/modify/write publication for one durable path.
+
+    The sidecar lock is intentionally persistent. Removing a lock file after
+    release can split future lockers across different inodes. A per-process
+    re-entrant guard makes nested ``atomic_write_json`` calls safe while the OS
+    lock provides the cross-process fence required by Windows product runtimes.
+    """
+
+    destination = Path(path)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    key = _resolved_key(destination)
+    thread_lock = _thread_lock_for(destination)
+
+    with thread_lock:
+        held = getattr(_PATH_LOCK_LOCAL, "held", None)
+        if held is None:
+            held = {}
+            _PATH_LOCK_LOCAL.held = held
+        current = held.get(key)
+        if current is not None:
+            current[0] += 1
+            try:
+                yield
+            finally:
+                current[0] -= 1
+            return
+
+        lock_path = destination.with_name(f".{destination.name}.lock")
+        handle = lock_path.open("a+b")
+        try:
+            _lock_handle(handle)
+            held[key] = [1, handle]
+            try:
+                yield
+            finally:
+                del held[key]
+                _unlock_handle(handle)
+        finally:
+            handle.close()
 
 
 def sha256_file(path: str | Path) -> str:
@@ -61,8 +150,9 @@ def atomic_write_json(path: str | Path, payload: dict[str, Any]) -> None:
             handle.write("\n")
             handle.flush()
             os.fsync(handle.fileno())
-        with _ATOMIC_JSON_PUBLISH_LOCK:
-            os.replace(temporary, destination)
+        with durable_path_lock(destination):
+            with _ATOMIC_JSON_PUBLISH_LOCK:
+                os.replace(temporary, destination)
     finally:
         if temporary is not None:
             try:

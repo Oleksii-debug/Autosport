@@ -152,7 +152,11 @@ def test_owner_initialization_persists_only_authority_even_with_supervised_ceili
     assert persisted.state == "valid"
     assert persisted.contract is not None
     assert persisted.contract.automation_level is AutomationLevel.SUPERVISED_EXECUTION
-    assert {path.name for path in tmp_path.iterdir()} == {
+    expected_files = {
         EconomicGoalStore.FILE_NAME,
         WorkspaceEconomicLock.FILE_NAME,
     }
+    allowed_lock_sidecars = {f".{name}.lock" for name in expected_files}
+    actual_files = {path.name for path in tmp_path.iterdir()}
+    assert actual_files - allowed_lock_sidecars == expected_files
+    assert actual_files <= expected_files | allowed_lock_sidecars

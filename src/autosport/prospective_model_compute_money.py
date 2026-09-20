@@ -284,6 +284,19 @@ def resolve_prospective_model_compute_money(
             "router_store must be the exact canonical ModelComputeRouterStore type"
         )
 
+    # An exact store instance is still mutable Python state. Instance-level
+    # shadows must never intercept authority-bearing durable reads.
+    instance_state = vars(router_store)
+    shadowed_authority_methods = tuple(
+        name
+        for name in ("get_request", "get_decision")
+        if name in instance_state
+    )
+    if shadowed_authority_methods:
+        raise ProspectiveModelComputeMoneyError(
+            "router_store authority method shadow is not allowed"
+        )
+
     proposal_ts = getattr(intent.risk_context, "proposal_ts", None)
     if proposal_ts is None:
         raise ProspectiveModelComputeMoneyError(
@@ -297,7 +310,7 @@ def resolve_prospective_model_compute_money(
         )
 
     canonical_request_id = _text(request_id, "request_id")
-    request = router_store.get_request(canonical_request_id)
+    request = ModelComputeRouterStore.get_request(router_store, canonical_request_id)
     if request is None:
         raise ProspectiveModelComputeMoneyError(
             "canonical model-compute route request is missing"
@@ -325,7 +338,7 @@ def resolve_prospective_model_compute_money(
             "canonical model-compute request payload identity mismatch"
         )
 
-    decision = router_store.get_decision(canonical_request_id)
+    decision = ModelComputeRouterStore.get_decision(router_store, canonical_request_id)
     if decision is None:
         raise ProspectiveModelComputeMoneyError(
             "canonical model-compute route decision is missing"

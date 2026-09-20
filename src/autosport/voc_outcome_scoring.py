@@ -226,15 +226,13 @@ def _execution_matches_admission(
         raise _base.VOCEvaluationError(
             "VOC terminal execution is not bound to its canonical route request"
         )
-    if (
-        evidence.decision_id != decision.decision_id
-        or decision.candidate_id != challenger["candidate_id"]
-        or decision.backend_id != challenger["backend_id"]
-        or decision.model_id != challenger["model_id"]
-        or decision.config_sha256 != challenger["config_sha256"]
-    ):
+    # A paired VOC challenger is deliberately a shadow computation and need
+    # not be the candidate selected by the production route. Bind the terminal
+    # execution to the exact canonical route request/decision, while the
+    # challenger backend/model/config identity is independently checked above.
+    if evidence.decision_id != decision.decision_id:
         raise _base.VOCEvaluationError(
-            "VOC terminal execution route decision does not match paired admission"
+            "VOC terminal execution does not match canonical route decision"
         )
     admitted_at = _base._instant(
         getattr(admission_record, "recorded_at"), field="VOC admission recorded_at"
@@ -639,7 +637,7 @@ class CanonicalOutcomeDerivedVOCScoreAuthority(
                 )
 
         samples = evidence.get("samples")
-        if type(samples) is not list or not samples:
+        if not isinstance(samples, (list, tuple)) or not samples:
             raise _base.VOCEvaluationError(
                 "canonical VOC scoring samples are missing"
             )

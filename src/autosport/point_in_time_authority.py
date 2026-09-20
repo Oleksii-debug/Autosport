@@ -52,6 +52,7 @@ _POLICY_KEYS: Final = frozenset(
         "source_identity",
         "policy_version",
         "policy_content_sha256",
+        "policy_content_json",
         "witness_kind",
         "frozen_at",
         "record_sha256",
@@ -240,8 +241,66 @@ class RevisionPolicyAuthority:
     source_identity: str
     policy_version: str
     policy_content_sha256: str
+    policy_content_json: str
     witness_kind: str
     frozen_at: datetime
+
+    @staticmethod
+    def _parse_content(value: object) -> dict[str, object]:
+        text = _text(value, "policy_content_json")
+        try:
+            raw = strict_json_loads(text)
+        except (TypeError, ValueError) as exc:
+            raise SourceRevisionAuthorityError(
+                "revision policy content must be strict canonical JSON"
+            ) from exc
+        expected = frozenset(
+            {
+                "schema",
+                "schema_version",
+                "source_identity",
+                "policy_version",
+                "witness_kind",
+                "availability_semantics",
+            }
+        )
+        if not isinstance(raw, dict) or frozenset(raw) != expected:
+            raise SourceRevisionAuthorityError(
+                "revision policy content fields mismatch"
+            )
+        if (
+            raw["schema"] != "autosport.revision_availability_policy"
+            or raw["schema_version"] != 1
+        ):
+            raise SourceRevisionAuthorityError(
+                "unsupported revision policy content schema"
+            )
+        canonical = {
+            "schema": raw["schema"],
+            "schema_version": raw["schema_version"],
+            "source_identity": _text(
+                raw["source_identity"],
+                "policy source_identity",
+            ),
+            "policy_version": _text(
+                raw["policy_version"],
+                "policy_version",
+            ),
+            "witness_kind": _text(raw["witness_kind"], "witness_kind"),
+            "availability_semantics": _text(
+                raw["availability_semantics"],
+                "availability_semantics",
+            ),
+        }
+        if canonical["availability_semantics"] != "source_as_of<=available_at":
+            raise SourceRevisionAuthorityError(
+                "unsupported revision policy availability semantics"
+            )
+        if _canonical_json(canonical) != text:
+            raise SourceRevisionAuthorityError(
+                "revision policy content must use canonical encoding"
+            )
+        return canonical
 
     def __post_init__(self) -> None:
         for name in (
@@ -256,7 +315,28 @@ class RevisionPolicyAuthority:
             "policy_content_sha256",
             _sha256(self.policy_content_sha256, "policy_content_sha256"),
         )
+        object.__setattr__(
+            self,
+            "policy_content_json",
+            _text(self.policy_content_json, "policy_content_json"),
+        )
         object.__setattr__(self, "frozen_at", _aware_utc(self.frozen_at, "frozen_at"))
+        content = self._parse_content(self.policy_content_json)
+        actual_content_sha256 = hashlib.sha256(
+            self.policy_content_json.encode("utf-8")
+        ).hexdigest()
+        if actual_content_sha256 != self.policy_content_sha256:
+            raise SourceRevisionAuthorityError(
+                "revision policy content digest mismatch"
+            )
+        if (
+            content["source_identity"] != self.source_identity
+            or content["policy_version"] != self.policy_version
+            or content["witness_kind"] != self.witness_kind
+        ):
+            raise SourceRevisionAuthorityError(
+                "revision policy content does not match authority fields"
+            )
 
     def to_payload(self) -> dict[str, object]:
         return {
@@ -264,6 +344,7 @@ class RevisionPolicyAuthority:
             "source_identity": self.source_identity,
             "policy_version": self.policy_version,
             "policy_content_sha256": self.policy_content_sha256,
+            "policy_content_json": self.policy_content_json,
             "witness_kind": self.witness_kind,
             "frozen_at": _iso(self.frozen_at),
         }
@@ -271,6 +352,27 @@ class RevisionPolicyAuthority:
     @property
     def authority_sha256(self) -> str:
         return _digest(self.to_payload())
+
+    @classmethod
+    def create(
+        cls,
+        *,
+        revision_policy_id: str,
+        policy_content_json: str,
+        frozen_at: datetime,
+    ) -> "RevisionPolicyAuthority":
+        content = cls._parse_content(policy_content_json)
+        return cls(
+            revision_policy_id=revision_policy_id,
+            source_identity=content["source_identity"],
+            policy_version=content["policy_version"],
+            policy_content_sha256=hashlib.sha256(
+                policy_content_json.encode("utf-8")
+            ).hexdigest(),
+            policy_content_json=policy_content_json,
+            witness_kind=content["witness_kind"],
+            frozen_at=frozen_at,
+        )
 
     @classmethod
     def from_payload(cls, payload: object) -> "RevisionPolicyAuthority":
@@ -288,6 +390,7 @@ class RevisionPolicyAuthority:
             source_identity=body["source_identity"],
             policy_version=body["policy_version"],
             policy_content_sha256=body["policy_content_sha256"],
+            policy_content_json=body["policy_content_json"],
             witness_kind=body["witness_kind"],
             frozen_at=_instant(body["frozen_at"], "frozen_at"),
         )

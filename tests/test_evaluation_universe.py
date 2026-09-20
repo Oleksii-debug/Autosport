@@ -6,6 +6,9 @@ from tempfile import TemporaryDirectory
 
 import pytest
 
+from autosport._evaluation_universe_structural_gate import (
+    _authorize_structural_intake_for_tests,
+)
 from autosport.evaluation_intake import (
     EvaluationIntakeError,
     EvaluationIntakeIntegrityError,
@@ -29,6 +32,12 @@ from autosport.evaluation_universe import (
 H = "a" * 64
 H2 = "b" * 64
 H3 = "c" * 64
+
+
+def _build_structural_universe(*, intake_ledger, **kwargs):
+    """Exercise legacy intake invariants without granting production completeness."""
+    _authorize_structural_intake_for_tests(intake_ledger)
+    return build_frozen_universe(intake_ledger=intake_ledger, **kwargs)
 
 
 class _Resolver:
@@ -169,7 +178,7 @@ def intake(workspace, rows: tuple[EvaluationRow, ...]) -> ObservationIntakeLedge
 def universe(*rows: EvaluationRow):
     with TemporaryDirectory() as workspace:
         intake_ledger = intake(workspace, tuple(rows))
-        return build_frozen_universe(
+        return _build_structural_universe(
             intake_ledger=intake_ledger,
             universe_id="universe-1",
             campaign_id="campaign-1",
@@ -268,7 +277,7 @@ def test_intake_membership_committed_after_freeze_fails_closed(tmp_path):
     )
     ledger.append_cycle(enumeration_id=witness.enumeration_id)
     with pytest.raises(EvaluationUniverseError, match="after universe freeze"):
-        build_frozen_universe(
+        _build_structural_universe(
             intake_ledger=ledger,
             universe_id="universe-1",
             campaign_id="campaign-1",
@@ -293,7 +302,7 @@ def test_evaluation_cannot_start_before_complete_membership_is_immutable(tmp_pat
     ledger.append_cycle(enumeration_id=witness.enumeration_id)
 
     with pytest.raises(EvaluationUniverseError, match="detection began before"):
-        build_frozen_universe(
+        _build_structural_universe(
             intake_ledger=ledger,
             universe_id="universe-1",
             campaign_id="campaign-1",
@@ -322,7 +331,7 @@ def test_all_rows_wait_for_complete_multi_cycle_evaluation_boundary(tmp_path):
     ledger.append_cycle(enumeration_id=second.enumeration_id)
 
     with pytest.raises(EvaluationUniverseError, match="detection began before"):
-        build_frozen_universe(
+        _build_structural_universe(
             intake_ledger=ledger,
             universe_id="universe-1",
             campaign_id="campaign-1",
@@ -354,7 +363,7 @@ def test_multi_cycle_rows_are_valid_after_complete_evaluation_boundary(tmp_path)
     ledger.append_cycle(enumeration_id=first.enumeration_id)
     ledger.append_cycle(enumeration_id=second.enumeration_id)
 
-    frozen = build_frozen_universe(
+    frozen = _build_structural_universe(
         intake_ledger=ledger,
         universe_id="universe-1",
         campaign_id="campaign-1",
@@ -371,7 +380,7 @@ def test_store_round_trip_and_append_only_restart(tmp_path):
     authority = tmp_path / "authority"
     item = row("candidate")
     intake_ledger = intake(workspace, (item,))
-    frozen = build_frozen_universe(
+    frozen = _build_structural_universe(
         intake_ledger=intake_ledger,
         universe_id="universe-1",
         campaign_id="campaign-1",
@@ -404,7 +413,7 @@ def test_store_detects_payload_tamper(tmp_path):
     authority = tmp_path / "authority"
     item = row("candidate")
     intake_ledger = intake(workspace, (item,))
-    frozen = build_frozen_universe(
+    frozen = _build_structural_universe(
         intake_ledger=intake_ledger,
         universe_id="universe-1",
         campaign_id="campaign-1",
@@ -433,7 +442,7 @@ def test_store_rejects_deleted_committed_state(tmp_path):
     authority = tmp_path / "authority"
     item = row("candidate")
     intake_ledger = intake(workspace, (item,))
-    frozen = build_frozen_universe(
+    frozen = _build_structural_universe(
         intake_ledger=intake_ledger,
         universe_id="universe-1",
         campaign_id="campaign-1",
@@ -463,7 +472,7 @@ def test_store_rejects_prior_valid_snapshot_rollback(tmp_path):
     authority = tmp_path / "authority"
     item = row("candidate")
     intake_ledger = intake(workspace, (item,))
-    frozen = build_frozen_universe(
+    frozen = _build_structural_universe(
         intake_ledger=intake_ledger,
         universe_id="universe-1",
         campaign_id="campaign-1",
@@ -505,7 +514,7 @@ def test_row_reveal_boundary_must_equal_pre_result_intake(tmp_path):
     )
     ledger.append_cycle(enumeration_id=witness.enumeration_id)
     with pytest.raises(EvaluationUniverseError, match="reveal boundary"):
-        build_frozen_universe(
+        _build_structural_universe(
             intake_ledger=ledger,
             universe_id="universe-1",
             campaign_id="campaign-1",
@@ -534,7 +543,7 @@ def test_same_row_key_cannot_reauthor_pre_result_evidence_payload(tmp_path):
     assert reauthored.row_id != original.row_id
 
     with pytest.raises(EvaluationUniverseIntegrityError, match="row evidence"):
-        build_frozen_universe(
+        _build_structural_universe(
             intake_ledger=ledger,
             universe_id="universe-1",
             campaign_id="campaign-1",

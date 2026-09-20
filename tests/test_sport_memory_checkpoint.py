@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from hashlib import sha256
 import json
 
 import pytest
@@ -70,6 +71,40 @@ def test_bound_runtime_captures_exact_roots_and_reopens_same_generation(tmp_path
 
     assert reopened.authority_generation_sha256 == checkpoint.generation_sha256
     assert reopened.authority_generation_sha256 == runtime.authority_generation_sha256
+
+
+def test_bound_runtime_consumes_fresh_authority_after_canonical_files_change(tmp_path):
+    identity, opponent = _canonical_stores(tmp_path)
+
+    # Change both canonical persisted roots after the caller objects were loaded,
+    # while keeping each file independently valid. The bound runtime must not
+    # pair these newer roots with the stale caller-owned in-memory authority.
+    for path in (identity.path, opponent.path):
+        raw = json.loads(path.read_text(encoding="utf-8"))
+        path.write_text(
+            json.dumps(raw, sort_keys=True, indent=4) + "\n",
+            encoding="utf-8",
+        )
+
+    checkpoint_path, runtime_path = _paths(tmp_path)
+    runtime = initialize_or_open_bound_sport_memory_runtime(
+        runtime_path,
+        checkpoint_path,
+        identity,
+        opponent,
+    )
+    checkpoint = load_verified_sport_memory_authority_checkpoint(
+        checkpoint_path,
+        identity,
+        opponent,
+    )
+
+    assert runtime.opponent_authority is not opponent
+    assert isinstance(runtime.opponent_authority, OpponentIntelligenceStore)
+    assert runtime.opponent_authority.identity_registry is not identity
+    assert runtime.opponent_authority.path == opponent.path
+    assert checkpoint.identity_root_sha256 == sha256(identity.path.read_bytes()).hexdigest()
+    assert checkpoint.opponent_root_sha256 == sha256(opponent.path.read_bytes()).hexdigest()
 
 
 def test_valid_identity_rollback_is_rejected_before_sport_memory_reopen(tmp_path):

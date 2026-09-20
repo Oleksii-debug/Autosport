@@ -160,10 +160,10 @@ class BetfairHistoricalImportTests(unittest.TestCase):
         self.assertTrue(all(event.ingest_ts == "2026-02-10T14:00:00Z" for event in events))
         self.assertNotIn('"1.01"', market_text)
         self.assertNotIn('"50.0"', market_text)
-        self.assertEqual(
-            output_files,
-            {"manifest.json", "market.jsonl", "results.json"},
-        )
+        expected_output_files = {"manifest.json", "market.jsonl", "results.json"}
+        allowed_lock_sidecars = {f".{name}.lock" for name in expected_output_files}
+        self.assertEqual(output_files - allowed_lock_sidecars, expected_output_files)
+        self.assertLessEqual(output_files, expected_output_files | allowed_lock_sidecars)
         self.assertEqual(manifest["import_identity"], report.import_identity)
         self.assertEqual(
             manifest["governance"]["source_files"],

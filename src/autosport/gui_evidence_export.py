@@ -9,17 +9,53 @@ from .evidence_export import export_evidence_manifest
 
 
 def _safe_worker_error(exc: BaseException) -> str:
-    """Render a terminal export failure without trusting exception metadata."""
+    """Return a bounded structural failure code without user-visible prose."""
 
     try:
         name = type.__getattribute__(type(exc), "__name__")
     except BaseException:
         name = "BaseException"
+    if (
+        not isinstance(name, str)
+        or not name
+        or len(name) > 96
+        or not name.replace("_", "").isalnum()
+    ):
+        name = "BaseException"
+    return name
+
+
+def resolve_evidence_output_destination(
+    workspace: str | Path,
+    output: str | Path,
+) -> Path:
+    """Conservatively preflight a GUI destination without exporter internals.
+
+    This check is UX-only. ``export_evidence_manifest`` remains the sole final
+    authority for destination fencing and publication safety.
+    """
+
     try:
-        detail = str(exc)
-    except BaseException:
-        return f"{name}: evidence export failed; exception details unavailable"
-    return f"{name}: {detail}" if detail else name
+        workspace_root = Path(workspace).resolve(strict=True)
+        output_path = Path(output).resolve(strict=False)
+    except (OSError, TypeError, ValueError) as exc:
+        raise ValueError("evidence export destination cannot be resolved") from exc
+
+    try:
+        output_path.relative_to(workspace_root)
+    except ValueError:
+        pass
+    else:
+        raise ValueError("evidence export destination must be outside the workspace")
+
+    output_parent = output_path.parent
+    try:
+        workspace_root.relative_to(output_parent)
+    except ValueError as exc:
+        raise ValueError(
+            "evidence export destination parent must contain the workspace"
+        ) from exc
+    return output_path
 
 
 @dataclass(frozen=True, slots=True)
@@ -35,9 +71,9 @@ class EvidenceExportMessage:
 class OneShotEvidenceExportWorker:
     """Export one canonical evidence manifest away from the Tk/UIA event thread.
 
-    The canonical exporter owns manifest semantics and secret-safety. This worker is
-    deliberately only a UI adapter: it serializes one export at a time and reports a
-    terminal message for Tk polling without changing evidence contents.
+    The canonical exporter owns destination fencing, manifest semantics and
+    secret-safety. This adapter only serializes one export at a time and reports
+    one terminal message for Tk polling.
     """
 
     def __init__(self) -> None:
@@ -52,13 +88,19 @@ class OneShotEvidenceExportWorker:
             return self._busy
 
     def start(self, workspace: str | Path, output: str | Path) -> bool:
+        # Convert caller values before owning the worker slot. A hostile or invalid
+        # path-like value must not strand ``busy=True`` before a thread exists.
+        try:
+            workspace_path = Path(workspace)
+            output_path = Path(output)
+        except (TypeError, ValueError, OSError):
+            return False
+
         with self._lock:
             if self._busy:
                 return False
             self._busy = True
 
-        workspace_path = Path(workspace)
-        output_path = Path(output)
         try:
             start_gate = threading.Event()
             cancelled = threading.Event()

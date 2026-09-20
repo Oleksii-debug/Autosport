@@ -182,26 +182,7 @@ class CollectorDeltaStore(_SQLiteCollectorDeltaStore):
         source_id: str,
         stream_epoch: str,
     ) -> StreamCheckpoint | None:
-        """Bind the mutable stream projection to immutable canonical delta history."""
-
-        delta_epochs = {
-            row["stream_epoch"]
-            for row in connection.execute(
-                "SELECT DISTINCT stream_epoch FROM collector_deltas WHERE source_id=?",
-                (source_id,),
-            ).fetchall()
-        }
-        stream_epochs = {
-            row["stream_epoch"]
-            for row in connection.execute(
-                "SELECT stream_epoch FROM collector_streams WHERE source_id=?",
-                (source_id,),
-            ).fetchall()
-        }
-        if delta_epochs != stream_epochs:
-            raise ValueError(
-                "collector stream checkpoint conflicts with immutable delta history"
-            )
+        """Bind one stream projection to immutable history using indexed probes only."""
 
         row = connection.execute(
             "SELECT last_cursor, last_position, last_delta_id "
@@ -209,6 +190,15 @@ class CollectorDeltaStore(_SQLiteCollectorDeltaStore):
             (source_id, stream_epoch),
         ).fetchone()
         if row is None:
+            historical = connection.execute(
+                "SELECT 1 FROM collector_deltas "
+                "WHERE source_id=? AND stream_epoch=? LIMIT 1",
+                (source_id, stream_epoch),
+            ).fetchone()
+            if historical is not None:
+                raise ValueError(
+                    "collector stream checkpoint conflicts with immutable delta history"
+                )
             return None
 
         checkpoint = StreamCheckpoint(

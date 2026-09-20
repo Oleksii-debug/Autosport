@@ -3,6 +3,7 @@ from __future__ import annotations
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from autosport.decision_ledger import JsonlDecisionLedger
 from autosport.paper import PaperBook
@@ -67,7 +68,7 @@ class PaperCampaignAdmissionCommittedBindingTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             fixture = AdmissionFixture(Path(directory))
             coordinator = fixture.coordinator()
-            with unittest.mock.patch.object(
+            with patch.object(
                 coordinator.runtime,
                 "begin_and_bind_paper_ticket",
                 side_effect=RuntimeError("crash before campaign action"),

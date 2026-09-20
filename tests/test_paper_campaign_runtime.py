@@ -638,6 +638,86 @@ class PaperCampaignRuntimeTests(unittest.TestCase):
                 T5,
             )
 
+    def test_deleted_campaign_sidecar_cannot_replace_anchored_plan(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            plan = PaperReflectionPlan(summary_code="ANCHORED_PLAN")
+            (
+                leg,
+                _book,
+                ticket_id,
+                _decision,
+                environment,
+                baseline,
+                _observation,
+                bridge,
+                runtime,
+            ) = _fixture(root, reflection_plan=plan)
+            resolutions = _settle(root, leg, "win")
+            bridge.reconcile_after_settlement(
+                paper_book_path=root / "paper_book.json",
+                resolutions=resolutions,
+                settled_ticket_ids=(ticket_id,),
+                at=T4,
+            )
+            witness = bridge.resolution_witness(ticket_id)
+            frozen_at = runtime._bind_finalization_plan(
+                witness,
+                available_at=T5,
+            )
+            self.assertEqual(frozen_at, T5)
+            runtime.state_path.unlink()
+
+            resumed_environment = CausalLearningEnvironment.resume(
+                environment.identity,
+                episode_key=environment.episode.episode_key,
+                policy_id=environment.episode.policy_id,
+                admissible_actions=frozenset(environment.episode.admissible_actions),
+                checkpoint=baseline,
+            )
+            recovered_bridge = PaperSettlementLearningBridge(
+                root / "paper-learning-bridge.json",
+                paper_book_path=root / "paper_book.json",
+                decision_ledger=JsonlDecisionLedger(root / "decisions.jsonl"),
+                agent_loop=AgentLoopRuntime(root / "agent-loop.json"),
+                economic_goal=bridge.economic_goal,
+                risk_policy=bridge.risk_policy,
+            )
+            conflicting = PaperCampaignRuntime(
+                environment=resumed_environment,
+                settlement_bridge=recovered_bridge,
+                reflection_plan=PaperReflectionPlan(summary_code="REPLACEMENT_PLAN"),
+            )
+            with self.assertRaisesRegex(
+                PaperCampaignRuntimeError,
+                "conflicts with bridge anchor",
+            ):
+                conflicting.finalize_ticket(ticket_id=ticket_id, at=T6)
+
+            raw = json.loads(
+                (root / "agent-loop.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(raw["phase"], AgentLoopPhase.EVALUATE.value)
+            self.assertEqual(raw["attributions"], [])
+
+            same_plan = PaperCampaignRuntime(
+                environment=resumed_environment,
+                settlement_bridge=recovered_bridge,
+                reflection_plan=plan,
+            )
+            same_plan.finalize_ticket(ticket_id=ticket_id, at=T6)
+            raw = json.loads(
+                (root / "agent-loop.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(raw["attributions"][0]["attributed_at"], T5)
+            durable = json.loads(
+                same_plan.state_path.read_text(encoding="utf-8")
+            )
+            self.assertEqual(
+                durable["plans"][ticket_id]["reflection_available_at"],
+                T5,
+            )
+
     def test_late_research_deadline_before_frozen_plan_time_fails_closed(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

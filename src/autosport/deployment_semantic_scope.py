@@ -1,8 +1,8 @@
 """Immutable semantic compatibility authority for cross-session PAPER deployment.
 
-This module deliberately does not create a second deployment policy.  It resolves one
+This module deliberately does not create a second deployment policy. It resolves one
 stable compatibility scope from canonical runtime/scientific evidence so callers cannot
-make unrelated strings agree by convention.  Exact data/cutoff evidence remains in the
+make unrelated strings agree by convention. Exact data/cutoff evidence remains in the
 authority witness while ``scope_id`` excludes the monotonic snapshot/cutoff dimensions
 that #596 permits to advance across later sessions.
 """
@@ -81,12 +81,7 @@ def _digest(value: object) -> str:
 
 @dataclass(frozen=True, slots=True)
 class ActionSemanticsDefinition:
-    """Versioned meanings for the externally admissible learning actions.
-
-    ``meaning`` is canonical descriptive authority, not a display label.  Changing a
-    meaning while retaining the same action name necessarily changes the definition
-    digest and therefore the resolved deployment scope.
-    """
+    """Versioned meanings for the externally admissible learning actions."""
 
     version: str
     meanings: tuple[tuple[str, str], ...]
@@ -154,7 +149,10 @@ class ActionSemanticsDefinition:
                     f"action semantics meanings[{index}] payload must have two items"
                 )
             meanings.append((_text(entry[0], "action type"), _text(entry[1], "action meaning")))
-        result = cls(version=_text(raw.get("version"), "action semantics version"), meanings=tuple(meanings))
+        result = cls(
+            version=_text(raw.get("version"), "action semantics version"),
+            meanings=tuple(meanings),
+        )
         if raw.get("definition_sha256") is not None and _sha(
             raw.get("definition_sha256"), "definition_sha256"
         ) != result.definition_sha256:
@@ -251,6 +249,9 @@ class DeploymentSemanticScope:
     def from_dict(cls, raw: Mapping[str, object]) -> "DeploymentSemanticScope":
         if not isinstance(raw, Mapping):
             raise DeploymentSemanticScopeError("deployment semantic scope payload must be a mapping")
+        schema_version = raw.get("schema_version", SCHEMA_VERSION)
+        if type(schema_version) is not int:
+            raise DeploymentSemanticScopeError("schema_version must be an integer")
         result = cls(
             sport_domain=_text(raw.get("sport_domain"), "sport_domain"),
             competition_scope=_text(raw.get("competition_scope"), "competition_scope"),
@@ -273,7 +274,7 @@ class DeploymentSemanticScope:
             ),
             reward_definition_id=_text(raw.get("reward_definition_id"), "reward_definition_id"),
             schema=_text(raw.get("schema", SCHEMA), "schema"),
-            schema_version=raw.get("schema_version", SCHEMA_VERSION),  # type: ignore[arg-type]
+            schema_version=schema_version,
         )
         if raw.get("scope_id") is not None and _sha(raw.get("scope_id"), "scope_id") != result.scope_id:
             raise DeploymentSemanticScopeError("deployment semantic scope id mismatch")
@@ -300,11 +301,7 @@ class DeploymentSemanticAuthority:
     def __post_init__(self) -> None:
         if not isinstance(self.scope, DeploymentSemanticScope):
             raise DeploymentSemanticScopeError("scope must be DeploymentSemanticScope")
-        for name in (
-            "event_quote_key",
-            "provider_source_id",
-            "dataset_snapshot_id",
-        ):
+        for name in ("event_quote_key", "provider_source_id", "dataset_snapshot_id"):
             _text(getattr(self, name), name)
         for name in ("dataset_manifest_sha256", "environment_id", "episode_id"):
             _sha(getattr(self, name), name)
@@ -360,9 +357,11 @@ def resolve_deployment_semantic_scope(
 ) -> DeploymentSemanticAuthority:
     """Resolve a fail-closed semantic authority from canonical evidence.
 
-    Snapshot/cutoff identities are verified and retained in ``authority_id`` but are
-    deliberately excluded from ``scope_id`` so a later append-only session can carry
-    the same semantic compatibility identity while preserving its own exact evidence.
+    The frozen research protocol is training/scientific authority. Its training dataset
+    manifest is intentionally not required to equal the later deployment snapshot: that
+    would make monotonic cross-session data advancement impossible. The deployment
+    snapshot must instead match the current EnvironmentIdentity source/data/cutoff, and
+    its exact manifest is retained in ``authority_id`` rather than ``scope_id``.
     """
 
     for expected_type, value, name in (
@@ -401,8 +400,6 @@ def resolve_deployment_semantic_scope(
 
     if research_protocol.record_id != environment.protocol_id:
         raise DeploymentSemanticScopeError("environment protocol identity mismatch")
-    if research_protocol.dataset_manifest_sha256.lower() != dataset_snapshot.manifest_sha256.lower():
-        raise DeploymentSemanticScopeError("research protocol dataset manifest mismatch")
     if research_protocol.binding.feature_set_version != feature_set.version:
         raise DeploymentSemanticScopeError("research protocol feature-set version mismatch")
     if episode.environment_id != environment.environment_id:

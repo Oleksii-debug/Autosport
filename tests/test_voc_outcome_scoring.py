@@ -10,6 +10,14 @@ from pathlib import Path
 from typing import Any
 
 from autosport.decision_ledger import DecisionRecord, JsonlDecisionLedger
+from autosport.model_compute_router import (
+    ComputeCandidate,
+    ComputeRouteRequest,
+    ComputeRoutingPolicy,
+    ComputeTier,
+    DataClassification,
+    ModelComputeRouterStore,
+)
 from autosport.market_outcomes import (
     OutcomeAuthorityStatus,
     assess_betfair_historical_market_definition_authority,
@@ -520,7 +528,82 @@ class CanonicalOutcomeDerivedVOCScoreAuthorityTests(unittest.TestCase):
             )
         )
 
-    def _authority(self) -> CanonicalOutcomeDerivedVOCScoreAuthority:
+    def _precommit_router(
+        self,
+        paired: PairedVOCEvaluation,
+        *,
+        protocol_id: str | None = None,
+        cohort_id: str = "voc-cohort-derived",
+    ) -> ModelComputeRouterStore:
+        router = ModelComputeRouterStore(
+            self.root / f"router-precommit-{paired.evaluation_id}-{protocol_id or paired.research_protocol_id}-{cohort_id}.json"
+        )
+        request_id = f"source:{paired.evaluation_id}"
+        request = ComputeRouteRequest(
+            request_id=request_id,
+            created_at=paired.decision_at,
+            decision_deadline=paired.decision_deadline,
+            required_capability=paired.task_class,
+            data_classification=DataClassification.PUBLIC,
+            allow_cloud=False,
+            max_cost=Decimal("10"),
+            response_ttl_seconds=Decimal("30"),
+            baseline_candidate_id=paired.baseline_candidate_id,
+            cloud_candidate_id=paired.challenger_candidate_id,
+            decision_input_sha256=paired.decision_input_sha256,
+            decision_evidence_sha256=paired.decision_context_sha256,
+            voc_regime_id=paired.regime_id,
+            voc_urgency_id=paired.urgency_id,
+            voc_contradiction_state=paired.contradiction_state,
+        )
+        candidates = (
+            ComputeCandidate(
+                candidate_id=paired.baseline_candidate_id,
+                tier=ComputeTier.LOCAL,
+                backend_id=paired.baseline_backend_id,
+                model_id=paired.baseline_model_id,
+                config_sha256=paired.baseline_config_sha256,
+                capabilities=(paired.task_class,),
+                estimated_cost=Decimal("0.10"),
+                estimated_latency_seconds=Decimal("1"),
+            ),
+            ComputeCandidate(
+                candidate_id=paired.challenger_candidate_id,
+                tier=ComputeTier.CLOUD,
+                backend_id=paired.challenger_backend_id,
+                model_id=paired.challenger_model_id,
+                config_sha256=paired.challenger_config_sha256,
+                capabilities=(paired.task_class,),
+                estimated_cost=Decimal("0.20"),
+                estimated_latency_seconds=Decimal("2"),
+            ),
+        )
+        policy = ComputeRoutingPolicy(
+            policy_id="voc-precompute-test-policy",
+            policy_version=1,
+            cloud_enabled=False,
+        )
+        router.route(
+            request,
+            candidates,
+            policy,
+            as_of=paired.decision_at,
+            voc_precompute_admission={
+                "admission_id": f"explicit:{paired.evaluation_id}",
+                "research_protocol_id": protocol_id or paired.research_protocol_id,
+                "cohort_id": cohort_id,
+                "challenger_candidate_id": paired.challenger_candidate_id,
+                "sport_id": paired.sport_id,
+                "league_id": paired.league_id,
+            },
+        )
+        return router
+
+    def _authority(
+        self,
+        *,
+        compute_execution_store: ModelComputeRouterStore | None = None,
+    ) -> CanonicalOutcomeDerivedVOCScoreAuthority:
         return CanonicalOutcomeDerivedVOCScoreAuthority(
             decision_ledger=self.ledger,
             scientific_registry=self.registry,
@@ -536,6 +619,7 @@ class CanonicalOutcomeDerivedVOCScoreAuthorityTests(unittest.TestCase):
                     source_record_sha256=self.second_outcome_sha256,
                 ),
             ),
+            compute_execution_store=compute_execution_store,
         )
 
     def _append_scientific_qualification(

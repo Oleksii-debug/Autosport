@@ -166,7 +166,7 @@ def test_bound_materialization_refreshes_concrete_canonical_authority(tmp_path):
     [
         ("rating", "0.123456789"),
         ("uncertainty", "999"),
-        ("identity_view", "LATEST_RESTATED"),
+        ("identity_view", "RESTATED_RESEARCH"),
     ],
 )
 def test_bound_reopen_rejects_recomputed_artifact_projection_tamper(

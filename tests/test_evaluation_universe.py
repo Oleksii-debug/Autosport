@@ -10,6 +10,7 @@ from autosport.evaluation_universe import (
     EvaluationUniverseError,
     EvaluationUniverseIntegrityError,
     EvaluationUniverseLedger,
+    ObservationManifest,
     EvaluationUniverseStore,
     FunnelEvent,
     FunnelStage,
@@ -95,7 +96,20 @@ def row(
 
 
 def universe(*rows: EvaluationRow):
+    manifest = ObservationManifest(
+        manifest_id="manifest-1",
+        campaign_id="campaign-1",
+        research_protocol_id="protocol-1",
+        protocol_sha256=H,
+        universe_id="universe-1",
+        enumeration_source_id="campaign-intake-1",
+        source_range_start="cursor-0001",
+        source_range_end="cursor-9999",
+        committed_at="2026-09-20T00:04:59Z",
+        expected_row_keys=tuple(sorted({row.row_key for row in rows})),
+    )
     return build_frozen_universe(
+        manifest=manifest,
         universe_id="universe-1",
         campaign_id="campaign-1",
         research_protocol_id="protocol-1",

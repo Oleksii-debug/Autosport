@@ -78,6 +78,7 @@ _FEATURE_MEMBERSHIP_KEYS: Final = frozenset(
         "feature_set_id",
         "feature_set_version",
         "feature_definition_sha256",
+        "feature_manifest_json",
         "feature_source_sha256",
         "feature_name",
         "member_definition_sha256",
@@ -384,10 +385,83 @@ class FeatureMembershipAuthority:
     feature_set_id: str
     feature_set_version: str
     feature_definition_sha256: str
+    feature_manifest_json: str
     feature_source_sha256: str
     feature_name: str
     member_definition_sha256: str
     available_at: datetime
+
+    @staticmethod
+    def _member_from_manifest(
+        *,
+        feature_manifest_json: object,
+        feature_definition_sha256: object,
+        feature_name: object,
+    ) -> str:
+        manifest_text = _text(feature_manifest_json, "feature_manifest_json")
+        definition_sha256 = _sha256(
+            feature_definition_sha256,
+            "feature_definition_sha256",
+        )
+        wanted_name = _text(feature_name, "feature_name")
+        try:
+            raw = strict_json_loads(manifest_text)
+        except (TypeError, ValueError) as exc:
+            raise SourceRevisionAuthorityError(
+                "feature manifest must be strict canonical JSON"
+            ) from exc
+        if not isinstance(raw, dict) or frozenset(raw) != frozenset(
+            {"schema", "schema_version", "features"}
+        ):
+            raise SourceRevisionAuthorityError(
+                "feature manifest fields mismatch"
+            )
+        if (
+            raw["schema"] != "autosport.feature_definition_manifest"
+            or raw["schema_version"] != 1
+        ):
+            raise SourceRevisionAuthorityError(
+                "unsupported feature manifest schema"
+            )
+        features = raw["features"]
+        if not isinstance(features, dict) or not all(
+            isinstance(name, str) and isinstance(value, str)
+            for name, value in features.items()
+        ):
+            raise SourceRevisionAuthorityError(
+                "feature manifest features must map names to SHA-256 digests"
+            )
+        canonical_features: dict[str, str] = {}
+        for name, value in features.items():
+            canonical_name = _text(name, "feature manifest name")
+            canonical_digest = _sha256(value, "feature manifest member digest")
+            if canonical_name != name or canonical_digest != value:
+                raise SourceRevisionAuthorityError(
+                    "feature manifest member entries must be canonical"
+                )
+            canonical_features[name] = value
+        canonical_manifest = {
+            "schema": raw["schema"],
+            "schema_version": raw["schema_version"],
+            "features": canonical_features,
+        }
+        if _canonical_json(canonical_manifest) != manifest_text:
+            raise SourceRevisionAuthorityError(
+                "feature manifest JSON must use canonical encoding"
+            )
+        actual_definition_sha256 = hashlib.sha256(
+            manifest_text.encode("utf-8")
+        ).hexdigest()
+        if actual_definition_sha256 != definition_sha256:
+            raise SourceRevisionAuthorityError(
+                "feature manifest digest does not match FeatureSet definition"
+            )
+        member = canonical_features.get(wanted_name)
+        if member is None:
+            raise SourceRevisionAuthorityError(
+                "feature is not present in canonical feature manifest"
+            )
+        return member
 
     def __post_init__(self) -> None:
         for name in ("feature_set_id", "feature_set_version", "feature_name"):
@@ -401,9 +475,23 @@ class FeatureMembershipAuthority:
             object.__setattr__(self, name, _sha256(getattr(self, name), name))
         object.__setattr__(
             self,
+            "feature_manifest_json",
+            _text(self.feature_manifest_json, "feature_manifest_json"),
+        )
+        object.__setattr__(
+            self,
             "available_at",
             _aware_utc(self.available_at, "available_at"),
         )
+        manifest_member = self._member_from_manifest(
+            feature_manifest_json=self.feature_manifest_json,
+            feature_definition_sha256=self.feature_definition_sha256,
+            feature_name=self.feature_name,
+        )
+        if manifest_member != self.member_definition_sha256:
+            raise SourceRevisionAuthorityError(
+                "feature member digest does not match canonical feature manifest"
+            )
         expected_id = _digest(self.semantic_payload())
         if self.feature_membership_id != expected_id:
             raise SourceRevisionAuthorityError(
@@ -416,6 +504,7 @@ class FeatureMembershipAuthority:
             "feature_set_id": self.feature_set_id,
             "feature_set_version": self.feature_set_version,
             "feature_definition_sha256": self.feature_definition_sha256,
+            "feature_manifest_json": self.feature_manifest_json,
             "feature_source_sha256": self.feature_source_sha256,
             "feature_name": self.feature_name,
             "member_definition_sha256": self.member_definition_sha256,
@@ -439,28 +528,37 @@ class FeatureMembershipAuthority:
         feature_set_id: str,
         feature_set_version: str,
         feature_definition_sha256: str,
+        feature_manifest_json: str,
         feature_source_sha256: str,
         feature_name: str,
-        member_definition_sha256: str,
         available_at: datetime,
     ) -> "FeatureMembershipAuthority":
+        canonical_definition_sha256 = _sha256(
+            feature_definition_sha256,
+            "feature_definition_sha256",
+        )
+        canonical_manifest_json = _text(
+            feature_manifest_json,
+            "feature_manifest_json",
+        )
+        canonical_feature_name = _text(feature_name, "feature_name")
+        member_definition_sha256 = cls._member_from_manifest(
+            feature_manifest_json=canonical_manifest_json,
+            feature_definition_sha256=canonical_definition_sha256,
+            feature_name=canonical_feature_name,
+        )
         semantic = {
             "schema_version": 1,
             "feature_set_id": _text(feature_set_id, "feature_set_id"),
             "feature_set_version": _text(feature_set_version, "feature_set_version"),
-            "feature_definition_sha256": _sha256(
-                feature_definition_sha256,
-                "feature_definition_sha256",
-            ),
+            "feature_definition_sha256": canonical_definition_sha256,
+            "feature_manifest_json": canonical_manifest_json,
             "feature_source_sha256": _sha256(
                 feature_source_sha256,
                 "feature_source_sha256",
             ),
-            "feature_name": _text(feature_name, "feature_name"),
-            "member_definition_sha256": _sha256(
-                member_definition_sha256,
-                "member_definition_sha256",
-            ),
+            "feature_name": canonical_feature_name,
+            "member_definition_sha256": member_definition_sha256,
             "available_at": _iso(_aware_utc(available_at, "available_at")),
         }
         return cls(
@@ -468,6 +566,7 @@ class FeatureMembershipAuthority:
             feature_set_id=semantic["feature_set_id"],
             feature_set_version=semantic["feature_set_version"],
             feature_definition_sha256=semantic["feature_definition_sha256"],
+            feature_manifest_json=semantic["feature_manifest_json"],
             feature_source_sha256=semantic["feature_source_sha256"],
             feature_name=semantic["feature_name"],
             member_definition_sha256=semantic["member_definition_sha256"],
@@ -495,6 +594,7 @@ class FeatureMembershipAuthority:
             feature_set_id=body["feature_set_id"],
             feature_set_version=body["feature_set_version"],
             feature_definition_sha256=body["feature_definition_sha256"],
+            feature_manifest_json=body["feature_manifest_json"],
             feature_source_sha256=body["feature_source_sha256"],
             feature_name=body["feature_name"],
             member_definition_sha256=body["member_definition_sha256"],

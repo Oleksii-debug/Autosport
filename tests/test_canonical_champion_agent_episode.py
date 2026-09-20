@@ -130,6 +130,7 @@ def test_initialize_routes_only_canonical_derived_scope_to_agent_loop(tmp_path) 
     assert initialize.call_args.kwargs["activation_binding"] == binding
     assert initialize.call_args.kwargs["training_identity"] == training
     assert initialize.call_args.kwargs["as_of"] == binding.activation_at
+    assert initialize.call_args.kwargs["_canonical_cross_session_authority"] is not None
 
 
 def test_resume_reuses_only_durable_binding_and_rechecks_exact_semantics(tmp_path) -> None:
@@ -194,3 +195,4 @@ def test_resume_reuses_only_durable_binding_and_rechecks_exact_semantics(tmp_pat
     assert resume.call_args.kwargs["training_identity"] == training
     assert resume.call_args.kwargs["deployment_scope"] == scope
     assert resume.call_args.kwargs["activation_binding"] == binding
+    assert resume.call_args.kwargs["_canonical_cross_session_authority"] is not None

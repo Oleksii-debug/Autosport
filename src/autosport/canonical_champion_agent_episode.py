@@ -11,7 +11,11 @@ from __future__ import annotations
 from pathlib import Path
 
 from .agent_loop import AgentLoopRuntime
-from .champion_agent_episode import ChampionAgentEpisode, ChampionAgentEpisodeError
+from .champion_agent_episode import (
+    ChampionAgentEpisode,
+    ChampionAgentEpisodeError,
+    _mint_canonical_cross_session_authority,
+)
 from .champion_policy import load_champion_policy
 from .deployment_runtime_authority import DeploymentRuntimeAuthorityStore
 from .learning_environment import EnvironmentCheckpoint, EnvironmentIdentity
@@ -99,6 +103,11 @@ def initialize_canonical_champion_episode(
             "canonical cross-session deployment authority is not proven"
         ) from exc
 
+    canonical_authority = _mint_canonical_cross_session_authority(
+        activation_binding=activation_binding,
+        deployment_identity=identity,
+        deployment_scope=resolved.deployment_scope,
+    )
     return ChampionAgentEpisode.initialize_pristine(
         path,
         registry,
@@ -117,6 +126,7 @@ def initialize_canonical_champion_episode(
         training_identity=training_identity,
         deployment_scope=resolved.deployment_scope,
         activation_binding=activation_binding,
+        _canonical_cross_session_authority=canonical_authority,
     )
 
 
@@ -195,6 +205,11 @@ def resume_canonical_champion_episode(
             "canonical cross-session deployment authority is not proven on resume"
         ) from exc
 
+    canonical_authority = _mint_canonical_cross_session_authority(
+        activation_binding=durable.binding,
+        deployment_identity=identity,
+        deployment_scope=durable.scope,
+    )
     return ChampionAgentEpisode.resume(
         path,
         registry,
@@ -209,6 +224,7 @@ def resume_canonical_champion_episode(
         training_identity=durable.training_identity,
         deployment_scope=durable.scope,
         activation_binding=durable.binding,
+        _canonical_cross_session_authority=canonical_authority,
     )
 
 

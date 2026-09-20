@@ -19,6 +19,7 @@ from autosport.agent_loop import (
 from autosport.champion_agent_episode import (
     ChampionAgentEpisode,
     ChampionAgentEpisodeError,
+    _mint_canonical_cross_session_authority,
 )
 from autosport.champion_policy import persist_policy_state
 from autosport.learning_environment import (
@@ -652,7 +653,7 @@ def _deployment_contract(policy, store, training_identity, deployment_identity):
     return scope, binding
 
 
-def test_champion_deploys_to_later_compatible_session_and_binds_restart(tmp_path):
+def test_public_legacy_cross_session_entrypoints_require_canonical_semantic_authority(tmp_path):
     training = EnvironmentIdentity(
         "lawful-provider:paper",
         "champion-agent-config-v1",
@@ -675,6 +676,111 @@ def test_champion_deploys_to_later_compatible_session_and_binds_restart(tmp_path
     persist_policy_state(store, champion)
     scope, binding = _deployment_contract(champion, store, training, deployment)
     _, patches = _deployment_authority(champion, training, deployment)
+    path = tmp_path / "legacy-bypass-loop.json"
+
+    with patches[0], patches[1], patches[2]:
+        with pytest.raises(
+            ChampionAgentEpisodeError,
+            match="cross-session activation requires canonical semantic entrypoint",
+        ):
+            ChampionAgentEpisode.initialize_pristine(
+                path,
+                registry,
+                store,
+                identity=deployment,
+                as_of=T4,
+                canonical_strategy_id=STRATEGY_ID,
+                config_sha256=CONFIG_SHA256,
+                episode_key="legacy-bypass",
+                admissible_actions=frozenset({"WAIT"}),
+                loop_id="legacy-bypass-loop",
+                economic_goal_fingerprint=GOAL_SHA256,
+                risk_fingerprint=RISK_SHA256,
+                source_sha256=SOURCE_SHA256,
+                at=T4,
+                training_identity=training,
+                deployment_scope=scope,
+                activation_binding=binding,
+            )
+    assert not path.exists()
+
+    canonical_authority = _mint_canonical_cross_session_authority(
+        activation_binding=binding,
+        deployment_identity=deployment,
+        deployment_scope=scope,
+    )
+    _, patches = _deployment_authority(champion, training, deployment)
+    with patches[0], patches[1], patches[2]:
+        session = ChampionAgentEpisode.initialize_pristine(
+            path,
+            registry,
+            store,
+            identity=deployment,
+            as_of=T4,
+            canonical_strategy_id=STRATEGY_ID,
+            config_sha256=CONFIG_SHA256,
+            episode_key="legacy-bypass",
+            admissible_actions=frozenset({"WAIT"}),
+            loop_id="legacy-bypass-loop",
+            economic_goal_fingerprint=GOAL_SHA256,
+            risk_fingerprint=RISK_SHA256,
+            source_sha256=SOURCE_SHA256,
+            at=T4,
+            training_identity=training,
+            deployment_scope=scope,
+            activation_binding=binding,
+            _canonical_cross_session_authority=canonical_authority,
+        )
+    checkpoint = session.environment.checkpoint()
+
+    _, patches = _deployment_authority(champion, training, deployment)
+    with patches[0], patches[1], patches[2]:
+        with pytest.raises(
+            ChampionAgentEpisodeError,
+            match="cross-session activation requires canonical semantic entrypoint",
+        ):
+            ChampionAgentEpisode.resume(
+                path,
+                registry,
+                store,
+                identity=deployment,
+                checkpoint=checkpoint,
+                as_of=T4,
+                canonical_strategy_id=STRATEGY_ID,
+                config_sha256=CONFIG_SHA256,
+                episode_key="legacy-bypass",
+                admissible_actions=frozenset({"WAIT"}),
+            )
+
+
+def test_champion_deploys_to_later_compatible_session_and_binds_restart(tmp_path):
+    training = EnvironmentIdentity(
+        "lawful-provider:paper",
+        "champion-agent-config-v1",
+        "paper-dataset-training-v1",
+        PROTOCOL_ID,
+        T1,
+        17,
+    )
+    deployment = EnvironmentIdentity(
+        "lawful-provider:paper",
+        "champion-agent-config-v1",
+        "paper-dataset-later-v2",
+        PROTOCOL_ID,
+        T3,
+        17,
+    )
+    _, champion = _learned_champion(training)
+    registry = ScientificRegistry.initialize_pristine(tmp_path / "registry.json")
+    store = FactoryArtifactStore(tmp_path / "artifacts")
+    persist_policy_state(store, champion)
+    scope, binding = _deployment_contract(champion, store, training, deployment)
+    canonical_authority = _mint_canonical_cross_session_authority(
+        activation_binding=binding,
+        deployment_identity=deployment,
+        deployment_scope=scope,
+    )
+    _, patches = _deployment_authority(champion, training, deployment)
     path = tmp_path / "agent-loop.json"
 
     with patches[0], patches[1], patches[2]:
@@ -696,6 +802,7 @@ def test_champion_deploys_to_later_compatible_session_and_binds_restart(tmp_path
             training_identity=training,
             deployment_scope=scope,
             activation_binding=binding,
+            _canonical_cross_session_authority=canonical_authority,
         )
 
     assert session.policy.policy_id == champion.policy_id
@@ -753,6 +860,7 @@ def test_champion_deploys_to_later_compatible_session_and_binds_restart(tmp_path
             config_sha256=CONFIG_SHA256,
             episode_key="later-paper-episode",
             admissible_actions=frozenset({"WAIT"}),
+            _canonical_cross_session_authority=canonical_authority,
         )
     assert reopened.policy.environment_id == training.environment_id
     assert reopened.environment.environment_id == deployment.environment_id
@@ -785,6 +893,11 @@ def test_cross_session_scope_mismatch_fails_closed(tmp_path):
     persist_policy_state(store, champion)
     scope, binding = _deployment_contract(champion, store, training, deployment)
     wrong_scope = replace(scope, competition_scope="another-league")
+    canonical_authority = _mint_canonical_cross_session_authority(
+        activation_binding=binding,
+        deployment_identity=deployment,
+        deployment_scope=wrong_scope,
+    )
     _, patches = _deployment_authority(champion, training, deployment)
 
     with patches[0], patches[1], patches[2]:
@@ -807,6 +920,7 @@ def test_cross_session_scope_mismatch_fails_closed(tmp_path):
                 training_identity=training,
                 deployment_scope=wrong_scope,
                 activation_binding=binding,
+                _canonical_cross_session_authority=canonical_authority,
             )
 
 
@@ -832,6 +946,11 @@ def test_cross_session_resume_rejects_tampered_binding(tmp_path):
     store = FactoryArtifactStore(tmp_path / "artifacts")
     persist_policy_state(store, champion)
     scope, binding = _deployment_contract(champion, store, training, deployment)
+    canonical_authority = _mint_canonical_cross_session_authority(
+        activation_binding=binding,
+        deployment_identity=deployment,
+        deployment_scope=scope,
+    )
     _, patches = _deployment_authority(champion, training, deployment)
     path = tmp_path / "binding-loop.json"
 
@@ -854,6 +973,7 @@ def test_cross_session_resume_rejects_tampered_binding(tmp_path):
             training_identity=training,
             deployment_scope=scope,
             activation_binding=binding,
+            _canonical_cross_session_authority=canonical_authority,
         )
     checkpoint = session.environment.checkpoint()
     tampered = replace(binding, risk_fingerprint="d" * 64)
@@ -877,6 +997,7 @@ def test_cross_session_resume_rejects_tampered_binding(tmp_path):
                 training_identity=training,
                 deployment_scope=scope,
                 activation_binding=tampered,
+                _canonical_cross_session_authority=canonical_authority,
             )
 
 
@@ -902,6 +1023,11 @@ def test_cross_session_resume_rejects_tampered_durable_authority(tmp_path):
     store = FactoryArtifactStore(tmp_path / "artifacts")
     persist_policy_state(store, champion)
     scope, binding = _deployment_contract(champion, store, training, deployment)
+    canonical_authority = _mint_canonical_cross_session_authority(
+        activation_binding=binding,
+        deployment_identity=deployment,
+        deployment_scope=scope,
+    )
     _, patches = _deployment_authority(champion, training, deployment)
     path = tmp_path / "tampered-authority-loop.json"
 
@@ -924,6 +1050,7 @@ def test_cross_session_resume_rejects_tampered_durable_authority(tmp_path):
             training_identity=training,
             deployment_scope=scope,
             activation_binding=binding,
+            _canonical_cross_session_authority=canonical_authority,
         )
     checkpoint = session.environment.checkpoint()
     authority_path = deployment_authority_path(path)
@@ -951,5 +1078,6 @@ def test_cross_session_resume_rejects_tampered_durable_authority(tmp_path):
                 config_sha256=CONFIG_SHA256,
                 episode_key="tampered-authority-episode",
                 admissible_actions=frozenset({"WAIT"}),
+                _canonical_cross_session_authority=canonical_authority,
             )
 

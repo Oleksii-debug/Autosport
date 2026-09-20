@@ -120,7 +120,7 @@ class PaperCampaignAdmissionTests(unittest.TestCase):
             fixture = AdmissionFixture(Path(directory), seed_execution_decision=False)
             with self.assertRaisesRegex(
                 PaperCampaignAdmissionError,
-                "pre-existing durable decision",
+                "pre-execution decision-origin",
             ):
                 fixture.admit(fixture.coordinator())
             self.assertEqual(

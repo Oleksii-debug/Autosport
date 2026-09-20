@@ -4,6 +4,8 @@ import threading
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
 import autosport.gui as gui
 import autosport.gui_evidence_export as gui_export
 from autosport.gui import AutosportApp
@@ -113,22 +115,49 @@ def test_export_worker_rejects_overlap_until_terminal_message_is_polled(
     assert worker.busy is False
 
 
-def test_destination_preflight_delegates_to_canonical_exporter_fence(
-    monkeypatch, tmp_path: Path
-) -> None:
-    calls: list[tuple[Path, Path]] = []
-    expected = tmp_path / "resolved.json"
-
-    def fake_resolve(workspace: Path, output: Path) -> Path:
-        calls.append((workspace, output))
-        return expected
-
-    monkeypatch.setattr(gui_export, "_resolve_output_destination", fake_resolve)
+def test_destination_preflight_accepts_safe_ancestor_destination(tmp_path: Path) -> None:
     workspace = tmp_path / "workspace"
+    workspace.mkdir()
     output = tmp_path / "evidence.json"
 
-    assert resolve_evidence_output_destination(workspace, output) == expected
-    assert calls == [(workspace, output)]
+    assert resolve_evidence_output_destination(workspace, output) == output.resolve()
+
+
+def test_destination_preflight_rejects_workspace_and_reparentable_sibling(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    sibling = tmp_path / "sibling"
+    sibling.mkdir()
+
+    for output in (
+        workspace / "forbidden.json",
+        sibling / "reparentable.json",
+    ):
+        with pytest.raises(ValueError):
+            resolve_evidence_output_destination(workspace, output)
+
+
+def test_destination_preflight_does_not_depend_on_private_exporter_helper(
+    monkeypatch, tmp_path: Path
+) -> None:
+    import autosport.evidence_export as evidence_export
+
+    def private_helper_must_not_run(*_args, **_kwargs):
+        raise AssertionError("GUI preflight called private canonical exporter helper")
+
+    monkeypatch.setattr(
+        evidence_export,
+        "_resolve_output_destination",
+        private_helper_must_not_run,
+    )
+    assert "_resolve_output_destination" not in gui_export.__dict__
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    output = tmp_path / "evidence.json"
+    assert resolve_evidence_output_destination(workspace, output) == output.resolve()
 
 
 def test_partial_gui_instance_without_export_worker_is_not_routed_to_tk_getattr() -> None:
@@ -227,6 +256,7 @@ def test_unsupported_destination_is_rejected_before_worker_start(
     assert log_values == [expected]
     assert start_calls == []
 
+
 def test_completed_export_does_not_echo_selected_filename_to_status_or_log(
     tmp_path: Path,
 ) -> None:
@@ -251,4 +281,3 @@ def test_completed_export_does_not_echo_selected_filename_to_status_or_log(
     assert log_values == [expected]
     for forbidden in ("SUPERSECRET", "credentials.json", "token="):
         assert forbidden not in expected
-

@@ -7,7 +7,7 @@ import pytest
 
 import autosport._paper_value_risk_admission_recovery as recovery
 from autosport.agents import AgentContext
-from autosport.decision_ledger import JsonlDecisionLedger
+from autosport.decision_ledger import DecisionRecord, JsonlDecisionLedger
 from autosport.domain import MarketEvent
 from autosport.paper import PaperBook
 from autosport.paper_execution_adoption import PaperExecutionAdoptionError, PaperExecutionAdoptionRuntime
@@ -187,3 +187,79 @@ def test_general_risk_admission_prepare_rejects_policy_drift_after_crash(
 
     assert not restarted_runtime.ledger.events()
     assert not restarted_book.tickets
+
+
+def test_general_recovery_prepare_cannot_bypass_exact_pre_action_risk_gate(tmp_path) -> None:
+    book = PaperBook("100.00")
+    runtime = _runtime(tmp_path, book)
+    context = _context(tmp_path, book, runtime)
+    event = _event()
+    policy = PaperRiskPolicy(max_ticket_fraction=Decimal("0.02"))
+    recovering = PaperValueAgent(
+        {},
+        stake=Decimal("10.00"),
+        minimum_expected_profit_per_unit=Decimal("0"),
+        risk_policy=policy,
+    )
+    decision_id = recovering._material_action_id(context, event)
+    descriptor = runtime.prepare_paper_value_action(
+        event=event,
+        stake=Decimal("10.00"),
+        decision_id=decision_id,
+        account_id="account-a",
+        bankroll_id=None,
+        currency=None,
+    )
+    action = descriptor.execution_plan.actions[0]
+    expected_run_id = runtime.expected_run_id(descriptor, decision_id)
+    record = DecisionRecord(
+        replay_run_id=context.replay_run_id,
+        agent=PaperValueAgent.name,
+        observed_ts=event.observed_ts,
+        action="OPEN_PAPER_VALUE_TICKET",
+        payload={
+            "quote_key": event.quote_key,
+            "material_action_id": decision_id,
+            "requested_stake": str(action.requested_stake),
+            "execution_plan_id": descriptor.execution_plan.plan_id,
+            "execution_plan_fingerprint": descriptor.execution_plan.fingerprint,
+            "execution_run_id": expected_run_id,
+            "execution_authority_json": descriptor.intent_evidence_json,
+        },
+        context_hash=context.market_context_hash(),
+        decision_id=decision_id,
+    )
+    context.decision_ledger.append(record)
+    durable = tuple(context.decision_ledger.verified_records())
+    assert durable == (record,)
+
+    pre_action_sha256 = policy.risk_of_ruin_portfolio_sha256(book)
+    assert pre_action_sha256 is not None
+    witness = recovery._expected_witness(
+        agent=recovering,
+        record=record,
+        descriptor=descriptor,
+        expected_run_id=expected_run_id,
+        pre_action_sha256=pre_action_sha256,
+    )
+    witness_path, pre_action_path = recovery._authority._risk_admission_paths(
+        context.decision_ledger,
+        decision_id,
+    )
+    witness_path.parent.mkdir(parents=True, exist_ok=True)
+    book.save(pre_action_path)
+    recovery.atomic_write_json(
+        recovery._prepare_path(witness_path),
+        recovery._prepare_payload(witness),
+    )
+
+    with pytest.raises(
+        PaperExecutionAdoptionError,
+        match="no longer passes canonical risk evaluation",
+    ):
+        recovering.on_market_event(event, context)
+
+    assert not witness_path.exists()
+    assert not runtime.ledger.events()
+    assert not book.tickets
+    assert book.balance == Decimal("100.00")

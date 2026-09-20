@@ -1,10 +1,10 @@
 """Explicit cross-session deployment authority for promoted paper/shadow policies.
 
-Training identity stays immutable.  A DeploymentScope and ActivationBinding may
+Training identity stays immutable. A DeploymentScope and ActivationBinding may
 authorize the same already-promoted policy for a later causal environment only
-when durable scientific evidence and dataset snapshots prove a compatible,
-monotonic deployment boundary.  This module grants no promotion, risk, money, or
-provider-execution authority.
+when durable scientific evidence, exact append-only dataset ancestry, and scope
+authority prove a compatible monotonic deployment boundary. This module grants
+no promotion, risk, money, or provider-execution authority.
 """
 
 from __future__ import annotations
@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Final
 
 from .champion_policy import POLICY_ARTIFACT_KIND
+from .dataset_snapshot_lineage import DatasetSnapshotLineageAuthority
 from .integrity import atomic_write_json
 from .learning_environment import EnvironmentIdentity
 from .scientific_registry import ScientificRegistry
@@ -28,9 +29,10 @@ from .workspace_lock import WorkspaceEconomicLock
 DEPLOYMENT_SCOPE_SCHEMA: Final = "autosport.policy_deployment_scope"
 DEPLOYMENT_SCOPE_SCHEMA_VERSION: Final = 1
 ACTIVATION_BINDING_SCHEMA: Final = "autosport.policy_activation_binding"
-ACTIVATION_BINDING_SCHEMA_VERSION: Final = 1
+ACTIVATION_BINDING_SCHEMA_VERSION: Final = 2
 DEPLOYMENT_AUTHORITY_SCHEMA: Final = "autosport.policy_deployment_authority"
 DEPLOYMENT_AUTHORITY_SCHEMA_VERSION: Final = 1
+DATASET_LINEAGE_AUTHORITY_FILENAME: Final = "dataset-snapshot-lineage.json"
 _HEX: Final = frozenset("0123456789abcdef")
 
 
@@ -116,6 +118,59 @@ def _causal_record(
     raise PolicyDeploymentError(f"{record_type} was not causally available at activation")
 
 
+def dataset_lineage_authority_path(registry: ScientificRegistry) -> Path:
+    """Canonical sibling path for append-only DatasetSnapshot ancestry authority."""
+
+    if not isinstance(registry, ScientificRegistry):
+        raise TypeError("registry must be ScientificRegistry")
+    return Path(registry.path).expanduser().resolve(strict=False).with_name(
+        DATASET_LINEAGE_AUTHORITY_FILENAME
+    )
+
+
+def _require_dataset_lineage(
+    registry: ScientificRegistry,
+    *,
+    training_snapshot_id: str,
+    deployment_snapshot_id: str,
+    training_record_sha256: str,
+    deployment_record_sha256: str,
+    expected_proof_sha256: str,
+):
+    """Resolve and bind the exact anti-rollback append-only ancestry proof."""
+
+    training_id = _text(training_snapshot_id, "training_snapshot_id")
+    deployment_id = _text(deployment_snapshot_id, "deployment_snapshot_id")
+    training_sha = _sha256(training_record_sha256, "training_record_sha256")
+    deployment_sha = _sha256(deployment_record_sha256, "deployment_record_sha256")
+    proof_sha = _sha256(expected_proof_sha256, "dataset_lineage_proof_sha256")
+    try:
+        authority = DatasetSnapshotLineageAuthority(
+            dataset_lineage_authority_path(registry),
+            registry,
+        )
+        ancestor = authority.record(training_id)
+        descendant = authority.require_descendant(
+            descendant_snapshot_id=deployment_id,
+            ancestor_snapshot_id=training_id,
+        )
+    except (OSError, ValueError, RuntimeError) as exc:
+        raise PolicyDeploymentError(
+            "deployment DatasetSnapshot append-only ancestry is not durably proven"
+        ) from exc
+    if ancestor is None:
+        raise PolicyDeploymentError(
+            "training DatasetSnapshot append-only ancestry is not durably proven"
+        )
+    if ancestor.dataset_record_sha256 != training_sha:
+        raise PolicyDeploymentError("training DatasetSnapshot lineage digest mismatch")
+    if descendant.dataset_record_sha256 != deployment_sha:
+        raise PolicyDeploymentError("deployment DatasetSnapshot lineage digest mismatch")
+    if descendant.proof_sha256 != proof_sha:
+        raise PolicyDeploymentError("activation binding dataset lineage proof mismatch")
+    return descendant
+
+
 @dataclass(frozen=True, slots=True)
 class DeploymentScope:
     """Exact semantic dimensions that may not widen across deployment sessions."""
@@ -193,6 +248,7 @@ class ActivationBinding:
     deployment_environment_id: str
     deployment_data_id: str
     deployment_dataset_record_sha256: str
+    dataset_lineage_proof_sha256: str
     deployment_cutoff_ts: str
     snapshot_available_at: str
     activation_at: str
@@ -219,6 +275,7 @@ class ActivationBinding:
             "deployment_scope_id",
             "deployment_environment_id",
             "deployment_dataset_record_sha256",
+            "dataset_lineage_proof_sha256",
             "economic_goal_fingerprint",
             "risk_fingerprint",
         ):
@@ -256,6 +313,7 @@ class ActivationBinding:
             "deployment_environment_id": self.deployment_environment_id.lower(),
             "deployment_data_id": self.deployment_data_id,
             "deployment_dataset_record_sha256": self.deployment_dataset_record_sha256.lower(),
+            "dataset_lineage_proof_sha256": self.dataset_lineage_proof_sha256.lower(),
             "deployment_cutoff_ts": _timestamp(self.deployment_cutoff_ts, "deployment_cutoff_ts"),
             "snapshot_available_at": _timestamp(self.snapshot_available_at, "snapshot_available_at"),
             "activation_at": _timestamp(self.activation_at, "activation_at"),
@@ -390,6 +448,7 @@ def _binding_from_payload(payload: object) -> ActivationBinding:
         "deployment_environment_id",
         "deployment_data_id",
         "deployment_dataset_record_sha256",
+        "dataset_lineage_proof_sha256",
         "deployment_cutoff_ts",
         "snapshot_available_at",
         "activation_at",
@@ -423,6 +482,7 @@ def _binding_from_payload(payload: object) -> ActivationBinding:
         deployment_environment_id=payload["deployment_environment_id"],
         deployment_data_id=payload["deployment_data_id"],
         deployment_dataset_record_sha256=payload["deployment_dataset_record_sha256"],
+        dataset_lineage_proof_sha256=payload["dataset_lineage_proof_sha256"],
         deployment_cutoff_ts=payload["deployment_cutoff_ts"],
         snapshot_available_at=payload["snapshot_available_at"],
         activation_at=payload["activation_at"],
@@ -675,9 +735,6 @@ def validate_activation_binding(
     ):
         raise PolicyDeploymentError("deployment cutoff identity mismatch")
 
-    # Cross-session deployment may advance data/cutoff only.  Opaque source,
-    # config, protocol and seed identities remain exact; semantic dimensions are
-    # separately frozen by DeploymentScope.
     for name in ("source_id", "config_id", "protocol_id", "seed"):
         if getattr(training_identity, name) != getattr(deployment_identity, name):
             raise PolicyDeploymentError(
@@ -706,10 +763,12 @@ def validate_activation_binding(
     dp = deployment_snapshot.payload
     if tp.get("dataset_snapshot_id") != training_identity.data_id:
         raise PolicyDeploymentError("training DatasetSnapshot identity mismatch")
-    if _instant(tp.get("causal_cutoff"), "training DatasetSnapshot causal_cutoff") != _instant(
-        training_identity.cutoff_ts, "training environment cutoff"
-    ):
-        raise PolicyDeploymentError("training environment cutoff does not bind DatasetSnapshot")
+    if _instant(
+        tp.get("causal_cutoff"), "training DatasetSnapshot causal_cutoff"
+    ) != _instant(training_identity.cutoff_ts, "training environment cutoff"):
+        raise PolicyDeploymentError(
+            "training environment cutoff does not bind DatasetSnapshot"
+        )
     if dp.get("dataset_snapshot_id") != deployment_identity.data_id:
         raise PolicyDeploymentError("deployment DatasetSnapshot identity mismatch")
     if (
@@ -717,22 +776,37 @@ def validate_activation_binding(
         or tp.get("license_identity") != dp.get("license_identity")
     ):
         raise PolicyDeploymentError("deployment snapshot crosses source/license lineage")
-    if _instant(dp.get("causal_cutoff"), "deployment DatasetSnapshot causal_cutoff") < _instant(
-        tp.get("causal_cutoff"), "training DatasetSnapshot causal_cutoff"
-    ):
-        raise PolicyDeploymentError("deployment DatasetSnapshot causal cutoff moves backwards")
-    if _instant(dp.get("causal_cutoff"), "deployment DatasetSnapshot causal_cutoff") != _instant(
-        deployment_identity.cutoff_ts, "deployment environment cutoff"
-    ):
-        raise PolicyDeploymentError("deployment environment cutoff does not bind DatasetSnapshot")
-    if _instant(deployment_snapshot.available_at, "deployment DatasetSnapshot available_at") > _instant(
-        binding.snapshot_available_at, "snapshot_available_at"
-    ):
+    if _instant(
+        dp.get("causal_cutoff"), "deployment DatasetSnapshot causal_cutoff"
+    ) < _instant(tp.get("causal_cutoff"), "training DatasetSnapshot causal_cutoff"):
+        raise PolicyDeploymentError(
+            "deployment DatasetSnapshot causal cutoff moves backwards"
+        )
+    if _instant(
+        dp.get("causal_cutoff"), "deployment DatasetSnapshot causal_cutoff"
+    ) != _instant(deployment_identity.cutoff_ts, "deployment environment cutoff"):
+        raise PolicyDeploymentError(
+            "deployment environment cutoff does not bind DatasetSnapshot"
+        )
+    if _instant(
+        deployment_snapshot.available_at, "deployment DatasetSnapshot available_at"
+    ) > _instant(binding.snapshot_available_at, "snapshot_available_at"):
         raise PolicyDeploymentError("deployment snapshot was not causally available")
     if _instant(binding.snapshot_available_at, "snapshot_available_at") > _instant(
         binding.activation_at, "activation_at"
     ):
-        raise PolicyDeploymentError("deployment snapshot becomes available after activation")
+        raise PolicyDeploymentError(
+            "deployment snapshot becomes available after activation"
+        )
+
+    _require_dataset_lineage(
+        registry,
+        training_snapshot_id=training_identity.data_id,
+        deployment_snapshot_id=deployment_identity.data_id,
+        training_record_sha256=binding.training_dataset_record_sha256,
+        deployment_record_sha256=binding.deployment_dataset_record_sha256,
+        expected_proof_sha256=binding.dataset_lineage_proof_sha256,
+    )
 
     decision = _causal_record(
         registry,
@@ -773,7 +847,9 @@ def validate_activation_binding(
         or epayload.get("dataset_snapshot_id") != training_identity.data_id
         or epayload.get("validity") != "ELIGIBLE"
     ):
-        raise PolicyDeploymentError("promotion evidence does not authorize deployed policy")
+        raise PolicyDeploymentError(
+            "promotion evidence does not authorize deployed policy"
+        )
     if (
         vpayload.get("evaluation_bundle_id") != binding.evaluation_bundle_id
         or vpayload.get("evaluated_strategy_version_id") != policy.policy_id
@@ -805,7 +881,9 @@ def validate_activation_binding(
         canonical_strategy_id=strategy_key,
     )
     if champion != policy.policy_id:
-        raise PolicyDeploymentError("deployed policy is not the durable champion at activation")
+        raise PolicyDeploymentError(
+            "deployed policy is not the durable champion at activation"
+        )
 
     requested = frozenset(_text(x, "admissible action") for x in admissible_actions)
     if not requested or tuple(sorted(requested)) != binding.admissible_actions:
@@ -826,6 +904,7 @@ __all__ = [
     "DeploymentAuthority",
     "DeploymentScope",
     "PolicyDeploymentError",
+    "dataset_lineage_authority_path",
     "deployment_authority_path",
     "load_deployment_authority",
     "persist_deployment_authority",

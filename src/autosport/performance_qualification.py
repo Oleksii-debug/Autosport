@@ -264,7 +264,7 @@ def _expected_check_roster(budget: PerformanceBudget) -> dict[str, tuple[str, in
     return roster
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True, slots=True, init=False)
 class PerformanceQualification:
     source_sha: str
     machine_profile: str
@@ -275,7 +275,33 @@ class PerformanceQualification:
     qualification_id: str = field(init=False)
     target_machine_acceptance: bool = field(default=False, init=False)
 
-    def __post_init__(self) -> None:
+    def __init__(self, *args: object, **kwargs: object) -> None:
+        del args, kwargs
+        raise PerformanceQualificationError(
+            "PerformanceQualification must be created by qualify_endurance_report"
+        )
+
+    @classmethod
+    def _from_validated(
+        cls,
+        *,
+        source_sha: str,
+        machine_profile: str,
+        report_sha256: str,
+        budget: PerformanceBudget,
+        checks: tuple[MetricQualification, ...],
+    ) -> "PerformanceQualification":
+        instance = object.__new__(cls)
+        object.__setattr__(instance, "source_sha", source_sha)
+        object.__setattr__(instance, "machine_profile", machine_profile)
+        object.__setattr__(instance, "report_sha256", report_sha256)
+        object.__setattr__(instance, "budget", budget)
+        object.__setattr__(instance, "checks", checks)
+        object.__setattr__(instance, "target_machine_acceptance", False)
+        instance._validate_and_finalize()
+        return instance
+
+    def _validate_and_finalize(self) -> None:
         canonical_source_sha = _source_sha(self.source_sha)
         canonical_machine_profile = _text(self.machine_profile, "machine_profile")
         canonical_report_sha256 = _sha256_hex(self.report_sha256, "report_sha256")
@@ -488,7 +514,7 @@ def qualify_endurance_report(
     maximum("replay_elapsed_seconds", budget.max_replay_elapsed_seconds)
     maximum("restart_elapsed_seconds", budget.max_restart_elapsed_seconds)
 
-    return PerformanceQualification(
+    return PerformanceQualification._from_validated(
         source_sha=canonical_source_sha,
         machine_profile=canonical_machine_profile,
         report_sha256=report_sha256,

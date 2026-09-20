@@ -13,8 +13,6 @@ from autosport.policy_utility_evidence import (
     AuthorityRef,
     DecisionKind,
     PolicyUtilityEvidence,
-    PolicyUtilityError,
-    PolicyUtilityStore,
     UtilityCompleteness,
     UtilityTruthClass,
 )
@@ -80,7 +78,7 @@ def _terminalize_worker(
     except BaseException as exc:  # child-process evidence must reach the parent
         results.put(("error", type(exc).__name__, str(exc)))
     else:
-        results.put(("ok", receipt.persisted, receipt.evidence_id))
+        results.put(("ok", receipt.persisted, receipt.evidence_id, receipt.record_id))
 
 
 def _run_two_processes(
@@ -114,7 +112,9 @@ def _run_two_processes(
     return observed
 
 
-def test_two_process_conflicting_semantic_key_has_one_durable_winner(tmp_path) -> None:
+def test_two_process_conflicting_same_semantic_key_preserves_both_non_authoritative_records(
+    tmp_path,
+) -> None:
     path = tmp_path / "utility.jsonl"
 
     observed = _run_two_processes(
@@ -123,20 +123,18 @@ def test_two_process_conflicting_semantic_key_has_one_durable_winner(tmp_path) -
         ("v2", _SHA_B),
     )
 
-    successes = [item for item in observed if item[0] == "ok"]
-    failures = [item for item in observed if item[0] == "error"]
-    assert len(successes) == 1
-    assert successes[0][1] is True
-    assert len(failures) == 1
-    assert failures[0][1] == "PolicyUtilityError"
-    assert "semantic drift" in str(failures[0][2])
+    assert all(item[0] == "ok" for item in observed)
+    assert sorted(item[1] for item in observed) == [True, True]
+    assert len({item[2] for item in observed}) == 2
+    assert len({item[3] for item in observed}) == 2
 
-    reopened = PolicyUtilityStore(path).list()
-    assert len(reopened) == 1
-    assert reopened[0].evidence_id == successes[0][2]
+    terminalizer = PolicyUtilityTerminalizer.from_path(path)
+    assert len(terminalizer.records()) == 2
+    assert not path.exists()
+    assert terminalizer.journal_path.exists()
 
 
-def test_two_process_identical_retry_converges_to_one_record(tmp_path) -> None:
+def test_two_process_identical_retry_converges_to_one_terminal_record(tmp_path) -> None:
     path = tmp_path / "utility.jsonl"
 
     observed = _run_two_processes(
@@ -148,10 +146,13 @@ def test_two_process_identical_retry_converges_to_one_record(tmp_path) -> None:
     assert all(item[0] == "ok" for item in observed)
     assert sorted(item[1] for item in observed) == [False, True]
     assert len({item[2] for item in observed}) == 1
-    assert len(PolicyUtilityStore(path).list()) == 1
+    assert len({item[3] for item in observed}) == 1
+    terminalizer = PolicyUtilityTerminalizer.from_path(path)
+    assert len(terminalizer.records()) == 1
+    assert not path.exists()
 
 
-def test_interrupted_publish_preserves_previous_canonical_image_and_retry_converges(
+def test_interrupted_publish_preserves_previous_terminal_image_and_retry_converges(
     tmp_path,
     monkeypatch,
 ) -> None:
@@ -161,24 +162,31 @@ def test_interrupted_publish_preserves_previous_canonical_image_and_retry_conver
     second = _evidence(episode_id="episode-2")
 
     assert terminalizer.terminalize(first).persisted is True
-    before = path.read_bytes()
+    journal = terminalizer.journal_path
+    before = journal.read_bytes()
 
-    real_replace = terminalizer_module.os.replace
+    real_replace = terminalizer_module._durable_replace
     with monkeypatch.context() as patch:
         def fail_replace(source, destination):
-            raise OSError("injected atomic publication failure")
+            raise OSError("injected durable publication failure")
 
-        patch.setattr(terminalizer_module.os, "replace", fail_replace)
-        with pytest.raises(OSError, match="injected atomic publication failure"):
+        patch.setattr(terminalizer_module, "_durable_replace", fail_replace)
+        with pytest.raises(OSError, match="injected durable publication failure"):
             terminalizer.terminalize(second)
 
-    assert terminalizer_module.os.replace is real_replace
-    assert path.read_bytes() == before
-    assert PolicyUtilityStore(path).list() == (first,)
-    assert not list(tmp_path.glob(".utility.jsonl.*.tmp"))
+    assert terminalizer_module._durable_replace is real_replace
+    assert journal.read_bytes() == before
+    assert len(terminalizer.records()) == 1
+    assert terminalizer.records()[0].candidate_evidence_id == first.evidence_id
+    assert not list(tmp_path.glob(f".{journal.name}.*.tmp"))
+    assert not path.exists()
 
     retry = PolicyUtilityTerminalizer.from_path(path).terminalize(second)
     assert retry.persisted is True
     exact_retry = PolicyUtilityTerminalizer.from_path(path).terminalize(second)
     assert exact_retry.persisted is False
-    assert PolicyUtilityStore(path).list() == (first, second)
+    records = PolicyUtilityTerminalizer.from_path(path).records()
+    assert tuple(record.candidate_evidence_id for record in records) == (
+        first.evidence_id,
+        second.evidence_id,
+    )

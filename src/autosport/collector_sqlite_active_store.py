@@ -199,6 +199,18 @@ class CollectorDeltaStore(_SQLiteCollectorDeltaStore):
                 raise ValueError(
                     "collector stream checkpoint conflicts with immutable delta history"
                 )
+            source_history = connection.execute(
+                "SELECT 1 FROM collector_deltas WHERE source_id=? LIMIT 1",
+                (source_id,),
+            ).fetchone()
+            source_checkpoint = connection.execute(
+                "SELECT 1 FROM collector_streams WHERE source_id=? LIMIT 1",
+                (source_id,),
+            ).fetchone()
+            if source_history is not None and source_checkpoint is None:
+                raise ValueError(
+                    "collector stream checkpoint conflicts with immutable delta history"
+                )
             return None
 
         checkpoint = StreamCheckpoint(

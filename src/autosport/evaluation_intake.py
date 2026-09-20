@@ -76,14 +76,7 @@ def _keys(values: object) -> tuple[str, ...]:
 
 @dataclass(frozen=True, slots=True)
 class ObservationEnumerationWitness:
-    """Upstream acquisition proof for one exhaustive observation cycle.
-
-    The evaluation layer never infers completeness from observed quotes.  A provider or
-    acquisition adapter must resolve this witness from its own durable page/range
-    authority and explicitly prove that the represented source window is exhaustive
-    and gap-free.  Providers that cannot make that claim cannot mint a witness that
-    qualifies a COMPLETE denominator.
-    """
+    """Upstream acquisition proof for one exhaustive, gap-free observation range."""
 
     enumeration_id: str
     session_id: str
@@ -119,8 +112,18 @@ class ObservationEnumerationWitness:
             "end_cursor",
         ):
             _text(getattr(self, field), field)
-        object.__setattr__(self, "protocol_sha256", _sha(self.protocol_sha256, "protocol_sha256"))
-        object.__setattr__(self, "acquisition_sha256", _sha(self.acquisition_sha256, "acquisition_sha256"))
+        if self.start_cursor == self.end_cursor:
+            raise EvaluationIntakeError("enumeration cursor range must advance")
+        object.__setattr__(
+            self,
+            "protocol_sha256",
+            _sha(self.protocol_sha256, "protocol_sha256"),
+        )
+        object.__setattr__(
+            self,
+            "acquisition_sha256",
+            _sha(self.acquisition_sha256, "acquisition_sha256"),
+        )
         object.__setattr__(self, "row_keys", _keys(self.row_keys))
         if type(self.cycle_index) is not int or self.cycle_index <= 0:
             raise EvaluationIntakeError("cycle_index must be a positive integer")
@@ -172,9 +175,21 @@ class ObservationEnumerationWitness:
 
 @runtime_checkable
 class ObservationEnumerationResolver(Protocol):
-    """Resolve immutable acquisition enumeration evidence by stable identity."""
+    """Upstream authority for immutable ranges and the terminal complete range."""
 
     def resolve_enumeration(self, enumeration_id: str) -> ObservationEnumerationWitness:
+        ...
+
+    def terminal_enumeration_id(
+        self,
+        *,
+        session_id: str,
+        source_id: str,
+        campaign_id: str,
+        research_protocol_id: str,
+        protocol_sha256: str,
+        universe_id: str,
+    ) -> str:
         ...
 
 
@@ -211,7 +226,11 @@ class ObservationIntakeRecord:
             "enumeration_id",
         ):
             _text(getattr(self, field), field)
-        object.__setattr__(self, "protocol_sha256", _sha(self.protocol_sha256, "protocol_sha256"))
+        object.__setattr__(
+            self,
+            "protocol_sha256",
+            _sha(self.protocol_sha256, "protocol_sha256"),
+        )
         object.__setattr__(
             self,
             "enumeration_witness_sha256",
@@ -343,7 +362,11 @@ class ObservationIntakeSnapshot:
             "universe_id",
         ):
             _text(getattr(self, field), field)
-        object.__setattr__(self, "protocol_sha256", _sha(self.protocol_sha256, "protocol_sha256"))
+        object.__setattr__(
+            self,
+            "protocol_sha256",
+            _sha(self.protocol_sha256, "protocol_sha256"),
+        )
         if type(self.first_cycle) is not int or type(self.last_cycle) is not int:
             raise EvaluationIntakeError("snapshot cycle bounds must be integers")
         if self.first_cycle <= 0 or self.last_cycle < self.first_cycle:
@@ -476,8 +499,8 @@ class ObservationIntakeLedger:
     def records(self) -> tuple[ObservationIntakeRecord, ...]:
         with WorkspaceEconomicLock(self.workspace):
             records = self._read_unlocked()
-        for record in records:
-            self._verify_enumeration(record)
+        witnesses = tuple(self._verify_enumeration(record) for record in records)
+        self._validate_enumeration_sequence(witnesses)
         return records
 
     def _validate_chain(self, records: tuple[ObservationIntakeRecord, ...]) -> None:
@@ -510,7 +533,12 @@ class ObservationIntakeLedger:
 
     def _resolve_enumeration(self, enumeration_id: str) -> ObservationEnumerationWitness:
         enumeration_id = _text(enumeration_id, "enumeration_id")
-        witness = self.enumeration_resolver.resolve_enumeration(enumeration_id)
+        try:
+            witness = self.enumeration_resolver.resolve_enumeration(enumeration_id)
+        except Exception as exc:
+            raise EvaluationIntakeIntegrityError(
+                "enumeration resolver could not resolve immutable acquisition evidence"
+            ) from exc
         if not isinstance(witness, ObservationEnumerationWitness):
             raise EvaluationIntakeIntegrityError(
                 "enumeration resolver returned invalid witness type"
@@ -525,7 +553,10 @@ class ObservationIntakeLedger:
             )
         return witness
 
-    def _verify_enumeration(self, record: ObservationIntakeRecord) -> None:
+    def _verify_enumeration(
+        self,
+        record: ObservationIntakeRecord,
+    ) -> ObservationEnumerationWitness:
         witness = self._resolve_enumeration(record.enumeration_id)
         expected = ObservationIntakeRecord(
             authority_id=self.authority_id,
@@ -549,6 +580,51 @@ class ObservationIntakeLedger:
             raise EvaluationIntakeIntegrityError(
                 "durable intake record no longer matches upstream enumeration authority"
             )
+        return witness
+
+    def _validate_enumeration_sequence(
+        self,
+        witnesses: tuple[ObservationEnumerationWitness, ...],
+    ) -> None:
+        if not witnesses:
+            return
+        epoch = witnesses[0].stream_epoch
+        seen_ranges: set[str] = set()
+        previous: ObservationEnumerationWitness | None = None
+        for witness in witnesses:
+            if witness.stream_epoch != epoch:
+                raise EvaluationIntakeIntegrityError(
+                    "enumeration sequence cannot cross acquisition stream epochs"
+                )
+            if witness.source_range_id in seen_ranges:
+                raise EvaluationIntakeIntegrityError(
+                    "source_range_id cannot authorize multiple intake cycles"
+                )
+            if previous is not None and witness.start_cursor != previous.end_cursor:
+                raise EvaluationIntakeIntegrityError(
+                    "enumeration cursor continuity contains a gap or overlap"
+                )
+            seen_ranges.add(witness.source_range_id)
+            previous = witness
+
+    def _terminal_enumeration_id(
+        self,
+        identity: tuple[str, str, str, str, str, str],
+    ) -> str:
+        try:
+            terminal = self.enumeration_resolver.terminal_enumeration_id(
+                session_id=identity[0],
+                source_id=identity[1],
+                campaign_id=identity[2],
+                research_protocol_id=identity[3],
+                protocol_sha256=identity[4],
+                universe_id=identity[5],
+            )
+        except Exception as exc:
+            raise EvaluationIntakeIntegrityError(
+                "enumeration resolver cannot prove the terminal complete acquisition range"
+            ) from exc
+        return _text(terminal, "terminal_enumeration_id")
 
     def append_cycle(self, *, enumeration_id: str) -> ObservationIntakeRecord:
         witness = self._resolve_enumeration(enumeration_id)
@@ -568,6 +644,9 @@ class ObservationIntakeLedger:
                     "intake cycle cannot skip an observation cycle"
                 )
             previous = None if not records else records[-1].record_sha256
+            if records:
+                previous_witness = self._verify_enumeration(records[-1])
+                self._validate_enumeration_sequence((previous_witness, witness))
             record = ObservationIntakeRecord(
                 authority_id=self.authority_id,
                 session_id=witness.session_id,
@@ -623,6 +702,11 @@ class ObservationIntakeLedger:
                 "evaluation intake freeze must include the complete durable intake tip"
             )
         selected = records[first_cycle - 1 : last_cycle]
+        terminal_id = self._terminal_enumeration_id(selected[0].identity)
+        if selected[-1].enumeration_id != terminal_id:
+            raise EvaluationIntakeError(
+                "evaluation intake tip is not the authoritative terminal acquisition enumeration"
+            )
         expected_keys = tuple(sorted(key for record in selected for key in record.row_keys))
         first = selected[0]
         return ObservationIntakeSnapshot(
@@ -639,9 +723,7 @@ class ObservationIntakeLedger:
             root_sha256=selected[-1].record_sha256,
             expected_row_keys=expected_keys,
             committed_at=max(record.committed_at for record in selected),
-            evaluation_not_before=max(
-                record.evaluation_not_before for record in selected
-            ),
+            evaluation_not_before=max(record.evaluation_not_before for record in selected),
         )
 
     def verify_snapshot(self, snapshot: ObservationIntakeSnapshot) -> None:

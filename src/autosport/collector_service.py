@@ -501,7 +501,7 @@ class HeadlessCollectorService:
             source_id=source_id,
             started_at=started_at,
         )
-        self.delta_store.activate_runtime_stream_epoch(
+        self.delta_store._record_runtime_stream_epoch_from_service(
             source_id=source_id,
             stream_epoch=stream_epoch,
             activated_at=started_at,
@@ -587,7 +587,7 @@ class HeadlessCollectorService:
                 raise CollectorServiceError(
                     "source.stream_epoch must remain a non-empty string"
                 )
-            self.delta_store.activate_runtime_stream_epoch(
+            self.delta_store._record_runtime_stream_epoch_from_service(
                 source_id=self.source_id,
                 stream_epoch=cycle_stream_epoch,
                 activated_at=attempt_at,

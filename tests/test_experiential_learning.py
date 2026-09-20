@@ -98,25 +98,12 @@ class ExperientialLearningFactoryBridgeTests(unittest.TestCase):
         self.assertEqual(factory_spec.research_protocol_id, successor.protocol_id)
         self.assertEqual(factory_spec.seed, successor.seed)
 
-    def test_retest_delegates_to_canonical_experiment_runner_without_promotion_math(self) -> None:
+    def test_retest_without_policy_specific_cases_fails_before_factory_mutation(self) -> None:
         predecessor, successor, evidence = self._lineage()
-        expected = FactoryRunResult(
-            "experiment-experiential-v1",
-            "model-experiential-v1",
-            successor.policy_id,
-            "evaluation-experiential-v1",
-            "promotion-experiential-v1",
-            "8" * 64,
-            "7" * 64,
-            PromotionVerdict.REJECT,
-            PromotionAction.REJECT,
-            {"mse": 1.0},
-        )
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             registry = ScientificRegistry.initialize_pristine(root / "scientific_registry.json")
             runner = ExperimentRunner(registry, FactoryArtifactStore(root / "artifacts"))
-            rule = PromotionRule("mse", 0.0)
             with (
                 patch.object(
                     ScientificRegistry,
@@ -126,34 +113,29 @@ class ExperientialLearningFactoryBridgeTests(unittest.TestCase):
                 ),
                 patch.object(
                     ExperimentRunner,
-                    "run_baseline_candidate",
+                    "run_policy_candidate",
                     autospec=True,
-                    return_value=expected,
                 ) as delegated,
             ):
-                result = run_policy_retest(
-                    runner,
-                    predecessor_policy=predecessor,
-                    challenger_policy=successor,
-                    update_evidence=evidence,
-                    spec=self._spec(),
-                    points=(),
-                    rule=rule,
-                )
-                self.assertTrue(
+                with self.assertRaisesRegex(
+                    ValueError, "policy-specific causal evaluation cases are required"
+                ):
+                    run_policy_retest(
+                        runner,
+                        predecessor_policy=predecessor,
+                        challenger_policy=successor,
+                        update_evidence=evidence,
+                        spec=self._spec(),
+                        points=(),
+                        rule=PromotionRule("mse", 0.0),
+                    )
+                self.assertFalse(
                     runner.artifact_store.exists(
                         "transparent-bandit-policy",
                         successor.policy_id,
                     )
                 )
-
-        self.assertEqual(result, expected)
-        called_spec = delegated.call_args.args[1]
-        self.assertEqual(called_spec.strategy_version_id, successor.policy_id)
-        self.assertEqual(called_spec.environment_sha256, successor.environment_id)
-        self.assertEqual(called_spec.research_protocol_id, successor.protocol_id)
-        self.assertEqual(called_spec.seed, successor.seed)
-        self.assertEqual(delegated.call_args.kwargs["rule"], rule)
+                delegated.assert_not_called()
 
     def test_retest_rejects_policy_config_not_frozen_in_protocol(self) -> None:
         predecessor, successor, evidence = self._lineage()

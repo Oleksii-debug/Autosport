@@ -260,17 +260,16 @@ def _canonical_agent_call(
             )
 
         if goal is None:
-            if persisted is None:
-                risk = local.get("risk", _FRAME_MISSING)
-                if risk is _FRAME_MISSING or getattr(risk, "allowed", None) is not True:
-                    raise PaperExecutionAdoptionError(
-                        "legacy paper-value execution has not passed canonical risk evaluation"
-                    )
+            # A fresh call appends its DecisionRecord before execute(), so
+            # ``persisted`` is already non-None here. The local RiskDecision is the
+            # causal proof that this invocation actually traversed the fresh gate.
+            risk = local.get("risk", _FRAME_MISSING)
+            if risk is not _FRAME_MISSING and getattr(risk, "allowed", None) is True:
                 risk_authority = "fresh-risk-evaluation"
             elif _has_durable_execution_reservation(runtime, decision_id):
                 risk_authority = "durable-execution-recovery"
             else:
-                if wrapper_frame is None:
+                if persisted is _FRAME_MISSING or wrapper_frame is None:
                     raise PaperExecutionAdoptionError(
                         "recovered legacy paper-value decision lacks canonical risk re-evaluation"
                     )

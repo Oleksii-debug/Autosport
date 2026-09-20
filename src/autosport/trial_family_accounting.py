@@ -581,7 +581,25 @@ class TrialFamilyAccountingStore:
                 raise ValueError(f'Experiment {field} does not match durable trial candidate/research protocol')
 
     @staticmethod
-    def _require_evaluation_bundle_matches(attempt: TrialAttemptView, family: TrialFamilyDefinition, registry: ScientificRegistry, experiment_id: str, experiment_available_at: str, bundle: Any) -> None:
+    def _require_registry_record_after_attempt_witness(registry: ScientificRegistry, start_payload: Mapping[str, Any], record_type: str, record_id: str, label: str) -> int:
+        registry_state = registry._read()
+        record_count = start_payload.get('registry_record_count')
+        witnessed = _sha256(start_payload.get('registry_prefix_sha256'), 'registry_prefix_sha256')
+        if _registry_prefix_sha256(registry_state, record_count) != witnessed:
+            raise ValueError('ScientificRegistry no longer matches the durable attempt-start prefix witness')
+        position: int | None = None
+        for index, raw in enumerate(registry_state['records']):
+            if raw['record_type'] == record_type and raw['record_id'] == record_id:
+                position = index
+                break
+        if position is None:
+            raise ValueError(f'{label} is missing from ScientificRegistry')
+        if position < record_count:
+            raise ValueError(f'{label} was already durable before trial attempt publication')
+        return position
+
+    @classmethod
+    def _require_evaluation_bundle_matches(cls, attempt: TrialAttemptView, family: TrialFamilyDefinition, registry: ScientificRegistry, start_payload: Mapping[str, Any], experiment_id: str, experiment_available_at: str, bundle: Any) -> None:
         expected = {
             'dataset_snapshot_id': attempt.candidate.dataset_snapshot_id,
             'protocol_sha256': family.protocol_sha256,
@@ -591,6 +609,9 @@ class TrialFamilyAccountingStore:
         for field, wanted in expected.items():
             if bundle.payload.get(field) != wanted:
                 raise ValueError(f'Experiment EvaluationBundle {field} does not match durable trial candidate/research protocol')
+        cls._require_registry_record_after_attempt_witness(registry, start_payload, 'EvaluationBundle', bundle.record_id, 'Experiment EvaluationBundle')
+        if _instant(bundle.available_at, 'EvaluationBundle.available_at') < _instant(attempt.created_at, 'attempt.created_at'):
+            raise ValueError('Experiment EvaluationBundle predates trial attempt')
         if _instant(bundle.available_at, 'EvaluationBundle.available_at') > _instant(experiment_available_at, 'Experiment.available_at'):
             raise ValueError('Experiment EvaluationBundle became available after the Experiment result')
         if not ScientificRegistry.causal_precedes(registry, 'EvaluationBundle', bundle.record_id, 'Experiment', experiment_id):
@@ -611,22 +632,9 @@ class TrialFamilyAccountingStore:
                 return event['payload']
         raise ValueError('attempt start evidence is missing from durable trial history')
 
-    @staticmethod
-    def _require_experiment_after_attempt_witness(registry: ScientificRegistry, start_payload: Mapping[str, Any], experiment_id: str) -> None:
-        registry_state = registry._read()
-        record_count = start_payload.get('registry_record_count')
-        witnessed = _sha256(start_payload.get('registry_prefix_sha256'), 'registry_prefix_sha256')
-        if _registry_prefix_sha256(registry_state, record_count) != witnessed:
-            raise ValueError('ScientificRegistry no longer matches the durable attempt-start prefix witness')
-        experiment_position: int | None = None
-        for index, raw in enumerate(registry_state['records']):
-            if raw['record_type'] == 'Experiment' and raw['record_id'] == experiment_id:
-                experiment_position = index
-                break
-        if experiment_position is None:
-            raise ValueError('Experiment is missing from ScientificRegistry')
-        if experiment_position < record_count:
-            raise ValueError('Experiment was already durable before trial attempt publication')
+    @classmethod
+    def _require_experiment_after_attempt_witness(cls, registry: ScientificRegistry, start_payload: Mapping[str, Any], experiment_id: str) -> None:
+        cls._require_registry_record_after_attempt_witness(registry, start_payload, 'Experiment', experiment_id, 'Experiment')
 
     def complete_attempt(self, *, attempt_id: str, experiment_id: str, registry: ScientificRegistry) -> TrialAttemptView:
         attempt_id, experiment_id = (_sha256(attempt_id, 'attempt_id'), _text(experiment_id, 'experiment_id'))
@@ -652,7 +660,7 @@ class TrialFamilyAccountingStore:
         bundle = registry.get('EvaluationBundle', bundle_id)
         if bundle is None:
             raise ValueError('Experiment EvaluationBundle is missing from ScientificRegistry')
-        self._require_evaluation_bundle_matches(attempt, family, registry, experiment_id, available, bundle)
+        self._require_evaluation_bundle_matches(attempt, family, registry, start_payload, experiment_id, available, bundle)
         outcome = ResearchOutcome(entry.payload.get('outcome'))
         if _instant(available, 'Experiment.available_at') < _instant(attempt.created_at, 'attempt.created_at'):
             raise ValueError('Experiment result predates trial attempt')
@@ -707,7 +715,8 @@ class TrialFamilyAccountingStore:
             bundle = registry.get('EvaluationBundle', evidence.evaluation_bundle_id)
             if bundle is None or experiment.payload.get('evaluation_bundle_id') != evidence.evaluation_bundle_id or bundle.payload.get('bundle_sha256') != evidence.evaluation_bundle_sha256:
                 raise ValueError('sequential look EvaluationBundle does not match durable registry truth')
-            self._require_evaluation_bundle_matches(attempt, family, registry, evidence.experiment_id, experiment.available_at, bundle)
+            start_payload = self._attempt_start_payload(state, attempt_id)
+            self._require_evaluation_bundle_matches(attempt, family, registry, start_payload, evidence.experiment_id, experiment.available_at, bundle)
             prior_assessments = store.assessments()
             causal_times = [_instant(raw['event_at'], 'event_at') for raw in state['events']] + [_instant(value.evidence.observed_at, 'observed_at') for value in prior_assessments]
             if causal_times and _instant(evidence.observed_at, 'observed_at') < max(causal_times):
@@ -775,7 +784,8 @@ class TrialFamilyAccountingStore:
                 bundle = registry.get('EvaluationBundle', bundle_id)
                 if bundle is None:
                     raise ValueError('completed attempt EvaluationBundle is missing from ScientificRegistry')
-                self._require_evaluation_bundle_matches(attempt, family, registry, durable_experiment.record_id, durable_experiment.available_at, bundle)
+                start_payload = self._attempt_start_payload(state, attempt.attempt_id)
+                self._require_evaluation_bundle_matches(attempt, family, registry, start_payload, durable_experiment.record_id, durable_experiment.available_at, bundle)
         target_looks = [a for a in self._sequential().assessments() if a.evidence.experiment_id == evidence.experiment_id and _instant(a.evidence.observed_at, 'observed_at') <= _instant(evidence.created_at, 'created_at')]
         if not target_looks:
             raise ValueError('promotion eligibility requires registered sequential evidence')

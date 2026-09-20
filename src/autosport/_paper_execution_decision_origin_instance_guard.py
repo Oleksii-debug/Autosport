@@ -4,10 +4,40 @@ import json
 
 from . import _paper_execution_decision_origin as _origin
 from .decision_ledger import JsonlDecisionLedger
-from .paper_execution_reality import PaperExecutionLedger
+from .paper_execution_reality import (
+    PaperExecutionLedger,
+    PaperExecutionStateError,
+)
 
 
-_ORIGIN_RESERVE_RUN = PaperExecutionLedger.reserve_run
+_VERIFIED_SNAPSHOT_SENTINEL = "_autosport_decision_origin_pristine_verified_snapshot"
+_RESERVE_SENTINEL = "_autosport_decision_origin_pristine_reserve_run"
+_APPEND_SENTINEL = "_autosport_decision_origin_pristine_append_event"
+
+# Preserve the exact pre-origin authority methods once. Re-importing/reloading guard
+# modules must never capture an already-installed wrapper as its own "original".
+if not hasattr(JsonlDecisionLedger, _VERIFIED_SNAPSHOT_SENTINEL):
+    setattr(
+        JsonlDecisionLedger,
+        _VERIFIED_SNAPSHOT_SENTINEL,
+        JsonlDecisionLedger.verified_snapshot,
+    )
+if not hasattr(PaperExecutionLedger, _RESERVE_SENTINEL):
+    setattr(
+        PaperExecutionLedger,
+        _RESERVE_SENTINEL,
+        _origin._ORIGINAL_LEDGER_RESERVE,
+    )
+if not hasattr(PaperExecutionLedger, _APPEND_SENTINEL):
+    setattr(
+        PaperExecutionLedger,
+        _APPEND_SENTINEL,
+        PaperExecutionLedger._append_event,
+    )
+
+_STABLE_VERIFIED_SNAPSHOT = getattr(JsonlDecisionLedger, _VERIFIED_SNAPSHOT_SENTINEL)
+_STABLE_RESERVE_RUN = getattr(PaperExecutionLedger, _RESERVE_SENTINEL)
+_STABLE_APPEND_EVENT = getattr(PaperExecutionLedger, _APPEND_SENTINEL)
 
 
 def _instance_shadows(obj: object, method_name: str) -> bool:
@@ -30,9 +60,7 @@ def _verified_decision_origin_without_instance_dispatch(
     if type(decision_id) is not str or not decision_id or decision_id.strip() != decision_id:
         raise ValueError("decision_id must be non-empty canonical text")
 
-    # Invoke the exact class implementation so authority cannot be redirected by
-    # per-instance method dispatch after exact-type validation.
-    snapshot = JsonlDecisionLedger.verified_snapshot(ledger)
+    snapshot = _STABLE_VERIFIED_SNAPSHOT(ledger)
     matches: list[_origin.DecisionRecordOrigin] = []
     for line in snapshot.payload.decode("utf-8").splitlines():
         envelope = json.loads(line)
@@ -62,27 +90,54 @@ def _reserve_run_without_shadowed_append(
     started_at: str,
     observation_evidence_ids,
 ) -> None:
-    if _origin._DECISION_ORIGIN.get() is not None and _instance_shadows(
-        self, "_append_event"
-    ):
+    origin = _origin._DECISION_ORIGIN.get()
+    if origin is None:
+        return _STABLE_RESERVE_RUN(
+            self,
+            run_id=run_id,
+            trigger_id=trigger_id,
+            plan=plan,
+            config=config,
+            started_at=started_at,
+            observation_evidence_ids=observation_evidence_ids,
+        )
+
+    if type(self) is not PaperExecutionLedger:
+        raise _origin.PaperExecutionDecisionOriginError(
+            "origin-bound execution requires exact PaperExecutionLedger authority"
+        )
+    if _instance_shadows(self, "_append_event"):
         raise _origin.PaperExecutionDecisionOriginError(
             "execution ledger shadows authority method _append_event"
         )
-    return _ORIGIN_RESERVE_RUN(
+    if origin.decision_id != trigger_id or origin.decision_id != plan.decision_id:
+        raise PaperExecutionStateError(
+            "decision origin does not match execution trigger/plan decision identity"
+        )
+
+    payload = {
+        "trigger_id": trigger_id,
+        "plan_id": plan.plan_id,
+        "plan_fingerprint": plan.fingerprint,
+        "model_fingerprint": config.fingerprint,
+        "started_at": started_at,
+        "action_ids": [action.action_id for action in plan.actions],
+        "observation_evidence_ids": dict(sorted(observation_evidence_ids.items())),
+        "decision_origin": origin.to_dict(),
+    }
+    _STABLE_APPEND_EVENT(
         self,
+        event_type="RUN_RESERVED",
         run_id=run_id,
-        trigger_id=trigger_id,
-        plan=plan,
-        config=config,
-        started_at=started_at,
-        observation_evidence_ids=observation_evidence_ids,
+        key=f"{run_id}:reserve",
+        payload=payload,
     )
 
 
 def _install() -> None:
+    _origin.verified_decision_origin = _verified_decision_origin_without_instance_dispatch
     if getattr(PaperExecutionLedger, "_autosport_decision_origin_instance_guard", False):
         return
-    _origin.verified_decision_origin = _verified_decision_origin_without_instance_dispatch
     PaperExecutionLedger.reserve_run = _reserve_run_without_shadowed_append
     PaperExecutionLedger._autosport_decision_origin_instance_guard = True
 

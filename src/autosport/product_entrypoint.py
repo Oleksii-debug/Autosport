@@ -17,6 +17,14 @@ class ProductEntrypointError(RuntimeError):
     """The supported product command cannot safely construct or run the product."""
 
 
+class ProductRuntimeError(ProductEntrypointError):
+    """The product failed only after the canonical runtime had started."""
+
+    def __init__(self, error_type: str) -> None:
+        super().__init__("product runtime failed after start")
+        self.error_type = error_type
+
+
 class _SignalStopRequest:
     def __init__(self) -> None:
         self.signal_number: int | None = None
@@ -80,6 +88,23 @@ def _print_record(kind: str, *, runtime: AutonomousProductRuntime, value: object
     )
 
 
+def _print_failure(*, kind: str, error_code: str, error_type: str) -> None:
+    print(
+        json.dumps(
+            {
+                "kind": kind,
+                "paper_only": True,
+                "real_money_execution": False,
+                "error_code": error_code,
+                "error_type": error_type,
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+    )
+
+
 def run_product(
     *,
     workspace: str | Path,
@@ -133,8 +158,11 @@ def run_product(
         for signum in previous_handlers:
             signal.signal(signum, stop_request.handle)
 
+    started = False
     try:
-        _print_record("product_status", runtime=runtime, value=runtime.start())
+        start_status = runtime.start()
+        started = True
+        _print_record("product_status", runtime=runtime, value=start_status)
         cycles = 0
         while max_cycles is None or cycles < max_cycles:
             if stop_request.requested:
@@ -165,10 +193,22 @@ def run_product(
                 break
             sleep(float(poll_seconds))
         return stop_request.exit_code
+    except Exception as exc:
+        if started:
+            if isinstance(exc, ProductRuntimeError):
+                raise
+            raise ProductRuntimeError(type(exc).__name__) from exc
+        raise
     finally:
-        runtime.close()
-        for signum, handler in previous_handlers.items():
-            signal.signal(signum, handler)
+        try:
+            runtime.close()
+        except Exception as exc:
+            if started:
+                raise ProductRuntimeError(type(exc).__name__) from exc
+            raise
+        finally:
+            for signum, handler in previous_handlers.items():
+                signal.signal(signum, handler)
 
 
 def run_product_command(
@@ -187,24 +227,22 @@ def run_product_command(
             max_cycles=max_cycles,
             poll_seconds=poll_seconds,
         )
+    except ProductRuntimeError as exc:
+        _print_failure(
+            kind="product_runtime_failure",
+            error_code="product_runtime_failed",
+            error_type=exc.error_type,
+        )
+        return 4
     except Exception as exc:
         # Product stdout is a public/machine-readable boundary. Arbitrary exception
         # messages may contain provider credentials, response bodies or other secrets,
         # so only stable classification is emitted here. Detailed diagnostics belong
         # behind an explicitly secret-safe internal logging boundary.
-        print(
-            json.dumps(
-                {
-                    "kind": "product_start_failure",
-                    "paper_only": True,
-                    "real_money_execution": False,
-                    "error_code": "product_start_failed",
-                    "error_type": type(exc).__name__,
-                },
-                ensure_ascii=False,
-                sort_keys=True,
-                separators=(",", ":"),
-            )
+        _print_failure(
+            kind="product_start_failure",
+            error_code="product_start_failed",
+            error_type=type(exc).__name__,
         )
         return 3
 

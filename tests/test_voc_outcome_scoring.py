@@ -592,6 +592,7 @@ class CanonicalOutcomeDerivedVOCScoreAuthorityTests(unittest.TestCase):
                 "admission_id": f"explicit:{paired.evaluation_id}",
                 "research_protocol_id": protocol_id or paired.research_protocol_id,
                 "cohort_id": cohort_id,
+                "baseline_candidate_id": paired.baseline_candidate_id,
                 "challenger_candidate_id": paired.challenger_candidate_id,
                 "sport_id": paired.sport_id,
                 "league_id": paired.league_id,

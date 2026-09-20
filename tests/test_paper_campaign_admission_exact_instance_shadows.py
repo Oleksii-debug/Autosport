@@ -97,3 +97,32 @@ def test_execution_ledger_shadow_added_after_construction_is_rejected_at_read(tm
 
     assert attacker_called is False
     assert not (fixture.workspace / "paper-campaign-admission.json").exists()
+
+
+def test_decision_ledger_replacement_after_construction_fails_closed(tmp_path):
+    fixture = AdmissionFixture(tmp_path)
+    coordinator = fixture.coordinator()
+    coordinator.decision_ledger = JsonlDecisionLedger(
+        fixture.workspace / "replacement-decisions.jsonl"
+    )
+
+    with pytest.raises(PaperCampaignAdmissionError, match="authority changed"):
+        fixture.admit(coordinator)
+
+    assert not (fixture.workspace / "paper-campaign-admission.json").exists()
+
+
+def test_execution_ledger_replacement_after_construction_fails_closed(tmp_path):
+    fixture = AdmissionFixture(tmp_path)
+    coordinator = fixture.coordinator()
+    with patch.dict(
+        os.environ,
+        {"AUTOSPORT_PAPER_EXECUTION_WITNESS_DIR": str(fixture.authority)},
+    ):
+        replacement = PaperExecutionLedger(fixture.execution_ledger_path)
+    coordinator.execution_ledger = replacement
+
+    with pytest.raises(PaperCampaignAdmissionError, match="authority changed"):
+        fixture.admit(coordinator)
+
+    assert not (fixture.workspace / "paper-campaign-admission.json").exists()

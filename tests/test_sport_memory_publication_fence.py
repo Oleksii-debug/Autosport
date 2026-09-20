@@ -187,7 +187,10 @@ def test_bound_materialization_cannot_overwrite_concurrent_source_generation(
 
     final_identity = ParticipantIdentityRegistry(identity.path)
     final_opponent = OpponentIntelligenceStore(opponent.path, final_identity)
-    assert set(final_opponent._performances) == {"event-1", "event-2"}
+    assert {
+        record.observation.event_id
+        for record in final_opponent._performances.values()
+    } == {"event-1", "event-2"}
 
     # The later source generation is canonical and must make the old authority
     # checkpoint unusable instead of being silently erased by stale snapshot bytes.

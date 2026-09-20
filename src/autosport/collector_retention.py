@@ -62,13 +62,16 @@ class CollectorCompactionResult:
     bytes_before: int
     bytes_after: int
     compacted_at: str
+    recovered_existing_journal: bool
+    reclamation_complete: bool
 
 
 class CollectorRetentionManager:
     """Explicit safety boundary for collector retention and physical compaction.
 
     Safety rules:
-    - the current provider epoch is never compacted;
+    - the current durably activated collector epoch is resolved from canonical
+      store history and is never caller-selectable or compacted;
     - only deltas with a durable canonical desktop application acknowledgement
       may be deleted;
     - the stream terminal checkpoint and latest acknowledged transport anchor are
@@ -76,8 +79,9 @@ class CollectorRetentionManager:
     - durable DECISION/REPLAY pins are retained;
     - revision ancestors of every retained row are retained;
     - preview/apply uses a content-bound plan and revalidates under BEGIN IMMEDIATE;
-    - deletion and the compaction journal are one SQLite transaction; VACUUM only
-      reclaims pages after that durable semantic transition.
+    - deletion and the compaction journal are one SQLite terminal transaction;
+      VACUUM is a separately retryable reclamation step and can never erase the
+      already-committed terminal result.
     """
 
     _PIN_TABLE = "collector_retention_pins_v1"
@@ -124,7 +128,9 @@ class CollectorRetentionManager:
                 "compacted_at TEXT NOT NULL,"
                 "deleted_count INTEGER NOT NULL CHECK(deleted_count >= 0),"
                 "deleted_delta_ids_json TEXT NOT NULL,"
-                "retained_delta_ids_json TEXT NOT NULL)"
+                "retained_delta_ids_json TEXT NOT NULL,"
+                "reclamation_complete INTEGER NOT NULL "
+                "CHECK(reclamation_complete IN (0,1)))"
             )
             connection.commit()
         except sqlite3.DatabaseError as exc:
@@ -277,15 +283,42 @@ class CollectorRetentionManager:
             )
         return checkpoint
 
+    @staticmethod
+    def _resolved_current_stream_epoch(
+        connection: sqlite3.Connection,
+        source_id: str,
+    ) -> str:
+        """Resolve the current durable epoch from product-owned activation history.
+
+        The first commit of an epoch is its durable activation witness. Selecting the
+        epoch with the newest first commit remains stable if a late correction for an
+        older epoch is appended later, unlike a caller argument or last-row heuristic.
+        If no durable epoch exists there is nothing safe to compact.
+        """
+
+        row = connection.execute(
+            "SELECT stream_epoch, MIN(commit_seq) AS activated_seq "
+            "FROM collector_deltas WHERE source_id=? "
+            "GROUP BY stream_epoch ORDER BY activated_seq DESC LIMIT 1",
+            (source_id,),
+        ).fetchone()
+        if row is None:
+            raise CollectorRetentionError(
+                "collector source has no durable current stream epoch"
+            )
+        return _text(row["stream_epoch"], "current_stream_epoch")
+
     def _build_plan(
         self,
         connection: sqlite3.Connection,
         *,
         source_id: str,
         stream_epoch: str,
-        current_stream_epoch: str,
         desktop_checkpoint: DesktopDeltaCheckpointStore,
     ) -> CollectorRetentionPlan:
+        current_stream_epoch = self._resolved_current_stream_epoch(
+            connection, source_id
+        )
         if stream_epoch == current_stream_epoch:
             raise CollectorRetentionError(
                 "current collector stream epoch cannot be compacted"
@@ -415,14 +448,10 @@ class CollectorRetentionManager:
         *,
         source_id: str,
         stream_epoch: str,
-        current_stream_epoch: str,
         desktop_checkpoint: DesktopDeltaCheckpointStore,
     ) -> CollectorRetentionPlan:
         source_id = _text(source_id, "source_id")
         stream_epoch = _text(stream_epoch, "stream_epoch")
-        current_stream_epoch = _text(
-            current_stream_epoch, "current_stream_epoch"
-        )
         checkpoint = self._require_desktop_checkpoint(desktop_checkpoint)
         connection = self.collector._connect()
         try:
@@ -430,13 +459,90 @@ class CollectorRetentionManager:
                 connection,
                 source_id=source_id,
                 stream_epoch=stream_epoch,
-                current_stream_epoch=current_stream_epoch,
                 desktop_checkpoint=checkpoint,
             )
         except sqlite3.DatabaseError as exc:
             raise CollectorRetentionError(
                 "cannot preview collector retention compaction"
             ) from exc
+        finally:
+            connection.close()
+
+    @staticmethod
+    def _decode_journal_ids(value: str, field: str) -> tuple[str, ...]:
+        try:
+            decoded = json.loads(value)
+        except (TypeError, json.JSONDecodeError) as exc:
+            raise CollectorRetentionError(
+                f"collector compaction journal {field} is invalid"
+            ) from exc
+        if (
+            not isinstance(decoded, list)
+            or any(not isinstance(item, str) or not item for item in decoded)
+        ):
+            raise CollectorRetentionError(
+                f"collector compaction journal {field} is invalid"
+            )
+        return tuple(decoded)
+
+    def _existing_terminal(
+        self,
+        connection: sqlite3.Connection,
+        plan: CollectorRetentionPlan,
+    ) -> tuple[str, bool] | None:
+        row = connection.execute(
+            f"SELECT source_id, stream_epoch, compacted_at, deleted_count, "
+            f"deleted_delta_ids_json, retained_delta_ids_json, reclamation_complete "
+            f"FROM {self._JOURNAL_TABLE} WHERE plan_id=?",
+            (plan.plan_id,),
+        ).fetchone()
+        if row is None:
+            return None
+        deleted = self._decode_journal_ids(
+            row["deleted_delta_ids_json"], "deleted_delta_ids"
+        )
+        retained = self._decode_journal_ids(
+            row["retained_delta_ids_json"], "retained_delta_ids"
+        )
+        if (
+            row["source_id"] != plan.source_id
+            or row["stream_epoch"] != plan.stream_epoch
+            or row["deleted_count"] != len(plan.delete_delta_ids)
+            or deleted != plan.delete_delta_ids
+            or retained != plan.retained_delta_ids
+            or row["reclamation_complete"] not in (0, 1)
+        ):
+            raise CollectorRetentionError(
+                "collector compaction journal conflicts with the requested plan"
+            )
+        _instant(row["compacted_at"], "compacted_at")
+        return row["compacted_at"], bool(row["reclamation_complete"])
+
+    def _reclaim_pages(self) -> None:
+        connection = self.collector._connect()
+        try:
+            connection.execute("VACUUM")
+        finally:
+            connection.close()
+
+    def _mark_reclamation_complete(self, plan_id: str) -> None:
+        connection = self.collector._connect()
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            cursor = connection.execute(
+                f"UPDATE {self._JOURNAL_TABLE} SET reclamation_complete=1 "
+                "WHERE plan_id=?",
+                (plan_id,),
+            )
+            if cursor.rowcount != 1:
+                raise CollectorRetentionError(
+                    "collector compaction terminal journal disappeared"
+                )
+            connection.commit()
+        except Exception:
+            if connection.in_transaction:
+                connection.rollback()
+            raise
         finally:
             connection.close()
 
@@ -457,54 +563,61 @@ class CollectorRetentionManager:
             raise CollectorRetentionError("collector store size is unavailable") from exc
 
         connection = self.collector._connect()
-        deleted: tuple[str, ...] = ()
+        recovered_existing_journal = False
+        terminal_compacted_at = compacted_at
+        reclamation_complete = False
         try:
             connection.execute("BEGIN IMMEDIATE")
-            refreshed = self._build_plan(
-                connection,
-                source_id=plan.source_id,
-                stream_epoch=plan.stream_epoch,
-                current_stream_epoch=plan.current_stream_epoch,
-                desktop_checkpoint=checkpoint,
-            )
-            if refreshed != plan:
-                raise CollectorRetentionPlanStaleError(
-                    "collector retention plan is stale; preview again before compaction"
+            existing = self._existing_terminal(connection, plan)
+            if existing is not None:
+                terminal_compacted_at, reclamation_complete = existing
+                recovered_existing_journal = True
+                connection.commit()
+            else:
+                refreshed = self._build_plan(
+                    connection,
+                    source_id=plan.source_id,
+                    stream_epoch=plan.stream_epoch,
+                    desktop_checkpoint=checkpoint,
                 )
-            deleted = plan.delete_delta_ids
-            if deleted:
-                placeholders = ",".join("?" for _ in deleted)
-                cursor = connection.execute(
-                    f"DELETE FROM collector_deltas WHERE delta_id IN ({placeholders})",
-                    deleted,
-                )
-                if cursor.rowcount != len(deleted):
+                if refreshed != plan:
                     raise CollectorRetentionPlanStaleError(
-                        "collector retention rows changed during compaction"
+                        "collector retention plan is stale; preview again before compaction"
                     )
-            connection.execute(
-                f"INSERT INTO {self._JOURNAL_TABLE}("
-                "plan_id, source_id, stream_epoch, compacted_at, deleted_count, "
-                "deleted_delta_ids_json, retained_delta_ids_json"
-                ") VALUES(?,?,?,?,?,?,?)",
-                (
-                    plan.plan_id,
-                    plan.source_id,
-                    plan.stream_epoch,
-                    compacted_at,
-                    len(deleted),
-                    json.dumps(list(deleted), separators=(",", ":")),
-                    json.dumps(list(plan.retained_delta_ids), separators=(",", ":")),
-                ),
-            )
-            connection.commit()
-            if deleted:
-                connection.execute("VACUUM")
+                deleted = plan.delete_delta_ids
+                if deleted:
+                    placeholders = ",".join("?" for _ in deleted)
+                    cursor = connection.execute(
+                        f"DELETE FROM collector_deltas WHERE delta_id IN ({placeholders})",
+                        deleted,
+                    )
+                    if cursor.rowcount != len(deleted):
+                        raise CollectorRetentionPlanStaleError(
+                            "collector retention rows changed during compaction"
+                        )
+                reclamation_complete = not bool(deleted)
+                connection.execute(
+                    f"INSERT INTO {self._JOURNAL_TABLE}("
+                    "plan_id, source_id, stream_epoch, compacted_at, deleted_count, "
+                    "deleted_delta_ids_json, retained_delta_ids_json, reclamation_complete"
+                    ") VALUES(?,?,?,?,?,?,?,?)",
+                    (
+                        plan.plan_id,
+                        plan.source_id,
+                        plan.stream_epoch,
+                        compacted_at,
+                        len(deleted),
+                        json.dumps(list(deleted), separators=(",", ":")),
+                        json.dumps(list(plan.retained_delta_ids), separators=(",", ":")),
+                        int(reclamation_complete),
+                    ),
+                )
+                connection.commit()
         except sqlite3.DatabaseError as exc:
             if connection.in_transaction:
                 connection.rollback()
             raise CollectorRetentionError(
-                "collector compaction failed without a valid terminal result"
+                "collector compaction semantic transition did not commit"
             ) from exc
         except Exception:
             if connection.in_transaction:
@@ -513,7 +626,21 @@ class CollectorRetentionManager:
         finally:
             connection.close()
 
-        # Reopen through the canonical verification paths after page reclamation.
+        # The journaled delete is the terminal semantic transition. Page reclamation
+        # is maintenance: failure leaves a durable retryable journal state instead of
+        # converting an already-committed delete into an ambiguous operation failure.
+        if plan.delete_delta_ids and not reclamation_complete:
+            try:
+                self._reclaim_pages()
+                self._mark_reclamation_complete(plan.plan_id)
+            except sqlite3.DatabaseError:
+                reclamation_complete = False
+            else:
+                reclamation_complete = True
+
+        # Reopen through canonical verification after either terminal path. A retry
+        # after process death finds the exact journal first and can finish VACUUM
+        # without rebuilding a now-impossible pre-delete plan.
         self.collector._verify_sqlite_schema()
         self.collector._ensure_projection_integrity_guard()
         verified = self.collector.stream_checkpoint(
@@ -534,11 +661,13 @@ class CollectorRetentionManager:
             plan_id=plan.plan_id,
             source_id=plan.source_id,
             stream_epoch=plan.stream_epoch,
-            deleted_delta_ids=deleted,
+            deleted_delta_ids=plan.delete_delta_ids,
             retained_delta_ids=plan.retained_delta_ids,
             bytes_before=bytes_before,
             bytes_after=bytes_after,
-            compacted_at=compacted_at,
+            compacted_at=terminal_compacted_at,
+            recovered_existing_journal=recovered_existing_journal,
+            reclamation_complete=reclamation_complete,
         )
 
     def compaction_journal(self) -> tuple[dict[str, object], ...]:
@@ -546,7 +675,8 @@ class CollectorRetentionManager:
         try:
             rows = connection.execute(
                 f"SELECT plan_id, source_id, stream_epoch, compacted_at, "
-                f"deleted_count, deleted_delta_ids_json, retained_delta_ids_json "
+                f"deleted_count, deleted_delta_ids_json, retained_delta_ids_json, "
+                f"reclamation_complete "
                 f"FROM {self._JOURNAL_TABLE} ORDER BY rowid"
             ).fetchall()
             return tuple(
@@ -556,12 +686,13 @@ class CollectorRetentionManager:
                     "stream_epoch": row["stream_epoch"],
                     "compacted_at": row["compacted_at"],
                     "deleted_count": row["deleted_count"],
-                    "deleted_delta_ids": tuple(
-                        json.loads(row["deleted_delta_ids_json"])
+                    "deleted_delta_ids": self._decode_journal_ids(
+                        row["deleted_delta_ids_json"], "deleted_delta_ids"
                     ),
-                    "retained_delta_ids": tuple(
-                        json.loads(row["retained_delta_ids_json"])
+                    "retained_delta_ids": self._decode_journal_ids(
+                        row["retained_delta_ids_json"], "retained_delta_ids"
                     ),
+                    "reclamation_complete": bool(row["reclamation_complete"]),
                 }
                 for row in rows
             )

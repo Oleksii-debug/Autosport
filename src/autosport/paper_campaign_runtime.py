@@ -14,6 +14,8 @@ they must not be multiplexed through this class.
 
 from __future__ import annotations
 
+import hashlib
+import json
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -29,10 +31,12 @@ from .agent_loop import (
     ReflectionPostmortem,
 )
 from .continuous_session import SettlementResolution
+from .integrity import atomic_write_json
 from .learning_environment import (
     Action,
     CausalLearningEnvironment,
     EnvironmentCheckpoint,
+    LearningEnvironmentError,
     Observation,
 )
 from .paper_settlement_learning import (
@@ -41,10 +45,51 @@ from .paper_settlement_learning import (
     PaperSettlementLearningWitness,
 )
 from .research_supervisor import ResearchSupervisor
+from .workspace_lock import WorkspaceEconomicLock
+
+
+CAMPAIGN_SCHEMA = "autosport.paper_campaign_runtime"
+CAMPAIGN_SCHEMA_VERSION = 1
+_HEX = frozenset("0123456789abcdef")
 
 
 class PaperCampaignRuntimeError(RuntimeError):
     """The campaign composition conflicts with durable canonical evidence."""
+
+
+def _canonical_json(value: object) -> str:
+    try:
+        return json.dumps(
+            value,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        )
+    except (TypeError, ValueError, UnicodeEncodeError) as exc:
+        raise PaperCampaignRuntimeError(
+            "campaign evidence is not canonical JSON"
+        ) from exc
+
+
+def _digest(value: object) -> str:
+    return hashlib.sha256(_canonical_json(value).encode("utf-8")).hexdigest()
+
+
+def _reject_duplicate_pairs(pairs: list[tuple[str, object]]) -> dict[str, object]:
+    result: dict[str, object] = {}
+    for key, value in pairs:
+        if key in result:
+            raise PaperCampaignRuntimeError(f"campaign JSON duplicate key: {key}")
+        result[key] = value
+    return result
+
+
+def _sha(value: object, name: str) -> str:
+    text = _text(value, name).lower()
+    if len(text) != 64 or any(ch not in _HEX for ch in text):
+        raise PaperCampaignRuntimeError(f"{name} must be canonical SHA-256 hex")
+    return text
 
 
 def _text(value: object, name: str) -> str:
@@ -189,10 +234,184 @@ class PaperCampaignRuntime:
             raise PaperCampaignRuntimeError(
                 "environment does not bind the settlement bridge AgentLoop"
             )
+        try:
+            active_checkpoint = environment.checkpoint()
+        except LearningEnvironmentError as exc:
+            raise PaperCampaignRuntimeError(
+                "campaign runtime must be constructed at an exact resolved environment checkpoint"
+            ) from exc
+        if snapshot.environment_checkpoint_id != active_checkpoint.checkpoint_id:
+            raise PaperCampaignRuntimeError(
+                "active environment checkpoint differs from AgentLoop durable checkpoint"
+            )
         self.environment = environment
         self.settlement_bridge = settlement_bridge
         self.reflection_plan = reflection_plan
         self.research_supervisor = research_supervisor
+        self._environment_checkpoint_id = active_checkpoint.checkpoint_id
+        self.state_path = settlement_bridge.state_path.with_name(
+            f"{settlement_bridge.state_path.name}.campaign.json"
+        )
+        self._ensure_campaign_state()
+
+    def _write_campaign_state(self, plans: dict[str, object]) -> None:
+        bare = {
+            "schema": CAMPAIGN_SCHEMA,
+            "schema_version": CAMPAIGN_SCHEMA_VERSION,
+            "plans": plans,
+        }
+        atomic_write_json(
+            self.state_path,
+            {**bare, "state_sha256": _digest(bare)},
+        )
+
+    def _read_campaign_state(self) -> dict[str, object]:
+        try:
+            raw = self.state_path.read_text(encoding="utf-8")
+            state = json.loads(
+                raw,
+                object_pairs_hook=_reject_duplicate_pairs,
+                parse_constant=lambda value: (_ for _ in ()).throw(
+                    PaperCampaignRuntimeError(
+                        f"campaign JSON contains non-finite value {value}"
+                    )
+                ),
+            )
+        except (OSError, json.JSONDecodeError) as exc:
+            raise PaperCampaignRuntimeError("campaign state is unreadable") from exc
+        if type(state) is not dict or set(state) != {
+            "schema",
+            "schema_version",
+            "plans",
+            "state_sha256",
+        }:
+            raise PaperCampaignRuntimeError("campaign state schema mismatch")
+        if (
+            state["schema"] != CAMPAIGN_SCHEMA
+            or state["schema_version"] != CAMPAIGN_SCHEMA_VERSION
+            or type(state["plans"]) is not dict
+        ):
+            raise PaperCampaignRuntimeError("unsupported campaign state")
+        bare = {
+            "schema": state["schema"],
+            "schema_version": state["schema_version"],
+            "plans": state["plans"],
+        }
+        if _sha(state["state_sha256"], "state_sha256") != _digest(bare):
+            raise PaperCampaignRuntimeError("campaign state digest mismatch")
+        expected_fields = {
+            "plan_id",
+            "ticket_id",
+            "binding_id",
+            "settlement_bundle_sha256",
+            "transition_id",
+            "attribution_id",
+            "postmortem_id",
+            "observation_id",
+            "action_id",
+            "baseline_checkpoint_id",
+            "next_checkpoint_id",
+            "summary_code",
+            "reason_code",
+            "unresolved_components",
+            "research_question_statement",
+            "research_budget_units",
+            "research_deadline_at",
+        }
+        for ticket_id, record in state["plans"].items():
+            _text(ticket_id, "campaign ticket_id")
+            if type(record) is not dict or set(record) != expected_fields:
+                raise PaperCampaignRuntimeError("campaign plan fields mismatch")
+            if record["ticket_id"] != ticket_id:
+                raise PaperCampaignRuntimeError("campaign plan ticket identity mismatch")
+            for field in (
+                "binding_id",
+                "settlement_bundle_sha256",
+                "transition_id",
+                "attribution_id",
+                "postmortem_id",
+                "observation_id",
+                "action_id",
+                "baseline_checkpoint_id",
+                "next_checkpoint_id",
+            ):
+                _sha(record[field], field)
+            _text(record["summary_code"], "summary_code")
+            _text(record["reason_code"], "reason_code")
+            if type(record["unresolved_components"]) is not list:
+                raise PaperCampaignRuntimeError(
+                    "campaign unresolved_components must be a list"
+                )
+            if record["research_question_statement"] is not None:
+                _text(
+                    record["research_question_statement"],
+                    "research_question_statement",
+                )
+            budget = record["research_budget_units"]
+            if budget is not None and (
+                isinstance(budget, bool) or not isinstance(budget, int) or budget <= 0
+            ):
+                raise PaperCampaignRuntimeError(
+                    "campaign research_budget_units must be positive"
+                )
+            deadline = record["research_deadline_at"]
+            if deadline is not None:
+                _timestamp(deadline, "research_deadline_at")
+            semantic = {key: value for key, value in record.items() if key != "plan_id"}
+            if _sha(record["plan_id"], "plan_id") != _digest(semantic):
+                raise PaperCampaignRuntimeError("campaign plan digest mismatch")
+        return state
+
+    def _ensure_campaign_state(self) -> None:
+        self.state_path.parent.mkdir(parents=True, exist_ok=True)
+        with WorkspaceEconomicLock(self.state_path.parent):
+            if self.state_path.exists():
+                self._read_campaign_state()
+            else:
+                self._write_campaign_state({})
+
+    def _bind_finalization_plan(
+        self,
+        witness: PaperSettlementLearningWitness,
+        attribution: OutcomeAttribution,
+        postmortem: ReflectionPostmortem,
+    ) -> None:
+        deadline = self.reflection_plan.research_deadline_at
+        canonical_deadline = (
+            None if deadline is None else _timestamp(deadline, "research_deadline_at")
+        )
+        semantic = {
+            "ticket_id": witness.ticket_id,
+            "binding_id": witness.binding_id,
+            "settlement_bundle_sha256": witness.settlement_bundle_sha256,
+            "transition_id": witness.transition.transition_id,
+            "attribution_id": attribution.attribution_id,
+            "postmortem_id": postmortem.postmortem_id,
+            "observation_id": witness.observation.observation_id,
+            "action_id": witness.action.action_id,
+            "baseline_checkpoint_id": witness.baseline_checkpoint.checkpoint_id,
+            "next_checkpoint_id": witness.next_checkpoint.checkpoint_id,
+            "summary_code": self.reflection_plan.summary_code,
+            "reason_code": self.reflection_plan.reason_code,
+            "unresolved_components": [
+                component.value
+                for component in self.reflection_plan.unresolved_components
+            ],
+            "research_question_statement": self.reflection_plan.research_question_statement,
+            "research_budget_units": self.reflection_plan.research_budget_units,
+            "research_deadline_at": canonical_deadline,
+        }
+        record = {"plan_id": _digest(semantic), **semantic}
+        with WorkspaceEconomicLock(self.state_path.parent):
+            state = self._read_campaign_state()
+            existing = state["plans"].get(witness.ticket_id)
+            if existing is not None and existing != record:
+                raise PaperCampaignRuntimeError(
+                    "durable campaign finalization plan conflicts with retry"
+                )
+            if existing is None:
+                state["plans"][witness.ticket_id] = record
+                self._write_campaign_state(state["plans"])
 
     @property
     def agent_loop(self):
@@ -237,6 +456,16 @@ class PaperCampaignRuntime:
             baseline_checkpoint, EnvironmentCheckpoint
         ):
             raise TypeError("baseline_checkpoint must be EnvironmentCheckpoint")
+
+        try:
+            self.settlement_bridge.verify_decision_observation_binding(
+                decision_id=decision_id,
+                observation=observation,
+            )
+        except PaperSettlementLearningBridgeError as exc:
+            raise PaperCampaignRuntimeError(
+                "economic decision does not bind the exact causal Observation"
+            ) from exc
 
         snapshot = self.agent_loop.snapshot()
         if snapshot.phase in {AgentLoopPhase.BOOTSTRAP, AgentLoopPhase.CHECKPOINT}:
@@ -373,6 +602,9 @@ class PaperCampaignRuntime:
             )
 
         postmortem = self._postmortem(attribution, witness)
+        # Freeze all optional research bounds and the exact bridge/checkpoint
+        # identities before the durable postmortem can cross the crash boundary.
+        self._bind_finalization_plan(witness, attribution, postmortem)
         # The same idempotent full-payload rule applies to a postmortem.  It
         # prevents a changed question/summary from being accepted merely
         # because it refers to the same attribution.
@@ -419,6 +651,7 @@ class PaperCampaignRuntime:
             admissible_actions=frozenset(self.environment.episode.admissible_actions),
             checkpoint=witness.next_checkpoint,
         )
+        self._environment_checkpoint_id = witness.next_checkpoint.checkpoint_id
         return PaperCampaignFinalizationReceipt(
             ticket_id=ticket_id,
             transition_id=witness.transition.transition_id,
@@ -433,6 +666,32 @@ class PaperCampaignRuntime:
         witness: PaperSettlementLearningWitness,
     ) -> None:
         snapshot = self.agent_loop.snapshot()
+        expected_environment_checkpoint_id: str
+        if snapshot.environment_checkpoint_id == witness.baseline_checkpoint.checkpoint_id:
+            expected_environment_checkpoint_id = witness.baseline_checkpoint.checkpoint_id
+        elif snapshot.environment_checkpoint_id == witness.next_checkpoint.checkpoint_id:
+            expected_environment_checkpoint_id = witness.next_checkpoint.checkpoint_id
+        else:
+            raise PaperCampaignRuntimeError(
+                "AgentLoop checkpoint does not bind bridge baseline or resolved checkpoint"
+            )
+        if self._environment_checkpoint_id != expected_environment_checkpoint_id:
+            raise PaperCampaignRuntimeError(
+                "active environment checkpoint differs from bridge/AgentLoop boundary"
+            )
+        try:
+            live_checkpoint = self.environment.checkpoint()
+        except LearningEnvironmentError:
+            # A pre-resolution in-memory environment legitimately carries the
+            # one pending action and therefore cannot emit a public checkpoint.
+            live_checkpoint = None
+        if (
+            live_checkpoint is not None
+            and live_checkpoint.checkpoint_id != self._environment_checkpoint_id
+        ):
+            raise PaperCampaignRuntimeError(
+                "active environment state drifted from its bound checkpoint"
+            )
         if (
             snapshot.environment_id != witness.transition.environment_id
             or snapshot.episode_id != witness.transition.episode_id

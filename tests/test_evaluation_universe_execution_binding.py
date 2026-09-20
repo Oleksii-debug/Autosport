@@ -420,3 +420,55 @@ def test_intake_cycle_retry_is_idempotent_but_resolver_drift_fails(tmp_path):
     )
     with pytest.raises(EvaluationIntakeIntegrityError, match="no longer matches"):
         intake.records()
+
+
+def test_terminal_corrections_must_extend_the_unique_current_tip(tmp_path):
+    row = _row()
+    _, frozen = _universe(tmp_path / "intake", (row,))
+    resolver, reality = _resolver(tmp_path / "paper", _paper_attempt(row))
+    ledger = EvaluationUniverseLedger(frozen, paper_resolver=resolver)
+    ledger = ledger.append(_attempted(row)).append(
+        _outcome(row, FunnelStage.ACCEPTED, reality)
+    ).append(
+        FunnelEvent(
+            row_id=row.row_id,
+            stage=FunnelStage.RECONCILED,
+            event_at="2026-09-20T00:06:00Z",
+            reason_code="paper-reconciled",
+        )
+    )
+    pending = FunnelEvent(
+        row_id=row.row_id,
+        stage=FunnelStage.PENDING,
+        event_at="2026-09-20T00:10:00Z",
+        settlement_proof_id="settlement-pending",
+    )
+    ledger = ledger.append(pending)
+    settled = FunnelEvent(
+        row_id=row.row_id,
+        stage=FunnelStage.SETTLED,
+        event_at="2026-09-20T00:10:01Z",
+        settlement_proof_id="settlement-final",
+        correction_of=pending.event_id,
+    )
+    ledger = ledger.append(settled)
+
+    sibling = FunnelEvent(
+        row_id=row.row_id,
+        stage=FunnelStage.VOID,
+        event_at="2026-09-20T00:10:02Z",
+        settlement_proof_id="settlement-sibling",
+        correction_of=pending.event_id,
+    )
+    with pytest.raises(EvaluationUniverseError, match="exact current terminal tip"):
+        ledger.append(sibling)
+
+    linear = FunnelEvent(
+        row_id=row.row_id,
+        stage=FunnelStage.VOID,
+        event_at="2026-09-20T00:10:02Z",
+        settlement_proof_id="settlement-linear",
+        correction_of=settled.event_id,
+    )
+    advanced = ledger.append(linear)
+    assert advanced.current_stage(row.row_id) is FunnelStage.VOID

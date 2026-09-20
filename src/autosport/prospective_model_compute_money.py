@@ -229,13 +229,7 @@ def _make_unknown_evidence(
     router_request_sha256: str,
     router_decision_sha256: str,
 ) -> ProspectiveModelComputeMoneyEvidence:
-    """Create the sole schema-v1 state.
-
-    The helper has no monetary/status parameters, so importing this private helper
-    does not create a positive authority surface. Product consumers must still
-    treat the returned object as fail-closed UNKNOWN evidence, never as a future
-    positive billing capability.
-    """
+    """Create the sole schema-v1 state without any positive-authority inputs."""
 
     item = object.__new__(ProspectiveModelComputeMoneyEvidence)
     object.__setattr__(item, "intent_sha256", intent_sha256)
@@ -298,6 +292,10 @@ def resolve_prospective_model_compute_money(
         raise ProspectiveModelComputeMoneyError(
             "canonical router returned a non-canonical ComputeRouteDecision"
         )
+    if _text(decision.request_id, "router decision request_id") != canonical_request_id:
+        raise ProspectiveModelComputeMoneyError(
+            "canonical model-compute request identity mismatch"
+        )
 
     router_decided_at = _instant(decision.decided_at, "router decision decided_at")
     if router_decided_at > cutoff:
@@ -309,14 +307,9 @@ def resolve_prospective_model_compute_money(
         raise ProspectiveModelComputeMoneyError(
             "canonical model-compute route payload is invalid"
         )
-    request_payload = decision_payload.get("request")
-    if not isinstance(request_payload, Mapping):
+    if decision_payload.get("request_id") != canonical_request_id:
         raise ProspectiveModelComputeMoneyError(
-            "canonical model-compute request payload is missing"
-        )
-    if request_payload.get("request_id") != canonical_request_id:
-        raise ProspectiveModelComputeMoneyError(
-            "canonical model-compute request identity mismatch"
+            "canonical model-compute decision payload request identity mismatch"
         )
 
     intent_sha256 = _sha256(intent.intent_sha256, "intent.intent_sha256")
@@ -326,15 +319,16 @@ def resolve_prospective_model_compute_money(
         "intent opportunity_id",
     )
 
-    # Seal the complete canonical request/route identity into fail-closed evidence.
-    # A future monetary implementation must be a new product-owned re-resolution
-    # authority; it must not expand this caller-visible object into positive truth.
+    # Public ModelComputeRouterStore re-resolves the exact canonical decision by
+    # request id but intentionally exposes no full-request getter. Seal that
+    # canonical request identity plus the complete decision payload; do not reach
+    # into private store state merely to manufacture a stronger-looking proof.
     return _make_unknown_evidence(
         intent_sha256=intent_sha256,
         opportunity_id=opportunity_id,
         request_id=canonical_request_id,
         decision_at=cutoff,
         router_decided_at=router_decided_at,
-        router_request_sha256=_digest(request_payload),
+        router_request_sha256=_digest({"request_id": canonical_request_id}),
         router_decision_sha256=_digest(decision_payload),
     )

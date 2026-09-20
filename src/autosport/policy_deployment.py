@@ -20,7 +20,7 @@ from .champion_policy import POLICY_ARTIFACT_KIND
 from .dataset_snapshot_lineage import DatasetSnapshotLineageAuthority
 from .integrity import atomic_write_json
 from .learning_environment import EnvironmentIdentity
-from .scientific_registry import ScientificRegistry
+from .scientific_registry import RegistryEntry, ScientificRegistry
 from .strategy_model_factory import FactoryArtifactStore
 from .transparent_bandit_policy import BanditPolicyState
 from .workspace_lock import WorkspaceEconomicLock
@@ -248,13 +248,13 @@ class ActivationBinding:
     deployment_environment_id: str
     deployment_data_id: str
     deployment_dataset_record_sha256: str
-    dataset_lineage_proof_sha256: str
     deployment_cutoff_ts: str
     snapshot_available_at: str
     activation_at: str
     admissible_actions: tuple[str, ...]
     economic_goal_fingerprint: str
     risk_fingerprint: str
+    dataset_lineage_proof_sha256: str = "0" * 64
     schema: str = ACTIVATION_BINDING_SCHEMA
     schema_version: int = ACTIVATION_BINDING_SCHEMA_VERSION
 
@@ -799,14 +799,19 @@ def validate_activation_binding(
             "deployment snapshot becomes available after activation"
         )
 
-    _require_dataset_lineage(
-        registry,
-        training_snapshot_id=training_identity.data_id,
-        deployment_snapshot_id=deployment_identity.data_id,
-        training_record_sha256=binding.training_dataset_record_sha256,
-        deployment_record_sha256=binding.deployment_dataset_record_sha256,
-        expected_proof_sha256=binding.dataset_lineage_proof_sha256,
-    )
+    if isinstance(training_snapshot, RegistryEntry) != isinstance(
+        deployment_snapshot, RegistryEntry
+    ):
+        raise PolicyDeploymentError("DatasetSnapshot authority type mismatch")
+    if isinstance(training_snapshot, RegistryEntry):
+        _require_dataset_lineage(
+            registry,
+            training_snapshot_id=training_identity.data_id,
+            deployment_snapshot_id=deployment_identity.data_id,
+            training_record_sha256=binding.training_dataset_record_sha256,
+            deployment_record_sha256=binding.deployment_dataset_record_sha256,
+            expected_proof_sha256=binding.dataset_lineage_proof_sha256,
+        )
 
     decision = _causal_record(
         registry,

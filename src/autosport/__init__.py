@@ -27,3 +27,7 @@ from . import _provider_observation_payload_strictness as _provider_observation_
 # owning opportunity/predictive modules.
 from . import predictive_authority as _predictive_authority  # noqa: E402,F401
 from . import _predictive_authority_type_fence as _predictive_authority_type_fence  # noqa: E402,F401
+
+# Product chrome describes one finished Autosport product. Keep internal/versioned
+# strategy and evidence identities intact while removing legacy V1 product framing.
+from . import _whole_product_title_guard as _whole_product_title_guard  # noqa: F401,E402

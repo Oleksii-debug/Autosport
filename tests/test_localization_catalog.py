@@ -155,7 +155,7 @@ def test_catalog_is_versioned_ukrainian_default_and_fails_closed() -> None:
 
 
 def test_critical_catalog_strings_are_exact_ukrainian_presentation() -> None:
-    assert text("ui.app.title") == "Автоспорт — V1 лабораторія паперового моделювання для Windows"
+    assert text("ui.app.title") == "Автоспорт — аналітична програма для Windows"
     assert text("ui.dialog.title") == "Автоспорт"
     assert text("ui.button.run_replay") == "Запустити паперовий повтор"
     assert text("ui.speed.event_driven") == "Подієвий — максимально швидко"
@@ -163,6 +163,11 @@ def test_critical_catalog_strings_are_exact_ukrainian_presentation() -> None:
     assert text("ui.accessibility.strategy.name") == "Стратегія повтору"
     assert text("ui.accessibility.live_quotes.name") == "Поточні котирування"
     assert text("ui.accessibility.bankroll.name") == "Віртуальний банк"
+
+
+def test_whole_product_chrome_has_no_version_finish_line_token() -> None:
+    assert "V1" not in text("ui.app.title")
+    assert "V1" not in text("ui.dialog.title")
 
 
 def test_remaining_runtime_presentation_residuals_are_localized_without_mutating_sha() -> None:

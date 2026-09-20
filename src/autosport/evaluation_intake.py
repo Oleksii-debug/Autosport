@@ -5,6 +5,7 @@ import json
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Protocol, runtime_checkable
 
 from .integrity import atomic_write_json
 from .json_integrity import strict_json_loads
@@ -12,7 +13,7 @@ from .workspace_lock import WorkspaceEconomicLock
 
 
 SCHEMA = "autosport.evaluation_intake"
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 _HEX = frozenset("0123456789abcdef")
 
 
@@ -74,8 +75,112 @@ def _keys(values: object) -> tuple[str, ...]:
 
 
 @dataclass(frozen=True, slots=True)
+class ObservationEnumerationWitness:
+    """Upstream acquisition proof for one exhaustive observation cycle.
+
+    The evaluation layer never infers completeness from observed quotes.  A provider or
+    acquisition adapter must resolve this witness from its own durable page/range
+    authority and explicitly prove that the represented source window is exhaustive
+    and gap-free.  Providers that cannot make that claim cannot mint a witness that
+    qualifies a COMPLETE denominator.
+    """
+
+    enumeration_id: str
+    session_id: str
+    source_id: str
+    campaign_id: str
+    research_protocol_id: str
+    protocol_sha256: str
+    universe_id: str
+    cycle_index: int
+    source_range_id: str
+    stream_epoch: str
+    start_cursor: str
+    end_cursor: str
+    acquisition_sha256: str
+    row_keys: tuple[str, ...]
+    exhaustive: bool
+    gap_free: bool
+    committed_at: str
+    evaluation_not_before: str
+    outcome_reveal_not_before: str
+
+    def __post_init__(self) -> None:
+        for field in (
+            "enumeration_id",
+            "session_id",
+            "source_id",
+            "campaign_id",
+            "research_protocol_id",
+            "universe_id",
+            "source_range_id",
+            "stream_epoch",
+            "start_cursor",
+            "end_cursor",
+        ):
+            _text(getattr(self, field), field)
+        object.__setattr__(self, "protocol_sha256", _sha(self.protocol_sha256, "protocol_sha256"))
+        object.__setattr__(self, "acquisition_sha256", _sha(self.acquisition_sha256, "acquisition_sha256"))
+        object.__setattr__(self, "row_keys", _keys(self.row_keys))
+        if type(self.cycle_index) is not int or self.cycle_index <= 0:
+            raise EvaluationIntakeError("cycle_index must be a positive integer")
+        if type(self.exhaustive) is not bool or type(self.gap_free) is not bool:
+            raise EvaluationIntakeError("exhaustive/gap_free must be booleans")
+        committed = _instant(self.committed_at, "committed_at")
+        evaluation = _instant(self.evaluation_not_before, "evaluation_not_before")
+        reveal = _instant(self.outcome_reveal_not_before, "outcome_reveal_not_before")
+        if evaluation < committed:
+            raise EvaluationIntakeError(
+                "evaluation_not_before cannot precede enumeration commit"
+            )
+        if reveal <= evaluation:
+            raise EvaluationIntakeError(
+                "outcome reveal must be strictly after evaluation boundary"
+            )
+
+    @property
+    def witness_sha256(self) -> str:
+        return _digest(self.to_payload())
+
+    def to_payload(self) -> dict[str, object]:
+        return {
+            "enumeration_id": self.enumeration_id,
+            "session_id": self.session_id,
+            "source_id": self.source_id,
+            "campaign_id": self.campaign_id,
+            "research_protocol_id": self.research_protocol_id,
+            "protocol_sha256": self.protocol_sha256,
+            "universe_id": self.universe_id,
+            "cycle_index": self.cycle_index,
+            "source_range_id": self.source_range_id,
+            "stream_epoch": self.stream_epoch,
+            "start_cursor": self.start_cursor,
+            "end_cursor": self.end_cursor,
+            "acquisition_sha256": self.acquisition_sha256,
+            "row_keys": list(self.row_keys),
+            "exhaustive": self.exhaustive,
+            "gap_free": self.gap_free,
+            "committed_at": _timestamp(self.committed_at, "committed_at"),
+            "evaluation_not_before": _timestamp(
+                self.evaluation_not_before, "evaluation_not_before"
+            ),
+            "outcome_reveal_not_before": _timestamp(
+                self.outcome_reveal_not_before, "outcome_reveal_not_before"
+            ),
+        }
+
+
+@runtime_checkable
+class ObservationEnumerationResolver(Protocol):
+    """Resolve immutable acquisition enumeration evidence by stable identity."""
+
+    def resolve_enumeration(self, enumeration_id: str) -> ObservationEnumerationWitness:
+        ...
+
+
+@dataclass(frozen=True, slots=True)
 class ObservationIntakeRecord:
-    """One pre-result observation cycle and its complete denominator membership."""
+    """One pre-result observation cycle derived from upstream enumeration evidence."""
 
     authority_id: str
     session_id: str
@@ -86,9 +191,12 @@ class ObservationIntakeRecord:
     universe_id: str
     cycle_index: int
     committed_at: str
+    evaluation_not_before: str
     outcome_reveal_not_before: str
     row_keys: tuple[str, ...]
     source_state: str
+    enumeration_id: str
+    enumeration_witness_sha256: str
     previous_record_sha256: str | None
 
     def __post_init__(self) -> None:
@@ -100,22 +208,27 @@ class ObservationIntakeRecord:
             "research_protocol_id",
             "universe_id",
             "source_state",
+            "enumeration_id",
         ):
             _text(getattr(self, field), field)
+        object.__setattr__(self, "protocol_sha256", _sha(self.protocol_sha256, "protocol_sha256"))
         object.__setattr__(
             self,
-            "protocol_sha256",
-            _sha(self.protocol_sha256, "protocol_sha256"),
+            "enumeration_witness_sha256",
+            _sha(self.enumeration_witness_sha256, "enumeration_witness_sha256"),
         )
         if type(self.cycle_index) is not int or self.cycle_index <= 0:
             raise EvaluationIntakeError("cycle_index must be a positive integer")
         committed = _instant(self.committed_at, "committed_at")
+        evaluation = _instant(self.evaluation_not_before, "evaluation_not_before")
         reveal = _instant(self.outcome_reveal_not_before, "outcome_reveal_not_before")
-        if reveal <= committed:
-            raise EvaluationIntakeError(
-                "intake membership must be committed before outcome reveal"
-            )
+        if evaluation < committed:
+            raise EvaluationIntakeError("evaluation boundary precedes intake commit")
+        if reveal <= evaluation:
+            raise EvaluationIntakeError("outcome reveal must follow evaluation boundary")
         object.__setattr__(self, "row_keys", _keys(self.row_keys))
+        if self.source_state != "EXHAUSTIVE_GAP_FREE":
+            raise EvaluationIntakeError("intake record must be exhaustive and gap-free")
         if self.previous_record_sha256 is not None:
             object.__setattr__(
                 self,
@@ -149,12 +262,16 @@ class ObservationIntakeRecord:
             "universe_id": self.universe_id,
             "cycle_index": self.cycle_index,
             "committed_at": _timestamp(self.committed_at, "committed_at"),
+            "evaluation_not_before": _timestamp(
+                self.evaluation_not_before, "evaluation_not_before"
+            ),
             "outcome_reveal_not_before": _timestamp(
-                self.outcome_reveal_not_before,
-                "outcome_reveal_not_before",
+                self.outcome_reveal_not_before, "outcome_reveal_not_before"
             ),
             "row_keys": list(self.row_keys),
             "source_state": self.source_state,
+            "enumeration_id": self.enumeration_id,
+            "enumeration_witness_sha256": self.enumeration_witness_sha256,
             "previous_record_sha256": self.previous_record_sha256,
         }
 
@@ -172,9 +289,12 @@ class ObservationIntakeRecord:
             "universe_id",
             "cycle_index",
             "committed_at",
+            "evaluation_not_before",
             "outcome_reveal_not_before",
             "row_keys",
             "source_state",
+            "enumeration_id",
+            "enumeration_witness_sha256",
             "previous_record_sha256",
             "record_sha256",
         }
@@ -196,7 +316,7 @@ class ObservationIntakeRecord:
 
 @dataclass(frozen=True, slots=True)
 class ObservationIntakeSnapshot:
-    """Independently recomputable immutable membership from canonical pre-result intake."""
+    """Immutable membership recomputed from canonical upstream-authorized intake."""
 
     authority_id: str
     session_id: str
@@ -211,6 +331,7 @@ class ObservationIntakeSnapshot:
     root_sha256: str
     expected_row_keys: tuple[str, ...]
     committed_at: str
+    evaluation_not_before: str
 
     def __post_init__(self) -> None:
         for field in (
@@ -222,11 +343,7 @@ class ObservationIntakeSnapshot:
             "universe_id",
         ):
             _text(getattr(self, field), field)
-        object.__setattr__(
-            self,
-            "protocol_sha256",
-            _sha(self.protocol_sha256, "protocol_sha256"),
-        )
+        object.__setattr__(self, "protocol_sha256", _sha(self.protocol_sha256, "protocol_sha256"))
         if type(self.first_cycle) is not int or type(self.last_cycle) is not int:
             raise EvaluationIntakeError("snapshot cycle bounds must be integers")
         if self.first_cycle <= 0 or self.last_cycle < self.first_cycle:
@@ -235,7 +352,10 @@ class ObservationIntakeSnapshot:
             raise EvaluationIntakeError("snapshot record_count must cover every cycle")
         object.__setattr__(self, "root_sha256", _sha(self.root_sha256, "root_sha256"))
         object.__setattr__(self, "expected_row_keys", _keys(self.expected_row_keys))
-        _instant(self.committed_at, "committed_at")
+        committed = _instant(self.committed_at, "committed_at")
+        evaluation = _instant(self.evaluation_not_before, "evaluation_not_before")
+        if evaluation < committed:
+            raise EvaluationIntakeError("snapshot evaluation boundary precedes commit")
 
     @property
     def identity(self) -> tuple[str, str, str, str, str, str]:
@@ -267,6 +387,9 @@ class ObservationIntakeSnapshot:
             "root_sha256": self.root_sha256,
             "expected_row_keys": list(self.expected_row_keys),
             "committed_at": _timestamp(self.committed_at, "committed_at"),
+            "evaluation_not_before": _timestamp(
+                self.evaluation_not_before, "evaluation_not_before"
+            ),
         }
 
     @classmethod
@@ -287,6 +410,7 @@ class ObservationIntakeSnapshot:
             "root_sha256",
             "expected_row_keys",
             "committed_at",
+            "evaluation_not_before",
         }
         if set(raw) != expected:
             raise EvaluationIntakeIntegrityError("intake snapshot schema mismatch")
@@ -301,14 +425,25 @@ class ObservationIntakeSnapshot:
 
 
 class ObservationIntakeLedger:
-    """Durable pre-result membership authority; freeze recomputes membership from history."""
+    """Durable denominator membership derived only from upstream enumeration authority."""
 
     FILE_NAME = "evaluation-intake.json"
 
-    def __init__(self, workspace: str | Path, *, authority_id: str) -> None:
+    def __init__(
+        self,
+        workspace: str | Path,
+        *,
+        authority_id: str,
+        enumeration_resolver: ObservationEnumerationResolver,
+    ) -> None:
+        if not isinstance(enumeration_resolver, ObservationEnumerationResolver):
+            raise TypeError(
+                "enumeration_resolver must implement ObservationEnumerationResolver"
+            )
         self.workspace = Path(workspace)
         self.path = self.workspace / self.FILE_NAME
         self.authority_id = _text(authority_id, "authority_id")
+        self.enumeration_resolver = enumeration_resolver
 
     def _read_unlocked(self) -> tuple[ObservationIntakeRecord, ...]:
         if not self.path.exists():
@@ -340,13 +475,17 @@ class ObservationIntakeLedger:
 
     def records(self) -> tuple[ObservationIntakeRecord, ...]:
         with WorkspaceEconomicLock(self.workspace):
-            return self._read_unlocked()
+            records = self._read_unlocked()
+        for record in records:
+            self._verify_enumeration(record)
+        return records
 
     def _validate_chain(self, records: tuple[ObservationIntakeRecord, ...]) -> None:
         previous: str | None = None
         identity: tuple[str, str, str, str, str, str] | None = None
         expected_cycle = 1
         seen_rows: set[str] = set()
+        seen_enumerations: set[str] = set()
         for record in records:
             if record.authority_id != self.authority_id:
                 raise EvaluationIntakeIntegrityError("record belongs to another intake authority")
@@ -362,70 +501,89 @@ class ObservationIntakeLedger:
                 raise EvaluationIntakeIntegrityError("intake record chain predecessor mismatch")
             if seen_rows.intersection(record.row_keys):
                 raise EvaluationIntakeIntegrityError("row_key cannot move between intake cycles")
+            if record.enumeration_id in seen_enumerations:
+                raise EvaluationIntakeIntegrityError("enumeration_id cannot authorize two cycles")
             seen_rows.update(record.row_keys)
+            seen_enumerations.add(record.enumeration_id)
             previous = record.record_sha256
             expected_cycle += 1
 
-    def append_cycle(
-        self,
-        *,
-        session_id: str,
-        source_id: str,
-        campaign_id: str,
-        research_protocol_id: str,
-        protocol_sha256: str,
-        universe_id: str,
-        cycle_index: int,
-        committed_at: str,
-        outcome_reveal_not_before: str,
-        row_keys: tuple[str, ...],
-        source_state: str,
-    ) -> ObservationIntakeRecord:
+    def _resolve_enumeration(self, enumeration_id: str) -> ObservationEnumerationWitness:
+        enumeration_id = _text(enumeration_id, "enumeration_id")
+        witness = self.enumeration_resolver.resolve_enumeration(enumeration_id)
+        if not isinstance(witness, ObservationEnumerationWitness):
+            raise EvaluationIntakeIntegrityError(
+                "enumeration resolver returned invalid witness type"
+            )
+        if witness.enumeration_id != enumeration_id:
+            raise EvaluationIntakeIntegrityError(
+                "enumeration resolver returned a different identity"
+            )
+        if not witness.exhaustive or not witness.gap_free:
+            raise EvaluationIntakeError(
+                "evaluation denominator requires exhaustive gap-free acquisition evidence"
+            )
+        return witness
+
+    def _verify_enumeration(self, record: ObservationIntakeRecord) -> None:
+        witness = self._resolve_enumeration(record.enumeration_id)
+        expected = ObservationIntakeRecord(
+            authority_id=self.authority_id,
+            session_id=witness.session_id,
+            source_id=witness.source_id,
+            campaign_id=witness.campaign_id,
+            research_protocol_id=witness.research_protocol_id,
+            protocol_sha256=witness.protocol_sha256,
+            universe_id=witness.universe_id,
+            cycle_index=witness.cycle_index,
+            committed_at=witness.committed_at,
+            evaluation_not_before=witness.evaluation_not_before,
+            outcome_reveal_not_before=witness.outcome_reveal_not_before,
+            row_keys=witness.row_keys,
+            source_state="EXHAUSTIVE_GAP_FREE",
+            enumeration_id=witness.enumeration_id,
+            enumeration_witness_sha256=witness.witness_sha256,
+            previous_record_sha256=record.previous_record_sha256,
+        )
+        if expected.record_sha256 != record.record_sha256:
+            raise EvaluationIntakeIntegrityError(
+                "durable intake record no longer matches upstream enumeration authority"
+            )
+
+    def append_cycle(self, *, enumeration_id: str) -> ObservationIntakeRecord:
+        witness = self._resolve_enumeration(enumeration_id)
         with WorkspaceEconomicLock(self.workspace):
             records = self._read_unlocked()
-            if type(cycle_index) is not int or cycle_index <= 0:
-                raise EvaluationIntakeError("cycle_index must be a positive integer")
-            if cycle_index <= len(records):
-                existing = records[cycle_index - 1]
-                proposed_without_previous = ObservationIntakeRecord(
-                    authority_id=self.authority_id,
-                    session_id=session_id,
-                    source_id=source_id,
-                    campaign_id=campaign_id,
-                    research_protocol_id=research_protocol_id,
-                    protocol_sha256=protocol_sha256,
-                    universe_id=universe_id,
-                    cycle_index=cycle_index,
-                    committed_at=committed_at,
-                    outcome_reveal_not_before=outcome_reveal_not_before,
-                    row_keys=row_keys,
-                    source_state=source_state,
-                    previous_record_sha256=existing.previous_record_sha256,
-                )
-                if proposed_without_previous.record_sha256 == existing.record_sha256:
+            if witness.cycle_index <= len(records):
+                existing = records[witness.cycle_index - 1]
+                self._verify_enumeration(existing)
+                if existing.enumeration_id == witness.enumeration_id:
                     return existing
                 raise EvaluationIntakeIntegrityError(
-                    "intake cycle retry conflicts with durable history"
+                    "intake cycle retry conflicts with durable enumeration history"
                 )
             expected_cycle = len(records) + 1
-            if cycle_index != expected_cycle:
+            if witness.cycle_index != expected_cycle:
                 raise EvaluationIntakeIntegrityError(
                     "intake cycle cannot skip an observation cycle"
                 )
             previous = None if not records else records[-1].record_sha256
             record = ObservationIntakeRecord(
                 authority_id=self.authority_id,
-                session_id=session_id,
-                source_id=source_id,
-                campaign_id=campaign_id,
-                research_protocol_id=research_protocol_id,
-                protocol_sha256=protocol_sha256,
-                universe_id=universe_id,
-                cycle_index=cycle_index,
-                committed_at=committed_at,
-                outcome_reveal_not_before=outcome_reveal_not_before,
-                row_keys=row_keys,
-                source_state=source_state,
+                session_id=witness.session_id,
+                source_id=witness.source_id,
+                campaign_id=witness.campaign_id,
+                research_protocol_id=witness.research_protocol_id,
+                protocol_sha256=witness.protocol_sha256,
+                universe_id=witness.universe_id,
+                cycle_index=witness.cycle_index,
+                committed_at=witness.committed_at,
+                evaluation_not_before=witness.evaluation_not_before,
+                outcome_reveal_not_before=witness.outcome_reveal_not_before,
+                row_keys=witness.row_keys,
+                source_state="EXHAUSTIVE_GAP_FREE",
+                enumeration_id=witness.enumeration_id,
+                enumeration_witness_sha256=witness.witness_sha256,
                 previous_record_sha256=previous,
             )
             if records and records[0].identity != record.identity:
@@ -449,11 +607,11 @@ class ObservationIntakeLedger:
             }
             atomic_write_json(self.path, payload)
             self._validate_chain(updated)
+            self._verify_enumeration(record)
             return record
 
     def snapshot(self, *, first_cycle: int, last_cycle: int) -> ObservationIntakeSnapshot:
-        with WorkspaceEconomicLock(self.workspace):
-            records = self._read_unlocked()
+        records = self.records()
         if type(first_cycle) is not int or type(last_cycle) is not int:
             raise EvaluationIntakeError("snapshot cycle bounds must be integers")
         if first_cycle != 1:
@@ -481,6 +639,9 @@ class ObservationIntakeLedger:
             root_sha256=selected[-1].record_sha256,
             expected_row_keys=expected_keys,
             committed_at=max(record.committed_at for record in selected),
+            evaluation_not_before=max(
+                record.evaluation_not_before for record in selected
+            ),
         )
 
     def verify_snapshot(self, snapshot: ObservationIntakeSnapshot) -> None:
@@ -492,7 +653,7 @@ class ObservationIntakeLedger:
         )
         if canonical != snapshot:
             raise EvaluationIntakeIntegrityError(
-                "snapshot does not match canonical durable pre-result intake"
+                "snapshot does not match canonical upstream-authorized intake"
             )
 
     def record_for_row(self, row_key: str) -> ObservationIntakeRecord:

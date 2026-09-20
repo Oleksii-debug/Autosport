@@ -177,7 +177,7 @@ class CollectorDeltaStore(_SQLiteCollectorDeltaStore):
                     )
         return delta
 
-    def activate_runtime_stream_epoch(
+    def _record_runtime_stream_epoch_from_service(
         self,
         *,
         source_id: str,

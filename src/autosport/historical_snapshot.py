@@ -417,7 +417,7 @@ def resolve_historical_snapshot_authority(
             )
 
     verifier = ParlayApiTableTennisProvider(
-        "persisted-capture-verification",
+        public_preview=True,
         clock=lambda: captured_at,
         sleeper=lambda _: None,
     )

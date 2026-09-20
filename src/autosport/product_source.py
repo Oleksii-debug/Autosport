@@ -101,8 +101,8 @@ class ParlayApiProductSource:
         if not callable(clock):
             raise TypeError("clock must be callable")
         try:
-            workspace_path = Path(workspace).expanduser().absolute()
-        except RuntimeError as exc:
+            workspace_path = Path(workspace).expanduser().resolve(strict=False)
+        except (TypeError, ValueError, OSError, RuntimeError) as exc:
             raise ProductSourceStateError("product source workspace cannot be resolved") from exc
         if not workspace_path.is_absolute():
             raise ProductSourceStateError("product source workspace must be absolute")

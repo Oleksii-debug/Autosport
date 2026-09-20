@@ -338,7 +338,7 @@ class CollectorSQLiteStoreTests(unittest.TestCase):
                     lookup_id = "forged-delta" if column == "delta_id" else delta.delta_id
                     with self.assertRaisesRegex(
                         ValueError,
-                        "indexed projection conflicts with canonical payload",
+                        "indexed projection conflicts with payload",
                     ):
                         store.get(lookup_id)
 

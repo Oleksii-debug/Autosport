@@ -647,8 +647,10 @@ class SequentialMultiplicityEvidenceStore:
                 continue
             try:
                 raw = candidate.read_text(encoding="utf-8")
-            except (OSError, UnicodeError):
-                continue
+            except (OSError, UnicodeError) as exc:
+                raise ValueError(
+                    "unreadable workspace file prevents multiplicity authority rebootstrap"
+                ) from exc
 
             recognizable_text = (
                 '"plan"' in raw

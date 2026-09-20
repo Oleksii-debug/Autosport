@@ -638,6 +638,60 @@ class PaperCampaignRuntimeTests(unittest.TestCase):
                 T5,
             )
 
+    def test_late_research_deadline_before_frozen_plan_time_fails_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            registry = ScientificRegistry.initialize_pristine(
+                root / "scientific_registry.json"
+            )
+            supervisor = ResearchSupervisor.initialize_pristine(
+                root / "research_supervisor.json", registry
+            )
+            plan = PaperReflectionPlan(
+                research_question_statement="Can this late question still run?",
+                research_budget_units=1,
+                research_deadline_at="2026-09-20T03:00:35+00:00",
+            )
+            (
+                leg,
+                _book,
+                ticket_id,
+                _decision,
+                _environment,
+                _baseline,
+                _observation,
+                bridge,
+                runtime,
+            ) = _fixture(
+                root,
+                reflection_plan=plan,
+                research_supervisor=supervisor,
+            )
+            resolutions = _settle(root, leg, "loss")
+            bridge.reconcile_after_settlement(
+                paper_book_path=root / "paper_book.json",
+                resolutions=resolutions,
+                settled_ticket_ids=(ticket_id,),
+                at=T4,
+            )
+            with self.assertRaisesRegex(
+                PaperCampaignRuntimeError,
+                "deadline predates frozen reflection availability",
+            ):
+                runtime.finalize_ticket(ticket_id=ticket_id, at=T5)
+
+            state = json.loads(
+                (root / "agent-loop.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(state["phase"], AgentLoopPhase.EVALUATE.value)
+            self.assertEqual(state["attributions"], [])
+            durable = json.loads(
+                (root / "paper-learning-bridge.json.campaign.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+            self.assertEqual(durable["plans"], {})
+
     def test_future_finalization_and_conflicting_reflection_fail_closed(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

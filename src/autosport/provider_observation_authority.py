@@ -12,6 +12,12 @@ from urllib.request import Request, urlopen
 
 from .integrity import atomic_write_json
 from .json_integrity import strict_json_loads
+from .monotonic_workspace_authority import (
+    AuthorityPhase,
+    MonotonicWorkspaceAuthority,
+    MonotonicWorkspaceAuthorityError,
+)
+from .workspace_lock import WorkspaceEconomicLock
 
 
 SCHEMA = "autosport.provider_complete_game_board"
@@ -229,9 +235,14 @@ class CompleteGameBoardSnapshot:
             raise ProviderObservationUnsupportedError(
                 "partial provider snapshot cannot prove complete membership"
             )
-        for name in ("missing_books", "truncated_books", "snapshot_partial_reasons"):
+        for name in (
+            "partial_reason",
+            "missing_books",
+            "truncated_books",
+            "snapshot_partial_reasons",
+        ):
             raw = frame.get(name)
-            if raw is not None and raw != []:
+            if raw not in (None, [], ""):
                 raise ProviderObservationUnsupportedError(
                     f"provider snapshot carries {name} incompleteness evidence"
                 )
@@ -495,36 +506,50 @@ def capture_parlay_complete_game_board(
 
 
 class CompleteGameBoardEvidenceStore:
-    """Content-addressed immutable persistence for production-acquired snapshots."""
+    """Immutable provider evidence anchored to the independent machine-state authority."""
 
     DIRECTORY = "provider-complete-game-board"
+    AUTHORITY_DOMAIN = "provider-complete-game-board-capture"
 
-    def __init__(self, workspace: str | Path) -> None:
-        self.root = Path(workspace).expanduser().resolve(strict=False) / self.DIRECTORY
+    def __init__(
+        self,
+        workspace: str | Path,
+        *,
+        authority_root: str | Path | None = None,
+    ) -> None:
+        self.workspace = Path(workspace).expanduser().resolve(strict=False)
+        self.root = self.workspace / self.DIRECTORY
+        self.authority_root = authority_root
 
     def _path(self, evidence_sha256: str) -> Path:
         return self.root / f"{_sha(evidence_sha256, 'evidence_sha256')}.json"
 
-    def save(self, snapshot: CompleteGameBoardSnapshot) -> Path:
-        assert_complete_game_board_authoritative(snapshot)
-        path = self._path(snapshot.evidence_sha256)
-        if path.exists():
-            loaded = self.load(snapshot.evidence_sha256)
-            if loaded.to_payload() != snapshot.to_payload():
-                raise ProviderObservationIntegrityError(
-                    "content-addressed provider evidence conflicts with existing bytes"
-                )
-            return path
-        atomic_write_json(path, snapshot.to_payload())
-        loaded = self.load(snapshot.evidence_sha256)
-        if loaded.to_payload() != snapshot.to_payload():
-            raise ProviderObservationIntegrityError(
-                "persisted provider evidence does not match captured evidence"
-            )
-        return path
+    def _authority(self, evidence_sha256: str) -> MonotonicWorkspaceAuthority:
+        return MonotonicWorkspaceAuthority(
+            workspace=self.workspace,
+            domain=self.AUTHORITY_DOMAIN,
+            key=_sha(evidence_sha256, "evidence_sha256"),
+            authority_root=self.authority_root,
+        )
 
-    def load(self, evidence_sha256: str) -> CompleteGameBoardSnapshot:
-        path = self._path(evidence_sha256)
+    @staticmethod
+    def _state_sha256(snapshot: CompleteGameBoardSnapshot) -> str:
+        return _digest(snapshot.to_payload())
+
+    @staticmethod
+    def _semantic_binding_sha256(snapshot: CompleteGameBoardSnapshot) -> str:
+        return _digest(
+            {
+                "kind": "provider-complete-game-board-capture-v1",
+                "source_id": snapshot.request.source_id,
+                "request": snapshot.request.to_payload(),
+                "frame_sha256": snapshot.frame_sha256,
+                "evidence_sha256": snapshot.evidence_sha256,
+            }
+        )
+
+    @staticmethod
+    def _read_path(path: Path) -> CompleteGameBoardSnapshot:
         try:
             raw = strict_json_loads(path.read_text(encoding="utf-8"))
         except (OSError, TypeError, ValueError) as exc:
@@ -535,9 +560,118 @@ class CompleteGameBoardEvidenceStore:
             raise ProviderObservationIntegrityError(
                 "complete provider evidence must be a JSON object"
             )
-        snapshot = CompleteGameBoardSnapshot.from_payload(raw)
-        if snapshot.evidence_sha256 != _sha(evidence_sha256, "evidence_sha256"):
-            raise ProviderObservationIntegrityError(
-                "content-addressed provider evidence path does not match payload"
+        return CompleteGameBoardSnapshot.from_payload(raw)
+
+    def _recover_provenance(
+        self,
+        authority: MonotonicWorkspaceAuthority,
+        snapshot: CompleteGameBoardSnapshot | None,
+    ) -> None:
+        observed = None if snapshot is None else self._state_sha256(snapshot)
+        try:
+            history = authority.read_history()
+            pending = (
+                history[-1]
+                if history and history[-1].phase is AuthorityPhase.PREPARE
+                else None
             )
+            if snapshot is None:
+                authority.recover(observed_state_sha256=None)
+                return
+            binding = self._semantic_binding_sha256(snapshot)
+            if pending is not None and pending.intended_state_sha256 == observed:
+                if pending.semantic_binding_sha256 != binding:
+                    raise ProviderObservationIntegrityError(
+                        "prepared provider-capture semantic binding mismatches published evidence"
+                    )
+                authority.recover(
+                    observed_state_sha256=observed,
+                    tx_id=pending.tx_id,
+                    semantic_binding_sha256=binding,
+                )
+            else:
+                authority.recover(observed_state_sha256=observed)
+        except MonotonicWorkspaceAuthorityError as exc:
+            raise ProviderObservationIntegrityError(
+                "provider evidence is not proven by independent machine-state acquisition authority"
+            ) from exc
+
+    @staticmethod
+    def _next_tx_id(
+        authority: MonotonicWorkspaceAuthority,
+        intended_state_sha256: str,
+    ) -> str:
+        attempt = len(authority.read_history()) + 1
+        return f"provider-complete-board:{attempt}:{intended_state_sha256[:32]}"
+
+    def save(self, snapshot: CompleteGameBoardSnapshot) -> Path:
+        """Persist only an in-process production capture and anchor its provenance."""
+
+        assert_complete_game_board_authoritative(snapshot)
+        path = self._path(snapshot.evidence_sha256)
+        authority = self._authority(snapshot.evidence_sha256)
+        intended = self._state_sha256(snapshot)
+        binding = self._semantic_binding_sha256(snapshot)
+
+        with WorkspaceEconomicLock(self.workspace):
+            existing = self._read_path(path) if path.exists() else None
+            history = authority.read_history()
+            if history:
+                self._recover_provenance(authority, existing)
+                history = authority.read_history()
+                if existing is not None:
+                    if existing.to_payload() != snapshot.to_payload():
+                        raise ProviderObservationIntegrityError(
+                            "content-addressed provider evidence conflicts with proven bytes"
+                        )
+                    return path
+            elif existing is not None and existing.to_payload() != snapshot.to_payload():
+                raise ProviderObservationIntegrityError(
+                    "unproven local provider evidence conflicts with production capture"
+                )
+
+            observed = (
+                None
+                if not history
+                else history[-1].intended_state_sha256
+                if history[-1].phase is AuthorityPhase.COMMIT
+                else None
+            )
+            tx_id = self._next_tx_id(authority, intended)
+            try:
+                authority.prepare(
+                    tx_id=tx_id,
+                    observed_state_sha256=observed,
+                    intended_state_sha256=intended,
+                    semantic_binding_sha256=binding,
+                )
+                atomic_write_json(path, snapshot.to_payload())
+                published = self._read_path(path)
+                if self._state_sha256(published) != intended:
+                    raise ProviderObservationIntegrityError(
+                        "published provider evidence does not match intended capture digest"
+                    )
+                authority.commit(
+                    tx_id=tx_id,
+                    observed_state_sha256=intended,
+                    semantic_binding_sha256=binding,
+                )
+            except MonotonicWorkspaceAuthorityError as exc:
+                raise ProviderObservationIntegrityError(
+                    "provider acquisition provenance publication failed closed"
+                ) from exc
+        return path
+
+    def load(self, evidence_sha256: str) -> CompleteGameBoardSnapshot:
+        """Load only evidence with surviving independent acquisition provenance."""
+
+        path = self._path(evidence_sha256)
+        with WorkspaceEconomicLock(self.workspace):
+            snapshot = self._read_path(path)
+            if snapshot.evidence_sha256 != _sha(evidence_sha256, "evidence_sha256"):
+                raise ProviderObservationIntegrityError(
+                    "content-addressed provider evidence path does not match payload"
+                )
+            authority = self._authority(snapshot.evidence_sha256)
+            self._recover_provenance(authority, snapshot)
         return _remember(snapshot)

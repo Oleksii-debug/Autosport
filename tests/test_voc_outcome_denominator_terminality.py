@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import sys
 import unittest
 from pathlib import Path
 
@@ -14,6 +15,7 @@ def _fixture_module():
     if spec is None or spec.loader is None:
         raise RuntimeError("unable to load VOC scoring fixture module")
     module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
     spec.loader.exec_module(module)
     return module
 

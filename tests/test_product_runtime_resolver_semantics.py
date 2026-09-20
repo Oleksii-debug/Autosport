@@ -50,11 +50,28 @@ def _replacement_resolve(self, record: EventLifecycleRecord, *, as_of: str):
     return None
 
 
+def _provider_settlement_helper(record: EventLifecycleRecord, as_of: str):
+    return None
+
+
+def _replacement_settlement_helper(record: EventLifecycleRecord, as_of: str):
+    if as_of == "never":
+        raise AssertionError("replacement helper executable semantics")
+    return None
+
+
+class _HelperProductSource(_ProductSource):
+    settlement_resolver_implementation_id = "provider-a-results-helper-resolver-v1"
+
+    def resolve(self, record: EventLifecycleRecord, *, as_of: str):
+        return _provider_settlement_helper(record, as_of)
+
+
 def test_resolver_semantic_fingerprint_ignores_install_relocation() -> None:
     resolver = _ProductSource.resolve
     original_code = resolver.__code__
     original = function_semantic_sha256(resolver)
-    assert original == "b64b17edee2de42e77cf0cab0ab844a798fb960af2d836b8cd830d6558f69d6d"
+    assert original == "e219274287e9f95dac1c098883adf26ab79c784233f1b02493918b876f5bd382"
     try:
         resolver.__code__ = original_code.replace(
             co_filename=r"C:\\relocated\\autosport\\provider.py",
@@ -78,6 +95,75 @@ def test_resolver_semantic_fingerprint_rejects_executable_replacement() -> None:
             function_semantic_sha256(resolver)
     finally:
         resolver.__code__ = original_code
+
+
+def test_resolver_semantic_fingerprint_rejects_referenced_helper_code_mutation() -> None:
+    source = _HelperProductSource()
+    baseline = _settlement_authority_identity(
+        source=source,
+        source_id=source.source_id,
+        outcome_authority=source,
+    )
+    helper = _provider_settlement_helper
+    original_code = helper.__code__
+    try:
+        helper.__code__ = _replacement_settlement_helper.__code__
+        with pytest.raises(
+            ProductCompositionError,
+            match="settlement resolve semantics cannot be fingerprinted safely",
+        ):
+            _settlement_authority_identity(
+                source=source,
+                source_id=source.source_id,
+                outcome_authority=source,
+            )
+    finally:
+        helper.__code__ = original_code
+    assert (
+        _settlement_authority_identity(
+            source=source,
+            source_id=source.source_id,
+            outcome_authority=source,
+        )
+        == baseline
+    )
+
+
+def test_restart_rejects_rebinding_referenced_helper_with_same_resolver_code(
+    tmp_path,
+) -> None:
+    source = _HelperProductSource()
+    runtime = build_autonomous_product_runtime(
+        workspace=tmp_path,
+        source=source,
+        clock=lambda: NOW,
+        outcome_authority=source,
+    )
+    expected_identity = runtime.manifest.settlement_authority_identity
+    runtime.close()
+
+    original_helper = globals()["_provider_settlement_helper"]
+    try:
+        globals()["_provider_settlement_helper"] = _replacement_settlement_helper
+        rebound_source = _HelperProductSource()
+        rebound_identity = _settlement_authority_identity(
+            source=rebound_source,
+            source_id=rebound_source.source_id,
+            outcome_authority=rebound_source,
+        )
+        assert rebound_identity != expected_identity
+        with pytest.raises(
+            ProductCompositionError,
+            match="settlement authority identity conflicts with durable product composition",
+        ):
+            build_autonomous_product_runtime(
+                workspace=tmp_path,
+                source=rebound_source,
+                clock=lambda: NOW,
+                outcome_authority=rebound_source,
+            )
+    finally:
+        globals()["_provider_settlement_helper"] = original_helper
 
 
 def test_product_runtime_restart_rejects_semantic_replacement_with_same_declared_identity(

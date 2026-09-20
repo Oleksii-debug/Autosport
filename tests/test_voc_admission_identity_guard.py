@@ -71,10 +71,15 @@ class VOCAdmissionIdentityGuardTests(unittest.TestCase):
         *,
         protocol_id: str,
         cohort_id: str,
-    ) -> str:
-        return append_paired_voc_admission(
+    ):
+        router = fixture._precommit_router(
+            target,
+            protocol_id=protocol_id,
+            cohort_id=cohort_id,
+        )
+        append_paired_voc_admission(
             fixture.ledger,
-            admission_id=f"foreign:{protocol_id}:{cohort_id}",
+            admission_id=f"explicit:{target.evaluation_id}",
             decision_context_sha256=target.decision_context_sha256,
             decision_input_sha256=target.decision_input_sha256,
             decision_deadline=target.decision_deadline,
@@ -88,10 +93,11 @@ class VOCAdmissionIdentityGuardTests(unittest.TestCase):
             agent="voc-admission-identity-test",
             recorded_at=_FIXTURE.T_DECISION,
         )
+        return router
 
     def test_foreign_protocol_cannot_enter_target_scored_denominator(self) -> None:
         fixture, target = self._fixture()
-        self._append_explicit_admission(
+        router = self._append_explicit_admission(
             fixture,
             target,
             protocol_id="foreign-research-protocol",
@@ -102,14 +108,14 @@ class VOCAdmissionIdentityGuardTests(unittest.TestCase):
             VOCEvaluationError,
             "protocol/cohort does not match canonical target",
         ):
-            fixture._authority().resolve(
+            fixture._authority(compute_execution_store=router).resolve(
                 target.evaluation_id,
                 as_of=_FIXTURE.T_AS_OF,
             )
 
     def test_foreign_cohort_cannot_enter_target_scored_denominator(self) -> None:
         fixture, target = self._fixture()
-        self._append_explicit_admission(
+        router = self._append_explicit_admission(
             fixture,
             target,
             protocol_id=target.research_protocol_id,
@@ -120,7 +126,7 @@ class VOCAdmissionIdentityGuardTests(unittest.TestCase):
             VOCEvaluationError,
             "protocol/cohort does not match canonical target",
         ):
-            fixture._authority().resolve(
+            fixture._authority(compute_execution_store=router).resolve(
                 target.evaluation_id,
                 as_of=_FIXTURE.T_AS_OF,
             )

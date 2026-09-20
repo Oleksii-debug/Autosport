@@ -133,7 +133,13 @@ def test_fractional_kelly_never_exceeds_declared_cap_or_goes_negative(
     recommended = Decimal(outputs["capped_fraction"])
     assert full >= Decimal("0")
     assert Decimal("0") <= recommended <= cap
-    assert recommended <= full * fraction if full > 0 else recommended == 0
+    if full > 0:
+        with localcontext() as context:
+            context.prec = 200
+            fractional = full * fraction
+        assert recommended <= fractional
+    else:
+        assert recommended == 0
 
 
 @settings(max_examples=64, deadline=None)

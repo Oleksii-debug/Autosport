@@ -3,7 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Mapping
 
 BUDGET_SCHEMA = "autosport.endurance-performance-budget"
@@ -49,6 +49,13 @@ def _source_sha(value: object) -> str:
     if len(sha) != 40 or any(character not in _HEX for character in sha):
         raise PerformanceQualificationError("source_sha must be lowercase 40-character Git SHA-1 hex")
     return sha
+
+
+def _sha256_hex(value: object, name: str) -> str:
+    digest = _text(value, name)
+    if len(digest) != 64 or any(character not in _HEX for character in digest):
+        raise PerformanceQualificationError(f"{name} must be lowercase SHA-256 hex")
+    return digest
 
 
 def _positive_int(value: object, name: str) -> int:
@@ -180,6 +187,25 @@ class MetricQualification:
     threshold: int | float
     status: str
 
+    def __post_init__(self) -> None:
+        metric = _text(self.metric, "metric")
+        if self.comparator not in (">=", "<="):
+            raise PerformanceQualificationError("metric comparator must be >= or <=")
+        if type(self.observed) not in (int, float) or type(self.threshold) not in (int, float):
+            raise PerformanceQualificationError("metric observed/threshold must be numbers")
+        observed = float(self.observed)
+        threshold = float(self.threshold)
+        if not math.isfinite(observed) or not math.isfinite(threshold):
+            raise PerformanceQualificationError("metric observed/threshold must be finite")
+        expected = (
+            "PASS"
+            if (observed >= threshold if self.comparator == ">=" else observed <= threshold)
+            else "FAIL"
+        )
+        if self.status != expected:
+            raise PerformanceQualificationError("metric status does not match observed threshold")
+        object.__setattr__(self, "metric", metric)
+
     def to_dict(self) -> dict[str, object]:
         return {
             "metric": self.metric,
@@ -190,6 +216,28 @@ class MetricQualification:
         }
 
 
+def _qualification_identity_payload(
+    *,
+    source_sha: str,
+    machine_profile: str,
+    report_sha256: str,
+    budget: PerformanceBudget,
+    checks: tuple[MetricQualification, ...],
+    status: str,
+) -> dict[str, object]:
+    return {
+        "schema": QUALIFICATION_SCHEMA,
+        "schema_version": QUALIFICATION_SCHEMA_VERSION,
+        "source_sha": source_sha,
+        "machine_profile": machine_profile,
+        "report_sha256": report_sha256,
+        "budget": budget.to_dict(),
+        "checks": [check.to_dict() for check in checks],
+        "status": status,
+        "target_machine_acceptance": False,
+    }
+
+
 @dataclass(frozen=True, slots=True)
 class PerformanceQualification:
     source_sha: str
@@ -197,9 +245,34 @@ class PerformanceQualification:
     report_sha256: str
     budget: PerformanceBudget
     checks: tuple[MetricQualification, ...]
-    status: str
-    qualification_id: str
-    target_machine_acceptance: bool = False
+    status: str = field(init=False)
+    qualification_id: str = field(init=False)
+    target_machine_acceptance: bool = field(default=False, init=False)
+
+    def __post_init__(self) -> None:
+        canonical_source_sha = _source_sha(self.source_sha)
+        canonical_machine_profile = _text(self.machine_profile, "machine_profile")
+        canonical_report_sha256 = _sha256_hex(self.report_sha256, "report_sha256")
+        if not isinstance(self.budget, PerformanceBudget):
+            raise PerformanceQualificationError("budget must be PerformanceBudget")
+        if type(self.checks) is not tuple or not self.checks:
+            raise PerformanceQualificationError("checks must be a non-empty tuple")
+        if any(not isinstance(check, MetricQualification) for check in self.checks):
+            raise PerformanceQualificationError("checks must contain MetricQualification values")
+        status = "PASS" if all(check.status == "PASS" for check in self.checks) else "FAIL"
+        identity_payload = _qualification_identity_payload(
+            source_sha=canonical_source_sha,
+            machine_profile=canonical_machine_profile,
+            report_sha256=canonical_report_sha256,
+            budget=self.budget,
+            checks=self.checks,
+            status=status,
+        )
+        object.__setattr__(self, "source_sha", canonical_source_sha)
+        object.__setattr__(self, "machine_profile", canonical_machine_profile)
+        object.__setattr__(self, "report_sha256", canonical_report_sha256)
+        object.__setattr__(self, "status", status)
+        object.__setattr__(self, "qualification_id", _digest(identity_payload))
 
     @property
     def failures(self) -> tuple[str, ...]:
@@ -252,7 +325,23 @@ def _endurance_fingerprint_payload(raw: Mapping[str, object]) -> dict[str, objec
     return {field: raw[field] for field in fields}
 
 
-def _validate_report(raw: Mapping[str, object]) -> dict[str, int | float]:
+def _performance_observation_payload(
+    *, source_sha: str, observed: Mapping[str, int | float]
+) -> dict[str, object]:
+    return {
+        "source_sha": source_sha,
+        "history_events": observed["history_events"],
+        "accepted_events_per_second": observed["accepted_events_per_second"],
+        "peak_traced_memory_bytes": observed["peak_traced_memory_bytes"],
+        "ingest_elapsed_seconds": observed["ingest_elapsed_seconds"],
+        "replay_elapsed_seconds": observed["replay_elapsed_seconds"],
+        "restart_elapsed_seconds": observed["restart_elapsed_seconds"],
+    }
+
+
+def _validate_report(
+    raw: Mapping[str, object], *, expected_source_sha: str
+) -> dict[str, int | float]:
     if not isinstance(raw, Mapping):
         raise PerformanceQualificationError("endurance report must be an object")
     if raw.get("status") != "PASS":
@@ -262,19 +351,16 @@ def _validate_report(raw: Mapping[str, object]) -> dict[str, int | float]:
         raise PerformanceQualificationError("PASS endurance report must contain an empty failures list")
     if raw.get("real_money_execution") is not False:
         raise PerformanceQualificationError("endurance report must preserve real_money_execution=false")
-    fingerprint = raw.get("stable_invariant_fingerprint")
-    if (
-        type(fingerprint) is not str
-        or len(fingerprint) != 64
-        or any(character not in _HEX for character in fingerprint)
-    ):
-        raise PerformanceQualificationError(
-            "stable_invariant_fingerprint must be lowercase SHA-256 hex"
-        )
+    report_source_sha = _source_sha(raw.get("source_sha"))
+    if report_source_sha != expected_source_sha:
+        raise PerformanceQualificationError("endurance report source_sha does not match expected source")
+    fingerprint = _sha256_hex(
+        raw.get("stable_invariant_fingerprint"), "stable_invariant_fingerprint"
+    )
     expected_fingerprint = _digest(_endurance_fingerprint_payload(raw))
     if fingerprint != expected_fingerprint:
         raise PerformanceQualificationError("endurance stable invariant fingerprint mismatch")
-    return {
+    observed: dict[str, int | float] = {
         "history_events": _positive_int(raw.get("history_events"), "history_events"),
         "accepted_events_per_second": _positive_float(
             raw.get("accepted_events_per_second"), "accepted_events_per_second"
@@ -292,6 +378,19 @@ def _validate_report(raw: Mapping[str, object]) -> dict[str, int | float]:
             raw.get("restart_elapsed_seconds"), "restart_elapsed_seconds"
         ),
     }
+    observation_fingerprint = _sha256_hex(
+        raw.get("performance_observation_fingerprint"),
+        "performance_observation_fingerprint",
+    )
+    expected_observation_fingerprint = _digest(
+        _performance_observation_payload(
+            source_sha=report_source_sha,
+            observed=observed,
+        )
+    )
+    if observation_fingerprint != expected_observation_fingerprint:
+        raise PerformanceQualificationError("performance observation fingerprint mismatch")
+    return observed
 
 
 def qualify_endurance_report(
@@ -305,7 +404,7 @@ def qualify_endurance_report(
         raise PerformanceQualificationError("budget must be PerformanceBudget")
     canonical_source_sha = _source_sha(source_sha)
     canonical_machine_profile = _text(machine_profile, "machine_profile")
-    observed = _validate_report(report)
+    observed = _validate_report(report, expected_source_sha=canonical_source_sha)
     report_sha256 = _digest(dict(report))
 
     checks: list[MetricQualification] = []
@@ -345,25 +444,10 @@ def qualify_endurance_report(
     maximum("replay_elapsed_seconds", budget.max_replay_elapsed_seconds)
     maximum("restart_elapsed_seconds", budget.max_restart_elapsed_seconds)
 
-    status = "PASS" if all(check.status == "PASS" for check in checks) else "FAIL"
-    identity_payload = {
-        "schema": QUALIFICATION_SCHEMA,
-        "schema_version": QUALIFICATION_SCHEMA_VERSION,
-        "source_sha": canonical_source_sha,
-        "machine_profile": canonical_machine_profile,
-        "report_sha256": report_sha256,
-        "budget": budget.to_dict(),
-        "checks": [check.to_dict() for check in checks],
-        "status": status,
-        "target_machine_acceptance": False,
-    }
-    qualification_id = _digest(identity_payload)
     return PerformanceQualification(
         source_sha=canonical_source_sha,
         machine_profile=canonical_machine_profile,
         report_sha256=report_sha256,
         budget=budget,
         checks=tuple(checks),
-        status=status,
-        qualification_id=qualification_id,
     )

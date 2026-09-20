@@ -199,29 +199,46 @@ class CollectorDeltaStore(_SQLiteCollectorDeltaStore):
                 raise ValueError(
                     "collector stream checkpoint conflicts with immutable delta history"
                 )
-            source_history = connection.execute(
-                "SELECT 1 FROM collector_deltas WHERE source_id=? LIMIT 1",
+            # New-epoch admission must prove coverage for every retained epoch,
+            # not merely validate whichever checkpoint rows survived corruption.
+            # These indexed probes stop on the first missing/orphaned epoch.
+            history_without_checkpoint = connection.execute(
+                "SELECT 1 FROM collector_deltas AS d "
+                "LEFT JOIN collector_streams AS s "
+                "ON s.source_id=d.source_id AND s.stream_epoch=d.stream_epoch "
+                "WHERE d.source_id=? AND s.source_id IS NULL LIMIT 1",
                 (source_id,),
             ).fetchone()
+            checkpoint_without_history = connection.execute(
+                "SELECT 1 FROM collector_streams AS s "
+                "WHERE s.source_id=? AND NOT EXISTS ("
+                "SELECT 1 FROM collector_deltas AS d "
+                "WHERE d.source_id=s.source_id AND d.stream_epoch=s.stream_epoch "
+                "LIMIT 1) LIMIT 1",
+                (source_id,),
+            ).fetchone()
+            if (
+                history_without_checkpoint is not None
+                or checkpoint_without_history is not None
+            ):
+                raise ValueError(
+                    "collector stream checkpoint conflicts with immutable delta history"
+                )
+
             source_checkpoints = connection.execute(
-                "SELECT stream_epoch FROM collector_streams WHERE source_id=?",
+                "SELECT stream_epoch FROM collector_streams "
+                "WHERE source_id=? ORDER BY stream_epoch",
                 (source_id,),
             ).fetchall()
-            if source_history is not None:
-                if not source_checkpoints:
-                    raise ValueError(
-                        "collector stream checkpoint conflicts with immutable delta history"
-                    )
-                # A new epoch may only inherit authority from checkpoints that are
-                # themselves still bound to immutable retained evidence.  Merely
-                # observing any surviving row lets a corrupted/foreign projection
-                # launder prior history across an explicit epoch rollover.
-                for checkpoint_row in source_checkpoints:
-                    cls._verified_stream_checkpoint(
-                        connection,
-                        source_id,
-                        checkpoint_row["stream_epoch"],
-                    )
+            # Set coverage above proves one row exists for each retained historical
+            # epoch (the table PK proves at most one). Validate every terminal
+            # cursor/delta binding before a fresh epoch may be admitted.
+            for checkpoint_row in source_checkpoints:
+                cls._verified_stream_checkpoint(
+                    connection,
+                    source_id,
+                    checkpoint_row["stream_epoch"],
+                )
             return None
 
         checkpoint = StreamCheckpoint(

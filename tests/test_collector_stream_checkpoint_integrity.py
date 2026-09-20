@@ -236,3 +236,70 @@ def test_legitimate_new_epoch_is_allowed_when_prior_checkpoint_survives() -> Non
         assert store.append(first)
         assert store.append(successor)
         assert store.get(successor.delta_id) == successor
+
+def test_surviving_newer_checkpoint_cannot_hide_deleted_retained_epoch() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "collector.json"
+        store = CollectorDeltaStore(path)
+        epoch_1 = _delta(delta_id="d-e1", cursor_position=1)
+        epoch_2 = _delta(
+            delta_id="d-e2",
+            cursor_position=0,
+            stream_epoch="epoch-2",
+            sync_state=SyncState.EPOCH_CHANGED,
+        )
+        assert store.append(epoch_1)
+        assert store.append(epoch_2)
+
+        connection = sqlite3.connect(path)
+        try:
+            connection.execute(
+                "DELETE FROM collector_streams "
+                "WHERE source_id=? AND stream_epoch=?",
+                ("source-x", "epoch-1"),
+            )
+            connection.commit()
+        finally:
+            connection.close()
+
+        reopened = CollectorDeltaStore(path)
+        epoch_3 = _delta(
+            delta_id="d-e3",
+            cursor_position=0,
+            stream_epoch="epoch-3",
+            sync_state=SyncState.EPOCH_CHANGED,
+        )
+        with pytest.raises(
+            ValueError,
+            match="stream checkpoint conflicts with immutable delta history",
+        ):
+            reopened.append(epoch_3)
+
+        assert reopened.get(epoch_3.delta_id) is None
+        assert reopened.get(epoch_1.delta_id) == epoch_1
+        assert reopened.get(epoch_2.delta_id) == epoch_2
+
+
+def test_intact_multi_epoch_checkpoint_chain_admits_third_epoch() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        store = CollectorDeltaStore(Path(tmp) / "collector.json")
+        epoch_1 = _delta(delta_id="d-e1", cursor_position=1)
+        epoch_2 = _delta(
+            delta_id="d-e2",
+            cursor_position=0,
+            stream_epoch="epoch-2",
+            sync_state=SyncState.EPOCH_CHANGED,
+        )
+        epoch_3 = _delta(
+            delta_id="d-e3",
+            cursor_position=0,
+            stream_epoch="epoch-3",
+            sync_state=SyncState.EPOCH_CHANGED,
+        )
+
+        assert store.append(epoch_1)
+        assert store.append(epoch_2)
+        assert store.append(epoch_3)
+        assert store.get(epoch_1.delta_id) == epoch_1
+        assert store.get(epoch_2.delta_id) == epoch_2
+        assert store.get(epoch_3.delta_id) == epoch_3

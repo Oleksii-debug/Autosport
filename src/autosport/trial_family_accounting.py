@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from enum import StrEnum
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Callable, Mapping
 from .integrity import atomic_write_json, sha256_file
 from .monotonic_workspace_authority import MonotonicWorkspaceAuthority
 from .research_multiplicity import ExperimentFamilyPlan, SequentialDecision, SequentialLookEvidence, SequentialMultiplicityEvidenceStore
@@ -57,6 +57,16 @@ def _state_sha256(payload: Mapping[str, Any]) -> str:
 
 def _text_sha256(value: object, name: str) -> str:
     return hashlib.sha256(_text(value, name).encode('utf-8')).hexdigest()
+
+def _registry_prefix_sha256(state: Mapping[str, Any], record_count: int) -> str:
+    if type(record_count) is not int or record_count < 0:
+        raise ValueError('registry_record_count must be a non-negative integer')
+    if state.get('schema_version') != ScientificRegistry.SCHEMA_VERSION:
+        raise ValueError('ScientificRegistry schema_version mismatch while proving attempt issuance')
+    records = state.get('records')
+    if type(records) is not list or record_count > len(records):
+        raise ValueError('ScientificRegistry no longer contains the witnessed attempt prefix')
+    return _digest({'schema_version': state['schema_version'], 'records': records[:record_count]})
 
 def _reject_duplicate_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
     result: dict[str, Any] = {}
@@ -224,7 +234,7 @@ class TrialFamilySnapshot:
     registered_looks: int
 
 class TrialFamilyAccountingStore:
-    SCHEMA_VERSION = 2
+    SCHEMA_VERSION = 3
     SEQUENTIAL_DIR = '.trial-family-sequential'
 
     def __init__(self, path: str | Path, *, workspace_root: str | Path | None=None, authority_root: str | Path | None=None) -> None:
@@ -260,6 +270,10 @@ class TrialFamilyAccountingStore:
             target.relative_to(workspace)
         except ValueError as exc:
             raise ValueError('trial-family store path must be inside workspace_root') from exc
+        registry_path = registry.path.resolve(strict=False)
+        if registry_path.parent != workspace:
+            raise ValueError('ScientificRegistry must use the same workspace root as trial-family accounting')
+        relative_registry = registry_path.relative_to(workspace).as_posix()
         family = TrialFamilyDefinition.resolve(registry, plan)
         authority = MonotonicWorkspaceAuthority(workspace=workspace, domain=_AUTHORITY_DOMAIN, key=family.family_id, authority_root=authority_root)
         if target.exists():
@@ -268,6 +282,8 @@ class TrialFamilyAccountingStore:
                 raise ValueError('existing store is bound to another trial family')
             if existing.plan.plan_sha256 != plan.plan_sha256:
                 raise ValueError('existing store is bound to another multiplicity contract')
+            if existing._registry().path.resolve(strict=False) != registry_path:
+                raise ValueError('existing store is bound to another ScientificRegistry')
             return existing
         sequential_path = cls._sequential_path(workspace, family.family_id)
         sequential = SequentialMultiplicityEvidenceStore.initialize_pristine(sequential_path, plan, workspace_root=workspace)
@@ -280,11 +296,13 @@ class TrialFamilyAccountingStore:
                     raise ValueError('existing store is bound to another trial family')
                 if existing.plan.plan_sha256 != plan.plan_sha256:
                     raise ValueError('existing store is bound to another multiplicity contract')
+                if existing._registry().path.resolve(strict=False) != registry_path:
+                    raise ValueError('existing store is bound to another ScientificRegistry')
                 return existing
             authority.recover(observed_state_sha256=None)
-            state = {'schema_version': cls.SCHEMA_VERSION, 'trial_store': relative_trial, 'family': family.to_payload(), 'multiplicity_plan': plan.to_payload(), 'sequential_store': relative_sequential, 'events': []}
+            state = {'schema_version': cls.SCHEMA_VERSION, 'trial_store': relative_trial, 'scientific_registry': relative_registry, 'family': family.to_payload(), 'multiplicity_plan': plan.to_payload(), 'sequential_store': relative_sequential, 'events': []}
             intended = _state_sha256(state)
-            binding = _digest({'family_id': family.family_id, 'kind': 'INITIALIZE', 'trial_store': relative_trial, 'sequential_store': relative_sequential})
+            binding = _digest({'family_id': family.family_id, 'kind': 'INITIALIZE', 'trial_store': relative_trial, 'scientific_registry': relative_registry, 'sequential_store': relative_sequential})
             tx_id = f'init-{family.family_id}'
             authority.prepare(tx_id=tx_id, observed_state_sha256=None, intended_state_sha256=intended, semantic_binding_sha256=binding)
             target.parent.mkdir(parents=True, exist_ok=True)
@@ -304,7 +322,7 @@ class TrialFamilyAccountingStore:
             state = json.loads(raw, object_pairs_hook=_reject_duplicate_keys, parse_constant=_reject_nonfinite)
         except (UnicodeDecodeError, json.JSONDecodeError) as exc:
             raise ValueError('trial-family accounting store must be valid UTF-8 JSON') from exc
-        if type(state) is not dict or set(state) != {'schema_version', 'trial_store', 'family', 'multiplicity_plan', 'sequential_store', 'events'}:
+        if type(state) is not dict or set(state) != {'schema_version', 'trial_store', 'scientific_registry', 'family', 'multiplicity_plan', 'sequential_store', 'events'}:
             raise ValueError('trial-family accounting store fields mismatch')
         if state['schema_version'] != self.SCHEMA_VERSION:
             raise ValueError('trial-family accounting schema_version mismatch')
@@ -330,6 +348,15 @@ class TrialFamilyAccountingStore:
             raise ValueError('trial store path escaped trial workspace') from exc
         if trial_path != self.path:
             raise ValueError('trial store path does not match canonical family authority')
+        registry_rel = _text(state['scientific_registry'], 'scientific_registry')
+        registry_path = (self.workspace_root / registry_rel).resolve(strict=False)
+        try:
+            registry_path.relative_to(self.workspace_root)
+        except ValueError as exc:
+            raise ValueError('ScientificRegistry path escaped trial workspace') from exc
+        if registry_path.parent != self.workspace_root:
+            raise ValueError('ScientificRegistry must share the trial workspace lock')
+        ScientificRegistry(registry_path)
         sequential_rel = _text(state['sequential_store'], 'sequential_store')
         sequential_path = (self.workspace_root / sequential_rel).resolve(strict=False)
         try:
@@ -376,6 +403,10 @@ class TrialFamilyAccountingStore:
     def plan(self) -> ExperimentFamilyPlan:
         return ExperimentFamilyPlan.from_payload(self._read_state()['multiplicity_plan'])
 
+    def _registry(self, state: dict[str, Any] | None=None) -> ScientificRegistry:
+        loaded = self._read_state() if state is None else state
+        return ScientificRegistry(self.workspace_root / loaded['scientific_registry'])
+
     def _sequential(self, state: dict[str, Any] | None=None) -> SequentialMultiplicityEvidenceStore:
         loaded = self._read_state() if state is None else state
         return SequentialMultiplicityEvidenceStore(self.workspace_root / loaded['sequential_store'], workspace_root=self.workspace_root)
@@ -393,11 +424,14 @@ class TrialFamilyAccountingStore:
             if type(payload) is not dict:
                 raise ValueError('trial-family event payload must be an object')
             if kind == 'ATTEMPT_STARTED':
-                required = {'attempt_id', 'semantic_attempt_id', 'ordinal', 'member_authority_id', 'hypothesis_id', 'candidate', 'created_at'}
+                required = {'attempt_id', 'semantic_attempt_id', 'ordinal', 'member_authority_id', 'hypothesis_id', 'candidate', 'created_at', 'registry_record_count', 'registry_prefix_sha256'}
                 if set(payload) != required or payload['created_at'] != event['event_at']:
                     raise ValueError('attempt-start payload fields/time mismatch')
                 if type(payload['ordinal']) is not int or payload['ordinal'] != len(attempts) + 1:
                     raise ValueError('attempt ordinal is not contiguous')
+                if type(payload['registry_record_count']) is not int or payload['registry_record_count'] < 0:
+                    raise ValueError('attempt registry_record_count must be a non-negative integer')
+                _sha256(payload['registry_prefix_sha256'], 'registry_prefix_sha256')
                 attempt_id = _sha256(payload['attempt_id'], 'attempt_id')
                 semantic_id = _text(payload['semantic_attempt_id'], 'semantic_attempt_id')
                 if attempt_id in by_id or semantic_id in semantic_ids:
@@ -445,12 +479,18 @@ class TrialFamilyAccountingStore:
             by_id[attempt_id] = view
         return tuple(attempts)
 
-    def _append_event(self, kind: str, event_at: str, payload: dict[str, Any]) -> None:
+    def _append_event(self, kind: str, event_at: str, payload: dict[str, Any], *, locked_payload_factory: Callable[[dict[str, Any], dict[str, Any]], dict[str, Any]] | None=None) -> None:
         if kind not in _EVENT_KINDS:
             raise ValueError('unsupported trial-family event kind')
         _iso(event_at, 'event_at')
+        if locked_payload_factory is not None and not callable(locked_payload_factory):
+            raise TypeError('locked_payload_factory must be callable')
         with WorkspaceEconomicLock(self.workspace_root):
             state = self._read_state()
+            if locked_payload_factory is not None:
+                payload = locked_payload_factory(state, payload)
+                if type(payload) is not dict:
+                    raise TypeError('locked_payload_factory must return a dict')
             family = TrialFamilyDefinition.from_payload(state['family'])
             events = list(state['events'])
             if _instant(event_at, 'event_at') < _instant(family.frozen_at, 'family.frozen_at'):
@@ -507,7 +547,13 @@ class TrialFamilyAccountingStore:
         ordinal = len(attempts) + 1
         attempt_id = _digest({'family_id': self.family.family_id, 'semantic_attempt_id': semantic_attempt_id, 'ordinal': ordinal, 'member_authority_id': member.member_authority_id, 'candidate': candidate.to_payload(), 'created_at': created_at})
         payload = {'attempt_id': attempt_id, 'semantic_attempt_id': semantic_attempt_id, 'ordinal': ordinal, 'member_authority_id': member.member_authority_id, 'hypothesis_id': member.hypothesis_id, 'candidate': candidate.to_payload(), 'created_at': created_at}
-        self._append_event('ATTEMPT_STARTED', created_at, payload)
+
+        def bind_registry_prefix(state: dict[str, Any], base_payload: dict[str, Any]) -> dict[str, Any]:
+            registry_state = self._registry(state)._read()
+            record_count = len(registry_state['records'])
+            return {**base_payload, 'registry_record_count': record_count, 'registry_prefix_sha256': _registry_prefix_sha256(registry_state, record_count)}
+
+        self._append_event('ATTEMPT_STARTED', created_at, payload, locked_payload_factory=bind_registry_prefix)
         return next((v for v in self._attempts() if v.attempt_id == attempt_id))
 
     @staticmethod
@@ -517,11 +563,43 @@ class TrialFamilyAccountingStore:
             if payload.get(field) != wanted:
                 raise ValueError(f'Experiment {field} does not match durable trial candidate/research protocol')
 
-    def complete_attempt(self, *, attempt_id: str, experiment_id: str, registry: ScientificRegistry) -> TrialAttemptView:
-        attempt_id, experiment_id = (_sha256(attempt_id, 'attempt_id'), _text(experiment_id, 'experiment_id'))
+    def _require_canonical_registry(self, registry: ScientificRegistry, state: dict[str, Any]) -> ScientificRegistry:
         if type(registry) is not ScientificRegistry:
             raise TypeError('registry must be ScientificRegistry')
-        attempts = self._attempts()
+        canonical = self._registry(state)
+        if registry.path.resolve(strict=False) != canonical.path.resolve(strict=False):
+            raise ValueError('registry does not match the ScientificRegistry bound to this trial family')
+        return canonical
+
+    @staticmethod
+    def _attempt_start_payload(state: Mapping[str, Any], attempt_id: str) -> dict[str, Any]:
+        for event in state['events']:
+            if event['kind'] == 'ATTEMPT_STARTED' and event['payload'].get('attempt_id') == attempt_id:
+                return event['payload']
+        raise ValueError('attempt start evidence is missing from durable trial history')
+
+    @staticmethod
+    def _require_experiment_after_attempt_witness(registry: ScientificRegistry, start_payload: Mapping[str, Any], experiment_id: str) -> None:
+        registry_state = registry._read()
+        record_count = start_payload.get('registry_record_count')
+        witnessed = _sha256(start_payload.get('registry_prefix_sha256'), 'registry_prefix_sha256')
+        if _registry_prefix_sha256(registry_state, record_count) != witnessed:
+            raise ValueError('ScientificRegistry no longer matches the durable attempt-start prefix witness')
+        experiment_position: int | None = None
+        for index, raw in enumerate(registry_state['records']):
+            if raw['record_type'] == 'Experiment' and raw['record_id'] == experiment_id:
+                experiment_position = index
+                break
+        if experiment_position is None:
+            raise ValueError('Experiment is missing from ScientificRegistry')
+        if experiment_position < record_count:
+            raise ValueError('Experiment was already durable before trial attempt publication')
+
+    def complete_attempt(self, *, attempt_id: str, experiment_id: str, registry: ScientificRegistry) -> TrialAttemptView:
+        attempt_id, experiment_id = (_sha256(attempt_id, 'attempt_id'), _text(experiment_id, 'experiment_id'))
+        state = self._read_state()
+        registry = self._require_canonical_registry(registry, state)
+        attempts = self._replay_events(TrialFamilyDefinition.from_payload(state['family']), ExperimentFamilyPlan.from_payload(state['multiplicity_plan']), tuple(state['events']), cutoff=None)
         attempt = next((v for v in attempts if v.attempt_id == attempt_id), None)
         if attempt is None:
             raise ValueError('attempt_id is not in the durable trial family')
@@ -531,7 +609,9 @@ class TrialFamilyAccountingStore:
         entry = registry.get('Experiment', experiment_id)
         if entry is None:
             raise ValueError('Experiment is missing from ScientificRegistry')
-        family = self.family
+        start_payload = self._attempt_start_payload(state, attempt_id)
+        self._require_experiment_after_attempt_witness(registry, start_payload, experiment_id)
+        family = TrialFamilyDefinition.from_payload(state['family'])
         self._require_experiment_matches(attempt, family, entry.payload)
         bundle_id = _text(entry.payload.get('evaluation_bundle_id'), 'evaluation_bundle_id')
         if registry.get('EvaluationBundle', bundle_id) is None:
@@ -569,9 +649,9 @@ class TrialFamilyAccountingStore:
         attempt_id = _sha256(attempt_id, 'attempt_id')
         if type(evidence) is not SequentialLookEvidence:
             raise TypeError('evidence must be SequentialLookEvidence')
-        if type(registry) is not ScientificRegistry:
-            raise TypeError('registry must be ScientificRegistry')
-        store = self._sequential()
+        state = self._read_state()
+        registry = self._require_canonical_registry(registry, state)
+        store = self._sequential(state)
 
         def locked_precondition() -> None:
             state = self._read_state()
@@ -620,11 +700,11 @@ class TrialFamilyAccountingStore:
     def assert_promotion_evidence_eligible(self, *, evidence: PromotionEvidence, registry: ScientificRegistry, accounted_attempt_count: int) -> TrialFamilySnapshot:
         if type(evidence) is not PromotionEvidence:
             raise TypeError('evidence must be PromotionEvidence')
-        if type(registry) is not ScientificRegistry:
-            raise TypeError('registry must be ScientificRegistry')
+        state = self._read_state()
+        registry = self._require_canonical_registry(registry, state)
         if type(accounted_attempt_count) is not int or accounted_attempt_count < 0:
             raise ValueError('accounted_attempt_count must be a non-negative integer')
-        family = self.family
+        family = TrialFamilyDefinition.from_payload(state['family'])
         if evidence.confirmation_trial_family_id != family.family_id:
             raise ValueError('PromotionEvidence is bound to another trial family')
         if evidence.research_protocol_id != family.research_protocol_id or evidence.research_question_id != family.research_question_id or evidence.hypothesis_id != family.hypothesis_id:

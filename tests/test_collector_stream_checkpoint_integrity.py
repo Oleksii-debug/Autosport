@@ -16,7 +16,13 @@ from autosport.causal_collector import (
 from autosport.domain import MarketEvent
 
 
-def _delta(*, delta_id: str, cursor_position: int) -> CollectorDelta:
+def _delta(
+    *,
+    delta_id: str,
+    cursor_position: int,
+    stream_epoch: str = "epoch-1",
+    sync_state: SyncState = SyncState.READY,
+) -> CollectorDelta:
     payload = {
         "event_id": "e1",
         "market_id": "winner",
@@ -39,7 +45,7 @@ def _delta(*, delta_id: str, cursor_position: int) -> CollectorDelta:
         source_id="source-x",
         lawful_terms_ref="terms:source-x:v1",
         retention_ref="retention:source-x:v1",
-        stream_epoch="epoch-1",
+        stream_epoch=stream_epoch,
         source_cursor=str(cursor_position),
         cursor_position=cursor_position,
         event_dedupe_key=MarketEvent.from_dict(payload).dedupe_key,
@@ -53,7 +59,7 @@ def _delta(*, delta_id: str, cursor_position: int) -> CollectorDelta:
         revision_of=None,
         revision_number=0,
         gap_state=GapState.NONE,
-        sync_state=SyncState.READY,
+        sync_state=sync_state,
     )
 
 
@@ -90,3 +96,60 @@ def test_deleted_checkpoint_with_immutable_history_fails_closed() -> None:
 
         assert reopened.get(successor.delta_id) is None
         assert reopened.get(first.delta_id) == first
+
+
+@pytest.mark.parametrize(
+    "transition",
+    [SyncState.EPOCH_CHANGED, SyncState.CURSOR_RESET],
+)
+def test_deleted_source_checkpoint_cannot_be_laundered_as_new_epoch(
+    transition: SyncState,
+) -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "collector.json"
+        first = _delta(delta_id="d1", cursor_position=1)
+        store = CollectorDeltaStore(path)
+        assert store.append(first)
+
+        connection = sqlite3.connect(path)
+        try:
+            connection.execute(
+                "DELETE FROM collector_streams WHERE source_id=?",
+                ("source-x",),
+            )
+            connection.commit()
+        finally:
+            connection.close()
+
+        reopened = CollectorDeltaStore(path)
+        successor = _delta(
+            delta_id=f"d2-{transition.value}",
+            cursor_position=0,
+            stream_epoch="epoch-2",
+            sync_state=transition,
+        )
+        with pytest.raises(
+            ValueError,
+            match="stream checkpoint conflicts with immutable delta history",
+        ):
+            reopened.append(successor)
+
+        assert reopened.get(successor.delta_id) is None
+        assert reopened.get(first.delta_id) == first
+
+
+def test_legitimate_new_epoch_is_allowed_when_prior_checkpoint_survives() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "collector.json"
+        store = CollectorDeltaStore(path)
+        first = _delta(delta_id="d1", cursor_position=1)
+        successor = _delta(
+            delta_id="d2",
+            cursor_position=0,
+            stream_epoch="epoch-2",
+            sync_state=SyncState.EPOCH_CHANGED,
+        )
+
+        assert store.append(first)
+        assert store.append(successor)
+        assert store.get(successor.delta_id) == successor

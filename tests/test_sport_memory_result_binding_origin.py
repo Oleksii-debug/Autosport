@@ -104,6 +104,11 @@ def _quote(selection: str, sequence: int) -> MarketEvent:
 class _ProductSource:
     source_id = "provider-a"
     stream_epoch = "epoch-1"
+    settlement_authority_id = "provider-a-results-v1"
+    settlement_configuration_sha256 = SHA_A
+
+    def __init__(self) -> None:
+        self.resolution: SettlementResolution | None = None
 
     def fetch_catalog_page(self, checkpoint):
         return CatalogPage(
@@ -119,11 +124,6 @@ class _ProductSource:
 
     def resolve_event(self, delta):
         raise AssertionError("binding-origin tests do not consume collector deltas")
-
-
-class _StaticOutcomeAuthority:
-    def __init__(self) -> None:
-        self.resolution: SettlementResolution | None = None
 
     def resolve(
         self,
@@ -164,12 +164,12 @@ def _authorities(
         root / "opponents.json",
         identities,
     )
-    authority = _StaticOutcomeAuthority()
+    source = _ProductSource()
     runtime = build_autonomous_product_runtime(
         workspace=root,
-        source=_ProductSource(),
+        source=source,
         clock=lambda: T2,
-        outcome_authority=authority,
+        outcome_authority=source,
     )
     market_store = runtime.market_store
     market_store.append(_quote("sel-alex-17", 1))
@@ -322,7 +322,7 @@ def test_recomputed_digest_cannot_backdate_post_reveal_provider_choice(tmp_path:
     )
 
     authority = materializer.runtime.coordinator.outcome_authority
-    assert isinstance(authority, _StaticOutcomeAuthority)
+    assert isinstance(authority, _ProductSource)
     authority.resolution = settlement
 
     with pytest.raises(
@@ -369,7 +369,7 @@ def test_provider_binding_cutoff_at_or_after_settlement_reveal_fails_closed(tmp_
     )
 
     authority = materializer.runtime.coordinator.outcome_authority
-    assert isinstance(authority, _StaticOutcomeAuthority)
+    assert isinstance(authority, _ProductSource)
     authority.resolution = settlement
 
     with pytest.raises(

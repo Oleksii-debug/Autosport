@@ -32,7 +32,7 @@ GUI_EVIDENCE_EXPORT_UK_UA: Mapping[str, str] = MappingProxyType(
             "Експорт канонічних доказів виконується у фоновому процесі; інтерфейс залишається доступним."
         ),
         "ui.error.evidence_export.failed": "Експорт доказів завершився помилкою: {error}",
-        "ui.status.evidence_export.complete": "Експорт доказів завершено: {filename}",
+        "ui.status.evidence_export.complete": "Експорт доказів завершено.",
         "ui.status.close.evidence_export_busy": (
             "Експорт доказів ще виконується; дочекайтеся завершення перед закриттям програми."
         ),

@@ -168,6 +168,21 @@ def test_successor_retry_rotates_aborted_prepare_before_version_publish(
             as_of=T2,
             previous=first,
         )
+        changed_replacement = _cost(
+            authority,
+            source_digit="b",
+            amount=Decimal("5"),
+            available_at=T2,
+            supersedes=(first_cost.cost_evidence_id,),
+        )
+        changed_second = derive_campaign_economics(
+            campaign=authority,
+            costs=(changed_replacement,),
+            as_of=T2,
+            previous=first,
+        )
+        assert changed_second.version_id != second.version_id
+
         store = CampaignEconomicEvidenceStore(
             workspace,
             campaign=authority,
@@ -208,9 +223,8 @@ def test_successor_retry_rotates_aborted_prepare_before_version_publish(
             campaign=authority,
             authority_root=authority_root,
         )
-        forged = replace(second, known_cost_total=Decimal("999"))
-        with pytest.raises(CampaignEconomicStoreError, match="forged"):
-            restarted.append(forged)
+        with pytest.raises(CampaignEconomicStoreError, match="exact semantic retry"):
+            restarted.append(changed_second)
 
         assert restarted.append(second) == second.version_id
         assert restarted.latest() == second

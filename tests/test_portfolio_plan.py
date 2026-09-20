@@ -1,11 +1,11 @@
 """Compatibility harness for the pre-authority portfolio-plan test corpus.
 
 The preserved implementation file contains historical synthetic positive predictive
-fixtures. Production now requires a ForecastRef object minted by durable registry
-resolution. For this historical unit-test module only, we replace synthetic
-ForecastRef values with a test-local subclass that preserves all original structural
-eligibility checks and suppresses only the new missing-runtime-authority reason.
-No production mint/token/backdoor is exposed by this compatibility seam.
+fixtures. Production now requires an exact ForecastRef object whose identity was
+minted by durable registry resolution. Historical portfolio tests keep using their
+synthetic durable payloads, but this wrapper authorizes only exact base-class fixture
+objects by reaching into the resolver closure from test code. No production mint or
+transferable token API is exposed, and subclass polymorphism is not used as authority.
 """
 
 from __future__ import annotations
@@ -14,6 +14,7 @@ import importlib.util
 from dataclasses import replace
 from pathlib import Path
 
+from autosport import predictive_authority as _runtime_authority
 from autosport.opportunity import ForecastRef
 
 
@@ -27,28 +28,31 @@ if _SPEC is None or _SPEC.loader is None:
 _IMPL = importlib.util.module_from_spec(_SPEC)
 _SPEC.loader.exec_module(_IMPL)
 
-_AUTHORITY_MISSING = (
-    "predictive eligibility was not resolved from canonical "
-    "ScientificRegistry authority for this decision"
-)
+
+def _test_only_authority_store() -> dict[int, tuple[ForecastRef, str]]:
+    resolver = _runtime_authority.resolve_authoritative_forecast_ref
+    closure = resolver.__closure__ or ()
+    by_name = {
+        name: cell.cell_contents
+        for name, cell in zip(resolver.__code__.co_freevars, closure, strict=True)
+    }
+    store = by_name.get("authorized")
+    if not isinstance(store, dict):
+        raise RuntimeError("predictive resolver authority closure is unavailable")
+    return store
 
 
-class _TrustedSyntheticForecastRef(ForecastRef):
-    """Test-local legacy fixture; never imported by production Autosport code."""
-
-    def predictive_eligibility_reason(
-        self,
-        decision_time,
-        *,
-        expected_model_id,
-    ):
-        reason = super().predictive_eligibility_reason(
-            decision_time,
-            expected_model_id=expected_model_id,
-        )
-        if reason == _AUTHORITY_MISSING:
-            return None
-        return reason
+def _authorize_historical_fixture(
+    forecast: ForecastRef,
+    decision_time: str,
+) -> ForecastRef:
+    if type(forecast) is not ForecastRef:
+        raise RuntimeError("historical fixture authority requires exact ForecastRef")
+    fingerprint = _runtime_authority._runtime_fingerprint(forecast, decision_time)
+    if fingerprint is None:
+        raise RuntimeError("historical predictive fixture lacks canonical fingerprint")
+    _test_only_authority_store()[id(forecast)] = (forecast, fingerprint)
+    return forecast
 
 
 class PortfolioPlanTests(_IMPL.PortfolioPlanTests):
@@ -60,7 +64,10 @@ class PortfolioPlanTests(_IMPL.PortfolioPlanTests):
             **kwargs,
         )
         forecasts = tuple(
-            _TrustedSyntheticForecastRef.from_dict(forecast.to_dict())
+            _authorize_historical_fixture(
+                ForecastRef.from_dict(forecast.to_dict()),
+                cls.DECISION_TS,
+            )
             if forecast.predictive_eligibility is not None
             else forecast
             for forecast in opportunity.forecasts

@@ -23,8 +23,11 @@ class CollectorSQLitePublicContractTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "collector.json"
             CollectorDeltaStore(path)
-            with sqlite3.connect(path) as connection:
+            connection = sqlite3.connect(path)
+            try:
                 mode = connection.execute("PRAGMA journal_mode").fetchone()[0]
+            finally:
+                connection.close()
             self.assertEqual(str(mode).lower(), "delete")
             self.assertFalse(path.with_name(path.name + "-wal").exists())
             self.assertFalse(path.with_name(path.name + "-shm").exists())

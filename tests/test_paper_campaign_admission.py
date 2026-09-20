@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import tempfile
 import unittest
 from decimal import Decimal
@@ -89,8 +90,11 @@ class PaperCampaignAdmissionTests(unittest.TestCase):
             self.assertEqual(
                 decision.payload["paper_execution_ticket_id"], fixture.execution_ticket_id
             )
-            snapshot = AgentLoopRuntime(fixture.workspace / "agent-loop.json").snapshot()
-            parameters = dict(snapshot.parameters)
+            bridge_state = json.loads(
+                (fixture.workspace / "paper-learning-bridge.json").read_text(encoding="utf-8")
+            )
+            binding = bridge_state["bindings"][fixture.execution_ticket_id]
+            parameters = dict(binding["action_parameters"])
             self.assertEqual(parameters["paper_execution_run_id"], fixture.execution_run_id)
             self.assertEqual(
                 parameters["paper_execution_attempt_id"], fixture.execution_attempt_id

@@ -18,16 +18,16 @@ from . import sport_memory_runtime as _impl
 
 _ORIGINAL_MATERIALIZE = _impl.SportMemoryRuntime.materialize
 _ORIGINAL_LOAD = _impl.SportMemoryRuntime._load
-_BOUND_RUNTIME_MODULE = "autosport.sport_memory_checkpoint"
-_BOUND_RUNTIME_NAME = "BoundSportMemoryRuntime"
 
 
 def _is_bound_product_runtime(runtime: object) -> bool:
-    runtime_type = type(runtime)
-    return (
-        runtime_type.__module__ == _BOUND_RUNTIME_MODULE
-        and runtime_type.__name__ == _BOUND_RUNTIME_NAME
-    )
+    # Resolve lazily so importing this guard from autosport.__init__ does not
+    # create a cycle while sport_memory_checkpoint is still being defined. Exact
+    # type identity is required: module/name strings are mutable and a subclass
+    # must not be able to spoof product authority.
+    from .sport_memory_checkpoint import BoundSportMemoryRuntime
+
+    return type(runtime) is BoundSportMemoryRuntime
 
 
 def _called_from_bound_materialize(runtime: object) -> bool:

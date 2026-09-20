@@ -44,10 +44,14 @@ _SCHEMA = "autosport.pre_evaluation_product_origin"
 _SCHEMA_VERSION = 1
 _COST_SCHEMA = "autosport.pre_evaluation_cost_contract"
 _COST_SELECTION_SCHEMA = "autosport.pre_evaluation_cost_contract_selection"
+_COST_SELECTION_SCHEMA_VERSION = 2
 _COST_SELECTION_AGENT = "pre-evaluation-cost-contract"
 _COST_SELECTION_ACTION = "SELECT_PRE_EVALUATION_COST_CONTRACT"
 _COST_SELECTION_MATERIAL_ACTION_KEY = "pre_evaluation_material_action_id"
 _COST_SELECTION_CONTRACT_KEY = "cost_contract"
+_COST_SELECTION_PREDECESSOR_SHA_KEY = "selection_predecessor_prefix_sha256"
+_COST_SELECTION_PREDECESSOR_COUNT_KEY = "selection_predecessor_record_count"
+_COST_SELECTION_AVAILABLE_COUNT_KEY = "selection_available_record_count"
 _HEX = frozenset("0123456789abcdef")
 _ISSUED: dict[int, tuple[weakref.ReferenceType["PreEvaluationProductOrigin"], str]] = {}
 
@@ -105,7 +109,6 @@ def _load_json_object(name: str, raw: object) -> Mapping[str, object]:
     return parsed
 
 
-
 def _cost_contract_payload(contract: PreEvaluationCostContract) -> dict[str, object]:
     if not isinstance(contract, PreEvaluationCostContract):
         raise TypeError("contract must be PreEvaluationCostContract")
@@ -150,15 +153,71 @@ def _cost_contract_from_payload(raw: object) -> PreEvaluationCostContract:
     return contract
 
 
+@dataclass(frozen=True, slots=True)
+class _CostSelectionRecord:
+    record: DecisionRecord
+    record_count: int
+    predecessor_prefix_sha256: str
+
+
+def _verified_ledger_records_with_prefixes(
+    ledger: JsonlDecisionLedger,
+) -> tuple[_CostSelectionRecord, ...]:
+    try:
+        snapshot = ledger.verified_snapshot()
+    except Exception as exc:
+        raise PreEvaluationProductOriginError(
+            "durable Decision Ledger cannot be verified"
+        ) from exc
+    lines = snapshot.payload.splitlines(keepends=True)
+    if len(lines) != snapshot.record_count:
+        raise PreEvaluationProductOriginError(
+            "durable Decision Ledger record count is inconsistent"
+        )
+    prefix = bytearray()
+    records: list[_CostSelectionRecord] = []
+    try:
+        for record_count, line in enumerate(lines, start=1):
+            predecessor_sha256 = sha256(bytes(prefix)).hexdigest()
+            envelope = json.loads(line.decode("utf-8"))
+            record = DecisionRecord(**envelope["record"])
+            records.append(
+                _CostSelectionRecord(
+                    record=record,
+                    record_count=record_count,
+                    predecessor_prefix_sha256=predecessor_sha256,
+                )
+            )
+            prefix.extend(line)
+    except (KeyError, TypeError, ValueError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise PreEvaluationProductOriginError(
+            "durable Decision Ledger snapshot cannot be replayed"
+        ) from exc
+    if sha256(bytes(prefix)).hexdigest() != snapshot.sha256:
+        raise PreEvaluationProductOriginError(
+            "durable Decision Ledger prefix digest is inconsistent"
+        )
+    return tuple(records)
+
+
 def _cost_selection_payload(
     *,
     material_action_id: str,
     economic_record: DecisionRecord,
     contract: PreEvaluationCostContract,
+    predecessor_prefix_sha256: str,
+    predecessor_record_count: int,
 ) -> dict[str, object]:
+    predecessor_prefix_sha256 = _sha(
+        _COST_SELECTION_PREDECESSOR_SHA_KEY, predecessor_prefix_sha256
+    )
+    if type(predecessor_record_count) is not int or predecessor_record_count < 0:
+        raise PreEvaluationProductOriginError(
+            "selection predecessor record count must be a non-negative integer"
+        )
     return {
         "schema": _COST_SELECTION_SCHEMA,
-        "schema_version": 1,
+        "schema_version": _COST_SELECTION_SCHEMA_VERSION,
         _COST_SELECTION_MATERIAL_ACTION_KEY: _text(
             _COST_SELECTION_MATERIAL_ACTION_KEY, material_action_id
         ),
@@ -168,6 +227,9 @@ def _cost_selection_payload(
         "economic_decision_context_hash": _sha(
             "economic_decision_context_hash", economic_record.context_hash
         ),
+        _COST_SELECTION_PREDECESSOR_SHA_KEY: predecessor_prefix_sha256,
+        _COST_SELECTION_PREDECESSOR_COUNT_KEY: predecessor_record_count,
+        _COST_SELECTION_AVAILABLE_COUNT_KEY: predecessor_record_count + 1,
         _COST_SELECTION_CONTRACT_KEY: _cost_contract_payload(contract),
     }
 
@@ -176,10 +238,22 @@ def _cost_selection_records(
     ledger: JsonlDecisionLedger,
     *,
     material_action_id: str,
-) -> tuple[DecisionRecord, ...]:
+) -> tuple[_CostSelectionRecord, ...]:
     material_action_id = _text("material_action_id", material_action_id)
-    matches: list[DecisionRecord] = []
-    for record in ledger.verified_records():
+    matches: list[_CostSelectionRecord] = []
+    expected_fields = {
+        "schema",
+        "schema_version",
+        _COST_SELECTION_MATERIAL_ACTION_KEY,
+        "economic_decision_id",
+        "economic_decision_context_hash",
+        _COST_SELECTION_PREDECESSOR_SHA_KEY,
+        _COST_SELECTION_PREDECESSOR_COUNT_KEY,
+        _COST_SELECTION_AVAILABLE_COUNT_KEY,
+        _COST_SELECTION_CONTRACT_KEY,
+    }
+    for located in _verified_ledger_records_with_prefixes(ledger):
+        record = located.record
         payload = record.payload
         is_selection = (
             record.agent == _COST_SELECTION_AGENT
@@ -191,27 +265,35 @@ def _cost_selection_records(
         if (
             record.agent != _COST_SELECTION_AGENT
             or record.action != _COST_SELECTION_ACTION
-            or set(payload)
-            != {
-                "schema",
-                "schema_version",
-                _COST_SELECTION_MATERIAL_ACTION_KEY,
-                "economic_decision_id",
-                "economic_decision_context_hash",
-                _COST_SELECTION_CONTRACT_KEY,
-            }
+            or set(payload) != expected_fields
             or payload.get("schema") != _COST_SELECTION_SCHEMA
-            or payload.get("schema_version") != 1
+            or payload.get("schema_version") != _COST_SELECTION_SCHEMA_VERSION
         ):
             raise PreEvaluationProductOriginError(
                 "durable product cost-contract selection record is malformed"
+            )
+        predecessor_count = payload.get(_COST_SELECTION_PREDECESSOR_COUNT_KEY)
+        available_count = payload.get(_COST_SELECTION_AVAILABLE_COUNT_KEY)
+        predecessor_sha256 = payload.get(_COST_SELECTION_PREDECESSOR_SHA_KEY)
+        if (
+            type(predecessor_count) is not int
+            or predecessor_count < 0
+            or type(available_count) is not int
+            or available_count < 1
+            or predecessor_count != located.record_count - 1
+            or available_count != located.record_count
+            or _sha(_COST_SELECTION_PREDECESSOR_SHA_KEY, predecessor_sha256)
+            != located.predecessor_prefix_sha256
+        ):
+            raise PreEvaluationProductOriginError(
+                "durable product cost-contract selection append-order fence mismatch"
             )
         selected_action = _text(
             _COST_SELECTION_MATERIAL_ACTION_KEY,
             payload.get(_COST_SELECTION_MATERIAL_ACTION_KEY),
         )
         if selected_action == material_action_id:
-            matches.append(record)
+            matches.append(located)
     if len(matches) > 1:
         raise PreEvaluationProductOriginError(
             "multiple durable product cost-contract selections exist for material action"
@@ -229,8 +311,9 @@ def persist_pre_evaluation_cost_contract_authority(
     """Bind one immutable cost contract to an existing durable economic decision.
 
     Selection is append-only and keyed by the same material action as the canonical
-    PortfolioPlan decision.  A restarted resolver therefore replays product-owned
-    selection instead of accepting a caller-selected filesystem path.
+    PortfolioPlan decision.  Its payload also binds the exact verified ledger prefix
+    that existed immediately before the append, so restart resolution cannot backdate
+    later selection availability by copying an older economic-decision timestamp.
     """
 
     if not isinstance(ledger, JsonlDecisionLedger):
@@ -260,23 +343,25 @@ def persist_pre_evaluation_cost_contract_authority(
             "cost-contract selection requires an existing durable economic decision"
         )
 
-    expected_payload = _cost_selection_payload(
-        material_action_id=material_action_id,
-        economic_record=economic_record,
-        contract=contract,
-    )
-    expected_context_hash = _digest(expected_payload)
     existing = _cost_selection_records(
         ledger,
         material_action_id=material_action_id,
     )
     if existing:
-        record = existing[0]
+        located = existing[0]
+        record = located.record
         selected = _cost_contract_from_payload(
             record.payload.get(_COST_SELECTION_CONTRACT_KEY)
         )
+        expected_payload = _cost_selection_payload(
+            material_action_id=material_action_id,
+            economic_record=economic_record,
+            contract=contract,
+            predecessor_prefix_sha256=located.predecessor_prefix_sha256,
+            predecessor_record_count=located.record_count - 1,
+        )
         if (
-            record.context_hash != expected_context_hash
+            record.context_hash != _digest(expected_payload)
             or record.payload.get("economic_decision_id") != economic_record.decision_id
             or record.payload.get("economic_decision_context_hash")
             != economic_record.context_hash
@@ -287,6 +372,15 @@ def persist_pre_evaluation_cost_contract_authority(
             )
         return record
 
+    prefix = ledger.verified_snapshot()
+    expected_payload = _cost_selection_payload(
+        material_action_id=material_action_id,
+        economic_record=economic_record,
+        contract=contract,
+        predecessor_prefix_sha256=prefix.sha256,
+        predecessor_record_count=prefix.record_count,
+    )
+    expected_context_hash = _digest(expected_payload)
     decision_id = f"pre-eval-cost:{expected_context_hash[:32]}"
     record = DecisionRecord(
         replay_run_id=economic_record.replay_run_id,
@@ -296,7 +390,6 @@ def persist_pre_evaluation_cost_contract_authority(
         payload=expected_payload,
         context_hash=expected_context_hash,
         decision_id=decision_id,
-        recorded_at=economic_record.recorded_at,
     )
     try:
         ledger.append(record)
@@ -304,12 +397,51 @@ def persist_pre_evaluation_cost_contract_authority(
         raise PreEvaluationProductOriginError(
             "durable product cost-contract selection could not be persisted"
         ) from exc
-    return record
+    written = _cost_selection_records(
+        ledger,
+        material_action_id=material_action_id,
+    )
+    if len(written) != 1 or written[0].record.decision_id != decision_id:
+        raise PreEvaluationProductOriginError(
+            "durable product cost-contract selection append could not be re-resolved"
+        )
+    return written[0].record
+
+
+def _validated_bound_ledger_prefix(
+    *,
+    ledger: JsonlDecisionLedger,
+    bound: BoundPreEvaluationSession,
+) -> int:
+    prefix_sha256 = bound.decision_ledger_prefix_sha256
+    prefix_record_count = bound.decision_ledger_prefix_record_count
+    if prefix_sha256 is None or prefix_record_count is None:
+        raise PreEvaluationProductOriginError(
+            "pre-evaluation freeze does not bind a durable Decision Ledger prefix"
+        )
+    try:
+        snapshot = ledger.verified_snapshot()
+    except Exception as exc:
+        raise PreEvaluationProductOriginError(
+            "pre-evaluation freeze Decision Ledger cannot be verified"
+        ) from exc
+    if prefix_record_count > snapshot.record_count:
+        raise PreEvaluationProductOriginError(
+            "pre-evaluation freeze ledger prefix is longer than durable ledger"
+        )
+    lines = snapshot.payload.splitlines(keepends=True)
+    prefix_payload = b"".join(lines[:prefix_record_count])
+    if sha256(prefix_payload).hexdigest() != prefix_sha256:
+        raise PreEvaluationProductOriginError(
+            "pre-evaluation freeze ledger prefix no longer matches durable history"
+        )
+    return prefix_record_count
 
 
 def _validated_durable_cost_contract(
     *,
     ledger: JsonlDecisionLedger,
+    bound: BoundPreEvaluationSession,
     material_action_id: str,
     economic_record: DecisionRecord,
     expected_cost_contract_sha256: str | None,
@@ -322,7 +454,8 @@ def _validated_durable_cost_contract(
         raise PreEvaluationProductOriginError(
             "durable product cost-contract selection is absent"
         )
-    record = matches[0]
+    located = matches[0]
+    record = located.record
     contract = _cost_contract_from_payload(
         record.payload.get(_COST_SELECTION_CONTRACT_KEY)
     )
@@ -330,6 +463,8 @@ def _validated_durable_cost_contract(
         material_action_id=material_action_id,
         economic_record=economic_record,
         contract=contract,
+        predecessor_prefix_sha256=located.predecessor_prefix_sha256,
+        predecessor_record_count=located.record_count - 1,
     )
     if (
         record.context_hash != _digest(expected_payload)
@@ -340,6 +475,11 @@ def _validated_durable_cost_contract(
         raise PreEvaluationProductOriginError(
             "durable product cost-contract selection is detached from economic decision"
         )
+    freeze_record_count = _validated_bound_ledger_prefix(ledger=ledger, bound=bound)
+    if located.record_count > freeze_record_count:
+        raise PreEvaluationProductOriginError(
+            "durable product cost-contract selection was not durable before pre-evaluation freeze"
+        )
     if expected_cost_contract_sha256 is not None:
         expected_digest = _sha(
             "expected_cost_contract_sha256", expected_cost_contract_sha256
@@ -349,6 +489,7 @@ def _validated_durable_cost_contract(
                 "expected cost contract does not match durable product selection"
             )
     return contract
+
 
 def _selection_labels(market_key: str) -> tuple[str, str]:
     if market_key in {"h2h", "spreads"}:
@@ -658,6 +799,7 @@ def resolve_pre_evaluation_product_origin(
     )
     cost_contract = _validated_durable_cost_contract(
         ledger=ledger,
+        bound=bound,
         material_action_id=material_action_id,
         economic_record=decision_record,
         expected_cost_contract_sha256=expected_cost_contract_sha256,

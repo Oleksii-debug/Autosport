@@ -12,3 +12,4 @@ from . import _paper_execution_freshness as _paper_execution_freshness  # noqa: 
 # may authorize a later-session activation.
 from . import _dataset_snapshot_lineage_publication as _dataset_snapshot_lineage_publication  # noqa: F401,E402
 from . import _dataset_snapshot_lineage_publication_provenance as _dataset_snapshot_lineage_publication_provenance  # noqa: F401,E402
+from . import _dataset_snapshot_lineage_publication_trust_root as _dataset_snapshot_lineage_publication_trust_root  # noqa: F401,E402

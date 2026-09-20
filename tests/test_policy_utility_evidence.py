@@ -332,7 +332,7 @@ def test_store_tamper_fails_closed_on_restart(tmp_path) -> None:
     raw["risk_fingerprint"] = SHA_A
     path.write_text(json.dumps(raw, sort_keys=True, separators=(",", ":")) + "\n", encoding="utf-8")
 
-    with pytest.raises(PolicyUtilityError, match="evidence digest mismatch"):
+    with pytest.raises(PolicyUtilityError, match="policy utility semantic key mismatch"):
         PolicyUtilityStore(path)
 
 

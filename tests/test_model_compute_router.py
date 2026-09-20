@@ -30,6 +30,7 @@ from autosport.sport_domain_fitness import (
     SportDomainFitnessObservation,
 )
 from autosport.voc_evaluation import (
+    OutcomeDerivedVOCScore,
     PairedVOCEvaluation,
     VOCEvaluationProvenance,
     VOCEvaluationStore,
@@ -439,6 +440,39 @@ class _FixtureCanonicalVOCResolver:
     def resolve_decision_context(self, context_sha256, *, as_of):
         value = self._contexts.get(context_sha256)
         return None if value is None else dict(value)
+
+    def resolve_score(self, evaluation, *, as_of):
+        value = self.resolve(evaluation, as_of=as_of)
+        if value is None:
+            return None
+        return OutcomeDerivedVOCScore(
+            evaluation_id=value.evaluation_id,
+            available_at=value.evaluated_at,
+            outcome_evidence_sha256=value.outcome_evidence_sha256,
+            scoring_rule_sha256=value.scoring_rule_sha256,
+            research_protocol_sha256=value.research_protocol_sha256,
+            holdout_access_id=value.holdout_access_id,
+            multiple_comparison_control_sha256=(
+                value.multiple_comparison_control_sha256
+            ),
+            baseline_utility=value.baseline_utility,
+            challenger_utility=value.challenger_utility,
+            compute_cost_penalty=value.compute_cost_penalty,
+            latency_opportunity_cost_penalty=(
+                value.latency_opportunity_cost_penalty
+            ),
+            measured_compute_cost=value.measured_compute_cost,
+            paired_sample_count=value.paired_sample_count,
+            effective_sample_size=value.effective_sample_size,
+            support_fraction=value.support_fraction,
+            incremental_value_interval_low=(
+                value.incremental_value_interval_low
+            ),
+            incremental_value_interval_high=(
+                value.incremental_value_interval_high
+            ),
+            source_artifact_sha256=SHA_D,
+        )
 
 
 class ModelComputeRouterTests(unittest.TestCase):

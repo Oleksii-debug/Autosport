@@ -27,6 +27,7 @@ from autosport.voc_evaluation import VOCEvaluationStore
 from autosport.voc_outcome_scoring import build_canonical_voc_authority_resolver
 from test_voc_outcome_scoring import (
     CanonicalOutcomeDerivedVOCScoreAuthorityTests,
+    digest,
     SHA_A,
     SHA_B,
     SHA_C,
@@ -84,11 +85,21 @@ class CanonicalVOCOutcomeRouterIntegrationTests(unittest.TestCase):
         self.fixture.tearDown()
 
     def test_restarted_production_score_authorizes_only_the_next_matching_cloud_route(self):
-        paired = self.fixture._evaluation()
+        paired = self.fixture._evaluation(register_cohort=False)
+        second = self.fixture._evaluation(
+            evaluation_id="voc-derived-2",
+            decision_input_sha256=digest({"episode": 2, "kind": "input"}),
+            baseline_output_sha256=digest({"episode": 2, "kind": "baseline"}),
+            challenger_output_sha256=digest({"episode": 2, "kind": "challenger"}),
+            register_cohort=False,
+        )
         self.fixture.registry.append(paired)
+        self.fixture.registry.append(second)
+        self.fixture._append_cohort(paired, second)
         score = self.fixture._authority().resolve(paired.evaluation_id, as_of=T_AS_OF)
         self.assertIsNotNone(score)
         assert score is not None
+        self.assertEqual(score.effective_sample_size, 2)
         self.fixture._append_scientific_qualification(
             paired,
             score_sha256=score.score_sha256,

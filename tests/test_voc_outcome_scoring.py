@@ -5,7 +5,7 @@ import json
 import tempfile
 import unittest
 from dataclasses import dataclass, replace
-from decimal import Decimal
+from decimal import Decimal, ROUND_DOWN, localcontext
 from pathlib import Path
 from typing import Any
 
@@ -138,11 +138,15 @@ class CanonicalOutcomeDerivedVOCScoreAuthorityTests(unittest.TestCase):
     def _append_pre_outcome_evidence(
         self,
         *,
+        evaluation_id: str = "voc-derived",
+        decision_input_sha256: str = SHA_A,
+        baseline_output_sha256: str = SHA_D,
+        challenger_output_sha256: str = SHA_E,
         sample_challenger_completed_at: str | None = None,
     ) -> tuple[str, str]:
         source_context = {
-            "request_id": "source:voc-derived",
-            "decision_input_sha256": SHA_A,
+            "request_id": f"source:{evaluation_id}",
+            "decision_input_sha256": decision_input_sha256,
             "task_class": "route-voc",
             "sport_id": "table_tennis",
             "league_id": "league-voc",
@@ -151,13 +155,13 @@ class CanonicalOutcomeDerivedVOCScoreAuthorityTests(unittest.TestCase):
             "contradiction_state": "none",
         }
         context_record = DecisionRecord(
-            replay_run_id="replay-voc-derived-context",
+            replay_run_id=f"replay-{evaluation_id}-context",
             agent="voc-derived-test",
             observed_ts=T_DECISION,
             action="VOC_ROUTE_CONTEXT",
             payload={"voc_current_context": source_context},
-            context_hash=SHA_A,
-            decision_id="decision-voc-derived-context",
+            context_hash=decision_input_sha256,
+            decision_id=f"decision-{evaluation_id}-context",
             recorded_at=T_DECISION,
         )
         context_sha = self.ledger.append(context_record)
@@ -167,17 +171,17 @@ class CanonicalOutcomeDerivedVOCScoreAuthorityTests(unittest.TestCase):
         )
         scoring_evidence = {
             "schema_version": 1,
-            "evaluation_id": "voc-derived",
-            "decision_input_sha256": SHA_A,
-            "baseline_output_sha256": SHA_D,
-            "challenger_output_sha256": SHA_E,
+            "evaluation_id": evaluation_id,
+            "decision_input_sha256": decision_input_sha256,
+            "baseline_output_sha256": baseline_output_sha256,
+            "challenger_output_sha256": challenger_output_sha256,
             "baseline_action": "BASE",
             "challenger_action": "CLOUD",
             "baseline_abstained": False,
             "challenger_abstained": False,
             "samples": [
                 {
-                    "sample_id": "quote-101",
+                    "sample_id": f"{evaluation_id}:quote-101",
                     "quote_key": self.quote_keys[0],
                     "baseline_compute_cost": "0.10",
                     "challenger_compute_cost": "0.20",
@@ -185,7 +189,7 @@ class CanonicalOutcomeDerivedVOCScoreAuthorityTests(unittest.TestCase):
                     "challenger_completed_at": sample_challenger_completed_at,
                 },
                 {
-                    "sample_id": "quote-202",
+                    "sample_id": f"{evaluation_id}:quote-202",
                     "quote_key": self.quote_keys[1],
                     "baseline_compute_cost": "0.10",
                     "challenger_compute_cost": "0.20",
@@ -195,20 +199,20 @@ class CanonicalOutcomeDerivedVOCScoreAuthorityTests(unittest.TestCase):
             ],
         }
         binding = {
-            "decision_input_sha256": SHA_A,
+            "decision_input_sha256": decision_input_sha256,
             "decision_context_sha256": context_sha,
             "baseline_candidate_id": "baseline",
             "baseline_backend_id": "local",
             "baseline_model_id": "baseline-model",
             "baseline_config_sha256": SHA_B,
-            "baseline_output_sha256": SHA_D,
+            "baseline_output_sha256": baseline_output_sha256,
             "baseline_action": "BASE",
             "baseline_abstained": False,
             "challenger_candidate_id": "challenger",
             "challenger_backend_id": "cloud",
             "challenger_model_id": "challenger-model",
             "challenger_config_sha256": SHA_C,
-            "challenger_output_sha256": SHA_E,
+            "challenger_output_sha256": challenger_output_sha256,
             "challenger_action": "CLOUD",
             "challenger_abstained": False,
             "sport_id": "table_tennis",
@@ -218,7 +222,7 @@ class CanonicalOutcomeDerivedVOCScoreAuthorityTests(unittest.TestCase):
             "contradiction_state": "none",
         }
         decision_record = DecisionRecord(
-            replay_run_id="replay-voc-derived",
+            replay_run_id=f"replay-{evaluation_id}",
             agent="voc-derived-test",
             observed_ts=T_DECISION,
             action="BASE",
@@ -226,8 +230,8 @@ class CanonicalOutcomeDerivedVOCScoreAuthorityTests(unittest.TestCase):
                 "voc_binding": binding,
                 "voc_scoring_evidence": scoring_evidence,
             },
-            context_hash=SHA_A,
-            decision_id="decision-voc-derived",
+            context_hash=decision_input_sha256,
+            decision_id=f"decision-{evaluation_id}",
             recorded_at=T_BINDING,
         )
         decision_sha = self.ledger.append(decision_record)
@@ -294,36 +298,47 @@ class CanonicalOutcomeDerivedVOCScoreAuthorityTests(unittest.TestCase):
             },
             "dataset_manifest_sha256": SHA_E,
         }
-        self.registry.append(
-            RawScientificRecord(
-                record_type="ResearchProtocol",
-                record_id="voc-protocol-derived",
-                available_at=T_PROTOCOL,
-                payload=protocol_payload,
+        if self.registry.get("ResearchProtocol", "voc-protocol-derived") is None:
+            self.registry.append(
+                RawScientificRecord(
+                    record_type="ResearchProtocol",
+                    record_id="voc-protocol-derived",
+                    available_at=T_PROTOCOL,
+                    payload=protocol_payload,
+                )
             )
-        )
-        self.registry.append(
-            RawScientificRecord(
-                record_type="DatasetSnapshot",
-                record_id=dataset_id,
-                available_at=T_PROTOCOL,
-                payload={
-                    "dataset_snapshot_id": dataset_id,
-                    "manifest_sha256": SHA_E,
-                    "source_identity": source_identity,
-                    "license_identity": license_identity,
-                },
+        if self.registry.get("DatasetSnapshot", dataset_id) is None:
+            self.registry.append(
+                RawScientificRecord(
+                    record_type="DatasetSnapshot",
+                    record_id=dataset_id,
+                    available_at=T_PROTOCOL,
+                    payload={
+                        "dataset_snapshot_id": dataset_id,
+                        "manifest_sha256": SHA_E,
+                        "source_identity": source_identity,
+                        "license_identity": license_identity,
+                    },
+                )
             )
-        )
         return scoring_sha, multiple_sha, holdout, trial_family, dataset_id
 
     def _evaluation(
         self,
         *,
+        evaluation_id: str = "voc-derived",
+        decision_input_sha256: str = SHA_A,
+        baseline_output_sha256: str = SHA_D,
+        challenger_output_sha256: str = SHA_E,
         forged_claim: bool = False,
         sample_challenger_completed_at: str | None = None,
+        register_cohort: bool = True,
     ) -> PairedVOCEvaluation:
         context_sha, decision_sha = self._append_pre_outcome_evidence(
+            evaluation_id=evaluation_id,
+            decision_input_sha256=decision_input_sha256,
+            baseline_output_sha256=baseline_output_sha256,
+            challenger_output_sha256=challenger_output_sha256,
             sample_challenger_completed_at=sample_challenger_completed_at,
         )
         scoring_sha, multiple_sha, holdout, _, _ = self._protocol_and_holdout()
@@ -339,10 +354,10 @@ class CanonicalOutcomeDerivedVOCScoreAuthorityTests(unittest.TestCase):
             compute_penalty = Decimal("0.1")
             latency_penalty = Decimal("0.05")
             measured_compute_cost = Decimal("0.1")
-            interval_low = Decimal("0.85")
-            interval_high = Decimal("1.85")
-        return PairedVOCEvaluation(
-            evaluation_id="voc-derived",
+            interval_low = Decimal("1.35")
+            interval_high = Decimal("1.35")
+        paired = PairedVOCEvaluation(
+            evaluation_id=evaluation_id,
             task_class="route-voc",
             sport_id="table_tennis",
             league_id="league-voc",
@@ -357,11 +372,11 @@ class CanonicalOutcomeDerivedVOCScoreAuthorityTests(unittest.TestCase):
             challenger_backend_id="cloud",
             challenger_model_id="challenger-model",
             challenger_config_sha256=SHA_C,
-            decision_input_sha256=SHA_A,
+            decision_input_sha256=decision_input_sha256,
             decision_context_sha256=context_sha,
             decision_evidence_sha256=decision_sha,
-            baseline_output_sha256=SHA_D,
-            challenger_output_sha256=SHA_E,
+            baseline_output_sha256=baseline_output_sha256,
+            challenger_output_sha256=challenger_output_sha256,
             baseline_action="BASE",
             challenger_action="CLOUD",
             baseline_abstained=False,
@@ -391,6 +406,59 @@ class CanonicalOutcomeDerivedVOCScoreAuthorityTests(unittest.TestCase):
             incremental_value_interval_high=interval_high,
             provenance=VOCEvaluationProvenance.MEASURED_SHADOW,
         )
+        if register_cohort:
+            self._append_cohort(paired)
+        return paired
+
+    def _append_cohort(self, *members: PairedVOCEvaluation) -> None:
+        ordered = sorted(members, key=lambda item: item.evaluation_id)
+        self.registry.append(
+            RawScientificRecord(
+                record_type="VOCCohort",
+                record_id="voc-cohort-derived",
+                available_at=max(item.evaluated_at for item in ordered),
+                payload={
+                    "cohort_id": "voc-cohort-derived",
+                    "denominator": len(ordered),
+                    "research_protocol_id": ordered[0].research_protocol_id,
+                    "research_protocol_sha256": ordered[0].research_protocol_sha256,
+                    "scoring_rule_sha256": ordered[0].scoring_rule_sha256,
+                    "holdout_access_id": ordered[0].holdout_access_id,
+                    "multiple_comparison_control_sha256": (
+                        ordered[0].multiple_comparison_control_sha256
+                    ),
+                    "task_class": ordered[0].task_class,
+                    "scope": {
+                        "sport_id": ordered[0].sport_id,
+                        "league_id": ordered[0].league_id,
+                        "regime_id": ordered[0].regime_id,
+                        "urgency_id": ordered[0].urgency_id,
+                        "contradiction_state": ordered[0].contradiction_state,
+                    },
+                    "baseline_compute_identity": {
+                        "candidate_id": ordered[0].baseline_candidate_id,
+                        "backend_id": ordered[0].baseline_backend_id,
+                        "model_id": ordered[0].baseline_model_id,
+                        "config_sha256": ordered[0].baseline_config_sha256,
+                    },
+                    "challenger_compute_identity": {
+                        "candidate_id": ordered[0].challenger_candidate_id,
+                        "backend_id": ordered[0].challenger_backend_id,
+                        "model_id": ordered[0].challenger_model_id,
+                        "config_sha256": ordered[0].challenger_config_sha256,
+                    },
+                    "members": [
+                        {
+                            "evaluation_id": item.evaluation_id,
+                            "evaluation_sha256": item.evaluation_sha256,
+                            "decision_context_sha256": item.decision_context_sha256,
+                            "decision_evidence_sha256": item.decision_evidence_sha256,
+                        }
+                        for item in ordered
+                    ],
+                },
+            )
+        )
 
     def _authority(self) -> CanonicalOutcomeDerivedVOCScoreAuthority:
         return CanonicalOutcomeDerivedVOCScoreAuthority(
@@ -409,6 +477,10 @@ class CanonicalOutcomeDerivedVOCScoreAuthorityTests(unittest.TestCase):
         score_sha256: str,
         minimum_effective_sample_size: int = 1,
     ) -> None:
+        score = self._authority().resolve(paired.evaluation_id, as_of=T_AS_OF)
+        assert score is not None
+        if score.score_sha256 != score_sha256:
+            raise AssertionError("qualification score digest does not match canonical score")
         trial_family = "voc-confirmation-family-v1"
         dataset_id = "voc-dataset-derived"
         bundle_id = "voc-bundle-derived"
@@ -426,10 +498,10 @@ class CanonicalOutcomeDerivedVOCScoreAuthorityTests(unittest.TestCase):
                     "dataset_snapshot_id": dataset_id,
                     "protocol_sha256": paired.research_protocol_sha256,
                     "artifact_hashes": [score_sha256],
-                    "effective_sample_size": paired.effective_sample_size,
-                    "effect_interval_low": str(paired.incremental_value_interval_low),
-                    "effect_interval_high": str(paired.incremental_value_interval_high),
-                    "practical_improvement": str(paired.net_value),
+                    "effective_sample_size": score.effective_sample_size,
+                    "effect_interval_low": str(score.incremental_value_interval_low),
+                    "effect_interval_high": str(score.incremental_value_interval_high),
+                    "practical_improvement": str(score.net_value),
                 },
             )
         )
@@ -462,11 +534,11 @@ class CanonicalOutcomeDerivedVOCScoreAuthorityTests(unittest.TestCase):
                     "validity": "ELIGIBLE",
                     "guardrails_passed": True,
                     "holdout_consumed": True,
-                    "effective_sample_size": paired.effective_sample_size,
+                    "effective_sample_size": score.effective_sample_size,
                     "minimum_effective_sample_size": minimum_effective_sample_size,
-                    "effect_interval_low": str(paired.incremental_value_interval_low),
-                    "effect_interval_high": str(paired.incremental_value_interval_high),
-                    "practical_improvement": str(paired.net_value),
+                    "effect_interval_low": str(score.incremental_value_interval_low),
+                    "effect_interval_high": str(score.incremental_value_interval_high),
+                    "practical_improvement": str(score.net_value),
                     "evaluation_bundle_id": bundle_id,
                     "evaluation_bundle_sha256": bundle_sha,
                     "dataset_snapshot_id": dataset_id,
@@ -491,8 +563,8 @@ class CanonicalOutcomeDerivedVOCScoreAuthorityTests(unittest.TestCase):
         self.assertEqual(score.paired_sample_count, 1)
         self.assertEqual(score.effective_sample_size, 1)
         self.assertEqual(score.support_fraction, Decimal("1"))
-        self.assertEqual(score.incremental_value_interval_low, Decimal("0.85"))
-        self.assertEqual(score.incremental_value_interval_high, Decimal("1.85"))
+        self.assertEqual(score.incremental_value_interval_low, Decimal("1.35"))
+        self.assertEqual(score.incremental_value_interval_high, Decimal("1.35"))
         self.assertEqual(score.net_value, Decimal("1.35"))
 
         self._append_scientific_qualification(
@@ -561,6 +633,58 @@ class CanonicalOutcomeDerivedVOCScoreAuthorityTests(unittest.TestCase):
             "scoring sample completion was not frozen by DecisionRecord",
         ):
             self._authority().resolve(paired.evaluation_id, as_of=T_AS_OF)
+
+    def test_cohort_counts_distinct_decision_episodes_and_rejects_reuse(self):
+        first = self._evaluation(register_cohort=False)
+        second = self._evaluation(
+            evaluation_id="voc-derived-2",
+            decision_input_sha256=digest({"episode": 2, "kind": "input"}),
+            baseline_output_sha256=digest({"episode": 2, "kind": "baseline"}),
+            challenger_output_sha256=digest({"episode": 2, "kind": "challenger"}),
+            register_cohort=False,
+        )
+        self.registry.append(first)
+        self.registry.append(second)
+        self._append_cohort(first, second)
+
+        score = self._authority().resolve(first.evaluation_id, as_of=T_AS_OF)
+        self.assertIsNotNone(score)
+        assert score is not None
+        self.assertEqual(score.paired_sample_count, 2)
+        self.assertEqual(score.effective_sample_size, 2)
+        self.assertEqual(score.incremental_value_interval_low, Decimal("1.35"))
+        self.assertEqual(score.incremental_value_interval_high, Decimal("1.35"))
+
+    def test_cohort_rejects_duplicate_decision_episode_identity(self):
+        first = self._evaluation(register_cohort=False)
+        second = replace(first, evaluation_id="voc-derived-duplicate")
+        self.registry.append(first)
+        self.registry.append(second)
+        self._append_cohort(first, second)
+        with self.assertRaisesRegex(
+            VOCEvaluationError,
+            "reuses one paired compute-decision episode",
+        ):
+            self._authority().resolve(first.evaluation_id, as_of=T_AS_OF)
+
+    def test_score_digest_is_independent_of_ambient_decimal_context(self):
+        paired = self._evaluation()
+        self.registry.append(paired)
+        baseline = self._authority().resolve(paired.evaluation_id, as_of=T_AS_OF)
+        self.assertIsNotNone(baseline)
+        assert baseline is not None
+
+        with localcontext() as context:
+            context.prec = 1
+            context.rounding = ROUND_DOWN
+            constrained = self._authority().resolve(
+                paired.evaluation_id,
+                as_of=T_AS_OF,
+            )
+            self.assertIsNotNone(constrained)
+            assert constrained is not None
+            self.assertEqual(constrained.score_sha256, baseline.score_sha256)
+            self.assertEqual(constrained.net_value, baseline.net_value)
 
     def test_caller_supplied_positive_utility_cannot_mint_voc(self):
         forged = self._evaluation(forged_claim=True)

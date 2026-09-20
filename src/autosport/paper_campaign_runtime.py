@@ -375,6 +375,8 @@ class PaperCampaignRuntime:
         witness: PaperSettlementLearningWitness,
         attribution: OutcomeAttribution,
         postmortem: ReflectionPostmortem,
+        *,
+        require_existing: bool = False,
     ) -> None:
         deadline = self.reflection_plan.research_deadline_at
         canonical_deadline = (
@@ -410,6 +412,10 @@ class PaperCampaignRuntime:
                     "durable campaign finalization plan conflicts with retry"
                 )
             if existing is None:
+                if require_existing:
+                    raise PaperCampaignRuntimeError(
+                        "existing research postmortem lacks durable campaign finalization plan"
+                    )
                 state["plans"][witness.ticket_id] = record
                 self._write_campaign_state(state["plans"])
 
@@ -602,18 +608,38 @@ class PaperCampaignRuntime:
             )
 
         postmortem = self._postmortem(attribution, witness)
-        # Freeze all optional research bounds and the exact bridge/checkpoint
-        # identities before the durable postmortem can cross the crash boundary.
-        self._bind_finalization_plan(witness, attribution, postmortem)
-        # The same idempotent full-payload rule applies to a postmortem.  It
-        # prevents a changed question/summary from being accepted merely
-        # because it refers to the same attribution.
-        try:
-            self.agent_loop.record_postmortem(postmortem, at=now)
-        except AgentLoopError as exc:
-            raise PaperCampaignRuntimeError(
-                "AgentLoop is bound to conflicting postmortem evidence"
-            ) from exc
+        snapshot = self.agent_loop.snapshot()
+        if snapshot.postmortem_id is not None:
+            # Legacy/restart state must prove that the durable AgentLoop
+            # postmortem is exactly this payload before any sidecar can be
+            # created or changed.  A research postmortem without the sidecar is
+            # unverifiable because its original budget/deadline lived only in
+            # memory, so fail closed instead of inventing them on restart.
+            try:
+                self.agent_loop.record_postmortem(postmortem, at=now)
+            except AgentLoopError as exc:
+                raise PaperCampaignRuntimeError(
+                    "AgentLoop is bound to conflicting postmortem evidence"
+                ) from exc
+            self._bind_finalization_plan(
+                witness,
+                attribution,
+                postmortem,
+                require_existing=(
+                    self.reflection_plan.research_question_statement is not None
+                ),
+            )
+        else:
+            # Freeze all optional research bounds and exact bridge/checkpoint
+            # identities before the durable postmortem crosses the crash
+            # boundary. A changed retry then collides with this immutable plan.
+            self._bind_finalization_plan(witness, attribution, postmortem)
+            try:
+                self.agent_loop.record_postmortem(postmortem, at=now)
+            except AgentLoopError as exc:
+                raise PaperCampaignRuntimeError(
+                    "AgentLoop is bound to conflicting postmortem evidence"
+                ) from exc
         snapshot = self.agent_loop.snapshot()
 
         if snapshot.phase is AgentLoopPhase.RESEARCH_HANDOFF:

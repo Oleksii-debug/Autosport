@@ -138,7 +138,7 @@ class VOCOutcomeDenominatorTerminalityTests(unittest.TestCase):
 
         with self.assertRaisesRegex(
             VOCEvaluationError,
-            "eligible VOC decision lacks terminal scoring evidence",
+            "legacy VOC admission terminated without score",
         ):
             fixture._authority().resolve(target.evaluation_id, as_of=_FIXTURE.T_AS_OF)
 

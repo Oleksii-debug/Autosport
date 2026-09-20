@@ -276,6 +276,19 @@ class PaperValueAgent:
                     goal,
                     risk_policy=self.risk_policy,
                 )
+            if persisted is None:
+                orphaned_execution = [
+                    item
+                    for item in runtime.ledger.events()
+                    if item.get("event_type") == "RUN_RESERVED"
+                    and item.get("payload", {}).get("trigger_id")
+                    == material_action_id
+                ]
+                if orphaned_execution:
+                    raise PaperDecisionReconciliationRequired(
+                        "#623 execution history exists without its durable "
+                        "paper-value economic decision"
+                    )
             if persisted is not None:
                 payload = persisted.payload
                 if (

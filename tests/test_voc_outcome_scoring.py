@@ -958,6 +958,22 @@ class CanonicalOutcomeDerivedVOCScoreAuthorityTests(unittest.TestCase):
                 as_of=T_AS_OF,
             )
 
+    def test_positive_voc_accepts_exact_preoutcome_router_shadow_execution(self):
+        paired = self._evaluation()
+        self.registry.append(paired)
+        router = self._precommit_router(paired)
+
+        score = self._authority(compute_execution_store=router).resolve(
+            paired.evaluation_id,
+            as_of=T_AS_OF,
+        )
+
+        self.assertIsNotNone(score)
+        assert score is not None
+        self.assertEqual(score.evaluation_id, paired.evaluation_id)
+        self.assertEqual(score.measured_compute_cost, Decimal("0.10"))
+        self.assertEqual(score.net_value, Decimal("1.35"))
+
     def test_cohort_rejects_omitted_eligible_episode(self):
         first = self._evaluation(register_cohort=False)
         second = self._evaluation(

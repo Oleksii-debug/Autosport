@@ -280,6 +280,16 @@ def _execute_with_exact_product_callsite(
     evidence_registry=None,
     suspended_action_ids: frozenset[str] = frozenset(),
 ):
+    # Ambient ContextVar state is caller-controlled input unless this exact wrapper
+    # minted it for the current product call below. Never inherit it across calls.
+    if (
+        _origin._DECISION_ORIGIN.get() is not None
+        or _instance_guard._PRODUCT_ORIGIN_RUNTIME.get() is not None
+    ):
+        raise _origin.PaperExecutionDecisionOriginError(
+            "caller-supplied decision-origin context cannot authorize product execution"
+        )
+
     decision_id = getattr(getattr(prepared, "execution_plan", None), "decision_id", None)
     if type(decision_id) is not str or not decision_id:
         return _execute_stable(
@@ -323,7 +333,8 @@ def _execute_with_exact_product_callsite(
                 "product execution trigger does not match verified DecisionLedger origin"
             )
 
-        token = _origin._DECISION_ORIGIN.set(origin)
+        origin_token = _origin._DECISION_ORIGIN.set(origin)
+        runtime_token = _instance_guard._PRODUCT_ORIGIN_RUNTIME.set(self)
         try:
             return _execute_stable(
                 self,
@@ -336,7 +347,8 @@ def _execute_with_exact_product_callsite(
                 suspended_action_ids=suspended_action_ids,
             )
         finally:
-            _origin._DECISION_ORIGIN.reset(token)
+            _instance_guard._PRODUCT_ORIGIN_RUNTIME.reset(runtime_token)
+            _origin._DECISION_ORIGIN.reset(origin_token)
     finally:
         del current
         del caller

@@ -14,6 +14,9 @@ from . import _paper_value_risk_admission_recovery as _paper_value_risk_admissio
 # record existed before #623 RUN_RESERVED/attempt publication. This guard wraps the
 # fully-composed execution runtime after the existing recovery/authority layers.
 from . import _paper_execution_decision_origin as _paper_execution_decision_origin  # noqa: F401,E402
+# Canonical producer ancestry is not an ambient capability: only the exact direct
+# product execute call may bind origin, while nested hooks fail before reservation.
+from . import _paper_execution_decision_origin_callsite_guard as _paper_execution_decision_origin_callsite_guard  # noqa: F401,E402
 
 # Bind explicit realized-VOC admissions to the exact canonical ResearchProtocol
 # and protocol-derived cohort before the scoring facade is imported by consumers.

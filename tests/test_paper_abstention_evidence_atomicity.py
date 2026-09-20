@@ -4,6 +4,7 @@ import tempfile
 import unittest
 from decimal import Decimal
 from pathlib import Path
+from unittest.mock import patch
 
 from autosport.agent_loop import AgentLoopRuntime
 from autosport.learning_environment import (
@@ -27,7 +28,7 @@ T3 = "2026-09-20T03:00:20+00:00"
 T4 = "2026-09-20T03:00:30+00:00"
 
 
-def _runtime(root: Path):
+def _pristine(root: Path):
     identity = EnvironmentIdentity(
         source_id="abstention-atomicity-source",
         config_id="abstention-atomicity-config",
@@ -63,6 +64,11 @@ def _runtime(root: Path):
         environment=environment,
         agent_loop=loop,
     )
+    return environment, loop, observation, runtime
+
+
+def _runtime(root: Path):
+    environment, loop, observation, runtime = _pristine(root)
     action = runtime.begin_abstention(
         observation=observation,
         action_type="WAIT",
@@ -266,6 +272,38 @@ class PaperAbstentionEvidenceAtomicityTests(unittest.TestCase):
                 at=T3,
             )
             self.assertEqual(exact.action_id, action.action_id)
+
+    def test_intent_write_failure_allows_exact_same_process_retry(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            environment, loop, observation, runtime = _pristine(root)
+            before_loop = (root / "agent-loop.json").read_bytes()
+
+            with patch(
+                "autosport.paper_abstention_learning.atomic_write_json",
+                side_effect=OSError("simulated intent journal failure"),
+            ):
+                with self.assertRaisesRegex(OSError, "simulated intent journal failure"):
+                    runtime.begin_abstention(
+                        observation=observation,
+                        action_type="WAIT",
+                        decision_at=T2,
+                        parameters=(("reason", "no-edge"),),
+                        at=T2,
+                    )
+
+            self.assertEqual((root / "agent-loop.json").read_bytes(), before_loop)
+            self.assertEqual(len(environment._pending), 1)
+
+            exact = runtime.begin_abstention(
+                observation=observation,
+                action_type="WAIT",
+                decision_at=T2,
+                parameters=(("reason", "no-edge"),),
+                at=T2,
+            )
+            self.assertEqual(loop.snapshot().action_id, exact.action_id)
+            self.assertTrue(runtime._intent_path.exists())
 
 
 if __name__ == "__main__":

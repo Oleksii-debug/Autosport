@@ -118,7 +118,11 @@ def _require_exact_lineage_authority(
         raise evidence.PointInTimeEvidenceError(
             "lineage_authority.registry must be an exact ScientificRegistry"
         )
-    if type(lineage_authority.monotonic_authority) is not MonotonicWorkspaceAuthority:
+    if (
+        holdout
+        and type(getattr(lineage_authority, "monotonic_authority", None))
+        is not MonotonicWorkspaceAuthority
+    ):
         raise evidence.PointInTimeEvidenceError(
             "lineage_authority.monotonic_authority must be an exact "
             "MonotonicWorkspaceAuthority"

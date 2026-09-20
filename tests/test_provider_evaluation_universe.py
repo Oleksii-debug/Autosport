@@ -342,7 +342,7 @@ def test_complete_board_rejects_caller_forged_later_reveal_boundary(tmp_path, mo
     rows[0] = replace(rows[0], outcome_reveal_not_before="2026-09-20T10:00:00Z")
     with pytest.raises(
         ProviderEvaluationUniverseError,
-        match="must equal canonical per-event lifecycle authority",
+        match="must equal canonical per-event provider authority",
     ):
         _build(snapshot, tuple(rows), event_lifecycle=lifecycle)
 
@@ -372,17 +372,19 @@ def test_freeze_after_authoritative_reveal_rejects_even_if_rows_forge_later_boun
         )
 
 
-def test_complete_board_rejects_mismatched_event_reveal_authority(tmp_path, monkeypatch):
+def test_caller_lifecycle_event_mismatch_cannot_change_provider_reveal_authority(
+    tmp_path, monkeypatch
+):
     snapshot = _capture(monkeypatch)
     lifecycle = _event_lifecycle(tmp_path, event_id="event-2")
-    with pytest.raises(
-        ProviderEvaluationUniverseError,
-        match="no exact provider event reveal authority",
-    ):
-        complete_game_board_member_specs(snapshot, event_lifecycle=lifecycle)
 
+    members = complete_game_board_member_specs(snapshot, event_lifecycle=lifecycle)
 
-def test_complete_board_rejects_reveal_authority_discovered_after_snapshot(
+    assert members
+    assert {item.outcome_reveal_not_before for item in members} == {
+        REVEAL_NOT_BEFORE
+    }
+def test_caller_lifecycle_discovery_time_cannot_change_provider_reveal_authority(
     tmp_path, monkeypatch
 ):
     snapshot = _capture(monkeypatch)
@@ -390,13 +392,13 @@ def test_complete_board_rejects_reveal_authority_discovered_after_snapshot(
         tmp_path,
         discovered_at="2026-09-20T08:00:30Z",
     )
-    with pytest.raises(
-        ProviderEvaluationUniverseError,
-        match="discovered after the provider snapshot",
-    ):
-        complete_game_board_member_specs(snapshot, event_lifecycle=lifecycle)
 
+    members = complete_game_board_member_specs(snapshot, event_lifecycle=lifecycle)
 
+    assert members
+    assert {item.outcome_reveal_not_before for item in members} == {
+        REVEAL_NOT_BEFORE
+    }
 def test_complete_board_requires_concrete_canonical_lifecycle(tmp_path, monkeypatch):
     snapshot = _capture(monkeypatch)
     with pytest.raises(

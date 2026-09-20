@@ -1,0 +1,92 @@
+import json
+import sqlite3
+import tempfile
+from pathlib import Path
+
+import pytest
+
+from autosport.causal_collector import (
+    CollectorDelta,
+    CollectorDeltaStore,
+    GapState,
+    SyncState,
+    canonical_event_digest,
+    digest_source_payload,
+)
+from autosport.domain import MarketEvent
+
+
+def _delta(*, delta_id: str, cursor_position: int) -> CollectorDelta:
+    payload = {
+        "event_id": "e1",
+        "market_id": "winner",
+        "selection_id": "player-a",
+        "decimal_odds": "1.80",
+        "observed_ts": "2026-01-01T00:00:01+00:00",
+        "source_id": "source-x",
+        "sequence": 1,
+        "market_type": "winner",
+        "status": "open",
+        "source_ts": "2026-01-01T00:00:00+00:00",
+        "ingest_ts": "2026-01-01T00:00:01+00:00",
+        "metadata": {},
+        "score_state": None,
+    }
+    source_payload = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+    return CollectorDelta(
+        schema_version=1,
+        delta_id=delta_id,
+        source_id="source-x",
+        lawful_terms_ref="terms:source-x:v1",
+        retention_ref="retention:source-x:v1",
+        stream_epoch="epoch-1",
+        source_cursor=str(cursor_position),
+        cursor_position=cursor_position,
+        event_dedupe_key=MarketEvent.from_dict(payload).dedupe_key,
+        event_id=payload["event_id"],
+        source_payload_digest=digest_source_payload(source_payload),
+        canonical_event_digest=canonical_event_digest(payload),
+        source_observed_at="2026-01-01T00:00:01+00:00",
+        collector_received_at="2026-01-01T00:00:02+00:00",
+        collector_committed_at="2026-01-01T00:00:03+00:00",
+        desktop_available_at="2026-01-01T00:00:04+00:00",
+        revision_of=None,
+        revision_number=0,
+        gap_state=GapState.NONE,
+        sync_state=SyncState.READY,
+    )
+
+
+def test_deleted_checkpoint_with_immutable_history_fails_closed() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "collector.json"
+        first = _delta(delta_id="d1", cursor_position=1)
+        store = CollectorDeltaStore(path)
+        assert store.append(first)
+
+        connection = sqlite3.connect(path)
+        try:
+            connection.execute(
+                "DELETE FROM collector_streams WHERE source_id=? AND stream_epoch=?",
+                ("source-x", "epoch-1"),
+            )
+            connection.commit()
+        finally:
+            connection.close()
+
+        reopened = CollectorDeltaStore(path)
+        with pytest.raises(
+            ValueError,
+            match="stream checkpoint conflicts with immutable delta history",
+        ):
+            reopened.stream_checkpoint("source-x", "epoch-1")
+
+        successor = _delta(delta_id="d2", cursor_position=2)
+        with pytest.raises(
+            ValueError,
+            match="stream checkpoint conflicts with immutable delta history",
+        ):
+            reopened.append(successor)
+
+        assert reopened.get(successor.delta_id) is None
+        assert reopened.get(first.delta_id) == first

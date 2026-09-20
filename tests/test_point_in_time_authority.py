@@ -6,6 +6,11 @@ from datetime import UTC, datetime, timedelta, timezone
 
 import pytest
 
+from autosport.historical_snapshot import (
+    HISTORICAL_CAPTURE_WITNESS_KIND,
+    capture_historical_snapshot,
+)
+from autosport.parlayapi_provider import HttpJsonResponse, ParlayApiTableTennisProvider
 from autosport.point_in_time_authority import (
     AvailabilityWitnessAuthority,
     FeatureAvailabilityError,
@@ -55,13 +60,58 @@ def _iso(value: datetime) -> str:
     return value.isoformat().replace("+00:00", "Z")
 
 
+class _HistoricalTransport:
+    def __init__(self, payload: dict[str, object]) -> None:
+        self.payload = payload
+
+    def __call__(
+        self,
+        url: str,
+        headers: dict[str, str],
+        timeout: float,
+    ) -> HttpJsonResponse:
+        return HttpJsonResponse(self.payload, 200, {"x-api-version": "test"})
+
+
+def _provider_capture_paths(
+    tmp_path,
+    *,
+    source_as_of: datetime,
+    available_at: datetime,
+):
+    token = hashlib.sha256(
+        (_iso(source_as_of) + "|" + _iso(available_at)).encode("utf-8")
+    ).hexdigest()[:12]
+    market_path = tmp_path / f"provider-capture-{token}.jsonl"
+    evidence_path = tmp_path / f"provider-capture-{token}.evidence.json"
+    payload = {
+        "timestamp": _iso(source_as_of),
+        "previous_timestamp": None,
+        "next_timestamp": None,
+        "data": [],
+    }
+    provider = ParlayApiTableTennisProvider(
+        "test-provider-key",
+        transport=_HistoricalTransport(payload),
+        clock=lambda: _iso(available_at),
+        sleeper=lambda _: None,
+    )
+    capture_historical_snapshot(
+        provider,
+        requested_at=_iso(source_as_of),
+        output_path=market_path,
+        evidence_path=evidence_path,
+    )
+    return market_path, evidence_path
+
+
 def _policy_content() -> tuple[str, str]:
     payload = {
         "schema": "autosport.revision_availability_policy",
         "schema_version": 1,
-        "source_identity": "lawful-provider:fixture",
+        "source_identity": "parlayapi:table_tennis",
         "policy_version": "1",
-        "witness_kind": "provider-publication-metadata",
+        "witness_kind": HISTORICAL_CAPTURE_WITNESS_KIND,
         "availability_semantics": "source_as_of<=available_at",
     }
     text = json.dumps(
@@ -82,10 +132,10 @@ def _witness_content(
     payload = {
         "schema": "autosport.source_availability_witness",
         "schema_version": 1,
-        "source_identity": "lawful-provider:fixture",
+        "source_identity": "parlayapi:table_tennis",
         "source_revision": "provider-revision-17",
         "source_revision_sha256": SHA_D,
-        "witness_kind": "provider-publication-metadata",
+        "witness_kind": HISTORICAL_CAPTURE_WITNESS_KIND,
         "source_as_of": _iso(source_as_of),
         "available_at": _iso(available_at),
     }
@@ -109,7 +159,7 @@ def _snapshot(
     return DatasetSnapshot(
         snapshot_id,
         SHA_A,
-        "lawful-provider:fixture",
+        "parlayapi:table_tennis",
         "license-evidence:v1",
         _iso(causal_cutoff),
         _iso(available_at),
@@ -162,23 +212,21 @@ def _source_store(
     SourceRevisionAuthority,
 ]:
     store = SourceRevisionAuthorityStore.initialize_pristine(tmp_path)
-    policy_content_json, _ = _policy_content()
-    policy = RevisionPolicyAuthority.create(
+    policy = store.register_provider_capture_policy(
         revision_policy_id="provider-publication-time-v1",
-        policy_content_json=policy_content_json,
         frozen_at=BASE - timedelta(days=1),
     )
-    store.register_policy(policy)
-    witness_content_json, _ = _witness_content(
+    market_path, evidence_path = _provider_capture_paths(
+        tmp_path,
         source_as_of=source_as_of,
         available_at=available_at,
     )
-    witness = AvailabilityWitnessAuthority.create(
+    witness = store.register_provider_capture_witness(
         availability_witness_id="provider-publication:17",
-        witness_content_json=witness_content_json,
+        market_path=market_path,
+        evidence_path=evidence_path,
         recorded_at=max(available_at, BASE + timedelta(minutes=35)),
     )
-    store.register_witness(witness)
     membership = FeatureMembershipAuthority.create(
         feature_set_id="features-1",
         feature_set_version="v1",
@@ -191,17 +239,17 @@ def _source_store(
     store.register_feature_membership(membership)
     revision = SourceRevisionAuthority(
         source_revision_authority_id="source-authority-17",
-        source_identity="lawful-provider:fixture",
-        source_revision="provider-revision-17",
-        source_revision_sha256=SHA_D,
+        source_identity=witness.source_identity,
+        source_revision=witness.source_revision,
+        source_revision_sha256=witness.source_revision_sha256,
         revision_policy_id=policy.revision_policy_id,
         revision_policy_record_sha256=policy.authority_sha256,
         availability_witness_id=witness.availability_witness_id,
         availability_witness_sha256=witness.witness_content_sha256,
         availability_witness_record_sha256=witness.authority_sha256,
-        witness_kind=policy.witness_kind,
-        source_as_of=source_as_of,
-        available_at=available_at,
+        witness_kind=witness.witness_kind,
+        source_as_of=witness.source_as_of,
+        available_at=witness.available_at,
         recorded_at=max(available_at, BASE + timedelta(minutes=40)),
     )
     store.register_revision(revision)
@@ -264,14 +312,10 @@ def test_feature_availability_resolves_registered_dataset_feature_policy_and_rev
 
     assert evidence.dataset_snapshot_id == "dataset-1"
     assert evidence.feature_set_id == "features-1"
-    assert evidence.source_revision == "provider-revision-17"
-    assert evidence.source_revision_sha256 == SHA_D
-    _, expected_witness_sha256 = _witness_content(
-        source_as_of=BASE + timedelta(minutes=20),
-        available_at=BASE + timedelta(minutes=30),
-    )
-    assert evidence.availability_witness_sha256 == expected_witness_sha256
-    assert evidence.witness_kind == "provider-publication-metadata"
+    assert evidence.source_revision.startswith("historical-snapshot:")
+    assert len(evidence.source_revision_sha256) == 64
+    assert len(evidence.availability_witness_sha256) == 64
+    assert evidence.witness_kind == HISTORICAL_CAPTURE_WITNESS_KIND
     assert len(evidence.dataset_record_sha256) == 64
     assert len(evidence.feature_record_sha256) == 64
     assert len(evidence.source_revision_authority_sha256) == 64
@@ -451,6 +495,49 @@ def test_availability_witness_content_is_hash_bound_and_canonical() -> None:
             available_at=witness.available_at,
             recorded_at=witness.recorded_at,
         )
+
+
+def test_supported_provider_witness_requires_canonical_capture_registration(
+    tmp_path,
+) -> None:
+    store = SourceRevisionAuthorityStore.initialize_pristine(tmp_path)
+    witness_content_json, _ = _witness_content(
+        source_as_of=BASE + timedelta(minutes=20),
+        available_at=BASE + timedelta(minutes=30),
+    )
+    reconstructed = AvailabilityWitnessAuthority.create(
+        availability_witness_id="provider-publication:reconstructed",
+        witness_content_json=witness_content_json,
+        recorded_at=BASE + timedelta(minutes=35),
+    )
+
+    with pytest.raises(
+        SourceRevisionAuthorityError,
+        match="canonical persisted capture evidence",
+    ):
+        store.register_witness(reconstructed)
+
+
+def test_provider_capture_bundle_is_reverified_after_restart(tmp_path) -> None:
+    store, _, revision = _source_store(tmp_path)
+    reopened = SourceRevisionAuthorityStore(tmp_path)
+    assert (
+        reopened.resolve_revision(revision.source_revision_authority_id)
+        == revision
+    )
+
+    _, evidence_path = store._capture_bundle_paths(
+        revision.availability_witness_id
+    )
+    raw = json.loads(evidence_path.read_text(encoding="utf-8"))
+    raw["response_sha256"] = SHA_F
+    evidence_path.write_text(json.dumps(raw), encoding="utf-8")
+
+    with pytest.raises(
+        SourceRevisionAuthorityError,
+        match="canonical provider capture authority|provider availability witness",
+    ):
+        SourceRevisionAuthorityStore(tmp_path)
 
 
 def test_revision_rejects_unknown_or_forged_availability_witness(tmp_path) -> None:

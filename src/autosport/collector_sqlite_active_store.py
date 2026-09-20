@@ -203,14 +203,25 @@ class CollectorDeltaStore(_SQLiteCollectorDeltaStore):
                 "SELECT 1 FROM collector_deltas WHERE source_id=? LIMIT 1",
                 (source_id,),
             ).fetchone()
-            source_checkpoint = connection.execute(
-                "SELECT 1 FROM collector_streams WHERE source_id=? LIMIT 1",
+            source_checkpoints = connection.execute(
+                "SELECT stream_epoch FROM collector_streams WHERE source_id=?",
                 (source_id,),
-            ).fetchone()
-            if source_history is not None and source_checkpoint is None:
-                raise ValueError(
-                    "collector stream checkpoint conflicts with immutable delta history"
-                )
+            ).fetchall()
+            if source_history is not None:
+                if not source_checkpoints:
+                    raise ValueError(
+                        "collector stream checkpoint conflicts with immutable delta history"
+                    )
+                # A new epoch may only inherit authority from checkpoints that are
+                # themselves still bound to immutable retained evidence.  Merely
+                # observing any surviving row lets a corrupted/foreign projection
+                # launder prior history across an explicit epoch rollover.
+                for checkpoint_row in source_checkpoints:
+                    cls._verified_stream_checkpoint(
+                        connection,
+                        source_id,
+                        checkpoint_row["stream_epoch"],
+                    )
             return None
 
         checkpoint = StreamCheckpoint(

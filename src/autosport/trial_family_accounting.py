@@ -15,6 +15,11 @@ _HEX = frozenset('0123456789abcdef')
 _EVENT_KINDS = frozenset({'ATTEMPT_STARTED', 'ATTEMPT_COMPLETED', 'ATTEMPT_ABORTED'})
 _AUTHORITY_DOMAIN = 'autosport.trial-family-accounting.v1'
 
+class _SequentialReplay(RuntimeError):
+    def __init__(self, decision: SequentialDecision) -> None:
+        super().__init__('exact sequential evidence replay')
+        self.decision = decision
+
 def _text(value: object, name: str) -> str:
     if type(value) is not str or not value or value != value.strip():
         raise ValueError(f'{name} must be a non-empty canonical string')
@@ -452,6 +457,14 @@ class TrialFamilyAccountingStore:
                 raise ValueError('trial-family event predates frozen family')
             if events and _instant(event_at, 'event_at') < _instant(events[-1]['event_at'], 'previous event_at'):
                 raise ValueError('event_at must not precede durable event history')
+            prior_assessments = self._sequential(state).assessments()
+            if prior_assessments:
+                latest_sequential_at = max(
+                    _instant(value.evidence.observed_at, 'observed_at')
+                    for value in prior_assessments
+                )
+                if _instant(event_at, 'event_at') < latest_sequential_at:
+                    raise ValueError('event_at must not precede durable sequential history')
             previous_sha = events[-1]['event_sha256'] if events else None
             envelope = {'sequence': len(events) + 1, 'kind': kind, 'event_at': event_at, 'payload': payload, 'prev_event_sha256': previous_sha}
             event = {**envelope, 'event_sha256': _digest(envelope)}
@@ -558,31 +571,40 @@ class TrialFamilyAccountingStore:
             raise TypeError('evidence must be SequentialLookEvidence')
         if type(registry) is not ScientificRegistry:
             raise TypeError('registry must be ScientificRegistry')
-        attempt = next((v for v in self._attempts() if v.attempt_id == attempt_id), None)
-        if attempt is None or attempt.status is not TrialAttemptStatus.COMPLETED:
-            raise ValueError('sequential look requires a completed durable attempt')
-        if evidence.member_authority_id != attempt.member_authority_id or evidence.experiment_id != attempt.experiment_id or evidence.classification is not attempt.outcome:
-            raise ValueError('sequential look does not match completed durable attempt')
-        if _instant(evidence.observed_at, 'observed_at') < _instant(attempt.result_available_at, 'result_available_at'):
-            raise ValueError('sequential look predates durable experiment result')
-        experiment = registry.get('Experiment', evidence.experiment_id)
-        if experiment is None or experiment.record_sha256 != attempt.experiment_record_sha256:
-            raise ValueError('sequential look Experiment does not match durable registry truth')
-        bundle = registry.get('EvaluationBundle', evidence.evaluation_bundle_id)
-        if bundle is None or experiment.payload.get('evaluation_bundle_id') != evidence.evaluation_bundle_id or bundle.payload.get('bundle_sha256') != evidence.evaluation_bundle_sha256:
-            raise ValueError('sequential look EvaluationBundle does not match durable registry truth')
         store = self._sequential()
-        prior_assessments = store.assessments()
-        state = self._read_state()
-        causal_times = [_instant(raw['event_at'], 'event_at') for raw in state['events']] + [_instant(value.evidence.observed_at, 'observed_at') for value in prior_assessments]
-        if causal_times and _instant(evidence.observed_at, 'observed_at') < max(causal_times):
-            raise ValueError('sequential look must not backdate durable family history')
-        for prior in store.assessments(evidence.member_authority_id):
-            if prior.evidence.look_index == evidence.look_index:
-                if prior.evidence.evidence_sha256 == evidence.evidence_sha256:
-                    return prior.decision
-                raise ValueError('conflicting sequential evidence reuses a durable look index')
-        return store.append(evidence).decision
+
+        def locked_precondition() -> None:
+            state = self._read_state()
+            family = TrialFamilyDefinition.from_payload(state['family'])
+            plan = ExperimentFamilyPlan.from_payload(state['multiplicity_plan'])
+            attempts = self._replay_events(family, plan, tuple(state['events']), cutoff=None)
+            attempt = next((v for v in attempts if v.attempt_id == attempt_id), None)
+            if attempt is None or attempt.status is not TrialAttemptStatus.COMPLETED:
+                raise ValueError('sequential look requires a completed durable attempt')
+            if evidence.member_authority_id != attempt.member_authority_id or evidence.experiment_id != attempt.experiment_id or evidence.classification is not attempt.outcome:
+                raise ValueError('sequential look does not match completed durable attempt')
+            if _instant(evidence.observed_at, 'observed_at') < _instant(attempt.result_available_at, 'result_available_at'):
+                raise ValueError('sequential look predates durable experiment result')
+            experiment = registry.get('Experiment', evidence.experiment_id)
+            if experiment is None or experiment.record_sha256 != attempt.experiment_record_sha256:
+                raise ValueError('sequential look Experiment does not match durable registry truth')
+            bundle = registry.get('EvaluationBundle', evidence.evaluation_bundle_id)
+            if bundle is None or experiment.payload.get('evaluation_bundle_id') != evidence.evaluation_bundle_id or bundle.payload.get('bundle_sha256') != evidence.evaluation_bundle_sha256:
+                raise ValueError('sequential look EvaluationBundle does not match durable registry truth')
+            prior_assessments = store.assessments()
+            causal_times = [_instant(raw['event_at'], 'event_at') for raw in state['events']] + [_instant(value.evidence.observed_at, 'observed_at') for value in prior_assessments]
+            if causal_times and _instant(evidence.observed_at, 'observed_at') < max(causal_times):
+                raise ValueError('sequential look must not backdate durable family history')
+            for prior in store.assessments(evidence.member_authority_id):
+                if prior.evidence.look_index == evidence.look_index:
+                    if prior.evidence.evidence_sha256 == evidence.evidence_sha256:
+                        raise _SequentialReplay(prior.decision)
+                    raise ValueError('conflicting sequential evidence reuses a durable look index')
+
+        try:
+            return store.append(evidence, locked_precondition=locked_precondition).decision
+        except _SequentialReplay as replay:
+            return replay.decision
 
     def attempts(self, *, as_of: str | None=None) -> tuple[TrialAttemptView, ...]:
         return self._attempts(as_of=as_of)

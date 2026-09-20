@@ -436,6 +436,30 @@ class PaperSettlementLearningBridge:
             _sha(binding.get("economic_goal_fingerprint"), "economic_goal_fingerprint")
             _sha(binding.get("risk_fingerprint"), "risk_fingerprint")
             _checkpoint(binding.get("baseline_checkpoint"))
+            campaign_plan_anchor = binding.get("campaign_plan_anchor")
+            if campaign_plan_anchor is not None:
+                if (
+                    type(campaign_plan_anchor) is not dict
+                    or set(campaign_plan_anchor) != {
+                        "plan_id",
+                        "reflection_available_at",
+                    }
+                ):
+                    raise PaperSettlementLearningBridgeError(
+                        "campaign plan anchor fields mismatch"
+                    )
+                _sha(campaign_plan_anchor["plan_id"], "campaign plan_id")
+                canonical_anchor_time = _instant_id(
+                    campaign_plan_anchor["reflection_available_at"],
+                    "campaign reflection_available_at",
+                )
+                if (
+                    canonical_anchor_time
+                    != campaign_plan_anchor["reflection_available_at"]
+                ):
+                    raise PaperSettlementLearningBridgeError(
+                        "campaign reflection_available_at must be canonical UTC"
+                    )
             intent = binding.get("settlement_intent")
             if intent is not None:
                 self._intent_resolutions(intent)
@@ -717,6 +741,7 @@ class PaperSettlementLearningBridge:
                 "settlement_intent": None,
                 "outbox": None,
                 "ack": None,
+                "campaign_plan_anchor": None,
             }
             existing = state["bindings"].get(ticket_id)
             if existing is not None:
@@ -732,6 +757,78 @@ class PaperSettlementLearningBridge:
             state["bindings"][ticket_id] = binding
             self._write(state)
             return binding["binding_id"]
+
+    def campaign_plan_anchor(
+        self,
+        ticket_id: str,
+    ) -> tuple[str, str] | None:
+        """Return the immutable campaign-plan anchor for one resolved ticket."""
+
+        canonical_ticket_id = _text(ticket_id, "ticket_id")
+        with WorkspaceEconomicLock(self.state_path.parent):
+            state = self._read()
+            binding = state["bindings"].get(canonical_ticket_id)
+            if binding is None:
+                raise PaperSettlementLearningBridgeError(
+                    "campaign plan anchor requires an existing ticket binding"
+                )
+            anchor = binding.get("campaign_plan_anchor")
+            if anchor is None:
+                return None
+            return (
+                _sha(anchor["plan_id"], "campaign plan_id"),
+                _instant_id(
+                    anchor["reflection_available_at"],
+                    "campaign reflection_available_at",
+                ),
+            )
+
+    def bind_campaign_plan_anchor(
+        self,
+        *,
+        ticket_id: str,
+        plan_id: str,
+        reflection_available_at: str,
+    ) -> tuple[str, str]:
+        """Bind one campaign plan identity before dependent AgentLoop progress.
+
+        The bridge does not interpret reflection semantics. It only persists the
+        plan digest and first causal availability beside the already sealed
+        settlement-learning binding, giving campaign sidecar recovery an
+        independent durable anchor.
+        """
+
+        canonical_ticket_id = _text(ticket_id, "ticket_id")
+        canonical_plan_id = _sha(plan_id, "campaign plan_id")
+        canonical_available_at = _instant_id(
+            reflection_available_at,
+            "campaign reflection_available_at",
+        )
+        expected = {
+            "plan_id": canonical_plan_id,
+            "reflection_available_at": canonical_available_at,
+        }
+        with WorkspaceEconomicLock(self.state_path.parent):
+            state = self._read()
+            binding = state["bindings"].get(canonical_ticket_id)
+            if binding is None:
+                raise PaperSettlementLearningBridgeError(
+                    "campaign plan anchor requires an existing ticket binding"
+                )
+            if binding.get("outbox") is None:
+                raise PaperSettlementLearningBridgeError(
+                    "campaign plan anchor requires sealed resolution evidence"
+                )
+            existing = binding.get("campaign_plan_anchor")
+            if existing is not None:
+                if existing != expected:
+                    raise PaperSettlementLearningBridgeError(
+                        "ticket is already bound to another campaign plan"
+                    )
+                return canonical_plan_id, canonical_available_at
+            binding["campaign_plan_anchor"] = expected
+            self._write(state)
+            return canonical_plan_id, canonical_available_at
 
     @staticmethod
     def _bound_ticket(book: PaperBook, binding: dict[str, object]) -> PaperTicket:

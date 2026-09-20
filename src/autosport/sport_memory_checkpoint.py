@@ -364,6 +364,42 @@ def _load_verified_checkpoint_and_opponent(
     return checkpoint, verified_opponent
 
 
+def _verify_runtime_snapshot_bindings(
+    runtime: SportMemoryRuntime,
+    opponent_store: OpponentIntelligenceStore,
+) -> SportMemoryRuntime:
+    """Fail closed if durable memory references lost canonical derived evidence."""
+
+    for artifact in runtime._artifacts.values():
+        rating = opponent_store._ratings.get(artifact.rating_snapshot_id)
+        feature = opponent_store._features.get(artifact.feature_snapshot_id)
+        if rating is None or feature is None:
+            raise SportMemoryCheckpointError(
+                "sport-memory artifact references missing canonical opponent snapshot"
+            )
+        if (
+            feature.rating_snapshot_id != rating.snapshot_id
+            or rating.participant_entity_id != artifact.participant_entity_id
+            or feature.participant_entity_id != artifact.participant_entity_id
+            or rating.sport_id != artifact.scope.sport_id
+            or feature.sport_id != artifact.scope.sport_id
+            or rating.league_id != artifact.scope.league_entity_id
+            or feature.league_id != artifact.scope.league_entity_id
+            or rating.market_context_id != artifact.scope.market_context_id
+            or feature.market_context_id != artifact.scope.market_context_id
+            or rating.causal_cutoff != artifact.causal_cutoff
+            or feature.causal_cutoff != artifact.causal_cutoff
+            or rating.published_at != artifact.published_at
+            or feature.published_at != artifact.published_at
+            or rating.input_digest != artifact.input_digest
+            or feature.input_digest != artifact.input_digest
+        ):
+            raise SportMemoryCheckpointError(
+                "sport-memory artifact canonical opponent snapshot binding mismatch"
+            )
+    return runtime
+
+
 def _initialize_checkpoint_and_opponent(
     path: Path,
     identity_registry: ParticipantIdentityRegistry,
@@ -447,11 +483,12 @@ def open_bound_sport_memory_runtime(
     authority, verified_opponent = _load_verified_checkpoint_and_opponent(
         checkpoint, identity_registry, opponent_store
     )
-    return SportMemoryRuntime(
+    bound = SportMemoryRuntime(
         runtime,
         verified_opponent,
         authority_generation_sha256=authority.generation_sha256,
     )
+    return _verify_runtime_snapshot_bindings(bound, verified_opponent)
 
 
 def initialize_or_open_bound_sport_memory_runtime(
@@ -491,11 +528,12 @@ def initialize_or_open_bound_sport_memory_runtime(
         )
 
     if runtime.exists():
-        return SportMemoryRuntime(
+        bound = SportMemoryRuntime(
             runtime,
             verified_opponent,
             authority_generation_sha256=authority.generation_sha256,
         )
+        return _verify_runtime_snapshot_bindings(bound, verified_opponent)
     return SportMemoryRuntime.initialize_pristine(
         runtime,
         verified_opponent,

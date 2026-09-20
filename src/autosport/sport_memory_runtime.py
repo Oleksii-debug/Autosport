@@ -411,10 +411,10 @@ class SportMemoryRuntime:
         support = _nonnegative_int("support", artifact.support)
         effective_sample = _nonnegative_int("effective_sample", artifact.effective_sample)
         opponent_count = _nonnegative_int("opponent_count", artifact.opponent_count)
-        if effective_sample > support:
-            raise SportMemoryError("effective_sample cannot exceed support")
-        if opponent_count > support:
-            raise SportMemoryError("opponent_count cannot exceed support")
+        if support != len(artifact.input_performance_ids):
+            raise SportMemoryError("support must equal input performance count")
+        if effective_sample != min(support, opponent_count):
+            raise SportMemoryError("effective_sample must equal bounded opponent support")
         state = _text("state", artifact.state)
         if state not in {"SUPPORTED", "INSUFFICIENT"}:
             raise SportMemoryError("unsupported sport memory state")

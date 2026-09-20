@@ -11,6 +11,7 @@ import hashlib
 import json
 import os
 import tempfile
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from decimal import Context, Decimal, DecimalException, Inexact, InvalidOperation, Overflow, Underflow, localcontext
 from pathlib import Path
@@ -59,6 +60,69 @@ _PAPER_DECISION_AGENT_ACTION_BINDINGS: Final = frozenset(
 
 class PaperSettlementLearningBridgeError(RuntimeError):
     """Binding or cross-authority evidence is incomplete or conflicting."""
+
+
+@dataclass(frozen=True, slots=True)
+class PaperSettlementLearningWitness:
+    """Read-only typed view of one durable learner outbox.
+
+    ``PaperSettlementLearningBridge`` remains the sole authority that derives a
+    PAPER outcome/reward from canonical settlement evidence.  A downstream
+    campaign terminalizer needs the resulting typed evidence to perform
+    attribution and reflection without re-reading private bridge JSON or
+    reimplementing settlement arithmetic.  This object is intentionally a
+    witness, not a second persistence or economic authority.
+    """
+
+    ticket_id: str
+    binding_id: str
+    settlement_bundle_sha256: str
+    observation: Observation
+    action: Action
+    outcome: Outcome
+    reward: RewardEvidence
+    transition: Transition
+    next_checkpoint: EnvironmentCheckpoint
+
+    def __post_init__(self) -> None:
+        _text(self.ticket_id, "ticket_id")
+        _sha(self.binding_id, "binding_id")
+        _sha(self.settlement_bundle_sha256, "settlement_bundle_sha256")
+        if not isinstance(self.observation, Observation):
+            raise TypeError("observation must be Observation")
+        if not isinstance(self.action, Action):
+            raise TypeError("action must be Action")
+        if not isinstance(self.outcome, Outcome):
+            raise TypeError("outcome must be Outcome")
+        if not isinstance(self.reward, RewardEvidence):
+            raise TypeError("reward must be RewardEvidence")
+        if not isinstance(self.transition, Transition):
+            raise TypeError("transition must be Transition")
+        if not isinstance(self.next_checkpoint, EnvironmentCheckpoint):
+            raise TypeError("next_checkpoint must be EnvironmentCheckpoint")
+        if (
+            self.observation.environment_id != self.action.environment_id
+            or self.action.environment_id != self.outcome.environment_id
+            or self.outcome.environment_id != self.reward.environment_id
+            or self.reward.environment_id != self.transition.environment_id
+            or self.transition.environment_id != self.next_checkpoint.environment_id
+        ):
+            raise PaperSettlementLearningBridgeError(
+                "witness environment identities do not match"
+            )
+        if (
+            self.observation.observation_id != self.action.observation_id
+            or self.action.action_id != self.outcome.action_id
+            or self.action.action_id != self.reward.action_id
+            or self.action.action_id != self.transition.action_id
+            or self.outcome.outcome_id != self.reward.outcome_id
+            or self.outcome.outcome_id != self.transition.outcome_id
+            or self.reward.reward_id != self.transition.reward_id
+            or self.next_checkpoint.last_transition_id != self.transition.transition_id
+        ):
+            raise PaperSettlementLearningBridgeError(
+                "witness causal identities do not match"
+            )
 
 
 def _canonical_json(value: object) -> str:
@@ -1191,15 +1255,86 @@ class PaperSettlementLearningBridge:
             acknowledged.append(transition.transition_id)
         return tuple(acknowledged)
 
-    def next_checkpoint(self, ticket_id: str) -> EnvironmentCheckpoint:
-        """Return the post-resolution checkpoint witness once outbox exists."""
+    def resolution_witness(
+        self,
+        ticket_id: str,
+    ) -> PaperSettlementLearningWitness:
+        """Return the exact typed evidence already sealed in one learner outbox.
 
-        _text(ticket_id, "ticket_id")
+        The witness is available once an outbox exists, including the narrow
+        restart window after resolution publication but before the bridge's ACK
+        write.  Consumers still have to verify the AgentLoop phase before using
+        it; this method deliberately does not advance an AgentLoop phase.
+        """
+
+        canonical_ticket_id = _text(ticket_id, "ticket_id")
         with WorkspaceEconomicLock(self.state_path.parent):
             state = self._read()
-            binding = state["bindings"].get(ticket_id)
-            if binding is None or binding["outbox"] is None:
+            binding = state["bindings"].get(canonical_ticket_id)
+            if binding is None:
+                raise PaperSettlementLearningBridgeError(
+                    "ticket has no durable learning binding"
+                )
+            outbox = binding.get("outbox")
+            if outbox is None:
                 raise PaperSettlementLearningBridgeError(
                     "ticket has no durable learner outbox"
                 )
-            return self._outbox_objects(binding["outbox"])[3]
+            outcome, reward, transition, checkpoint = self._outbox_objects(outbox)
+            try:
+                raw_observation = binding["observation"]
+                observation = Observation(
+                    environment_id=raw_observation["environment_id"],
+                    observed_at=raw_observation["observed_at"],
+                    available_at=raw_observation["available_at"],
+                    evidence=tuple(
+                        (item[0], item[1])
+                        for item in raw_observation["evidence"]
+                    ),
+                )
+                action = Action(
+                    environment_id=binding["environment_id"],
+                    observation_id=binding["observation_id"],
+                    action_type=binding["action_type"],
+                    decided_at=binding["action_decided_at"],
+                    parameters=tuple(
+                        (item[0], item[1])
+                        for item in binding["action_parameters"]
+                    ),
+                )
+                witness = PaperSettlementLearningWitness(
+                    ticket_id=canonical_ticket_id,
+                    binding_id=binding["binding_id"],
+                    settlement_bundle_sha256=outbox[
+                        "settlement_bundle_sha256"
+                    ],
+                    observation=observation,
+                    action=action,
+                    outcome=outcome,
+                    reward=reward,
+                    transition=transition,
+                    next_checkpoint=checkpoint,
+                )
+            except (
+                KeyError,
+                TypeError,
+                ValueError,
+                IndexError,
+            ) as exc:
+                raise PaperSettlementLearningBridgeError(
+                    "durable learner witness is not canonical"
+                ) from exc
+            if (
+                witness.binding_id != binding["binding_id"]
+                or witness.action.action_id != binding["action_id"]
+                or witness.transition.episode_id != binding["episode_id"]
+            ):
+                raise PaperSettlementLearningBridgeError(
+                    "durable learner witness differs from ticket binding"
+                )
+            return witness
+
+    def next_checkpoint(self, ticket_id: str) -> EnvironmentCheckpoint:
+        """Return the post-resolution checkpoint witness once outbox exists."""
+
+        return self.resolution_witness(ticket_id).next_checkpoint

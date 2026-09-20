@@ -1,66 +1,95 @@
 from __future__ import annotations
 
-"""Narrow deterministic fixture bridge for production-owned capture authority tests.
+"""Narrow deterministic fixtures for the point-in-time authority tests.
 
-The product API deliberately refuses to mint provider availability authority from
-caller-supplied transports/clocks.  The existing point-in-time test module predates
-that boundary and builds deterministic provider responses through those public
-injection seams.  During collection we replace only its private positive helper so
-positive tests exercise the production-owned constructor path while still avoiding
-network access.  Adversarial tests continue to call the public injected path and
-must remain non-authoritative.
+Production deliberately fails closed for positive historical-provider authority
+until origin can be independently re-resolved.  The point-in-time unit tests still
+need a deterministic *already trusted* source witness in order to exercise the
+separate persistence, revision, feature-availability and restart contracts without
+making a network call or weakening that production boundary.
+
+This collection hook therefore replaces only the test module's private
+``_source_store`` helper.  It temporarily stubs the external-origin assertion for
+the single fixture publication, then immediately restores the production function.
+Adversarial tests that call the public/injected historical capture path continue to
+see the real fail-closed behavior.
 """
 
-from pathlib import Path
 from types import ModuleType
 
-import autosport._historical_capture_authority_guard as _guard
-from autosport.parlayapi_provider import ParlayApiTableTennisProvider
+import autosport.point_in_time_authority as _pit
 
 
-def _install_point_in_time_capture_fixture(module: ModuleType) -> None:
-    def authoritative_provider_capture(
-        tmp_path: Path,
+def _install_point_in_time_source_fixture(module: ModuleType) -> None:
+    artifact_capture = module._provider_capture
+
+    def trusted_source_store(
+        tmp_path,
         *,
-        source_as_of,
-        available_at,
+        available_at=module.BASE + module.timedelta(minutes=30),
+        source_as_of=module.BASE + module.timedelta(minutes=20),
+        feature_available_at=module.BASE + module.timedelta(minutes=15),
     ):
-        token = module.hashlib.sha256(
-            (module._iso(source_as_of) + "|" + module._iso(available_at)).encode(
-                "utf-8"
-            )
-        ).hexdigest()[:12]
-        market_path = tmp_path / f"provider-capture-{token}.jsonl"
-        evidence_path = tmp_path / f"provider-capture-{token}.evidence.json"
-        payload = {
-            "timestamp": module._iso(source_as_of),
-            "previous_timestamp": None,
-            "next_timestamp": None,
-            "data": [],
-        }
-        provider = ParlayApiTableTennisProvider(
-            "test-provider-key",
-            transport=module._HistoricalTransport(payload),
-            clock=lambda: module._iso(available_at),
-            sleeper=lambda _: None,
+        store = module.SourceRevisionAuthorityStore.initialize_pristine(tmp_path)
+        policy = store.register_provider_capture_policy(
+            revision_policy_id="provider-publication-time-v1",
+            frozen_at=module.BASE - module.timedelta(days=1),
+        )
+        capture = artifact_capture(
+            tmp_path,
+            source_as_of=source_as_of,
+            available_at=available_at,
         )
 
-        previous_factory = _guard.ParlayApiTableTennisProvider
+        # Model the one fact this unit-test layer cannot establish locally:
+        # independent production-origin attestation.  Keep the bypass scoped to
+        # this fixture publication and restore production behavior immediately.
+        production_assert = _pit.assert_historical_snapshot_capture_authoritative
         try:
-            # Replace only the guard's private constructor symbol. The public
-            # historical capture function still treats this provider as caller
-            # supplied and therefore cannot mint authority.
-            _guard.ParlayApiTableTennisProvider = lambda *args, **kwargs: provider
-            return _guard.capture_authoritative_historical_snapshot(
-                api_key="test-provider-key",
-                requested_at=module._iso(source_as_of),
-                output_path=market_path,
-                evidence_path=evidence_path,
+            _pit.assert_historical_snapshot_capture_authoritative = lambda capture: None
+            witness = store.register_provider_capture_witness(
+                availability_witness_id="provider-publication:17",
+                capture=capture,
+                recorded_at=max(
+                    available_at,
+                    module.BASE + module.timedelta(minutes=35),
+                ),
             )
         finally:
-            _guard.ParlayApiTableTennisProvider = previous_factory
+            _pit.assert_historical_snapshot_capture_authoritative = production_assert
 
-    module._provider_capture = authoritative_provider_capture
+        membership = module.FeatureMembershipAuthority.create(
+            feature_set_id="features-1",
+            feature_set_version="v1",
+            feature_definition_sha256=module.FEATURE_MANIFEST_SHA256,
+            feature_manifest_json=module.FEATURE_MANIFEST_JSON,
+            feature_source_sha256=module.SHA_C,
+            feature_name="participant.form.trailing_5",
+            available_at=feature_available_at,
+        )
+        store.register_feature_membership(membership)
+        revision = module.SourceRevisionAuthority(
+            source_revision_authority_id="source-authority-17",
+            source_identity=witness.source_identity,
+            source_revision=witness.source_revision,
+            source_revision_sha256=witness.source_revision_sha256,
+            revision_policy_id=policy.revision_policy_id,
+            revision_policy_record_sha256=policy.authority_sha256,
+            availability_witness_id=witness.availability_witness_id,
+            availability_witness_sha256=witness.witness_content_sha256,
+            availability_witness_record_sha256=witness.authority_sha256,
+            witness_kind=witness.witness_kind,
+            source_as_of=witness.source_as_of,
+            available_at=witness.available_at,
+            recorded_at=max(
+                available_at,
+                module.BASE + module.timedelta(minutes=40),
+            ),
+        )
+        store.register_revision(revision)
+        return store, policy, revision
+
+    module._source_store = trusted_source_store
 
 
 def pytest_collection_modifyitems(items) -> None:
@@ -72,5 +101,5 @@ def pytest_collection_modifyitems(items) -> None:
         module = item.module
         key = id(module)
         if key not in patched:
-            _install_point_in_time_capture_fixture(module)
+            _install_point_in_time_source_fixture(module)
             patched.add(key)

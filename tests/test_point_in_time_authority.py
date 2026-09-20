@@ -7,8 +7,10 @@ from datetime import UTC, datetime, timedelta, timezone
 import pytest
 
 from autosport.point_in_time_authority import (
+    AvailabilityWitnessAuthority,
     FeatureAvailabilityError,
     FeatureAvailabilityEvidence,
+    FeatureMembershipAuthority,
     HoldoutAlreadyConsumedError,
     HoldoutConsumptionError,
     HoldoutConsumptionLedger,
@@ -94,6 +96,7 @@ def _source_store(
     *,
     available_at: datetime = BASE + timedelta(minutes=30),
     source_as_of: datetime = BASE + timedelta(minutes=20),
+    feature_available_at: datetime = BASE + timedelta(minutes=15),
 ) -> tuple[
     SourceRevisionAuthorityStore,
     RevisionPolicyAuthority,
@@ -109,6 +112,28 @@ def _source_store(
         frozen_at=BASE - timedelta(days=1),
     )
     store.register_policy(policy)
+    witness = AvailabilityWitnessAuthority(
+        availability_witness_id="provider-publication:17",
+        source_identity="lawful-provider:fixture",
+        source_revision="provider-revision-17",
+        source_revision_sha256=SHA_D,
+        witness_kind=policy.witness_kind,
+        witness_content_sha256=SHA_F,
+        source_as_of=source_as_of,
+        available_at=available_at,
+        recorded_at=max(available_at, BASE + timedelta(minutes=35)),
+    )
+    store.register_witness(witness)
+    membership = FeatureMembershipAuthority.create(
+        feature_set_id="features-1",
+        feature_set_version="v1",
+        feature_definition_sha256=SHA_B,
+        feature_source_sha256=SHA_C,
+        feature_name="participant.form.trailing_5",
+        member_definition_sha256=SHA_E,
+        available_at=feature_available_at,
+    )
+    store.register_feature_membership(membership)
     revision = SourceRevisionAuthority(
         source_revision_authority_id="source-authority-17",
         source_identity="lawful-provider:fixture",
@@ -116,8 +141,9 @@ def _source_store(
         source_revision_sha256=SHA_D,
         revision_policy_id=policy.revision_policy_id,
         revision_policy_record_sha256=policy.authority_sha256,
-        availability_witness_id="provider-publication:17",
-        availability_witness_sha256=SHA_F,
+        availability_witness_id=witness.availability_witness_id,
+        availability_witness_sha256=witness.witness_content_sha256,
+        availability_witness_record_sha256=witness.authority_sha256,
         witness_kind=policy.witness_kind,
         source_as_of=source_as_of,
         available_at=available_at,
@@ -146,6 +172,7 @@ def _evidence(
     store, _, revision = _source_store(
         tmp_path,
         available_at=source_available_at,
+        feature_available_at=feature_available_at,
     )
     return FeatureAvailabilityEvidence.from_authorities(
         scientific_registry=registry,
@@ -190,7 +217,11 @@ def test_feature_availability_resolves_registered_dataset_feature_policy_and_rev
     assert len(evidence.feature_record_sha256) == 64
     assert len(evidence.source_revision_authority_sha256) == 64
     assert len(evidence.evidence_sha256) == 64
-    assert evidence.to_payload()["schema_version"] == 2
+    assert evidence.to_payload()["schema_version"] == 3
+    assert len(evidence.availability_witness_record_sha256) == 64
+    assert len(evidence.feature_membership_id) == 64
+    assert len(evidence.feature_membership_sha256) == 64
+    assert evidence.feature_member_definition_sha256 == SHA_E
 
 
 def test_feature_evidence_digest_is_stable_across_equivalent_timezone_offsets(
@@ -290,6 +321,7 @@ def test_revision_with_arbitrary_policy_digest_cannot_be_registered(tmp_path) ->
         revision_policy_record_sha256=SHA_A,
         availability_witness_id="provider-publication:forged",
         availability_witness_sha256=SHA_F,
+        availability_witness_record_sha256=SHA_A,
         witness_kind=policy.witness_kind,
         source_as_of=BASE + timedelta(minutes=20),
         available_at=BASE + timedelta(minutes=30),
@@ -298,6 +330,93 @@ def test_revision_with_arbitrary_policy_digest_cannot_be_registered(tmp_path) ->
 
     with pytest.raises(SourceRevisionAuthorityError, match="policy digest mismatch"):
         store.register_revision(forged)
+
+
+def test_revision_rejects_unknown_or_forged_availability_witness(tmp_path) -> None:
+    store, policy, revision = _source_store(tmp_path)
+
+    unknown = SourceRevisionAuthority(
+        source_revision_authority_id="source-authority-unknown-witness",
+        source_identity=revision.source_identity,
+        source_revision=revision.source_revision,
+        source_revision_sha256=revision.source_revision_sha256,
+        revision_policy_id=policy.revision_policy_id,
+        revision_policy_record_sha256=policy.authority_sha256,
+        availability_witness_id="provider-publication:unknown",
+        availability_witness_sha256=revision.availability_witness_sha256,
+        availability_witness_record_sha256=revision.availability_witness_record_sha256,
+        witness_kind=revision.witness_kind,
+        source_as_of=revision.source_as_of,
+        available_at=revision.available_at,
+        recorded_at=revision.recorded_at,
+    )
+    with pytest.raises(
+        SourceRevisionAuthorityError,
+        match="unknown availability witness",
+    ):
+        store.register_revision(unknown)
+
+    forged_digest = SourceRevisionAuthority(
+        source_revision_authority_id="source-authority-forged-witness",
+        source_identity=revision.source_identity,
+        source_revision=revision.source_revision,
+        source_revision_sha256=revision.source_revision_sha256,
+        revision_policy_id=policy.revision_policy_id,
+        revision_policy_record_sha256=policy.authority_sha256,
+        availability_witness_id=revision.availability_witness_id,
+        availability_witness_sha256=SHA_A,
+        availability_witness_record_sha256=revision.availability_witness_record_sha256,
+        witness_kind=revision.witness_kind,
+        source_as_of=revision.source_as_of,
+        available_at=revision.available_at,
+        recorded_at=revision.recorded_at,
+    )
+    with pytest.raises(
+        SourceRevisionAuthorityError,
+        match="witness content digest mismatch",
+    ):
+        store.register_revision(forged_digest)
+
+    backdated = SourceRevisionAuthority(
+        source_revision_authority_id="source-authority-backdated",
+        source_identity=revision.source_identity,
+        source_revision=revision.source_revision,
+        source_revision_sha256=revision.source_revision_sha256,
+        revision_policy_id=policy.revision_policy_id,
+        revision_policy_record_sha256=policy.authority_sha256,
+        availability_witness_id=revision.availability_witness_id,
+        availability_witness_sha256=revision.availability_witness_sha256,
+        availability_witness_record_sha256=revision.availability_witness_record_sha256,
+        witness_kind=revision.witness_kind,
+        source_as_of=revision.source_as_of,
+        available_at=revision.available_at - timedelta(minutes=1),
+        recorded_at=revision.recorded_at,
+    )
+    with pytest.raises(
+        SourceRevisionAuthorityError,
+        match="witness time mismatch",
+    ):
+        store.register_revision(backdated)
+
+
+def test_unknown_feature_name_cannot_reuse_registered_feature_set(tmp_path) -> None:
+    registry = _registry(tmp_path)
+    snapshot, feature_set = _append_dataset_and_features(registry)
+    store, _, revision = _source_store(tmp_path)
+
+    with pytest.raises(
+        FeatureAvailabilityError,
+        match="feature membership authority cannot be resolved",
+    ):
+        FeatureAvailabilityEvidence.from_authorities(
+            scientific_registry=registry,
+            source_authority_store=store,
+            dataset_snapshot_id=snapshot.dataset_snapshot_id,
+            feature_set_id=feature_set.feature_set_id,
+            feature_name="participant.form.future_leak",
+            source_revision_authority_id=revision.source_revision_authority_id,
+            decision_cutoff=BASE + timedelta(hours=1),
+        )
 
 
 def test_backdated_caller_claim_cannot_override_registered_late_availability(

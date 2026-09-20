@@ -154,8 +154,11 @@ def _paper_value_on_market_event_with_durable_origin(
         ledger,
         decision_id,
     )
-    with _origin.bound_decision_origin(verified_origin):
+    token = _origin._DECISION_ORIGIN.set(verified_origin)
+    try:
         return _STABLE_PAPER_VALUE_ON_MARKET_EVENT(self, event, context)
+    finally:
+        _origin._DECISION_ORIGIN.reset(token)
 
 
 def _install() -> None:

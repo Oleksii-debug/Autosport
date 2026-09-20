@@ -212,6 +212,7 @@ class FrozenBaselineProtocol:
     candidate_id: str
     candidate_artifact_sha256: str
     evaluation_semantics: str
+    evaluation_contract_sha256: str
     primary_metric: str
     uncertainty_method: str
     baselines: tuple[BaselineDefinition, ...]
@@ -230,6 +231,11 @@ class FrozenBaselineProtocol:
             _sha256(self.candidate_artifact_sha256, "candidate_artifact_sha256"),
         )
         _text(self.evaluation_semantics, "evaluation_semantics")
+        object.__setattr__(
+            self,
+            "evaluation_contract_sha256",
+            _sha256(self.evaluation_contract_sha256, "evaluation_contract_sha256"),
+        )
         _text(self.primary_metric, "primary_metric")
         _text(self.uncertainty_method, "uncertainty_method")
         if type(self.baselines) is not tuple:
@@ -262,6 +268,7 @@ class FrozenBaselineProtocol:
             "candidate_id": self.candidate_id,
             "candidate_artifact_sha256": self.candidate_artifact_sha256,
             "evaluation_semantics": self.evaluation_semantics,
+            "evaluation_contract_sha256": self.evaluation_contract_sha256,
             "primary_metric": self.primary_metric,
             "uncertainty_method": self.uncertainty_method,
             "baselines": [item.to_payload() for item in self.baselines],
@@ -281,6 +288,7 @@ class PolicyEvaluation:
     evidence_scope_sha256: str
     cohort_sha256: str
     primary_metric: str
+    evaluated_at: str
     metric_value: str
     uncertainty_low: str
     uncertainty_high: str
@@ -311,6 +319,7 @@ class PolicyEvaluation:
                 ),
             )
         _text(self.primary_metric, "primary_metric")
+        _instant(self.evaluated_at, "evaluated_at")
         value = _decimal(self.metric_value, "metric_value")
         low = _decimal(self.uncertainty_low, "uncertainty_low")
         high = _decimal(self.uncertainty_high, "uncertainty_high")
@@ -346,6 +355,7 @@ class PolicyEvaluation:
             "evidence_scope_sha256": self.evidence_scope_sha256,
             "cohort_sha256": self.cohort_sha256,
             "primary_metric": self.primary_metric,
+            "evaluated_at": self.evaluated_at,
             "metric_value": self.metric_value,
             "uncertainty_low": self.uncertainty_low,
             "uncertainty_high": self.uncertainty_high,
@@ -465,6 +475,12 @@ def _validate_common_result(
     if result.primary_metric != protocol.primary_metric:
         raise ExternalValidityError(
             f"{result.policy_id}: primary metric differs from frozen protocol"
+        )
+    if _instant(result.evaluated_at, "evaluated_at") < _instant(
+        protocol.frozen_at, "frozen_at"
+    ):
+        raise ExternalValidityError(
+            f"{result.policy_id}: evaluation predates frozen protocol"
         )
 
 

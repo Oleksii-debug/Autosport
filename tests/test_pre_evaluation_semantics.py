@@ -236,7 +236,10 @@ def test_actionable_slot_semantics_are_derived_from_canonical_objects() -> None:
     assert slot.config_sha256 == intent.config_sha256
     assert slot.quote_set_sha256 is not None
     assert slot.quote_identity_sha256 is not None
-    assert slot.freshness_policy_sha256 == _bound(intent=intent).evidence.policy_digest
+    assert slot.freshness_policy_sha256 == (
+        PreEvaluationSemanticAuthority._freshness_policy_sha256(_risk_policy())
+    )
+    assert slot.freshness_policy_sha256 != _bound(intent=intent).evidence.policy_digest
     assert slot.portfolio_before_id.startswith("paper-book:")
     assert slot.risk_policy_id.startswith("paper-risk-policy:")
     assert slot.economic_goal_id.startswith("goal-pre-evaluation@1:")

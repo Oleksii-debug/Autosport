@@ -217,7 +217,10 @@ def test_duplicate_delivery_is_idempotent_but_conflicting_row_key_fails_closed()
     assert len(frozen.rows) == 1
 
     conflicting = replace(original, quote_set_sha256=H3)
-    with pytest.raises(EvaluationUniverseError, match="conflicting immutable row_key"):
+    with pytest.raises(
+        EvaluationUniverseIntegrityError,
+        match="row evidence does not match immutable upstream intake evidence",
+    ):
         universe(original, conflicting)
 
 

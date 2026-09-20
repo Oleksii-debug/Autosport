@@ -5,6 +5,7 @@ import json
 
 import pytest
 
+import autosport.point_in_time_evidence as point_in_time_module
 from autosport.point_in_time_evidence import (
     EvidenceLedgerCorruptError,
     FutureEvidenceError,
@@ -46,6 +47,10 @@ def _feature_set(*, available_at: str = "2026-09-20T10:01:30Z") -> FeatureSet:
         source_sha256=_SHA_D,
         available_at_utc=available_at,
     )
+
+
+def _authority_root(tmp_path):
+    return tmp_path.parent / f"{tmp_path.name}-machine-authority"
 
 
 def test_point_in_time_feature_derives_authority_from_canonical_registry_records() -> None:
@@ -269,3 +274,118 @@ def test_redigested_identity_tamper_is_still_rejected(tmp_path) -> None:
 
     with pytest.raises(EvidenceLedgerCorruptError, match="invalid holdout record"):
         HoldoutConsumptionLedger(path)
+
+
+def test_restoring_older_valid_ledger_is_rejected_by_external_monotonic_authority(tmp_path) -> None:
+    path = tmp_path / "holdout_consumption.json"
+    authority_root = _authority_root(tmp_path)
+    ledger = HoldoutConsumptionLedger(path, authority_root=authority_root)
+
+    ledger.consume(
+        dataset_snapshot=_snapshot(snapshot_id="window-a", manifest_sha256=_SHA_A),
+        research_protocol_id="protocol-42",
+        confirmation_trial_family_id="family-9",
+        consumer_identity="experiment:a",
+        purpose="final-confirmation",
+        consumed_at_utc="2026-09-20T10:05:00Z",
+    )
+    old_valid_bytes = path.read_bytes()
+
+    ledger.consume(
+        dataset_snapshot=_snapshot(snapshot_id="window-b", manifest_sha256=_SHA_B),
+        research_protocol_id="protocol-42",
+        confirmation_trial_family_id="family-10",
+        consumer_identity="experiment:b",
+        purpose="final-confirmation",
+        consumed_at_utc="2026-09-20T10:06:00Z",
+    )
+    path.write_bytes(old_valid_bytes)
+
+    with pytest.raises(EvidenceLedgerCorruptError, match="monotonic authority"):
+        HoldoutConsumptionLedger(path, authority_root=authority_root)
+
+
+def test_deleting_ledger_after_consumption_is_rejected_by_external_authority(tmp_path) -> None:
+    path = tmp_path / "holdout_consumption.json"
+    authority_root = _authority_root(tmp_path)
+    HoldoutConsumptionLedger(path, authority_root=authority_root).consume(
+        dataset_snapshot=_snapshot(),
+        research_protocol_id="protocol-42",
+        confirmation_trial_family_id="family-9",
+        consumer_identity="experiment:a",
+        purpose="final-confirmation",
+        consumed_at_utc="2026-09-20T10:05:00Z",
+    )
+    path.unlink()
+
+    with pytest.raises(EvidenceLedgerCorruptError, match="monotonic authority"):
+        HoldoutConsumptionLedger(path, authority_root=authority_root)
+
+
+def test_crash_after_local_publish_recovers_pending_commit(tmp_path, monkeypatch) -> None:
+    path = tmp_path / "holdout_consumption.json"
+    authority_root = _authority_root(tmp_path)
+    ledger = HoldoutConsumptionLedger(path, authority_root=authority_root)
+    real_write = point_in_time_module._atomic_write_json
+
+    class SimulatedCrash(RuntimeError):
+        pass
+
+    def write_then_crash(target, payload):
+        real_write(target, payload)
+        raise SimulatedCrash("after local publish")
+
+    monkeypatch.setattr(point_in_time_module, "_atomic_write_json", write_then_crash)
+    with pytest.raises(SimulatedCrash, match="after local publish"):
+        ledger.consume(
+            dataset_snapshot=_snapshot(),
+            research_protocol_id="protocol-42",
+            confirmation_trial_family_id="family-9",
+            consumer_identity="experiment:a",
+            purpose="final-confirmation",
+            consumed_at_utc="2026-09-20T10:05:00Z",
+        )
+    monkeypatch.setattr(point_in_time_module, "_atomic_write_json", real_write)
+
+    restarted = HoldoutConsumptionLedger(path, authority_root=authority_root)
+    assert len(restarted.records()) == 1
+    assert restarted.records()[0].consumer_identity == "experiment:a"
+
+
+def test_crash_before_local_publish_aborts_and_exact_retry_uses_fresh_transaction(
+    tmp_path, monkeypatch
+) -> None:
+    path = tmp_path / "holdout_consumption.json"
+    authority_root = _authority_root(tmp_path)
+    ledger = HoldoutConsumptionLedger(path, authority_root=authority_root)
+    real_write = point_in_time_module._atomic_write_json
+
+    class SimulatedCrash(RuntimeError):
+        pass
+
+    def crash_before_write(target, payload):
+        raise SimulatedCrash("before local publish")
+
+    monkeypatch.setattr(point_in_time_module, "_atomic_write_json", crash_before_write)
+    with pytest.raises(SimulatedCrash, match="before local publish"):
+        ledger.consume(
+            dataset_snapshot=_snapshot(),
+            research_protocol_id="protocol-42",
+            confirmation_trial_family_id="family-9",
+            consumer_identity="experiment:a",
+            purpose="final-confirmation",
+            consumed_at_utc="2026-09-20T10:05:00Z",
+        )
+    monkeypatch.setattr(point_in_time_module, "_atomic_write_json", real_write)
+
+    restarted = HoldoutConsumptionLedger(path, authority_root=authority_root)
+    persisted = restarted.consume(
+        dataset_snapshot=_snapshot(),
+        research_protocol_id="protocol-42",
+        confirmation_trial_family_id="family-9",
+        consumer_identity="experiment:a",
+        purpose="final-confirmation",
+        consumed_at_utc="2026-09-20T10:05:00Z",
+    )
+    assert persisted.consumer_identity == "experiment:a"
+    assert len(restarted.records()) == 1

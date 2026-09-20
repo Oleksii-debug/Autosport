@@ -78,6 +78,16 @@ def _catalog_checkpoint(page) -> CatalogCheckpoint:
     )
 
 
+def _stream_checkpoint(delta) -> StreamCheckpoint:
+    return StreamCheckpoint(
+        delta.source_id,
+        delta.stream_epoch,
+        delta.source_cursor,
+        delta.cursor_position,
+        delta.delta_id,
+    )
+
+
 class ParlayApiProductSourceTests(unittest.TestCase):
     def test_snapshot_becomes_restart_safe_catalog_delta_and_event(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -108,13 +118,7 @@ class ParlayApiProductSourceTests(unittest.TestCase):
             self.assertEqual(event.decimal_odds, Decimal("1.80"))
             self.assertEqual(event.event_id, delta.event_id)
 
-            collector_checkpoint = StreamCheckpoint(
-                delta.source_id,
-                delta.stream_epoch,
-                delta.source_cursor,
-                delta.cursor_position,
-                delta.delta_id,
-            )
+            collector_checkpoint = _stream_checkpoint(delta)
             self.assertEqual(source.fetch_deltas(collector_checkpoint, (), 10), ())
 
             restored = ParlayApiProductSource(
@@ -162,6 +166,73 @@ class ParlayApiProductSourceTests(unittest.TestCase):
             replay_delta = restored.fetch_deltas(None, (), 1)[0]
             self.assertEqual(replay_delta, first_delta)
 
+    def test_catalog_checkpoint_must_match_exact_cursor_and_page_digest(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            source = ParlayApiProductSource(
+                _Provider([_batch(cursor="snapshot-1")]),
+                state_path=Path(directory) / "source.json",
+                lawful_terms_ref="terms:parlayapi:v1",
+                retention_ref="retention:parlayapi:v1",
+                clock=lambda: "2026-09-20T17:34:02+00:00",
+            )
+            page = source.fetch_catalog_page(None)
+            forged_cursor = CatalogCheckpoint(
+                source_id=page.source_id,
+                stream_epoch=page.stream_epoch,
+                cursor="forged-cursor",
+                position=page.position,
+                page_sha256=page.digest,
+            )
+            with self.assertRaisesRegex(ProductSourceStateError, "pending exact page"):
+                source.fetch_catalog_page(forged_cursor)
+
+            forged_digest = CatalogCheckpoint(
+                source_id=page.source_id,
+                stream_epoch=page.stream_epoch,
+                cursor=page.cursor,
+                position=page.position,
+                page_sha256="0" * 64,
+            )
+            with self.assertRaisesRegex(ProductSourceStateError, "pending exact page"):
+                source.fetch_catalog_page(forged_digest)
+
+            replay = source.fetch_catalog_page(_catalog_checkpoint(page))
+            self.assertEqual(replay.digest, page.digest)
+
+    def test_collector_checkpoint_must_match_exact_cursor_and_delta_id(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            source = ParlayApiProductSource(
+                _Provider([_batch(cursor="snapshot-1")]),
+                state_path=Path(directory) / "source.json",
+                lawful_terms_ref="terms:parlayapi:v1",
+                retention_ref="retention:parlayapi:v1",
+                clock=lambda: "2026-09-20T17:34:02+00:00",
+            )
+            source.fetch_catalog_page(None)
+            delta = source.fetch_deltas(None, (), 1)[0]
+
+            forged_cursor = StreamCheckpoint(
+                delta.source_id,
+                delta.stream_epoch,
+                "forged-cursor",
+                delta.cursor_position,
+                delta.delta_id,
+            )
+            with self.assertRaisesRegex(ProductSourceStateError, "exact durable delta"):
+                source.fetch_deltas(forged_cursor, (), 1)
+
+            forged_delta = StreamCheckpoint(
+                delta.source_id,
+                delta.stream_epoch,
+                delta.source_cursor,
+                delta.cursor_position,
+                "forged-delta-id",
+            )
+            with self.assertRaisesRegex(ProductSourceStateError, "exact durable delta"):
+                source.fetch_deltas(forged_delta, (), 1)
+
+            self.assertEqual(source.fetch_deltas(_stream_checkpoint(delta), (), 1), ())
+
     def test_same_causal_identity_cannot_change_price(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             state_path = Path(directory) / "source.json"
@@ -174,13 +245,7 @@ class ParlayApiProductSourceTests(unittest.TestCase):
             )
             page = source.fetch_catalog_page(None)
             delta = source.fetch_deltas(None, (), 1)[0]
-            checkpoint = StreamCheckpoint(
-                delta.source_id,
-                delta.stream_epoch,
-                delta.source_cursor,
-                delta.cursor_position,
-                delta.delta_id,
-            )
+            checkpoint = _stream_checkpoint(delta)
             source.fetch_deltas(checkpoint, (), 1)
 
             restored = ParlayApiProductSource(
@@ -209,7 +274,10 @@ class ParlayApiProductSourceTests(unittest.TestCase):
             source.fetch_catalog_page(None)
             delta = source.fetch_deltas(None, (), 1)[0]
             raw = state_path.read_text(encoding="utf-8")
-            state_path.write_text(raw.replace(f'"{delta.delta_id}":', '"missing-delta":', 1), encoding="utf-8")
+            state_path.write_text(
+                raw.replace(f'"{delta.delta_id}":', '"missing-delta":', 1),
+                encoding="utf-8",
+            )
             with self.assertRaises(ProductSourceStateError):
                 source.resolve_event(delta)
 

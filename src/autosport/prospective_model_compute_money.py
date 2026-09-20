@@ -2,12 +2,13 @@ from __future__ import annotations
 
 """Fail-closed prospective monetary authority for model-compute routing.
 
-The existing model-compute router owns compute request/route identity and measured
-compute-unit cost, but current product truth does not expose a product-owned,
-pre-decision monetary tariff (amount + currency + tariff identity) for that route.
-This adapter therefore binds an exact live OpportunityIntent to the canonical
-router decision and emits explicit UNKNOWN_UNPROVEN monetary truth. It never
-converts credits/tokens/dimensionless compute cost into money and never accepts a
+The existing model-compute router owns immutable compute request/route identity,
+but current product truth exposes neither a product-owned OpportunityIntent-to-
+request origin relation nor a pre-decision monetary tariff (amount + currency +
+tariff identity) for that route. This adapter therefore re-resolves canonical route
+truth and emits explicit UNKNOWN_UNPROVEN evidence naming the first missing
+authority. It never labels independently selected canonical objects as causally
+bound, converts credits/tokens/dimensionless compute cost into money, or accepts a
 caller-authored monetary amount, currency, tariff, zero, or applicability claim.
 
 Schema v1 deliberately cannot represent positive monetary truth. A future positive
@@ -354,10 +355,6 @@ def resolve_prospective_model_compute_money(
         )
 
     intent_sha256 = _sha256(intent.intent_sha256, "intent.intent_sha256")
-    intent_evidence_sha256 = _sha256(
-        intent.evidence.evidence_sha256,
-        "intent.evidence.evidence_sha256",
-    )
     opportunity_id = _text(
         getattr(intent.opportunity, "opportunity_id", None),
         "intent opportunity_id",
@@ -365,13 +362,9 @@ def resolve_prospective_model_compute_money(
 
     # The persisted request is router-owned immutable route evidence, but its
     # decision_input/evidence fields are not, by themselves, a product-owned
-    # OpportunityIntent-origin certificate. Even exact equality is therefore only
-    # an assertion. Keep the evidence explicitly unbound until an integrated
+    # OpportunityIntent-origin certificate. Do not even use digest equality as a
+    # promotion condition; keep the result explicitly unbound until an integrated
     # producer-origin authority can be re-resolved here.
-    _ = (
-        request.decision_input_sha256 == intent_sha256
-        and request.decision_evidence_sha256 == intent_evidence_sha256
-    )
 
     return _make_unknown_evidence(
         intent_sha256=intent_sha256,

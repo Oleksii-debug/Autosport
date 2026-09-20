@@ -62,8 +62,8 @@ def _witness(index: int, row: EvaluationRow) -> ObservationEnumerationWitness:
         row_keys=(row.row_key,),
         exhaustive=True,
         gap_free=True,
-        committed_at=f"2026-09-20T00:04:{index:02d}Z",
-        evaluation_not_before=f"2026-09-20T00:04:{index:02d}Z",
+        committed_at="2026-09-20T00:00:02.500000Z",
+        evaluation_not_before="2026-09-20T00:00:03Z",
         outcome_reveal_not_before=row.outcome_reveal_not_before,
     )
 

@@ -3,16 +3,22 @@ from __future__ import annotations
 """Seal durable provider-origin receipt issuance behind canonical capture authority.
 
 The generic monotonic authority is caller-constructible and remains only a rollback
-fence.  Provider origin is a separate trust decision: a durable receipt may be
-minted only while the exact in-process snapshot capability issued by the fixed
-production acquisition path is live.
+fence. Provider origin is a separate trust decision: a durable receipt may be minted
+only while the exact in-process snapshot capability issued by the fixed production
+acquisition path is live.
 
 The receipt verifier remains restart-capable, but the consumer-facing evidence store
 no longer returns the machine signing key, exposes a generic receipt signer, or
-exposes the credential/receipt trust-root paths.  Credential IO and signing live in
+exposes the credential/receipt trust-root paths. Credential IO and signing live in
 an installation-local closure used only by the capability-gated writer and the
-restart verifier.  A caller-selected ``authority_root`` therefore controls only the
-generic monotonic journal and cannot select or invoke provider-origin issuance.
+restart verifier.
+
+Provider-origin credentials intentionally do *not* use
+``AUTOSPORT_MONOTONIC_AUTHORITY_ROOT`` (nor a constructor ``authority_root``). Those
+selectors exist for the generic rollback journal and are therefore caller-controlled
+by design. The provider receipt instead uses an Autosport-owned per-user application
+state location derived from the OS account home and rejects any workspace that would
+contain, or be contained by, that trust root.
 """
 
 import hashlib
@@ -25,10 +31,6 @@ from typing import Mapping
 
 from . import provider_observation_authority as provider
 from .integrity import atomic_write_json
-from .monotonic_workspace_authority import (
-    MonotonicWorkspaceAuthorityError,
-    resolve_monotonic_authority_root,
-)
 
 
 def _install_guard() -> None:
@@ -37,13 +39,51 @@ def _install_guard() -> None:
         return
 
     def receipt_root(store) -> Path:
+        # Do not call default/resolve_monotonic_authority_root here. In particular,
+        # AUTOSPORT_MONOTONIC_AUTHORITY_ROOT is an intentional caller/test seam for
+        # the generic journal and therefore cannot select provider-origin trust.
         try:
-            root = resolve_monotonic_authority_root(store.workspace, None)
-        except MonotonicWorkspaceAuthorityError as exc:
+            home = Path.home().resolve(strict=False)
+            workspace = store.workspace.resolve(strict=False)
+        except (OSError, RuntimeError) as exc:
             raise provider.ProviderObservationIntegrityError(
                 "provider acquisition receipt trust root is unsafe"
             ) from exc
-        return root / provider._RECEIPT_ROOT_NAME / store._workspace_sha256()
+        if not home.is_absolute() or not workspace.is_absolute():
+            raise provider.ProviderObservationIntegrityError(
+                "provider acquisition receipt trust root is unsafe"
+            )
+
+        if os.name == "nt":
+            base = (
+                home
+                / "AppData"
+                / "Local"
+                / "Autosport"
+                / "application-state"
+                / "provider-origin-receipt-v1"
+            )
+        else:
+            base = home / ".local" / "state" / "autosport" / "provider-origin-receipt-v1"
+        try:
+            root = base.resolve(strict=False)
+        except OSError as exc:
+            raise provider.ProviderObservationIntegrityError(
+                "provider acquisition receipt trust root is unsafe"
+            ) from exc
+        if (
+            root == workspace
+            or root.is_relative_to(workspace)
+            or workspace.is_relative_to(root)
+        ):
+            raise provider.ProviderObservationIntegrityError(
+                "provider acquisition receipt trust root must be disjoint from workspace"
+            )
+        if root.exists() and not root.is_dir():
+            raise provider.ProviderObservationIntegrityError(
+                "provider acquisition receipt trust root must be a directory"
+            )
+        return root / store._workspace_sha256()
 
     def key_path(store) -> Path:
         return receipt_root(store) / "receipt.key"
@@ -184,7 +224,7 @@ def _install_guard() -> None:
     setattr(verify_receipt, "_sealed_provider_receipt_verifier", True)
 
     # The only positive signing operation is the exact-object capability-gated
-    # writer above.  These legacy helpers previously exposed enough material to
+    # writer above. These legacy helpers previously exposed enough material to
     # manufacture a production-root receipt for caller-created bytes.
     store_type._write_receipt = write_receipt
     store_type._verify_receipt = verify_receipt

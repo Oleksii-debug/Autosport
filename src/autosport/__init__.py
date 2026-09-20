@@ -10,6 +10,11 @@ from . import _paper_execution_append_recovery as _paper_execution_append_recove
 from . import _paper_value_execution_authority as _paper_value_execution_authority  # noqa: F401,E402
 from . import _paper_value_risk_admission_recovery as _paper_value_risk_admission_recovery  # noqa: F401,E402
 
+# Product PAPER execution must preserve which exact, already-durable DecisionLedger
+# record existed before #623 RUN_RESERVED/attempt publication. This guard wraps the
+# fully-composed execution runtime after the existing recovery/authority layers.
+from . import _paper_execution_decision_origin as _paper_execution_decision_origin  # noqa: F401,E402
+
 # Bind explicit realized-VOC admissions to the exact canonical ResearchProtocol
 # and protocol-derived cohort before the scoring facade is imported by consumers.
 from . import _voc_admission_identity_guard as _voc_admission_identity_guard  # noqa: F401,E402

@@ -338,6 +338,32 @@ def test_router_subclass_is_rejected_before_authority_read(monkeypatch):
     assert touched is False
 
 
+@pytest.mark.parametrize("method_name", ("get_request", "get_decision"))
+def test_router_instance_method_shadow_is_rejected_before_authority_read(
+    monkeypatch,
+    method_name,
+):
+    _patch_types(monkeypatch)
+    store = _Store()
+    touched = False
+
+    def attacker(*_args, **_kwargs):
+        nonlocal touched
+        touched = True
+        raise AssertionError("instance shadow authority was invoked")
+
+    setattr(store, method_name, attacker)
+
+    with pytest.raises(
+        subject.ProspectiveModelComputeMoneyError,
+        match="router_store authority method shadow is not allowed",
+    ):
+        _resolve(store)
+
+    assert touched is False
+    assert store.reads == 0
+
+
 def test_intent_subclass_is_rejected_before_router_read(monkeypatch):
     _patch_types(monkeypatch)
 
@@ -472,6 +498,37 @@ def test_real_store_readback_and_cross_intent_pair_stay_explicitly_unbound():
         assert request.decision_input_sha256 != other.intent_sha256
         assert substituted.reason is subject.ProspectiveModelComputeMoneyReason.NO_PRODUCT_OWNED_INTENT_REQUEST_BINDING
         assert substituted.amount is None
+
+
+@pytest.mark.parametrize("method_name", ("get_request", "get_decision"))
+def test_real_router_store_instance_shadow_cannot_supply_authority(method_name):
+    intent = _canonical_portfolio_fixture_intent(suffix=f"shadow-{method_name}")
+    proposal_ts = intent.risk_context.proposal_ts
+    assert proposal_ts is not None
+    decision_at = datetime.fromisoformat(proposal_ts.replace("Z", "+00:00"))
+    touched = False
+
+    def attacker(*_args, **_kwargs):
+        nonlocal touched
+        touched = True
+        raise AssertionError("real store instance shadow was invoked")
+
+    with tempfile.TemporaryDirectory() as tmp:
+        store = ModelComputeRouterStore(Path(tmp) / "router.json")
+        setattr(store, method_name, attacker)
+
+        with pytest.raises(
+            subject.ProspectiveModelComputeMoneyError,
+            match="router_store authority method shadow is not allowed",
+        ):
+            subject.resolve_prospective_model_compute_money(
+                intent=intent,
+                router_store=store,
+                request_id="shadowed-request",
+                decision_at=decision_at,
+            )
+
+    assert touched is False
 
 
 def test_schema_v1_has_no_positive_status_member():

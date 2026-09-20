@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import importlib.util
 import json
 import tempfile
 import unittest
@@ -14,6 +15,17 @@ from autosport.paper_campaign_routing import (
 )
 from autosport.paper_campaign_runtime import PaperCampaignLearningHandoff
 from autosport.paper_settlement_learning import PaperSettlementLearningBridgeError
+
+
+_BASE_PATH = Path(__file__).with_name("_paper_campaign_runtime_tests_base.py")
+_SPEC = importlib.util.spec_from_file_location(
+    "_paper_campaign_runtime_tests_base_for_routing",
+    _BASE_PATH,
+)
+if _SPEC is None or _SPEC.loader is None:  # pragma: no cover - import machinery guard
+    raise RuntimeError("cannot load campaign runtime regression base")
+_campaign = importlib.util.module_from_spec(_SPEC)
+_SPEC.loader.exec_module(_campaign)
 
 
 def _handoff(
@@ -45,6 +57,16 @@ def _handoff(
         postmortem_id="postmortem-id" if terminal else None,
     )
     bridge = Mock()
+    bridge._read.return_value = {
+        "bindings": {
+            ticket_id: {
+                "ticket_id": ticket_id,
+                "environment_id": environment_id,
+                "episode_id": episode_id,
+                "action_id": action_id,
+            }
+        }
+    }
     if has_outbox:
         bridge.resolution_witness.return_value = SimpleNamespace(
             transition=SimpleNamespace(
@@ -109,6 +131,94 @@ class PaperCampaignRouteStoreTests(unittest.TestCase):
                         action_id="action-2",
                     )
                 )
+
+    def test_same_agent_action_cannot_route_two_tickets(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = PaperCampaignRouteStore(Path(directory) / "campaign_routes.json")
+            store.register(
+                _handoff(
+                    "ticket-1",
+                    environment_id="env-1",
+                    episode_id="episode-1",
+                    action_id="action-1",
+                )
+            )
+            with self.assertRaisesRegex(
+                PaperCampaignRouteError,
+                "one campaign action cannot route multiple PaperTickets",
+            ):
+                store.register(
+                    _handoff(
+                        "ticket-2",
+                        environment_id="env-1",
+                        episode_id="episode-1",
+                        action_id="action-1",
+                    )
+                )
+
+    def test_rehashed_duplicate_action_rows_fail_on_restart(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "campaign_routes.json"
+            store = PaperCampaignRouteStore(path)
+            store.register(
+                _handoff(
+                    "ticket-1",
+                    environment_id="env-1",
+                    episode_id="episode-1",
+                    action_id="action-1",
+                )
+            )
+            store.register(
+                _handoff(
+                    "ticket-2",
+                    environment_id="env-2",
+                    episode_id="episode-2",
+                    action_id="action-2",
+                )
+            )
+            state = store._read()
+            first = state["routes"]["ticket-1"]
+            state["routes"]["ticket-2"] = store._record(
+                ticket_id="ticket-2",
+                environment_id=first["environment_id"],
+                episode_id=first["episode_id"],
+                action_id=first["action_id"],
+                status="ACTIVE",
+            )
+            store._write(state["routes"])
+
+            with self.assertRaisesRegex(
+                PaperCampaignRouteError,
+                "one campaign action cannot route multiple PaperTickets",
+            ):
+                PaperCampaignRouteStore(path)
+
+    def test_foreign_ticket_handoff_cannot_poison_route_index(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (
+                _leg,
+                _book,
+                _ticket_id,
+                _decision,
+                _environment,
+                _baseline,
+                _observation,
+                _bridge,
+                runtime,
+            ) = _campaign._fixture(root)
+            foreign = PaperCampaignLearningHandoff(
+                runtime,
+                ticket_id="foreign-ticket",
+            )
+            store = PaperCampaignRouteStore(root / "campaign_routes.json")
+
+            with self.assertRaisesRegex(
+                PaperCampaignRouteError,
+                "lacks durable settlement-learning binding",
+            ):
+                store.register(foreign)
+            self.assertEqual(store.routes(), ())
 
     def test_tampered_durable_route_index_fails_closed(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -301,6 +411,42 @@ class PaperCampaignLearningRouterTests(unittest.TestCase):
             self.assertEqual(transitions, ("transition-1",))
             self.assertEqual(store.get("ticket-1").status, "FINALIZED")
             self.assertEqual(store.get("ticket-2").status, "ACTIVE")
+
+    def test_duplicate_transition_identity_across_routes_fails_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = PaperCampaignRouteStore(Path(directory) / "campaign_routes.json")
+            first = _handoff(
+                "ticket-1",
+                environment_id="env-1",
+                episode_id="episode-1",
+                action_id="action-1",
+                transitions=("transition-shared",),
+            )
+            second = _handoff(
+                "ticket-2",
+                environment_id="env-2",
+                episode_id="episode-2",
+                action_id="action-2",
+                transitions=("transition-shared",),
+            )
+            store.register(first)
+            store.register(second)
+            handoffs = {"ticket-1": first, "ticket-2": second}
+            router = PaperCampaignLearningRouter(
+                store,
+                resolve_handoff=lambda route: handoffs[route.ticket_id],
+            )
+
+            with self.assertRaisesRegex(
+                PaperCampaignRouteError,
+                "duplicate transition identity",
+            ):
+                router.reconcile_after_settlement(
+                    paper_book_path=Path(directory) / "paper.json",
+                    resolutions=(),
+                    settled_ticket_ids=(),
+                    at="2026-09-20T17:40:00+00:00",
+                )
 
     def test_restart_resolver_must_match_durable_episode_and_action(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

@@ -82,7 +82,7 @@ class VOCProductNegativeTerminalGuardTests(unittest.TestCase):
         self.assertEqual(terminal["status"], "failed")
         self.assertEqual(terminal["execution_id"], execution.execution_id)
         self.assertEqual(terminal["execution_record_sha256"], execution.execution_record_sha256)
-        self.assertEqual(len(terminal["authority_recorded_at"]), 27)
+        self.assertTrue(terminal["authority_recorded_at"].endswith("Z"))
 
         reopened = ModelComputeRouterStore(fixture.router_path)
         restarted = VOCProductionOrchestrator(

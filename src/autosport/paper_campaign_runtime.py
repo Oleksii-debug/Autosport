@@ -173,6 +173,18 @@ class PaperCampaignRuntime(_base.PaperCampaignRuntime):
                 "campaign finalization predates causal reflection availability"
             )
 
+        # Research is an external side effect requested at the real finalization
+        # call, not at the earlier attribution time.  Reject an already-expired
+        # bounded handoff before attribution/postmortem mutation.
+        deadline = self.reflection_plan.research_deadline_at
+        if deadline is not None and _base._instant(
+            deadline,
+            "research_deadline_at",
+        ) < _base._instant(requested_at, "reflection_plan available_at"):
+            raise PaperCampaignRuntimeError(
+                "research deadline predates frozen reflection availability"
+            )
+
         # A valid Action commitment is the causal root.  Even if every later
         # campaign-plan cache is restored to a pre-finalization snapshot, exact
         # retry may safely regenerate the same deterministic plan while changed

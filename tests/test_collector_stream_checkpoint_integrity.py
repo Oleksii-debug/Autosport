@@ -58,7 +58,11 @@ def _delta(
         desktop_available_at="2026-01-01T00:00:04+00:00",
         revision_of=None,
         revision_number=0,
-        gap_state=GapState.NONE,
+        gap_state=(
+            GapState.CURSOR_RESET
+            if sync_state == SyncState.CURSOR_RESET
+            else GapState.NONE
+        ),
         sync_state=sync_state,
     )
 

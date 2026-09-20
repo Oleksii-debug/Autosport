@@ -1558,12 +1558,12 @@ def route_compute(
                     evaluation_reason = (
                         "VOC evaluation effective sample size is insufficient"
                     )
+                elif resolved_score.net_value <= _ZERO:
+                    evaluation_reason = "measured value of computation is non-positive"
                 elif resolved_score.incremental_value_interval_low <= _ZERO:
                     evaluation_reason = (
                         "VOC uncertainty interval does not establish positive incremental value"
                     )
-                elif resolved_score.net_value <= _ZERO:
-                    evaluation_reason = "measured value of computation is non-positive"
                 elif not resolved_evaluation.action_changed:
                     evaluation_reason = (
                         "extra computation did not change action or abstention"

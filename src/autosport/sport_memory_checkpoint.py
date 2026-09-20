@@ -17,7 +17,7 @@ import json
 from pathlib import Path
 from typing import Any
 
-from .integrity import atomic_write_json
+from .integrity import atomic_write_json, durable_path_lock
 from .opponent_intelligence import OpponentIntelligenceStore
 from .participant_identity import ParticipantIdentityRegistry
 from .sport_memory_runtime import SportMemoryRuntime
@@ -457,11 +457,17 @@ class BoundSportMemoryRuntime(SportMemoryRuntime):
         return verified_opponent
 
     def materialize(self, **kwargs):
-        self._refresh_bound_authority()
-        artifact = super().materialize(**kwargs)
-        verified_opponent = self._refresh_bound_authority()
-        _verify_runtime_snapshot_bindings(self, verified_opponent)
-        return artifact
+        # The opponent store is a whole-file canonical authority. Hold the same
+        # durable path lock used by atomic_write_json from the pre-refresh through
+        # snapshot publication and post-publication projection verification. A
+        # concurrent canonical source writer therefore cannot publish G2 between
+        # our G verification and a stale derived-snapshot whole-file replace.
+        with durable_path_lock(Path(self._bound_opponent_selector.path)):
+            self._refresh_bound_authority()
+            artifact = super().materialize(**kwargs)
+            verified_opponent = self._refresh_bound_authority()
+            _verify_runtime_snapshot_bindings(self, verified_opponent)
+            return artifact
 
 
 def _new_bound_runtime(

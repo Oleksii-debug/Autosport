@@ -7,9 +7,14 @@ from decimal import Decimal
 import pytest
 
 import autosport.betfair_commission_cost_evidence as bridge
-from autosport.betfair_account_readonly import ADAPTER_ID, ADAPTER_VERSION
+from autosport.betfair_account_readonly import (
+    ADAPTER_ID,
+    ADAPTER_VERSION,
+    BetfairReadOnlyClient,
+)
 from autosport.betfair_market_commission_authority import (
     BetfairMarketCommissionAuthority,
+    BetfairMarketCommissionAuthorityError,
     BetfairMarketCommissionReceipt,
 )
 from autosport.campaign_cost_evidence import (
@@ -130,9 +135,10 @@ def _authorities(
     *,
     receipt: BetfairMarketCommissionReceipt,
     stable_account_id: str = STABLE_ACCOUNT,
-) -> tuple[BetfairMarketCommissionAuthority, FinalizedCampaignAuthority]:
+) -> tuple[BetfairMarketCommissionAuthority, FinalizedCampaignAuthority, BetfairReadOnlyClient]:
     source = object.__new__(BetfairMarketCommissionAuthority)
-    source._client = object()
+    source._client = object.__new__(BetfairReadOnlyClient)
+    origin_client = object.__new__(BetfairReadOnlyClient)
     campaign = object.__new__(FinalizedCampaignAuthority)
     projection = _projection()
 
@@ -142,9 +148,9 @@ def _authorities(
         lambda self: projection,
     )
     monkeypatch.setattr(
-        BetfairMarketCommissionAuthority,
-        "resolve",
-        lambda self, *, receipt_id, record_sha256, as_of: receipt,
+        bridge._source_origin,
+        "resolve_bound_receipt",
+        lambda source, *, receipt_id, record_sha256, as_of: (receipt, origin_client),
     )
     monkeypatch.setattr(
         bridge._scope,
@@ -153,17 +159,17 @@ def _authorities(
     )
     monkeypatch.setattr(
         bridge,
-        "_stable_source_account_identity",
+        "_stable_client_account_identity",
         lambda value: (stable_account_id, NOW - timedelta(seconds=30)),
     )
-    return source, campaign
+    return source, campaign, origin_client
 
 
 def test_issue_binds_source_money_to_exact_campaign_session(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     receipt = _receipt()
-    source, campaign = _authorities(monkeypatch, receipt=receipt)
+    source, campaign, _ = _authorities(monkeypatch, receipt=receipt)
     provider_scope = _scope()
 
     evidence = bridge.issue_betfair_commission_cost_evidence(
@@ -185,6 +191,8 @@ def test_issue_binds_source_money_to_exact_campaign_session(
     assert evidence.incurred_at == receipt.settled_at
     assert evidence.available_at == NOW - timedelta(seconds=30)
     assert evidence.observed_at == NOW - timedelta(seconds=30)
+    assert evidence.shared_source is True
+    assert evidence.allocation_source is None
     assert evidence.source.evidence_id == receipt.receipt_id
     assert evidence.source.sha256 == receipt.record_sha256
     assert {(value.kind, value.evidence_id) for value in evidence.memberships} == {
@@ -199,7 +207,7 @@ def test_zero_commission_is_authoritative_known_zero(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     receipt = _receipt(commission=Decimal("0"))
-    source, campaign = _authorities(monkeypatch, receipt=receipt)
+    source, campaign, _ = _authorities(monkeypatch, receipt=receipt)
 
     evidence = bridge.issue_betfair_commission_cost_evidence(
         source=source,
@@ -213,13 +221,14 @@ def test_zero_commission_is_authoritative_known_zero(
     assert evidence.truth is CostTruth.KNOWN_ZERO
     assert evidence.amount == Decimal("0")
     assert evidence.basis is CostBasis.OBSERVED_INCURRED
+    assert evidence.shared_source is True
 
 
 def test_account_or_market_mismatch_fails_closed(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     receipt = _receipt()
-    source, campaign = _authorities(
+    source, campaign, _ = _authorities(
         monkeypatch,
         receipt=receipt,
         stable_account_id="betfair-account-evidence:" + "e" * 64,
@@ -227,7 +236,7 @@ def test_account_or_market_mismatch_fails_closed(
 
     with pytest.raises(
         bridge.BetfairCommissionCostEvidenceError,
-        match="source account",
+        match="receipt account",
     ):
         bridge.issue_betfair_commission_cost_evidence(
             source=source,
@@ -240,7 +249,7 @@ def test_account_or_market_mismatch_fails_closed(
 
     monkeypatch.setattr(
         bridge,
-        "_stable_source_account_identity",
+        "_stable_client_account_identity",
         lambda value: (STABLE_ACCOUNT, NOW - timedelta(seconds=30)),
     )
     with pytest.raises(
@@ -257,11 +266,46 @@ def test_account_or_market_mismatch_fails_closed(
         )
 
 
+def test_mutating_source_client_cannot_relabel_bound_receipt(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    receipt = _receipt()
+    source, campaign, origin_client = _authorities(monkeypatch, receipt=receipt)
+    substituted_client = object.__new__(BetfairReadOnlyClient)
+    source._client = substituted_client
+    seen: list[BetfairReadOnlyClient] = []
+
+    def stable_identity(client: BetfairReadOnlyClient):
+        seen.append(client)
+        return STABLE_ACCOUNT, NOW - timedelta(seconds=30)
+
+    monkeypatch.setattr(bridge, "_stable_client_account_identity", stable_identity)
+    scope_for_other_account = _scope(
+        account_id="betfair-account-evidence:" + "e" * 64,
+    )
+
+    with pytest.raises(
+        bridge.BetfairCommissionCostEvidenceError,
+        match="receipt account",
+    ):
+        bridge.issue_betfair_commission_cost_evidence(
+            source=source,
+            campaign=campaign,
+            provider_scope=scope_for_other_account,
+            receipt_id=receipt.receipt_id,
+            record_sha256=receipt.record_sha256,
+            as_of=NOW,
+        )
+
+    assert seen == [origin_client]
+    assert seen[0] is not substituted_client
+
+
 def test_future_scope_account_identity_and_corrections_do_not_backfill_cost_truth(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     receipt = _receipt()
-    source, campaign = _authorities(monkeypatch, receipt=receipt)
+    source, campaign, origin_client = _authorities(monkeypatch, receipt=receipt)
 
     with pytest.raises(
         bridge.BetfairCommissionCostEvidenceError,
@@ -278,7 +322,7 @@ def test_future_scope_account_identity_and_corrections_do_not_backfill_cost_trut
 
     monkeypatch.setattr(
         bridge,
-        "_stable_source_account_identity",
+        "_stable_client_account_identity",
         lambda value: (STABLE_ACCOUNT, NOW + timedelta(seconds=1)),
     )
     with pytest.raises(
@@ -296,14 +340,14 @@ def test_future_scope_account_identity_and_corrections_do_not_backfill_cost_trut
 
     monkeypatch.setattr(
         bridge,
-        "_stable_source_account_identity",
+        "_stable_client_account_identity",
         lambda value: (STABLE_ACCOUNT, NOW - timedelta(seconds=30)),
     )
     corrected = _receipt(supersedes_receipt_id="f" * 64)
     monkeypatch.setattr(
-        BetfairMarketCommissionAuthority,
-        "resolve",
-        lambda self, *, receipt_id, record_sha256, as_of: corrected,
+        bridge._source_origin,
+        "resolve_bound_receipt",
+        lambda source, *, receipt_id, record_sha256, as_of: (corrected, origin_client),
     )
     with pytest.raises(
         bridge.BetfairCommissionCostEvidenceError,
@@ -323,7 +367,7 @@ def test_verifier_re_resolves_and_rejects_caller_amount_change(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     receipt = _receipt()
-    source, campaign = _authorities(monkeypatch, receipt=receipt)
+    source, campaign, _ = _authorities(monkeypatch, receipt=receipt)
     provider_scope = _scope()
     evidence = bridge.issue_betfair_commission_cost_evidence(
         source=source,
@@ -357,7 +401,7 @@ def test_forged_provider_scope_is_rejected_before_source_resolution(
 ) -> None:
     receipt = _receipt()
     source = object.__new__(BetfairMarketCommissionAuthority)
-    source._client = object()
+    source._client = object.__new__(BetfairReadOnlyClient)
     campaign = object.__new__(FinalizedCampaignAuthority)
     monkeypatch.setattr(FinalizedCampaignAuthority, "projection", lambda self: _projection())
     monkeypatch.setattr(
@@ -367,12 +411,12 @@ def test_forged_provider_scope_is_rejected_before_source_resolution(
     )
     called = False
 
-    def should_not_resolve(self, *, receipt_id, record_sha256, as_of):
+    def should_not_resolve(source, *, receipt_id, record_sha256, as_of):
         nonlocal called
         called = True
-        return receipt
+        return receipt, object.__new__(BetfairReadOnlyClient)
 
-    monkeypatch.setattr(BetfairMarketCommissionAuthority, "resolve", should_not_resolve)
+    monkeypatch.setattr(bridge._source_origin, "resolve_bound_receipt", should_not_resolve)
 
     with pytest.raises(
         bridge.BetfairCommissionCostEvidenceError,
@@ -387,3 +431,27 @@ def test_forged_provider_scope_is_rejected_before_source_resolution(
             as_of=NOW,
         )
     assert called is False
+
+
+def test_unregistered_source_cannot_resolve_receipt_origin(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    receipt = _receipt()
+    source = object.__new__(BetfairMarketCommissionAuthority)
+    source._client = object.__new__(BetfairReadOnlyClient)
+    monkeypatch.setattr(
+        BetfairMarketCommissionAuthority,
+        "resolve",
+        lambda self, *, receipt_id, record_sha256, as_of: receipt,
+    )
+
+    with pytest.raises(
+        BetfairMarketCommissionAuthorityError,
+        match="lacks immutable current-process client-origin authority",
+    ):
+        bridge._source_origin.resolve_bound_receipt(
+            source,
+            receipt_id=receipt.receipt_id,
+            record_sha256=receipt.record_sha256,
+            as_of=NOW,
+        )

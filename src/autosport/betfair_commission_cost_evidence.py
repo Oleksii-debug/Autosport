@@ -88,11 +88,15 @@ def issue_betfair_commission_cost_evidence(
         )
 
     try:
-        stable_account_id = _stable_source_account_id(source)
+        stable_account_id, account_observed = _stable_source_account_identity(source)
     except Exception as exc:
         raise BetfairCommissionCostEvidenceError(
             "stable authenticated Betfair account identity is unavailable"
         ) from exc
+    if account_observed > as_of:
+        raise BetfairCommissionCostEvidenceError(
+            "future account-identity verification cannot be backdated"
+        )
     if stable_account_id != provider_scope.authenticated_account_id:
         raise BetfairCommissionCostEvidenceError(
             "commission source account is outside campaign provider scope"
@@ -126,8 +130,8 @@ def issue_betfair_commission_cost_evidence(
         )
 
     memberships = _scoped_memberships(projection.membership_refs, provider_scope)
-    available_at = max(receipt.available_at, scope_available)
-    observed_at = max(receipt.observed_at, scope_observed)
+    available_at = max(receipt.available_at, scope_available, account_observed)
+    observed_at = max(receipt.observed_at, scope_observed, account_observed)
     if available_at > as_of:
         raise BetfairCommissionCostEvidenceError(
             "combined source/applicability evidence is not yet available"
@@ -185,17 +189,24 @@ def verify_betfair_commission_cost_evidence(
     return evidence == expected
 
 
-def _stable_source_account_id(source: BetfairMarketCommissionAuthority) -> str:
-    """Derive stable account identity from the source's canonical live client.
+def _stable_source_account_identity(
+    source: BetfairMarketCommissionAuthority,
+) -> tuple[str, datetime]:
+    """Derive stable account identity and its real source-observation time.
 
     ``BetfairMarketCommissionAuthority`` constructs this client internally and does
     not accept injected transport/clock. The developer-app identity helper itself
     rejects non-canonical origins, so ordinary callers cannot relabel one receipt as
-    another Betfair account by passing an account string.
+    another Betfair account by passing an account string. Its observation time is
+    carried into CostEvidence availability so later re-verification cannot be
+    backdated into an earlier economic snapshot.
     """
 
     identity = _devapp._read_developer_account_identity(source._client)
-    return f"betfair-account-evidence:{identity.account_identity_sha256}"
+    return (
+        f"betfair-account-evidence:{identity.account_identity_sha256}",
+        _instant(identity.observed_at, "stable account observed_at"),
+    )
 
 
 def _scoped_memberships(

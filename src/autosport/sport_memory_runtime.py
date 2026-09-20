@@ -245,6 +245,18 @@ class SportMemoryRuntime:
         runtime._persist()
         return runtime
 
+    def _require_durable_positive_authority(self) -> None:
+        # Import lazily to avoid a module cycle while making the production write
+        # boundary exact: only the concrete checkpoint-bound runtime may emit a
+        # durable positive sport-memory artifact. Low-level fake-authority seams
+        # remain test-only and cannot authorize this public production path.
+        from .sport_memory_checkpoint import BoundSportMemoryRuntime
+
+        if type(self) is not BoundSportMemoryRuntime:
+            raise SportMemoryError(
+                "durable positive sport memory requires checkpoint-bound canonical authority"
+            )
+
     def materialize(
         self,
         *,
@@ -259,6 +271,7 @@ class SportMemoryRuntime:
         max_age_seconds: int = 30 * 24 * 60 * 60,
         algorithm_version: str = "mean-score-v1",
     ) -> SportMemoryArtifact:
+        self._require_durable_positive_authority()
         participant = _text("participant_entity_id", participant_entity_id)
         cutoff = _text("causal_cutoff", causal_cutoff)
         publication = _text("published_at", published_at)

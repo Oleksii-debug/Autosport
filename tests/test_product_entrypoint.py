@@ -19,11 +19,12 @@ class _Source:
     stream_epoch = "epoch-1"
 
     def fetch_catalog_page(self, checkpoint):
+        position = 1 if checkpoint is None else int(getattr(checkpoint, "position")) + 1
         return CatalogPage(
             source_id=self.source_id,
             stream_epoch=self.stream_epoch,
-            cursor="catalog-1",
-            position=1,
+            cursor=f"catalog-{position}",
+            position=position,
             events=(),
         )
 

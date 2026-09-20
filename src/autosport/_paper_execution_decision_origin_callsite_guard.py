@@ -280,18 +280,21 @@ def _execute_with_exact_product_callsite(
     evidence_registry=None,
     suspended_action_ids: frozenset[str] = frozenset(),
 ):
-    # Ambient ContextVar state is caller-controlled input unless this exact wrapper
-    # minted it for the current product call below. Never inherit it across calls.
-    if (
-        _origin._DECISION_ORIGIN.get() is not None
-        or _instance_guard._PRODUCT_ORIGIN_RUNTIME.get() is not None
-    ):
+    # A runtime token can only exist inside this wrapper's own stable execution.
+    # Seeing one at entry means a caller tried to smuggle product authority across
+    # an invocation boundary.
+    if _instance_guard._PRODUCT_ORIGIN_RUNTIME.get() is not None:
         raise _origin.PaperExecutionDecisionOriginError(
-            "caller-supplied decision-origin context cannot authorize product execution"
+            "caller-supplied product-origin runtime context is not authority"
         )
+    ambient_origin = _origin._DECISION_ORIGIN.get()
 
     decision_id = getattr(getattr(prepared, "execution_plan", None), "decision_id", None)
     if type(decision_id) is not str or not decision_id:
+        if ambient_origin is not None:
+            raise _origin.PaperExecutionDecisionOriginError(
+                "caller-supplied decision-origin context cannot authorize execution"
+            )
         return _execute_stable(
             self,
             prepared=prepared,
@@ -312,11 +315,28 @@ def _execute_with_exact_product_callsite(
             if caller is None
             else _origin_from_direct_caller(self, decision_id, caller)
         )
+
+        if ambient_origin is not None:
+            if (
+                caller is None
+                or caller.f_code
+                not in {_PAPER_VALUE_FRESH_CODE, _PAPER_VALUE_RECOVERY_CODE}
+                or origin is None
+                or origin != ambient_origin
+            ):
+                raise _origin.PaperExecutionDecisionOriginError(
+                    "ambient decision origin is not the exact verified paper-value resume origin"
+                )
+
         if origin is None:
             ancestor = None if caller is None else caller.f_back
             if _matching_product_ancestor(self, decision_id, ancestor):
                 raise PaperExecutionAdoptionError(
                     "nested PAPER execution cannot inherit product decision-origin authority"
+                )
+            if ambient_origin is not None:
+                raise _origin.PaperExecutionDecisionOriginError(
+                    "ambient decision origin cannot authorize non-product execution"
                 )
             return _execute_stable(
                 self,
@@ -333,7 +353,9 @@ def _execute_with_exact_product_callsite(
                 "product execution trigger does not match verified DecisionLedger origin"
             )
 
-        origin_token = _origin._DECISION_ORIGIN.set(origin)
+        origin_token = None
+        if ambient_origin is None:
+            origin_token = _origin._DECISION_ORIGIN.set(origin)
         runtime_token = _instance_guard._PRODUCT_ORIGIN_RUNTIME.set(self)
         try:
             return _execute_stable(
@@ -348,7 +370,8 @@ def _execute_with_exact_product_callsite(
             )
         finally:
             _instance_guard._PRODUCT_ORIGIN_RUNTIME.reset(runtime_token)
-            _origin._DECISION_ORIGIN.reset(origin_token)
+            if origin_token is not None:
+                _origin._DECISION_ORIGIN.reset(origin_token)
     finally:
         del current
         del caller

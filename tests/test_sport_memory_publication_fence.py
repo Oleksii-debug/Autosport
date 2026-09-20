@@ -18,7 +18,7 @@ from autosport.sport_memory_checkpoint import (
     initialize_or_open_bound_sport_memory_runtime,
     open_bound_sport_memory_runtime,
 )
-from autosport.sport_memory_runtime import SportMemoryScope
+from autosport.sport_memory_runtime import SportMemoryError, SportMemoryRuntime, SportMemoryScope
 
 
 SHA_A = "a" * 64
@@ -102,6 +102,43 @@ def _scope() -> SportMemoryScope:
         league_entity_id="league-tour-a",
         market_context_id="match-outcome",
     )
+
+
+def test_explicit_public_base_dispatch_cannot_skip_bound_refresh(tmp_path):
+    identity, opponent = _canonical_stores(tmp_path)
+    checkpoint_path = tmp_path / "sport-memory-authority.json"
+    runtime_path = tmp_path / "sport-memory.json"
+    runtime = initialize_or_open_bound_sport_memory_runtime(
+        runtime_path,
+        checkpoint_path,
+        identity,
+        opponent,
+    )
+
+    class _PoisonAuthority:
+        called = False
+
+        def build_snapshots(self, **kwargs):
+            self.called = True
+            raise AssertionError("caller-supplied authority must not be reached")
+
+    poison = _PoisonAuthority()
+    runtime.opponent_authority = poison
+
+    with pytest.raises(SportMemoryError, match="canonical bound authority"):
+        SportMemoryRuntime.materialize(
+            runtime,
+            participant_entity_id="p-alex",
+            scope=_scope(),
+            causal_cutoff=T2,
+            published_at=T3,
+            code_sha256=SHA_A,
+            dependency_sha256=SHA_B,
+            min_support=1,
+        )
+
+    assert not poison.called
+    assert runtime.participant_history("p-alex", _scope()) == ()
 
 
 def test_bound_materialization_cannot_overwrite_concurrent_source_generation(

@@ -118,8 +118,8 @@ def _materialize(
     )
 
 
-def test_as_known_request_rejects_latest_restated_snapshot_pair(tmp_path):
-    authority = _ViewAuthority(IdentityView.LATEST_RESTATED)
+def test_as_known_request_rejects_restated_research_snapshot_pair(tmp_path):
+    authority = _ViewAuthority(IdentityView.RESTATED_RESEARCH)
     runtime = SportMemoryRuntime.initialize_pristine(
         tmp_path / "sport-memory.json",
         authority,
@@ -171,26 +171,26 @@ def test_tampering_persisted_identity_view_invalidates_artifact_digest(tmp_path)
     _materialize(runtime)
 
     raw = json.loads(path.read_text(encoding="utf-8"))
-    raw["artifacts"][0]["identity_view"] = "LATEST_RESTATED"
+    raw["artifacts"][0]["identity_view"] = "RESTATED_RESEARCH"
     path.write_text(json.dumps(raw, sort_keys=True) + "\n", encoding="utf-8")
 
     with pytest.raises(SportMemoryError, match="artifact digest mismatch"):
         SportMemoryRuntime(
             path,
-            _ViewAuthority(IdentityView.LATEST_RESTATED),
+            _ViewAuthority(IdentityView.RESTATED_RESEARCH),
             authority_generation_sha256=SHA_3,
         )
 
 
-def test_latest_restated_artifact_is_not_default_decision_view(tmp_path):
+def test_restated_research_artifact_is_not_default_decision_view(tmp_path):
     runtime = SportMemoryRuntime.initialize_pristine(
         tmp_path / "sport-memory.json",
-        _ViewAuthority(IdentityView.LATEST_RESTATED),
+        _ViewAuthority(IdentityView.RESTATED_RESEARCH),
         authority_generation_sha256=SHA_3,
     )
-    artifact = _materialize(runtime, view=IdentityView.LATEST_RESTATED)
+    artifact = _materialize(runtime, view=IdentityView.RESTATED_RESEARCH)
 
-    assert artifact.identity_view is IdentityView.LATEST_RESTATED
+    assert artifact.identity_view is IdentityView.RESTATED_RESEARCH
     assert runtime.participant_history("participant-1", _scope()) == ()
     assert runtime.last_causal_snapshot(
         "participant-1",
@@ -200,7 +200,7 @@ def test_latest_restated_artifact_is_not_default_decision_view(tmp_path):
     assert runtime.participant_history(
         "participant-1",
         _scope(),
-        view=IdentityView.LATEST_RESTATED,
+        view=IdentityView.RESTATED_RESEARCH,
     ) == (artifact,)
 
     with pytest.raises(SportMemoryError, match="identity view mismatch"):
@@ -218,6 +218,6 @@ def test_latest_restated_artifact_is_not_default_decision_view(tmp_path):
         decision_cutoff="2026-09-20T10:00:02Z",
         consumed_at="2026-09-20T10:00:03Z",
         expected_scope=_scope(),
-        expected_view=IdentityView.LATEST_RESTATED,
+        expected_view=IdentityView.RESTATED_RESEARCH,
     )
     assert consumption.memory_id == artifact.memory_id

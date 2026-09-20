@@ -7,6 +7,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+from autosport.champion_agent_episode import ChampionAgentEpisode
 from autosport.paper_campaign_episode_handoff import (
     PaperCampaignEpisodeHandoff,
     PaperCampaignEpisodeHandoffError,
@@ -115,6 +116,84 @@ class PaperCampaignEpisodeHandoffGuardTests(unittest.TestCase):
                         snapshot,
                         at=_legacy.T3,
                     )
+
+    def test_prechild_intent_survives_sidecar_rollback(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            root = base / "workspace"
+            root.mkdir()
+            with patch.dict(
+                os.environ,
+                {"AUTOSPORT_MONOTONIC_AUTHORITY_ROOT": str(base / "authority")},
+            ):
+                environment, runtime = self._terminal_parent(root)
+                snapshot = runtime.agent_loop.snapshot()
+                policy = self._policy(environment)
+                handoff = PaperCampaignEpisodeHandoff(runtime)
+                created: dict[str, str] = {}
+                original_initialize = ChampionAgentEpisode.initialize_pristine
+
+                def crash_after_child(*args, **kwargs):
+                    child = original_initialize(*args, **kwargs)
+                    created["episode_id"] = child.environment.episode.episode_id
+                    raise RuntimeError("injected crash after durable child")
+
+                with patch(
+                    "autosport.champion_agent_episode.load_champion_policy",
+                    return_value=policy,
+                ), patch.object(
+                    ChampionAgentEpisode,
+                    "initialize_pristine",
+                    side_effect=crash_after_child,
+                ):
+                    with self.assertRaisesRegex(
+                        RuntimeError, "injected crash after durable child"
+                    ):
+                        self._start(
+                            handoff,
+                            root,
+                            environment,
+                            snapshot,
+                        )
+
+                self.assertTrue((root / "child-agent-loop.json").exists())
+                handoff.state_path.unlink()
+                recreated = PaperCampaignEpisodeHandoff(runtime)
+
+                with patch(
+                    "autosport.champion_agent_episode.load_champion_policy",
+                    return_value=policy,
+                ):
+                    with self.assertRaisesRegex(
+                        PaperCampaignEpisodeHandoffError,
+                        "intent conflicts with durable reservation",
+                    ):
+                        self._start(
+                            recreated,
+                            root,
+                            environment,
+                            snapshot,
+                            child_name="other-child-agent-loop.json",
+                            episode_key="campaign-episode-3",
+                            loop_id="campaign-loop-3",
+                            at=_legacy.T5,
+                        )
+                self.assertFalse((root / "other-child-agent-loop.json").exists())
+
+                with patch(
+                    "autosport.champion_agent_episode.load_champion_policy",
+                    return_value=policy,
+                ):
+                    recovered = self._start(
+                        recreated,
+                        root,
+                        environment,
+                        snapshot,
+                    )
+                self.assertEqual(
+                    recovered.episode.environment.episode.episode_id,
+                    created["episode_id"],
+                )
 
     def test_committed_parent_consumption_survives_handoff_file_deletion(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

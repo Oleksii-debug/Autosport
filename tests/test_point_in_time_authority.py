@@ -55,6 +55,31 @@ def _iso(value: datetime) -> str:
     return value.isoformat().replace("+00:00", "Z")
 
 
+def _witness_content(
+    *,
+    source_as_of: datetime,
+    available_at: datetime,
+) -> tuple[str, str]:
+    payload = {
+        "schema": "autosport.source_availability_witness",
+        "schema_version": 1,
+        "source_identity": "lawful-provider:fixture",
+        "source_revision": "provider-revision-17",
+        "source_revision_sha256": SHA_D,
+        "witness_kind": "provider-publication-metadata",
+        "source_as_of": _iso(source_as_of),
+        "available_at": _iso(available_at),
+    }
+    text = json.dumps(
+        payload,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    )
+    return text, hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
 def _snapshot(
     snapshot_id: str = "dataset-1",
     *,
@@ -127,15 +152,13 @@ def _source_store(
         frozen_at=BASE - timedelta(days=1),
     )
     store.register_policy(policy)
-    witness = AvailabilityWitnessAuthority(
-        availability_witness_id="provider-publication:17",
-        source_identity="lawful-provider:fixture",
-        source_revision="provider-revision-17",
-        source_revision_sha256=SHA_D,
-        witness_kind=policy.witness_kind,
-        witness_content_sha256=SHA_F,
+    witness_content_json, _ = _witness_content(
         source_as_of=source_as_of,
         available_at=available_at,
+    )
+    witness = AvailabilityWitnessAuthority.create(
+        availability_witness_id="provider-publication:17",
+        witness_content_json=witness_content_json,
         recorded_at=max(available_at, BASE + timedelta(minutes=35)),
     )
     store.register_witness(witness)
@@ -226,7 +249,11 @@ def test_feature_availability_resolves_registered_dataset_feature_policy_and_rev
     assert evidence.feature_set_id == "features-1"
     assert evidence.source_revision == "provider-revision-17"
     assert evidence.source_revision_sha256 == SHA_D
-    assert evidence.availability_witness_sha256 == SHA_F
+    _, expected_witness_sha256 = _witness_content(
+        source_as_of=BASE + timedelta(minutes=20),
+        available_at=BASE + timedelta(minutes=30),
+    )
+    assert evidence.availability_witness_sha256 == expected_witness_sha256
     assert evidence.witness_kind == "provider-publication-metadata"
     assert len(evidence.dataset_record_sha256) == 64
     assert len(evidence.feature_record_sha256) == 64
@@ -345,6 +372,40 @@ def test_revision_with_arbitrary_policy_digest_cannot_be_registered(tmp_path) ->
 
     with pytest.raises(SourceRevisionAuthorityError, match="policy digest mismatch"):
         store.register_revision(forged)
+
+
+def test_availability_witness_content_is_hash_bound_and_canonical() -> None:
+    content, digest = _witness_content(
+        source_as_of=BASE + timedelta(minutes=20),
+        available_at=BASE + timedelta(minutes=30),
+    )
+    witness = AvailabilityWitnessAuthority.create(
+        availability_witness_id="provider-publication:17",
+        witness_content_json=content,
+        recorded_at=BASE + timedelta(minutes=40),
+    )
+    assert witness.witness_content_sha256 == digest
+
+    forged = content.replace(
+        _iso(BASE + timedelta(minutes=30)),
+        _iso(BASE + timedelta(minutes=29)),
+    )
+    with pytest.raises(
+        SourceRevisionAuthorityError,
+        match="content does not match authority fields|content digest mismatch",
+    ):
+        AvailabilityWitnessAuthority(
+            availability_witness_id=witness.availability_witness_id,
+            source_identity=witness.source_identity,
+            source_revision=witness.source_revision,
+            source_revision_sha256=witness.source_revision_sha256,
+            witness_kind=witness.witness_kind,
+            witness_content_sha256=witness.witness_content_sha256,
+            witness_content_json=forged,
+            source_as_of=witness.source_as_of,
+            available_at=witness.available_at,
+            recorded_at=witness.recorded_at,
+        )
 
 
 def test_revision_rejects_unknown_or_forged_availability_witness(tmp_path) -> None:

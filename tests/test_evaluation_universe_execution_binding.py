@@ -5,6 +5,10 @@ from decimal import Decimal
 
 import pytest
 
+import autosport.provider_observation_authority as provider_module
+from autosport._evaluation_universe_structural_gate import (
+    _authorize_structural_intake_for_tests,
+)
 from autosport.evaluation_intake import (
     EvaluationIntakeError,
     EvaluationIntakeIntegrityError,
@@ -23,6 +27,20 @@ from autosport.evaluation_universe import (
     SlotState,
     build_frozen_universe,
 )
+from autosport.event_lifecycle import (
+    CatalogEvent,
+    CatalogPage,
+    ContinuousEventLifecycle,
+    EventPhase,
+)
+from autosport.provider_evaluation_universe import (
+    build_frozen_universe_from_complete_game_board,
+    complete_game_board_member_specs,
+)
+from autosport.provider_observation_authority import (
+    CompleteGameBoardRequest,
+    capture_parlay_complete_game_board,
+)
 from autosport.paper_execution_reality import (
     EvidenceGrade,
     PaperAttemptOutcome,
@@ -34,6 +52,131 @@ from autosport.paper_execution_reality import (
 H = "a" * 64
 H2 = "b" * 64
 H3 = "c" * 64
+
+
+PROVIDER_CAPTURED_AT = "2026-09-20T00:00:01Z"
+PROVIDER_EVALUATION_AT = "2026-09-20T00:00:03Z"
+PROVIDER_FROZEN_AT = "2026-09-20T00:05:00Z"
+PROVIDER_REVEAL_AT = "2026-09-20T00:10:00Z"
+
+
+def _provider_request() -> CompleteGameBoardRequest:
+    return CompleteGameBoardRequest(
+        sport_key="football",
+        bookmakers=("bovada",),
+        max_age_s=600,
+    )
+
+
+def _provider_frame() -> dict[str, object]:
+    return {
+        "type": "initial_state",
+        "sport_key": "football",
+        "snapshot_scope": "current_game_board",
+        "snapshot_complete": True,
+        "truncated": False,
+        "resume_mode": "replace",
+        "partial": False,
+        "missing_books": [],
+        "truncated_books": [],
+        "snapshot_partial_reasons": [],
+        "count": 1,
+        "timestamp": 1789862401,
+        "data": [
+            {
+                "event_id": "event-1",
+                "bookmaker": "bovada",
+                "kind": "game",
+                "market_key": "h2h",
+                "home_ml": -110,
+                "away_ml": 105,
+                "last_update": "2026-09-20T00:00:00Z",
+            }
+        ],
+    }
+
+
+def _capture_provider_board():
+    patcher = pytest.MonkeyPatch()
+    patcher.setattr(
+        provider_module,
+        "_read_production_initial_state",
+        lambda request_scope, *, api_key, timeout_seconds: _provider_frame(),
+    )
+    patcher.setattr(provider_module, "_default_clock", lambda: PROVIDER_CAPTURED_AT)
+    try:
+        return capture_parlay_complete_game_board(
+            api_key="test-key",
+            request=_provider_request(),
+            timeout_seconds=1.0,
+        )
+    finally:
+        patcher.undo()
+
+
+def _provider_lifecycle(workspace) -> ContinuousEventLifecycle:
+    workspace.mkdir(parents=True, exist_ok=True)
+    request = _provider_request()
+    lifecycle = ContinuousEventLifecycle(workspace / "event-lifecycle.json")
+    lifecycle.apply_page(
+        CatalogPage(
+            source_id=request.source_id,
+            stream_epoch="epoch-1",
+            cursor="cursor-1",
+            position=0,
+            events=(
+                CatalogEvent(
+                    source_id=request.source_id,
+                    sport=request.sport_key,
+                    event_id="event-1",
+                    phase=EventPhase.PRE_MATCH,
+                    available_at="2026-09-20T00:00:00Z",
+                    scheduled_start_at=PROVIDER_REVEAL_AT,
+                ),
+            ),
+        ),
+        discovered_at=PROVIDER_CAPTURED_AT,
+    )
+    return lifecycle
+
+
+def _providerize_row(template: EvaluationRow, snapshot, member) -> EvaluationRow:
+    return replace(
+        template,
+        row_key=member.row_key,
+        sport=snapshot.request.sport_key,
+        provider_id="parlayapi",
+        source_id=snapshot.request.source_id,
+        event_id=member.event_id,
+        market_id=member.market_id,
+        selection_id=member.selection_id,
+        source_at=member.source_at,
+        received_at=PROVIDER_CAPTURED_AT,
+        committed_at="2026-09-20T00:00:02Z",
+        detection_at=PROVIDER_EVALUATION_AT if template.detection_at is not None else None,
+        decision_at="2026-09-20T00:00:04Z" if template.decision_at is not None else None,
+        execution_run_id=(
+            f"{template.execution_run_id}:{member.selection_id}"
+            if template.execution_run_id is not None
+            else None
+        ),
+        execution_plan_id=(
+            f"{template.execution_plan_id}:{member.selection_id}"
+            if template.execution_plan_id is not None
+            else None
+        ),
+        execution_action_id=(
+            f"{template.execution_action_id}:{member.selection_id}"
+            if template.execution_action_id is not None
+            else None
+        ),
+        decision_quote_id=(
+            f"{template.decision_quote_id}:{member.selection_id}"
+            if template.decision_quote_id is not None
+            else None
+        ),
+        outcome_reveal_not_before=member.outcome_reveal_not_before,
+    )
 
 
 class _Resolver:
@@ -155,17 +298,26 @@ def _intake(workspace, rows: tuple[EvaluationRow, ...]) -> ObservationIntakeLedg
 
 
 def _universe(workspace, rows: tuple[EvaluationRow, ...]):
-    intake = _intake(workspace, rows)
-    frozen = build_frozen_universe(
-        intake_ledger=intake,
+    if len(rows) != 1:
+        raise ValueError("provider execution-binding fixture expects one template row")
+    snapshot = _capture_provider_board()
+    lifecycle = _provider_lifecycle(workspace)
+    members = complete_game_board_member_specs(snapshot, event_lifecycle=lifecycle)
+    provider_rows = tuple(_providerize_row(rows[0], snapshot, member) for member in members)
+    frozen = build_frozen_universe_from_complete_game_board(
+        snapshot=snapshot,
+        event_lifecycle=lifecycle,
+        authority_id="provider-intake-1",
+        session_id="session-1",
         universe_id="universe-1",
         campaign_id="campaign-1",
         research_protocol_id="protocol-1",
         protocol_sha256=H,
-        frozen_at="2026-09-20T00:05:00Z",
-        rows=rows,
+        evaluation_not_before=PROVIDER_EVALUATION_AT,
+        frozen_at=PROVIDER_FROZEN_AT,
+        rows=provider_rows,
     )
-    return intake, frozen
+    return provider_rows[0], frozen
 
 
 def _paper_attempt(
@@ -192,7 +344,7 @@ def _paper_attempt(
         plan_id=plan_id or row.execution_plan_id,
         action_id=action_id or row.execution_action_id,
         sequence=0,
-        bookmaker_id="provider-1",
+        bookmaker_id=row.provider_id,
         account_id="paper-account-1",
         event_id=event_id or row.event_id,
         market_id=market_id or row.market_id,
@@ -255,8 +407,7 @@ def _outcome(
 
 
 def test_exact_canonical_paper_attempt_can_enrich_frozen_row(tmp_path):
-    row = _row()
-    _, frozen = _universe(tmp_path / "intake", (row,))
+    row, frozen = _universe(tmp_path / "intake", (_row(),))
     resolver, reality = _resolver(tmp_path / "paper", _paper_attempt(row))
     ledger = EvaluationUniverseLedger(frozen, paper_resolver=resolver)
     ledger = ledger.append(_attempted(row)).append(
@@ -282,8 +433,7 @@ def test_exact_canonical_paper_attempt_can_enrich_frozen_row(tmp_path):
 
 
 def test_invented_reality_digest_is_rejected(tmp_path):
-    row = _row()
-    _, frozen = _universe(tmp_path / "intake", (row,))
+    row, frozen = _universe(tmp_path / "intake", (_row(),))
     resolver, _ = _resolver(tmp_path / "paper", _paper_attempt(row))
     ledger = EvaluationUniverseLedger(frozen, paper_resolver=resolver).append(
         _attempted(row)
@@ -294,8 +444,7 @@ def test_invented_reality_digest_is_rejected(tmp_path):
 
 
 def test_foreign_paper_attempt_cannot_be_spliced_into_frozen_row(tmp_path):
-    row = _row()
-    _, frozen = _universe(tmp_path / "intake", (row,))
+    row, frozen = _universe(tmp_path / "intake", (_row(),))
     foreign = _paper_attempt(
         row,
         attempt_id="attempt-foreign",
@@ -320,8 +469,7 @@ def test_foreign_paper_attempt_cannot_be_spliced_into_frozen_row(tmp_path):
 
 
 def test_funnel_outcome_must_equal_canonical_paper_outcome(tmp_path):
-    row = _row()
-    _, frozen = _universe(tmp_path / "intake", (row,))
+    row, frozen = _universe(tmp_path / "intake", (_row(),))
     resolver, reality = _resolver(
         tmp_path / "paper",
         _paper_attempt(row, outcome=PaperAttemptOutcome.REJECTED),
@@ -335,8 +483,7 @@ def test_funnel_outcome_must_equal_canonical_paper_outcome(tmp_path):
 
 
 def test_execution_model_and_local_attempt_identity_are_fail_closed(tmp_path):
-    row = _row()
-    _, frozen = _universe(tmp_path / "intake", (row,))
+    row, frozen = _universe(tmp_path / "intake", (_row(),))
     with pytest.raises(EvaluationUniverseError, match="execution model"):
         EvaluationUniverseLedger(frozen).append(
             FunnelEvent(
@@ -359,8 +506,7 @@ def test_execution_model_and_local_attempt_identity_are_fail_closed(tmp_path):
 
 
 def test_paper_outcome_cannot_precede_canonical_execution_observation(tmp_path):
-    row = _row()
-    _, frozen = _universe(tmp_path / "intake", (row,))
+    row, frozen = _universe(tmp_path / "intake", (_row(),))
     resolver, reality = _resolver(tmp_path / "paper", _paper_attempt(row))
     ledger = EvaluationUniverseLedger(frozen, paper_resolver=resolver).append(
         _attempted(row)
@@ -380,6 +526,7 @@ def test_canonical_intake_rejects_rows_when_both_caller_manifest_and_rows_would_
     candidate = _row("candidate")
     no_quote = _row("no-quote", slot_state=SlotState.NO_QUOTE)
     intake = _intake(tmp_path, (candidate, no_quote))
+    _authorize_structural_intake_for_tests(intake)
 
     with pytest.raises(EvaluationUniverseError, match="canonical pre-result intake membership"):
         build_frozen_universe(
@@ -424,8 +571,7 @@ def test_intake_cycle_retry_is_idempotent_but_resolver_drift_fails(tmp_path):
 
 
 def test_terminal_corrections_must_extend_the_unique_current_tip(tmp_path):
-    row = _row()
-    _, frozen = _universe(tmp_path / "intake", (row,))
+    row, frozen = _universe(tmp_path / "intake", (_row(),))
     resolver, reality = _resolver(tmp_path / "paper", _paper_attempt(row))
     ledger = EvaluationUniverseLedger(frozen, paper_resolver=resolver)
     ledger = ledger.append(_attempted(row)).append(

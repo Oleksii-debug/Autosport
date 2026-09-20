@@ -209,7 +209,10 @@ class RestartRecoveryAuditTests(unittest.TestCase):
                     restart_audit.run_restart_recovery_audit(output)
 
             self.assertEqual(output.read_bytes(), previous)
-            self.assertEqual([item.name for item in root.iterdir()], [output.name])
+            self.assertEqual(
+                {item.name for item in root.iterdir()},
+                {output.name, f".{output.name}.lock"},
+            )
 
 
 if __name__ == "__main__":

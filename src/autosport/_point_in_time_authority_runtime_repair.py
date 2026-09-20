@@ -27,6 +27,9 @@ from .scientific_registry import ScientificRegistry
 
 _ORIGINAL_BIND = evidence.PointInTimeFeatureAuthority.bind
 _ORIGINAL_LOAD = evidence.HoldoutConsumptionLedger._load
+_PROVENANCE_GUARD_MODULE_NAME = (
+    f"{__package__}._point_in_time_feature_provenance_guard"
+)
 
 
 def _fsync_directory_fail_closed(path: Path) -> None:
@@ -159,7 +162,7 @@ def _install_runtime_guards() -> None:
 
 
 class _PointInTimeReloadLoader(importlib.abc.Loader):
-    """Wrap only reload execution of the point-in-time authority module."""
+    """Wrap reload execution of either authority-bearing point-in-time submodule."""
 
     def __init__(self, wrapped: importlib.abc.Loader) -> None:
         self._wrapped = wrapped
@@ -172,15 +175,20 @@ class _PointInTimeReloadLoader(importlib.abc.Loader):
 
     def exec_module(self, module) -> None:
         self._wrapped.exec_module(module)
-        if module is evidence:
+        if module is evidence or module.__name__ == _PROVENANCE_GUARD_MODULE_NAME:
             _install_runtime_guards()
 
 
 class _PointInTimeReloadFinder(importlib.abc.MetaPathFinder):
-    """Intercept only explicit reload of the already-loaded authority submodule."""
+    """Intercept explicit reload of either already-loaded authority submodule."""
 
     def find_spec(self, fullname, path, target=None):
-        if fullname != evidence.__name__ or target is not evidence:
+        is_evidence_reload = fullname == evidence.__name__ and target is evidence
+        is_provenance_reload = (
+            fullname == _PROVENANCE_GUARD_MODULE_NAME
+            and target is sys.modules.get(_PROVENANCE_GUARD_MODULE_NAME)
+        )
+        if not (is_evidence_reload or is_provenance_reload):
             return None
         spec = importlib.machinery.PathFinder.find_spec(fullname, path)
         if spec is None or spec.loader is None:

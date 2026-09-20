@@ -33,8 +33,8 @@ from .storage import SQLiteMarketStore
 
 
 SCHEMA: Final = "autosport.sport_memory_result_binding"
-SCHEMA_VERSION: Final = 5
-_SOURCE_EVIDENCE_KIND: Final = "sport-memory-result-source-pair-v4"
+SCHEMA_VERSION: Final = 6
+_SOURCE_EVIDENCE_KIND: Final = "sport-memory-result-source-pair-v5"
 
 
 class SportMemoryResultMaterializationError(ValueError):
@@ -108,7 +108,8 @@ class SportMemoryResultBinding:
     Display aliases never double as provider selection or competition identifiers.
     Complete bindings minted by :meth:`freeze_binding` persist provider identifiers,
     canonical participant/league roots, exact quote identities, the canonical
-    event-membership fingerprint, and any provider-selection inference cutoff.
+    event-membership fingerprint, and the causal provider-binding cutoff that
+    mechanically fixes those identifiers from product-owned pre-reveal evidence.
     """
 
     event_identity: str
@@ -128,6 +129,7 @@ class SportMemoryResultBinding:
     subject_entity_id: str | None = None
     opponent_entity_id: str | None = None
     league_entity_id: str | None = None
+    provider_binding_as_of: str | None = None
     provider_inference_as_of: str | None = None
     identity_sha256: str | None = None
 
@@ -161,6 +163,12 @@ class SportMemoryResultBinding:
             value = getattr(self, name)
             if value is not None:
                 _text(name, value)
+        if self.provider_binding_as_of is not None:
+            object.__setattr__(
+                self,
+                "provider_binding_as_of",
+                _time_text("provider_binding_as_of", self.provider_binding_as_of),
+            )
         if self.provider_inference_as_of is not None:
             object.__setattr__(
                 self,
@@ -211,6 +219,7 @@ class SportMemoryResultBinding:
             "subject_entity_id": self.subject_entity_id,
             "opponent_entity_id": self.opponent_entity_id,
             "league_entity_id": self.league_entity_id,
+            "provider_binding_as_of": self.provider_binding_as_of,
             "provider_inference_as_of": self.provider_inference_as_of,
             "identity_sha256": self.identity_sha256,
         }
@@ -301,6 +310,7 @@ def _source_pair_digest(
     opponent: MarketEvent,
     frozen_at: str,
     identity_sha256: str,
+    provider_binding_as_of: str,
     provider_inference_as_of: str | None,
 ) -> str:
     return _digest(
@@ -308,6 +318,7 @@ def _source_pair_digest(
             "kind": _SOURCE_EVIDENCE_KIND,
             "frozen_at": frozen_at,
             "identity_sha256": identity_sha256,
+            "provider_binding_as_of": provider_binding_as_of,
             "provider_inference_as_of": provider_inference_as_of,
             "subject_selection_id": subject.selection_id,
             "subject_dedupe_key": subject.dedupe_key,
@@ -562,8 +573,6 @@ class SportMemoryResultMaterializer:
             raise SportMemoryResultMaterializationError(
                 "provider competition id does not match canonical quote"
             )
-        if opponent_selection_id is not None:
-            return subject_selection, opponent_selection_id, competition
 
         try:
             opponent_alias_record = ParticipantIdentityRegistry.resolve_alias_record(
@@ -608,6 +617,10 @@ class SportMemoryResultMaterializer:
         if len(matches) != 1:
             raise SportMemoryResultMaterializationError(
                 "opponent provider selection cannot be resolved uniquely through canonical identity"
+            )
+        if opponent_selection_id is not None and matches[0] != opponent_selection_id:
+            raise SportMemoryResultMaterializationError(
+                "opponent provider selection id does not match canonical pre-reveal identity"
             )
         return subject_selection, matches[0], competition
 
@@ -679,14 +692,13 @@ class SportMemoryResultMaterializer:
             opponent_quote_key=None,
             as_of=binding_as_of,
         )
+        provider_binding_as_of = binding_as_of
         provider_inference_as_of = binding_as_of if opponent_was_inferred else None
-        if (
-            provider_inference_as_of is not None
-            and _instant("provider_inference_as_of", provider_inference_as_of)
-            < _instant("frozen_at", frozen_at)
+        if _instant("provider_binding_as_of", provider_binding_as_of) < _instant(
+            "frozen_at", frozen_at
         ):
             raise SportMemoryResultMaterializationError(
-                "provider-selection inference cutoff cannot precede frozen quote evidence"
+                "provider-binding cutoff cannot precede frozen quote evidence"
             )
         snapshot = self._resolve_identity_snapshot(
             event_identity=event_identity,
@@ -705,6 +717,7 @@ class SportMemoryResultMaterializer:
             opponent,
             frozen_at,
             identity_sha256,
+            provider_binding_as_of,
             provider_inference_as_of,
         )
         return SportMemoryResultBinding(
@@ -725,6 +738,7 @@ class SportMemoryResultMaterializer:
             subject_entity_id=snapshot.subject_entity_id,
             opponent_entity_id=snapshot.opponent_entity_id,
             league_entity_id=snapshot.league_entity_id,
+            provider_binding_as_of=provider_binding_as_of,
             provider_inference_as_of=provider_inference_as_of,
             identity_sha256=identity_sha256,
         )
@@ -788,18 +802,30 @@ class SportMemoryResultMaterializer:
             raise SportMemoryResultMaterializationError(
                 "result binding must be frozen before settlement reveal"
             )
+        if binding.provider_binding_as_of is None:
+            raise SportMemoryResultMaterializationError(
+                "result binding lacks product-owned pre-reveal provider-selection authority"
+            )
+        provider_binding_as_of = _instant(
+            "binding.provider_binding_as_of",
+            binding.provider_binding_as_of,
+        )
+        if provider_binding_as_of < frozen:
+            raise SportMemoryResultMaterializationError(
+                "provider-binding cutoff cannot precede frozen quote evidence"
+            )
+        if provider_binding_as_of >= available:
+            raise SportMemoryResultMaterializationError(
+                "provider-selection binding must predate settlement reveal"
+            )
         if binding.provider_inference_as_of is not None:
             inference = _instant(
                 "binding.provider_inference_as_of",
                 binding.provider_inference_as_of,
             )
-            if inference < frozen:
+            if inference != provider_binding_as_of:
                 raise SportMemoryResultMaterializationError(
-                    "provider-selection inference cutoff cannot precede frozen quote evidence"
-                )
-            if inference >= available:
-                raise SportMemoryResultMaterializationError(
-                    "provider-selection inference must predate settlement reveal"
+                    "provider-selection inference cutoff must equal canonical binding cutoff"
                 )
         (
             subject_selection,
@@ -811,6 +837,34 @@ class SportMemoryResultMaterializer:
             league_entity,
             identity_sha,
         ) = self._complete_provider_binding(binding)
+
+        # Caller-authored fields are assertions only. Re-derive the exact provider
+        # identities from product-owned pre-reveal market + identity history at the
+        # persisted causal cutoff even when the caller labels them "explicit". This
+        # prevents a post-result caller from choosing among a historically ambiguous
+        # candidate set, clearing inference provenance, and recomputing a valid digest.
+        derived_subject, derived_opponent, derived_competition = self._infer_provider_identifiers(
+            event_identity=binding.event_identity,
+            source_id=binding.source_id,
+            subject_alias=binding.subject_alias,
+            opponent_alias=binding.opponent_alias,
+            sport_id=binding.sport_id,
+            market_context_id=binding.market_context_id,
+            subject_quote_key=binding.subject_quote_key,
+            as_of=binding.provider_binding_as_of,
+            subject_selection_id=subject_selection,
+            opponent_selection_id=opponent_selection,
+            competition_id=competition,
+        )
+        if (
+            derived_subject != subject_selection
+            or derived_opponent != opponent_selection
+            or derived_competition != competition
+        ):
+            raise SportMemoryResultMaterializationError(
+                "provider identities are not uniquely fixed by canonical pre-reveal evidence"
+            )
+
         subject, opponent, expected_frozen = self._resolve_source_pair(
             event_identity=binding.event_identity,
             source_id=binding.source_id,
@@ -839,6 +893,7 @@ class SportMemoryResultMaterializer:
             opponent,
             expected_frozen,
             frozen_snapshot.sha256,
+            binding.provider_binding_as_of,
             binding.provider_inference_as_of,
         )
         if (

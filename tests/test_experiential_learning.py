@@ -203,24 +203,26 @@ class ExperientialLearningFactoryBridgeTests(unittest.TestCase):
 
     def test_retest_rejects_utility_evidence_subclass_before_field_admission(self) -> None:
         predecessor, successor, evidence = self._lineage()
-
-        class ForgedUtilityBoundUpdateEvidence(UtilityBoundUpdateEvidence):
-            pass
-
         transition = evidence.transition
         self.assertIsNotNone(transition)
-        forged = ForgedUtilityBoundUpdateEvidence(
-            environment_id=predecessor.environment_id,
-            episode_id=transition.episode_id,
-            transition_id=evidence.transition_id,
-            action_id=evidence.action_id,
-            reward_id=evidence.reward_id,
-            utility_evidence_id="4" * 64,
-            utility_semantic_key="test.blocked-utility-v1",
-            predecessor_policy_id=predecessor.policy_id,
-            successor_policy_id=predecessor.policy_id,
-            reason_codes=("utility_authority_unresolved",),
-        )
+
+        class ForgedUtilityBoundUpdateEvidence(UtilityBoundUpdateEvidence):
+            def __init__(self) -> None:
+                # Deliberately bypass the base dataclass initializer/post-init exactly as
+                # an in-process spoof would: the forged subtype claims a positive successor
+                # and removes the schema-v1 blocking reasons.
+                object.__setattr__(self, "environment_id", predecessor.environment_id)
+                object.__setattr__(self, "episode_id", transition.episode_id)
+                object.__setattr__(self, "transition_id", evidence.transition_id)
+                object.__setattr__(self, "action_id", evidence.action_id)
+                object.__setattr__(self, "reward_id", evidence.reward_id)
+                object.__setattr__(self, "utility_evidence_id", "4" * 64)
+                object.__setattr__(self, "utility_semantic_key", "test.forged-utility-v1")
+                object.__setattr__(self, "predecessor_policy_id", predecessor.policy_id)
+                object.__setattr__(self, "successor_policy_id", successor.policy_id)
+                object.__setattr__(self, "reason_codes", ())
+
+        forged = ForgedUtilityBoundUpdateEvidence()
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             registry = ScientificRegistry.initialize_pristine(root / "scientific_registry.json")

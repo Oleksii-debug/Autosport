@@ -35,6 +35,17 @@ def test_exact_decision_ledger_instance_shadow_is_rejected_before_admission(tmp_
     assert not (fixture.workspace / "paper-campaign-admission.json").exists()
 
 
+def test_alternate_same_workspace_decision_ledger_is_rejected_before_construction(tmp_path):
+    fixture = AdmissionFixture(tmp_path)
+    alternate = JsonlDecisionLedger(fixture.workspace / "alternate-decisions.jsonl")
+    state_path = fixture.workspace / "paper-campaign-admission.json"
+
+    with pytest.raises(PaperCampaignAdmissionError, match="canonical workspace decisions.jsonl"):
+        fixture.coordinator(decision_ledger=alternate)
+
+    assert not state_path.exists()
+
+
 def test_exact_execution_ledger_instance_shadow_is_rejected_before_admission(tmp_path):
     fixture = AdmissionFixture(tmp_path)
     with patch.dict(
@@ -79,6 +90,23 @@ def test_decision_ledger_shadow_added_after_construction_is_rejected_at_read(tmp
         fixture.admit(coordinator)
 
     assert attacker_called is False
+    assert state_path.read_bytes() == state_before
+    assert (fixture.workspace / "decisions.jsonl").read_bytes() == decisions_before
+
+
+def test_decision_ledger_path_mutation_after_construction_fails_closed(tmp_path):
+    fixture = AdmissionFixture(tmp_path)
+    decision_ledger = JsonlDecisionLedger(fixture.workspace / "decisions.jsonl")
+    coordinator = fixture.coordinator(decision_ledger=decision_ledger)
+    state_path = fixture.workspace / "paper-campaign-admission.json"
+    state_before = state_path.read_bytes()
+    decisions_before = (fixture.workspace / "decisions.jsonl").read_bytes()
+
+    decision_ledger.path = fixture.workspace / "alternate-decisions.jsonl"
+
+    with pytest.raises(PaperCampaignAdmissionError, match="canonical workspace decisions.jsonl"):
+        fixture.admit(coordinator)
+
     assert state_path.read_bytes() == state_before
     assert (fixture.workspace / "decisions.jsonl").read_bytes() == decisions_before
 

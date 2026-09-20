@@ -39,6 +39,7 @@ from autosport.voc_evaluation import (
 SHA_A = "a" * 64
 SHA_B = "b" * 64
 SHA_C = "c" * 64
+SHA_D = "d" * 64
 T0 = "2026-01-01T00:00:00Z"
 T1 = "2026-01-01T00:00:10Z"
 T2 = "2026-01-01T00:00:20Z"
@@ -221,7 +222,10 @@ def request(**overrides):
         response_ttl_seconds=Decimal("10"),
         baseline_candidate_id="local",
         cloud_candidate_id="cloud",
-        decision_evidence_sha256=SHA_C,
+        decision_evidence_sha256=SHA_D,
+        voc_regime_id="regime-1",
+        voc_urgency_id="routine",
+        voc_contradiction_state="none",
     )
     values.update(overrides)
     return ComputeRouteRequest(**values)
@@ -285,6 +289,8 @@ def voc(**overrides):
             sport_id="table-tennis",
             league_id="league-1",
             regime_id="regime-1",
+            urgency_id="routine",
+            contradiction_state="none",
             baseline_candidate_id=values["baseline_candidate_id"],
             baseline_backend_id=values["baseline_backend_id"],
             baseline_model_id=values["baseline_model_id"],
@@ -554,7 +560,7 @@ class ModelComputeRouterTests(unittest.TestCase):
         )
         self.assertEqual(simulated.tier, ComputeTier.LOCAL)
 
-    def test_voc_decision_evidence_is_bound_to_current_route_identity(self):
+    def test_voc_history_requires_distinct_current_identity_and_matching_stratum(self):
         evidence = self.qualified_voc(evidence_id="voc-route-scope")
 
         current = self.route_compute(
@@ -567,10 +573,10 @@ class ModelComputeRouterTests(unittest.TestCase):
         )
         self.assertEqual(current.tier, ComputeTier.CLOUD)
 
-        wrong_context = self.route_compute(
+        source_decision = self.route_compute(
             request(
-                request_id="req-different-context",
-                decision_evidence_sha256=SHA_A,
+                request_id="req-source-context",
+                decision_evidence_sha256=SHA_C,
             ),
             self.candidates,
             policy(),
@@ -578,8 +584,22 @@ class ModelComputeRouterTests(unittest.TestCase):
             voc_evidence=evidence,
             domain_observation=slow_observation(),
         )
-        self.assertEqual(wrong_context.tier, ComputeTier.LOCAL)
-        self.assertIn("does not match current route identity", wrong_context.reason)
+        self.assertEqual(source_decision.tier, ComputeTier.LOCAL)
+        self.assertIn("cannot authorize its source decision", source_decision.reason)
+
+        wrong_stratum = self.route_compute(
+            request(
+                request_id="req-wrong-stratum",
+                voc_urgency_id="urgent",
+            ),
+            self.candidates,
+            policy(),
+            as_of=T1,
+            voc_evidence=evidence,
+            domain_observation=slow_observation(),
+        )
+        self.assertEqual(wrong_stratum.tier, ComputeTier.LOCAL)
+        self.assertIn("routing stratum", wrong_stratum.reason)
 
         missing_context = self.route_compute(
             request(

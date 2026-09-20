@@ -18,7 +18,7 @@ from .scientific_registry import ScientificRegistry
 from .workspace_lock import WorkspaceEconomicLock
 
 _SCHEMA = "autosport.voc_evaluation"
-_VERSION = 1
+_VERSION = 2
 _ZERO = Decimal("0")
 _ONE = Decimal("1")
 
@@ -110,6 +110,8 @@ class PairedVOCEvaluation:
     sport_id: str
     league_id: str
     regime_id: str
+    urgency_id: str
+    contradiction_state: str
     baseline_candidate_id: str
     baseline_backend_id: str
     baseline_model_id: str
@@ -157,6 +159,8 @@ class PairedVOCEvaluation:
             "sport_id",
             "league_id",
             "regime_id",
+            "urgency_id",
+            "contradiction_state",
             "baseline_candidate_id",
             "baseline_backend_id",
             "baseline_model_id",
@@ -266,6 +270,8 @@ class PairedVOCEvaluation:
             "sport_id": self.sport_id,
             "league_id": self.league_id,
             "regime_id": self.regime_id,
+            "urgency_id": self.urgency_id,
+            "contradiction_state": self.contradiction_state,
             "baseline_candidate_id": self.baseline_candidate_id,
             "baseline_backend_id": self.baseline_backend_id,
             "baseline_model_id": self.baseline_model_id,
@@ -364,6 +370,8 @@ class PairedVOCEvaluation:
                 sport_id=raw["sport_id"],
                 league_id=raw["league_id"],
                 regime_id=raw["regime_id"],
+                urgency_id=raw["urgency_id"],
+                contradiction_state=raw["contradiction_state"],
                 baseline_candidate_id=raw["baseline_candidate_id"],
                 baseline_backend_id=raw["baseline_backend_id"],
                 baseline_model_id=raw["baseline_model_id"],
@@ -625,6 +633,8 @@ class CanonicalVOCAuthorityResolver:
             "sport_id": evaluation.sport_id,
             "league_id": evaluation.league_id,
             "regime_id": evaluation.regime_id,
+            "urgency_id": evaluation.urgency_id,
+            "contradiction_state": evaluation.contradiction_state,
         }
         for record in records:
             if self._decision_digest(record) != evaluation.decision_evidence_sha256:
@@ -696,6 +706,8 @@ class CanonicalVOCAuthorityResolver:
             "sport_id": evaluation.sport_id,
             "league_id": evaluation.league_id,
             "regime_id": evaluation.regime_id,
+            "urgency_id": evaluation.urgency_id,
+            "contradiction_state": evaluation.contradiction_state,
         }
         if scope != expected_scope:
             raise VOCEvaluationError("canonical ResearchProtocol scope does not match paired evaluation")

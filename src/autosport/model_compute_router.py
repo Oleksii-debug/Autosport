@@ -28,7 +28,7 @@ from .voc_evaluation import (
 )
 
 _SCHEMA = "autosport.model_compute_router"
-_VERSION = 4
+_VERSION = 5
 _EXECUTION_AUTHORITY_SCHEMA = (
     "autosport.model_compute_router.execution_authority"
 )
@@ -242,6 +242,9 @@ class ComputeRouteRequest:
     baseline_candidate_id: str
     cloud_candidate_id: str | None = None
     decision_evidence_sha256: str | None = None
+    voc_regime_id: str | None = None
+    voc_urgency_id: str | None = None
+    voc_contradiction_state: str | None = None
 
     def __post_init__(self) -> None:
         _text("request_id", self.request_id)
@@ -267,6 +270,14 @@ class ComputeRouteRequest:
                 )
         if self.decision_evidence_sha256 is not None:
             _sha256("decision_evidence_sha256", self.decision_evidence_sha256)
+        for name in (
+            "voc_regime_id",
+            "voc_urgency_id",
+            "voc_contradiction_state",
+        ):
+            value = getattr(self, name)
+            if value is not None:
+                _text(name, value)
 
     def payload(self) -> dict[str, Any]:
         return {
@@ -283,6 +294,9 @@ class ComputeRouteRequest:
             "baseline_candidate_id": self.baseline_candidate_id,
             "cloud_candidate_id": self.cloud_candidate_id,
             "decision_evidence_sha256": self.decision_evidence_sha256,
+            "voc_regime_id": self.voc_regime_id,
+            "voc_urgency_id": self.voc_urgency_id,
+            "voc_contradiction_state": self.voc_contradiction_state,
         }
 
     @classmethod
@@ -302,6 +316,9 @@ class ComputeRouteRequest:
                 baseline_candidate_id=raw["baseline_candidate_id"],
                 cloud_candidate_id=raw.get("cloud_candidate_id"),
                 decision_evidence_sha256=raw.get("decision_evidence_sha256"),
+                voc_regime_id=raw.get("voc_regime_id"),
+                voc_urgency_id=raw.get("voc_urgency_id"),
+                voc_contradiction_state=raw.get("voc_contradiction_state"),
             )
         except (KeyError, TypeError, InvalidOperation, ValueError) as exc:
             if isinstance(exc, ModelComputeRouterError):
@@ -1535,37 +1552,73 @@ def route_compute(
                     + str(exc)
                 )
             else:
+                evaluation_reason = (
+                    resolved_evaluation.routing_ineligibility_reason(
+                        as_of=as_of,
+                        minimum_effective_sample_size=(
+                            policy.voc_min_effective_sample_size
+                        ),
+                    )
+                )
                 if (
-                    request.decision_evidence_sha256 is None
-                ):
-                    baseline_reason = (
-                        "missing canonical decision-evidence route identity"
-                    )
-                elif (
-                    resolved_evaluation.decision_evidence_sha256
-                    != request.decision_evidence_sha256
-                ):
-                    baseline_reason = (
-                        "VOC decision evidence does not match current route identity"
-                    )
-                elif (
                     resolved_evaluation.payload()
                     != voc_evidence.evaluation.payload()
                 ):
                     baseline_reason = (
                         "durable VOC evaluation differs from routed evidence"
                     )
-                else:
-                    evaluation_reason = (
-                        resolved_evaluation.routing_ineligibility_reason(
-                            as_of=as_of,
-                            minimum_effective_sample_size=(
-                                policy.voc_min_effective_sample_size
-                            ),
-                        )
+                elif evaluation_reason is not None:
+                    baseline_reason = evaluation_reason
+                elif (
+                    _instant("available_at", voc_evidence.available_at)
+                    > _instant("created_at", request.created_at)
+                ):
+                    baseline_reason = (
+                        "qualified VOC evidence was not available when "
+                        "the current request began"
                     )
-                    if evaluation_reason is not None:
-                        baseline_reason = evaluation_reason
+                elif request.decision_evidence_sha256 is None:
+                    baseline_reason = (
+                        "missing canonical decision-evidence route identity"
+                    )
+                elif (
+                    resolved_evaluation.decision_evidence_sha256
+                    == request.decision_evidence_sha256
+                ):
+                    baseline_reason = (
+                        "historical VOC evidence cannot authorize its "
+                        "source decision"
+                    )
+                elif (
+                    request.voc_regime_id is None
+                    or request.voc_urgency_id is None
+                    or request.voc_contradiction_state is None
+                ):
+                    baseline_reason = (
+                        "missing canonical VOC routing stratum"
+                    )
+                elif (
+                    (
+                        request.required_capability,
+                        domain_observation.sport_id,
+                        domain_observation.league_id,
+                        request.voc_regime_id,
+                        request.voc_urgency_id,
+                        request.voc_contradiction_state,
+                    )
+                    != (
+                        resolved_evaluation.task_class,
+                        resolved_evaluation.sport_id,
+                        resolved_evaluation.league_id,
+                        resolved_evaluation.regime_id,
+                        resolved_evaluation.urgency_id,
+                        resolved_evaluation.contradiction_state,
+                    )
+                ):
+                    baseline_reason = (
+                        "qualified VOC routing stratum does not match "
+                        "the current request"
+                    )
 
     if baseline_reason is not None:
         return ComputeRouteDecision.build(

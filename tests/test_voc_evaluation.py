@@ -40,6 +40,7 @@ SHA_A = "a" * 64
 SHA_B = "b" * 64
 SHA_C = "c" * 64
 SHA_D = "d" * 64
+SHA_E = "e" * 64
 T0 = "2026-01-01T00:00:00Z"
 T1 = "2026-01-01T00:00:10Z"
 T2 = "2026-01-01T00:00:20Z"
@@ -54,6 +55,8 @@ def evaluation(**overrides):
         sport_id="table-tennis",
         league_id="league-1",
         regime_id="regime-1",
+        urgency_id="routine",
+        contradiction_state="none",
         baseline_candidate_id="local",
         baseline_backend_id="local-cpu",
         baseline_model_id="baseline-v1",
@@ -170,7 +173,7 @@ def candidates():
 def request():
     return ComputeRouteRequest(
         request_id="req-voc",
-        created_at=T0,
+        created_at=T2,
         decision_deadline=T4,
         required_capability="forecast",
         data_classification=DataClassification.PUBLIC,
@@ -179,7 +182,10 @@ def request():
         response_ttl_seconds=Decimal("30"),
         baseline_candidate_id="local",
         cloud_candidate_id="cloud",
-        decision_evidence_sha256=SHA_C,
+        decision_evidence_sha256=SHA_E,
+        voc_regime_id="regime-1",
+        voc_urgency_id="routine",
+        voc_contradiction_state="none",
     )
 
 
@@ -323,6 +329,8 @@ class PairedVOCEvaluationTests(unittest.TestCase):
                 "sport_id": paired.sport_id,
                 "league_id": paired.league_id,
                 "regime_id": paired.regime_id,
+                "urgency_id": paired.urgency_id,
+                "contradiction_state": paired.contradiction_state,
             }
         }
         decision_record = DecisionRecord(
@@ -387,6 +395,8 @@ class PairedVOCEvaluationTests(unittest.TestCase):
                 "sport_id": paired.sport_id,
                 "league_id": paired.league_id,
                 "regime_id": paired.regime_id,
+                "urgency_id": paired.urgency_id,
+                "contradiction_state": paired.contradiction_state,
             },
             "outcome_identity": {
                 "event_id": "event-voc",
@@ -756,10 +766,7 @@ class PairedVOCEvaluationTests(unittest.TestCase):
             canonical_authority_resolver=resolver,
         )
         production_store.record(paired)
-        production_request = replace(
-            request(),
-            decision_evidence_sha256=paired.decision_evidence_sha256,
-        )
+        production_request = request()
         decision = route_compute(
             production_request,
             candidates(),
@@ -770,6 +777,97 @@ class PairedVOCEvaluationTests(unittest.TestCase):
             domain_observation=slow_observation(),
         )
         self.assertEqual(decision.tier, ComputeTier.CLOUD)
+
+    def test_historical_voc_cannot_authorize_its_source_decision(self):
+        paired = evaluation()
+        evidence = self.qualified_voc(paired)
+        source_request = replace(
+            request(),
+            request_id="req-source-decision",
+            decision_evidence_sha256=paired.decision_evidence_sha256,
+        )
+        decision = self.route_compute(
+            source_request,
+            candidates(),
+            policy(),
+            as_of=T2,
+            voc_evidence=evidence,
+            domain_observation=slow_observation(),
+        )
+        self.assertEqual(decision.tier, ComputeTier.LOCAL)
+        self.assertIn("cannot authorize its source decision", decision.reason)
+
+    def test_voc_routing_stratum_mismatch_fails_closed(self):
+        paired = evaluation()
+        evidence = self.qualified_voc(paired)
+        mismatches = {
+            "required_capability": "different-task",
+            "voc_regime_id": "different-regime",
+            "voc_urgency_id": "urgent",
+            "voc_contradiction_state": "contradicted",
+        }
+        for field, value in mismatches.items():
+            with self.subTest(field=field):
+                decision = self.route_compute(
+                    replace(
+                        request(),
+                        request_id=f"req-mismatch-{field}",
+                        **{field: value},
+                    ),
+                    candidates(),
+                    policy(),
+                    as_of=T2,
+                    voc_evidence=evidence,
+                    domain_observation=slow_observation(),
+                )
+                self.assertEqual(decision.tier, ComputeTier.LOCAL)
+                self.assertIn("routing stratum", decision.reason)
+
+        sport_mismatch = self.route_compute(
+            request(),
+            candidates(),
+            policy(),
+            as_of=T2,
+            voc_evidence=evidence,
+            domain_observation=replace(
+                slow_observation(),
+                sport_id="different-sport",
+            ),
+        )
+        self.assertEqual(sport_mismatch.tier, ComputeTier.LOCAL)
+        self.assertIn("routing stratum", sport_mismatch.reason)
+
+        league_mismatch = self.route_compute(
+            request(),
+            candidates(),
+            policy(),
+            as_of=T2,
+            voc_evidence=evidence,
+            domain_observation=replace(
+                slow_observation(),
+                league_id="different-league",
+            ),
+        )
+        self.assertEqual(league_mismatch.tier, ComputeTier.LOCAL)
+        self.assertIn("routing stratum", league_mismatch.reason)
+
+    def test_voc_history_must_exist_before_current_request_begins(self):
+        paired = evaluation()
+        evidence = self.qualified_voc(paired)
+        decision = self.route_compute(
+            replace(
+                request(),
+                request_id="req-predates-voc",
+                created_at=T1,
+            ),
+            candidates(),
+            policy(),
+            as_of=T2,
+            voc_evidence=evidence,
+            domain_observation=slow_observation(),
+        )
+        self.assertEqual(decision.tier, ComputeTier.LOCAL)
+        self.assertIn("not available when the current request began", decision.reason)
 
     def test_persisted_shadow_record_without_canonical_authority_cannot_mint_cloud(self):
         raw_store = VOCEvaluationStore(Path(self._router_tmp.name) / "raw-only.json")

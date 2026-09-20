@@ -14,7 +14,11 @@ from autosport.sport_memory_checkpoint import (
     SportMemoryCheckpointError,
     initialize_or_open_bound_sport_memory_runtime,
 )
-from autosport.sport_memory_runtime import SportMemoryScope
+from autosport.sport_memory_runtime import (
+    SportMemoryError,
+    SportMemoryRuntime,
+    SportMemoryScope,
+)
 
 
 SHA_A = "a" * 64
@@ -77,7 +81,7 @@ def _scope() -> SportMemoryScope:
     )
 
 
-def test_bound_consumption_rejects_source_generation_drift_without_persisting(tmp_path):
+def test_bound_consumption_requires_current_generation_without_persisting(tmp_path):
     identity = ParticipantIdentityRegistry.initialize_pristine(
         tmp_path / "participant-identity.json"
     )
@@ -116,6 +120,20 @@ def test_bound_consumption_rejects_source_generation_drift_without_persisting(tm
         min_support=1,
     )
     durable_before = runtime_path.read_bytes()
+
+    # An explicit base dispatch on the exact product-bound instance must not skip
+    # the bound consumption transaction wrapper.
+    with pytest.raises(SportMemoryError, match="canonical generation verification"):
+        SportMemoryRuntime.record_consumption(
+            runtime,
+            decision_id="decision-base-bypass",
+            memory_id=artifact.memory_id,
+            decision_cutoff=T4,
+            consumed_at=T5,
+            expected_scope=_scope(),
+        )
+    assert runtime.consumptions_for_artifact(artifact.memory_id) == ()
+    assert runtime_path.read_bytes() == durable_before
 
     # Advance canonical identity after the artifact was issued. The already-open
     # bound runtime must not authorize a new decision consumption under old roots.

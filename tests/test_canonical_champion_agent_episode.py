@@ -1,11 +1,12 @@
 from types import SimpleNamespace
 from unittest.mock import patch
 
+import autosport.champion_agent_episode as champion_module
 from autosport.canonical_champion_agent_episode import (
     initialize_canonical_champion_episode,
     resume_canonical_champion_episode,
 )
-from autosport.learning_environment import EnvironmentCheckpoint, EnvironmentIdentity
+from autosport.learning_environment import EnvironmentIdentity
 from autosport.policy_deployment import ActivationBinding, DeploymentScope
 from autosport.policy_deployment_semantic_bridge import (
     CrossSessionSemanticInputs,
@@ -82,21 +83,22 @@ def _semantic_inputs() -> CrossSessionSemanticInputs:
     )
 
 
-def test_initialize_routes_only_canonical_derived_scope_to_agent_loop(tmp_path) -> None:
+def test_general_module_exposes_no_caller_mintable_cross_session_capability() -> None:
+    assert not hasattr(champion_module, "_mint_canonical_cross_session_authority")
+    assert not hasattr(champion_module, "_CanonicalCrossSessionAuthority")
+    assert not hasattr(champion_module, "_CANONICAL_CROSS_SESSION_MARKER")
+
+
+def test_initialize_routes_resolver_inputs_into_actual_agent_boundary(tmp_path) -> None:
     training = _identity("training-data", T1)
     deployment = _identity("deployment-data", T2)
     binding = _binding(training, deployment)
-    derived_scope = _scope()
-    policy = object()
+    semantic_inputs = _semantic_inputs()
+    market_store = object()
+    runtime_store = object()
     expected = object()
 
     with patch(
-        "autosport.canonical_champion_agent_episode.load_champion_policy",
-        return_value=policy,
-    ), patch(
-        "autosport.canonical_champion_agent_episode.validate_canonical_activation_binding",
-        return_value=SimpleNamespace(deployment_scope=derived_scope),
-    ) as canonical_validate, patch(
         "autosport.canonical_champion_agent_episode.ChampionAgentEpisode.initialize_pristine",
         return_value=expected,
     ) as initialize:
@@ -107,9 +109,9 @@ def test_initialize_routes_only_canonical_derived_scope_to_agent_loop(tmp_path) 
             identity=deployment,
             training_identity=training,
             activation_binding=binding,
-            semantic_inputs=_semantic_inputs(),
-            market_store=object(),
-            runtime_authority_store=object(),
+            semantic_inputs=semantic_inputs,
+            market_store=market_store,
+            runtime_authority_store=runtime_store,
             canonical_strategy_id="strategy-v1",
             config_sha256=CONFIG_SHA,
             episode_key="episode-v1",
@@ -122,55 +124,32 @@ def test_initialize_routes_only_canonical_derived_scope_to_agent_loop(tmp_path) 
         )
 
     assert actual is expected
-    canonical_validate.assert_called_once()
-    assert canonical_validate.call_args.kwargs["policy"] is policy
-    assert canonical_validate.call_args.kwargs["require_existing_semantic_binding"] is False
     initialize.assert_called_once()
-    assert initialize.call_args.kwargs["deployment_scope"] == derived_scope
-    assert initialize.call_args.kwargs["activation_binding"] == binding
-    assert initialize.call_args.kwargs["training_identity"] == training
-    assert initialize.call_args.kwargs["as_of"] == binding.activation_at
-    assert initialize.call_args.kwargs["_canonical_cross_session_authority"] is not None
+    kwargs = initialize.call_args.kwargs
+    assert kwargs["training_identity"] == training
+    assert kwargs["activation_binding"] == binding
+    assert kwargs["semantic_inputs"] == semantic_inputs
+    assert kwargs["market_store"] is market_store
+    assert kwargs["runtime_authority_store"] is runtime_store
+    assert "deployment_scope" not in kwargs
+    assert "_canonical_cross_session_authority" not in kwargs
 
 
-def test_resume_reuses_only_durable_binding_and_rechecks_exact_semantics(tmp_path) -> None:
-    training = _identity("training-data", T1)
+def test_resume_routes_resolver_inputs_into_actual_agent_boundary(tmp_path) -> None:
     deployment = _identity("deployment-data", T2)
-    binding = _binding(training, deployment)
-    scope = _scope()
     checkpoint = SimpleNamespace()
-    snapshot = SimpleNamespace(
-        activation_binding_id=binding.binding_id,
-        economic_goal_fingerprint=GOAL_SHA,
-        risk_fingerprint=RISK_SHA,
-    )
-    durable = SimpleNamespace(
-        binding=binding,
-        training_identity=training,
-        deployment_identity=deployment,
-        scope=scope,
-    )
+    semantic_inputs = _semantic_inputs()
+    market_store = object()
+    runtime_store = object()
     expected = object()
 
     with patch(
         "autosport.canonical_champion_agent_episode.EnvironmentCheckpoint",
         object,
     ), patch(
-        "autosport.canonical_champion_agent_episode.AgentLoopRuntime"
-    ) as runtime, patch(
-        "autosport.canonical_champion_agent_episode.load_deployment_authority",
-        return_value=durable,
-    ), patch(
-        "autosport.canonical_champion_agent_episode.load_champion_policy",
-        return_value=object(),
-    ), patch(
-        "autosport.canonical_champion_agent_episode.validate_canonical_activation_binding",
-        return_value=SimpleNamespace(deployment_scope=scope),
-    ) as canonical_validate, patch(
         "autosport.canonical_champion_agent_episode.ChampionAgentEpisode.resume",
         return_value=expected,
     ) as resume:
-        runtime.return_value.snapshot.return_value = snapshot
         actual = resume_canonical_champion_episode(
             tmp_path / "agent-loop.json",
             object(),
@@ -182,17 +161,15 @@ def test_resume_reuses_only_durable_binding_and_rechecks_exact_semantics(tmp_pat
             config_sha256=CONFIG_SHA,
             episode_key="episode-v1",
             admissible_actions=frozenset({"WAIT"}),
-            semantic_inputs=_semantic_inputs(),
-            market_store=object(),
-            runtime_authority_store=object(),
+            semantic_inputs=semantic_inputs,
+            market_store=market_store,
+            runtime_authority_store=runtime_store,
         )
 
     assert actual is expected
-    canonical_validate.assert_called_once()
-    assert canonical_validate.call_args.args[0] == binding
-    assert canonical_validate.call_args.kwargs["require_existing_semantic_binding"] is True
     resume.assert_called_once()
-    assert resume.call_args.kwargs["training_identity"] == training
-    assert resume.call_args.kwargs["deployment_scope"] == scope
-    assert resume.call_args.kwargs["activation_binding"] == binding
-    assert resume.call_args.kwargs["_canonical_cross_session_authority"] is not None
+    kwargs = resume.call_args.kwargs
+    assert kwargs["semantic_inputs"] == semantic_inputs
+    assert kwargs["market_store"] is market_store
+    assert kwargs["runtime_authority_store"] is runtime_store
+    assert "_canonical_cross_session_authority" not in kwargs

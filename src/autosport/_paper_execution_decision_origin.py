@@ -6,6 +6,8 @@ import inspect
 import json
 from typing import Any, Mapping
 
+from . import _paper_value_execution_authority as _paper_value_authority
+from . import live_decision_loop as _live_decision_loop
 from .decision_ledger import JsonlDecisionLedger
 from .paper_execution_adoption import PaperExecutionAdoptionError, PaperExecutionAdoptionRuntime
 from .paper_execution_reality import (
@@ -288,15 +290,15 @@ def _reservation_decision_origin(
     return _reservation_origin_from_events(_raw_events(self, run_id))
 
 
-def _candidate_ledger_from_context(runtime: PaperExecutionAdoptionRuntime, context: object):
+def _exact_context_ledger(runtime: PaperExecutionAdoptionRuntime, context: object):
     if getattr(context, "paper_execution", None) is not runtime:
-        return None
+        raise PaperExecutionDecisionOriginError(
+            "canonical product frame is not bound to this execution runtime"
+        )
     ledger = getattr(context, "decision_ledger", None)
-    if ledger is None:
-        return None
     if type(ledger) is not JsonlDecisionLedger:
         raise PaperExecutionDecisionOriginError(
-            "product execution context requires exact JsonlDecisionLedger authority"
+            "canonical product execution requires exact JsonlDecisionLedger authority"
         )
     return ledger
 
@@ -305,7 +307,13 @@ def _resolve_product_origin_from_stack(
     runtime: PaperExecutionAdoptionRuntime,
     decision_id: str,
 ) -> DecisionRecordOrigin | None:
-    """Resolve product-owned origin from the canonical executing frame, not callers."""
+    """Resolve origin only from exact canonical product code frames.
+
+    Arbitrary callers can construct AgentContext-like objects, local variables, and
+    valid DecisionLedger records. None of those become product authority here. The
+    executing frame itself must be one of the integrated product producers that
+    durably publish the decision before invoking PAPER execution.
+    """
 
     ledgers: dict[int, JsonlDecisionLedger] = {}
     current = inspect.currentframe()
@@ -313,24 +321,53 @@ def _resolve_product_origin_from_stack(
         frame = current.f_back if current is not None else None
         while frame is not None:
             local = frame.f_locals
-            context = local.get("context")
-            if context is not None:
-                ledger = _candidate_ledger_from_context(runtime, context)
-                if ledger is not None:
-                    ledgers[id(ledger)] = ledger
-
-            owner = local.get("self")
-            if (
-                owner is not None
-                and type(owner).__module__ == "autosport.live_decision_loop"
-                and type(owner).__name__ == "PersistentLiveDecisionLoop"
-                and getattr(owner, "paper_execution", None) is runtime
-            ):
+            if frame.f_code is _live_decision_loop.PersistentLiveDecisionLoop._persist_plan.__code__:
+                owner = local.get("self")
+                if type(owner) is not _live_decision_loop.PersistentLiveDecisionLoop:
+                    raise PaperExecutionDecisionOriginError(
+                        "live decision origin requires exact PersistentLiveDecisionLoop authority"
+                    )
+                if getattr(owner, "paper_execution", None) is not runtime:
+                    raise PaperExecutionDecisionOriginError(
+                        "live decision origin runtime binding changed"
+                    )
                 ledger = getattr(owner, "decision_ledger", None)
                 if type(ledger) is not JsonlDecisionLedger:
                     raise PaperExecutionDecisionOriginError(
-                        "live execution requires exact JsonlDecisionLedger authority"
+                        "live decision origin requires exact JsonlDecisionLedger authority"
                     )
+                if local.get("decision_id") != decision_id:
+                    raise PaperExecutionDecisionOriginError(
+                        "live decision frame identity does not match execution plan"
+                    )
+                ledgers[id(ledger)] = ledger
+
+            elif frame.f_code is _paper_value_authority._ORIGINAL_ON_MARKET_EVENT.__code__:
+                context = local.get("context")
+                agent = local.get("self")
+                event = local.get("event")
+                if type(agent) is not _paper_value_authority.PaperValueAgent:
+                    raise PaperExecutionDecisionOriginError(
+                        "paper-value origin requires exact PaperValueAgent authority"
+                    )
+                if event is None or agent._material_action_id(context, event) != decision_id:
+                    raise PaperExecutionDecisionOriginError(
+                        "paper-value decision frame identity does not match execution plan"
+                    )
+                ledger = _exact_context_ledger(runtime, context)
+                ledgers[id(ledger)] = ledger
+
+            elif frame.f_code is _paper_value_authority._resume_durable_paper_value.__code__:
+                context = local.get("context")
+                record = local.get("record")
+                if (
+                    type(record) is not _paper_value_authority.DecisionRecord
+                    or record.decision_id != decision_id
+                ):
+                    raise PaperExecutionDecisionOriginError(
+                        "paper-value recovery frame identity does not match execution plan"
+                    )
+                ledger = _exact_context_ledger(runtime, context)
                 ledgers[id(ledger)] = ledger
             frame = frame.f_back
     finally:

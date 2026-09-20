@@ -17,8 +17,6 @@ from autosport.paper_execution_adoption import (
 from autosport.paper_execution_reality import (
     EvidenceGrade,
     PaperAttemptOutcome,
-    PaperExecutionEvidenceRecord,
-    PaperExecutionEvidenceRegistry,
     PaperExecutionLedger,
     PaperExecutionModelConfig,
 )
@@ -134,42 +132,21 @@ class PaperExecutionAppendRecoveryTests(unittest.TestCase):
             model = _config()
             book = PaperBook("100.00")
             runtime = _runtime(root, book, model=model)
-            pre_action_path = root / "live_decision_pre_action_book.json"
-            book.save(pre_action_path)
-
+            book.save(root / "live_decision_pre_action_book.json")
             action = _action()
-            observed = PaperExecutionEvidenceRecord(
-                action_id=action.action_id,
-                bookmaker_id=action.bookmaker_id,
-                account_id=action.account_id,
-                event_id=action.event_id,
-                market_id=action.market_id,
-                selection_id=action.selection_id,
-                side=action.side,
-                quote_id=action.quote_id,
-                outcome=PaperAttemptOutcome.ACCEPTED,
-                observed_at=STARTED_AT,
-                evidence_grade=EvidenceGrade.CONFIGURED,
-                evidence_source="append-recovery-observation",
-                accepted_odds="2.25",
-                accepted_stake="10.00",
-            )
-            registry = PaperExecutionEvidenceRegistry(runtime.ledger)
-            registry.register(observed)
-            runtime.execute(
+
+            first = runtime.execute(
                 prepared=_prepared(runtime, action),
                 trigger_id="live-append-recovery-accepted",
                 started_at=STARTED_AT,
                 materialize_exposure=True,
-                observations={action.action_id: observed.as_observation()},
-                evidence_registry=registry,
             )
+            self.assertEqual(first.run.attempts[0].outcome, PaperAttemptOutcome.ACCEPTED)
             self.assertEqual(len(book.tickets), 1)
 
             _persist_unrelated_ticket(book, root / "paper_book.json")
             restarted_book = PaperBook.load(root / "paper_book.json")
             restarted = _runtime(root, restarted_book, model=model)
-            restarted_registry = PaperExecutionEvidenceRegistry(restarted.ledger)
 
             with self.assertRaisesRegex(
                 PaperExecutionAdoptionError,
@@ -180,8 +157,6 @@ class PaperExecutionAppendRecoveryTests(unittest.TestCase):
                     trigger_id="live-append-recovery-accepted",
                     started_at=STARTED_AT,
                     materialize_exposure=True,
-                    observations={action.action_id: observed.as_observation()},
-                    evidence_registry=restarted_registry,
                 )
 
     def test_live_retry_rejects_changed_book_for_terminal_no_fill_attempts(self):
@@ -204,6 +179,7 @@ class PaperExecutionAppendRecoveryTests(unittest.TestCase):
                     started_at=STARTED_AT,
                     materialize_exposure=True,
                 )
+                self.assertEqual(result.run.attempts[0].outcome, outcome)
                 self.assertEqual(result.ticket_ids, ())
                 self.assertEqual(book.tickets, {})
 

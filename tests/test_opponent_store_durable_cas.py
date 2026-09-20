@@ -2,84 +2,124 @@ from __future__ import annotations
 
 import pytest
 
+from autosport.learning_environment import EvidenceTruth
 from autosport.opponent_intelligence import (
-    InvalidationReason,
-    InvalidationTarget,
+    ObservedPerformance,
     OpponentIntelligenceError,
     OpponentIntelligenceStore,
 )
-from autosport.participant_identity import ParticipantIdentityRegistry
+from autosport.participant_identity import (
+    AliasRecord,
+    EntityIdentity,
+    EntityKind,
+    ParticipantIdentityRegistry,
+)
 
 
 SHA_A = "a" * 64
 SHA_B = "b" * 64
-T0 = "2026-09-20T10:00:00Z"
+T0 = "2026-09-20T08:00:00Z"
+T1 = "2026-09-20T10:00:00Z"
 
 
-def test_independent_stale_store_cannot_erase_intervening_commit(tmp_path):
+def _entity(entity_id: str, kind: EntityKind) -> EntityIdentity:
+    return EntityIdentity(
+        entity_id,
+        kind,
+        f"provider:{entity_id}",
+        SHA_A,
+        T0,
+        T0,
+    )
+
+
+def _alias(text: str, entity_id: str) -> AliasRecord:
+    return AliasRecord(
+        "provider-a",
+        text,
+        entity_id,
+        T0,
+        None,
+        T0,
+        SHA_A,
+        T0,
+    )
+
+
+def _identity(tmp_path) -> ParticipantIdentityRegistry:
     identity = ParticipantIdentityRegistry.initialize_pristine(
         tmp_path / "participant-identity.json"
     )
+    for entity in (
+        _entity("p-alex", EntityKind.PARTICIPANT),
+        _entity("p-blair", EntityKind.PARTICIPANT),
+        _entity("p-casey", EntityKind.PARTICIPANT),
+        _entity("league-tour-a", EntityKind.LEAGUE),
+    ):
+        identity.add_entity(entity)
+    for alias in (
+        _alias("Alex", "p-alex"),
+        _alias("Blair", "p-blair"),
+        _alias("Casey", "p-casey"),
+        _alias("Tour A", "league-tour-a"),
+    ):
+        identity.add_alias(alias)
+    return identity
+
+
+def _performance(
+    event_id: str,
+    opponent_alias: str,
+    evidence_sha256: str,
+) -> ObservedPerformance:
+    return ObservedPerformance(
+        event_id=event_id,
+        source_id="provider-a",
+        subject_alias="Alex",
+        opponent_alias=opponent_alias,
+        sport_id="tennis",
+        league_alias="Tour A",
+        market_context_id="match-outcome",
+        score="1",
+        observed_at=T1,
+        available_at=T1,
+        recorded_at=T1,
+        evidence_sha256=evidence_sha256,
+        truth=EvidenceTruth.OBSERVED,
+    )
+
+
+def test_independent_stale_store_cannot_erase_intervening_commit(tmp_path):
+    identity = _identity(tmp_path)
     path = tmp_path / "opponent-intelligence.json"
     first = OpponentIntelligenceStore.initialize_pristine(path, identity)
     stale = OpponentIntelligenceStore(path, identity)
 
-    invalidation = first._make_invalidation(
-        InvalidationTarget.OPPONENT_EDGE,
-        SHA_A,
-        InvalidationReason.OUTCOME_CORRECTION,
-        SHA_B,
-        T0,
+    committed = first.record_performance(
+        _performance("event-1", "Blair", SHA_A)
     )
-    committed = {invalidation.invalidation_id: invalidation}
-    first._persist_state(invalidations=committed)
-    first._invalidations = committed
 
     with pytest.raises(OpponentIntelligenceError, match="durable root changed"):
         stale._persist()
 
     reopened = OpponentIntelligenceStore(path, identity)
-    assert reopened.invalidations() == (invalidation,)
+    assert tuple(reopened._performances) == (committed.performance_id,)
 
 
 def test_store_rebinds_root_after_each_successful_publication(tmp_path):
-    identity = ParticipantIdentityRegistry.initialize_pristine(
-        tmp_path / "participant-identity.json"
-    )
+    identity = _identity(tmp_path)
     path = tmp_path / "opponent-intelligence.json"
     store = OpponentIntelligenceStore.initialize_pristine(path, identity)
 
-    first = store._make_invalidation(
-        InvalidationTarget.OPPONENT_EDGE,
-        SHA_A,
-        InvalidationReason.OUTCOME_CORRECTION,
-        SHA_B,
-        T0,
+    first = store.record_performance(
+        _performance("event-1", "Blair", SHA_A)
     )
-    state = {first.invalidation_id: first}
-    store._persist_state(invalidations=state)
-    store._invalidations = state
-
-    second = store._make_invalidation(
-        InvalidationTarget.RATING_SNAPSHOT,
-        SHA_B,
-        InvalidationReason.IDENTITY_CORRECTION,
-        SHA_A,
-        T0,
+    second = store.record_performance(
+        _performance("event-2", "Casey", SHA_B)
     )
-    state = {**state, second.invalidation_id: second}
-    store._persist_state(invalidations=state)
-    store._invalidations = state
 
     reopened = OpponentIntelligenceStore(path, identity)
-    assert reopened.invalidations() == tuple(
-        sorted(
-            (first, second),
-            key=lambda item: (
-                item.detected_at,
-                item.target_kind.value,
-                item.target_id,
-                item.invalidation_id,
-            ),
-        )
-    )
+    assert set(reopened._performances) == {
+        first.performance_id,
+        second.performance_id,
+    }

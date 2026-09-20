@@ -4,10 +4,13 @@ from threading import Event, Thread, current_thread
 
 import pytest
 
-import autosport.opponent_intelligence as opponent_module
 import autosport.participant_identity as identity_module
 from autosport.learning_environment import EvidenceTruth
-from autosport.opponent_intelligence import ObservedPerformance, OpponentIntelligenceStore
+from autosport.opponent_intelligence import (
+    ObservedPerformance,
+    OpponentIntelligenceError,
+    OpponentIntelligenceStore,
+)
 from autosport.participant_identity import (
     AliasRecord,
     EntityIdentity,
@@ -293,28 +296,44 @@ def test_bound_materialization_cannot_overwrite_concurrent_source_generation(
     )
 
     original_build = OpponentIntelligenceStore.build_snapshots
-    original_atomic = opponent_module.atomic_write_json
+    original_persist = OpponentIntelligenceStore._persist_state
     writer_loaded = Event()
     writer_publish_started = Event()
     writer_done = Event()
     writer_errors: list[BaseException] = []
     writer_holder: list[Thread] = []
 
-    def instrumented_atomic(path, payload):
+    def instrumented_persist(self, **kwargs):
         if current_thread().name == "concurrent-source-writer":
             writer_publish_started.set()
-        return original_atomic(path, payload)
+        return original_persist(self, **kwargs)
 
-    monkeypatch.setattr(opponent_module, "atomic_write_json", instrumented_atomic)
+    monkeypatch.setattr(
+        OpponentIntelligenceStore,
+        "_persist_state",
+        instrumented_persist,
+    )
 
     def source_writer() -> None:
         try:
             fresh_identity = ParticipantIdentityRegistry(identity.path)
             fresh_opponent = OpponentIntelligenceStore(opponent.path, fresh_identity)
             writer_loaded.set()
-            fresh_opponent.record_performance(
-                _performance("event-2", "Casey", SHA_B)
-            )
+            try:
+                fresh_opponent.record_performance(
+                    _performance("event-2", "Casey", SHA_B)
+                )
+            except OpponentIntelligenceError as exc:
+                if "durable root changed" not in str(exc):
+                    raise
+                retry_identity = ParticipantIdentityRegistry(identity.path)
+                retry_opponent = OpponentIntelligenceStore(
+                    opponent.path,
+                    retry_identity,
+                )
+                retry_opponent.record_performance(
+                    _performance("event-2", "Casey", SHA_B)
+                )
         except BaseException as exc:  # captured for the main test thread
             writer_errors.append(exc)
         finally:

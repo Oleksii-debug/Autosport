@@ -1,10 +1,8 @@
 """Crash-safe composition admission for one PAPER ticket -> learning action.
 
-The existing authorities deliberately stop at separate durable boundaries:
-``PaperBook`` owns virtual tickets, ``JsonlDecisionLedger`` owns economic decisions,
-and ``PaperCampaignRuntime`` owns AgentLoop/action/settlement-learning binding. This
-module owns only the missing composition journal which makes those boundaries
-retryable as one logical PAPER admission. It never creates a real-money path.
+This module owns only the missing composition journal across existing PaperBook,
+DecisionLedger, AgentLoop and settlement-learning authorities. It never creates a
+real-money/provider-write path.
 """
 
 from __future__ import annotations
@@ -35,7 +33,6 @@ from .paper import PaperBook
 from .paper_campaign_runtime import PaperCampaignRuntime
 from .workspace_lock import WorkspaceEconomicLock
 
-
 SCHEMA = "autosport.paper_campaign_admission"
 SCHEMA_VERSION = 2
 _PREPARED = "PREPARED"
@@ -57,7 +54,7 @@ _RESERVED_ACTION_PARAMETERS = frozenset({"economic_decision_id", "paper_ticket_i
 
 
 class PaperCampaignAdmissionError(RuntimeError):
-    """PAPER composition admission is missing, corrupt, or conflicts with durable truth."""
+    """PAPER composition admission is incomplete, corrupt, stale, or conflicting."""
 
 
 def _text(value: object, name: str) -> str:
@@ -89,7 +86,7 @@ def _digest(value: object) -> str:
 
 def _sha(value: object, name: str) -> str:
     text = _text(value, name).lower()
-    if len(text) != 64 or any(character not in "0123456789abcdef" for character in text):
+    if len(text) != 64 or any(ch not in "0123456789abcdef" for ch in text):
         raise PaperCampaignAdmissionError(f"{name} must be lowercase SHA-256 hex")
     return text
 
@@ -166,7 +163,7 @@ def _checkpoint_payload(checkpoint: EnvironmentCheckpoint) -> dict[str, object]:
 
 
 def _checkpoint(raw: object) -> EnvironmentCheckpoint:
-    if type(raw) is not dict or set(raw) != {
+    expected = {
         "environment_id",
         "episode_id",
         "policy_id",
@@ -175,10 +172,11 @@ def _checkpoint(raw: object) -> EnvironmentCheckpoint:
         "last_transition_id",
         "committed_action_ids",
         "committed_decision_intents",
-    }:
+    }
+    if type(raw) is not dict or set(raw) != expected:
         raise PaperCampaignAdmissionError("admission baseline checkpoint fields mismatch")
     try:
-        checkpoint = EnvironmentCheckpoint(
+        return EnvironmentCheckpoint(
             environment_id=raw["environment_id"],
             episode_id=raw["episode_id"],
             policy_id=raw["policy_id"],
@@ -192,7 +190,6 @@ def _checkpoint(raw: object) -> EnvironmentCheckpoint:
         )
     except (KeyError, TypeError, ValueError, IndexError) as exc:
         raise PaperCampaignAdmissionError("admission baseline checkpoint is invalid") from exc
-    return checkpoint
 
 
 @dataclass(frozen=True, slots=True)
@@ -205,13 +202,7 @@ class PaperCampaignAdmissionReceipt:
 
 
 class PaperCampaignAdmissionCoordinator:
-    """Converge a logical PAPER admission across existing durable authorities.
-
-    The composition journal is rollback-fenced by the same independent monotonic
-    authority root used by the canonical PAPER execution anti-rollback mechanism.
-    The witness is published before the mutable workspace state, so a crash between
-    those durability barriers fails closed instead of accepting an older snapshot.
-    """
+    """Converge one logical PAPER admission with independent rollback fencing."""
 
     def __init__(
         self,
@@ -245,9 +236,10 @@ class PaperCampaignAdmissionCoordinator:
             raise PaperCampaignAdmissionError(
                 "cannot establish independent admission monotonic authority"
             ) from exc
-        identity = _state_identity(self.state_path)
-        self._witness_path = authority_root / f"{identity}{_WITNESS_SUFFIX}"
-        self._state_identity = identity
+        self._state_identity = _state_identity(self.state_path)
+        self._witness_path = (
+            authority_root / f"{self._state_identity}{_WITNESS_SUFFIX}"
+        )
         with WorkspaceEconomicLock(self._admission_lock_workspace):
             if self.state_path.exists():
                 self._read()
@@ -267,8 +259,6 @@ class PaperCampaignAdmissionCoordinator:
             raise PaperCampaignAdmissionError(
                 "cannot read admission monotonic witness journal"
             ) from exc
-        records: list[dict[str, object]] = []
-        previous_witness_sha256: str | None = None
         expected_keys = {
             "witness_schema_version",
             "generation",
@@ -278,6 +268,8 @@ class PaperCampaignAdmissionCoordinator:
             "previous_witness_sha256",
             "witness_sha256",
         }
+        records: list[dict[str, object]] = []
+        previous: str | None = None
         for generation, raw in enumerate(lines, start=1):
             if not raw:
                 raise PaperCampaignAdmissionError(
@@ -318,21 +310,17 @@ class PaperCampaignAdmissionCoordinator:
                     "admission monotonic witness belongs to another journal"
                 )
             _sha(record["state_sha256"], "witness state_sha256")
-            if record["previous_witness_sha256"] != previous_witness_sha256:
+            if record["previous_witness_sha256"] != previous:
                 raise PaperCampaignAdmissionError(
                     "admission monotonic witness predecessor mismatch"
                 )
-            body = {
-                key: record[key]
-                for key in expected_keys
-                if key != "witness_sha256"
-            }
+            body = {key: record[key] for key in expected_keys if key != "witness_sha256"}
             if _sha(record["witness_sha256"], "witness_sha256") != _digest(body):
                 raise PaperCampaignAdmissionError(
                     "admission monotonic witness digest mismatch"
                 )
             records.append(record)
-            previous_witness_sha256 = record["witness_sha256"]
+            previous = record["witness_sha256"]
         return records
 
     def _append_witness(self, *, generation: int, state_sha256: str) -> None:
@@ -341,14 +329,15 @@ class PaperCampaignAdmissionCoordinator:
             raise PaperCampaignAdmissionError(
                 "admission state did not advance beyond monotonic authority"
             )
-        previous = None if not records else records[-1]["witness_sha256"]
         body = {
             "witness_schema_version": _WITNESS_SCHEMA_VERSION,
             "generation": generation,
             "state_identity": self._state_identity,
             "state_name": self.state_path.name,
             "state_sha256": _sha(state_sha256, "state_sha256"),
-            "previous_witness_sha256": previous,
+            "previous_witness_sha256": (
+                None if not records else records[-1]["witness_sha256"]
+            ),
         }
         record = {**body, "witness_sha256": _digest(body)}
         existed = self._witness_path.exists()
@@ -401,7 +390,7 @@ class PaperCampaignAdmissionCoordinator:
         }
         if _sha(state["state_sha256"], "state_sha256") != _digest(bare):
             raise PaperCampaignAdmissionError("admission state digest mismatch")
-        expected = {
+        fields = {
             "admission_id",
             "intent_sha256",
             "phase",
@@ -413,7 +402,7 @@ class PaperCampaignAdmissionCoordinator:
         }
         for admission_id, record in state["admissions"].items():
             _text(admission_id, "admission_id")
-            if type(record) is not dict or set(record) != expected:
+            if type(record) is not dict or set(record) != fields:
                 raise PaperCampaignAdmissionError("admission record fields mismatch")
             if record["admission_id"] != admission_id:
                 raise PaperCampaignAdmissionError("admission identity mismatch")
@@ -429,9 +418,8 @@ class PaperCampaignAdmissionCoordinator:
             if record["phase"] not in {_PREPARED, _COMMITTED}:
                 raise PaperCampaignAdmissionError("admission phase is invalid")
             for field in ("ticket_id", "decision_id", "action_id"):
-                value = record[field]
-                if value is not None:
-                    _text(value, field)
+                if record[field] is not None:
+                    _text(record[field], field)
             if record["phase"] == _COMMITTED and any(
                 record[field] is None for field in ("ticket_id", "decision_id", "action_id")
             ):
@@ -459,8 +447,7 @@ class PaperCampaignAdmissionCoordinator:
 
     def _write(self, admissions: dict[str, object]) -> None:
         if self.state_path.exists():
-            current = self._read()
-            generation = current["generation"] + 1
+            generation = self._read()["generation"] + 1
         else:
             if self._read_witnesses():
                 raise PaperCampaignAdmissionError(
@@ -481,10 +468,10 @@ class PaperCampaignAdmissionCoordinator:
         atomic_write_json(self.state_path, state)
 
     @staticmethod
-    def _marker(admission_id: str, intent_sha256: str, strategy_reason: str) -> str:
+    def _marker(admission_id: str, intent_sha256: str, reason: str) -> str:
         return (
-            f"AUTOSPORT_PAPER_ADMISSION_V1:{_digest(admission_id)}:{intent_sha256}:"
-            f"{strategy_reason}"
+            f"AUTOSPORT_PAPER_ADMISSION_V1:{_digest(admission_id)}:"
+            f"{intent_sha256}:{reason}"
         )
 
     @staticmethod
@@ -601,6 +588,69 @@ class PaperCampaignAdmissionCoordinator:
                 "committed admission differs from durable AgentLoop identity"
             )
 
+    def _verify_committed_binding(
+        self,
+        *,
+        record: dict[str, object],
+        baseline: EnvironmentCheckpoint,
+        observation: Observation,
+        action_type: str,
+        parameters: tuple[tuple[str, str], ...],
+        ticket: PaperTicket,
+        decision: DecisionRecord,
+    ) -> None:
+        bridge = self.runtime.settlement_bridge
+        with WorkspaceEconomicLock(self.workspace):
+            state = bridge._read()
+        binding = state["bindings"].get(ticket.ticket_id)
+        if binding is None:
+            raise PaperCampaignAdmissionError(
+                "committed admission settlement-learning binding is missing"
+            )
+        identity = self.runtime.environment.identity
+        expected_environment_identity = {
+            "source_id": identity.source_id,
+            "config_id": identity.config_id,
+            "data_id": identity.data_id,
+            "protocol_id": identity.protocol_id,
+            "cutoff_ts": identity.cutoff_ts,
+            "seed": identity.seed,
+        }
+        exact = {
+            "ticket_id": ticket.ticket_id,
+            "ticket_identity_sha256": _digest(_ticket_payload(ticket)),
+            "decision_id": decision.decision_id,
+            "decision_sha256": _digest(decision.to_dict()),
+            "environment_id": baseline.environment_id,
+            "environment_identity": expected_environment_identity,
+            "episode_id": baseline.episode_id,
+            "episode_key": self.runtime.environment.episode.episode_key,
+            "policy_id": baseline.policy_id,
+            "observation_id": observation.observation_id,
+            "action_id": record["action_id"],
+            "action_type": action_type,
+            "action_parameters": [list(item) for item in parameters],
+            "economic_goal_fingerprint": bridge.goal_fingerprint,
+            "risk_fingerprint": bridge.risk_fingerprint,
+            "baseline_checkpoint": _checkpoint_payload(baseline),
+        }
+        for field, expected in exact.items():
+            if binding.get(field) != expected:
+                raise PaperCampaignAdmissionError(
+                    f"committed admission binding {field} differs from canonical truth"
+                )
+        actions = binding.get("admissible_actions")
+        if type(actions) is not list or set(actions) != set(
+            self.runtime.environment.episode.admissible_actions
+        ):
+            raise PaperCampaignAdmissionError(
+                "committed admission binding admissible actions differ from runtime"
+            )
+        if binding.get("status") != "BOUND":
+            raise PaperCampaignAdmissionError(
+                "committed admission binding is no longer at admission boundary"
+            )
+
     def admit(
         self,
         *,
@@ -649,8 +699,8 @@ class PaperCampaignAdmissionCoordinator:
             )
         if type(action_parameters) is not tuple:
             raise TypeError("action_parameters must be a canonical tuple")
-        normalized_action_parameters: list[tuple[str, str]] = []
-        parameter_keys: list[str] = []
+        normalized: list[tuple[str, str]] = []
+        keys: list[str] = []
         for item in action_parameters:
             if type(item) is not tuple or len(item) != 2:
                 raise PaperCampaignAdmissionError("action_parameters are malformed")
@@ -660,16 +710,17 @@ class PaperCampaignAdmissionCoordinator:
                 raise PaperCampaignAdmissionError(
                     "action_parameters replace reserved identity"
                 )
-            normalized_action_parameters.append((key, value))
-            parameter_keys.append(key)
-        if len(parameter_keys) != len(set(parameter_keys)):
+            normalized.append((key, value))
+            keys.append(key)
+        if len(keys) != len(set(keys)):
             raise PaperCampaignAdmissionError("action_parameters contain duplicate keys")
-        action_parameters = tuple(normalized_action_parameters)
+        action_parameters = tuple(normalized)
 
-        goal = self.runtime.settlement_bridge.economic_goal
-        risk = self.runtime.settlement_bridge.risk_policy
-        goal_fingerprint = self.runtime.settlement_bridge.goal_fingerprint
-        risk_fingerprint = self.runtime.settlement_bridge.risk_fingerprint
+        bridge = self.runtime.settlement_bridge
+        goal = bridge.economic_goal
+        risk = bridge.risk_policy
+        goal_fingerprint = bridge.goal_fingerprint
+        risk_fingerprint = bridge.risk_fingerprint
         bankroll_id = goal.bankroll_id if bankroll_id is None else _text(bankroll_id, "bankroll_id")
         currency = goal.currency if currency is None else _text(currency, "currency")
         if bankroll_id != goal.bankroll_id or currency != goal.currency:
@@ -680,11 +731,11 @@ class PaperCampaignAdmissionCoordinator:
         with WorkspaceEconomicLock(self._admission_lock_workspace):
             state = self._read()
             record = state["admissions"].get(admission_id)
-            if record is None:
-                baseline = self.runtime.environment.checkpoint()
-            else:
-                baseline = _checkpoint(record["baseline_checkpoint"])
-
+            baseline = (
+                self.runtime.environment.checkpoint()
+                if record is None
+                else _checkpoint(record["baseline_checkpoint"])
+            )
             baseline_payload = _checkpoint_payload(baseline)
             intent = {
                 "admission_id": admission_id,
@@ -710,7 +761,6 @@ class PaperCampaignAdmissionCoordinator:
                 "baseline_checkpoint": baseline_payload,
             }
             intent_sha256 = _digest(intent)
-
             if record is None:
                 record = {
                     "admission_id": admission_id,
@@ -793,6 +843,11 @@ class PaperCampaignAdmissionCoordinator:
                         decision,
                         EconomicDecisionAuthority(goal, risk),
                     )
+                    existing = self.decision_ledger.verified_economic_decision(
+                        decision_id,
+                        goal,
+                        risk_policy=risk,
+                    )
                 else:
                     provenance_keys = {
                         ECONOMIC_GOAL_PROVENANCE_PAYLOAD_KEY,
@@ -826,6 +881,17 @@ class PaperCampaignAdmissionCoordinator:
                     )
                 )
             )
+            if committed_retry:
+                self._verify_committed_binding(
+                    record=record,
+                    baseline=baseline,
+                    observation=observation,
+                    action_type=action_type,
+                    parameters=parameters,
+                    ticket=ticket,
+                    decision=existing,
+                )
+
             action = self.runtime.begin_and_bind_paper_ticket(
                 ticket_id=ticket.ticket_id,
                 decision_id=decision_id,
@@ -863,14 +929,13 @@ class PaperCampaignAdmissionCoordinator:
                     action_id=action.action_id,
                 )
 
-            committed = {
+            state["admissions"][admission_id] = {
                 **current,
                 "phase": _COMMITTED,
                 "ticket_id": ticket.ticket_id,
                 "decision_id": decision_id,
                 "action_id": action.action_id,
             }
-            state["admissions"][admission_id] = committed
             self._write(state["admissions"])
             return PaperCampaignAdmissionReceipt(
                 admission_id=admission_id,

@@ -375,10 +375,14 @@ class SportMemoryRuntime:
             rating.causal_cutoff == causal_cutoff,
             feature.causal_cutoff == causal_cutoff,
             rating.published_at == published_at,
-            feature.published_at == published_at,
+            feature.published_at == rating.published_at,
             feature.input_digest == rating.input_digest,
+            feature.support == rating.support,
+            feature.effective_sample == rating.effective_sample,
+            feature.opponent_count == rating.opponent_count,
+            feature.state is rating.state,
         )):
-            raise SportMemoryError("canonical snapshot pair does not match requested scope")
+            raise SportMemoryError("canonical snapshot pair is not one coherent requested view")
         if _instant("snapshot published_at", rating.published_at) < _instant(
             "snapshot causal_cutoff", rating.causal_cutoff
         ):

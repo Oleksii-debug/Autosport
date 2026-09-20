@@ -23,7 +23,7 @@ from .campaign_cost_evidence import (
 from .campaign_economic_authority import CanonicalMembershipRef
 
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 RECEIPT_FAMILY = "autosport.monetary.receipt.v1"
 ALLOCATION_FAMILY = "autosport.monetary.allocation.v1"
 CURRENCY_FAMILY = "autosport.monetary.campaign-currency.v1"
@@ -32,7 +32,7 @@ _CURRENCY_RE = re.compile(r"^[A-Z]{3}$")
 
 
 class MonetaryCostAuthorityError(ValueError):
-    """Raised when authoritative monetary evidence is invalid or inconsistent."""
+    """Raised when monetary evidence is invalid or not authoritative."""
 
 
 class MonetaryCostAuthorityIntegrityError(MonetaryCostAuthorityError):
@@ -51,6 +51,14 @@ class MonetaryEvidenceQuality(StrEnum):
     ESTIMATE = "ESTIMATE"
     SIMULATED = "SIMULATED"
     UNVERIFIED = "UNVERIFIED"
+
+
+class MonetaryResolverFamily(StrEnum):
+    PROVIDER_ACCOUNT_BILLING = "PROVIDER_ACCOUNT_BILLING"
+    COMPUTE_BILLING = "COMPUTE_BILLING"
+    EXECUTION_SETTLEMENT = "EXECUTION_SETTLEMENT"
+    OWNER_FIXED_EXPENSE = "OWNER_FIXED_EXPENSE"
+    OWNER_CAMPAIGN_CURRENCY = "OWNER_CAMPAIGN_CURRENCY"
 
 
 @dataclass(frozen=True, slots=True)
@@ -277,8 +285,7 @@ class MonetaryReceipt:
         )
 
     def payload(self) -> dict[str, Any]:
-        assert self.covered_start is not None
-        assert self.covered_end is not None
+        assert self.covered_start is not None and self.covered_end is not None
         return {
             "schema_version": SCHEMA_VERSION,
             "cost_class": self.cost_class.value,
@@ -312,38 +319,19 @@ class MonetaryReceipt:
     @classmethod
     def from_dict(cls, raw: Mapping[str, Any]) -> "MonetaryReceipt":
         expected = {
-            "schema_version",
-            "cost_class",
-            "source_class",
-            "source_authority",
-            "source_evidence_id",
-            "source_sha256",
-            "provenance_sha256",
-            "money",
-            "incurred_start",
-            "incurred_end",
-            "covered_start",
-            "covered_end",
-            "observed_at",
-            "available_at",
-            "treatment",
-            "shared_source",
-            "campaign_sha256",
-            "memberships",
-            "quality",
-            "upstream_refs",
-            "supersedes_receipt_ids",
-            "receipt_id",
-            "record_sha256",
+            "schema_version", "cost_class", "source_class", "source_authority",
+            "source_evidence_id", "source_sha256", "provenance_sha256", "money",
+            "incurred_start", "incurred_end", "covered_start", "covered_end",
+            "observed_at", "available_at", "treatment", "shared_source",
+            "campaign_sha256", "memberships", "quality", "upstream_refs",
+            "supersedes_receipt_ids", "receipt_id", "record_sha256",
         }
         _exact_keys(raw, expected, "MonetaryReceipt")
         if raw["schema_version"] != SCHEMA_VERSION:
             raise MonetaryCostAuthorityIntegrityError("unsupported monetary receipt schema")
         item = cls(
             cost_class=CostClass(_string(raw["cost_class"], "cost_class")),
-            source_class=MonetarySourceClass(
-                _string(raw["source_class"], "source_class")
-            ),
+            source_class=MonetarySourceClass(_string(raw["source_class"], "source_class")),
             source_authority=_string(raw["source_authority"], "source_authority"),
             source_evidence_id=_string(raw["source_evidence_id"], "source_evidence_id"),
             source_sha256=_string(raw["source_sha256"], "source_sha256"),
@@ -469,14 +457,8 @@ class AllocationPlan:
     @classmethod
     def from_dict(cls, raw: Mapping[str, Any]) -> "AllocationPlan":
         expected = {
-            "schema_version",
-            "receipt_id",
-            "receipt_sha256",
-            "targets",
-            "observed_at",
-            "available_at",
-            "allocation_id",
-            "record_sha256",
+            "schema_version", "receipt_id", "receipt_sha256", "targets",
+            "observed_at", "available_at", "allocation_id", "record_sha256",
         }
         _exact_keys(raw, expected, "AllocationPlan")
         if raw["schema_version"] != SCHEMA_VERSION:
@@ -498,13 +480,119 @@ class AllocationPlan:
         return item
 
 
-class CampaignMonetaryCostAuthority:
-    """Durable, content-addressed authority for incurred campaign money evidence.
+_RESOLUTION_TOKEN = object()
 
-    A #645 CostEvidence qualifies only if this resolver can reconstruct it from
-    exact persisted receipt and allocation bytes whose external source identity
-    is separately bound. Failed/conflicting publication may leave content-addressed
-    bytes, but unbound bytes can never qualify as incurred truth.
+
+class ResolvedMonetaryReceipt:
+    """Opaque capability minted only by package-owned source resolvers.
+
+    There is deliberately no public constructor/factory. Future canonical provider,
+    compute, settlement, or owner-admin resolver modules must validate their native
+    source authority first and then use the package-private issuer below. Raw strings,
+    digests, JSON, or MonetaryReceipt objects are never sufficient for admission.
+    """
+
+    __slots__ = ("receipt", "resolver_family", "resolver_evidence_id", "resolver_sha256")
+
+    def __init__(
+        self,
+        receipt: MonetaryReceipt,
+        resolver_family: MonetaryResolverFamily,
+        resolver_evidence_id: str,
+        resolver_sha256: str,
+        *,
+        _token: object | None = None,
+    ) -> None:
+        if _token is not _RESOLUTION_TOKEN:
+            raise TypeError("ResolvedMonetaryReceipt cannot be caller-constructed")
+        self.receipt = receipt
+        self.resolver_family = resolver_family
+        self.resolver_evidence_id = resolver_evidence_id
+        self.resolver_sha256 = resolver_sha256
+
+
+class ResolvedCampaignCurrency:
+    """Opaque campaign-currency capability from a package-owned resolver."""
+
+    __slots__ = ("evidence", "resolver_family", "resolver_evidence_id", "resolver_sha256")
+
+    def __init__(
+        self,
+        evidence: CampaignCurrencyEvidence,
+        resolver_family: MonetaryResolverFamily,
+        resolver_evidence_id: str,
+        resolver_sha256: str,
+        *,
+        _token: object | None = None,
+    ) -> None:
+        if _token is not _RESOLUTION_TOKEN:
+            raise TypeError("ResolvedCampaignCurrency cannot be caller-constructed")
+        self.evidence = evidence
+        self.resolver_family = resolver_family
+        self.resolver_evidence_id = resolver_evidence_id
+        self.resolver_sha256 = resolver_sha256
+
+
+def _issue_resolved_receipt(
+    *,
+    receipt: MonetaryReceipt,
+    resolver_family: MonetaryResolverFamily,
+    resolver_evidence_id: str,
+    resolver_sha256: str,
+) -> ResolvedMonetaryReceipt:
+    """Package-private issuer for future canonical source-resolver modules.
+
+    This is intentionally underscored and is not an application/domain API. Adding a
+    production call site is a source change that must itself prove the native upstream
+    authority before invoking this issuer.
+    """
+
+    if type(receipt) is not MonetaryReceipt:
+        raise MonetaryCostAuthorityError("resolver receipt has invalid type")
+    if not isinstance(resolver_family, MonetaryResolverFamily):
+        raise MonetaryCostAuthorityError("resolver_family is invalid")
+    _text(resolver_evidence_id, "resolver_evidence_id")
+    _sha256(resolver_sha256, "resolver_sha256")
+    _validate_resolver_family(receipt.cost_class, resolver_family)
+    return ResolvedMonetaryReceipt(
+        receipt,
+        resolver_family,
+        resolver_evidence_id,
+        resolver_sha256,
+        _token=_RESOLUTION_TOKEN,
+    )
+
+
+def _issue_resolved_currency(
+    *,
+    evidence: CampaignCurrencyEvidence,
+    resolver_evidence_id: str,
+    resolver_sha256: str,
+) -> ResolvedCampaignCurrency:
+    """Package-private issuer for a future canonical owner/account currency resolver."""
+
+    if type(evidence) is not CampaignCurrencyEvidence:
+        raise MonetaryCostAuthorityError("resolver currency evidence has invalid type")
+    _text(resolver_evidence_id, "resolver_evidence_id")
+    _sha256(resolver_sha256, "resolver_sha256")
+    return ResolvedCampaignCurrency(
+        evidence,
+        MonetaryResolverFamily.OWNER_CAMPAIGN_CURRENCY,
+        resolver_evidence_id,
+        resolver_sha256,
+        _token=_RESOLUTION_TOKEN,
+    )
+
+
+class CampaignMonetaryCostAuthority:
+    """Durable admitted-money authority consumed by #645 campaign economics.
+
+    Raw evidence may be stored for audit, but only an opaque Resolved* capability can
+    create an admission binding. Current main has no concrete provider/account billing,
+    compute-billing, execution-settlement, or owner-admin resolver that calls the private
+    issuers above, so this class intentionally cannot turn arbitrary caller input into
+    COMPLETE_NET_ECONOMICS. Future resolvers must land as separately reviewed source
+    adapters and can then feed this stable admission/persistence boundary.
     """
 
     def __init__(self, root: str | Path) -> None:
@@ -512,22 +600,114 @@ class CampaignMonetaryCostAuthority:
         self.receipts_dir = self.root / "receipts"
         self.allocations_dir = self.root / "allocations"
         self.currency_dir = self.root / "campaign-currency"
+        self.admissions_dir = self.root / "admissions"
         self.source_index_dir = self.root / "source-index"
         self.allocation_index_dir = self.root / "allocation-by-receipt"
         self.correction_index_dir = self.root / "correction-by-receipt"
         self.campaign_currency_index_dir = self.root / "currency-by-campaign"
 
-    def publish_currency(self, evidence: CampaignCurrencyEvidence) -> CostSourceRef:
+    def store_receipt_candidate(self, receipt: MonetaryReceipt) -> CostSourceRef:
+        if type(receipt) is not MonetaryReceipt:
+            raise MonetaryCostAuthorityError("receipt candidate has invalid type")
+        self._write_record(self.receipts_dir / f"{receipt.receipt_id}.json", receipt.to_dict())
+        return receipt.ref
+
+    def store_currency_candidate(self, evidence: CampaignCurrencyEvidence) -> CostSourceRef:
         if type(evidence) is not CampaignCurrencyEvidence:
-            raise MonetaryCostAuthorityError("currency evidence has invalid type")
-        self._write_record(
-            self.currency_dir / f"{evidence.evidence_id}.json", evidence.to_dict()
+            raise MonetaryCostAuthorityError("currency candidate has invalid type")
+        self._write_record(self.currency_dir / f"{evidence.evidence_id}.json", evidence.to_dict())
+        return evidence.ref
+
+    def publish_receipt(self, resolution: ResolvedMonetaryReceipt) -> CostSourceRef:
+        if type(resolution) is not ResolvedMonetaryReceipt:
+            raise MonetaryCostAuthorityError(
+                "authoritative receipt publication requires ResolvedMonetaryReceipt capability"
+            )
+        receipt = resolution.receipt
+        _validate_resolver_family(receipt.cost_class, resolution.resolver_family)
+        _text(resolution.resolver_evidence_id, "resolver_evidence_id")
+        _sha256(resolution.resolver_sha256, "resolver_sha256")
+        if receipt.quality is not MonetaryEvidenceQuality.INCURRED_ACTUAL:
+            raise MonetaryCostAuthorityError(
+                "non-incurred resolver evidence cannot be admitted as monetary truth"
+            )
+        if receipt.shared_source and receipt.supersedes_receipt_ids:
+            raise MonetaryCostAuthorityError(
+                "shared receipt corrections require a future conserved allocation lineage"
+            )
+        for prior_id in receipt.supersedes_receipt_ids:
+            prior = self._load_receipt(prior_id)
+            self._require_receipt_admitted(prior)
+            if prior.cost_class is not receipt.cost_class:
+                raise MonetaryCostAuthorityError("receipt correction cannot cross cost class")
+            if prior.source_class is not receipt.source_class:
+                raise MonetaryCostAuthorityError("receipt correction cannot cross source class")
+            if prior.money.currency != receipt.money.currency:
+                raise MonetaryCostAuthorityError("receipt correction cannot change currency")
+            if prior.shared_source != receipt.shared_source:
+                raise MonetaryCostAuthorityError("receipt correction cannot change sharing mode")
+            if prior.campaign_sha256 != receipt.campaign_sha256 or prior.memberships != receipt.memberships:
+                raise MonetaryCostAuthorityError(
+                    "receipt correction cannot rewrite campaign membership"
+                )
+            if receipt.available_at < prior.available_at:
+                raise MonetaryCostAuthorityError(
+                    "receipt correction cannot become available before predecessor"
+                )
+
+        self.store_receipt_candidate(receipt)
+        self._bind_source_once(
+            namespace=receipt.source_class.value,
+            source_authority=receipt.source_authority,
+            source_evidence_id=receipt.source_evidence_id,
+            record_id=receipt.receipt_id,
         )
+        self._write_binding_once(
+            self.admissions_dir / f"receipt-{receipt.receipt_id}.json",
+            {
+                "kind": "RECEIPT",
+                "record_id": receipt.receipt_id,
+                "resolver_family": resolution.resolver_family.value,
+                "resolver_evidence_id": resolution.resolver_evidence_id,
+                "resolver_sha256": resolution.resolver_sha256,
+            },
+            conflict_message="receipt already has a different resolver admission",
+        )
+        for prior_id in receipt.supersedes_receipt_ids:
+            self._write_binding_once(
+                self.correction_index_dir / f"{prior_id}.json",
+                {"prior_receipt_id": prior_id, "replacement_receipt_id": receipt.receipt_id},
+                conflict_message="receipt already has a different append-only correction",
+            )
+        return receipt.ref
+
+    def publish_currency(self, resolution: ResolvedCampaignCurrency) -> CostSourceRef:
+        if type(resolution) is not ResolvedCampaignCurrency:
+            raise MonetaryCostAuthorityError(
+                "authoritative currency publication requires ResolvedCampaignCurrency capability"
+            )
+        if resolution.resolver_family is not MonetaryResolverFamily.OWNER_CAMPAIGN_CURRENCY:
+            raise MonetaryCostAuthorityError("campaign currency resolver family is invalid")
+        _text(resolution.resolver_evidence_id, "resolver_evidence_id")
+        _sha256(resolution.resolver_sha256, "resolver_sha256")
+        evidence = resolution.evidence
+        self.store_currency_candidate(evidence)
         self._bind_source_once(
             namespace="currency",
             source_authority=evidence.source_authority,
             source_evidence_id=evidence.source_evidence_id,
             record_id=evidence.evidence_id,
+        )
+        self._write_binding_once(
+            self.admissions_dir / f"currency-{evidence.evidence_id}.json",
+            {
+                "kind": "CURRENCY",
+                "record_id": evidence.evidence_id,
+                "resolver_family": resolution.resolver_family.value,
+                "resolver_evidence_id": resolution.resolver_evidence_id,
+                "resolver_sha256": resolution.resolver_sha256,
+            },
+            conflict_message="currency evidence already has a different resolver admission",
         )
         self._write_binding_once(
             self.campaign_currency_index_dir / f"{evidence.campaign_sha256}.json",
@@ -540,79 +720,21 @@ class CampaignMonetaryCostAuthority:
         )
         return evidence.ref
 
-    def publish_receipt(self, receipt: MonetaryReceipt) -> CostSourceRef:
-        if type(receipt) is not MonetaryReceipt:
-            raise MonetaryCostAuthorityError("receipt has invalid type")
-        if receipt.shared_source and receipt.supersedes_receipt_ids:
-            raise MonetaryCostAuthorityError(
-                "shared receipt corrections require an explicit future allocation-lineage authority"
-            )
-        for prior_id in receipt.supersedes_receipt_ids:
-            prior = self._load_receipt(prior_id)
-            self._require_receipt_bound(prior)
-            if prior.cost_class is not receipt.cost_class:
-                raise MonetaryCostAuthorityError("receipt correction cannot cross cost class")
-            if prior.source_class is not receipt.source_class:
-                raise MonetaryCostAuthorityError("receipt correction cannot cross source class")
-            if prior.money.currency != receipt.money.currency:
-                raise MonetaryCostAuthorityError("receipt correction cannot change currency")
-            if prior.shared_source != receipt.shared_source:
-                raise MonetaryCostAuthorityError("receipt correction cannot change sharing mode")
-            if prior.quality is not receipt.quality:
-                raise MonetaryCostAuthorityError("receipt correction cannot change evidence quality")
-            if not receipt.shared_source and (
-                prior.campaign_sha256 != receipt.campaign_sha256
-                or prior.memberships != receipt.memberships
-            ):
-                raise MonetaryCostAuthorityError(
-                    "receipt correction cannot rewrite campaign membership"
-                )
-            if receipt.available_at < prior.available_at:
-                raise MonetaryCostAuthorityError(
-                    "receipt correction cannot become available before predecessor"
-                )
-
+    def store_allocation_candidate(self, plan: AllocationPlan) -> CostSourceRef:
+        receipt = self._load_receipt(plan.receipt_id)
+        self._validate_allocation(plan, receipt)
         self._write_record(
-            self.receipts_dir / f"{receipt.receipt_id}.json", receipt.to_dict()
+            self.allocations_dir / f"{plan.allocation_id}.json", plan.to_dict()
         )
-        self._bind_source_once(
-            namespace=receipt.source_class.value,
-            source_authority=receipt.source_authority,
-            source_evidence_id=receipt.source_evidence_id,
-            record_id=receipt.receipt_id,
-        )
-        for prior_id in receipt.supersedes_receipt_ids:
-            self._write_binding_once(
-                self.correction_index_dir / f"{prior_id}.json",
-                {"prior_receipt_id": prior_id, "replacement_receipt_id": receipt.receipt_id},
-                conflict_message="receipt already has a different append-only correction",
-            )
-        return receipt.ref
+        return plan.ref
 
     def publish_allocation(self, plan: AllocationPlan) -> CostSourceRef:
         if type(plan) is not AllocationPlan:
             raise MonetaryCostAuthorityError("allocation has invalid type")
         receipt = self._load_receipt(plan.receipt_id)
-        self._require_receipt_bound(receipt)
-        if receipt.record_sha256 != plan.receipt_sha256:
-            raise MonetaryCostAuthorityError("allocation references wrong receipt digest")
-        if not receipt.shared_source:
-            raise MonetaryCostAuthorityError("exclusive receipt cannot have allocation plan")
-        currencies = {target.money.currency for target in plan.targets}
-        if currencies != {receipt.money.currency}:
-            raise MonetaryCostAuthorityError("allocation currency must match source receipt")
-        allocated = sum((target.money.amount for target in plan.targets), Decimal("0"))
-        if allocated != receipt.money.amount:
-            raise MonetaryCostAuthorityError(
-                "allocation plan must exactly conserve the source receipt amount"
-            )
-        if plan.available_at < receipt.available_at:
-            raise MonetaryCostAuthorityError(
-                "allocation cannot be available before source receipt"
-            )
-        self._write_record(
-            self.allocations_dir / f"{plan.allocation_id}.json", plan.to_dict()
-        )
+        self._require_receipt_admitted(receipt)
+        self._validate_allocation(plan, receipt)
+        self.store_allocation_candidate(plan)
         self._write_binding_once(
             self.allocation_index_dir / f"{receipt.receipt_id}.json",
             {"receipt_id": receipt.receipt_id, "allocation_id": plan.allocation_id},
@@ -632,28 +754,20 @@ class CampaignMonetaryCostAuthority:
         _sha256(campaign_sha256, "campaign_sha256")
         _utc(as_of, "as_of")
         evidence = self._load_currency(ref.evidence_id)
-        self._require_source_bound(
-            namespace="currency",
-            source_authority=evidence.source_authority,
-            source_evidence_id=evidence.source_evidence_id,
-            record_id=evidence.evidence_id,
-        )
+        self._require_currency_admitted(evidence)
         if evidence.record_sha256 != ref.sha256:
-            raise MonetaryCostAuthorityIntegrityError(
-                "campaign currency reference digest mismatch"
-            )
+            raise MonetaryCostAuthorityIntegrityError("campaign currency reference digest mismatch")
         if evidence.campaign_sha256 != campaign_sha256:
             raise MonetaryCostAuthorityError("currency evidence belongs to another campaign")
         binding = self._read_record(
             self.campaign_currency_index_dir / f"{campaign_sha256}.json",
             "campaign currency binding",
         )
-        expected_binding = {
+        if dict(binding) != {
             "campaign_sha256": campaign_sha256,
             "currency": evidence.currency,
             "evidence_id": evidence.evidence_id,
-        }
-        if dict(binding) != expected_binding:
+        }:
             raise MonetaryCostAuthorityIntegrityError(
                 "campaign currency evidence is not the canonical campaign binding"
             )
@@ -672,11 +786,7 @@ class CampaignMonetaryCostAuthority:
         required_interval: tuple[datetime, datetime] | None = None,
     ) -> CostEvidence:
         receipt = self._load_receipt(receipt_id)
-        self._require_receipt_bound(receipt)
-        if receipt.quality is not MonetaryEvidenceQuality.INCURRED_ACTUAL:
-            raise MonetaryCostAuthorityError(
-                "estimate/simulated/unverified evidence cannot mint incurred cost truth"
-            )
+        self._require_receipt_admitted(receipt)
         membership_tuple = tuple(memberships)
         _sorted_unique(membership_tuple, "memberships")
         _sha256(campaign_sha256, "campaign_sha256")
@@ -686,12 +796,10 @@ class CampaignMonetaryCostAuthority:
         money = receipt.money
         observed_at = receipt.observed_at
         available_at = receipt.available_at
-
         if receipt.shared_source:
             plan = self._allocation_for_receipt(receipt.receipt_id)
             target_matches = [
-                item
-                for item in plan.targets
+                item for item in plan.targets
                 if item.campaign_sha256 == campaign_sha256
                 and item.memberships == membership_tuple
             ]
@@ -722,11 +830,7 @@ class CampaignMonetaryCostAuthority:
 
         return CostEvidence(
             cost_class=receipt.cost_class,
-            truth=(
-                CostTruth.KNOWN_ZERO
-                if money.amount == Decimal("0")
-                else CostTruth.KNOWN_AMOUNT
-            ),
+            truth=CostTruth.KNOWN_ZERO if money.amount == 0 else CostTruth.KNOWN_AMOUNT,
             basis=CostBasis.OBSERVED_INCURRED,
             treatment=receipt.treatment,
             source=receipt.ref,
@@ -775,6 +879,25 @@ class CampaignMonetaryCostAuthority:
             )
         return canonical
 
+    def _validate_allocation(self, plan: AllocationPlan, receipt: MonetaryReceipt) -> None:
+        if type(plan) is not AllocationPlan:
+            raise MonetaryCostAuthorityError("allocation has invalid type")
+        if receipt.record_sha256 != plan.receipt_sha256:
+            raise MonetaryCostAuthorityError("allocation references wrong receipt digest")
+        if not receipt.shared_source:
+            raise MonetaryCostAuthorityError("exclusive receipt cannot have allocation plan")
+        if {target.money.currency for target in plan.targets} != {receipt.money.currency}:
+            raise MonetaryCostAuthorityError("allocation currency must match source receipt")
+        allocated = sum((target.money.amount for target in plan.targets), Decimal("0"))
+        if allocated != receipt.money.amount:
+            raise MonetaryCostAuthorityError(
+                "allocation plan must exactly conserve the source receipt amount"
+            )
+        if plan.available_at < receipt.available_at:
+            raise MonetaryCostAuthorityError(
+                "allocation cannot be available before source receipt"
+            )
+
     def _validate_required_interval(
         self,
         receipt: MonetaryReceipt,
@@ -782,15 +905,12 @@ class CampaignMonetaryCostAuthority:
     ) -> None:
         if required_interval is None:
             return
-        if len(required_interval) != 2:
-            raise MonetaryCostAuthorityError("required_interval must contain start and end")
         start, end = required_interval
         _utc(start, "required_interval start")
         _utc(end, "required_interval end")
         if end < start:
             raise MonetaryCostAuthorityError("required_interval end precedes start")
-        assert receipt.covered_start is not None
-        assert receipt.covered_end is not None
+        assert receipt.covered_start is not None and receipt.covered_end is not None
         if receipt.covered_start > start or receipt.covered_end < end:
             raise MonetaryCostAuthorityError(
                 "receipt coverage does not contain the required campaign interval"
@@ -798,9 +918,7 @@ class CampaignMonetaryCostAuthority:
 
     def _load_receipt(self, receipt_id: str) -> MonetaryReceipt:
         _sha256(receipt_id, "receipt_id")
-        raw = self._read_record(
-            self.receipts_dir / f"{receipt_id}.json", "monetary receipt"
-        )
+        raw = self._read_record(self.receipts_dir / f"{receipt_id}.json", "monetary receipt")
         item = MonetaryReceipt.from_dict(raw)
         if item.receipt_id != receipt_id:
             raise MonetaryCostAuthorityIntegrityError("receipt filename identity mismatch")
@@ -813,9 +931,7 @@ class CampaignMonetaryCostAuthority:
         )
         item = CampaignCurrencyEvidence.from_dict(raw)
         if item.evidence_id != evidence_id:
-            raise MonetaryCostAuthorityIntegrityError(
-                "currency filename identity mismatch"
-            )
+            raise MonetaryCostAuthorityIntegrityError("currency filename identity mismatch")
         return item
 
     def _load_allocation(self, allocation_id: str) -> AllocationPlan:
@@ -825,9 +941,7 @@ class CampaignMonetaryCostAuthority:
         )
         item = AllocationPlan.from_dict(raw)
         if item.allocation_id != allocation_id:
-            raise MonetaryCostAuthorityIntegrityError(
-                "allocation filename identity mismatch"
-            )
+            raise MonetaryCostAuthorityIntegrityError("allocation filename identity mismatch")
         return item
 
     def _allocation_for_receipt(self, receipt_id: str) -> AllocationPlan:
@@ -842,21 +956,66 @@ class CampaignMonetaryCostAuthority:
             raise MonetaryCostAuthorityIntegrityError("allocation points to wrong receipt")
         return plan
 
+    def _require_receipt_admitted(self, receipt: MonetaryReceipt) -> None:
+        if receipt.quality is not MonetaryEvidenceQuality.INCURRED_ACTUAL:
+            raise MonetaryCostAuthorityError(
+                "estimate/simulated/unverified evidence cannot mint incurred cost truth"
+            )
+        raw = self._read_record(
+            self.admissions_dir / f"receipt-{receipt.receipt_id}.json",
+            "receipt resolver admission",
+        )
+        family = MonetaryResolverFamily(_string(raw.get("resolver_family"), "resolver_family"))
+        _validate_resolver_family(receipt.cost_class, family)
+        _exact_keys(
+            raw,
+            {"kind", "record_id", "resolver_family", "resolver_evidence_id", "resolver_sha256"},
+            "receipt resolver admission",
+        )
+        if raw["kind"] != "RECEIPT" or raw["record_id"] != receipt.receipt_id:
+            raise MonetaryCostAuthorityIntegrityError("receipt resolver admission identity mismatch")
+        _text(_string(raw["resolver_evidence_id"], "resolver_evidence_id"), "resolver_evidence_id")
+        _sha256(_string(raw["resolver_sha256"], "resolver_sha256"), "resolver_sha256")
+        self._require_source_bound(
+            namespace=receipt.source_class.value,
+            source_authority=receipt.source_authority,
+            source_evidence_id=receipt.source_evidence_id,
+            record_id=receipt.receipt_id,
+        )
+
+    def _require_currency_admitted(self, evidence: CampaignCurrencyEvidence) -> None:
+        raw = self._read_record(
+            self.admissions_dir / f"currency-{evidence.evidence_id}.json",
+            "currency resolver admission",
+        )
+        _exact_keys(
+            raw,
+            {"kind", "record_id", "resolver_family", "resolver_evidence_id", "resolver_sha256"},
+            "currency resolver admission",
+        )
+        if (
+            raw["kind"] != "CURRENCY"
+            or raw["record_id"] != evidence.evidence_id
+            or raw["resolver_family"] != MonetaryResolverFamily.OWNER_CAMPAIGN_CURRENCY.value
+        ):
+            raise MonetaryCostAuthorityIntegrityError("currency resolver admission identity mismatch")
+        _text(_string(raw["resolver_evidence_id"], "resolver_evidence_id"), "resolver_evidence_id")
+        _sha256(_string(raw["resolver_sha256"], "resolver_sha256"), "resolver_sha256")
+        self._require_source_bound(
+            namespace="currency",
+            source_authority=evidence.source_authority,
+            source_evidence_id=evidence.source_evidence_id,
+            record_id=evidence.evidence_id,
+        )
+
     def _source_index_path(
         self, *, namespace: str, source_authority: str, source_evidence_id: str
     ) -> Path:
-        material = "\0".join(
-            (namespace, source_authority, source_evidence_id)
-        ).encode("utf-8")
+        material = "\0".join((namespace, source_authority, source_evidence_id)).encode("utf-8")
         return self.source_index_dir / f"{hashlib.sha256(material).hexdigest()}.json"
 
     def _bind_source_once(
-        self,
-        *,
-        namespace: str,
-        source_authority: str,
-        source_evidence_id: str,
-        record_id: str,
+        self, *, namespace: str, source_authority: str, source_evidence_id: str, record_id: str
     ) -> None:
         self._write_binding_once(
             self._source_index_path(
@@ -876,12 +1035,7 @@ class CampaignMonetaryCostAuthority:
         )
 
     def _require_source_bound(
-        self,
-        *,
-        namespace: str,
-        source_authority: str,
-        source_evidence_id: str,
-        record_id: str,
+        self, *, namespace: str, source_authority: str, source_evidence_id: str, record_id: str
     ) -> None:
         raw = self._read_record(
             self._source_index_path(
@@ -902,33 +1056,20 @@ class CampaignMonetaryCostAuthority:
                 "source identity binding does not authorize this record"
             )
 
-    def _require_receipt_bound(self, receipt: MonetaryReceipt) -> None:
-        self._require_source_bound(
-            namespace=receipt.source_class.value,
-            source_authority=receipt.source_authority,
-            source_evidence_id=receipt.source_evidence_id,
-            record_id=receipt.receipt_id,
-        )
-
     def _require_correction_binding(self, prior_id: str, replacement_id: str) -> None:
         raw = self._read_record(
             self.correction_index_dir / f"{prior_id}.json", "correction binding"
         )
-        expected = {
+        if dict(raw) != {
             "prior_receipt_id": prior_id,
             "replacement_receipt_id": replacement_id,
-        }
-        if dict(raw) != expected:
+        }:
             raise MonetaryCostAuthorityIntegrityError(
                 "correction lineage does not authorize this replacement"
             )
 
     def _write_binding_once(
-        self,
-        path: Path,
-        payload: Mapping[str, Any],
-        *,
-        conflict_message: str,
+        self, path: Path, payload: Mapping[str, Any], *, conflict_message: str
     ) -> None:
         if path.exists():
             existing = self._read_record(path, "authority binding")
@@ -956,9 +1097,7 @@ class CampaignMonetaryCostAuthority:
         except FileExistsError:
             existing = path.read_text(encoding="utf-8")
             if existing != text:
-                raise MonetaryCostAuthorityIntegrityError(
-                    "concurrent authority record conflict"
-                )
+                raise MonetaryCostAuthorityIntegrityError("concurrent authority record conflict")
 
     @staticmethod
     def _read_record(path: Path, label: str) -> Mapping[str, Any]:
@@ -979,17 +1118,29 @@ class CampaignMonetaryCostAuthority:
 
 def _validate_source_class(cost_class: CostClass, source_class: MonetarySourceClass) -> None:
     allowed = {
-        CostClass.PROVIDER_DATA: {MonetarySourceClass.PROVIDER_BILLING},
-        CostClass.MODEL_COMPUTE_AI: {MonetarySourceClass.COMPUTE_BILLING},
-        CostClass.EXECUTION_SLIPPAGE: {MonetarySourceClass.EXECUTION_RECEIPT},
-        CostClass.EXECUTION_FEES_COMMISSION_TAX: {
-            MonetarySourceClass.EXECUTION_RECEIPT
-        },
-        CostClass.FIXED_CAMPAIGN: {MonetarySourceClass.FIXED_CAMPAIGN_ADMIN},
+        CostClass.PROVIDER_DATA: MonetarySourceClass.PROVIDER_BILLING,
+        CostClass.MODEL_COMPUTE_AI: MonetarySourceClass.COMPUTE_BILLING,
+        CostClass.EXECUTION_SLIPPAGE: MonetarySourceClass.EXECUTION_RECEIPT,
+        CostClass.EXECUTION_FEES_COMMISSION_TAX: MonetarySourceClass.EXECUTION_RECEIPT,
+        CostClass.FIXED_CAMPAIGN: MonetarySourceClass.FIXED_CAMPAIGN_ADMIN,
     }
-    if source_class not in allowed[cost_class]:
+    if allowed[cost_class] is not source_class:
         raise MonetaryCostAuthorityError(
             f"{source_class.value} cannot authorize {cost_class.value}"
+        )
+
+
+def _validate_resolver_family(cost_class: CostClass, family: MonetaryResolverFamily) -> None:
+    allowed = {
+        CostClass.PROVIDER_DATA: MonetaryResolverFamily.PROVIDER_ACCOUNT_BILLING,
+        CostClass.MODEL_COMPUTE_AI: MonetaryResolverFamily.COMPUTE_BILLING,
+        CostClass.EXECUTION_SLIPPAGE: MonetaryResolverFamily.EXECUTION_SETTLEMENT,
+        CostClass.EXECUTION_FEES_COMMISSION_TAX: MonetaryResolverFamily.EXECUTION_SETTLEMENT,
+        CostClass.FIXED_CAMPAIGN: MonetaryResolverFamily.OWNER_FIXED_EXPENSE,
+    }
+    if allowed[cost_class] is not family:
+        raise MonetaryCostAuthorityError(
+            f"{family.value} cannot resolve {cost_class.value}"
         )
 
 
@@ -1121,23 +1272,23 @@ def _parse_datetime(value: Any, label: str) -> datetime:
 
 def _canonical_json_text(payload: Mapping[str, Any]) -> str:
     return json.dumps(
-        dict(payload),
-        ensure_ascii=False,
-        sort_keys=True,
-        separators=(",", ":"),
-        allow_nan=False,
+        dict(payload), ensure_ascii=False, sort_keys=True,
+        separators=(",", ":"), allow_nan=False,
     ) + "\n"
 
 
 def _digest(payload: Mapping[str, Any]) -> str:
-    return hashlib.sha256(_canonical_json_text(payload)[:-1].encode("utf-8")).hexdigest()
+    canonical = json.dumps(
+        dict(payload), ensure_ascii=False, sort_keys=True,
+        separators=(",", ":"), allow_nan=False,
+    ).encode("utf-8")
+    return hashlib.sha256(canonical).hexdigest()
 
 
 def _fsync_directory(path: Path) -> None:
     if os.name == "nt":
         return
-    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
-    descriptor = os.open(path, flags)
+    descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
     try:
         os.fsync(descriptor)
     finally:

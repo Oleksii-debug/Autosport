@@ -44,6 +44,11 @@ def derive_campaign_economics_with_betfair_commission(
     Therefore this composition may close only the *source-authority* reason for
     the exact verified commission evidence. It must not subtract that amount,
     infer campaign currency, or upgrade incomplete net economics.
+
+    A supplied prior version is never returned as positive authority merely
+    because it has the exact public dataclass type. Every call first re-runs the
+    canonical derivation, so caller-authored completeness/totals/reasons cannot
+    bypass the fail-closed economic rules.
     """
 
     if previous is not None and type(previous) is not CampaignEconomicEvidenceVersion:
@@ -61,18 +66,10 @@ def derive_campaign_economics_with_betfair_commission(
     )
     costs = _merge_previous_costs(previous, commission)
 
-    # Exact retries of an already source-qualified immutable version are
-    # idempotent. Revalidate the live finalized campaign projection first so a
-    # caller cannot use retry behavior to carry a version across campaign truth.
-    if (
-        previous is not None
-        and previous.costs == costs
-        and previous.as_of == as_of
-        and _UNRESOLVED_REASON not in previous.incomplete_reasons
-        and campaign.projection() == previous.campaign_authority
-    ):
-        return previous
-
+    # Never shortcut through a caller-supplied CampaignEconomicEvidenceVersion.
+    # It is a public immutable value, not an issued capability. Canonical
+    # derivation must recompute gross/cost semantics before this source-specific
+    # consumer is allowed to narrow one generic unresolved-source reason.
     derived = derive_campaign_economics(
         campaign=campaign,
         costs=costs,

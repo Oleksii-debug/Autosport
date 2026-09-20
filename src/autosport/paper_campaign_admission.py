@@ -66,7 +66,7 @@ _LIVE_DECISION_SCHEMA = "autosport.persistent_live_decision"
 _LIVE_DECISION_SCHEMA_VERSION = 2
 _EXECUTION_ADOPTION_SCHEMA = "autosport.paper_execution_adoption"
 _EXECUTION_ADOPTION_SCHEMA_VERSION = 1
-_LEGACY_EXECUTION_AUTHORITY_SCHEMA = "paper_value.execution_authority"
+_LEGACY_EXECUTION_AUTHORITY_SCHEMA = "autosport.paper_value.execution_authority"
 _LEGACY_EXECUTION_AUTHORITY_SCHEMA_VERSION = 1
 
 

@@ -35,6 +35,7 @@ _RECORD_TYPES = frozenset(
         "DriftFinding",
         "CounterfactualQualification",
         "CounterfactualSourceEvidence",
+        "ChampionEligibilityDecision",
     }
 )
 

@@ -1725,6 +1725,173 @@ def route_compute(
     )
 
 
+_VOC_PRECOMPUTE_CONTROL_FIELDS = {
+    "admission_id",
+    "research_protocol_id",
+    "cohort_id",
+    "challenger_candidate_id",
+}
+_VOC_PRECOMPUTE_FIELDS = {
+    "schema_version",
+    "admission_id",
+    "request_id",
+    "decision_id",
+    "decision_input_sha256",
+    "decision_context_sha256",
+    "decision_deadline",
+    "admitted_at",
+    "research_protocol_id",
+    "cohort_id",
+    "task_class",
+    "scope",
+    "baseline_compute_identity",
+    "challenger_compute_identity",
+}
+
+
+def _voc_compute_identity(candidate: ComputeCandidate) -> dict[str, str]:
+    return {
+        "candidate_id": candidate.candidate_id,
+        "backend_id": candidate.backend_id,
+        "model_id": candidate.model_id,
+        "config_sha256": candidate.config_sha256,
+    }
+
+
+def _build_voc_precompute_admission(
+    *,
+    request: ComputeRouteRequest,
+    candidates: Sequence[ComputeCandidate],
+    decision: ComputeRouteDecision,
+    domain_observation: SportDomainFitnessObservation | None,
+    control: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Derive one immutable paired-shadow enrollment from canonical route inputs."""
+
+    if type(control) is not dict or set(control) != _VOC_PRECOMPUTE_CONTROL_FIELDS:
+        raise ModelComputeRouterError(
+            "voc_precompute_admission control fields are invalid"
+        )
+    if request.decision_input_sha256 is None:
+        raise ModelComputeRouterError(
+            "VOC precompute admission requires decision_input_sha256"
+        )
+    if request.decision_evidence_sha256 is None:
+        raise ModelComputeRouterError(
+            "VOC precompute admission requires canonical decision context evidence"
+        )
+    if domain_observation is None:
+        raise ModelComputeRouterError(
+            "VOC precompute admission requires canonical domain observation"
+        )
+    for name in (
+        "voc_regime_id",
+        "voc_urgency_id",
+        "voc_contradiction_state",
+    ):
+        if getattr(request, name) is None:
+            raise ModelComputeRouterError(
+                f"VOC precompute admission requires {name}"
+            )
+
+    by_id = _candidate_map(candidates)
+    baseline = by_id.get(request.baseline_candidate_id)
+    challenger_id = _text(
+        "voc_precompute_admission challenger_candidate_id",
+        control["challenger_candidate_id"],
+    )
+    challenger = by_id.get(challenger_id)
+    if baseline is None or challenger is None:
+        raise ModelComputeRouterError(
+            "VOC precompute admission candidates must exist in canonical route inputs"
+        )
+    if baseline.candidate_id == challenger.candidate_id:
+        raise ModelComputeRouterError(
+            "VOC precompute admission candidates must be distinct"
+        )
+    if (
+        request.required_capability not in baseline.capabilities
+        or request.required_capability not in challenger.capabilities
+    ):
+        raise ModelComputeRouterError(
+            "VOC precompute admission candidates must support the routed task"
+        )
+
+    return {
+        "schema_version": 1,
+        "admission_id": _text(
+            "voc_precompute_admission admission_id",
+            control["admission_id"],
+        ),
+        "request_id": request.request_id,
+        "decision_id": decision.decision_id,
+        "decision_input_sha256": request.decision_input_sha256,
+        "decision_context_sha256": request.decision_evidence_sha256,
+        "decision_deadline": _time(
+            "decision_deadline", request.decision_deadline
+        ),
+        "admitted_at": _time("decision.decided_at", decision.decided_at),
+        "research_protocol_id": _text(
+            "voc_precompute_admission research_protocol_id",
+            control["research_protocol_id"],
+        ),
+        "cohort_id": _text(
+            "voc_precompute_admission cohort_id",
+            control["cohort_id"],
+        ),
+        "task_class": request.required_capability,
+        "scope": {
+            "sport_id": domain_observation.sport_id,
+            "league_id": domain_observation.league_id,
+            "regime_id": request.voc_regime_id,
+            "urgency_id": request.voc_urgency_id,
+            "contradiction_state": request.voc_contradiction_state,
+        },
+        "baseline_compute_identity": _voc_compute_identity(baseline),
+        "challenger_compute_identity": _voc_compute_identity(challenger),
+    }
+
+
+def _validate_persisted_voc_precompute_admission(
+    *,
+    request: ComputeRouteRequest,
+    candidates: Sequence[ComputeCandidate],
+    decision: ComputeRouteDecision,
+    domain_observation: SportDomainFitnessObservation | None,
+    raw: object,
+) -> dict[str, Any]:
+    if type(raw) is not dict or set(raw) != _VOC_PRECOMPUTE_FIELDS:
+        raise ModelComputeRouterError(
+            "persisted VOC precompute admission schema is invalid"
+        )
+    if raw.get("schema_version") != 1:
+        raise ModelComputeRouterError(
+            "persisted VOC precompute admission schema version is unsupported"
+        )
+    challenger = raw.get("challenger_compute_identity")
+    if type(challenger) is not dict:
+        raise ModelComputeRouterError(
+            "persisted VOC challenger compute identity is invalid"
+        )
+    expected = _build_voc_precompute_admission(
+        request=request,
+        candidates=candidates,
+        decision=decision,
+        domain_observation=domain_observation,
+        control={
+            "admission_id": raw.get("admission_id"),
+            "research_protocol_id": raw.get("research_protocol_id"),
+            "cohort_id": raw.get("cohort_id"),
+            "challenger_candidate_id": challenger.get("candidate_id"),
+        },
+    )
+    if raw != expected:
+        raise ModelComputeRouterError(
+            "persisted VOC precompute admission is not derived from canonical route inputs"
+        )
+    return expected
+
+
 class ModelComputeRouterStore:
     """Restart-safe route/cost ledger with separate execution authority."""
 
@@ -2344,6 +2511,17 @@ class ModelComputeRouterStore:
                     "persisted domain route is not derived from "
                     "the bound observation evidence"
                 )
+            persisted_voc_precompute = item.get("voc_precompute_admission")
+            if persisted_voc_precompute is not None:
+                persisted_voc_precompute = (
+                    _validate_persisted_voc_precompute_admission(
+                        request=request,
+                        candidates=candidates,
+                        decision=decision,
+                        domain_observation=domain_observation,
+                        raw=persisted_voc_precompute,
+                    )
+                )
             replayed_decision = route_compute(
                 request,
                 candidates,
@@ -2377,6 +2555,8 @@ class ModelComputeRouterStore:
                     verified_domain_route
                 ),
             }
+            if persisted_voc_precompute is not None:
+                unsigned["voc_precompute_admission"] = persisted_voc_precompute
             if (
                 _sha256(
                     "record_sha256",
@@ -2621,6 +2801,7 @@ class ModelComputeRouterStore:
         voc_evidence: ValueOfComputationEvidence | None = None,
         domain_observation: SportDomainFitnessObservation | None = None,
         domain_route: RouteRecommendation | None = None,
+        voc_precompute_admission: Mapping[str, Any] | None = None,
     ) -> ComputeRouteDecision:
         if self._publication_interrupted:
             raise ModelComputeRouterError(
@@ -2649,6 +2830,17 @@ class ModelComputeRouterStore:
         domain_route_payload = _domain_route_payload(
             verified_domain_route
         )
+        canonical_voc_precompute = (
+            None
+            if voc_precompute_admission is None
+            else _build_voc_precompute_admission(
+                request=request,
+                candidates=candidates,
+                decision=decision,
+                domain_observation=domain_observation,
+                control=voc_precompute_admission,
+            )
+        )
         unsigned = {
             "request": request.payload(),
             "policy": policy.payload(),
@@ -2665,6 +2857,8 @@ class ModelComputeRouterStore:
             "domain_observation": domain_observation_payload,
             "domain_route": domain_route_payload,
         }
+        if canonical_voc_precompute is not None:
+            unsigned["voc_precompute_admission"] = canonical_voc_precompute
         record = {
             **unsigned,
             "record_sha256": _canonical_digest(unsigned),
@@ -2706,6 +2900,43 @@ class ModelComputeRouterStore:
                 record["decision"]
             )
         )
+
+    def get_voc_precompute_admission(
+        self, request_id: str
+    ) -> dict[str, Any] | None:
+        """Resolve immutable router-owned paired-shadow enrollment evidence."""
+
+        _text("request_id", request_id)
+        record = self._routes.get(request_id)
+        if record is None:
+            return None
+        raw = record.get("voc_precompute_admission")
+        if raw is None:
+            return None
+        # _load()/route() already canonicalize this payload. Return detached
+        # JSON data plus the immutable route-record digest that owns it.
+        return {
+            **json.loads(
+                json.dumps(
+                    raw,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                    allow_nan=False,
+                )
+            ),
+            "route_record_sha256": record["record_sha256"],
+        }
+
+    def voc_precompute_admissions(self) -> tuple[dict[str, Any], ...]:
+        """Return the complete immutable paired-shadow enrollment universe."""
+
+        values: list[dict[str, Any]] = []
+        for request_id in sorted(self._routes):
+            resolved = self.get_voc_precompute_admission(request_id)
+            if resolved is not None:
+                values.append(resolved)
+        return tuple(values)
 
     def record_execution(
         self,

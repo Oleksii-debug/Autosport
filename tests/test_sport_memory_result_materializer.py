@@ -8,7 +8,10 @@ import sys
 
 import pytest
 
-from autosport.continuous_session import SettlementResolution
+from autosport.continuous_session import (
+    SettlementResolution,
+    _seal_settlement_resolution,
+)
 from autosport.domain import MarketEvent
 from autosport.opponent_intelligence import OpponentIntelligenceStore
 from autosport.participant_identity import (
@@ -183,17 +186,72 @@ def _settlement(
 ) -> SettlementResolution:
     opponent_outcome = "void" if outcome == "void" else ("loss" if outcome == "win" else "win")
     assert binding.opponent_quote_key is not None
-    return SettlementResolution(
-        event_identity=event_identity,
-        settlement_ref=settlement_ref,
-        quote_outcomes={
-            binding.subject_quote_key: outcome,
-            binding.opponent_quote_key: opponent_outcome,
-        },
-        evidence_id=evidence_id,
-        evidence_sha256=evidence_sha256,
-        available_at=available_at,
+    return _seal_settlement_resolution(
+        SettlementResolution(
+            event_identity=event_identity,
+            settlement_ref=settlement_ref,
+            quote_outcomes={
+                binding.subject_quote_key: outcome,
+                binding.opponent_quote_key: opponent_outcome,
+            },
+            evidence_id=evidence_id,
+            evidence_sha256=evidence_sha256,
+            available_at=available_at,
+        )
     )
+
+
+def test_caller_constructed_exact_settlement_cannot_authorize_memory_truth(tmp_path):
+    _, store, market_store, materializer = _authorities(tmp_path)
+    binding = _binding(materializer, market_store)
+    assert binding.opponent_quote_key is not None
+
+    for outcome in ("win", "loss", "void"):
+        opponent_outcome = (
+            "void" if outcome == "void" else ("loss" if outcome == "win" else "win")
+        )
+        forged = SettlementResolution(
+            event_identity=binding.event_identity,
+            settlement_ref=f"caller-{outcome}",
+            quote_outcomes={
+                binding.subject_quote_key: outcome,
+                binding.opponent_quote_key: opponent_outcome,
+            },
+            evidence_id=f"caller-{outcome}",
+            evidence_sha256=SHA_C,
+            available_at=T2,
+        )
+        with pytest.raises(
+            SportMemoryResultMaterializationError,
+            match="product-owned outcome-authority",
+        ):
+            materializer.materialize(binding, forged, as_of=T2)
+
+    assert store.graph_edges(as_of=T3) == ()
+    market_store.close()
+
+
+def test_sealed_settlement_capability_is_bound_to_exact_payload(tmp_path):
+    _, store, market_store, materializer = _authorities(tmp_path)
+    binding = _binding(materializer, market_store)
+    canonical = _settlement(binding, "win")
+    assert binding.opponent_quote_key is not None
+
+    forged = replace(
+        canonical,
+        quote_outcomes={
+            binding.subject_quote_key: "loss",
+            binding.opponent_quote_key: "win",
+        },
+    )
+    with pytest.raises(
+        SportMemoryResultMaterializationError,
+        match="product-owned outcome-authority",
+    ):
+        materializer.materialize(binding, forged, as_of=T2)
+
+    assert store.graph_edges(as_of=T3) == ()
+    market_store.close()
 
 
 def test_provider_ids_and_canonical_roots_are_bound_separately_from_display_aliases(tmp_path):
@@ -654,13 +712,15 @@ def test_event_and_subject_quote_must_match_frozen_binding(tmp_path):
             as_of=T2,
         )
 
-    settlement = SettlementResolution(
-        event_identity="event-1",
-        settlement_ref="settlement-1",
-        quote_outcomes={"other-quote": "win"},
-        evidence_id="result-1",
-        evidence_sha256=SHA_B,
-        available_at=T2,
+    settlement = _seal_settlement_resolution(
+        SettlementResolution(
+            event_identity="event-1",
+            settlement_ref="settlement-1",
+            quote_outcomes={"other-quote": "win"},
+            evidence_id="result-1",
+            evidence_sha256=SHA_B,
+            available_at=T2,
+        )
     )
     with pytest.raises(
         SportMemoryResultMaterializationError,

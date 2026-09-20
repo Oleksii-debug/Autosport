@@ -187,6 +187,37 @@ class HeadlessCollectorServiceTests(unittest.TestCase):
             stop_reason=stop_reason,
         )
 
+    def test_runtime_epoch_activation_is_durable_and_revalidated_each_cycle(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            page = catalog_page(1, "event-1")
+            source = FakeCollectorSource([page], [()])
+            service = self.make_service(tmp, source)
+            self.assertEqual(
+                service.delta_store.runtime_stream_epoch("source-x"),
+                ("epoch-1", 1),
+            )
+
+            source.stream_epoch = "epoch-2"
+            service.run_cycle()
+            self.assertEqual(
+                service.delta_store.runtime_stream_epoch("source-x"),
+                ("epoch-2", 2),
+            )
+            reopened = CollectorDeltaStore(Path(tmp) / "collector.json")
+            self.assertEqual(
+                reopened.runtime_stream_epoch("source-x"),
+                ("epoch-2", 2),
+            )
+
+            # Reactivating a previously used epoch is a new generation, so a
+            # retention plan previewed under generation 2 cannot survive ABA.
+            source.stream_epoch = "epoch-1"
+            service.run_cycle()
+            self.assertEqual(
+                service.delta_store.runtime_stream_epoch("source-x"),
+                ("epoch-1", 3),
+            )
+
     def test_restart_reuses_durable_delta_identity_without_duplicate_commit(self):
         with tempfile.TemporaryDirectory() as tmp:
             page = catalog_page(1, "event-1")

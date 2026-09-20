@@ -326,3 +326,33 @@ def test_proof_identity_changes_with_decision_time() -> None:
     assert first.completeness is ProspectiveCostCompleteness.COMPLETE
     assert second.completeness is ProspectiveCostCompleteness.COMPLETE
     assert first.proof_id != second.proof_id
+
+
+def test_future_applicability_fails_closed() -> None:
+    plan = _plan()
+    applicability, costs = _complete_inputs(plan)
+    target = REQUIRED_COST_CLASSES[0]
+    future = _applicability(
+        plan,
+        target,
+        available_at=DECISION_AT + timedelta(seconds=1),
+        valid_until=DECISION_AT + timedelta(minutes=5),
+    )
+    applicability = tuple(
+        future if item.cost_class is target else item for item in applicability
+    )
+
+    result = resolve_prospective_applicable_costs(
+        plan=plan,
+        decision_at=DECISION_AT,
+        currency="EUR",
+        applicability=applicability,
+        costs=costs,
+    )
+
+    assert result.completeness is ProspectiveCostCompleteness.INCOMPLETE
+    assert (
+        f"stale-or-future-applicability:{target.value}"
+        in result.incomplete_reasons
+    )
+    assert result.total_subtractable_amount is None

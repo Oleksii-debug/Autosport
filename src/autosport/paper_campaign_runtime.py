@@ -9,7 +9,10 @@ bridge plan anchor cannot substitute different reflection semantics.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 from . import _paper_campaign_runtime_base as _base
+from .agent_loop import ABSTAIN_ACTION_TYPE, AgentLoopPhase
 from .learning_environment import Action, EnvironmentCheckpoint, Observation
 from .paper_settlement_learning import PaperSettlementLearningWitness
 
@@ -22,6 +25,18 @@ PaperCampaignFinalizationReceipt = _base.PaperCampaignFinalizationReceipt
 PaperCampaignLearningHandoff = _base.PaperCampaignLearningHandoff
 
 _REFLECTION_PLAN_PARAMETER = "paper_reflection_plan_sha256"
+_ABSTENTION_REASON_PARAMETER = "paper_abstention_reason_code"
+
+
+@dataclass(frozen=True, slots=True)
+class PaperCampaignAbstentionReceipt:
+    """Durable acknowledgement of one no-ticket, no-effect campaign decision."""
+
+    observation_id: str
+    action_id: str
+    checkpoint_id: str
+    reason_code: str
+    newly_committed: bool
 
 
 class PaperCampaignRuntime(_base.PaperCampaignRuntime):
@@ -135,6 +150,136 @@ class PaperCampaignRuntime(_base.PaperCampaignRuntime):
             baseline_checkpoint=baseline_checkpoint,
         )
 
+    def commit_abstention(
+        self,
+        *,
+        observation: Observation,
+        decision_at: str,
+        reason_code: str,
+        at: str,
+        parameters: tuple[tuple[str, str], ...] = (),
+        baseline_checkpoint: EnvironmentCheckpoint | None = None,
+    ) -> PaperCampaignAbstentionReceipt:
+        """Durably commit an explicit no-ticket decision without a fake reward.
+
+        ABSTAIN is an externally admissible AgentLoop decision with no external
+        effect.  It never enters PaperBook/settlement/reward/attribution authority;
+        the canonical environment checkpoint therefore remains unchanged.  The
+        durable decision record carries the exact reason and supports idempotent
+        crash/restart replay before the next observation.
+        """
+
+        if not isinstance(observation, Observation):
+            raise TypeError("observation must be Observation")
+        if type(parameters) is not tuple:
+            raise TypeError("parameters must be a canonical tuple")
+        if baseline_checkpoint is not None and not isinstance(
+            baseline_checkpoint, EnvironmentCheckpoint
+        ):
+            raise TypeError("baseline_checkpoint must be EnvironmentCheckpoint")
+        reason = _base._text(reason_code, "reason_code")
+        now = _base._timestamp(at, "at")
+        _base._timestamp(decision_at, "decision_at")
+        if any(
+            type(entry) is tuple
+            and len(entry) == 2
+            and entry[0] == _ABSTENTION_REASON_PARAMETER
+            for entry in parameters
+        ):
+            raise PaperCampaignRuntimeError(
+                "caller cannot supply the internal abstention reason parameter"
+            )
+
+        active_checkpoint = self.environment.checkpoint()
+        if baseline_checkpoint is not None and (
+            baseline_checkpoint.checkpoint_id != active_checkpoint.checkpoint_id
+        ):
+            raise PaperCampaignRuntimeError(
+                "supplied abstention baseline differs from active environment"
+            )
+        baseline = active_checkpoint
+        snapshot = self.agent_loop.snapshot()
+        if snapshot.environment_checkpoint_id != baseline.checkpoint_id:
+            raise PaperCampaignRuntimeError(
+                "AgentLoop checkpoint differs from active environment"
+            )
+
+        if snapshot.phase in {AgentLoopPhase.BOOTSTRAP, AgentLoopPhase.CHECKPOINT}:
+            self.agent_loop.begin_observation(
+                observation,
+                environment_identity=self.environment.identity,
+                at=now,
+            )
+            for phase in (
+                AgentLoopPhase.OBSERVE,
+                AgentLoopPhase.ASSESS,
+                AgentLoopPhase.PLAN,
+                AgentLoopPhase.DECIDE,
+            ):
+                self.agent_loop.advance(expected=phase, at=now)
+        elif snapshot.phase is AgentLoopPhase.ACT_OR_ABSTAIN:
+            if snapshot.observation_id != observation.observation_id:
+                raise PaperCampaignRuntimeError(
+                    "abstention retry does not bind current observation"
+                )
+        else:
+            raise PaperCampaignRuntimeError(
+                "abstention requires BOOTSTRAP, CHECKPOINT, or retryable ACT_OR_ABSTAIN"
+            )
+
+        bound_parameters = tuple(
+            sorted((*parameters, (_ABSTENTION_REASON_PARAMETER, reason)))
+        )
+        action = Action(
+            environment_id=self.environment.environment_id,
+            observation_id=observation.observation_id,
+            action_type=ABSTAIN_ACTION_TYPE,
+            decided_at=decision_at,
+            parameters=bound_parameters,
+        )
+        try:
+            commit = self.agent_loop.commit_abstention(
+                action,
+                episode=self.environment.episode,
+                observation=observation,
+                at=now,
+            )
+        except _base.AgentLoopError as exc:
+            raise PaperCampaignRuntimeError(
+                "AgentLoop rejected campaign abstention"
+            ) from exc
+
+        unchanged_checkpoint = self.environment.checkpoint()
+        if unchanged_checkpoint.checkpoint_id != baseline.checkpoint_id:
+            raise PaperCampaignRuntimeError(
+                "abstention unexpectedly changed the causal environment checkpoint"
+            )
+        try:
+            terminal = self.agent_loop.commit_checkpoint(
+                unchanged_checkpoint,
+                at=now,
+            )
+        except _base.AgentLoopError as exc:
+            raise PaperCampaignRuntimeError(
+                "AgentLoop rejected abstention checkpoint acknowledgement"
+            ) from exc
+        if (
+            terminal.phase is not AgentLoopPhase.CHECKPOINT
+            or terminal.action_id != action.action_id
+            or terminal.transition_id is not None
+            or terminal.environment_checkpoint_id != baseline.checkpoint_id
+        ):
+            raise PaperCampaignRuntimeError(
+                "abstention did not converge to the unchanged canonical checkpoint"
+            )
+        return PaperCampaignAbstentionReceipt(
+            observation_id=observation.observation_id,
+            action_id=action.action_id,
+            checkpoint_id=baseline.checkpoint_id,
+            reason_code=reason,
+            newly_committed=commit.newly_committed,
+        )
+
     def _bind_finalization_plan(
         self,
         witness: PaperSettlementLearningWitness,
@@ -206,6 +351,7 @@ class PaperCampaignRuntime(_base.PaperCampaignRuntime):
 
 
 __all__ = [
+    "PaperCampaignAbstentionReceipt",
     "PaperCampaignFinalizationReceipt",
     "PaperCampaignLearningHandoff",
     "PaperCampaignRuntime",

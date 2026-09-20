@@ -342,8 +342,8 @@ def _install() -> None:
                 "VOC ResearchProtocol was not logically available by precompute admission"
             )
 
-    def hardened_router_precompute(self, admission: Mapping[str, Any]):
-        authority = original_router_precompute(self, admission)
+    def hardened_router_precompute(self, *args, **kwargs):
+        authority = original_router_precompute(self, *args, **kwargs)
         verify_bound_protocol(self, authority)
         return authority
 

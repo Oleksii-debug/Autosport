@@ -296,7 +296,7 @@ def _install() -> None:
                     or existing.agent != agent
                     or existing.observed_ts != existing.recorded_at
                     or existing.action != _SCORING_ACTION
-                    or existing.payload != payload
+                    or existing.to_dict()["payload"] != payload
                     or existing.context_hash != decision_input_sha
                     or existing_at < latest_shadow_ready_at
                 ):

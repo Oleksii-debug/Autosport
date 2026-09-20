@@ -177,7 +177,6 @@ class ExperimentFamilyMember:
 
     def authority_payload(self) -> dict[str, Any]:
         return {
-            "hypothesis_id": self.hypothesis_id,
             "hypothesis_sha256": self.hypothesis_sha256.lower(),
             "semantic_variant_sha256": self.semantic_variant_sha256.lower(),
         }
@@ -303,7 +302,10 @@ class ExperimentFamilyPlan:
             "familywise_alpha": _decimal_text(self.familywise_alpha),
             "look_alpha_spend": [_decimal_text(value) for value in self.look_alpha_spend],
             "members": [
-                member.authority_payload()
+                {
+                    "hypothesis_id": member.hypothesis_id,
+                    **member.authority_payload(),
+                }
                 for member in sorted(self.members, key=lambda value: value.member_authority_id)
             ],
             "frozen_at": self.frozen_at,

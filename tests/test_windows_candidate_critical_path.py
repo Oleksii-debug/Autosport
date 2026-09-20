@@ -63,11 +63,10 @@ def test_windows_candidate_skip_transform_executes_fail_closed() -> None:
     helper = ROOT / "scripts" / "windows_build_skip_gate.ps1"
     fixture = """python -c \"print('before')\"\npython -m pytest -v tests\nif ($LASTEXITCODE -ne 0) { throw \"Full pytest gate exited $LASTEXITCODE\" }\npython -c \"print('after')\"\n"""
     escaped_helper = str(helper).replace("'", "''")
-    escaped_fixture = fixture.replace("'", "''")
     command = f"""
 . '{escaped_helper}'
 $core = @'
-{escaped_fixture}
+{fixture}
 '@
 $result = ConvertTo-WindowsCandidateCoreText -CoreText $core
 if ($result.Contains('python -m pytest -v tests')) {{ throw 'pytest gate was not removed' }}

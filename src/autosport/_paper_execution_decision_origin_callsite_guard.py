@@ -4,72 +4,53 @@ import inspect
 from types import FrameType
 
 from . import _paper_execution_decision_origin as _origin
+from . import _paper_execution_decision_origin_instance_guard as _instance_guard
 from . import _paper_value_execution_authority as _paper_value_authority
 from . import live_decision_loop as _live_decision_loop
 from .decision_ledger import JsonlDecisionLedger
 from .paper_execution_adoption import PaperExecutionAdoptionError, PaperExecutionAdoptionRuntime
-from .paper_execution_reality import PaperExecutionLedger
 
 
-_ORIGINAL_VERIFIED_DECISION_ORIGIN = _origin.verified_decision_origin
-_ORIGINAL_ORIGIN_RESERVE = _origin._reserve_run_with_decision_origin
+_RUNTIME_EXECUTE_SENTINEL = "_autosport_decision_origin_pristine_runtime_execute"
+_CALLSITE_IDENTITY_SENTINEL = "_autosport_decision_origin_frozen_callsites"
 
-
-def _reject_callable_instance_shadows(instance: object, exact_type: type, *, label: str) -> None:
-    """Reject exact instances that shadow class callables used as authority."""
-
-    state = getattr(instance, "__dict__", None)
-    if type(state) is not dict:
-        return
-    for name in state:
-        descriptor = inspect.getattr_static(exact_type, name, None)
-        if callable(descriptor) or isinstance(descriptor, (classmethod, staticmethod)):
-            raise _origin.PaperExecutionDecisionOriginError(
-                f"{label} exact instance shadows authority method {name}"
-            )
-
-
-def _verified_decision_origin_without_instance_method_shadow(
-    ledger: JsonlDecisionLedger,
-    decision_id: str,
-):
-    if type(ledger) is not JsonlDecisionLedger:
-        raise _origin.PaperExecutionDecisionOriginError(
-            "decision origin requires exact JsonlDecisionLedger authority"
-        )
-    _reject_callable_instance_shadows(
-        ledger,
-        JsonlDecisionLedger,
-        label="decision ledger",
+# The true execution implementation must be preserved once, before any origin
+# wrapper can be recaptured by importlib.reload(_paper_execution_decision_origin).
+if not hasattr(PaperExecutionAdoptionRuntime, _RUNTIME_EXECUTE_SENTINEL):
+    setattr(
+        PaperExecutionAdoptionRuntime,
+        _RUNTIME_EXECUTE_SENTINEL,
+        _origin._ORIGINAL_RUNTIME_EXECUTE,
     )
-    return _ORIGINAL_VERIFIED_DECISION_ORIGIN(ledger, decision_id)
+_STABLE_RUNTIME_EXECUTE = getattr(
+    PaperExecutionAdoptionRuntime,
+    _RUNTIME_EXECUTE_SENTINEL,
+)
 
-
-def _reserve_run_without_instance_method_shadow(
-    self: PaperExecutionLedger,
-    *,
-    run_id: str,
-    trigger_id: str,
-    plan,
-    config,
-    started_at: str,
-    observation_evidence_ids,
-) -> None:
-    if type(self) is PaperExecutionLedger:
-        _reject_callable_instance_shadows(
-            self,
-            PaperExecutionLedger,
-            label="paper execution ledger",
-        )
-    return _ORIGINAL_ORIGIN_RESERVE(
-        self,
-        run_id=run_id,
-        trigger_id=trigger_id,
-        plan=plan,
-        config=config,
-        started_at=started_at,
-        observation_evidence_ids=observation_evidence_ids,
+# Freeze producer ownership at installation time. Reading mutable class attributes
+# on every call would let later monkey-patching redefine which code object is
+# accepted as a product authority.
+if not hasattr(PaperExecutionAdoptionRuntime, _CALLSITE_IDENTITY_SENTINEL):
+    setattr(
+        PaperExecutionAdoptionRuntime,
+        _CALLSITE_IDENTITY_SENTINEL,
+        (
+            _live_decision_loop.PersistentLiveDecisionLoop,
+            _live_decision_loop.PersistentLiveDecisionLoop._persist_plan.__code__,
+            _paper_value_authority.PaperValueAgent,
+            _paper_value_authority._ORIGINAL_ON_MARKET_EVENT.__code__,
+            _paper_value_authority._resume_durable_paper_value.__code__,
+            _paper_value_authority.DecisionRecord,
+        ),
     )
+(
+    _LIVE_LOOP_CLASS,
+    _LIVE_PERSIST_PLAN_CODE,
+    _PAPER_VALUE_AGENT_CLASS,
+    _PAPER_VALUE_FRESH_CODE,
+    _PAPER_VALUE_RECOVERY_CODE,
+    _DECISION_RECORD_CLASS,
+) = getattr(PaperExecutionAdoptionRuntime, _CALLSITE_IDENTITY_SENTINEL)
 
 
 def _origin_from_direct_caller(
@@ -80,9 +61,9 @@ def _origin_from_direct_caller(
     """Resolve origin only when the canonical producer directly calls execute."""
 
     local = caller.f_locals
-    if caller.f_code is _live_decision_loop.PersistentLiveDecisionLoop._persist_plan.__code__:
+    if caller.f_code is _LIVE_PERSIST_PLAN_CODE:
         owner = local.get("self")
-        if type(owner) is not _live_decision_loop.PersistentLiveDecisionLoop:
+        if type(owner) is not _LIVE_LOOP_CLASS:
             raise _origin.PaperExecutionDecisionOriginError(
                 "live decision origin requires exact PersistentLiveDecisionLoop authority"
             )
@@ -99,13 +80,16 @@ def _origin_from_direct_caller(
             raise _origin.PaperExecutionDecisionOriginError(
                 "live decision call-site identity does not match execution plan"
             )
-        return _origin.verified_decision_origin(ledger, decision_id)
+        return _instance_guard._verified_decision_origin_without_instance_dispatch(
+            ledger,
+            decision_id,
+        )
 
-    if caller.f_code is _paper_value_authority._ORIGINAL_ON_MARKET_EVENT.__code__:
+    if caller.f_code is _PAPER_VALUE_FRESH_CODE:
         context = local.get("context")
         agent = local.get("self")
         event = local.get("event")
-        if type(agent) is not _paper_value_authority.PaperValueAgent:
+        if type(agent) is not _PAPER_VALUE_AGENT_CLASS:
             raise _origin.PaperExecutionDecisionOriginError(
                 "paper-value origin requires exact PaperValueAgent authority"
             )
@@ -114,20 +98,23 @@ def _origin_from_direct_caller(
                 "paper-value decision call-site identity does not match execution plan"
             )
         ledger = _origin._exact_context_ledger(runtime, context)
-        return _origin.verified_decision_origin(ledger, decision_id)
+        return _instance_guard._verified_decision_origin_without_instance_dispatch(
+            ledger,
+            decision_id,
+        )
 
-    if caller.f_code is _paper_value_authority._resume_durable_paper_value.__code__:
+    if caller.f_code is _PAPER_VALUE_RECOVERY_CODE:
         context = local.get("context")
         record = local.get("record")
-        if (
-            type(record) is not _paper_value_authority.DecisionRecord
-            or record.decision_id != decision_id
-        ):
+        if type(record) is not _DECISION_RECORD_CLASS or record.decision_id != decision_id:
             raise _origin.PaperExecutionDecisionOriginError(
                 "paper-value recovery call-site identity does not match execution plan"
             )
         ledger = _origin._exact_context_ledger(runtime, context)
-        return _origin.verified_decision_origin(ledger, decision_id)
+        return _instance_guard._verified_decision_origin_without_instance_dispatch(
+            ledger,
+            decision_id,
+        )
 
     return None
 
@@ -137,47 +124,64 @@ def _matching_product_ancestor(
     decision_id: str,
     frame: FrameType | None,
 ) -> bool:
-    """Detect authority-bearing ancestors only to reject nested execution.
-
-    Ancestor presence never grants authority. It is used solely as a re-entrancy
-    fence so arbitrary hooks/callbacks running inside a canonical producer cannot
-    create an originless reservation that would poison the subsequent intended
-    product execution.
-    """
+    """Detect canonical ancestors only to reject nested execution, never authorize."""
 
     current = frame
     while current is not None:
         local = current.f_locals
-        if current.f_code is _live_decision_loop.PersistentLiveDecisionLoop._persist_plan.__code__:
+        if current.f_code is _LIVE_PERSIST_PLAN_CODE:
             owner = local.get("self")
             if (
-                type(owner) is _live_decision_loop.PersistentLiveDecisionLoop
+                type(owner) is _LIVE_LOOP_CLASS
                 and getattr(owner, "paper_execution", None) is runtime
                 and local.get("decision_id") == decision_id
             ):
                 return True
-        elif current.f_code is _paper_value_authority._ORIGINAL_ON_MARKET_EVENT.__code__:
+        elif current.f_code is _PAPER_VALUE_FRESH_CODE:
             context = local.get("context")
             agent = local.get("self")
             event = local.get("event")
             if (
-                type(agent) is _paper_value_authority.PaperValueAgent
+                type(agent) is _PAPER_VALUE_AGENT_CLASS
                 and getattr(context, "paper_execution", None) is runtime
                 and event is not None
                 and agent._material_action_id(context, event) == decision_id
             ):
                 return True
-        elif current.f_code is _paper_value_authority._resume_durable_paper_value.__code__:
+        elif current.f_code is _PAPER_VALUE_RECOVERY_CODE:
             context = local.get("context")
             record = local.get("record")
             if (
                 getattr(context, "paper_execution", None) is runtime
-                and type(record) is _paper_value_authority.DecisionRecord
+                and type(record) is _DECISION_RECORD_CLASS
                 and record.decision_id == decision_id
             ):
                 return True
         current = current.f_back
     return False
+
+
+def _execute_stable(
+    self: PaperExecutionAdoptionRuntime,
+    *,
+    prepared,
+    trigger_id: str,
+    started_at: str,
+    materialize_exposure: bool,
+    observations,
+    evidence_registry,
+    suspended_action_ids: frozenset[str],
+):
+    return _STABLE_RUNTIME_EXECUTE(
+        self,
+        prepared=prepared,
+        trigger_id=trigger_id,
+        started_at=started_at,
+        materialize_exposure=materialize_exposure,
+        observations=observations,
+        evidence_registry=evidence_registry,
+        suspended_action_ids=suspended_action_ids,
+    )
 
 
 def _execute_with_exact_product_callsite(
@@ -193,7 +197,7 @@ def _execute_with_exact_product_callsite(
 ):
     decision_id = getattr(getattr(prepared, "execution_plan", None), "decision_id", None)
     if type(decision_id) is not str or not decision_id:
-        return _origin._ORIGINAL_RUNTIME_EXECUTE(
+        return _execute_stable(
             self,
             prepared=prepared,
             trigger_id=trigger_id,
@@ -219,9 +223,7 @@ def _execute_with_exact_product_callsite(
                 raise PaperExecutionAdoptionError(
                     "nested PAPER execution cannot inherit product decision-origin authority"
                 )
-            # Isolated execution/replay callers remain valid but carry no product
-            # origin and therefore cannot satisfy downstream product admission.
-            return _origin._ORIGINAL_RUNTIME_EXECUTE(
+            return _execute_stable(
                 self,
                 prepared=prepared,
                 trigger_id=trigger_id,
@@ -238,7 +240,7 @@ def _execute_with_exact_product_callsite(
 
         token = _origin._DECISION_ORIGIN.set(origin)
         try:
-            return _origin._ORIGINAL_RUNTIME_EXECUTE(
+            return _execute_stable(
                 self,
                 prepared=prepared,
                 trigger_id=trigger_id,
@@ -251,16 +253,11 @@ def _execute_with_exact_product_callsite(
         finally:
             _origin._DECISION_ORIGIN.reset(token)
     finally:
-        # Frame references form cycles; release them deterministically.
         del current
         del caller
 
 
 def _install() -> None:
-    _origin.verified_decision_origin = _verified_decision_origin_without_instance_method_shadow
-    _origin._reserve_run_with_decision_origin = _reserve_run_without_instance_method_shadow
-    PaperExecutionLedger.reserve_run = _reserve_run_without_instance_method_shadow
-
     if getattr(PaperExecutionAdoptionRuntime, "_autosport_decision_origin_callsite_guard", False):
         return
     PaperExecutionAdoptionRuntime.execute = _execute_with_exact_product_callsite

@@ -1374,8 +1374,12 @@ class PersistentLiveDecisionLoop:
                     "append-pending durable decision conflicts with progress"
                 )
             try:
-                plan = PortfolioPlan.from_dict(durable_record.payload.get("plan"))
-            except (TypeError, ValueError) as exc:
+                # DecisionRecord freezes mappings/lists after verification. Re-enter
+                # the canonical JSON parser through its detached representation
+                # rather than weakening PortfolioPlan.from_dict to trust mappings.
+                detached_payload = durable_record.to_dict()["payload"]
+                plan = PortfolioPlan.from_dict(detached_payload.get("plan"))
+            except (KeyError, TypeError, ValueError) as exc:
                 raise LiveDecisionProgressError(
                     "append-pending durable PortfolioPlan is invalid"
                 ) from exc

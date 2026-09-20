@@ -233,6 +233,32 @@ def test_mismatched_dataset_scope_fails_closed():
         )
 
 
+def test_mismatched_cutoff_fails_closed_even_with_same_corpus():
+    protocol = _protocol()
+    alternate = FrozenEvidenceScope(
+        dataset_sha256=protocol.evidence_scope.dataset_sha256,
+        dataset_cutoff="2026-01-01T01:00:00+00:00",
+        cohort_keys=protocol.evidence_scope.cohort_keys,
+        market_evidence_sha256=protocol.evidence_scope.market_evidence_sha256,
+        outcome_evidence_sha256=protocol.evidence_scope.outcome_evidence_sha256,
+        cost_model_sha256=protocol.evidence_scope.cost_model_sha256,
+        execution_model_sha256=protocol.evidence_scope.execution_model_sha256,
+    )
+    candidate = _result(
+        protocol,
+        protocol.candidate_id,
+        artifact_sha256=protocol.candidate_artifact_sha256,
+        scope=alternate,
+    )
+
+    with pytest.raises(ExternalValidityError, match="evidence scope"):
+        build_external_validity_report(
+            protocol,
+            candidate,
+            _supported_results(protocol),
+        )
+
+
 def test_cherry_picked_subset_fails_closed_even_with_same_dataset():
     protocol = _protocol()
     subset = _scope(keys=("a", "b"))

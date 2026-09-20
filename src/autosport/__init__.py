@@ -11,3 +11,4 @@ from . import _paper_execution_freshness as _paper_execution_freshness  # noqa: 
 # requiring an authority-owned causal re-observation witness before those proofs
 # may authorize a later-session activation.
 from . import _dataset_snapshot_lineage_publication as _dataset_snapshot_lineage_publication  # noqa: F401,E402
+from . import _dataset_snapshot_lineage_publication_provenance as _dataset_snapshot_lineage_publication_provenance  # noqa: F401,E402

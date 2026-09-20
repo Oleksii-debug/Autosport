@@ -22,6 +22,11 @@ from autosport.paper_strategy import Forecast, PaperValueAgent
 from autosport.risk import PaperRiskPolicy
 
 
+_GENERAL_RECOVERY_ERROR = (
+    "durable GENERAL paper-value action lacks caller-non-mintable risk provenance"
+)
+
+
 def _config() -> PaperExecutionModelConfig:
     return PaperExecutionModelConfig(
         model_id="paper-value-authority-test",
@@ -91,6 +96,10 @@ def _executed_general_action(tmp_path):
         paper_execution=runtime,
         paper_provider_accounts=(("provider-a", "account-a"),),
     )
+    agent.on_market_event(event, context)
+    assert len(book.tickets) == 1
+    # Same-process duplicate delivery is already proven complete by the canonical
+    # agent instance and must remain a no-op rather than entering restart recovery.
     agent.on_market_event(event, context)
     assert len(book.tickets) == 1
     return book, runtime, event, ledger, policy, context
@@ -241,10 +250,7 @@ def test_caller_authored_general_restart_record_cannot_be_first_execution_author
         )
     )
 
-    with pytest.raises(
-        PaperExecutionAdoptionError,
-        match="GENERAL paper-value decision lacks exact #623 first-execution authority",
-    ):
+    with pytest.raises(PaperExecutionAdoptionError, match=_GENERAL_RECOVERY_ERROR):
         agent.on_market_event(event, context)
 
     assert book.balance == Decimal("100.00")
@@ -265,8 +271,8 @@ def test_canonical_goal_less_agent_path_still_executes_after_risk_pass(tmp_path)
     assert event.quote_key
 
 
-def test_durable_run_recovers_when_forecast_is_missing(tmp_path) -> None:
-    book, runtime, event, ledger, policy, context = _executed_general_action(tmp_path)
+def test_durable_general_action_is_detected_before_missing_forecast_gate(tmp_path) -> None:
+    book, _, event, _, policy, context = _executed_general_action(tmp_path)
     balance = book.balance
     ticket_ids = tuple(book.tickets)
     recovering = PaperValueAgent(
@@ -276,20 +282,14 @@ def test_durable_run_recovers_when_forecast_is_missing(tmp_path) -> None:
         risk_policy=policy,
     )
 
-    recovering.on_market_event(event, context)
+    with pytest.raises(PaperExecutionAdoptionError, match=_GENERAL_RECOVERY_ERROR):
+        recovering.on_market_event(event, context)
 
     assert book.balance == balance
     assert tuple(book.tickets) == ticket_ids
-    assert len(ledger.verified_records()) == 1
-    assert any(
-        item.get("event_type") == "RUN_RESERVED"
-        for item in runtime.ledger.events()
-    )
 
 
-def test_durable_run_recovers_when_recomputed_edge_would_be_below_threshold(
-    tmp_path,
-) -> None:
+def test_durable_general_action_is_detected_before_changed_edge_gate(tmp_path) -> None:
     book, _, event, _, policy, context = _executed_general_action(tmp_path)
     balance = book.balance
     ticket_ids = tuple(book.tickets)
@@ -300,13 +300,14 @@ def test_durable_run_recovers_when_recomputed_edge_would_be_below_threshold(
         risk_policy=policy,
     )
 
-    recovering.on_market_event(event, context)
+    with pytest.raises(PaperExecutionAdoptionError, match=_GENERAL_RECOVERY_ERROR):
+        recovering.on_market_event(event, context)
 
     assert book.balance == balance
     assert tuple(book.tickets) == ticket_ids
 
 
-def test_durable_run_recovers_when_redelivered_event_is_closed(tmp_path) -> None:
+def test_durable_general_action_is_detected_before_closed_status_gate(tmp_path) -> None:
     book, _, event, _, policy, context = _executed_general_action(tmp_path)
     balance = book.balance
     ticket_ids = tuple(book.tickets)
@@ -321,7 +322,8 @@ def test_durable_run_recovers_when_redelivered_event_is_closed(tmp_path) -> None
         risk_policy=policy,
     )
 
-    recovering.on_market_event(closed_event, context)
+    with pytest.raises(PaperExecutionAdoptionError, match=_GENERAL_RECOVERY_ERROR):
+        recovering.on_market_event(closed_event, context)
 
     assert book.balance == balance
     assert tuple(book.tickets) == ticket_ids

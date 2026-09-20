@@ -1228,18 +1228,11 @@ class PersistentLiveDecisionLoop:
 
     def _decision_context_sha256(self) -> str:
         self._verify_intent_factory_provenance()
-        book_state_sha256 = self.authority.risk_policy.risk_of_ruin_portfolio_sha256(
-            self.book
-        )
-        if book_state_sha256 is None:
-            raise LiveDecisionProgressError(
-                "cannot derive canonical PaperBook decision context"
-            )
         provenance = self.intent_provenance
         return _canonical_json_sha256(
             {
                 "schema": "autosport.live_decision_runtime_context",
-                "schema_version": 2,
+                "schema_version": 3,
                 "mode": self.mode.value,
                 "intent_strategy_version_id": provenance.strategy_version_id,
                 "intent_model_version_id": provenance.model_version_id,
@@ -1248,7 +1241,11 @@ class PersistentLiveDecisionLoop:
                     self.authority.contract
                 ).contract_sha256,
                 "risk_policy_sha256": self.authority.risk_policy.provenance_sha256,
-                "book_state_sha256": book_state_sha256,
+                # The exact pre-action PaperBook identity is already bound by
+                # PortfolioPlan.portfolio_sha256. Keeping mutable book state in
+                # this runtime/config digest made a valid accepted execution
+                # unrecoverable after the durable book publish but before
+                # progress COMMITTED.
                 "max_quote_age_seconds": str(
                     _timedelta_decimal_seconds(self.max_quote_age)
                 ),
@@ -1284,23 +1281,92 @@ class PersistentLiveDecisionLoop:
                 expected_market_state_sha256=progress.market_state_sha256,
             )
             intents = self._all_cached_intents()
+        else:
+            intents = ()
+
+        # Once the exact economic DecisionRecord is durable, it is the immutable
+        # pre-action plan authority.  In particular, an accepted #623 attempt may
+        # already have atomically published its PaperBook exposure while progress
+        # is still APPEND_PENDING. Rebuilding the plan from that post-action book
+        # would re-size/re-decide economics and can never be a valid recovery.
+        durable_record = None
+        if (
+            progress.phase == _PHASE_APPEND_PENDING
+            and progress.ledger_offset is not None
+        ):
+            durable_record = self._verified_ledger_record_at_offset(
+                progress.ledger_offset
+            )
+
+        if durable_record is not None:
+            if progress.decision_id is None or progress.plan_sha256 is None:
+                raise LiveDecisionProgressError(
+                    "append-pending recovery lacks reserved decision identity"
+                )
+            verify_economic_goal_binding(
+                durable_record,
+                self.authority.contract,
+                self.authority.risk_policy,
+            )
+            if (
+                durable_record.decision_id != progress.decision_id
+                or durable_record.payload.get("plan_sha256")
+                != progress.plan_sha256
+                or durable_record.payload.get("market_state_sha256")
+                != progress.market_state_sha256
+                or durable_record.payload.get("decision_context_sha256")
+                != progress.decision_context_sha256
+                or durable_record.payload.get("gate") != progress.gate
+                or durable_record.payload.get(MATERIAL_ACTION_ID_PAYLOAD_KEY)
+                != progress.decision_id
+            ):
+                raise LiveDecisionProgressError(
+                    "append-pending durable decision conflicts with progress"
+                )
+            try:
+                plan = PortfolioPlan.from_dict(durable_record.payload.get("plan"))
+            except (TypeError, ValueError) as exc:
+                raise LiveDecisionProgressError(
+                    "append-pending durable PortfolioPlan is invalid"
+                ) from exc
+            if plan.plan_sha256 != progress.plan_sha256:
+                raise LiveDecisionProgressError(
+                    "append-pending durable PortfolioPlan identity changed"
+                )
+            if (
+                tuple(getattr(intent, "intent_id", None) for intent in intents)
+                != plan.intent_ids
+                or tuple(
+                    getattr(intent, "intent_sha256", None) for intent in intents
+                )
+                != plan.intent_sha256s
+                or tuple(
+                    getattr(
+                        getattr(intent, "opportunity_class", None),
+                        "value",
+                        None,
+                    )
+                    for intent in intents
+                )
+                != plan.opportunity_classes
+            ):
+                raise LiveDecisionProgressError(
+                    "append-pending replayed intents conflict with durable PortfolioPlan"
+                )
+        else:
             graph = (
                 None
                 if not intents
                 else PortfolioDependencyGraph.for_inputs(self.book, intents)
             )
-        else:
-            intents = ()
-            graph = None
-
-        plan = build_portfolio_plan(
-            self.book,
-            intents,
-            self.authority.risk_policy,
-            decision_ts,
-            dependency_graph=graph,
-            market_outcome_authorities=(),
-        )
+            plan = build_portfolio_plan(
+                self.book,
+                intents,
+                self.authority.risk_policy,
+                decision_ts,
+                dependency_graph=graph,
+                market_outcome_authorities=(),
+            )
         result = self._persist_plan(
             plan=plan,
             intents=intents,

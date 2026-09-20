@@ -8,6 +8,13 @@ import pytest
 
 from autosport.continuous_session import SettlementResolution
 from autosport.domain import MarketEvent
+from autosport.event_lifecycle import (
+    CatalogEvent,
+    CatalogPage,
+    ContinuousEventLifecycle,
+    EventLifecycleRecord,
+    EventPhase,
+)
 from autosport.opponent_intelligence import OpponentIntelligenceStore
 from autosport.participant_identity import (
     AliasRecord,
@@ -30,6 +37,7 @@ T0 = "2026-09-20T10:00:00Z"
 T1 = "2026-09-20T10:01:00Z"
 T2 = "2026-09-20T10:02:00Z"
 T3 = "2026-09-20T10:03:00Z"
+EVENT_ID = "provider-a:event-1"
 
 
 def _entity(entity_id: str, *, kind: EntityKind = EntityKind.PARTICIPANT) -> EntityIdentity:
@@ -65,7 +73,7 @@ def _alias(
 
 def _roster(entity_id: str) -> RosterMembership:
     return RosterMembership(
-        event_id="event-1",
+        event_id=EVENT_ID,
         source_id="provider-a",
         entity_id=entity_id,
         member_from=T0,
@@ -77,7 +85,7 @@ def _roster(entity_id: str) -> RosterMembership:
 
 def _quote(selection: str, sequence: int) -> MarketEvent:
     return MarketEvent(
-        event_id="event-1",
+        event_id=EVENT_ID,
         market_id="match-outcome",
         selection_id=selection,
         decimal_odds=Decimal("2.0"),
@@ -90,6 +98,19 @@ def _quote(selection: str, sequence: int) -> MarketEvent:
         market_semantics_id="match-outcome",
         provider_source_class="sportsbook",
     )
+
+
+class _StaticOutcomeAuthority:
+    def __init__(self) -> None:
+        self.resolution: SettlementResolution | None = None
+
+    def resolve(
+        self,
+        record: EventLifecycleRecord,
+        *,
+        as_of: str,
+    ) -> SettlementResolution | None:
+        return self.resolution
 
 
 def _authorities(
@@ -125,7 +146,33 @@ def _authorities(
     market_store = SQLiteMarketStore(root / "market.db")
     market_store.append(_quote("sel-alex-17", 1))
     market_store.append(_quote("sel-blair-23", 2))
-    materializer = SportMemoryResultMaterializer(opponent_store, market_store)
+    lifecycle = ContinuousEventLifecycle(root / "lifecycle.json")
+    lifecycle.apply_page(
+        CatalogPage(
+            source_id="provider-a",
+            stream_epoch="epoch-1",
+            cursor="cursor-1",
+            position=0,
+            events=(
+                CatalogEvent(
+                    source_id="provider-a",
+                    sport="tennis",
+                    event_id="event-1",
+                    phase=EventPhase.COMPLETED,
+                    available_at=T2,
+                    completion_ref="completion-1",
+                    settlement_ref="settlement-1",
+                ),
+            ),
+        ),
+        discovered_at=T2,
+    )
+    materializer = SportMemoryResultMaterializer(
+        opponent_store,
+        market_store,
+        lifecycle=lifecycle,
+        outcome_authority=_StaticOutcomeAuthority(),
+    )
     return identities, opponent_store, market_store, materializer
 
 
@@ -144,15 +191,19 @@ def test_recomputed_digest_cannot_backdate_post_reveal_provider_choice(tmp_path:
 
     subject = next(
         event
-        for event in market_store.events("event-1")
+        for event in market_store.events(EVENT_ID)
         if event.selection_id == "sel-alex-17"
     )
+    authority = materializer.outcome_authority
+    assert isinstance(authority, _StaticOutcomeAuthority)
+    authority.resolution = settlement
+
     with pytest.raises(
         SportMemoryResultMaterializationError,
         match="cannot be resolved uniquely",
     ):
         materializer.freeze_binding(
-            event_identity="event-1",
+            event_identity=EVENT_ID,
             source_id="provider-a",
             subject_alias="alex",
             opponent_alias="blair",
@@ -178,7 +229,7 @@ def test_recomputed_digest_cannot_backdate_post_reveal_provider_choice(tmp_path:
         )
     )
     post_reveal = materializer.freeze_binding(
-        event_identity="event-1",
+        event_identity=EVENT_ID,
         source_id="provider-a",
         subject_alias="alex",
         opponent_alias="blair",
@@ -200,7 +251,7 @@ def test_recomputed_digest_cannot_backdate_post_reveal_provider_choice(tmp_path:
     # still reject because provider choice was ambiguous before settlement reveal.
     historical_subject, historical_opponent, historical_frozen = (
         materializer._resolve_source_pair(
-            event_identity="event-1",
+            event_identity=EVENT_ID,
             source_id="provider-a",
             subject_selection_id="sel-alex-17",
             opponent_selection_id="sel-blair-23",
@@ -213,7 +264,7 @@ def test_recomputed_digest_cannot_backdate_post_reveal_provider_choice(tmp_path:
         )
     )
     historical_identity = materializer._resolve_identity_snapshot(
-        event_identity="event-1",
+        event_identity=EVENT_ID,
         source_id="provider-a",
         subject_alias="alex",
         opponent_alias="blair",
@@ -237,7 +288,7 @@ def test_recomputed_digest_cannot_backdate_post_reveal_provider_choice(tmp_path:
         ),
     )
     settlement = SettlementResolution(
-        event_identity="event-1",
+        event_identity=EVENT_ID,
         settlement_ref="settlement-1",
         quote_outcomes={
             forged.subject_quote_key: "win",
@@ -247,6 +298,10 @@ def test_recomputed_digest_cannot_backdate_post_reveal_provider_choice(tmp_path:
         evidence_sha256=SHA_B,
         available_at=T2,
     )
+
+    authority = materializer.outcome_authority
+    assert isinstance(authority, _StaticOutcomeAuthority)
+    authority.resolution = settlement
 
     with pytest.raises(
         SportMemoryResultMaterializationError,
@@ -261,11 +316,11 @@ def test_provider_binding_cutoff_at_or_after_settlement_reveal_fails_closed(tmp_
     _, store, market_store, materializer = _authorities(tmp_path)
     subject = next(
         event
-        for event in market_store.events("event-1")
+        for event in market_store.events(EVENT_ID)
         if event.selection_id == "sel-alex-17"
     )
     binding = materializer.freeze_binding(
-        event_identity="event-1",
+        event_identity=EVENT_ID,
         source_id="provider-a",
         subject_alias="alex",
         opponent_alias="blair",
@@ -280,7 +335,7 @@ def test_provider_binding_cutoff_at_or_after_settlement_reveal_fails_closed(tmp_
     )
     forged = replace(binding, provider_binding_as_of=T2)
     settlement = SettlementResolution(
-        event_identity="event-1",
+        event_identity=EVENT_ID,
         settlement_ref="settlement-1",
         quote_outcomes={
             forged.subject_quote_key: "win",
@@ -290,6 +345,10 @@ def test_provider_binding_cutoff_at_or_after_settlement_reveal_fails_closed(tmp_
         evidence_sha256=SHA_B,
         available_at=T2,
     )
+
+    authority = materializer.outcome_authority
+    assert isinstance(authority, _StaticOutcomeAuthority)
+    authority.resolution = settlement
 
     with pytest.raises(
         SportMemoryResultMaterializationError,

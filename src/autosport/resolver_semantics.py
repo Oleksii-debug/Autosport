@@ -298,8 +298,14 @@ def _module_attribute_dependencies(
 def _resolve_global_type_attribute(
     owner: type,
     attribute: str,
-) -> tuple[object, list[str]]:
-    """Resolve one class attribute without hiding its concrete descriptor owner."""
+) -> tuple[object, list[str], type | None]:
+    """Resolve one class attribute without invoking opaque descriptors.
+
+    dispatch_owner preserves the concrete class through which an inherited
+    classmethod/ordinary method is reached. The declaring owner alone is not
+    enough: classmethod cls dispatch can depend on helpers overridden on a
+    subclass even when the inherited method's own code is unchanged.
+    """
 
     resolved_owner: type | None = None
     raw: object = None
@@ -316,32 +322,34 @@ def _resolve_global_type_attribute(
 
     descriptor_kind: str
     value: object
+    dispatch_owner: type | None = None
     if type(raw) is staticmethod:
         descriptor_kind = "staticmethod"
         value = raw.__func__
     elif type(raw) is classmethod:
         descriptor_kind = "classmethod"
         value = raw.__func__
+        dispatch_owner = owner
     elif type(raw) is FunctionType:
         descriptor_kind = "function"
         value = raw
+        dispatch_owner = owner
     elif type(raw) is type:
         descriptor_kind = "type"
         value = raw
     else:
         descriptor_kind = f"{type(raw).__module__}.{type(raw).__qualname__}"
-        try:
-            value = getattr(owner, attribute)
-        except (AttributeError, TypeError) as exc:
+        if getattr(type(raw), "__get__", None) is not None:
             raise ResolverSemanticIdentityError(
                 "referenced global type descriptor cannot be resolved safely"
-            ) from exc
+            )
+        value = raw
 
     return value, [
         f"{resolved_owner.__module__}.{resolved_owner.__qualname__}",
         descriptor_kind,
         attribute,
-    ]
+    ], dispatch_owner
 
 
 def _global_type_attribute_dependencies(
@@ -381,21 +389,37 @@ def _global_type_attribute_dependencies(
         value: object = root
         path: list[list[str]] = []
         complete = True
+        dispatch_owner: type | None = None
         for attribute in attributes:
             if type(value) is not type:
                 complete = False
                 break
-            value, step = _resolve_global_type_attribute(value, attribute)
+            value, step, dispatch_owner = _resolve_global_type_attribute(
+                value,
+                attribute,
+            )
             path.append(step)
         if not complete or type(value) not in executable_types:
             continue
+
+        if type(value) is FunctionType:
+            dependency_payload: object = [
+                "function",
+                _function_semantic_payload(
+                    value,
+                    visiting=visiting,
+                    runtime_owner=dispatch_owner,
+                ),
+            ]
+        else:
+            dependency_payload = _dependency_payload(value, visiting=visiting)
 
         key = f"global-type:{root_name}.{'.'.join(attributes)}"
         dependencies[key] = [
             "global-type-attribute-chain",
             f"{root.__module__}.{root.__qualname__}",
             path,
-            _dependency_payload(value, visiting=visiting),
+            dependency_payload,
         ]
     return dependencies
 

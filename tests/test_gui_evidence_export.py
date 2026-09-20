@@ -58,7 +58,7 @@ def test_export_worker_calls_canonical_exporter_and_reports_output(
     assert worker.busy is False
 
 
-def test_export_worker_reports_structural_failure_without_secret_text(
+def test_export_worker_reports_structural_failure_without_secret_or_human_text(
     monkeypatch, tmp_path: Path
 ) -> None:
     secret = r"token=SUPERSECRET C:\Users\name\credentials.json"
@@ -75,8 +75,14 @@ def test_export_worker_reports_structural_failure_without_secret_text(
     message = worker.poll()
     assert message is not None
     assert message.output is None
-    assert message.error == "RuntimeError: evidence export failed"
-    for forbidden in ("SUPERSECRET", "credentials.json", "token=", r"C:\Users"):
+    assert message.error == "RuntimeError"
+    for forbidden in (
+        "SUPERSECRET",
+        "credentials.json",
+        "token=",
+        r"C:\Users",
+        "evidence export failed",
+    ):
         assert forbidden not in message.error
     assert worker.busy is False
 
@@ -131,6 +137,29 @@ def test_partial_gui_instance_without_export_worker_is_not_routed_to_tk_getattr(
 
     assert app._evidence_export_busy is False
     assert app._dataset_selection_blocker() is None
+
+
+def test_export_evidence_uses_active_workspace_without_tk_getattr_fallback(
+    monkeypatch, tmp_path: Path
+) -> None:
+    app = _partial_app()
+    active_workspace = tmp_path / "active"
+    chooser_kwargs: dict[str, object] = {}
+    app.__dict__.update(
+        _closing=False,
+        _active_workspace=active_workspace,
+    )
+    assert "workspace" not in app.__dict__
+
+    def fake_chooser(**kwargs):
+        chooser_kwargs.update(kwargs)
+        return ""
+
+    monkeypatch.setattr(gui.filedialog, "asksaveasfilename", fake_chooser)
+
+    app.export_evidence()
+
+    assert chooser_kwargs["initialdir"] == str(active_workspace.parent)
 
 
 def test_control_e_path_is_blocked_while_recovery_worker_is_busy(

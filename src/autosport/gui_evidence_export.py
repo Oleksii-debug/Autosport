@@ -9,7 +9,7 @@ from .evidence_export import _resolve_output_destination, export_evidence_manife
 
 
 def _safe_worker_error(exc: BaseException) -> str:
-    """Return structural failure evidence without stringifying hostile exceptions."""
+    """Return a bounded structural failure code without user-visible prose."""
 
     try:
         name = type.__getattribute__(type(exc), "__name__")
@@ -22,7 +22,7 @@ def _safe_worker_error(exc: BaseException) -> str:
         or not name.replace("_", "").isalnum()
     ):
         name = "BaseException"
-    return f"{name}: evidence export failed"
+    return name
 
 
 def resolve_evidence_output_destination(

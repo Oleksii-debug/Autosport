@@ -690,6 +690,7 @@ class SequentialMultiplicityEvidenceStore:
                 cls.WORKSPACE_AUTHORITY_FILE,
                 cls.ENROLLMENT_FILE,
                 cls.BOOTSTRAP_MARKER_FILE,
+                WorkspaceEconomicLock.FILE_NAME,
             }:
                 continue
             try:
@@ -984,6 +985,7 @@ class SequentialMultiplicityEvidenceStore:
             cls.ENROLLMENT_FILE,
             cls.WORKSPACE_AUTHORITY_FILE,
             cls.BOOTSTRAP_MARKER_FILE,
+            WorkspaceEconomicLock.FILE_NAME,
         }:
             raise ValueError("multiplicity store path conflicts with workspace authority")
         workspace = cls._resolve_workspace_root(target, workspace_root)

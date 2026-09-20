@@ -83,6 +83,11 @@ def _look(
     )
 
 
+@pytest.fixture(autouse=True)
+def _canonical_multiplicity_workspace(tmp_path) -> None:
+    SequentialMultiplicityEvidenceStore.initialize_workspace(tmp_path)
+
+
 def test_repeated_peeking_cannot_create_unplanned_looks(tmp_path) -> None:
     plan = _plan()
     member = plan.members[0]
@@ -221,6 +226,26 @@ def test_family_split_or_merge_cannot_reset_via_second_store(tmp_path) -> None:
     assert len(reopened.assessments(member.member_authority_id)) == 1
 
 
+def test_semantic_member_cannot_reset_across_distinct_parent_paths(tmp_path) -> None:
+    first_path = tmp_path / "path-a" / "family.json"
+    second_path = tmp_path / "path-b" / "family.json"
+    plan = _plan()
+    member = plan.members[0]
+    store = SequentialMultiplicityEvidenceStore.initialize_pristine(first_path, plan)
+    store.append(_look(plan, member, index=1, p="0.5", bundle_char="e"))
+
+    with pytest.raises(ValueError, match="already enrolled"):
+        SequentialMultiplicityEvidenceStore.initialize_pristine(second_path, plan)
+
+    reopened = SequentialMultiplicityEvidenceStore(first_path)
+    assert len(reopened.assessments(member.member_authority_id)) == 1
+
+
+def test_nested_workspace_authority_cannot_reset_distinct_parent_path(tmp_path) -> None:
+    with pytest.raises(ValueError, match="nested"):
+        SequentialMultiplicityEvidenceStore.initialize_workspace(tmp_path / "path-b")
+
+
 def test_missing_workspace_enrollment_authority_fails_closed(tmp_path) -> None:
     path = tmp_path / "multiplicity.json"
     plan = _plan()
@@ -229,6 +254,35 @@ def test_missing_workspace_enrollment_authority_fails_closed(tmp_path) -> None:
 
     with pytest.raises(ValueError, match="enrollment authority is missing"):
         SequentialMultiplicityEvidenceStore(path)
+
+
+def test_missing_enrollment_cannot_rebootstrap_second_store(tmp_path) -> None:
+    first_path = tmp_path / "family-a.json"
+    plan = _plan()
+    member = plan.members[0]
+    store = SequentialMultiplicityEvidenceStore.initialize_pristine(first_path, plan)
+    store.append(_look(plan, member, index=1, p="0.5", bundle_char="e"))
+    (tmp_path / SequentialMultiplicityEvidenceStore.ENROLLMENT_FILE).unlink()
+
+    with pytest.raises(ValueError, match="enrollment authority is missing"):
+        SequentialMultiplicityEvidenceStore.initialize_pristine(
+            tmp_path / "family-b.json", plan
+        )
+    with pytest.raises(ValueError, match="authority is incomplete"):
+        SequentialMultiplicityEvidenceStore.initialize_workspace(tmp_path)
+
+
+def test_deleted_both_workspace_authorities_cannot_rebootstrap_existing_store(tmp_path) -> None:
+    path = tmp_path / "multiplicity.json"
+    plan = _plan()
+    member = plan.members[0]
+    store = SequentialMultiplicityEvidenceStore.initialize_pristine(path, plan)
+    store.append(_look(plan, member, index=1, p="0.5", bundle_char="e"))
+    (tmp_path / SequentialMultiplicityEvidenceStore.ENROLLMENT_FILE).unlink()
+    (tmp_path / SequentialMultiplicityEvidenceStore.WORKSPACE_AUTHORITY_FILE).unlink()
+
+    with pytest.raises(ValueError, match="existing multiplicity evidence"):
+        SequentialMultiplicityEvidenceStore.initialize_workspace(tmp_path)
 
 
 def test_deleted_enrolled_store_cannot_be_recreated_pristine(tmp_path) -> None:

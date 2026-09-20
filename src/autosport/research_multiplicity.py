@@ -542,34 +542,193 @@ class SequentialMultiplicityEvidenceStore:
     This store does not mint promotion authority; it provides reproducible
     multiplicity/sequential evidence for later canonical registry binding.
 
-    Stores in one workspace directory share an immutable member-enrollment
-    authority. A semantic member may have exactly one canonical family/store in
-    that workspace, so changing a filename cannot reset allocated alpha or
-    consumed evidence.
+    A separately bootstrapped canonical workspace authority owns one immutable
+    semantic-member enrollment registry across every nested store path. Store
+    initialization never creates that authority, so deleting it cannot silently
+    rebootstrap consumed alpha/evidence. Workspace-wide locking serializes both
+    enrollment and evidence mutations across sibling directories.
     """
 
     SCHEMA_VERSION = 1
-    ENROLLMENT_SCHEMA_VERSION = 1
+    WORKSPACE_SCHEMA_VERSION = 1
+    ENROLLMENT_SCHEMA_VERSION = 2
+    WORKSPACE_AUTHORITY_FILE = ".research-multiplicity-workspace.json"
     ENROLLMENT_FILE = ".research-multiplicity-enrollment.json"
 
-    def __init__(self, path: str | Path) -> None:
-        self.path = Path(path)
+    def __init__(
+        self,
+        path: str | Path,
+        *,
+        workspace_root: str | Path | None = None,
+    ) -> None:
+        self.path = Path(path).resolve(strict=False)
+        self.workspace_root = self._resolve_workspace_root(self.path, workspace_root)
         self._read_state()
+
+    @classmethod
+    def _workspace_authority_path(cls, workspace: Path) -> Path:
+        return workspace / cls.WORKSPACE_AUTHORITY_FILE
 
     @classmethod
     def _enrollment_path(cls, workspace: Path) -> Path:
         return workspace / cls.ENROLLMENT_FILE
 
     @classmethod
+    def _read_workspace_authority(cls, workspace: Path) -> None:
+        authority_path = cls._workspace_authority_path(workspace)
+        try:
+            raw = authority_path.read_text(encoding="utf-8")
+        except FileNotFoundError as exc:
+            raise ValueError("canonical multiplicity workspace authority is missing") from exc
+        try:
+            state = json.loads(
+                raw,
+                object_pairs_hook=_reject_duplicate_keys,
+                parse_constant=_reject_nonfinite,
+            )
+        except json.JSONDecodeError as exc:
+            raise ValueError(
+                "canonical multiplicity workspace authority must be valid UTF-8 JSON"
+            ) from exc
+        if type(state) is not dict or set(state) != {"schema_version", "authority_kind"}:
+            raise ValueError("canonical multiplicity workspace authority fields mismatch")
+        if state["schema_version"] != cls.WORKSPACE_SCHEMA_VERSION:
+            raise ValueError("canonical multiplicity workspace authority schema_version mismatch")
+        if state["authority_kind"] != "autosport.research-multiplicity-workspace.v1":
+            raise ValueError("canonical multiplicity workspace authority kind mismatch")
+
+    @classmethod
+    def _find_workspace_roots(cls, target: Path) -> tuple[Path, ...]:
+        parent = target.parent.resolve(strict=False)
+        candidates = (parent, *parent.parents)
+        return tuple(
+            candidate
+            for candidate in candidates
+            if cls._workspace_authority_path(candidate).exists()
+        )
+
+    @classmethod
+    def _resolve_workspace_root(
+        cls,
+        target: Path,
+        workspace_root: str | Path | None,
+    ) -> Path:
+        target = target.resolve(strict=False)
+        discovered = cls._find_workspace_roots(target)
+        if len(discovered) > 1:
+            raise ValueError("nested multiplicity workspace authorities are forbidden")
+        if workspace_root is None:
+            if not discovered:
+                raise ValueError(
+                    "canonical multiplicity workspace authority is missing; "
+                    "bootstrap it explicitly before creating stores"
+                )
+            root = discovered[0]
+        else:
+            root = Path(workspace_root).resolve(strict=False)
+            try:
+                target.relative_to(root)
+            except ValueError as exc:
+                raise ValueError("multiplicity store path must be inside workspace_root") from exc
+            if not discovered:
+                raise ValueError("canonical multiplicity workspace authority is missing")
+            if discovered[0] != root:
+                raise ValueError("workspace_root does not match canonical multiplicity authority")
+        cls._read_workspace_authority(root)
+        cls._read_workspace_enrollments(root)
+        return root
+
+    @classmethod
+    def _contains_existing_store(cls, workspace: Path) -> bool:
+        for candidate in workspace.rglob("*.json"):
+            if candidate.name in {cls.WORKSPACE_AUTHORITY_FILE, cls.ENROLLMENT_FILE}:
+                continue
+            try:
+                raw = candidate.read_text(encoding="utf-8")
+                state = json.loads(
+                    raw,
+                    object_pairs_hook=_reject_duplicate_keys,
+                    parse_constant=_reject_nonfinite,
+                )
+                if (
+                    type(state) is dict
+                    and set(state) == {"schema_version", "plan", "records"}
+                    and state["schema_version"] == cls.SCHEMA_VERSION
+                    and type(state["records"]) is list
+                ):
+                    ExperimentFamilyPlan.from_payload(state["plan"])
+                    return True
+            except (OSError, UnicodeError, ValueError):
+                continue
+        return False
+
+    @classmethod
+    def initialize_workspace(cls, workspace_root: str | Path) -> Path:
+        """Explicitly bootstrap one canonical multiplicity workspace authority.
+
+        Store creation is intentionally separate from this operation. A missing or
+        partial authority after initialization is treated as corruption, never as
+        permission to mint a new pristine multiplicity budget.
+        """
+
+        workspace = Path(workspace_root).resolve(strict=False)
+        workspace.mkdir(parents=True, exist_ok=True)
+        ancestor_roots = tuple(
+            ancestor
+            for ancestor in workspace.parents
+            if cls._workspace_authority_path(ancestor).exists()
+        )
+        if ancestor_roots:
+            raise ValueError("nested multiplicity workspace authorities are forbidden")
+        descendant_roots = tuple(
+            path.parent
+            for path in workspace.rglob(cls.WORKSPACE_AUTHORITY_FILE)
+            if path.parent != workspace
+        )
+        if descendant_roots:
+            raise ValueError("workspace cannot enclose another multiplicity authority")
+
+        authority_path = cls._workspace_authority_path(workspace)
+        enrollment_path = cls._enrollment_path(workspace)
+        with WorkspaceEconomicLock(workspace):
+            authority_exists = authority_path.exists()
+            enrollment_exists = enrollment_path.exists()
+            if authority_exists != enrollment_exists:
+                raise ValueError("multiplicity workspace authority is incomplete")
+            if authority_exists:
+                cls._read_workspace_authority(workspace)
+                cls._read_workspace_enrollments(workspace)
+                return workspace
+            if cls._contains_existing_store(workspace):
+                raise ValueError(
+                    "existing multiplicity evidence prevents workspace authority rebootstrap"
+                )
+            atomic_write_json(
+                authority_path,
+                {
+                    "schema_version": cls.WORKSPACE_SCHEMA_VERSION,
+                    "authority_kind": "autosport.research-multiplicity-workspace.v1",
+                },
+            )
+            atomic_write_json(
+                enrollment_path,
+                {
+                    "schema_version": cls.ENROLLMENT_SCHEMA_VERSION,
+                    "members": {},
+                },
+            )
+        return workspace
+
+    @classmethod
     def _read_workspace_enrollments(
         cls,
         workspace: Path,
-    ) -> dict[str, dict[str, str]] | None:
+    ) -> dict[str, dict[str, str]]:
         enrollment_path = cls._enrollment_path(workspace)
         try:
             raw = enrollment_path.read_text(encoding="utf-8")
-        except FileNotFoundError:
-            return None
+        except FileNotFoundError as exc:
+            raise ValueError("multiplicity workspace enrollment authority is missing") from exc
         try:
             state = json.loads(
                 raw,
@@ -596,7 +755,7 @@ class SequentialMultiplicityEvidenceStore:
             "research_protocol_id",
             "protocol_sha256",
             "research_question_id",
-            "store_name",
+            "store_path",
         }
         normalized: dict[str, dict[str, str]] = {}
         for raw_authority_id, raw_record in members.items():
@@ -619,13 +778,27 @@ class SequentialMultiplicityEvidenceStore:
                 "research_question_id": _text(
                     raw_record["research_question_id"], "research_question_id"
                 ),
-                "store_name": _text(raw_record["store_name"], "store_name"),
+                "store_path": _text(raw_record["store_path"], "store_path"),
             }
         return normalized
 
-    @staticmethod
+    @classmethod
+    def _canonical_store_path(cls, target: Path, workspace: Path) -> str:
+        target = target.resolve(strict=False)
+        workspace = workspace.resolve(strict=False)
+        try:
+            relative = target.relative_to(workspace)
+        except ValueError as exc:
+            raise ValueError("multiplicity store path must be inside canonical workspace") from exc
+        if relative == Path("."):
+            raise ValueError("multiplicity store path must name a file inside canonical workspace")
+        return relative.as_posix()
+
+    @classmethod
     def _expected_enrollment(
+        cls,
         target: Path,
+        workspace: Path,
         plan: ExperimentFamilyPlan,
     ) -> dict[str, str]:
         return {
@@ -634,18 +807,18 @@ class SequentialMultiplicityEvidenceStore:
             "research_protocol_id": plan.research_protocol_id,
             "protocol_sha256": plan.protocol_sha256.lower(),
             "research_question_id": plan.research_question_id,
-            "store_name": target.name,
+            "store_path": cls._canonical_store_path(target, workspace),
         }
 
     @classmethod
     def _next_workspace_enrollment_state(
         cls,
         target: Path,
+        workspace: Path,
         plan: ExperimentFamilyPlan,
     ) -> dict[str, Any]:
-        current = cls._read_workspace_enrollments(target.parent)
-        enrollments = {} if current is None else dict(current)
-        expected = cls._expected_enrollment(target, plan)
+        enrollments = dict(cls._read_workspace_enrollments(workspace))
+        expected = cls._expected_enrollment(target, workspace, plan)
         for member in plan.members:
             prior = enrollments.get(member.member_authority_id)
             if prior is not None:
@@ -663,10 +836,8 @@ class SequentialMultiplicityEvidenceStore:
         }
 
     def _validate_workspace_enrollment(self, plan: ExperimentFamilyPlan) -> None:
-        enrollments = self._read_workspace_enrollments(self.path.parent)
-        if enrollments is None:
-            raise ValueError("multiplicity workspace enrollment authority is missing")
-        expected = self._expected_enrollment(self.path, plan)
+        enrollments = self._read_workspace_enrollments(self.workspace_root)
+        expected = self._expected_enrollment(self.path, self.workspace_root, plan)
         for member in plan.members:
             if enrollments.get(member.member_authority_id) != expected:
                 raise ValueError(
@@ -678,19 +849,27 @@ class SequentialMultiplicityEvidenceStore:
         cls,
         path: str | Path,
         plan: ExperimentFamilyPlan,
+        *,
+        workspace_root: str | Path | None = None,
     ) -> "SequentialMultiplicityEvidenceStore":
-        target = Path(path)
-        if target.name == cls.ENROLLMENT_FILE:
-            raise ValueError("multiplicity store path conflicts with enrollment authority")
+        target = Path(path).resolve(strict=False)
+        if target.name in {cls.ENROLLMENT_FILE, cls.WORKSPACE_AUTHORITY_FILE}:
+            raise ValueError("multiplicity store path conflicts with workspace authority")
+        workspace = cls._resolve_workspace_root(target, workspace_root)
         target.parent.mkdir(parents=True, exist_ok=True)
-        with WorkspaceEconomicLock(target.parent):
+        with WorkspaceEconomicLock(workspace):
+            workspace = cls._resolve_workspace_root(target, workspace)
             if target.exists():
-                store = cls(target)
+                store = cls(target, workspace_root=workspace)
                 if store.plan.plan_sha256 != plan.plan_sha256:
                     raise ValueError("existing multiplicity store is bound to another family plan")
                 return store
 
-            next_enrollments = cls._next_workspace_enrollment_state(target, plan)
+            next_enrollments = cls._next_workspace_enrollment_state(
+                target,
+                workspace,
+                plan,
+            )
             # Publish the journal before its enrollment. If the second write fails,
             # restart sees an unusable orphan and fails closed instead of silently
             # treating a pre-existing family as pristine.
@@ -703,10 +882,10 @@ class SequentialMultiplicityEvidenceStore:
                 },
             )
             atomic_write_json(
-                cls._enrollment_path(target.parent),
+                cls._enrollment_path(workspace),
                 next_enrollments,
             )
-        return cls(target)
+        return cls(target, workspace_root=workspace)
 
     def _read_state(self) -> dict[str, Any]:
         try:
@@ -785,7 +964,7 @@ class SequentialMultiplicityEvidenceStore:
         return tuple(loaded["by_member"].get(wanted, ()))
 
     def append(self, evidence: SequentialLookEvidence) -> SequentialAssessment:
-        with WorkspaceEconomicLock(self.path.parent):
+        with WorkspaceEconomicLock(self.workspace_root):
             loaded = self._read_state()
             plan: ExperimentFamilyPlan = loaded["plan"]
             if evidence.family_plan_sha256 != plan.plan_sha256:

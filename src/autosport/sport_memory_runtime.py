@@ -40,6 +40,18 @@ def _instant(name: str, value: object) -> datetime:
     return instant.astimezone(timezone.utc)
 
 
+def _nonnegative_int(name: str, value: object) -> int:
+    if type(value) is not int or value < 0:
+        raise SportMemoryError(f"{name} must be a non-negative integer")
+    return value
+
+
+def _optional_text(name: str, value: object) -> str | None:
+    if value is None:
+        return None
+    return _text(name, value)
+
+
 def _digest(payload: object) -> str:
     raw = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True, allow_nan=False)
     return sha256(raw.encode("utf-8")).hexdigest()
@@ -57,6 +69,12 @@ def _require_identity_view(value: object, *, name: str = "view") -> IdentityView
     if not isinstance(value, IdentityView):
         raise TypeError(f"{name} must be IdentityView")
     return value
+
+
+def _require_exact_keys(name: str, raw: object, expected: set[str]) -> dict[str, object]:
+    if type(raw) is not dict or set(raw) != expected:
+        raise SportMemoryError(f"invalid {name} schema")
+    return raw
 
 
 @dataclass(frozen=True, slots=True)
@@ -174,6 +192,41 @@ class SportMemoryRuntime:
 
     SCHEMA_VERSION = 2
 
+    _CHECKPOINT_KEYS = {
+        "schema_version",
+        "authority_generation_sha256",
+        "artifacts",
+        "consumptions",
+    }
+    _ARTIFACT_KEYS = {
+        "memory_id",
+        "participant_entity_id",
+        "scope",
+        "identity_view",
+        "causal_cutoff",
+        "published_at",
+        "rating_snapshot_id",
+        "feature_snapshot_id",
+        "input_digest",
+        "input_performance_ids",
+        "support",
+        "effective_sample",
+        "opponent_count",
+        "rating",
+        "uncertainty",
+        "state",
+        "last_observed_at",
+        "age_seconds",
+        "authority_generation_sha256",
+    }
+    _CONSUMPTION_KEYS = {
+        "consumption_id",
+        "decision_id",
+        "memory_id",
+        "decision_cutoff",
+        "consumed_at",
+    }
+
     def __init__(self, path: Path, opponent_authority: OpponentSnapshotAuthority, *, authority_generation_sha256: str) -> None:
         self.path = Path(path)
         self.opponent_authority = opponent_authority
@@ -234,6 +287,7 @@ class SportMemoryRuntime:
             participant,
             scope,
             cutoff,
+            publication,
             requested_view,
         )
         payload: dict[str, object] = {
@@ -280,6 +334,7 @@ class SportMemoryRuntime:
             age_seconds=feature.age_seconds,
             authority_generation_sha256=self.authority_generation_sha256,
         )
+        self._validate_artifact(artifact)
         self._artifacts[memory_id] = artifact
         try:
             self._persist()
@@ -295,6 +350,7 @@ class SportMemoryRuntime:
         participant_entity_id: str,
         scope: SportMemoryScope,
         causal_cutoff: str,
+        published_at: str,
         requested_view: IdentityView,
     ) -> None:
         if type(rating) is not RatingSnapshot or type(feature) is not FeatureSnapshot:
@@ -318,9 +374,83 @@ class SportMemoryRuntime:
             feature.market_context_id == scope.market_context_id,
             rating.causal_cutoff == causal_cutoff,
             feature.causal_cutoff == causal_cutoff,
+            rating.published_at == published_at,
+            feature.published_at == published_at,
             feature.input_digest == rating.input_digest,
         )):
             raise SportMemoryError("canonical snapshot pair does not match requested scope")
+        if _instant("snapshot published_at", rating.published_at) < _instant(
+            "snapshot causal_cutoff", rating.causal_cutoff
+        ):
+            raise SportMemoryError("canonical snapshot cannot be published before causal cutoff")
+
+    @staticmethod
+    def _validate_artifact(artifact: SportMemoryArtifact) -> None:
+        if type(artifact) is not SportMemoryArtifact:
+            raise SportMemoryError("invalid sport memory artifact")
+        _sha256("memory_id", artifact.memory_id)
+        _text("participant_entity_id", artifact.participant_entity_id)
+        if type(artifact.scope) is not SportMemoryScope:
+            raise SportMemoryError("invalid sport memory scope")
+        _require_identity_view(artifact.identity_view, name="identity_view")
+        cutoff = _instant("causal_cutoff", artifact.causal_cutoff)
+        published = _instant("published_at", artifact.published_at)
+        if published < cutoff:
+            raise SportMemoryError("memory cannot be published before causal cutoff")
+        _sha256("rating_snapshot_id", artifact.rating_snapshot_id)
+        _sha256("feature_snapshot_id", artifact.feature_snapshot_id)
+        _sha256("input_digest", artifact.input_digest)
+        if type(artifact.input_performance_ids) is not tuple:
+            raise SportMemoryError("input_performance_ids must be an immutable tuple")
+        for value in artifact.input_performance_ids:
+            _sha256("input_performance_id", value)
+        support = _nonnegative_int("support", artifact.support)
+        effective_sample = _nonnegative_int("effective_sample", artifact.effective_sample)
+        opponent_count = _nonnegative_int("opponent_count", artifact.opponent_count)
+        if effective_sample > support:
+            raise SportMemoryError("effective_sample cannot exceed support")
+        if opponent_count > support:
+            raise SportMemoryError("opponent_count cannot exceed support")
+        state = _text("state", artifact.state)
+        if state not in {"SUPPORTED", "INSUFFICIENT"}:
+            raise SportMemoryError("unsupported sport memory state")
+        if artifact.rating is not None:
+            _text("rating", artifact.rating)
+        if artifact.uncertainty is not None:
+            _text("uncertainty", artifact.uncertainty)
+        if state == "SUPPORTED" and (artifact.rating is None or artifact.uncertainty is None):
+            raise SportMemoryError("supported sport memory requires rating and uncertainty")
+        if state == "INSUFFICIENT" and (artifact.rating is not None or artifact.uncertainty is not None):
+            raise SportMemoryError("insufficient sport memory cannot carry rating or uncertainty")
+        if artifact.last_observed_at is None:
+            if artifact.age_seconds is not None:
+                raise SportMemoryError("age_seconds requires last_observed_at")
+        else:
+            observed = _instant("last_observed_at", artifact.last_observed_at)
+            if observed > cutoff:
+                raise SportMemoryError("last_observed_at cannot exceed causal cutoff")
+            _nonnegative_int("age_seconds", artifact.age_seconds)
+        _sha256("authority_generation_sha256", artifact.authority_generation_sha256)
+
+    @staticmethod
+    def _validate_consumption(
+        record: DecisionMemoryConsumption,
+        artifact: SportMemoryArtifact,
+    ) -> None:
+        if type(record) is not DecisionMemoryConsumption:
+            raise SportMemoryError("invalid sport memory consumption")
+        _sha256("consumption_id", record.consumption_id)
+        _text("decision_id", record.decision_id)
+        if record.memory_id != artifact.memory_id:
+            raise SportMemoryError("consumption references wrong sport memory artifact")
+        cutoff = _instant("decision_cutoff", record.decision_cutoff)
+        consumed = _instant("consumed_at", record.consumed_at)
+        if _instant("causal_cutoff", artifact.causal_cutoff) > cutoff:
+            raise SportMemoryError("future causal snapshot cannot be consumed by decision")
+        if _instant("published_at", artifact.published_at) > cutoff:
+            raise SportMemoryError("snapshot unavailable at decision cutoff")
+        if consumed < cutoff:
+            raise SportMemoryError("consumption cannot precede decision cutoff")
 
     def get(self, memory_id: str) -> SportMemoryArtifact:
         key = _sha256("memory_id", memory_id)
@@ -414,21 +544,24 @@ class SportMemoryRuntime:
             )
         cutoff = _text("decision_cutoff", decision_cutoff)
         consumed = _text("consumed_at", consumed_at)
-        cutoff_instant = _instant("decision_cutoff", cutoff)
-        if _instant("causal_cutoff", artifact.causal_cutoff) > cutoff_instant:
-            raise SportMemoryError("future causal snapshot cannot be consumed by decision")
-        if _instant("published_at", artifact.published_at) > cutoff_instant:
-            raise SportMemoryError("snapshot unavailable at decision cutoff")
-        if _instant("consumed_at", consumed) < cutoff_instant:
-            raise SportMemoryError("consumption cannot precede decision cutoff")
+        payload = {
+            "decision_id": decision,
+            "memory_id": artifact.memory_id,
+            "decision_cutoff": cutoff,
+            "consumed_at": consumed,
+        }
+        record = DecisionMemoryConsumption(consumption_id=_digest(payload), **payload)
+        self._validate_consumption(record, artifact)
         existing_id = self._decision_consumptions.get(decision)
         if existing_id is not None:
             existing = self._consumptions[existing_id]
-            if (existing.memory_id, existing.decision_cutoff, existing.consumed_at) != (artifact.memory_id, cutoff, consumed):
+            if (existing.memory_id, existing.decision_cutoff, existing.consumed_at) != (
+                artifact.memory_id,
+                cutoff,
+                consumed,
+            ):
                 raise SportMemoryError("decision consumption semantic drift")
             return existing
-        payload = {"decision_id": decision, "memory_id": artifact.memory_id, "decision_cutoff": cutoff, "consumed_at": consumed}
-        record = DecisionMemoryConsumption(consumption_id=_digest(payload), **payload)
         self._consumptions[record.consumption_id] = record
         self._decision_consumptions[decision] = record.consumption_id
         try:
@@ -454,8 +587,9 @@ class SportMemoryRuntime:
 
     def _load(self) -> None:
         try:
-            payload = json.loads(self.path.read_text(encoding="utf-8"))
-            if type(payload) is not dict or payload.get("schema_version") != self.SCHEMA_VERSION:
+            raw_payload = json.loads(self.path.read_text(encoding="utf-8"))
+            payload = _require_exact_keys("sport memory checkpoint", raw_payload, self._CHECKPOINT_KEYS)
+            if type(payload["schema_version"]) is not int or payload["schema_version"] != self.SCHEMA_VERSION:
                 raise SportMemoryError("unsupported sport memory schema version")
             generation = _sha256("authority_generation_sha256", payload["authority_generation_sha256"])
             if generation != self.authority_generation_sha256:
@@ -471,8 +605,10 @@ class SportMemoryRuntime:
                 self._artifacts[artifact.memory_id] = artifact
             for raw in consumptions:
                 record = self._consumption_from_raw(raw)
-                if record.memory_id not in self._artifacts:
+                artifact = self._artifacts.get(record.memory_id)
+                if artifact is None:
                     raise SportMemoryError("consumption references unknown memory artifact")
+                self._validate_consumption(record, artifact)
                 if record.consumption_id in self._consumptions:
                     raise SportMemoryError("duplicate sport memory consumption")
                 if record.decision_id in self._decision_consumptions:
@@ -484,35 +620,52 @@ class SportMemoryRuntime:
         except (OSError, json.JSONDecodeError, KeyError, TypeError, ValueError, OverflowError) as exc:
             raise SportMemoryError("invalid sport memory checkpoint") from exc
 
-    @staticmethod
-    def _artifact_from_raw(raw: object, generation: str) -> SportMemoryArtifact:
-        if type(raw) is not dict:
-            raise SportMemoryError("invalid sport memory artifact")
-        r = raw
+    @classmethod
+    def _artifact_from_raw(cls, raw: object, generation: str) -> SportMemoryArtifact:
+        r = _require_exact_keys("sport memory artifact", raw, cls._ARTIFACT_KEYS)
+        scope_raw = r["scope"]
+        if type(scope_raw) is not dict:
+            raise SportMemoryError("invalid sport memory scope")
+        input_ids = r["input_performance_ids"]
+        if type(input_ids) is not list:
+            raise SportMemoryError("input_performance_ids must be a list")
         artifact = SportMemoryArtifact(
             memory_id=_sha256("memory_id", r["memory_id"]),
             participant_entity_id=_text("participant_entity_id", r["participant_entity_id"]),
-            scope=SportMemoryScope(**r["scope"]),
+            scope=SportMemoryScope(**scope_raw),
             identity_view=_identity_view_from_raw(r["identity_view"]),
             causal_cutoff=_text("causal_cutoff", r["causal_cutoff"]),
             published_at=_text("published_at", r["published_at"]),
             rating_snapshot_id=_sha256("rating_snapshot_id", r["rating_snapshot_id"]),
             feature_snapshot_id=_sha256("feature_snapshot_id", r["feature_snapshot_id"]),
             input_digest=_sha256("input_digest", r["input_digest"]),
-            input_performance_ids=tuple(_sha256("input_performance_id", v) for v in r["input_performance_ids"]),
-            support=int(r["support"]), effective_sample=int(r["effective_sample"]), opponent_count=int(r["opponent_count"]),
-            rating=r["rating"], uncertainty=r["uncertainty"], state=_text("state", r["state"]),
-            last_observed_at=r["last_observed_at"], age_seconds=r["age_seconds"], authority_generation_sha256=generation,
+            input_performance_ids=tuple(_sha256("input_performance_id", v) for v in input_ids),
+            support=_nonnegative_int("support", r["support"]),
+            effective_sample=_nonnegative_int("effective_sample", r["effective_sample"]),
+            opponent_count=_nonnegative_int("opponent_count", r["opponent_count"]),
+            rating=_optional_text("rating", r["rating"]),
+            uncertainty=_optional_text("uncertainty", r["uncertainty"]),
+            state=_text("state", r["state"]),
+            last_observed_at=_optional_text("last_observed_at", r["last_observed_at"]),
+            age_seconds=(
+                None
+                if r["age_seconds"] is None
+                else _nonnegative_int("age_seconds", r["age_seconds"])
+            ),
+            authority_generation_sha256=_sha256(
+                "authority_generation_sha256", r["authority_generation_sha256"]
+            ),
         )
+        if artifact.authority_generation_sha256 != generation:
+            raise SportMemoryError("artifact authority generation mismatch")
+        cls._validate_artifact(artifact)
         if _digest(artifact.payload(include_id=False)) != artifact.memory_id:
             raise SportMemoryError("sport memory artifact digest mismatch")
         return artifact
 
-    @staticmethod
-    def _consumption_from_raw(raw: object) -> DecisionMemoryConsumption:
-        if type(raw) is not dict:
-            raise SportMemoryError("invalid sport memory consumption")
-        r = raw
+    @classmethod
+    def _consumption_from_raw(cls, raw: object) -> DecisionMemoryConsumption:
+        r = _require_exact_keys("sport memory consumption", raw, cls._CONSUMPTION_KEYS)
         record = DecisionMemoryConsumption(
             consumption_id=_sha256("consumption_id", r["consumption_id"]),
             decision_id=_text("decision_id", r["decision_id"]),

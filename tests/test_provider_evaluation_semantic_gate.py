@@ -38,6 +38,10 @@ class _ForgedBoundPreEvaluationSession(BoundPreEvaluationSession):
     pass
 
 
+class _ForgedEvaluationRow(EvaluationRow):
+    pass
+
+
 def _row() -> EvaluationRow:
     return EvaluationRow(
         row_key="row-1",
@@ -119,6 +123,34 @@ def _validation_kwargs() -> dict[str, object]:
 
 def test_exact_product_semantic_row_is_accepted() -> None:
     _validate_row_against_semantic_slot(_row(), _slot())
+
+
+def test_row_subclass_is_rejected_before_semantic_reads() -> None:
+    forged = _ForgedEvaluationRow.from_payload(_row().to_payload())
+
+    with pytest.raises(
+        ProviderEvaluationUniverseError,
+        match="exact EvaluationRow",
+    ):
+        _validate_row_against_semantic_slot(forged, _slot())
+
+
+def test_product_semantic_gate_rejects_row_subclass_before_authority_reads() -> None:
+    forged = _ForgedEvaluationRow.from_payload(_row().to_payload())
+    kwargs = _validation_kwargs()
+    kwargs["rows"] = (forged,)
+
+    with pytest.raises(
+        ProviderEvaluationUniverseError,
+        match="exact EvaluationRow",
+    ):
+        _validate_product_semantic_authority(
+            **kwargs,
+            pre_evaluation_authority=object.__new__(
+                ProductOwnedPreEvaluationSemanticSession
+            ),
+            pre_evaluation_bound=object.__new__(BoundPreEvaluationSession),
+        )
 
 
 @pytest.mark.parametrize(

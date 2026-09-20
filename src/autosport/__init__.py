@@ -28,6 +28,12 @@ from . import _provider_observation_payload_strictness as _provider_observation_
 from . import predictive_authority as _predictive_authority  # noqa: E402,F401
 from . import _predictive_authority_type_fence as _predictive_authority_type_fence  # noqa: E402,F401
 
+# Sport-memory durable positive materialization is a product composition authority,
+# not a caller-mintable generation digest. Install the public authority guard first,
+# then the durable cross-store transaction guard that composes with it.
+from . import _sport_memory_authority_guard as _sport_memory_authority_guard  # noqa: F401,E402
+from . import _sport_memory_cross_store_guard as _sport_memory_cross_store_guard  # noqa: F401,E402
+
 # Product chrome describes one finished Autosport product. Keep internal/versioned
 # strategy and evidence identities intact while removing legacy V1 product framing.
 from . import _whole_product_title_guard as _whole_product_title_guard  # noqa: F401,E402
@@ -53,3 +59,12 @@ from . import _provider_evaluation_semantic_gate as _provider_evaluation_semanti
 # session the product derived. Record the canonical derivation result per live origin
 # and require that exact semantic digest before #638 denominator admission.
 from . import _provider_evaluation_semantic_issuance as _provider_evaluation_semantic_issuance  # noqa: F401,E402
+
+# Campaign/provider applicability needs a stable authenticated Betfair account
+# discriminator, but application/session credentials must never become evidence.
+from . import _campaign_provider_scope_devapp_identity as _campaign_provider_scope_devapp_identity  # noqa: F401,E402
+
+# A later authenticated provider re-read validates the original T0 applicability
+# scope; it must not mint a replacement projection merely because T1 evidence
+# instance ids or timestamps changed after restart.
+from . import _campaign_provider_scope_stable_projection as _campaign_provider_scope_stable_projection  # noqa: F401,E402

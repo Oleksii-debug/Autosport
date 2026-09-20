@@ -15,7 +15,7 @@ from enum import StrEnum
 from pathlib import Path
 from typing import Any, Iterable
 
-from .integrity import atomic_write_json
+from .integrity import atomic_write_json, durable_path_lock, sha256_file
 from .learning_environment import EvidenceTruth
 from .participant_identity import (
     EntityKind,
@@ -380,6 +380,7 @@ class OpponentIntelligenceStore:
         self._ratings: dict[str, RatingSnapshot] = {}
         self._features: dict[str, FeatureSnapshot] = {}
         self._invalidations: dict[str, DownstreamInvalidation] = {}
+        self._durable_root_sha256: str | None = None
         if self.path.exists():
             self._load()
 
@@ -1270,51 +1271,59 @@ class OpponentIntelligenceStore:
             if invalidations is None
             else invalidations
         )
-        atomic_write_json(
-            self.path,
-            {
-                "schema": _SCHEMA,
-                "version": _VERSION,
-                "performances": [
-                    item.payload()
-                    for item in sorted(
-                        performance_state.values(),
-                        key=lambda item: item.performance_id,
-                    )
-                ],
-                "rating_snapshots": [
-                    item.payload()
-                    for item in sorted(
-                        rating_state.values(),
-                        key=lambda item: item.snapshot_id,
-                    )
-                ],
-                "feature_snapshots": [
-                    item.payload()
-                    for item in sorted(
-                        feature_state.values(),
-                        key=lambda item: item.snapshot_id,
-                    )
-                ],
-                "invalidations": [
-                    item.payload()
-                    for item in sorted(
-                        invalidation_state.values(),
-                        key=lambda item: item.invalidation_id,
-                    )
-                ],
-            },
-        )
+        payload = {
+            "schema": _SCHEMA,
+            "version": _VERSION,
+            "performances": [
+                item.payload()
+                for item in sorted(
+                    performance_state.values(),
+                    key=lambda item: item.performance_id,
+                )
+            ],
+            "rating_snapshots": [
+                item.payload()
+                for item in sorted(
+                    rating_state.values(),
+                    key=lambda item: item.snapshot_id,
+                )
+            ],
+            "feature_snapshots": [
+                item.payload()
+                for item in sorted(
+                    feature_state.values(),
+                    key=lambda item: item.snapshot_id,
+                )
+            ],
+            "invalidations": [
+                item.payload()
+                for item in sorted(
+                    invalidation_state.values(),
+                    key=lambda item: item.invalidation_id,
+                )
+            ],
+        }
+        with durable_path_lock(self.path):
+            current_root = (
+                sha256_file(self.path)
+                if self.path.exists()
+                else None
+            )
+            if current_root != self._durable_root_sha256:
+                raise OpponentIntelligenceError(
+                    "durable root changed; reopen before writing"
+                )
+            atomic_write_json(self.path, payload)
+            self._durable_root_sha256 = sha256_file(self.path)
 
     def _persist(self) -> None:
         self._persist_state()
 
     def _load(self) -> None:
         try:
-            raw = json.loads(
-                self.path.read_text(encoding="utf-8")
-            )
-        except (OSError, json.JSONDecodeError) as exc:
+            raw_bytes = self.path.read_bytes()
+            raw = json.loads(raw_bytes.decode("utf-8"))
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
             raise OpponentIntelligenceError(
                 f"cannot load opponent intelligence store: {exc}"
             ) from exc
@@ -1657,3 +1666,4 @@ class OpponentIntelligenceStore:
         self._ratings = ratings
         self._features = features
         self._invalidations = invalidations
+        self._durable_root_sha256 = hashlib.sha256(raw_bytes).hexdigest()

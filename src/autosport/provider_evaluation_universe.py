@@ -86,8 +86,10 @@ def _digest(value: object) -> str:
 def _row_semantic_sha256(row: EvaluationRow) -> str:
     """Bind the complete immutable pre-outcome row payload into provider intake."""
 
-    if not isinstance(row, EvaluationRow):
-        raise ProviderEvaluationUniverseError("rows must contain EvaluationRow values")
+    if type(row) is not EvaluationRow:
+        raise ProviderEvaluationUniverseError(
+            "rows must contain exact EvaluationRow values"
+        )
     return _digest(asdict(row))
 
 
@@ -466,8 +468,10 @@ def build_frozen_universe_from_complete_game_board(
         raise ProviderEvaluationUniverseError(
             "provider evaluation denominator requires explicit membership rows"
         )
-    if not all(isinstance(row, EvaluationRow) for row in materialized):
-        raise ProviderEvaluationUniverseError("rows must contain EvaluationRow values")
+    if not all(type(row) is EvaluationRow for row in materialized):
+        raise ProviderEvaluationUniverseError(
+            "rows must contain exact EvaluationRow values"
+        )
     by_key = {row.row_key: row for row in materialized}
     if len(by_key) != len(materialized):
         raise ProviderEvaluationUniverseError(

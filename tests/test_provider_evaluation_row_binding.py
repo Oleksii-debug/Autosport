@@ -2,13 +2,22 @@ from __future__ import annotations
 
 from dataclasses import replace
 
+import pytest
+
 from autosport.evaluation_universe import (
     AttritionReason,
     EvaluationRow,
     FunnelStage,
     SlotState,
 )
-from autosport.provider_evaluation_universe import _row_semantic_sha256
+from autosport.provider_evaluation_universe import (
+    ProviderEvaluationUniverseError,
+    _row_semantic_sha256,
+)
+
+
+class _ForgedEvaluationRow(EvaluationRow):
+    pass
 
 
 def _row() -> EvaluationRow:
@@ -51,6 +60,16 @@ def _row() -> EvaluationRow:
         outcome_reveal_not_before="2026-09-20T12:00:00Z",
         dependence_cluster_keys=("event:event-1",),
     )
+
+
+def test_row_semantic_digest_rejects_subclasses_before_payload_reads() -> None:
+    forged = _ForgedEvaluationRow.from_payload(_row().to_payload())
+
+    with pytest.raises(
+        ProviderEvaluationUniverseError,
+        match="exact EvaluationRow",
+    ):
+        _row_semantic_sha256(forged)
 
 
 def test_row_semantic_digest_is_deterministic() -> None:

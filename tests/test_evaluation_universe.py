@@ -40,6 +40,10 @@ def _build_structural_universe(*, intake_ledger, **kwargs):
     return build_frozen_universe(intake_ledger=intake_ledger, **kwargs)
 
 
+class _ForgedEvaluationRow(EvaluationRow):
+    pass
+
+
 class _Resolver:
     def __init__(self, witnesses: tuple[ObservationEnumerationWitness, ...]) -> None:
         self._witnesses = {item.enumeration_id: item for item in witnesses}
@@ -218,6 +222,23 @@ def test_zero_coverage_states_are_first_class_denominator_rows():
     assert attrition[AttritionReason.NO_QUOTE.value] == 1
     assert attrition[AttritionReason.SOURCE_OUTAGE.value] == 1
     assert attrition[AttritionReason.WAIT_ZERO.value] == 1
+
+
+def test_evaluation_universe_rejects_row_subclasses_before_identity_reads():
+    original = row("subclass")
+    frozen = universe(original)
+    forged = _ForgedEvaluationRow.from_payload(original.to_payload())
+
+    with pytest.raises(EvaluationUniverseError, match="exact EvaluationRow"):
+        type(frozen)._construct(
+            intake_snapshot=frozen.intake_snapshot,
+            universe_id=frozen.universe_id,
+            campaign_id=frozen.campaign_id,
+            research_protocol_id=frozen.research_protocol_id,
+            protocol_sha256=frozen.protocol_sha256,
+            frozen_at=frozen.frozen_at,
+            rows=(forged,),
+        )
 
 
 def test_duplicate_delivery_is_idempotent_but_conflicting_row_key_fails_closed():

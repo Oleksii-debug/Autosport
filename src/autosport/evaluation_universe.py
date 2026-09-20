@@ -518,8 +518,10 @@ class EvaluationUniverse:
         by_key: dict[str, EvaluationRow] = {}
         by_id: dict[str, EvaluationRow] = {}
         for row in self.rows:
-            if not isinstance(row, EvaluationRow):
-                raise EvaluationUniverseError("rows must contain EvaluationRow")
+            if type(row) is not EvaluationRow:
+                raise EvaluationUniverseError(
+                    "rows must contain exact EvaluationRow values"
+                )
             if (
                 row.universe_id,
                 row.campaign_id,

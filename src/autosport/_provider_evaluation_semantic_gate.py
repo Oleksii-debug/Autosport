@@ -68,9 +68,9 @@ def _validate_row_against_semantic_slot(
 
     from . import provider_evaluation_universe as provider_consumer
 
-    if not isinstance(row, EvaluationRow):
+    if type(row) is not EvaluationRow:
         raise provider_consumer.ProviderEvaluationUniverseError(
-            "rows must contain EvaluationRow values"
+            "rows must contain exact EvaluationRow values"
         )
     if not isinstance(slot, PreEvaluationSlotSemanticEvidence):
         raise provider_consumer.ProviderEvaluationUniverseError(
@@ -159,6 +159,14 @@ def _validate_product_semantic_authority(
     pre_evaluation_bound: BoundPreEvaluationSession,
 ) -> tuple[dict[str, str], ...]:
     from . import provider_evaluation_universe as provider_consumer
+
+    # Rows are authority-bearing immutable evidence objects, not extension points.
+    # Reject subclasses before the first row_key/property read so a caller cannot
+    # make validation and later hashing/serialization observe different values.
+    if not all(type(row) is EvaluationRow for row in rows):
+        raise provider_consumer.ProviderEvaluationUniverseError(
+            "rows must contain exact EvaluationRow values"
+        )
 
     # Capability wrappers are authority-bearing objects, not extension points.  Exact
     # concrete types prevent a subclass from retaining a genuine issued origin while

@@ -17,6 +17,9 @@ from . import _paper_execution_decision_origin as _paper_execution_decision_orig
 # Canonical producer ancestry is not an ambient capability: only the exact direct
 # product execute call may bind origin, while nested hooks fail before reservation.
 from . import _paper_execution_decision_origin_callsite_guard as _paper_execution_decision_origin_callsite_guard  # noqa: F401,E402
+# An origin-bound incomplete run may resume only after the product re-resolves the
+# same durable DecisionLedger origin; generic/originless retry remains fail-closed.
+from . import _paper_execution_decision_origin_resume_guard as _paper_execution_decision_origin_resume_guard  # noqa: F401,E402
 
 # Bind explicit realized-VOC admissions to the exact canonical ResearchProtocol
 # and protocol-derived cohort before the scoring facade is imported by consumers.

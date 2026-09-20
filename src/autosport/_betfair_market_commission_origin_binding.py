@@ -1,16 +1,17 @@
 """Bind Betfair commission receipts to the exact client origin that acquired them.
 
 The durable commission receipt intentionally contains only secret-free provider
-bytes.  Its account-details digest is evidence-instance integrity, not a stable
-Betfair account discriminator.  This process-local guard therefore records the
+bytes. Its account-details digest is evidence-instance integrity, not a stable
+Betfair account discriminator. This process-local guard therefore records the
 canonical client object owned by each ``BetfairMarketCommissionAuthority`` and
 binds every positively issued receipt to that exact origin at capture/reacquisition
 time.
 
 The registry is deliberately not durable: after restart, a receipt regains positive
 origin authority only after the source reacquires it through the newly constructed
-canonical client.  Mutating ``source._client`` cannot retarget an already-issued
-receipt to another account.
+canonical client. Once construction finishes the authority's client reference is
+immutable, so even a transient A->B->A assignment cannot mix account-details and
+cleared-order reads from different authenticated origins during one capture.
 """
 from __future__ import annotations
 
@@ -35,6 +36,21 @@ def _install_origin_binding() -> None:
     if getattr(raw_init, "_autosport_receipt_origin_binding", False):
         return
     raw_capture = BetfairMarketCommissionAuthority.capture_market
+    raw_setattr = BetfairMarketCommissionAuthority.__setattr__
+
+    def bound_setattr(
+        self: BetfairMarketCommissionAuthority,
+        name: str,
+        value: object,
+    ) -> None:
+        if name == "_client":
+            with _LOCK:
+                origin = _SOURCE_ORIGINS.get(self)
+            if origin is not None and value is not origin:
+                raise BetfairMarketCommissionAuthorityError(
+                    "commission authority client origin is immutable after construction"
+                )
+        raw_setattr(self, name, value)
 
     def bound_init(self: BetfairMarketCommissionAuthority, *args, **kwargs) -> None:
         raw_init(self, *args, **kwargs)
@@ -91,6 +107,8 @@ def _install_origin_binding() -> None:
     bound_init._autosport_receipt_origin_binding = True  # type: ignore[attr-defined]
     bound_init._autosport_receipt_origin_raw_init = raw_init  # type: ignore[attr-defined]
     bound_capture._autosport_receipt_origin_binding = True  # type: ignore[attr-defined]
+    bound_setattr._autosport_receipt_origin_binding = True  # type: ignore[attr-defined]
+    BetfairMarketCommissionAuthority.__setattr__ = bound_setattr
     BetfairMarketCommissionAuthority.__init__ = bound_init
     BetfairMarketCommissionAuthority.capture_market = bound_capture
 

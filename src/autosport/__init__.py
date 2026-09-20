@@ -97,3 +97,8 @@ from . import _betfair_market_commission_origin_binding as _betfair_market_commi
 # scope; it must not mint a replacement projection merely because T1 evidence
 # instance ids or timestamps changed after restart.
 from . import _campaign_provider_scope_stable_projection as _campaign_provider_scope_stable_projection  # noqa: F401,E402
+
+# Collector retention may physically delete historical rows only from durable desktop
+# application acknowledgement. Pin those reads to the exact checkpoint class so a
+# mutable exact instance cannot shadow methods and mint deletion authority.
+from . import _collector_retention_desktop_ack_authority as _collector_retention_desktop_ack_authority  # noqa: F401,E402

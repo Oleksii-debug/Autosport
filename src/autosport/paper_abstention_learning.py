@@ -383,11 +383,16 @@ class PaperAbstentionLearningRuntime:
             try:
                 baseline = self.environment.checkpoint()
             except LearningEnvironmentError:
-                # An exact same-process retry can legitimately arrive here with the
-                # canonical action still pending after durable intent publication
-                # failed. CausalLearningEnvironment.act() below may reuse only that
-                # pending decision payload; the Action identity check after act()
-                # additionally binds the exact decision timestamp supplied here.
+                # A starting AgentLoop may legitimately pair with one exact pending
+                # environment action only when the previous attempt failed before
+                # publishing its durable intent. Reject any unrelated/multiple pending
+                # authority before calling act(), because act() may otherwise create a
+                # second pending action for another observation and strand the runtime.
+                pending = self.environment._pending
+                if len(pending) != 1 or retry_action.action_id not in pending:
+                    raise PaperAbstentionLearningError(
+                        "starting abstention conflicts with unresolved environment action"
+                    )
                 baseline = None
             if (
                 baseline is not None

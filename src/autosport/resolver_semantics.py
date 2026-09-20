@@ -295,6 +295,111 @@ def _module_attribute_dependencies(
     return dependencies
 
 
+def _resolve_global_type_attribute(
+    owner: type,
+    attribute: str,
+) -> tuple[object, list[str]]:
+    """Resolve one class attribute without hiding its concrete descriptor owner."""
+
+    resolved_owner: type | None = None
+    raw: object = None
+    for candidate in owner.__mro__:
+        namespace = vars(candidate)
+        if attribute in namespace:
+            resolved_owner = candidate
+            raw = namespace[attribute]
+            break
+    if resolved_owner is None:
+        raise ResolverSemanticIdentityError(
+            "referenced global type attribute cannot be resolved"
+        )
+
+    descriptor_kind: str
+    value: object
+    if type(raw) is staticmethod:
+        descriptor_kind = "staticmethod"
+        value = raw.__func__
+    elif type(raw) is classmethod:
+        descriptor_kind = "classmethod"
+        value = raw.__func__
+    elif type(raw) is FunctionType:
+        descriptor_kind = "function"
+        value = raw
+    elif type(raw) is type:
+        descriptor_kind = "type"
+        value = raw
+    else:
+        descriptor_kind = f"{type(raw).__module__}.{type(raw).__qualname__}"
+        try:
+            value = getattr(owner, attribute)
+        except (AttributeError, TypeError) as exc:
+            raise ResolverSemanticIdentityError(
+                "referenced global type descriptor cannot be resolved safely"
+            ) from exc
+
+    return value, [
+        f"{resolved_owner.__module__}.{resolved_owner.__qualname__}",
+        descriptor_kind,
+        attribute,
+    ]
+
+
+def _global_type_attribute_dependencies(
+    segment: str,
+    resolver: FunctionType,
+    *,
+    visiting: set[str],
+) -> dict[str, object]:
+    """Seal executable attribute chains rooted at directly referenced global types."""
+
+    try:
+        tree = ast.parse(segment)
+    except (SyntaxError, ValueError) as exc:
+        raise ResolverSemanticIdentityError(
+            "resolver source cannot be inspected for global type dependencies"
+        ) from exc
+
+    dependencies: dict[str, object] = {}
+    executable_types = (
+        FunctionType,
+        BuiltinFunctionType,
+        BuiltinMethodType,
+        ModuleType,
+        type,
+    )
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Attribute):
+            continue
+        chain = _attribute_chain(node)
+        if chain is None:
+            continue
+        root_name, attributes = chain
+        root = resolver.__globals__.get(root_name)
+        if type(root) is not type:
+            continue
+
+        value: object = root
+        path: list[list[str]] = []
+        complete = True
+        for attribute in attributes:
+            if type(value) is not type:
+                complete = False
+                break
+            value, step = _resolve_global_type_attribute(value, attribute)
+            path.append(step)
+        if not complete or type(value) not in executable_types:
+            continue
+
+        key = f"global-type:{root_name}.{'.'.join(attributes)}"
+        dependencies[key] = [
+            "global-type-attribute-chain",
+            f"{root.__module__}.{root.__qualname__}",
+            path,
+            _dependency_payload(value, visiting=visiting),
+        ]
+    return dependencies
+
+
 def _owner_class(resolver: FunctionType) -> type | None:
     parts = _qualname_parts(resolver)
     if len(parts) < 2:
@@ -443,6 +548,13 @@ def _function_semantic_payload(
 
     dependencies.update(
         _module_attribute_dependencies(
+            segment,
+            resolver,
+            visiting=next_visiting,
+        )
+    )
+    dependencies.update(
+        _global_type_attribute_dependencies(
             segment,
             resolver,
             visiting=next_visiting,

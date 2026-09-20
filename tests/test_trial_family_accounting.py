@@ -108,7 +108,7 @@ def _foundation(tmp_path):
     model = ModelVersion("model-1", "fixture-model", SHA_A, SHA_C, SHA_D, "dataset-1", "features-1", "protocol-1", 7, SHA_B, T1)
     strategy = StrategyVersion("strategy-1", "canonical-strategy", SHA_C, SHA_D, SHA_B, T1, model_version_id="model-1")
     bundle = EvaluationBundleRef("eval-1", SHA_D, SHA_C, "dataset-1", protocol.protocol_sha256, (SHA_A, SHA_B), T2, evaluated_strategy_version_id="strategy-1", evaluated_model_version_id="model-1", effective_sample_size=5, effect_interval_low="0.01", effect_interval_high="0.1", practical_improvement="0.05")
-    for record in (question, hypothesis, protocol, dataset, features, model, strategy, bundle):
+    for record in (question, hypothesis, protocol, dataset, features, model, strategy):
         registry.append(record)
     candidate = _candidate()
     member = ExperimentFamilyMember(hypothesis_id=hypothesis.hypothesis_id, hypothesis_sha256=_payload_sha(hypothesis), semantic_variant_sha256=candidate.semantic_sha256, candidate_label="candidate display label")
@@ -245,11 +245,12 @@ def test_machine_authority_rejects_tail_truncation(tmp_path):
 
 
 def test_negative_completed_and_aborted_attempts_survive_restart_and_asof(tmp_path):
-    registry, _, _, candidate, member, _, store = _foundation(tmp_path)
+    registry, _, bundle, candidate, member, _, store = _foundation(tmp_path)
     completed = store.start_attempt(semantic_attempt_id="negative-attempt", member_authority_id=member.member_authority_id, candidate=candidate, created_at=T1)
     aborted = store.start_attempt(semantic_attempt_id="aborted-attempt", member_authority_id=member.member_authority_id, candidate=candidate, created_at=T2)
     early = store.snapshot(as_of=T2)
     assert (early.total_attempts, early.completed_attempts, early.aborted_attempts, early.open_attempts) == (2, 0, 0, 2)
+    registry.append(bundle)
     experiment = _experiment(outcome=ResearchOutcome.NEGATIVE)
     registry.append(experiment)
     closed = store.complete_attempt(attempt_id=completed.attempt_id, experiment_id=experiment.experiment_id, registry=registry)
@@ -289,6 +290,17 @@ def test_completion_rejects_foreign_evaluation_bundle_lineage(tmp_path):
     assert store.attempts()[0].status is TrialAttemptStatus.OPEN
 
 
+def test_completion_rejects_evaluation_bundle_published_before_attempt_start(tmp_path):
+    registry, _, bundle, candidate, member, _, store = _foundation(tmp_path)
+    registry.append(bundle)
+    attempt = store.start_attempt(semantic_attempt_id="preexisting-evaluation", member_authority_id=member.member_authority_id, candidate=candidate, created_at=T1)
+    experiment = _experiment(experiment_id="wrapped-preexisting-evaluation", outcome=ResearchOutcome.NEGATIVE)
+    registry.append(experiment)
+    with pytest.raises(ValueError, match="EvaluationBundle was already durable before trial attempt publication"):
+        store.complete_attempt(attempt_id=attempt.attempt_id, experiment_id=experiment.experiment_id, registry=registry)
+    assert store.attempts()[0].status is TrialAttemptStatus.OPEN
+
+
 def test_completion_rejects_experiment_published_before_attempt_start(tmp_path):
     registry, _, _, candidate, member, _, store = _foundation(tmp_path)
     experiment = _experiment(outcome=ResearchOutcome.NEGATIVE)
@@ -300,9 +312,10 @@ def test_completion_rejects_experiment_published_before_attempt_start(tmp_path):
 
 
 def test_same_experiment_cannot_complete_two_attempts(tmp_path):
-    registry, _, _, candidate, member, _, store = _foundation(tmp_path)
+    registry, _, bundle, candidate, member, _, store = _foundation(tmp_path)
     first = store.start_attempt(semantic_attempt_id="first", member_authority_id=member.member_authority_id, candidate=candidate, created_at=T1)
     second = store.start_attempt(semantic_attempt_id="second", member_authority_id=member.member_authority_id, candidate=candidate, created_at=T2)
+    registry.append(bundle)
     experiment = _experiment(outcome=ResearchOutcome.NEGATIVE)
     registry.append(experiment)
     store.complete_attempt(attempt_id=first.attempt_id, experiment_id=experiment.experiment_id, registry=registry)
@@ -313,6 +326,7 @@ def test_same_experiment_cannot_complete_two_attempts(tmp_path):
 def test_sequential_truth_is_native_store_backed_and_exact_retry_is_idempotent(tmp_path):
     registry, _, bundle, candidate, member, plan, store = _foundation(tmp_path)
     attempt = store.start_attempt(semantic_attempt_id="look-attempt", member_authority_id=member.member_authority_id, candidate=candidate, created_at=T1)
+    registry.append(bundle)
     experiment = _experiment(outcome=ResearchOutcome.NULL)
     registry.append(experiment)
     store.complete_attempt(attempt_id=attempt.attempt_id, experiment_id=experiment.experiment_id, registry=registry)
@@ -327,6 +341,7 @@ def test_sequential_truth_is_native_store_backed_and_exact_retry_is_idempotent(t
 def test_trial_event_cannot_backdate_durable_sequential_history(tmp_path):
     registry, _, bundle, candidate, member, plan, store = _foundation(tmp_path)
     attempt = store.start_attempt(semantic_attempt_id="look-first", member_authority_id=member.member_authority_id, candidate=candidate, created_at=T1)
+    registry.append(bundle)
     experiment = _experiment(outcome=ResearchOutcome.NULL)
     registry.append(experiment)
     store.complete_attempt(attempt_id=attempt.attempt_id, experiment_id=experiment.experiment_id, registry=registry)
@@ -340,6 +355,7 @@ def test_trial_event_cannot_backdate_durable_sequential_history(tmp_path):
 def test_sequential_append_rechecks_trial_high_water_inside_workspace_lock(tmp_path, monkeypatch):
     registry, _, bundle, candidate, member, plan, store = _foundation(tmp_path)
     attempt = store.start_attempt(semantic_attempt_id="prepared-look", member_authority_id=member.member_authority_id, candidate=candidate, created_at=T1)
+    registry.append(bundle)
     experiment = _experiment(outcome=ResearchOutcome.NULL)
     registry.append(experiment)
     store.complete_attempt(attempt_id=attempt.attempt_id, experiment_id=experiment.experiment_id, registry=registry)
@@ -372,6 +388,7 @@ def test_sequential_append_rechecks_trial_high_water_inside_workspace_lock(tmp_p
 def test_promotion_guard_requires_exact_hashes_count_registry_and_native_sequential_truth(tmp_path):
     registry, _, bundle, candidate, member, plan, store = _foundation(tmp_path)
     attempt = store.start_attempt(semantic_attempt_id="positive-attempt", member_authority_id=member.member_authority_id, candidate=candidate, created_at=T1)
+    registry.append(bundle)
     experiment = _experiment(outcome=ResearchOutcome.POSITIVE)
     registry.append(experiment)
     store.complete_attempt(attempt_id=attempt.attempt_id, experiment_id=experiment.experiment_id, registry=registry)
@@ -387,6 +404,7 @@ def test_promotion_guard_requires_exact_hashes_count_registry_and_native_sequent
 def test_promotion_guard_rejects_positive_result_without_registered_sequential_decision(tmp_path):
     registry, _, bundle, candidate, member, _, store = _foundation(tmp_path)
     attempt = store.start_attempt(semantic_attempt_id="positive-attempt", member_authority_id=member.member_authority_id, candidate=candidate, created_at=T1)
+    registry.append(bundle)
     experiment = _experiment(outcome=ResearchOutcome.POSITIVE)
     registry.append(experiment)
     store.complete_attempt(attempt_id=attempt.attempt_id, experiment_id=experiment.experiment_id, registry=registry)

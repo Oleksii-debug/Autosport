@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import marshal
+from types import FunctionType
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -174,10 +176,32 @@ def _settlement_authority_identity(
         raise ProductCompositionError(
             "settlement outcome authority must be owned by the configured product source"
         )
-    if not callable(getattr(source, "resolve", None)):
+    instance_dict = getattr(source, "__dict__", None)
+    if type(instance_dict) is dict and "resolve" in instance_dict:
         raise ProductCompositionError(
-            "source-owned settlement authority must expose resolve(record, as_of)"
+            "source-owned settlement authority forbids per-instance resolve shadowing"
         )
+    resolver = getattr(type(source), "resolve", None)
+    if type(resolver) is not FunctionType:
+        raise ProductCompositionError(
+            "source-owned settlement authority must use a concrete class resolve method"
+        )
+    if resolver.__defaults__ is not None or resolver.__kwdefaults__ not in (None, {}):
+        raise ProductCompositionError(
+            "source-owned settlement resolve method cannot use mutable call defaults"
+        )
+    if resolver.__closure__ is not None:
+        raise ProductCompositionError(
+            "source-owned settlement resolve method cannot close over mutable authority"
+        )
+    try:
+        resolver_sha256 = hashlib.sha256(
+            marshal.dumps(resolver.__code__)
+        ).hexdigest()
+    except (TypeError, ValueError) as exc:
+        raise ProductCompositionError(
+            "source-owned settlement resolve implementation cannot be fingerprinted"
+        ) from exc
     authority_id = _ManifestStore._text(
         getattr(source, "settlement_authority_id", None),
         "settlement_authority_id",
@@ -205,6 +229,7 @@ def _settlement_authority_identity(
         "authority_id": authority_id,
         "configuration_sha256": configuration_sha256,
         "implementation": implementation,
+        "resolve_sha256": resolver_sha256,
     }
     encoded = json.dumps(
         payload,

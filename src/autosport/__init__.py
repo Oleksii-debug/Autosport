@@ -97,3 +97,8 @@ from . import _betfair_market_commission_origin_binding as _betfair_market_commi
 # scope; it must not mint a replacement projection merely because T1 evidence
 # instance ids or timestamps changed after restart.
 from . import _campaign_provider_scope_stable_projection as _campaign_provider_scope_stable_projection  # noqa: F401,E402
+
+# ScientificRegistry successors are protected by an independent machine authority;
+# every read must consume the exact authority-current image before causal witnesses
+# can be minted from it.
+from . import _scientific_registry_read_authority as _scientific_registry_read_authority  # noqa: F401,E402

@@ -5,7 +5,7 @@ import threading
 from dataclasses import dataclass
 from pathlib import Path
 
-from .evidence_export import _resolve_output_destination, export_evidence_manifest
+from .evidence_export import export_evidence_manifest
 
 
 def _safe_worker_error(exc: BaseException) -> str:
@@ -29,9 +29,33 @@ def resolve_evidence_output_destination(
     workspace: str | Path,
     output: str | Path,
 ) -> Path:
-    """Preflight a GUI destination through the canonical exporter destination law."""
+    """Conservatively preflight a GUI destination without exporter internals.
 
-    return _resolve_output_destination(Path(workspace), Path(output))
+    This check is UX-only. ``export_evidence_manifest`` remains the sole final
+    authority for destination fencing and publication safety.
+    """
+
+    try:
+        workspace_root = Path(workspace).resolve(strict=True)
+        output_path = Path(output).resolve(strict=False)
+    except (OSError, TypeError, ValueError) as exc:
+        raise ValueError("evidence export destination cannot be resolved") from exc
+
+    try:
+        output_path.relative_to(workspace_root)
+    except ValueError:
+        pass
+    else:
+        raise ValueError("evidence export destination must be outside the workspace")
+
+    output_parent = output_path.parent
+    try:
+        workspace_root.relative_to(output_parent)
+    except ValueError as exc:
+        raise ValueError(
+            "evidence export destination parent must contain the workspace"
+        ) from exc
+    return output_path
 
 
 @dataclass(frozen=True, slots=True)

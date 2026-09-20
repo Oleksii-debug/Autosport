@@ -815,8 +815,12 @@ class SportMemoryResultMaterializer:
                 "provider-binding cutoff cannot precede frozen quote evidence"
             )
         if provider_binding_as_of >= available:
+            if binding.provider_inference_as_of is not None:
+                raise SportMemoryResultMaterializationError(
+                    "provider-selection inference must predate settlement reveal"
+                )
             raise SportMemoryResultMaterializationError(
-                "provider-selection binding must predate settlement reveal"
+                "result binding is not canonical pre-reveal authority: provider-selection binding must predate settlement reveal"
             )
         if binding.provider_inference_as_of is not None:
             inference = _instant(

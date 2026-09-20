@@ -2,9 +2,16 @@ from __future__ import annotations
 
 import threading
 from pathlib import Path
+from types import SimpleNamespace
 
+import autosport.gui as gui
 import autosport.gui_evidence_export as gui_export
-from autosport.gui_evidence_export import OneShotEvidenceExportWorker
+from autosport.gui import AutosportApp
+from autosport.gui_evidence_export import (
+    OneShotEvidenceExportWorker,
+    resolve_evidence_output_destination,
+)
+from autosport.localization import text
 
 
 def _join_worker(worker: OneShotEvidenceExportWorker) -> None:
@@ -12,6 +19,18 @@ def _join_worker(worker: OneShotEvidenceExportWorker) -> None:
     assert thread is not None
     thread.join(timeout=2)
     assert not thread.is_alive()
+
+
+def _partial_app(*, recovery_busy: bool = False) -> AutosportApp:
+    app = object.__new__(AutosportApp)
+    app.__dict__.update(
+        dataset_worker=SimpleNamespace(busy=False),
+        replay_worker=SimpleNamespace(busy=False),
+        live_worker=SimpleNamespace(busy=False),
+        recovery_worker=SimpleNamespace(busy=recovery_busy),
+        evidence_export_worker=SimpleNamespace(busy=False),
+    )
+    return app
 
 
 def test_export_worker_calls_canonical_exporter_and_reports_output(
@@ -39,9 +58,13 @@ def test_export_worker_calls_canonical_exporter_and_reports_output(
     assert worker.busy is False
 
 
-def test_export_worker_reports_safe_failure(monkeypatch, tmp_path: Path) -> None:
+def test_export_worker_reports_structural_failure_without_secret_text(
+    monkeypatch, tmp_path: Path
+) -> None:
+    secret = r"token=SUPERSECRET C:\Users\name\credentials.json"
+
     def fail_export(workspace, output):
-        raise FileExistsError("destination already exists")
+        raise RuntimeError(secret)
 
     monkeypatch.setattr(gui_export, "export_evidence_manifest", fail_export)
     worker = OneShotEvidenceExportWorker()
@@ -52,7 +75,9 @@ def test_export_worker_reports_safe_failure(monkeypatch, tmp_path: Path) -> None
     message = worker.poll()
     assert message is not None
     assert message.output is None
-    assert message.error == "FileExistsError: destination already exists"
+    assert message.error == "RuntimeError: evidence export failed"
+    for forbidden in ("SUPERSECRET", "credentials.json", "token=", r"C:\Users"):
+        assert forbidden not in message.error
     assert worker.busy is False
 
 
@@ -80,3 +105,95 @@ def test_export_worker_rejects_overlap_until_terminal_message_is_polled(
     assert message is not None
     assert message.output == tmp_path / "first.json"
     assert worker.busy is False
+
+
+def test_destination_preflight_delegates_to_canonical_exporter_fence(
+    monkeypatch, tmp_path: Path
+) -> None:
+    calls: list[tuple[Path, Path]] = []
+    expected = tmp_path / "resolved.json"
+
+    def fake_resolve(workspace: Path, output: Path) -> Path:
+        calls.append((workspace, output))
+        return expected
+
+    monkeypatch.setattr(gui_export, "_resolve_output_destination", fake_resolve)
+    workspace = tmp_path / "workspace"
+    output = tmp_path / "evidence.json"
+
+    assert resolve_evidence_output_destination(workspace, output) == expected
+    assert calls == [(workspace, output)]
+
+
+def test_partial_gui_instance_without_export_worker_is_not_routed_to_tk_getattr() -> None:
+    app = _partial_app()
+    del app.__dict__["evidence_export_worker"]
+
+    assert app._evidence_export_busy is False
+    assert app._dataset_selection_blocker() is None
+
+
+def test_control_e_path_is_blocked_while_recovery_worker_is_busy(
+    monkeypatch, tmp_path: Path
+) -> None:
+    app = _partial_app(recovery_busy=True)
+    status_values: list[str] = []
+    log_values: list[str] = []
+    app.__dict__.update(
+        _closing=False,
+        workspace=tmp_path / "workspace",
+        _active_workspace=tmp_path / "workspace",
+        status=SimpleNamespace(set=status_values.append),
+        _append_log=log_values.append,
+    )
+
+    def chooser_must_not_open(**kwargs):
+        raise AssertionError("chooser opened while recovery owns the workspace")
+
+    monkeypatch.setattr(gui.filedialog, "asksaveasfilename", chooser_must_not_open)
+
+    app.export_evidence()
+
+    expected = text("ui.status.evidence_export.recovery_busy")
+    assert status_values == [expected]
+    assert log_values == [expected]
+
+
+def test_unsupported_destination_is_rejected_before_worker_start(
+    monkeypatch, tmp_path: Path
+) -> None:
+    app = _partial_app()
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    status_values: list[str] = []
+    log_values: list[str] = []
+    start_calls: list[tuple[Path, Path]] = []
+    app.__dict__.update(
+        _closing=False,
+        workspace=workspace,
+        _active_workspace=workspace,
+        status=SimpleNamespace(set=status_values.append),
+        _append_log=log_values.append,
+    )
+    app.evidence_export_worker.start = lambda workspace, output: start_calls.append(
+        (Path(workspace), Path(output))
+    ) or True
+
+    monkeypatch.setattr(
+        gui.filedialog,
+        "asksaveasfilename",
+        lambda **kwargs: str(workspace / "forbidden.json"),
+    )
+    monkeypatch.setattr(
+        gui,
+        "resolve_evidence_output_destination",
+        lambda workspace, output: (_ for _ in ()).throw(ValueError("blocked")),
+    )
+    monkeypatch.setattr(gui.messagebox, "showerror", lambda *args, **kwargs: None)
+
+    app.export_evidence()
+
+    expected = text("ui.status.evidence_export.destination_invalid")
+    assert status_values == [expected]
+    assert log_values == [expected]
+    assert start_calls == []

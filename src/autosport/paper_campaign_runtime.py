@@ -88,10 +88,14 @@ class PaperCampaignRuntime(_base.PaperCampaignRuntime):
         return tuple(sorted((*parameters, committed)))
 
     def _canonical_abstention_runtime(self) -> PaperAbstentionLearningRuntime:
-        """Reuse the campaign-bound environment and AgentLoop for WAIT/NO_BET."""
+        """Bind WAIT/NO_BET to the campaign's current environment authority."""
 
         runtime = getattr(self, "_abstention_learning_runtime", None)
-        if runtime is None:
+        if (
+            runtime is None
+            or runtime.environment is not self.environment
+            or runtime.agent_loop is not self.agent_loop
+        ):
             runtime = PaperAbstentionLearningRuntime(
                 environment=self.environment,
                 agent_loop=self.agent_loop,

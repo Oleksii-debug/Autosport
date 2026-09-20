@@ -138,6 +138,11 @@ class PerformanceBudget:
             raise PerformanceQualificationError(
                 "performance budget has unexpected fields: " + ",".join(sorted(unexpected))
             )
+        missing = expected - set(raw)
+        if missing:
+            raise PerformanceQualificationError(
+                "performance budget is missing explicit fields: " + ",".join(sorted(missing))
+            )
         if raw.get("schema") != BUDGET_SCHEMA:
             raise PerformanceQualificationError("unsupported performance budget schema")
         if raw.get("schema_version") != BUDGET_SCHEMA_VERSION:
@@ -213,6 +218,37 @@ class PerformanceQualification:
         }
 
 
+def _endurance_fingerprint_payload(raw: Mapping[str, object]) -> dict[str, object]:
+    fields = (
+        "config",
+        "history_events",
+        "current_quotes",
+        "accepted_first_pass",
+        "accepted_duplicate_pass",
+        "replay_dataset_hash",
+        "mirror_dataset_hash",
+        "restart_hashes",
+        "restart_projection_counts",
+        "paper_tickets_opened",
+        "paper_tickets_settled_first_pass",
+        "paper_tickets_settled_second_pass",
+        "paper_tickets_won",
+        "paper_payout_total",
+        "paper_expected_balance",
+        "paper_balance_after_restart",
+        "paper_economics_verified",
+        "corrupt_health_rejected",
+        "corrupt_paper_book_rejected",
+        "real_money_execution",
+    )
+    missing = [field for field in fields if field not in raw]
+    if missing:
+        raise PerformanceQualificationError(
+            "endurance report is missing invariant fields: " + ",".join(missing)
+        )
+    return {field: raw[field] for field in fields}
+
+
 def _validate_report(raw: Mapping[str, object]) -> dict[str, int | float]:
     if not isinstance(raw, Mapping):
         raise PerformanceQualificationError("endurance report must be an object")
@@ -223,6 +259,18 @@ def _validate_report(raw: Mapping[str, object]) -> dict[str, int | float]:
         raise PerformanceQualificationError("PASS endurance report must contain an empty failures list")
     if raw.get("real_money_execution") is not False:
         raise PerformanceQualificationError("endurance report must preserve real_money_execution=false")
+    fingerprint = raw.get("stable_invariant_fingerprint")
+    if (
+        type(fingerprint) is not str
+        or len(fingerprint) != 64
+        or any(character not in _HEX for character in fingerprint)
+    ):
+        raise PerformanceQualificationError(
+            "stable_invariant_fingerprint must be lowercase SHA-256 hex"
+        )
+    expected_fingerprint = _digest(_endurance_fingerprint_payload(raw))
+    if fingerprint != expected_fingerprint:
+        raise PerformanceQualificationError("endurance stable invariant fingerprint mismatch")
     return {
         "history_events": _positive_int(raw.get("history_events"), "history_events"),
         "accepted_events_per_second": _positive_float(

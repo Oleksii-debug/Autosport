@@ -1,9 +1,12 @@
 """Cross-store authority generation for durable sport memory.
 
 This module does not create a second identity, opponent, or snapshot authority.
-It binds the exact validated persisted roots of the canonical
-ParticipantIdentityRegistry and OpponentIntelligenceStore into one immutable
-content-addressed generation before SportMemoryRuntime can be opened.
+It binds the exact validated persisted root of the canonical
+ParticipantIdentityRegistry and the validated source-authority projection of the
+OpponentIntelligenceStore into one immutable content-addressed generation before
+SportMemoryRuntime can be opened. Derived opponent rating/feature snapshots are
+outputs of sport-memory materialization and therefore cannot redefine the
+upstream authority generation that authorized that materialization.
 """
 
 from __future__ import annotations
@@ -22,6 +25,18 @@ from .sport_memory_runtime import SportMemoryRuntime
 
 _SCHEMA = "autosport.sport_memory_authority_checkpoint"
 _VERSION = 1
+_OPPONENT_STORE_SCHEMA = "autosport.opponent_intelligence"
+_OPPONENT_STORE_VERSION = 1
+_OPPONENT_SOURCE_SCHEMA = "autosport.sport_memory.opponent_source_authority"
+_OPPONENT_SOURCE_VERSION = 1
+_OPPONENT_STORE_KEYS = {
+    "schema",
+    "version",
+    "performances",
+    "rating_snapshots",
+    "feature_snapshots",
+    "invalidations",
+}
 
 
 class SportMemoryCheckpointError(ValueError):
@@ -67,6 +82,51 @@ def _file_root(name: str, path: Path) -> str:
         ) from exc
 
 
+def _opponent_source_root(path: Path) -> str:
+    """Hash canonical opponent source evidence, not derived snapshot caches.
+
+    Rating/feature snapshots are deterministic derived outputs written by
+    ``build_snapshots``. Including them in the upstream authority root makes a
+    successful sport-memory materialization invalidate the very generation that
+    authorized it. Performance observations and invalidations are the canonical
+    source evidence that can change the causal inputs, so those remain bound.
+    """
+
+    try:
+        raw: Any = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise SportMemoryCheckpointError(
+            "cannot read opponent canonical store"
+        ) from exc
+    if type(raw) is not dict or set(raw) != _OPPONENT_STORE_KEYS:
+        raise SportMemoryCheckpointError(
+            "opponent canonical store has unexpected fields"
+        )
+    if (
+        raw["schema"] != _OPPONENT_STORE_SCHEMA
+        or type(raw["schema"]) is not str
+        or type(raw["version"]) is not int
+        or raw["version"] != _OPPONENT_STORE_VERSION
+    ):
+        raise SportMemoryCheckpointError(
+            "unsupported opponent canonical store schema"
+        )
+    if type(raw["performances"]) is not list or type(raw["invalidations"]) is not list:
+        raise SportMemoryCheckpointError(
+            "invalid opponent canonical source-authority state"
+        )
+    return _canonical_digest(
+        {
+            "schema": _OPPONENT_SOURCE_SCHEMA,
+            "version": _OPPONENT_SOURCE_VERSION,
+            "opponent_store_schema": raw["schema"],
+            "opponent_store_version": raw["version"],
+            "performances": raw["performances"],
+            "invalidations": raw["invalidations"],
+        }
+    )
+
+
 def _resolved(path: Path) -> Path:
     try:
         return path.resolve(strict=False)
@@ -91,11 +151,16 @@ def _validated_authorities(
     str,
     str,
 ]:
-    """Re-open and return the exact canonical authorities whose roots are hashed.
+    """Re-open exact canonical authorities and return their bound source roots.
 
     Caller-owned in-memory objects are accepted only as path/binding selectors.
     Runtime reads must use the freshly re-opened authority objects returned here,
     otherwise a stale caller object could be paired with newer persisted roots.
+
+    The whole opponent file is still byte-fenced across validation to reject a
+    concurrent mutation. The durable checkpoint binds only the validated source
+    projection so deterministic rating/feature cache publication cannot make a
+    normal materialization self-invalidate its upstream generation.
     """
 
     if not isinstance(identity_registry, ParticipantIdentityRegistry):
@@ -112,10 +177,11 @@ def _validated_authorities(
     _require_distinct_paths(identity_path, opponent_path)
 
     identity_before = _file_root("identity", identity_path)
-    opponent_before = _file_root("opponent", opponent_path)
+    opponent_bytes_before = _file_root("opponent", opponent_path)
+    opponent_source_before = _opponent_source_root(opponent_path)
 
     # Re-open the canonical files so locally persisted bytes are not accepted as
-    # roots merely because an older in-memory object once parsed successfully.
+    # authority merely because an older in-memory object once parsed successfully.
     # These constructors are the existing authorities' own validation boundary.
     try:
         verified_identity = ParticipantIdentityRegistry(identity_path)
@@ -128,22 +194,31 @@ def _validated_authorities(
         ) from exc
 
     identity_after = _file_root("identity", identity_path)
-    opponent_after = _file_root("opponent", opponent_path)
-    if (identity_before, opponent_before) != (identity_after, opponent_after):
+    opponent_bytes_after = _file_root("opponent", opponent_path)
+    opponent_source_after = _opponent_source_root(opponent_path)
+    if identity_before != identity_after:
         raise SportMemoryCheckpointError(
             "canonical authority roots changed during checkpoint validation"
+        )
+    if opponent_bytes_before != opponent_bytes_after:
+        raise SportMemoryCheckpointError(
+            "canonical authority roots changed during checkpoint validation"
+        )
+    if opponent_source_before != opponent_source_after:
+        raise SportMemoryCheckpointError(
+            "canonical opponent source authority changed during checkpoint validation"
         )
     return (
         verified_identity,
         verified_opponent,
         identity_after,
-        opponent_after,
+        opponent_source_after,
     )
 
 
 @dataclass(frozen=True, slots=True)
 class SportMemoryAuthorityCheckpoint:
-    """Immutable binding of canonical identity and opponent persisted roots."""
+    """Immutable binding of canonical identity and opponent source authority."""
 
     identity_root_sha256: str
     opponent_root_sha256: str
@@ -317,7 +392,8 @@ def _initialize_checkpoint_and_opponent(
 
     # Re-read both the durable checkpoint and the canonical upstream stores after
     # publication. This closes the checkpoint-publication window and returns the
-    # exact fresh opponent object whose bytes match the committed generation.
+    # exact fresh opponent object whose source authority matches the committed
+    # generation.
     persisted, verified_opponent = _load_verified_checkpoint_and_opponent(
         checkpoint_path, identity_registry, opponent_store
     )
@@ -387,8 +463,8 @@ def initialize_or_open_bound_sport_memory_runtime(
     """Crash-safe bounded composition of checkpoint then sport-memory runtime.
 
     The checkpoint is committed first. If runtime creation then fails, a retry
-    verifies the exact same upstream roots and can finish runtime creation. A
-    runtime without its checkpoint is never adopted because that would let a
+    verifies the exact same upstream source roots and can finish runtime creation.
+    A runtime without its checkpoint is never adopted because that would let a
     caller-provided generation self-attest canonical upstream state.
     """
 

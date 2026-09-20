@@ -74,6 +74,10 @@ def _bind_legacy_paper_value_execution_authority(request, monkeypatch, tmp_path)
     module_name = module.__name__.rsplit(".", 1)[-1]
     if module_name not in _LEGACY_PAPER_VALUE_MODULES:
         return
+    if request.node.name == "test_paper_value_agent_without_execution_authority_does_not_open_ticket":
+        # Preserve this negative boundary test: the legacy positive-action fixture
+        # must not supply the very execution authority it is verifying is absent.
+        return
 
     original_context = getattr(module, "AgentContext", None)
     if original_context is None:

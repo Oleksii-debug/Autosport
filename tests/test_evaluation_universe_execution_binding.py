@@ -431,7 +431,9 @@ def test_exact_canonical_paper_attempt_can_enrich_frozen_row(tmp_path):
     )
 
     assert ledger.current_stage(row.row_id) is FunnelStage.SETTLED
-    assert ledger.cohort().sample_count == 1
+    # H2H provider completeness freezes both home and away selections. Enriching one
+    # canonical PAPER row must not shrink or rewrite the frozen denominator.
+    assert ledger.cohort().sample_count == len(frozen.rows) == 2
 
 
 def test_invented_reality_digest_is_rejected(tmp_path):

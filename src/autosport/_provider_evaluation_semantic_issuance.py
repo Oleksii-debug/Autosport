@@ -19,6 +19,8 @@ import weakref
 
 from . import _provider_evaluation_semantic_gate as semantic_gate
 from . import pre_evaluation_product_origin as product_origin
+from .evaluation_universe import EvaluationRow
+from .pre_evaluation_binding import BoundPreEvaluationSession
 from .pre_evaluation_product_origin import (
     PreEvaluationProductOrigin,
     ProductOwnedPreEvaluationSemanticSession,
@@ -106,11 +108,16 @@ def _install_denominator_issuance_gate() -> None:
         return
 
     def _validate_product_semantic_authority(*, pre_evaluation_authority, **kwargs):
-        # Preserve the exact-type error ordering owned by the existing #638 gate.  Once
-        # the two concrete capability types are present, require the semantic session
-        # digest that the canonical #662 derivation issued for this exact live origin.
+        # Preserve the exact-type error ordering owned by the #638 gate. Rows and the
+        # bound capability must be admitted before this wrapper reads nested semantic
+        # authority state; otherwise a subclass or malformed capability could run code
+        # before the primary fail-closed fence.
+        rows = kwargs.get("rows", ())
+        pre_evaluation_bound = kwargs.get("pre_evaluation_bound")
         if (
-            type(pre_evaluation_authority)
+            all(type(row) is EvaluationRow for row in rows)
+            and type(pre_evaluation_bound) is BoundPreEvaluationSession
+            and type(pre_evaluation_authority)
             is ProductOwnedPreEvaluationSemanticSession
             and type(pre_evaluation_authority.session) is PreEvaluationSemanticSession
         ):

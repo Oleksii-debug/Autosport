@@ -1,25 +1,28 @@
-"""Exactly-once terminalization for owner-bound policy utility evidence.
+"""Fail-closed terminal journaling for unresolved owner-bound policy utility.
 
-This module is deliberately a narrow downstream seam. It does not calculate
-utility, promote a challenger, or create a second evidence store. It consumes
-the existing :mod:`policy_utility_evidence` contract and durably closes the
-only dispositions that are safe while source-resolved complete net economics
-is unavailable: ``BLOCKED`` and ``INCONCLUSIVE``.
+Schema-v1 :class:`PolicyUtilityEvidence` is deliberately caller-constructible and
+contract-only.  It is therefore unsafe to append such an object to the canonical
+``PolicyUtilityStore``: doing so would let an untrusted candidate permanently
+reserve the causal semantic key before a future product-owned resolver can issue
+canonical utility evidence.
 
-The blocked product path also composes the existing utility-bound update gate,
-so raw ``RewardEvidence`` can never mutate a policy before the terminal record
-is durable. A later source-resolved positive authority can extend the same
-boundary without weakening this replay-safe champion-preserving path.
+This module keeps the canonical utility store untouched.  It journals only a
+minimal, explicitly NON-AUTHORITATIVE terminal record in a deterministic sidecar
+file.  The sidecar records that a candidate was BLOCKED/INCONCLUSIVE and preserves
+its digest for audit/retry purposes; it is never utility evidence and cannot
+authorize learning, retest, promotion, or successor activation.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import StrEnum
+import hashlib
 import json
 import os
 from pathlib import Path
 import tempfile
+from typing import Any, Mapping
 
 from .integrity import durable_path_lock
 from .learning_environment import Action, RewardEvidence, Transition
@@ -30,46 +33,132 @@ from .policy_update_authority import (
 from .policy_utility_evidence import (
     PolicyUtilityError,
     PolicyUtilityEvidence,
-    PolicyUtilityStore,
     UtilityCompleteness,
 )
 from .transparent_bandit_policy import BanditPolicyState
 
 
+_TERMINAL_SCHEMA = "autosport.policy_utility_unresolved_terminal"
+_TERMINAL_SCHEMA_VERSION = 1
+_TERMINAL_AUTHORITY = "NON_AUTHORITATIVE_SCHEMA_V1_CANDIDATE"
+
+
 class PolicyUtilityTerminalizationError(PolicyUtilityError):
-    """Raised when a terminal learning disposition cannot be trusted."""
+    """Raised when an unresolved utility terminal cannot be trusted."""
 
 
 class TerminalizationDisposition(StrEnum):
-    """Durable learning terminal states exposed to the campaign owner."""
+    """Learning terminal states permitted while utility authority is unresolved."""
 
     BLOCKED = "BLOCKED"
     INCONCLUSIVE = "INCONCLUSIVE"
 
 
 @dataclass(frozen=True, slots=True)
-class PolicyUtilityTerminalReceipt:
-    """Immutable acknowledgement of one durable terminal evidence record.
+class PolicyUtilityTerminalRecord:
+    """Minimal durable audit record for one non-authoritative utility candidate.
 
-    ``persisted`` is true only for the first append. A false value means the
-    exact same causal evidence was already present after retry/restart; it is
-    not permission to invoke a learner or promotion path again.
+    The record intentionally does *not* persist caller-provided model, strategy,
+    goal, risk, bankroll, portfolio, cost, denominator, or authority references.
+    Those fields become trustworthy only after a product-owned resolver re-reads
+    their canonical durable sources.  ``candidate_*`` values are assertions for
+    audit correlation only and never occupy the canonical utility store.
     """
+
+    candidate_evidence_id: str
+    candidate_semantic_key: str
+    disposition: TerminalizationDisposition
+    authority_status: str = _TERMINAL_AUTHORITY
+
+    def __post_init__(self) -> None:
+        _sha256(self.candidate_evidence_id, "candidate_evidence_id")
+        _sha256(self.candidate_semantic_key, "candidate_semantic_key")
+        if type(self.disposition) is not TerminalizationDisposition:
+            raise PolicyUtilityTerminalizationError(
+                "disposition must be TerminalizationDisposition"
+            )
+        if self.authority_status != _TERMINAL_AUTHORITY:
+            raise PolicyUtilityTerminalizationError(
+                "unresolved terminal record cannot carry utility authority"
+            )
+
+    @property
+    def record_id(self) -> str:
+        return _digest(self.payload())
+
+    def payload(self) -> dict[str, Any]:
+        return {
+            "schema": _TERMINAL_SCHEMA,
+            "schema_version": _TERMINAL_SCHEMA_VERSION,
+            "authority_status": self.authority_status,
+            "candidate_evidence_id": self.candidate_evidence_id,
+            "candidate_semantic_key": self.candidate_semantic_key,
+            "disposition": self.disposition.value,
+        }
+
+    def to_dict(self) -> dict[str, Any]:
+        raw = self.payload()
+        raw["record_id"] = self.record_id
+        return raw
+
+    @classmethod
+    def from_dict(cls, raw: Mapping[str, Any]) -> "PolicyUtilityTerminalRecord":
+        expected = {
+            "schema",
+            "schema_version",
+            "authority_status",
+            "candidate_evidence_id",
+            "candidate_semantic_key",
+            "disposition",
+            "record_id",
+        }
+        if type(raw) is not dict or set(raw) != expected:
+            raise PolicyUtilityTerminalizationError(
+                "unresolved terminal record has unexpected fields"
+            )
+        if raw["schema"] != _TERMINAL_SCHEMA:
+            raise PolicyUtilityTerminalizationError("unsupported terminal record schema")
+        if raw["schema_version"] != _TERMINAL_SCHEMA_VERSION:
+            raise PolicyUtilityTerminalizationError(
+                "unsupported terminal record schema_version"
+            )
+        try:
+            disposition = TerminalizationDisposition(raw["disposition"])
+        except (TypeError, ValueError) as exc:
+            raise PolicyUtilityTerminalizationError(
+                "unsupported terminal record disposition"
+            ) from exc
+        record = cls(
+            candidate_evidence_id=_string(raw["candidate_evidence_id"], "candidate_evidence_id"),
+            candidate_semantic_key=_string(
+                raw["candidate_semantic_key"], "candidate_semantic_key"
+            ),
+            disposition=disposition,
+            authority_status=_string(raw["authority_status"], "authority_status"),
+        )
+        supplied_record_id = _string(raw["record_id"], "record_id")
+        _sha256(supplied_record_id, "record_id")
+        if supplied_record_id != record.record_id:
+            raise PolicyUtilityTerminalizationError(
+                "unresolved terminal record digest mismatch"
+            )
+        return record
+
+
+@dataclass(frozen=True, slots=True)
+class PolicyUtilityTerminalReceipt:
+    """Acknowledgement for one NON-AUTHORITATIVE terminal journal record."""
 
     evidence_id: str
     semantic_key: str
     disposition: TerminalizationDisposition
     persisted: bool
+    record_id: str
 
     def __post_init__(self) -> None:
-        if type(self.evidence_id) is not str or len(self.evidence_id) != 64:
-            raise PolicyUtilityTerminalizationError("evidence_id must be a SHA-256 digest")
-        if any(char not in "0123456789abcdef" for char in self.evidence_id):
-            raise PolicyUtilityTerminalizationError("evidence_id must be lowercase SHA-256")
-        if type(self.semantic_key) is not str or len(self.semantic_key) != 64:
-            raise PolicyUtilityTerminalizationError("semantic_key must be a SHA-256 digest")
-        if any(char not in "0123456789abcdef" for char in self.semantic_key):
-            raise PolicyUtilityTerminalizationError("semantic_key must be lowercase SHA-256")
+        _sha256(self.evidence_id, "evidence_id")
+        _sha256(self.semantic_key, "semantic_key")
+        _sha256(self.record_id, "record_id")
         if type(self.disposition) is not TerminalizationDisposition:
             raise PolicyUtilityTerminalizationError(
                 "disposition must be TerminalizationDisposition"
@@ -80,7 +169,7 @@ class PolicyUtilityTerminalReceipt:
 
 @dataclass(frozen=True, slots=True)
 class PolicyUtilityBlockedLearningReceipt:
-    """One durable blocked utility plus the unchanged governed-policy witness."""
+    """One non-authoritative terminal plus unchanged governed-policy witness."""
 
     terminal: PolicyUtilityTerminalReceipt
     update_evidence: UtilityBoundUpdateEvidence
@@ -95,14 +184,7 @@ class PolicyUtilityBlockedLearningReceipt:
             raise PolicyUtilityTerminalizationError(
                 "update_evidence must be exact UtilityBoundUpdateEvidence"
             )
-        if type(self.champion_policy_id) is not str or len(self.champion_policy_id) != 64:
-            raise PolicyUtilityTerminalizationError(
-                "champion_policy_id must be a SHA-256 digest"
-            )
-        if any(char not in "0123456789abcdef" for char in self.champion_policy_id):
-            raise PolicyUtilityTerminalizationError(
-                "champion_policy_id must be lowercase SHA-256"
-            )
+        _sha256(self.champion_policy_id, "champion_policy_id")
         if not self.update_evidence.reason_codes:
             raise PolicyUtilityTerminalizationError(
                 "blocked learning receipt requires a fail-closed reason"
@@ -117,63 +199,148 @@ class PolicyUtilityBlockedLearningReceipt:
             )
         if self.update_evidence.utility_evidence_id != self.terminal.evidence_id:
             raise PolicyUtilityTerminalizationError(
-                "blocked update utility evidence does not match durable terminal"
+                "blocked update utility evidence does not match terminal assertion"
             )
         if self.update_evidence.utility_semantic_key != self.terminal.semantic_key:
             raise PolicyUtilityTerminalizationError(
-                "blocked update utility semantic key does not match durable terminal"
+                "blocked update utility semantic key does not match terminal assertion"
             )
 
 
-def _encoded_evidence_line(evidence: PolicyUtilityEvidence) -> bytes:
-    return (
-        json.dumps(
-            evidence.to_dict(),
-            sort_keys=True,
-            separators=(",", ":"),
-            ensure_ascii=True,
-            allow_nan=False,
+def _string(value: object, label: str) -> str:
+    if type(value) is not str or not value:
+        raise PolicyUtilityTerminalizationError(f"{label} must be a non-empty string")
+    return value
+
+
+def _sha256(value: object, label: str) -> str:
+    text = _string(value, label)
+    if len(text) != 64 or any(char not in "0123456789abcdef" for char in text):
+        raise PolicyUtilityTerminalizationError(
+            f"{label} must be lowercase SHA-256"
         )
-        + "\n"
+    return text
+
+
+def _digest(payload: Mapping[str, Any]) -> str:
+    encoded = json.dumps(
+        dict(payload),
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
+        allow_nan=False,
     ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
 
 
-def _atomic_compare_and_append(
-    store: PolicyUtilityStore,
-    evidence: PolicyUtilityEvidence,
-) -> bool:
-    """Cross-process, crash-safe compare-and-append to the canonical JSONL store.
+def _journal_path_for(utility_store_path: Path) -> Path:
+    """Return a path that can never be mistaken for the canonical utility store."""
 
-    ``PolicyUtilityStore`` predates product-level exactly-once terminalization and
-    documents cross-process fencing as a composition-root responsibility.  The
-    terminalizer is now that product boundary, so it supplies the missing durable
-    path fence and publishes a complete replacement image atomically.  A crash
-    before ``os.replace`` leaves the previous canonical image authoritative; a
-    crash after it leaves the complete successor image authoritative.  Temporary
-    files are not evidence and are ignored on restart.
-    """
+    return utility_store_path.with_name(f"{utility_store_path.name}.unresolved-terminal.jsonl")
 
-    path = store.path
-    path.parent.mkdir(parents=True, exist_ok=True)
 
-    with durable_path_lock(path):
-        existing = store.list()
-        for prior in existing:
-            if prior.semantic_key == evidence.semantic_key:
-                if prior.evidence_id == evidence.evidence_id:
-                    return False
-                raise PolicyUtilityError(
-                    "policy utility semantic drift for existing causal update key"
-                )
-            if prior.evidence_id == evidence.evidence_id:
-                raise PolicyUtilityError("policy utility evidence_id collision")
+def _load_records(path: Path) -> tuple[PolicyUtilityTerminalRecord, ...]:
+    if not path.exists():
+        return ()
+    try:
+        raw_bytes = path.read_bytes()
+    except OSError as exc:
+        raise PolicyUtilityTerminalizationError(
+            "cannot read unresolved utility terminal journal"
+        ) from exc
+    if raw_bytes and not raw_bytes.endswith(b"\n"):
+        raise PolicyUtilityTerminalizationError(
+            "unresolved terminal journal lacks canonical trailing record boundary"
+        )
 
-        previous = path.read_bytes() if path.exists() else b""
-        if previous and not previous.endswith(b"\n"):
-            raise PolicyUtilityError(
-                "policy utility store lacks canonical trailing record boundary"
+    records: list[PolicyUtilityTerminalRecord] = []
+    seen: dict[str, PolicyUtilityTerminalRecord] = {}
+    for line_number, raw_line in enumerate(raw_bytes.splitlines(), start=1):
+        if not raw_line:
+            raise PolicyUtilityTerminalizationError(
+                f"empty unresolved terminal record at line {line_number}"
             )
+        try:
+            raw = json.loads(raw_line.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise PolicyUtilityTerminalizationError(
+                f"invalid unresolved terminal record at line {line_number}"
+            ) from exc
+        if type(raw) is not dict:
+            raise PolicyUtilityTerminalizationError(
+                f"unresolved terminal record {line_number} must be an object"
+            )
+        record = PolicyUtilityTerminalRecord.from_dict(raw)
+        prior = seen.get(record.record_id)
+        if prior is not None:
+            if prior != record:
+                raise PolicyUtilityTerminalizationError(
+                    "unresolved terminal record_id collision"
+                )
+            raise PolicyUtilityTerminalizationError(
+                "duplicate unresolved terminal record_id in durable journal"
+            )
+        seen[record.record_id] = record
+        records.append(record)
+    return tuple(records)
 
+
+def _encode_records(records: tuple[PolicyUtilityTerminalRecord, ...]) -> bytes:
+    return b"".join(
+        (
+            json.dumps(
+                record.to_dict(),
+                sort_keys=True,
+                separators=(",", ":"),
+                ensure_ascii=True,
+                allow_nan=False,
+            )
+            + "\n"
+        ).encode("utf-8")
+        for record in records
+    )
+
+
+def _durable_replace(source: Path, destination: Path) -> None:
+    """Publish a complete image with platform-appropriate metadata durability."""
+
+    if os.name == "nt":
+        # MoveFileExW with WRITE_THROUGH is the Windows equivalent of publishing
+        # the directory entry synchronously; Python's os.replace alone does not
+        # expose that durability flag.
+        import ctypes
+
+        MOVEFILE_REPLACE_EXISTING = 0x1
+        MOVEFILE_WRITE_THROUGH = 0x8
+        move_file_ex = ctypes.windll.kernel32.MoveFileExW
+        move_file_ex.argtypes = [ctypes.c_wchar_p, ctypes.c_wchar_p, ctypes.c_uint]
+        move_file_ex.restype = ctypes.c_int
+        if not move_file_ex(
+            str(source),
+            str(destination),
+            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+        ):
+            raise ctypes.WinError(ctypes.get_last_error())
+        return
+
+    os.replace(source, destination)
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+    directory_fd = os.open(destination.parent, flags)
+    try:
+        os.fsync(directory_fd)
+    finally:
+        os.close(directory_fd)
+
+
+def _append_record(path: Path, record: PolicyUtilityTerminalRecord) -> bool:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with durable_path_lock(path):
+        existing = _load_records(path)
+        for prior in existing:
+            if prior.record_id == record.record_id:
+                return False
+
+        successor = existing + (record,)
         temporary: Path | None = None
         try:
             with tempfile.NamedTemporaryFile(
@@ -184,11 +351,10 @@ def _atomic_compare_and_append(
                 delete=False,
             ) as handle:
                 temporary = Path(handle.name)
-                handle.write(previous)
-                handle.write(_encoded_evidence_line(evidence))
+                handle.write(_encode_records(successor))
                 handle.flush()
                 os.fsync(handle.fileno())
-            os.replace(temporary, path)
+            _durable_replace(temporary, path)
             temporary = None
         finally:
             if temporary is not None:
@@ -197,68 +363,72 @@ def _atomic_compare_and_append(
                 except FileNotFoundError:
                     pass
 
-        persisted = store.get(evidence.evidence_id)
-        if persisted != evidence:
+        reloaded = {item.record_id: item for item in _load_records(path)}
+        if reloaded.get(record.record_id) != record:
             raise PolicyUtilityTerminalizationError(
-                "published policy utility evidence failed exact reload verification"
+                "published unresolved terminal failed exact reload verification"
             )
         return True
 
 
 class PolicyUtilityTerminalizer:
-    """Close incomplete policy utility evidence exactly once.
+    """Journal unresolved utility candidates without granting utility authority."""
 
-    The terminalizer reuses ``PolicyUtilityStore`` as the single durable
-    authority. It intentionally accepts only schema-v1 evidence whose
-    completeness is already ``INCOMPLETE`` or ``UNSUPPORTED``; those records
-    cannot carry positive policy authority and therefore safely preserve the
-    current champion. Complete utility resolution and promotion remain the
-    responsibility of the canonical owner-bound utility authority.
-    """
-
-    def __init__(self, store: PolicyUtilityStore) -> None:
-        if type(store) is not PolicyUtilityStore:
-            raise TypeError("store must be PolicyUtilityStore")
-        self._store = store
+    def __init__(self, utility_store_path: str | Path) -> None:
+        self._utility_store_path = Path(utility_store_path)
+        self._journal_path = _journal_path_for(self._utility_store_path)
 
     @classmethod
     def from_path(cls, path: str | Path) -> "PolicyUtilityTerminalizer":
-        """Build a terminalizer over the existing policy utility JSONL store."""
+        """Bind the terminalizer to a canonical utility-store path without writing it."""
 
-        return cls(PolicyUtilityStore(path))
+        return cls(path)
 
-    def terminalize(
-        self, evidence: PolicyUtilityEvidence
-    ) -> PolicyUtilityTerminalReceipt:
-        """Persist one blocked/inconclusive terminal and return its receipt.
+    @property
+    def journal_path(self) -> Path:
+        return self._journal_path
 
-        The append operation is replay-safe across processes and restart: the same
-        causal semantic key and digest return ``persisted=False`` on retry, while
-        changed evidence for that key fails closed before publication.
-        """
+    @staticmethod
+    def classify(evidence: PolicyUtilityEvidence) -> TerminalizationDisposition:
+        """Purely classify an unresolved candidate; this grants no durable authority."""
 
         if type(evidence) is not PolicyUtilityEvidence:
             raise TypeError("evidence must be PolicyUtilityEvidence")
         if evidence.policy_update_eligible or evidence.source_resolved:
             raise PolicyUtilityTerminalizationError(
-                "terminalizer cannot consume positive policy authority"
+                "schema-v1 terminalizer cannot consume positive policy authority"
             )
-
         if evidence.completeness is UtilityCompleteness.INCOMPLETE:
-            disposition = TerminalizationDisposition.BLOCKED
-        elif evidence.completeness is UtilityCompleteness.UNSUPPORTED:
-            disposition = TerminalizationDisposition.INCONCLUSIVE
-        else:  # pragma: no cover - exhaustive enum fence for future versions
-            raise PolicyUtilityTerminalizationError(
-                "unsupported utility completeness for terminalization"
-            )
+            return TerminalizationDisposition.BLOCKED
+        if evidence.completeness is UtilityCompleteness.UNSUPPORTED:
+            return TerminalizationDisposition.INCONCLUSIVE
+        raise PolicyUtilityTerminalizationError(
+            "unsupported utility completeness for terminalization"
+        )
 
-        persisted = _atomic_compare_and_append(self._store, evidence)
+    def terminalize(
+        self, evidence: PolicyUtilityEvidence
+    ) -> PolicyUtilityTerminalReceipt:
+        """Journal a NON-AUTHORITATIVE candidate without touching PolicyUtilityStore.
+
+        The candidate digest is assertion-only.  A later product-owned resolver is
+        free to issue canonical evidence for the same causal semantic key because
+        this method never appends to ``self._utility_store_path``.
+        """
+
+        disposition = self.classify(evidence)
+        record = PolicyUtilityTerminalRecord(
+            candidate_evidence_id=evidence.evidence_id,
+            candidate_semantic_key=evidence.semantic_key,
+            disposition=disposition,
+        )
+        persisted = _append_record(self._journal_path, record)
         return PolicyUtilityTerminalReceipt(
             evidence_id=evidence.evidence_id,
             semantic_key=evidence.semantic_key,
             disposition=disposition,
             persisted=persisted,
+            record_id=record.record_id,
         )
 
     def terminalize_blocked_update(
@@ -270,18 +440,7 @@ class PolicyUtilityTerminalizer:
         transition: Transition,
         utility: PolicyUtilityEvidence,
     ) -> PolicyUtilityBlockedLearningReceipt:
-        """Durably close one non-authoritative utility without mutating policy.
-
-        Exact product-facing types are required here even though lower-level
-        library functions accept ``isinstance``. The existing utility gate
-        validates causal binding and returns an unchanged policy plus an
-        immutable blocked witness. Only after that witness is proven blocked is
-        the utility evidence appended to the canonical durable store.
-
-        Replaying the same delivery after a crash yields the same update witness
-        and ``terminal.persisted == False``; it never grants permission to call
-        retest, promotion, or next-episode successor logic.
-        """
+        """Validate a causal blocked update, then journal only its candidate digest."""
 
         for value, expected, label in (
             (policy, BanditPolicyState, "policy"),
@@ -316,20 +475,33 @@ class PolicyUtilityTerminalizer:
             champion_policy_id=policy.policy_id,
         )
 
-    def resolve(self, evidence_id: str) -> PolicyUtilityEvidence:
-        """Resolve the exact durable terminal evidence after restart."""
+    def resolve(self, evidence_id: str) -> PolicyUtilityTerminalRecord:
+        """Resolve a non-authoritative terminal record by candidate evidence digest."""
 
-        evidence = self._store.get(evidence_id)
-        if evidence.policy_update_eligible or evidence.source_resolved:
+        _sha256(evidence_id, "evidence_id")
+        matches = [
+            record
+            for record in _load_records(self._journal_path)
+            if record.candidate_evidence_id == evidence_id
+        ]
+        if len(matches) != 1:
+            if not matches:
+                raise KeyError(evidence_id)
             raise PolicyUtilityTerminalizationError(
-                "durable evidence unexpectedly carries positive policy authority"
+                "candidate evidence_id resolves to multiple terminal records"
             )
-        return evidence
+        return matches[0]
+
+    def records(self) -> tuple[PolicyUtilityTerminalRecord, ...]:
+        """Return exact non-authoritative journal records in durable order."""
+
+        return _load_records(self._journal_path)
 
 
 __all__ = [
     "PolicyUtilityBlockedLearningReceipt",
     "PolicyUtilityTerminalReceipt",
+    "PolicyUtilityTerminalRecord",
     "PolicyUtilityTerminalizationError",
     "PolicyUtilityTerminalizer",
     "TerminalizationDisposition",

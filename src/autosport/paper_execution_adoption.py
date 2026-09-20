@@ -121,16 +121,22 @@ def _timestamp_text(value: datetime) -> str:
 class PaperExecutionAdoptionRuntime:
     """Bridge canonical PortfolioPlan decisions through #623 PAPER attempt truth.
 
-    This class never performs provider writes.  It converts already-authorized,
+    This class never performs provider writes. It converts already-authorized,
     exact single-leg OpportunityIntent stakes into canonical ExecutionAction values,
     executes/resumes the #623 PAPER ledger, and materializes only ACCEPTED/PARTIAL
-    attempt truth into PaperBook.  REJECTED/UNKNOWN attempts remain durable without
+    attempt truth into PaperBook. REJECTED/UNKNOWN attempts remain durable without
     fabricated exposure.
 
     A positive multi-leg *single intent* is deliberately rejected until the
-    portfolio contract carries an exact per-leg stake vector.  Multiple independent
+    portfolio contract carries an exact per-leg stake vector. Multiple independent
     single-leg intents still form one ordered multi-action execution plan, so #623
     preserves partial/second-leg/recovery semantics without inventing stake authority.
+
+    Prepared execution values are audit data, not authority. A prepared value must
+    be minted by this exact runtime instance from canonical inputs before any ledger
+    execution or PaperBook materialization is allowed. This prevents callers from
+    constructing a syntactically valid PreparedPaperExecution that enlarges stake,
+    changes selection/account, or otherwise bypasses upstream portfolio/risk truth.
     """
 
     _TICKET_MARKER = "paper_execution_attempt_id="
@@ -155,6 +161,10 @@ class PaperExecutionAdoptionRuntime:
         self.book = book
         self.ledger = ledger
         self.config = config
+        # In-process capability registry. Object identity is intentional: serialized,
+        # copied, reconstructed, or caller-authored PreparedPaperExecution values do
+        # not carry execution authority. Restart re-mints from canonical inputs.
+        self._prepared_authorities: dict[int, PreparedPaperExecution] = {}
         self.paper_book_path = Path(paper_book_path)
         if self.paper_book_path.exists():
             durable_book = PaperBook.load(self.paper_book_path)
@@ -177,6 +187,18 @@ class PaperExecutionAdoptionRuntime:
         )
         if self.max_quote_age <= timedelta(0):
             raise ValueError("effective max_quote_age must be positive")
+
+    def _mint_prepared(self, prepared: PreparedPaperExecution) -> PreparedPaperExecution:
+        if not isinstance(prepared, PreparedPaperExecution):
+            raise TypeError("prepared must be PreparedPaperExecution")
+        self._prepared_authorities[id(prepared)] = prepared
+        return prepared
+
+    def _require_minted(self, prepared: PreparedPaperExecution) -> None:
+        if self._prepared_authorities.get(id(prepared)) is not prepared:
+            raise PaperExecutionAdoptionError(
+                "prepared execution was not minted by this runtime from canonical authority"
+            )
 
     def prepare(
         self,
@@ -322,10 +344,12 @@ class PaperExecutionAdoptionRuntime:
             created_at=plan.decision_ts,
             actions=tuple(actions),
         )
-        return PreparedPaperExecution(
-            execution_plan=execution_plan,
-            exposure_bindings=tuple(bindings),
-            intent_evidence_json=intent_evidence_json,
+        return self._mint_prepared(
+            PreparedPaperExecution(
+                execution_plan=execution_plan,
+                exposure_bindings=tuple(bindings),
+                intent_evidence_json=intent_evidence_json,
+            )
         )
 
     def prepare_paper_value_action(
@@ -341,7 +365,7 @@ class PaperExecutionAdoptionRuntime:
         """Bind one legacy paper-value decision to canonical #623 execution truth.
 
         The legacy strategy may still decide that a value opportunity exists, but
-        it no longer owns fill semantics.  This bridge carries its already-risk-
+        it no longer owns fill semantics. This bridge carries its already-risk-
         authorized single-leg stake into the same immutable execution plan/run
         authority used by the persistent live loop.
         """
@@ -416,17 +440,19 @@ class PaperExecutionAdoptionRuntime:
             created_at=event.observed_ts,
             actions=(action,),
         )
-        return PreparedPaperExecution(
-            execution_plan=execution_plan,
-            exposure_bindings=(
-                PaperExposureBinding(
-                    action_id=action.action_id,
-                    sport=event.sport,
-                    bankroll_id=bankroll_id,
-                    currency=currency,
+        return self._mint_prepared(
+            PreparedPaperExecution(
+                execution_plan=execution_plan,
+                exposure_bindings=(
+                    PaperExposureBinding(
+                        action_id=action.action_id,
+                        sport=event.sport,
+                        bankroll_id=bankroll_id,
+                        currency=currency,
+                    ),
                 ),
-            ),
-            intent_evidence_json=evidence_json,
+                intent_evidence_json=evidence_json,
+            )
         )
 
     def expected_run_id(
@@ -436,6 +462,7 @@ class PaperExecutionAdoptionRuntime:
     ) -> str:
         if not isinstance(prepared, PreparedPaperExecution):
             raise TypeError("prepared must be PreparedPaperExecution")
+        self._require_minted(prepared)
         return _paper_impl._run_id(
             prepared.execution_plan,
             trigger_id,
@@ -456,6 +483,7 @@ class PaperExecutionAdoptionRuntime:
             raise TypeError("pre_action_book must be PaperBook")
         if not isinstance(prepared, PreparedPaperExecution):
             raise TypeError("prepared must be PreparedPaperExecution")
+        self._require_minted(prepared)
         if type(materialize_exposure) is not bool:
             raise TypeError("materialize_exposure must be bool")
 
@@ -546,6 +574,7 @@ class PaperExecutionAdoptionRuntime:
     ) -> PaperExecutionAdoptionResult:
         if not isinstance(prepared, PreparedPaperExecution):
             raise TypeError("prepared must be PreparedPaperExecution")
+        self._require_minted(prepared)
         if type(materialize_exposure) is not bool:
             raise TypeError("materialize_exposure must be bool")
         run = execute_paper_plan(

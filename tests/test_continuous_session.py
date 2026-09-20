@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import tempfile
 import unittest
 from datetime import timedelta
@@ -17,6 +18,7 @@ from autosport.causal_collector import (
     SyncState,
     canonical_event_digest,
 )
+from autosport.agent_loop import AgentLoopPhase, AgentLoopRuntime, ExternalEffectState
 from autosport.collector_service import HeadlessCollectorService
 from autosport.continuous_session import (
     ContinuousSessionCoordinator,
@@ -25,7 +27,15 @@ from autosport.continuous_session import (
     SettlementResolution,
     SessionState,
 )
+from autosport.decision_ledger import (
+    ECONOMIC_DECISION_KIND,
+    DecisionRecord,
+    EconomicDecisionAuthority,
+    JsonlDecisionLedger,
+)
 from autosport.domain import MarketEvent, MarketType, TicketLeg
+from autosport.economic_goal import EconomicGoalContract
+from autosport.economic_goal_provenance import provenance_for
 from autosport.event_lifecycle import CatalogEvent, CatalogPage, ContinuousEventLifecycle, EventPhase
 from autosport.market_bus import MarketEventBus
 from autosport.market_mirror_runtime import (
@@ -33,8 +43,16 @@ from autosport.market_mirror_runtime import (
     FocusedMirrorDependencyIndex,
     MarketMirror,
 )
+from autosport.learning_environment import (
+    Action,
+    CausalLearningEnvironment,
+    EnvironmentIdentity,
+    Observation,
+)
 from autosport.paper import PaperBook
+from autosport.paper_settlement_learning import PaperSettlementLearningBridge
 from autosport.providers import ProviderUnavailableError
+from autosport.risk import PaperRiskPolicy
 from autosport.storage import SQLiteMarketStore
 
 
@@ -171,7 +189,14 @@ def _collector_delta(
     )
 
 
-def _build_coordinator(root: Path, source: _Source, clock: _Clock, *, outcome_authority=None):
+def _build_coordinator(
+    root: Path,
+    source: _Source,
+    clock: _Clock,
+    *,
+    outcome_authority=None,
+    settlement_learning_handoff=None,
+):
     market_store = SQLiteMarketStore(root / "market.db")
     lifecycle = ContinuousEventLifecycle(root / "catalog.json")
     mirror = MarketMirror()
@@ -208,6 +233,7 @@ def _build_coordinator(root: Path, source: _Source, clock: _Clock, *, outcome_au
         invalidation_buffer=invalidations,
         dependency_index=dependencies,
         outcome_authority=outcome_authority,
+        settlement_learning_handoff=settlement_learning_handoff,
         session_id="session-1",
         clock=clock,
         initial_bankroll="100",
@@ -435,6 +461,219 @@ class ContinuousSessionCoordinatorTests(unittest.TestCase):
                     settled_again = PaperBook.load(root / "paper_book.json")
                     self.assertEqual(settled_again.balance, Decimal("110"))
                     self.assertEqual(authority.calls, 2)
+                finally:
+                    restarted_store.close()
+            finally:
+                store.close()
+
+    def test_settled_bound_ticket_reaches_agent_loop_once_across_restart(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            clock = _Clock()
+            event = _event(
+                phase=EventPhase.COMPLETED,
+                settlement_ref="provider-result:learning-1",
+            )
+            source = _Source(
+                CatalogPage(
+                    source_id="provider-a",
+                    stream_epoch="epoch-1",
+                    cursor="cursor-learning-1",
+                    position=1,
+                    events=(event,),
+                )
+            )
+
+            goal = EconomicGoalContract(
+                goal_id="paper-learning-goal",
+                revision=1,
+                bankroll_id="paper-bankroll",
+                currency="USD",
+            )
+            risk = PaperRiskPolicy(economic_goal=goal)
+            book = PaperBook("100")
+            leg = TicketLeg(
+                event_id="event-1",
+                market_id="winner",
+                selection_id="home",
+                locked_odds=Decimal("2.00"),
+                sport="table_tennis",
+            )
+            ticket = book.open_ticket(
+                (leg,),
+                Decimal("10"),
+                placed_at="2026-09-19T21:19:10+00:00",
+                bankroll_id=goal.bankroll_id,
+                currency=goal.currency,
+            )
+            book.save(root / "paper_book.json")
+
+            ledger = JsonlDecisionLedger(root / "decisions.jsonl")
+            decision_action = "OPEN_PAPER_VALUE_TICKET"
+            decision = DecisionRecord(
+                replay_run_id="paper-learning-run",
+                agent="paper-learning-fixture",
+                observed_ts="2026-09-19T21:19:00+00:00",
+                action=decision_action,
+                payload={
+                    "ticket_id": ticket.ticket_id,
+                    "quote_key": leg.quote_key,
+                    "stake": str(ticket.stake),
+                },
+                context_hash="paper-learning-context",
+                decision_id="paper-learning-decision-1",
+                decision_kind=ECONOMIC_DECISION_KIND,
+            )
+            ledger.append_economic(
+                decision,
+                EconomicDecisionAuthority(goal, risk),
+            )
+
+            identity = EnvironmentIdentity(
+                source_id="paper-learning-source",
+                config_id="paper-learning-config",
+                data_id="paper-learning-data",
+                protocol_id="paper-learning-protocol",
+                cutoff_ts="2026-09-19T21:20:00+00:00",
+                seed=17,
+            )
+            environment = CausalLearningEnvironment(
+                identity,
+                episode_key="paper-learning-episode",
+                policy_id="paper-learning-policy",
+                admissible_actions=frozenset({"PAPER_PROPOSAL"}),
+            )
+            baseline = environment.checkpoint()
+            runtime = AgentLoopRuntime.initialize_pristine(
+                root / "agent-loop.json",
+                loop_id="paper-learning-loop",
+                environment_checkpoint=baseline,
+                policy_id=environment.episode.policy_id,
+                economic_goal_fingerprint=provenance_for(goal).contract_sha256,
+                risk_fingerprint=risk.provenance_sha256,
+                source_sha256="a" * 64,
+                config_sha256="b" * 64,
+                at="2026-09-19T21:18:59+00:00",
+            )
+            observation = Observation(
+                environment_id=environment.environment_id,
+                observed_at="2026-09-19T21:19:00+00:00",
+                available_at="2026-09-19T21:19:01+00:00",
+                evidence=(("market_state", "paper-learning-snapshot"),),
+            )
+            runtime.begin_observation(
+                observation,
+                environment_identity=environment.identity,
+                at="2026-09-19T21:19:01+00:00",
+            )
+            for phase in (
+                AgentLoopPhase.OBSERVE,
+                AgentLoopPhase.ASSESS,
+                AgentLoopPhase.PLAN,
+                AgentLoopPhase.DECIDE,
+            ):
+                runtime.advance(expected=phase, at="2026-09-19T21:19:02+00:00")
+            action = environment.act(
+                observation,
+                action_type="PAPER_PROPOSAL",
+                decision_at="2026-09-19T21:19:05+00:00",
+                parameters=(
+                    ("economic_decision_id", decision.decision_id),
+                    ("paper_ticket_id", ticket.ticket_id),
+                ),
+            )
+            runtime.commit_action(
+                action,
+                episode=environment.episode,
+                observation=observation,
+                effect_state=ExternalEffectState.PAPER_ONLY,
+                at="2026-09-19T21:19:05+00:00",
+            )
+
+            bridge = PaperSettlementLearningBridge(
+                root / "paper_learning_bridge.json",
+                paper_book_path=root / "paper_book.json",
+                decision_ledger=ledger,
+                agent_loop=runtime,
+                economic_goal=goal,
+                risk_policy=risk,
+            )
+            bridge.bind_ticket(
+                ticket_id=ticket.ticket_id,
+                decision_id=decision.decision_id,
+                environment=environment,
+                observation=observation,
+                action=action,
+                baseline_checkpoint=baseline,
+            )
+
+            resolution = SettlementResolution(
+                event_identity=event.identity,
+                settlement_ref="provider-result:learning-1",
+                quote_outcomes={leg.quote_key: "win"},
+                evidence_id="paper-learning-outcome-1",
+                evidence_sha256="c" * 64,
+                available_at="2026-09-19T21:19:30+00:00",
+            )
+            authority = _OutcomeAuthority(resolution)
+            coordinator, store, *_ = _build_coordinator(
+                root,
+                source,
+                clock,
+                outcome_authority=authority,
+                settlement_learning_handoff=bridge,
+            )
+            try:
+                first = coordinator.tick()
+                self.assertEqual(first.settled_ticket_ids, (ticket.ticket_id,))
+                self.assertEqual(PaperBook.load(root / "paper_book.json").balance, Decimal("110"))
+                first_snapshot = runtime.snapshot()
+                self.assertIs(first_snapshot.phase, AgentLoopPhase.EVALUATE)
+                self.assertIsNotNone(first_snapshot.transition_id)
+                self.assertIsNotNone(first_snapshot.reward_id)
+                bridge_state = json.loads(
+                    (root / "paper_learning_bridge.json").read_text(encoding="utf-8")
+                )
+                self.assertIsNotNone(
+                    bridge_state["bindings"][ticket.ticket_id]["settlement_intent"]
+                )
+
+                raw_loop = json.loads((root / "agent-loop.json").read_text(encoding="utf-8"))
+                self.assertEqual(len(raw_loop["resolutions"]), 1)
+                self.assertEqual(raw_loop["resolutions"][0]["reward_value"], "10.00")
+                state_before_restart = first_snapshot.state_sha256
+
+                restarted_runtime = AgentLoopRuntime(root / "agent-loop.json")
+                restarted_bridge = PaperSettlementLearningBridge(
+                    root / "paper_learning_bridge.json",
+                    paper_book_path=root / "paper_book.json",
+                    decision_ledger=JsonlDecisionLedger(root / "decisions.jsonl"),
+                    agent_loop=restarted_runtime,
+                    economic_goal=goal,
+                    risk_policy=risk,
+                )
+                restarted, restarted_store, *_ = _build_coordinator(
+                    root,
+                    source,
+                    clock,
+                    outcome_authority=authority,
+                    settlement_learning_handoff=restarted_bridge,
+                )
+                try:
+                    second = restarted.tick()
+                    self.assertEqual(second.settled_ticket_ids, ())
+                    self.assertEqual(
+                        restarted_runtime.snapshot().state_sha256,
+                        state_before_restart,
+                    )
+                    raw_after = json.loads(
+                        (root / "agent-loop.json").read_text(encoding="utf-8")
+                    )
+                    self.assertEqual(len(raw_after["resolutions"]), 1)
+                    self.assertEqual(
+                        restarted_bridge.next_checkpoint(ticket.ticket_id).last_transition_id,
+                        first_snapshot.transition_id,
+                    )
                 finally:
                     restarted_store.close()
             finally:

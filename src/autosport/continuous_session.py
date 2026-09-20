@@ -88,6 +88,29 @@ class SettlementOutcomeAuthority(Protocol):
         ...
 
 
+class SettlementLearningHandoff(Protocol):
+    """Optional durable PAPER settlement seam for causal learning."""
+
+    def prepare_settlement(
+        self,
+        *,
+        paper_book_path: Path,
+        resolutions: tuple[SettlementResolution, ...],
+        at: str,
+    ) -> tuple[str, ...]:
+        ...
+
+    def reconcile_after_settlement(
+        self,
+        *,
+        paper_book_path: Path,
+        resolutions: tuple[SettlementResolution, ...],
+        settled_ticket_ids: tuple[str, ...],
+        at: str,
+    ) -> tuple[str, ...]:
+        ...
+
+
 @dataclass(frozen=True, slots=True)
 class ContinuousTickResult:
     session_id: str
@@ -542,6 +565,7 @@ class ContinuousSessionCoordinator:
         dependency_index: FocusedMirrorDependencyIndex,
         paper_book_path: str | Path | None = None,
         outcome_authority: SettlementOutcomeAuthority | None = None,
+        settlement_learning_handoff: SettlementLearningHandoff | None = None,
         session_id: str | None = None,
         clock: Callable[[], str] | None = None,
         required_history: timedelta = timedelta(0),
@@ -570,6 +594,18 @@ class ContinuousSessionCoordinator:
             getattr(outcome_authority, "resolve", None)
         ):
             raise TypeError("outcome_authority.resolve must be callable")
+        if settlement_learning_handoff is not None:
+            if not callable(
+                getattr(settlement_learning_handoff, "reconcile_after_settlement", None)
+            ):
+                raise TypeError(
+                    "settlement_learning_handoff.reconcile_after_settlement must be callable"
+                )
+            prepare = getattr(settlement_learning_handoff, "prepare_settlement", None)
+            if prepare is not None and not callable(prepare):
+                raise TypeError(
+                    "settlement_learning_handoff.prepare_settlement must be callable"
+                )
 
         self.workspace = Path(workspace)
         self.workspace.mkdir(parents=True, exist_ok=True)
@@ -585,6 +621,7 @@ class ContinuousSessionCoordinator:
             else Path(paper_book_path)
         )
         self.outcome_authority = outcome_authority
+        self.settlement_learning_handoff = settlement_learning_handoff
         self.clock = clock or (lambda: datetime.now(timezone.utc).isoformat())
         if isinstance(required_history, timedelta) and required_history.total_seconds() < 0:
             raise ValueError("required_history cannot be negative")
@@ -890,7 +927,26 @@ class ContinuousSessionCoordinator:
             self._state.validate_settlement_evidence(
                 settlement_evidence=resolutions
             )
+            if self.settlement_learning_handoff is not None:
+                prepare = getattr(
+                    self.settlement_learning_handoff,
+                    "prepare_settlement",
+                    None,
+                )
+                if prepare is not None:
+                    prepare(
+                        paper_book_path=self.paper_book_path,
+                        resolutions=resolutions,
+                        at=now,
+                    )
             settled, evidence_ids = self._settle(resolutions=resolutions)
+            if self.settlement_learning_handoff is not None:
+                self.settlement_learning_handoff.reconcile_after_settlement(
+                    paper_book_path=self.paper_book_path,
+                    resolutions=resolutions,
+                    settled_ticket_ids=settled,
+                    at=now,
+                )
 
             cycle_index = self._state.snapshot().cycles_completed + 1
             self._state.record_success(

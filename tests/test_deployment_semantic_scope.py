@@ -168,12 +168,11 @@ def _resolve(
     protocol: ResearchProtocol | None = None,
     environment: EnvironmentIdentity | None = None,
     actions: ActionSemanticsDefinition | None = None,
-    decision_ts: str = "2026-09-02T00:00:00Z",
+    decision_ts: str = "2100-09-02T00:00:00Z",
     reward_definition_id: str = REWARD_RULE,
     feature_set_id: str | None = None,
     persist_event: bool = True,
     register_runtime: bool = True,
-    runtime_observed_at: str = "2026-08-01T00:00:00Z",
 ):
     event = event or _event()
     dataset = dataset or _dataset()
@@ -195,8 +194,7 @@ def _resolve(
 
         market_store = SQLiteMarketStore(root / "market.db")
         runtime_store = DeploymentRuntimeAuthorityStore.initialize_pristine(
-            root / "runtime-authority.json",
-            clock=lambda: runtime_observed_at,
+            root / "runtime-authority.json"
         )
         try:
             if persist_event:
@@ -290,10 +288,7 @@ def test_durable_authorities_reresolve_identically_across_restart() -> None:
         registry.append(protocol)
         market_store = SQLiteMarketStore(market_path)
         market_store.append(event)
-        runtime_store = DeploymentRuntimeAuthorityStore.initialize_pristine(
-            runtime_path,
-            clock=lambda: "2026-08-01T00:00:00Z",
-        )
+        runtime_store = DeploymentRuntimeAuthorityStore.initialize_pristine(runtime_path)
         runtime = runtime_store.append(
             environment=environment,
             episode=episode,
@@ -309,7 +304,7 @@ def test_durable_authorities_reresolve_identically_across_restart() -> None:
             research_protocol_id=protocol.record_id,
             runtime_authority_store=runtime_store,
             runtime_authority_id=runtime.runtime_authority_id,
-            decision_ts="2026-09-02T00:00:00Z",
+            decision_ts="2100-09-02T00:00:00Z",
         )
         market_store.close()
 
@@ -324,7 +319,7 @@ def test_durable_authorities_reresolve_identically_across_restart() -> None:
                 research_protocol_id=protocol.record_id,
                 runtime_authority_store=DeploymentRuntimeAuthorityStore(runtime_path),
                 runtime_authority_id=runtime.runtime_authority_id,
-                decision_ts="2026-09-02T00:00:00Z",
+                decision_ts="2100-09-02T00:00:00Z",
             )
         finally:
             reopened_market.close()
@@ -338,12 +333,10 @@ def test_runtime_first_seen_time_is_store_owned_and_retry_immutable() -> None:
     environment = _environment()
     episode = _episode(environment)
     actions = _action_semantics()
-    observed_times = iter(("2026-08-01T00:00:00Z", "2026-07-01T00:00:00Z"))
 
     with tempfile.TemporaryDirectory() as directory:
         runtime_store = DeploymentRuntimeAuthorityStore.initialize_pristine(
-            Path(directory) / "runtime-authority.json",
-            clock=lambda: next(observed_times),
+            Path(directory) / "runtime-authority.json"
         )
         first = runtime_store.append(
             environment=environment,
@@ -358,9 +351,20 @@ def test_runtime_first_seen_time_is_store_owned_and_retry_immutable() -> None:
             action_semantics_meanings=actions.meanings,
         )
 
-        assert first.available_at == "2026-08-01T00:00:00Z"
+        assert first.available_at.endswith("Z")
         assert retry == first
+        assert retry.available_at == first.available_at
         assert runtime_store.records() == (first,)
+
+
+def test_authorizing_store_exposes_no_caller_clock_injection() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        path = Path(directory) / "runtime-authority.json"
+        with pytest.raises(TypeError, match="clock"):
+            DeploymentRuntimeAuthorityStore.initialize_pristine(  # type: ignore[call-arg]
+                path,
+                clock=lambda: "2000-01-01T00:00:00Z",
+            )
 
 
 def test_runtime_appended_after_decision_cannot_claim_historical_availability() -> None:
@@ -368,10 +372,7 @@ def test_runtime_appended_after_decision_cannot_claim_historical_availability() 
         DeploymentSemanticScopeError,
         match="runtime authority was not available at decision time",
     ):
-        _resolve(
-            decision_ts="2026-09-02T00:00:00Z",
-            runtime_observed_at="2026-09-03T00:00:00Z",
-        )
+        _resolve(decision_ts="2026-09-02T00:00:00Z")
 
 
 def test_later_append_only_snapshot_keeps_scope_but_changes_exact_authority() -> None:
@@ -395,7 +396,7 @@ def test_later_append_only_snapshot_keeps_scope_but_changes_exact_authority() ->
             causal_cutoff=later_dataset.causal_cutoff,
         ),
         environment=later_environment,
-        decision_ts="2026-09-09T00:00:00Z",
+        decision_ts="2100-09-09T00:00:00Z",
     )
 
     assert later.scope.scope_id == first.scope.scope_id

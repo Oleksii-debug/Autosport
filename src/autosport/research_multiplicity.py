@@ -818,6 +818,10 @@ class SequentialMultiplicityEvidenceStore:
                 return workspace
             if marker_exists:
                 cls._read_bootstrap_marker(workspace)
+                if cls._contains_existing_store(workspace):
+                    raise ValueError(
+                        "existing multiplicity evidence prevents workspace authority rebootstrap"
+                    )
                 raise ValueError(
                     "multiplicity workspace bootstrap marker prevents authority rebootstrap"
                 )

@@ -162,6 +162,7 @@ class PaperCampaignRouteStore:
         }
         if _sha(state["state_sha256"], "state_sha256") != _digest(bare):
             raise PaperCampaignRouteError("campaign route index digest mismatch")
+        action_routes: dict[tuple[str, str, str], str] = {}
         for ticket_id, raw in state["routes"].items():
             _text(ticket_id, "route ticket key")
             if type(raw) is not dict or set(raw) != self._ROUTE_FIELDS:
@@ -175,6 +176,17 @@ class PaperCampaignRouteStore:
             )
             if raw != expected or raw["ticket_id"] != ticket_id:
                 raise PaperCampaignRouteError("campaign route identity mismatch")
+            action_key = (
+                raw["environment_id"],
+                raw["episode_id"],
+                raw["action_id"],
+            )
+            previous_ticket = action_routes.get(action_key)
+            if previous_ticket is not None and previous_ticket != ticket_id:
+                raise PaperCampaignRouteError(
+                    "one campaign action cannot route multiple PaperTickets"
+                )
+            action_routes[action_key] = ticket_id
         return state
 
     @staticmethod
@@ -193,15 +205,44 @@ class PaperCampaignRouteStore:
         if not isinstance(handoff, PaperCampaignLearningHandoff):
             raise TypeError("handoff must be PaperCampaignLearningHandoff")
         snapshot = handoff.runtime.agent_loop.snapshot()
-        environment_id = getattr(snapshot, "environment_id", None)
-        episode_id = getattr(snapshot, "episode_id", None)
-        action_id = getattr(snapshot, "action_id", None)
-        return PaperCampaignRouteStore._route_identity(
+        identity = PaperCampaignRouteStore._route_identity(
             ticket_id=handoff.ticket_id,
-            environment_id=environment_id,
-            episode_id=episode_id,
-            action_id=action_id,
+            environment_id=getattr(snapshot, "environment_id", None),
+            episode_id=getattr(snapshot, "episode_id", None),
+            action_id=getattr(snapshot, "action_id", None),
         )
+
+        # Registration is only a projection of the bridge's existing durable
+        # ticket/action authority.  A handoff's public ticket string is not
+        # sufficient: prove that the bridge already binds this exact ticket to
+        # the exact AgentLoop environment/episode/action before persisting a
+        # routing row.  `_read()` is the bridge's canonical integrity validator;
+        # identity fields are immutable after bind, so an atomic snapshot read is
+        # sufficient here and avoids creating a second binding authority.
+        bridge = getattr(handoff.runtime, "settlement_bridge", None)
+        try:
+            state = bridge._read()
+            bindings = state["bindings"]
+            binding = bindings.get(handoff.ticket_id)
+        except (AttributeError, KeyError, TypeError, PaperSettlementLearningBridgeError) as exc:
+            raise PaperCampaignRouteError(
+                "cannot verify durable settlement-learning ticket binding"
+            ) from exc
+        if type(binding) is not dict:
+            raise PaperCampaignRouteError(
+                "handoff ticket lacks durable settlement-learning binding"
+            )
+        bound_identity = PaperCampaignRouteStore._route_identity(
+            ticket_id=binding.get("ticket_id"),
+            environment_id=binding.get("environment_id"),
+            episode_id=binding.get("episode_id"),
+            action_id=binding.get("action_id"),
+        )
+        if bound_identity != identity:
+            raise PaperCampaignRouteError(
+                "handoff ticket binding conflicts with durable AgentLoop action"
+            )
+        return identity
 
     def register(self, handoff: PaperCampaignLearningHandoff) -> PaperCampaignRoute:
         identity = self._handoff_identity(handoff)
@@ -215,6 +256,23 @@ class PaperCampaignRouteStore:
                         "ticket is already bound to another campaign learning route"
                     )
                 return self._from_raw(existing)
+            action_key = (
+                identity["environment_id"],
+                identity["episode_id"],
+                identity["action_id"],
+            )
+            if any(
+                (
+                    raw["environment_id"],
+                    raw["episode_id"],
+                    raw["action_id"],
+                )
+                == action_key
+                for raw in state["routes"].values()
+            ):
+                raise PaperCampaignRouteError(
+                    "one campaign action cannot route multiple PaperTickets"
+                )
             state["routes"][identity["ticket_id"]] = candidate
             self._write(state["routes"])
         return self._from_raw(candidate)

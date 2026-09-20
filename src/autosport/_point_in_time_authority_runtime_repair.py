@@ -19,11 +19,14 @@ from pathlib import Path
 import sys
 import weakref
 
+from . import _dataset_snapshot_lineage_publication_trust_root as lineage_trust_root
+from . import dataset_snapshot_lineage as lineage_module
 from . import point_in_time_evidence as evidence
 from .dataset_snapshot_lineage import DatasetSnapshotLineageAuthority
 from .monotonic_workspace_authority import (
     MonotonicWorkspaceAuthority,
     MonotonicWorkspaceAuthorityError,
+    resolve_monotonic_authority_root,
 )
 from .scientific_registry import DatasetSnapshot, ScientificRegistry
 
@@ -152,6 +155,74 @@ def _canonical_path_identity(path: str | Path) -> str:
     return os.path.normcase(os.fspath(Path(path).expanduser().resolve(strict=False)))
 
 
+def _product_authority_root(workspace: Path) -> Path:
+    """Resolve the non-environment product machine root for positive holdout authority."""
+
+    try:
+        machine_root = lineage_trust_root._machine_account_authority_root()
+        return resolve_monotonic_authority_root(workspace, machine_root).resolve(
+            strict=False
+        )
+    except (MonotonicWorkspaceAuthorityError, OSError, ValueError) as exc:
+        raise evidence.EvidenceLedgerCorruptError(
+            "canonical holdout product authority root is unavailable"
+        ) from exc
+
+
+def _require_product_lineage_composition(
+    ledger: evidence.HoldoutConsumptionLedger,
+    lineage: DatasetSnapshotLineageAuthority,
+) -> DatasetSnapshotLineageAuthority:
+    """Require one product-owned workspace/root/namespace composition."""
+
+    lineage = _require_exact_lineage_authority(lineage, holdout=True)
+    workspace = ledger._workspace.resolve(strict=False)
+    expected_root = _product_authority_root(workspace)
+
+    try:
+        lineage_workspace = lineage.path.parent.resolve(strict=False)
+        registry_workspace = lineage.registry.path.parent.resolve(strict=False)
+        monotonic_workspace = lineage.monotonic_authority.workspace.resolve(
+            strict=False
+        )
+        lineage_root = lineage.monotonic_authority.authority_root.resolve(
+            strict=False
+        )
+        ledger_root = ledger._authority.authority_root.resolve(strict=False)
+    except OSError as exc:
+        raise evidence.PointInTimeEvidenceError(
+            "canonical dataset lineage composition paths cannot be resolved"
+        ) from exc
+
+    if (
+        lineage_workspace != workspace
+        or registry_workspace != workspace
+        or monotonic_workspace != workspace
+    ):
+        raise evidence.PointInTimeEvidenceError(
+            "holdout lineage must belong to the canonical holdout workspace"
+        )
+    if lineage_root != expected_root or ledger_root != expected_root:
+        raise evidence.PointInTimeEvidenceError(
+            "holdout lineage must use the product-owned machine authority root"
+        )
+    if (
+        lineage.monotonic_authority.workspace_instance_id
+        != ledger._authority.workspace_instance_id
+    ):
+        raise evidence.PointInTimeEvidenceError(
+            "holdout lineage workspace identity does not match the ledger"
+        )
+    if (
+        lineage.monotonic_authority.domain != lineage_module._MONOTONIC_DOMAIN
+        or lineage.monotonic_authority.key != lineage_module._MONOTONIC_KEY
+    ):
+        raise evidence.PointInTimeEvidenceError(
+            "holdout lineage does not use the canonical lineage authority namespace"
+        )
+    return lineage
+
+
 def _lineage_identity_sha256(
     lineage: DatasetSnapshotLineageAuthority,
 ) -> str:
@@ -237,6 +308,7 @@ def _pin_lineage_authority(
     ledger: evidence.HoldoutConsumptionLedger,
     lineage: DatasetSnapshotLineageAuthority,
 ) -> None:
+    lineage = _require_product_lineage_composition(ledger, lineage)
     identity_sha256 = _lineage_identity_sha256(lineage)
     _persist_or_validate_lineage_identity(ledger, identity_sha256)
     _HOLDOUT_LINEAGE_BINDINGS[ledger] = (
@@ -266,7 +338,7 @@ def _bound_lineage_authority(
         raise evidence.PointInTimeEvidenceError(
             "holdout canonical lineage monotonic authority was replaced after construction"
         )
-    _require_exact_lineage_authority(lineage, holdout=True)
+    _require_product_lineage_composition(ledger, lineage)
     if _lineage_identity_sha256(lineage) != identity_sha256:
         raise evidence.PointInTimeEvidenceError(
             "holdout canonical dataset lineage identity changed after construction"
@@ -309,6 +381,24 @@ def _holdout_init_with_lineage(
             lineage_authority,
             holdout=True,
         )
+        workspace = Path(path).parent.resolve(strict=False)
+        expected_root = _product_authority_root(workspace)
+        if authority_root is not None:
+            try:
+                configured_root = resolve_monotonic_authority_root(
+                    workspace,
+                    authority_root,
+                ).resolve(strict=False)
+            except (MonotonicWorkspaceAuthorityError, OSError, ValueError) as exc:
+                raise evidence.EvidenceLedgerCorruptError(
+                    "configured holdout authority root is unsafe"
+                ) from exc
+            if configured_root != expected_root:
+                raise evidence.PointInTimeEvidenceError(
+                    "positive holdout authority cannot use a caller-selected "
+                    "machine authority root"
+                )
+        authority_root = expected_root
     _PRISTINE_LEDGER_INIT(self, path, authority_root=authority_root)
     self._dataset_lineage_authority = lineage_authority
     if lineage_authority is not None:

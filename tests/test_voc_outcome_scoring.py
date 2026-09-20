@@ -960,8 +960,7 @@ class CanonicalOutcomeDerivedVOCScoreAuthorityTests(unittest.TestCase):
             )
 
     def test_positive_voc_accepts_exact_preoutcome_router_shadow_execution(self):
-        paired = self._evaluation()
-        self.registry.append(paired)
+        paired = self._evaluation(register_cohort=False)
         successful = next(
             record
             for record in self.ledger.verified_records()
@@ -1001,7 +1000,7 @@ class CanonicalOutcomeDerivedVOCScoreAuthorityTests(unittest.TestCase):
             agent="voc-derived-test",
             recorded_at=T_DECISION,
         )
-        self.ledger.append(
+        terminal_sha = self.ledger.append(
             DecisionRecord(
                 replay_run_id="replay-voc-derived-explicit-terminal",
                 agent="voc-derived-test",
@@ -1013,6 +1012,9 @@ class CanonicalOutcomeDerivedVOCScoreAuthorityTests(unittest.TestCase):
                 recorded_at=T_BINDING,
             )
         )
+        paired = replace(paired, decision_evidence_sha256=terminal_sha)
+        self.registry.append(paired)
+        self._append_cohort(paired)
 
         score = self._authority(compute_execution_store=router).resolve(
             paired.evaluation_id,

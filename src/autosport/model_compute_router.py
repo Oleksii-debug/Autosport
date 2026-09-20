@@ -1730,6 +1730,8 @@ _VOC_PRECOMPUTE_CONTROL_FIELDS = {
     "research_protocol_id",
     "cohort_id",
     "challenger_candidate_id",
+    "sport_id",
+    "league_id",
 }
 _VOC_PRECOMPUTE_FIELDS = {
     "schema_version",
@@ -1780,9 +1782,18 @@ def _build_voc_precompute_admission(
         raise ModelComputeRouterError(
             "VOC precompute admission requires canonical decision context evidence"
         )
-    if domain_observation is None:
+    sport_id = _text(
+        "voc_precompute_admission sport_id", control["sport_id"]
+    )
+    league_id = _text(
+        "voc_precompute_admission league_id", control["league_id"]
+    )
+    if domain_observation is not None and (
+        domain_observation.sport_id != sport_id
+        or domain_observation.league_id != league_id
+    ):
         raise ModelComputeRouterError(
-            "VOC precompute admission requires canonical domain observation"
+            "VOC precompute admission scope does not match canonical domain observation"
         )
     for name in (
         "voc_regime_id",
@@ -1841,8 +1852,8 @@ def _build_voc_precompute_admission(
         ),
         "task_class": request.required_capability,
         "scope": {
-            "sport_id": domain_observation.sport_id,
-            "league_id": domain_observation.league_id,
+            "sport_id": sport_id,
+            "league_id": league_id,
             "regime_id": request.voc_regime_id,
             "urgency_id": request.voc_urgency_id,
             "contradiction_state": request.voc_contradiction_state,
@@ -1883,6 +1894,16 @@ def _validate_persisted_voc_precompute_admission(
             "research_protocol_id": raw.get("research_protocol_id"),
             "cohort_id": raw.get("cohort_id"),
             "challenger_candidate_id": challenger.get("candidate_id"),
+            "sport_id": (
+                raw.get("scope", {}).get("sport_id")
+                if isinstance(raw.get("scope"), Mapping)
+                else None
+            ),
+            "league_id": (
+                raw.get("scope", {}).get("league_id")
+                if isinstance(raw.get("scope"), Mapping)
+                else None
+            ),
         },
     )
     if raw != expected:

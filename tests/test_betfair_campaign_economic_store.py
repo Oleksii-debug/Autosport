@@ -100,3 +100,56 @@ def test_source_qualified_append_is_live_gated_durable_and_idempotent(
             as_of=NOW,
         )
     assert restarted.verify_chain() == (qualified,)
+
+
+def test_source_qualified_terminal_prepare_recovers_after_restart(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    receipt = _receipt()
+    source, campaign, _ = _authorities(monkeypatch, receipt=receipt)
+    provider_scope = _scope()
+    workspace = tmp_path / "crash-workspace"
+    authority_root = tmp_path / "crash-authority"
+    store = BetfairCampaignEconomicEvidenceStore(
+        workspace,
+        campaign=campaign,
+        source=source,
+        provider_scope=provider_scope,
+        authority_root=authority_root,
+    )
+    qualified = store.derive_betfair_commission(
+        receipt_id=receipt.receipt_id,
+        record_sha256=receipt.record_sha256,
+        as_of=NOW,
+    )
+
+    def crash_before_commit(**_kwargs):
+        raise RuntimeError("simulated process loss before authority commit")
+
+    monkeypatch.setattr(store._authority, "commit", crash_before_commit)
+    with pytest.raises(RuntimeError, match="simulated process loss"):
+        store.append_betfair_commission(
+            receipt_id=receipt.receipt_id,
+            record_sha256=receipt.record_sha256,
+            as_of=NOW,
+        )
+
+    restarted = BetfairCampaignEconomicEvidenceStore(
+        workspace,
+        campaign=campaign,
+        source=source,
+        provider_scope=provider_scope,
+        authority_root=authority_root,
+    )
+    assert restarted.latest() == qualified
+    assert restarted.verify_chain() == (qualified,)
+    assert (
+        restarted.append_betfair_commission(
+            receipt_id=receipt.receipt_id,
+            record_sha256=receipt.record_sha256,
+            as_of=NOW,
+        )
+        == qualified.version_id
+    )
+    assert restarted.verify_chain() == (qualified,)

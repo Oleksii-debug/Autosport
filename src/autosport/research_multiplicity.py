@@ -674,6 +674,11 @@ class SequentialMultiplicityEvidenceStore:
                 continue
 
             if type(state) is not dict:
+                if recognizable_text:
+                    raise ValueError(
+                        "recognizable multiplicity evidence is invalid; "
+                        "refusing workspace authority rebootstrap"
+                    )
                 continue
             plan = state.get("plan")
             recognizable_state = (
@@ -689,6 +694,11 @@ class SequentialMultiplicityEvidenceStore:
                 )
             )
             if not recognizable_state:
+                if recognizable_text:
+                    raise ValueError(
+                        "recognizable multiplicity evidence is invalid; "
+                        "refusing workspace authority rebootstrap"
+                    )
                 continue
 
             if (

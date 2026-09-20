@@ -280,7 +280,7 @@ class CollectorPointInTimeSourceRevisionAuthorityStore(SourceRevisionAuthoritySt
         expected_id = self._collector_witness_id(delta, receipt)
         if witness.availability_witness_id != expected_id:
             raise _legacy.SourceRevisionAuthorityError(
-                "collector availability witness identity does not match durable application"
+                "collector availability witness identity does not match durable application evidence"
             )
         expected = self._expected_collector_witness(
             availability_witness_id=expected_id,

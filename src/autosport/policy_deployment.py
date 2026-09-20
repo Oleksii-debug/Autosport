@@ -136,6 +136,7 @@ def _require_dataset_lineage(
     training_record_sha256: str,
     deployment_record_sha256: str,
     expected_proof_sha256: str,
+    activation_at: str,
 ):
     """Resolve and bind the exact anti-rollback append-only ancestry proof."""
 
@@ -150,9 +151,10 @@ def _require_dataset_lineage(
             registry,
         )
         ancestor = authority.record(training_id)
-        descendant = authority.require_descendant(
+        descendant = authority.require_descendant_as_of(
             descendant_snapshot_id=deployment_id,
             ancestor_snapshot_id=training_id,
+            as_of=activation_at,
         )
     except (OSError, ValueError, RuntimeError) as exc:
         raise PolicyDeploymentError(
@@ -811,6 +813,7 @@ def validate_activation_binding(
             training_record_sha256=binding.training_dataset_record_sha256,
             deployment_record_sha256=binding.deployment_dataset_record_sha256,
             expected_proof_sha256=binding.dataset_lineage_proof_sha256,
+            activation_at=binding.activation_at,
         )
 
     decision = _causal_record(

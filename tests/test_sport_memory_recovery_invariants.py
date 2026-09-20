@@ -6,6 +6,7 @@ import json
 
 import pytest
 
+from autosport import _sport_memory_authority_guard as _guard
 from autosport.opponent_intelligence import (
     FeatureSnapshot,
     IdentityView,
@@ -14,7 +15,7 @@ from autosport.opponent_intelligence import (
 )
 from autosport.sport_memory_runtime import (
     SportMemoryError,
-    SportMemoryRuntime,
+    SportMemoryRuntime as _PublicSportMemoryRuntime,
     SportMemoryScope,
 )
 
@@ -28,6 +29,19 @@ SHA_F = "f" * 64
 SHA_1 = "1" * 64
 SHA_2 = "2" * 64
 SHA_3 = "3" * 64
+
+
+class _LowLevelSportMemoryRuntime(_PublicSportMemoryRuntime):
+    """Unit-test harness for deterministic recovery semantics, not a product API."""
+
+    def _require_durable_positive_authority(self) -> None:
+        return None
+
+    def materialize(self, *args, **kwargs):
+        return _guard._ORIGINAL_MATERIALIZE(self, *args, **kwargs)
+
+
+SportMemoryRuntime = _LowLevelSportMemoryRuntime
 
 
 def _digest(payload: object) -> str:
@@ -106,7 +120,7 @@ class _PairAuthority:
         return rating, feature
 
 
-def _runtime(tmp_path, authority=None) -> SportMemoryRuntime:
+def _runtime(tmp_path, authority=None) -> _PublicSportMemoryRuntime:
     return SportMemoryRuntime.initialize_pristine(
         tmp_path / "sport-memory.json",
         authority or _PairAuthority(),
@@ -114,7 +128,7 @@ def _runtime(tmp_path, authority=None) -> SportMemoryRuntime:
     )
 
 
-def _materialize(runtime: SportMemoryRuntime):
+def _materialize(runtime: _PublicSportMemoryRuntime):
     return runtime.materialize(
         participant_entity_id="participant-1",
         scope=_scope(),

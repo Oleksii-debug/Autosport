@@ -537,6 +537,7 @@ class CanonicalOutcomeDerivedVOCScoreAuthorityTests(unittest.TestCase):
         cohort_id: str = "voc-cohort-derived",
         record_shadows: bool = True,
         authority_recorded_at: str | None = None,
+        include_omitted_request: bool = False,
     ) -> ModelComputeRouterStore:
         router = ModelComputeRouterStore(
             self.root / f"router-precommit-{paired.evaluation_id}-{protocol_id or paired.research_protocol_id}-{cohort_id}.json"
@@ -639,6 +640,49 @@ class CanonicalOutcomeDerivedVOCScoreAuthorityTests(unittest.TestCase):
                     available_at=paired.challenger_completed_at,
                     actual_cost=Decimal("0.20"),
                     evidence_sha256=paired.challenger_output_sha256,
+                )
+        if include_omitted_request:
+            omitted = ComputeRouteRequest(
+                request_id=f"omitted:{paired.evaluation_id}",
+                created_at=paired.decision_at,
+                decision_deadline=paired.decision_deadline,
+                required_capability=paired.task_class,
+                data_classification=DataClassification.PUBLIC,
+                allow_cloud=False,
+                max_cost=Decimal("10"),
+                response_ttl_seconds=Decimal("30"),
+                baseline_candidate_id=paired.baseline_candidate_id,
+                cloud_candidate_id=paired.challenger_candidate_id,
+                decision_input_sha256=digest(
+                    {"omitted": paired.evaluation_id, "kind": "input"}
+                ),
+                decision_evidence_sha256=digest(
+                    {"omitted": paired.evaluation_id, "kind": "context"}
+                ),
+                voc_regime_id=paired.regime_id,
+                voc_urgency_id=paired.urgency_id,
+                voc_contradiction_state=paired.contradiction_state,
+            )
+            with patch(
+                "autosport.model_compute_router._authority_now",
+                return_value=paired.decision_at,
+            ):
+                router.route(
+                    omitted,
+                    candidates,
+                    policy,
+                    as_of=paired.decision_at,
+                    voc_precompute_admission={
+                        "admission_id": f"omitted:{paired.evaluation_id}",
+                        "research_protocol_id": (
+                            protocol_id or paired.research_protocol_id
+                        ),
+                        "cohort_id": cohort_id,
+                        "baseline_candidate_id": paired.baseline_candidate_id,
+                        "challenger_candidate_id": paired.challenger_candidate_id,
+                        "sport_id": paired.sport_id,
+                        "league_id": paired.league_id,
+                    },
                 )
         return router
 

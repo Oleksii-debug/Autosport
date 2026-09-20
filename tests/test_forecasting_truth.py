@@ -1,7 +1,6 @@
 import json
 import tempfile
 import unittest
-from datetime import timedelta
 from decimal import Decimal
 from pathlib import Path
 
@@ -17,12 +16,6 @@ from autosport.forecasting import (
     evaluate_walk_forward,
 )
 from autosport.paper import PaperBook
-from autosport.paper_execution_adoption import PaperExecutionAdoptionRuntime
-from autosport.paper_execution_reality import (
-    EvidenceGrade,
-    PaperExecutionLedger,
-    PaperExecutionModelConfig,
-)
 from autosport.paper_strategy import PaperValueAgent
 
 
@@ -194,33 +187,10 @@ class ForecastTruthTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             ledger_path = Path(tmp) / "decisions.jsonl"
             book = PaperBook("10000")
-            execution = PaperExecutionAdoptionRuntime(
-                book=book,
-                ledger=PaperExecutionLedger(Path(tmp) / "paper-execution.jsonl"),
-                config=PaperExecutionModelConfig(
-                    model_id="forecast-provenance-test",
-                    model_version="1",
-                    evidence_grade=EvidenceGrade.SYNTHETIC,
-                    evidence_source="forecast-provenance-test",
-                    seed="forecast-provenance",
-                    max_quote_age_ms=5_000,
-                    min_delay_ms=0,
-                    max_delay_ms=0,
-                    rejected_bps=0,
-                    partial_bps=0,
-                    unknown_bps=0,
-                    partial_fill_bps=5000,
-                    max_slippage_bps=0,
-                ),
-                max_quote_age=timedelta(seconds=5),
-                paper_book_path=Path(tmp) / "paper_book.json",
-            )
             context = AgentContext(
                 book,
                 replay_run_id="run-forecast",
                 decision_ledger=JsonlDecisionLedger(ledger_path),
-                paper_execution=execution,
-                paper_provider_accounts=((event.source_id, "paper-account"),),
             )
             AgentOrchestrator(
                 [MarketMirrorAgent(), PaperValueAgent({event.quote_key: record}, "50", "0.05")],

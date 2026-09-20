@@ -1,7 +1,6 @@
 import tempfile
 import unittest
 from dataclasses import replace
-from datetime import timedelta
 from decimal import Decimal
 from pathlib import Path
 
@@ -10,12 +9,6 @@ from autosport.decision_ledger import JsonlDecisionLedger
 from autosport.domain import MarketEvent, TicketLeg, TicketStatus
 from autosport.economic_goal import EconomicGoalContract
 from autosport.paper import PaperBook
-from autosport.paper_execution_adoption import PaperExecutionAdoptionRuntime
-from autosport.paper_execution_reality import (
-    EvidenceGrade,
-    PaperExecutionLedger,
-    PaperExecutionModelConfig,
-)
 from autosport.paper_strategy import Forecast, PaperValueAgent
 from autosport.risk import (
     PaperRiskPolicy,
@@ -88,46 +81,6 @@ class EconomicGoalEndogenousStakeTests(unittest.TestCase):
             },
             stake=Decimal("999"),
             risk_policy=policy,
-        )
-
-    @staticmethod
-    def _execution_context(
-        root: Path,
-        event: MarketEvent,
-        book: PaperBook,
-        *,
-        replay_run_id: str,
-        ledger: JsonlDecisionLedger,
-    ) -> AgentContext:
-        execution_ledger = PaperExecutionLedger(root / "paper-execution.jsonl")
-        runtime = PaperExecutionAdoptionRuntime(
-            book=book,
-            ledger=execution_ledger,
-            config=PaperExecutionModelConfig(
-                model_id="endogenous-stake-test",
-                model_version="1",
-                evidence_grade=EvidenceGrade.SYNTHETIC,
-                evidence_source="endogenous-stake-test",
-                seed="endogenous-stake",
-                max_quote_age_ms=5_000,
-                min_delay_ms=0,
-                max_delay_ms=0,
-                rejected_bps=0,
-                partial_bps=0,
-                unknown_bps=0,
-                partial_fill_bps=5000,
-                max_slippage_bps=0,
-            ),
-            max_quote_age=timedelta(seconds=5),
-            paper_book_path=root / "paper_book.json",
-        )
-        return AgentContext(
-            book,
-            latest_quotes={event.quote_key: event},
-            replay_run_id=replay_run_id,
-            decision_ledger=ledger,
-            paper_execution=runtime,
-            paper_provider_accounts=((event.source_id, "paper-account"),),
         )
 
     @staticmethod
@@ -235,12 +188,11 @@ class EconomicGoalEndogenousStakeTests(unittest.TestCase):
         book = PaperBook("1000")
         with tempfile.TemporaryDirectory() as tmp:
             ledger = JsonlDecisionLedger(Path(tmp) / "decisions.jsonl")
-            context = self._execution_context(
-                Path(tmp),
-                event,
+            context = AgentContext(
                 book,
+                latest_quotes={event.quote_key: event},
                 replay_run_id="run-endogenous-stake",
-                ledger=ledger,
+                decision_ledger=ledger,
             )
 
             self._agent(event, self._policy(goal)).on_market_event(event, context)
@@ -270,12 +222,11 @@ class EconomicGoalEndogenousStakeTests(unittest.TestCase):
             ledger_path = root / "decisions.jsonl"
             book_path = root / "paper.json"
             ledger = JsonlDecisionLedger(ledger_path)
-            context = self._execution_context(
-                root,
-                event,
+            context = AgentContext(
                 book,
+                latest_quotes={event.quote_key: event},
                 replay_run_id="run-exposure-aware-stake",
-                ledger=ledger,
+                decision_ledger=ledger,
             )
 
             self._agent(event, self._policy(goal)).on_market_event(event, context)
@@ -292,12 +243,11 @@ class EconomicGoalEndogenousStakeTests(unittest.TestCase):
             book.save(book_path)
 
             restarted_book = PaperBook.load(book_path)
-            restarted_context = self._execution_context(
-                root,
-                event,
+            restarted_context = AgentContext(
                 restarted_book,
+                latest_quotes={event.quote_key: event},
                 replay_run_id="run-exposure-aware-stake",
-                ledger=JsonlDecisionLedger(ledger_path),
+                decision_ledger=JsonlDecisionLedger(ledger_path),
             )
             self._agent(event, self._policy(goal)).on_market_event(event, restarted_context)
 
@@ -318,12 +268,11 @@ class EconomicGoalEndogenousStakeTests(unittest.TestCase):
         )
         with tempfile.TemporaryDirectory() as tmp:
             ledger = JsonlDecisionLedger(Path(tmp) / "decisions.jsonl")
-            context = self._execution_context(
-                Path(tmp),
-                event,
+            context = AgentContext(
                 book,
+                latest_quotes={event.quote_key: event},
                 replay_run_id="run-zero-stake",
-                ledger=ledger,
+                decision_ledger=ledger,
             )
 
             self._agent(event, self._policy(goal)).on_market_event(event, context)

@@ -23,3 +23,9 @@ from . import _provider_transport_origin as _provider_transport_origin  # noqa: 
 # provider frame JSON extensible/content-bound, but reject unknown local envelope
 # fields before normalization or monotonic integrity validation.
 from . import _provider_observation_payload_strictness as _provider_observation_payload_strictness  # noqa: F401,E402
+
+# Install the fail-closed predictive runtime authority bridge before callers import
+# decision modules.  The import is intentionally private; public APIs remain in the
+# owning opportunity/predictive modules.
+from . import predictive_authority as _predictive_authority  # noqa: E402,F401
+from . import _predictive_authority_type_fence as _predictive_authority_type_fence  # noqa: E402,F401

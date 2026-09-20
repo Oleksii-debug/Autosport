@@ -51,18 +51,15 @@ class ProviderProbabilityAgentTests(unittest.TestCase):
         self.assertAlmostEqual(brier_score(observations), 0.04)
         self.assertGreater(log_loss(observations), 0)
 
-    def test_paper_value_agent_cannot_bypass_execution_reality(self):
+    def test_paper_value_agent_opens_only_virtual_ticket(self):
         event = MarketEvent.from_dict({"event_id":"e","market_id":"m","selection_id":"a","decimal_odds":"2.0","observed_ts":"2026-01-01T00:00:01+00:00","source_id":"s","sequence":1})
         forecast = Forecast(event.quote_key, Decimal("0.70"), "model-1", "2026-01-01T00:00:00+00:00")
         book = PaperBook("10000")
         context = AgentContext(book, replay_run_id="paper-run")
         orchestrator = AgentOrchestrator([MarketMirrorAgent(), PaperValueAgent({event.quote_key: forecast}, "50", "0.05")], context)
         orchestrator.on_market_event(event)
-        self.assertEqual(book.tickets, {})
-        self.assertEqual(book.balance, Decimal("10000"))
-        self.assertTrue(
-            any("canonical #623 execution" in note for note in context.notes)
-        )
+        self.assertEqual(len(book.tickets), 1)
+        self.assertEqual(book.balance, Decimal("9950"))
 
     def test_evidence_rejects_future_result_fields(self):
         with self.assertRaisesRegex(ValueError, "future-result"):

@@ -219,8 +219,6 @@ class PaperExecutionRepairRegressions(unittest.TestCase):
                 anchor["anchor_sha256"] = digest(anchor_body)
                 anchor_path.write_text(canonical(anchor) + "\n", encoding="utf-8")
 
-                # Compromise the separate authority too so this regression still
-                # reaches the mechanically-derived economics validation layer.
                 witness_path = Path(ledger._monotonic_witness_path)
                 self.assertNotEqual(witness_path.parent, path.parent)
                 witness_lines = witness_path.read_text(encoding="utf-8").splitlines()
@@ -287,8 +285,6 @@ class PaperExecutionRepairRegressions(unittest.TestCase):
                 )
                 registry.register(changed)
 
-                # Restore the complete rollbackable workspace snapshot, not just
-                # ledger+anchor. The independent authority remains at G2.
                 for item in workspace.iterdir():
                     if item.is_file():
                         item.unlink()
@@ -339,7 +335,7 @@ class PaperExecutionRepairRegressions(unittest.TestCase):
                 ):
                     PaperExecutionLedger(path).events()
 
-    def test_sub_millisecond_synthetic_quote_age_is_rejected_conservatively(self):
+    def test_sub_millisecond_synthetic_quote_age_is_rejected_without_changing_telemetry(self):
         current = plan(
             action(
                 "a1",
@@ -368,7 +364,7 @@ class PaperExecutionRepairRegressions(unittest.TestCase):
                     started_at=STARTED_AT,
                 )
 
-        self.assertEqual(result.attempts[0].quote_age_ms, 501)
+        self.assertEqual(result.attempts[0].quote_age_ms, 500)
         self.assertEqual(result.attempts[0].outcome, PaperAttemptOutcome.REJECTED)
         self.assertIn("freshness bound", result.attempts[0].reason)
 

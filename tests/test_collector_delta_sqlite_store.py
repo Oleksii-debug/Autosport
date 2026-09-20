@@ -287,6 +287,25 @@ class CollectorSQLiteStoreTests(unittest.TestCase):
                 result_queue.close()
                 result_queue.join_thread()
 
+    def test_projection_immutability_trigger_rejects_ordinary_sql_update(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "collector.json"
+            delta = make_delta()
+            store = CollectorDeltaStore(path)
+            store.append(delta)
+
+            connection = sqlite3.connect(path)
+            try:
+                with self.assertRaises(sqlite3.IntegrityError):
+                    connection.execute(
+                        "UPDATE collector_deltas SET source_id=? WHERE delta_id=?",
+                        ("forged-source", delta.delta_id),
+                    )
+            finally:
+                connection.close()
+
+            self.assertEqual(store.get(delta.delta_id), delta)
+
     def test_indexed_projection_tamper_fails_closed(self):
         projections = {
             "delta_id": "forged-delta",
@@ -302,9 +321,13 @@ class CollectorSQLiteStoreTests(unittest.TestCase):
                 with self.subTest(column=column):
                     path = Path(tmp) / f"{column}.sqlite"
                     delta = make_delta()
-                    CollectorDeltaStore(path).append(delta)
+                    store = CollectorDeltaStore(path)
+                    store.append(delta)
                     connection = sqlite3.connect(path)
                     try:
+                        connection.execute(
+                            "DROP TRIGGER collector_deltas_projection_immutable_v1"
+                        )
                         connection.execute(
                             f"UPDATE collector_deltas SET {column}=? WHERE delta_id=?",
                             (forged, delta.delta_id),
@@ -317,15 +340,19 @@ class CollectorSQLiteStoreTests(unittest.TestCase):
                         ValueError,
                         "indexed projection conflicts with canonical payload",
                     ):
-                        CollectorDeltaStore(path).get(lookup_id)
+                        store.get(lookup_id)
 
     def test_source_projection_tamper_cannot_route_delivery_or_causal_view(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "collector.json"
             delta = make_delta()
-            CollectorDeltaStore(path).append(delta)
+            store = CollectorDeltaStore(path)
+            store.append(delta)
             connection = sqlite3.connect(path)
             try:
+                connection.execute(
+                    "DROP TRIGGER collector_deltas_projection_immutable_v1"
+                )
                 connection.execute(
                     "UPDATE collector_deltas SET source_id=? WHERE delta_id=?",
                     ("forged-source", delta.delta_id),
@@ -334,7 +361,6 @@ class CollectorSQLiteStoreTests(unittest.TestCase):
             finally:
                 connection.close()
 
-            store = CollectorDeltaStore(path)
             with self.assertRaises(ValueError):
                 store.deltas_after_commit(source_id="forged-source")
             with self.assertRaises(ValueError):

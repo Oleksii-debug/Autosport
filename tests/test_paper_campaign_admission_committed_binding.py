@@ -8,6 +8,7 @@ from unittest.mock import patch
 from autosport.decision_ledger import JsonlDecisionLedger
 from autosport.paper import PaperBook
 from autosport.paper_campaign_admission import PaperCampaignAdmissionError
+from autosport.paper_campaign_runtime import PaperCampaignRuntime
 from paper_campaign_admission_test_support import AdmissionFixture
 
 
@@ -72,8 +73,9 @@ class PaperCampaignAdmissionCommittedBindingTests(unittest.TestCase):
             fixture = AdmissionFixture(Path(directory))
             coordinator = fixture.coordinator()
             with patch.object(
-                coordinator.runtime,
+                PaperCampaignRuntime,
                 "begin_and_bind_paper_ticket",
+                autospec=True,
                 side_effect=RuntimeError("crash before campaign action"),
             ):
                 with self.assertRaisesRegex(RuntimeError, "crash before campaign action"):

@@ -78,3 +78,32 @@ def test_post_dialog_workspace_recheck_does_not_eagerly_touch_removed_workspace(
     app.export_evidence()
 
     assert start_calls == [(workspace, output)]
+
+
+def test_export_stops_if_app_closes_while_save_dialog_is_open(
+    monkeypatch, tmp_path: Path
+) -> None:
+    workspace = tmp_path / "workspace"
+    output = tmp_path / "evidence.json"
+    app = _partial_export_app(workspace)
+    destination_calls: list[tuple[Path, Path]] = []
+    start_calls: list[tuple[Path, Path]] = []
+
+    def choose(**_kwargs):
+        app.__dict__["_closing"] = True
+        return str(output)
+
+    def resolve(workspace_arg, output_arg):
+        destination_calls.append((Path(workspace_arg), Path(output_arg)))
+        return Path(output_arg)
+
+    app.evidence_export_worker.start = lambda workspace_arg, output_arg: start_calls.append(
+        (Path(workspace_arg), Path(output_arg))
+    ) or True
+    monkeypatch.setattr(gui.filedialog, "asksaveasfilename", choose)
+    monkeypatch.setattr(gui, "resolve_evidence_output_destination", resolve)
+
+    app.export_evidence()
+
+    assert destination_calls == []
+    assert start_calls == []

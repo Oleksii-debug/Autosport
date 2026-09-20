@@ -2,10 +2,11 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Callable, Mapping
+from typing import Mapping
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
@@ -20,6 +21,7 @@ COMPLETE_RESUME_MODE = "replace"
 GAME_LINE_MARKETS = ("h2h", "spreads", "totals")
 _MAX_SSE_BYTES = 16 * 1024 * 1024
 _HEX = frozenset("0123456789abcdef")
+_IDENTITY_CHARS = frozenset("abcdefghijklmnopqrstuvwxyz0123456789_-")
 
 
 class ProviderObservationAuthorityError(RuntimeError):
@@ -34,18 +36,20 @@ class ProviderObservationIntegrityError(ProviderObservationAuthorityError):
     """Persisted or returned provider evidence is malformed or inconsistent."""
 
 
-SseSnapshotTransport = Callable[
-    [str, Mapping[str, str], float, int],
-    Mapping[str, object],
-]
-Clock = Callable[[], str]
-
-
 def _text(value: object, name: str) -> str:
     if not isinstance(value, str) or not value or value != value.strip() or "\x00" in value:
         raise ProviderObservationIntegrityError(f"{name} must be non-empty canonical text")
     value.encode("utf-8")
     return value
+
+
+def _provider_identity(value: object, name: str) -> str:
+    raw = _text(value, name)
+    if raw != raw.lower() or any(character not in _IDENTITY_CHARS for character in raw):
+        raise ProviderObservationIntegrityError(
+            f"{name} must be lowercase canonical provider identity"
+        )
+    return raw
 
 
 def _sha(value: object, name: str) -> str:
@@ -85,20 +89,13 @@ def _digest(value: object) -> str:
     return hashlib.sha256(_canonical_json(value).encode("utf-8")).hexdigest()
 
 
-def _headerless_secret(value: object) -> str:
-    secret = _text(value, "api_key")
-    if any(character.isspace() for character in secret):
-        raise ValueError("api_key must not contain whitespace")
-    return secret
-
-
 def _default_clock() -> str:
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
 @dataclass(frozen=True, slots=True)
 class CompleteGameBoardRequest:
-    """Exact ParlayAPI stream scope eligible for a complete current game-line baseline."""
+    """Exact documented scope eligible for a complete current game-line baseline."""
 
     sport_key: str
     bookmakers: tuple[str, ...]
@@ -108,27 +105,14 @@ class CompleteGameBoardRequest:
     max_age_s: int = 600
 
     def __post_init__(self) -> None:
-        sport_key = _text(self.sport_key, "sport_key")
-        if sport_key != sport_key.lower() or any(
-            character not in "abcdefghijklmnopqrstuvwxyz0123456789_-"
-            for character in sport_key
-        ):
-            raise ProviderObservationIntegrityError(
-                "sport_key must be lowercase canonical provider identity"
-            )
+        object.__setattr__(self, "sport_key", _provider_identity(self.sport_key, "sport_key"))
         if not isinstance(self.bookmakers, tuple) or not self.bookmakers:
             raise ProviderObservationIntegrityError("bookmakers must be a non-empty tuple")
-        books = tuple(sorted(_text(book, "bookmaker") for book in self.bookmakers))
+        books = tuple(sorted(_provider_identity(book, "bookmaker") for book in self.bookmakers))
         if len(books) != len(set(books)):
             raise ProviderObservationIntegrityError("bookmakers must be unique")
-        if any(book != book.lower() for book in books):
-            raise ProviderObservationIntegrityError("bookmakers must be lowercase canonical identities")
         object.__setattr__(self, "bookmakers", books)
-
-        if not isinstance(self.markets, tuple):
-            raise ProviderObservationIntegrityError("markets must be a tuple")
-        markets = tuple(self.markets)
-        if markets != GAME_LINE_MARKETS:
+        if not isinstance(self.markets, tuple) or self.markets != GAME_LINE_MARKETS:
             raise ProviderObservationUnsupportedError(
                 "complete game-board authority requires h2h, spreads and totals together"
             )
@@ -140,11 +124,7 @@ class CompleteGameBoardRequest:
             raise ProviderObservationUnsupportedError(
                 "complete provider authority requires the documented limit=1000 scope"
             )
-        if (
-            type(self.max_age_s) is not int
-            or self.max_age_s < 1
-            or self.max_age_s > 3600
-        ):
+        if type(self.max_age_s) is not int or not 1 <= self.max_age_s <= 3600:
             raise ProviderObservationIntegrityError("max_age_s must be an integer in 1..3600")
 
     @property
@@ -164,24 +144,26 @@ class CompleteGameBoardRequest:
     @classmethod
     def from_payload(cls, payload: Mapping[str, object]) -> "CompleteGameBoardRequest":
         try:
+            books = payload["bookmakers"]
+            markets = payload["markets"]
+            if not isinstance(books, list) or not isinstance(markets, list):
+                raise ProviderObservationIntegrityError(
+                    "request bookmakers/markets must be JSON arrays"
+                )
             return cls(
                 sport_key=payload["sport_key"],
-                bookmakers=tuple(payload["bookmakers"]),
-                markets=tuple(payload["markets"]),
+                bookmakers=tuple(books),
+                markets=tuple(markets),
                 kind=payload["kind"],
                 limit=payload["limit"],
                 max_age_s=payload["max_age_s"],
             )
-        except (KeyError, TypeError, ValueError) as exc:
-            if isinstance(exc, ProviderObservationAuthorityError):
-                raise
+        except KeyError as exc:
             raise ProviderObservationIntegrityError(
-                "complete game-board request payload is invalid"
+                "complete game-board request payload is incomplete"
             ) from exc
 
-    def sse_url(self, base_url: str = "https://parlay-api.com") -> str:
-        if not isinstance(base_url, str) or not base_url.startswith("https://"):
-            raise ValueError("base_url must use https")
+    def sse_url(self) -> str:
         query = urlencode(
             {
                 "bookmakers": ",".join(self.bookmakers),
@@ -191,12 +173,12 @@ class CompleteGameBoardRequest:
                 "max_age_s": str(self.max_age_s),
             }
         )
-        return f"{base_url.rstrip('/')}/v1/sse/odds/{self.sport_key}?{query}"
+        return f"https://parlay-api.com/v1/sse/odds/{self.sport_key}?{query}"
 
 
 @dataclass(frozen=True, slots=True)
 class CompleteGameBoardSnapshot:
-    """Immutable exact response evidence; authority is granted only by capture/store paths."""
+    """Immutable exact response evidence; construction alone grants no authority."""
 
     request: CompleteGameBoardRequest
     captured_at: str
@@ -216,8 +198,7 @@ class CompleteGameBoardSnapshot:
             raise ProviderObservationIntegrityError("initial_state frame is invalid JSON") from exc
         if not isinstance(frame, dict):
             raise ProviderObservationIntegrityError("initial_state frame must be an object")
-        canonical = _canonical_json(frame)
-        object.__setattr__(self, "frame_json", canonical)
+        object.__setattr__(self, "frame_json", _canonical_json(frame))
         self._validate_frame(frame)
 
     def _validate_frame(self, frame: Mapping[str, object]) -> None:
@@ -243,13 +224,14 @@ class CompleteGameBoardSnapshot:
             raise ProviderObservationUnsupportedError(
                 "complete provider snapshot must use replacement semantics"
             )
-        if frame.get("partial") is True:
+        partial = frame.get("partial")
+        if partial is not None and partial is not False:
             raise ProviderObservationUnsupportedError(
                 "partial provider snapshot cannot prove complete membership"
             )
         for name in ("missing_books", "truncated_books", "snapshot_partial_reasons"):
             raw = frame.get(name)
-            if raw not in (None, [], ()):
+            if raw is not None and raw != []:
                 raise ProviderObservationUnsupportedError(
                     f"provider snapshot carries {name} incompleteness evidence"
                 )
@@ -269,23 +251,19 @@ class CompleteGameBoardSnapshot:
                 raise ProviderObservationIntegrityError(
                     "provider snapshot rows must be JSON objects"
                 )
-            bookmaker = row.get("bookmaker")
-            kind = row.get("kind")
-            market_key = row.get("market_key")
-            event_id = row.get("event_id")
-            if bookmaker not in self.request.bookmakers:
+            if row.get("bookmaker") not in self.request.bookmakers:
                 raise ProviderObservationIntegrityError(
                     "provider snapshot row escapes requested bookmaker scope"
                 )
-            if kind != self.request.kind:
+            if row.get("kind") != self.request.kind:
                 raise ProviderObservationIntegrityError(
                     "provider snapshot row escapes requested kind scope"
                 )
-            if market_key not in self.request.markets:
+            if row.get("market_key") not in self.request.markets:
                 raise ProviderObservationIntegrityError(
                     "provider snapshot row escapes requested market scope"
                 )
-            _text(event_id, "provider event_id")
+            _text(row.get("event_id"), "provider event_id")
             digest = _digest(row)
             if digest in digests:
                 raise ProviderObservationIntegrityError(
@@ -347,26 +325,28 @@ class CompleteGameBoardSnapshot:
                 captured_at=payload["captured_at"],
                 frame_json=payload["frame_json"],
             )
-            if payload.get("frame_sha256") != snapshot.frame_sha256:
-                raise ProviderObservationIntegrityError(
-                    "frame_sha256 does not bind exact provider frame"
-                )
-            raw_rows = payload.get("row_sha256s")
-            if not isinstance(raw_rows, list) or tuple(raw_rows) != snapshot.row_sha256s:
-                raise ProviderObservationIntegrityError(
-                    "row_sha256s do not bind exact provider rows"
-                )
-            if payload.get("evidence_sha256") != snapshot.evidence_sha256:
-                raise ProviderObservationIntegrityError(
-                    "evidence_sha256 does not bind complete provider evidence"
-                )
-            return snapshot
         except KeyError as exc:
             raise ProviderObservationIntegrityError(
                 "complete game-board evidence payload is incomplete"
             ) from exc
+        if payload.get("frame_sha256") != snapshot.frame_sha256:
+            raise ProviderObservationIntegrityError(
+                "frame_sha256 does not bind exact provider frame"
+            )
+        raw_rows = payload.get("row_sha256s")
+        if not isinstance(raw_rows, list) or tuple(raw_rows) != snapshot.row_sha256s:
+            raise ProviderObservationIntegrityError(
+                "row_sha256s do not bind exact provider rows"
+            )
+        if payload.get("evidence_sha256") != snapshot.evidence_sha256:
+            raise ProviderObservationIntegrityError(
+                "evidence_sha256 does not bind complete provider evidence"
+            )
+        return snapshot
 
 
+# Exact-object issuance closes the structural-protocol hole: a caller can construct a
+# lookalike evidence value for inspection, but it cannot authorize production intake.
 _ISSUED: dict[int, tuple[CompleteGameBoardSnapshot, str]] = {}
 
 
@@ -376,8 +356,6 @@ def _remember(snapshot: CompleteGameBoardSnapshot) -> CompleteGameBoardSnapshot:
 
 
 def assert_complete_game_board_authoritative(snapshot: CompleteGameBoardSnapshot) -> None:
-    """Reject caller-constructed lookalikes that did not pass capture/store authority."""
-
     if not isinstance(snapshot, CompleteGameBoardSnapshot):
         raise ProviderObservationUnsupportedError(
             "complete provider authority requires CompleteGameBoardSnapshot"
@@ -409,25 +387,41 @@ def _parse_sse_event(event_name: str | None, data_lines: list[str]) -> Mapping[s
     return None
 
 
-def _default_sse_snapshot_transport(
-    url: str,
-    headers: Mapping[str, str],
+def _read_production_initial_state(
+    request_scope: CompleteGameBoardRequest,
+    *,
+    api_key: str,
     timeout_seconds: float,
-    max_bytes: int,
 ) -> Mapping[str, object]:
-    request = Request(url, headers=dict(headers), method="GET")
+    """Read one bounded initial_state from the fixed production ParlayAPI SSE origin."""
+
+    request = Request(
+        request_scope.sse_url(),
+        headers={
+            "Accept": "text/event-stream",
+            "X-API-Key": api_key,
+            "User-Agent": "Autosport/0.1 read-only-complete-board-observer",
+        },
+        method="GET",
+    )
     consumed = 0
     event_name: str | None = None
     data_lines: list[str] = []
     try:
-        with urlopen(request, timeout=timeout_seconds) as response:  # nosec B310 - caller enforces HTTPS
+        with urlopen(request, timeout=timeout_seconds) as response:  # nosec B310 - fixed HTTPS origin
             if int(getattr(response, "status", 0)) != 200:
                 raise ProviderObservationUnsupportedError(
                     "provider SSE did not return HTTP 200"
                 )
+            headers = getattr(response, "headers", None)
+            content_type = None if headers is None else headers.get("Content-Type")
+            if not isinstance(content_type, str) or "text/event-stream" not in content_type.lower():
+                raise ProviderObservationUnsupportedError(
+                    "provider complete-board endpoint did not return text/event-stream"
+                )
             for raw_line in response:
                 consumed += len(raw_line)
-                if consumed > max_bytes:
+                if consumed > _MAX_SSE_BYTES:
                     raise ProviderObservationUnsupportedError(
                         "provider SSE exceeded bounded initial-state evidence budget"
                     )
@@ -469,49 +463,39 @@ def capture_parlay_complete_game_board(
     api_key: str,
     request: CompleteGameBoardRequest,
     timeout_seconds: float = 10.0,
-    base_url: str = "https://parlay-api.com",
-    transport: SseSnapshotTransport = _default_sse_snapshot_transport,
-    clock: Clock = _default_clock,
 ) -> CompleteGameBoardSnapshot:
-    """Acquire and authorize exactly one documented complete replacement baseline.
+    """Acquire and authorize one documented complete replacement baseline.
 
-    No API call occurs unless this function is explicitly invoked. Credentials are sent
-    only in the request header and are never persisted in evidence.
+    The network origin and transport are deliberately not caller-injectable. Credentials
+    are sent only as a request header and are never persisted in evidence.
     """
 
-    secret = _headerless_secret(api_key)
+    if not isinstance(api_key, str) or not api_key or api_key != api_key.strip():
+        raise ValueError("api_key must be non-empty trimmed text")
+    if any(character.isspace() for character in api_key):
+        raise ValueError("api_key must not contain whitespace")
     if not isinstance(request, CompleteGameBoardRequest):
         raise TypeError("request must be CompleteGameBoardRequest")
     if isinstance(timeout_seconds, bool) or not isinstance(timeout_seconds, (int, float)):
         raise ValueError("timeout_seconds must be a positive finite number")
     timeout = float(timeout_seconds)
-    if timeout <= 0 or timeout != timeout or timeout in (float("inf"), float("-inf")):
+    if not math.isfinite(timeout) or timeout <= 0:
         raise ValueError("timeout_seconds must be a positive finite number")
-    url = request.sse_url(base_url)
-    frame = transport(
-        url,
-        {
-            "Accept": "text/event-stream",
-            "X-API-Key": secret,
-            "User-Agent": "Autosport/0.1 read-only-complete-board-observer",
-        },
-        timeout,
-        _MAX_SSE_BYTES,
+    frame = _read_production_initial_state(
+        request,
+        api_key=api_key,
+        timeout_seconds=timeout,
     )
-    if not isinstance(frame, Mapping):
-        raise ProviderObservationIntegrityError(
-            "provider snapshot transport must return an object"
-        )
     snapshot = CompleteGameBoardSnapshot(
         request=request,
-        captured_at=clock(),
+        captured_at=_default_clock(),
         frame_json=_canonical_json(dict(frame)),
     )
     return _remember(snapshot)
 
 
 class CompleteGameBoardEvidenceStore:
-    """Content-addressed immutable persistence for authorized provider snapshots."""
+    """Content-addressed immutable persistence for production-acquired snapshots."""
 
     DIRECTORY = "provider-complete-game-board"
 

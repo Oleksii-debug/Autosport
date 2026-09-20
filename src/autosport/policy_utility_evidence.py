@@ -9,8 +9,11 @@ import json
 import os
 from pathlib import Path
 import re
+import tempfile
 import threading
-from typing import Any, Mapping
+from typing import Any, Callable, Mapping
+
+from .integrity import durable_path_lock
 
 
 SCHEMA_VERSION = 1
@@ -70,11 +73,10 @@ class AuthorityRef:
 class PolicyUtilityEvidence:
     """Fail-closed contract for owner-bound policy utility.
 
-    Schema v1 is intentionally contract-only. It can preserve incomplete or
-    unsupported economic utility evidence, but it cannot authorize an economic
-    policy update. A later product-owned resolver must re-resolve canonical
-    currency/cost/denominator/counterfactual authorities before a positive
-    learning disposition can exist.
+    Schema v1 is intentionally contract-only. It preserves incomplete or
+    unsupported economic utility evidence but can never self-authorize a policy
+    update. The semantic key is owner-scoped so an unresolved caller assertion
+    cannot reserve the canonical causal key for a different owner context.
     """
 
     environment_id: str
@@ -162,7 +164,6 @@ class PolicyUtilityEvidence:
             _finite_decimal(self.utility_value, "utility_value")
             if self.currency is None:
                 raise PolicyUtilityError("utility_value requires canonical currency")
-
         if self.completeness is UtilityCompleteness.UNSUPPORTED and self.utility_value is not None:
             raise PolicyUtilityError("UNSUPPORTED utility cannot carry a utility_value")
 
@@ -215,6 +216,11 @@ class PolicyUtilityEvidence:
 
     @property
     def semantic_key(self) -> str:
+        # Unresolved schema-v1 evidence is deliberately scoped by immutable
+        # product-owner identity. A forged risk/economic/bankroll/portfolio
+        # assertion therefore cannot consume the key that a later correctly
+        # bound product record needs. Utility-definition changes remain semantic
+        # drift within the same owner/causal scope.
         return _digest(
             {
                 "environment_id": self.environment_id,
@@ -224,6 +230,14 @@ class PolicyUtilityEvidence:
                 "reward_id": self.reward_id,
                 "transition_id": self.transition_id,
                 "policy_id": self.policy_id,
+                "model_id": self.model_id,
+                "strategy_id": self.strategy_id,
+                "config_sha256": self.config_sha256,
+                "protocol_sha256": self.protocol_sha256,
+                "economic_goal_fingerprint": self.economic_goal_fingerprint,
+                "risk_fingerprint": self.risk_fingerprint,
+                "bankroll_id": self.bankroll_id,
+                "portfolio_identity": self.portfolio_identity,
             }
         )
 
@@ -263,9 +277,7 @@ class PolicyUtilityEvidence:
             "decision_kind": self.decision_kind.value,
             "available_at": _datetime_text(self.available_at),
             "currency": self.currency,
-            "utility_value": (
-                None if self.utility_value is None else _decimal_text(self.utility_value)
-            ),
+            "utility_value": None if self.utility_value is None else _decimal_text(self.utility_value),
             "authority_refs": [item.to_dict() for item in self.authority_refs],
             "denominator_ref": (
                 None if self.denominator_ref is None else self.denominator_ref.to_dict()
@@ -279,9 +291,7 @@ class PolicyUtilityEvidence:
                 if self.effective_sample_size is None
                 else _decimal_text(self.effective_sample_size)
             ),
-            "uncertainty": (
-                None if self.uncertainty is None else _decimal_text(self.uncertainty)
-            ),
+            "uncertainty": None if self.uncertainty is None else _decimal_text(self.uncertainty),
             "source_resolved": False,
             "policy_update_eligible": False,
         }
@@ -295,41 +305,16 @@ class PolicyUtilityEvidence:
     @classmethod
     def from_dict(cls, raw: Mapping[str, Any]) -> "PolicyUtilityEvidence":
         expected = {
-            "schema_version",
-            "environment_id",
-            "episode_id",
-            "action_id",
-            "outcome_id",
-            "reward_id",
-            "transition_id",
-            "policy_id",
-            "model_id",
-            "strategy_id",
-            "config_sha256",
-            "protocol_sha256",
-            "economic_goal_fingerprint",
-            "risk_fingerprint",
-            "bankroll_id",
-            "portfolio_identity",
-            "utility_definition_family",
-            "utility_definition_version",
-            "utility_definition_sha256",
-            "completeness",
-            "truth_class",
-            "decision_kind",
-            "available_at",
-            "currency",
-            "utility_value",
-            "authority_refs",
-            "denominator_ref",
-            "counterfactual_ref",
-            "support_count",
-            "effective_sample_size",
-            "uncertainty",
-            "source_resolved",
-            "policy_update_eligible",
-            "semantic_key",
-            "evidence_id",
+            "schema_version", "environment_id", "episode_id", "action_id", "outcome_id",
+            "reward_id", "transition_id", "policy_id", "model_id", "strategy_id",
+            "config_sha256", "protocol_sha256", "economic_goal_fingerprint",
+            "risk_fingerprint", "bankroll_id", "portfolio_identity",
+            "utility_definition_family", "utility_definition_version",
+            "utility_definition_sha256", "completeness", "truth_class",
+            "decision_kind", "available_at", "currency", "utility_value",
+            "authority_refs", "denominator_ref", "counterfactual_ref",
+            "support_count", "effective_sample_size", "uncertainty",
+            "source_resolved", "policy_update_eligible", "semantic_key", "evidence_id",
         }
         _exact_keys(raw, expected, "PolicyUtilityEvidence")
         if type(raw["schema_version"]) is not int or raw["schema_version"] != SCHEMA_VERSION:
@@ -348,6 +333,7 @@ class PolicyUtilityEvidence:
             decision_kind = DecisionKind(_string(raw["decision_kind"], "decision_kind"))
         except ValueError as exc:
             raise PolicyUtilityError("unsupported policy utility enum value") from exc
+
         evidence = cls(
             environment_id=_string(raw["environment_id"], "environment_id"),
             episode_id=_string(raw["episode_id"], "episode_id"),
@@ -402,7 +388,9 @@ class PolicyUtilityEvidence:
                 None if ess_raw is None else _parse_decimal(ess_raw, "effective_sample_size")
             ),
             uncertainty=(
-                None if uncertainty_raw is None else _parse_decimal(uncertainty_raw, "uncertainty")
+                None
+                if uncertainty_raw is None
+                else _parse_decimal(uncertainty_raw, "uncertainty")
             ),
         )
         if _string(raw["semantic_key"], "semantic_key") != evidence.semantic_key:
@@ -413,22 +401,30 @@ class PolicyUtilityEvidence:
 
 
 class PolicyUtilityStore:
-    """Append-only durable store for schema-v1 utility evidence.
+    """Canonical exactly-once durable store for schema-v1 utility evidence.
 
-    Cross-process writer fencing remains a composition-root responsibility.
-    Every append reloads durable state before mutation and fails closed on
-    semantic drift for the same causal policy-update key.
+    Every writer uses the same cross-process path fence and compare/publish
+    protocol. Publication writes a complete successor image, fsyncs the file,
+    atomically replaces the canonical path, and then fsyncs the parent
+    directory on platforms that support directory descriptors. No receipt is
+    returned until that durability boundary succeeds.
     """
 
     _locks_guard = threading.Lock()
     _locks: dict[str, threading.RLock] = {}
 
-    def __init__(self, path: str | Path) -> None:
+    def __init__(
+        self,
+        path: str | Path,
+        *,
+        fault_hook: Callable[[str], None] | None = None,
+    ) -> None:
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
         key = str(self.path.resolve())
         with self._locks_guard:
             self._lock = self._locks.setdefault(key, threading.RLock())
+        self._fault_hook = fault_hook
         self._by_id: dict[str, PolicyUtilityEvidence] = {}
         self._by_semantic_key: dict[str, PolicyUtilityEvidence] = {}
         with self._lock:
@@ -438,34 +434,29 @@ class PolicyUtilityStore:
         if not isinstance(evidence, PolicyUtilityEvidence):
             raise PolicyUtilityError("append requires PolicyUtilityEvidence")
         with self._lock:
-            self._reload()
-            existing = self._by_semantic_key.get(evidence.semantic_key)
-            if existing is not None:
-                if existing.evidence_id == evidence.evidence_id:
-                    return False
-                raise PolicyUtilityError(
-                    "policy utility semantic drift for existing causal update key"
-                )
-            by_id = self._by_id.get(evidence.evidence_id)
-            if by_id is not None:
-                if by_id.semantic_key == evidence.semantic_key:
-                    return False
-                raise PolicyUtilityError("policy utility evidence_id collision")
+            with durable_path_lock(self.path):
+                self._reload()
+                existing = self._by_semantic_key.get(evidence.semantic_key)
+                if existing is not None:
+                    if existing.evidence_id == evidence.evidence_id:
+                        return False
+                    raise PolicyUtilityError(
+                        "policy utility semantic drift for existing causal update key"
+                    )
+                by_id = self._by_id.get(evidence.evidence_id)
+                if by_id is not None:
+                    if by_id.semantic_key == evidence.semantic_key:
+                        return False
+                    raise PolicyUtilityError("policy utility evidence_id collision")
 
-            encoded = json.dumps(
-                evidence.to_dict(),
-                sort_keys=True,
-                separators=(",", ":"),
-                ensure_ascii=True,
-                allow_nan=False,
-            )
-            with self.path.open("a", encoding="utf-8", newline="\n") as handle:
-                handle.write(encoded + "\n")
-                handle.flush()
-                os.fsync(handle.fileno())
-            self._by_id[evidence.evidence_id] = evidence
-            self._by_semantic_key[evidence.semantic_key] = evidence
-            return True
+                self._publish_successor(evidence)
+                self._reload()
+                persisted = self._by_id.get(evidence.evidence_id)
+                if persisted != evidence:
+                    raise PolicyUtilityError(
+                        "published policy utility evidence failed exact reload verification"
+                    )
+                return True
 
     def get(self, evidence_id: str) -> PolicyUtilityEvidence:
         _sha256(evidence_id, "evidence_id")
@@ -480,6 +471,64 @@ class PolicyUtilityStore:
         with self._lock:
             self._reload()
             return tuple(self._by_id.values())
+
+    def _publish_successor(self, evidence: PolicyUtilityEvidence) -> None:
+        try:
+            previous = self.path.read_bytes() if self.path.exists() else b""
+        except OSError as exc:
+            raise PolicyUtilityError("unable to read policy utility store") from exc
+        if previous and not previous.endswith(b"\n"):
+            raise PolicyUtilityError(
+                "policy utility store lacks canonical trailing record boundary"
+            )
+
+        encoded = (
+            json.dumps(
+                evidence.to_dict(),
+                sort_keys=True,
+                separators=(",", ":"),
+                ensure_ascii=True,
+                allow_nan=False,
+            )
+            + "\n"
+        ).encode("utf-8")
+
+        temporary: Path | None = None
+        try:
+            with tempfile.NamedTemporaryFile(
+                "wb",
+                dir=self.path.parent,
+                prefix=f".{self.path.name}.",
+                suffix=".tmp",
+                delete=False,
+            ) as handle:
+                temporary = Path(handle.name)
+                handle.write(previous)
+                handle.write(encoded)
+                handle.flush()
+                os.fsync(handle.fileno())
+
+            self._fault("before_replace")
+            os.replace(temporary, self.path)
+            temporary = None
+
+            self._fault("after_replace_before_directory_fsync")
+            _fsync_directory(self.path.parent)
+            self._fault("after_directory_fsync")
+        except PolicyUtilityError:
+            raise
+        except OSError as exc:
+            raise PolicyUtilityError("unable to durably publish policy utility evidence") from exc
+        finally:
+            if temporary is not None:
+                try:
+                    temporary.unlink()
+                except FileNotFoundError:
+                    pass
+
+    def _fault(self, stage: str) -> None:
+        if self._fault_hook is not None:
+            self._fault_hook(stage)
 
     def _reload(self) -> None:
         by_id: dict[str, PolicyUtilityEvidence] = {}
@@ -519,6 +568,23 @@ class PolicyUtilityStore:
                 by_semantic[evidence.semantic_key] = evidence
         self._by_id = by_id
         self._by_semantic_key = by_semantic
+
+
+def _fsync_directory(path: Path) -> None:
+    """Persist the rename on platforms where directory fsync is available."""
+
+    if os.name == "nt" or not hasattr(os, "O_DIRECTORY"):
+        return
+    try:
+        directory_fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY)
+    except OSError as exc:
+        raise PolicyUtilityError("unable to open policy utility store directory") from exc
+    try:
+        os.fsync(directory_fd)
+    except OSError as exc:
+        raise PolicyUtilityError("unable to fsync policy utility store directory") from exc
+    finally:
+        os.close(directory_fd)
 
 
 def _digest(raw: Mapping[str, Any]) -> str:
@@ -627,4 +693,6 @@ def _exact_keys(raw: Mapping[str, Any], expected: set[str], label: str) -> None:
     if set(raw) != expected:
         missing = sorted(expected - set(raw))
         extra = sorted(set(raw) - expected)
-        raise PolicyUtilityError(f"{label} keys mismatch; missing={missing}; extra={extra}")
+        raise PolicyUtilityError(
+            f"{label} keys mismatch; missing={missing}; extra={extra}"
+        )

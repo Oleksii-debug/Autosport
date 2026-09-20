@@ -39,7 +39,6 @@ def issue_betfair_commission_cost_evidence(
     receipt_id: str,
     record_sha256: str,
     as_of: datetime,
-    supersedes: CostEvidence | None = None,
 ) -> CostEvidence:
     """Issue source-owned incurred commission evidence for an exact campaign slice.
 
@@ -56,12 +55,6 @@ def issue_betfair_commission_cost_evidence(
     whether commission is subtractive or already embedded in gross P&L. This path
     advances authoritative incurred-source truth without claiming complete net
     economics.
-
-    A corrected provider receipt may carry one append-only campaign-cost correction
-    edge. The caller must supply the exact predecessor ``CostEvidence`` and the
-    source receipt must name that predecessor receipt identity. This function does
-    not make an arbitrary predecessor authoritative: durable campaign economics must
-    still prove that predecessor is the exact active cost in the prior version.
     """
 
     if type(source) is not BetfairMarketCommissionAuthority:
@@ -141,14 +134,12 @@ def issue_betfair_commission_cost_evidence(
         raise BetfairCommissionCostEvidenceError(
             "commission market is outside campaign provider scope"
         )
+    if receipt.supersedes_receipt_id is not None:
+        raise BetfairCommissionCostEvidenceError(
+            "corrected commission receipts require append-only campaign cost correction lineage"
+        )
 
     memberships = _scoped_memberships(projection.membership_refs, provider_scope)
-    supersedes_ids = _correction_supersedes(
-        receipt=receipt,
-        predecessor=supersedes,
-        campaign_sha256=projection.campaign_sha256,
-        memberships=memberships,
-    )
     available_at = max(receipt.available_at, scope_available, account_observed)
     observed_at = max(receipt.observed_at, scope_observed, account_observed)
     if available_at > as_of:
@@ -180,7 +171,6 @@ def issue_betfair_commission_cost_evidence(
         available_at=available_at,
         incurred_at=receipt.settled_at,
         shared_source=True,
-        supersedes_cost_evidence_ids=supersedes_ids,
     )
 
 
@@ -191,7 +181,6 @@ def verify_betfair_commission_cost_evidence(
     provider_scope: _scope.CampaignProviderScopeProjection,
     evidence: CostEvidence,
     as_of: datetime,
-    supersedes: CostEvidence | None = None,
 ) -> bool:
     """Re-resolve both authorities and require byte-semantic CostEvidence equality."""
 
@@ -205,49 +194,10 @@ def verify_betfair_commission_cost_evidence(
             receipt_id=evidence.source.evidence_id,
             record_sha256=evidence.source.sha256,
             as_of=as_of,
-            supersedes=supersedes,
         )
     except (BetfairCommissionCostEvidenceError, ValueError, TypeError):
         return False
     return evidence == expected
-
-
-def _correction_supersedes(
-    *,
-    receipt: BetfairMarketCommissionReceipt,
-    predecessor: CostEvidence | None,
-    campaign_sha256: str,
-    memberships: tuple[CanonicalMembershipRef, ...],
-) -> tuple[str, ...]:
-    if receipt.supersedes_receipt_id is None:
-        if predecessor is not None:
-            raise BetfairCommissionCostEvidenceError(
-                "uncorrected commission receipt cannot supersede campaign cost evidence"
-            )
-        return ()
-    if type(predecessor) is not CostEvidence:
-        raise BetfairCommissionCostEvidenceError(
-            "corrected commission receipts require append-only campaign cost correction lineage"
-        )
-    if (
-        predecessor.cost_class is not CostClass.EXECUTION_FEES_COMMISSION_TAX
-        or predecessor.source.family != BETFAIR_COMMISSION_SOURCE_FAMILY
-        or predecessor.source.evidence_id != receipt.supersedes_receipt_id
-        or predecessor.source.sha256 != receipt.supersedes_receipt_id
-        or predecessor.campaign_sha256 != campaign_sha256
-        or predecessor.memberships != memberships
-        or predecessor.basis is not CostBasis.OBSERVED_INCURRED
-        or predecessor.treatment is not CostTreatment.INFORMATIONAL
-        or predecessor.truth not in {CostTruth.KNOWN_ZERO, CostTruth.KNOWN_AMOUNT}
-        or predecessor.unit is not CostUnit.MONEY
-        or predecessor.currency != receipt.currency
-        or not predecessor.shared_source
-        or predecessor.allocation_source is not None
-    ):
-        raise BetfairCommissionCostEvidenceError(
-            "corrected commission receipt does not exactly supersede active Betfair campaign cost evidence"
-        )
-    return (predecessor.cost_evidence_id,)
 
 
 def _stable_client_account_identity(

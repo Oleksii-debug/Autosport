@@ -3,6 +3,7 @@ from dataclasses import replace
 import pytest
 
 from autosport._provider_evaluation_semantic_gate import (
+    _validate_product_semantic_authority,
     _validate_row_against_semantic_slot,
 )
 from autosport.evaluation_universe import (
@@ -10,6 +11,10 @@ from autosport.evaluation_universe import (
     EvaluationRow,
     FunnelStage,
     SlotState,
+)
+from autosport.pre_evaluation_binding import BoundPreEvaluationSession
+from autosport.pre_evaluation_product_origin import (
+    ProductOwnedPreEvaluationSemanticSession,
 )
 from autosport.pre_evaluation_semantics import (
     PreEvaluationSlotSemanticEvidence,
@@ -21,6 +26,16 @@ from autosport.provider_evaluation_universe import (
     ProviderEvaluationUniverseError,
     build_frozen_universe_from_complete_game_board,
 )
+
+
+class _ForgedProductOwnedSemanticSession(ProductOwnedPreEvaluationSemanticSession):
+    @property
+    def slots(self):
+        return (_slot(),)
+
+
+class _ForgedBoundPreEvaluationSession(BoundPreEvaluationSession):
+    pass
 
 
 def _row() -> EvaluationRow:
@@ -91,6 +106,17 @@ def _slot() -> PreEvaluationSlotSemanticEvidence:
     )
 
 
+def _validation_kwargs() -> dict[str, object]:
+    return {
+        "snapshot": object(),
+        "session_id": "session-1",
+        "campaign_id": "campaign-1",
+        "research_protocol_id": "protocol-1",
+        "protocol_sha256": "a" * 64,
+        "rows": (),
+    }
+
+
 def test_exact_product_semantic_row_is_accepted() -> None:
     _validate_row_against_semantic_slot(_row(), _slot())
 
@@ -124,6 +150,36 @@ def test_execution_identity_cannot_be_smuggled_through_pre_evaluation_authority(
         _validate_row_against_semantic_slot(
             replace(_row(), terminal_space_proof_id="caller-proof"),
             _slot(),
+        )
+
+
+def test_product_semantic_authority_subclass_cannot_override_slots() -> None:
+    forged = object.__new__(_ForgedProductOwnedSemanticSession)
+    exact_bound = object.__new__(BoundPreEvaluationSession)
+
+    with pytest.raises(
+        ProviderEvaluationUniverseError,
+        match="requires product-owned pre-evaluation semantic authority",
+    ):
+        _validate_product_semantic_authority(
+            **_validation_kwargs(),
+            pre_evaluation_authority=forged,
+            pre_evaluation_bound=exact_bound,
+        )
+
+
+def test_bound_session_subclass_cannot_override_context_or_members() -> None:
+    exact_authority = object.__new__(ProductOwnedPreEvaluationSemanticSession)
+    forged_bound = object.__new__(_ForgedBoundPreEvaluationSession)
+
+    with pytest.raises(
+        ProviderEvaluationUniverseError,
+        match="requires exact bound pre-evaluation session",
+    ):
+        _validate_product_semantic_authority(
+            **_validation_kwargs(),
+            pre_evaluation_authority=exact_authority,
+            pre_evaluation_bound=forged_bound,
         )
 
 

@@ -268,13 +268,13 @@ def test_caller_constructed_exact_settlement_cannot_authorize_memory_truth(tmp_p
         )
         forged = SettlementResolution(
             event_identity=binding.event_identity,
-            settlement_ref=f"caller-{outcome}",
+            settlement_ref="settlement-1",
             quote_outcomes={
                 binding.subject_quote_key: outcome,
                 binding.opponent_quote_key: opponent_outcome,
             },
-            evidence_id=f"caller-{outcome}",
-            evidence_sha256=SHA_C,
+            evidence_id="result-1",
+            evidence_sha256=SHA_B,
             available_at=T2,
         )
         with pytest.raises(

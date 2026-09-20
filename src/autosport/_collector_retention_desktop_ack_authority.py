@@ -4,23 +4,50 @@ from __future__ import annotations
 
 Retention physically deletes acknowledged historical collector rows. Exact concrete
 ``DesktopDeltaCheckpointStore`` type checks are necessary but not sufficient because
-ordinary Python instance attributes can shadow its non-data-descriptor methods. A
-caller holding a real checkpoint instance must therefore not be able to replace
-``has_ack`` / ``application_receipt`` and mint deletion authority.
+ordinary Python instance attributes can shadow its non-data-descriptor methods and
+Python classes themselves are mutable at runtime. A caller holding acknowledgement
+state must therefore not be able to replace ``has_ack`` / ``application_receipt`` at
+either the instance or class level and mint deletion authority.
 
 This package-installed guard keeps the existing retention implementation and durable
-store as the sole authorities. It rejects instance-shadowed acknowledgement methods
-at every retention read boundary and routes the actual reads through the trusted exact
-class implementations, so a later instance mutation cannot affect authority-bearing
-dispatch between validation and use.
+store as the sole authorities. It captures the pristine exact class implementations
+once in the defining legacy module, rejects later class/instance rebinding, and routes
+authority-bearing reads through those captured callables. The anchor lives outside
+this guard module so reloading this installer or ``collector_retention`` cannot
+silently recapture a forged implementation as pristine.
 """
 
+from . import causal_collector_legacy as _legacy
 from . import collector_retention as _retention
-from .causal_collector_legacy import DesktopDeltaCheckpointStore
 
 
+DesktopDeltaCheckpointStore = _legacy.DesktopDeltaCheckpointStore
 _ORIGINAL_BUILD_PLAN = _retention.CollectorRetentionManager._build_plan
 _AUTHORITY_METHODS = ("has_ack", "application_receipt")
+_PRISTINE_ANCHOR_NAME = "_collector_retention_pristine_desktop_ack_v1"
+
+
+def _load_pristine_authority_methods():
+    existing = getattr(_legacy, _PRISTINE_ANCHOR_NAME, None)
+    if existing is None:
+        existing = (
+            DesktopDeltaCheckpointStore,
+            DesktopDeltaCheckpointStore.has_ack,
+            DesktopDeltaCheckpointStore.application_receipt,
+        )
+        setattr(_legacy, _PRISTINE_ANCHOR_NAME, existing)
+    if (
+        not isinstance(existing, tuple)
+        or len(existing) != 3
+        or existing[0] is not DesktopDeltaCheckpointStore
+        or not callable(existing[1])
+        or not callable(existing[2])
+    ):
+        raise RuntimeError("desktop checkpoint acknowledgement authority anchor is invalid")
+    return existing[1], existing[2]
+
+
+_PRISTINE_HAS_ACK, _PRISTINE_APPLICATION_RECEIPT = _load_pristine_authority_methods()
 
 
 def _require_desktop_checkpoint(
@@ -29,6 +56,14 @@ def _require_desktop_checkpoint(
     if type(checkpoint) is not DesktopDeltaCheckpointStore:
         raise TypeError(
             "desktop_checkpoint must be the canonical DesktopDeltaCheckpointStore"
+        )
+    if (
+        DesktopDeltaCheckpointStore.has_ack is not _PRISTINE_HAS_ACK
+        or DesktopDeltaCheckpointStore.application_receipt
+        is not _PRISTINE_APPLICATION_RECEIPT
+    ):
+        raise TypeError(
+            "desktop checkpoint acknowledgement authority methods cannot be class-rebound"
         )
     namespace = getattr(checkpoint, "__dict__", None)
     if isinstance(namespace, dict) and any(
@@ -41,7 +76,7 @@ def _require_desktop_checkpoint(
 
 
 class _TrustedDesktopCheckpointView:
-    """Pin acknowledgement dispatch to exact canonical class implementations."""
+    """Pin acknowledgement dispatch to captured pristine class implementations."""
 
     __slots__ = ("_checkpoint",)
 
@@ -49,10 +84,12 @@ class _TrustedDesktopCheckpointView:
         self._checkpoint = _require_desktop_checkpoint(checkpoint)
 
     def has_ack(self, delta_id: str) -> bool:
-        return DesktopDeltaCheckpointStore.has_ack(self._checkpoint, delta_id)
+        _require_desktop_checkpoint(self._checkpoint)
+        return _PRISTINE_HAS_ACK(self._checkpoint, delta_id)
 
     def application_receipt(self, delta):
-        return DesktopDeltaCheckpointStore.application_receipt(self._checkpoint, delta)
+        _require_desktop_checkpoint(self._checkpoint)
+        return _PRISTINE_APPLICATION_RECEIPT(self._checkpoint, delta)
 
 
 def _build_plan(
@@ -75,8 +112,9 @@ def _build_plan(
 
 
 # The package imports this guard before public consumers run. Patch both entry
-# points: preview/compact reject a shadow immediately, while _build_plan also
-# revalidates and pins dispatch in case an instance is mutated after the outer check.
+# points: preview/compact reject a substitution immediately, while _build_plan also
+# revalidates and pins dispatch in case authority methods are mutated after the
+# outer check.
 _retention.CollectorRetentionManager._require_desktop_checkpoint = staticmethod(
     _require_desktop_checkpoint
 )

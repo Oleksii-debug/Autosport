@@ -535,6 +535,8 @@ class CanonicalOutcomeDerivedVOCScoreAuthorityTests(unittest.TestCase):
         *,
         protocol_id: str | None = None,
         cohort_id: str = "voc-cohort-derived",
+        record_shadows: bool = True,
+        authority_recorded_at: str | None = None,
     ) -> ModelComputeRouterStore:
         router = ModelComputeRouterStore(
             self.root / f"router-precommit-{paired.evaluation_id}-{protocol_id or paired.research_protocol_id}-{cohort_id}.json"
@@ -584,13 +586,19 @@ class CanonicalOutcomeDerivedVOCScoreAuthorityTests(unittest.TestCase):
             policy_version=1,
             cloud_enabled=False,
         )
+        authority_times = [
+            authority_recorded_at or paired.decision_at,
+        ]
+        if record_shadows:
+            authority_times.extend(
+                [
+                    paired.baseline_completed_at,
+                    paired.challenger_completed_at,
+                ]
+            )
         with patch(
             "autosport.model_compute_router._authority_now",
-            side_effect=[
-                paired.decision_at,
-                paired.baseline_completed_at,
-                paired.challenger_completed_at,
-            ],
+            side_effect=authority_times,
         ):
             router.route(
                 request,
@@ -609,28 +617,29 @@ class CanonicalOutcomeDerivedVOCScoreAuthorityTests(unittest.TestCase):
                     "league_id": paired.league_id,
                 },
             )
-            router.record_voc_shadow_execution(
-                request_id=request_id,
-                role="baseline",
-                output_sha256=paired.baseline_output_sha256,
-                action=paired.baseline_action,
-                abstained=paired.baseline_abstained,
-                completed_at=paired.baseline_completed_at,
-                available_at=paired.baseline_completed_at,
-                actual_cost=Decimal("0.10"),
-                evidence_sha256=paired.baseline_output_sha256,
-            )
-            router.record_voc_shadow_execution(
-                request_id=request_id,
-                role="challenger",
-                output_sha256=paired.challenger_output_sha256,
-                action=paired.challenger_action,
-                abstained=paired.challenger_abstained,
-                completed_at=paired.challenger_completed_at,
-                available_at=paired.challenger_completed_at,
-                actual_cost=Decimal("0.20"),
-                evidence_sha256=paired.challenger_output_sha256,
-            )
+            if record_shadows:
+                router.record_voc_shadow_execution(
+                    request_id=request_id,
+                    role="baseline",
+                    output_sha256=paired.baseline_output_sha256,
+                    action=paired.baseline_action,
+                    abstained=paired.baseline_abstained,
+                    completed_at=paired.baseline_completed_at,
+                    available_at=paired.baseline_completed_at,
+                    actual_cost=Decimal("0.10"),
+                    evidence_sha256=paired.baseline_output_sha256,
+                )
+                router.record_voc_shadow_execution(
+                    request_id=request_id,
+                    role="challenger",
+                    output_sha256=paired.challenger_output_sha256,
+                    action=paired.challenger_action,
+                    abstained=paired.challenger_abstained,
+                    completed_at=paired.challenger_completed_at,
+                    available_at=paired.challenger_completed_at,
+                    actual_cost=Decimal("0.20"),
+                    evidence_sha256=paired.challenger_output_sha256,
+                )
         return router
 
     def _authority(
@@ -874,6 +883,36 @@ class CanonicalOutcomeDerivedVOCScoreAuthorityTests(unittest.TestCase):
         assert score is not None
         self.assertEqual(score.paired_sample_count, 2)
         self.assertEqual(score.effective_sample_size, 2)
+
+    def test_positive_voc_rejects_physically_post_outcome_precompute(self):
+        paired = self._evaluation()
+        self.registry.append(paired)
+        router = self._precommit_router(
+            paired,
+            record_shadows=False,
+            authority_recorded_at=T_AS_OF,
+        )
+        with self.assertRaisesRegex(
+            VOCEvaluationError,
+            "precompute authority was not physically recorded before outcome reveal",
+        ):
+            self._authority(compute_execution_store=router).resolve(
+                paired.evaluation_id,
+                as_of=T_AS_OF,
+            )
+
+    def test_positive_voc_requires_exact_router_shadow_execution(self):
+        paired = self._evaluation()
+        self.registry.append(paired)
+        router = self._precommit_router(paired, record_shadows=False)
+        with self.assertRaisesRegex(
+            VOCEvaluationError,
+            "positive VOC score lacks canonical router shadow execution",
+        ):
+            self._authority(compute_execution_store=router).resolve(
+                paired.evaluation_id,
+                as_of=T_AS_OF,
+            )
 
     def test_cohort_rejects_omitted_eligible_episode(self):
         first = self._evaluation(register_cohort=False)

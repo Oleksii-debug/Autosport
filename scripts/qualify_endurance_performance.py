@@ -74,7 +74,7 @@ def main(argv: list[str] | None = None) -> int:
             machine_profile=args.machine_profile,
         )
         _write_json_atomic(args.output, qualification.to_dict())
-    except PerformanceQualificationError as exc:
+    except (PerformanceQualificationError, OSError) as exc:
         print(f"performance_qualification=INVALID error={exc}")
         return 3
 

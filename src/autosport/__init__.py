@@ -54,3 +54,12 @@ from . import _whole_product_title_guard as _whole_product_title_guard  # noqa: 
 from . import _dataset_snapshot_lineage_publication as _dataset_snapshot_lineage_publication  # noqa: F401,E402
 from . import _dataset_snapshot_lineage_publication_provenance as _dataset_snapshot_lineage_publication_provenance  # noqa: F401,E402
 from . import _dataset_snapshot_lineage_publication_trust_root as _dataset_snapshot_lineage_publication_trust_root  # noqa: F401,E402
+
+# Campaign/provider applicability needs a stable authenticated Betfair account
+# discriminator, but application/session credentials must never become evidence.
+from . import _campaign_provider_scope_devapp_identity as _campaign_provider_scope_devapp_identity  # noqa: F401,E402
+
+# A later authenticated provider re-read validates the original T0 applicability
+# scope; it must not mint a replacement projection merely because T1 evidence
+# instance ids or timestamps changed after restart.
+from . import _campaign_provider_scope_stable_projection as _campaign_provider_scope_stable_projection  # noqa: F401,E402

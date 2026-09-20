@@ -160,6 +160,46 @@ class ExperientialLearningFactoryBridgeTests(unittest.TestCase):
                         rule=PromotionRule("mse", 0.0),
                     )
 
+    def test_retest_rejects_raw_reward_challenger_without_utility_authority(self) -> None:
+        predecessor, successor, evidence = self._lineage()
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            registry = ScientificRegistry.initialize_pristine(root / "scientific_registry.json")
+            runner = ExperimentRunner(registry, FactoryArtifactStore(root / "artifacts"))
+            with (
+                patch.object(
+                    ScientificRegistry,
+                    "get",
+                    autospec=True,
+                    return_value=self._protocol_entry(successor),
+                ),
+                patch.object(
+                    ExperimentRunner,
+                    "run_policy_candidate",
+                    autospec=True,
+                ) as delegated,
+            ):
+                with self.assertRaisesRegex(
+                    ValueError, "requires utility-bound update provenance"
+                ):
+                    run_policy_retest(
+                        runner,
+                        predecessor_policy=predecessor,
+                        challenger_policy=successor,
+                        update_evidence=evidence,
+                        spec=self._spec(),
+                        points=(),
+                        rule=PromotionRule("mse", 0.0),
+                        evaluation_cases=(),
+                    )
+                self.assertFalse(
+                    runner.artifact_store.exists(
+                        "transparent-bandit-policy",
+                        successor.policy_id,
+                    )
+                )
+                delegated.assert_not_called()
+
     def test_retest_rejects_policy_successor_rebinding_before_factory_call(self) -> None:
         predecessor, successor, evidence = self._lineage()
         rebound = BanditPolicyState.initial(

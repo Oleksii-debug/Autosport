@@ -12,19 +12,23 @@ from autosport.provider_observation_authority import (
     CompleteGameBoardSnapshot,
     ProviderObservationUnsupportedError,
     assert_complete_game_board_authoritative,
+    capture_parlay_complete_game_board,
 )
 
 
 CAPTURED_AT = "2026-09-20T08:00:00Z"
 
 
-def _snapshot(index: int) -> CompleteGameBoardSnapshot:
-    request = CompleteGameBoardRequest(
+def _request() -> CompleteGameBoardRequest:
+    return CompleteGameBoardRequest(
         sport_key="table_tennis",
         bookmakers=("bovada",),
         max_age_s=600,
     )
-    frame = {
+
+
+def _frame(index: int) -> dict[str, object]:
+    return {
         "type": "initial_state",
         "sport_key": "table_tennis",
         "snapshot_scope": "current_game_board",
@@ -47,15 +51,55 @@ def _snapshot(index: int) -> CompleteGameBoardSnapshot:
             }
         ],
     }
+
+
+def _snapshot(index: int) -> CompleteGameBoardSnapshot:
     return CompleteGameBoardSnapshot(
-        request=request,
+        request=_request(),
         captured_at=CAPTURED_AT,
-        frame_json=json.dumps(frame),
+        frame_json=json.dumps(_frame(index)),
     )
 
 
-def test_authority_registry_is_identity_exact_without_retaining_historical_frames() -> None:
-    live = authority_module._remember(_snapshot(0))
+class _FakeSseResponse:
+    def __init__(self, frame: dict[str, object]) -> None:
+        self.status = 200
+        self.headers = {"Content-Type": "text/event-stream; charset=utf-8"}
+        payload = json.dumps(frame, separators=(",", ":"), allow_nan=False).encode("utf-8")
+        self._lines = [b"event: initial_state\n", b"data: " + payload + b"\n", b"\n"]
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, traceback):
+        del exc_type, exc, traceback
+        return False
+
+    def __iter__(self):
+        return iter(self._lines)
+
+
+def test_authority_registry_is_identity_exact_without_retaining_historical_frames(
+    monkeypatch,
+) -> None:
+    next_index = {"value": 0}
+
+    def fake_urlopen(request, timeout):
+        del request, timeout
+        return _FakeSseResponse(_frame(next_index["value"]))
+
+    monkeypatch.setattr(authority_module, "urlopen", fake_urlopen)
+    monkeypatch.setattr(authority_module, "_default_clock", lambda: CAPTURED_AT)
+
+    def issue(index: int) -> CompleteGameBoardSnapshot:
+        next_index["value"] = index
+        return capture_parlay_complete_game_board(
+            api_key="secret-value",
+            request=_request(),
+            timeout_seconds=3.0,
+        )
+
+    live = issue(0)
     live_id = id(live)
     live_ref = weakref.ref(live)
     assert_complete_game_board_authoritative(live)
@@ -68,10 +112,18 @@ def test_authority_registry_is_identity_exact_without_retaining_historical_frame
     with pytest.raises(ProviderObservationUnsupportedError):
         assert_complete_game_board_authoritative(lookalike)
 
+    # The old module-global issuer was itself a forgery primitive. It is now a
+    # fail-closed compatibility tombstone rather than a capability minting API.
+    with pytest.raises(
+        ProviderObservationUnsupportedError,
+        match="issuance is not a consumer API",
+    ):
+        authority_module._remember(_snapshot(999))
+
     transient_refs: list[weakref.ReferenceType[CompleteGameBoardSnapshot]] = []
     transient_ids: list[int] = []
     for index in range(1, 33):
-        transient = authority_module._remember(_snapshot(index))
+        transient = issue(index)
         transient_refs.append(weakref.ref(transient))
         transient_ids.append(id(transient))
         assert_complete_game_board_authoritative(transient)

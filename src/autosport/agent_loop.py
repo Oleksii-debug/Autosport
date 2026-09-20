@@ -49,6 +49,7 @@ AGENT_LOOP_SCHEMA: Final = "autosport.agent_loop"
 AGENT_LOOP_SCHEMA_VERSION: Final = 3
 AGENT_LOOP_LEGACY_SCHEMA_VERSION: Final = 2
 _HEX: Final = frozenset("0123456789abcdef")
+ABSTAIN_ACTION_TYPE: Final = "ABSTAIN"
 
 
 class AgentLoopError(RuntimeError):
@@ -511,6 +512,45 @@ class AgentLoopRuntime:
         }
 
     @staticmethod
+    def _is_abstention_decision(record: dict[str, Any]) -> bool:
+        """Return whether one durable decision is the explicit no-effect abstention."""
+
+        return (
+            record.get("action_type") == ABSTAIN_ACTION_TYPE
+            and record.get("may_execute") is False
+            and record.get("external_effect_state") == ExternalEffectState.NONE.value
+        )
+
+    @classmethod
+    def _current_is_abstention(cls, state: dict[str, Any]) -> bool:
+        current = state["current"]
+        action_id = current["action_id"]
+        if action_id is None or current["transition_id"] is not None:
+            return False
+        if any(
+            current[key] is not None
+            for key in (
+                "outcome_id",
+                "reward_id",
+                "attribution_id",
+                "postmortem_id",
+                "research_question_id",
+                "research_trigger_id",
+                "research_run_id",
+            )
+        ):
+            return False
+        decision = next(
+            (
+                item
+                for item in state["decisions"]
+                if item["action_id"] == action_id
+            ),
+            None,
+        )
+        return decision is not None and cls._is_abstention_decision(decision)
+
+    @staticmethod
     def _checkpoint_record(
         checkpoint: EnvironmentCheckpoint,
         *,
@@ -810,6 +850,13 @@ class AgentLoopRuntime:
                     record.get("external_effect_state")
                 ),
             )
+            if record["action_type"] == ABSTAIN_ACTION_TYPE and not (
+                record["may_execute"] is False
+                and record["external_effect_state"] == ExternalEffectState.NONE.value
+            ):
+                raise AgentLoopError(
+                    "ABSTAIN decision must be durable no-effect evidence"
+                )
             if record["action_id"] in decisions_by_action or record[
                 "observation_id"
             ] in observations:
@@ -861,6 +908,10 @@ class AgentLoopRuntime:
             decision = decisions_by_action.get(record["action_id"])
             if decision is None:
                 raise AgentLoopError("resolution does not bind a durable decision")
+            if decision["action_type"] == ABSTAIN_ACTION_TYPE:
+                raise AgentLoopError(
+                    "ABSTAIN decision cannot bind outcome/reward resolution evidence"
+                )
             if _instant(record["reward_available_at"], "reward_available_at") < _instant(
                 decision["decided_at"], "decision decided_at"
             ):
@@ -1502,8 +1553,10 @@ class AgentLoopRuntime:
             if current["postmortem_id"] is None or current["research_run_id"] is not None:
                 raise AgentLoopError("RESEARCH_HANDOFF current evidence mismatch")
         elif effective_phase is AgentLoopPhase.CHECKPOINT:
-            if current["postmortem_id"] is None:
-                raise AgentLoopError("CHECKPOINT current evidence lacks reflection")
+            if current["postmortem_id"] is None and not AgentLoopRuntime._current_is_abstention(state):
+                raise AgentLoopError(
+                    "CHECKPOINT current evidence lacks reflection or durable abstention"
+                )
 
     def snapshot(self) -> AgentLoopSnapshot:
         state = self._read()
@@ -1629,6 +1682,7 @@ class AgentLoopRuntime:
                 phase is AgentLoopPhase.CHECKPOINT
                 and state["current"]["transition_id"]
                 != state["checkpointed_transition_id"]
+                and not self._current_is_abstention(state)
             ):
                 raise StaleAgentLoopStateError(
                     "new observation requires durable checkpoint for current transition"
@@ -1753,6 +1807,10 @@ class AgentLoopRuntime:
             raise TypeError("action must be Action")
         if not isinstance(effect_state, ExternalEffectState):
             raise TypeError("effect_state must be ExternalEffectState")
+        if action.action_type == ABSTAIN_ACTION_TYPE:
+            raise AgentLoopError(
+                "ABSTAIN must use commit_abstention so it cannot acquire outcome authority"
+            )
         existing_state = self._read()
         self._require_action_authority(
             action, episode, observation, existing_state
@@ -1854,6 +1912,133 @@ class AgentLoopRuntime:
                 newly_committed=True,
                 may_execute=may_execute,
                 external_effect_state=effect_state,
+            )
+
+        self._mutate(at, apply)
+        return receipt_holder["value"]
+
+    def commit_abstention(
+        self,
+        action: Action,
+        *,
+        episode: Episode,
+        observation: Observation,
+        at: str,
+    ) -> ActionCommitReceipt:
+        """Commit one explicit no-effect abstention without inventing outcome/reward truth.
+
+        An abstention is a durable decision, not a material environment transition.
+        It therefore cannot receive Outcome/RewardEvidence and leaves the canonical
+        environment checkpoint unchanged.  The decision record itself is the
+        restart-safe negative-action evidence and is never externally executable.
+        """
+
+        if not isinstance(action, Action):
+            raise TypeError("action must be Action")
+        if action.action_type != ABSTAIN_ACTION_TYPE:
+            raise AgentLoopError("commit_abstention requires action_type ABSTAIN")
+        existing_state = self._read()
+        self._require_action_authority(action, episode, observation, existing_state)
+        existing = next(
+            (
+                item
+                for item in existing_state["decisions"]
+                if item["observation_id"] == action.observation_id
+            ),
+            None,
+        )
+        if existing is not None:
+            if existing["action_id"] != action.action_id:
+                raise ConflictingAgentLoopEvidenceError(
+                    "observation is already bound to another durable action"
+                )
+            if not self._is_abstention_decision(existing):
+                raise ConflictingAgentLoopEvidenceError(
+                    "durable action cannot be relabelled as abstention"
+                )
+            phase = AgentLoopPhase(existing_state["phase"])
+            current = existing_state["current"]
+            if phase is AgentLoopPhase.CHECKPOINT and current["action_id"] == action.action_id:
+                return ActionCommitReceipt(
+                    action_id=action.action_id,
+                    newly_committed=False,
+                    may_execute=False,
+                    external_effect_state=ExternalEffectState.NONE,
+                )
+            if (
+                phase is AgentLoopPhase.ACT_OR_ABSTAIN
+                and current["observation_id"] == action.observation_id
+                and current["action_id"] is None
+            ):
+                def replay(state: dict[str, Any], _now: str) -> None:
+                    if AgentLoopPhase(state["phase"]) is not AgentLoopPhase.ACT_OR_ABSTAIN:
+                        raise StaleAgentLoopStateError(
+                            "abstention replay requires ACT_OR_ABSTAIN"
+                        )
+                    if state["current"]["observation_id"] != action.observation_id:
+                        raise AgentLoopError(
+                            "abstention replay does not bind current observation"
+                        )
+                    state["current"]["action_id"] = action.action_id
+                    state["external_effect_state"] = ExternalEffectState.NONE.value
+                    state["phase"] = AgentLoopPhase.CHECKPOINT.value
+
+                self._mutate(at, replay)
+                return ActionCommitReceipt(
+                    action_id=action.action_id,
+                    newly_committed=False,
+                    may_execute=False,
+                    external_effect_state=ExternalEffectState.NONE,
+                )
+            raise StaleAgentLoopStateError(
+                "durable abstention retry is not at a replayable phase"
+            )
+
+        receipt_holder: dict[str, ActionCommitReceipt] = {}
+
+        def apply(state: dict[str, Any], now: str) -> None:
+            if AgentLoopPhase(state["phase"]) is not AgentLoopPhase.ACT_OR_ABSTAIN:
+                raise StaleAgentLoopStateError(
+                    "abstention commit requires ACT_OR_ABSTAIN"
+                )
+            self._require_action_authority(action, episode, observation, state)
+            current = state["current"]
+            if _instant(action.decided_at, "action.decided_at") > _instant(now, "at"):
+                raise AgentLoopError("abstention decision is from the future")
+            canonical_parameters = [[key, value] for key, value in action.parameters]
+            record: dict[str, object] = {
+                "observation_id": action.observation_id,
+                "action_id": action.action_id,
+                "action_type": action.action_type,
+                "decided_at": _timestamp_identity(action.decided_at, "action.decided_at"),
+                "parameters_sha256": _digest(canonical_parameters),
+                "external_effect_state": ExternalEffectState.NONE.value,
+                "may_execute": False,
+            }
+            if state["schema_version"] == AGENT_LOOP_SCHEMA_VERSION:
+                record["parameters"] = canonical_parameters
+                record["decision_intent_id"] = _digest(
+                    {
+                        "environment_id": state["identity"]["environment_id"],
+                        "episode_id": state["identity"]["episode_id"],
+                        "observation_id": action.observation_id,
+                    }
+                )
+                record["decision_payload_id"] = _digest(
+                    {
+                        "action_type": action.action_type,
+                        "parameters": canonical_parameters,
+                    }
+                )
+            state["decisions"].append(record)
+            current["action_id"] = action.action_id
+            state["external_effect_state"] = ExternalEffectState.NONE.value
+            state["phase"] = AgentLoopPhase.CHECKPOINT.value
+            receipt_holder["value"] = ActionCommitReceipt(
+                action_id=action.action_id,
+                newly_committed=True,
+                may_execute=False,
+                external_effect_state=ExternalEffectState.NONE,
             )
 
         self._mutate(at, apply)

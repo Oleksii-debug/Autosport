@@ -43,6 +43,10 @@ class _Resolver:
     def resolve_enumeration(self, enumeration_id: str) -> ObservationEnumerationWitness:
         return self._witnesses[enumeration_id]
 
+    def terminal_enumeration_id(self, **identity: str) -> str:
+        del identity
+        return max(self._witnesses.values(), key=lambda item: item.cycle_index).enumeration_id
+
 
 def _witness(index: int, row: EvaluationRow) -> ObservationEnumerationWitness:
     return ObservationEnumerationWitness(
@@ -56,8 +60,8 @@ def _witness(index: int, row: EvaluationRow) -> ObservationEnumerationWitness:
         cycle_index=index,
         source_range_id=f"range-{index}",
         stream_epoch="epoch-1",
-        start_cursor=f"cursor-{index}-start",
-        end_cursor=f"cursor-{index}-end",
+        start_cursor=f"cursor-{index - 1}",
+        end_cursor=f"cursor-{index}",
         acquisition_sha256=H3,
         row_keys=(row.row_key,),
         exhaustive=True,

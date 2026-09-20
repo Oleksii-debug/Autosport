@@ -49,6 +49,11 @@ from . import _dataset_snapshot_lineage_publication_trust_root as _dataset_snaps
 # discriminator, but application/session credentials must never become evidence.
 from . import _campaign_provider_scope_devapp_identity as _campaign_provider_scope_devapp_identity  # noqa: F401,E402
 
+# A market-level commission receipt must stay tied to the exact canonical client
+# origin that acquired/reacquired it. This prevents later source._client mutation
+# from relabelling an already-issued receipt as another Betfair account.
+from . import _betfair_market_commission_origin_binding as _betfair_market_commission_origin_binding  # noqa: F401,E402
+
 # A later authenticated provider re-read validates the original T0 applicability
 # scope; it must not mint a replacement projection merely because T1 evidence
 # instance ids or timestamps changed after restart.

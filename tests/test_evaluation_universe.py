@@ -63,8 +63,8 @@ def _witness(
         row_keys=row_keys or (item.row_key,),
         exhaustive=exhaustive,
         gap_free=gap_free,
-        committed_at=f"2026-09-20T00:04:{index:02d}Z",
-        evaluation_not_before=f"2026-09-20T00:04:{index:02d}Z",
+        committed_at="2026-09-20T00:00:02.500000Z",
+        evaluation_not_before="2026-09-20T00:00:03Z",
         outcome_reveal_not_before=item.outcome_reveal_not_before,
     )
 
@@ -267,9 +267,36 @@ def test_intake_membership_committed_after_freeze_fails_closed(tmp_path):
         )
 
 
-def test_store_round_trip_and_append_only_restart(tmp_path):
+def test_evaluation_cannot_start_before_complete_membership_is_immutable(tmp_path):
     item = row("candidate")
-    intake_ledger = intake(tmp_path, (item,))
+    witness = replace(
+        _witness(1, item),
+        evaluation_not_before="2026-09-20T00:00:03.500000Z",
+    )
+    ledger = ObservationIntakeLedger(
+        tmp_path,
+        authority_id="intake-1",
+        enumeration_resolver=_Resolver((witness,)),
+    )
+    ledger.append_cycle(enumeration_id=witness.enumeration_id)
+
+    with pytest.raises(EvaluationUniverseError, match="detection began before"):
+        build_frozen_universe(
+            intake_ledger=ledger,
+            universe_id="universe-1",
+            campaign_id="campaign-1",
+            research_protocol_id="protocol-1",
+            protocol_sha256=H,
+            frozen_at="2026-09-20T00:05:00Z",
+            rows=(item,),
+        )
+
+
+def test_store_round_trip_and_append_only_restart(tmp_path):
+    workspace = tmp_path / "workspace"
+    authority = tmp_path / "authority"
+    item = row("candidate")
+    intake_ledger = intake(workspace, (item,))
     frozen = build_frozen_universe(
         intake_ledger=intake_ledger,
         universe_id="universe-1",
@@ -280,10 +307,18 @@ def test_store_round_trip_and_append_only_restart(tmp_path):
         rows=(item,),
     )
     first = EvaluationUniverseLedger(frozen).append(attempted(item))
-    store = EvaluationUniverseStore(tmp_path, intake_ledger=intake_ledger)
+    store = EvaluationUniverseStore(
+        workspace,
+        intake_ledger=intake_ledger,
+        authority_root=authority,
+    )
     store.save(first)
 
-    loaded = store.load()
+    loaded = EvaluationUniverseStore(
+        workspace,
+        intake_ledger=intake_ledger,
+        authority_root=authority,
+    ).load()
     assert loaded is not None
     assert loaded.ledger_sha256 == first.ledger_sha256
     assert loaded.universe.membership_sha256 == first.universe.membership_sha256
@@ -291,8 +326,10 @@ def test_store_round_trip_and_append_only_restart(tmp_path):
 
 
 def test_store_detects_payload_tamper(tmp_path):
+    workspace = tmp_path / "workspace"
+    authority = tmp_path / "authority"
     item = row("candidate")
-    intake_ledger = intake(tmp_path, (item,))
+    intake_ledger = intake(workspace, (item,))
     frozen = build_frozen_universe(
         intake_ledger=intake_ledger,
         universe_id="universe-1",
@@ -302,7 +339,11 @@ def test_store_detects_payload_tamper(tmp_path):
         frozen_at="2026-09-20T00:05:00Z",
         rows=(item,),
     )
-    store = EvaluationUniverseStore(tmp_path, intake_ledger=intake_ledger)
+    store = EvaluationUniverseStore(
+        workspace,
+        intake_ledger=intake_ledger,
+        authority_root=authority,
+    )
     store.save(EvaluationUniverseLedger(frozen))
 
     payload = json.loads(store.path.read_text(encoding="utf-8"))
@@ -311,6 +352,70 @@ def test_store_detects_payload_tamper(tmp_path):
 
     with pytest.raises(EvaluationUniverseIntegrityError):
         store.load()
+
+
+def test_store_rejects_deleted_committed_state(tmp_path):
+    workspace = tmp_path / "workspace"
+    authority = tmp_path / "authority"
+    item = row("candidate")
+    intake_ledger = intake(workspace, (item,))
+    frozen = build_frozen_universe(
+        intake_ledger=intake_ledger,
+        universe_id="universe-1",
+        campaign_id="campaign-1",
+        research_protocol_id="protocol-1",
+        protocol_sha256=H,
+        frozen_at="2026-09-20T00:05:00Z",
+        rows=(item,),
+    )
+    store = EvaluationUniverseStore(
+        workspace,
+        intake_ledger=intake_ledger,
+        authority_root=authority,
+    )
+    store.save(EvaluationUniverseLedger(frozen))
+    store.path.unlink()
+
+    with pytest.raises(EvaluationUniverseIntegrityError, match="stale, deleted, rolled back"):
+        EvaluationUniverseStore(
+            workspace,
+            intake_ledger=intake_ledger,
+            authority_root=authority,
+        ).load()
+
+
+def test_store_rejects_prior_valid_snapshot_rollback(tmp_path):
+    workspace = tmp_path / "workspace"
+    authority = tmp_path / "authority"
+    item = row("candidate")
+    intake_ledger = intake(workspace, (item,))
+    frozen = build_frozen_universe(
+        intake_ledger=intake_ledger,
+        universe_id="universe-1",
+        campaign_id="campaign-1",
+        research_protocol_id="protocol-1",
+        protocol_sha256=H,
+        frozen_at="2026-09-20T00:05:00Z",
+        rows=(item,),
+    )
+    store = EvaluationUniverseStore(
+        workspace,
+        intake_ledger=intake_ledger,
+        authority_root=authority,
+    )
+    first = EvaluationUniverseLedger(frozen)
+    store.save(first)
+    prior_bytes = store.path.read_bytes()
+    second = first.append(attempted(item))
+    store.save(second)
+    store.path.write_bytes(prior_bytes)
+
+    with pytest.raises(EvaluationUniverseIntegrityError, match="stale, deleted, rolled back"):
+        EvaluationUniverseStore(
+            workspace,
+            intake_ledger=intake_ledger,
+            authority_root=authority,
+        ).load()
 
 
 def test_row_reveal_boundary_must_equal_pre_result_intake(tmp_path):

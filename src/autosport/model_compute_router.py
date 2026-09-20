@@ -92,6 +92,12 @@ def _time(name: str, value: object) -> str:
     return _instant(name, value).isoformat().replace("+00:00", "Z")
 
 
+def _authority_now() -> str:
+    """Production-owned wall-clock stamp; tests may patch this private seam."""
+
+    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
 def _decimal(name: str, value: object) -> Decimal:
     if not isinstance(value, Decimal) or not value.is_finite():
         raise ModelComputeRouterError(f"{name} must be a finite Decimal")
@@ -1743,6 +1749,7 @@ _VOC_PRECOMPUTE_FIELDS = {
     "decision_context_sha256",
     "decision_deadline",
     "admitted_at",
+    "authority_recorded_at",
     "research_protocol_id",
     "cohort_id",
     "task_class",
@@ -1768,6 +1775,7 @@ def _build_voc_precompute_admission(
     decision: ComputeRouteDecision,
     domain_observation: SportDomainFitnessObservation | None,
     control: Mapping[str, Any],
+    authority_recorded_at: str | None = None,
 ) -> dict[str, Any]:
     """Derive one immutable paired-shadow enrollment from canonical route inputs."""
 
@@ -1833,6 +1841,19 @@ def _build_voc_precompute_admission(
             "VOC precompute admission candidates must support the routed task"
         )
 
+    recorded_at = _time(
+        "voc_precompute authority_recorded_at",
+        _authority_now()
+        if authority_recorded_at is None
+        else authority_recorded_at,
+    )
+    if _instant("voc_precompute authority_recorded_at", recorded_at) < _instant(
+        "decision.decided_at", decision.decided_at
+    ):
+        raise ModelComputeRouterError(
+            "VOC precompute authority cannot predate canonical route decision"
+        )
+
     return {
         "schema_version": 1,
         "admission_id": _text(
@@ -1847,6 +1868,7 @@ def _build_voc_precompute_admission(
             "decision_deadline", request.decision_deadline
         ),
         "admitted_at": _time("decision.decided_at", decision.decided_at),
+        "authority_recorded_at": recorded_at,
         "research_protocol_id": _text(
             "voc_precompute_admission research_protocol_id",
             control["research_protocol_id"],
@@ -1915,6 +1937,7 @@ def _validate_persisted_voc_precompute_admission(
                 else None
             ),
         },
+        authority_recorded_at=raw.get("authority_recorded_at"),
     )
     if raw != expected:
         raise ModelComputeRouterError(

@@ -95,12 +95,22 @@ class CampaignEconomicEvidenceStore:
 
         self._validate_derived(version, current)
         binding = self._semantic_binding(version)
-        self._authority.prepare(
-            tx_id=version.version_id,
+        publication_tx_id = self._next_publication_tx_id(version, binding)
+        prepared = self._authority.prepare(
+            tx_id=publication_tx_id,
             observed_state_sha256=None if current is None else current.version_id,
             intended_state_sha256=version.version_id,
             semantic_binding_sha256=binding,
         )
+        if (
+            prepared.phase is not AuthorityPhase.PREPARE
+            or prepared.tx_id != publication_tx_id
+            or prepared.intended_state_sha256 != version.version_id
+            or prepared.semantic_binding_sha256 != binding
+        ):
+            raise CampaignEconomicStoreError(
+                "economic publication did not acquire an exact fresh authority PREPARE"
+            )
 
         version_path = self._versions_dir() / f"{version.version_id}.json"
         encoded = _canonical_bytes(version.to_dict())
@@ -126,7 +136,7 @@ class CampaignEconomicEvidenceStore:
                 "economic head failed exact durable re-read"
             )
         self._authority.commit(
-            tx_id=version.version_id,
+            tx_id=publication_tx_id,
             observed_state_sha256=version.version_id,
             semantic_binding_sha256=binding,
         )
@@ -185,34 +195,40 @@ class CampaignEconomicEvidenceStore:
         if not version_path.exists():
             return False
 
-        head_id = self._read_head_id()
-        if head_id == version.version_id:
-            return False
-
         history = self._authority.read_history()
         if not history:
             return False
         pending = history[-1]
         if pending.phase is not AuthorityPhase.PREPARE:
             return False
-        if pending.tx_id != version.version_id:
-            return False
 
         binding = self._semantic_binding(version)
+        if not self._is_publication_tx_id(version.version_id, pending.tx_id):
+            if pending.intended_state_sha256 == version.version_id:
+                raise CampaignEconomicStoreError(
+                    "prepared economic successor uses an invalid publication transaction"
+                )
+            return False
         if (
             pending.intended_state_sha256 != version.version_id
             or pending.semantic_binding_sha256 != binding
-            or pending.previous_committed_state_sha256 != head_id
         ):
             raise CampaignEconomicStoreError(
                 "prepared economic successor does not match durable authority"
             )
-        if version.previous_version_id != head_id:
+
+        predecessor_id = pending.previous_committed_state_sha256
+        if version.previous_version_id != predecessor_id:
             raise CampaignEconomicStoreError(
-                "prepared economic successor does not extend local committed head"
+                "prepared economic successor does not extend authority predecessor"
+            )
+        head_id = self._read_head_id()
+        if head_id not in (predecessor_id, version.version_id):
+            raise CampaignEconomicStoreError(
+                "prepared economic successor conflicts with local head"
             )
 
-        current = None if head_id is None else self._load_raw(head_id)
+        current = None if predecessor_id is None else self._load_raw(predecessor_id)
         if current is None:
             if version.previous_version_sha256 is not None:
                 raise CampaignEconomicStoreError(
@@ -239,22 +255,23 @@ class CampaignEconomicEvidenceStore:
                 "prepared recovery found unrelated economic version history"
             )
 
-        _atomic_json(
-            self._head_path(),
-            {
-                "schema_version": 1,
-                "campaign_sha256": self.campaign_sha256,
-                "version_id": version.version_id,
-                "record_sha256": version.record_sha256,
-            },
-        )
-        if self._read_head_id() != version.version_id:
-            raise CampaignEconomicStoreError(
-                "recovered economic head failed exact durable re-read"
+        if head_id != version.version_id:
+            _atomic_json(
+                self._head_path(),
+                {
+                    "schema_version": 1,
+                    "campaign_sha256": self.campaign_sha256,
+                    "version_id": version.version_id,
+                    "record_sha256": version.record_sha256,
+                },
             )
+            if self._read_head_id() != version.version_id:
+                raise CampaignEconomicStoreError(
+                    "recovered economic head failed exact durable re-read"
+                )
         recovered = self._authority.recover(
             observed_state_sha256=version.version_id,
-            tx_id=version.version_id,
+            tx_id=pending.tx_id,
             semantic_binding_sha256=binding,
         )
         if (
@@ -265,6 +282,51 @@ class CampaignEconomicEvidenceStore:
                 "prepared economic recovery did not commit exact successor"
             )
         return True
+
+    def _next_publication_tx_id(
+        self,
+        version: CampaignEconomicEvidenceVersion,
+        binding: str,
+    ) -> str:
+        """Allocate a never-reused authority tx for one physical publish attempt."""
+        history = self._authority.read_history()
+        prefix = f"{version.version_id}:publish:"
+        used: set[str] = set()
+        for record in history:
+            belongs_to_target = record.intended_state_sha256 == version.version_id
+            names_target_attempt = (
+                record.tx_id == version.version_id or record.tx_id.startswith(prefix)
+            )
+            if belongs_to_target:
+                if (
+                    record.semantic_binding_sha256 != binding
+                    or not self._is_publication_tx_id(version.version_id, record.tx_id)
+                ):
+                    raise CampaignEconomicStoreError(
+                        "economic version has conflicting authority publication history"
+                    )
+                used.add(record.tx_id)
+            elif names_target_attempt:
+                raise CampaignEconomicStoreError(
+                    "economic publication transaction identity was reused for another state"
+                )
+
+        attempt = 1
+        while True:
+            candidate = f"{prefix}{attempt}"
+            if candidate not in used:
+                return candidate
+            attempt += 1
+
+    @staticmethod
+    def _is_publication_tx_id(version_id: str, tx_id: str) -> bool:
+        if tx_id == version_id:
+            return True
+        prefix = f"{version_id}:publish:"
+        if not tx_id.startswith(prefix):
+            return False
+        suffix = tx_id[len(prefix) :]
+        return suffix.isdigit() and suffix != "0" and not suffix.startswith("0")
 
     def _chain_from(
         self, head: CampaignEconomicEvidenceVersion

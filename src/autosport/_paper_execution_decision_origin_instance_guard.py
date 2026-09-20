@@ -23,17 +23,15 @@ _RUNTIME_EXECUTE_CODE_SENTINEL = (
 _EXECUTE_PLAN_CODE_SENTINEL = (
     "_autosport_decision_origin_instance_guard_pristine_execute_plan_code"
 )
+_CALLSITE_EXECUTE_CODE_SENTINEL = (
+    "_autosport_decision_origin_pristine_product_callsite_code"
+)
 
-# A verified DecisionRecordOrigin is evidence, not capability. Only the exact
-# canonical product execute wrapper may arm this runtime identity while it calls
-# through the stable adoption implementation into execute_paper_plan.
 _PRODUCT_ORIGIN_RUNTIME: ContextVar[PaperExecutionAdoptionRuntime | None] = ContextVar(
     "autosport_paper_execution_product_origin_runtime",
     default=None,
 )
 
-# Freeze executable identities once. Guard-module reloads must never recapture an
-# already-wrapped runtime method or redefine the authority path from mutable code.
 if not hasattr(PaperExecutionAdoptionRuntime, _RUNTIME_EXECUTE_CODE_SENTINEL):
     setattr(
         PaperExecutionAdoptionRuntime,
@@ -55,8 +53,6 @@ _EXECUTE_PAPER_PLAN_CODE = getattr(
     _EXECUTE_PLAN_CODE_SENTINEL,
 )
 
-# Preserve the exact pre-origin authority methods once. Re-importing/reloading guard
-# modules must never capture an already-installed wrapper as its own "original".
 if not hasattr(JsonlDecisionLedger, _VERIFIED_SNAPSHOT_SENTINEL):
     setattr(
         JsonlDecisionLedger,
@@ -131,9 +127,15 @@ def _require_canonical_product_reservation_path(
         raise _origin.PaperExecutionDecisionOriginError(
             "decision origin context is not bound to canonical product execution"
         )
-
-    # Import lazily because this guard is installed before the call-site guard.
-    from . import _paper_execution_decision_origin_callsite_guard as _callsite_guard
+    expected_callsite_code = getattr(
+        PaperExecutionAdoptionRuntime,
+        _CALLSITE_EXECUTE_CODE_SENTINEL,
+        None,
+    )
+    if expected_callsite_code is None:
+        raise _origin.PaperExecutionDecisionOriginError(
+            "canonical product callsite identity is unavailable"
+        )
 
     current = inspect.currentframe()
     reserve_frame = None
@@ -163,8 +165,7 @@ def _require_canonical_product_reservation_path(
             ):
                 saw_stable_runtime = True
             if (
-                cursor.f_code
-                is _callsite_guard._execute_with_exact_product_callsite.__code__
+                cursor.f_code is expected_callsite_code
                 and cursor.f_locals.get("self") is runtime
             ):
                 saw_product_wrapper = True

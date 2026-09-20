@@ -3,8 +3,11 @@ from __future__ import annotations
 import importlib.util
 import json
 import tempfile
+from decimal import Decimal
 from pathlib import Path
 from unittest import mock
+
+from autosport.learning_environment import EvidenceTruth, Outcome, RewardEvidence
 
 
 _BASE_PATH = Path(__file__).with_name("_paper_campaign_runtime_tests_base.py")
@@ -383,6 +386,122 @@ class PaperCampaignRuntimeTests(_legacy.PaperCampaignRuntimeTests):
                 final_state["checkpointed_transition_id"],
                 receipt.transition_id,
             )
+
+
+    def test_canonical_runtime_abstention_reaches_checkpoint_without_ticket(self) -> None:
+        """WAIT is reachable from PaperCampaignRuntime without settlement authority."""
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            goal = _legacy.EconomicGoalContract(
+                goal_id="campaign-abstention-goal",
+                revision=1,
+                bankroll_id="campaign-abstention-bankroll",
+                currency="USD",
+            )
+            risk = _legacy.PaperRiskPolicy(economic_goal=goal)
+            paper_path = root / "paper_book.json"
+            _legacy.PaperBook("100").save(paper_path)
+
+            identity = _legacy.EnvironmentIdentity(
+                source_id="campaign-abstention-source",
+                config_id="campaign-abstention-config",
+                data_id="campaign-abstention-data",
+                protocol_id="campaign-abstention-protocol",
+                cutoff_ts="2026-09-20T04:00:00+00:00",
+                seed=41,
+            )
+            environment = _legacy.CausalLearningEnvironment(
+                identity,
+                episode_key="campaign-abstention-episode",
+                policy_id="campaign-abstention-policy",
+                admissible_actions=frozenset({"WAIT", "NO_BET"}),
+            )
+            observation = _legacy.Observation(
+                environment_id=environment.environment_id,
+                observed_at=_legacy.T0,
+                available_at=_legacy.T1,
+                evidence=(("opportunity", "no-authorized-paper-action"),),
+            )
+            baseline = environment.checkpoint()
+            loop = _legacy.AgentLoopRuntime.initialize_pristine(
+                root / "agent-loop.json",
+                loop_id="campaign-abstention-loop",
+                environment_checkpoint=baseline,
+                policy_id=environment.episode.policy_id,
+                economic_goal_fingerprint=_legacy.provenance_for(goal).contract_sha256,
+                risk_fingerprint=risk.provenance_sha256,
+                source_sha256="a" * 64,
+                config_sha256="b" * 64,
+                at=_legacy.T0,
+            )
+            bridge = _legacy.PaperSettlementLearningBridge(
+                root / "paper-learning-bridge.json",
+                paper_book_path=paper_path,
+                decision_ledger=_legacy.JsonlDecisionLedger(root / "decisions.jsonl"),
+                agent_loop=loop,
+                economic_goal=goal,
+                risk_policy=risk,
+            )
+            runtime = _legacy.PaperCampaignRuntime(
+                environment=environment,
+                settlement_bridge=bridge,
+            )
+
+            paper_before = paper_path.read_bytes()
+            bridge_before = bridge.state_path.read_bytes()
+            campaign_before = runtime.state_path.read_bytes()
+
+            action = runtime.begin_abstention(
+                observation=observation,
+                action_type="WAIT",
+                decision_at=_legacy.T2,
+                parameters=(("reason", "no-edge"),),
+                at=_legacy.T2,
+            )
+            outcome = Outcome(
+                environment_id=environment.environment_id,
+                action_id=action.action_id,
+                revealed_at=_legacy.T3,
+                truth=EvidenceTruth.OBSERVED,
+                evidence=(("market_resolution", "no-position-outcome"),),
+            )
+            reward = RewardEvidence(
+                environment_id=environment.environment_id,
+                action_id=action.action_id,
+                outcome_id=outcome.outcome_id,
+                reward=Decimal("0"),
+                available_at=_legacy.T4,
+                truth=EvidenceTruth.OBSERVED,
+                evidence=(("reward_basis", "explicit-no-position-evidence"),),
+            )
+
+            receipt = runtime.finalize_abstention(
+                observation=observation,
+                action=action,
+                outcome=outcome,
+                reward=reward,
+                at=_legacy.T4,
+            )
+
+            snapshot = runtime.agent_loop.snapshot()
+            self.assertIs(snapshot.phase, _legacy.AgentLoopPhase.CHECKPOINT)
+            self.assertEqual(snapshot.environment_checkpoint_id, receipt.checkpoint_id)
+            self.assertEqual(snapshot.checkpointed_transition_id, receipt.transition_id)
+            self.assertEqual(runtime.environment.checkpoint().checkpoint_id, receipt.checkpoint_id)
+            self.assertEqual(paper_path.read_bytes(), paper_before)
+            self.assertEqual(bridge.state_path.read_bytes(), bridge_before)
+            self.assertEqual(runtime.state_path.read_bytes(), campaign_before)
+
+            durable = json.loads(
+                (root / "agent-loop.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(len(durable["decisions"]), 1)
+            self.assertEqual(len(durable["resolutions"]), 1)
+            self.assertEqual(len(durable["attributions"]), 1)
+            self.assertEqual(len(durable["postmortems"]), 1)
+            self.assertEqual(durable["research_handoffs"], [])
+
 
 
 if __name__ == "__main__":

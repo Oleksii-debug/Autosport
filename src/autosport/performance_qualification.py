@@ -145,7 +145,10 @@ class PerformanceBudget:
             )
         if raw.get("schema") != BUDGET_SCHEMA:
             raise PerformanceQualificationError("unsupported performance budget schema")
-        if raw.get("schema_version") != BUDGET_SCHEMA_VERSION:
+        if (
+            type(raw.get("schema_version")) is not int
+            or raw.get("schema_version") != BUDGET_SCHEMA_VERSION
+        ):
             raise PerformanceQualificationError("unsupported performance budget schema version")
         return cls(
             min_history_events=raw.get("min_history_events"),  # type: ignore[arg-type]

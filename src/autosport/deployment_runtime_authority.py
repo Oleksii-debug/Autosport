@@ -7,8 +7,8 @@ versioned meanings of those actions.  Records are append-only and hash chained; 
 read revalidates the full file before exposing an authority by ID.
 
 Runtime availability is a store-owned first-seen boundary. Callers cannot backdate it:
-new records are timestamped by an injected/default UTC clock, while exact retries reuse
-the immutable timestamp already durably recorded.
+new records are timestamped only by the production-owned UTC clock, while exact retries
+reuse the immutable timestamp already durably recorded.
 """
 
 from __future__ import annotations
@@ -17,7 +17,6 @@ import hashlib
 import json
 import os
 import tempfile
-from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -391,16 +390,8 @@ class DeploymentRuntimeAuthorityRecord:
 class DeploymentRuntimeAuthorityStore:
     """One local durable append-only authority file with full-read validation."""
 
-    def __init__(
-        self,
-        path: str | Path,
-        *,
-        clock: Callable[[], str] | None = None,
-    ) -> None:
+    def __init__(self, path: str | Path) -> None:
         self.path = Path(path)
-        self._clock = clock or _utc_now_timestamp
-        if not callable(self._clock):
-            raise DeploymentRuntimeAuthorityError("runtime authority store clock must be callable")
         self._lock = RLock()
         self._read_validated_records()
 
@@ -408,8 +399,6 @@ class DeploymentRuntimeAuthorityStore:
     def initialize_pristine(
         cls,
         path: str | Path,
-        *,
-        clock: Callable[[], str] | None = None,
     ) -> "DeploymentRuntimeAuthorityStore":
         destination = Path(path)
         destination.parent.mkdir(parents=True, exist_ok=True)
@@ -423,7 +412,7 @@ class DeploymentRuntimeAuthorityStore:
                 "records": [],
             },
         )
-        return cls(destination, clock=clock)
+        return cls(destination)
 
     @staticmethod
     def _write_atomic_path(path: Path, payload: Mapping[str, object]) -> None:
@@ -503,7 +492,7 @@ class DeploymentRuntimeAuthorityStore:
 
     def _observed_now(self) -> str:
         try:
-            value = self._clock()
+            value = _utc_now_timestamp()
         except Exception as exc:
             raise DeploymentRuntimeAuthorityError("runtime authority store clock failed") from exc
         return _timestamp(value, "runtime authority store clock")

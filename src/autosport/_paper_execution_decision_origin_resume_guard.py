@@ -3,9 +3,11 @@ from __future__ import annotations
 from typing import Any
 
 from . import _paper_execution_decision_origin as _origin
+from . import _paper_execution_decision_origin_callsite_guard as _callsite_guard
 from . import _paper_execution_decision_origin_instance_guard as _instance_guard
 from . import _paper_value_execution_authority as _paper_value_authority
 from .decision_ledger import JsonlDecisionLedger
+from .paper_execution_adoption import PaperExecutionAdoptionRuntime
 from .paper_execution_reality import PaperExecutionLedger, PaperExecutionStateError
 from .paper_strategy import PaperValueAgent
 
@@ -15,18 +17,26 @@ _EVENTS_SENTINEL = "_autosport_decision_origin_pristine_events"
 _AGENT_EVENT_SENTINEL = (
     "_autosport_decision_origin_pristine_paper_value_on_market_event"
 )
+_CALLSITE_EXECUTE_CODE_SENTINEL = (
+    "_autosport_decision_origin_pristine_product_callsite_code"
+)
 
-# Persist the pre-origin composed implementations once. The origin module may be
-# reloaded later; these references must never become already-installed wrappers.
 if not hasattr(PaperExecutionLedger, _LOAD_SENTINEL):
     setattr(PaperExecutionLedger, _LOAD_SENTINEL, _origin._ORIGINAL_LEDGER_LOAD)
 if not hasattr(PaperExecutionLedger, _EVENTS_SENTINEL):
     setattr(PaperExecutionLedger, _EVENTS_SENTINEL, _origin._ORIGINAL_LEDGER_EVENTS)
 if not hasattr(PaperValueAgent, _AGENT_EVENT_SENTINEL):
-    # _paper_value_execution_authority is imported before this guard by the package
-    # facade, so this is the fully-composed product producer rather than the legacy
-    # strategy method. Keep that exact producer stable across guard reloads.
     setattr(PaperValueAgent, _AGENT_EVENT_SENTINEL, PaperValueAgent.on_market_event)
+if not hasattr(PaperExecutionAdoptionRuntime, _CALLSITE_EXECUTE_CODE_SENTINEL):
+    # This module is imported after the callsite guard. Freeze the first installed
+    # wrapper code once so later module reloads cannot redefine product authority.
+    if PaperExecutionAdoptionRuntime.execute is not _callsite_guard._execute_with_exact_product_callsite:
+        raise RuntimeError("decision-origin callsite guard was not installed canonically")
+    setattr(
+        PaperExecutionAdoptionRuntime,
+        _CALLSITE_EXECUTE_CODE_SENTINEL,
+        _callsite_guard._execute_with_exact_product_callsite.__code__,
+    )
 
 _STABLE_LOAD_RUN = getattr(PaperExecutionLedger, _LOAD_SENTINEL)
 _STABLE_EVENTS = getattr(PaperExecutionLedger, _EVENTS_SENTINEL)
@@ -75,8 +85,6 @@ def _load_run_requiring_bound_origin(
     started_at: str,
     observation_evidence_ids,
 ):
-    """Reject retry unless the exact reservation origin is re-resolved now."""
-
     stored = _origin._reservation_origin_from_events(_stable_raw_events(self, run_id))
     expected = _origin._DECISION_ORIGIN.get()
     if stored is not None and (
@@ -130,11 +138,6 @@ def _paper_value_on_market_event_with_durable_origin(
     event,
     context,
 ) -> None:
-    """Bind an already-durable decision origin across the whole recovery read path."""
-
-    # Product entry is an authority boundary. ContextVars are process-local ambient
-    # state, so callers must not be able to pre-seed either token and have a
-    # canonical paper-value producer inherit it as if it had minted the capability.
     if (
         _origin._DECISION_ORIGIN.get() is not None
         or _instance_guard._PRODUCT_ORIGIN_RUNTIME.get() is not None
@@ -173,9 +176,6 @@ def _paper_value_on_market_event_with_durable_origin(
 
 
 def _install() -> None:
-    # Re-assert the composed bindings on every reload. Other guard modules are
-    # intentionally reload-tested and can reinstall an earlier layer; a persistent
-    # boolean marker alone would otherwise leave stale product methods behind.
     PaperExecutionLedger.events = _events_with_stable_origin_mask
     PaperExecutionLedger.load_run = _load_run_requiring_bound_origin
     PaperExecutionLedger.reservation_decision_origin = _reservation_decision_origin_stable

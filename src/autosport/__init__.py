@@ -7,6 +7,8 @@ __version__ = "0.1.0"
 from . import _paper_execution_anti_rollback as _paper_execution_anti_rollback  # noqa: F401,E402
 from . import _paper_execution_freshness as _paper_execution_freshness  # noqa: F401,E402
 
-# Provider-origin credentials must never inherit a caller-selected generic
-# monotonic trust root; keep that origin proof on the production machine root.
+# Provider completeness is positive only for an exact live canonical acquisition.
+# Local persisted bytes/journals remain integrity evidence and fail closed across
+# restart because the current provider contract supplies no non-caller-mintable
+# remote/OS attestation that could truthfully recreate provider origin.
 from . import _provider_receipt_trust_root as _provider_receipt_trust_root  # noqa: F401,E402

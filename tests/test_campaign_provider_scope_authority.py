@@ -6,7 +6,12 @@ from pathlib import Path
 
 import pytest
 
-from autosport.betfair_account_readonly import ADAPTER_ID, ADAPTER_VERSION
+from autosport.betfair_account_readonly import (
+    ADAPTER_ID,
+    ADAPTER_VERSION,
+    BetfairReadOnlyClient,
+    BetfairSessionCredentials,
+)
 from autosport.bookmaker_capability import (
     BookmakerCapability,
     BookmakerCapabilityFact,
@@ -46,6 +51,7 @@ from autosport.campaign_provider_scope_authority import (
     VerifiedBetfairProviderScopeCapture,
     assert_campaign_provider_scope_authoritative,
     assert_provider_scope_capture_authoritative,
+    capture_betfair_provider_scope,
 )
 
 
@@ -145,7 +151,7 @@ def test_caller_constructed_capture_cannot_mint_positive_authority() -> None:
 
     with pytest.raises(
         CampaignProviderScopeError,
-        match="was not issued by canonical resolver",
+        match="stable authenticated Betfair account identity is unavailable",
     ):
         assert_provider_scope_capture_authoritative(forged)
 
@@ -170,9 +176,79 @@ def test_frozen_capture_copy_is_not_source_authoritative() -> None:
 
     with pytest.raises(
         CampaignProviderScopeError,
-        match="was not issued by canonical resolver",
+        match="stable authenticated Betfair account identity is unavailable",
     ):
         assert_provider_scope_capture_authoritative(copied)
+
+
+class _ForbiddenInjectedTransport:
+    def __init__(self) -> None:
+        self.called = False
+
+    def post(
+        self,
+        url: str,
+        *,
+        headers,
+        body: bytes,
+        timeout_seconds: float,
+    ) -> bytes:
+        self.called = True
+        raise AssertionError(
+            "fail-closed account identity gate must run before injected transport"
+        )
+
+
+def test_injected_betfair_client_cannot_mint_provider_scope() -> None:
+    transport = _ForbiddenInjectedTransport()
+    client = BetfairReadOnlyClient(
+        BetfairSessionCredentials("app-key", "session-token"),
+        transport=transport,
+        clock=lambda: "2026-09-20T12:00:00Z",
+    )
+    profile = BookmakerCapabilityProfile(
+        venue_id="betfair",
+        account_id="client-scope",
+        adapter_id=ADAPTER_ID,
+        adapter_version=ADAPTER_VERSION,
+        profile_version=1,
+        facts=(
+            BookmakerCapabilityFact(
+                BookmakerCapability.BET_READBACK,
+                BookmakerCapabilityState.SUPPORTED,
+            ),
+        ),
+        observed_at="2026-09-20T11:59:00Z",
+        source_ref="test-provider-capability",
+        source_payload_sha256=SHA_A,
+    )
+    action = ExecutionAction(
+        action_id="action-1",
+        bookmaker_id="betfair",
+        account_id="client-scope",
+        event_id="event-1",
+        market_id="1.23456789",
+        selection_id="42",
+        side="BACK",
+        requested_odds=Decimal("2.00"),
+        requested_stake=Decimal("1.00"),
+        quote_id="quote-1",
+        quote_observed_at="2026-09-20T11:59:30Z",
+        expires_at="2026-09-20T12:01:00Z",
+    )
+
+    with pytest.raises(
+        CampaignProviderScopeError,
+        match="stable authenticated Betfair account identity is unavailable",
+    ):
+        capture_betfair_provider_scope(
+            client,
+            action,
+            profile,
+            expected_profile_sha256=profile.profile_id,
+        )
+
+    assert transport.called is False
 
 
 def test_projection_digest_binds_campaign_and_provider_scope() -> None:

@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import uuid
-from dataclasses import dataclass, replace
+import weakref
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta, timezone
 from enum import StrEnum
 from pathlib import Path
@@ -48,6 +50,15 @@ class SessionState(StrEnum):
     STOPPED = "STOPPED"
 
 
+class _SettlementAuthorityToken:
+    """Ephemeral product-issued capability for one exact settlement payload."""
+
+
+_SETTLEMENT_AUTHORITY_DIGESTS: weakref.WeakKeyDictionary[
+    _SettlementAuthorityToken, str
+] = weakref.WeakKeyDictionary()
+
+
 @dataclass(frozen=True, slots=True)
 class SettlementResolution:
     """One externally-authoritative, causally available settlement resolution."""
@@ -58,6 +69,11 @@ class SettlementResolution:
     evidence_id: str
     evidence_sha256: str
     available_at: str
+    _authority_token: object | None = field(
+        default=None,
+        repr=False,
+        compare=False,
+    )
 
     def validate(self, *, as_of: str) -> None:
         _text(self.event_identity, "event_identity")
@@ -177,6 +193,73 @@ def _sha256(value: object, field: str) -> str:
     ):
         raise ValueError(f"{field} must be a lowercase SHA-256 hex digest")
     return value
+
+
+def _settlement_resolution_authority_digest(
+    resolution: SettlementResolution,
+) -> str:
+    """Bind the ephemeral authority capability to every public settlement field."""
+
+    if type(resolution) is not SettlementResolution:
+        raise TypeError("resolution must be exact SettlementResolution")
+    payload = {
+        "event_identity": resolution.event_identity,
+        "settlement_ref": resolution.settlement_ref,
+        "quote_outcomes": resolution.quote_outcomes,
+        "evidence_id": resolution.evidence_id,
+        "evidence_sha256": resolution.evidence_sha256,
+        "available_at": resolution.available_at,
+    }
+    try:
+        encoded = json.dumps(
+            payload,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        ).encode("utf-8")
+    except (TypeError, ValueError, UnicodeEncodeError) as exc:
+        raise ValueError("settlement resolution must be canonical JSON") from exc
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _seal_settlement_resolution(
+    resolution: SettlementResolution,
+) -> SettlementResolution:
+    """Seal one exact external-authority result for in-process product consumption.
+
+    The capability is deliberately ephemeral. On restart the configured external
+    outcome authority must resolve the settlement again; persisted/caller-created
+    DTO bytes cannot recreate product origin.
+    """
+
+    if type(resolution) is not SettlementResolution:
+        raise TypeError("resolution must be exact SettlementResolution")
+    resolution.validate(as_of=resolution.available_at)
+    token = _SettlementAuthorityToken()
+    sealed = replace(resolution, _authority_token=token)
+    _SETTLEMENT_AUTHORITY_DIGESTS[token] = (
+        _settlement_resolution_authority_digest(sealed)
+    )
+    return sealed
+
+
+def _is_authoritative_settlement_resolution(value: object) -> bool:
+    """Return whether value is the unchanged payload sealed by product resolution."""
+
+    if type(value) is not SettlementResolution:
+        return False
+    token = value._authority_token
+    if type(token) is not _SettlementAuthorityToken:
+        return False
+    expected = _SETTLEMENT_AUTHORITY_DIGESTS.get(token)
+    if expected is None:
+        return False
+    try:
+        actual = _settlement_resolution_authority_digest(value)
+    except (TypeError, ValueError):
+        return False
+    return actual == expected
 
 
 class _ContinuousSessionState:
@@ -784,7 +867,7 @@ class ContinuousSessionCoordinator:
                     "settlement evidence reference does not match lifecycle evidence"
                 )
             resolution.validate(as_of=as_of)
-            resolutions.append(resolution)
+            resolutions.append(_seal_settlement_resolution(resolution))
         return tuple(resolutions)
 
     def _load_book(self) -> PaperBook:

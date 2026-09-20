@@ -235,6 +235,16 @@ def test_completion_requires_durable_experiment_exact_protocol_and_candidate(tmp
         store2.complete_attempt(attempt_id=attempt2.attempt_id, experiment_id=wrong_candidate.experiment_id, registry=registry2)
 
 
+def test_completion_rejects_experiment_published_before_attempt_start(tmp_path):
+    registry, _, _, candidate, member, _, store = _foundation(tmp_path)
+    experiment = _experiment(outcome=ResearchOutcome.NEGATIVE)
+    registry.append(experiment)
+    attempt = store.start_attempt(semantic_attempt_id="retrospective-attempt", member_authority_id=member.member_authority_id, candidate=candidate, created_at=T1)
+    with pytest.raises(ValueError, match="already durable before trial attempt publication"):
+        store.complete_attempt(attempt_id=attempt.attempt_id, experiment_id=experiment.experiment_id, registry=registry)
+    assert store.attempts()[0].status is TrialAttemptStatus.OPEN
+
+
 def test_same_experiment_cannot_complete_two_attempts(tmp_path):
     registry, _, _, candidate, member, _, store = _foundation(tmp_path)
     first = store.start_attempt(semantic_attempt_id="first", member_authority_id=member.member_authority_id, candidate=candidate, created_at=T1)

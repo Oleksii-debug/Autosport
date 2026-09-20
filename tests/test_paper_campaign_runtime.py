@@ -746,7 +746,7 @@ class PaperCampaignRuntimeTests(unittest.TestCase):
                     unresolved_components=(AttributionComponent.DATA,),
                 ),
             )
-            with self.assertRaisesRegex(PaperCampaignRuntimeError, "conflicting attribution"):
+            with self.assertRaisesRegex(PaperCampaignRuntimeError, "finalization plan conflicts"):
                 conflicting.finalize_ticket(ticket_id=ticket_id, at=T4)
 
             recovered.agent_loop.record_postmortem(
@@ -768,7 +768,7 @@ class PaperCampaignRuntimeTests(unittest.TestCase):
                     summary_code="DIFFERENT_POSTMORTEM_SUMMARY",
                 ),
             )
-            with self.assertRaisesRegex(PaperCampaignRuntimeError, "conflicting postmortem"):
+            with self.assertRaisesRegex(PaperCampaignRuntimeError, "finalization plan conflicts"):
                 same_attribution_different_postmortem.finalize_ticket(
                     ticket_id=ticket_id,
                     at=T4,

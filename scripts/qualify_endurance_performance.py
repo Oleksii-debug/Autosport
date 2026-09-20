@@ -16,7 +16,7 @@ from autosport.performance_qualification import (
 def _read_json_object(path: Path, name: str) -> dict[str, object]:
     try:
         raw = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+    except (OSError, UnicodeError, ValueError) as exc:
         raise PerformanceQualificationError(f"cannot read {name}: {exc}") from exc
     if type(raw) is not dict:
         raise PerformanceQualificationError(f"{name} must contain a JSON object")

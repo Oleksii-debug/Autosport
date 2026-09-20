@@ -27,6 +27,7 @@ _CRITICAL_GUI_KEYS = {
     "ui.button.choose_dataset",
     "ui.button.run_replay",
     "ui.button.repair_workspace",
+    "ui.button.export_evidence",
     "ui.button.live_refresh",
     "ui.speed.event_driven",
     "ui.speed.realtime",
@@ -43,6 +44,18 @@ _CRITICAL_GUI_KEYS = {
     "ui.status.live.never",
     "ui.status.live_quotes.empty",
     "ui.status.evaluation.empty",
+    "ui.dialog.evidence_export.choose_title",
+    "ui.status.evidence_export.operation_busy",
+    "ui.status.evidence_export.recovery_busy",
+    "ui.status.evidence_export.already_busy",
+    "ui.status.evidence_export.in_progress",
+    "ui.status.evidence_export.workspace_changed",
+    "ui.status.evidence_export.destination_invalid",
+    "ui.status.evidence_export.start_failed",
+    "ui.status.evidence_export.running",
+    "ui.error.evidence_export.failed",
+    "ui.status.evidence_export.complete",
+    "ui.status.close.evidence_export_busy",
     "ui.accessibility.strategy.name",
     "ui.accessibility.strategy.description",
     "ui.accessibility.research_plan.name",
@@ -53,6 +66,8 @@ _CRITICAL_GUI_KEYS = {
     "ui.accessibility.run_replay.description",
     "ui.accessibility.repair_workspace.name",
     "ui.accessibility.repair_workspace.description",
+    "ui.accessibility.export_evidence.name",
+    "ui.accessibility.export_evidence.description",
     "ui.accessibility.replay_speed.name",
     "ui.accessibility.replay_speed.description",
     "ui.accessibility.live_mode.name",
@@ -79,7 +94,9 @@ def test_critical_gui_catalog_is_complete_and_ukrainian_first() -> None:
     assert text("ui.button.choose_dataset") == "Вибрати набір даних"
     assert text("ui.button.run_replay") == "Запустити паперовий повтор"
     assert text("ui.button.repair_workspace") == "Відновити робочу область"
+    assert text("ui.button.export_evidence") == "Експортувати докази…"
     assert text("ui.accessibility.strategy.name") == "Стратегія повтору"
+    assert text("ui.accessibility.export_evidence.name") == "Експортувати канонічні докази"
     assert text("ui.accessibility.bankroll.name") == "Віртуальний банк"
 
 
@@ -120,6 +137,7 @@ def test_accessibility_ids_and_keyboard_bindings_are_identity_fences() -> None:
         "strategy": 106,
         "research_plan": 107,
         "repair_workspace": 108,
+        "export_evidence": 109,
         "tickets": 201,
         "log": 202,
         "live_quotes": 203,
@@ -132,6 +150,7 @@ def test_accessibility_ids_and_keyboard_bindings_are_identity_fences() -> None:
         "<Control-o>",
         "<Control-r>",
         "<Control-Shift-R>",
+        "<Control-e>",
         "<Control-l>",
         "<F6>",
         "<F7>",

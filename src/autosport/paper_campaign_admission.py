@@ -2,9 +2,9 @@
 
 The existing authorities deliberately stop at separate durable boundaries:
 ``PaperBook`` owns virtual tickets, ``JsonlDecisionLedger`` owns economic decisions,
-and ``PaperCampaignRuntime`` owns AgentLoop/action/settlement-learning binding.  This
+and ``PaperCampaignRuntime`` owns AgentLoop/action/settlement-learning binding. This
 module owns only the missing composition journal which makes those boundaries
-retryable as one logical PAPER admission.  It never creates a real-money path.
+retryable as one logical PAPER admission. It never creates a real-money path.
 """
 
 from __future__ import annotations
@@ -27,7 +27,7 @@ from .decision_ledger import (
 )
 from .domain import TicketLeg
 from .integrity import atomic_write_json
-from .learning_environment import Action, Observation
+from .learning_environment import Action, EnvironmentCheckpoint, Observation
 from .paper import PaperBook
 from .paper_campaign_runtime import PaperCampaignRuntime
 from .workspace_lock import WorkspaceEconomicLock
@@ -89,6 +89,15 @@ def _sha(value: object, name: str) -> str:
     return text
 
 
+def _pairs(pairs: list[tuple[str, object]]) -> dict[str, object]:
+    result: dict[str, object] = {}
+    for key, value in pairs:
+        if key in result:
+            raise PaperCampaignAdmissionError(f"admission JSON contains duplicate key {key!r}")
+        result[key] = value
+    return result
+
+
 def _leg_payload(leg: TicketLeg) -> dict[str, str]:
     if not isinstance(leg, TicketLeg):
         raise TypeError("legs must contain TicketLeg values")
@@ -114,6 +123,54 @@ def _observation_payload(observation: Observation) -> dict[str, object]:
     }
 
 
+def _checkpoint_payload(checkpoint: EnvironmentCheckpoint) -> dict[str, object]:
+    if not isinstance(checkpoint, EnvironmentCheckpoint):
+        raise TypeError("checkpoint must be EnvironmentCheckpoint")
+    return {
+        "environment_id": checkpoint.environment_id,
+        "episode_id": checkpoint.episode_id,
+        "policy_id": checkpoint.policy_id,
+        "step_index": checkpoint.step_index,
+        "chain_sha256": checkpoint.chain_sha256,
+        "last_transition_id": checkpoint.last_transition_id,
+        "committed_action_ids": list(checkpoint.committed_action_ids),
+        "committed_decision_intents": [
+            [intent_id, payload_id]
+            for intent_id, payload_id in checkpoint.committed_decision_intents
+        ],
+    }
+
+
+def _checkpoint(raw: object) -> EnvironmentCheckpoint:
+    if type(raw) is not dict or set(raw) != {
+        "environment_id",
+        "episode_id",
+        "policy_id",
+        "step_index",
+        "chain_sha256",
+        "last_transition_id",
+        "committed_action_ids",
+        "committed_decision_intents",
+    }:
+        raise PaperCampaignAdmissionError("admission baseline checkpoint fields mismatch")
+    try:
+        checkpoint = EnvironmentCheckpoint(
+            environment_id=raw["environment_id"],
+            episode_id=raw["episode_id"],
+            policy_id=raw["policy_id"],
+            step_index=raw["step_index"],
+            chain_sha256=raw["chain_sha256"],
+            last_transition_id=raw["last_transition_id"],
+            committed_action_ids=tuple(raw["committed_action_ids"]),
+            committed_decision_intents=tuple(
+                (item[0], item[1]) for item in raw["committed_decision_intents"]
+            ),
+        )
+    except (KeyError, TypeError, ValueError, IndexError) as exc:
+        raise PaperCampaignAdmissionError("admission baseline checkpoint is invalid") from exc
+    return checkpoint
+
+
 @dataclass(frozen=True, slots=True)
 class PaperCampaignAdmissionReceipt:
     admission_id: str
@@ -126,7 +183,7 @@ class PaperCampaignAdmissionReceipt:
 class PaperCampaignAdmissionCoordinator:
     """Converge a logical PAPER admission across existing durable authorities.
 
-    A dedicated admission lock serializes retries of this composition journal.  The
+    A dedicated admission lock serializes retries of this composition journal. The
     canonical workspace economic lock is acquired only around PaperBook + ledger
     publication and released before ``PaperCampaignRuntime`` is entered, avoiding a
     nested acquisition while still excluding competing economic writers.
@@ -174,7 +231,15 @@ class PaperCampaignAdmissionCoordinator:
 
     def _read(self) -> dict[str, object]:
         try:
-            state = json.loads(self.state_path.read_text(encoding="utf-8"))
+            state = json.loads(
+                self.state_path.read_text(encoding="utf-8"),
+                object_pairs_hook=_pairs,
+                parse_constant=lambda value: (_ for _ in ()).throw(
+                    PaperCampaignAdmissionError(
+                        f"admission JSON contains non-finite value {value}"
+                    )
+                ),
+            )
         except (OSError, json.JSONDecodeError) as exc:
             raise PaperCampaignAdmissionError("admission state is unreadable") from exc
         if type(state) is not dict or set(state) != {
@@ -201,6 +266,7 @@ class PaperCampaignAdmissionCoordinator:
             "admission_id",
             "intent_sha256",
             "phase",
+            "baseline_checkpoint",
             "baseline_checkpoint_id",
             "ticket_id",
             "decision_id",
@@ -213,7 +279,12 @@ class PaperCampaignAdmissionCoordinator:
             if record["admission_id"] != admission_id:
                 raise PaperCampaignAdmissionError("admission identity mismatch")
             _sha(record["intent_sha256"], "intent_sha256")
-            _sha(record["baseline_checkpoint_id"], "baseline_checkpoint_id")
+            checkpoint = _checkpoint(record["baseline_checkpoint"])
+            if (
+                _sha(record["baseline_checkpoint_id"], "baseline_checkpoint_id")
+                != checkpoint.checkpoint_id
+            ):
+                raise PaperCampaignAdmissionError("admission baseline checkpoint identity mismatch")
             if record["phase"] not in {_PREPARED, _COMMITTED}:
                 raise PaperCampaignAdmissionError("admission phase is invalid")
             for field in ("ticket_id", "decision_id", "action_id"):
@@ -317,58 +388,77 @@ class PaperCampaignAdmissionCoordinator:
             extra_payload: dict[str, object] = {}
         elif isinstance(decision_payload, Mapping):
             extra_payload = dict(decision_payload)
+            _json(extra_payload)
         else:
             raise TypeError("decision_payload must be a mapping or None")
         if _RESERVED_DECISION_PAYLOAD & set(extra_payload):
-            raise PaperCampaignAdmissionError("decision_payload attempts to replace admission authority fields")
+            raise PaperCampaignAdmissionError(
+                "decision_payload attempts to replace admission authority fields"
+            )
         if type(action_parameters) is not tuple:
             raise TypeError("action_parameters must be a canonical tuple")
-        parameter_keys = [item[0] for item in action_parameters]
-        if (
-            any(type(item) is not tuple or len(item) != 2 for item in action_parameters)
-            or any(key in _RESERVED_ACTION_PARAMETERS for key in parameter_keys)
-            or len(parameter_keys) != len(set(parameter_keys))
-        ):
-            raise PaperCampaignAdmissionError("action_parameters are malformed or reserved")
+        normalized_action_parameters: list[tuple[str, str]] = []
+        parameter_keys: list[str] = []
+        for item in action_parameters:
+            if type(item) is not tuple or len(item) != 2:
+                raise PaperCampaignAdmissionError("action_parameters are malformed")
+            key = _text(item[0], "action parameter key")
+            value = _text(item[1], "action parameter value")
+            if key in _RESERVED_ACTION_PARAMETERS:
+                raise PaperCampaignAdmissionError("action_parameters replace reserved identity")
+            normalized_action_parameters.append((key, value))
+            parameter_keys.append(key)
+        if len(parameter_keys) != len(set(parameter_keys)):
+            raise PaperCampaignAdmissionError("action_parameters contain duplicate keys")
+        action_parameters = tuple(normalized_action_parameters)
+
         goal = self.runtime.settlement_bridge.economic_goal
         risk = self.runtime.settlement_bridge.risk_policy
         bankroll_id = goal.bankroll_id if bankroll_id is None else _text(bankroll_id, "bankroll_id")
         currency = goal.currency if currency is None else _text(currency, "currency")
         if bankroll_id != goal.bankroll_id or currency != goal.currency:
-            raise PaperCampaignAdmissionError("admission bankroll/currency differs from economic authority")
-
-        baseline = self.runtime.environment.checkpoint()
-        intent = {
-            "admission_id": admission_id,
-            "observation": _observation_payload(observation),
-            "action_type": action_type,
-            "decision_action": decision_action,
-            "decision_at": decision_at,
-            "at": at,
-            "legs": leg_payloads,
-            "stake": str(amount),
-            "placed_at": placed_at,
-            "replay_run_id": replay_run_id,
-            "agent": agent,
-            "strategy_reason": strategy_reason,
-            "decision_payload": extra_payload,
-            "action_parameters": [list(item) for item in action_parameters],
-            "provider_source_ids": list(provider_source_ids),
-            "provider_accounts": [list(item) for item in provider_accounts],
-            "bankroll_id": bankroll_id,
-            "currency": currency,
-            "baseline_checkpoint_id": baseline.checkpoint_id,
-        }
-        intent_sha256 = _digest(intent)
+            raise PaperCampaignAdmissionError(
+                "admission bankroll/currency differs from economic authority"
+            )
 
         with WorkspaceEconomicLock(self._admission_lock_workspace):
             state = self._read()
             record = state["admissions"].get(admission_id)
             if record is None:
+                baseline = self.runtime.environment.checkpoint()
+            else:
+                baseline = _checkpoint(record["baseline_checkpoint"])
+
+            baseline_payload = _checkpoint_payload(baseline)
+            intent = {
+                "admission_id": admission_id,
+                "observation": _observation_payload(observation),
+                "action_type": action_type,
+                "decision_action": decision_action,
+                "decision_at": decision_at,
+                "at": at,
+                "legs": leg_payloads,
+                "stake": str(amount),
+                "placed_at": placed_at,
+                "replay_run_id": replay_run_id,
+                "agent": agent,
+                "strategy_reason": strategy_reason,
+                "decision_payload": extra_payload,
+                "action_parameters": [list(item) for item in action_parameters],
+                "provider_source_ids": list(provider_source_ids),
+                "provider_accounts": [list(item) for item in provider_accounts],
+                "bankroll_id": bankroll_id,
+                "currency": currency,
+                "baseline_checkpoint": baseline_payload,
+            }
+            intent_sha256 = _digest(intent)
+
+            if record is None:
                 record = {
                     "admission_id": admission_id,
                     "intent_sha256": intent_sha256,
                     "phase": _PREPARED,
+                    "baseline_checkpoint": baseline_payload,
                     "baseline_checkpoint_id": baseline.checkpoint_id,
                     "ticket_id": None,
                     "decision_id": None,
@@ -377,11 +467,10 @@ class PaperCampaignAdmissionCoordinator:
                 state["admissions"][admission_id] = record
                 self._write(state["admissions"])
             else:
-                if (
-                    record["intent_sha256"] != intent_sha256
-                    or record["baseline_checkpoint_id"] != baseline.checkpoint_id
-                ):
-                    raise PaperCampaignAdmissionError("admission retry conflicts with durable intent")
+                if record["intent_sha256"] != intent_sha256:
+                    raise PaperCampaignAdmissionError(
+                        "admission retry conflicts with durable intent"
+                    )
                 if record["phase"] == _COMMITTED:
                     return PaperCampaignAdmissionReceipt(
                         admission_id=admission_id,
@@ -430,11 +519,13 @@ class PaperCampaignAdmissionCoordinator:
                     recorded_at=at,
                     decision_kind=ECONOMIC_DECISION_KIND,
                 )
-                existing = self.decision_ledger.verified_economic_decision_for_material_action(
-                    admission_id,
-                    goal,
-                    risk_policy=risk,
-                )
+                existing = None
+                if self.decision_ledger.path.exists():
+                    existing = self.decision_ledger.verified_economic_decision_for_material_action(
+                        admission_id,
+                        goal,
+                        risk_policy=risk,
+                    )
                 if existing is None:
                     self.decision_ledger.append_economic(
                         decision,
@@ -446,7 +537,9 @@ class PaperCampaignAdmissionCoordinator:
                         RISK_POLICY_PROVENANCE_PAYLOAD_KEY,
                     }
                     existing_payload = {
-                        key: value for key, value in existing.payload.items() if key not in provenance_keys
+                        key: value
+                        for key, value in existing.payload.items()
+                        if key not in provenance_keys
                     }
                     if (
                         existing.decision_id != decision.decision_id
@@ -464,9 +557,11 @@ class PaperCampaignAdmissionCoordinator:
 
             parameters = tuple(
                 sorted(
-                    (*action_parameters,
-                     ("economic_decision_id", decision_id),
-                     ("paper_ticket_id", ticket.ticket_id))
+                    (
+                        *action_parameters,
+                        ("economic_decision_id", decision_id),
+                        ("paper_ticket_id", ticket.ticket_id),
+                    )
                 )
             )
             action = self.runtime.begin_and_bind_paper_ticket(
@@ -480,7 +575,9 @@ class PaperCampaignAdmissionCoordinator:
                 baseline_checkpoint=baseline,
             )
             if not isinstance(action, Action):
-                raise PaperCampaignAdmissionError("campaign runtime returned no canonical Action")
+                raise PaperCampaignAdmissionError(
+                    "campaign runtime returned no canonical Action"
+                )
 
             state = self._read()
             current = state["admissions"].get(admission_id)

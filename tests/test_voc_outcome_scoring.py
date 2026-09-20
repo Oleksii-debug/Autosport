@@ -135,7 +135,11 @@ class CanonicalOutcomeDerivedVOCScoreAuthorityTests(unittest.TestCase):
             "uncertainty_method": "paired-range-v1",
         }
 
-    def _append_pre_outcome_evidence(self) -> tuple[str, str]:
+    def _append_pre_outcome_evidence(
+        self,
+        *,
+        sample_challenger_completed_at: str | None = None,
+    ) -> tuple[str, str]:
         source_context = {
             "request_id": "source:voc-derived",
             "decision_input_sha256": SHA_A,
@@ -158,6 +162,9 @@ class CanonicalOutcomeDerivedVOCScoreAuthorityTests(unittest.TestCase):
         )
         context_sha = self.ledger.append(context_record)
 
+        sample_challenger_completed_at = (
+            sample_challenger_completed_at or T_CHALLENGER
+        )
         scoring_evidence = {
             "schema_version": 1,
             "evaluation_id": "voc-derived",
@@ -175,7 +182,7 @@ class CanonicalOutcomeDerivedVOCScoreAuthorityTests(unittest.TestCase):
                     "baseline_compute_cost": "0.10",
                     "challenger_compute_cost": "0.20",
                     "baseline_completed_at": T_BASELINE,
-                    "challenger_completed_at": T_CHALLENGER,
+                    "challenger_completed_at": sample_challenger_completed_at,
                 },
                 {
                     "sample_id": "quote-202",
@@ -310,8 +317,15 @@ class CanonicalOutcomeDerivedVOCScoreAuthorityTests(unittest.TestCase):
         )
         return scoring_sha, multiple_sha, holdout, trial_family, dataset_id
 
-    def _evaluation(self, *, forged_claim: bool = False) -> PairedVOCEvaluation:
-        context_sha, decision_sha = self._append_pre_outcome_evidence()
+    def _evaluation(
+        self,
+        *,
+        forged_claim: bool = False,
+        sample_challenger_completed_at: str | None = None,
+    ) -> PairedVOCEvaluation:
+        context_sha, decision_sha = self._append_pre_outcome_evidence(
+            sample_challenger_completed_at=sample_challenger_completed_at,
+        )
         scoring_sha, multiple_sha, holdout, _, _ = self._protocol_and_holdout()
         if forged_claim:
             challenger_utility = Decimal("9")
@@ -521,6 +535,18 @@ class CanonicalOutcomeDerivedVOCScoreAuthorityTests(unittest.TestCase):
             ),
             paired,
         )
+
+    def test_scoring_sample_must_be_frozen_by_decision_record(self):
+        paired = self._evaluation(
+            sample_challenger_completed_at="2026-09-20T00:00:13Z",
+        )
+        self.registry.append(paired)
+
+        with self.assertRaisesRegex(
+            VOCEvaluationError,
+            "scoring sample completion was not frozen by DecisionRecord",
+        ):
+            self._authority().resolve(paired.evaluation_id, as_of=T_AS_OF)
 
     def test_caller_supplied_positive_utility_cannot_mint_voc(self):
         forged = self._evaluation(forged_claim=True)

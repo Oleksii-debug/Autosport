@@ -23,7 +23,15 @@ def _ledger_identity(path: Path) -> str:
     return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
 
 
-def _authority_root() -> Path:
+def _is_within(path: Path, parent: Path) -> bool:
+    try:
+        path.relative_to(parent)
+    except ValueError:
+        return False
+    return True
+
+
+def _authority_root(ledger_path: Path) -> Path:
     configured = os.environ.get(_WITNESS_DIR_ENV)
     if configured:
         root = Path(configured).expanduser()
@@ -43,6 +51,16 @@ def _authority_root() -> Path:
         ) / "autosport" / "paper-execution-reality"
     try:
         root = root.resolve(strict=False)
+        workspace = Path(ledger_path).expanduser().resolve(strict=False).parent
+    except OSError as exc:
+        raise _impl.PaperExecutionIntegrityError(
+            "cannot resolve independent PAPER execution monotonic authority"
+        ) from exc
+    if root == workspace or _is_within(root, workspace):
+        raise _impl.PaperExecutionIntegrityError(
+            "PAPER execution monotonic authority must resolve outside ledger workspace"
+        )
+    try:
         root.mkdir(parents=True, exist_ok=True, mode=0o700)
     except OSError as exc:
         raise _impl.PaperExecutionIntegrityError(
@@ -74,7 +92,7 @@ def _witness_path(self) -> Path:
     path = getattr(self, "_monotonic_witness_path", None)
     if path is None:
         identity = _ledger_identity(self.path)
-        path = _authority_root() / f"{identity}{_WITNESS_SUFFIX}"
+        path = _authority_root(self.path) / f"{identity}{_WITNESS_SUFFIX}"
         self._monotonic_witness_path = path
         self._monotonic_witness_ledger_identity = identity
     return Path(path)
@@ -235,7 +253,7 @@ def _patched_init(self, path) -> None:
     identity = _ledger_identity(self.path)
     self._monotonic_witness_ledger_identity = identity
     self._monotonic_witness_path = (
-        _authority_root() / f"{identity}{_WITNESS_SUFFIX}"
+        _authority_root(self.path) / f"{identity}{_WITNESS_SUFFIX}"
     )
 
 

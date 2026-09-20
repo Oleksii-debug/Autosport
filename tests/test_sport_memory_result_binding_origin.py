@@ -16,6 +16,7 @@ from autosport.event_lifecycle import (
     EventPhase,
 )
 from autosport.opponent_intelligence import OpponentIntelligenceStore
+from autosport.product_runtime import build_autonomous_product_runtime
 from autosport.participant_identity import (
     AliasRecord,
     EntityIdentity,
@@ -100,6 +101,26 @@ def _quote(selection: str, sequence: int) -> MarketEvent:
     )
 
 
+class _ProductSource:
+    source_id = "provider-a"
+    stream_epoch = "epoch-1"
+
+    def fetch_catalog_page(self, checkpoint):
+        return CatalogPage(
+            source_id=self.source_id,
+            stream_epoch=self.stream_epoch,
+            cursor="unused",
+            position=0,
+            events=(),
+        )
+
+    def fetch_deltas(self, checkpoint, records, max_items):
+        return ()
+
+    def resolve_event(self, delta):
+        raise AssertionError("binding-origin tests do not consume collector deltas")
+
+
 class _StaticOutcomeAuthority:
     def __init__(self) -> None:
         self.resolution: SettlementResolution | None = None
@@ -143,10 +164,17 @@ def _authorities(
         root / "opponents.json",
         identities,
     )
-    market_store = SQLiteMarketStore(root / "market.db")
+    authority = _StaticOutcomeAuthority()
+    runtime = build_autonomous_product_runtime(
+        workspace=root,
+        source=_ProductSource(),
+        clock=lambda: T2,
+        outcome_authority=authority,
+    )
+    market_store = runtime.market_store
     market_store.append(_quote("sel-alex-17", 1))
     market_store.append(_quote("sel-blair-23", 2))
-    lifecycle = ContinuousEventLifecycle(root / "lifecycle.json")
+    lifecycle = runtime.lifecycle
     lifecycle.apply_page(
         CatalogPage(
             source_id="provider-a",
@@ -169,9 +197,7 @@ def _authorities(
     )
     materializer = SportMemoryResultMaterializer(
         opponent_store,
-        market_store,
-        lifecycle=lifecycle,
-        outcome_authority=_StaticOutcomeAuthority(),
+        runtime,
     )
     return identities, opponent_store, market_store, materializer
 
@@ -295,7 +321,7 @@ def test_recomputed_digest_cannot_backdate_post_reveal_provider_choice(tmp_path:
         available_at=T2,
     )
 
-    authority = materializer.outcome_authority
+    authority = materializer.runtime.coordinator.outcome_authority
     assert isinstance(authority, _StaticOutcomeAuthority)
     authority.resolution = settlement
 
@@ -342,7 +368,7 @@ def test_provider_binding_cutoff_at_or_after_settlement_reveal_fails_closed(tmp_
         available_at=T2,
     )
 
-    authority = materializer.outcome_authority
+    authority = materializer.runtime.coordinator.outcome_authority
     assert isinstance(authority, _StaticOutcomeAuthority)
     authority.resolution = settlement
 

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+from decimal import localcontext
 
 import pytest
 
@@ -436,3 +437,53 @@ def test_policy_evaluation_requires_complete_observed_funnel_accounting():
             total_cost="0",
             evaluation_bundle_sha256=SHA_A,
         )
+
+def test_decimal_evidence_and_report_identity_ignore_ambient_decimal_context():
+    def build_at_precision(precision: int):
+        with localcontext() as context:
+            context.prec = precision
+            protocol = _protocol()
+            candidate = _result(
+                protocol,
+                protocol.candidate_id,
+                artifact_sha256=protocol.candidate_artifact_sha256,
+                metric="1.2345678901234567890123456789012345",
+                low="1.1000000000000000000000000000000000",
+                high="1.3000000000000000000000000000000000",
+                scored=2,
+                abstained=1,
+                total_cost="0.0100000000000000000000000000000001",
+            )
+            report = build_external_validity_report(
+                protocol,
+                candidate,
+                _supported_results(protocol),
+            )
+            return (
+                candidate.to_payload(),
+                report.to_payload(),
+                candidate.identity_sha256,
+                report.identity_sha256,
+            )
+
+    low_precision = build_at_precision(9)
+    high_precision = build_at_precision(60)
+
+    assert low_precision == high_precision
+    assert (
+        low_precision[0]["metric_value"]
+        == "1.2345678901234567890123456789012345"
+    )
+    assert (
+        low_precision[0]["uncertainty_low"]
+        == "1.1"
+    )
+    assert (
+        low_precision[0]["uncertainty_high"]
+        == "1.3"
+    )
+    assert (
+        low_precision[0]["total_cost"]
+        == "0.0100000000000000000000000000000001"
+    )
+

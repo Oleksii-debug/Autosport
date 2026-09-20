@@ -510,6 +510,7 @@ class CanonicalOutcomeDerivedVOCScoreAuthority(
         matches: dict[str, tuple[object, Mapping[str, Any]]] = {}
         admission_ids: set[str] = set()
         context_ids: set[str] = set()
+        request_ids: set[str] = set()
         for admission_sha, record in ordered:
             if getattr(record, "action", None) != _ADMISSION_ACTION:
                 continue
@@ -611,14 +612,193 @@ class CanonicalOutcomeDerivedVOCScoreAuthority(
                 raise _base.VOCEvaluationError(
                     "canonical VOC paired admission does not match route context"
                 )
-            if admission_id in admission_ids or context_sha in context_ids:
+            request_id = _base._text(
+                context.get("request_id"), field="VOC context request_id"
+            )
+            self._router_precompute_for_admission(
+                admission_record=record,
+                admission=raw,
+                context_record=context_record,
+            )
+            if (
+                admission_id in admission_ids
+                or context_sha in context_ids
+                or request_id in request_ids
+            ):
                 raise _base.VOCEvaluationError(
                     "precommitted VOC cohort reuses paired admission identity"
                 )
             admission_ids.add(admission_id)
             context_ids.add(context_sha)
+            request_ids.add(request_id)
             matches[admission_sha] = (record, raw)
+
+        if expected_protocol_id is not None and expected_cohort_id is not None:
+            canonical_request_ids = self._matching_router_precompute_request_ids(
+                recorded_from=recorded_from,
+                recorded_through=recorded_through,
+                expected_task_class=expected_task_class,
+                expected_scope=expected_scope,
+                expected_baseline=expected_baseline,
+                expected_challenger=expected_challenger,
+                expected_protocol_id=expected_protocol_id,
+                expected_cohort_id=expected_cohort_id,
+            )
+            if canonical_request_ids != request_ids:
+                missing = canonical_request_ids - request_ids
+                if missing:
+                    raise _base.VOCEvaluationError(
+                        "canonical router VOC precompute admission is missing from DecisionLedger"
+                    )
+                raise _base.VOCEvaluationError(
+                    "DecisionLedger VOC admission is absent from canonical router precompute universe"
+                )
         return matches
+
+    def _router_precompute_for_admission(
+        self,
+        *,
+        admission_record: object,
+        admission: Mapping[str, Any],
+        context_record: object,
+    ) -> dict[str, Any]:
+        store = self.compute_execution_store
+        if store is None:
+            raise _base.VOCEvaluationError(
+                "explicit VOC paired admission requires canonical router precompute authority"
+            )
+        context_payload = getattr(context_record, "payload", None)
+        context = (
+            context_payload.get(_CONTEXT_KEY)
+            if isinstance(context_payload, Mapping)
+            else None
+        )
+        if not isinstance(context, Mapping):
+            raise _base.VOCEvaluationError(
+                "canonical VOC paired admission route context is missing"
+            )
+        request_id = _base._text(
+            context.get("request_id"), field="VOC context request_id"
+        )
+        authority = store.get_voc_precompute_admission(request_id)
+        if authority is None:
+            raise _base.VOCEvaluationError(
+                "explicit VOC paired admission lacks immutable router precompute authority"
+            )
+        expected = {
+            "admission_id": _base._text(
+                admission.get("admission_id"), field="VOC admission admission_id"
+            ),
+            "request_id": request_id,
+            "decision_input_sha256": _base._sha256(
+                admission.get("decision_input_sha256"),
+                field="VOC admission decision_input_sha256",
+            ),
+            "decision_context_sha256": _base._sha256(
+                admission.get("decision_context_sha256"),
+                field="VOC admission decision_context_sha256",
+            ),
+            "decision_deadline": _base._time(
+                admission.get("decision_deadline"),
+                field="VOC admission decision_deadline",
+            ),
+            "research_protocol_id": _base._text(
+                admission.get("research_protocol_id"),
+                field="VOC admission research_protocol_id",
+            ),
+            "cohort_id": _base._text(
+                admission.get("cohort_id"), field="VOC admission cohort_id"
+            ),
+            "task_class": _base._text(
+                admission.get("task_class"), field="VOC admission task_class"
+            ),
+            "scope": _nested_scope(
+                admission.get("scope"), field="VOC admission scope"
+            ),
+            "baseline_compute_identity": _nested_identity(
+                admission.get("baseline_compute_identity"),
+                field="VOC admission baseline_compute_identity",
+            ),
+            "challenger_compute_identity": _nested_identity(
+                admission.get("challenger_compute_identity"),
+                field="VOC admission challenger_compute_identity",
+            ),
+        }
+        for field, value in expected.items():
+            if authority.get(field) != value:
+                raise _base.VOCEvaluationError(
+                    "explicit VOC paired admission does not match immutable router precompute authority"
+                )
+        context_recorded_at = _base._instant(
+            getattr(context_record, "recorded_at"),
+            field="VOC route context recorded_at",
+        )
+        router_admitted_at = _base._instant(
+            authority.get("admitted_at"),
+            field="router VOC precompute admitted_at",
+        )
+        ledger_admitted_at = _base._instant(
+            getattr(admission_record, "recorded_at"),
+            field="VOC admission recorded_at",
+        )
+        if router_admitted_at < context_recorded_at:
+            raise _base.VOCEvaluationError(
+                "router VOC precompute admission predates canonical route context"
+            )
+        if ledger_admitted_at < router_admitted_at:
+            raise _base.VOCEvaluationError(
+                "DecisionLedger VOC admission predates immutable router precompute authority"
+            )
+        _base._sha256(
+            authority.get("route_record_sha256"),
+            field="router VOC precompute route_record_sha256",
+        )
+        return authority
+
+    def _matching_router_precompute_request_ids(
+        self,
+        *,
+        recorded_from: datetime,
+        recorded_through: datetime,
+        expected_task_class: str,
+        expected_scope: Mapping[str, str],
+        expected_baseline: Mapping[str, str],
+        expected_challenger: Mapping[str, str],
+        expected_protocol_id: str,
+        expected_cohort_id: str,
+    ) -> set[str]:
+        store = self.compute_execution_store
+        if store is None:
+            return set()
+        result: set[str] = set()
+        for authority in store.voc_precompute_admissions():
+            admitted_at = _base._instant(
+                authority.get("admitted_at"),
+                field="router VOC precompute admitted_at",
+            )
+            if admitted_at < recorded_from or admitted_at > recorded_through:
+                continue
+            if (
+                authority.get("task_class") != expected_task_class
+                or authority.get("scope") != dict(expected_scope)
+                or authority.get("baseline_compute_identity")
+                != dict(expected_baseline)
+                or authority.get("challenger_compute_identity")
+                != dict(expected_challenger)
+                or authority.get("research_protocol_id") != expected_protocol_id
+                or authority.get("cohort_id") != expected_cohort_id
+            ):
+                continue
+            request_id = _base._text(
+                authority.get("request_id"),
+                field="router VOC precompute request_id",
+            )
+            if request_id in result:
+                raise _base.VOCEvaluationError(
+                    "canonical router VOC precompute universe reuses request identity"
+                )
+            result.add(request_id)
+        return result
 
     def _terminal_execution(
         self,

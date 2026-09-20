@@ -63,6 +63,9 @@ def test_decision_ledger_shadow_added_after_construction_is_rejected_at_read(tmp
     fixture = AdmissionFixture(tmp_path)
     decision_ledger = JsonlDecisionLedger(fixture.workspace / "decisions.jsonl")
     coordinator = fixture.coordinator(decision_ledger=decision_ledger)
+    state_path = fixture.workspace / "paper-campaign-admission.json"
+    state_before = state_path.read_bytes()
+    decisions_before = (fixture.workspace / "decisions.jsonl").read_bytes()
     attacker_called = False
 
     def attacker_verified_records():
@@ -76,7 +79,8 @@ def test_decision_ledger_shadow_added_after_construction_is_rejected_at_read(tmp
         fixture.admit(coordinator)
 
     assert attacker_called is False
-    assert not (fixture.workspace / "paper-campaign-admission.json").exists()
+    assert state_path.read_bytes() == state_before
+    assert (fixture.workspace / "decisions.jsonl").read_bytes() == decisions_before
 
 
 def test_execution_ledger_shadow_added_after_construction_is_rejected_at_read(tmp_path):
@@ -87,6 +91,9 @@ def test_execution_ledger_shadow_added_after_construction_is_rejected_at_read(tm
     ):
         execution_ledger = PaperExecutionLedger(fixture.execution_ledger_path)
     coordinator = fixture.coordinator(execution_ledger=execution_ledger)
+    state_path = fixture.workspace / "paper-campaign-admission.json"
+    state_before = state_path.read_bytes()
+    decisions_before = (fixture.workspace / "decisions.jsonl").read_bytes()
     attacker_called = False
 
     def attacker_events(run_id: str):
@@ -100,12 +107,16 @@ def test_execution_ledger_shadow_added_after_construction_is_rejected_at_read(tm
         fixture.admit(coordinator)
 
     assert attacker_called is False
-    assert not (fixture.workspace / "paper-campaign-admission.json").exists()
+    assert state_path.read_bytes() == state_before
+    assert (fixture.workspace / "decisions.jsonl").read_bytes() == decisions_before
 
 
 def test_decision_ledger_replacement_after_construction_fails_closed(tmp_path):
     fixture = AdmissionFixture(tmp_path)
     coordinator = fixture.coordinator()
+    state_path = fixture.workspace / "paper-campaign-admission.json"
+    state_before = state_path.read_bytes()
+    decisions_before = (fixture.workspace / "decisions.jsonl").read_bytes()
     coordinator.decision_ledger = JsonlDecisionLedger(
         fixture.workspace / "replacement-decisions.jsonl"
     )
@@ -113,12 +124,16 @@ def test_decision_ledger_replacement_after_construction_fails_closed(tmp_path):
     with pytest.raises(PaperCampaignAdmissionError, match="authority changed"):
         fixture.admit(coordinator)
 
-    assert not (fixture.workspace / "paper-campaign-admission.json").exists()
+    assert state_path.read_bytes() == state_before
+    assert (fixture.workspace / "decisions.jsonl").read_bytes() == decisions_before
 
 
 def test_execution_ledger_replacement_after_construction_fails_closed(tmp_path):
     fixture = AdmissionFixture(tmp_path)
     coordinator = fixture.coordinator()
+    state_path = fixture.workspace / "paper-campaign-admission.json"
+    state_before = state_path.read_bytes()
+    decisions_before = (fixture.workspace / "decisions.jsonl").read_bytes()
     with patch.dict(
         os.environ,
         {"AUTOSPORT_PAPER_EXECUTION_WITNESS_DIR": str(fixture.authority)},
@@ -129,7 +144,8 @@ def test_execution_ledger_replacement_after_construction_fails_closed(tmp_path):
     with pytest.raises(PaperCampaignAdmissionError, match="authority changed"):
         fixture.admit(coordinator)
 
-    assert not (fixture.workspace / "paper-campaign-admission.json").exists()
+    assert state_path.read_bytes() == state_before
+    assert (fixture.workspace / "decisions.jsonl").read_bytes() == decisions_before
 
 
 def test_runtime_subclass_is_rejected_before_admission_coordinator_construction(tmp_path):

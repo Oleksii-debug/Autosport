@@ -1,6 +1,10 @@
 from __future__ import annotations
 
+import shutil
+import subprocess
 from pathlib import Path
+
+import pytest
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -13,9 +17,10 @@ def test_windows_builder_skip_is_explicit_and_default_safe() -> None:
     assert "[switch] $SkipTests" in wrapper
     assert "if (-not $SkipTests)" in wrapper
     assert "& $coreScript" in wrapper
-    assert wrapper.index("if (-not $SkipTests)") < wrapper.index("function python")
-    assert "BUILDER_LOCAL_PYTEST=SKIPPED_BY_EXPLICIT_CALLER" in wrapper
-    assert "skippedBuilderPytestGate -ne 1" in wrapper
+    assert wrapper.index("if (-not $SkipTests)") < wrapper.index(
+        "ConvertTo-WindowsCandidateCoreText"
+    )
+    assert "windows_build_skip_gate.ps1" in wrapper
     assert core.count("python -m pytest -v tests") == 1
     assert 'throw "Full pytest gate exited $LASTEXITCODE"' in core
 
@@ -42,3 +47,31 @@ def test_windows_candidate_opts_into_only_builder_local_skip() -> None:
         "External UIA fresh-extraction gate",
     ):
         assert required_gate in workflow
+
+
+@pytest.mark.skipif(shutil.which("pwsh") is None, reason="PowerShell is Windows-CI coverage")
+def test_windows_candidate_skip_transform_executes_fail_closed() -> None:
+    helper = ROOT / "scripts" / "windows_build_skip_gate.ps1"
+    fixture = """python -c \"print('before')\"\npython -m pytest -v tests\nif ($LASTEXITCODE -ne 0) { throw \"Full pytest gate exited $LASTEXITCODE\" }\npython -c \"print('after')\"\n"""
+    escaped_helper = str(helper).replace("'", "''")
+    escaped_fixture = fixture.replace("'", "''")
+    command = f"""
+. '{escaped_helper}'
+$core = @'
+{escaped_fixture}
+'@
+$result = ConvertTo-WindowsCandidateCoreText -CoreText $core
+if ($result -match 'python -m pytest -v tests') {{ throw 'pytest gate was not removed' }}
+if ($result -notmatch 'BUILDER_LOCAL_PYTEST=SKIPPED_BY_EXPLICIT_CALLER') {{ throw 'skip marker missing' }}
+if ($result -notmatch 'print\(''before''\)' -or $result -notmatch 'print\(''after''\)') {{ throw 'ordinary Python commands were not preserved' }}
+try {{ ConvertTo-WindowsCandidateCoreText -CoreText ($core + $core) | Out-Null; throw 'duplicate gate unexpectedly accepted' }} catch {{
+  if ($_.Exception.Message -notmatch 'exactly one canonical builder-local pytest gate') {{ throw }}
+}}
+"""
+    subprocess.run(
+        ["pwsh", "-NoProfile", "-NonInteractive", "-Command", command],
+        cwd=ROOT,
+        check=True,
+        capture_output=True,
+        text=True,
+    )

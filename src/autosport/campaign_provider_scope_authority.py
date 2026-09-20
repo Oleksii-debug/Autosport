@@ -228,7 +228,7 @@ class VerifiedBetfairProviderScopeCapture:
         return _digest(self.payload())
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True, slots=True, weakref_slot=True)
 class CampaignProviderScopeProjection:
     """Immutable applicability proof consumed by campaign cost allocation."""
 
@@ -313,10 +313,23 @@ class CampaignProviderScopeProjection:
 
 def _install_capture_authority() -> None:
     issued: dict[int, tuple[object, str]] = {}
+    raw_capture = _capture_betfair_provider_scope_raw
 
-    def remember(
-        capture: VerifiedBetfairProviderScopeCapture,
+    def authoritative_capture(
+        client: BetfairReadOnlyClient,
+        action: ExecutionAction,
+        profile: BookmakerCapabilityProfile,
+        *,
+        expected_profile_sha256: str,
+        provider_order_ref: str | None = None,
     ) -> VerifiedBetfairProviderScopeCapture:
+        capture = raw_capture(
+            client,
+            action,
+            profile,
+            expected_profile_sha256=expected_profile_sha256,
+            provider_order_ref=provider_order_ref,
+        )
         key = id(capture)
 
         def forget(
@@ -346,17 +359,13 @@ def _install_capture_authority() -> None:
                 "provider scope capture changed after source verification"
             )
 
-    globals()["_remember_capture"] = remember
+    globals()["capture_betfair_provider_scope"] = authoritative_capture
     globals()[
         "assert_provider_scope_capture_authoritative"
     ] = assert_authoritative
 
 
-_install_capture_authority()
-del _install_capture_authority
-
-
-def capture_betfair_provider_scope(
+def _capture_betfair_provider_scope_raw(
     client: BetfairReadOnlyClient,
     action: ExecutionAction,
     profile: BookmakerCapabilityProfile,
@@ -443,7 +452,11 @@ def capture_betfair_provider_scope(
         source_interval_end=end,
         available_at=end,
     )
-    return _remember_capture(capture)
+    return capture
+
+
+_install_capture_authority()
+del _install_capture_authority
 
 
 def _decision_prefix_records(run_registry, run_id: str):
@@ -512,7 +525,7 @@ def _execution_plan_action(
     return plan, actions[0], plan_event
 
 
-def resolve_campaign_provider_scope(
+def _resolve_campaign_provider_scope_raw(
     authority: FinalizedCampaignAuthority,
     *,
     session_id: str,
@@ -710,3 +723,68 @@ def resolve_campaign_provider_scope(
                 "re-resolved provider scope digest drifted"
             )
     return resolved
+
+
+def _install_projection_authority() -> None:
+    issued: dict[int, tuple[object, str]] = {}
+    raw_resolve = _resolve_campaign_provider_scope_raw
+
+    def authoritative_resolve(
+        authority: FinalizedCampaignAuthority,
+        *,
+        session_id: str,
+        execution_ledger: RealExecutionLedger,
+        plan_id: str,
+        attempt_id: str,
+        capture: VerifiedBetfairProviderScopeCapture,
+        expected_applicability_digest: str | None = None,
+    ) -> CampaignProviderScopeProjection:
+        projection = raw_resolve(
+            authority,
+            session_id=session_id,
+            execution_ledger=execution_ledger,
+            plan_id=plan_id,
+            attempt_id=attempt_id,
+            capture=capture,
+            expected_applicability_digest=expected_applicability_digest,
+        )
+        key = id(projection)
+
+        def forget(
+            _weakref: object,
+            *,
+            projection_key: int = key,
+        ) -> None:
+            issued.pop(projection_key, None)
+
+        issued[key] = (
+            ref(projection, forget),
+            projection.applicability_digest,
+        )
+        return projection
+
+    def assert_authoritative(
+        projection: CampaignProviderScopeProjection,
+    ) -> None:
+        if not isinstance(projection, CampaignProviderScopeProjection):
+            raise CampaignProviderScopeError(
+                "campaign provider scope projection type is not canonical"
+            )
+        record = issued.get(id(projection))
+        if record is None or record[0]() is not projection:
+            raise CampaignProviderScopeError(
+                "campaign provider scope projection was not issued by canonical resolver"
+            )
+        if record[1] != projection.applicability_digest:
+            raise CampaignProviderScopeError(
+                "campaign provider scope projection changed after resolution"
+            )
+
+    globals()["resolve_campaign_provider_scope"] = authoritative_resolve
+    globals()[
+        "assert_campaign_provider_scope_authoritative"
+    ] = assert_authoritative
+
+
+_install_projection_authority()
+del _install_projection_authority

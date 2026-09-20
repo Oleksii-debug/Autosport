@@ -11,6 +11,10 @@ from typing import Iterable, Mapping
 from .evaluation_intake import ObservationIntakeLedger, ObservationIntakeSnapshot
 from .integrity import atomic_write_json
 from .json_integrity import strict_json_loads
+from .monotonic_workspace_authority import (
+    MonotonicWorkspaceAuthority,
+    MonotonicWorkspaceAuthorityError,
+)
 from .paper_execution_reality import (
     PaperAttemptOutcome,
     PaperExecutionLedger,
@@ -500,6 +504,13 @@ class EvaluationUniverse:
             )
         if _instant(self.intake_snapshot.committed_at, "intake committed_at") > frozen:
             raise EvaluationUniverseError("canonical intake committed after frozen_at")
+        if _instant(
+            self.intake_snapshot.evaluation_not_before,
+            "intake evaluation_not_before",
+        ) > frozen:
+            raise EvaluationUniverseError(
+                "canonical intake evaluation boundary is after frozen_at"
+            )
         if not isinstance(self.rows, tuple) or not self.rows:
             raise EvaluationUniverseError("rows must be a non-empty tuple")
 
@@ -1110,7 +1121,7 @@ class EvaluationUniverseLedger:
 
 
 class EvaluationUniverseStore:
-    """Durable denominator store bound to canonical intake and canonical PAPER authority."""
+    """Durable denominator store protected by the shared monotonic workspace authority."""
 
     FILE_NAME = "evaluation-universe.json"
 
@@ -1120,13 +1131,20 @@ class EvaluationUniverseStore:
         *,
         intake_ledger: ObservationIntakeLedger,
         paper_resolver: CanonicalPaperExecutionResolver | None = None,
+        authority_root: str | Path | None = None,
     ) -> None:
         if not isinstance(intake_ledger, ObservationIntakeLedger):
             raise TypeError("intake_ledger must be ObservationIntakeLedger")
-        self.workspace = Path(workspace)
+        self.workspace = Path(workspace).expanduser().resolve(strict=False)
         self.path = self.workspace / self.FILE_NAME
         self.intake_ledger = intake_ledger
         self.paper_resolver = paper_resolver
+        self.monotonic_authority = MonotonicWorkspaceAuthority(
+            workspace=self.workspace,
+            domain="evaluation-universe",
+            key=self.intake_ledger.authority_id,
+            authority_root=authority_root,
+        )
 
     def _read_unlocked(self) -> EvaluationUniverseLedger | None:
         if not self.path.exists():
@@ -1146,9 +1164,40 @@ class EvaluationUniverseStore:
             paper_resolver=self.paper_resolver,
         )
 
+    def _semantic_binding(self, ledger: EvaluationUniverseLedger) -> str:
+        return _digest(
+            {
+                "kind": "evaluation-universe-store-v1",
+                "intake_authority_id": self.intake_ledger.authority_id,
+                "intake_snapshot_sha256": ledger.universe.intake_snapshot.snapshot_sha256,
+                "universe_sha256": ledger.universe.universe_sha256,
+            }
+        )
+
+    def _recover_unlocked(
+        self,
+        ledger: EvaluationUniverseLedger | None,
+    ) -> None:
+        observed = None if ledger is None else ledger.ledger_sha256
+        try:
+            if ledger is None:
+                self.monotonic_authority.recover(observed_state_sha256=None)
+            else:
+                binding = self._semantic_binding(ledger)
+                self.monotonic_authority.recover(
+                    observed_state_sha256=observed,
+                    tx_id=f"evaluation-universe:{observed}",
+                    semantic_binding_sha256=binding,
+                )
+        except MonotonicWorkspaceAuthorityError as exc:
+            raise EvaluationUniverseIntegrityError(
+                "evaluation-universe state is stale, deleted, rolled back, or unproven"
+            ) from exc
+
     def load(self) -> EvaluationUniverseLedger | None:
         with WorkspaceEconomicLock(self.workspace):
             ledger = self._read_unlocked()
+            self._recover_unlocked(ledger)
         if ledger is not None:
             self.intake_ledger.verify_snapshot(ledger.universe.intake_snapshot)
         return ledger
@@ -1159,6 +1208,7 @@ class EvaluationUniverseStore:
         self.intake_ledger.verify_snapshot(ledger.universe.intake_snapshot)
         with WorkspaceEconomicLock(self.workspace):
             existing = self._read_unlocked()
+            self._recover_unlocked(existing)
             if existing is not None:
                 if existing.universe.universe_sha256 != ledger.universe.universe_sha256:
                     raise EvaluationUniverseIntegrityError(
@@ -1176,7 +1226,33 @@ class EvaluationUniverseStore:
                     )
                 if existing.ledger_sha256 == ledger.ledger_sha256:
                     return
-            atomic_write_json(self.path, ledger.to_payload())
+
+            observed = None if existing is None else existing.ledger_sha256
+            intended = ledger.ledger_sha256
+            binding = self._semantic_binding(ledger)
+            tx_id = f"evaluation-universe:{intended}"
+            try:
+                self.monotonic_authority.prepare(
+                    tx_id=tx_id,
+                    observed_state_sha256=observed,
+                    intended_state_sha256=intended,
+                    semantic_binding_sha256=binding,
+                )
+                atomic_write_json(self.path, ledger.to_payload())
+                published = self._read_unlocked()
+                if published is None or published.ledger_sha256 != intended:
+                    raise EvaluationUniverseIntegrityError(
+                        "published evaluation-universe state does not match intended digest"
+                    )
+                self.monotonic_authority.commit(
+                    tx_id=tx_id,
+                    observed_state_sha256=intended,
+                    semantic_binding_sha256=binding,
+                )
+            except MonotonicWorkspaceAuthorityError as exc:
+                raise EvaluationUniverseIntegrityError(
+                    "monotonic evaluation-universe publication failed closed"
+                ) from exc
 
 
 def _validate_canonical_intake_rows(
@@ -1199,20 +1275,31 @@ def _validate_canonical_intake_rows(
                 "row intake record escapes canonical snapshot identity"
             )
         intake_committed = _instant(record.committed_at, "intake committed_at")
+        evaluation_not_before = _instant(
+            record.evaluation_not_before,
+            "intake evaluation_not_before",
+        )
         if _instant(row.committed_at, "row committed_at") > intake_committed:
             raise EvaluationUniverseError(
                 "row evidence was committed after canonical intake membership"
             )
+        if row.detection_at is not None and _instant(
+            row.detection_at,
+            "detection_at",
+        ) < evaluation_not_before:
+            raise EvaluationUniverseError(
+                "row detection began before complete intake membership was immutable"
+            )
         if row.decision_at is not None and _instant(
             row.decision_at,
             "decision_at",
-        ) > intake_committed:
+        ) < evaluation_not_before:
             raise EvaluationUniverseError(
-                "row decision was not available when intake membership was committed"
+                "row decision began before complete intake membership was immutable"
             )
-        if intake_committed > frozen:
+        if evaluation_not_before > frozen:
             raise EvaluationUniverseError(
-                "canonical intake membership was committed after universe freeze"
+                "canonical intake evaluation boundary is after universe freeze"
             )
         if row.outcome_reveal_not_before is None or _instant(
             row.outcome_reveal_not_before,

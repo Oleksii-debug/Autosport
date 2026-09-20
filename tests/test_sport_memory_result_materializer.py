@@ -242,6 +242,13 @@ def _settlement(
         evidence_sha256=evidence_sha256,
         available_at=available_at,
     )
+    return _authoritative_assertion(materializer, canonical)
+
+
+def _authoritative_assertion(
+    materializer: SportMemoryResultMaterializer,
+    canonical: SettlementResolution,
+) -> SettlementResolution:
     authority = materializer.outcome_authority
     assert isinstance(authority, _StaticOutcomeAuthority)
     authority.resolution = canonical
@@ -298,6 +305,25 @@ def test_caller_settlement_payload_must_equal_re_resolved_product_truth(tmp_path
         match="settlement assertion differs from product-owned outcome authority",
     ):
         materializer.materialize(binding, forged, as_of=T2)
+
+    assert store.graph_edges(as_of=T3) == ()
+    market_store.close()
+
+
+def test_settlement_reference_and_digest_are_assertions_against_product_truth(tmp_path):
+    _, store, market_store, materializer = _authorities(tmp_path)
+    binding = _binding(materializer, market_store)
+    canonical = _settlement(materializer, binding, "win")
+
+    for forged in (
+        replace(canonical, settlement_ref="caller-settlement"),
+        replace(canonical, evidence_sha256=SHA_C),
+    ):
+        with pytest.raises(
+            SportMemoryResultMaterializationError,
+            match="settlement assertion differs from product-owned outcome authority",
+        ):
+            materializer.materialize(binding, forged, as_of=T2)
 
     assert store.graph_edges(as_of=T3) == ()
     market_store.close()
@@ -463,7 +489,12 @@ def test_result_projection_is_exactly_once_across_restart_and_causally_hidden_be
         ParticipantIdentityRegistry(tmp_path / "identity.json"),
     )
     reopened_market = SQLiteMarketStore(tmp_path / "market.db")
-    reopened = SportMemoryResultMaterializer(reopened_store, reopened_market)
+    reopened = SportMemoryResultMaterializer(
+        reopened_store,
+        reopened_market,
+        lifecycle=ContinuousEventLifecycle(tmp_path / "lifecycle.json"),
+        outcome_authority=_StaticOutcomeAuthority(),
+    )
     replay_binding = _binding(reopened, reopened_market)
     replay = reopened.materialize(replay_binding, _settlement(reopened, replay_binding), as_of=T3)
     assert replay == first
@@ -476,12 +507,12 @@ def test_result_projection_requires_explicit_store_correction_lineage(tmp_path):
     binding = _binding(materializer, market_store)
     first = materializer.materialize(binding, _settlement(materializer, binding), as_of=T2)
     correction = _settlement(
+        materializer,
         binding,
         "loss",
         available_at=T3,
         evidence_sha256=SHA_C,
         evidence_id="result-2",
-        settlement_ref="settlement-2",
     )
 
     with pytest.raises(
@@ -761,7 +792,8 @@ def test_event_and_subject_quote_must_match_frozen_binding(tmp_path):
             as_of=T2,
         )
 
-    settlement = _resolve_external_settlement(
+    settlement = _authoritative_assertion(
+        materializer,
         SettlementResolution(
             event_identity=EVENT_ID,
             settlement_ref="settlement-1",
@@ -769,7 +801,7 @@ def test_event_and_subject_quote_must_match_frozen_binding(tmp_path):
             evidence_id="result-1",
             evidence_sha256=SHA_B,
             available_at=T2,
-        )
+        ),
     )
     with pytest.raises(
         SportMemoryResultMaterializationError,
@@ -784,11 +816,11 @@ def test_initial_void_is_consumed_without_fabricating_performance(tmp_path):
     _, store, market_store, materializer = _authorities(tmp_path)
     binding = _binding(materializer, market_store)
     settlement = _settlement(
+        materializer,
         binding,
         "void",
         available_at=T2,
         evidence_id="result-void",
-        settlement_ref="settlement-void",
     )
 
     receipt = materializer.materialize(binding, settlement, as_of=T2)
@@ -806,12 +838,12 @@ def test_win_to_void_correction_retires_performance_across_restart_without_fake_
     assert len(store.graph_edges(as_of=T2)) == 1
 
     void = _settlement(
+        materializer,
         binding,
         "void",
         available_at=T3,
         evidence_sha256=SHA_C,
         evidence_id="result-void-correction",
-        settlement_ref="settlement-void-correction",
     )
     receipt = materializer.materialize(
         binding,
@@ -830,19 +862,24 @@ def test_win_to_void_correction_retires_performance_across_restart_without_fake_
         ParticipantIdentityRegistry(tmp_path / "identity.json"),
     )
     reopened_market = SQLiteMarketStore(tmp_path / "market.db")
-    reopened = SportMemoryResultMaterializer(reopened_store, reopened_market)
+    reopened = SportMemoryResultMaterializer(
+        reopened_store,
+        reopened_market,
+        lifecycle=ContinuousEventLifecycle(tmp_path / "lifecycle.json"),
+        outcome_authority=_StaticOutcomeAuthority(),
+    )
     reopened_binding = _binding(reopened, reopened_market)
     assert reopened_store.graph_edges(as_of=T4) == ()
     replay = reopened.materialize(
         reopened_binding,
         _settlement(
+            reopened,
             reopened_binding,
             "void",
             available_at=T3,
             evidence_sha256=SHA_C,
             evidence_id="result-void-correction",
-            settlement_ref="settlement-void-correction",
-        ),
+            ),
         as_of=T4,
         supersedes_performance_id=win.performance_id,
     )

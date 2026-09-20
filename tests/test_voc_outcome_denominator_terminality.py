@@ -162,7 +162,9 @@ class VOCOutcomeDenominatorTerminalityTests(unittest.TestCase):
             if isinstance(record.payload, Mapping)
             and isinstance(record.payload.get("voc_current_context"), Mapping)
         )
-        source_context_sha = _FIXTURE.digest(source_context.to_dict())
+        source_context_sha = successful.payload["voc_binding"][
+            "decision_context_sha256"
+        ]
 
         # A legacy-format cohort member fails without a canonical score.
         legacy_input = _FIXTURE.digest(

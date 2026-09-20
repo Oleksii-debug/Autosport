@@ -76,6 +76,7 @@ if (-not $result.Contains('python -c "print(''after'')"')) {{ throw 'after Pytho
 try {{ ConvertTo-WindowsCandidateCoreText -CoreText ($core + $core) | Out-Null; throw 'duplicate gate unexpectedly accepted' }} catch {{
   if ($_.Exception.Message -notmatch 'exactly one canonical builder-local pytest gate') {{ throw }}
 }}
+exit 0
 """
     subprocess.run(
         ["pwsh", "-NoProfile", "-NonInteractive", "-Command", command],

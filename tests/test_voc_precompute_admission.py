@@ -184,6 +184,7 @@ class VOCPrecomputeAdmissionTests(unittest.TestCase):
                     "admission_id": "admission-1",
                     "research_protocol_id": "protocol-1",
                     "cohort_id": "cohort-1",
+                    "baseline_candidate_id": "baseline",
                     "challenger_candidate_id": "challenger",
                     "sport_id": "table_tennis",
                     "league_id": "league-voc",

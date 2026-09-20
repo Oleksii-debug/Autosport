@@ -408,6 +408,10 @@ class SportMemoryRuntime:
             raise SportMemoryError("input_performance_ids must be an immutable tuple")
         for value in artifact.input_performance_ids:
             _sha256("input_performance_id", value)
+        if len(set(artifact.input_performance_ids)) != len(artifact.input_performance_ids):
+            raise SportMemoryError("input_performance_ids must be unique")
+        if _digest(list(artifact.input_performance_ids)) != artifact.input_digest:
+            raise SportMemoryError("input_digest does not match input performance ids")
         support = _nonnegative_int("support", artifact.support)
         effective_sample = _nonnegative_int("effective_sample", artifact.effective_sample)
         opponent_count = _nonnegative_int("opponent_count", artifact.opponent_count)
@@ -429,11 +433,18 @@ class SportMemoryRuntime:
         if artifact.last_observed_at is None:
             if artifact.age_seconds is not None:
                 raise SportMemoryError("age_seconds requires last_observed_at")
+            if any((support, effective_sample, opponent_count)):
+                raise SportMemoryError("memory without observation cannot carry support")
         else:
             observed = _instant("last_observed_at", artifact.last_observed_at)
             if observed > cutoff:
                 raise SportMemoryError("last_observed_at cannot exceed causal cutoff")
-            _nonnegative_int("age_seconds", artifact.age_seconds)
+            if support == 0:
+                raise SportMemoryError("last_observed_at requires positive support")
+            age_seconds = _nonnegative_int("age_seconds", artifact.age_seconds)
+            expected_age_seconds = max(0, int((cutoff - observed).total_seconds()))
+            if age_seconds != expected_age_seconds:
+                raise SportMemoryError("age_seconds does not match causal cutoff")
         _sha256("authority_generation_sha256", artifact.authority_generation_sha256)
 
     @staticmethod

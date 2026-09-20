@@ -219,7 +219,7 @@ def test_manually_written_self_consistent_bytes_cannot_regain_authority(tmp_path
 
     with pytest.raises(
         ProviderObservationIntegrityError,
-        match="not proven by independent machine-state acquisition authority",
+        match="not proven by production-owned acquisition receipt",
     ):
         _store(tmp_path).load(forged.evidence_sha256)
     with pytest.raises(ProviderObservationUnsupportedError):

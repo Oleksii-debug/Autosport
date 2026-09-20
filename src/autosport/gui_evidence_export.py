@@ -9,17 +9,20 @@ from .evidence_export import export_evidence_manifest
 
 
 def _safe_worker_error(exc: BaseException) -> str:
-    """Render a terminal export failure without trusting exception metadata."""
+    """Return structural failure evidence without stringifying hostile exceptions."""
 
     try:
         name = type.__getattribute__(type(exc), "__name__")
     except BaseException:
         name = "BaseException"
-    try:
-        detail = str(exc)
-    except BaseException:
-        return f"{name}: evidence export failed; exception details unavailable"
-    return f"{name}: {detail}" if detail else name
+    if (
+        not isinstance(name, str)
+        or not name
+        or len(name) > 96
+        or not name.replace("_", "").isalnum()
+    ):
+        name = "BaseException"
+    return f"{name}: evidence export failed"
 
 
 @dataclass(frozen=True, slots=True)
@@ -35,9 +38,9 @@ class EvidenceExportMessage:
 class OneShotEvidenceExportWorker:
     """Export one canonical evidence manifest away from the Tk/UIA event thread.
 
-    The canonical exporter owns manifest semantics and secret-safety. This worker is
-    deliberately only a UI adapter: it serializes one export at a time and reports a
-    terminal message for Tk polling without changing evidence contents.
+    The canonical exporter owns destination fencing, manifest semantics and
+    secret-safety. This adapter only serializes one export at a time and reports
+    one terminal message for Tk polling.
     """
 
     def __init__(self) -> None:
@@ -52,13 +55,19 @@ class OneShotEvidenceExportWorker:
             return self._busy
 
     def start(self, workspace: str | Path, output: str | Path) -> bool:
+        # Convert caller values before owning the worker slot. A hostile or invalid
+        # path-like value must not strand ``busy=True`` before a thread exists.
+        try:
+            workspace_path = Path(workspace)
+            output_path = Path(output)
+        except (TypeError, ValueError, OSError):
+            return False
+
         with self._lock:
             if self._busy:
                 return False
             self._busy = True
 
-        workspace_path = Path(workspace)
-        output_path = Path(output)
         try:
             start_gate = threading.Event()
             cancelled = threading.Event()

@@ -161,13 +161,16 @@ def test_historical_artifact_cannot_be_promoted_through_importable_guard_state(
         evidence_path=tmp_path / "evidence.json",
     )
 
-    # Authority mutation is lexical only; there is no package-importable issuer
-    # hook or mutable registry that a consumer can call/populate.
+    # There is no package-importable issuer hook or mutable registry that a
+    # consumer can call/populate to promote this artifact into positive origin.
     assert "_remember" not in vars(historical_guard)
     assert "_issued" not in vars(historical_guard)
     assert "_build_authority_boundary" not in vars(historical_guard)
 
-    with pytest.raises(ProviderPayloadError, match="canonical production capture path"):
+    with pytest.raises(
+        ProviderPayloadError,
+        match="independently re-resolved canonical production-origin evidence",
+    ):
         assert_historical_snapshot_capture_authoritative(capture)
 
 

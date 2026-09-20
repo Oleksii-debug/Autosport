@@ -1560,6 +1560,11 @@ class PersistentLiveDecisionLoop:
         decision_id = f"live-{context_hash}"
         prepared_execution: PreparedPaperExecution | None = None
         expected_execution_payload = None
+        has_positive_execution_stake = any(stake > 0 for stake in plan.stakes)
+        if has_positive_execution_stake and self.paper_execution is None:
+            raise LiveDecisionProgressError(
+                "positive PAPER/SHADOW plan requires canonical #623 execution adoption"
+            )
         if self.paper_execution is not None:
             prepared_execution = self.paper_execution.prepare(
                 plan=plan,

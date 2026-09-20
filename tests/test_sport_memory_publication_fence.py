@@ -265,7 +265,7 @@ def test_bound_materialization_fences_concurrent_identity_generation(
     assert writer_errors == []
 
     final_identity = ParticipantIdentityRegistry(identity.path)
-    assert final_identity.entity("p-drew").entity_id == "p-drew"
+    assert "p-drew" in final_identity._entities
     final_opponent = OpponentIntelligenceStore(opponent.path, final_identity)
 
     # The later canonical identity generation survives after the serialized

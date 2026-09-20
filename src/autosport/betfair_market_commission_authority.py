@@ -37,7 +37,7 @@ class BetfairMarketCommissionReceipt:
     venue_id: str
     account_id: str
     adapter_id: str
-    adapter_version: int
+    adapter_version: str
     market_id: str
     commission: Decimal
     profit: Decimal
@@ -133,9 +133,7 @@ class BetfairMarketCommissionReceipt:
         )
         if raw["schema_version"] != SCHEMA_VERSION or raw["source_family"] != SOURCE_FAMILY:
             raise BetfairMarketCommissionAuthorityError("unsupported Betfair commission receipt")
-        version = raw["adapter_version"]
-        if type(version) is not int:
-            raise BetfairMarketCommissionAuthorityError("adapter_version must be integer")
+        version = _string(raw["adapter_version"], "adapter_version")
         item = cls(
             venue_id=_string(raw["venue_id"], "venue_id"),
             account_id=_string(raw["account_id"], "account_id"),

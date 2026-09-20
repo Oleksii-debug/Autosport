@@ -5,6 +5,7 @@ import json
 import os
 import subprocess
 import sys
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -19,7 +20,18 @@ from autosport.performance_qualification import (
 SOURCE_SHA = "a" * 40
 
 
-def _report() -> dict[str, object]:
+def _canonical_digest(value: object) -> str:
+    canonical = json.dumps(
+        value,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    )
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def _report(*, source_sha: str = SOURCE_SHA) -> dict[str, object]:
     report: dict[str, object] = {
         "status": "PASS",
         "failures": [],
@@ -50,6 +62,7 @@ def _report() -> dict[str, object]:
         "corrupt_health_rejected": True,
         "corrupt_paper_book_rejected": True,
         "real_money_execution": False,
+        "source_sha": source_sha,
         "accepted_events_per_second": 5_000.0,
         "peak_traced_memory_bytes": 100_000_000,
         "ingest_elapsed_seconds": 4.0,
@@ -80,13 +93,20 @@ def _report() -> dict[str, object]:
         "corrupt_paper_book_rejected",
         "real_money_execution",
     )
-    stable = {field: report[field] for field in stable_fields}
-    canonical = json.dumps(
-        stable, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+    report["stable_invariant_fingerprint"] = _canonical_digest(
+        {field: report[field] for field in stable_fields}
     )
-    report["stable_invariant_fingerprint"] = hashlib.sha256(
-        canonical.encode("utf-8")
-    ).hexdigest()
+    report["performance_observation_fingerprint"] = _canonical_digest(
+        {
+            "source_sha": source_sha,
+            "history_events": report["history_events"],
+            "accepted_events_per_second": report["accepted_events_per_second"],
+            "peak_traced_memory_bytes": report["peak_traced_memory_bytes"],
+            "ingest_elapsed_seconds": report["ingest_elapsed_seconds"],
+            "replay_elapsed_seconds": report["replay_elapsed_seconds"],
+            "restart_elapsed_seconds": report["restart_elapsed_seconds"],
+        }
+    )
     return report
 
 
@@ -202,12 +222,25 @@ def test_tampered_stable_payload_is_rejected() -> None:
         )
 
 
-def test_identity_changes_with_source_profile_budget_or_report() -> None:
+def test_tampered_performance_observation_is_rejected() -> None:
+    report = _report()
+    report["accepted_events_per_second"] = 50_000.0
+    with pytest.raises(PerformanceQualificationError, match="observation fingerprint mismatch"):
+        qualify_endurance_report(
+            report, _budget(), source_sha=SOURCE_SHA, machine_profile="machine"
+        )
+
+
+def test_report_source_sha_cannot_be_relabelled_by_qualifier_argument() -> None:
+    with pytest.raises(PerformanceQualificationError, match="does not match expected source"):
+        qualify_endurance_report(
+            _report(), _budget(), source_sha="b" * 40, machine_profile="machine"
+        )
+
+
+def test_identity_changes_with_profile_budget_or_full_report() -> None:
     baseline = qualify_endurance_report(
         _report(), _budget(), source_sha=SOURCE_SHA, machine_profile="machine-a"
-    )
-    changed_source = qualify_endurance_report(
-        _report(), _budget(), source_sha="b" * 40, machine_profile="machine-a"
     )
     changed_profile = qualify_endurance_report(
         _report(), _budget(), source_sha=SOURCE_SHA, machine_profile="machine-b"
@@ -228,12 +261,23 @@ def test_identity_changes_with_source_profile_budget_or_report() -> None:
     )
     identities = {
         baseline.qualification_id,
-        changed_source.qualification_id,
         changed_profile.qualification_id,
         changed_budget.qualification_id,
         changed_report.qualification_id,
     }
-    assert len(identities) == 5
+    assert len(identities) == 4
+
+
+def test_qualification_derived_fields_are_not_replaceable() -> None:
+    qualification = qualify_endurance_report(
+        _report(), _budget(), source_sha=SOURCE_SHA, machine_profile="machine"
+    )
+    with pytest.raises(ValueError, match="init=False"):
+        replace(qualification, target_machine_acceptance=True)
+    with pytest.raises(ValueError, match="init=False"):
+        replace(qualification, status="FAIL")
+    with pytest.raises(ValueError, match="init=False"):
+        replace(qualification, qualification_id="0" * 64)
 
 
 def test_pass_with_nonempty_failures_is_rejected() -> None:

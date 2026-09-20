@@ -10,6 +10,7 @@ from autosport.betfair_campaign_economic_composition import (
     derive_campaign_economics_with_betfair_commission,
 )
 from autosport.campaign_cost_evidence import (
+    CampaignEconomicEvidenceVersion,
     CostClass,
     CostEvidenceError,
     CostSourceRef,
@@ -99,7 +100,7 @@ def test_source_verification_is_append_only_upgrade_of_generic_evidence(
     assert verified.net_after_known_costs is None
 
 
-def test_exact_verified_retry_is_idempotent(
+def test_exact_retry_rederives_before_emitting_successor(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     receipt, source, campaign, first = _compose(monkeypatch)
@@ -114,8 +115,47 @@ def test_exact_verified_retry_is_idempotent(
         previous=first,
     )
 
-    assert retry is first
-    assert retry.version_id == first.version_id
+    assert retry is not first
+    assert retry.previous_version_id == first.version_id
+    assert retry.previous_version_sha256 == first.record_sha256
+    assert retry.costs == first.costs
+    assert retry.known_cost_total == Decimal("0")
+    assert retry.net_after_known_costs is None
+    assert retry.completeness is EconomicCompleteness.INCOMPLETE_NET_ECONOMICS
+    assert UNRESOLVED not in retry.incomplete_reasons
+
+
+def test_caller_constructed_complete_previous_is_never_returned_as_authority(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    receipt, source, campaign, first = _compose(monkeypatch)
+    forged = replace(
+        first,
+        known_cost_total=Decimal("999"),
+        net_after_known_costs=Decimal("-939"),
+        completeness=EconomicCompleteness.COMPLETE_NET_ECONOMICS,
+        incomplete_reasons=(),
+    )
+    assert type(forged) is CampaignEconomicEvidenceVersion
+    assert forged.completeness is EconomicCompleteness.COMPLETE_NET_ECONOMICS
+
+    repaired = derive_campaign_economics_with_betfair_commission(
+        source=source,
+        campaign=campaign,
+        provider_scope=_scope(),
+        receipt_id=receipt.receipt_id,
+        record_sha256=receipt.record_sha256,
+        as_of=NOW,
+        previous=forged,
+    )
+
+    assert repaired is not forged
+    assert repaired.previous_version_id == forged.version_id
+    assert repaired.known_cost_total == Decimal("0")
+    assert repaired.net_after_known_costs is None
+    assert repaired.completeness is EconomicCompleteness.INCOMPLETE_NET_ECONOMICS
+    assert INFORMATIONAL in repaired.incomplete_reasons
+    assert "MISSING_CAMPAIGN_CURRENCY_AUTHORITY" in repaired.incomplete_reasons
 
 
 def test_one_verified_receipt_cannot_launder_other_same_class_cost(
@@ -166,7 +206,7 @@ def test_one_verified_receipt_cannot_launder_other_same_class_cost(
     assert product.completeness is EconomicCompleteness.INCOMPLETE_NET_ECONOMICS
 
 
-def test_previous_version_requires_exact_capability(
+def test_previous_version_requires_exact_value_type(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     receipt = _receipt()

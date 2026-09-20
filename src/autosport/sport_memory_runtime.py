@@ -45,6 +45,20 @@ def _digest(payload: object) -> str:
     return sha256(raw.encode("utf-8")).hexdigest()
 
 
+def _identity_view_from_raw(value: object) -> IdentityView:
+    text = _text("identity_view", value)
+    try:
+        return IdentityView(text)
+    except ValueError as exc:
+        raise SportMemoryError("identity_view is not a supported causal view") from exc
+
+
+def _require_identity_view(value: object, *, name: str = "view") -> IdentityView:
+    if not isinstance(value, IdentityView):
+        raise TypeError(f"{name} must be IdentityView")
+    return value
+
+
 @dataclass(frozen=True, slots=True)
 class SportMemoryScope:
     sport_id: str
@@ -69,6 +83,7 @@ class SportMemoryArtifact:
     memory_id: str
     participant_entity_id: str
     scope: SportMemoryScope
+    identity_view: IdentityView
     causal_cutoff: str
     published_at: str
     rating_snapshot_id: str
@@ -89,6 +104,7 @@ class SportMemoryArtifact:
         result: dict[str, object] = {
             "participant_entity_id": self.participant_entity_id,
             "scope": self.scope.payload(),
+            "identity_view": self.identity_view.value,
             "causal_cutoff": self.causal_cutoff,
             "published_at": self.published_at,
             "rating_snapshot_id": self.rating_snapshot_id,
@@ -156,7 +172,7 @@ class SportMemoryRuntime:
     authority itself exposes provider provenance; callers cannot self-attest it.
     """
 
-    SCHEMA_VERSION = 1
+    SCHEMA_VERSION = 2
 
     def __init__(self, path: Path, opponent_authority: OpponentSnapshotAuthority, *, authority_generation_sha256: str) -> None:
         self.path = Path(path)
@@ -193,6 +209,7 @@ class SportMemoryRuntime:
         participant = _text("participant_entity_id", participant_entity_id)
         cutoff = _text("causal_cutoff", causal_cutoff)
         publication = _text("published_at", published_at)
+        requested_view = _require_identity_view(view)
         if _instant("published_at", publication) < _instant("causal_cutoff", cutoff):
             raise SportMemoryError("memory cannot be published before causal cutoff")
         if not isinstance(scope, SportMemoryScope):
@@ -206,15 +223,23 @@ class SportMemoryRuntime:
             published_at=publication,
             code_sha256=code_sha256,
             dependency_sha256=dependency_sha256,
-            view=view,
+            view=requested_view,
             min_support=min_support,
             max_age_seconds=max_age_seconds,
             algorithm_version=algorithm_version,
         )
-        self._validate_snapshot_pair(rating, feature, participant, scope, cutoff)
+        self._validate_snapshot_pair(
+            rating,
+            feature,
+            participant,
+            scope,
+            cutoff,
+            requested_view,
+        )
         payload: dict[str, object] = {
             "participant_entity_id": participant,
             "scope": scope.payload(),
+            "identity_view": requested_view.value,
             "causal_cutoff": rating.causal_cutoff,
             "published_at": rating.published_at,
             "rating_snapshot_id": rating.snapshot_id,
@@ -235,13 +260,24 @@ class SportMemoryRuntime:
         if memory_id in self._artifacts:
             return self._artifacts[memory_id]
         artifact = SportMemoryArtifact(
-            memory_id=memory_id, participant_entity_id=participant, scope=scope,
-            causal_cutoff=rating.causal_cutoff, published_at=rating.published_at,
-            rating_snapshot_id=rating.snapshot_id, feature_snapshot_id=feature.snapshot_id,
-            input_digest=rating.input_digest, input_performance_ids=tuple(rating.input_performance_ids),
-            support=rating.support, effective_sample=rating.effective_sample, opponent_count=rating.opponent_count,
-            rating=rating.rating, uncertainty=rating.uncertainty, state=rating.state.value,
-            last_observed_at=feature.last_observed_at, age_seconds=feature.age_seconds,
+            memory_id=memory_id,
+            participant_entity_id=participant,
+            scope=scope,
+            identity_view=requested_view,
+            causal_cutoff=rating.causal_cutoff,
+            published_at=rating.published_at,
+            rating_snapshot_id=rating.snapshot_id,
+            feature_snapshot_id=feature.snapshot_id,
+            input_digest=rating.input_digest,
+            input_performance_ids=tuple(rating.input_performance_ids),
+            support=rating.support,
+            effective_sample=rating.effective_sample,
+            opponent_count=rating.opponent_count,
+            rating=rating.rating,
+            uncertainty=rating.uncertainty,
+            state=rating.state.value,
+            last_observed_at=feature.last_observed_at,
+            age_seconds=feature.age_seconds,
             authority_generation_sha256=self.authority_generation_sha256,
         )
         self._artifacts[memory_id] = artifact
@@ -253,7 +289,22 @@ class SportMemoryRuntime:
         return artifact
 
     @staticmethod
-    def _validate_snapshot_pair(rating: RatingSnapshot, feature: FeatureSnapshot, participant_entity_id: str, scope: SportMemoryScope, causal_cutoff: str) -> None:
+    def _validate_snapshot_pair(
+        rating: RatingSnapshot,
+        feature: FeatureSnapshot,
+        participant_entity_id: str,
+        scope: SportMemoryScope,
+        causal_cutoff: str,
+        requested_view: IdentityView,
+    ) -> None:
+        if type(rating) is not RatingSnapshot or type(feature) is not FeatureSnapshot:
+            raise SportMemoryError(
+                "canonical snapshot authority returned unexpected snapshot type"
+            )
+        if rating.view is not requested_view or feature.view is not requested_view:
+            raise SportMemoryError(
+                "canonical snapshot pair does not match requested identity view"
+            )
         if feature.rating_snapshot_id != rating.snapshot_id:
             raise SportMemoryError("feature snapshot does not reference rating snapshot")
         if not all((
@@ -278,25 +329,89 @@ class SportMemoryRuntime:
         except KeyError as exc:
             raise SportMemoryError("unknown sport memory artifact") from exc
 
-    def participant_history(self, participant_entity_id: str, scope: SportMemoryScope) -> tuple[SportMemoryArtifact, ...]:
+    def participant_history(
+        self,
+        participant_entity_id: str,
+        scope: SportMemoryScope,
+        *,
+        view: IdentityView = IdentityView.AS_KNOWN_AT_DECISION,
+    ) -> tuple[SportMemoryArtifact, ...]:
         participant = _text("participant_entity_id", participant_entity_id)
+        requested_view = _require_identity_view(view)
         if not isinstance(scope, SportMemoryScope):
             raise TypeError("scope must be SportMemoryScope")
-        records = (a for a in self._artifacts.values() if a.participant_entity_id == participant and a.scope == scope)
-        return tuple(sorted(records, key=lambda a: (_instant("causal_cutoff", a.causal_cutoff), _instant("published_at", a.published_at), a.memory_id)))
+        records = (
+            artifact
+            for artifact in self._artifacts.values()
+            if artifact.participant_entity_id == participant
+            and artifact.scope == scope
+            and artifact.identity_view is requested_view
+        )
+        return tuple(
+            sorted(
+                records,
+                key=lambda artifact: (
+                    _instant("causal_cutoff", artifact.causal_cutoff),
+                    _instant("published_at", artifact.published_at),
+                    artifact.memory_id,
+                ),
+            )
+        )
 
-    def last_causal_snapshot(self, participant_entity_id: str, scope: SportMemoryScope, *, as_of: str) -> SportMemoryArtifact | None:
+    def last_causal_snapshot(
+        self,
+        participant_entity_id: str,
+        scope: SportMemoryScope,
+        *,
+        as_of: str,
+        view: IdentityView = IdentityView.AS_KNOWN_AT_DECISION,
+    ) -> SportMemoryArtifact | None:
         instant = _instant("as_of", as_of)
-        candidates = [a for a in self.participant_history(participant_entity_id, scope) if _instant("causal_cutoff", a.causal_cutoff) <= instant and _instant("published_at", a.published_at) <= instant]
-        return max(candidates, key=lambda a: (_instant("causal_cutoff", a.causal_cutoff), _instant("published_at", a.published_at), a.memory_id)) if candidates else None
+        requested_view = _require_identity_view(view)
+        candidates = [
+            artifact
+            for artifact in self.participant_history(
+                participant_entity_id,
+                scope,
+                view=requested_view,
+            )
+            if _instant("causal_cutoff", artifact.causal_cutoff) <= instant
+            and _instant("published_at", artifact.published_at) <= instant
+        ]
+        return (
+            max(
+                candidates,
+                key=lambda artifact: (
+                    _instant("causal_cutoff", artifact.causal_cutoff),
+                    _instant("published_at", artifact.published_at),
+                    artifact.memory_id,
+                ),
+            )
+            if candidates
+            else None
+        )
 
-    def record_consumption(self, *, decision_id: str, memory_id: str, decision_cutoff: str, consumed_at: str, expected_scope: SportMemoryScope) -> DecisionMemoryConsumption:
+    def record_consumption(
+        self,
+        *,
+        decision_id: str,
+        memory_id: str,
+        decision_cutoff: str,
+        consumed_at: str,
+        expected_scope: SportMemoryScope,
+        expected_view: IdentityView = IdentityView.AS_KNOWN_AT_DECISION,
+    ) -> DecisionMemoryConsumption:
         decision = _text("decision_id", decision_id)
         artifact = self.get(memory_id)
+        requested_view = _require_identity_view(expected_view, name="expected_view")
         if not isinstance(expected_scope, SportMemoryScope):
             raise TypeError("expected_scope must be SportMemoryScope")
         if artifact.scope != expected_scope:
             raise SportMemoryError("sport memory scope mismatch; refusing cross-domain reuse")
+        if artifact.identity_view is not requested_view:
+            raise SportMemoryError(
+                "sport memory identity view mismatch; refusing causal-view reuse"
+            )
         cutoff = _text("decision_cutoff", decision_cutoff)
         consumed = _text("consumed_at", consumed_at)
         cutoff_instant = _instant("decision_cutoff", cutoff)
@@ -378,6 +493,7 @@ class SportMemoryRuntime:
             memory_id=_sha256("memory_id", r["memory_id"]),
             participant_entity_id=_text("participant_entity_id", r["participant_entity_id"]),
             scope=SportMemoryScope(**r["scope"]),
+            identity_view=_identity_view_from_raw(r["identity_view"]),
             causal_cutoff=_text("causal_cutoff", r["causal_cutoff"]),
             published_at=_text("published_at", r["published_at"]),
             rating_snapshot_id=_sha256("rating_snapshot_id", r["rating_snapshot_id"]),

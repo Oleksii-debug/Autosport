@@ -19,7 +19,10 @@ from autosport.betfair_market_commission_authority import (
     BetfairMarketCommissionAuthority,
     BetfairMarketCommissionAuthorityError,
     BetfairMarketCommissionReceipt,
+    _binding,
+    _state_digest,
 )
+from autosport.monotonic_workspace_authority import MonotonicWorkspaceAuthority
 
 
 UTC = timezone.utc
@@ -80,6 +83,25 @@ def _authority(tmp_path) -> BetfairMarketCommissionAuthority:
         tmp_path / "workspace",
         BetfairSessionCredentials("app-key", "session-token"),
         authority_root=tmp_path / "authority",
+    )
+
+
+def _forged_receipt() -> BetfairMarketCommissionReceipt:
+    return BetfairMarketCommissionReceipt(
+        venue_id="betfair",
+        account_id=f"betfair-account-evidence:{'a' * 64}",
+        adapter_id=ADAPTER_ID,
+        adapter_version=ADAPTER_VERSION,
+        market_id="1.143732676",
+        commission=Decimal("999"),
+        profit=Decimal("999"),
+        currency="EUR",
+        settled_at=datetime(2026, 9, 20, 8, tzinfo=UTC),
+        observed_at=datetime(2026, 9, 20, 10, tzinfo=UTC),
+        available_at=datetime(2026, 9, 20, 10, tzinfo=UTC),
+        account_details_sha256="a" * 64,
+        cleared_orders_sha256="f" * 64,
+        request_scope_sha256="e" * 64,
     )
 
 
@@ -157,6 +179,64 @@ def test_durable_state_and_generic_journal_never_mint_origin_after_restart(
         )
 
 
+def test_caller_forged_state_plus_generic_journal_cannot_mint_origin(
+    tmp_path,
+) -> None:
+    fake = _forged_receipt()
+    records = (fake,)
+    intended = _state_digest(records)
+    binding = _binding(intended)
+    generic = MonotonicWorkspaceAuthority(
+        workspace=tmp_path / "workspace",
+        domain="autosport.betfair_market_commission.v1",
+        key="betfair:authenticated-account",
+        authority_root=tmp_path / "authority",
+    )
+    generic.prepare(
+        tx_id=intended,
+        observed_state_sha256=None,
+        intended_state_sha256=intended,
+        semantic_binding_sha256=binding,
+    )
+    path = (
+        tmp_path
+        / "workspace"
+        / "betfair_market_commission"
+        / "state.json"
+    )
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "records": [fake.to_dict()],
+                "state_sha256": intended,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    generic.commit(
+        tx_id=intended,
+        observed_state_sha256=intended,
+        semantic_binding_sha256=binding,
+    )
+
+    restarted = _authority(tmp_path)
+    assert restarted.verify() == (fake,)
+    with pytest.raises(
+        BetfairMarketCommissionAuthorityError,
+        match="requires authenticated acquisition",
+    ):
+        restarted.resolve(
+            receipt_id=fake.receipt_id,
+            record_sha256=fake.record_sha256,
+            as_of=fake.available_at + timedelta(seconds=1),
+        )
+
+
 def test_caller_cannot_relabel_authenticated_provider_identity(tmp_path) -> None:
     credentials = BetfairSessionCredentials("app-key", "session-token")
     with pytest.raises(
@@ -186,22 +266,7 @@ def test_caller_constructed_receipt_cannot_be_committed(
 ) -> None:
     _install_provider(monkeypatch)
     authority = _authority(tmp_path)
-    fake = BetfairMarketCommissionReceipt(
-        venue_id="betfair",
-        account_id=f"betfair-account-evidence:{'a' * 64}",
-        adapter_id=ADAPTER_ID,
-        adapter_version=ADAPTER_VERSION,
-        market_id="1.143732676",
-        commission=Decimal("999"),
-        profit=Decimal("999"),
-        currency="EUR",
-        settled_at=datetime(2026, 9, 20, 8, tzinfo=UTC),
-        observed_at=datetime(2026, 9, 20, 10, tzinfo=UTC),
-        available_at=datetime(2026, 9, 20, 10, tzinfo=UTC),
-        account_details_sha256="a" * 64,
-        cleared_orders_sha256="f" * 64,
-        request_scope_sha256="e" * 64,
-    )
+    fake = _forged_receipt()
     with pytest.raises(
         BetfairMarketCommissionAuthorityError,
         match="requires authenticated acquisition",

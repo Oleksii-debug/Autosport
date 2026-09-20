@@ -13,6 +13,7 @@ from pathlib import Path
 
 from .agent_loop import AgentLoopPhase, AgentLoopRuntime
 from .champion_policy import load_champion_policy
+from .deployment_runtime_authority import DeploymentRuntimeAuthorityStore
 from .learning_environment import (
     Action,
     CausalLearningEnvironment,
@@ -25,73 +26,20 @@ from .policy_deployment import (
     DeploymentScope,
     load_deployment_authority,
     persist_deployment_authority,
-    validate_activation_binding,
+)
+from .policy_deployment_semantic_bridge import (
+    CrossSessionSemanticInputs,
+    PolicyDeploymentSemanticBridgeError,
+    validate_canonical_activation_binding,
 )
 from .scientific_registry import ScientificRegistry
+from .storage import SQLiteMarketStore
 from .strategy_model_factory import FactoryArtifactStore
 from .transparent_bandit_policy import BanditPolicyState
 
 
 class ChampionAgentEpisodeError(RuntimeError):
     """Champion activation conflicts with the causal episode or AgentLoop."""
-
-
-_CANONICAL_CROSS_SESSION_MARKER = object()
-
-
-@dataclass(frozen=True, slots=True)
-class _CanonicalCrossSessionAuthority:
-    """Opaque in-process proof that canonical semantic resolution already passed."""
-
-    binding_id: str
-    deployment_environment_id: str
-    scope_id: str
-    _marker: object
-
-
-def _mint_canonical_cross_session_authority(
-    *,
-    activation_binding: ActivationBinding,
-    deployment_identity: EnvironmentIdentity,
-    deployment_scope: DeploymentScope,
-) -> _CanonicalCrossSessionAuthority:
-    """Mint only after the canonical semantic resolver succeeds.
-
-    This helper is private and excluded from the supported product API. Product
-    callers must use canonical_champion_agent_episode for later-session activation.
-    """
-
-    if not isinstance(activation_binding, ActivationBinding):
-        raise TypeError("activation_binding must be ActivationBinding")
-    if not isinstance(deployment_identity, EnvironmentIdentity):
-        raise TypeError("deployment_identity must be EnvironmentIdentity")
-    if not isinstance(deployment_scope, DeploymentScope):
-        raise TypeError("deployment_scope must be DeploymentScope")
-    return _CanonicalCrossSessionAuthority(
-        activation_binding.binding_id,
-        deployment_identity.environment_id,
-        deployment_scope.scope_id,
-        _CANONICAL_CROSS_SESSION_MARKER,
-    )
-
-
-def _require_canonical_cross_session_authority(
-    authority: _CanonicalCrossSessionAuthority | None,
-    *,
-    activation_binding: ActivationBinding,
-    deployment_identity: EnvironmentIdentity,
-    deployment_scope: DeploymentScope,
-) -> None:
-    if (
-        type(authority) is not _CanonicalCrossSessionAuthority
-        or authority._marker is not _CANONICAL_CROSS_SESSION_MARKER
-        or authority.binding_id != activation_binding.binding_id
-        or authority.deployment_environment_id != deployment_identity.environment_id
-        or authority.scope_id != deployment_scope.scope_id
-    ):
-        raise ChampionAgentEpisodeError(
-            "cross-session activation requires canonical semantic entrypoint"
-        )
 
 
 def _instant(value: object, name: str) -> datetime:
@@ -108,6 +56,38 @@ def _instant(value: object, name: str) -> datetime:
             f"{name} must be timezone-aware ISO-8601"
         )
     return parsed
+
+
+def _require_canonical_inputs(
+    *,
+    semantic_inputs: CrossSessionSemanticInputs | None,
+    market_store: SQLiteMarketStore | None,
+    runtime_authority_store: DeploymentRuntimeAuthorityStore | None,
+) -> tuple[
+    CrossSessionSemanticInputs,
+    SQLiteMarketStore,
+    DeploymentRuntimeAuthorityStore,
+]:
+    """Fail closed unless the real canonical semantic resolver can run.
+
+    Cross-session authority is deliberately not represented by a caller-mintable
+    token.  The positive boundary owns the immutable resolver inputs and executes
+    canonical re-resolution itself on every initialize/resume.
+    """
+
+    if not isinstance(semantic_inputs, CrossSessionSemanticInputs):
+        raise ChampionAgentEpisodeError(
+            "cross-session activation requires canonical semantic resolver inputs"
+        )
+    if not isinstance(market_store, SQLiteMarketStore):
+        raise ChampionAgentEpisodeError(
+            "cross-session activation requires canonical semantic resolver inputs"
+        )
+    if not isinstance(runtime_authority_store, DeploymentRuntimeAuthorityStore):
+        raise ChampionAgentEpisodeError(
+            "cross-session activation requires canonical semantic resolver inputs"
+        )
+    return semantic_inputs, market_store, runtime_authority_store
 
 
 @dataclass(frozen=True, slots=True)
@@ -207,9 +187,16 @@ class ChampionAgentEpisode:
         training_identity: EnvironmentIdentity | None = None,
         deployment_scope: DeploymentScope | None = None,
         activation_binding: ActivationBinding | None = None,
-        _canonical_cross_session_authority: _CanonicalCrossSessionAuthority | None = None,
+        semantic_inputs: CrossSessionSemanticInputs | None = None,
+        market_store: SQLiteMarketStore | None = None,
+        runtime_authority_store: DeploymentRuntimeAuthorityStore | None = None,
     ) -> "ChampionAgentEpisode":
-        """Start a new paper/shadow episode from canonical champion authority."""
+        """Start a new paper/shadow episode from canonical champion authority.
+
+        Later-session activation is positive only when this method itself can
+        re-resolve the exact canonical semantic authorities.  No caller-created
+        capability object can substitute for that resolution.
+        """
 
         if not isinstance(identity, EnvironmentIdentity):
             raise TypeError("identity must be EnvironmentIdentity")
@@ -217,34 +204,35 @@ class ChampionAgentEpisode:
             raise ChampionAgentEpisodeError(
                 "champion evidence is not available at AgentLoop initialization"
             )
-        deployment_values = (
+
+        cross_session_values = (
             training_identity,
             deployment_scope,
             activation_binding,
+            semantic_inputs,
+            market_store,
+            runtime_authority_store,
         )
-        if any(value is not None for value in deployment_values) and any(
-            value is None for value in deployment_values
-        ):
-            raise ChampionAgentEpisodeError(
-                "cross-session deployment authority must be complete"
-            )
         if activation_binding is None:
-            if _canonical_cross_session_authority is not None:
+            if any(value is not None for value in cross_session_values):
                 raise ChampionAgentEpisodeError(
-                    "canonical cross-session authority cannot authorize same-session activation"
+                    "cross-session deployment authority must be complete"
                 )
             authority_identity = identity
             authority_as_of = as_of
             effective_episode_key = episode_key
             binding_id = None
         else:
-            assert training_identity is not None
-            assert deployment_scope is not None
-            _require_canonical_cross_session_authority(
-                _canonical_cross_session_authority,
-                activation_binding=activation_binding,
-                deployment_identity=identity,
-                deployment_scope=deployment_scope,
+            if not isinstance(training_identity, EnvironmentIdentity):
+                raise ChampionAgentEpisodeError(
+                    "cross-session deployment authority must be complete"
+                )
+            semantic_inputs, market_store, runtime_authority_store = (
+                _require_canonical_inputs(
+                    semantic_inputs=semantic_inputs,
+                    market_store=market_store,
+                    runtime_authority_store=runtime_authority_store,
+                )
             )
             if _instant(activation_binding.activation_at, "activation_at") != _instant(
                 at, "at"
@@ -258,6 +246,7 @@ class ChampionAgentEpisode:
                 f"{episode_key}|deployment:{activation_binding.binding_id}"
             )
             binding_id = activation_binding.binding_id
+
         policy = load_champion_policy(
             registry,
             artifact_store,
@@ -268,22 +257,39 @@ class ChampionAgentEpisode:
             config_sha256=config_sha256,
             admissible_actions=admissible_actions,
         )
+
         if activation_binding is not None:
             assert training_identity is not None
-            assert deployment_scope is not None
-            validate_activation_binding(
-                activation_binding,
-                scope=deployment_scope,
-                policy=policy,
-                training_identity=training_identity,
-                deployment_identity=identity,
-                registry=registry,
-                artifact_store=artifact_store,
-                canonical_strategy_id=canonical_strategy_id,
-                admissible_actions=admissible_actions,
-                economic_goal_fingerprint=economic_goal_fingerprint,
-                risk_fingerprint=risk_fingerprint,
-            )
+            assert semantic_inputs is not None
+            assert market_store is not None
+            assert runtime_authority_store is not None
+            try:
+                resolved = validate_canonical_activation_binding(
+                    activation_binding,
+                    semantic_inputs=semantic_inputs,
+                    market_store=market_store,
+                    runtime_authority_store=runtime_authority_store,
+                    loop_path=path,
+                    require_existing_semantic_binding=False,
+                    policy=policy,
+                    training_identity=training_identity,
+                    deployment_identity=identity,
+                    registry=registry,
+                    artifact_store=artifact_store,
+                    canonical_strategy_id=canonical_strategy_id,
+                    admissible_actions=admissible_actions,
+                    economic_goal_fingerprint=economic_goal_fingerprint,
+                    risk_fingerprint=risk_fingerprint,
+                )
+            except (PolicyDeploymentSemanticBridgeError, OSError, RuntimeError, ValueError) as exc:
+                raise ChampionAgentEpisodeError(
+                    "canonical cross-session deployment authority is not proven"
+                ) from exc
+            if deployment_scope is not None and deployment_scope != resolved.deployment_scope:
+                raise ChampionAgentEpisodeError(
+                    "caller deployment scope conflicts with canonical semantic authority"
+                )
+            deployment_scope = resolved.deployment_scope
             persist_deployment_authority(
                 path,
                 scope=deployment_scope,
@@ -291,6 +297,7 @@ class ChampionAgentEpisode:
                 training_identity=training_identity,
                 deployment_identity=identity,
             )
+
         environment = CausalLearningEnvironment(
             identity,
             episode_key=effective_episode_key,
@@ -335,7 +342,9 @@ class ChampionAgentEpisode:
         training_identity: EnvironmentIdentity | None = None,
         deployment_scope: DeploymentScope | None = None,
         activation_binding: ActivationBinding | None = None,
-        _canonical_cross_session_authority: _CanonicalCrossSessionAuthority | None = None,
+        semantic_inputs: CrossSessionSemanticInputs | None = None,
+        market_store: SQLiteMarketStore | None = None,
+        runtime_authority_store: DeploymentRuntimeAuthorityStore | None = None,
     ) -> "ChampionAgentEpisode":
         """Rebuild one exact champion episode from its durable checkpoint."""
 
@@ -349,26 +358,19 @@ class ChampionAgentEpisode:
             raise ChampionAgentEpisodeError(
                 "checkpoint does not match durable AgentLoop checkpoint"
             )
-        deployment_values = (
-            training_identity,
-            deployment_scope,
-            activation_binding,
-        )
-        caller_supplied_authority = any(
-            value is not None for value in deployment_values
-        )
-        if caller_supplied_authority and any(
-            value is None for value in deployment_values
-        ):
+
+        caller_values = (training_identity, deployment_scope, activation_binding)
+        caller_supplied_authority = any(value is not None for value in caller_values)
+        if caller_supplied_authority and any(value is None for value in caller_values):
             raise ChampionAgentEpisodeError(
                 "cross-session deployment authority must be complete"
             )
+
         if snapshot.activation_binding_id is None:
-            if _canonical_cross_session_authority is not None:
-                raise ChampionAgentEpisodeError(
-                    "canonical cross-session authority cannot authorize same-session resume"
-                )
-            if caller_supplied_authority:
+            if caller_supplied_authority or any(
+                value is not None
+                for value in (semantic_inputs, market_store, runtime_authority_store)
+            ):
                 raise ChampionAgentEpisodeError(
                     "legacy AgentLoop cannot accept deployment authority on resume"
                 )
@@ -376,6 +378,13 @@ class ChampionAgentEpisode:
             authority_as_of = as_of
             effective_episode_key = episode_key
         else:
+            semantic_inputs, market_store, runtime_authority_store = (
+                _require_canonical_inputs(
+                    semantic_inputs=semantic_inputs,
+                    market_store=market_store,
+                    runtime_authority_store=runtime_authority_store,
+                )
+            )
             durable_authority = load_deployment_authority(
                 path,
                 expected_binding_id=snapshot.activation_binding_id,
@@ -384,12 +393,6 @@ class ChampionAgentEpisode:
                 raise ChampionAgentEpisodeError(
                     "deployment identity conflicts with durable activation authority"
                 )
-            _require_canonical_cross_session_authority(
-                _canonical_cross_session_authority,
-                activation_binding=durable_authority.binding,
-                deployment_identity=identity,
-                deployment_scope=durable_authority.scope,
-            )
             if caller_supplied_authority and (
                 training_identity != durable_authority.training_identity
                 or deployment_scope != durable_authority.scope
@@ -412,6 +415,7 @@ class ChampionAgentEpisode:
             effective_episode_key = (
                 f"{episode_key}|deployment:{activation_binding.binding_id}"
             )
+
         policy = load_champion_policy(
             registry,
             artifact_store,
@@ -422,22 +426,40 @@ class ChampionAgentEpisode:
             config_sha256=config_sha256,
             admissible_actions=admissible_actions,
         )
+
         if activation_binding is not None:
             assert training_identity is not None
             assert deployment_scope is not None
-            validate_activation_binding(
-                activation_binding,
-                scope=deployment_scope,
-                policy=policy,
-                training_identity=training_identity,
-                deployment_identity=identity,
-                registry=registry,
-                artifact_store=artifact_store,
-                canonical_strategy_id=canonical_strategy_id,
-                admissible_actions=admissible_actions,
-                economic_goal_fingerprint=snapshot.economic_goal_fingerprint,
-                risk_fingerprint=snapshot.risk_fingerprint,
-            )
+            assert semantic_inputs is not None
+            assert market_store is not None
+            assert runtime_authority_store is not None
+            try:
+                resolved = validate_canonical_activation_binding(
+                    activation_binding,
+                    semantic_inputs=semantic_inputs,
+                    market_store=market_store,
+                    runtime_authority_store=runtime_authority_store,
+                    loop_path=path,
+                    require_existing_semantic_binding=True,
+                    policy=policy,
+                    training_identity=training_identity,
+                    deployment_identity=identity,
+                    registry=registry,
+                    artifact_store=artifact_store,
+                    canonical_strategy_id=canonical_strategy_id,
+                    admissible_actions=admissible_actions,
+                    economic_goal_fingerprint=snapshot.economic_goal_fingerprint,
+                    risk_fingerprint=snapshot.risk_fingerprint,
+                )
+            except (PolicyDeploymentSemanticBridgeError, OSError, RuntimeError, ValueError) as exc:
+                raise ChampionAgentEpisodeError(
+                    "canonical cross-session deployment authority is not proven on resume"
+                ) from exc
+            if resolved.deployment_scope != deployment_scope:
+                raise ChampionAgentEpisodeError(
+                    "durable deployment scope differs from canonical re-resolution"
+                )
+
         environment = CausalLearningEnvironment.resume(
             identity,
             episode_key=effective_episode_key,

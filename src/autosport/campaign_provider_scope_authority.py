@@ -25,12 +25,6 @@ from .portfolio_plan import (
     _PORTFOLIO_PLAN_JSON_PAYLOAD_KEY,
     _PORTFOLIO_PLAN_SHA256_PAYLOAD_KEY,
 )
-from .supervised_provider_evidence import (
-    ProviderEvidenceError,
-    VerifiedProviderEffectEvidence,
-    assert_verified_provider_evidence_authoritative,
-    verify_betfair_provider_state,
-)
 
 
 SCHEMA_VERSION = 1
@@ -321,61 +315,13 @@ class CampaignProviderScopeProjection:
             )
 
 
-def _install_capture_authority() -> None:
-    issued: dict[int, tuple[object, str]] = {}
-    raw_capture = _capture_betfair_provider_scope_raw
-
-    def authoritative_capture(
-        client: BetfairReadOnlyClient,
-        action: ExecutionAction,
-        profile: BookmakerCapabilityProfile,
-        *,
-        expected_profile_sha256: str,
-        provider_order_ref: str | None = None,
-    ) -> VerifiedBetfairProviderScopeCapture:
-        capture = raw_capture(
-            client,
-            action,
-            profile,
-            expected_profile_sha256=expected_profile_sha256,
-            provider_order_ref=provider_order_ref,
-        )
-        key = id(capture)
-
-        def forget(
-            _weakref: object,
-            *,
-            capture_key: int = key,
-        ) -> None:
-            issued.pop(capture_key, None)
-
-        issued[key] = (ref(capture, forget), capture.capture_sha256)
-        return capture
-
-    def assert_authoritative(
-        capture: VerifiedBetfairProviderScopeCapture,
-    ) -> None:
-        if not isinstance(capture, VerifiedBetfairProviderScopeCapture):
-            raise CampaignProviderScopeError(
-                "provider scope capture type is not canonical"
-            )
-        record = issued.get(id(capture))
-        if record is None or record[0]() is not capture:
-            raise CampaignProviderScopeError(
-                "provider scope capture was not issued by canonical resolver"
-            )
-        if record[1] != capture.capture_sha256:
-            raise CampaignProviderScopeError(
-                "provider scope capture changed after source verification"
-            )
-
-    globals()["capture_betfair_provider_scope"] = authoritative_capture
-    globals()[
-        "assert_provider_scope_capture_authoritative"
-    ] = assert_authoritative
+_ACCOUNT_IDENTITY_UNAVAILABLE = (
+    "stable authenticated Betfair account identity is unavailable from the "
+    "supported source-owned provider surface"
+)
 
 
-def _capture_betfair_provider_scope_raw(
+def capture_betfair_provider_scope(
     client: BetfairReadOnlyClient,
     action: ExecutionAction,
     profile: BookmakerCapabilityProfile,
@@ -383,7 +329,19 @@ def _capture_betfair_provider_scope_raw(
     expected_profile_sha256: str,
     provider_order_ref: str | None = None,
 ) -> VerifiedBetfairProviderScopeCapture:
-    """Acquire non-circular account + action + external-market source evidence."""
+    """Fail closed until Betfair exposes a supported stable account identity.
+
+    getAccountDetails response bytes are valid evidence-instance integrity,
+    but they are not account identity: JSON-RPC request ids change those bytes
+    across reads, and the returned account-details fields do not contain a
+    provider-unique account identifier. The public read-only client also
+    accepts injected transports for deterministic tests. Neither fact may mint
+    positive campaign/provider applicability.
+
+    A future source-owned stable account-identity capability may replace this
+    fail-closed seam. This task deliberately does not expand the provider
+    adapter to add one.
+    """
 
     if type(client) is not BetfairReadOnlyClient:
         raise CampaignProviderScopeError(
@@ -397,76 +355,22 @@ def _capture_betfair_provider_scope_raw(
         raise CampaignProviderScopeError(
             "provider scope requires canonical BookmakerCapabilityProfile"
         )
+    _sha(expected_profile_sha256, "expected_profile_sha256")
+    if provider_order_ref is not None:
+        _text(provider_order_ref, "provider_order_ref")
+    raise CampaignProviderScopeError(_ACCOUNT_IDENTITY_UNAVAILABLE)
 
-    account = client.read_account_details()
-    readback = client.read_execution_readback(
-        action_id=action.action_id,
-        market_id=action.market_id,
-        provider_order_ref=provider_order_ref,
-    )
-    try:
-        effect = verify_betfair_provider_state(
-            action,
-            profile,
-            expected_profile_sha256=expected_profile_sha256,
-            readback=readback,
-            expected_provider_order_ref=provider_order_ref,
-        )
-        assert_verified_provider_evidence_authoritative(effect)
-    except ProviderEvidenceError as exc:
+
+def assert_provider_scope_capture_authoritative(
+    capture: VerifiedBetfairProviderScopeCapture,
+) -> None:
+    """Reject every capture until stable provider-owned account identity exists."""
+
+    if not isinstance(capture, VerifiedBetfairProviderScopeCapture):
         raise CampaignProviderScopeError(
-            "provider scope lacks canonical verified effect evidence"
-        ) from exc
-    if not isinstance(effect, VerifiedProviderEffectEvidence):
-        raise CampaignProviderScopeError(
-            "provider scope requires positive authenticated provider effect"
+            "provider scope capture type is not canonical"
         )
-
-    times = (
-        _canonical_instant(
-            action.quote_observed_at, "quote_observed_at"
-        ),
-        _canonical_instant(
-            account.evidence.observed_at, "account observed_at"
-        ),
-        _canonical_instant(
-            readback.observed_at, "readback observed_at"
-        ),
-    )
-    parsed = tuple(
-        _instant(value, "provider source time") for value in times
-    )
-    start = times[parsed.index(min(parsed))]
-    end = times[parsed.index(max(parsed))]
-    capture = VerifiedBetfairProviderScopeCapture(
-        venue_id=effect.bookmaker_id,
-        client_account_scope=effect.account_id,
-        authenticated_account_id=(
-            _ACCOUNT_PREFIX + account.evidence.source_payload_sha256
-        ),
-        account_details_sha256=account.evidence.source_payload_sha256,
-        adapter_id=effect.adapter_id,
-        adapter_version=effect.adapter_version,
-        action_id=effect.action_id,
-        event_id=effect.event_id,
-        market_id=effect.market_id,
-        provider_order_ref=effect.provider_order_ref,
-        provider_evidence_id=effect.evidence_id,
-        provider_source_sha256=effect.source_payload_sha256,
-        request_scope_sha256=readback.request_scope_sha256,
-        readback_evidence_sha256=readback.evidence_sha256,
-        quote_observed_at=times[0],
-        account_observed_at=times[1],
-        readback_observed_at=times[2],
-        source_interval_start=start,
-        source_interval_end=end,
-        available_at=end,
-    )
-    return capture
-
-
-_install_capture_authority()
-del _install_capture_authority
+    raise CampaignProviderScopeError(_ACCOUNT_IDENTITY_UNAVAILABLE)
 
 
 def _decision_prefix_records(run_registry, run_id: str):

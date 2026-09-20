@@ -25,6 +25,50 @@ _FIXTURE = _fixture_module()
 
 
 class VOCOutcomeDenominatorTerminalityTests(unittest.TestCase):
+    def test_matching_preoutput_admission_without_any_terminal_cannot_disappear(self):
+        fixture = _FIXTURE.CanonicalOutcomeDerivedVOCScoreAuthorityTests(
+            methodName="runTest"
+        )
+        fixture.setUp()
+        self.addCleanup(fixture.tearDown)
+
+        target = fixture._evaluation()
+        fixture.registry.append(target)
+
+        source_context = next(
+            record
+            for record in fixture.ledger.verified_records()
+            if isinstance(record.payload, Mapping)
+            and isinstance(record.payload.get("voc_current_context"), Mapping)
+        )
+        missing_input = _FIXTURE.digest(
+            {"episode": "prebinding-failure", "kind": "input"}
+        )
+        context_payload = dict(source_context.payload["voc_current_context"])
+        context_payload["request_id"] = "source:voc-prebinding-failure"
+        context_payload["decision_input_sha256"] = missing_input
+        fixture.ledger.append(
+            DecisionRecord(
+                replay_run_id="replay-voc-prebinding-failure-context",
+                agent="voc-derived-test",
+                observed_ts=_FIXTURE.T_DECISION,
+                action="VOC_ROUTE_CONTEXT",
+                payload={"voc_current_context": context_payload},
+                context_hash=missing_input,
+                decision_id="decision-voc-prebinding-failure-context",
+                recorded_at=_FIXTURE.T_DECISION,
+            )
+        )
+
+        # No output, binding, or scoring record is emitted for this admitted
+        # challenger.  Cohort qualification must see the admission and fail closed
+        # rather than selecting only the successful target episode.
+        with self.assertRaisesRegex(
+            VOCEvaluationError,
+            "eligible VOC admission lacks terminal paired record",
+        ):
+            fixture._authority().resolve(target.evaluation_id, as_of=_FIXTURE.T_AS_OF)
+
     def test_matching_admitted_attempt_without_scoring_cannot_disappear(self):
         fixture = _FIXTURE.CanonicalOutcomeDerivedVOCScoreAuthorityTests(
             methodName="runTest"

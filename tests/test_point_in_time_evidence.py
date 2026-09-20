@@ -95,12 +95,12 @@ def _members_for_manifest(manifest_sha256: str) -> tuple[str, ...]:
 
 def _holdout_lineage(tmp_path, *snapshots: DatasetSnapshot) -> DatasetSnapshotLineageAuthority:
     registry = ScientificRegistry.initialize_pristine(
-        tmp_path / "holdout-scientific-registry.json"
+        tmp_path / "scientific-registry.json"
     )
     for snapshot in snapshots:
         registry.append(snapshot)
     lineage = DatasetSnapshotLineageAuthority.initialize_pristine(
-        tmp_path / "holdout-dataset-snapshot-lineage.json",
+        tmp_path / "dataset-snapshot-lineage.json",
         registry,
         authority_root=_authority_root(tmp_path),
     )

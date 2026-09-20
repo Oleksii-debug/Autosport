@@ -82,6 +82,7 @@ class PaperSettlementLearningWitness:
     outcome: Outcome
     reward: RewardEvidence
     transition: Transition
+    baseline_checkpoint: EnvironmentCheckpoint
     next_checkpoint: EnvironmentCheckpoint
 
     def __post_init__(self) -> None:
@@ -98,6 +99,8 @@ class PaperSettlementLearningWitness:
             raise TypeError("reward must be RewardEvidence")
         if not isinstance(self.transition, Transition):
             raise TypeError("transition must be Transition")
+        if not isinstance(self.baseline_checkpoint, EnvironmentCheckpoint):
+            raise TypeError("baseline_checkpoint must be EnvironmentCheckpoint")
         if not isinstance(self.next_checkpoint, EnvironmentCheckpoint):
             raise TypeError("next_checkpoint must be EnvironmentCheckpoint")
         if (
@@ -105,6 +108,7 @@ class PaperSettlementLearningWitness:
             or self.action.environment_id != self.outcome.environment_id
             or self.outcome.environment_id != self.reward.environment_id
             or self.reward.environment_id != self.transition.environment_id
+            or self.transition.environment_id != self.baseline_checkpoint.environment_id
             or self.transition.environment_id != self.next_checkpoint.environment_id
         ):
             raise PaperSettlementLearningBridgeError(
@@ -118,6 +122,9 @@ class PaperSettlementLearningWitness:
             or self.outcome.outcome_id != self.reward.outcome_id
             or self.outcome.outcome_id != self.transition.outcome_id
             or self.reward.reward_id != self.transition.reward_id
+            or self.baseline_checkpoint.episode_id != self.transition.episode_id
+            or self.next_checkpoint.episode_id != self.transition.episode_id
+            or self.next_checkpoint.step_index != self.baseline_checkpoint.step_index + 1
             or self.next_checkpoint.last_transition_id != self.transition.transition_id
         ):
             raise PaperSettlementLearningBridgeError(
@@ -488,7 +495,50 @@ class PaperSettlementLearningBridge:
             )
 
     @staticmethod
-    def _decision_matches(record: DecisionRecord, ticket: PaperTicket, action: Action) -> None:
+    def _decision_context_matches(
+        record: DecisionRecord,
+        observation: Observation,
+    ) -> None:
+        if not isinstance(observation, Observation):
+            raise TypeError("observation must be Observation")
+        if record.context_hash != observation.observation_id:
+            raise PaperSettlementLearningBridgeError(
+                "economic decision context_hash does not bind exact learning Observation"
+            )
+        if _instant(record.observed_ts, "decision observed_ts") != _instant(
+            observation.observed_at, "observation observed_at"
+        ):
+            raise PaperSettlementLearningBridgeError(
+                "economic decision observed_ts differs from exact learning Observation"
+            )
+
+    def verify_decision_observation_binding(
+        self,
+        *,
+        decision_id: str,
+        observation: Observation,
+    ) -> str:
+        """Verify immutable economic-decision context before AgentLoop mutation."""
+
+        canonical_decision_id = _text(decision_id, "decision_id")
+        if not isinstance(observation, Observation):
+            raise TypeError("observation must be Observation")
+        decision = self.decision_ledger.verified_economic_decision(
+            canonical_decision_id,
+            self.economic_goal,
+            risk_policy=self.risk_policy,
+        )
+        self._decision_context_matches(decision, observation)
+        return _decision_sha(decision)
+
+    @staticmethod
+    def _decision_matches(
+        record: DecisionRecord,
+        ticket: PaperTicket,
+        action: Action,
+        observation: Observation,
+    ) -> None:
+        PaperSettlementLearningBridge._decision_context_matches(record, observation)
         payload = record.payload
         action_parameters = dict(action.parameters)
         decision_action = _text(record.action, "economic decision action")
@@ -622,7 +672,7 @@ class PaperSettlementLearningBridge:
                 self.economic_goal,
                 risk_policy=self.risk_policy,
             )
-            self._decision_matches(decision, ticket, action)
+            self._decision_matches(decision, ticket, action, observation)
             semantic = {
                 "ticket_id": ticket.ticket_id,
                 "ticket_identity_sha256": _digest(_ticket_payload(ticket)),
@@ -1313,6 +1363,7 @@ class PaperSettlementLearningBridge:
                     outcome=outcome,
                     reward=reward,
                     transition=transition,
+                    baseline_checkpoint=_checkpoint(binding["baseline_checkpoint"]),
                     next_checkpoint=checkpoint,
                 )
             except (

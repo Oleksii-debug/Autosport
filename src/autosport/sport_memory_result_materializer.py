@@ -379,12 +379,30 @@ class SportMemoryResultMaterializer:
             raise TypeError(
                 "product runtime has no configured settlement outcome authority"
             )
+        if outcome_authority is not runtime.collector.source:
+            raise TypeError(
+                "settlement outcome authority is not owned by the product source"
+            )
+        authority_identity = runtime.manifest.settlement_authority_identity
+        if (
+            type(authority_identity) is not str
+            or len(authority_identity) != 64
+            or authority_identity != authority_identity.lower()
+            or any(
+                character not in "0123456789abcdef"
+                for character in authority_identity
+            )
+        ):
+            raise TypeError(
+                "product runtime lacks durable settlement authority identity"
+            )
         self.opponent_store = opponent_store
         self._runtime = runtime
         self._coordinator = coordinator
         self.market_store = runtime.market_store
         self._lifecycle = runtime.lifecycle
         self._outcome_authority = outcome_authority
+        self._settlement_authority_identity = authority_identity
 
     @property
     def runtime(self) -> AutonomousProductRuntime:
@@ -411,6 +429,9 @@ class SportMemoryResultMaterializer:
             self._coordinator.market_store is not self.market_store
             or self._coordinator.lifecycle is not self._lifecycle
             or self._coordinator.outcome_authority is not self._outcome_authority
+            or self._outcome_authority is not self._runtime.collector.source
+            or self._runtime.manifest.settlement_authority_identity
+            != self._settlement_authority_identity
         ):
             raise TypeError(
                 "product-owned settlement authority binding changed after construction"

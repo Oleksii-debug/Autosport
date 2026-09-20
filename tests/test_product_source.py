@@ -91,10 +91,12 @@ def _stream_checkpoint(delta) -> StreamCheckpoint:
 class ParlayApiProductSourceTests(unittest.TestCase):
     def test_snapshot_becomes_restart_safe_catalog_delta_and_event(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            state_path = Path(directory) / "source.json"
+            workspace = Path(directory) / "workspace"
+            authority_root = Path(directory) / "authority"
             source = ParlayApiProductSource(
                 _Provider([_batch(cursor="snapshot-1")]),
-                state_path=state_path,
+                workspace=workspace,
+                authority_root=authority_root,
                 lawful_terms_ref="terms:parlayapi:operator-approved",
                 retention_ref="retention:parlayapi:operator-approved",
                 clock=lambda: "2026-09-20T17:34:02+00:00",
@@ -123,7 +125,8 @@ class ParlayApiProductSourceTests(unittest.TestCase):
 
             restored = ParlayApiProductSource(
                 _Provider([_batch(cursor="snapshot-2", odds="1.90", sequence=2)]),
-                state_path=state_path,
+                workspace=workspace,
+                authority_root=authority_root,
                 lawful_terms_ref="terms:parlayapi:operator-approved",
                 retention_ref="retention:parlayapi:operator-approved",
                 clock=lambda: "2026-09-20T17:34:03+00:00",
@@ -143,10 +146,12 @@ class ParlayApiProductSourceTests(unittest.TestCase):
 
     def test_uncommitted_snapshot_is_replayed_instead_of_fetching_past_it(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            state_path = Path(directory) / "source.json"
+            workspace = Path(directory) / "workspace"
+            authority_root = Path(directory) / "authority"
             source = ParlayApiProductSource(
                 _Provider([_batch(cursor="snapshot-1")]),
-                state_path=state_path,
+                workspace=workspace,
+                authority_root=authority_root,
                 lawful_terms_ref="terms:parlayapi:v1",
                 retention_ref="retention:parlayapi:v1",
                 clock=lambda: "2026-09-20T17:34:02+00:00",
@@ -156,7 +161,8 @@ class ParlayApiProductSourceTests(unittest.TestCase):
 
             restored = ParlayApiProductSource(
                 _Provider([]),
-                state_path=state_path,
+                workspace=workspace,
+                authority_root=authority_root,
                 lawful_terms_ref="terms:parlayapi:v1",
                 retention_ref="retention:parlayapi:v1",
                 clock=lambda: "2026-09-20T17:34:03+00:00",
@@ -170,7 +176,8 @@ class ParlayApiProductSourceTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             source = ParlayApiProductSource(
                 _Provider([_batch(cursor="snapshot-1")]),
-                state_path=Path(directory) / "source.json",
+                workspace=Path(directory) / "workspace",
+                authority_root=Path(directory) / "authority",
                 lawful_terms_ref="terms:parlayapi:v1",
                 retention_ref="retention:parlayapi:v1",
                 clock=lambda: "2026-09-20T17:34:02+00:00",
@@ -203,7 +210,8 @@ class ParlayApiProductSourceTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             source = ParlayApiProductSource(
                 _Provider([_batch(cursor="snapshot-1")]),
-                state_path=Path(directory) / "source.json",
+                workspace=Path(directory) / "workspace",
+                authority_root=Path(directory) / "authority",
                 lawful_terms_ref="terms:parlayapi:v1",
                 retention_ref="retention:parlayapi:v1",
                 clock=lambda: "2026-09-20T17:34:02+00:00",
@@ -235,10 +243,12 @@ class ParlayApiProductSourceTests(unittest.TestCase):
 
     def test_same_causal_identity_cannot_change_price(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            state_path = Path(directory) / "source.json"
+            workspace = Path(directory) / "workspace"
+            authority_root = Path(directory) / "authority"
             source = ParlayApiProductSource(
                 _Provider([_batch(cursor="snapshot-1")]),
-                state_path=state_path,
+                workspace=workspace,
+                authority_root=authority_root,
                 lawful_terms_ref="terms:parlayapi:v1",
                 retention_ref="retention:parlayapi:v1",
                 clock=lambda: "2026-09-20T17:34:02+00:00",
@@ -250,7 +260,8 @@ class ParlayApiProductSourceTests(unittest.TestCase):
 
             restored = ParlayApiProductSource(
                 _Provider([_batch(cursor="snapshot-2", odds="1.95", sequence=1)]),
-                state_path=state_path,
+                workspace=workspace,
+                authority_root=authority_root,
                 lawful_terms_ref="terms:parlayapi:v1",
                 retention_ref="retention:parlayapi:v1",
                 clock=lambda: "2026-09-20T17:34:03+00:00",
@@ -263,16 +274,19 @@ class ParlayApiProductSourceTests(unittest.TestCase):
 
     def test_missing_durable_event_cache_fails_closed(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            state_path = Path(directory) / "source.json"
+            workspace = Path(directory) / "workspace"
+            authority_root = Path(directory) / "authority"
             source = ParlayApiProductSource(
                 _Provider([_batch(cursor="snapshot-1")]),
-                state_path=state_path,
+                workspace=workspace,
+                authority_root=authority_root,
                 lawful_terms_ref="terms:parlayapi:v1",
                 retention_ref="retention:parlayapi:v1",
                 clock=lambda: "2026-09-20T17:34:02+00:00",
             )
             source.fetch_catalog_page(None)
             delta = source.fetch_deltas(None, (), 1)[0]
+            state_path = source.state_path
             raw = state_path.read_text(encoding="utf-8")
             state_path.write_text(
                 raw.replace(f'"{delta.delta_id}":', '"missing-delta":', 1),
@@ -281,11 +295,115 @@ class ParlayApiProductSourceTests(unittest.TestCase):
             with self.assertRaises(ProductSourceStateError):
                 source.resolve_event(delta)
 
+    def test_two_instances_cannot_last_writer_win_pending_snapshot(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory) / "workspace"
+            authority_root = Path(directory) / "authority"
+            second = ParlayApiProductSource(
+                _Provider([_batch(cursor="snapshot-2", odds="1.90", sequence=2)]),
+                workspace=workspace,
+                authority_root=authority_root,
+                lawful_terms_ref="terms:parlayapi:v1",
+                retention_ref="retention:parlayapi:v1",
+                clock=lambda: "2026-09-20T17:34:03+00:00",
+            )
+
+            class _InterleavingProvider:
+                source_id = _SOURCE_ID
+
+                def __init__(self) -> None:
+                    self.called = False
+
+                def read_batch(self, max_items: int = 1000) -> ProviderBatch:
+                    if self.called:
+                        raise AssertionError("stale writer must not fetch twice")
+                    self.called = True
+                    second.fetch_catalog_page(None)
+                    return _batch(cursor="snapshot-1")
+
+            first = ParlayApiProductSource(
+                _InterleavingProvider(),
+                workspace=workspace,
+                authority_root=authority_root,
+                lawful_terms_ref="terms:parlayapi:v1",
+                retention_ref="retention:parlayapi:v1",
+                clock=lambda: "2026-09-20T17:34:02+00:00",
+            )
+            with self.assertRaisesRegex(
+                ProductSourceStateError,
+                "stale product source writer generation",
+            ):
+                first.fetch_catalog_page(None)
+
+            replay = first.fetch_catalog_page(None)
+            self.assertEqual(replay.cursor, "snapshot-2")
+
+    def test_workspace_identity_prevents_silent_cross_workspace_state_sharing(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            first = ParlayApiProductSource(
+                _Provider([]),
+                workspace=root / "workspace-a",
+                authority_root=root / "authority",
+                lawful_terms_ref="terms:parlayapi:v1",
+                retention_ref="retention:parlayapi:v1",
+            )
+            second = ParlayApiProductSource(
+                _Provider([]),
+                workspace=root / "workspace-b",
+                authority_root=root / "authority",
+                lawful_terms_ref="terms:parlayapi:v1",
+                retention_ref="retention:parlayapi:v1",
+            )
+            self.assertNotEqual(first.workspace_instance_id, second.workspace_instance_id)
+            self.assertNotEqual(first.state_path, second.state_path)
+
+    def test_rollback_to_older_valid_state_is_rejected_by_external_authority(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory) / "workspace"
+            authority_root = Path(directory) / "authority"
+            source = ParlayApiProductSource(
+                _Provider([_batch(cursor="snapshot-1")]),
+                workspace=workspace,
+                authority_root=authority_root,
+                lawful_terms_ref="terms:parlayapi:v1",
+                retention_ref="retention:parlayapi:v1",
+                clock=lambda: "2026-09-20T17:34:02+00:00",
+            )
+            initial_bytes = source.state_path.read_bytes()
+            source.fetch_catalog_page(None)
+            source.state_path.write_bytes(initial_bytes)
+
+            with self.assertRaisesRegex(
+                ProductSourceStateError,
+                "stale, rolled back",
+            ):
+                ParlayApiProductSource(
+                    _Provider([]),
+                    workspace=workspace,
+                    authority_root=authority_root,
+                    lawful_terms_ref="terms:parlayapi:v1",
+                    retention_ref="retention:parlayapi:v1",
+                )
+
+    def test_factory_requires_canonical_product_workspace_environment(self) -> None:
+        with patch.dict(
+            "os.environ",
+            {
+                "AUTOSPORT_PARLAY_API_KEY": "test-only-api-key",
+                "AUTOSPORT_PARLAY_LAWFUL_TERMS_REF": "terms:parlayapi:v1",
+                "AUTOSPORT_PARLAY_RETENTION_REF": "retention:parlayapi:v1",
+            },
+            clear=True,
+        ):
+            with self.assertRaisesRegex(ProductSourceError, "AUTOSPORT_PRODUCT_WORKSPACE"):
+                create_parlay_product_source()
+
     def test_factory_requires_secret_and_operator_authority_environment(self) -> None:
         with patch.dict(
             "os.environ",
             {
-                "AUTOSPORT_PRODUCT_SOURCE_STATE": "source.json",
+                "AUTOSPORT_PRODUCT_WORKSPACE": "workspace",
                 "AUTOSPORT_PARLAY_LAWFUL_TERMS_REF": "terms:parlayapi:v1",
                 "AUTOSPORT_PARLAY_RETENTION_REF": "retention:parlayapi:v1",
             },

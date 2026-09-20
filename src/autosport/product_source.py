@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable
@@ -22,9 +23,14 @@ from .event_lifecycle import (
     EventPhase,
 )
 from .integrity import atomic_write_json
+from .monotonic_workspace_authority import (
+    MonotonicWorkspaceAuthority,
+    MonotonicWorkspaceAuthorityError,
+)
 from .json_integrity import strict_json_loads
 from .parlayapi_provider import ParlayApiTableTennisProvider
 from .providers import CanonicalNormalizer, MarketProvider, ProviderBatch, ProviderQuote
+from .workspace_lock import WorkspaceEconomicLock, WorkspaceEconomicLockError
 
 
 class ProductSourceError(RuntimeError):
@@ -52,7 +58,7 @@ class ParlayApiProductSource:
     """
 
     _SCHEMA = "autosport.parlay_product_source"
-    _VERSION = 2
+    _VERSION = 3
     _STREAM_EPOCH = "parlayapi-table-tennis-product-v1"
     _READ_BATCH_ITEMS = 1000
     _MAX_SNAPSHOT_ITEMS = 50_000
@@ -61,6 +67,9 @@ class ParlayApiProductSource:
         "schema_version",
         "source_id",
         "stream_epoch",
+        "workspace_instance_id",
+        "generation",
+        "authority_tx_id",
         "last_catalog_position",
         "last_catalog_cursor",
         "last_catalog_page_sha256",
@@ -78,9 +87,10 @@ class ParlayApiProductSource:
         self,
         provider: MarketProvider,
         *,
-        state_path: str | Path,
+        workspace: str | Path,
         lawful_terms_ref: str,
         retention_ref: str,
+        authority_root: str | Path | None = None,
         clock: Clock = utc_now_iso,
     ) -> None:
         source_id = getattr(provider, "source_id", None)
@@ -90,17 +100,52 @@ class ParlayApiProductSource:
             raise TypeError("provider.read_batch must be callable")
         if not callable(clock):
             raise TypeError("clock must be callable")
+        try:
+            workspace_path = Path(workspace).expanduser().absolute()
+        except RuntimeError as exc:
+            raise ProductSourceStateError("product source workspace cannot be resolved") from exc
+        if not workspace_path.is_absolute():
+            raise ProductSourceStateError("product source workspace must be absolute")
         self.provider = provider
         self.source_id = source_id
         self.stream_epoch = self._STREAM_EPOCH
-        self.state_path = Path(state_path)
+        self.workspace = workspace_path
         self.lawful_terms_ref = self._text(lawful_terms_ref, "lawful_terms_ref")
         self.retention_ref = self._text(retention_ref, "retention_ref")
         self.clock = clock
         self.normalizer = CanonicalNormalizer()
-        self.state_path.parent.mkdir(parents=True, exist_ok=True)
-        if not self.state_path.exists():
-            atomic_write_json(self.state_path, self._seal_state(self._empty_state()))
+        try:
+            self._authority = MonotonicWorkspaceAuthority(
+                workspace=self.workspace,
+                domain="autosport.parlay_product_source.v3",
+                key=f"{self.source_id}|{self.stream_epoch}",
+                authority_root=authority_root,
+            )
+        except MonotonicWorkspaceAuthorityError as exc:
+            raise ProductSourceStateError(
+                "cannot bind product source to canonical workspace authority"
+            ) from exc
+        self.workspace_instance_id = self._authority.workspace_instance_id
+        source_namespace = hashlib.sha256(
+            f"{self.source_id}\0{self.stream_epoch}".encode("utf-8")
+        ).hexdigest()
+        self.state_dir = (
+            self.workspace / ".autosport" / "product-sources" / source_namespace
+        )
+        self.state_path = self.state_dir / "state.json"
+        self._authority_binding_sha256 = hashlib.sha256(
+            self._canonical_json(
+                {
+                    "schema": self._SCHEMA,
+                    "schema_version": self._VERSION,
+                    "workspace_instance_id": self.workspace_instance_id,
+                    "source_id": self.source_id,
+                    "stream_epoch": self.stream_epoch,
+                    "state_path": self.state_path.relative_to(self.workspace).as_posix(),
+                }
+            ).encode("utf-8")
+        ).hexdigest()
+        self._initialize_state()
         self._read_state()
 
     @staticmethod
@@ -123,6 +168,16 @@ class ParlayApiProductSource:
     @staticmethod
     def _is_digest(value: object) -> bool:
         if type(value) is not str or len(value) != 64:
+            return False
+        try:
+            int(value, 16)
+        except ValueError:
+            return False
+        return value == value.lower()
+
+    @staticmethod
+    def _is_tx_id(value: object) -> bool:
+        if type(value) is not str or len(value) != 32:
             return False
         try:
             int(value, 16)
@@ -160,6 +215,9 @@ class ParlayApiProductSource:
             "schema_version": self._VERSION,
             "source_id": self.source_id,
             "stream_epoch": self.stream_epoch,
+            "workspace_instance_id": self.workspace_instance_id,
+            "generation": 0,
+            "authority_tx_id": uuid.uuid4().hex,
             "last_catalog_position": -1,
             "last_catalog_cursor": None,
             "last_catalog_page_sha256": None,
@@ -172,7 +230,7 @@ class ParlayApiProductSource:
             "event_cache": {},
         }
 
-    def _read_state(self) -> dict[str, object]:
+    def _read_state_unlocked(self) -> dict[str, object]:
         try:
             raw = strict_json_loads(self.state_path.read_text(encoding="utf-8"))
         except (OSError, TypeError, ValueError) as exc:
@@ -184,6 +242,10 @@ class ParlayApiProductSource:
             or raw.get("schema_version") != self._VERSION
             or raw.get("source_id") != self.source_id
             or raw.get("stream_epoch") != self.stream_epoch
+            or raw.get("workspace_instance_id") != self.workspace_instance_id
+            or type(raw.get("generation")) is not int
+            or raw.get("generation") < 0
+            or not self._is_tx_id(raw.get("authority_tx_id"))
             or not self._is_digest(raw.get("state_sha256"))
             or raw.get("state_sha256") != self._state_digest(raw)
         ):
@@ -282,9 +344,134 @@ class ParlayApiProductSource:
         if digest_identity and not self._is_digest(identity):
             raise ProductSourceStateError("catalog checkpoint digest is invalid")
 
+    def _recover_authority_locked(self, raw: dict[str, object]) -> None:
+        observed = raw["state_sha256"]
+        tx_id = raw["authority_tx_id"]
+        assert isinstance(observed, str)
+        assert isinstance(tx_id, str)
+        try:
+            recovery = self._authority.recover(
+                observed_state_sha256=observed,
+                tx_id=tx_id,
+                semantic_binding_sha256=self._authority_binding_sha256,
+            )
+        except MonotonicWorkspaceAuthorityError as exc:
+            raise ProductSourceStateError(
+                "product source state is stale, rolled back, or outside workspace authority"
+            ) from exc
+        if recovery.committed_state_sha256 != observed:
+            raise ProductSourceStateError(
+                "product source authority does not match durable state"
+            )
+
+    def _publish_state_locked(
+        self,
+        sealed: dict[str, object],
+        *,
+        observed_state_sha256: str | None,
+    ) -> None:
+        intended = sealed["state_sha256"]
+        tx_id = sealed["authority_tx_id"]
+        assert isinstance(intended, str)
+        assert isinstance(tx_id, str)
+        try:
+            prepared = self._authority.prepare(
+                tx_id=tx_id,
+                observed_state_sha256=observed_state_sha256,
+                intended_state_sha256=intended,
+                semantic_binding_sha256=self._authority_binding_sha256,
+            )
+            if prepared.intended_state_sha256 != intended or prepared.tx_id != tx_id:
+                raise ProductSourceStateError(
+                    "product source authority prepared a different state transition"
+                )
+            atomic_write_json(self.state_path, sealed)
+            verified = self._read_state_unlocked()
+            if verified["state_sha256"] != intended or verified["authority_tx_id"] != tx_id:
+                raise ProductSourceStateError(
+                    "product source state failed exact durable re-read"
+                )
+            self._authority.commit(
+                tx_id=tx_id,
+                observed_state_sha256=intended,
+                semantic_binding_sha256=self._authority_binding_sha256,
+            )
+        except ProductSourceStateError:
+            raise
+        except (MonotonicWorkspaceAuthorityError, OSError) as exc:
+            raise ProductSourceStateError(
+                "cannot publish product source state under workspace authority"
+            ) from exc
+
+    def _initialize_state(self) -> None:
+        try:
+            self.state_dir.mkdir(parents=True, exist_ok=True)
+            with WorkspaceEconomicLock(self.state_dir):
+                if self.state_path.exists():
+                    raw = self._read_state_unlocked()
+                    self._recover_authority_locked(raw)
+                    return
+                try:
+                    recovery = self._authority.recover(observed_state_sha256=None)
+                except MonotonicWorkspaceAuthorityError as exc:
+                    raise ProductSourceStateError(
+                        "product source state is missing but workspace authority is not pristine"
+                    ) from exc
+                if recovery.committed_state_sha256 is not None:
+                    raise ProductSourceStateError(
+                        "product source state deletion/rollback detected"
+                    )
+                initial = self._seal_state(self._empty_state())
+                self._publish_state_locked(initial, observed_state_sha256=None)
+        except ProductSourceStateError:
+            raise
+        except (WorkspaceEconomicLockError, OSError) as exc:
+            raise ProductSourceStateError(
+                "cannot initialize canonical product source journal"
+            ) from exc
+
+    def _read_state(self) -> dict[str, object]:
+        try:
+            with WorkspaceEconomicLock(self.state_dir):
+                raw = self._read_state_unlocked()
+                self._recover_authority_locked(raw)
+                return raw
+        except ProductSourceStateError:
+            raise
+        except WorkspaceEconomicLockError as exc:
+            raise ProductSourceStateError(
+                "cannot acquire canonical product source journal lock"
+            ) from exc
+
     def _write_state(self, raw: dict[str, object]) -> None:
-        atomic_write_json(self.state_path, self._seal_state(raw))
-        self._read_state()
+        expected = raw.get("state_sha256")
+        if not self._is_digest(expected):
+            raise ProductSourceStateError(
+                "product source write is missing an exact previous state digest"
+            )
+        assert isinstance(expected, str)
+        try:
+            with WorkspaceEconomicLock(self.state_dir):
+                current = self._read_state_unlocked()
+                self._recover_authority_locked(current)
+                if current["state_sha256"] != expected:
+                    raise ProductSourceStateError(
+                        "stale product source writer generation detected"
+                    )
+                candidate = dict(raw)
+                candidate["generation"] = int(current["generation"]) + 1
+                candidate["authority_tx_id"] = uuid.uuid4().hex
+                sealed = self._seal_state(candidate)
+                self._publish_state_locked(
+                    sealed,
+                    observed_state_sha256=expected,
+                )
+        except ProductSourceStateError:
+            raise
+        except WorkspaceEconomicLockError as exc:
+            raise ProductSourceStateError(
+                "cannot acquire canonical product source journal lock"
+            ) from exc
 
     def _validate_pending(self, pending: object) -> None:
         if type(pending) is not dict or set(pending) != {
@@ -820,7 +1007,7 @@ def create_parlay_product_source() -> ParlayApiProductSource:
     provider = ParlayApiTableTennisProvider(api_key=_required_env("AUTOSPORT_PARLAY_API_KEY"))
     return ParlayApiProductSource(
         provider,
-        state_path=_required_env("AUTOSPORT_PRODUCT_SOURCE_STATE"),
+        workspace=_required_env("AUTOSPORT_PRODUCT_WORKSPACE"),
         lawful_terms_ref=_required_env("AUTOSPORT_PARLAY_LAWFUL_TERMS_REF"),
         retention_ref=_required_env("AUTOSPORT_PARLAY_RETENTION_REF"),
     )

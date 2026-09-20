@@ -57,7 +57,7 @@ class SportMemoryScope:
             _text(name, getattr(self, name))
         if self.provider_id is not None:
             raise SportMemoryError(
-                "provider-qualified scope is unresolved by canonical opponent snapshots"
+                "provider-specific scope requires canonical provider authority"
             )
 
     def payload(self) -> dict[str, str | None]:

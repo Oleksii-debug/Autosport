@@ -18,6 +18,7 @@ from autosport.event_lifecycle import (
 )
 from autosport.domain import MarketEvent
 from autosport.opponent_intelligence import OpponentIntelligenceStore
+from autosport.product_runtime import build_autonomous_product_runtime
 from autosport.participant_identity import (
     AliasRecord,
     EntityIdentity,
@@ -115,6 +116,26 @@ def _quote(
     )
 
 
+class _ProductSource:
+    source_id = "provider-a"
+    stream_epoch = "epoch-1"
+
+    def fetch_catalog_page(self, checkpoint):
+        return CatalogPage(
+            source_id=self.source_id,
+            stream_epoch=self.stream_epoch,
+            cursor="unused",
+            position=0,
+            events=(),
+        )
+
+    def fetch_deltas(self, checkpoint, records, max_items):
+        return ()
+
+    def resolve_event(self, delta):
+        raise AssertionError("result-materializer tests do not consume collector deltas")
+
+
 class _StaticOutcomeAuthority:
     def __init__(self) -> None:
         self.resolution: SettlementResolution | None = None
@@ -158,10 +179,17 @@ def _authorities(
         root / "opponents.json",
         identities,
     )
-    market_store = SQLiteMarketStore(root / "market.db")
+    authority = _StaticOutcomeAuthority()
+    runtime = build_autonomous_product_runtime(
+        workspace=root,
+        source=_ProductSource(),
+        clock=lambda: T2,
+        outcome_authority=authority,
+    )
+    market_store = runtime.market_store
     market_store.append(_quote("sel-alex-17", 1))
     market_store.append(_quote("sel-blair-23", 2))
-    lifecycle = ContinuousEventLifecycle(root / "lifecycle.json")
+    lifecycle = runtime.lifecycle
     lifecycle.apply_page(
         CatalogPage(
             source_id="provider-a",
@@ -184,9 +212,7 @@ def _authorities(
     )
     materializer = SportMemoryResultMaterializer(
         opponent_store,
-        market_store,
-        lifecycle=lifecycle,
-        outcome_authority=_StaticOutcomeAuthority(),
+        runtime,
     )
     return identities, opponent_store, market_store, materializer
 
@@ -249,7 +275,7 @@ def _authoritative_assertion(
     materializer: SportMemoryResultMaterializer,
     canonical: SettlementResolution,
 ) -> SettlementResolution:
-    authority = materializer.outcome_authority
+    authority = materializer.runtime.coordinator.outcome_authority
     assert isinstance(authority, _StaticOutcomeAuthority)
     authority.resolution = canonical
     return replace(canonical)
@@ -488,12 +514,16 @@ def test_result_projection_is_exactly_once_across_restart_and_causally_hidden_be
         tmp_path / "opponents.json",
         ParticipantIdentityRegistry(tmp_path / "identity.json"),
     )
-    reopened_market = SQLiteMarketStore(tmp_path / "market.db")
+    reopened_runtime = build_autonomous_product_runtime(
+        workspace=tmp_path,
+        source=_ProductSource(),
+        clock=lambda: T3,
+        outcome_authority=_StaticOutcomeAuthority(),
+    )
+    reopened_market = reopened_runtime.market_store
     reopened = SportMemoryResultMaterializer(
         reopened_store,
-        reopened_market,
-        lifecycle=ContinuousEventLifecycle(tmp_path / "lifecycle.json"),
-        outcome_authority=_StaticOutcomeAuthority(),
+        reopened_runtime,
     )
     replay_binding = _binding(reopened, reopened_market)
     replay = reopened.materialize(replay_binding, _settlement(reopened, replay_binding), as_of=T3)
@@ -861,12 +891,16 @@ def test_win_to_void_correction_retires_performance_across_restart_without_fake_
         tmp_path / "opponents.json",
         ParticipantIdentityRegistry(tmp_path / "identity.json"),
     )
-    reopened_market = SQLiteMarketStore(tmp_path / "market.db")
+    reopened_runtime = build_autonomous_product_runtime(
+        workspace=tmp_path,
+        source=_ProductSource(),
+        clock=lambda: T3,
+        outcome_authority=_StaticOutcomeAuthority(),
+    )
+    reopened_market = reopened_runtime.market_store
     reopened = SportMemoryResultMaterializer(
         reopened_store,
-        reopened_market,
-        lifecycle=ContinuousEventLifecycle(tmp_path / "lifecycle.json"),
-        outcome_authority=_StaticOutcomeAuthority(),
+        reopened_runtime,
     )
     reopened_binding = _binding(reopened, reopened_market)
     assert reopened_store.graph_edges(as_of=T4) == ()

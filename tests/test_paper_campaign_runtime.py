@@ -87,10 +87,11 @@ class PaperCampaignRuntimeTests(_legacy.PaperCampaignRuntimeTests):
                 state["postmortems"][0]["created_at"],
                 _legacy.T4.replace("+00:00", "Z"),
             )
-            # The external research request is still made at the real T5 call.
+            # Research identity is causally anchored to the postmortem at T4;
+            # the later T5 API call is only the mutation/retry clock.
             self.assertEqual(
                 state["research_handoffs"][0]["requested_at"],
-                _legacy.T5.replace("+00:00", "Z"),
+                _legacy.T4.replace("+00:00", "Z"),
             )
             self.assertEqual(len(state["research_handoffs"]), 1)
             durable = json.loads(
@@ -130,7 +131,10 @@ class PaperCampaignRuntimeTests(_legacy.PaperCampaignRuntimeTests):
                 witness,
                 available_at=_legacy.T5,
             )
-            self.assertEqual(frozen_at, _legacy.T4)
+            self.assertEqual(
+                frozen_at,
+                _legacy.T4.replace("+00:00", "Z"),
+            )
             runtime.state_path.unlink()
 
             resumed_environment = _legacy.CausalLearningEnvironment.resume(
@@ -221,7 +225,7 @@ class PaperCampaignRuntimeTests(_legacy.PaperCampaignRuntimeTests):
             witness = bridge.resolution_witness(ticket_id)
             self.assertEqual(
                 runtime._bind_finalization_plan(witness, available_at=_legacy.T5),
-                _legacy.T4,
+                _legacy.T4.replace("+00:00", "Z"),
             )
 
             # Crash before AgentLoop attribution, then restore both individually

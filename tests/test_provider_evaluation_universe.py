@@ -70,6 +70,8 @@ def _frame() -> dict[str, object]:
         "data": [
             {
                 "event_id": "event-1",
+                "commence_time_reported": True,
+                "commence_time": REVEAL_NOT_BEFORE,
                 "bookmaker": "bovada",
                 "kind": "game",
                 "market_key": "h2h",
@@ -79,6 +81,8 @@ def _frame() -> dict[str, object]:
             },
             {
                 "event_id": "event-1",
+                "commence_time_reported": True,
+                "commence_time": REVEAL_NOT_BEFORE,
                 "bookmaker": "bovada",
                 "kind": "game",
                 "market_key": "spreads",
@@ -89,6 +93,8 @@ def _frame() -> dict[str, object]:
             },
             {
                 "event_id": "event-1",
+                "commence_time_reported": True,
+                "commence_time": REVEAL_NOT_BEFORE,
                 "bookmaker": "tenbet",
                 "kind": "game",
                 "market_key": "totals",

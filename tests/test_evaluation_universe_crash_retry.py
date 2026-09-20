@@ -74,6 +74,8 @@ def _provider_frame() -> dict[str, object]:
         "data": [
             {
                 "event_id": "event-1",
+                "commence_time_reported": True,
+                "commence_time": PROVIDER_REVEAL_AT,
                 "bookmaker": "bovada",
                 "kind": "game",
                 "market_key": "h2h",

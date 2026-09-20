@@ -10,11 +10,14 @@ physical confirmation identity.
 
 from __future__ import annotations
 
+import hashlib
 import importlib.abc
 import importlib.machinery
+import json
 import os
 from pathlib import Path
 import sys
+import weakref
 
 from . import point_in_time_evidence as evidence
 from .dataset_snapshot_lineage import DatasetSnapshotLineageAuthority
@@ -47,9 +50,18 @@ _SOURCE_AUTHORITY_REQUIRED = (
     "positive point-in-time feature evidence requires an independent "
     "source-owned feature artifact authority"
 )
+_FEATURE_LINEAGE_REQUIRED = (
+    "lineage_authority must be an exact DatasetSnapshotLineageAuthority"
+)
 _HOLDOUT_LINEAGE_REQUIRED = (
     "holdout consumption requires an exact canonical DatasetSnapshotLineageAuthority"
 )
+_HOLDOUT_LINEAGE_BINDING_DOMAIN = "data.point-in-time-holdout-lineage-binding-v1"
+
+# importlib.reload reuses this module globals dictionary. Keep lineage object
+# pins off mutable ledger instances and preserve them across repair self-reload.
+if "_HOLDOUT_LINEAGE_BINDINGS" not in globals():
+    _HOLDOUT_LINEAGE_BINDINGS = weakref.WeakKeyDictionary()
 
 
 def _fsync_directory_fail_closed(path: Path) -> None:
@@ -93,12 +105,23 @@ def _reject_instance_method_shadows(
         )
 
 
-def _require_exact_lineage_authority(lineage_authority) -> DatasetSnapshotLineageAuthority:
+def _require_exact_lineage_authority(
+    lineage_authority,
+    *,
+    holdout: bool = False,
+) -> DatasetSnapshotLineageAuthority:
     if type(lineage_authority) is not DatasetSnapshotLineageAuthority:
-        raise evidence.PointInTimeEvidenceError(_HOLDOUT_LINEAGE_REQUIRED)
+        raise evidence.PointInTimeEvidenceError(
+            _HOLDOUT_LINEAGE_REQUIRED if holdout else _FEATURE_LINEAGE_REQUIRED
+        )
     if type(lineage_authority.registry) is not ScientificRegistry:
         raise evidence.PointInTimeEvidenceError(
             "lineage_authority.registry must be an exact ScientificRegistry"
+        )
+    if type(lineage_authority.monotonic_authority) is not MonotonicWorkspaceAuthority:
+        raise evidence.PointInTimeEvidenceError(
+            "lineage_authority.monotonic_authority must be an exact "
+            "MonotonicWorkspaceAuthority"
         )
     _reject_instance_method_shadows(
         lineage_authority,
@@ -119,6 +142,133 @@ def _bind_exact_lineage_authority(*, lineage_authority, **kwargs):
     _require_exact_lineage_authority(lineage_authority)
     _PRISTINE_BIND(lineage_authority=lineage_authority, **kwargs)
     raise evidence.PointInTimeEvidenceError(_SOURCE_AUTHORITY_REQUIRED)
+
+
+def _canonical_path_identity(path: str | Path) -> str:
+    return os.path.normcase(os.fspath(Path(path).expanduser().resolve(strict=False)))
+
+
+def _lineage_identity_sha256(
+    lineage: DatasetSnapshotLineageAuthority,
+) -> str:
+    """Derive one durable identity from the existing canonical lineage authority."""
+
+    lineage = _require_exact_lineage_authority(lineage, holdout=True)
+    monotonic = lineage.monotonic_authority
+    payload = {
+        "lineage_path": _canonical_path_identity(lineage.path),
+        "registry_path": _canonical_path_identity(lineage.registry.path),
+        "lineage_workspace": _canonical_path_identity(monotonic.workspace),
+        "lineage_workspace_instance_id": monotonic.workspace_instance_id,
+        "lineage_namespace_sha256": monotonic.namespace_sha256,
+        "lineage_authority_root": _canonical_path_identity(monotonic.authority_root),
+    }
+    encoded = json.dumps(
+        payload,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _lineage_binding_authority(
+    ledger: evidence.HoldoutConsumptionLedger,
+) -> MonotonicWorkspaceAuthority:
+    return MonotonicWorkspaceAuthority(
+        workspace=ledger._workspace,
+        workspace_instance_id=ledger._authority.workspace_instance_id,
+        domain=_HOLDOUT_LINEAGE_BINDING_DOMAIN,
+        key=f"holdout-lineage:{ledger._path.name}",
+        authority_root=ledger._authority.authority_root,
+    )
+
+
+def _persist_or_validate_lineage_identity(
+    ledger: evidence.HoldoutConsumptionLedger,
+    identity_sha256: str,
+) -> None:
+    """Fence the canonical lineage identity in independent monotonic state."""
+
+    authority = _lineage_binding_authority(ledger)
+    tx_id = f"bind-lineage:{identity_sha256}"
+    try:
+        history = authority.read_history()
+        if history:
+            authority.recover(
+                observed_state_sha256=identity_sha256,
+                tx_id=tx_id,
+                semantic_binding_sha256=identity_sha256,
+            )
+            return
+        try:
+            authority.prepare(
+                tx_id=tx_id,
+                observed_state_sha256=None,
+                intended_state_sha256=identity_sha256,
+                semantic_binding_sha256=identity_sha256,
+            )
+            authority.commit(
+                tx_id=tx_id,
+                observed_state_sha256=identity_sha256,
+                semantic_binding_sha256=identity_sha256,
+            )
+        except MonotonicWorkspaceAuthorityError:
+            # A concurrent opener may have committed the same deterministic
+            # identity after our empty-history read. Recover only that exact tip.
+            authority.recover(
+                observed_state_sha256=identity_sha256,
+                tx_id=tx_id,
+                semantic_binding_sha256=identity_sha256,
+            )
+    except MonotonicWorkspaceAuthorityError as exc:
+        raise evidence.EvidenceLedgerCorruptError(
+            "holdout ledger canonical dataset lineage identity does not match "
+            "its durable binding"
+        ) from exc
+
+
+def _pin_lineage_authority(
+    ledger: evidence.HoldoutConsumptionLedger,
+    lineage: DatasetSnapshotLineageAuthority,
+) -> None:
+    identity_sha256 = _lineage_identity_sha256(lineage)
+    _persist_or_validate_lineage_identity(ledger, identity_sha256)
+    _HOLDOUT_LINEAGE_BINDINGS[ledger] = (
+        lineage,
+        lineage.registry,
+        lineage.monotonic_authority,
+        identity_sha256,
+    )
+
+
+def _bound_lineage_authority(
+    ledger: evidence.HoldoutConsumptionLedger,
+) -> DatasetSnapshotLineageAuthority:
+    binding = _HOLDOUT_LINEAGE_BINDINGS.get(ledger)
+    if binding is None:
+        raise evidence.PointInTimeEvidenceError(_HOLDOUT_LINEAGE_REQUIRED)
+    lineage, registry, monotonic, identity_sha256 = binding
+    if getattr(ledger, "_dataset_lineage_authority", None) is not lineage:
+        raise evidence.PointInTimeEvidenceError(
+            "holdout canonical dataset lineage authority was replaced after construction"
+        )
+    if lineage.registry is not registry:
+        raise evidence.PointInTimeEvidenceError(
+            "holdout canonical ScientificRegistry authority was replaced after construction"
+        )
+    if lineage.monotonic_authority is not monotonic:
+        raise evidence.PointInTimeEvidenceError(
+            "holdout canonical lineage monotonic authority was replaced after construction"
+        )
+    _require_exact_lineage_authority(lineage, holdout=True)
+    if _lineage_identity_sha256(lineage) != identity_sha256:
+        raise evidence.PointInTimeEvidenceError(
+            "holdout canonical dataset lineage identity changed after construction"
+        )
+    _persist_or_validate_lineage_identity(ledger, identity_sha256)
+    return lineage
 
 
 def _refresh_monotonic_authority(ledger: evidence.HoldoutConsumptionLedger) -> None:
@@ -151,9 +301,14 @@ def _holdout_init_with_lineage(
     lineage_authority=None,
 ) -> None:
     if lineage_authority is not None:
-        lineage_authority = _require_exact_lineage_authority(lineage_authority)
-    self._dataset_lineage_authority = lineage_authority
+        lineage_authority = _require_exact_lineage_authority(
+            lineage_authority,
+            holdout=True,
+        )
     _PRISTINE_LEDGER_INIT(self, path, authority_root=authority_root)
+    self._dataset_lineage_authority = lineage_authority
+    if lineage_authority is not None:
+        _pin_lineage_authority(self, lineage_authority)
 
 
 def _resolve_canonical_snapshot(
@@ -166,11 +321,12 @@ def _resolve_canonical_snapshot(
         raise evidence.PointInTimeEvidenceError(
             "dataset_snapshot must be an exact DatasetSnapshot"
         )
-    lineage = _require_exact_lineage_authority(
-        getattr(ledger, "_dataset_lineage_authority", None)
-    )
+    lineage = _bound_lineage_authority(ledger)
     try:
-        record = lineage.record(dataset_snapshot.dataset_snapshot_id)
+        record = DatasetSnapshotLineageAuthority.record(
+            lineage,
+            dataset_snapshot.dataset_snapshot_id,
+        )
     except ValueError as exc:
         raise evidence.PointInTimeEvidenceError(
             "canonical dataset lineage authority could not resolve dataset_snapshot"

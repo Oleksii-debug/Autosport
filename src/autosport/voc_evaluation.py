@@ -1000,6 +1000,66 @@ class CanonicalVOCAuthorityResolver:
             raise VOCEvaluationError(
                 "canonical outcome-derived VOC score identity mismatch"
             )
+
+        episode_resolver = getattr(
+            self.outcome_score_authority,
+            "resolve_episode",
+            None,
+        )
+        episode_score = (
+            episode_resolver(
+                evaluation.evaluation_id,
+                as_of=evaluation.evaluated_at,
+            )
+            if callable(episode_resolver)
+            else score
+        )
+        if not isinstance(episode_score, OutcomeDerivedVOCScore):
+            raise VOCEvaluationError(
+                "canonical outcome-derived VOC episode score is missing"
+            )
+        episode_identity = (
+            episode_score.evaluation_id,
+            episode_score.outcome_evidence_sha256,
+            episode_score.scoring_rule_sha256,
+            episode_score.research_protocol_sha256,
+            episode_score.holdout_access_id,
+            episode_score.multiple_comparison_control_sha256,
+        )
+        if episode_identity != expected_identity:
+            raise VOCEvaluationError(
+                "canonical outcome-derived VOC episode identity mismatch"
+            )
+        expected_values = (
+            evaluation.baseline_utility,
+            evaluation.challenger_utility,
+            evaluation.compute_cost_penalty,
+            evaluation.latency_opportunity_cost_penalty,
+            evaluation.measured_compute_cost,
+            evaluation.paired_sample_count,
+            evaluation.effective_sample_size,
+            evaluation.support_fraction,
+            evaluation.incremental_value_interval_low,
+            evaluation.incremental_value_interval_high,
+            evaluation.net_value,
+        )
+        actual_values = (
+            episode_score.baseline_utility,
+            episode_score.challenger_utility,
+            episode_score.compute_cost_penalty,
+            episode_score.latency_opportunity_cost_penalty,
+            episode_score.measured_compute_cost,
+            episode_score.paired_sample_count,
+            episode_score.effective_sample_size,
+            episode_score.support_fraction,
+            episode_score.incremental_value_interval_low,
+            episode_score.incremental_value_interval_high,
+            episode_score.net_value,
+        )
+        if actual_values != expected_values:
+            raise VOCEvaluationError(
+                "canonical outcome-derived VOC score does not match routed evaluation"
+            )
         return score
 
     def _require_scientific_statistics(

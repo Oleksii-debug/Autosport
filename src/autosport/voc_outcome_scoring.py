@@ -985,6 +985,34 @@ class CanonicalOutcomeDerivedVOCScoreAuthority:
             source_artifact_sha256=source_artifact_sha256,
         )
 
+    def resolve_episode(
+        self,
+        evaluation_id: str,
+        *,
+        as_of: str,
+    ) -> OutcomeDerivedVOCScore | None:
+        identity = _text(evaluation_id, field="evaluation_id")
+        cutoff = _instant(as_of, field="as_of")
+        evaluation = self._evaluation(identity, as_of=cutoff)
+        if evaluation is None:
+            return None
+        if _instant(evaluation.evaluated_at, field="evaluated_at") > cutoff:
+            return None
+        evidence, decision_record_sha256 = self._decision_scoring_evidence(evaluation)
+        rule = self._scoring_rule(evaluation)
+        outcomes, _, outcome_source_sha256 = self._revealed_outcomes(
+            evaluation,
+            as_of=cutoff,
+        )
+        return self._derive_episode_score(
+            evaluation=evaluation,
+            evidence=evidence,
+            decision_record_sha256=decision_record_sha256,
+            rule=rule,
+            outcomes=outcomes,
+            outcome_source_sha256=outcome_source_sha256,
+        )
+
     def resolve(
         self,
         evaluation_id: str,

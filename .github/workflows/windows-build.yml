@@ -42,7 +42,7 @@ jobs:
         shell: pwsh
         run: python scripts/verify_source_checkout.py --source-sha $env:AUTOSPORT_SOURCE_SHA
       - shell: pwsh
-        run: ./scripts/build_windows.ps1 -SkipTests
+        run: ./scripts/build_windows_candidate.ps1
       - name: Materialize verified independent package extraction
         shell: pwsh
         run: |

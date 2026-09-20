@@ -1559,12 +1559,26 @@ class PersistentLiveDecisionLoop:
         context_hash = _canonical_json_sha256(context_payload)
         decision_id = f"live-{context_hash}"
         prepared_execution: PreparedPaperExecution | None = None
+        expected_execution_payload = None
         if self.paper_execution is not None:
             prepared_execution = self.paper_execution.prepare(
                 plan=plan,
                 intents=intents,
                 decision_id=decision_id,
             )
+            if prepared_execution is not None:
+                expected_execution_payload = {
+                    "schema": "autosport.paper_execution_adoption",
+                    "schema_version": 1,
+                    "plan_id": prepared_execution.execution_plan.plan_id,
+                    "plan_fingerprint": prepared_execution.execution_plan.fingerprint,
+                    "model_fingerprint": self.paper_execution.config.fingerprint,
+                    "run_id": self.paper_execution.expected_run_id(
+                        prepared_execution,
+                        decision_id,
+                    ),
+                    "intent_evidence_json": prepared_execution.intent_evidence_json,
+                }
 
         record_payload = {
             "schema": "autosport.persistent_live_decision",
@@ -1582,16 +1596,11 @@ class PersistentLiveDecisionLoop:
             "plan": plan.to_dict(),
             MATERIAL_ACTION_ID_PAYLOAD_KEY: decision_id,
         }
-        if prepared_execution is not None:
-            record_payload["schema_version"] = 3
-            record_payload["paper_execution"] = {
-                "schema": "autosport.paper_execution_adoption",
-                "schema_version": 1,
-                "plan_id": prepared_execution.execution_plan.plan_id,
-                "plan_fingerprint": prepared_execution.execution_plan.fingerprint,
-                "model_fingerprint": self.paper_execution.config.fingerprint,
-                "intent_evidence_json": prepared_execution.intent_evidence_json,
-            }
+        if expected_execution_payload is not None:
+            # Keep the established top-level live-decision schema/version so the
+            # decision identity remains stable; execution adoption is additive,
+            # separately versioned evidence.
+            record_payload["paper_execution"] = expected_execution_payload
 
         record = DecisionRecord(
             replay_run_id=f"live:{self.loop_id}",
@@ -1699,18 +1708,6 @@ class PersistentLiveDecisionLoop:
                     raise DecisionLedgerIntegrityError(
                         "reserved live decision identity conflicts with durable evidence"
                     )
-                expected_execution_payload = (
-                    None
-                    if prepared_execution is None
-                    else {
-                        "schema": "autosport.paper_execution_adoption",
-                        "schema_version": 1,
-                        "plan_id": prepared_execution.execution_plan.plan_id,
-                        "plan_fingerprint": prepared_execution.execution_plan.fingerprint,
-                        "model_fingerprint": self.paper_execution.config.fingerprint,
-                        "intent_evidence_json": prepared_execution.intent_evidence_json,
-                    }
-                )
                 if existing.payload.get("paper_execution") != expected_execution_payload:
                     raise DecisionLedgerIntegrityError(
                         "durable live decision execution-adoption evidence changed"
@@ -1732,6 +1729,11 @@ class PersistentLiveDecisionLoop:
                     started_at=plan.decision_ts,
                     materialize_exposure=(self.mode is LiveDecisionMode.PAPER),
                 )
+                assert expected_execution_payload is not None
+                if execution_result.run.run_id != expected_execution_payload["run_id"]:
+                    raise DecisionLedgerIntegrityError(
+                        "durable PAPER execution run identity drifted after decision publication"
+                    )
 
             committed = _Progress(
                 loop_id=self.loop_id,

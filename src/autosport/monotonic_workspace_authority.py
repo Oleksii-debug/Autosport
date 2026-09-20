@@ -400,7 +400,12 @@ class MonotonicWorkspaceAuthority:
             / self.namespace_sha256
         )
         self.records_dir = self.journal_dir / "records"
-        self.namespace_marker_path = self.journal_dir / "namespace.json"
+        self.namespace_marker_path = (
+            self.authority_root
+            / "namespace-bindings"
+            / self.namespace_sha256[:2]
+            / f"{self.namespace_sha256}.json"
+        )
 
     def prepare(
         self,
@@ -858,6 +863,9 @@ class MonotonicWorkspaceAuthority:
         try:
             _durable_exclusive_json_create(
                 self.namespace_marker_path, self._namespace_payload()
+            )
+            _sync_directory_lineage(
+                self.authority_root, self.namespace_marker_path.parent
             )
         except FileExistsError:
             self._validate_namespace_marker()

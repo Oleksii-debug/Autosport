@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from decimal import Decimal
 
 import pytest
@@ -7,6 +8,7 @@ import pytest
 from autosport.evaluation_intake import (
     EvaluationIntakeError,
     EvaluationIntakeIntegrityError,
+    ObservationEnumerationWitness,
     ObservationIntakeLedger,
 )
 from autosport.evaluation_universe import (
@@ -32,6 +34,38 @@ from autosport.paper_execution_reality import (
 H = "a" * 64
 H2 = "b" * 64
 H3 = "c" * 64
+
+
+class _Resolver:
+    def __init__(self, witnesses: tuple[ObservationEnumerationWitness, ...]) -> None:
+        self._witnesses = {item.enumeration_id: item for item in witnesses}
+
+    def resolve_enumeration(self, enumeration_id: str) -> ObservationEnumerationWitness:
+        return self._witnesses[enumeration_id]
+
+
+def _witness(index: int, row: EvaluationRow) -> ObservationEnumerationWitness:
+    return ObservationEnumerationWitness(
+        enumeration_id=f"enumeration-{index}",
+        session_id="session-1",
+        source_id="source-1",
+        campaign_id="campaign-1",
+        research_protocol_id="protocol-1",
+        protocol_sha256=H,
+        universe_id="universe-1",
+        cycle_index=index,
+        source_range_id=f"range-{index}",
+        stream_epoch="epoch-1",
+        start_cursor=f"cursor-{index}-start",
+        end_cursor=f"cursor-{index}-end",
+        acquisition_sha256=H3,
+        row_keys=(row.row_key,),
+        exhaustive=True,
+        gap_free=True,
+        committed_at=f"2026-09-20T00:04:{index:02d}Z",
+        evaluation_not_before=f"2026-09-20T00:04:{index:02d}Z",
+        outcome_reveal_not_before=row.outcome_reveal_not_before,
+    )
 
 
 def _row(
@@ -101,21 +135,17 @@ def _row(
 
 
 def _intake(workspace, rows: tuple[EvaluationRow, ...]) -> ObservationIntakeLedger:
-    ledger = ObservationIntakeLedger(workspace, authority_id="intake-1")
-    for index, item in enumerate(sorted(rows, key=lambda value: value.row_key), 1):
-        ledger.append_cycle(
-            session_id="session-1",
-            source_id="source-1",
-            campaign_id="campaign-1",
-            research_protocol_id="protocol-1",
-            protocol_sha256=H,
-            universe_id="universe-1",
-            cycle_index=index,
-            committed_at=f"2026-09-20T00:04:{index:02d}Z",
-            outcome_reveal_not_before=item.outcome_reveal_not_before,
-            row_keys=(item.row_key,),
-            source_state="PRE_RESULT_COMMITTED",
-        )
+    witnesses = tuple(
+        _witness(index, item)
+        for index, item in enumerate(sorted(rows, key=lambda value: value.row_key), 1)
+    )
+    ledger = ObservationIntakeLedger(
+        workspace,
+        authority_id="intake-1",
+        enumeration_resolver=_Resolver(witnesses),
+    )
+    for witness in witnesses:
+        ledger.append_cycle(enumeration_id=witness.enumeration_id)
     return ledger
 
 
@@ -367,25 +397,22 @@ def test_intake_snapshot_cannot_cherry_pick_prefix_before_durable_tip(tmp_path):
         intake.snapshot(first_cycle=1, last_cycle=1)
 
 
-def test_intake_cycle_retry_is_idempotent_but_conflict_fails(tmp_path):
+def test_intake_cycle_retry_is_idempotent_but_resolver_drift_fails(tmp_path):
     item = _row()
-    intake = ObservationIntakeLedger(tmp_path, authority_id="intake-1")
-    kwargs = dict(
-        session_id="session-1",
-        source_id="source-1",
-        campaign_id="campaign-1",
-        research_protocol_id="protocol-1",
-        protocol_sha256=H,
-        universe_id="universe-1",
-        cycle_index=1,
-        committed_at="2026-09-20T00:04:01Z",
-        outcome_reveal_not_before=item.outcome_reveal_not_before,
-        row_keys=(item.row_key,),
-        source_state="PRE_RESULT_COMMITTED",
+    witness = _witness(1, item)
+    resolver = _Resolver((witness,))
+    intake = ObservationIntakeLedger(
+        tmp_path,
+        authority_id="intake-1",
+        enumeration_resolver=resolver,
     )
-    first = intake.append_cycle(**kwargs)
-    second = intake.append_cycle(**kwargs)
+    first = intake.append_cycle(enumeration_id=witness.enumeration_id)
+    second = intake.append_cycle(enumeration_id=witness.enumeration_id)
     assert first.record_sha256 == second.record_sha256
 
-    with pytest.raises(EvaluationIntakeIntegrityError, match="retry conflicts"):
-        intake.append_cycle(**{**kwargs, "source_state": "CHANGED"})
+    resolver._witnesses[witness.enumeration_id] = replace(
+        witness,
+        acquisition_sha256=H2,
+    )
+    with pytest.raises(EvaluationIntakeIntegrityError, match="no longer matches"):
+        intake.records()

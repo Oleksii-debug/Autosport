@@ -11,7 +11,11 @@ from pathlib import Path
 from unittest.mock import patch
 
 from autosport.event_lifecycle import CatalogPage
-from autosport.product_entrypoint import ProductEntrypointError, run_product
+from autosport.product_entrypoint import (
+    ProductEntrypointError,
+    run_product,
+    run_product_command,
+)
 
 
 class _Source:
@@ -163,6 +167,55 @@ class SupportedProductEntrypointTests(unittest.TestCase):
                         install_signal_handlers=False,
                     )
                 self.assertFalse(workspace.exists())
+
+    def test_unbounded_zero_poll_interval_fails_before_source_or_workspace(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory) / "must-not-exist"
+            with self.assertRaisesRegex(
+                ValueError,
+                "unbounded product run requires a positive poll interval",
+            ):
+                run_product(
+                    workspace=workspace,
+                    source_factory="not-even-loaded:factory",
+                    max_cycles=None,
+                    poll_seconds=0,
+                    install_signal_handlers=False,
+                )
+            self.assertFalse(workspace.exists())
+
+    def test_command_failure_output_never_echoes_source_exception_text(self) -> None:
+        sentinel = "SENTINEL-CREDENTIAL-DO-NOT-PRINT"
+
+        def failing_factory():
+            raise RuntimeError(f"provider login failed token={sentinel}")
+
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory) / "must-not-exist"
+            source_module = _module(failing_factory)
+            with patch.dict(
+                sys.modules,
+                {"autosport_test_product_source": source_module},
+            ):
+                output = io.StringIO()
+                with redirect_stdout(output):
+                    code = run_product_command(
+                        workspace=workspace,
+                        source_factory="autosport_test_product_source:make_source",
+                        initial_bankroll="100",
+                        max_cycles=1,
+                        poll_seconds=0,
+                    )
+            self.assertEqual(code, 3)
+            self.assertNotIn(sentinel, output.getvalue())
+            self.assertNotIn("provider login failed", output.getvalue())
+            records = _records(output.getvalue())
+            self.assertEqual(len(records), 1)
+            self.assertEqual(records[0]["kind"], "product_start_failure")
+            self.assertEqual(records[0]["error_code"], "product_start_failed")
+            self.assertEqual(records[0]["error_type"], "RuntimeError")
+            self.assertNotIn("error", records[0])
+            self.assertFalse(workspace.exists())
 
 
 if __name__ == "__main__":

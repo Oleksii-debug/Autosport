@@ -26,7 +26,7 @@ from .storage import SQLiteMarketStore
 
 
 SCHEMA: Final = "autosport.deployment_semantic_scope"
-SCHEMA_VERSION: Final = 1
+SCHEMA_VERSION: Final = 2
 _HEX: Final = frozenset("0123456789abcdef")
 
 
@@ -81,6 +81,38 @@ def _canonical_json(value: object) -> str:
 
 def _digest(value: object) -> str:
     return hashlib.sha256(_canonical_json(value).encode("utf-8")).hexdigest()
+
+
+_PROTOCOL_EXACT_SESSION_FIELDS: Final = frozenset(
+    {"research_protocol_id", "causal_cutoff", "frozen_at_utc"}
+)
+
+
+def _research_protocol_semantics_id(binding: Mapping[str, object]) -> str:
+    """Hash only protocol semantics that must remain stable across later sessions."""
+
+    if not isinstance(binding, Mapping):
+        raise DeploymentSemanticScopeError("canonical ResearchProtocol lacks binding authority")
+    _text(
+        binding.get("research_protocol_id"),
+        "ResearchProtocol.binding.research_protocol_id",
+    )
+    _instant(binding.get("causal_cutoff"), "ResearchProtocol.binding.causal_cutoff")
+    _instant(binding.get("frozen_at_utc"), "ResearchProtocol.binding.frozen_at_utc")
+    stable = {
+        key: value
+        for key, value in binding.items()
+        if key not in _PROTOCOL_EXACT_SESSION_FIELDS
+    }
+    if not stable:
+        raise DeploymentSemanticScopeError("research protocol semantics are empty")
+    return _digest(
+        {
+            "schema": "autosport.research_protocol_semantics",
+            "schema_version": 1,
+            "binding": stable,
+        }
+    )
 
 
 def _payload_text(payload: Mapping[str, object], field: str, owner: str) -> str:
@@ -252,6 +284,7 @@ class DeploymentSemanticScope:
     feature_set_version: str
     feature_definition_sha256: str
     feature_source_sha256: str
+    research_protocol_semantics_id: str
     research_protocol_id: str
     research_protocol_sha256: str
     config_id: str
@@ -282,6 +315,7 @@ class DeploymentSemanticScope:
         for name in (
             "feature_definition_sha256",
             "feature_source_sha256",
+            "research_protocol_semantics_id",
             "research_protocol_sha256",
             "config_sha256",
             "action_semantics_id",
@@ -303,6 +337,7 @@ class DeploymentSemanticScope:
             "feature_set_version": self.feature_set_version,
             "feature_definition_sha256": self.feature_definition_sha256,
             "feature_source_sha256": self.feature_source_sha256,
+            "research_protocol_semantics_id": self.research_protocol_semantics_id,
             "research_protocol_id": self.research_protocol_id,
             "research_protocol_sha256": self.research_protocol_sha256,
             "config_id": self.config_id,
@@ -314,6 +349,7 @@ class DeploymentSemanticScope:
 
     def compatibility_payload(self) -> dict[str, object]:
         payload = self.identity_payload()
+        payload.pop("research_protocol_id")
         payload.pop("research_protocol_sha256")
         return payload
 
@@ -342,6 +378,10 @@ class DeploymentSemanticScope:
             feature_set_version=_text(raw.get("feature_set_version"), "feature_set_version"),
             feature_definition_sha256=_sha(raw.get("feature_definition_sha256"), "feature_definition_sha256"),
             feature_source_sha256=_sha(raw.get("feature_source_sha256"), "feature_source_sha256"),
+            research_protocol_semantics_id=_sha(
+                raw.get("research_protocol_semantics_id"),
+                "research_protocol_semantics_id",
+            ),
             research_protocol_id=_text(raw.get("research_protocol_id"), "research_protocol_id"),
             research_protocol_sha256=_sha(raw.get("research_protocol_sha256"), "research_protocol_sha256"),
             config_id=_text(raw.get("config_id"), "config_id"),
@@ -564,6 +604,11 @@ def resolve_deployment_semantic_scope(
     protocol_sha = _payload_sha(protocol_payload, "protocol_sha256", "ResearchProtocol")
     if protocol_identity != protocol.record_id:
         raise DeploymentSemanticScopeError("canonical ResearchProtocol payload identity mismatch")
+    if _payload_text(
+        binding, "research_protocol_id", "ResearchProtocol.binding"
+    ) != protocol_identity:
+        raise DeploymentSemanticScopeError("research protocol binding identity mismatch")
+    protocol_semantics_id = _research_protocol_semantics_id(binding)
     protocol_dataset_manifest = _payload_sha(
         protocol_payload, "dataset_manifest_sha256", "ResearchProtocol"
     )
@@ -654,6 +699,7 @@ def resolve_deployment_semantic_scope(
         feature_set_version=feature_version,
         feature_definition_sha256=feature_definition,
         feature_source_sha256=feature_source,
+        research_protocol_semantics_id=protocol_semantics_id,
         research_protocol_id=protocol_identity,
         research_protocol_sha256=protocol_sha,
         config_id=binding_config_id,

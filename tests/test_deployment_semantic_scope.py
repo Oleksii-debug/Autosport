@@ -37,13 +37,15 @@ def _sha(label: str) -> str:
 
 def _protocol(
     *,
+    research_protocol_id: str = "protocol-v1",
     dataset_manifest_sha256: str = _sha("dataset-manifest"),
     available_at: str = "2026-08-01T00:00:00Z",
     feature_set_version: str = "features-v1",
     causal_cutoff: str = "2026-09-01T00:00:00Z",
+    evaluation_design: str = "walk-forward holdout",
 ) -> ResearchProtocol:
     binding = ScientificProtocolBinding(
-        research_protocol_id="protocol-v1",
+        research_protocol_id=research_protocol_id,
         research_question_id="question-v1",
         research_question_sha256=_sha("question"),
         hypothesis_id="hypothesis-v1",
@@ -52,7 +54,7 @@ def _protocol(
         exclusion_criteria="future or revised evidence excluded",
         lawful_source_requirements="lawful immutable source evidence",
         causal_cutoff=causal_cutoff,
-        evaluation_design="walk-forward holdout",
+        evaluation_design=evaluation_design,
         feature_set_version=feature_set_version,
         uncertainty_method="bootstrap-v1",
         multiple_comparison_control="holm-v1",
@@ -110,12 +112,13 @@ def _environment(
     snapshot_id: str = "dataset-001",
     cutoff: str = "2026-09-01T00:00:00Z",
     source_id: str = "canonical-market-store",
+    protocol_id: str = "protocol-v1",
 ) -> EnvironmentIdentity:
     return EnvironmentIdentity(
         source_id=source_id,
         config_id="paper-agent-config-v1",
         data_id=snapshot_id,
-        protocol_id="protocol-v1",
+        protocol_id=protocol_id,
         cutoff_ts=cutoff,
         seed=7,
     )
@@ -376,32 +379,111 @@ def test_runtime_appended_after_decision_cannot_claim_historical_availability() 
 
 
 def test_later_append_only_snapshot_keeps_scope_but_changes_exact_authority() -> None:
-    first = _resolve()
+    first_dataset = _dataset()
     later_dataset = _dataset(
         snapshot_id="dataset-002",
         manifest_sha256=_sha("dataset-manifest-2"),
         cutoff="2026-09-08T00:00:00Z",
     )
-    later_environment = _environment(snapshot_id="dataset-002", cutoff="2026-09-08T00:00:00Z")
+    feature = _feature_set()
+    first_protocol = _protocol()
+    later_protocol = _protocol(
+        research_protocol_id="protocol-v2",
+        dataset_manifest_sha256=later_dataset.manifest_sha256,
+        causal_cutoff=later_dataset.causal_cutoff,
+    )
+    first_environment = _environment()
+    later_environment = _environment(
+        snapshot_id=later_dataset.dataset_snapshot_id,
+        cutoff=later_dataset.causal_cutoff,
+        protocol_id=later_protocol.record_id,
+    )
+    first_event = _event()
     later_event = _event(
         observed_ts="2026-09-07T23:59:00Z",
         ingest_ts="2026-09-07T23:59:01Z",
         sequence=2,
     )
-    later = _resolve(
-        event=later_event,
-        dataset=later_dataset,
-        protocol=_protocol(
-            dataset_manifest_sha256=later_dataset.manifest_sha256,
-            causal_cutoff=later_dataset.causal_cutoff,
-        ),
-        environment=later_environment,
-        decision_ts="2100-09-09T00:00:00Z",
-    )
+    actions = _action_semantics()
+
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        registry = ScientificRegistry.initialize_pristine(root / "scientific-registry.json")
+        for record in (
+            first_dataset,
+            feature,
+            first_protocol,
+            later_dataset,
+            later_protocol,
+        ):
+            registry.append(record)
+
+        market_store = SQLiteMarketStore(root / "market.db")
+        runtime_store = DeploymentRuntimeAuthorityStore.initialize_pristine(
+            root / "runtime-authority.json"
+        )
+        try:
+            market_store.append(first_event)
+            market_store.append(later_event)
+            first_runtime = runtime_store.append(
+                environment=first_environment,
+                episode=_episode(first_environment),
+                action_semantics_version=actions.version,
+                action_semantics_meanings=actions.meanings,
+            )
+            later_runtime = runtime_store.append(
+                environment=later_environment,
+                episode=_episode(later_environment),
+                action_semantics_version=actions.version,
+                action_semantics_meanings=actions.meanings,
+            )
+            first = resolve_deployment_semantic_scope(
+                market_store=market_store,
+                market_event_dedupe_key=first_event.dedupe_key,
+                scientific_registry=registry,
+                dataset_snapshot_id=first_dataset.dataset_snapshot_id,
+                feature_set_id=feature.feature_set_id,
+                research_protocol_id=first_protocol.record_id,
+                runtime_authority_store=runtime_store,
+                runtime_authority_id=first_runtime.runtime_authority_id,
+                decision_ts="2100-09-02T00:00:00Z",
+            )
+            later = resolve_deployment_semantic_scope(
+                market_store=market_store,
+                market_event_dedupe_key=later_event.dedupe_key,
+                scientific_registry=registry,
+                dataset_snapshot_id=later_dataset.dataset_snapshot_id,
+                feature_set_id=feature.feature_set_id,
+                research_protocol_id=later_protocol.record_id,
+                runtime_authority_store=runtime_store,
+                runtime_authority_id=later_runtime.runtime_authority_id,
+                decision_ts="2100-09-09T00:00:00Z",
+            )
+        finally:
+            market_store.close()
 
     assert later.scope.scope_id == first.scope.scope_id
+    assert (
+        later.scope.research_protocol_semantics_id
+        == first.scope.research_protocol_semantics_id
+    )
+    assert later.scope.research_protocol_id != first.scope.research_protocol_id
+    assert later.scope.research_protocol_sha256 != first.scope.research_protocol_sha256
     assert later.authority_id != first.authority_id
     assert later.dataset_snapshot_id != first.dataset_snapshot_id
+
+
+def test_research_protocol_semantic_change_changes_scope() -> None:
+    baseline = _resolve()
+    changed = _resolve(
+        protocol=_protocol(evaluation_design="blocked-time-series holdout"),
+    )
+
+    assert (
+        changed.scope.research_protocol_semantics_id
+        != baseline.scope.research_protocol_semantics_id
+    )
+    assert changed.scope.scope_id != baseline.scope.scope_id
 
 
 @pytest.mark.parametrize(
@@ -528,21 +610,21 @@ def test_missing_canonical_scientific_identity_fails_closed() -> None:
     ("dataset", "feature", "protocol", "message"),
     [
         (
-            _dataset(available_at="2026-09-03T00:00:00Z"),
+            _dataset(available_at="2100-09-03T00:00:00Z"),
             _feature_set(),
             _protocol(),
             "DatasetSnapshot:dataset-001 was not available at decision time",
         ),
         (
             _dataset(),
-            _feature_set(available_at="2026-09-03T00:00:00Z"),
+            _feature_set(available_at="2100-09-03T00:00:00Z"),
             _protocol(),
             "FeatureSet:features-main was not available at decision time",
         ),
         (
             _dataset(),
             _feature_set(),
-            _protocol(available_at="2026-09-03T00:00:00Z"),
+            _protocol(available_at="2100-09-03T00:00:00Z"),
             "ResearchProtocol:protocol-v1 was not available at decision time",
         ),
     ],
@@ -558,19 +640,19 @@ def test_scientific_evidence_available_only_after_decision_is_rejected(
             dataset=dataset,
             feature=feature,
             protocol=protocol,
-            decision_ts="2026-09-02T00:00:00Z",
+            decision_ts="2100-09-02T00:00:00Z",
         )
 
 
 def test_dataset_cutoff_cannot_be_after_decision() -> None:
     dataset = _dataset(
-        cutoff="2026-09-03T00:00:00Z",
-        available_at="2026-09-02T00:00:00Z",
+        cutoff="2100-09-03T00:00:00Z",
+        available_at="2100-09-02T00:00:00Z",
     )
-    environment = _environment(cutoff="2026-09-03T00:00:00Z")
+    environment = _environment(cutoff="2100-09-03T00:00:00Z")
     with pytest.raises(DeploymentSemanticScopeError, match="causal cutoff is later than decision time"):
         _resolve(
             dataset=dataset,
             environment=environment,
-            decision_ts="2026-09-02T00:00:00Z",
+            decision_ts="2100-09-02T00:00:00Z",
         )

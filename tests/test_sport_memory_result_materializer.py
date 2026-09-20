@@ -10,8 +10,9 @@ import pytest
 
 from autosport.continuous_session import (
     SettlementResolution,
-    _seal_settlement_resolution,
+    _resolve_authoritative_settlement,
 )
+from autosport.event_lifecycle import EventLifecycleRecord, EventPhase
 from autosport.domain import MarketEvent
 from autosport.opponent_intelligence import OpponentIntelligenceStore
 from autosport.participant_identity import (
@@ -37,6 +38,7 @@ T1 = "2026-09-20T10:01:00Z"
 T2 = "2026-09-20T10:02:00Z"
 T3 = "2026-09-20T10:03:00Z"
 T4 = "2026-09-20T10:04:00Z"
+EVENT_ID = "provider-a:event-1"
 
 
 def _entity(entity_id: str, *, kind: EntityKind = EntityKind.PARTICIPANT) -> EntityIdentity:
@@ -74,7 +76,7 @@ def _roster(
     entity_id: str,
     *,
     available_at: str = T0,
-    event_id: str = "event-1",
+    event_id: str = EVENT_ID,
 ) -> RosterMembership:
     return RosterMembership(
         event_id=event_id,
@@ -95,7 +97,7 @@ def _quote(
     competition_id: str = "comp-tour-42",
 ) -> MarketEvent:
     return MarketEvent(
-        event_id="event-1",
+        event_id=EVENT_ID,
         market_id="match-outcome",
         selection_id=selection,
         decimal_odds=Decimal("2.0"),
@@ -155,11 +157,11 @@ def _binding(
 ) -> SportMemoryResultBinding:
     subject = next(
         event
-        for event in market_store.events("event-1")
+        for event in market_store.events(EVENT_ID)
         if event.selection_id == "sel-alex-17"
     )
     return materializer.freeze_binding(
-        event_identity="event-1",
+        event_identity=EVENT_ID,
         source_id="provider-a",
         subject_alias="alex",
         opponent_alias="blair",
@@ -174,19 +176,63 @@ def _binding(
     )
 
 
+class _StaticOutcomeAuthority:
+    def __init__(self, resolution: SettlementResolution) -> None:
+        self.resolution = resolution
+
+    def resolve(
+        self,
+        record: EventLifecycleRecord,
+        *,
+        as_of: str,
+    ) -> SettlementResolution:
+        assert record.identity == self.resolution.event_identity
+        assert record.settlement_ref == self.resolution.settlement_ref
+        assert as_of >= self.resolution.available_at
+        return self.resolution
+
+
+def _resolve_external_settlement(
+    resolution: SettlementResolution,
+) -> SettlementResolution:
+    source_id, provider_event_id = resolution.event_identity.split(":", 1)
+    record = EventLifecycleRecord(
+        identity=resolution.event_identity,
+        source_id=source_id,
+        sport="tennis",
+        event_id=provider_event_id,
+        phase=EventPhase.COMPLETED,
+        first_discovered_at=T0,
+        last_available_at=resolution.available_at,
+        scheduled_start_at=None,
+        completion_ref=f"completion:{resolution.settlement_ref}",
+        settlement_ref=resolution.settlement_ref,
+        completion_discovered_at=resolution.available_at,
+        settlement_discovered_at=resolution.available_at,
+        last_discovered_at=resolution.available_at,
+    )
+    resolved = _resolve_authoritative_settlement(
+        _StaticOutcomeAuthority(resolution),
+        record,
+        as_of=resolution.available_at,
+    )
+    assert resolved is not None
+    return resolved
+
+
 def _settlement(
     binding: SportMemoryResultBinding,
     outcome: str = "win",
     *,
     available_at: str = T2,
     evidence_sha256: str = SHA_B,
-    event_identity: str = "event-1",
+    event_identity: str = EVENT_ID,
     evidence_id: str = "result-1",
     settlement_ref: str = "settlement-1",
 ) -> SettlementResolution:
     opponent_outcome = "void" if outcome == "void" else ("loss" if outcome == "win" else "win")
     assert binding.opponent_quote_key is not None
-    return _seal_settlement_resolution(
+    return _resolve_external_settlement(
         SettlementResolution(
             event_identity=event_identity,
             settlement_ref=settlement_ref,
@@ -291,11 +337,11 @@ def test_pre_reveal_provider_inference_persists_causal_cutoff(tmp_path):
     _, store, market_store, materializer = _authorities(tmp_path)
     subject = next(
         event
-        for event in market_store.events("event-1")
+        for event in market_store.events(EVENT_ID)
         if event.selection_id == "sel-alex-17"
     )
     binding = materializer.freeze_binding(
-        event_identity="event-1",
+        event_identity=EVENT_ID,
         source_id="provider-a",
         subject_alias="alex",
         opponent_alias="blair",
@@ -322,7 +368,7 @@ def test_post_reveal_identity_correction_cannot_backdate_provider_inference(tmp_
     market_store.append(_quote("sel-blair-shadow", 3))
     subject = next(
         event
-        for event in market_store.events("event-1")
+        for event in market_store.events(EVENT_ID)
         if event.selection_id == "sel-alex-17"
     )
 
@@ -331,7 +377,7 @@ def test_post_reveal_identity_correction_cannot_backdate_provider_inference(tmp_
         match="cannot be resolved uniquely",
     ):
         materializer.freeze_binding(
-            event_identity="event-1",
+            event_identity=EVENT_ID,
             source_id="provider-a",
             subject_alias="alex",
             opponent_alias="blair",
@@ -359,7 +405,7 @@ def test_post_reveal_identity_correction_cannot_backdate_provider_inference(tmp_
         )
     )
     binding = materializer.freeze_binding(
-        event_identity="event-1",
+        event_identity=EVENT_ID,
         source_id="provider-a",
         subject_alias="alex",
         opponent_alias="blair",
@@ -508,7 +554,7 @@ def test_foreign_event_member_and_selection_alias_collision_fail_closed(tmp_path
     market_store.append(_quote("sel-charlie-99", 3))
     subject = next(
         event
-        for event in market_store.events("event-1")
+        for event in market_store.events(EVENT_ID)
         if event.selection_id == "sel-alex-17"
     )
 
@@ -517,7 +563,7 @@ def test_foreign_event_member_and_selection_alias_collision_fail_closed(tmp_path
         match="canonical members of the bound event roster",
     ):
         materializer.freeze_binding(
-            event_identity="event-1",
+            event_identity=EVENT_ID,
             source_id="provider-a",
             subject_alias="alex",
             opponent_alias="charlie",
@@ -536,7 +582,7 @@ def test_foreign_event_member_and_selection_alias_collision_fail_closed(tmp_path
         match="subject quote key lacks exact canonical pre-reveal market evidence",
     ):
         materializer.freeze_binding(
-            event_identity="event-1",
+            event_identity=EVENT_ID,
             source_id="provider-a",
             subject_alias="alex",
             opponent_alias="blair",
@@ -561,7 +607,7 @@ def test_same_name_distinct_root_and_foreign_competition_fail_closed(tmp_path):
     market_store.append(_quote("sel-alex-shadow", 3))
     shadow_quote = next(
         event
-        for event in market_store.events("event-1")
+        for event in market_store.events(EVENT_ID)
         if event.selection_id == "sel-alex-shadow"
     )
 
@@ -570,7 +616,7 @@ def test_same_name_distinct_root_and_foreign_competition_fail_closed(tmp_path):
         match="provider subject selection identity does not match canonical participant alias",
     ):
         materializer.freeze_binding(
-            event_identity="event-1",
+            event_identity=EVENT_ID,
             source_id="provider-a",
             subject_alias="alex",
             opponent_alias="blair",
@@ -591,7 +637,7 @@ def test_same_name_distinct_root_and_foreign_competition_fail_closed(tmp_path):
     foreign_subject = max(
         (
             event
-            for event in market_store.events("event-1")
+            for event in market_store.events(EVENT_ID)
             if event.selection_id == "sel-alex-17"
             and event.competition_id == "comp-foreign-9"
         ),
@@ -602,7 +648,7 @@ def test_same_name_distinct_root_and_foreign_competition_fail_closed(tmp_path):
         match="provider competition identity does not match canonical league alias",
     ):
         materializer.freeze_binding(
-            event_identity="event-1",
+            event_identity=EVENT_ID,
             source_id="provider-a",
             subject_alias="alex",
             opponent_alias="blair",
@@ -659,7 +705,7 @@ def test_binding_digest_tamper_and_swapped_quote_fail_closed(tmp_path):
     binding = _binding(materializer, market_store)
     opponent = next(
         event
-        for event in market_store.events("event-1")
+        for event in market_store.events(EVENT_ID)
         if event.selection_id == "sel-blair-23"
     )
 
@@ -708,13 +754,13 @@ def test_event_and_subject_quote_must_match_frozen_binding(tmp_path):
     with pytest.raises(SportMemoryResultMaterializationError, match="event does not match"):
         materializer.materialize(
             binding,
-            _settlement(binding, event_identity="event-2"),
+            _settlement(binding, event_identity="provider-a:event-2"),
             as_of=T2,
         )
 
-    settlement = _seal_settlement_resolution(
+    settlement = _resolve_external_settlement(
         SettlementResolution(
-            event_identity="event-1",
+            event_identity=EVENT_ID,
             settlement_ref="settlement-1",
             quote_outcomes={"other-quote": "win"},
             evidence_id="result-1",

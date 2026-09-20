@@ -33,6 +33,30 @@ _EXECUTION_AUTHORITY_SCHEMA = (
     "autosport.model_compute_router.execution_authority"
 )
 _EXECUTION_AUTHORITY_VERSION = 2
+_VOC_SHADOW_AUTHORITY_SCHEMA = (
+    "autosport.model_compute_router.voc_shadow_execution_authority"
+)
+_VOC_SHADOW_AUTHORITY_VERSION = 1
+_VOC_SHADOW_AUTHORITY_FIELDS = {
+    "schema",
+    "version",
+    "authority_sequence",
+    "previous_authority_sha256",
+    "authority_recorded_at",
+    "request_id",
+    "role",
+    "route_record_sha256",
+    "candidate_identity",
+    "output_sha256",
+    "action",
+    "abstained",
+    "completed_at",
+    "available_at",
+    "actual_cost",
+    "actual_latency_seconds",
+    "evidence_sha256",
+    "authority_sha256",
+}
 _ZERO = Decimal("0")
 
 
@@ -1729,6 +1753,153 @@ def route_compute(
         voc_evidence_id=voc_evidence.evidence_id,
         domain_observation_id=domain_observation_id,
     )
+
+
+def _validated_voc_shadow_identity(value: object) -> dict[str, str]:
+    if type(value) is not dict or set(value) != {
+        "candidate_id",
+        "backend_id",
+        "model_id",
+        "config_sha256",
+    }:
+        raise ModelComputeRouterError(
+            "VOC shadow execution candidate identity is invalid"
+        )
+    return {
+        "candidate_id": _text("candidate_id", value["candidate_id"]),
+        "backend_id": _text("backend_id", value["backend_id"]),
+        "model_id": _text("model_id", value["model_id"]),
+        "config_sha256": _sha256(
+            "config_sha256", value["config_sha256"]
+        ),
+    }
+
+
+def _validate_voc_shadow_authority_record(
+    raw: object,
+) -> dict[str, Any]:
+    if type(raw) is not dict or set(raw) != _VOC_SHADOW_AUTHORITY_FIELDS:
+        raise ModelComputeRouterError(
+            "VOC shadow execution authority schema is invalid"
+        )
+    if (
+        raw.get("schema") != _VOC_SHADOW_AUTHORITY_SCHEMA
+        or raw.get("version") != _VOC_SHADOW_AUTHORITY_VERSION
+    ):
+        raise ModelComputeRouterError(
+            "VOC shadow execution authority version is unsupported"
+        )
+    sequence = raw.get("authority_sequence")
+    if type(sequence) is not int or sequence < 1:
+        raise ModelComputeRouterError(
+            "VOC shadow execution authority sequence is invalid"
+        )
+    previous = raw.get("previous_authority_sha256")
+    if previous is not None:
+        _sha256("previous_authority_sha256", previous)
+    _time("authority_recorded_at", raw.get("authority_recorded_at"))
+    _text("request_id", raw.get("request_id"))
+    role = _text("role", raw.get("role"))
+    if role not in {"baseline", "challenger"}:
+        raise ModelComputeRouterError(
+            "VOC shadow execution role is invalid"
+        )
+    _sha256("route_record_sha256", raw.get("route_record_sha256"))
+    _validated_voc_shadow_identity(raw.get("candidate_identity"))
+    _sha256("output_sha256", raw.get("output_sha256"))
+    _text("action", raw.get("action"))
+    if type(raw.get("abstained")) is not bool:
+        raise ModelComputeRouterError(
+            "VOC shadow execution abstained must be bool"
+        )
+    _time("completed_at", raw.get("completed_at"))
+    _time("available_at", raw.get("available_at"))
+    try:
+        actual_cost = Decimal(raw.get("actual_cost"))
+        actual_latency = Decimal(raw.get("actual_latency_seconds"))
+    except (InvalidOperation, TypeError, ValueError) as exc:
+        raise ModelComputeRouterError(
+            "VOC shadow execution measurements are invalid"
+        ) from exc
+    _nonnegative("actual_cost", actual_cost)
+    _nonnegative("actual_latency_seconds", actual_latency)
+    _sha256("evidence_sha256", raw.get("evidence_sha256"))
+    authority_sha = _sha256(
+        "authority_sha256", raw.get("authority_sha256")
+    )
+    unsigned = {
+        key: raw[key]
+        for key in _VOC_SHADOW_AUTHORITY_FIELDS
+        if key != "authority_sha256"
+    }
+    if authority_sha != _canonical_digest(unsigned):
+        raise ModelComputeRouterError(
+            "VOC shadow execution authority SHA-256 mismatch"
+        )
+    return dict(raw)
+
+
+def _voc_shadow_authority_record(
+    *,
+    authority_sequence: int,
+    previous_authority_sha256: str | None,
+    authority_recorded_at: str,
+    request_id: str,
+    role: str,
+    route_record_sha256: str,
+    candidate_identity: Mapping[str, str],
+    output_sha256: str,
+    action: str,
+    abstained: bool,
+    completed_at: str,
+    available_at: str,
+    actual_cost: Decimal,
+    actual_latency_seconds: Decimal,
+    evidence_sha256: str,
+) -> dict[str, Any]:
+    unsigned = {
+        "schema": _VOC_SHADOW_AUTHORITY_SCHEMA,
+        "version": _VOC_SHADOW_AUTHORITY_VERSION,
+        "authority_sequence": authority_sequence,
+        "previous_authority_sha256": previous_authority_sha256,
+        "authority_recorded_at": _time(
+            "authority_recorded_at", authority_recorded_at
+        ),
+        "request_id": _text("request_id", request_id),
+        "role": _text("role", role),
+        "route_record_sha256": _sha256(
+            "route_record_sha256", route_record_sha256
+        ),
+        "candidate_identity": _validated_voc_shadow_identity(
+            dict(candidate_identity)
+        ),
+        "output_sha256": _sha256("output_sha256", output_sha256),
+        "action": _text("action", action),
+        "abstained": abstained,
+        "completed_at": _time("completed_at", completed_at),
+        "available_at": _time("available_at", available_at),
+        "actual_cost": str(_nonnegative("actual_cost", actual_cost)),
+        "actual_latency_seconds": str(
+            _nonnegative(
+                "actual_latency_seconds", actual_latency_seconds
+            )
+        ),
+        "evidence_sha256": _sha256(
+            "evidence_sha256", evidence_sha256
+        ),
+    }
+    if role not in {"baseline", "challenger"}:
+        raise ModelComputeRouterError(
+            "VOC shadow execution role is invalid"
+        )
+    if type(abstained) is not bool:
+        raise ModelComputeRouterError(
+            "VOC shadow execution abstained must be bool"
+        )
+    return {
+        **unsigned,
+        "authority_sha256": _canonical_digest(unsigned),
+    }
 
 
 _VOC_PRECOMPUTE_CONTROL_FIELDS = {

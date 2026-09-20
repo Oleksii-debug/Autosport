@@ -366,16 +366,28 @@ class PaperAbstentionLearningRuntime:
                 "durable AgentLoop observation differs from abstention retry"
             )
 
+        try:
+            retry_action = Action(
+                environment_id=self.environment.environment_id,
+                observation_id=observation.observation_id,
+                action_type=action_type,
+                decided_at=decision_at,
+                parameters=parameters,
+            )
+        except LearningEnvironmentError as exc:
+            raise PaperAbstentionLearningError(
+                "abstention retry payload is not canonical"
+            ) from exc
+
         if starting:
             try:
                 baseline = self.environment.checkpoint()
             except LearningEnvironmentError:
                 # An exact same-process retry can legitimately arrive here with the
                 # canonical action still pending after durable intent publication
-                # failed.  CausalLearningEnvironment.act() below is the authority
-                # for reusing that exact pending action and rejecting a conflicting
-                # unresolved action; requiring a clean checkpoint first would make
-                # the documented exact retry impossible.
+                # failed. CausalLearningEnvironment.act() below may reuse only that
+                # pending decision payload; the Action identity check after act()
+                # additionally binds the exact decision timestamp supplied here.
                 baseline = None
             if (
                 baseline is not None
@@ -385,18 +397,6 @@ class PaperAbstentionLearningRuntime:
                     "AgentLoop checkpoint differs from active environment"
                 )
         else:
-            try:
-                retry_action = Action(
-                    environment_id=self.environment.environment_id,
-                    observation_id=observation.observation_id,
-                    action_type=action_type,
-                    decided_at=decision_at,
-                    parameters=parameters,
-                )
-            except LearningEnvironmentError as exc:
-                raise PaperAbstentionLearningError(
-                    "abstention retry payload is not canonical"
-                ) from exc
             self._ensure_durable_intent(
                 observation=observation,
                 action=retry_action,
@@ -415,15 +415,15 @@ class PaperAbstentionLearningRuntime:
                 "canonical environment rejected abstention intent"
             ) from exc
 
+        if action.action_id != retry_action.action_id:
+            raise PaperAbstentionLearningError(
+                "canonical environment changed the durable abstention retry intent"
+            )
         if starting:
             self._ensure_durable_intent(
                 observation=observation,
                 action=action,
                 phase=snapshot.phase,
-            )
-        elif action.action_id != retry_action.action_id:
-            raise PaperAbstentionLearningError(
-                "canonical environment changed the durable abstention retry intent"
             )
 
         try:

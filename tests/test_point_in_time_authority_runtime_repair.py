@@ -126,7 +126,8 @@ def test_feature_authority_rejects_exact_registry_instance_method_shadow() -> No
     assert dispatched is False
 
 
-def test_holdout_atomic_publication_fails_when_directory_sync_is_unavailable(
+@pytest.mark.skipif(os.name == "nt", reason="Windows intentionally has no directory fsync contract")
+def test_holdout_atomic_publication_fails_when_directory_open_for_sync_is_unavailable(
     tmp_path: Path,
 ) -> None:
     state_path = tmp_path / "holdout.json"
@@ -134,7 +135,7 @@ def test_holdout_atomic_publication_fails_when_directory_sync_is_unavailable(
 
     def fail_only_directory_open(path, flags, *args, **kwargs):
         if Path(path) == tmp_path:
-            raise OSError("directory fsync unavailable")
+            raise OSError("directory open unavailable")
         return real_open(path, flags, *args, **kwargs)
 
     with patch(
@@ -144,5 +145,33 @@ def test_holdout_atomic_publication_fails_when_directory_sync_is_unavailable(
         with pytest.raises(
             EvidenceLedgerCorruptError,
             match="cannot open holdout ledger directory for durability",
+        ):
+            evidence._atomic_write_json(state_path, {"schema_version": 1})
+
+
+@pytest.mark.skipif(os.name == "nt", reason="Windows intentionally has no directory fsync contract")
+def test_holdout_atomic_publication_fails_when_directory_fsync_fails(
+    tmp_path: Path,
+) -> None:
+    state_path = tmp_path / "holdout.json"
+    real_fsync = os.fsync
+
+    def fail_only_directory_fsync(descriptor: int):
+        target = Path(f"/proc/self/fd/{descriptor}")
+        try:
+            resolved = target.resolve(strict=True)
+        except (OSError, RuntimeError):
+            return real_fsync(descriptor)
+        if resolved == tmp_path:
+            raise OSError("directory fsync unavailable")
+        return real_fsync(descriptor)
+
+    with patch(
+        "autosport._point_in_time_authority_runtime_repair.os.fsync",
+        side_effect=fail_only_directory_fsync,
+    ):
+        with pytest.raises(
+            EvidenceLedgerCorruptError,
+            match="cannot fsync holdout ledger directory for durability",
         ):
             evidence._atomic_write_json(state_path, {"schema_version": 1})

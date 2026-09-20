@@ -1,11 +1,12 @@
 from __future__ import annotations
 
+import argparse
 import json
 import signal
 import time
 from dataclasses import asdict
 from pathlib import Path
-from typing import Callable
+from typing import Callable, Sequence
 
 from .collector_service import _load_source_factory
 from .product_runtime import AutonomousProductRuntime, build_autonomous_product_runtime
@@ -198,3 +199,43 @@ def run_product_command(
             )
         )
         return 3
+
+
+def _parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="autosport-product",
+        description=(
+            "Run the canonical durable Autosport PAPER product. Provider credentials "
+            "remain external to Autosport and are never accepted as CLI arguments."
+        ),
+    )
+    parser.add_argument("--workspace", type=Path, default=Path(".autosport-product"))
+    parser.add_argument(
+        "--source-factory",
+        required=True,
+        help="external product source factory in module:function form",
+    )
+    parser.add_argument("--bankroll", default="10000")
+    parser.add_argument(
+        "--max-cycles",
+        type=int,
+        default=None,
+        help="optional bounded cycle count for qualification/supervised runs",
+    )
+    parser.add_argument("--poll-seconds", type=float, default=30.0)
+    return parser
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    args = _parser().parse_args(argv)
+    return run_product_command(
+        workspace=args.workspace,
+        source_factory=args.source_factory,
+        initial_bankroll=args.bankroll,
+        max_cycles=args.max_cycles,
+        poll_seconds=args.poll_seconds,
+    )
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

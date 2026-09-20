@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta, timezone
 
 import pytest
@@ -73,7 +74,7 @@ class _HistoricalTransport:
         return HttpJsonResponse(self.payload, 200, {"x-api-version": "test"})
 
 
-def _provider_capture_paths(
+def _provider_capture(
     tmp_path,
     *,
     source_as_of: datetime,
@@ -96,13 +97,12 @@ def _provider_capture_paths(
         clock=lambda: _iso(available_at),
         sleeper=lambda _: None,
     )
-    capture_historical_snapshot(
+    return capture_historical_snapshot(
         provider,
         requested_at=_iso(source_as_of),
         output_path=market_path,
         evidence_path=evidence_path,
     )
-    return market_path, evidence_path
 
 
 def _policy_content() -> tuple[str, str]:
@@ -216,15 +216,14 @@ def _source_store(
         revision_policy_id="provider-publication-time-v1",
         frozen_at=BASE - timedelta(days=1),
     )
-    market_path, evidence_path = _provider_capture_paths(
+    capture = _provider_capture(
         tmp_path,
         source_as_of=source_as_of,
         available_at=available_at,
     )
     witness = store.register_provider_capture_witness(
         availability_witness_id="provider-publication:17",
-        market_path=market_path,
-        evidence_path=evidence_path,
+        capture=capture,
         recorded_at=max(available_at, BASE + timedelta(minutes=35)),
     )
     membership = FeatureMembershipAuthority.create(
@@ -431,7 +430,7 @@ def test_revision_with_arbitrary_policy_digest_cannot_be_registered(tmp_path) ->
         recorded_at=BASE + timedelta(minutes=40),
     )
 
-    with pytest.raises(SourceRevisionAuthorityError, match="policy digest mismatch"):
+    with pytest.raises(SourceRevisionAuthorityError, match=r"policy.*digest mismatch"):
         store.register_revision(forged)
 
 
@@ -516,6 +515,26 @@ def test_supported_provider_witness_requires_canonical_capture_registration(
         match="canonical persisted capture evidence",
     ):
         store.register_witness(reconstructed)
+
+
+def test_reconstructed_provider_capture_capability_is_rejected(tmp_path) -> None:
+    store = SourceRevisionAuthorityStore.initialize_pristine(tmp_path)
+    issued = _provider_capture(
+        tmp_path,
+        source_as_of=BASE + timedelta(minutes=20),
+        available_at=BASE + timedelta(minutes=30),
+    )
+    reconstructed = replace(issued)
+
+    with pytest.raises(
+        SourceRevisionAuthorityError,
+        match="not issued by canonical capture path",
+    ):
+        store.register_provider_capture_witness(
+            availability_witness_id="provider-publication:reconstructed-capture",
+            capture=reconstructed,
+            recorded_at=BASE + timedelta(minutes=35),
+        )
 
 
 def test_provider_capture_bundle_is_reverified_after_restart(tmp_path) -> None:

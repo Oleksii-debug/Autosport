@@ -194,10 +194,6 @@ def test_recomputed_digest_cannot_backdate_post_reveal_provider_choice(tmp_path:
         for event in market_store.events(EVENT_ID)
         if event.selection_id == "sel-alex-17"
     )
-    authority = materializer.outcome_authority
-    assert isinstance(authority, _StaticOutcomeAuthority)
-    authority.resolution = settlement
-
     with pytest.raises(
         SportMemoryResultMaterializationError,
         match="cannot be resolved uniquely",

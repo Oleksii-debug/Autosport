@@ -25,11 +25,18 @@ from .monotonic_workspace_authority import (
 from .scientific_registry import ScientificRegistry
 
 
-_ORIGINAL_BIND = evidence.PointInTimeFeatureAuthority.bind
-_ORIGINAL_LOAD = evidence.HoldoutConsumptionLedger._load
+# ``importlib.reload`` reuses this module's globals dictionary.  Preserve the
+# pre-wrapper implementations only on the first execution so self-reload cannot
+# recapture our own wrappers and turn them into recursive "originals".
+if "_PRISTINE_BIND" not in globals():
+    _PRISTINE_BIND = evidence.PointInTimeFeatureAuthority.bind
+if "_PRISTINE_LOAD" not in globals():
+    _PRISTINE_LOAD = evidence.HoldoutConsumptionLedger._load
+
 _PROVENANCE_GUARD_MODULE_NAME = (
     f"{__package__}._point_in_time_feature_provenance_guard"
 )
+_RELOAD_FINDER_MARKER = "_autosport_point_in_time_reload_finder_v1"
 
 
 def _fsync_directory_fail_closed(path: Path) -> None:
@@ -60,14 +67,7 @@ def _reject_instance_method_shadows(
     *,
     authority_name: str,
 ) -> None:
-    """Fail closed when an exact capability shadows trusted class methods.
-
-    Exact-type checks prevent subclass dispatch, but both accepted authority classes
-    intentionally carry mutable instance state.  A caller must not be able to place a
-    same-named callable in ``__dict__`` (for example ``record``, ``get`` or an
-    internal read/verify method) and thereby redirect the later authority call while
-    still satisfying ``type(instance) is concrete_type``.
-    """
+    """Fail closed when an exact capability shadows trusted class methods."""
 
     shadowed = sorted(
         name
@@ -101,24 +101,11 @@ def _bind_exact_lineage_authority(*, lineage_authority, **kwargs):
         ScientificRegistry,
         authority_name="lineage_authority.registry",
     )
-    return _ORIGINAL_BIND(lineage_authority=lineage_authority, **kwargs)
+    return _PRISTINE_BIND(lineage_authority=lineage_authority, **kwargs)
 
 
 def _refresh_monotonic_authority(ledger: evidence.HoldoutConsumptionLedger) -> None:
-    """Re-resolve the same durable authority identity under the ledger lock.
-
-    Two HoldoutConsumptionLedger objects may both be constructed while a workspace is
-    pristine, before either has a durable workspace marker.  Their initial authority
-    objects therefore carry provisional random workspace ids.  Once one writer
-    performs PREPARE it durably binds the canonical id.  A stale process view must
-    resolve that durable binding before validating the newly published local state;
-    retaining its provisional id would incorrectly report identity corruption.
-
-    Reconstructing the authority from the same workspace/domain/key/resolved external
-    root cannot reset freshness: surviving path/marker/history evidence is still
-    validated by MonotonicWorkspaceAuthority and rollback/deletion/move/copy/tamper
-    checks remain fail-closed.
-    """
+    """Re-resolve the same durable authority identity under the ledger lock."""
 
     previous = ledger._authority
     try:
@@ -136,19 +123,11 @@ def _refresh_monotonic_authority(ledger: evidence.HoldoutConsumptionLedger) -> N
 
 def _load_with_fresh_authority(self: evidence.HoldoutConsumptionLedger) -> None:
     _refresh_monotonic_authority(self)
-    _ORIGINAL_LOAD(self)
+    _PRISTINE_LOAD(self)
 
 
 def _install_runtime_guards() -> None:
-    """Reinstall every authority-bearing point-in-time patch on the live module.
-
-    ``importlib.reload`` re-executes a submodule without re-executing package
-    ``__init__`` or already-cached guard modules.  Without an explicit reinstall, a
-    reload of ``point_in_time_evidence`` can therefore resurrect its legacy
-    caller-constructible feature bind.  Keep the reload target fail-closed by restoring
-    the canonical provenance classes and exact capability fences immediately after
-    the underlying source module executes.
-    """
+    """Reinstall every authority-bearing point-in-time patch on the live module."""
 
     from . import _point_in_time_feature_provenance_guard as provenance_guard
 
@@ -182,6 +161,9 @@ class _PointInTimeReloadLoader(importlib.abc.Loader):
 class _PointInTimeReloadFinder(importlib.abc.MetaPathFinder):
     """Intercept explicit reload of either already-loaded authority submodule."""
 
+    # Stable marker survives runtime-repair class redefinition on self-reload.
+    _autosport_point_in_time_reload_finder_v1 = True
+
     def find_spec(self, fullname, path, target=None):
         is_evidence_reload = fullname == evidence.__name__ and target is evidence
         is_provenance_reload = (
@@ -198,7 +180,10 @@ class _PointInTimeReloadFinder(importlib.abc.MetaPathFinder):
 
 
 def _install_reload_finder() -> None:
-    if any(isinstance(finder, _PointInTimeReloadFinder) for finder in sys.meta_path):
+    if any(
+        getattr(finder, _RELOAD_FINDER_MARKER, False)
+        for finder in sys.meta_path
+    ):
         return
     sys.meta_path.insert(0, _PointInTimeReloadFinder())
 

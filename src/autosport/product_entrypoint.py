@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import signal
 import time
 from dataclasses import asdict
@@ -106,9 +107,10 @@ def run_product(
     if (
         isinstance(poll_seconds, bool)
         or not isinstance(poll_seconds, (int, float))
+        or not math.isfinite(float(poll_seconds))
         or poll_seconds < 0
     ):
-        raise ValueError("poll_seconds must be a non-negative number")
+        raise ValueError("poll_seconds must be a finite non-negative number")
 
     # Validate the complete production source capability before the composition root
     # creates a workspace or durable manifest. Missing event resolution must never be

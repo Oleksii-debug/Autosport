@@ -14,7 +14,7 @@ from autosport.decision_ledger import (
     EconomicDecisionAuthority,
     JsonlDecisionLedger,
 )
-from autosport.domain import MarketEvent
+from autosport.domain import MarketEvent, TicketLeg
 from autosport.economic_goal import EconomicGoalContract
 from autosport.event_lifecycle import (
     CatalogEvent,
@@ -30,9 +30,17 @@ from autosport.live_decision_loop import (
     PersistentLiveDecisionLoop,
 )
 from autosport.market_bus import MarketEventBus
+from autosport.opportunity import Opportunity, OpportunityDecision, QuoteRef, StrategyClass
 from autosport.paper import PaperBook
+from autosport.paper_execution_adoption import PaperExecutionAdoptionRuntime
+from autosport.paper_execution_reality import (
+    EvidenceGrade,
+    PaperExecutionLedger,
+    PaperExecutionModelConfig,
+)
 from autosport.portfolio_plan import (
     EvidenceTruth,
+    OpportunityEvidence,
     OpportunityIntent,
     PortfolioAction,
     PortfolioDependencyGraph,
@@ -40,7 +48,7 @@ from autosport.portfolio_plan import (
 )
 from autosport.providers import ProviderUnavailableError
 from autosport.scientific_registry import ScientificRegistry, StrategyVersion
-from autosport.risk import PaperRiskPolicy
+from autosport.risk import PaperRiskPolicy, ProposedTicketRiskContext
 from autosport.storage import SQLiteMarketStore
 
 
@@ -101,6 +109,67 @@ class _EmptyIntentFactory:
             )
         )
         return ()
+
+
+class _PositiveIntentFactory:
+    def __init__(
+        self,
+        config_sha256: str,
+        strategy_version_id: str = "live-test-strategy-v1",
+    ) -> None:
+        self.strategy_version_id = strategy_version_id
+        self.config_sha256 = config_sha256
+        self.calls = 0
+
+    def __call__(self, input_id, snapshot):
+        del input_id
+        self.calls += 1
+        if not snapshot.events:
+            return ()
+        event = snapshot.events[0]
+        leg = TicketLeg(
+            event.event_id,
+            event.market_id,
+            event.selection_id,
+            event.decimal_odds,
+            sport=event.sport,
+        )
+        risk_context = ProposedTicketRiskContext(
+            legs=(leg,),
+            quotes=(event,),
+            provider_accounts=((event.source_id, "paper-account"),),
+            bankroll_id="bankroll-live-test",
+            currency="EUR",
+            proposal_ts=event.observed_ts,
+        )
+        quote = QuoteRef.from_market_event(
+            event,
+            market_snapshot_hash="9" * 64,
+        )
+        opportunity = Opportunity(
+            strategy_class=StrategyClass.LIVE_PRICE_MOVEMENT,
+            decision=OpportunityDecision.ACTIONABLE,
+            quotes=(quote,),
+        )
+        evidence = OpportunityEvidence(
+            evidence_id=f"live-evidence-{event.sequence}",
+            observed_at=event.observed_ts,
+            causal_cutoff=event.source_ts or event.observed_ts,
+            reproducibility_sha256="a" * 64,
+            truth=EvidenceTruth.EXACT,
+            execution_feasible=True,
+        )
+        return (
+            OpportunityIntent(
+                intent_id=f"live-intent-{event.sequence}",
+                opportunity=opportunity,
+                evidence=evidence,
+                risk_context=risk_context,
+                signal_strength=Decimal("1"),
+                strategy_id=self.strategy_version_id,
+                config_sha256=self.config_sha256,
+            ),
+        )
 
 
 class PersistentLiveDecisionLoopTests(unittest.TestCase):
@@ -203,6 +272,7 @@ class PersistentLiveDecisionLoopTests(unittest.TestCase):
         catalog_fetch_page=None,
         catalog_source_id: str | None = None,
         catalog_required_history: timedelta = timedelta(0),
+        paper_execution: PaperExecutionAdoptionRuntime | None = None,
     ) -> PersistentLiveDecisionLoop:
         selected_strategy = strategy_version or self._strategy_version()
         registry = self._scientific_registry(workspace, selected_strategy)
@@ -219,6 +289,7 @@ class PersistentLiveDecisionLoopTests(unittest.TestCase):
             max_quote_age=timedelta(seconds=5),
             clock=clock,
             post_append_hook=post_append_hook,
+            paper_execution=paper_execution,
             catalog_lifecycle=catalog_lifecycle,
             catalog_fetch_page=catalog_fetch_page,
             catalog_source_id=catalog_source_id,
@@ -706,6 +777,128 @@ class PersistentLiveDecisionLoopTests(unittest.TestCase):
             self.assertEqual(advanced.status, LiveCycleStatus.DECIDED)
             self.assertEqual(resumed_observer.calls, 1)
             self.assertEqual(len(ledger.verified_records()), 2)
+
+    def test_post_execution_book_publish_restart_reuses_durable_plan_and_ticket(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            event = self._event(selection="selection-a", sequence=1)
+            clock = _ManualClock(self.START + timedelta(seconds=1))
+            model = PaperExecutionModelConfig(
+                model_id="live-paper-recovery-test",
+                model_version="1",
+                evidence_grade=EvidenceGrade.SYNTHETIC,
+                evidence_source="live-paper-recovery-test",
+                seed="live-paper-recovery",
+                max_quote_age_ms=5_000,
+                min_delay_ms=0,
+                max_delay_ms=0,
+                rejected_bps=0,
+                partial_bps=0,
+                unknown_bps=0,
+                partial_fill_bps=5000,
+                max_slippage_bps=0,
+            )
+            book = PaperBook("1000")
+            execution_ledger = PaperExecutionLedger(
+                workspace / "paper-execution.jsonl"
+            )
+            execution = PaperExecutionAdoptionRuntime(
+                book=book,
+                ledger=execution_ledger,
+                config=model,
+                max_quote_age=timedelta(seconds=5),
+                paper_book_path=workspace / "paper_book.json",
+            )
+            first = self._loop(
+                workspace,
+                observer=_DurableObserver(workspace, [(event,)]),
+                factory=_PositiveIntentFactory(self.INTENT_CONFIG_SHA256),
+                clock=clock,
+                book=book,
+                paper_execution=execution,
+            )
+            first.register_input("input-a", selection_ids="selection-a")
+
+            import autosport.live_decision_loop as live_loop_module
+
+            real_atomic_write_json = live_loop_module.atomic_write_json
+            crashed = {"value": False}
+
+            def crash_before_committed(path, payload):
+                if (
+                    Path(path) == workspace / PersistentLiveDecisionLoop.PROGRESS_FILE_NAME
+                    and payload.get("phase") == "committed"
+                    and not crashed["value"]
+                ):
+                    crashed["value"] = True
+                    raise RuntimeError("simulated process loss before COMMITTED")
+                return real_atomic_write_json(path, payload)
+
+            with patch(
+                "autosport.live_decision_loop.atomic_write_json",
+                side_effect=crash_before_committed,
+            ):
+                with self.assertRaisesRegex(
+                    RuntimeError,
+                    "simulated process loss before COMMITTED",
+                ):
+                    first.run_cycle()
+
+            durable_after_crash = PaperBook.load(workspace / "paper_book.json")
+            self.assertEqual(len(durable_after_crash.tickets), 1)
+            balance_after_crash = durable_after_crash.balance
+            ticket_ids_after_crash = tuple(durable_after_crash.tickets)
+            execution_event_count = len(execution_ledger.events())
+            decision = JsonlDecisionLedger(
+                workspace / "decisions.jsonl"
+            ).verified_records()[0]
+
+            resumed_book = PaperBook.load(workspace / "paper_book.json")
+            resumed_execution = PaperExecutionAdoptionRuntime(
+                book=resumed_book,
+                ledger=execution_ledger,
+                config=model,
+                max_quote_age=timedelta(seconds=5),
+                paper_book_path=workspace / "paper_book.json",
+            )
+            resumed_observer = _DurableObserver(
+                workspace,
+                [
+                    (
+                        self._event(
+                            selection="selection-a",
+                            sequence=2,
+                            odds="2.10",
+                            observed=self.START + timedelta(seconds=2),
+                        ),
+                    )
+                ],
+            )
+            resumed = self._loop(
+                workspace,
+                observer=resumed_observer,
+                factory=_PositiveIntentFactory(self.INTENT_CONFIG_SHA256),
+                clock=_ManualClock(self.START + timedelta(seconds=3)),
+                book=resumed_book,
+                paper_execution=resumed_execution,
+            )
+
+            recovered = resumed.run_cycle()
+
+            self.assertEqual(recovered.status, LiveCycleStatus.DUPLICATE_DECISION)
+            self.assertEqual(recovered.decision_id, decision.decision_id)
+            self.assertEqual(resumed_observer.calls, 0)
+            self.assertEqual(resumed_book.balance, balance_after_crash)
+            self.assertEqual(tuple(resumed_book.tickets), ticket_ids_after_crash)
+            self.assertEqual(len(execution_ledger.events()), execution_event_count)
+            self.assertEqual(
+                len(
+                    JsonlDecisionLedger(
+                        workspace / "decisions.jsonl"
+                    ).verified_records()
+                ),
+                1,
+            )
 
     def test_pending_restart_recovers_before_polling_new_quote(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

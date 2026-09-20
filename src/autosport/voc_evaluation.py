@@ -18,7 +18,7 @@ from .scientific_registry import ScientificRegistry
 from .workspace_lock import WorkspaceEconomicLock
 
 _SCHEMA = "autosport.voc_evaluation"
-_VERSION = 2
+_VERSION = 3
 _ZERO = Decimal("0")
 _ONE = Decimal("1")
 VOC_CURRENT_CONTEXT_ACTION = "VOC_ROUTE_CONTEXT"

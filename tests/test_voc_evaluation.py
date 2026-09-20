@@ -1183,6 +1183,21 @@ class PairedVOCEvaluationTests(unittest.TestCase):
             ):
                 store.record(changed)
 
+    def test_store_schema_version_tracks_required_decision_context_field(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "voc.json"
+            VOCEvaluationStore(path)
+            raw = json.loads(path.read_text(encoding="utf-8"))
+            self.assertEqual(raw["version"], 3)
+
+            raw["version"] = 2
+            path.write_text(json.dumps(raw), encoding="utf-8")
+            with self.assertRaisesRegex(
+                VOCEvaluationError,
+                "version mismatch",
+            ):
+                VOCEvaluationStore(path)
+
     def test_store_state_tamper_is_detected_after_restart(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "voc.json"

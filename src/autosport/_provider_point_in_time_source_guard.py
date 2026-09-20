@@ -54,8 +54,13 @@ def _assert_provider_source_state(state: dict[str, object]) -> None:
 
 def _reject_generic_provider_record(record: object, *, label: str) -> None:
     if _provider_source(record):
+        detail = (
+            "; canonical persisted capture evidence is required"
+            if label == "witness"
+            else ""
+        )
         raise _legacy.SourceRevisionAuthorityError(
-            f"canonical provider source requires canonical provider {label} authority"
+            f"canonical provider source requires canonical provider {label} authority{detail}"
         )
 
 

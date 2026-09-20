@@ -13,38 +13,24 @@ if (-not $SkipTests) {
   return
 }
 
-$pythonApplications = @(Get-Command python -CommandType Application -ErrorAction Stop)
-if ($pythonApplications.Count -lt 1) { throw 'Unable to resolve Python application for Windows build wrapper' }
-$script:trustedPythonApplication = [string]$pythonApplications[0].Source
-if ([string]::IsNullOrWhiteSpace($script:trustedPythonApplication)) {
-  throw 'Resolved Python application has an empty source path'
-}
-$script:skippedBuilderPytestGate = 0
-
-function python {
-  $pythonArgs = @($args)
-  if (
-    $pythonArgs.Count -eq 4 -and
-    [string]$pythonArgs[0] -eq '-m' -and
-    [string]$pythonArgs[1] -eq 'pytest' -and
-    [string]$pythonArgs[2] -eq '-v' -and
-    [string]$pythonArgs[3] -eq 'tests'
-  ) {
-    $script:skippedBuilderPytestGate += 1
-    Write-Host 'BUILDER_LOCAL_PYTEST=SKIPPED_BY_EXPLICIT_CALLER'
-    & $script:trustedPythonApplication -c 'pass'
-    return
-  }
-
-  & $script:trustedPythonApplication @pythonArgs
+# The production builder remains byte-identical to the proven pre-optimization
+# script.  The opt-in candidate path removes only its one duplicate full-suite
+# gate from the in-memory script text.  This is deliberately fail-closed: any
+# future builder edit that changes, removes, or duplicates the exact gate makes
+# -SkipTests fail before any build work rather than silently weakening coverage.
+$coreText = [System.IO.File]::ReadAllText($coreScript)
+$pytestGatePattern = '(?m)^python -m pytest -v tests\r?\nif \(\$LASTEXITCODE -ne 0\) \{ throw "Full pytest gate exited \$LASTEXITCODE" \}\r?\n'
+$pytestGateRegex = [regex]::new($pytestGatePattern)
+$pytestGateMatches = $pytestGateRegex.Matches($coreText)
+if ($pytestGateMatches.Count -ne 1) {
+  throw "-SkipTests requires exactly one canonical builder-local pytest gate; observed $($pytestGateMatches.Count)"
 }
 
-try {
-  & $coreScript
-} finally {
-  Remove-Item Function:\python -ErrorAction SilentlyContinue
+$replacement = "Write-Host 'BUILDER_LOCAL_PYTEST=SKIPPED_BY_EXPLICIT_CALLER'`n"
+$candidateCoreText = $pytestGateRegex.Replace($coreText, $replacement, 1)
+if ($candidateCoreText -eq $coreText -or $candidateCoreText.Contains('python -m pytest -v tests')) {
+  throw '-SkipTests failed to remove exactly the canonical builder-local pytest invocation'
 }
 
-if ($script:skippedBuilderPytestGate -ne 1) {
-  throw "-SkipTests expected to bypass exactly one builder-local pytest gate; observed $($script:skippedBuilderPytestGate)"
-}
+$candidateCore = [scriptblock]::Create($candidateCoreText)
+& $candidateCore

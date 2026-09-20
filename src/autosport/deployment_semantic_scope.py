@@ -558,8 +558,37 @@ def resolve_deployment_semantic_scope(
     protocol_sha = _payload_sha(protocol_payload, "protocol_sha256", "ResearchProtocol")
     if protocol_identity != protocol.record_id:
         raise DeploymentSemanticScopeError("canonical ResearchProtocol payload identity mismatch")
+    protocol_dataset_manifest = _payload_sha(
+        protocol_payload, "dataset_manifest_sha256", "ResearchProtocol"
+    )
+    if protocol_dataset_manifest != dataset_manifest:
+        raise DeploymentSemanticScopeError(
+            "research protocol dataset manifest does not match DatasetSnapshot"
+        )
+    protocol_cutoff = _instant_id(
+        binding.get("causal_cutoff"), "ResearchProtocol.binding.causal_cutoff"
+    )
+    if protocol_cutoff != dataset_cutoff:
+        raise DeploymentSemanticScopeError(
+            "research protocol causal cutoff does not match DatasetSnapshot"
+        )
     if _payload_text(binding, "feature_set_version", "ResearchProtocol.binding") != feature_version:
         raise DeploymentSemanticScopeError("research protocol feature-set version mismatch")
+    if _payload_text(binding, "feature_set_id", "ResearchProtocol.binding") != feature_identity:
+        raise DeploymentSemanticScopeError("research protocol feature-set identity mismatch")
+    if _payload_sha(
+        binding, "feature_definition_sha256", "ResearchProtocol.binding"
+    ) != feature_definition:
+        raise DeploymentSemanticScopeError(
+            "research protocol feature definition does not match FeatureSet"
+        )
+    if _payload_sha(
+        binding, "feature_source_sha256", "ResearchProtocol.binding"
+    ) != feature_source:
+        raise DeploymentSemanticScopeError(
+            "research protocol feature source does not match FeatureSet"
+        )
+    binding_config_id = _payload_text(binding, "config_id", "ResearchProtocol.binding")
     config_sha = _payload_sha(binding, "code_config_sha256", "ResearchProtocol.binding")
 
     if event.sport is None:
@@ -574,6 +603,12 @@ def resolve_deployment_semantic_scope(
         dataset_cutoff, "dataset causal cutoff"
     ):
         raise DeploymentSemanticScopeError("event is later than the causal dataset cutoff")
+    if _instant(event.ingest_ts, "event ingest_ts") > _instant(
+        dataset_cutoff, "dataset causal cutoff"
+    ):
+        raise DeploymentSemanticScopeError(
+            "event was ingested after the causal dataset cutoff"
+        )
 
     if environment.source_id != dataset_source:
         raise DeploymentSemanticScopeError("environment source identity does not match dataset source")
@@ -583,6 +618,10 @@ def resolve_deployment_semantic_scope(
         raise DeploymentSemanticScopeError("environment cutoff does not match dataset causal cutoff")
     if environment.protocol_id != protocol_identity:
         raise DeploymentSemanticScopeError("environment protocol identity mismatch")
+    if environment.config_id != binding_config_id:
+        raise DeploymentSemanticScopeError(
+            "environment config identity does not match research protocol"
+        )
     if episode.environment_id != environment.environment_id:
         raise DeploymentSemanticScopeError("episode environment identity mismatch")
 
@@ -611,7 +650,7 @@ def resolve_deployment_semantic_scope(
         feature_source_sha256=feature_source,
         research_protocol_id=protocol_identity,
         research_protocol_sha256=protocol_sha,
-        config_id=environment.config_id,
+        config_id=binding_config_id,
         config_sha256=config_sha,
         action_semantics_id=action_semantics.action_semantics_id,
         action_semantics_definition_sha256=action_semantics.definition_sha256,

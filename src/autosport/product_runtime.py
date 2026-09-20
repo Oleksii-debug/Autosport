@@ -203,19 +203,20 @@ def _settlement_authority_identity(
         None,
     )
     if declared_implementation_id is None:
-        resolver_implementation_id = resolver_owner
-    else:
-        if (
-            type(instance_dict) is dict
-            and "settlement_resolver_implementation_id" in instance_dict
-        ):
-            raise ProductCompositionError(
-                "source-owned settlement authority forbids per-instance implementation identity shadowing"
-            )
-        resolver_implementation_id = _ManifestStore._text(
-            declared_implementation_id,
-            "settlement_resolver_implementation_id",
+        raise ProductCompositionError(
+            "source-owned settlement authority must declare stable settlement_resolver_implementation_id"
         )
+    if (
+        type(instance_dict) is dict
+        and "settlement_resolver_implementation_id" in instance_dict
+    ):
+        raise ProductCompositionError(
+            "source-owned settlement authority forbids per-instance implementation identity shadowing"
+        )
+    resolver_implementation_id = _ManifestStore._text(
+        declared_implementation_id,
+        "settlement_resolver_implementation_id",
+    )
     authority_id = _ManifestStore._text(
         getattr(source, "settlement_authority_id", None),
         "settlement_authority_id",

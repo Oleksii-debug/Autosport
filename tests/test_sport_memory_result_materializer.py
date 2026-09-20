@@ -124,6 +124,7 @@ class _ProductSource:
     stream_epoch = "epoch-1"
     settlement_authority_id = "provider-a-results-v1"
     settlement_configuration_sha256 = SHA_A
+    settlement_resolver_implementation_id = "provider-a-results-resolver-v1"
 
     def __init__(self) -> None:
         self.resolution: SettlementResolution | None = None
@@ -352,6 +353,79 @@ def test_restart_rejects_settlement_authority_identity_substitution(tmp_path):
             source=replacement,
             outcome_authority=replacement,
             clock=lambda: T3,
+        )
+
+
+def test_restart_accepts_same_settlement_resolver_after_install_relocation(tmp_path):
+    first_source = _ProductSource()
+    runtime = build_autonomous_product_runtime(
+        workspace=tmp_path,
+        source=first_source,
+        outcome_authority=first_source,
+        clock=lambda: T2,
+    )
+    runtime.close()
+
+    original_code = _ProductSource.resolve.__code__
+    try:
+        _ProductSource.resolve.__code__ = original_code.replace(
+            co_filename=r"C:\\relocated\\Autosport\\provider_source.py",
+            co_firstlineno=original_code.co_firstlineno + 100,
+        )
+        relocated_source = _ProductSource()
+        reopened = build_autonomous_product_runtime(
+            workspace=tmp_path,
+            source=relocated_source,
+            outcome_authority=relocated_source,
+            clock=lambda: T3,
+        )
+        reopened.close()
+    finally:
+        _ProductSource.resolve.__code__ = original_code
+
+
+def test_restart_rejects_changed_settlement_resolver_semantic_identity(tmp_path):
+    first_source = _ProductSource()
+    runtime = build_autonomous_product_runtime(
+        workspace=tmp_path,
+        source=first_source,
+        outcome_authority=first_source,
+        clock=lambda: T2,
+    )
+    runtime.close()
+
+    original_identity = _ProductSource.settlement_resolver_implementation_id
+    try:
+        _ProductSource.settlement_resolver_implementation_id = (
+            "provider-a-results-resolver-v2"
+        )
+        replacement = _ProductSource()
+        with pytest.raises(
+            ProductCompositionError,
+            match="settlement authority identity conflicts with durable product composition",
+        ):
+            build_autonomous_product_runtime(
+                workspace=tmp_path,
+                source=replacement,
+                outcome_authority=replacement,
+                clock=lambda: T3,
+            )
+    finally:
+        _ProductSource.settlement_resolver_implementation_id = original_identity
+
+
+def test_per_instance_settlement_resolver_identity_shadow_is_rejected(tmp_path):
+    source = _ProductSource()
+    source.settlement_resolver_implementation_id = "forged-resolver-v1"
+    with pytest.raises(
+        ProductCompositionError,
+        match="forbids per-instance implementation identity shadowing",
+    ):
+        build_autonomous_product_runtime(
+            workspace=tmp_path,
+            source=source,
+            outcome_authority=source,
+            clock=lambda: T2,
         )
 
 

@@ -40,7 +40,6 @@ def _fixture(
     placed_at: str = "2026-09-19T21:19:10+00:00",
     effect_state: ExternalEffectState = ExternalEffectState.PAPER_ONLY,
     bind_action_to_decision: bool = True,
-    decision_agent_action_type: str | None = None,
 ):
     goal = EconomicGoalContract(
         goal_id="bridge-goal",
@@ -65,12 +64,6 @@ def _fixture(
     payload = {
         "ticket_id": ticket.ticket_id,
         "stake": str(ticket.stake),
-        "agent_action_binding": {
-            "schema": "autosport.paper_settlement_decision_action_binding",
-            "schema_version": 1,
-            "decision_action": decision_action,
-            "agent_action_type": decision_agent_action_type or action_type,
-        },
     }
     if len(quote_keys) == 1:
         payload["quote_key"] = quote_keys[0]
@@ -1023,7 +1016,6 @@ class PaperSettlementLearningBridgeTests(unittest.TestCase):
                 root,
                 legs=(leg,),
                 action_type="HEDGE_PROPOSAL",
-                decision_agent_action_type="PAPER_PROPOSAL",
             )
             self.assertEqual(dict(action.parameters)["economic_decision_id"], decision.decision_id)
             self.assertEqual(dict(action.parameters)["paper_ticket_id"], ticket.ticket_id)

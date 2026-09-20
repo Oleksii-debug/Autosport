@@ -519,12 +519,6 @@ class ContinuousSessionCoordinatorTests(unittest.TestCase):
                     "ticket_id": ticket.ticket_id,
                     "quote_key": leg.quote_key,
                     "stake": str(ticket.stake),
-                    "agent_action_binding": {
-                        "schema": "autosport.paper_settlement_decision_action_binding",
-                        "schema_version": 1,
-                        "decision_action": decision_action,
-                        "agent_action_type": "PAPER_PROPOSAL",
-                    },
                 },
                 context_hash="paper-learning-context",
                 decision_id="paper-learning-decision-1",

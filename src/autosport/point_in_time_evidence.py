@@ -117,14 +117,26 @@ def _holdout_freshness_id(
     )
 
 
-def _transition_tx_id(consumption_id: str) -> str:
-    return f"holdout-consumption:{_sha256(consumption_id, 'consumption_id')}"
+def _transition_tx_prefix(consumption_id: str) -> str:
+    return f"holdout-consumption:{_sha256(consumption_id, 'consumption_id')}:"
+
+
+def _validate_transition_tx_id(tx_id: object, consumption_id: str) -> str:
+    text = _text(tx_id, "authority_tx_id")
+    prefix = _transition_tx_prefix(consumption_id)
+    if not text.startswith(prefix):
+        raise PointInTimeEvidenceError("authority_tx_id does not bind consumption_id")
+    attempt = text[len(prefix) :]
+    if not attempt.isascii() or not attempt.isdigit() or int(attempt) <= 0:
+        raise PointInTimeEvidenceError("authority_tx_id attempt must be a positive integer")
+    return text
 
 
 def _transition_binding(
     *,
     previous_state_sha256: str | None,
     consumption_id: str,
+    tx_id: str,
 ) -> str:
     return _digest(
         {
@@ -134,6 +146,7 @@ def _transition_binding(
                 previous_state_sha256, "previous_state_sha256"
             ),
             "consumption_id": _sha256(consumption_id, "consumption_id"),
+            "tx_id": _validate_transition_tx_id(tx_id, consumption_id),
         }
     )
 
@@ -432,6 +445,22 @@ class HoldoutConsumptionLedger:
                 "holdout ledger failed independent monotonic authority validation"
             ) from exc
 
+    def _next_transition_tx_id(self, consumption_id: str) -> str:
+        prefix = _transition_tx_prefix(consumption_id)
+        try:
+            history = self._authority.read_history()
+        except MonotonicWorkspaceAuthorityError as exc:
+            raise EvidenceLedgerCorruptError(
+                "holdout ledger monotonic history is unreadable"
+            ) from exc
+        attempts: list[int] = []
+        for authority_record in history:
+            if authority_record.tx_id.startswith(prefix):
+                suffix = authority_record.tx_id[len(prefix) :]
+                if suffix.isascii() and suffix.isdigit() and int(suffix) > 0:
+                    attempts.append(int(suffix))
+        return f"{prefix}{max(attempts, default=0) + 1}"
+
     def _load(self) -> None:
         if not self._path.exists():
             self._recover_authority(observed_state_sha256=None)
@@ -460,7 +489,9 @@ class HoldoutConsumptionLedger:
             authority_consumption_id = _sha256(
                 payload.get("authority_consumption_id"), "authority_consumption_id"
             )
-            authority_tx_id = _text(payload.get("authority_tx_id"), "authority_tx_id")
+            authority_tx_id = _validate_transition_tx_id(
+                payload.get("authority_tx_id"), authority_consumption_id
+            )
             authority_binding = _sha256(
                 payload.get("authority_semantic_binding_sha256"),
                 "authority_semantic_binding_sha256",
@@ -468,11 +499,10 @@ class HoldoutConsumptionLedger:
         except PointInTimeEvidenceError as exc:
             raise EvidenceLedgerCorruptError("invalid monotonic authority metadata") from exc
 
-        if authority_tx_id != _transition_tx_id(authority_consumption_id):
-            raise EvidenceLedgerCorruptError("holdout ledger authority transaction identity mismatch")
         expected_binding = _transition_binding(
             previous_state_sha256=previous_state_sha256,
             consumption_id=authority_consumption_id,
+            tx_id=authority_tx_id,
         )
         if authority_binding != expected_binding:
             raise EvidenceLedgerCorruptError("holdout ledger authority semantic binding mismatch")
@@ -505,12 +535,14 @@ class HoldoutConsumptionLedger:
         *,
         added_record: HoldoutConsumption,
         previous_state_sha256: str | None,
-    ) -> tuple[dict[str, Any], str, str]:
+        tx_id: str,
+    ) -> tuple[dict[str, Any], str]:
         consumption_id = added_record.consumption_id
-        tx_id = _transition_tx_id(consumption_id)
+        tx_id = _validate_transition_tx_id(tx_id, consumption_id)
         semantic_binding = _transition_binding(
             previous_state_sha256=previous_state_sha256,
             consumption_id=consumption_id,
+            tx_id=tx_id,
         )
         records_payload = [self._records[key].to_payload() for key in sorted(self._records)]
         payload = {
@@ -522,7 +554,7 @@ class HoldoutConsumptionLedger:
             "authority_tx_id": tx_id,
             "authority_semantic_binding_sha256": semantic_binding,
         }
-        return payload, tx_id, semantic_binding
+        return payload, semantic_binding
 
     @staticmethod
     def access_id(
@@ -644,9 +676,11 @@ class HoldoutConsumptionLedger:
 
                 previous_state_sha256 = self._state_sha256
                 self._records[freshness_id] = record
-                payload, tx_id, semantic_binding = self._payload_for_transition(
+                tx_id = self._next_transition_tx_id(record.consumption_id)
+                payload, semantic_binding = self._payload_for_transition(
                     added_record=record,
                     previous_state_sha256=previous_state_sha256,
+                    tx_id=tx_id,
                 )
                 intended_state_sha256 = _digest(payload)
                 try:

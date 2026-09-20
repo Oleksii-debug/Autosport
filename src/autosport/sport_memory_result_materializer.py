@@ -14,9 +14,11 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Final
 
-from .continuous_session import (
-    SettlementResolution,
-    _is_authoritative_settlement_resolution,
+from .continuous_session import SettlementOutcomeAuthority, SettlementResolution
+from .event_lifecycle import (
+    CatalogLifecycleError,
+    ContinuousEventLifecycle,
+    EventPhase,
 )
 from .domain import MarketEvent
 from .learning_environment import EvidenceTruth
@@ -342,6 +344,9 @@ class SportMemoryResultMaterializer:
         self,
         opponent_store: OpponentIntelligenceStore,
         market_store: SQLiteMarketStore,
+        *,
+        lifecycle: ContinuousEventLifecycle,
+        outcome_authority: SettlementOutcomeAuthority,
     ) -> None:
         if type(opponent_store) is not OpponentIntelligenceStore:
             raise TypeError("opponent_store must be exact OpponentIntelligenceStore")
@@ -351,14 +356,24 @@ class SportMemoryResultMaterializer:
             raise TypeError(
                 "opponent_store identity_registry must be exact ParticipantIdentityRegistry"
             )
+        if type(lifecycle) is not ContinuousEventLifecycle:
+            raise TypeError("lifecycle must be exact ContinuousEventLifecycle")
+        if not callable(getattr(outcome_authority, "resolve", None)):
+            raise TypeError("outcome_authority.resolve must be callable")
         self.opponent_store = opponent_store
         self.market_store = market_store
+        self.lifecycle = lifecycle
+        self.outcome_authority = outcome_authority
 
     def _require_canonical_stores(self) -> ParticipantIdentityRegistry:
         if type(self.opponent_store) is not OpponentIntelligenceStore:
             raise TypeError("opponent_store capability changed after construction")
         if type(self.market_store) is not SQLiteMarketStore:
             raise TypeError("market_store capability changed after construction")
+        if type(self.lifecycle) is not ContinuousEventLifecycle:
+            raise TypeError("lifecycle capability changed after construction")
+        if not callable(getattr(self.outcome_authority, "resolve", None)):
+            raise TypeError("outcome_authority capability changed after construction")
         registry = self.opponent_store.identity_registry
         if type(registry) is not ParticipantIdentityRegistry:
             raise TypeError("identity_registry capability changed after construction")
@@ -919,6 +934,81 @@ class SportMemoryResultMaterializer:
             )
         return frozen_snapshot
 
+    def _resolve_canonical_settlement(
+        self,
+        binding: SportMemoryResultBinding,
+        asserted: SettlementResolution,
+        *,
+        as_of: str,
+    ) -> SettlementResolution:
+        """Re-resolve product-owned outcome truth; caller DTO is assertion-only."""
+
+        self._require_canonical_stores()
+        try:
+            record = ContinuousEventLifecycle.get(
+                self.lifecycle,
+                binding.event_identity,
+            )
+        except (CatalogLifecycleError, OSError, TypeError, ValueError) as exc:
+            raise SportMemoryResultMaterializationError(
+                "canonical lifecycle could not resolve settlement authority"
+            ) from exc
+        if (
+            record is None
+            or record.phase is not EventPhase.COMPLETED
+            or record.settlement_ref is None
+        ):
+            raise SportMemoryResultMaterializationError(
+                "result binding lacks completed canonical lifecycle settlement evidence"
+            )
+        if (
+            record.source_id != binding.source_id
+            or record.sport != binding.sport_id
+        ):
+            raise SportMemoryResultMaterializationError(
+                "canonical lifecycle does not match frozen result binding"
+            )
+
+        try:
+            canonical = self.outcome_authority.resolve(record, as_of=as_of)
+        except Exception as exc:
+            raise SportMemoryResultMaterializationError(
+                "product-owned outcome authority could not resolve settlement"
+            ) from exc
+        if type(canonical) is not SettlementResolution:
+            raise SportMemoryResultMaterializationError(
+                "product-owned outcome authority returned no exact settlement"
+            )
+        try:
+            SettlementResolution.validate(canonical, as_of=as_of)
+        except (TypeError, ValueError) as exc:
+            raise SportMemoryResultMaterializationError(
+                "product-owned settlement is malformed or not causally available"
+            ) from exc
+        if (
+            canonical.event_identity != record.identity
+            or canonical.settlement_ref != record.settlement_ref
+        ):
+            raise SportMemoryResultMaterializationError(
+                "product-owned settlement does not match canonical lifecycle evidence"
+            )
+        if asserted != canonical:
+            raise SportMemoryResultMaterializationError(
+                "settlement assertion differs from product-owned outcome authority"
+            )
+
+        # Snapshot the exact externally resolved public payload before using it.
+        # Restart intentionally repeats the external resolution; no persisted or
+        # caller-mintable token becomes settlement truth authority.
+        return SettlementResolution(
+            event_identity=canonical.event_identity,
+            settlement_ref=canonical.settlement_ref,
+            quote_outcomes=canonical.quote_outcomes.copy(),
+            evidence_id=canonical.evidence_id,
+            evidence_sha256=canonical.evidence_sha256,
+            available_at=canonical.available_at,
+        )
+
     def _retire_void_predecessor(
         self,
         binding: SportMemoryResultBinding,
@@ -993,17 +1083,12 @@ class SportMemoryResultMaterializer:
             raise TypeError("binding must be exact SportMemoryResultBinding")
         if type(settlement) is not SettlementResolution:
             raise TypeError("settlement must be exact SettlementResolution")
-        if not _is_authoritative_settlement_resolution(settlement):
-            raise SportMemoryResultMaterializationError(
-                "settlement must come from product-owned outcome-authority resolution"
-            )
         cutoff = _instant("as_of", as_of)
-        try:
-            SettlementResolution.validate(settlement, as_of=as_of)
-        except (TypeError, ValueError) as exc:
-            raise SportMemoryResultMaterializationError(
-                "settlement evidence is malformed or not causally available"
-            ) from exc
+        settlement = self._resolve_canonical_settlement(
+            binding,
+            settlement,
+            as_of=as_of,
+        )
         available = _instant("settlement.available_at", settlement.available_at)
         if cutoff < available:
             raise SportMemoryResultMaterializationError(

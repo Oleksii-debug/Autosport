@@ -50,3 +50,31 @@ def test_export_chooser_uses_active_workspace_without_eager_tk_workspace_lookup(
             ),
         }
     ]
+
+
+def test_post_dialog_workspace_recheck_does_not_eagerly_touch_removed_workspace(
+    monkeypatch, tmp_path: Path
+) -> None:
+    workspace = tmp_path / "workspace"
+    output = tmp_path / "evidence.json"
+    app = _partial_export_app(workspace)
+    app.__dict__["workspace"] = workspace
+    start_calls: list[tuple[Path, Path]] = []
+    app.evidence_export_worker.start = lambda workspace_arg, output_arg: start_calls.append(
+        (Path(workspace_arg), Path(output_arg))
+    ) or False
+
+    def choose(**_kwargs):
+        del app.__dict__["workspace"]
+        return str(output)
+
+    monkeypatch.setattr(gui.filedialog, "asksaveasfilename", choose)
+    monkeypatch.setattr(
+        gui,
+        "resolve_evidence_output_destination",
+        lambda workspace_arg, output_arg: Path(output_arg),
+    )
+
+    app.export_evidence()
+
+    assert start_calls == [(workspace, output)]

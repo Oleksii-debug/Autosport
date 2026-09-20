@@ -9,11 +9,13 @@ from .causal_collector_legacy import (
     CursorRegressionError,
     DeltaConflictError,
     StreamCheckpoint,
+    _instant,
     _text,
 )
 from .collector_sqlite_store import (
     CollectorDeltaStore as _SQLiteCollectorDeltaStore,
     _canonical_delta_json,
+    _payload_digest,
 )
 
 
@@ -101,6 +103,23 @@ class CollectorDeltaStore(_SQLiteCollectorDeltaStore):
         connection = self._connect()
         try:
             connection.execute("BEGIN IMMEDIATE")
+            connection.execute(
+                "CREATE TABLE IF NOT EXISTS collector_delta_tombstones_v1 ("
+                "delta_id TEXT PRIMARY KEY NOT NULL,"
+                "source_id TEXT NOT NULL,"
+                "stream_epoch TEXT NOT NULL,"
+                "payload_sha256 TEXT NOT NULL,"
+                "compacted_at TEXT NOT NULL,"
+                "plan_id TEXT NOT NULL)"
+            )
+            connection.execute(
+                "CREATE TABLE IF NOT EXISTS collector_epoch_activations_v1 ("
+                "source_id TEXT NOT NULL,"
+                "generation INTEGER NOT NULL CHECK(generation > 0),"
+                "stream_epoch TEXT NOT NULL,"
+                "activated_at TEXT NOT NULL,"
+                "PRIMARY KEY(source_id, generation))"
+            )
             marker = connection.execute(
                 "SELECT value FROM collector_meta WHERE key=?",
                 (_PROJECTION_INTEGRITY_META_KEY,),
@@ -157,6 +176,69 @@ class CollectorDeltaStore(_SQLiteCollectorDeltaStore):
                         f"collector delta indexed projection conflicts with payload: {field}"
                     )
         return delta
+
+    def activate_runtime_stream_epoch(
+        self,
+        *,
+        source_id: str,
+        stream_epoch: str,
+        activated_at: str,
+    ) -> int:
+        """Persist the collector runtime's active epoch as append-only authority.
+
+        The service calls this at successful construction and at the start of every
+        cycle. Repeating the same epoch is idempotent; reactivation of any different
+        epoch appends a new generation so preview/apply can detect ABA transitions.
+        """
+
+        source_id = _text(source_id, "source_id")
+        stream_epoch = _text(stream_epoch, "stream_epoch")
+        _instant(activated_at, "activated_at")
+        connection = self._connect()
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            current = connection.execute(
+                "SELECT generation, stream_epoch FROM collector_epoch_activations_v1 "
+                "WHERE source_id=? ORDER BY generation DESC LIMIT 1",
+                (source_id,),
+            ).fetchone()
+            if current is not None and current["stream_epoch"] == stream_epoch:
+                connection.commit()
+                return int(current["generation"])
+            generation = 1 if current is None else int(current["generation"]) + 1
+            connection.execute(
+                "INSERT INTO collector_epoch_activations_v1("
+                "source_id, generation, stream_epoch, activated_at"
+                ") VALUES(?,?,?,?)",
+                (source_id, generation, stream_epoch, activated_at),
+            )
+            connection.commit()
+            return generation
+        except sqlite3.DatabaseError as exc:
+            if connection.in_transaction:
+                connection.rollback()
+            raise ValueError("invalid causal collector active-epoch authority") from exc
+        finally:
+            connection.close()
+
+    def runtime_stream_epoch(self, source_id: str) -> tuple[str, int] | None:
+        """Return the latest product-owned active epoch and monotonic generation."""
+
+        source_id = _text(source_id, "source_id")
+        connection = self._connect()
+        try:
+            row = connection.execute(
+                "SELECT generation, stream_epoch FROM collector_epoch_activations_v1 "
+                "WHERE source_id=? ORDER BY generation DESC LIMIT 1",
+                (source_id,),
+            ).fetchone()
+            if row is None:
+                return None
+            return (_text(row["stream_epoch"], "stream_epoch"), int(row["generation"]))
+        except sqlite3.DatabaseError as exc:
+            raise ValueError("invalid causal collector active-epoch authority") from exc
+        finally:
+            connection.close()
 
     @classmethod
     def _delta_by_id(
@@ -303,15 +385,32 @@ class CollectorDeltaStore(_SQLiteCollectorDeltaStore):
         delta: CollectorDelta,
     ) -> bool:
         delta.validate()
+        encoded = _canonical_delta_json(delta)
+        digest = _payload_digest(encoded)
         existing = connection.execute(
             f"SELECT {_DELTA_SELECT_COLUMNS} FROM collector_deltas WHERE delta_id=?",
             (delta.delta_id,),
         ).fetchone()
         if existing is not None:
             existing_delta = cls._row_delta(existing)
-            if _canonical_delta_json(existing_delta) != _canonical_delta_json(delta):
+            if _canonical_delta_json(existing_delta) != encoded:
                 raise DeltaConflictError(
                     f"delta {delta.delta_id} conflicts with immutable evidence"
+                )
+            return False
+        tombstone = connection.execute(
+            "SELECT source_id, stream_epoch, payload_sha256 "
+            "FROM collector_delta_tombstones_v1 WHERE delta_id=?",
+            (delta.delta_id,),
+        ).fetchone()
+        if tombstone is not None:
+            if (
+                tombstone["source_id"] != delta.source_id
+                or tombstone["stream_epoch"] != delta.stream_epoch
+                or tombstone["payload_sha256"] != digest
+            ):
+                raise DeltaConflictError(
+                    f"delta {delta.delta_id} conflicts with compacted immutable evidence"
                 )
             return False
         cls._verified_stream_checkpoint(

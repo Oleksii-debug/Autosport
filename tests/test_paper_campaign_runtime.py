@@ -43,6 +43,8 @@ T1 = "2026-09-20T03:00:01+00:00"
 T2 = "2026-09-20T03:00:05+00:00"
 T3 = "2026-09-20T03:00:10+00:00"
 T4 = "2026-09-20T03:00:30+00:00"
+T5 = "2026-09-20T03:00:40+00:00"
+T6 = "2026-09-20T03:00:50+00:00"
 
 
 def _fixture(
@@ -304,11 +306,22 @@ class PaperCampaignRuntimeTests(unittest.TestCase):
                 )
                 witness = bridge.resolution_witness(ticket_id)
                 runtime.agent_loop.advance(expected=AgentLoopPhase.EVALUATE, at=T4)
-                attribution = runtime._attribution(witness)
+                frozen_at = runtime._bind_finalization_plan(
+                    witness,
+                    available_at=T4,
+                )
+                attribution = runtime._attribution(
+                    witness,
+                    available_at=frozen_at,
+                )
                 runtime.agent_loop.record_attribution(attribution, at=T4)
                 if boundary == "postmortem":
                     runtime.agent_loop.record_postmortem(
-                        runtime._postmortem(attribution, witness),
+                        runtime._postmortem(
+                            attribution,
+                            witness,
+                            available_at=frozen_at,
+                        ),
                         at=T4,
                     )
 
@@ -562,6 +575,69 @@ class PaperCampaignRuntimeTests(unittest.TestCase):
                     settlement_bridge=bridge,
                 )
 
+    def test_late_reflection_semantics_keep_actual_first_availability(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            registry = ScientificRegistry.initialize_pristine(
+                root / "scientific_registry.json"
+            )
+            supervisor = ResearchSupervisor.initialize_pristine(
+                root / "research_supervisor.json", registry
+            )
+            plan = PaperReflectionPlan(
+                summary_code="LATE_REFLECTION",
+                reason_code="LATE_REASON",
+                research_question_statement="What explains this late PAPER review?",
+                research_budget_units=2,
+                research_deadline_at="2026-09-20T04:00:00+00:00",
+            )
+            (
+                leg,
+                _book,
+                ticket_id,
+                _decision,
+                _environment,
+                _baseline,
+                _observation,
+                bridge,
+                runtime,
+            ) = _fixture(
+                root,
+                reflection_plan=plan,
+                research_supervisor=supervisor,
+            )
+            resolutions = _settle(root, leg, "win")
+            bridge.reconcile_after_settlement(
+                paper_book_path=root / "paper_book.json",
+                resolutions=resolutions,
+                settled_ticket_ids=(ticket_id,),
+                at=T4,
+            )
+
+            first = runtime.finalize_ticket(ticket_id=ticket_id, at=T5)
+            second = runtime.finalize_ticket(ticket_id=ticket_id, at=T6)
+            self.assertEqual(first, second)
+
+            state = json.loads(
+                (root / "agent-loop.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(state["attributions"][0]["attributed_at"], T5)
+            self.assertEqual(
+                state["attributions"][0]["findings"][0]["evidence_available_at"],
+                T5,
+            )
+            self.assertEqual(state["postmortems"][0]["created_at"], T5)
+            self.assertEqual(state["research_handoffs"][0]["requested_at"], T5)
+            durable = json.loads(
+                (root / "paper-learning-bridge.json.campaign.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+            self.assertEqual(
+                durable["plans"][ticket_id]["reflection_available_at"],
+                T5,
+            )
+
     def test_future_finalization_and_conflicting_reflection_fail_closed(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -598,7 +674,17 @@ class PaperCampaignRuntimeTests(unittest.TestCase):
                 )
             recovered.agent_loop.advance(expected=AgentLoopPhase.EVALUATE, at=T4)
             witness = recovered.settlement_bridge.resolution_witness(ticket_id)
-            recovered.agent_loop.record_attribution(recovered._attribution(witness), at=T4)
+            frozen_at = recovered._bind_finalization_plan(
+                witness,
+                available_at=T4,
+            )
+            recovered.agent_loop.record_attribution(
+                recovered._attribution(
+                    witness,
+                    available_at=frozen_at,
+                ),
+                at=T4,
+            )
             conflicting = PaperCampaignRuntime(
                 environment=recovered_environment,
                 settlement_bridge=recovered.settlement_bridge,
@@ -610,7 +696,14 @@ class PaperCampaignRuntimeTests(unittest.TestCase):
                 conflicting.finalize_ticket(ticket_id=ticket_id, at=T4)
 
             recovered.agent_loop.record_postmortem(
-                recovered._postmortem(recovered._attribution(witness), witness),
+                recovered._postmortem(
+                    recovered._attribution(
+                        witness,
+                        available_at=frozen_at,
+                    ),
+                    witness,
+                    available_at=frozen_at,
+                ),
                 at=T4,
             )
 

@@ -42,3 +42,8 @@ from . import _dataset_snapshot_lineage_publication_trust_root as _dataset_snaps
 # Campaign/provider applicability needs a stable authenticated Betfair account
 # discriminator, but application/session credentials must never become evidence.
 from . import _campaign_provider_scope_devapp_identity as _campaign_provider_scope_devapp_identity  # noqa: F401,E402
+
+# A later authenticated provider re-read validates the original T0 applicability
+# scope; it must not mint a replacement projection merely because T1 evidence
+# instance ids or timestamps changed after restart.
+from . import _campaign_provider_scope_stable_projection as _campaign_provider_scope_stable_projection  # noqa: F401,E402

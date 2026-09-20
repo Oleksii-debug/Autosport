@@ -220,6 +220,33 @@ def _recover_or_bootstrap_scientific_registry_authority(
     )
 
 
+def read_verified_scientific_registry_text(path: str | Path) -> str:
+    """Return one authority-verified ScientificRegistry image under its path fence.
+
+    A pristine or legacy registry has no independent authority until its first real
+    record is published. Once authority history exists, every read must prove that
+    the exact bytes being consumed are the current committed image (or resolve the
+    one recoverable PREPARE crash boundary) before those bytes leave the lock.
+    """
+
+    destination = Path(path)
+    with durable_path_lock(destination):
+        observed = sha256_file(destination) if destination.exists() else None
+        authority = _scientific_registry_authority(destination)
+        history = authority.read_history()
+        if history:
+            pending = history[-1] if history[-1].phase is AuthorityPhase.PREPARE else None
+            if pending is None:
+                authority.recover(observed_state_sha256=observed)
+            else:
+                authority.recover(
+                    observed_state_sha256=observed,
+                    tx_id=pending.tx_id,
+                    semantic_binding_sha256=pending.semantic_binding_sha256,
+                )
+        return destination.read_text(encoding="utf-8")
+
+
 def atomic_write_json(path: str | Path, payload: dict[str, Any]) -> None:
     destination = Path(path)
     destination.parent.mkdir(parents=True, exist_ok=True)

@@ -1,11 +1,16 @@
 from __future__ import annotations
 
-from decimal import Decimal, localcontext
+from decimal import Decimal, ROUND_HALF_EVEN, localcontext
 
 from hypothesis import given, settings, strategies as st
 
 from autosport.calculation import CalculationEngine
 
+
+# CalculationEngine's integrated deterministic Decimal contract is 160 significant
+# digits with ROUND_HALF_EVEN. Property oracles that compare rounded engine outputs
+# must use the same contract rather than a higher-precision one-sided inequality.
+_ENGINE_DECIMAL_PRECISION = 160
 
 _DECIMAL_ODDS = st.decimals(
     min_value=Decimal("1.001"),
@@ -39,6 +44,17 @@ _UNIT_FRACTIONS = st.decimals(
 
 def _outputs(result) -> dict[str, str]:
     return dict(result.outputs)
+
+
+def _canonical_fractional_allocation(
+    full_kelly_fraction: Decimal,
+    fraction: Decimal,
+    cap: Decimal,
+) -> Decimal:
+    with localcontext() as context:
+        context.prec = _ENGINE_DECIMAL_PRECISION
+        context.rounding = ROUND_HALF_EVEN
+        return min(full_kelly_fraction * fraction, cap)
 
 
 @settings(max_examples=64, deadline=None)
@@ -133,13 +149,34 @@ def test_fractional_kelly_never_exceeds_declared_cap_or_goes_negative(
     recommended = Decimal(outputs["capped_fraction"])
     assert full >= Decimal("0")
     assert Decimal("0") <= recommended <= cap
-    if full > 0:
-        with localcontext() as context:
-            context.prec = 200
-            fractional = full * fraction
-        assert recommended <= fractional
-    else:
-        assert recommended == 0
+    assert recommended == _canonical_fractional_allocation(full, fraction, cap)
+
+
+def test_fractional_kelly_rounding_regression_uses_canonical_engine_precision() -> None:
+    probability = Decimal("0.911")
+    decimal_odds = Decimal("54.773")
+    fraction = Decimal("0.729")
+    cap = Decimal("1")
+
+    result = CalculationEngine().fractional_kelly(
+        probability,
+        decimal_odds,
+        fraction=fraction,
+        cap=cap,
+    )
+    outputs = _outputs(result)
+    full = Decimal(outputs["full_kelly_fraction"])
+    recommended = Decimal(outputs["capped_fraction"])
+
+    assert recommended == _canonical_fractional_allocation(full, fraction, cap)
+
+    # This exact generated case is retained because the old property compared the
+    # 160-digit rounded runtime value one-sided against an unrelated 200-digit
+    # recomputation and therefore rejected correct ROUND_HALF_EVEN behavior.
+    with localcontext() as context:
+        context.prec = 200
+        higher_precision_product = full * fraction
+    assert recommended > higher_precision_product
 
 
 @settings(max_examples=64, deadline=None)

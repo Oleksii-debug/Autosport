@@ -173,14 +173,23 @@ class PaperCampaignRuntime(_base.PaperCampaignRuntime):
                 "campaign finalization predates causal reflection availability"
             )
 
-        # Research is an external side effect requested at the real finalization
-        # call, not at the earlier attribution time.  Reject an already-expired
-        # bounded handoff before attribution/postmortem mutation.
+        # The deadline fences creation of the *first* external research request.
+        # Once AgentLoop has durably recorded that handoff, an exact restart must
+        # still be able to replay/ack it and commit the checkpoint after expiry.
+        # `research_run_id` is the canonical durable proof that this episode's
+        # handoff already exists; the pre-settlement reflection commitment above
+        # still verifies that the retried plan is exactly the one that was bound.
         deadline = self.reflection_plan.research_deadline_at
-        if deadline is not None and _base._instant(
-            deadline,
-            "research_deadline_at",
-        ) < _base._instant(requested_at, "reflection_plan available_at"):
+        research_run_id = self.agent_loop.snapshot().research_run_id
+        if (
+            deadline is not None
+            and research_run_id is None
+            and _base._instant(
+                deadline,
+                "research_deadline_at",
+            )
+            < _base._instant(requested_at, "reflection_plan available_at")
+        ):
             raise PaperCampaignRuntimeError(
                 "research deadline predates frozen reflection availability"
             )

@@ -126,6 +126,39 @@ def _persist_unrelated_ticket(book: PaperBook, path: Path) -> None:
 
 
 class PaperExecutionAppendRecoveryTests(unittest.TestCase):
+    def test_live_retry_accepts_exact_authorized_post_action_book_without_duplicate(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            model = _config()
+            book = PaperBook("100.00")
+            runtime = _runtime(root, book, model=model)
+            book.save(root / "live_decision_pre_action_book.json")
+            action = _action()
+
+            first = runtime.execute(
+                prepared=_prepared(runtime, action),
+                trigger_id="live-append-recovery-exact",
+                started_at=STARTED_AT,
+                materialize_exposure=True,
+            )
+            self.assertEqual(first.run.attempts[0].outcome, PaperAttemptOutcome.ACCEPTED)
+            self.assertEqual(len(book.tickets), 1)
+            first_ticket_ids = tuple(book.tickets)
+
+            restarted_book = PaperBook.load(root / "paper_book.json")
+            restarted = _runtime(root, restarted_book, model=model)
+            resumed = restarted.execute(
+                prepared=_prepared(restarted, action),
+                trigger_id="live-append-recovery-exact",
+                started_at=STARTED_AT,
+                materialize_exposure=True,
+            )
+
+            self.assertEqual(resumed.run.run_id, first.run.run_id)
+            self.assertEqual(tuple(restarted_book.tickets), first_ticket_ids)
+            self.assertEqual(len(restarted_book.tickets), 1)
+            self.assertEqual(restarted_book.balance, Decimal("90.00"))
+
     def test_live_retry_rejects_unrelated_book_mutation_after_accepted_attempt(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

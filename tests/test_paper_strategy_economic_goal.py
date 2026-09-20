@@ -12,6 +12,7 @@ from autosport.decision_ledger import (
 from autosport.domain import MarketEvent
 from autosport.economic_goal import EconomicGoalContract
 from autosport.paper import PaperBook
+from autosport.paper_execution_adoption import PaperExecutionAdoptionError
 from autosport.paper_strategy import (
     Forecast,
     PaperDecisionReconciliationRequired,
@@ -64,6 +65,15 @@ class PaperValueEconomicGoalIntegrationTests(unittest.TestCase):
             risk_policy=PaperRiskPolicy(economic_goal=goal),
         )
 
+    @staticmethod
+    def _assert_decision_binds_ticket(record: DecisionRecord, book: PaperBook) -> None:
+        ticket = next(iter(book.tickets.values()))
+        material_action_id = record.payload["material_action_id"]
+        assert isinstance(material_action_id, str) and material_action_id
+        assert f"decision_id={material_action_id}" in ticket.strategy_reason
+        assert isinstance(record.payload["execution_run_id"], str)
+        assert record.payload["execution_run_id"]
+
     def test_active_goal_allows_fresh_proposal_and_persists_restart_verifiable_provenance(self) -> None:
         goal = self._goal()
         event = self._event()
@@ -84,6 +94,7 @@ class PaperValueEconomicGoalIntegrationTests(unittest.TestCase):
             self.assertEqual(len(records), 1)
             self.assertEqual(records[0].action, "OPEN_PAPER_VALUE_TICKET")
             self.assertRegex(records[0].payload["material_action_id"], r"^[0-9a-f]{64}$")
+            self._assert_decision_binds_ticket(records[0], context.paper_book)
 
             restarted = JsonlDecisionLedger(ledger_path)
             rebound = restarted.verified_economic_decision(records[0].decision_id, goal)
@@ -153,22 +164,22 @@ class PaperValueEconomicGoalIntegrationTests(unittest.TestCase):
             self._agent(event, goal).on_market_event(event, live_context)
             self.assertEqual(len(live_context.decision_ledger.verified_records()), 1)
 
-            # Simulate a process crash after Decision Ledger fsync but before the
-            # mutated PaperBook crossed its own atomic snapshot boundary.
+            # #623 publishes its canonical PaperBook snapshot with accepted execution
+            # truth. A caller that restarts from an older application-level snapshot
+            # must therefore fail closed before an AgentContext can bind a runtime to
+            # that stale book.
             restarted_book = PaperBook.load(pristine_book_path)
             restarted_ledger = JsonlDecisionLedger(ledger_path)
-            restarted_context = AgentContext(
-                restarted_book,
-                latest_quotes={event.quote_key: event},
-                replay_run_id="run-1",
-                decision_ledger=restarted_ledger,
-            )
-
             with self.assertRaisesRegex(
-                PaperDecisionReconciliationRequired,
-                "Decision Ledger material action exists without a durable PaperBook ticket",
+                PaperExecutionAdoptionError,
+                "configured PaperBook does not match durable snapshot",
             ):
-                self._agent(event, goal).on_market_event(event, restarted_context)
+                AgentContext(
+                    restarted_book,
+                    latest_quotes={event.quote_key: event},
+                    replay_run_id="run-1",
+                    decision_ledger=restarted_ledger,
+                )
 
             self.assertEqual(restarted_book.balance, Decimal("100"))
             self.assertEqual(restarted_book.tickets, {})
@@ -192,9 +203,10 @@ class PaperValueEconomicGoalIntegrationTests(unittest.TestCase):
             book.save(book_path)
             ledger_path.unlink()
 
-            # Simulate the converse split boundary: the ticket snapshot survived,
-            # but the ledger append did not. A fresh process must not open another
-            # ticket merely because its in-memory _acted set is empty.
+            # Simulate the converse split boundary: #623 attempt/exposure truth and
+            # the PaperBook snapshot survived, but the decision append did not.
+            # Restart must fail closed instead of treating the durable execution as a
+            # fresh opportunity and opening a duplicate ticket.
             restarted_book = PaperBook.load(book_path)
             restarted_ledger = JsonlDecisionLedger(ledger_path)
             restarted_context = AgentContext(
@@ -206,7 +218,7 @@ class PaperValueEconomicGoalIntegrationTests(unittest.TestCase):
 
             with self.assertRaisesRegex(
                 PaperDecisionReconciliationRequired,
-                "PaperBook material action exists without a durable Decision Ledger record",
+                "#623 execution history exists without its durable paper-value decision",
             ):
                 self._agent(event, goal).on_market_event(event, restarted_context)
 
@@ -261,10 +273,7 @@ class PaperValueEconomicGoalIntegrationTests(unittest.TestCase):
             self.assertEqual(len(book.tickets), 1)
             records = ledger.verified_records()
             self.assertEqual(len(records), 1)
-            self.assertEqual(
-                records[0].payload["ticket_id"],
-                next(iter(book.tickets)),
-            )
+            self._assert_decision_binds_ticket(records[0], book)
             restarted = JsonlDecisionLedger(ledger_path)
             rebound = restarted.verified_economic_decision(records[0].decision_id, goal)
             self.assertEqual(rebound, records[0])
@@ -305,10 +314,7 @@ class PaperValueEconomicGoalIntegrationTests(unittest.TestCase):
             self.assertEqual(len(book.tickets), 1)
             records = ledger.verified_records()
             self.assertEqual(len(records), 1)
-            self.assertEqual(
-                records[0].payload["ticket_id"],
-                next(iter(book.tickets)),
-            )
+            self._assert_decision_binds_ticket(records[0], book)
 
     def test_economic_ledger_post_write_error_keeps_verified_ticket_commit(self) -> None:
         class RaiseAfterCommitLedger(JsonlDecisionLedger):
@@ -339,10 +345,7 @@ class PaperValueEconomicGoalIntegrationTests(unittest.TestCase):
             self.assertEqual(len(book.tickets), 1)
             records = ledger.verified_records()
             self.assertEqual(len(records), 1)
-            self.assertEqual(
-                records[0].payload["ticket_id"],
-                next(iter(book.tickets)),
-            )
+            self._assert_decision_binds_ticket(records[0], book)
 
             # _acted must agree with the proven durable commit and prevent a duplicate
             # position if the same event is delivered again in the same process.

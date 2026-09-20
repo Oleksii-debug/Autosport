@@ -13,7 +13,11 @@ from .campaign_cost_evidence import (
     derive_campaign_economics,
 )
 from .campaign_economic_authority import FinalizedCampaignAuthority
-from .monotonic_workspace_authority import MonotonicWorkspaceAuthority
+from .monotonic_workspace_authority import (
+    AuthorityPhase,
+    MonotonicWorkspaceAuthority,
+    RecoveryDisposition,
+)
 
 
 class CampaignEconomicStoreError(RuntimeError):
@@ -69,6 +73,9 @@ class CampaignEconomicEvidenceStore:
             raise CampaignEconomicStoreError(
                 "economic version belongs to a different campaign"
             )
+        if self._recover_exact_prepared_publish(version):
+            return version.version_id
+
         current = self.latest()
         if current is None:
             if version.previous_version_id is not None:
@@ -163,6 +170,101 @@ class CampaignEconomicEvidenceStore:
     def verify_chain(self) -> tuple[CampaignEconomicEvidenceVersion, ...]:
         latest = self.latest()
         return () if latest is None else self._chain_from(latest)
+
+    def _recover_exact_prepared_publish(
+        self, version: CampaignEconomicEvidenceVersion
+    ) -> bool:
+        """Finish only the exact durable PREPARE -> local-file crash prefix.
+
+        Normal reads remain strict about orphan files. Recovery is admitted only
+        while the independent monotonic authority still has the exact requested
+        version as its live PREPARE and local history contains exactly the
+        committed predecessor chain plus that byte-exact direct successor.
+        """
+        version_path = self._versions_dir() / f"{version.version_id}.json"
+        if not version_path.exists():
+            return False
+
+        head_id = self._read_head_id()
+        if head_id == version.version_id:
+            return False
+
+        history = self._authority.read_history()
+        if not history:
+            return False
+        pending = history[-1]
+        if pending.phase is not AuthorityPhase.PREPARE:
+            return False
+        if pending.tx_id != version.version_id:
+            return False
+
+        binding = self._semantic_binding(version)
+        if (
+            pending.intended_state_sha256 != version.version_id
+            or pending.semantic_binding_sha256 != binding
+            or pending.previous_committed_state_sha256 != head_id
+        ):
+            raise CampaignEconomicStoreError(
+                "prepared economic successor does not match durable authority"
+            )
+        if version.previous_version_id != head_id:
+            raise CampaignEconomicStoreError(
+                "prepared economic successor does not extend local committed head"
+            )
+
+        current = None if head_id is None else self._load_raw(head_id)
+        if current is None:
+            if version.previous_version_sha256 is not None:
+                raise CampaignEconomicStoreError(
+                    "prepared first economic version names predecessor digest"
+                )
+            committed_ids: set[str] = set()
+        else:
+            if version.previous_version_sha256 != current.record_sha256:
+                raise CampaignEconomicStoreError(
+                    "prepared economic predecessor digest mismatch"
+                )
+            committed_ids = {
+                value.version_id for value in self._chain_from(current)
+            }
+
+        self._validate_derived(version, current)
+        encoded = _canonical_bytes(version.to_dict())
+        if version_path.read_bytes() != encoded:
+            raise CampaignEconomicStoreError(
+                "prepared immutable economic version conflicts with exact retry"
+            )
+        if self._version_ids() != committed_ids | {version.version_id}:
+            raise CampaignEconomicStoreError(
+                "prepared recovery found unrelated economic version history"
+            )
+
+        _atomic_json(
+            self._head_path(),
+            {
+                "schema_version": 1,
+                "campaign_sha256": self.campaign_sha256,
+                "version_id": version.version_id,
+                "record_sha256": version.record_sha256,
+            },
+        )
+        if self._read_head_id() != version.version_id:
+            raise CampaignEconomicStoreError(
+                "recovered economic head failed exact durable re-read"
+            )
+        recovered = self._authority.recover(
+            observed_state_sha256=version.version_id,
+            tx_id=version.version_id,
+            semantic_binding_sha256=binding,
+        )
+        if (
+            recovered.disposition is not RecoveryDisposition.COMMITTED_PREPARE
+            or recovered.committed_state_sha256 != version.version_id
+        ):
+            raise CampaignEconomicStoreError(
+                "prepared economic recovery did not commit exact successor"
+            )
+        return True
 
     def _chain_from(
         self, head: CampaignEconomicEvidenceVersion

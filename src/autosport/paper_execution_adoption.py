@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Mapping
 
 from . import _paper_execution_reality_legacy as _paper_impl
-from .domain import PaperTicket, TicketLeg
+from .domain import MarketEvent, PaperTicket, TicketLeg
 from .opportunity import QuoteRef
 from .paper import PaperBook
 from .paper_execution_reality import (
@@ -325,6 +325,107 @@ class PaperExecutionAdoptionRuntime:
             execution_plan=execution_plan,
             exposure_bindings=tuple(bindings),
             intent_evidence_json=intent_evidence_json,
+        )
+
+    def prepare_paper_value_action(
+        self,
+        *,
+        event: MarketEvent,
+        stake: Decimal,
+        decision_id: str,
+        account_id: str,
+        bankroll_id: str | None,
+        currency: str | None,
+    ) -> PreparedPaperExecution:
+        """Bind one legacy paper-value decision to canonical #623 execution truth.
+
+        The legacy strategy may still decide that a value opportunity exists, but
+        it no longer owns fill semantics.  This bridge carries its already-risk-
+        authorized single-leg stake into the same immutable execution plan/run
+        authority used by the persistent live loop.
+        """
+        if not isinstance(event, MarketEvent):
+            raise TypeError("event must be MarketEvent")
+        if not isinstance(stake, Decimal) or not stake.is_finite() or stake <= 0:
+            raise ValueError("stake must be a positive finite exact Decimal")
+        if type(decision_id) is not str or not decision_id or decision_id.strip() != decision_id:
+            raise ValueError("decision_id must be non-empty canonical text")
+        if type(account_id) is not str or not account_id or account_id.strip() != account_id:
+            raise ValueError("account_id must be non-empty canonical text")
+        if (bankroll_id is None) != (currency is None):
+            raise ValueError("bankroll_id and currency must be supplied together")
+
+        quote_time = _utc_timestamp(
+            event.source_ts or event.observed_ts,
+            "execution quote observed time",
+        )
+        quote_id = "paper-value-quote-v1-" + _digest(
+            {
+                "schema": "autosport.paper_value.execution_quote",
+                "schema_version": 1,
+                "event": event.to_dict(),
+            }
+        )
+        evidence_payload = {
+            "schema": "autosport.paper_value.execution_authority",
+            "schema_version": 1,
+            "decision_id": decision_id,
+            "quote_id": quote_id,
+            "event": event.to_dict(),
+            "stake": str(stake),
+            "provider_account": [event.source_id, account_id],
+            "bankroll_id": bankroll_id,
+            "currency": currency,
+        }
+        evidence_json = json.dumps(
+            evidence_payload,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        )
+        action = ExecutionAction(
+            action_id="paper-value-action-v1-" + _digest(evidence_payload),
+            bookmaker_id=event.source_id,
+            account_id=account_id,
+            event_id=event.event_id,
+            market_id=event.market_id,
+            selection_id=event.selection_id,
+            side="BACK",
+            requested_odds=event.decimal_odds,
+            requested_stake=stake,
+            quote_id=quote_id,
+            quote_observed_at=_timestamp_text(quote_time),
+            expires_at=_timestamp_text(quote_time + self.max_quote_age),
+        )
+        execution_plan = ExecutionPlan(
+            plan_id="paper-value-plan-v1-" + _digest(
+                {
+                    "decision_id": decision_id,
+                    "action": action.to_dict(),
+                    "model_fingerprint": self.config.fingerprint,
+                }
+            ),
+            bookmaker_profile_version=(
+                f"paper-execution-reality:{self.config.model_id}:"
+                f"{self.config.model_version}"
+            ),
+            decision_id=decision_id,
+            approval_id="paper-only-no-real-money",
+            created_at=event.observed_ts,
+            actions=(action,),
+        )
+        return PreparedPaperExecution(
+            execution_plan=execution_plan,
+            exposure_bindings=(
+                PaperExposureBinding(
+                    action_id=action.action_id,
+                    sport=event.sport,
+                    bankroll_id=bankroll_id,
+                    currency=currency,
+                ),
+            ),
+            intent_evidence_json=evidence_json,
         )
 
     def expected_run_id(

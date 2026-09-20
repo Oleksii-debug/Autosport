@@ -1729,6 +1729,7 @@ _VOC_PRECOMPUTE_CONTROL_FIELDS = {
     "admission_id",
     "research_protocol_id",
     "cohort_id",
+    "baseline_candidate_id",
     "challenger_candidate_id",
     "sport_id",
     "league_id",
@@ -1806,7 +1807,11 @@ def _build_voc_precompute_admission(
             )
 
     by_id = _candidate_map(candidates)
-    baseline = by_id.get(request.baseline_candidate_id)
+    baseline_id = _text(
+        "voc_precompute_admission baseline_candidate_id",
+        control["baseline_candidate_id"],
+    )
+    baseline = by_id.get(baseline_id)
     challenger_id = _text(
         "voc_precompute_admission challenger_candidate_id",
         control["challenger_candidate_id"],
@@ -1893,6 +1898,11 @@ def _validate_persisted_voc_precompute_admission(
             "admission_id": raw.get("admission_id"),
             "research_protocol_id": raw.get("research_protocol_id"),
             "cohort_id": raw.get("cohort_id"),
+            "baseline_candidate_id": (
+                raw.get("baseline_compute_identity", {}).get("candidate_id")
+                if isinstance(raw.get("baseline_compute_identity"), Mapping)
+                else None
+            ),
             "challenger_candidate_id": challenger.get("candidate_id"),
             "sport_id": (
                 raw.get("scope", {}).get("sport_id")

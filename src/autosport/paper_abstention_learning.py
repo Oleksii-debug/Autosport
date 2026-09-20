@@ -377,6 +377,24 @@ class PaperAbstentionLearningRuntime:
                 raise PaperAbstentionLearningError(
                     "AgentLoop checkpoint differs from active environment"
                 )
+        else:
+            try:
+                retry_action = Action(
+                    environment_id=self.environment.environment_id,
+                    observation_id=observation.observation_id,
+                    action_type=action_type,
+                    decided_at=decision_at,
+                    parameters=parameters,
+                )
+            except LearningEnvironmentError as exc:
+                raise PaperAbstentionLearningError(
+                    "abstention retry payload is not canonical"
+                ) from exc
+            self._ensure_durable_intent(
+                observation=observation,
+                action=retry_action,
+                phase=snapshot.phase,
+            )
 
         try:
             action = self.environment.act(
@@ -390,11 +408,16 @@ class PaperAbstentionLearningRuntime:
                 "canonical environment rejected abstention intent"
             ) from exc
 
-        self._ensure_durable_intent(
-            observation=observation,
-            action=action,
-            phase=snapshot.phase,
-        )
+        if starting:
+            self._ensure_durable_intent(
+                observation=observation,
+                action=action,
+                phase=snapshot.phase,
+            )
+        elif action.action_id != retry_action.action_id:
+            raise PaperAbstentionLearningError(
+                "canonical environment changed the durable abstention retry intent"
+            )
 
         try:
             if starting:

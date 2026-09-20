@@ -411,46 +411,136 @@ class PaperCampaignRuntime:
             "research_budget_units": self.reflection_plan.research_budget_units,
             "research_deadline_at": canonical_deadline,
         }
-        with WorkspaceEconomicLock(self.state_path.parent):
-            state = self._read_campaign_state()
-            existing = state["plans"].get(witness.ticket_id)
-            if existing is not None:
-                existing_semantic = {
-                    key: value
-                    for key, value in existing.items()
-                    if key not in {"plan_id", "reflection_available_at"}
-                }
-                if existing_semantic != semantic:
-                    raise PaperCampaignRuntimeError(
-                        "durable campaign finalization plan conflicts with retry"
-                    )
-                return _timestamp(
-                    existing["reflection_available_at"],
-                    "reflection_available_at",
-                )
-            if require_existing:
+
+        def record_for(frozen_at: str) -> dict[str, object]:
+            canonical_frozen_at = _timestamp(
+                frozen_at, "reflection_available_at"
+            )
+            if _instant(
+                canonical_frozen_at, "reflection_available_at"
+            ) < _instant(witness.reward.available_at, "reward.available_at"):
                 raise PaperCampaignRuntimeError(
-                    "existing attribution lacks durable campaign finalization plan"
+                    "reflection plan predates authoritative reward availability"
                 )
             if canonical_deadline is not None and _instant(
                 canonical_deadline, "research_deadline_at"
             ) < _instant(
-                canonical_available_at, "reflection_plan available_at"
+                canonical_frozen_at, "reflection_available_at"
             ):
                 raise PaperCampaignRuntimeError(
                     "research deadline predates frozen reflection availability"
                 )
             durable_semantic = {
                 **semantic,
-                "reflection_available_at": canonical_available_at,
+                "reflection_available_at": canonical_frozen_at,
             }
-            record = {
+            return {
                 "plan_id": _digest(durable_semantic),
                 **durable_semantic,
             }
-            state["plans"][witness.ticket_id] = record
-            self._write_campaign_state(state["plans"])
-            return canonical_available_at
+
+        # Inspect the sidecar first, but never trust it as the only authority.
+        with WorkspaceEconomicLock(self.state_path.parent):
+            state = self._read_campaign_state()
+            existing = state["plans"].get(witness.ticket_id)
+
+        try:
+            anchor = self.settlement_bridge.campaign_plan_anchor(witness.ticket_id)
+        except PaperSettlementLearningBridgeError as exc:
+            raise PaperCampaignRuntimeError(
+                "campaign plan anchor is unreadable"
+            ) from exc
+
+        if existing is not None:
+            existing_semantic = {
+                key: value
+                for key, value in existing.items()
+                if key not in {"plan_id", "reflection_available_at"}
+            }
+            if existing_semantic != semantic:
+                raise PaperCampaignRuntimeError(
+                    "durable campaign finalization plan conflicts with retry"
+                )
+            expected = record_for(existing["reflection_available_at"])
+            if existing != expected:
+                raise PaperCampaignRuntimeError(
+                    "durable campaign finalization plan is inconsistent"
+                )
+            try:
+                anchored = self.settlement_bridge.bind_campaign_plan_anchor(
+                    ticket_id=witness.ticket_id,
+                    plan_id=expected["plan_id"],
+                    reflection_available_at=expected["reflection_available_at"],
+                )
+            except PaperSettlementLearningBridgeError as exc:
+                raise PaperCampaignRuntimeError(
+                    "campaign finalization plan conflicts with bridge anchor"
+                ) from exc
+            if anchored != (
+                expected["plan_id"],
+                expected["reflection_available_at"],
+            ):
+                raise PaperCampaignRuntimeError(
+                    "campaign bridge anchor acknowledgement mismatch"
+                )
+            return expected["reflection_available_at"]
+
+        if anchor is not None:
+            frozen_plan = record_for(anchor[1])
+            if frozen_plan["plan_id"] != anchor[0]:
+                raise PaperCampaignRuntimeError(
+                    "campaign finalization plan conflicts with bridge anchor"
+                )
+            with WorkspaceEconomicLock(self.state_path.parent):
+                state = self._read_campaign_state()
+                concurrent = state["plans"].get(witness.ticket_id)
+                if concurrent is not None and concurrent != frozen_plan:
+                    raise PaperCampaignRuntimeError(
+                        "campaign sidecar changed during anchored recovery"
+                    )
+                if concurrent is None:
+                    state["plans"][witness.ticket_id] = frozen_plan
+                    self._write_campaign_state(state["plans"])
+            return frozen_plan["reflection_available_at"]
+
+        if require_existing:
+            raise PaperCampaignRuntimeError(
+                "existing attribution lacks durable campaign plan anchor"
+            )
+
+        new_plan = record_for(canonical_available_at)
+        try:
+            anchored = self.settlement_bridge.bind_campaign_plan_anchor(
+                ticket_id=witness.ticket_id,
+                plan_id=new_plan["plan_id"],
+                reflection_available_at=new_plan["reflection_available_at"],
+            )
+        except PaperSettlementLearningBridgeError as exc:
+            raise PaperCampaignRuntimeError(
+                "campaign finalization plan conflicts with bridge anchor"
+            ) from exc
+        if anchored != (
+            new_plan["plan_id"],
+            new_plan["reflection_available_at"],
+        ):
+            raise PaperCampaignRuntimeError(
+                "campaign bridge anchor acknowledgement mismatch"
+            )
+
+        # Anchor-first publication is deliberate. A crash here leaves enough
+        # immutable bridge evidence to reconstruct exactly this plan; a changed
+        # plan cannot replace it merely by deleting or rolling back the sidecar.
+        with WorkspaceEconomicLock(self.state_path.parent):
+            state = self._read_campaign_state()
+            concurrent = state["plans"].get(witness.ticket_id)
+            if concurrent is not None and concurrent != new_plan:
+                raise PaperCampaignRuntimeError(
+                    "campaign sidecar changed during plan publication"
+                )
+            if concurrent is None:
+                state["plans"][witness.ticket_id] = new_plan
+                self._write_campaign_state(state["plans"])
+        return new_plan["reflection_available_at"]
 
     @property
     def agent_loop(self):

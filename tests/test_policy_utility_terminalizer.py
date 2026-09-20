@@ -1,9 +1,20 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from decimal import Decimal
+import hashlib
 
 import pytest
 
+from autosport.learning_environment import (
+    CausalLearningEnvironment,
+    EnvironmentIdentity,
+    EvidenceTruth,
+    Observation,
+    Outcome,
+    RewardEvidence,
+)
+from autosport.policy_update_authority import UTILITY_AUTHORITY_UNRESOLVED
 from autosport.policy_utility_evidence import (
     AuthorityRef,
     DecisionKind,
@@ -17,6 +28,7 @@ from autosport.policy_utility_terminalizer import (
     PolicyUtilityTerminalizer,
     TerminalizationDisposition,
 )
+from autosport.transparent_bandit_policy import BanditPolicyState
 
 
 UTC_NOW = datetime(2026, 9, 20, 12, 0, tzinfo=timezone.utc)
@@ -64,6 +76,98 @@ def _evidence(**overrides: object) -> PolicyUtilityEvidence:
     }
     values.update(overrides)
     return PolicyUtilityEvidence(**values)  # type: ignore[arg-type]
+
+
+def _blocked_learning_case():
+    identity = EnvironmentIdentity(
+        source_id="paper-replay-source-v1",
+        config_id="terminalizer-config-v1",
+        data_id="terminalizer-dataset-v1",
+        protocol_id="rq-terminalizer-001",
+        cutoff_ts="2026-09-20T12:00:00Z",
+        seed=41,
+    )
+    environment = CausalLearningEnvironment(
+        identity,
+        episode_key="terminalizer-episode",
+        policy_id="transparent-bandit-bootstrap-v1",
+        admissible_actions=frozenset({"PAPER_PROPOSAL", "WAIT"}),
+    )
+    observation = Observation(
+        environment_id=environment.environment_id,
+        observed_at="2026-09-20T12:00:01Z",
+        available_at="2026-09-20T12:00:02Z",
+        evidence=(("quote", "2.10"),),
+    )
+    action = environment.act(
+        observation,
+        action_type="PAPER_PROPOSAL",
+        decision_at="2026-09-20T12:00:03Z",
+    )
+    outcome = Outcome(
+        environment_id=environment.environment_id,
+        action_id=action.action_id,
+        revealed_at="2026-09-20T12:10:00Z",
+        truth=EvidenceTruth.OBSERVED,
+        evidence=(("result", "home-win"),),
+    )
+    reward = RewardEvidence(
+        environment_id=environment.environment_id,
+        action_id=action.action_id,
+        outcome_id=outcome.outcome_id,
+        reward=Decimal("0.25"),
+        available_at="2026-09-20T12:10:01Z",
+        truth=EvidenceTruth.OBSERVED,
+        evidence=(("paper_settlement", "canonical"),),
+    )
+    transition = environment.resolve(
+        action.action_id,
+        outcome=outcome,
+        reward=reward,
+        resolved_at="2026-09-20T12:10:02Z",
+    )
+    config_sha256 = hashlib.sha256(b"terminalizer-config-v1").hexdigest()
+    policy = BanditPolicyState.initial(
+        environment_id=environment.environment_id,
+        protocol_id="rq-terminalizer-001",
+        config_sha256=config_sha256,
+        seed=41,
+        action_types=frozenset({"PAPER_PROPOSAL", "WAIT"}),
+    )
+    utility = PolicyUtilityEvidence(
+        environment_id=policy.environment_id,
+        episode_id=transition.episode_id,
+        action_id=action.action_id,
+        outcome_id=reward.outcome_id,
+        reward_id=reward.reward_id,
+        transition_id=transition.transition_id,
+        policy_id=policy.policy_id,
+        model_id="transparent-bandit",
+        strategy_id="paper-proposal",
+        config_sha256=policy.config_sha256,
+        protocol_sha256=hashlib.sha256(b"rq-terminalizer-001").hexdigest(),
+        economic_goal_fingerprint=hashlib.sha256(b"goal").hexdigest(),
+        risk_fingerprint=hashlib.sha256(b"risk").hexdigest(),
+        bankroll_id="paper-bankroll",
+        portfolio_identity="paper-portfolio",
+        utility_definition_family="owner-net-utility",
+        utility_definition_version="v1",
+        utility_definition_sha256=hashlib.sha256(b"owner-net-utility-v1").hexdigest(),
+        completeness=UtilityCompleteness.INCOMPLETE,
+        truth_class=UtilityTruthClass.OBSERVED,
+        decision_kind=DecisionKind.POSITIONED,
+        available_at=UTC_NOW,
+        currency="EUR",
+        utility_value=Decimal("0.20"),
+        authority_refs=(
+            AuthorityRef(
+                "campaign-economics",
+                "campaign-evidence-v1",
+                hashlib.sha256(b"campaign-economics").hexdigest(),
+            ),
+        ),
+    )
+    return policy, action, reward, transition, utility
 
 
 def test_incomplete_evidence_closes_as_blocked_and_is_idempotent(tmp_path) -> None:
@@ -115,6 +219,70 @@ def test_terminalizer_rejects_policy_utility_subclass_before_store_mutation(tmp_
 
     with pytest.raises(TypeError, match="PolicyUtilityEvidence"):
         terminalizer.terminalize(forged)
+
+
+def test_blocked_update_is_durable_replay_safe_and_preserves_champion(tmp_path) -> None:
+    policy, action, reward, transition, utility = _blocked_learning_case()
+    path = tmp_path / "utility.jsonl"
+
+    first = PolicyUtilityTerminalizer.from_path(path).terminalize_blocked_update(
+        policy=policy,
+        action=action,
+        reward=reward,
+        transition=transition,
+        utility=utility,
+    )
+    retry = PolicyUtilityTerminalizer.from_path(path).terminalize_blocked_update(
+        policy=policy,
+        action=action,
+        reward=reward,
+        transition=transition,
+        utility=utility,
+    )
+
+    assert first.terminal.persisted is True
+    assert retry.terminal.persisted is False
+    assert first.update_evidence == retry.update_evidence
+    assert first.champion_policy_id == retry.champion_policy_id == policy.policy_id
+    assert first.update_evidence.reason_codes == (UTILITY_AUTHORITY_UNRESOLVED,)
+    assert first.update_evidence.predecessor_policy_id == policy.policy_id
+    assert first.update_evidence.successor_policy_id == policy.policy_id
+    assert policy.generation == 0
+    assert PolicyUtilityTerminalizer.from_path(path).resolve(utility.evidence_id) == utility
+
+
+def test_blocked_update_captures_utility_binding_mismatch_without_raw_reward_learning(
+    tmp_path,
+) -> None:
+    policy, action, reward, transition, utility = _blocked_learning_case()
+    mismatched = PolicyUtilityEvidence(
+        **{
+            field: (
+                "different-reward"
+                if field == "reward_id"
+                else getattr(utility, field)
+            )
+            for field in utility.__dataclass_fields__
+        }
+    )
+
+    receipt = PolicyUtilityTerminalizer.from_path(
+        tmp_path / "utility.jsonl"
+    ).terminalize_blocked_update(
+        policy=policy,
+        action=action,
+        reward=reward,
+        transition=transition,
+        utility=mismatched,
+    )
+
+    assert receipt.champion_policy_id == policy.policy_id
+    assert receipt.update_evidence.reason_codes == (
+        UTILITY_AUTHORITY_UNRESOLVED,
+        "utility_reward_mismatch",
+    )
+    assert receipt.update_evidence.successor_policy_id == policy.policy_id
+    assert policy.generation == 0
 
 
 def test_changed_evidence_for_same_causal_key_fails_closed(tmp_path) -> None:

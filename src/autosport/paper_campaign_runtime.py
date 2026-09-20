@@ -305,8 +305,6 @@ class PaperCampaignRuntime:
             "binding_id",
             "settlement_bundle_sha256",
             "transition_id",
-            "attribution_id",
-            "postmortem_id",
             "observation_id",
             "action_id",
             "baseline_checkpoint_id",
@@ -317,6 +315,7 @@ class PaperCampaignRuntime:
             "research_question_statement",
             "research_budget_units",
             "research_deadline_at",
+            "reflection_available_at",
         }
         for ticket_id, record in state["plans"].items():
             _text(ticket_id, "campaign ticket_id")
@@ -328,8 +327,6 @@ class PaperCampaignRuntime:
                 "binding_id",
                 "settlement_bundle_sha256",
                 "transition_id",
-                "attribution_id",
-                "postmortem_id",
                 "observation_id",
                 "action_id",
                 "baseline_checkpoint_id",
@@ -357,6 +354,7 @@ class PaperCampaignRuntime:
             deadline = record["research_deadline_at"]
             if deadline is not None:
                 _timestamp(deadline, "research_deadline_at")
+            _timestamp(record["reflection_available_at"], "reflection_available_at")
             semantic = {key: value for key, value in record.items() if key != "plan_id"}
             if _sha(record["plan_id"], "plan_id") != _digest(semantic):
                 raise PaperCampaignRuntimeError("campaign plan digest mismatch")
@@ -373,11 +371,13 @@ class PaperCampaignRuntime:
     def _bind_finalization_plan(
         self,
         witness: PaperSettlementLearningWitness,
-        attribution: OutcomeAttribution,
-        postmortem: ReflectionPostmortem,
         *,
+        available_at: str,
         require_existing: bool = False,
-    ) -> None:
+    ) -> str:
+        canonical_available_at = _timestamp(
+            available_at, "reflection_plan available_at"
+        )
         deadline = self.reflection_plan.research_deadline_at
         canonical_deadline = (
             None if deadline is None else _timestamp(deadline, "research_deadline_at")
@@ -387,8 +387,6 @@ class PaperCampaignRuntime:
             "binding_id": witness.binding_id,
             "settlement_bundle_sha256": witness.settlement_bundle_sha256,
             "transition_id": witness.transition.transition_id,
-            "attribution_id": attribution.attribution_id,
-            "postmortem_id": postmortem.postmortem_id,
             "observation_id": witness.observation.observation_id,
             "action_id": witness.action.action_id,
             "baseline_checkpoint_id": witness.baseline_checkpoint.checkpoint_id,
@@ -403,21 +401,38 @@ class PaperCampaignRuntime:
             "research_budget_units": self.reflection_plan.research_budget_units,
             "research_deadline_at": canonical_deadline,
         }
-        record = {"plan_id": _digest(semantic), **semantic}
         with WorkspaceEconomicLock(self.state_path.parent):
             state = self._read_campaign_state()
             existing = state["plans"].get(witness.ticket_id)
-            if existing is not None and existing != record:
-                raise PaperCampaignRuntimeError(
-                    "durable campaign finalization plan conflicts with retry"
-                )
-            if existing is None:
-                if require_existing:
+            if existing is not None:
+                existing_semantic = {
+                    key: value
+                    for key, value in existing.items()
+                    if key not in {"plan_id", "reflection_available_at"}
+                }
+                if existing_semantic != semantic:
                     raise PaperCampaignRuntimeError(
-                        "existing research postmortem lacks durable campaign finalization plan"
+                        "durable campaign finalization plan conflicts with retry"
                     )
-                state["plans"][witness.ticket_id] = record
-                self._write_campaign_state(state["plans"])
+                return _timestamp(
+                    existing["reflection_available_at"],
+                    "reflection_available_at",
+                )
+            if require_existing:
+                raise PaperCampaignRuntimeError(
+                    "existing attribution lacks durable campaign finalization plan"
+                )
+            durable_semantic = {
+                **semantic,
+                "reflection_available_at": canonical_available_at,
+            }
+            record = {
+                "plan_id": _digest(durable_semantic),
+                **durable_semantic,
+            }
+            state["plans"][witness.ticket_id] = record
+            self._write_campaign_state(state["plans"])
+            return canonical_available_at
 
     @property
     def agent_loop(self):
@@ -571,6 +586,11 @@ class PaperCampaignRuntime:
         self._verify_witness_against_loop(witness)
 
         snapshot = self.agent_loop.snapshot()
+        reflection_available_at = self._bind_finalization_plan(
+            witness,
+            available_at=now,
+            require_existing=snapshot.attribution_id is not None,
+        )
         if snapshot.phase is AgentLoopPhase.EVALUATE:
             self.agent_loop.advance(expected=AgentLoopPhase.EVALUATE, at=now)
             snapshot = self.agent_loop.snapshot()
@@ -584,7 +604,10 @@ class PaperCampaignRuntime:
                 "bridge resolution is not yet acknowledged by AgentLoop"
             )
 
-        attribution = self._attribution(witness)
+        attribution = self._attribution(
+            witness,
+            available_at=reflection_available_at,
+        )
         # Always route through the canonical immutable-evidence writer, even
         # after a restart.  ``attribution_id`` intentionally identifies the
         # transition/reward boundary, not a particular interpretation of it;
@@ -607,39 +630,20 @@ class PaperCampaignRuntime:
                 "AgentLoop did not advance to a postmortem-capable phase"
             )
 
-        postmortem = self._postmortem(attribution, witness)
-        snapshot = self.agent_loop.snapshot()
-        if snapshot.postmortem_id is not None:
-            # Legacy/restart state must prove that the durable AgentLoop
-            # postmortem is exactly this payload before any sidecar can be
-            # created or changed.  A research postmortem without the sidecar is
-            # unverifiable because its original budget/deadline lived only in
-            # memory, so fail closed instead of inventing them on restart.
-            try:
-                self.agent_loop.record_postmortem(postmortem, at=now)
-            except AgentLoopError as exc:
-                raise PaperCampaignRuntimeError(
-                    "AgentLoop is bound to conflicting postmortem evidence"
-                ) from exc
-            self._bind_finalization_plan(
-                witness,
-                attribution,
-                postmortem,
-                require_existing=(
-                    self.reflection_plan.research_question_statement is not None
-                ),
-            )
-        else:
-            # Freeze all optional research bounds and exact bridge/checkpoint
-            # identities before the durable postmortem crosses the crash
-            # boundary. A changed retry then collides with this immutable plan.
-            self._bind_finalization_plan(witness, attribution, postmortem)
-            try:
-                self.agent_loop.record_postmortem(postmortem, at=now)
-            except AgentLoopError as exc:
-                raise PaperCampaignRuntimeError(
-                    "AgentLoop is bound to conflicting postmortem evidence"
-                ) from exc
+        postmortem = self._postmortem(
+            attribution,
+            witness,
+            available_at=reflection_available_at,
+        )
+        # The immutable plan and its first real availability time were already
+        # sealed before attribution. AgentLoop remains the sole postmortem
+        # authority and enforces exact-payload idempotency here.
+        try:
+            self.agent_loop.record_postmortem(postmortem, at=now)
+        except AgentLoopError as exc:
+            raise PaperCampaignRuntimeError(
+                "AgentLoop is bound to conflicting postmortem evidence"
+            ) from exc
         snapshot = self.agent_loop.snapshot()
 
         if snapshot.phase is AgentLoopPhase.RESEARCH_HANDOFF:
@@ -743,17 +747,25 @@ class PaperCampaignRuntime:
     def _attribution(
         self,
         witness: PaperSettlementLearningWitness,
+        *,
+        available_at: str,
     ) -> OutcomeAttribution:
-        available_at = _timestamp(
-            witness.reward.available_at,
-            "reward.available_at",
+        reflection_available_at = _timestamp(
+            available_at,
+            "reflection available_at",
         )
+        if _instant(
+            reflection_available_at, "reflection available_at"
+        ) < _instant(witness.reward.available_at, "reward.available_at"):
+            raise PaperCampaignRuntimeError(
+                "reflection plan predates authoritative reward availability"
+            )
         findings = tuple(
             AttributionFinding(
                 component=component,
                 status=AttributionStatus.UNKNOWN,
                 evidence_sha256=witness.settlement_bundle_sha256,
-                evidence_available_at=available_at,
+                evidence_available_at=reflection_available_at,
                 contribution=None,
                 reason_code=self.reflection_plan.reason_code,
             )
@@ -769,7 +781,7 @@ class PaperCampaignRuntime:
             reward_value=witness.reward.reward,
             truth=witness.reward.truth,
             simulation_model_id=witness.reward.simulation_model_id,
-            attributed_at=available_at,
+            attributed_at=reflection_available_at,
             findings=findings,
         )
 
@@ -777,11 +789,18 @@ class PaperCampaignRuntime:
         self,
         attribution: OutcomeAttribution,
         witness: PaperSettlementLearningWitness,
+        *,
+        available_at: str,
     ) -> ReflectionPostmortem:
+        created_at = _timestamp(available_at, "reflection available_at")
+        if created_at != attribution.attributed_at:
+            raise PaperCampaignRuntimeError(
+                "postmortem availability differs from frozen attribution time"
+            )
         return ReflectionPostmortem(
             attribution_id=attribution.attribution_id,
             transition_id=witness.transition.transition_id,
-            created_at=_timestamp(witness.reward.available_at, "reward.available_at"),
+            created_at=created_at,
             unresolved_components=self.reflection_plan.unresolved_components,
             summary_code=self.reflection_plan.summary_code,
             research_question_statement=self.reflection_plan.research_question_statement,

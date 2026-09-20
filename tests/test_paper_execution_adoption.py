@@ -133,7 +133,7 @@ class PaperExecutionAdoptionTests(unittest.TestCase):
                 current,
                 PaperAttemptOutcome.ACCEPTED,
                 odds="2.25",
-                stake="7.50",
+                stake="10.00",
             )
             registry = PaperExecutionEvidenceRegistry(ledger)
             registry.register(registered)
@@ -159,10 +159,10 @@ class PaperExecutionAdoptionTests(unittest.TestCase):
             self.assertEqual(first.ticket_ids, second.ticket_ids)
             self.assertEqual(len(book.tickets), 1)
             ticket = next(iter(book.tickets.values()))
-            self.assertEqual(str(ticket.stake), "7.50")
+            self.assertEqual(str(ticket.stake), "10.00")
             self.assertEqual(str(ticket.legs[0].locked_odds), "2.25")
             self.assertEqual(ticket.placed_at, STARTED_AT)
-            self.assertEqual(book.balance, __import__("decimal").Decimal("92.50"))
+            self.assertEqual(book.balance, __import__("decimal").Decimal("90.00"))
 
     def test_rejected_and_unknown_never_create_paper_exposure(self):
         for outcome, override in (

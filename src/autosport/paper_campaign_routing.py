@@ -236,9 +236,70 @@ class PaperCampaignRouteStore:
                 for ticket_id in sorted(state["routes"])
             )
 
-    def mark_finalized(self, route: PaperCampaignRoute) -> PaperCampaignRoute:
+    def _require_terminal_handoff(
+        self,
+        route: PaperCampaignRoute,
+        handoff: PaperCampaignLearningHandoff,
+    ) -> None:
+        """Re-resolve canonical terminal evidence before persisting FINALIZED."""
+
+        identity = self._handoff_identity(handoff)
+        expected_identity = self._route_identity(
+            ticket_id=route.ticket_id,
+            environment_id=route.environment_id,
+            episode_id=route.episode_id,
+            action_id=route.action_id,
+        )
+        if identity != expected_identity:
+            raise PaperCampaignRouteError(
+                "terminal campaign handoff conflicts with durable ticket route"
+            )
+        try:
+            witness = handoff.runtime.settlement_bridge.resolution_witness(route.ticket_id)
+        except PaperSettlementLearningBridgeError as exc:
+            raise PaperCampaignRouteError(
+                "campaign route lacks canonical terminal settlement evidence"
+            ) from exc
+
+        transition = getattr(witness, "transition", None)
+        next_checkpoint = getattr(witness, "next_checkpoint", None)
+        transition_id = getattr(transition, "transition_id", None)
+        checkpoint_id = getattr(next_checkpoint, "checkpoint_id", None)
+        if (
+            getattr(transition, "environment_id", None) != route.environment_id
+            or getattr(transition, "episode_id", None) != route.episode_id
+            or getattr(transition, "action_id", None) != route.action_id
+            or not transition_id
+            or not checkpoint_id
+        ):
+            raise PaperCampaignRouteError(
+                "campaign terminal witness conflicts with durable ticket route"
+            )
+
+        snapshot = handoff.runtime.agent_loop.snapshot()
+        if (
+            getattr(snapshot, "environment_id", None) != route.environment_id
+            or getattr(snapshot, "episode_id", None) != route.episode_id
+            or getattr(snapshot, "action_id", None) != route.action_id
+            or getattr(snapshot, "transition_id", None) != transition_id
+            or getattr(snapshot, "checkpointed_transition_id", None) != transition_id
+            or getattr(snapshot, "environment_checkpoint_id", None) != checkpoint_id
+            or getattr(snapshot, "attribution_id", None) is None
+            or getattr(snapshot, "postmortem_id", None) is None
+        ):
+            raise PaperCampaignRouteError(
+                "campaign handoff has not reached canonical terminal checkpoint"
+            )
+
+    def mark_finalized(
+        self,
+        route: PaperCampaignRoute,
+        *,
+        handoff: PaperCampaignLearningHandoff,
+    ) -> PaperCampaignRoute:
         if not isinstance(route, PaperCampaignRoute):
             raise TypeError("route must be PaperCampaignRoute")
+        self._require_terminal_handoff(route, handoff)
         with WorkspaceEconomicLock(self.path.parent):
             state = self._read()
             current = state["routes"].get(route.ticket_id)
@@ -369,7 +430,7 @@ class PaperCampaignLearningRouter:
                         "cannot verify routed learner outbox"
                     ) from exc
             else:
-                self.store.mark_finalized(route)
+                self.store.mark_finalized(route, handoff=handoff)
         return tuple(transitions)
 
 

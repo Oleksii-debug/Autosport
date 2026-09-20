@@ -147,6 +147,7 @@ class PredictiveAdmissionPolicy:
     minimum_selective_coverage: Decimal
     maximum_selective_risk: Decimal
     maximum_evidence_age_seconds: int
+    frozen_at: str
 
     def __post_init__(self) -> None:
         for name in (
@@ -174,6 +175,7 @@ class PredictiveAdmissionPolicy:
             self.maximum_evidence_age_seconds,
             "maximum_evidence_age_seconds",
         )
+        parse_iso_timestamp(_text(self.frozen_at, "frozen_at"))
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -191,6 +193,7 @@ class PredictiveAdmissionPolicy:
             "minimum_selective_coverage": str(self.minimum_selective_coverage),
             "maximum_selective_risk": str(self.maximum_selective_risk),
             "maximum_evidence_age_seconds": self.maximum_evidence_age_seconds,
+            "frozen_at": self.frozen_at,
         }
 
     @property
@@ -258,10 +261,10 @@ class ResolvedPredictiveEligibility:
         }
 
 
-def _available_by(entry: Any, decision_time: object, name: str) -> None:
-    if parse_iso_timestamp(entry.available_at) > decision_time:
+def _available_by(entry: Any, cutoff: object, name: str) -> None:
+    if parse_iso_timestamp(entry.available_at) > cutoff:
         raise PredictiveQualificationError(
-            f"{name} was not causally available at decision time"
+            f"{name} was not causally available before forecast generation"
         )
 
 
@@ -276,9 +279,9 @@ def resolve_predictive_eligibility(
     """Resolve positive predictive eligibility only from durable registry truth.
 
     Missing, mismatched, stale, revoked, under-supported, or self-asserted evidence
-    raises PredictiveQualificationError. The typed calibration/selective-prediction
-    artifact is accepted only when its exact digest was frozen into the durable
-    EvaluationBundle. Callers must translate failure to WAIT/ZERO.
+    raises PredictiveQualificationError. Policy, qualification, and promotion lineage
+    must already be frozen before forecast generation, and the strategy must remain
+    the durable champion through portfolio decision time.
     """
 
     if not isinstance(registry, ScientificRegistry):
@@ -295,17 +298,25 @@ def resolve_predictive_eligibility(
         )
 
     decision = parse_iso_timestamp(_text(decision_time, "decision_time"))
+    generated = parse_iso_timestamp(forecast.generated_at)
+    policy_frozen = parse_iso_timestamp(policy.frozen_at)
     qualification_at = parse_iso_timestamp(qualification.available_at)
-    if qualification_at > decision:
-        raise PredictiveQualificationError(
-            "calibration qualification was not causally available at decision time"
-        )
-    if parse_iso_timestamp(forecast.generated_at) > decision:
+    if generated > decision:
         raise PredictiveQualificationError(
             "forecast was generated after decision time"
         )
-    if parse_iso_timestamp(forecast.input_cutoff_ts) > decision:
-        raise PredictiveQualificationError("forecast input cutoff is from the future")
+    if policy_frozen > generated:
+        raise PredictiveQualificationError(
+            "predictive admission policy was frozen after forecast generation"
+        )
+    if qualification_at > generated:
+        raise PredictiveQualificationError(
+            "calibration qualification was not available before forecast generation"
+        )
+    if parse_iso_timestamp(forecast.input_cutoff_ts) > generated:
+        raise PredictiveQualificationError(
+            "forecast input cutoff is after forecast generation"
+        )
     if forecast.uncertainty > policy.maximum_uncertainty:
         raise PredictiveQualificationError(
             "forecast uncertainty exceeds frozen policy threshold"
@@ -335,7 +346,7 @@ def resolve_predictive_eligibility(
         raise PredictiveQualificationError(
             "forecast strategy version is absent from ScientificRegistry"
         )
-    _available_by(strategy, decision, "StrategyVersion")
+    _available_by(strategy, generated, "StrategyVersion")
     if strategy.payload.get("canonical_strategy_id") != policy.canonical_strategy_id:
         raise PredictiveQualificationError(
             "forecast strategy belongs to a different canonical strategy"
@@ -348,14 +359,18 @@ def resolve_predictive_eligibility(
         raise PredictiveQualificationError(
             "forecast model version is absent from ScientificRegistry"
         )
-    _available_by(model, decision, "ModelVersion")
+    _available_by(model, generated, "ModelVersion")
     if model.payload.get("model_family") != forecast.model_id:
         raise PredictiveQualificationError(
             "forecast model family does not match durable ModelVersion"
         )
 
     try:
-        champion = registry.champion_strategy(
+        champion_at_generation = registry.champion_strategy(
+            as_of=forecast.generated_at,
+            canonical_strategy_id=policy.canonical_strategy_id,
+        )
+        champion_at_decision = registry.champion_strategy(
             as_of=decision_time,
             canonical_strategy_id=policy.canonical_strategy_id,
         )
@@ -363,15 +378,19 @@ def resolve_predictive_eligibility(
         raise PredictiveQualificationError(
             "durable promotion history is not resolvable"
         ) from exc
-    if champion != forecast.strategy_version:
+    if champion_at_generation != forecast.strategy_version:
         raise PredictiveQualificationError(
-            "forecast strategy is not the durable champion at decision time"
+            "forecast strategy was not the durable champion at generation time"
+        )
+    if champion_at_decision != forecast.strategy_version:
+        raise PredictiveQualificationError(
+            "forecast strategy is no longer the durable champion at decision time"
         )
 
     decisions = tuple(
         entry
         for entry in registry.causal_records(
-            "PromotionDecision", as_of=decision_time
+            "PromotionDecision", as_of=forecast.generated_at
         )
         if entry.payload.get("action") == PromotionAction.PROMOTE.value
         and entry.payload.get("candidate_strategy_version_id")
@@ -381,7 +400,7 @@ def resolve_predictive_eligibility(
     )
     if not decisions:
         raise PredictiveQualificationError(
-            "no causal durable PROMOTE decision authorizes forecast identity"
+            "no pre-forecast durable PROMOTE decision authorizes forecast identity"
         )
     decision_entry = decisions[-1]
     promotion_evidence_id = decision_entry.payload.get("promotion_evidence_id")
@@ -395,7 +414,7 @@ def resolve_predictive_eligibility(
         raise PredictiveQualificationError(
             "PromotionEvidence is missing from ScientificRegistry"
         )
-    _available_by(evidence, decision, "PromotionEvidence")
+    _available_by(evidence, generated, "PromotionEvidence")
     ep = evidence.payload
     if ep.get("validity") != PromotionEvidenceValidity.ELIGIBLE.value:
         raise PredictiveQualificationError(
@@ -436,7 +455,7 @@ def resolve_predictive_eligibility(
     )
     if bundle is None:
         raise PredictiveQualificationError("promotion EvaluationBundle is missing")
-    _available_by(bundle, decision, "EvaluationBundle")
+    _available_by(bundle, generated, "EvaluationBundle")
     if bundle.record_sha256 != decision_entry.payload.get(
         "evaluation_bundle_sha256"
     ):
@@ -484,7 +503,7 @@ def resolve_predictive_eligibility(
     )
     if protocol is None:
         raise PredictiveQualificationError("promotion ResearchProtocol is missing")
-    _available_by(protocol, decision, "ResearchProtocol")
+    _available_by(protocol, generated, "ResearchProtocol")
     protocol_sha256 = protocol.payload.get("protocol_sha256")
     if protocol_sha256 != decision_entry.payload.get("protocol_sha256"):
         raise PredictiveQualificationError("promotion protocol digest mismatch")
@@ -510,7 +529,7 @@ def resolve_predictive_eligibility(
     )
     if dataset is None:
         raise PredictiveQualificationError("evaluation DatasetSnapshot is missing")
-    _available_by(dataset, decision, "DatasetSnapshot")
+    _available_by(dataset, generated, "DatasetSnapshot")
     if qualification.dataset_snapshot_id != dataset.record_id:
         raise PredictiveQualificationError(
             "calibration qualification dataset identity mismatch"
@@ -532,7 +551,7 @@ def resolve_predictive_eligibility(
         raise PredictiveQualificationError(
             "predictive calibration qualification is stale"
         )
-    available_at = max(evidence_at, qualification_at)
+    available_at = max(evidence_at, qualification_at, policy_frozen)
     valid_until = min(evidence_at + max_age, qualification_at + max_age)
 
     return ResolvedPredictiveEligibility(

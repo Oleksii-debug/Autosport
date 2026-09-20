@@ -90,10 +90,10 @@ def test_generic_monotonic_authority_cannot_forge_provider_acquisition_receipt(t
     )
 
     # The generic history is no longer sufficient. Only save() of the exact object
-    # issued by the fixed production acquisition boundary can mint the HMAC receipt.
+    # issued by the fixed production acquisition boundary can mint durable origin proof.
     with pytest.raises(
         ProviderObservationIntegrityError,
-        match="production-owned acquisition receipt",
+        match=r"production(?:-owned)? acquisition",
     ):
         CompleteGameBoardEvidenceStore(
             workspace,

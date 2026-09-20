@@ -5,6 +5,7 @@ import json
 import tempfile
 import unittest
 from dataclasses import dataclass, replace
+from unittest.mock import patch
 from decimal import Decimal, ROUND_DOWN, localcontext
 from pathlib import Path
 from typing import Any
@@ -583,21 +584,53 @@ class CanonicalOutcomeDerivedVOCScoreAuthorityTests(unittest.TestCase):
             policy_version=1,
             cloud_enabled=False,
         )
-        router.route(
-            request,
-            candidates,
-            policy,
-            as_of=paired.decision_at,
-            voc_precompute_admission={
-                "admission_id": f"explicit:{paired.evaluation_id}",
-                "research_protocol_id": protocol_id or paired.research_protocol_id,
-                "cohort_id": cohort_id,
-                "baseline_candidate_id": paired.baseline_candidate_id,
-                "challenger_candidate_id": paired.challenger_candidate_id,
-                "sport_id": paired.sport_id,
-                "league_id": paired.league_id,
-            },
-        )
+        with patch(
+            "autosport.model_compute_router._authority_now",
+            side_effect=[
+                paired.decision_at,
+                paired.baseline_completed_at,
+                paired.challenger_completed_at,
+            ],
+        ):
+            router.route(
+                request,
+                candidates,
+                policy,
+                as_of=paired.decision_at,
+                voc_precompute_admission={
+                    "admission_id": f"explicit:{paired.evaluation_id}",
+                    "research_protocol_id": (
+                        protocol_id or paired.research_protocol_id
+                    ),
+                    "cohort_id": cohort_id,
+                    "baseline_candidate_id": paired.baseline_candidate_id,
+                    "challenger_candidate_id": paired.challenger_candidate_id,
+                    "sport_id": paired.sport_id,
+                    "league_id": paired.league_id,
+                },
+            )
+            router.record_voc_shadow_execution(
+                request_id=request_id,
+                role="baseline",
+                output_sha256=paired.baseline_output_sha256,
+                action=paired.baseline_action,
+                abstained=paired.baseline_abstained,
+                completed_at=paired.baseline_completed_at,
+                available_at=paired.baseline_completed_at,
+                actual_cost=Decimal("0.10"),
+                evidence_sha256=paired.baseline_output_sha256,
+            )
+            router.record_voc_shadow_execution(
+                request_id=request_id,
+                role="challenger",
+                output_sha256=paired.challenger_output_sha256,
+                action=paired.challenger_action,
+                abstained=paired.challenger_abstained,
+                completed_at=paired.challenger_completed_at,
+                available_at=paired.challenger_completed_at,
+                actual_cost=Decimal("0.20"),
+                evidence_sha256=paired.challenger_output_sha256,
+            )
         return router
 
     def _authority(

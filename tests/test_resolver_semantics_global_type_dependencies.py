@@ -294,3 +294,38 @@ def test_global_custom_descriptor_fails_closed_without_invoking_get() -> None:
         )
 
     assert descriptor.calls == 0
+
+
+
+class _ConstructorProbeResolver:
+    calls = 0
+
+    def __init__(self) -> None:
+        type(self).calls += 1
+
+    def resolve_instance(self, record: EventLifecycleRecord, *, as_of: str):
+        return None
+
+
+class _ConstructorProbeProductSource(_ProductSource):
+    settlement_resolver_implementation_id = "provider-a-constructor-probe-v1"
+
+    def resolve(self, record: EventLifecycleRecord, *, as_of: str):
+        return _ConstructorProbeResolver().resolve_instance(record, as_of=as_of)
+
+
+def test_global_type_instance_dependency_fails_closed_without_running_constructor() -> None:
+    _ConstructorProbeResolver.calls = 0
+    source = _ConstructorProbeProductSource()
+
+    with pytest.raises(
+        ProductCompositionError,
+        match="source-owned settlement resolve semantics cannot be fingerprinted safely",
+    ):
+        _settlement_authority_identity(
+            source=source,
+            source_id=source.source_id,
+            outcome_authority=source,
+        )
+
+    assert _ConstructorProbeResolver.calls == 0

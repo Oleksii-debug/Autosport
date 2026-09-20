@@ -64,6 +64,21 @@ from . import _dataset_snapshot_lineage_publication as _dataset_snapshot_lineage
 from . import _dataset_snapshot_lineage_publication_provenance as _dataset_snapshot_lineage_publication_provenance  # noqa: F401,E402
 from . import _dataset_snapshot_lineage_publication_trust_root as _dataset_snapshot_lineage_publication_trust_root  # noqa: F401,E402
 
+# Structural cursor/range witnesses are useful legacy intake evidence but are not
+# production provider-completeness authority. Install the fail-closed public gate;
+# the supported denominator path consumes the exact live CompleteGameBoardSnapshot.
+from . import _evaluation_universe_structural_gate as _evaluation_universe_structural_gate  # noqa: F401,E402
+
+# Provider membership alone cannot authorize caller-created decision semantics. The
+# production denominator must consume the exact product-owned pre-evaluation semantic
+# capability before freezing the initial row set.
+from . import _provider_evaluation_semantic_gate as _provider_evaluation_semantic_gate  # noqa: F401,E402
+
+# A live #662 origin alone is transferable and cannot prove which exact semantic
+# session the product derived. Record the canonical derivation result per live origin
+# and require that exact semantic digest before #638 denominator admission.
+from . import _provider_evaluation_semantic_issuance as _provider_evaluation_semantic_issuance  # noqa: F401,E402
+
 # Campaign/provider applicability needs a stable authenticated Betfair account
 # discriminator, but application/session credentials must never become evidence.
 from . import _campaign_provider_scope_devapp_identity as _campaign_provider_scope_devapp_identity  # noqa: F401,E402

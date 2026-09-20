@@ -208,16 +208,54 @@ class LiveOpportunityProofTests(unittest.TestCase):
             decision_at=decision_at or self.DECISION_AT,
         )
 
-    def test_exact_complete_current_after_cost_arbitrage_is_positive(self) -> None:
+    def test_exact_complete_current_after_cost_arbitrage_is_theoretical_until_product_authority_resolves(self) -> None:
         intent = self._intent()
         proof = self._classify(intent)
         self.assertEqual(
             proof.classification,
-            OpportunityProofClassification.OUTCOME_INDEPENDENT_POSITIVE,
+            OpportunityProofClassification.THEORETICAL_ARBITRAGE_ONLY,
         )
         self.assertEqual(proof.gross_min_pnl, Decimal("5"))
         self.assertEqual(proof.after_cost_min_pnl, Decimal("4"))
+        self.assertIn("caller assertions", proof.reason)
         self.assertEqual(len(proof.proof_sha256), 64)
+
+    def test_caller_forged_zero_cost_complete_witness_cannot_mint_positive(self) -> None:
+        intent = self._intent()
+        forged = self._cost(intent, amount=Decimal("0"), complete=True)
+        proof = self._classify(intent, cost=forged)
+        self.assertNotEqual(
+            proof.classification,
+            OpportunityProofClassification.OUTCOME_INDEPENDENT_POSITIVE,
+        )
+
+    def test_caller_forged_future_freshness_cannot_mint_positive(self) -> None:
+        intent = self._intent()
+        forged = self._fresh(intent, valid_until="2099-01-01T00:00:00+00:00")
+        proof = self._classify(intent, fresh=forged)
+        self.assertNotEqual(
+            proof.classification,
+            OpportunityProofClassification.OUTCOME_INDEPENDENT_POSITIVE,
+        )
+
+    def test_caller_constructed_exact_scenario_cannot_mint_positive(self) -> None:
+        intent = self._intent()
+        forged = self._scenario(worst=Decimal("999"), exact=True, exhaustive=True)
+        proof = self._classify(intent, scenario=forged)
+        self.assertNotEqual(
+            proof.classification,
+            OpportunityProofClassification.OUTCOME_INDEPENDENT_POSITIVE,
+        )
+
+    def test_scenario_from_another_intent_cannot_mint_positive(self) -> None:
+        first = self._intent()
+        second = replace(first, intent_id="other-intent")
+        scenario_from_first = self._scenario()
+        proof = self._classify(second, scenario=scenario_from_first)
+        self.assertNotEqual(
+            proof.classification,
+            OpportunityProofClassification.OUTCOME_INDEPENDENT_POSITIVE,
+        )
 
     def test_incomplete_outcome_space_is_partial_coverage(self) -> None:
         intent = self._intent(complete=False)

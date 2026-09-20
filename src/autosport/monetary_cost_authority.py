@@ -418,14 +418,7 @@ class MonetaryCostAuthority:
             raise MonetaryAuthorityError(
                 "future-available allocation cannot be captured"
             )
-        source = self._resolve(allocation.source_ref)
-        if (
-            tuple(campaign_id for campaign_id, _ in allocation.shares)
-            != source.snapshot.campaign_ids
-        ):
-            raise MonetaryAuthorityError(
-                "allocation must cover source campaigns exactly"
-            )
+        self._validate_allocation_source(allocation)
         if any(
             previous.source_ref == allocation.source_ref
             and previous != allocation
@@ -593,6 +586,22 @@ class MonetaryCostAuthority:
             )
         return record
 
+    def _validate_allocation_source(
+        self,
+        allocation: SharedAllocationSnapshot,
+    ) -> MonetarySourceRecord:
+        """Replay exact allocation applicability for live and durable state."""
+
+        source = self._resolve(allocation.source_ref)
+        if (
+            tuple(campaign_id for campaign_id, _ in allocation.shares)
+            != source.snapshot.campaign_ids
+        ):
+            raise MonetaryAuthorityError(
+                "allocation must cover source campaigns exactly"
+            )
+        return source
+
     def _superseder(
         self,
         record: MonetarySourceRecord,
@@ -693,7 +702,7 @@ class MonetaryCostAuthority:
             allocation = SharedAllocationSnapshot.from_dict(
                 _mapping(value, "allocation")
             )
-            self._resolve(allocation.source_ref)
+            self._validate_allocation_source(allocation)
             if allocation.sha256 in self._allocations:
                 raise MonetaryAuthorityError(
                     "duplicate durable allocation"

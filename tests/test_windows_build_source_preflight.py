@@ -493,7 +493,7 @@ class WindowsBuildSourcePreflightTests(unittest.TestCase):
         workflow = Path(".github/workflows/windows-build.yml").read_text(encoding="utf-8")
         exact_ref = "ref: ${{ github.event.pull_request.head.sha || github.sha }}"
         preflight = "python scripts/verify_source_checkout.py --source-sha $env:AUTOSPORT_SOURCE_SHA"
-        build = "run: ./scripts/build_windows.ps1"
+        build = "run: ./scripts/build_windows_candidate.ps1"
         self.assertIn(exact_ref, workflow)
         self.assertIn("fetch-depth: 0", workflow)
         self.assertIn(preflight, workflow)

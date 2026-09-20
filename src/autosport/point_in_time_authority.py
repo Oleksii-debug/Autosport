@@ -65,6 +65,7 @@ _WITNESS_KEYS: Final = frozenset(
         "source_revision_sha256",
         "witness_kind",
         "witness_content_sha256",
+        "witness_content_json",
         "source_as_of",
         "available_at",
         "recorded_at",
@@ -305,9 +306,67 @@ class AvailabilityWitnessAuthority:
     source_revision_sha256: str
     witness_kind: str
     witness_content_sha256: str
+    witness_content_json: str
     source_as_of: datetime
     available_at: datetime
     recorded_at: datetime
+
+    @staticmethod
+    def _parse_content(value: object) -> dict[str, object]:
+        text = _text(value, "witness_content_json")
+        try:
+            raw = strict_json_loads(text)
+        except (TypeError, ValueError) as exc:
+            raise SourceRevisionAuthorityError(
+                "availability witness content must be strict canonical JSON"
+            ) from exc
+        expected = frozenset(
+            {
+                "schema",
+                "schema_version",
+                "source_identity",
+                "source_revision",
+                "source_revision_sha256",
+                "witness_kind",
+                "source_as_of",
+                "available_at",
+            }
+        )
+        if not isinstance(raw, dict) or frozenset(raw) != expected:
+            raise SourceRevisionAuthorityError(
+                "availability witness content fields mismatch"
+            )
+        if (
+            raw["schema"] != "autosport.source_availability_witness"
+            or raw["schema_version"] != 1
+        ):
+            raise SourceRevisionAuthorityError(
+                "unsupported availability witness content schema"
+            )
+        canonical = {
+            "schema": raw["schema"],
+            "schema_version": raw["schema_version"],
+            "source_identity": _text(
+                raw["source_identity"],
+                "witness source_identity",
+            ),
+            "source_revision": _text(
+                raw["source_revision"],
+                "witness source_revision",
+            ),
+            "source_revision_sha256": _sha256(
+                raw["source_revision_sha256"],
+                "witness source_revision_sha256",
+            ),
+            "witness_kind": _text(raw["witness_kind"], "witness_kind"),
+            "source_as_of": _iso(_instant(raw["source_as_of"], "source_as_of")),
+            "available_at": _iso(_instant(raw["available_at"], "available_at")),
+        }
+        if _canonical_json(canonical) != text:
+            raise SourceRevisionAuthorityError(
+                "availability witness content must use canonical encoding"
+            )
+        return canonical
 
     def __post_init__(self) -> None:
         for name in (
@@ -319,8 +378,32 @@ class AvailabilityWitnessAuthority:
             _text(getattr(self, name), name)
         for name in ("source_revision_sha256", "witness_content_sha256"):
             object.__setattr__(self, name, _sha256(getattr(self, name), name))
+        object.__setattr__(
+            self,
+            "witness_content_json",
+            _text(self.witness_content_json, "witness_content_json"),
+        )
         for name in ("source_as_of", "available_at", "recorded_at"):
             object.__setattr__(self, name, _aware_utc(getattr(self, name), name))
+        content = self._parse_content(self.witness_content_json)
+        actual_content_sha256 = hashlib.sha256(
+            self.witness_content_json.encode("utf-8")
+        ).hexdigest()
+        if actual_content_sha256 != self.witness_content_sha256:
+            raise SourceRevisionAuthorityError(
+                "availability witness content digest mismatch"
+            )
+        if (
+            content["source_identity"] != self.source_identity
+            or content["source_revision"] != self.source_revision
+            or content["source_revision_sha256"] != self.source_revision_sha256
+            or content["witness_kind"] != self.witness_kind
+            or _instant(content["source_as_of"], "source_as_of") != self.source_as_of
+            or _instant(content["available_at"], "available_at") != self.available_at
+        ):
+            raise SourceRevisionAuthorityError(
+                "availability witness content does not match authority fields"
+            )
         if self.source_as_of > self.available_at:
             raise SourceRevisionAuthorityError(
                 "availability witness cannot precede its source as-of instant"
@@ -338,6 +421,7 @@ class AvailabilityWitnessAuthority:
             "source_revision_sha256": self.source_revision_sha256,
             "witness_kind": self.witness_kind,
             "witness_content_sha256": self.witness_content_sha256,
+            "witness_content_json": self.witness_content_json,
             "source_as_of": _iso(self.source_as_of),
             "available_at": _iso(self.available_at),
             "recorded_at": _iso(self.recorded_at),
@@ -346,6 +430,30 @@ class AvailabilityWitnessAuthority:
     @property
     def authority_sha256(self) -> str:
         return _digest(self.to_payload())
+
+    @classmethod
+    def create(
+        cls,
+        *,
+        availability_witness_id: str,
+        witness_content_json: str,
+        recorded_at: datetime,
+    ) -> "AvailabilityWitnessAuthority":
+        content = cls._parse_content(witness_content_json)
+        return cls(
+            availability_witness_id=availability_witness_id,
+            source_identity=content["source_identity"],
+            source_revision=content["source_revision"],
+            source_revision_sha256=content["source_revision_sha256"],
+            witness_kind=content["witness_kind"],
+            witness_content_sha256=hashlib.sha256(
+                witness_content_json.encode("utf-8")
+            ).hexdigest(),
+            witness_content_json=witness_content_json,
+            source_as_of=_instant(content["source_as_of"], "source_as_of"),
+            available_at=_instant(content["available_at"], "available_at"),
+            recorded_at=recorded_at,
+        )
 
     @classmethod
     def from_payload(cls, payload: object) -> "AvailabilityWitnessAuthority":
@@ -366,6 +474,7 @@ class AvailabilityWitnessAuthority:
             source_revision_sha256=body["source_revision_sha256"],
             witness_kind=body["witness_kind"],
             witness_content_sha256=body["witness_content_sha256"],
+            witness_content_json=body["witness_content_json"],
             source_as_of=_instant(body["source_as_of"], "source_as_of"),
             available_at=_instant(body["available_at"], "available_at"),
             recorded_at=_instant(body["recorded_at"], "recorded_at"),

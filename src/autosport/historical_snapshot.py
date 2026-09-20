@@ -13,6 +13,7 @@ from urllib.parse import urlencode
 
 from .domain import MarketEvent
 from .integrity import atomic_write_json
+from .json_integrity import strict_json_loads
 from .parlayapi_provider import (
     ParlayApiTableTennisProvider,
     ProviderPayloadError,
@@ -43,6 +44,22 @@ class HistoricalSnapshotCapture:
     @property
     def has_data(self) -> bool:
         return self.quote_count > 0
+
+
+HISTORICAL_CAPTURE_WITNESS_KIND = "provider-historical-snapshot-capture"
+
+
+@dataclass(frozen=True, slots=True)
+class HistoricalSnapshotAuthority:
+    """Restart-verifiable authority derived from persisted canonical provider capture."""
+
+    source_identity: str
+    source_revision: str
+    source_revision_sha256: str
+    witness_kind: str
+    source_as_of: str
+    available_at: str
+    capture_sha256: str
 
 
 def capture_historical_snapshot(
@@ -234,6 +251,203 @@ def _historical_snapshot_capture_fingerprint(
         allow_nan=False,
     )
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def resolve_historical_snapshot_authority(
+    *,
+    market_path: str | Path,
+    evidence_path: str | Path,
+) -> HistoricalSnapshotAuthority:
+    """Re-resolve one persisted historical provider capture without object identity.
+
+    The evidence file is accepted only when it is the canonical ParlayAPI
+    historical-snapshot shape emitted by the capture path and the persisted
+    market bytes still match its recorded digest. This is a durable provenance
+    boundary for application callers; it does not claim that an unsigned
+    third-party HTTP response is cryptographically provider-signed.
+    """
+
+    market = Path(market_path)
+    evidence = Path(evidence_path)
+    try:
+        raw = strict_json_loads(evidence.read_text(encoding="utf-8"))
+    except (OSError, TypeError, ValueError) as exc:
+        raise ProviderPayloadError(
+            "persisted historical snapshot evidence is unreadable or invalid"
+        ) from exc
+    if not isinstance(raw, dict) or not all(isinstance(key, str) for key in raw):
+        raise ProviderPayloadError(
+            "persisted historical snapshot evidence must be a JSON object"
+        )
+
+    required = frozenset(
+        {
+            "schema_version",
+            "kind",
+            "provider",
+            "sport_key",
+            "requested_at",
+            "snapshot_at",
+            "captured_at",
+            "previous_snapshot_at",
+            "next_snapshot_at",
+            "response_sha256",
+            "market_sha256",
+            "quote_count",
+            "snapshot_timestamp_fallback_count",
+            "market_types",
+            "bookmaker_keys",
+        }
+    )
+    if not required.issubset(raw):
+        raise ProviderPayloadError(
+            "persisted historical snapshot evidence is missing authority fields"
+        )
+    if (
+        raw["schema_version"] != 1
+        or raw["kind"] != "parlayapi_point_in_time_historical_snapshot"
+        or raw["provider"] != "parlayapi"
+        or raw["sport_key"] != ParlayApiTableTennisProvider.sport_key
+    ):
+        raise ProviderPayloadError(
+            "persisted historical snapshot evidence has unsupported source identity"
+        )
+
+    requested_at = _required_text(raw, "requested_at")
+    snapshot_at = _required_text(raw, "snapshot_at")
+    captured_at = _required_text(raw, "captured_at")
+    requested_dt = _parse_timestamp(requested_at, field="requested_at")
+    snapshot_dt = _parse_timestamp(snapshot_at, field="snapshot_at")
+    captured_dt = _parse_timestamp(captured_at, field="captured_at")
+    if snapshot_dt > requested_dt:
+        raise ProviderPayloadError(
+            "persisted historical snapshot timestamp is after requested_at"
+        )
+    if captured_dt < requested_dt or captured_dt < snapshot_dt:
+        raise ProviderPayloadError(
+            "persisted historical capture time precedes its causal snapshot"
+        )
+
+    response_sha256 = _required_text(raw, "response_sha256")
+    market_sha256 = _required_text(raw, "market_sha256")
+    for field, value in (
+        ("response_sha256", response_sha256),
+        ("market_sha256", market_sha256),
+    ):
+        if len(value) != 64 or any(ch not in "0123456789abcdef" for ch in value):
+            raise ProviderPayloadError(f"{field} must be SHA-256 hex")
+
+    try:
+        actual_market_sha256 = _sha256(market)
+        market_text = market.read_text(encoding="utf-8")
+    except (OSError, UnicodeError) as exc:
+        raise ProviderPayloadError(
+            "persisted historical market artifact is unreadable"
+        ) from exc
+    if actual_market_sha256 != market_sha256:
+        raise ProviderPayloadError(
+            "persisted historical market digest does not match capture evidence"
+        )
+
+    quote_count = raw["quote_count"]
+    fallback_count = raw["snapshot_timestamp_fallback_count"]
+    if (
+        type(quote_count) is not int
+        or quote_count < 0
+        or type(fallback_count) is not int
+        or fallback_count < 0
+        or fallback_count > quote_count
+    ):
+        raise ProviderPayloadError(
+            "persisted historical snapshot counts are invalid"
+        )
+    rows = [line for line in market_text.splitlines() if line]
+    if len(rows) != quote_count:
+        raise ProviderPayloadError(
+            "persisted historical market row count does not match capture evidence"
+        )
+    for line in rows:
+        try:
+            row = strict_json_loads(line)
+        except (TypeError, ValueError) as exc:
+            raise ProviderPayloadError(
+                "persisted historical market row is invalid JSON"
+            ) from exc
+        if not isinstance(row, dict):
+            raise ProviderPayloadError(
+                "persisted historical market row must be a JSON object"
+            )
+
+    market_types = raw["market_types"]
+    bookmaker_keys = raw["bookmaker_keys"]
+    if (
+        not isinstance(market_types, list)
+        or not all(isinstance(value, str) and value for value in market_types)
+        or not isinstance(bookmaker_keys, list)
+        or not all(isinstance(value, str) and value for value in bookmaker_keys)
+    ):
+        raise ProviderPayloadError(
+            "persisted historical snapshot source metadata is invalid"
+        )
+
+    previous_snapshot_at = raw["previous_snapshot_at"]
+    next_snapshot_at = raw["next_snapshot_at"]
+    previous = _optional_timestamp(previous_snapshot_at, "previous_snapshot_at")
+    next_value = _optional_timestamp(next_snapshot_at, "next_snapshot_at")
+    if previous is not None and _parse_timestamp(
+        previous, field="previous_snapshot_at"
+    ) > snapshot_dt:
+        raise ProviderPayloadError(
+            "persisted previous snapshot is after snapshot_at"
+        )
+    if next_value is not None and _parse_timestamp(
+        next_value, field="next_snapshot_at"
+    ) < snapshot_dt:
+        raise ProviderPayloadError(
+            "persisted next snapshot is before snapshot_at"
+        )
+
+    source_identity = ParlayApiTableTennisProvider.source_id
+    source_revision = (
+        "historical-snapshot:"
+        + snapshot_at
+        + ":"
+        + response_sha256[:16]
+    )
+    authority_payload = {
+        "schema": "autosport.historical_snapshot_authority",
+        "schema_version": 1,
+        "source_identity": source_identity,
+        "source_revision": source_revision,
+        "source_revision_sha256": response_sha256,
+        "witness_kind": HISTORICAL_CAPTURE_WITNESS_KIND,
+        "source_as_of": snapshot_at,
+        "available_at": captured_at,
+        "requested_at": requested_at,
+        "market_sha256": market_sha256,
+        "quote_count": quote_count,
+        "snapshot_timestamp_fallback_count": fallback_count,
+        "market_types": sorted(market_types),
+        "bookmaker_keys": sorted(bookmaker_keys),
+    }
+    capture_sha256 = hashlib.sha256(
+        json.dumps(
+            authority_payload,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        ).encode("utf-8")
+    ).hexdigest()
+    return HistoricalSnapshotAuthority(
+        source_identity=source_identity,
+        source_revision=source_revision,
+        source_revision_sha256=response_sha256,
+        witness_kind=HISTORICAL_CAPTURE_WITNESS_KIND,
+        source_as_of=snapshot_at,
+        available_at=captured_at,
+        capture_sha256=capture_sha256,
+    )
 
 
 def _install_historical_snapshot_capture_authority() -> None:

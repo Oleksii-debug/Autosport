@@ -24,7 +24,10 @@ class PaperCampaignAdmissionCommittedBindingTests(unittest.TestCase):
             for overrides, expected in (
                 ({"execution_attempt_id": "paper-attempt-v2-forged"}, "missing or duplicated"),
                 ({"execution_ticket_id": "forged-ticket"}, "exactly one canonical PaperTicket"),
-                ({"execution_decision_id": "forged-decision"}, "marker conflicts"),
+                (
+                    {"execution_decision_id": "forged-decision"},
+                    "caller execution_decision_id conflicts",
+                ),
             ):
                 with self.subTest(overrides=overrides):
                     with self.assertRaisesRegex(PaperCampaignAdmissionError, expected):
@@ -61,7 +64,7 @@ class PaperCampaignAdmissionCommittedBindingTests(unittest.TestCase):
                 fixture.admit(fixture.coordinator())
             self.assertEqual(
                 JsonlDecisionLedger(fixture.workspace / "decisions.jsonl").verify_integrity(),
-                0,
+                1,
             )
 
     def test_crash_after_execution_materialization_before_admission_commit_converges_once(self) -> None:
@@ -78,7 +81,7 @@ class PaperCampaignAdmissionCommittedBindingTests(unittest.TestCase):
             self.assertEqual(len(PaperBook.load(fixture.workspace / "paper_book.json").tickets), 1)
             self.assertEqual(
                 JsonlDecisionLedger(fixture.workspace / "decisions.jsonl").verify_integrity(),
-                1,
+                2,
             )
 
             receipt = fixture.admit(fixture.coordinator(resumed=True))
@@ -86,7 +89,7 @@ class PaperCampaignAdmissionCommittedBindingTests(unittest.TestCase):
             self.assertEqual(len(PaperBook.load(fixture.workspace / "paper_book.json").tickets), 1)
             self.assertEqual(
                 JsonlDecisionLedger(fixture.workspace / "decisions.jsonl").verify_integrity(),
-                1,
+                2,
             )
 
 

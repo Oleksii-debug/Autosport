@@ -150,6 +150,66 @@ def _clusters(values: object) -> tuple[str, ...]:
 
 
 @dataclass(frozen=True, slots=True)
+class ObservationManifest:
+    """Canonical pre-result enumeration of every row key in the evaluation denominator."""
+
+    manifest_id: str
+    campaign_id: str
+    research_protocol_id: str
+    protocol_sha256: str
+    universe_id: str
+    enumeration_source_id: str
+    source_range_start: str
+    source_range_end: str
+    committed_at: str
+    expected_row_keys: tuple[str, ...]
+
+    def __post_init__(self) -> None:
+        for field in (
+            "manifest_id", "campaign_id", "research_protocol_id", "universe_id",
+            "enumeration_source_id", "source_range_start", "source_range_end",
+        ):
+            _text(getattr(self, field), field)
+        object.__setattr__(self, "protocol_sha256", _sha(self.protocol_sha256, "protocol_sha256"))
+        _instant(self.committed_at, "committed_at")
+        if not isinstance(self.expected_row_keys, tuple) or not self.expected_row_keys:
+            raise EvaluationUniverseError("expected_row_keys must be a non-empty tuple")
+        keys = tuple(_text(key, "expected_row_key") for key in self.expected_row_keys)
+        if keys != tuple(sorted(keys)) or len(keys) != len(set(keys)):
+            raise EvaluationUniverseError("expected_row_keys must be sorted and unique")
+        object.__setattr__(self, "expected_row_keys", keys)
+
+    @property
+    def manifest_sha256(self) -> str:
+        return _digest(self.to_payload())
+
+    def to_payload(self) -> dict[str, object]:
+        return {
+            "manifest_id": self.manifest_id,
+            "campaign_id": self.campaign_id,
+            "research_protocol_id": self.research_protocol_id,
+            "protocol_sha256": self.protocol_sha256,
+            "universe_id": self.universe_id,
+            "enumeration_source_id": self.enumeration_source_id,
+            "source_range_start": self.source_range_start,
+            "source_range_end": self.source_range_end,
+            "committed_at": _ts(self.committed_at, "committed_at"),
+            "expected_row_keys": list(self.expected_row_keys),
+        }
+
+    @classmethod
+    def from_payload(cls, payload: Mapping[str, object]) -> "ObservationManifest":
+        try:
+            values = dict(payload)
+            values["expected_row_keys"] = tuple(values["expected_row_keys"])
+            return cls(**values)
+        except (KeyError, TypeError, ValueError) as exc:
+            if isinstance(exc, EvaluationUniverseError):
+                raise
+            raise EvaluationUniverseIntegrityError("invalid observation manifest payload") from exc
+
+
+@dataclass(frozen=True, slots=True)
 class EvaluationRow:
     row_key: str
     campaign_id: str
@@ -308,6 +368,7 @@ class EvaluationRow:
 
 @dataclass(frozen=True, slots=True)
 class EvaluationUniverse:
+    manifest: ObservationManifest
     universe_id: str
     campaign_id: str
     research_protocol_id: str
@@ -316,10 +377,18 @@ class EvaluationUniverse:
     rows: tuple[EvaluationRow, ...]
 
     def __post_init__(self) -> None:
+        if not isinstance(self.manifest, ObservationManifest):
+            raise EvaluationUniverseError("manifest must be ObservationManifest")
         for field in ("universe_id", "campaign_id", "research_protocol_id"):
             _text(getattr(self, field), field)
         object.__setattr__(self, "protocol_sha256", _sha(self.protocol_sha256, "protocol_sha256"))
         frozen = _instant(self.frozen_at, "frozen_at")
+        if (self.manifest.universe_id, self.manifest.campaign_id, self.manifest.research_protocol_id, self.manifest.protocol_sha256) != (
+            self.universe_id, self.campaign_id, self.research_protocol_id, self.protocol_sha256
+        ):
+            raise EvaluationUniverseError("manifest must bind the exact universe/campaign/protocol identity")
+        if _instant(self.manifest.committed_at, "manifest committed_at") > frozen:
+            raise EvaluationUniverseError("observation manifest committed after frozen_at")
         if not isinstance(self.rows, tuple) or not self.rows:
             raise EvaluationUniverseError("rows must be a non-empty tuple")
         by_key: dict[str, EvaluationRow] = {}
@@ -340,6 +409,9 @@ class EvaluationUniverse:
                 raise EvaluationUniverseError("conflicting immutable row_key in frozen universe")
             by_key[row.row_key] = row
             by_id[row.row_id] = row
+        actual_keys = tuple(sorted(by_key))
+        if actual_keys != self.manifest.expected_row_keys:
+            raise EvaluationUniverseError("supplied rows do not exactly match canonical observation manifest")
         object.__setattr__(self, "rows", tuple(sorted(by_id.values(), key=lambda item: (item.row_key, item.row_id))))
 
     @property
@@ -353,6 +425,7 @@ class EvaluationUniverse:
             "campaign_id": self.campaign_id,
             "research_protocol_id": self.research_protocol_id,
             "protocol_sha256": self.protocol_sha256,
+            "manifest_sha256": self.manifest.manifest_sha256,
             "row_ids": list(self.row_ids),
         })
 
@@ -364,6 +437,8 @@ class EvaluationUniverse:
         payload: dict[str, object] = {
             "schema": SCHEMA,
             "schema_version": SCHEMA_VERSION,
+            "manifest": self.manifest.to_payload(),
+            "manifest_sha256": self.manifest.manifest_sha256,
             "universe_id": self.universe_id,
             "campaign_id": self.campaign_id,
             "research_protocol_id": self.research_protocol_id,
@@ -394,8 +469,14 @@ class EvaluationUniverse:
                 if claimed != row.row_id:
                     raise EvaluationUniverseIntegrityError("row_id does not bind row payload")
                 rows.append(row)
+            raw_manifest = payload["manifest"]
+            if not isinstance(raw_manifest, Mapping):
+                raise EvaluationUniverseIntegrityError("manifest must be an object")
+            manifest = ObservationManifest.from_payload(raw_manifest)
+            if payload.get("manifest_sha256") != manifest.manifest_sha256:
+                raise EvaluationUniverseIntegrityError("manifest_sha256 does not bind observation manifest")
             universe = cls(
-                universe_id=payload["universe_id"], campaign_id=payload["campaign_id"],
+                manifest=manifest, universe_id=payload["universe_id"], campaign_id=payload["campaign_id"],
                 research_protocol_id=payload["research_protocol_id"], protocol_sha256=payload["protocol_sha256"],
                 frozen_at=payload["frozen_at"], rows=tuple(rows),
             )
@@ -702,14 +783,14 @@ class EvaluationUniverseStore:
 
 
 def build_frozen_universe(
-    *, universe_id: str, campaign_id: str, research_protocol_id: str,
+    *, manifest: ObservationManifest, universe_id: str, campaign_id: str, research_protocol_id: str,
     protocol_sha256: str, frozen_at: str, rows: Iterable[EvaluationRow],
 ) -> EvaluationUniverse:
     materialized = tuple(rows)
     if not materialized:
         raise EvaluationUniverseError("cannot freeze an empty evaluation universe")
     return EvaluationUniverse(
-        universe_id=universe_id, campaign_id=campaign_id,
+        manifest=manifest, universe_id=universe_id, campaign_id=campaign_id,
         research_protocol_id=research_protocol_id, protocol_sha256=protocol_sha256,
         frozen_at=frozen_at, rows=materialized,
     )

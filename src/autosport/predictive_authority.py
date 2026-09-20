@@ -16,7 +16,12 @@ from datetime import datetime, timezone
 from typing import Any, Callable
 
 from .forecasting import ForecastRecord, parse_iso_timestamp
-from .opportunity import ForecastRef, PredictiveEligibilityEvidence, QuoteRef
+from .opportunity import (
+    ForecastRef,
+    Opportunity,
+    PredictiveEligibilityEvidence,
+    QuoteRef,
+)
 from .scientific_registry import ScientificRegistry
 from . import predictive_qualification as _qualification
 
@@ -248,12 +253,14 @@ def resolve_forecast_predictive_authority(
 
 
 def _install_runtime_authority() -> Callable[..., ForecastRef]:
-    """Install an object-identity guard and return the sole durable minting path.
+    """Install non-virtual object-identity admission and the sole durable mint path.
 
     Runtime authority state lives only in this closure.  There is no module-global
     token set, computable membership key, or standalone mint helper.  The public
-    function returned below first performs durable registry resolution and only then
-    records the exact immutable ForecastRef object + decision fingerprint.
+    resolver first performs durable registry resolution and only then records the
+    exact immutable ForecastRef object + decision fingerprint.  Positive portfolio
+    admission is also guarded at the canonical Opportunity boundary so a caller-
+    defined ForecastRef subclass cannot replace the authority method virtually.
     """
 
     authorized: dict[int, tuple[ForecastRef, str]] = {}
@@ -264,6 +271,11 @@ def _install_runtime_authority() -> Callable[..., ForecastRef]:
         *,
         expected_model_id: str | None,
     ) -> str | None:
+        # Positive runtime authority is intentionally exact-type.  A subclass may
+        # override the public method, so the portfolio-facing Opportunity guard below
+        # calls this closure directly rather than dispatching through the forecast.
+        if type(self) is not ForecastRef:
+            return _AUTHORITY_MISSING_REASON
         reason = _ORIGINAL_FORECAST_ELIGIBILITY_REASON(
             self,
             decision_time,
@@ -282,7 +294,28 @@ def _install_runtime_authority() -> Callable[..., ForecastRef]:
             return _AUTHORITY_MISSING_REASON
         return None
 
+    def guarded_opportunity_reason(
+        self: Opportunity,
+        decision_time: object,
+        *,
+        expected_model_id: str | None,
+    ) -> str | None:
+        if not self.claims_probability_edge:
+            return None
+        for forecast in self.forecasts:
+            # Deliberately bypass virtual ForecastRef method dispatch.  This is the
+            # final predictive admission check consumed by portfolio planning.
+            reason = guarded_reason(
+                forecast,
+                decision_time,
+                expected_model_id=expected_model_id,
+            )
+            if reason is not None:
+                return reason
+        return None
+
     ForecastRef.predictive_eligibility_reason = guarded_reason  # type: ignore[method-assign]
+    Opportunity.predictive_eligibility_reason = guarded_opportunity_reason  # type: ignore[method-assign]
 
     def resolve_authoritative_forecast_ref(
         registry: ScientificRegistry,

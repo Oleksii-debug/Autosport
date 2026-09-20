@@ -5,6 +5,7 @@ import json
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
+from pathlib import Path
 from typing import Mapping
 
 from .domain import PaperTicket, TicketLeg
@@ -139,6 +140,7 @@ class PaperExecutionAdoptionRuntime:
         ledger: PaperExecutionLedger,
         config: PaperExecutionModelConfig,
         max_quote_age: timedelta,
+        paper_book_path: str | Path,
     ) -> None:
         if not isinstance(book, PaperBook):
             raise TypeError("book must be PaperBook")
@@ -151,6 +153,22 @@ class PaperExecutionAdoptionRuntime:
         self.book = book
         self.ledger = ledger
         self.config = config
+        self.paper_book_path = Path(paper_book_path)
+        if self.paper_book_path.exists():
+            durable_book = PaperBook.load(self.paper_book_path)
+            self._assert_same_book_state(
+                durable_book,
+                self.book,
+                "configured PaperBook does not match durable snapshot",
+            )
+        else:
+            self.book.save(self.paper_book_path)
+            durable_book = PaperBook.load(self.paper_book_path)
+            self._assert_same_book_state(
+                durable_book,
+                self.book,
+                "initial PaperBook durability verification failed",
+            )
         self.max_quote_age = min(
             max_quote_age,
             timedelta(milliseconds=config.max_quote_age_ms),
@@ -343,6 +361,7 @@ class PaperExecutionAdoptionRuntime:
             binding.action_id: binding for binding in prepared.exposure_bindings
         }
         ticket_ids: list[str] = []
+        accepted_attempts = []
         for attempt in run.attempts:
             if attempt.outcome not in {
                 PaperAttemptOutcome.ACCEPTED,
@@ -358,7 +377,51 @@ class PaperExecutionAdoptionRuntime:
                 decision_id=prepared.execution_plan.decision_id,
             )
             ticket_ids.append(ticket.ticket_id)
+            accepted_attempts.append((attempt, action, binding))
+
+        if accepted_attempts:
+            # COMMITTED live progress is not permitted until the exposure is a
+            # canonical PaperBook snapshot, not merely an in-memory mutation.
+            self.book.save(self.paper_book_path)
+            durable_book = PaperBook.load(self.paper_book_path)
+            self._assert_same_book_state(
+                durable_book,
+                self.book,
+                "PaperBook changed across atomic durable publication",
+            )
+            for attempt, action, binding in accepted_attempts:
+                marker = f"{self._TICKET_MARKER}{attempt.attempt_id}"
+                matches = [
+                    ticket
+                    for ticket in durable_book.tickets.values()
+                    if marker in ticket.strategy_reason
+                ]
+                if len(matches) != 1 or not self._ticket_matches_attempt(
+                    ticket=matches[0],
+                    attempt=attempt,
+                    action=action,
+                    binding=binding,
+                ):
+                    raise PaperExecutionAdoptionError(
+                        "durable PaperBook does not bind exact execution attempt"
+                    )
+
         return PaperExecutionAdoptionResult(run=run, ticket_ids=tuple(ticket_ids))
+
+    @staticmethod
+    def _assert_same_book_state(
+        left: PaperBook,
+        right: PaperBook,
+        message: str,
+    ) -> None:
+        if (
+            left.initial_bankroll != right.initial_bankroll
+            or left.balance != right.balance
+            or left.tickets != right.tickets
+            or left._lifecycle != right._lifecycle
+            or left._settlement_times != right._settlement_times
+        ):
+            raise PaperExecutionAdoptionError(message)
 
     def _materialize_attempt(
         self,

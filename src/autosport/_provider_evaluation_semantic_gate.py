@@ -25,6 +25,7 @@ from .pre_evaluation_product_origin import (
 )
 from .pre_evaluation_semantics import (
     PreEvaluationSemanticAuthority,
+    PreEvaluationSemanticSession,
     PreEvaluationSlotSemanticEvidence,
 )
 
@@ -165,6 +166,15 @@ def _validate_product_semantic_authority(
     if type(pre_evaluation_authority) is not ProductOwnedPreEvaluationSemanticSession:
         raise provider_consumer.ProviderEvaluationUniverseError(
             "complete-board denominator requires product-owned pre-evaluation semantic authority"
+        )
+    # The product-owned wrapper constructor intentionally accepts the semantic session
+    # through isinstance().  A caller can therefore otherwise place a subclass inside
+    # an exact wrapper and override slots/semantic properties while retaining a genuine
+    # issued product origin.  The nested capability is authority-bearing too: require
+    # its exact concrete type before reading any nested field.
+    if type(pre_evaluation_authority.session) is not PreEvaluationSemanticSession:
+        raise provider_consumer.ProviderEvaluationUniverseError(
+            "complete-board denominator requires exact pre-evaluation semantic session"
         )
     if type(pre_evaluation_bound) is not BoundPreEvaluationSession:
         raise provider_consumer.ProviderEvaluationUniverseError(

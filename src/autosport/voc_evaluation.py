@@ -631,8 +631,21 @@ class CanonicalVOCAuthorityResolver:
                 continue
             if _instant("observed_ts", record.observed_ts) > _instant("decision_at", evaluation.decision_at):
                 raise VOCEvaluationError("canonical decision evidence postdates paired decision")
-            if _instant("recorded_at", record.recorded_at) > _instant("evaluated_at", evaluation.evaluated_at):
-                raise VOCEvaluationError("canonical decision evidence was recorded after evaluation")
+            recorded_at = _instant("recorded_at", record.recorded_at)
+            outputs_completed_at = max(
+                _instant("baseline_completed_at", evaluation.baseline_completed_at),
+                _instant("challenger_completed_at", evaluation.challenger_completed_at),
+            )
+            if recorded_at < outputs_completed_at:
+                raise VOCEvaluationError(
+                    "canonical decision VOC binding predates paired candidate outputs"
+                )
+            if recorded_at >= _instant(
+                "outcome_revealed_at", evaluation.outcome_revealed_at
+            ):
+                raise VOCEvaluationError(
+                    "canonical decision VOC binding was not durably recorded before outcome reveal"
+                )
             payload = record.payload
             if not isinstance(payload, Mapping):
                 raise VOCEvaluationError("canonical decision payload is invalid")

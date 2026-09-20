@@ -1,9 +1,15 @@
 from __future__ import annotations
 
+import os
+from pathlib import Path
+from unittest.mock import patch
+
 import pytest
 
+from autosport import point_in_time_evidence as evidence
 from autosport.dataset_snapshot_lineage import DatasetSnapshotLineageAuthority
 from autosport.point_in_time_evidence import (
+    EvidenceLedgerCorruptError,
     PointInTimeEvidenceError,
     PointInTimeFeatureAuthority,
 )
@@ -118,3 +124,25 @@ def test_feature_authority_rejects_exact_registry_instance_method_shadow() -> No
         )
 
     assert dispatched is False
+
+
+def test_holdout_atomic_publication_fails_when_directory_sync_is_unavailable(
+    tmp_path: Path,
+) -> None:
+    state_path = tmp_path / "holdout.json"
+    real_open = os.open
+
+    def fail_only_directory_open(path, flags, *args, **kwargs):
+        if Path(path) == tmp_path:
+            raise OSError("directory fsync unavailable")
+        return real_open(path, flags, *args, **kwargs)
+
+    with patch(
+        "autosport._point_in_time_authority_runtime_repair.os.open",
+        side_effect=fail_only_directory_open,
+    ):
+        with pytest.raises(
+            EvidenceLedgerCorruptError,
+            match="cannot open holdout ledger directory for durability",
+        ):
+            evidence._atomic_write_json(state_path, {"schema_version": 1})

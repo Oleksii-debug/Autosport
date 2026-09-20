@@ -51,6 +51,9 @@ def _witness(
     gap_free: bool = True,
     row_keys: tuple[str, ...] | None = None,
 ) -> ObservationEnumerationWitness:
+    resolved_row_keys = row_keys or (item.row_key,)
+    if resolved_row_keys != (item.row_key,):
+        raise ValueError("test witness requires exact row evidence for every row_key")
     return ObservationEnumerationWitness(
         enumeration_id=f"enumeration-{index}",
         session_id="session-1",
@@ -65,7 +68,8 @@ def _witness(
         start_cursor=f"cursor-{index - 1}",
         end_cursor=f"cursor-{index}",
         acquisition_sha256=H3,
-        row_keys=row_keys or (item.row_key,),
+        row_keys=resolved_row_keys,
+        row_evidence_sha256=((item.row_key, item.row_id),),
         exhaustive=exhaustive,
         gap_free=gap_free,
         committed_at="2026-09-20T00:00:02.500000Z",
@@ -506,6 +510,35 @@ def test_row_reveal_boundary_must_equal_pre_result_intake(tmp_path):
             protocol_sha256=H,
             frozen_at="2026-09-20T00:05:00Z",
             rows=(item,),
+        )
+
+
+def test_same_row_key_cannot_reauthor_pre_result_evidence_payload(tmp_path):
+    original = row("candidate")
+    witness = _witness(1, original)
+    ledger = ObservationIntakeLedger(
+        tmp_path,
+        authority_id="intake-1",
+        enumeration_resolver=_Resolver((witness,)),
+    )
+    ledger.append_cycle(enumeration_id=witness.enumeration_id)
+    reauthored = replace(
+        original,
+        strategy_version_id="strategy-reauthored-after-observation",
+        config_sha256=H3,
+    )
+    assert reauthored.row_key == original.row_key
+    assert reauthored.row_id != original.row_id
+
+    with pytest.raises(EvaluationUniverseIntegrityError, match="row evidence"):
+        build_frozen_universe(
+            intake_ledger=ledger,
+            universe_id="universe-1",
+            campaign_id="campaign-1",
+            research_protocol_id="protocol-1",
+            protocol_sha256=H,
+            frozen_at="2026-09-20T00:05:00Z",
+            rows=(reauthored,),
         )
 
 

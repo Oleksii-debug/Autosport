@@ -285,6 +285,35 @@ def test_deleted_both_workspace_authorities_cannot_rebootstrap_existing_store(tm
         SequentialMultiplicityEvidenceStore.initialize_workspace(tmp_path)
 
 
+def test_non_json_store_cannot_hide_consumed_evidence_from_rebootstrap(tmp_path) -> None:
+    path = tmp_path / "multiplicity.evidence"
+    plan = _plan()
+    member = plan.members[0]
+    store = SequentialMultiplicityEvidenceStore.initialize_pristine(path, plan)
+    store.append(_look(plan, member, index=1, p="0.5", bundle_char="e"))
+    (tmp_path / SequentialMultiplicityEvidenceStore.ENROLLMENT_FILE).unlink()
+    (tmp_path / SequentialMultiplicityEvidenceStore.WORKSPACE_AUTHORITY_FILE).unlink()
+
+    with pytest.raises(ValueError, match="existing multiplicity evidence"):
+        SequentialMultiplicityEvidenceStore.initialize_workspace(tmp_path)
+
+
+def test_corrupt_recognizable_store_fails_closed_during_rebootstrap(tmp_path) -> None:
+    path = tmp_path / "multiplicity.evidence"
+    plan = _plan()
+    member = plan.members[0]
+    store = SequentialMultiplicityEvidenceStore.initialize_pristine(path, plan)
+    store.append(_look(plan, member, index=1, p="0.5", bundle_char="e"))
+    raw = json.loads(path.read_text(encoding="utf-8"))
+    raw["plan"]["primary_metric"] = "tampered_metric"
+    path.write_text(json.dumps(raw), encoding="utf-8")
+    (tmp_path / SequentialMultiplicityEvidenceStore.ENROLLMENT_FILE).unlink()
+    (tmp_path / SequentialMultiplicityEvidenceStore.WORKSPACE_AUTHORITY_FILE).unlink()
+
+    with pytest.raises(ValueError, match="recognizable multiplicity evidence is invalid"):
+        SequentialMultiplicityEvidenceStore.initialize_workspace(tmp_path)
+
+
 def test_deleted_enrolled_store_cannot_be_recreated_pristine(tmp_path) -> None:
     path = tmp_path / "multiplicity.json"
     plan = _plan()

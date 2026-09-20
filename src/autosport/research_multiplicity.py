@@ -640,26 +640,74 @@ class SequentialMultiplicityEvidenceStore:
 
     @classmethod
     def _contains_existing_store(cls, workspace: Path) -> bool:
-        for candidate in workspace.rglob("*.json"):
+        for candidate in workspace.rglob("*"):
+            if not candidate.is_file():
+                continue
             if candidate.name in {cls.WORKSPACE_AUTHORITY_FILE, cls.ENROLLMENT_FILE}:
                 continue
             try:
                 raw = candidate.read_text(encoding="utf-8")
+            except (OSError, UnicodeError):
+                continue
+
+            recognizable_text = (
+                '"plan"' in raw
+                and '"records"' in raw
+                and (
+                    '"plan_sha256"' in raw
+                    or '"family_plan_sha256"' in raw
+                    or '"familywise_alpha"' in raw
+                )
+            )
+            try:
                 state = json.loads(
                     raw,
                     object_pairs_hook=_reject_duplicate_keys,
                     parse_constant=_reject_nonfinite,
                 )
-                if (
-                    type(state) is dict
-                    and set(state) == {"schema_version", "plan", "records"}
-                    and state["schema_version"] == cls.SCHEMA_VERSION
-                    and type(state["records"]) is list
-                ):
-                    ExperimentFamilyPlan.from_payload(state["plan"])
-                    return True
-            except (OSError, UnicodeError, ValueError):
+            except (json.JSONDecodeError, ValueError) as exc:
+                if recognizable_text:
+                    raise ValueError(
+                        "recognizable multiplicity evidence is corrupt; "
+                        "refusing workspace authority rebootstrap"
+                    ) from exc
                 continue
+
+            if type(state) is not dict:
+                continue
+            plan = state.get("plan")
+            recognizable_state = (
+                "records" in state
+                and type(plan) is dict
+                and (
+                    {"family_id", "method_id", "plan_sha256"}.issubset(plan)
+                    or {
+                        "research_protocol_id",
+                        "familywise_alpha",
+                        "look_alpha_spend",
+                    }.issubset(plan)
+                )
+            )
+            if not recognizable_state:
+                continue
+
+            if (
+                set(state) != {"schema_version", "plan", "records"}
+                or state["schema_version"] != cls.SCHEMA_VERSION
+                or type(state["records"]) is not list
+            ):
+                raise ValueError(
+                    "recognizable multiplicity evidence is invalid; "
+                    "refusing workspace authority rebootstrap"
+                )
+            try:
+                ExperimentFamilyPlan.from_payload(plan)
+            except ValueError as exc:
+                raise ValueError(
+                    "recognizable multiplicity evidence is invalid; "
+                    "refusing workspace authority rebootstrap"
+                ) from exc
+            return True
         return False
 
     @classmethod

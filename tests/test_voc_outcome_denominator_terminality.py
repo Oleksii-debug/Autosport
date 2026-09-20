@@ -252,7 +252,7 @@ class VOCOutcomeDenominatorTerminalityTests(unittest.TestCase):
                 agent="voc-derived-test",
                 observed_ts=_FIXTURE.T_BINDING,
                 action=successful.action,
-                payload=dict(successful.payload),
+                payload=successful.to_dict()["payload"],
                 context_hash=target.decision_input_sha256,
                 decision_id="decision-explicit-success-terminal",
                 recorded_at=_FIXTURE.T_BINDING,

@@ -164,6 +164,28 @@ def _ensure_pre_action(
     return persisted
 
 
+def _require_pre_action_risk_pass(
+    *,
+    agent: PaperValueAgent,
+    pre_action_book: PaperBook,
+    descriptor: _authority.PaperValueExecutionDescriptor,
+) -> None:
+    """Re-run the canonical GENERAL risk gate on the exact durable pre-action book."""
+    if len(descriptor.execution_plan.actions) != 1:
+        raise PaperExecutionAdoptionError(
+            "paper-value risk admission requires exactly one execution action"
+        )
+    action = descriptor.execution_plan.actions[0]
+    risk = agent.risk_policy.evaluate(
+        pre_action_book,
+        action.requested_stake,
+    )
+    if getattr(risk, "allowed", None) is not True:
+        raise PaperExecutionAdoptionError(
+            "durable GENERAL paper-value risk admission no longer passes canonical risk evaluation"
+        )
+
+
 def _issue_general_risk_admission(
     *,
     agent: PaperValueAgent,
@@ -279,6 +301,10 @@ def _verify_general_risk_admission(
     prepare_path = _prepare_path(witness_path)
 
     if not witness_path.exists() or not pre_action_path.exists():
+        if not prepare_path.exists():
+            raise PaperExecutionAdoptionError(
+                "durable GENERAL paper-value action lacks canonical risk admission witness"
+            )
         prepare = _load_prepare(prepare_path)
         prepared_witness = prepare["witness"]
         assert isinstance(prepared_witness, dict)
@@ -302,12 +328,17 @@ def _verify_general_risk_admission(
             raise PaperExecutionAdoptionError(
                 "incomplete paper-value risk admission cannot follow execution reservation"
             )
-        _ensure_pre_action(
+        pre_action_book = _ensure_pre_action(
             agent=agent,
             context=context,
             runtime=runtime,
             pre_action_path=pre_action_path,
             expected_sha256=pre_action_sha256,
+        )
+        _require_pre_action_risk_pass(
+            agent=agent,
+            pre_action_book=pre_action_book,
+            descriptor=descriptor,
         )
         if witness_path.exists():
             existing, _ = _authority._load_general_risk_admission(ledger, record.decision_id)
@@ -317,6 +348,16 @@ def _verify_general_risk_admission(
                 )
         else:
             _write_commit(witness_path, expected)
+    else:
+        _, pre_action_book = _authority._load_general_risk_admission(
+            ledger,
+            record.decision_id,
+        )
+        _require_pre_action_risk_pass(
+            agent=agent,
+            pre_action_book=pre_action_book,
+            descriptor=descriptor,
+        )
 
     _ORIGINAL_VERIFY(
         agent=agent,

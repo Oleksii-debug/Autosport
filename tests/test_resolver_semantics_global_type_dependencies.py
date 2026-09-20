@@ -1,0 +1,138 @@
+from __future__ import annotations
+
+import pytest
+
+from autosport.event_lifecycle import CatalogPage, EventLifecycleRecord
+from autosport.product_runtime import (
+    ProductCompositionError,
+    _settlement_authority_identity,
+    build_autonomous_product_runtime,
+)
+
+
+SHA_A = "a" * 64
+NOW = "2026-09-20T10:00:00Z"
+
+
+class _GlobalResolverHelper:
+    @staticmethod
+    def resolve_static(record: EventLifecycleRecord, *, as_of: str):
+        return None
+
+    @classmethod
+    def resolve_class(cls, record: EventLifecycleRecord, *, as_of: str):
+        return None
+
+
+def _replacement_static(record: EventLifecycleRecord, *, as_of: str):
+    if as_of == "never":
+        raise AssertionError("replacement static helper semantics")
+    return None
+
+
+def _replacement_class(cls, record: EventLifecycleRecord, *, as_of: str):
+    if as_of == "never":
+        raise AssertionError("replacement class helper semantics")
+    return None
+
+
+class _ProductSource:
+    source_id = "provider-a"
+    stream_epoch = "epoch-1"
+    settlement_authority_id = "provider-a-results-v1"
+    settlement_configuration_sha256 = SHA_A
+
+    def fetch_catalog_page(self, checkpoint):
+        return CatalogPage(
+            source_id=self.source_id,
+            stream_epoch=self.stream_epoch,
+            cursor="unused",
+            position=0,
+            events=(),
+        )
+
+    def fetch_deltas(self, checkpoint, records, max_items):
+        return ()
+
+    def resolve_event(self, delta):
+        raise AssertionError("resolver-semantics tests do not consume collector deltas")
+
+
+class _StaticHelperProductSource(_ProductSource):
+    settlement_resolver_implementation_id = "provider-a-global-static-helper-v1"
+
+    def resolve(self, record: EventLifecycleRecord, *, as_of: str):
+        return _GlobalResolverHelper.resolve_static(record, as_of=as_of)
+
+
+class _ClassHelperProductSource(_ProductSource):
+    settlement_resolver_implementation_id = "provider-a-global-class-helper-v1"
+
+    def resolve(self, record: EventLifecycleRecord, *, as_of: str):
+        return _GlobalResolverHelper.resolve_class(record, as_of=as_of)
+
+
+def _assert_restart_rejects_rebound_helper(
+    tmp_path,
+    *,
+    source_type,
+    helper_name: str,
+    replacement,
+    descriptor_type,
+) -> None:
+    source = source_type()
+    runtime = build_autonomous_product_runtime(
+        workspace=tmp_path,
+        source=source,
+        clock=lambda: NOW,
+        outcome_authority=source,
+    )
+    expected_identity = runtime.manifest.settlement_authority_identity
+    runtime.close()
+
+    original_descriptor = vars(_GlobalResolverHelper)[helper_name]
+    try:
+        setattr(_GlobalResolverHelper, helper_name, descriptor_type(replacement))
+        rebound_source = source_type()
+        rebound_identity = _settlement_authority_identity(
+            source=rebound_source,
+            source_id=rebound_source.source_id,
+            outcome_authority=rebound_source,
+        )
+        assert rebound_identity != expected_identity
+        with pytest.raises(
+            ProductCompositionError,
+            match="settlement authority identity conflicts with durable product composition",
+        ):
+            build_autonomous_product_runtime(
+                workspace=tmp_path,
+                source=rebound_source,
+                clock=lambda: NOW,
+                outcome_authority=rebound_source,
+            )
+    finally:
+        setattr(_GlobalResolverHelper, helper_name, original_descriptor)
+
+
+def test_global_staticmethod_rebind_changes_authority_identity_and_restart_fails(
+    tmp_path,
+) -> None:
+    _assert_restart_rejects_rebound_helper(
+        tmp_path,
+        source_type=_StaticHelperProductSource,
+        helper_name="resolve_static",
+        replacement=_replacement_static,
+        descriptor_type=staticmethod,
+    )
+
+
+def test_global_classmethod_rebind_changes_authority_identity_and_restart_fails(
+    tmp_path,
+) -> None:
+    _assert_restart_rejects_rebound_helper(
+        tmp_path,
+        source_type=_ClassHelperProductSource,
+        helper_name="resolve_class",
+        replacement=_replacement_class,
+        descriptor_type=classmethod,
+    )

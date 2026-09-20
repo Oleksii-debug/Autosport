@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import subprocess
@@ -19,18 +20,74 @@ SOURCE_SHA = "a" * 40
 
 
 def _report() -> dict[str, object]:
-    return {
+    report: dict[str, object] = {
         "status": "PASS",
         "failures": [],
+        "config": {
+            "event_count": 20_000,
+            "quote_keys": 2_000,
+            "batch_size": 500,
+            "restart_cycles": 3,
+            "paper_tickets": 50,
+            "source_id": "endurance-fixture",
+        },
         "history_events": 20_000,
+        "current_quotes": 2_000,
+        "accepted_first_pass": 20_000,
+        "accepted_duplicate_pass": 0,
+        "replay_dataset_hash": "a" * 64,
+        "mirror_dataset_hash": "a" * 64,
+        "restart_hashes": ["a" * 64, "a" * 64, "a" * 64],
+        "restart_projection_counts": [2_000, 2_000, 2_000],
+        "paper_tickets_opened": 50,
+        "paper_tickets_settled_first_pass": 50,
+        "paper_tickets_settled_second_pass": 0,
+        "paper_tickets_won": 50,
+        "paper_payout_total": "100.00",
+        "paper_expected_balance": "100050.00",
+        "paper_balance_after_restart": "100050.00",
+        "paper_economics_verified": True,
+        "corrupt_health_rejected": True,
+        "corrupt_paper_book_rejected": True,
+        "real_money_execution": False,
         "accepted_events_per_second": 5_000.0,
         "peak_traced_memory_bytes": 100_000_000,
         "ingest_elapsed_seconds": 4.0,
+        "duplicate_elapsed_seconds": 1.0,
         "replay_elapsed_seconds": 1.0,
         "restart_elapsed_seconds": 0.5,
-        "real_money_execution": False,
-        "stable_invariant_fingerprint": "fixture",
+        "mirror_ingest_elapsed_seconds": 4.0,
     }
+    stable_fields = (
+        "config",
+        "history_events",
+        "current_quotes",
+        "accepted_first_pass",
+        "accepted_duplicate_pass",
+        "replay_dataset_hash",
+        "mirror_dataset_hash",
+        "restart_hashes",
+        "restart_projection_counts",
+        "paper_tickets_opened",
+        "paper_tickets_settled_first_pass",
+        "paper_tickets_settled_second_pass",
+        "paper_tickets_won",
+        "paper_payout_total",
+        "paper_expected_balance",
+        "paper_balance_after_restart",
+        "paper_economics_verified",
+        "corrupt_health_rejected",
+        "corrupt_paper_book_rejected",
+        "real_money_execution",
+    )
+    stable = {field: report[field] for field in stable_fields}
+    canonical = json.dumps(
+        stable, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+    )
+    report["stable_invariant_fingerprint"] = hashlib.sha256(
+        canonical.encode("utf-8")
+    ).hexdigest()
+    return report
 
 
 def _budget(**overrides: object) -> PerformanceBudget:
@@ -65,7 +122,9 @@ def test_correctness_failure_cannot_become_performance_pass() -> None:
     report["status"] = "FAIL"
     report["failures"] = ["integrity mismatch"]
     with pytest.raises(PerformanceQualificationError, match="correctness status must be PASS"):
-        qualify_endurance_report(report, _budget(), source_sha=SOURCE_SHA, machine_profile="machine")
+        qualify_endurance_report(
+            report, _budget(), source_sha=SOURCE_SHA, machine_profile="machine"
+        )
 
 
 def test_empty_budget_is_rejected() -> None:
@@ -102,15 +161,23 @@ def test_report_rejects_malformed_metric_values(field: str, value: object) -> No
     report = _report()
     report[field] = value
     with pytest.raises(PerformanceQualificationError):
-        qualify_endurance_report(report, _budget(), source_sha=SOURCE_SHA, machine_profile="machine")
+        qualify_endurance_report(
+            report, _budget(), source_sha=SOURCE_SHA, machine_profile="machine"
+        )
 
 
 @pytest.mark.parametrize(
     ("budget", "failed_metric"),
     [
         (PerformanceBudget(min_history_events=20_001), "history_events"),
-        (PerformanceBudget(min_accepted_events_per_second=5_001), "accepted_events_per_second"),
-        (PerformanceBudget(max_peak_traced_memory_bytes=99_999_999), "peak_traced_memory_bytes"),
+        (
+            PerformanceBudget(min_accepted_events_per_second=5_001),
+            "accepted_events_per_second",
+        ),
+        (
+            PerformanceBudget(max_peak_traced_memory_bytes=99_999_999),
+            "peak_traced_memory_bytes",
+        ),
         (PerformanceBudget(max_ingest_elapsed_seconds=3.9), "ingest_elapsed_seconds"),
         (PerformanceBudget(max_replay_elapsed_seconds=0.9), "replay_elapsed_seconds"),
         (PerformanceBudget(max_restart_elapsed_seconds=0.4), "restart_elapsed_seconds"),
@@ -126,6 +193,15 @@ def test_each_budget_dimension_fails_closed(
     assert result.failures == (failed_metric,)
 
 
+def test_tampered_stable_payload_is_rejected() -> None:
+    report = _report()
+    report["accepted_first_pass"] = 19_999
+    with pytest.raises(PerformanceQualificationError, match="fingerprint mismatch"):
+        qualify_endurance_report(
+            report, _budget(), source_sha=SOURCE_SHA, machine_profile="machine"
+        )
+
+
 def test_identity_changes_with_source_profile_budget_or_report() -> None:
     baseline = qualify_endurance_report(
         _report(), _budget(), source_sha=SOURCE_SHA, machine_profile="machine-a"
@@ -137,12 +213,18 @@ def test_identity_changes_with_source_profile_budget_or_report() -> None:
         _report(), _budget(), source_sha=SOURCE_SHA, machine_profile="machine-b"
     )
     changed_budget = qualify_endurance_report(
-        _report(), _budget(max_ingest_elapsed_seconds=4.1), source_sha=SOURCE_SHA, machine_profile="machine-a"
+        _report(),
+        _budget(max_ingest_elapsed_seconds=4.1),
+        source_sha=SOURCE_SHA,
+        machine_profile="machine-a",
     )
     changed_report_data = _report()
-    changed_report_data["stable_invariant_fingerprint"] = "changed"
+    changed_report_data["host_metadata"] = "changed"
     changed_report = qualify_endurance_report(
-        changed_report_data, _budget(), source_sha=SOURCE_SHA, machine_profile="machine-a"
+        changed_report_data,
+        _budget(),
+        source_sha=SOURCE_SHA,
+        machine_profile="machine-a",
     )
     identities = {
         baseline.qualification_id,
@@ -158,12 +240,16 @@ def test_pass_with_nonempty_failures_is_rejected() -> None:
     report = _report()
     report["failures"] = ["hidden"]
     with pytest.raises(PerformanceQualificationError, match="empty failures"):
-        qualify_endurance_report(report, _budget(), source_sha=SOURCE_SHA, machine_profile="machine")
+        qualify_endurance_report(
+            report, _budget(), source_sha=SOURCE_SHA, machine_profile="machine"
+        )
 
 
 def test_malformed_source_sha_is_rejected() -> None:
     with pytest.raises(PerformanceQualificationError, match="40-character"):
-        qualify_endurance_report(_report(), _budget(), source_sha="ABC", machine_profile="machine")
+        qualify_endurance_report(
+            _report(), _budget(), source_sha="ABC", machine_profile="machine"
+        )
 
 
 def test_budget_from_dict_rejects_unknown_fields() -> None:
@@ -171,9 +257,24 @@ def test_budget_from_dict_rejects_unknown_fields() -> None:
         "schema": BUDGET_SCHEMA,
         "schema_version": 1,
         "min_history_events": 1,
+        "min_accepted_events_per_second": None,
+        "max_peak_traced_memory_bytes": None,
+        "max_ingest_elapsed_seconds": None,
+        "max_replay_elapsed_seconds": None,
+        "max_restart_elapsed_seconds": None,
         "surprise": 2,
     }
     with pytest.raises(PerformanceQualificationError, match="unexpected fields"):
+        PerformanceBudget.from_dict(raw)
+
+
+def test_budget_from_dict_requires_explicit_nulls_for_omitted_metrics() -> None:
+    raw = {
+        "schema": BUDGET_SCHEMA,
+        "schema_version": 1,
+        "min_history_events": 1,
+    }
+    with pytest.raises(PerformanceQualificationError, match="missing explicit fields"):
         PerformanceBudget.from_dict(raw)
 
 
@@ -184,7 +285,9 @@ def test_script_returns_zero_for_pass_and_five_for_budget_failure(tmp_path: Path
     budget_path = tmp_path / "budget.json"
     output_path = tmp_path / "qualification.json"
     report_path.write_text(json.dumps(_report(), allow_nan=False), encoding="utf-8")
-    budget_path.write_text(json.dumps(_budget().to_dict(), allow_nan=False), encoding="utf-8")
+    budget_path.write_text(
+        json.dumps(_budget().to_dict(), allow_nan=False), encoding="utf-8"
+    )
     env = os.environ.copy()
     env["PYTHONPATH"] = str(root / "src") + os.pathsep + env.get("PYTHONPATH", "")
 
@@ -200,7 +303,9 @@ def test_script_returns_zero_for_pass_and_five_for_budget_failure(tmp_path: Path
         "--output",
         str(output_path),
     ]
-    passed = subprocess.run(command, cwd=root, env=env, capture_output=True, text=True, check=False)
+    passed = subprocess.run(
+        command, cwd=root, env=env, capture_output=True, text=True, check=False
+    )
     assert passed.returncode == 0, passed.stderr + passed.stdout
     payload = json.loads(output_path.read_text(encoding="utf-8"))
     assert payload["status"] == "PASS"
@@ -208,6 +313,8 @@ def test_script_returns_zero_for_pass_and_five_for_budget_failure(tmp_path: Path
 
     failing = _budget(min_accepted_events_per_second=5_001).to_dict()
     budget_path.write_text(json.dumps(failing, allow_nan=False), encoding="utf-8")
-    failed = subprocess.run(command, cwd=root, env=env, capture_output=True, text=True, check=False)
+    failed = subprocess.run(
+        command, cwd=root, env=env, capture_output=True, text=True, check=False
+    )
     assert failed.returncode == 5
     assert "performance_qualification=FAIL" in failed.stdout

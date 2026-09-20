@@ -31,7 +31,13 @@ from autosport.live_decision_loop import (
 )
 from autosport.market_bus import MarketEventBus
 from autosport.paper import PaperBook
-from autosport.portfolio_plan import OpportunityIntent
+from autosport.portfolio_plan import (
+    EvidenceTruth,
+    OpportunityIntent,
+    PortfolioAction,
+    PortfolioDependencyGraph,
+    PortfolioPlan,
+)
 from autosport.providers import ProviderUnavailableError
 from autosport.scientific_registry import ScientificRegistry, StrategyVersion
 from autosport.risk import PaperRiskPolicy
@@ -298,6 +304,54 @@ class PersistentLiveDecisionLoopTests(unittest.TestCase):
                 "strategy identity does not match registered StrategyVersion",
             ):
                 loop._validated_intents((forged,))
+
+    def test_positive_paper_plan_without_execution_adoption_fails_closed_before_ledger(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            loop = self._loop(
+                workspace,
+                observer=_DurableObserver(workspace, [()]),
+                factory=_EmptyIntentFactory(),
+                clock=_ManualClock(self.START),
+            )
+            intent_sha = "1" * 64
+            candidate_sha = "2" * 64
+            portfolio_sha = "3" * 64
+            dependency_graph = PortfolioDependencyGraph(
+                portfolio_sha256=portfolio_sha,
+                intent_sha256s=(intent_sha,),
+                candidate_sha256s=(candidate_sha,),
+            )
+            plan = PortfolioPlan(
+                decision_ts=self.START.isoformat(),
+                action=PortfolioAction.PAPER_PLAN,
+                stakes=(Decimal("1"),),
+                intent_ids=("intent-1",),
+                intent_sha256s=(intent_sha,),
+                opportunity_classes=("predictive_edge",),
+                portfolio_sha256=portfolio_sha,
+                dependency_graph=dependency_graph,
+                terminal_economics=None,
+                economic_goal_contract_sha256="4" * 64,
+                risk_policy_sha256="5" * 64,
+                portfolio_truth=EvidenceTruth.EXACT,
+                reason="test positive plan must not bypass execution reality",
+            )
+
+            with self.assertRaisesRegex(
+                LiveDecisionProgressError,
+                "requires canonical #623 execution adoption",
+            ):
+                loop._persist_plan(
+                    plan=plan,
+                    intents=(),
+                    market_state_sha256="6" * 64,
+                    affected_input_ids=(),
+                    gate="normal",
+                )
+
+            self.assertFalse((workspace / "decisions.jsonl").exists())
+            self.assertEqual(loop.book.tickets, {})
 
     def test_decision_ledger_binds_exact_registered_intent_provenance(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

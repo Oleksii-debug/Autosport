@@ -295,6 +295,16 @@ def test_bound_materialization_cannot_overwrite_concurrent_source_generation(
         opponent,
     )
 
+    # Capture a genuinely stale competing reader before the bound transaction
+    # acquires the identity/opponent lock set. The worker thread below performs
+    # only the write attempt, so the handshake observes the intended persist
+    # boundary instead of blocking while trying to construct its stale view.
+    stale_identity = ParticipantIdentityRegistry(identity.path)
+    stale_opponent = OpponentIntelligenceStore(
+        opponent.path,
+        stale_identity,
+    )
+
     original_build = OpponentIntelligenceStore.build_snapshots
     original_persist = OpponentIntelligenceStore._persist_state
     writer_loaded = Event()
@@ -316,15 +326,9 @@ def test_bound_materialization_cannot_overwrite_concurrent_source_generation(
 
     def source_writer() -> None:
         try:
-            # Reuse the already-canonical identity selector here. Re-opening the
-            # identity file would correctly block on the bound transaction's
-            # identity fence before this thread can reach the opponent persist
-            # attempt that this test is specifically trying to interleave.
-            fresh_identity = identity
-            fresh_opponent = OpponentIntelligenceStore(opponent.path, fresh_identity)
             writer_loaded.set()
             try:
-                fresh_opponent.record_performance(
+                stale_opponent.record_performance(
                     _performance("event-2", "Casey", SHA_B)
                 )
             except OpponentIntelligenceError as exc:

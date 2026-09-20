@@ -128,6 +128,12 @@ class CostEvidence:
             _utc(self.incurred_at, "incurred_at")
             if self.incurred_at > self.available_at:
                 raise CostEvidenceError("incurred_at cannot be later than available_at")
+        if (
+            self.basis is CostBasis.OBSERVED_INCURRED
+            and self.truth in {CostTruth.KNOWN_ZERO, CostTruth.KNOWN_AMOUNT}
+            and self.incurred_at is None
+        ):
+            raise CostEvidenceError("OBSERVED_INCURRED known cost requires incurred_at")
         _sorted_unique(self.memberships, "memberships")
         _sorted_unique(self.supersedes_cost_evidence_ids, "supersedes ids")
         for evidence_id in self.supersedes_cost_evidence_ids:
@@ -380,7 +386,10 @@ def derive_campaign_economics(
             raise CostEvidenceError("same immutable cost source cannot be counted twice")
         seen_sources.add(source_key)
 
-    if previous is not None:
+    if previous is None:
+        if any(cost.supersedes_cost_evidence_ids for cost in cost_items):
+            raise CostEvidenceError("first economic version cannot supersede prior cost evidence")
+    else:
         if previous.campaign_authority != projection:
             raise CostEvidenceError("successor cannot rewrite finalized campaign authority")
         if as_of < previous.as_of:
@@ -436,6 +445,11 @@ def _validate_successor(
     current_ids = {value.cost_evidence_id for value in current}
     superseders: dict[str, CostEvidence] = {}
     for value in current:
+        retained = previous_by_id.get(value.cost_evidence_id)
+        if retained is not None:
+            if value != retained:
+                raise CostEvidenceError("retained cost evidence changed under the same identity")
+            continue
         for superseded_id in value.supersedes_cost_evidence_ids:
             if superseded_id not in previous_by_id:
                 raise CostEvidenceError("correction may supersede only predecessor cost evidence")

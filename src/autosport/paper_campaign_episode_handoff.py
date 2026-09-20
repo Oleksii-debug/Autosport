@@ -35,6 +35,7 @@ HANDOFF_SCHEMA_VERSION: Final = 1
 _HEX: Final = frozenset("0123456789abcdef")
 _PREPARED: Final = "PREPARED"
 _COMMITTED: Final = "COMMITTED"
+_INTENT_AUTHORITY_DOMAIN: Final = "paper-campaign-episode-handoff-intent-v1"
 _CONSUMPTION_AUTHORITY_DOMAIN: Final = "paper-campaign-episode-handoff-consumption-v1"
 
 
@@ -241,6 +242,121 @@ class PaperCampaignEpisodeHandoff:
         except (OSError, MonotonicWorkspaceAuthorityError) as exc:
             raise PaperCampaignEpisodeHandoffError(
                 "cannot establish independent parent-checkpoint consumption authority"
+            ) from exc
+
+    def _intent_authority(
+        self, parent_checkpoint_id: str
+    ) -> MonotonicWorkspaceAuthority:
+        try:
+            return MonotonicWorkspaceAuthority(
+                workspace=self.state_path.parent.resolve(strict=False),
+                domain=_INTENT_AUTHORITY_DOMAIN,
+                key=_sha(parent_checkpoint_id, "parent_checkpoint_id"),
+            )
+        except (OSError, MonotonicWorkspaceAuthorityError) as exc:
+            raise PaperCampaignEpisodeHandoffError(
+                "cannot establish independent parent-checkpoint intent authority"
+            ) from exc
+
+    @staticmethod
+    def _intent_binding(parent_checkpoint_id: str, prepare_id: str) -> str:
+        return _digest(
+            {
+                "kind": "paper-campaign-parent-intent-v1",
+                "parent_checkpoint_id": _sha(
+                    parent_checkpoint_id, "parent_checkpoint_id"
+                ),
+                "prepare_id": _sha(prepare_id, "prepare_id"),
+            }
+        )
+
+    def _reserve_prepared_intent(
+        self,
+        parent_checkpoint_id: str,
+        prepared_record: dict[str, object],
+        existing: object | None,
+        handoffs: dict[str, object],
+    ) -> None:
+        """Seal exact PREPARED intent before any durable child can be created."""
+
+        self._validate_record(parent_checkpoint_id, prepared_record)
+        prepare_id = _sha(prepared_record["prepare_id"], "prepare_id")
+        binding = self._intent_binding(parent_checkpoint_id, prepare_id)
+        authority = self._intent_authority(parent_checkpoint_id)
+        try:
+            history = authority.read_history()
+            pending = (
+                history[-1]
+                if history and history[-1].phase is AuthorityPhase.PREPARE
+                else None
+            )
+            committed = next(
+                (
+                    record
+                    for record in reversed(history)
+                    if record.phase is AuthorityPhase.COMMIT
+                ),
+                None,
+            )
+
+            if pending is not None:
+                if (
+                    pending.intended_state_sha256 != prepare_id
+                    or pending.semantic_binding_sha256 != binding
+                ):
+                    raise PaperCampaignEpisodeHandoffError(
+                        "parent checkpoint intent conflicts with durable reservation"
+                    )
+                tx_id: str | None = pending.tx_id
+            elif committed is not None:
+                if (
+                    committed.intended_state_sha256 != prepare_id
+                    or committed.semantic_binding_sha256 != binding
+                ):
+                    raise PaperCampaignEpisodeHandoffError(
+                        "parent checkpoint intent conflicts with durable reservation"
+                    )
+                tx_id = None
+            else:
+                if existing is not None:
+                    raise PaperCampaignEpisodeHandoffError(
+                        "existing handoff has no independent intent reservation"
+                    )
+                tx_id = (
+                    f"paper-campaign-intent:{len(history) + 1}:"
+                    f"{prepare_id[:24]}"
+                )
+                authority.prepare(
+                    tx_id=tx_id,
+                    observed_state_sha256=None,
+                    intended_state_sha256=prepare_id,
+                    semantic_binding_sha256=binding,
+                )
+
+            if existing is None:
+                handoffs[parent_checkpoint_id] = prepared_record
+                self._write_state(handoffs)
+            else:
+                self._validate_record(parent_checkpoint_id, existing)
+                assert isinstance(existing, dict)
+                if (
+                    existing["prepare_id"] != prepare_id
+                    or self._prepared_semantic(existing)
+                    != self._prepared_semantic(prepared_record)
+                ):
+                    raise PaperCampaignEpisodeHandoffError(
+                        "parent checkpoint is already bound to a different next episode"
+                    )
+
+            if tx_id is not None:
+                authority.commit(
+                    tx_id=tx_id,
+                    observed_state_sha256=prepare_id,
+                    semantic_binding_sha256=binding,
+                )
+        except MonotonicWorkspaceAuthorityError as exc:
+            raise PaperCampaignEpisodeHandoffError(
+                "parent checkpoint intent reservation is missing, rolled back, or unproven"
             ) from exc
 
     def _recover_consumption_authority(
@@ -541,17 +657,12 @@ class PaperCampaignEpisodeHandoff:
             self._recover_consumption_authority(
                 parent_checkpoint.checkpoint_id, existing
             )
-            if existing is None:
-                state["handoffs"][parent_checkpoint.checkpoint_id] = prepared_record
-                self._write_state(state["handoffs"])
-            else:
-                self._validate_record(parent_checkpoint.checkpoint_id, existing)
-                if existing["prepare_id"] != prepare_id or self._prepared_semantic(
-                    existing
-                ) != prepared_semantic:
-                    raise PaperCampaignEpisodeHandoffError(
-                        "parent checkpoint is already bound to a different next episode"
-                    )
+            self._reserve_prepared_intent(
+                parent_checkpoint.checkpoint_id,
+                prepared_record,
+                existing,
+                state["handoffs"],
+            )
 
         try:
             child = ChampionAgentEpisode.initialize_pristine(

@@ -1,9 +1,9 @@
 """Fail-closed restart publication for already-produced paired VOC work.
 
 A router process intentionally forgets ``_live_request_ids`` on restart so old route
-records cannot be used to mint outcome-aware shadow evidence.  The production
+records cannot be used to mint outcome-aware shadow evidence. The production
 orchestrator, however, can already have a durable ``SUCCEEDED`` producer receipt
-when a process dies immediately before shadow-authority publication.  This guard
+when a process dies immediately before shadow-authority publication. This guard
 permits only that exact pre-authorized result to finish publication after restart.
 It does not make historical requests generally live and it never permits a new
 backend invocation for a restarted request.
@@ -13,7 +13,7 @@ from __future__ import annotations
 
 from contextvars import ContextVar
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Iterable
 
 from . import model_compute_router as router
 from . import voc_production_orchestrator as production
@@ -35,6 +35,36 @@ _RESTART_PUBLICATION_GRANT: ContextVar[_RestartPublicationGrant | None] = Contex
     "autosport_voc_restart_publication_grant",
     default=None,
 )
+
+
+class _ScopedLiveRequestIds(set[str]):
+    """Normal live IDs plus one context-local restart publication identity.
+
+    Recovery must satisfy the original router's live-route check without making a
+    historical request live to another thread. ContextVar state is intentionally
+    consulted only for membership; normal route-created IDs remain ordinary set
+    members and retain their existing process-wide semantics.
+    """
+
+    def __init__(
+        self,
+        store: router.ModelComputeRouterStore,
+        values: Iterable[str] = (),
+    ) -> None:
+        super().__init__(values)
+        self._store = store
+
+    def __contains__(self, value: object) -> bool:
+        if super().__contains__(value):
+            return True
+        if type(value) is not str:
+            return False
+        grant = _RESTART_PUBLICATION_GRANT.get()
+        return (
+            grant is not None
+            and grant.store is self._store
+            and grant.request_id == value
+        )
 
 
 def _restart_grant(
@@ -99,12 +129,16 @@ def _restart_grant(
             "restart publication SUCCEEDED receipt lacks backend result"
         )
     result = production.VOCBackendResult.from_payload(raw_result)
-    started_at = production._instant("VOC producer started_at", receipt.get("started_at"))
+    started_at = production._instant(
+        "VOC producer started_at", receipt.get("started_at")
+    )
     precompute_recorded_at = production._instant(
         "VOC precompute authority_recorded_at",
         precompute.get("authority_recorded_at"),
     )
-    completed_at = production._instant("VOC backend completed_at", result.completed_at)
+    completed_at = production._instant(
+        "VOC backend completed_at", result.completed_at
+    )
     if started_at < precompute_recorded_at:
         raise router.ModelComputeRouterError(
             "restart publication producer start predates precompute authority"
@@ -129,11 +163,24 @@ def _restart_grant(
 def _install() -> None:
     orchestrator_cls = production.VOCProductionOrchestrator
     store_cls = router.ModelComputeRouterStore
-    if getattr(orchestrator_cls, "_restart_publication_guard_v1", False):
+    if getattr(orchestrator_cls, "_restart_publication_guard_v2", False):
         return
 
+    original_store_init = store_cls.__init__
     original_run_role = orchestrator_cls.run_role
     original_record_shadow = store_cls.record_voc_shadow_execution
+
+    def hardened_store_init(
+        self: router.ModelComputeRouterStore,
+        *args: Any,
+        **kwargs: Any,
+    ) -> None:
+        original_store_init(self, *args, **kwargs)
+        if not isinstance(self._live_request_ids, _ScopedLiveRequestIds):
+            self._live_request_ids = _ScopedLiveRequestIds(
+                self,
+                self._live_request_ids,
+            )
 
     def hardened_run_role(
         self: production.VOCProductionOrchestrator,
@@ -238,27 +285,31 @@ def _install() -> None:
             raise router.ModelComputeRouterError(
                 "restart publication result differs from durable SUCCEEDED receipt"
             )
-
-        self._live_request_ids.add(request_id)
-        try:
-            return original_record_shadow(
-                self,
-                request_id=request_id,
-                role=role,
-                output_sha256=output_sha256,
-                action=action,
-                abstained=abstained,
-                completed_at=completed_at,
-                available_at=available_at,
-                actual_cost=actual_cost,
-                evidence_sha256=evidence_sha256,
+        if not isinstance(self._live_request_ids, _ScopedLiveRequestIds):
+            raise router.ModelComputeRouterError(
+                "restart publication store lacks context-local liveness fence"
             )
-        finally:
-            self._live_request_ids.discard(request_id)
 
+        # The original publisher still performs every canonical validation. Its
+        # liveness membership check is satisfied only in this ContextVar, for this
+        # exact store/request grant. No shared request-id mutation occurs here.
+        return original_record_shadow(
+            self,
+            request_id=request_id,
+            role=role,
+            output_sha256=output_sha256,
+            action=action,
+            abstained=abstained,
+            completed_at=completed_at,
+            available_at=available_at,
+            actual_cost=actual_cost,
+            evidence_sha256=evidence_sha256,
+        )
+
+    store_cls.__init__ = hardened_store_init
     orchestrator_cls.run_role = hardened_run_role
     store_cls.record_voc_shadow_execution = hardened_record_shadow
-    orchestrator_cls._restart_publication_guard_v1 = True
+    orchestrator_cls._restart_publication_guard_v2 = True
 
 
 _install()

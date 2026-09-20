@@ -520,6 +520,7 @@ def resolve_campaign_provider_scope(
     plan_id: str,
     attempt_id: str,
     capture: VerifiedBetfairProviderScopeCapture,
+    expected_applicability_digest: str | None = None,
 ) -> CampaignProviderScopeProjection:
     """Return applicability only on exact campaign/execution/provider membership."""
 
@@ -672,7 +673,7 @@ def resolve_campaign_provider_scope(
             "campaign causal membership drifted"
         )
 
-    return CampaignProviderScopeProjection(
+    resolved = CampaignProviderScopeProjection(
         campaign_id=campaign_projection.campaign_id,
         campaign_version=campaign_projection.campaign_version,
         campaign_sha256=campaign_projection.campaign_sha256,
@@ -697,3 +698,15 @@ def resolve_campaign_provider_scope(
         observed_at=capture.readback_observed_at,
         available_at=capture.available_at,
     )
+    if expected_applicability_digest is not None:
+        if (
+            _sha(
+                expected_applicability_digest,
+                "expected_applicability_digest",
+            )
+            != resolved.applicability_digest
+        ):
+            raise CampaignProviderScopeError(
+                "re-resolved provider scope digest drifted"
+            )
+    return resolved

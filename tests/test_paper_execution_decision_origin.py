@@ -196,6 +196,50 @@ def test_origin_bound_reservation_rejects_polymorphic_execution_ledger(tmp_path)
         origin_module._DECISION_ORIGIN.reset(token)
 
 
+def test_exact_decision_ledger_method_shadow_cannot_mint_origin(tmp_path) -> None:
+    ledger = JsonlDecisionLedger(tmp_path / "decision.jsonl")
+    ledger.append(_record())
+    attacker_called = False
+
+    def forged_verified_snapshot():
+        nonlocal attacker_called
+        attacker_called = True
+        raise AssertionError("shadowed verified_snapshot must not execute")
+
+    ledger.verified_snapshot = forged_verified_snapshot  # type: ignore[method-assign]
+    with pytest.raises(
+        origin_module.PaperExecutionDecisionOriginError,
+        match="shadows authority method verified_snapshot",
+    ):
+        origin_module.verified_decision_origin(ledger, DECISION_ID)
+    assert attacker_called is False
+
+
+def test_exact_execution_ledger_method_shadow_cannot_write_origin(tmp_path) -> None:
+    decision_ledger = JsonlDecisionLedger(tmp_path / "decision.jsonl")
+    decision_ledger.append(_record())
+    origin = origin_module.verified_decision_origin(decision_ledger, DECISION_ID)
+    ledger = PaperExecutionLedger(tmp_path / "paper-execution.jsonl")
+    attacker_called = False
+
+    def forged_append_event(**kwargs):
+        nonlocal attacker_called
+        attacker_called = True
+        raise AssertionError("shadowed _append_event must not execute")
+
+    ledger._append_event = forged_append_event  # type: ignore[method-assign]
+    token = origin_module._DECISION_ORIGIN.set(origin)
+    try:
+        with pytest.raises(
+            origin_module.PaperExecutionDecisionOriginError,
+            match="shadows authority method _append_event",
+        ):
+            _reserve(ledger, _plan())
+    finally:
+        origin_module._DECISION_ORIGIN.reset(token)
+    assert attacker_called is False
+
+
 def test_caller_shaped_context_frame_cannot_mint_product_origin(tmp_path) -> None:
     decision_ledger = JsonlDecisionLedger(tmp_path / "decision.jsonl")
     decision_ledger.append(_record())

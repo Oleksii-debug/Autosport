@@ -19,6 +19,7 @@ from autosport.collector_service import (
     CollectorServiceError,
     CollectorServiceStoppedError,
     CollectorStorageLimitError,
+    CollectorRetentionRequiredError,
     HeadlessCollectorService,
     ReadOnlyCollectorDeltaFeed,
     _SignalStopRequest,
@@ -373,13 +374,15 @@ class HeadlessCollectorServiceTests(unittest.TestCase):
                     max_store_bytes=1,
                 ),
             )
-            with self.assertRaises(CollectorStorageLimitError):
+            with self.assertRaises(CollectorRetentionRequiredError) as caught:
                 service.run_cycle()
+            self.assertIsInstance(caught.exception, CollectorStorageLimitError)
+            self.assertEqual(caught.exception.code, "RETENTION_REQUIRED")
             self.assertEqual(source.catalog_calls, 0)
             self.assertEqual(service.status()["provider_failures"], 0)
             self.assertEqual(
                 service.status()["last_error_code"],
-                "CollectorStorageLimitError",
+                "CollectorRetentionRequiredError",
             )
 
     def test_wrong_source_delta_fails_closed_without_success(self):

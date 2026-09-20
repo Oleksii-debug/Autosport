@@ -9,6 +9,9 @@ from pathlib import Path
 
 from autosport.paper_execution_reality import (
     EvidenceGrade,
+    PaperAttemptOutcome,
+    PaperExecutionEvidenceRecord,
+    PaperExecutionEvidenceRegistry,
     PaperExecutionIntegrityError,
     PaperExecutionLedger,
     PaperExecutionModelConfig,
@@ -22,6 +25,20 @@ from autosport.real_execution_ledger import ExecutionAction, ExecutionPlan
 QUOTE_AT = "2026-09-20T03:00:00+00:00"
 STARTED_AT = "2026-09-20T03:00:00.100000+00:00"
 EXPIRES_AT = "2026-09-20T03:01:00+00:00"
+
+
+def canonical(value):
+    return json.dumps(
+        value,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    )
+
+
+def digest(value):
+    return hashlib.sha256(canonical(value).encode("utf-8")).hexdigest()
 
 
 def action(action_id: str, *, odds: str, stake: str) -> ExecutionAction:
@@ -70,6 +87,31 @@ def model(**overrides) -> PaperExecutionModelConfig:
     }
     values.update(overrides)
     return PaperExecutionModelConfig(**values)
+
+
+def empirical_record(
+    action_id: str,
+    *,
+    source: str,
+    accepted_odds: str = "2.50",
+    accepted_stake: str = "10.00",
+) -> PaperExecutionEvidenceRecord:
+    return PaperExecutionEvidenceRecord(
+        action_id=action_id,
+        bookmaker_id="paper-venue",
+        account_id="paper-account",
+        event_id="event-1",
+        market_id=f"market-{action_id}",
+        selection_id=f"selection-{action_id}",
+        side="BACK",
+        quote_id=f"quote-{action_id}",
+        outcome=PaperAttemptOutcome.ACCEPTED,
+        observed_at=STARTED_AT,
+        evidence_grade=EvidenceGrade.EMPIRICAL,
+        evidence_source=source,
+        accepted_odds=accepted_odds,
+        accepted_stake=accepted_stake,
+    )
 
 
 class PaperExecutionRepairRegressions(unittest.TestCase):
@@ -133,20 +175,6 @@ class PaperExecutionRepairRegressions(unittest.TestCase):
                 started_at=STARTED_AT,
             )
 
-            def canonical(value):
-                return json.dumps(
-                    value,
-                    ensure_ascii=False,
-                    sort_keys=True,
-                    separators=(",", ":"),
-                    allow_nan=False,
-                )
-
-            def digest(value):
-                return hashlib.sha256(
-                    canonical(value).encode("utf-8")
-                ).hexdigest()
-
             lines = path.read_text(encoding="utf-8").splitlines()
             completion = json.loads(lines[-1])
             self.assertEqual(completion["event_type"], "RUN_COMPLETED")
@@ -165,6 +193,23 @@ class PaperExecutionRepairRegressions(unittest.TestCase):
             anchor["anchor_sha256"] = digest(anchor_body)
             anchor_path.write_text(canonical(anchor) + "\n", encoding="utf-8")
 
+            # Simulate compromise of the independent witness too, so this test
+            # still reaches the second-line mechanically-derived economics check.
+            witness_path = path.with_name(
+                path.name + ".monotonic-witness.jsonl"
+            )
+            witness_lines = witness_path.read_text(encoding="utf-8").splitlines()
+            witness = json.loads(witness_lines[-1])
+            witness["ledger_root_sha256"] = completion["event_sha256"]
+            witness_body = dict(witness)
+            witness_body.pop("witness_sha256")
+            witness["witness_sha256"] = digest(witness_body)
+            witness_lines[-1] = canonical(witness)
+            witness_path.write_text(
+                "\n".join(witness_lines) + "\n",
+                encoding="utf-8",
+            )
+
             with self.assertRaisesRegex(
                 PaperExecutionIntegrityError,
                 "completion payload does not match durable attempt economics",
@@ -176,6 +221,80 @@ class PaperExecutionRepairRegressions(unittest.TestCase):
                     ledger=PaperExecutionLedger(path),
                     started_at=STARTED_AT,
                 )
+
+    def test_paired_ledger_anchor_rollback_is_rejected_by_monotonic_witness(self):
+        current = plan(action("a1", odds="2.50", stake="10.00"))
+        cfg = model(max_slippage_bps=0)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "paper.jsonl"
+            ledger = PaperExecutionLedger(path)
+            registry = PaperExecutionEvidenceRegistry(ledger)
+            first = empirical_record("a1", source="empirical-first")
+            registry.register(first)
+            execute_paper_plan(
+                plan=current,
+                trigger_id="trigger-monotonic-rollback",
+                config=cfg,
+                ledger=ledger,
+                started_at=STARTED_AT,
+                observations={"a1": first.as_observation()},
+                evidence_registry=registry,
+            )
+
+            anchor_path = path.with_name(path.name + ".anchor.json")
+            old_ledger = path.read_bytes()
+            old_anchor = anchor_path.read_bytes()
+
+            changed = empirical_record(
+                "a1",
+                source="empirical-changed",
+                accepted_odds="2.40",
+            )
+            registry.register(changed)
+
+            path.write_bytes(old_ledger)
+            anchor_path.write_bytes(old_anchor)
+
+            reopened = PaperExecutionLedger(path)
+            with self.assertRaisesRegex(
+                PaperExecutionIntegrityError,
+                "older than monotonic witness authority",
+            ):
+                reopened.events()
+
+            with self.assertRaisesRegex(
+                PaperExecutionIntegrityError,
+                "older than monotonic witness authority",
+            ):
+                PaperExecutionEvidenceRegistry(reopened).register(changed)
+
+    def test_deleting_ledger_and_anchor_after_history_fails_closed(self):
+        current = plan(action("a1", odds="2.50", stake="10.00"))
+        cfg = model(max_slippage_bps=0)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "paper.jsonl"
+            execute_paper_plan(
+                plan=current,
+                trigger_id="trigger-delete-pair",
+                config=cfg,
+                ledger=PaperExecutionLedger(path),
+                started_at=STARTED_AT,
+            )
+            anchor_path = path.with_name(path.name + ".anchor.json")
+            witness_path = path.with_name(
+                path.name + ".monotonic-witness.jsonl"
+            )
+            self.assertTrue(witness_path.exists())
+            path.unlink()
+            anchor_path.unlink()
+
+            with self.assertRaisesRegex(
+                PaperExecutionIntegrityError,
+                "older than monotonic witness authority",
+            ):
+                PaperExecutionLedger(path).events()
 
 
 if __name__ == "__main__":

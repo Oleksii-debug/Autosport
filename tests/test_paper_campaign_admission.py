@@ -297,16 +297,25 @@ class PaperCampaignAdmissionTests(unittest.TestCase):
             fixture = _Fixture(Path(directory))
             root = fixture.root
             fixture.admit(fixture.coordinator())
-            book = PaperBook.load(root / "paper_book.json")
-            book.tickets.clear()
-            book.save(root / "paper_book.json")
+            book_path = root / "paper_book.json"
+            raw_book = json.loads(book_path.read_text(encoding="utf-8"))
+            raw_book["tickets"] = []
+            book_path.write_text(
+                json.dumps(raw_book, sort_keys=True, separators=(",", ":")),
+                encoding="utf-8",
+            )
 
             with self.assertRaisesRegex(
                 PaperCampaignAdmissionError,
                 "PaperTicket is missing or substituted",
             ):
                 fixture.admit(fixture.coordinator(resumed=True))
-            self.assertEqual(len(PaperBook.load(root / "paper_book.json").tickets), 0)
+            self.assertEqual(
+                json.loads(
+                    (root / "paper_book.json").read_text(encoding="utf-8")
+                )["tickets"],
+                [],
+            )
 
     def test_committed_retry_missing_decision_fails_without_republishing(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

@@ -627,7 +627,14 @@ class PaperCampaignAdmissionCoordinator:
         currency: str,
         expected_ticket_id: str | None = None,
     ) -> PaperTicket:
-        book = PaperBook.load(self.paper_book_path)
+        try:
+            book = PaperBook.load(self.paper_book_path)
+        except ValueError as exc:
+            if expected_ticket_id is not None:
+                raise PaperCampaignAdmissionError(
+                    "committed admission PaperTicket is missing or substituted"
+                ) from exc
+            raise
         marker = self._marker(admission_id, intent_sha256, strategy_reason)
         matches = [ticket for ticket in book.tickets.values() if ticket.strategy_reason == marker]
         if expected_ticket_id is not None:
@@ -706,6 +713,7 @@ class PaperCampaignAdmissionCoordinator:
         baseline: EnvironmentCheckpoint,
         observation: Observation,
         action_type: str,
+        decision_at: str,
         parameters: tuple[tuple[str, str], ...],
         ticket: PaperTicket,
         decision: DecisionRecord,
@@ -719,6 +727,10 @@ class PaperCampaignAdmissionCoordinator:
                 "committed admission settlement-learning binding is missing"
             )
         identity = self.runtime.environment.identity
+        bound_parameters = self.runtime._parameters_with_reflection_commitment(
+            parameters,
+            decision_at=decision_at,
+        )
         exact = {
             "ticket_id": ticket.ticket_id,
             "ticket_identity_sha256": _digest(_ticket_payload(ticket)),
@@ -739,7 +751,7 @@ class PaperCampaignAdmissionCoordinator:
             "observation_id": observation.observation_id,
             "action_id": record["action_id"],
             "action_type": action_type,
-            "action_parameters": [list(item) for item in parameters],
+            "action_parameters": [list(item) for item in bound_parameters],
             "economic_goal_fingerprint": bridge.goal_fingerprint,
             "risk_fingerprint": bridge.risk_fingerprint,
             "baseline_checkpoint": _checkpoint_payload(baseline),
@@ -997,6 +1009,7 @@ class PaperCampaignAdmissionCoordinator:
                     baseline=baseline,
                     observation=observation,
                     action_type=action_type,
+                    decision_at=decision_at,
                     parameters=parameters,
                     ticket=ticket,
                     decision=existing,

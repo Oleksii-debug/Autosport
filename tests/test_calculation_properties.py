@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from decimal import Decimal, ROUND_HALF_EVEN, localcontext
 
+import pytest
 from hypothesis import given, settings, strategies as st
 
 from autosport.calculation import CalculationEngine
@@ -108,9 +109,24 @@ def test_multiplicative_devig_is_permutation_invariant_and_normalized(
     second: Decimal,
 ) -> None:
     engine = CalculationEngine()
-    forward = engine.multiplicative_devig({"alpha": first, "beta": second})
-    reverse = engine.multiplicative_devig({"beta": second, "alpha": first})
+    forward_market = {"alpha": first, "beta": second}
+    reverse_market = {"beta": second, "alpha": first}
 
+    try:
+        forward = engine.multiplicative_devig(forward_market)
+    except ValueError as exc:
+        # The canonical engine deliberately fails closed when the exact market
+        # margin subtraction would round. Mapping order cannot change whether a
+        # pair belongs to that fail-closed domain.
+        assert str(exc) == "market margin arithmetic would require rounding"
+        with pytest.raises(
+            ValueError,
+            match=r"^market margin arithmetic would require rounding$",
+        ):
+            engine.multiplicative_devig(reverse_market)
+        return
+
+    reverse = engine.multiplicative_devig(reverse_market)
     assert forward.input_hash == reverse.input_hash
     assert forward.result_hash == reverse.result_hash
 
@@ -122,6 +138,22 @@ def test_multiplicative_devig_is_permutation_invariant_and_normalized(
             + Decimal(outputs["fair_probability.beta"])
         )
     assert abs(fair_total - Decimal("1")) <= Decimal("1e-150")
+
+
+def test_multiplicative_devig_rounding_failure_is_permutation_invariant() -> None:
+    first = Decimal("19.901")
+    second = Decimal("20.100")
+    engine = CalculationEngine()
+
+    for market in (
+        {"alpha": first, "beta": second},
+        {"beta": second, "alpha": first},
+    ):
+        with pytest.raises(
+            ValueError,
+            match=r"^market margin arithmetic would require rounding$",
+        ):
+            engine.multiplicative_devig(market)
 
 
 @settings(max_examples=64, deadline=None)

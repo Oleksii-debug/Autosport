@@ -44,6 +44,7 @@ def _digest(payload: object) -> str:
 @dataclass
 class _Authority:
     feature_published_at: str = "2026-09-20T10:00:01Z"
+    feature_support: int = 2
 
     def build_snapshots(self, **kwargs):
         rating = RatingSnapshot(
@@ -83,7 +84,7 @@ class _Authority:
             causal_cutoff=rating.causal_cutoff,
             published_at=self.feature_published_at,
             input_digest=rating.input_digest,
-            support=rating.support,
+            support=self.feature_support,
             effective_sample=rating.effective_sample,
             opponent_count=rating.opponent_count,
             last_observed_at="2026-09-19T10:00:00Z",
@@ -127,7 +128,25 @@ def test_later_feature_publication_cannot_be_hidden_by_rating_publication(tmp_pa
         authority_generation_sha256=SHA_3,
     )
 
-    with pytest.raises(SportMemoryError, match="requested scope"):
+    with pytest.raises(SportMemoryError, match="one coherent requested view"):
+        runtime.materialize(
+            participant_entity_id="participant-1",
+            scope=_scope(),
+            causal_cutoff="2026-09-20T10:00:00Z",
+            published_at="2026-09-20T10:00:01Z",
+            code_sha256=SHA_C,
+            dependency_sha256=SHA_D,
+        )
+
+
+def test_rating_and_feature_support_must_describe_one_snapshot_pair(tmp_path):
+    runtime = SportMemoryRuntime.initialize_pristine(
+        tmp_path / "sport-memory.json",
+        _Authority(feature_support=1),
+        authority_generation_sha256=SHA_3,
+    )
+
+    with pytest.raises(SportMemoryError, match="one coherent requested view"):
         runtime.materialize(
             participant_entity_id="participant-1",
             scope=_scope(),

@@ -195,7 +195,10 @@ def _settlement_authority_identity(
             "source-owned settlement resolve method cannot close over mutable authority"
         )
     try:
-        resolver_semantic_sha256 = function_semantic_sha256(resolver)
+        resolver_semantic_sha256 = function_semantic_sha256(
+            resolver,
+            runtime_owner=type(source),
+        )
     except ResolverSemanticIdentityError as exc:
         raise ProductCompositionError(
             "source-owned settlement resolve semantics cannot be fingerprinted safely"

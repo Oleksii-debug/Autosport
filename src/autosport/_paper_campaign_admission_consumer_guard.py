@@ -1,15 +1,18 @@
-"""Fail closed on exact-instance authority method shadowing during PAPER admission.
+"""Fail closed on mutable PAPER-admission authority objects.
 
 Exact concrete ledger types prevent subclass-based authority forgery, but their
 non-data-descriptor methods can still be replaced per instance through ``__dict__``.
-Campaign admission must reject those objects immediately before every authority-
-bearing read.  The guarded read then uses a tiny exact-class view so a mutation
-racing after the check still cannot redirect durable execution or decision history.
+The coordinator itself can also be pointed at a different exact ledger after
+construction.  Admission therefore pins the original authority objects outside the
+coordinator instance, rejects replacement/shadowing immediately before every read,
+and performs the read through an exact-class view so a racing mutation cannot
+redirect durable execution or decision history.
 """
 
 from __future__ import annotations
 
 from threading import RLock
+from weakref import WeakKeyDictionary
 
 from .decision_ledger import JsonlDecisionLedger
 from .paper_campaign_admission import (
@@ -18,13 +21,14 @@ from .paper_campaign_admission import (
 )
 from .paper_execution_reality import PaperExecutionLedger
 
-_GUARD_MARKER = "__autosport_exact_admission_authority_guard_v2__"
-_GUARD_LOCK_ATTR = "_exact_admission_authority_guard_lock"
+_GUARD_MARKER = "__autosport_exact_admission_authority_guard_v3__"
 _ORIGINAL_INIT = PaperCampaignAdmissionCoordinator.__init__
 _ORIGINAL_RESOLVED_EXECUTION_DECISION_ID = (
     PaperCampaignAdmissionCoordinator._resolved_execution_decision_id
 )
 _ORIGINAL_EXECUTION_ATTEMPT = PaperCampaignAdmissionCoordinator._execution_attempt
+_AUTHORITY_BINDINGS = WeakKeyDictionary()
+_AUTHORITY_BINDINGS_LOCK = RLock()
 
 
 def _has_instance_shadow(value: object, method_name: str) -> bool:
@@ -46,8 +50,6 @@ class _ExactDecisionLedgerReadView:
         self._ledger = ledger
 
     def verified_records(self):
-        # Bind the authority read to the exact class implementation instead of
-        # normal instance dispatch, which can be redirected through __dict__.
         return JsonlDecisionLedger.verified_records(self._ledger)
 
 
@@ -59,6 +61,16 @@ class _ExactExecutionLedgerReadView:
 
     def events(self, run_id: str):
         return PaperExecutionLedger.events(self._ledger, run_id)
+
+
+def _binding_for(self: PaperCampaignAdmissionCoordinator):
+    with _AUTHORITY_BINDINGS_LOCK:
+        binding = _AUTHORITY_BINDINGS.get(self)
+    if binding is None:
+        raise PaperCampaignAdmissionError(
+            "PAPER admission authority binding is unavailable"
+        )
+    return binding
 
 
 def _guarded_init(
@@ -90,39 +102,46 @@ def _guarded_init(
         runtime=runtime,
         execution_ledger=execution_ledger,
     )
-    setattr(self, _GUARD_LOCK_ATTR, RLock())
+    with _AUTHORITY_BINDINGS_LOCK:
+        _AUTHORITY_BINDINGS[self] = (decision_ledger, execution_ledger, RLock())
 
 
 def _guarded_resolved_execution_decision_id(self, *args, **kwargs):
-    lock = getattr(self, _GUARD_LOCK_ATTR)
+    decision_ledger, _execution_ledger, lock = _binding_for(self)
     with lock:
-        ledger = self.decision_ledger
-        if type(ledger) is not JsonlDecisionLedger:
+        if self.decision_ledger is not decision_ledger:
             raise PaperCampaignAdmissionError(
                 "Decision Ledger authority changed after admission construction"
             )
-        _reject_instance_shadow(ledger, "verified_records", "Decision Ledger")
-        self.decision_ledger = _ExactDecisionLedgerReadView(ledger)
+        _reject_instance_shadow(
+            decision_ledger,
+            "verified_records",
+            "Decision Ledger",
+        )
+        self.decision_ledger = _ExactDecisionLedgerReadView(decision_ledger)
         try:
             return _ORIGINAL_RESOLVED_EXECUTION_DECISION_ID(self, *args, **kwargs)
         finally:
-            self.decision_ledger = ledger
+            self.decision_ledger = decision_ledger
 
 
 def _guarded_execution_attempt(self, *args, **kwargs):
-    lock = getattr(self, _GUARD_LOCK_ATTR)
+    _decision_ledger, execution_ledger, lock = _binding_for(self)
     with lock:
-        ledger = self.execution_ledger
-        if type(ledger) is not PaperExecutionLedger:
+        if self.execution_ledger is not execution_ledger:
             raise PaperCampaignAdmissionError(
                 "PAPER execution authority changed after admission construction"
             )
-        _reject_instance_shadow(ledger, "events", "PAPER execution")
-        self.execution_ledger = _ExactExecutionLedgerReadView(ledger)
+        _reject_instance_shadow(
+            execution_ledger,
+            "events",
+            "PAPER execution",
+        )
+        self.execution_ledger = _ExactExecutionLedgerReadView(execution_ledger)
         try:
             return _ORIGINAL_EXECUTION_ATTEMPT(self, *args, **kwargs)
         finally:
-            self.execution_ledger = ledger
+            self.execution_ledger = execution_ledger
 
 
 if not getattr(PaperCampaignAdmissionCoordinator, _GUARD_MARKER, False):

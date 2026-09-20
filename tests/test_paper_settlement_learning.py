@@ -58,29 +58,6 @@ def _fixture(
     )
     book.save(root / "paper_book.json")
 
-    ledger = JsonlDecisionLedger(root / "decisions.jsonl")
-    quote_keys = tuple(sorted(leg.quote_key for leg in legs))
-    decision_action = "OPEN_PAPER_TICKET"
-    payload = {
-        "ticket_id": ticket.ticket_id,
-        "stake": str(ticket.stake),
-    }
-    if len(quote_keys) == 1:
-        payload["quote_key"] = quote_keys[0]
-    else:
-        payload["quote_keys"] = list(quote_keys)
-    decision = DecisionRecord(
-        replay_run_id="bridge-run",
-        agent="bridge-fixture",
-        observed_ts="2026-09-19T21:19:00+00:00",
-        action=decision_action,
-        payload=payload,
-        context_hash="bridge-context",
-        decision_id="bridge-decision",
-        decision_kind=ECONOMIC_DECISION_KIND,
-    )
-    ledger.append_economic(decision, EconomicDecisionAuthority(goal, risk))
-
     identity = EnvironmentIdentity(
         source_id="bridge-source",
         config_id="bridge-config",
@@ -95,6 +72,36 @@ def _fixture(
         policy_id="bridge-policy",
         admissible_actions=frozenset({action_type}),
     )
+    observation = Observation(
+        environment_id=environment.environment_id,
+        observed_at="2026-09-19T21:19:00+00:00",
+        available_at="2026-09-19T21:19:01+00:00",
+        evidence=(("market_state", "bridge-snapshot"),),
+    )
+
+    ledger = JsonlDecisionLedger(root / "decisions.jsonl")
+    quote_keys = tuple(sorted(leg.quote_key for leg in legs))
+    decision_action = "OPEN_PAPER_TICKET"
+    payload = {
+        "ticket_id": ticket.ticket_id,
+        "stake": str(ticket.stake),
+    }
+    if len(quote_keys) == 1:
+        payload["quote_key"] = quote_keys[0]
+    else:
+        payload["quote_keys"] = list(quote_keys)
+    decision = DecisionRecord(
+        replay_run_id="bridge-run",
+        agent="bridge-fixture",
+        observed_ts=observation.observed_at,
+        action=decision_action,
+        payload=payload,
+        context_hash=observation.observation_id,
+        decision_id="bridge-decision",
+        decision_kind=ECONOMIC_DECISION_KIND,
+    )
+    ledger.append_economic(decision, EconomicDecisionAuthority(goal, risk))
+
     baseline = environment.checkpoint()
     runtime = AgentLoopRuntime.initialize_pristine(
         root / "agent-loop.json",
@@ -106,12 +113,6 @@ def _fixture(
         source_sha256="a" * 64,
         config_sha256="b" * 64,
         at="2026-09-19T21:18:59+00:00",
-    )
-    observation = Observation(
-        environment_id=environment.environment_id,
-        observed_at="2026-09-19T21:19:00+00:00",
-        available_at="2026-09-19T21:19:01+00:00",
-        evidence=(("market_state", "bridge-snapshot"),),
     )
     runtime.begin_observation(
         observation,

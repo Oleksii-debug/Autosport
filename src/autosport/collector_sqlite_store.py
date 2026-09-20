@@ -28,19 +28,6 @@ from .workspace_lock import WorkspaceEconomicLock, WorkspaceEconomicLockBusyErro
 
 _SQLITE_HEADER = b"SQLite format 3\x00"
 _DB_SCHEMA_VERSION = 1
-_DELTA_PROJECTION_FIELDS = (
-    ("delta_id", "delta_id"),
-    ("source_id", "source_id"),
-    ("stream_epoch", "stream_epoch"),
-    ("cursor_position", "cursor_position"),
-    ("revision_number", "revision_number"),
-    ("desktop_available_at", "desktop_available_at"),
-    ("collector_committed_at", "collector_committed_at"),
-)
-_DELTA_EVIDENCE_SELECT = (
-    "delta_id, source_id, stream_epoch, cursor_position, revision_number, "
-    "desktop_available_at, collector_committed_at, payload_sha256, payload_json"
-)
 
 
 def _pairs(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
@@ -88,8 +75,7 @@ def _decode_delta(payload: str, expected_digest: str) -> CollectorDelta:
 
 def _fsync_file(path: Path) -> None:
     # Windows rejects fsync() on a CRT descriptor opened read-only. The migration
-    # candidate is our own writable temporary SQLite file, so use a read/write
-    # descriptor while preserving the same durability boundary on every platform.
+    # candidate is our own writable temporary SQLite file, so use read/write here.
     with path.open("r+b") as handle:
         os.fsync(handle.fileno())
 
@@ -438,18 +424,7 @@ class CollectorDeltaStore:
 
     @staticmethod
     def _row_delta(row: sqlite3.Row) -> CollectorDelta:
-        delta = _decode_delta(row["payload_json"], row["payload_sha256"])
-        try:
-            for column, attribute in _DELTA_PROJECTION_FIELDS:
-                if row[column] != getattr(delta, attribute):
-                    raise ValueError(
-                        "collector delta indexed projection conflicts with canonical payload"
-                    )
-        except (IndexError, KeyError) as exc:
-            raise ValueError(
-                "collector delta row is missing canonical projection evidence"
-            ) from exc
-        return delta
+        return _decode_delta(row["payload_json"], row["payload_sha256"])
 
     @classmethod
     def _delta_by_id(
@@ -458,7 +433,7 @@ class CollectorDeltaStore:
         delta_id: str,
     ) -> CollectorDelta | None:
         row = connection.execute(
-            f"SELECT {_DELTA_EVIDENCE_SELECT} FROM collector_deltas WHERE delta_id=?",
+            "SELECT payload_sha256, payload_json FROM collector_deltas WHERE delta_id=?",
             (delta_id,),
         ).fetchone()
         return None if row is None else cls._row_delta(row)
@@ -473,7 +448,7 @@ class CollectorDeltaStore:
         encoded = _canonical_delta_json(delta)
         digest = _payload_digest(encoded)
         existing = connection.execute(
-            f"SELECT {_DELTA_EVIDENCE_SELECT} FROM collector_deltas WHERE delta_id=?",
+            "SELECT payload_sha256, payload_json FROM collector_deltas WHERE delta_id=?",
             (delta.delta_id,),
         ).fetchone()
         if existing is not None:
@@ -624,7 +599,7 @@ class CollectorDeltaStore:
         connection = self._connect()
         try:
             rows = connection.execute(
-                f"SELECT {_DELTA_EVIDENCE_SELECT} FROM collector_deltas ORDER BY commit_seq"
+                "SELECT payload_sha256, payload_json FROM collector_deltas ORDER BY commit_seq"
             ).fetchall()
             return [self._row_delta(row) for row in rows]
         except sqlite3.DatabaseError as exc:
@@ -710,22 +685,16 @@ class CollectorDeltaStore:
             if after_delta_id is not None:
                 _text(after_delta_id, "after_delta_id")
                 anchor = connection.execute(
-                    f"SELECT commit_seq, {_DELTA_EVIDENCE_SELECT} "
-                    "FROM collector_deltas WHERE delta_id=?",
+                    "SELECT source_id, commit_seq FROM collector_deltas WHERE delta_id=?",
                     (after_delta_id,),
                 ).fetchone()
-                if anchor is None:
-                    raise CursorRegressionError(
-                        "delivery cursor delta is not present for this source"
-                    )
-                anchor_delta = self._row_delta(anchor)
-                if anchor_delta.source_id != source_id:
+                if anchor is None or anchor["source_id"] != source_id:
                     raise CursorRegressionError(
                         "delivery cursor delta is not present for this source"
                     )
                 after_seq = anchor["commit_seq"]
             rows = connection.execute(
-                f"SELECT {_DELTA_EVIDENCE_SELECT} FROM collector_deltas "
+                "SELECT payload_sha256, payload_json FROM collector_deltas "
                 "WHERE source_id=? AND commit_seq>? ORDER BY commit_seq LIMIT ?",
                 (source_id, after_seq, max_items),
             ).fetchall()

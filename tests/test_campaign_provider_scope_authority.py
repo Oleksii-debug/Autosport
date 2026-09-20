@@ -6,6 +6,8 @@ from pathlib import Path
 
 import pytest
 
+import autosport.campaign_provider_scope_authority as scope
+
 from autosport.betfair_account_readonly import (
     ADAPTER_ID,
     ADAPTER_VERSION,

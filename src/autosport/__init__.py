@@ -69,6 +69,10 @@ from . import _dataset_snapshot_lineage_publication_trust_root as _dataset_snaps
 # provenance relation. The guard reuses the existing lineage/registry authorities.
 from . import _point_in_time_feature_provenance_guard as _point_in_time_feature_provenance_guard  # noqa: F401,E402
 
+# Exact-fence the lineage capability before any authority-bearing dispatch and let
+# stale holdout process views re-resolve the same durable workspace binding/root.
+from . import _point_in_time_authority_runtime_repair as _point_in_time_authority_runtime_repair  # noqa: F401,E402
+
 # Structural cursor/range witnesses are useful legacy intake evidence but are not
 # production provider-completeness authority. Install the fail-closed public gate;
 # the supported denominator path consumes the exact live CompleteGameBoardSnapshot.

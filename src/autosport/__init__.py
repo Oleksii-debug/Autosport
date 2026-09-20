@@ -97,3 +97,7 @@ from . import _betfair_market_commission_origin_binding as _betfair_market_commi
 # scope; it must not mint a replacement projection merely because T1 evidence
 # instance ids or timestamps changed after restart.
 from . import _campaign_provider_scope_stable_projection as _campaign_provider_scope_stable_projection  # noqa: F401,E402
+
+# PAPER campaign admission consumes exact durable ledgers. Reject per-instance
+# method shadows before any authority-bearing decision/execution history read.
+from . import _paper_campaign_admission_consumer_guard as _paper_campaign_admission_consumer_guard  # noqa: F401,E402

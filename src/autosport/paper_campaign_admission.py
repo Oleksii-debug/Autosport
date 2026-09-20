@@ -105,6 +105,16 @@ def _state_identity(path: Path) -> str:
     return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
 
 
+def _state_for(admissions: dict[str, object], generation: int) -> dict[str, object]:
+    bare = {
+        "schema": SCHEMA,
+        "schema_version": SCHEMA_VERSION,
+        "generation": generation,
+        "admissions": admissions,
+    }
+    return {**bare, "state_sha256": _digest(bare)}
+
+
 def _leg_payload(leg: TicketLeg) -> dict[str, str]:
     if not isinstance(leg, TicketLeg):
         raise TypeError("legs must contain TicketLeg values")
@@ -237,18 +247,25 @@ class PaperCampaignAdmissionCoordinator:
                 "cannot establish independent admission monotonic authority"
             ) from exc
         self._state_identity = _state_identity(self.state_path)
-        self._witness_path = (
-            authority_root / f"{self._state_identity}{_WITNESS_SUFFIX}"
-        )
+        self._witness_path = authority_root / f"{self._state_identity}{_WITNESS_SUFFIX}"
         with WorkspaceEconomicLock(self._admission_lock_workspace):
+            witnesses = self._read_witnesses()
             if self.state_path.exists():
                 self._read()
-            else:
-                if self._read_witnesses():
-                    raise PaperCampaignAdmissionError(
-                        "admission journal is missing behind monotonic authority"
-                    )
+            elif not witnesses:
                 self._write({})
+            elif len(witnesses) == 1:
+                initial = _state_for({}, 1)
+                if witnesses[0]["state_sha256"] != initial["state_sha256"]:
+                    raise PaperCampaignAdmissionError(
+                        "missing admission journal cannot match initial monotonic witness"
+                    )
+                atomic_write_json(self.state_path, initial)
+                self._read()
+            else:
+                raise PaperCampaignAdmissionError(
+                    "admission journal is missing behind monotonic authority"
+                )
 
     def _read_witnesses(self) -> list[dict[str, object]]:
         if not self._witness_path.exists():
@@ -382,13 +399,7 @@ class PaperCampaignAdmissionCoordinator:
             or type(state["admissions"]) is not dict
         ):
             raise PaperCampaignAdmissionError("unsupported admission state")
-        bare = {
-            "schema": state["schema"],
-            "schema_version": state["schema_version"],
-            "generation": state["generation"],
-            "admissions": state["admissions"],
-        }
-        if _sha(state["state_sha256"], "state_sha256") != _digest(bare):
+        if state != _state_for(state["admissions"], state["generation"]):
             raise PaperCampaignAdmissionError("admission state digest mismatch")
         fields = {
             "admission_id",
@@ -431,41 +442,54 @@ class PaperCampaignAdmissionCoordinator:
     def _read(self) -> dict[str, object]:
         state = self._read_local()
         witnesses = self._read_witnesses()
-        if not witnesses:
+        generation = state["generation"]
+        if len(witnesses) < generation:
             raise PaperCampaignAdmissionError(
-                "admission state is missing independent monotonic authority"
+                "admission monotonic authority is behind local journal"
             )
-        latest = witnesses[-1]
-        if (
-            state["generation"] != latest["generation"]
-            or state["state_sha256"] != latest["state_sha256"]
-        ):
+        anchored = witnesses[generation - 1]
+        if anchored["state_sha256"] != state["state_sha256"]:
             raise PaperCampaignAdmissionError(
-                "admission journal is older than monotonic authority"
+                "admission journal does not match monotonic authority"
             )
-        return state
+        if len(witnesses) == generation:
+            return state
+        if len(witnesses) == generation + 1:
+            return state
+        raise PaperCampaignAdmissionError(
+            "admission journal is older than monotonic authority"
+        )
 
     def _write(self, admissions: dict[str, object]) -> None:
         if self.state_path.exists():
-            generation = self._read()["generation"] + 1
+            current = self._read()
+            generation = current["generation"] + 1
         else:
-            if self._read_witnesses():
+            witnesses = self._read_witnesses()
+            if witnesses:
                 raise PaperCampaignAdmissionError(
                     "cannot recreate admission journal behind monotonic authority"
                 )
             generation = 1
-        bare = {
-            "schema": SCHEMA,
-            "schema_version": SCHEMA_VERSION,
-            "generation": generation,
-            "admissions": admissions,
-        }
-        state = {**bare, "state_sha256": _digest(bare)}
-        self._append_witness(
-            generation=generation,
-            state_sha256=state["state_sha256"],
-        )
+        state = _state_for(admissions, generation)
+        witnesses = self._read_witnesses()
+        if len(witnesses) == generation - 1:
+            self._append_witness(
+                generation=generation,
+                state_sha256=state["state_sha256"],
+            )
+        elif len(witnesses) == generation:
+            pending = witnesses[-1]
+            if pending["state_sha256"] != state["state_sha256"]:
+                raise PaperCampaignAdmissionError(
+                    "pending admission witness conflicts with recovered publication"
+                )
+        else:
+            raise PaperCampaignAdmissionError(
+                "admission monotonic authority generation cannot be reconciled"
+            )
         atomic_write_json(self.state_path, state)
+        self._read()
 
     @staticmethod
     def _marker(admission_id: str, intent_sha256: str, reason: str) -> str:
@@ -608,21 +632,20 @@ class PaperCampaignAdmissionCoordinator:
                 "committed admission settlement-learning binding is missing"
             )
         identity = self.runtime.environment.identity
-        expected_environment_identity = {
-            "source_id": identity.source_id,
-            "config_id": identity.config_id,
-            "data_id": identity.data_id,
-            "protocol_id": identity.protocol_id,
-            "cutoff_ts": identity.cutoff_ts,
-            "seed": identity.seed,
-        }
         exact = {
             "ticket_id": ticket.ticket_id,
             "ticket_identity_sha256": _digest(_ticket_payload(ticket)),
             "decision_id": decision.decision_id,
             "decision_sha256": _digest(decision.to_dict()),
             "environment_id": baseline.environment_id,
-            "environment_identity": expected_environment_identity,
+            "environment_identity": {
+                "source_id": identity.source_id,
+                "config_id": identity.config_id,
+                "data_id": identity.data_id,
+                "protocol_id": identity.protocol_id,
+                "cutoff_ts": identity.cutoff_ts,
+                "seed": identity.seed,
+            },
             "episode_id": baseline.episode_id,
             "episode_key": self.runtime.environment.episode.episode_key,
             "policy_id": baseline.policy_id,

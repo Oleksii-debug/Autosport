@@ -221,6 +221,64 @@ def test_runtime_replacement_after_construction_fails_before_admission_mutation(
     assert (fixture.workspace / "decisions.jsonl").read_bytes() == decisions_before
 
 
+def test_settlement_bridge_read_shadow_after_construction_is_never_invoked(tmp_path):
+    fixture = AdmissionFixture(tmp_path)
+    coordinator = fixture.coordinator()
+    state_path = fixture.workspace / "paper-campaign-admission.json"
+    state_before = state_path.read_bytes()
+    decisions_before = (fixture.workspace / "decisions.jsonl").read_bytes()
+    attacker_called = False
+
+    def attacker_read():
+        nonlocal attacker_called
+        attacker_called = True
+        raise AssertionError("attacker settlement bridge callback must never run")
+
+    coordinator.runtime.settlement_bridge.__dict__["_read"] = attacker_read
+
+    with pytest.raises(
+        PaperCampaignAdmissionError,
+        match="settlement-learning bridge authority method is shadowed",
+    ):
+        fixture.admit(coordinator)
+
+    assert attacker_called is False
+    assert state_path.read_bytes() == state_before
+    assert (fixture.workspace / "decisions.jsonl").read_bytes() == decisions_before
+
+
+def test_runtime_environment_replacement_fails_before_admission_mutation(tmp_path):
+    fixture = AdmissionFixture(tmp_path)
+    coordinator = fixture.coordinator()
+    state_path = fixture.workspace / "paper-campaign-admission.json"
+    state_before = state_path.read_bytes()
+    decisions_before = (fixture.workspace / "decisions.jsonl").read_bytes()
+
+    coordinator.runtime.environment = object()
+
+    with pytest.raises(PaperCampaignAdmissionError, match="environment authority changed"):
+        fixture.admit(coordinator)
+
+    assert state_path.read_bytes() == state_before
+    assert (fixture.workspace / "decisions.jsonl").read_bytes() == decisions_before
+
+
+def test_bridge_agent_loop_replacement_fails_before_admission_mutation(tmp_path):
+    fixture = AdmissionFixture(tmp_path)
+    coordinator = fixture.coordinator()
+    state_path = fixture.workspace / "paper-campaign-admission.json"
+    state_before = state_path.read_bytes()
+    decisions_before = (fixture.workspace / "decisions.jsonl").read_bytes()
+
+    coordinator.runtime.settlement_bridge.agent_loop = object()
+
+    with pytest.raises(PaperCampaignAdmissionError, match="AgentLoop authority changed"):
+        fixture.admit(coordinator)
+
+    assert state_path.read_bytes() == state_before
+    assert (fixture.workspace / "decisions.jsonl").read_bytes() == decisions_before
+
+
 def test_runtime_method_shadow_after_construction_is_never_invoked(tmp_path):
     fixture = AdmissionFixture(tmp_path)
     coordinator = fixture.coordinator()

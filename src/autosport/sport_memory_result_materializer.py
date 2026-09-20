@@ -14,7 +14,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Final
 
-from .continuous_session import SettlementOutcomeAuthority, SettlementResolution
+from .continuous_session import ContinuousSessionCoordinator, SettlementResolution
 from .event_lifecycle import (
     CatalogLifecycleError,
     ContinuousEventLifecycle,
@@ -34,6 +34,7 @@ from .participant_identity import (
     ParticipantIdentityError,
     ParticipantIdentityRegistry,
 )
+from .product_runtime import AutonomousProductRuntime
 from .storage import SQLiteMarketStore
 
 
@@ -343,43 +344,77 @@ class SportMemoryResultMaterializer:
     def __init__(
         self,
         opponent_store: OpponentIntelligenceStore,
-        market_store: SQLiteMarketStore,
-        *,
-        lifecycle: ContinuousEventLifecycle,
-        outcome_authority: SettlementOutcomeAuthority,
+        runtime: AutonomousProductRuntime,
     ) -> None:
         if type(opponent_store) is not OpponentIntelligenceStore:
             raise TypeError("opponent_store must be exact OpponentIntelligenceStore")
-        if type(market_store) is not SQLiteMarketStore:
-            raise TypeError("market_store must be exact SQLiteMarketStore")
         if type(opponent_store.identity_registry) is not ParticipantIdentityRegistry:
             raise TypeError(
                 "opponent_store identity_registry must be exact ParticipantIdentityRegistry"
             )
-        if type(lifecycle) is not ContinuousEventLifecycle:
-            raise TypeError("lifecycle must be exact ContinuousEventLifecycle")
-        if not callable(getattr(outcome_authority, "resolve", None)):
-            raise TypeError("outcome_authority.resolve must be callable")
+        if type(runtime) is not AutonomousProductRuntime:
+            raise TypeError(
+                "runtime must be exact product-owned AutonomousProductRuntime"
+            )
+        coordinator = runtime.coordinator
+        if type(coordinator) is not ContinuousSessionCoordinator:
+            raise TypeError(
+                "runtime coordinator must be exact ContinuousSessionCoordinator"
+            )
+        if type(runtime.market_store) is not SQLiteMarketStore:
+            raise TypeError("runtime market_store must be exact SQLiteMarketStore")
+        if type(runtime.lifecycle) is not ContinuousEventLifecycle:
+            raise TypeError("runtime lifecycle must be exact ContinuousEventLifecycle")
+        if (
+            coordinator.market_store is not runtime.market_store
+            or coordinator.lifecycle is not runtime.lifecycle
+        ):
+            raise TypeError(
+                "runtime settlement holder is not bound to canonical market/lifecycle"
+            )
+        outcome_authority = coordinator.outcome_authority
+        if outcome_authority is None or not callable(
+            getattr(outcome_authority, "resolve", None)
+        ):
+            raise TypeError(
+                "product runtime has no configured settlement outcome authority"
+            )
         self.opponent_store = opponent_store
-        self.market_store = market_store
-        self._lifecycle = lifecycle
+        self._runtime = runtime
+        self._coordinator = coordinator
+        self.market_store = runtime.market_store
+        self._lifecycle = runtime.lifecycle
         self._outcome_authority = outcome_authority
 
     @property
-    def lifecycle(self) -> ContinuousEventLifecycle:
-        return self._lifecycle
-
-    @property
-    def outcome_authority(self) -> SettlementOutcomeAuthority:
-        return self._outcome_authority
+    def runtime(self) -> AutonomousProductRuntime:
+        return self._runtime
 
     def _require_canonical_stores(self) -> ParticipantIdentityRegistry:
         if type(self.opponent_store) is not OpponentIntelligenceStore:
             raise TypeError("opponent_store capability changed after construction")
+        if type(self._runtime) is not AutonomousProductRuntime:
+            raise TypeError("product runtime capability changed after construction")
+        if type(self._coordinator) is not ContinuousSessionCoordinator:
+            raise TypeError("continuous coordinator capability changed after construction")
+        if self._runtime.coordinator is not self._coordinator:
+            raise TypeError("product runtime coordinator changed after construction")
         if type(self.market_store) is not SQLiteMarketStore:
             raise TypeError("market_store capability changed after construction")
+        if self._runtime.market_store is not self.market_store:
+            raise TypeError("product runtime market_store changed after construction")
         if type(self._lifecycle) is not ContinuousEventLifecycle:
             raise TypeError("lifecycle capability changed after construction")
+        if self._runtime.lifecycle is not self._lifecycle:
+            raise TypeError("product runtime lifecycle changed after construction")
+        if (
+            self._coordinator.market_store is not self.market_store
+            or self._coordinator.lifecycle is not self._lifecycle
+            or self._coordinator.outcome_authority is not self._outcome_authority
+        ):
+            raise TypeError(
+                "product-owned settlement authority binding changed after construction"
+            )
         if not callable(getattr(self._outcome_authority, "resolve", None)):
             raise TypeError("outcome_authority capability changed after construction")
         registry = self.opponent_store.identity_registry

@@ -150,7 +150,9 @@ def _holdout_init_with_lineage(
     authority_root: str | Path | None = None,
     lineage_authority=None,
 ) -> None:
-    self._dataset_lineage_authority = _require_exact_lineage_authority(lineage_authority)
+    if lineage_authority is not None:
+        lineage_authority = _require_exact_lineage_authority(lineage_authority)
+    self._dataset_lineage_authority = lineage_authority
     _PRISTINE_LEDGER_INIT(self, path, authority_root=authority_root)
 
 
@@ -387,7 +389,7 @@ def _install_runtime_guards() -> None:
 
 
 class _PointInTimeReloadLoader(importlib.abc.Loader):
-    """Wrap reload execution of either authority-bearing point-in-time submodule."""
+    """Wrap reload execution of either already-loaded authority-bearing point-in-time submodule."""
 
     def __init__(self, wrapped: importlib.abc.Loader) -> None:
         self._wrapped = wrapped

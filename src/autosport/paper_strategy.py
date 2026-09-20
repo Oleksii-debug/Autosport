@@ -453,13 +453,3 @@ class PaperValueAgent:
             )
 
         self._acted.add(event.quote_key)
-                return
-            self._rollback_uncommitted_ticket(
-                context,
-                ticket,
-                balance_before=balance_before,
-                lifecycle_len_before=lifecycle_len_before,
-            )
-            raise
-
-        self._acted.add(event.quote_key)

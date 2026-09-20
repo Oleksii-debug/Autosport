@@ -98,3 +98,39 @@ def test_exact_retry_after_aborted_prepare_uses_fresh_authority_transaction(
         "COMMIT",
     ]
     assert history[0].tx_id != history[2].tx_id
+
+
+def test_restart_repairs_exact_pending_ledger_before_anchor_publish(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace, authority_root, registry, snapshot = _fixture(tmp_path)
+    ledger = _ledger(workspace, authority_root, registry)
+    real_atomic_write_json = point_in_time.atomic_write_json
+    calls = 0
+
+    def fail_anchor_publish(path: Path, payload: object) -> None:
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise OSError("simulated crash after ledger before anchor")
+        real_atomic_write_json(path, payload)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(point_in_time, "atomic_write_json", fail_anchor_publish)
+        with pytest.raises(OSError, match="before anchor"):
+            _consume(ledger, snapshot)
+
+    assert ledger.path.exists()
+    assert not ledger.anchor_path.exists()
+
+    # The external PREPARE commits to the exact local ledger digest + final receipt
+    # binding, so restart may reconstruct only the missing first-generation anchor
+    # and then finish that same prepared transaction.  It must not mint new state.
+    reopened = _ledger(workspace, authority_root, registry)
+    receipts = reopened.receipts()
+    assert len(receipts) == 1
+    assert receipts[0].confirmation_trial_family_id == "family-1"
+
+    history = reopened.monotonic_authority.read_history()
+    assert [record.phase.value for record in history] == ["PREPARE", "COMMIT"]

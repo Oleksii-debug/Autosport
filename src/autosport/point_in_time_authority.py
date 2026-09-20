@@ -1,13 +1,13 @@
 from __future__ import annotations
 
-"""Point-in-time authority compatibility surface with monotonic holdout fencing.
+"""Point-in-time authority with provider provenance and external rollback fencing.
 
-The implementation accumulated on the EXTVAL candidate remains intact in the
-private legacy module.  This surface tightens the one durability boundary that
-cannot be expressed by the rollbackable ledger/head pair alone: every new
-holdout consumption first publishes an independent content-addressed marker.
-Restoring an older, otherwise-valid ledger+anchor pair therefore fails closed
-instead of making already-consumed evidence look fresh again.
+The accumulated EXTVAL implementation remains intact in the private legacy
+module.  This compatibility surface binds provider availability to canonical
+persisted capture evidence and binds holdout-consumption freshness to Autosport's
+shared machine-state MonotonicWorkspaceAuthority.  The semantic ledger remains
+workspace-local; only its opaque freshness/digest proof lives outside that
+rollback domain.
 """
 
 import hashlib
@@ -28,7 +28,10 @@ from .historical_snapshot import (
     resolve_historical_snapshot_authority,
 )
 from .integrity import atomic_write_json
-from .json_integrity import strict_json_loads
+from .monotonic_workspace_authority import (
+    MonotonicWorkspaceAuthority,
+    MonotonicWorkspaceAuthorityError,
+)
 from .workspace_lock import WorkspaceEconomicLock
 
 
@@ -384,76 +387,103 @@ class SourceRevisionAuthorityStore(_legacy.SourceRevisionAuthorityStore):
 
 
 class HoldoutConsumptionLedger(_legacy.HoldoutConsumptionLedger):
-    """Holdout ledger whose consumed identities survive paired head rollback."""
+    """Holdout ledger fenced by the shared workspace-external monotonic authority."""
 
-    MONOTONIC_DIR_NAME: Final = "holdout_consumption_immutable"
+    AUTHORITY_DOMAIN: Final = "data.point-in-time.holdout-consumption"
+    AUTHORITY_KEY: Final = "holdout-consumption-ledger-v1"
 
     def __init__(
         self,
         workspace: str | Path,
         *,
         scientific_registry: _legacy.ScientificRegistry,
+        monotonic_authority_root: str | Path | None = None,
     ) -> None:
         super().__init__(workspace, scientific_registry=scientific_registry)
-        self.monotonic_dir = self.workspace / self.MONOTONIC_DIR_NAME
-
-    def _marker_path(self, holdout_access_id: str) -> Path:
-        canonical = _legacy._sha256(holdout_access_id, "holdout_access_id")
-        return self.monotonic_dir / f"{canonical}.json"
+        try:
+            self.monotonic_authority = MonotonicWorkspaceAuthority(
+                workspace=self.workspace.resolve(strict=False),
+                domain=self.AUTHORITY_DOMAIN,
+                key=self.AUTHORITY_KEY,
+                authority_root=monotonic_authority_root,
+            )
+        except MonotonicWorkspaceAuthorityError as exc:
+            raise _legacy.HoldoutConsumptionError(
+                "cannot initialize independent holdout monotonic authority"
+            ) from exc
 
     @staticmethod
-    def _read_marker(path: Path) -> _legacy.HoldoutConsumptionReceipt:
-        try:
-            raw = strict_json_loads(path.read_text(encoding="utf-8"))
-        except (OSError, TypeError, ValueError) as exc:
-            raise _legacy.HoldoutConsumptionError(
-                "invalid immutable holdout-consumption marker"
-            ) from exc
-        try:
-            receipt = _legacy.HoldoutConsumptionReceipt.from_payload(raw)
-        except _legacy.HoldoutConsumptionError as exc:
-            raise _legacy.HoldoutConsumptionError(
-                "invalid immutable holdout-consumption marker"
-            ) from exc
-        if path.stem != receipt.holdout_access_id:
-            raise _legacy.HoldoutConsumptionError(
-                "immutable holdout-consumption marker identity mismatch"
-            )
-        return receipt
+    def _authority_state_sha256(state: _legacy._LedgerState) -> str | None:
+        if state.generation == 0:
+            return None
+        return state.ledger_sha256
 
-    def _markers_unlocked(self) -> tuple[_legacy.HoldoutConsumptionReceipt, ...]:
-        if not self.monotonic_dir.exists():
-            return ()
-        if not self.monotonic_dir.is_dir():
-            raise _legacy.HoldoutConsumptionError(
-                "immutable holdout-consumption authority is not a directory"
-            )
-        markers = tuple(
-            self._read_marker(path)
-            for path in sorted(self.monotonic_dir.glob("*.json"))
+    @staticmethod
+    def _latest_transaction(
+        state: _legacy._LedgerState,
+    ) -> tuple[str | None, str | None]:
+        if not state.receipts:
+            return None, None
+        receipt = state.receipts[-1]
+        return (
+            f"holdout-consumption:{receipt.receipt_sha256}",
+            receipt.receipt_sha256,
         )
-        seen: set[str] = set()
-        for marker in markers:
-            if marker.holdout_access_id in seen:
-                raise _legacy.HoldoutConsumptionError(
-                    "duplicate immutable holdout-consumption marker"
-                )
-            seen.add(marker.holdout_access_id)
-        return markers
 
-    def _assert_markers_match_state(self, state: _legacy._LedgerState) -> None:
-        receipts = {receipt.holdout_access_id: receipt for receipt in state.receipts}
-        for marker in self._markers_unlocked():
-            current = receipts.get(marker.holdout_access_id)
-            if current is None or current.receipt_sha256 != marker.receipt_sha256:
-                raise _legacy.HoldoutConsumptionError(
-                    "holdout ledger rollback detected against immutable consumption marker"
-                )
+    def _recover_authority_unlocked(
+        self,
+        state: _legacy._LedgerState,
+    ) -> None:
+        tx_id, binding = self._latest_transaction(state)
+        try:
+            self.monotonic_authority.recover(
+                observed_state_sha256=self._authority_state_sha256(state),
+                tx_id=tx_id,
+                semantic_binding_sha256=binding,
+            )
+        except MonotonicWorkspaceAuthorityError as exc:
+            raise _legacy.HoldoutConsumptionError(
+                "holdout ledger rejected by independent monotonic authority"
+            ) from exc
 
-    def _load_unlocked(self) -> _legacy._LedgerState:
+    def _load_with_authority_unlocked(self) -> _legacy._LedgerState:
+        # Preserve all legacy ledger/anchor integrity checks before consulting the
+        # external freshness root.  This keeps malformed/half-published local
+        # state fail-closed rather than asking the generic authority to guess
+        # domain semantics.
         state = super()._load_unlocked()
-        self._assert_markers_match_state(state)
+        self._recover_authority_unlocked(state)
         return state
+
+    def receipts(self) -> tuple[_legacy.HoldoutConsumptionReceipt, ...]:
+        with WorkspaceEconomicLock(self.workspace):
+            return self._load_with_authority_unlocked().receipts
+
+    def receipt_for(
+        self,
+        holdout_access_id: str,
+    ) -> _legacy.HoldoutConsumptionReceipt | None:
+        target = _legacy._sha256(holdout_access_id, "holdout_access_id")
+        with WorkspaceEconomicLock(self.workspace):
+            for receipt in self._load_with_authority_unlocked().receipts:
+                if receipt.holdout_access_id == target:
+                    return receipt
+        return None
+
+    def is_consumed(
+        self,
+        *,
+        dataset_snapshot: _legacy.DatasetSnapshot,
+        research_protocol_id: str,
+        confirmation_trial_family_id: str,
+    ) -> bool:
+        access_id = _legacy.holdout_identity(
+            scientific_registry=self.scientific_registry,
+            dataset_snapshot=dataset_snapshot,
+            research_protocol_id=research_protocol_id,
+            confirmation_trial_family_id=confirmation_trial_family_id,
+        )
+        return self.receipt_for(access_id) is not None
 
     def consume(
         self,
@@ -465,7 +495,7 @@ class HoldoutConsumptionLedger(_legacy.HoldoutConsumptionLedger):
         purpose: str,
         consumed_at: _legacy.datetime,
     ) -> _legacy.HoldoutConsumptionReceipt:
-        """Consume once, publishing non-rollbackable identity before pair update."""
+        """Consume once with PREPARE -> local publish -> exact COMMIT fencing."""
 
         _legacy._require_registered_dataset(self.scientific_registry, dataset_snapshot)
         _legacy._validate_holdout_available(dataset_snapshot, consumed_at=consumed_at)
@@ -475,12 +505,13 @@ class HoldoutConsumptionLedger(_legacy.HoldoutConsumptionLedger):
             research_protocol_id=research_protocol_id,
             confirmation_trial_family_id=confirmation_trial_family_id,
         )
-        marker_path = self._marker_path(access_id)
 
+        # Global order is protected workspace lock -> shared authority lock, as
+        # required by MonotonicWorkspaceAuthority.  The authority stores only
+        # opaque ledger digests/bindings; this ledger remains the semantic truth.
         with WorkspaceEconomicLock(self.workspace):
-            current = super()._load_unlocked()
-            self._assert_markers_match_state(current)
-            if marker_path.exists() or any(
+            current = self._load_with_authority_unlocked()
+            if any(
                 receipt.holdout_access_id == access_id for receipt in current.receipts
             ):
                 raise _legacy.HoldoutAlreadyConsumedError(
@@ -496,15 +527,6 @@ class HoldoutConsumptionLedger(_legacy.HoldoutConsumptionLedger):
                 purpose=purpose,
                 consumed_at=consumed_at,
             )
-
-            self.monotonic_dir.mkdir(parents=True, exist_ok=True)
-            atomic_write_json(marker_path, receipt.to_payload())
-            marker = self._read_marker(marker_path)
-            if marker != receipt:
-                raise _legacy.HoldoutConsumptionError(
-                    "immutable holdout-consumption marker did not verify after write"
-                )
-
             next_payload = self._payload(
                 current.receipts + (receipt,),
                 generation=current.generation + 1,
@@ -515,12 +537,47 @@ class HoldoutConsumptionLedger(_legacy.HoldoutConsumptionLedger):
                 generation=current.generation + 1,
                 ledger_sha256=next_payload["ledger_sha256"],
             )
+            tx_id = f"holdout-consumption:{receipt.receipt_sha256}"
+            binding = receipt.receipt_sha256
+
+            try:
+                self.monotonic_authority.prepare(
+                    tx_id=tx_id,
+                    observed_state_sha256=self._authority_state_sha256(current),
+                    intended_state_sha256=next_state.ledger_sha256,
+                    semantic_binding_sha256=binding,
+                )
+            except MonotonicWorkspaceAuthorityError as exc:
+                raise _legacy.HoldoutConsumptionError(
+                    "holdout consumption could not reserve monotonic authority"
+                ) from exc
+
             atomic_write_json(self.path, next_payload)
             atomic_write_json(self.anchor_path, self._anchor_payload(next_state))
-            verified = self._load_unlocked()
-            if verified != next_state:
+            verified_local = super()._load_unlocked()
+            if verified_local != next_state:
                 raise _legacy.HoldoutConsumptionError(
                     "published holdout ledger did not verify after write"
+                )
+
+            try:
+                self.monotonic_authority.commit(
+                    tx_id=tx_id,
+                    observed_state_sha256=next_state.ledger_sha256,
+                    semantic_binding_sha256=binding,
+                )
+            except MonotonicWorkspaceAuthorityError as exc:
+                # The complete local pair is intentionally left intact.  On
+                # restart, recover() can commit this exact prepared digest only
+                # when the final receipt proves the same tx/binding.
+                raise _legacy.HoldoutConsumptionError(
+                    "holdout ledger published but monotonic commit was not completed"
+                ) from exc
+
+            verified = self._load_with_authority_unlocked()
+            if verified != next_state:
+                raise _legacy.HoldoutConsumptionError(
+                    "committed holdout ledger did not verify against monotonic authority"
                 )
             return receipt
 

@@ -293,18 +293,14 @@ def test_blocked_update_captures_utility_binding_mismatch_without_raw_reward_lea
     assert policy.generation == 0
 
 
-def test_same_causal_key_wrong_authority_candidate_cannot_poison_canonical_utility_store(
+def test_same_owner_scoped_causal_key_wrong_candidate_cannot_poison_canonical_utility_store(
     tmp_path,
 ) -> None:
     path = tmp_path / "utility.jsonl"
     canonical = _evidence()
     forged = _evidence(
-        model_id="forged-model",
-        strategy_id="forged-strategy",
-        economic_goal_fingerprint=SHA_A,
-        risk_fingerprint=SHA_B,
-        bankroll_id="forged-bankroll",
-        portfolio_identity="forged-portfolio",
+        utility_definition_version="forged-v2",
+        utility_definition_sha256=SHA_A,
         authority_refs=(AuthorityRef("campaign-economics", "forged", SHA_B),),
     )
     assert forged.semantic_key == canonical.semantic_key
@@ -320,7 +316,7 @@ def test_same_causal_key_wrong_authority_candidate_cannot_poison_canonical_utili
     assert len(terminalizer.records()) == 2
     assert not path.exists()
 
-    # The non-authoritative journal must not reserve the canonical semantic key.
+    # Neither unresolved caller assertion may reserve the canonical store key.
     canonical_store = PolicyUtilityStore(path)
     assert canonical_store.list() == ()
     assert canonical_store.append(canonical) is True

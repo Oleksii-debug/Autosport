@@ -73,6 +73,7 @@ _WITNESS_KEYS: Final = frozenset(
 )
 _FEATURE_MEMBERSHIP_KEYS: Final = frozenset(
     {
+        "schema_version",
         "feature_membership_id",
         "feature_set_id",
         "feature_set_version",
@@ -484,6 +485,10 @@ class FeatureMembershipAuthority:
         body: dict[str, object] = payload
         if frozenset(body) != _FEATURE_MEMBERSHIP_KEYS:
             raise SourceRevisionAuthorityError("feature membership fields mismatch")
+        if body["schema_version"] != 1:
+            raise SourceRevisionAuthorityError(
+                "unsupported feature membership schema_version"
+            )
         record_sha256 = _sha256(body["record_sha256"], "record_sha256")
         membership = cls(
             feature_membership_id=body["feature_membership_id"],

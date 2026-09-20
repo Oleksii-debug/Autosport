@@ -31,3 +31,10 @@ from . import _predictive_authority_type_fence as _predictive_authority_type_fen
 # Product chrome describes one finished Autosport product. Keep internal/versioned
 # strategy and evidence identities intact while removing legacy V1 product framing.
 from . import _whole_product_title_guard as _whole_product_title_guard  # noqa: F401,E402
+
+# Preserve immutable schema-v1 DatasetSnapshot ancestry proof identities while
+# requiring an authority-owned causal re-observation witness before those proofs
+# may authorize a later-session activation.
+from . import _dataset_snapshot_lineage_publication as _dataset_snapshot_lineage_publication  # noqa: F401,E402
+from . import _dataset_snapshot_lineage_publication_provenance as _dataset_snapshot_lineage_publication_provenance  # noqa: F401,E402
+from . import _dataset_snapshot_lineage_publication_trust_root as _dataset_snapshot_lineage_publication_trust_root  # noqa: F401,E402

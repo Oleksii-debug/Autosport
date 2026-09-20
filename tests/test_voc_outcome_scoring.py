@@ -384,8 +384,8 @@ class CanonicalOutcomeDerivedVOCScoreAuthorityTests(unittest.TestCase):
             compute_cost_penalty=compute_penalty,
             latency_opportunity_cost_penalty=latency_penalty,
             measured_compute_cost=measured_compute_cost,
-            paired_sample_count=2,
-            effective_sample_size=2,
+            paired_sample_count=1,
+            effective_sample_size=1,
             support_fraction=Decimal("1"),
             incremental_value_interval_low=interval_low,
             incremental_value_interval_high=interval_high,
@@ -407,6 +407,7 @@ class CanonicalOutcomeDerivedVOCScoreAuthorityTests(unittest.TestCase):
         paired: PairedVOCEvaluation,
         *,
         score_sha256: str,
+        minimum_effective_sample_size: int = 1,
     ) -> None:
         trial_family = "voc-confirmation-family-v1"
         dataset_id = "voc-dataset-derived"
@@ -462,7 +463,7 @@ class CanonicalOutcomeDerivedVOCScoreAuthorityTests(unittest.TestCase):
                     "guardrails_passed": True,
                     "holdout_consumed": True,
                     "effective_sample_size": paired.effective_sample_size,
-                    "minimum_effective_sample_size": 2,
+                    "minimum_effective_sample_size": minimum_effective_sample_size,
                     "effect_interval_low": str(paired.incremental_value_interval_low),
                     "effect_interval_high": str(paired.incremental_value_interval_high),
                     "practical_improvement": str(paired.net_value),
@@ -487,7 +488,8 @@ class CanonicalOutcomeDerivedVOCScoreAuthorityTests(unittest.TestCase):
         self.assertEqual(score.measured_compute_cost, Decimal("0.10"))
         self.assertEqual(score.compute_cost_penalty, Decimal("0.10"))
         self.assertEqual(score.latency_opportunity_cost_penalty, Decimal("0.05"))
-        self.assertEqual(score.effective_sample_size, 2)
+        self.assertEqual(score.paired_sample_count, 1)
+        self.assertEqual(score.effective_sample_size, 1)
         self.assertEqual(score.support_fraction, Decimal("1"))
         self.assertEqual(score.incremental_value_interval_low, Decimal("0.85"))
         self.assertEqual(score.incremental_value_interval_high, Decimal("1.85"))
@@ -535,6 +537,18 @@ class CanonicalOutcomeDerivedVOCScoreAuthorityTests(unittest.TestCase):
             ),
             paired,
         )
+
+    def test_multiple_quote_legs_count_as_one_paired_compute_decision(self):
+        paired = self._evaluation()
+        self.registry.append(paired)
+
+        score = self._authority().resolve(paired.evaluation_id, as_of=T_AS_OF)
+        self.assertIsNotNone(score)
+        assert score is not None
+        self.assertEqual(len(self.quote_keys), 2)
+        self.assertEqual(score.paired_sample_count, 1)
+        self.assertEqual(score.effective_sample_size, 1)
+        self.assertEqual(score.support_fraction, Decimal("1"))
 
     def test_scoring_sample_must_be_frozen_by_decision_record(self):
         paired = self._evaluation(

@@ -258,6 +258,43 @@ class VOCProductionOrchestrator:
 
         already = self.router_store.get_voc_shadow_execution(request_id, role)
         if already is not None:
+            with WorkspaceEconomicLock(self.path.parent):
+                receipts = self._load()
+                existing = receipts.get(key)
+                if existing is None:
+                    return already
+                if (
+                    existing["route_record_sha256"] != precompute["route_record_sha256"]
+                    or existing["candidate_identity"] != identity
+                ):
+                    raise ModelComputeRouterError(
+                        "VOC production receipt no longer matches canonical route authority"
+                    )
+                if existing["state"] == "STARTED":
+                    raise ModelComputeRouterError(
+                        "canonical VOC publication exists without terminal producer result"
+                    )
+                result = VOCBackendResult.from_payload(existing["result"])
+                authority_result = VOCBackendResult.from_payload(already)
+                if result != authority_result:
+                    raise ModelComputeRouterError(
+                        "VOC publication authority conflicts with producer result"
+                    )
+                expected_authority = _sha(
+                    "authority_sha256", already.get("authority_sha256")
+                )
+                if existing["state"] == "PUBLISHED":
+                    if existing["authority_sha256"] != expected_authority:
+                        raise ModelComputeRouterError(
+                            "VOC publication authority conflicts with receipt"
+                        )
+                else:
+                    receipts[key] = {
+                        **existing,
+                        "state": "PUBLISHED",
+                        "authority_sha256": expected_authority,
+                    }
+                    self._persist_map(receipts)
             return already
 
         with WorkspaceEconomicLock(self.path.parent):

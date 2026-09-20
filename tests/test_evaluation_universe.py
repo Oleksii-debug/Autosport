@@ -8,6 +8,7 @@ import pytest
 
 from autosport.evaluation_intake import (
     EvaluationIntakeError,
+    EvaluationIntakeIntegrityError,
     ObservationEnumerationWitness,
     ObservationIntakeLedger,
 )
@@ -37,6 +38,10 @@ class _Resolver:
     def resolve_enumeration(self, enumeration_id: str) -> ObservationEnumerationWitness:
         return self._witnesses[enumeration_id]
 
+    def terminal_enumeration_id(self, **identity: str) -> str:
+        del identity
+        return max(self._witnesses.values(), key=lambda item: item.cycle_index).enumeration_id
+
 
 def _witness(
     index: int,
@@ -57,8 +62,8 @@ def _witness(
         cycle_index=index,
         source_range_id=f"range-{index}",
         stream_epoch="epoch-1",
-        start_cursor=f"cursor-{index}-start",
-        end_cursor=f"cursor-{index}-end",
+        start_cursor=f"cursor-{index - 1}",
+        end_cursor=f"cursor-{index}",
         acquisition_sha256=H3,
         row_keys=row_keys or (item.row_key,),
         exhaustive=exhaustive,
@@ -455,3 +460,35 @@ def test_incomplete_or_gapped_enumeration_cannot_authorize_denominator(tmp_path)
         )
         with pytest.raises(EvaluationIntakeError, match="exhaustive gap-free"):
             ledger.append_cycle(enumeration_id=witness.enumeration_id)
+
+
+def test_prefix_ledger_cannot_masquerade_as_authoritative_terminal_range(tmp_path):
+    first_row = row("a")
+    second_row = row("b")
+    first = _witness(1, first_row)
+    second = _witness(2, second_row)
+    ledger = ObservationIntakeLedger(
+        tmp_path,
+        authority_id="intake-1",
+        enumeration_resolver=_Resolver((first, second)),
+    )
+    ledger.append_cycle(enumeration_id=first.enumeration_id)
+
+    with pytest.raises(EvaluationIntakeError, match="terminal acquisition enumeration"):
+        ledger.snapshot(first_cycle=1, last_cycle=1)
+
+
+def test_cursor_gap_between_authoritative_ranges_fails_closed(tmp_path):
+    first_row = row("a")
+    second_row = row("b")
+    first = _witness(1, first_row)
+    second = replace(_witness(2, second_row), start_cursor="cursor-gap")
+    ledger = ObservationIntakeLedger(
+        tmp_path,
+        authority_id="intake-1",
+        enumeration_resolver=_Resolver((first, second)),
+    )
+    ledger.append_cycle(enumeration_id=first.enumeration_id)
+
+    with pytest.raises(EvaluationIntakeIntegrityError, match="cursor continuity"):
+        ledger.append_cycle(enumeration_id=second.enumeration_id)

@@ -1516,26 +1516,6 @@ def route_compute(
             > policy.voc_max_age_seconds
         ):
             baseline_reason = "VOC evidence is stale"
-        elif (
-            voc_evidence.measured_compute_cost
-            > request.max_cost
-        ):
-            baseline_reason = (
-                "measured VOC compute cost exceeds "
-                "request budget"
-            )
-        elif (
-            voc_evidence.measured_compute_cost
-            > policy.max_cloud_cost
-        ):
-            baseline_reason = (
-                "measured VOC compute cost exceeds "
-                "policy cloud-cost limit"
-            )
-        elif voc_evidence.net_value <= _ZERO:
-            baseline_reason = (
-                "measured value of computation is non-positive"
-            )
         elif voc_evaluation_store is None:
             baseline_reason = (
                 "missing durable VOC evaluation authority"
@@ -1551,20 +1531,55 @@ def route_compute(
                     evaluation_sha256=voc_evidence.evaluation_sha256,
                     as_of=as_of,
                 )
+                resolved_score = voc_evaluation_store.require_score(
+                    voc_evidence.evidence_id,
+                    evaluation_sha256=voc_evidence.evaluation_sha256,
+                    as_of=as_of,
+                )
             except VOCEvaluationError as exc:
                 baseline_reason = (
                     "durable VOC evaluation authority rejected evidence: "
                     + str(exc)
                 )
             else:
-                evaluation_reason = (
-                    resolved_evaluation.routing_ineligibility_reason(
-                        as_of=as_of,
-                        minimum_effective_sample_size=(
-                            policy.voc_min_effective_sample_size
-                        ),
-                    )
+                score_available_at = _instant(
+                    "canonical VOC score available_at",
+                    resolved_score.available_at,
                 )
+                evaluation_reason = None
+                if resolved_evaluation.deadline_missed:
+                    evaluation_reason = (
+                        "challenger compute missed the frozen decision deadline"
+                    )
+                elif (
+                    resolved_score.effective_sample_size
+                    < policy.voc_min_effective_sample_size
+                ):
+                    evaluation_reason = (
+                        "VOC evaluation effective sample size is insufficient"
+                    )
+                elif resolved_score.incremental_value_interval_low <= _ZERO:
+                    evaluation_reason = (
+                        "VOC uncertainty interval does not establish positive incremental value"
+                    )
+                elif resolved_score.net_value <= _ZERO:
+                    evaluation_reason = "measured value of computation is non-positive"
+                elif not resolved_evaluation.action_changed:
+                    evaluation_reason = (
+                        "extra computation did not change action or abstention"
+                    )
+                elif score_available_at > now:
+                    evaluation_reason = "VOC cohort score is not causally available"
+                elif _seconds(now, score_available_at) > policy.voc_max_age_seconds:
+                    evaluation_reason = "VOC cohort score is stale"
+                elif resolved_score.measured_compute_cost > request.max_cost:
+                    evaluation_reason = (
+                        "measured VOC compute cost exceeds request budget"
+                    )
+                elif resolved_score.measured_compute_cost > policy.max_cloud_cost:
+                    evaluation_reason = (
+                        "measured VOC compute cost exceeds policy cloud-cost limit"
+                    )
                 if (
                     resolved_evaluation.payload()
                     != voc_evidence.evaluation.payload()

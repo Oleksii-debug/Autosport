@@ -13,7 +13,7 @@ import hashlib
 import json
 from collections.abc import Mapping
 from datetime import datetime, timezone
-from decimal import Decimal, InvalidOperation
+from decimal import Context, Decimal, InvalidOperation, ROUND_HALF_EVEN, localcontext
 from pathlib import Path
 from typing import Any
 
@@ -31,6 +31,7 @@ from .voc_evaluation import (
 _ZERO = Decimal("0")
 _ONE = Decimal("1")
 _MICROSECOND = Decimal("0.000001")
+_ARITHMETIC_CONTEXT = Context(prec=50, rounding=ROUND_HALF_EVEN)
 _SCORING_EVIDENCE_KEY = "voc_scoring_evidence"
 _SCORING_KIND = "paired-realized-utility-v1"
 _UNCERTAINTY_METHOD = "paired-range-v1"
@@ -68,6 +69,30 @@ _SCORING_RULE_FIELDS = frozenset(
         "compute_cost_multiplier",
         "latency_cost_per_second",
         "uncertainty_method",
+    }
+)
+_COHORT_FIELDS = frozenset(
+    {
+        "cohort_id",
+        "denominator",
+        "research_protocol_id",
+        "research_protocol_sha256",
+        "scoring_rule_sha256",
+        "holdout_access_id",
+        "multiple_comparison_control_sha256",
+        "task_class",
+        "scope",
+        "baseline_compute_identity",
+        "challenger_compute_identity",
+        "members",
+    }
+)
+_COHORT_MEMBER_FIELDS = frozenset(
+    {
+        "evaluation_id",
+        "evaluation_sha256",
+        "decision_context_sha256",
+        "decision_evidence_sha256",
     }
 )
 
@@ -168,13 +193,31 @@ def _duration_seconds(later: datetime, earlier: datetime) -> Decimal:
         + delta.seconds * 1_000_000
         + delta.microseconds
     )
-    return Decimal(micros) * _MICROSECOND
+    with localcontext(_ARITHMETIC_CONTEXT):
+        return +(Decimal(micros) * _MICROSECOND)
 
 
 def _mean(values: list[Decimal], *, field: str) -> Decimal:
     if not values:
         raise VOCEvaluationError(f"{field} has no canonical paired samples")
-    return sum(values, _ZERO) / Decimal(len(values))
+    with localcontext(_ARITHMETIC_CONTEXT):
+        return +(sum(values, _ZERO) / Decimal(len(values)))
+
+
+def _net_value(
+    *,
+    baseline_utility: Decimal,
+    challenger_utility: Decimal,
+    compute_cost_penalty: Decimal,
+    latency_opportunity_cost_penalty: Decimal,
+) -> Decimal:
+    with localcontext(_ARITHMETIC_CONTEXT):
+        return +(
+            challenger_utility
+            - baseline_utility
+            - compute_cost_penalty
+            - latency_opportunity_cost_penalty
+        )
 
 
 class CanonicalOutcomeDerivedVOCScoreAuthority:
@@ -278,6 +321,34 @@ class CanonicalOutcomeDerivedVOCScoreAuthority:
         payload = record.payload
         if not isinstance(payload, Mapping):
             raise VOCEvaluationError("canonical VOC scoring decision payload is invalid")
+        binding = payload.get("voc_binding")
+        expected_binding = {
+            "decision_input_sha256": evaluation.decision_input_sha256,
+            "decision_context_sha256": evaluation.decision_context_sha256,
+            "baseline_candidate_id": evaluation.baseline_candidate_id,
+            "baseline_backend_id": evaluation.baseline_backend_id,
+            "baseline_model_id": evaluation.baseline_model_id,
+            "baseline_config_sha256": evaluation.baseline_config_sha256,
+            "baseline_output_sha256": evaluation.baseline_output_sha256,
+            "baseline_action": evaluation.baseline_action,
+            "baseline_abstained": evaluation.baseline_abstained,
+            "challenger_candidate_id": evaluation.challenger_candidate_id,
+            "challenger_backend_id": evaluation.challenger_backend_id,
+            "challenger_model_id": evaluation.challenger_model_id,
+            "challenger_config_sha256": evaluation.challenger_config_sha256,
+            "challenger_output_sha256": evaluation.challenger_output_sha256,
+            "challenger_action": evaluation.challenger_action,
+            "challenger_abstained": evaluation.challenger_abstained,
+            "sport_id": evaluation.sport_id,
+            "league_id": evaluation.league_id,
+            "regime_id": evaluation.regime_id,
+            "urgency_id": evaluation.urgency_id,
+            "contradiction_state": evaluation.contradiction_state,
+        }
+        if not isinstance(binding, Mapping) or binding != expected_binding:
+            raise VOCEvaluationError(
+                "canonical VOC scoring decision binding does not match paired evaluation"
+            )
         evidence = payload.get(_SCORING_EVIDENCE_KEY)
         if not isinstance(evidence, Mapping) or set(evidence) != _SCORING_EVIDENCE_FIELDS:
             raise VOCEvaluationError("canonical voc_scoring_evidence schema is invalid")
@@ -470,7 +541,193 @@ class CanonicalOutcomeDerivedVOCScoreAuthority:
             )
         return _decimal(values[action], field=f"VOC utility for {outcome}/{action}")
 
-    def _derive_score(
+    def _cohort_members(
+        self,
+        evaluation: PairedVOCEvaluation,
+        *,
+        as_of: datetime,
+    ) -> tuple[str, str, str, tuple[PairedVOCEvaluation, ...]]:
+        protocol_entry = self.scientific_registry.get(
+            "ResearchProtocol", evaluation.research_protocol_id
+        )
+        if protocol_entry is None:
+            raise VOCEvaluationError("canonical ResearchProtocol is missing for VOC cohort")
+        binding = protocol_entry.payload.get("binding")
+        design_text = None if not isinstance(binding, Mapping) else binding.get(
+            "evaluation_design"
+        )
+        if type(design_text) is not str or not design_text.strip():
+            raise VOCEvaluationError("canonical VOC cohort design is missing")
+        try:
+            design = json.loads(design_text)
+        except json.JSONDecodeError as exc:
+            raise VOCEvaluationError("canonical VOC cohort design is invalid JSON") from exc
+        if type(design) is not dict:
+            raise VOCEvaluationError("canonical VOC cohort design must be an object")
+        cohort_id = _text(design.get("cohort_id"), field="VOC cohort_id")
+        entry = self.scientific_registry.get("VOCCohort", cohort_id)
+        if entry is None:
+            raise VOCEvaluationError("canonical frozen VOC cohort is missing")
+        cohort_available_at = _instant(entry.available_at, field="VOCCohort.available_at")
+        if cohort_available_at > as_of:
+            raise VOCEvaluationError("canonical VOC cohort is not causally available")
+        payload = entry.payload
+        if type(payload) is not dict or set(payload) != _COHORT_FIELDS:
+            raise VOCEvaluationError("canonical VOC cohort schema is invalid")
+        if payload.get("cohort_id") != cohort_id:
+            raise VOCEvaluationError("canonical VOC cohort identity mismatch")
+        denominator = payload.get("denominator")
+        raw_members = payload.get("members")
+        if (
+            isinstance(denominator, bool)
+            or not isinstance(denominator, int)
+            or denominator < 1
+            or type(raw_members) is not list
+            or len(raw_members) != denominator
+        ):
+            raise VOCEvaluationError(
+                "canonical VOC cohort denominator does not match frozen members"
+            )
+        expected_scope = {
+            "sport_id": evaluation.sport_id,
+            "league_id": evaluation.league_id,
+            "regime_id": evaluation.regime_id,
+            "urgency_id": evaluation.urgency_id,
+            "contradiction_state": evaluation.contradiction_state,
+        }
+        expected_baseline = {
+            "candidate_id": evaluation.baseline_candidate_id,
+            "backend_id": evaluation.baseline_backend_id,
+            "model_id": evaluation.baseline_model_id,
+            "config_sha256": evaluation.baseline_config_sha256,
+        }
+        expected_challenger = {
+            "candidate_id": evaluation.challenger_candidate_id,
+            "backend_id": evaluation.challenger_backend_id,
+            "model_id": evaluation.challenger_model_id,
+            "config_sha256": evaluation.challenger_config_sha256,
+        }
+        expected_identity = {
+            "research_protocol_id": evaluation.research_protocol_id,
+            "research_protocol_sha256": evaluation.research_protocol_sha256,
+            "scoring_rule_sha256": evaluation.scoring_rule_sha256,
+            "holdout_access_id": evaluation.holdout_access_id,
+            "multiple_comparison_control_sha256": (
+                evaluation.multiple_comparison_control_sha256
+            ),
+            "task_class": evaluation.task_class,
+            "scope": expected_scope,
+            "baseline_compute_identity": expected_baseline,
+            "challenger_compute_identity": expected_challenger,
+        }
+        for field, wanted in expected_identity.items():
+            if payload.get(field) != wanted:
+                raise VOCEvaluationError(
+                    f"canonical VOC cohort {field} does not match target evaluation"
+                )
+
+        members: list[PairedVOCEvaluation] = []
+        member_ids: list[str] = []
+        decision_context_ids: set[str] = set()
+        decision_ids: set[str] = set()
+        for index, raw in enumerate(raw_members, start=1):
+            if type(raw) is not dict or set(raw) != _COHORT_MEMBER_FIELDS:
+                raise VOCEvaluationError(
+                    f"canonical VOC cohort member {index} schema is invalid"
+                )
+            member_id = _text(
+                raw.get("evaluation_id"),
+                field=f"VOC cohort member {index} evaluation_id",
+            )
+            member_sha = _sha256(
+                raw.get("evaluation_sha256"),
+                field=f"VOC cohort member {index} evaluation_sha256",
+            )
+            context_sha = _sha256(
+                raw.get("decision_context_sha256"),
+                field=f"VOC cohort member {index} decision_context_sha256",
+            )
+            decision_sha = _sha256(
+                raw.get("decision_evidence_sha256"),
+                field=f"VOC cohort member {index} decision_evidence_sha256",
+            )
+            if member_id in member_ids:
+                raise VOCEvaluationError("canonical VOC cohort reuses evaluation identity")
+            if context_sha in decision_context_ids or decision_sha in decision_ids:
+                raise VOCEvaluationError(
+                    "canonical VOC cohort reuses one paired compute-decision episode"
+                )
+            member_ids.append(member_id)
+            decision_context_ids.add(context_sha)
+            decision_ids.add(decision_sha)
+            member = self._evaluation(member_id, as_of=as_of)
+            if member is None:
+                raise VOCEvaluationError("canonical VOC cohort member is missing")
+            if (
+                member.evaluation_sha256 != member_sha
+                or member.decision_context_sha256 != context_sha
+                or member.decision_evidence_sha256 != decision_sha
+            ):
+                raise VOCEvaluationError("canonical VOC cohort member identity mismatch")
+            if _instant(member.evaluated_at, field="cohort member evaluated_at") > cohort_available_at:
+                raise VOCEvaluationError(
+                    "canonical VOC cohort froze before a member evaluation was available"
+                )
+            member_scope = {
+                "sport_id": member.sport_id,
+                "league_id": member.league_id,
+                "regime_id": member.regime_id,
+                "urgency_id": member.urgency_id,
+                "contradiction_state": member.contradiction_state,
+            }
+            member_baseline = {
+                "candidate_id": member.baseline_candidate_id,
+                "backend_id": member.baseline_backend_id,
+                "model_id": member.baseline_model_id,
+                "config_sha256": member.baseline_config_sha256,
+            }
+            member_challenger = {
+                "candidate_id": member.challenger_candidate_id,
+                "backend_id": member.challenger_backend_id,
+                "model_id": member.challenger_model_id,
+                "config_sha256": member.challenger_config_sha256,
+            }
+            if (
+                member.research_protocol_id != evaluation.research_protocol_id
+                or member.research_protocol_sha256
+                != evaluation.research_protocol_sha256
+                or member.scoring_rule_sha256 != evaluation.scoring_rule_sha256
+                or member.holdout_access_id != evaluation.holdout_access_id
+                or member.multiple_comparison_control_sha256
+                != evaluation.multiple_comparison_control_sha256
+                or member.task_class != evaluation.task_class
+                or member_scope != expected_scope
+                or member_baseline != expected_baseline
+                or member_challenger != expected_challenger
+                or member.outcome_evidence_sha256
+                != evaluation.outcome_evidence_sha256
+                or member.provenance is not evaluation.provenance
+            ):
+                raise VOCEvaluationError(
+                    "canonical VOC cohort mixes incompatible decision episodes"
+                )
+            members.append(member)
+        if member_ids != sorted(member_ids):
+            raise VOCEvaluationError(
+                "canonical VOC cohort members must use deterministic identity order"
+            )
+        if evaluation.evaluation_id not in member_ids:
+            raise VOCEvaluationError(
+                "target PairedVOCEvaluation is outside the canonical VOC cohort"
+            )
+        return (
+            cohort_id,
+            entry.available_at,
+            _digest(payload),
+            tuple(members),
+        )
+
+    def _derive_episode_score(
         self,
         *,
         evaluation: PairedVOCEvaluation,
@@ -545,7 +802,8 @@ class CanonicalOutcomeDerivedVOCScoreAuthority:
                 field=f"VOC sample {index} challenger_compute_cost",
                 nonnegative=True,
             )
-            extra_compute = max(_ZERO, challenger_cost - baseline_cost)
+            with localcontext(_ARITHMETIC_CONTEXT):
+                extra_compute = max(_ZERO, +(challenger_cost - baseline_cost))
             baseline_completed = _instant(
                 raw.get("baseline_completed_at"),
                 field=f"VOC sample {index} baseline_completed_at",
@@ -561,13 +819,14 @@ class CanonicalOutcomeDerivedVOCScoreAuthority:
             if baseline_completed >= reveal_at or challenger_completed >= reveal_at:
                 raise VOCEvaluationError("VOC scoring sample completion is not pre-outcome")
             extra_latency = _duration_seconds(challenger_completed, baseline_completed)
-            compute_penalty = extra_compute * compute_multiplier
-            latency_penalty = extra_latency * latency_rate
-            sample_net = (
-                challenger_utility
-                - baseline_utility
-                - compute_penalty
-                - latency_penalty
+            with localcontext(_ARITHMETIC_CONTEXT):
+                compute_penalty = +(extra_compute * compute_multiplier)
+                latency_penalty = +(extra_latency * latency_rate)
+            sample_net = _net_value(
+                baseline_utility=baseline_utility,
+                challenger_utility=challenger_utility,
+                compute_cost_penalty=compute_penalty,
+                latency_opportunity_cost_penalty=latency_penalty,
             )
             baseline_utilities.append(baseline_utility)
             challenger_utilities.append(challenger_utility)
@@ -583,13 +842,20 @@ class CanonicalOutcomeDerivedVOCScoreAuthority:
         baseline_utility = _mean(baseline_utilities, field="baseline utility")
         challenger_utility = _mean(challenger_utilities, field="challenger utility")
         measured_compute_cost = _mean(extra_compute_costs, field="measured compute cost")
-        compute_cost_penalty = measured_compute_cost * compute_multiplier
-        latency_opportunity_cost_penalty = (
-            _mean(extra_latency_seconds, field="measured latency") * latency_rate
-        )
+        with localcontext(_ARITHMETIC_CONTEXT):
+            compute_cost_penalty = +(measured_compute_cost * compute_multiplier)
+            latency_opportunity_cost_penalty = +(
+                _mean(extra_latency_seconds, field="measured latency") * latency_rate
+            )
         support_fraction = _ONE
-        interval_low = min(sample_net_values)
-        interval_high = max(sample_net_values)
+        episode_net_value = _net_value(
+            baseline_utility=baseline_utility,
+            challenger_utility=challenger_utility,
+            compute_cost_penalty=compute_cost_penalty,
+            latency_opportunity_cost_penalty=latency_opportunity_cost_penalty,
+        )
+        interval_low = episode_net_value
+        interval_high = episode_net_value
 
         source_artifact_sha256 = _digest(
             {
@@ -629,6 +895,96 @@ class CanonicalOutcomeDerivedVOCScoreAuthority:
             source_artifact_sha256=source_artifact_sha256,
         )
 
+    def _derive_score(
+        self,
+        *,
+        evaluation: PairedVOCEvaluation,
+        as_of: datetime,
+    ) -> OutcomeDerivedVOCScore:
+        cohort_id, cohort_available_at, cohort_sha256, members = self._cohort_members(
+            evaluation,
+            as_of=as_of,
+        )
+        episode_scores: list[OutcomeDerivedVOCScore] = []
+        member_sources: list[dict[str, str]] = []
+        for member in members:
+            evidence, decision_record_sha256 = self._decision_scoring_evidence(member)
+            rule = self._scoring_rule(member)
+            outcomes, _, outcome_source_sha256 = self._revealed_outcomes(
+                member,
+                as_of=as_of,
+            )
+            episode = self._derive_episode_score(
+                evaluation=member,
+                evidence=evidence,
+                decision_record_sha256=decision_record_sha256,
+                rule=rule,
+                outcomes=outcomes,
+                outcome_source_sha256=outcome_source_sha256,
+            )
+            episode_scores.append(episode)
+            member_sources.append(
+                {
+                    "evaluation_id": member.evaluation_id,
+                    "evaluation_sha256": member.evaluation_sha256,
+                    "episode_source_artifact_sha256": episode.source_artifact_sha256,
+                }
+            )
+
+        baseline_utility = _mean(
+            [score.baseline_utility for score in episode_scores],
+            field="cohort baseline utility",
+        )
+        challenger_utility = _mean(
+            [score.challenger_utility for score in episode_scores],
+            field="cohort challenger utility",
+        )
+        compute_cost_penalty = _mean(
+            [score.compute_cost_penalty for score in episode_scores],
+            field="cohort compute cost penalty",
+        )
+        latency_opportunity_cost_penalty = _mean(
+            [score.latency_opportunity_cost_penalty for score in episode_scores],
+            field="cohort latency opportunity cost penalty",
+        )
+        measured_compute_cost = _mean(
+            [score.measured_compute_cost for score in episode_scores],
+            field="cohort measured compute cost",
+        )
+        episode_net_values = [score.net_value for score in episode_scores]
+        source_artifact_sha256 = _digest(
+            {
+                "schema": "autosport.canonical_voc_cohort_score_sources",
+                "schema_version": 1,
+                "target_evaluation_id": evaluation.evaluation_id,
+                "cohort_id": cohort_id,
+                "cohort_sha256": cohort_sha256,
+                "members": member_sources,
+            }
+        )
+        return OutcomeDerivedVOCScore(
+            evaluation_id=evaluation.evaluation_id,
+            available_at=cohort_available_at,
+            outcome_evidence_sha256=evaluation.outcome_evidence_sha256,
+            scoring_rule_sha256=evaluation.scoring_rule_sha256,
+            research_protocol_sha256=evaluation.research_protocol_sha256,
+            holdout_access_id=evaluation.holdout_access_id,
+            multiple_comparison_control_sha256=(
+                evaluation.multiple_comparison_control_sha256
+            ),
+            baseline_utility=baseline_utility,
+            challenger_utility=challenger_utility,
+            compute_cost_penalty=compute_cost_penalty,
+            latency_opportunity_cost_penalty=latency_opportunity_cost_penalty,
+            measured_compute_cost=measured_compute_cost,
+            paired_sample_count=len(episode_scores),
+            effective_sample_size=len(episode_scores),
+            support_fraction=_ONE,
+            incremental_value_interval_low=min(episode_net_values),
+            incremental_value_interval_high=max(episode_net_values),
+            source_artifact_sha256=source_artifact_sha256,
+        )
+
     def resolve(
         self,
         evaluation_id: str,
@@ -642,19 +998,9 @@ class CanonicalOutcomeDerivedVOCScoreAuthority:
             return None
         if _instant(evaluation.evaluated_at, field="evaluated_at") > cutoff:
             return None
-        evidence, decision_record_sha256 = self._decision_scoring_evidence(evaluation)
-        rule = self._scoring_rule(evaluation)
-        outcomes, _, outcome_source_sha256 = self._revealed_outcomes(
-            evaluation,
-            as_of=cutoff,
-        )
         return self._derive_score(
             evaluation=evaluation,
-            evidence=evidence,
-            decision_record_sha256=decision_record_sha256,
-            rule=rule,
-            outcomes=outcomes,
-            outcome_source_sha256=outcome_source_sha256,
+            as_of=cutoff,
         )
 
 

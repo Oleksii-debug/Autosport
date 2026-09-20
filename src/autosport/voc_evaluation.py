@@ -6,7 +6,7 @@ import hashlib
 import json
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from decimal import Decimal, InvalidOperation
+from decimal import Context, Decimal, InvalidOperation, ROUND_HALF_EVEN, localcontext
 from enum import StrEnum
 from pathlib import Path
 from typing import Any, Mapping, Protocol, runtime_checkable
@@ -21,6 +21,7 @@ _SCHEMA = "autosport.voc_evaluation"
 _VERSION = 3
 _ZERO = Decimal("0")
 _ONE = Decimal("1")
+_ARITHMETIC_CONTEXT = Context(prec=50, rounding=ROUND_HALF_EVEN)
 VOC_CURRENT_CONTEXT_ACTION = "VOC_ROUTE_CONTEXT"
 VOC_CURRENT_CONTEXT_PAYLOAD_KEY = "voc_current_context"
 _VOC_CURRENT_CONTEXT_FIELDS = frozenset(
@@ -320,12 +321,13 @@ class PairedVOCEvaluation:
 
     @property
     def net_value(self) -> Decimal:
-        return (
-            self.challenger_utility
-            - self.baseline_utility
-            - self.compute_cost_penalty
-            - self.latency_opportunity_cost_penalty
-        )
+        with localcontext(_ARITHMETIC_CONTEXT):
+            return +(
+                self.challenger_utility
+                - self.baseline_utility
+                - self.compute_cost_penalty
+                - self.latency_opportunity_cost_penalty
+            )
 
     @property
     def deadline_missed(self) -> bool:
@@ -584,12 +586,13 @@ class OutcomeDerivedVOCScore:
 
     @property
     def net_value(self) -> Decimal:
-        return (
-            self.challenger_utility
-            - self.baseline_utility
-            - self.compute_cost_penalty
-            - self.latency_opportunity_cost_penalty
-        )
+        with localcontext(_ARITHMETIC_CONTEXT):
+            return +(
+                self.challenger_utility
+                - self.baseline_utility
+                - self.compute_cost_penalty
+                - self.latency_opportunity_cost_penalty
+            )
 
     def payload(self) -> dict[str, Any]:
         return {
@@ -665,6 +668,13 @@ class VOCCanonicalAuthorityResolver(Protocol):
         *,
         as_of: str,
     ) -> Mapping[str, str] | None: ...
+
+    def resolve_score(
+        self,
+        evaluation: PairedVOCEvaluation,
+        *,
+        as_of: str,
+    ) -> OutcomeDerivedVOCScore | None: ...
 
 
 class CanonicalVOCAuthorityResolver:
@@ -990,42 +1000,12 @@ class CanonicalVOCAuthorityResolver:
             raise VOCEvaluationError(
                 "canonical outcome-derived VOC score identity mismatch"
             )
-        expected_values = (
-            evaluation.baseline_utility,
-            evaluation.challenger_utility,
-            evaluation.compute_cost_penalty,
-            evaluation.latency_opportunity_cost_penalty,
-            evaluation.measured_compute_cost,
-            evaluation.paired_sample_count,
-            evaluation.effective_sample_size,
-            evaluation.support_fraction,
-            evaluation.incremental_value_interval_low,
-            evaluation.incremental_value_interval_high,
-            evaluation.net_value,
-        )
-        actual_values = (
-            score.baseline_utility,
-            score.challenger_utility,
-            score.compute_cost_penalty,
-            score.latency_opportunity_cost_penalty,
-            score.measured_compute_cost,
-            score.paired_sample_count,
-            score.effective_sample_size,
-            score.support_fraction,
-            score.incremental_value_interval_low,
-            score.incremental_value_interval_high,
-            score.net_value,
-        )
-        if actual_values != expected_values:
-            raise VOCEvaluationError(
-                "canonical outcome-derived VOC score does not match routed evaluation"
-            )
         return score
 
     def _require_scientific_statistics(
         self,
         evaluation: PairedVOCEvaluation,
-    ) -> None:
+    ) -> OutcomeDerivedVOCScore:
         """Fail closed unless outcome authority and #367 memory bind VOC statistics."""
 
         score = self._require_outcome_score(evaluation)
@@ -1132,7 +1112,7 @@ class CanonicalVOCAuthorityResolver:
             raise VOCEvaluationError(
                 "canonical scientific VOC statistics evidence is not eligible"
             )
-        if evidence.get("effective_sample_size") != evaluation.effective_sample_size:
+        if evidence.get("effective_sample_size") != score.effective_sample_size:
             raise VOCEvaluationError(
                 "canonical VOC effective sample size mismatch"
             )
@@ -1140,7 +1120,7 @@ class CanonicalVOCAuthorityResolver:
         if (
             isinstance(minimum_ess, bool)
             or not isinstance(minimum_ess, int)
-            or evaluation.effective_sample_size < minimum_ess
+            or score.effective_sample_size < minimum_ess
         ):
             raise VOCEvaluationError(
                 "canonical VOC minimum effective sample size is not satisfied"
@@ -1154,9 +1134,9 @@ class CanonicalVOCAuthorityResolver:
                 "canonical scientific VOC statistics are invalid"
             ) from exc
         if (
-            interval_low != evaluation.incremental_value_interval_low
-            or interval_high != evaluation.incremental_value_interval_high
-            or practical_improvement != evaluation.net_value
+            interval_low != score.incremental_value_interval_low
+            or interval_high != score.incremental_value_interval_high
+            or practical_improvement != score.net_value
         ):
             raise VOCEvaluationError(
                 "canonical scientific VOC statistics do not match routed evaluation"
@@ -1187,7 +1167,7 @@ class CanonicalVOCAuthorityResolver:
             raise VOCEvaluationError(
                 "canonical VOC EvaluationBundle authority mismatch"
             )
-        if bundle.get("effective_sample_size") != evaluation.effective_sample_size:
+        if bundle.get("effective_sample_size") != score.effective_sample_size:
             raise VOCEvaluationError(
                 "canonical VOC EvaluationBundle ESS mismatch"
             )
@@ -1200,9 +1180,9 @@ class CanonicalVOCAuthorityResolver:
                 "canonical VOC EvaluationBundle statistics are invalid"
             ) from exc
         if (
-            bundle_low != evaluation.incremental_value_interval_low
-            or bundle_high != evaluation.incremental_value_interval_high
-            or bundle_improvement != evaluation.net_value
+            bundle_low != score.incremental_value_interval_low
+            or bundle_high != score.incremental_value_interval_high
+            or bundle_improvement != score.net_value
         ):
             raise VOCEvaluationError(
                 "canonical VOC EvaluationBundle statistics mismatch"
@@ -1237,6 +1217,7 @@ class CanonicalVOCAuthorityResolver:
             raise VOCEvaluationError(
                 "canonical outcome-derived VOC score artifact is missing"
             )
+        return score
 
     def _require_registry_result(
         self,
@@ -1268,12 +1249,12 @@ class CanonicalVOCAuthorityResolver:
             )
         return PairedVOCEvaluation.from_payload(entry.payload)
 
-    def resolve(
+    def resolve_score(
         self,
         evaluation: PairedVOCEvaluation,
         *,
         as_of: str,
-    ) -> PairedVOCEvaluation | None:
+    ) -> OutcomeDerivedVOCScore | None:
         if not isinstance(evaluation, PairedVOCEvaluation):
             raise TypeError("evaluation must be PairedVOCEvaluation")
         _instant("as_of", as_of)
@@ -1281,8 +1262,16 @@ class CanonicalVOCAuthorityResolver:
         self._require_decision(canonical)
         self._require_protocol(canonical)
         self._require_outcome(canonical)
-        self._require_scientific_statistics(canonical)
-        return canonical
+        return self._require_scientific_statistics(canonical)
+
+    def resolve(
+        self,
+        evaluation: PairedVOCEvaluation,
+        *,
+        as_of: str,
+    ) -> PairedVOCEvaluation | None:
+        self.resolve_score(evaluation, as_of=as_of)
+        return self._require_registry_result(evaluation, as_of=as_of)
 
 
 class VOCEvaluationStore:
@@ -1424,6 +1413,26 @@ class VOCEvaluationStore:
         if resolved.payload() != value.payload():
             raise VOCEvaluationError("canonical VOC authority differs from routed evaluation")
         return resolved
+
+    def require_score(
+        self,
+        evaluation_id: str,
+        *,
+        evaluation_sha256: str,
+        as_of: str,
+    ) -> OutcomeDerivedVOCScore:
+        value = self.require(
+            evaluation_id,
+            evaluation_sha256=evaluation_sha256,
+            as_of=as_of,
+        )
+        resolver = self._canonical_authority_resolver
+        if resolver is None:
+            raise VOCEvaluationError("missing canonical VOC authority resolver")
+        score = resolver.resolve_score(value, as_of=as_of)
+        if score is None or not isinstance(score, OutcomeDerivedVOCScore):
+            raise VOCEvaluationError("canonical outcome-derived VOC score is missing")
+        return score
 
     def values(self) -> tuple[PairedVOCEvaluation, ...]:
         loaded = self._load()

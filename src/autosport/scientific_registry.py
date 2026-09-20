@@ -27,6 +27,7 @@ _RECORD_TYPES = frozenset(
         "StrategyVersion",
         "EvaluationBundle",
         "PairedVOCEvaluation",
+        "VOCCohort",
         "Experiment",
         "PromotionDecision",
         "PromotionEvidence",

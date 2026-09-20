@@ -352,9 +352,19 @@ class PaperCampaignRuntime:
                     "campaign research_budget_units must be positive"
                 )
             deadline = record["research_deadline_at"]
+            reflection_available_at = _timestamp(
+                record["reflection_available_at"], "reflection_available_at"
+            )
             if deadline is not None:
-                _timestamp(deadline, "research_deadline_at")
-            _timestamp(record["reflection_available_at"], "reflection_available_at")
+                canonical_deadline = _timestamp(deadline, "research_deadline_at")
+                if _instant(
+                    canonical_deadline, "research_deadline_at"
+                ) < _instant(
+                    reflection_available_at, "reflection_available_at"
+                ):
+                    raise PaperCampaignRuntimeError(
+                        "research deadline predates frozen reflection availability"
+                    )
             semantic = {key: value for key, value in record.items() if key != "plan_id"}
             if _sha(record["plan_id"], "plan_id") != _digest(semantic):
                 raise PaperCampaignRuntimeError("campaign plan digest mismatch")
@@ -421,6 +431,14 @@ class PaperCampaignRuntime:
             if require_existing:
                 raise PaperCampaignRuntimeError(
                     "existing attribution lacks durable campaign finalization plan"
+                )
+            if canonical_deadline is not None and _instant(
+                canonical_deadline, "research_deadline_at"
+            ) < _instant(
+                canonical_available_at, "reflection_plan available_at"
+            ):
+                raise PaperCampaignRuntimeError(
+                    "research deadline predates frozen reflection availability"
                 )
             durable_semantic = {
                 **semantic,

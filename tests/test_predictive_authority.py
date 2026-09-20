@@ -1,16 +1,24 @@
 from __future__ import annotations
 
 import importlib.util
+import json
+from dataclasses import replace
 from decimal import Decimal
 from pathlib import Path
 
+import pytest
+
 from autosport import predictive_authority as _runtime_authority
 from autosport.forecasting import ForecastRecord, parse_iso_timestamp
-from autosport.opportunity import ForecastRef, PredictiveEligibilityEvidence
-from autosport.predictive_authority import resolve_forecast_predictive_authority
+from autosport.opportunity import ForecastRef, PredictiveEligibilityEvidence, QuoteRef
+from autosport.predictive_authority import (
+    resolve_authoritative_forecast_ref,
+    resolve_forecast_predictive_authority,
+)
 from autosport.predictive_qualification import (
     ForecastCalibrationQualification,
     PredictiveAdmissionPolicy,
+    PredictiveQualificationError,
 )
 from autosport.scientific_registry import (
     EvaluationBundleRef,
@@ -35,6 +43,10 @@ _SPEC.loader.exec_module(_HELPERS)
 
 _DECISION_TIME = "2026-01-04T00:02:00+00:00"
 _FORECAST_TIME = "2026-01-04T00:01:00+00:00"
+_AUTHORITY_MISSING = (
+    "predictive eligibility was not resolved from canonical "
+    "ScientificRegistry authority for this decision"
+)
 
 
 def _policy() -> PredictiveAdmissionPolicy:
@@ -51,6 +63,13 @@ def _policy() -> PredictiveAdmissionPolicy:
         maximum_evidence_age_seconds=172800,
         frozen_at=_HELPERS.T0,
     )
+
+
+def _promotion_rule(policy: PredictiveAdmissionPolicy) -> str:
+    payload = json.loads(_HELPERS._frozen_promotion_rule_text())
+    payload["predictive_admission_policy_id"] = policy.policy_id
+    payload["predictive_admission_policy_sha256"] = policy.sha256
+    return json.dumps(payload, sort_keys=True, separators=(",", ":"))
 
 
 def _qualification() -> ForecastCalibrationQualification:
@@ -87,9 +106,33 @@ def _forecast() -> ForecastRecord:
     )
 
 
-def _promoted_registry(tmp_path, qualification: ForecastCalibrationQualification):
+def _quote() -> QuoteRef:
+    return QuoteRef(
+        event_id="event-authority",
+        market_id="market-authority",
+        selection_id="selection-authority",
+        source_id="fixture-book",
+        sequence=1,
+        decimal_odds=Decimal("2.00"),
+        observed_ts="2026-01-04T00:01:30+00:00",
+        source_ts="2026-01-04T00:01:29+00:00",
+        ingest_ts="2026-01-04T00:01:31+00:00",
+        market_event_hash="b" * 64,
+        market_snapshot_hash="a" * 64,
+        sport="soccer",
+    )
+
+
+def _promoted_registry(
+    tmp_path,
+    qualification: ForecastCalibrationQualification,
+    policy: PredictiveAdmissionPolicy,
+):
     registry = ScientificRegistry.initialize_pristine(tmp_path / "scientific.json")
-    foundation = _HELPERS._foundation(registry)
+    foundation = _HELPERS._foundation_with_binding(
+        registry,
+        promotion_rule=_promotion_rule(policy),
+    )
     protocol = foundation["protocol"]
     bundle = EvaluationBundleRef(
         "eval-authority-v1",
@@ -195,22 +238,50 @@ def test_self_attested_predictive_witness_cannot_authorize_positive_path() -> No
         parse_iso_timestamp(_DECISION_TIME),
         expected_model_id=forecast.model_id,
     )
-    assert reason is not None
-    assert "not resolved from canonical ScientificRegistry authority" in reason
+    assert reason == _AUTHORITY_MISSING
 
 
-def test_durable_registry_resolution_mints_exact_decision_authority_and_restart_fails_closed(
+def test_backdated_permissive_policy_not_precommitted_by_protocol_fails_closed(
     tmp_path,
 ) -> None:
+    policy = _policy()
     qualification = _qualification()
-    registry, bundle = _promoted_registry(tmp_path, qualification)
+    registry, _ = _promoted_registry(tmp_path, qualification, policy)
+    permissive = replace(
+        policy,
+        maximum_uncertainty=Decimal("1"),
+        maximum_calibration_error_upper=Decimal("1"),
+        minimum_selective_coverage=Decimal("0"),
+        maximum_selective_risk=Decimal("1"),
+        maximum_evidence_age_seconds=999999999,
+    )
+    with pytest.raises(
+        PredictiveQualificationError,
+        match="was not precommitted by ResearchProtocol",
+    ):
+        resolve_forecast_predictive_authority(
+            registry,
+            _forecast(),
+            decision_time=_DECISION_TIME,
+            policy=permissive,
+            qualification=qualification,
+        )
+
+
+def test_durable_resolution_mints_opaque_exact_object_authority_and_restart_fails_closed(
+    tmp_path,
+) -> None:
+    policy = _policy()
+    qualification = _qualification()
+    registry, bundle = _promoted_registry(tmp_path, qualification, policy)
     forecast = _forecast()
+    decision = parse_iso_timestamp(_DECISION_TIME)
 
     evidence = resolve_forecast_predictive_authority(
         registry,
         forecast,
         decision_time=_DECISION_TIME,
-        policy=_policy(),
+        policy=policy,
         qualification=qualification,
     )
     stored_bundle = registry.get("EvaluationBundle", bundle.record_id)
@@ -220,22 +291,31 @@ def test_durable_registry_resolution_mints_exact_decision_authority_and_restart_
     assert evidence.as_of == _DECISION_TIME
     assert evidence.valid_until == _DECISION_TIME
 
-    ref = _ref(forecast, evidence)
-    decision = parse_iso_timestamp(_DECISION_TIME)
-    assert ref.predictive_eligibility_reason(
+    # Durable audit evidence alone is deliberately not a transferable capability.
+    caller_ref = _ref(forecast, evidence)
+    assert caller_ref.predictive_eligibility_reason(
+        decision,
+        expected_model_id=forecast.model_id,
+    ) == _AUTHORITY_MISSING
+
+    authorized = resolve_authoritative_forecast_ref(
+        registry,
+        forecast,
+        _quote(),
+        decision_time=_DECISION_TIME,
+        policy=policy,
+        qualification=qualification,
+    )
+    assert authorized.predictive_eligibility_reason(
         decision,
         expected_model_id=forecast.model_id,
     ) is None
 
-    authority_key = _runtime_authority._authority_key_from_ref(ref, decision)
-    assert authority_key is not None
-    assert authority_key in _runtime_authority._RESOLVED_AUTHORITIES
-    _runtime_authority._RESOLVED_AUTHORITIES.remove(authority_key)
-
-    restored = ForecastRef.from_dict(ref.to_dict())
-    reason = restored.predictive_eligibility_reason(
+    # Same fields in a different object, including serialization/restart, do not mint.
+    reconstructed = ForecastRef.from_dict(authorized.to_dict())
+    assert reconstructed.predictive_eligibility_reason(
         decision,
         expected_model_id=forecast.model_id,
-    )
-    assert reason is not None
-    assert "not resolved from canonical ScientificRegistry authority" in reason
+    ) == _AUTHORITY_MISSING
+    assert not hasattr(_runtime_authority, "_RESOLVED_AUTHORITIES")
+    assert not hasattr(_runtime_authority, "_authority_key_from_ref")

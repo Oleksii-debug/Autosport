@@ -2,18 +2,18 @@ from __future__ import annotations
 
 """Canonical runtime bridge from durable predictive science to stake admission.
 
-The scientific resolver owns eligibility truth.  This module binds that resolved
-truth to the exact forecast and exact portfolio decision instant, then installs a
-fail-closed guard on ``ForecastRef``.  Serialized/caller-constructed eligibility
-objects remain audit data only: after restart they must be re-resolved from the
-``ScientificRegistry`` before they can authorize a positive predictive action.
+The scientific resolver owns eligibility truth.  This module binds a pre-forecast,
+immutable admission-policy commitment plus the durable scientific lineage to the
+exact forecast and decision instant.  Serialized/caller-constructed eligibility is
+audit data only: positive predictive allocation requires the exact ``ForecastRef``
+object returned by a successful durable resolution in this process.
 """
 
 import hashlib
 import json
 from dataclasses import replace
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, Callable
 
 from .forecasting import ForecastRecord, parse_iso_timestamp
 from .opportunity import ForecastRef, PredictiveEligibilityEvidence, QuoteRef
@@ -25,7 +25,11 @@ _ORIGINAL_FORECAST_ELIGIBILITY_REASON = ForecastRef.predictive_eligibility_reaso
 _ORIGINAL_RESOLVE_PREDICTIVE_ELIGIBILITY = (
     _qualification.resolve_predictive_eligibility
 )
-_RESOLVED_AUTHORITIES: set[str] = set()
+_AUTHORITY_MISSING_REASON = (
+    "predictive eligibility was not resolved from canonical "
+    "ScientificRegistry authority for this decision"
+)
+_MAX_RUNTIME_AUTHORITIES = 10_000
 
 
 def _utc_instant(value: object) -> str:
@@ -52,92 +56,108 @@ def _authority_digest(payload: dict[str, object]) -> str:
 
 
 def _authority_payload(
-    *,
-    forecast_hash: str,
-    quote_key: str,
-    probability: object,
-    input_cutoff_ts: str,
-    market_snapshot_hash: str | None,
-    model_id: str | None,
-    model_version: str | None,
-    strategy_version: str | None,
-    uncertainty: object,
-    evidence: PredictiveEligibilityEvidence,
+    forecast: ForecastRef,
     decision_time: object,
-) -> dict[str, object]:
+) -> dict[str, object] | None:
+    evidence = forecast.predictive_eligibility
+    if evidence is None:
+        return None
     return {
         "schema": "autosport.resolved_predictive_runtime_authority",
-        "schema_version": 1,
-        "forecast_hash": forecast_hash,
-        "quote_key": quote_key,
-        "probability": str(probability),
-        "input_cutoff_ts": _utc_instant(input_cutoff_ts),
-        "market_snapshot_hash": market_snapshot_hash,
-        "model_id": model_id,
-        "model_version": model_version,
-        "strategy_version": strategy_version,
-        "uncertainty": None if uncertainty is None else str(uncertainty),
+        "schema_version": 2,
+        "forecast_hash": forecast.forecast_hash,
+        "quote_key": forecast.quote_key,
+        "probability": str(forecast.probability),
+        "input_cutoff_ts": _utc_instant(forecast.input_cutoff_ts),
+        "market_snapshot_hash": forecast.market_snapshot_hash,
+        "quote_market_event_hash": forecast.quote_market_event_hash,
+        "model_id": forecast.model_id,
+        "model_version": forecast.model_version,
+        "strategy_version": forecast.strategy_version,
+        "uncertainty": (
+            None if forecast.uncertainty is None else str(forecast.uncertainty)
+        ),
         "eligibility": evidence.to_dict(),
         "decision_time": _utc_instant(decision_time),
     }
 
 
-def _authority_key_from_ref(
+def _runtime_fingerprint(
     forecast: ForecastRef,
     decision_time: object,
 ) -> str | None:
-    evidence = forecast.predictive_eligibility
-    if evidence is None:
-        return None
-    return _authority_digest(
-        _authority_payload(
-            forecast_hash=forecast.forecast_hash,
-            quote_key=forecast.quote_key,
-            probability=forecast.probability,
-            input_cutoff_ts=forecast.input_cutoff_ts,
-            market_snapshot_hash=forecast.market_snapshot_hash,
-            model_id=forecast.model_id,
-            model_version=forecast.model_version,
-            strategy_version=forecast.strategy_version,
-            uncertainty=forecast.uncertainty,
-            evidence=evidence,
-            decision_time=decision_time,
-        )
-    )
+    payload = _authority_payload(forecast, decision_time)
+    return None if payload is None else _authority_digest(payload)
 
 
-def _authority_key_from_record(
+def _policy_commitment_from_protocol(
+    registry: ScientificRegistry,
+    *,
+    qualification: _qualification.ForecastCalibrationQualification,
     forecast: ForecastRecord,
-    evidence: PredictiveEligibilityEvidence,
-    decision_time: object,
-) -> str:
-    return _authority_digest(
-        _authority_payload(
-            forecast_hash=forecast.canonical_hash,
-            quote_key=forecast.quote_key,
-            probability=forecast.probability,
-            input_cutoff_ts=forecast.input_cutoff_ts,
-            market_snapshot_hash=forecast.market_snapshot_hash,
-            model_id=forecast.model_id,
-            model_version=forecast.model_version,
-            strategy_version=forecast.strategy_version,
-            uncertainty=forecast.uncertainty,
-            evidence=evidence,
-            decision_time=decision_time,
+    policy: _qualification.PredictiveAdmissionPolicy,
+) -> None:
+    """Require the exact admission policy to have been frozen before the forecast.
+
+    ``ResearchProtocol.binding.promotion_rule`` is already an immutable, registry-
+    hashed preregistration object.  We extend that existing authority rather than
+    inventing a second policy registry: a predictive protocol must commit the exact
+    policy id/digest in that canonical JSON before forecast generation.
+    """
+
+    entry = registry.get("ResearchProtocol", qualification.research_protocol_id)
+    if entry is None:
+        raise _qualification.PredictiveQualificationError(
+            "predictive admission policy has no durable ResearchProtocol authority"
         )
-    )
+    payload = entry.payload
+    binding = payload.get("binding")
+    if not isinstance(binding, dict):
+        raise _qualification.PredictiveQualificationError(
+            "ResearchProtocol binding is not canonical"
+        )
+    rule_text = binding.get("promotion_rule")
+    if not isinstance(rule_text, str):
+        raise _qualification.PredictiveQualificationError(
+            "ResearchProtocol lacks frozen promotion rule"
+        )
+    try:
+        rule = json.loads(rule_text)
+    except json.JSONDecodeError as exc:
+        raise _qualification.PredictiveQualificationError(
+            "ResearchProtocol promotion rule is not canonical JSON"
+        ) from exc
+    if not isinstance(rule, dict) or rule.get("kind") != "autosport-promotion-rule-v1":
+        raise _qualification.PredictiveQualificationError(
+            "ResearchProtocol promotion rule kind is unsupported"
+        )
+    committed_id = rule.get("predictive_admission_policy_id")
+    committed_sha = rule.get("predictive_admission_policy_sha256")
+    if committed_id != policy.policy_id or committed_sha != policy.sha256:
+        raise _qualification.PredictiveQualificationError(
+            "predictive admission policy was not precommitted by ResearchProtocol"
+        )
+    try:
+        protocol_available = parse_iso_timestamp(str(payload.get("available_at")))
+        protocol_frozen = parse_iso_timestamp(str(binding.get("frozen_at_utc")))
+        generated_at = parse_iso_timestamp(forecast.generated_at)
+        policy_frozen = parse_iso_timestamp(policy.frozen_at)
+    except (TypeError, ValueError) as exc:
+        raise _qualification.PredictiveQualificationError(
+            "predictive admission policy commitment timestamps are invalid"
+        ) from exc
+    if protocol_available > generated_at or protocol_frozen > generated_at:
+        raise _qualification.PredictiveQualificationError(
+            "predictive admission policy commitment was unavailable at forecast time"
+        )
+    if policy_frozen > protocol_available:
+        raise _qualification.PredictiveQualificationError(
+            "predictive admission policy claims freeze after durable protocol authority"
+        )
 
 
 class _PromotionBundleDigestRegistry(ScientificRegistry):
-    """Read-only resolver view matching PromotionDecision's bundle-hash contract.
-
-    ``ScientificRegistry.record_promotion`` canonically stores the EvaluationBundle's
-    declared ``bundle_sha256`` in PromotionDecision.  The pre-existing #597 resolver
-    compared that value with the registry-envelope digest instead, making every real
-    promoted lineage fail its positive path.  This view fixes only that comparison;
-    the returned resolver result is rebound to the real immutable registry-record
-    digest before it leaves this module.
-    """
+    """Read-only resolver view matching PromotionDecision's bundle-hash contract."""
 
     def __init__(self, delegate: ScientificRegistry) -> None:
         self._delegate = delegate
@@ -166,12 +186,18 @@ def resolve_predictive_eligibility(
     policy: _qualification.PredictiveAdmissionPolicy,
     qualification: _qualification.ForecastCalibrationQualification,
 ) -> _qualification.ResolvedPredictiveEligibility:
-    """Resolve eligibility from immutable registry truth with exact bundle identity."""
+    """Resolve eligibility only from precommitted policy + immutable registry truth."""
 
     if not isinstance(registry, ScientificRegistry):
         raise _qualification.PredictiveQualificationError(
             "registry must be ScientificRegistry"
         )
+    _policy_commitment_from_protocol(
+        registry,
+        qualification=qualification,
+        forecast=forecast,
+        policy=policy,
+    )
     resolved = _ORIGINAL_RESOLVE_PREDICTIVE_ELIGIBILITY(
         _PromotionBundleDigestRegistry(registry),
         forecast,
@@ -195,11 +221,7 @@ def resolve_forecast_predictive_authority(
     policy: _qualification.PredictiveAdmissionPolicy,
     qualification: _qualification.ForecastCalibrationQualification,
 ) -> PredictiveEligibilityEvidence:
-    """Mint one non-durable admission capability from durable scientific truth.
-
-    The capability is valid only for the exact decision instant used for resolution.
-    Its serialized fields are audit evidence, not a transferable authority token.
-    """
+    """Return durable audit evidence; this value alone grants no runtime authority."""
 
     resolved = resolve_predictive_eligibility(
         registry,
@@ -208,7 +230,7 @@ def resolve_forecast_predictive_authority(
         policy=policy,
         qualification=qualification,
     )
-    evidence = PredictiveEligibilityEvidence(
+    return PredictiveEligibilityEvidence(
         evaluation_id=resolved.evaluation_bundle_id,
         evaluation_sha256=resolved.evaluation_bundle_sha256,
         protocol_sha256=resolved.protocol_sha256,
@@ -223,60 +245,78 @@ def resolve_forecast_predictive_authority(
         as_of=resolved.resolved_at,
         valid_until=resolved.resolved_at,
     )
-    _RESOLVED_AUTHORITIES.add(
-        _authority_key_from_record(forecast, evidence, decision_time)
-    )
-    return evidence
 
 
-def resolve_authoritative_forecast_ref(
-    registry: ScientificRegistry,
-    forecast: ForecastRecord,
-    quote: QuoteRef,
-    *,
-    decision_time: str,
-    policy: _qualification.PredictiveAdmissionPolicy,
-    qualification: _qualification.ForecastCalibrationQualification,
-) -> ForecastRef:
-    """Resolve durable eligibility and bind it to the exact quote/forecast snapshot."""
+def _install_runtime_authority() -> Callable[..., ForecastRef]:
+    """Install an object-identity guard and return the sole durable minting path.
 
-    evidence = resolve_forecast_predictive_authority(
-        registry,
-        forecast,
-        decision_time=decision_time,
-        policy=policy,
-        qualification=qualification,
-    )
-    return ForecastRef.from_forecast(
-        forecast,
-        quote,
-        predictive_eligibility=evidence,
-    )
+    Runtime authority state lives only in this closure.  There is no module-global
+    token set, computable membership key, or standalone mint helper.  The public
+    function returned below first performs durable registry resolution and only then
+    records the exact immutable ForecastRef object + decision fingerprint.
+    """
 
+    authorized: dict[int, tuple[ForecastRef, str]] = {}
 
-def _authoritative_predictive_eligibility_reason(
-    self: ForecastRef,
-    decision_time: object,
-    *,
-    expected_model_id: str | None,
-) -> str | None:
-    reason = _ORIGINAL_FORECAST_ELIGIBILITY_REASON(
-        self,
-        decision_time,
-        expected_model_id=expected_model_id,
-    )
-    if reason is not None:
-        return reason
-    key = _authority_key_from_ref(self, decision_time)
-    if key is None or key not in _RESOLVED_AUTHORITIES:
-        return (
-            "predictive eligibility was not resolved from canonical "
-            "ScientificRegistry authority for this decision"
+    def guarded_reason(
+        self: ForecastRef,
+        decision_time: object,
+        *,
+        expected_model_id: str | None,
+    ) -> str | None:
+        reason = _ORIGINAL_FORECAST_ELIGIBILITY_REASON(
+            self,
+            decision_time,
+            expected_model_id=expected_model_id,
         )
-    return None
+        if reason is not None:
+            return reason
+        fingerprint = _runtime_fingerprint(self, decision_time)
+        entry = authorized.get(id(self))
+        if (
+            fingerprint is None
+            or entry is None
+            or entry[0] is not self
+            or entry[1] != fingerprint
+        ):
+            return _AUTHORITY_MISSING_REASON
+        return None
+
+    ForecastRef.predictive_eligibility_reason = guarded_reason  # type: ignore[method-assign]
+
+    def resolve_authoritative_forecast_ref(
+        registry: ScientificRegistry,
+        forecast: ForecastRecord,
+        quote: QuoteRef,
+        *,
+        decision_time: str,
+        policy: _qualification.PredictiveAdmissionPolicy,
+        qualification: _qualification.ForecastCalibrationQualification,
+    ) -> ForecastRef:
+        evidence = resolve_forecast_predictive_authority(
+            registry,
+            forecast,
+            decision_time=decision_time,
+            policy=policy,
+            qualification=qualification,
+        )
+        reference = ForecastRef.from_forecast(
+            forecast,
+            quote,
+            predictive_eligibility=evidence,
+        )
+        fingerprint = _runtime_fingerprint(reference, decision_time)
+        if fingerprint is None:
+            raise _qualification.PredictiveQualificationError(
+                "resolved predictive authority lacks eligibility evidence"
+            )
+        if len(authorized) >= _MAX_RUNTIME_AUTHORITIES:
+            authorized.pop(next(iter(authorized)))
+        authorized[id(reference)] = (reference, fingerprint)
+        return reference
+
+    return resolve_authoritative_forecast_ref
 
 
-# Install the guard before any normal Autosport submodule import can consume these
-# APIs.  The package initializer imports this module exactly once per interpreter.
-ForecastRef.predictive_eligibility_reason = _authoritative_predictive_eligibility_reason  # type: ignore[method-assign]
+resolve_authoritative_forecast_ref = _install_runtime_authority()
 _qualification.resolve_predictive_eligibility = resolve_predictive_eligibility

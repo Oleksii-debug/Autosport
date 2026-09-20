@@ -1,19 +1,20 @@
 """Compatibility harness for the pre-authority portfolio-plan test corpus.
 
 The preserved implementation file contains historical synthetic positive predictive
-fixtures.  Production now requires a runtime capability minted by the durable
-ScientificRegistry resolver, so this subclass explicitly marks only those legacy
-unit-test fixtures as already resolved.  New authority tests exercise the real
-registry path and prove that ordinary caller-constructed witnesses fail closed.
+fixtures. Production now requires a ForecastRef object minted by durable registry
+resolution. For this historical unit-test module only, we replace synthetic
+ForecastRef values with a test-local subclass that preserves all original structural
+eligibility checks and suppresses only the new missing-runtime-authority reason.
+No production mint/token/backdoor is exposed by this compatibility seam.
 """
 
 from __future__ import annotations
 
 import importlib.util
+from dataclasses import replace
 from pathlib import Path
 
-from autosport import predictive_authority as _predictive_authority
-from autosport.forecasting import parse_iso_timestamp
+from autosport.opportunity import ForecastRef
 
 
 _IMPL_PATH = Path(__file__).with_name("_test_portfolio_plan_impl.py")
@@ -26,6 +27,29 @@ if _SPEC is None or _SPEC.loader is None:
 _IMPL = importlib.util.module_from_spec(_SPEC)
 _SPEC.loader.exec_module(_IMPL)
 
+_AUTHORITY_MISSING = (
+    "predictive eligibility was not resolved from canonical "
+    "ScientificRegistry authority for this decision"
+)
+
+
+class _TrustedSyntheticForecastRef(ForecastRef):
+    """Test-local legacy fixture; never imported by production Autosport code."""
+
+    def predictive_eligibility_reason(
+        self,
+        decision_time,
+        *,
+        expected_model_id,
+    ):
+        reason = super().predictive_eligibility_reason(
+            decision_time,
+            expected_model_id=expected_model_id,
+        )
+        if reason == _AUTHORITY_MISSING:
+            return None
+        return reason
+
 
 class PortfolioPlanTests(_IMPL.PortfolioPlanTests):
     @classmethod
@@ -35,17 +59,13 @@ class PortfolioPlanTests(_IMPL.PortfolioPlanTests):
             *args,
             **kwargs,
         )
-        decision_time = parse_iso_timestamp(cls.DECISION_TS)
-        for forecast in opportunity.forecasts:
-            if forecast.predictive_eligibility is None:
-                continue
-            key = _predictive_authority._authority_key_from_ref(
-                forecast,
-                decision_time,
-            )
-            if key is not None:
-                _predictive_authority._RESOLVED_AUTHORITIES.add(key)
-        return opportunity
+        forecasts = tuple(
+            _TrustedSyntheticForecastRef.from_dict(forecast.to_dict())
+            if forecast.predictive_eligibility is not None
+            else forecast
+            for forecast in opportunity.forecasts
+        )
+        return replace(opportunity, forecasts=forecasts)
 
 
 if __name__ == "__main__":

@@ -163,7 +163,7 @@ def _intent(snapshot: CompleteGameBoardSnapshot) -> OpportunityIntent:
         proposal_ts=DECISION_TS,
     )
     opportunity = Opportunity(
-        strategy_class=StrategyClass.VALUE,
+        strategy_class=StrategyClass.PREDICTIVE_EDGE,
         decision=OpportunityDecision.ACTIONABLE,
         quotes=(QuoteRef.from_market_event(quote, market_snapshot_hash=SNAPSHOT_SHA),),
     )
@@ -248,7 +248,7 @@ def _persist_intent_authority(
     )
 
 
-def test_durable_product_origin_survives_restart_and_rejects_forged_intent(
+def test_durable_cost_selection_survives_ledger_reopen_and_rejects_forged_intent(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
@@ -290,14 +290,14 @@ def test_durable_product_origin_survives_restart_and_rejects_forged_intent(
         ledger=ledger,
         expected_cost_contract_sha256=contract.contract_sha256,
     )
-    restarted = derive_product_owned_pre_evaluation_session(
+    reopened = derive_product_owned_pre_evaluation_session(
         **kwargs,
         ledger=JsonlDecisionLedger(ledger_path),
     )
 
-    assert restarted.authority_digest == first.authority_digest
-    assert restarted.origin.cost_contract_sha256 == contract.contract_sha256
-    slot = restarted.resolve_slot(provider.row_key)
+    assert reopened.authority_digest == first.authority_digest
+    assert reopened.origin.cost_contract_sha256 == contract.contract_sha256
+    slot = reopened.resolve_slot(provider.row_key)
     assert slot.decision_stage is SemanticFunnelStage.ELIGIBLE
     assert slot.attrition_reason is SemanticAttritionReason.THEORETICAL_ONLY
     assert slot.opportunity_intent_sha256 == intent.intent_sha256

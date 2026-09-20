@@ -6,12 +6,14 @@ from types import SimpleNamespace
 import pytest
 
 from autosport import _paper_execution_decision_origin as origin_module
+from autosport import _paper_execution_decision_origin_instance_guard as instance_guard
 from autosport.decision_ledger import DecisionRecord, JsonlDecisionLedger
 from autosport.paper_execution_reality import (
     EvidenceGrade,
     PaperExecutionLedger,
     PaperExecutionModelConfig,
     PaperExecutionStateError,
+    execute_paper_plan,
 )
 from autosport.real_execution_ledger import ExecutionAction, ExecutionPlan
 
@@ -91,33 +93,74 @@ def _load(ledger: PaperExecutionLedger, plan: ExecutionPlan):
     )
 
 
-def test_verified_decision_origin_is_persisted_before_attempts_and_restarts_exactly(
-    tmp_path,
+def _append_origin_reservation_for_test(
+    ledger: PaperExecutionLedger,
+    plan: ExecutionPlan,
+    origin: origin_module.DecisionRecordOrigin,
 ) -> None:
+    config = _config()
+    instance_guard._STABLE_APPEND_EVENT(
+        ledger,
+        event_type="RUN_RESERVED",
+        run_id="paper-run-origin-test-1",
+        key="paper-run-origin-test-1:reserve",
+        payload={
+            "trigger_id": plan.decision_id,
+            "plan_id": plan.plan_id,
+            "plan_fingerprint": plan.fingerprint,
+            "model_fingerprint": config.fingerprint,
+            "started_at": STARTED_AT,
+            "action_ids": [action.action_id for action in plan.actions],
+            "observation_evidence_ids": {},
+            "decision_origin": origin.to_dict(),
+        },
+    )
+
+
+def test_verified_origin_is_evidence_not_direct_reservation_capability(tmp_path) -> None:
     decision_ledger = JsonlDecisionLedger(tmp_path / "decision.jsonl")
     digest = decision_ledger.append(_record())
     origin = origin_module.verified_decision_origin(decision_ledger, DECISION_ID)
     assert origin.record_sha256 == digest
 
     execution_ledger = PaperExecutionLedger(tmp_path / "paper-execution.jsonl")
-    plan = _plan()
     token = origin_module._DECISION_ORIGIN.set(origin)
     try:
-        _reserve(execution_ledger, plan)
-        run = _load(execution_ledger, plan)
-        _reserve(execution_ledger, plan)
-        retry = _load(execution_ledger, plan)
+        with pytest.raises(
+            origin_module.PaperExecutionDecisionOriginError,
+            match="canonical product execution",
+        ):
+            _reserve(execution_ledger, _plan())
     finally:
         origin_module._DECISION_ORIGIN.reset(token)
 
-    assert run == retry
-    assert execution_ledger.reservation_decision_origin(
-        "paper-run-origin-test-1"
-    ) == origin
-    events = execution_ledger.events("paper-run-origin-test-1")
-    assert events[0]["event_type"] == "RUN_RESERVED"
-    assert events[0]["payload"]["decision_origin"] == origin.to_dict()
-    assert all(event["event_type"] != "ATTEMPT_RECORDED" for event in events)
+    assert execution_ledger.events("paper-run-origin-test-1") == ()
+
+
+def test_verified_origin_cannot_smuggle_through_raw_execute_paper_plan(tmp_path) -> None:
+    decision_ledger = JsonlDecisionLedger(tmp_path / "decision.jsonl")
+    decision_ledger.append(_record())
+    origin = origin_module.verified_decision_origin(decision_ledger, DECISION_ID)
+    execution_ledger = PaperExecutionLedger(tmp_path / "paper-execution.jsonl")
+    plan = _plan()
+
+    token = origin_module._DECISION_ORIGIN.set(origin)
+    try:
+        with pytest.raises(
+            origin_module.PaperExecutionDecisionOriginError,
+            match="canonical product execution",
+        ):
+            execute_paper_plan(
+                plan=plan,
+                trigger_id=DECISION_ID,
+                config=_config(),
+                ledger=execution_ledger,
+                started_at=STARTED_AT,
+            )
+    finally:
+        origin_module._DECISION_ORIGIN.reset(token)
+
+    assert execution_ledger.events("paper-run-origin-test-1") == ()
 
 
 def test_originless_reservation_cannot_be_upgraded_by_late_decision_append(tmp_path) -> None:
@@ -145,11 +188,7 @@ def test_changed_record_digest_cannot_resume_same_execution_reservation(tmp_path
 
     execution_ledger = PaperExecutionLedger(tmp_path / "paper-execution.jsonl")
     plan = _plan()
-    token = origin_module._DECISION_ORIGIN.set(original)
-    try:
-        _reserve(execution_ledger, plan)
-    finally:
-        origin_module._DECISION_ORIGIN.reset(token)
+    _append_origin_reservation_for_test(execution_ledger, plan, original)
 
     substituted = origin_module.DecisionRecordOrigin(
         decision_id=DECISION_ID,

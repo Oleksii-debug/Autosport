@@ -163,7 +163,7 @@ def capture_historical_snapshot(
         )
 
     evidence_payload = {
-        "schema_version": 1,
+        "schema_version": 2,
         "kind": "parlayapi_point_in_time_historical_snapshot",
         "provider": "parlayapi",
         "sport_key": provider.sport_key,
@@ -173,6 +173,8 @@ def capture_historical_snapshot(
         "previous_snapshot_at": previous_snapshot_at,
         "next_snapshot_at": next_snapshot_at,
         "response_sha256": response_sha256,
+        "provider_http_status": response.status_code,
+        "provider_response_payload": payload,
         "market_sha256": market_sha256,
         "quote_count": len(events),
         "has_data": bool(events),
@@ -292,6 +294,8 @@ def resolve_historical_snapshot_authority(
             "previous_snapshot_at",
             "next_snapshot_at",
             "response_sha256",
+            "provider_http_status",
+            "provider_response_payload",
             "market_sha256",
             "quote_count",
             "snapshot_timestamp_fallback_count",
@@ -304,7 +308,7 @@ def resolve_historical_snapshot_authority(
             "persisted historical snapshot evidence is missing authority fields"
         )
     if (
-        raw["schema_version"] != 1
+        raw["schema_version"] != 2
         or raw["kind"] != "parlayapi_point_in_time_historical_snapshot"
         or raw["provider"] != "parlayapi"
         or raw["sport_key"] != ParlayApiTableTennisProvider.sport_key
@@ -330,12 +334,46 @@ def resolve_historical_snapshot_authority(
 
     response_sha256 = _required_text(raw, "response_sha256")
     market_sha256 = _required_text(raw, "market_sha256")
+    provider_http_status = raw["provider_http_status"]
+    provider_response_payload = raw["provider_response_payload"]
     for field, value in (
         ("response_sha256", response_sha256),
         ("market_sha256", market_sha256),
     ):
         if len(value) != 64 or any(ch not in "0123456789abcdef" for ch in value):
             raise ProviderPayloadError(f"{field} must be SHA-256 hex")
+
+    if (
+        type(provider_http_status) is not int
+        or provider_http_status < 100
+        or provider_http_status > 599
+        or not isinstance(provider_response_payload, dict)
+    ):
+        raise ProviderPayloadError(
+            "persisted historical provider response metadata is invalid"
+        )
+    canonical_response = json.dumps(
+        provider_response_payload,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    if hashlib.sha256(canonical_response.encode("utf-8")).hexdigest() != response_sha256:
+        raise ProviderPayloadError(
+            "persisted provider response digest does not match capture evidence"
+        )
+    if _required_text(provider_response_payload, "timestamp") != snapshot_at:
+        raise ProviderPayloadError(
+            "persisted provider response timestamp does not match capture evidence"
+        )
+    provider_data = provider_response_payload.get("data")
+    if (
+        not isinstance(provider_data, list)
+        or not all(isinstance(item, dict) for item in provider_data)
+    ):
+        raise ProviderPayloadError(
+            "persisted provider response requires data[] event objects"
+        )
 
     try:
         actual_market_sha256 = _sha256(market)
@@ -377,6 +415,58 @@ def resolve_historical_snapshot_authority(
             raise ProviderPayloadError(
                 "persisted historical market row must be a JSON object"
             )
+
+    verifier = ParlayApiTableTennisProvider(
+        "persisted-capture-verification",
+        clock=lambda: captured_at,
+        sleeper=lambda _: None,
+    )
+    normalizer = CanonicalNormalizer()
+    expected_events: list[MarketEvent] = []
+    expected_dedupe_keys: set[str] = set()
+    for raw_event in provider_data:
+        quotes = verifier._event_quotes(
+            raw_event,
+            snapshot_at,
+            provider_http_status,
+        )
+        for quote in quotes:
+            causal_quote, _ = _bind_quote_to_snapshot(
+                quote,
+                snapshot_at,
+                snapshot_dt,
+            )
+            event = normalizer.normalize(verifier.source_id, causal_quote)
+            event = replace(event, ingest_ts=captured_at)
+            if event.dedupe_key in expected_dedupe_keys:
+                raise ProviderPayloadError(
+                    "persisted provider response contains duplicate canonical quote identity"
+                )
+            expected_dedupe_keys.add(event.dedupe_key)
+            expected_events.append(event)
+    expected_events.sort(
+        key=lambda item: (
+            item.observed_ts,
+            item.sequence,
+            item.event_id,
+            item.market_id,
+            item.selection_id,
+        )
+    )
+    expected_market_text = "".join(
+        json.dumps(
+            event.to_dict(),
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        + "\n"
+        for event in expected_events
+    )
+    if expected_market_text != market_text:
+        raise ProviderPayloadError(
+            "persisted historical market bytes do not match provider response"
+        )
 
     market_types = raw["market_types"]
     bookmaker_keys = raw["bookmaker_keys"]
@@ -424,6 +514,7 @@ def resolve_historical_snapshot_authority(
         "source_as_of": snapshot_at,
         "available_at": captured_at,
         "requested_at": requested_at,
+        "provider_http_status": provider_http_status,
         "market_sha256": market_sha256,
         "quote_count": quote_count,
         "snapshot_timestamp_fallback_count": fallback_count,

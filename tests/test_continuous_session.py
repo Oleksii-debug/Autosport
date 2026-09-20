@@ -576,6 +576,10 @@ class ContinuousSessionCoordinatorTests(unittest.TestCase):
                 observation,
                 action_type="PAPER_PROPOSAL",
                 decision_at="2026-09-19T21:19:05+00:00",
+                parameters=(
+                    ("economic_decision_id", decision.decision_id),
+                    ("paper_ticket_id", ticket.ticket_id),
+                ),
             )
             runtime.commit_action(
                 action,

@@ -37,8 +37,10 @@ SCHEMA = "autosport.paper_campaign_admission"
 SCHEMA_VERSION = 2
 _PREPARED = "PREPARED"
 _COMMITTED = "COMMITTED"
-_WITNESS_SCHEMA_VERSION = 1
+_WITNESS_SCHEMA_VERSION = 2
 _WITNESS_SUFFIX = ".paper-campaign-admission.monotonic-witness.jsonl"
+_WITNESS_PREPARE = "PREPARE"
+_WITNESS_COMMIT = "COMMIT"
 _RESERVED_DECISION_PAYLOAD = frozenset(
     {
         "ticket_id",
@@ -249,23 +251,30 @@ class PaperCampaignAdmissionCoordinator:
         self._state_identity = _state_identity(self.state_path)
         self._witness_path = authority_root / f"{self._state_identity}{_WITNESS_SUFFIX}"
         with WorkspaceEconomicLock(self._admission_lock_workspace):
-            witnesses = self._read_witnesses()
+            records = self._read_witnesses()
             if self.state_path.exists():
                 self._read()
-            elif not witnesses:
+            elif not records:
                 self._write({})
-            elif len(witnesses) == 1:
+            else:
+                _, pending = self._witness_status(records)
                 initial = _state_for({}, 1)
-                if witnesses[0]["state_sha256"] != initial["state_sha256"]:
+                if (
+                    pending is None
+                    or pending["generation"] != 1
+                    or pending["state_sha256"] != initial["state_sha256"]
+                    or any(record["event"] == _WITNESS_COMMIT for record in records)
+                ):
                     raise PaperCampaignAdmissionError(
-                        "missing admission journal cannot match initial monotonic witness"
+                        "admission journal is missing behind monotonic authority"
                     )
                 atomic_write_json(self.state_path, initial)
-                self._read()
-            else:
-                raise PaperCampaignAdmissionError(
-                    "admission journal is missing behind monotonic authority"
+                self._append_witness(
+                    event=_WITNESS_COMMIT,
+                    generation=1,
+                    state_sha256=initial["state_sha256"],
                 )
+                self._read()
 
     def _read_witnesses(self) -> list[dict[str, object]]:
         if not self._witness_path.exists():
@@ -278,6 +287,8 @@ class PaperCampaignAdmissionCoordinator:
             ) from exc
         expected_keys = {
             "witness_schema_version",
+            "sequence",
+            "event",
             "generation",
             "state_identity",
             "state_name",
@@ -286,8 +297,10 @@ class PaperCampaignAdmissionCoordinator:
             "witness_sha256",
         }
         records: list[dict[str, object]] = []
-        previous: str | None = None
-        for generation, raw in enumerate(lines, start=1):
+        previous_sha: str | None = None
+        next_generation = 1
+        pending: dict[str, object] | None = None
+        for sequence, raw in enumerate(lines, start=1):
             if not raw:
                 raise PaperCampaignAdmissionError(
                     "admission monotonic witness journal contains a blank line"
@@ -314,9 +327,13 @@ class PaperCampaignAdmissionCoordinator:
                 raise PaperCampaignAdmissionError(
                     "unsupported admission monotonic witness schema"
                 )
-            if record["generation"] != generation:
+            if record["sequence"] != sequence:
                 raise PaperCampaignAdmissionError(
-                    "admission monotonic witness generation is not contiguous"
+                    "admission monotonic witness sequence is not contiguous"
+                )
+            if record["event"] not in {_WITNESS_PREPARE, _WITNESS_COMMIT}:
+                raise PaperCampaignAdmissionError(
+                    "admission monotonic witness event is invalid"
                 )
             if record["state_identity"] != self._state_identity:
                 raise PaperCampaignAdmissionError(
@@ -327,7 +344,7 @@ class PaperCampaignAdmissionCoordinator:
                     "admission monotonic witness belongs to another journal"
                 )
             _sha(record["state_sha256"], "witness state_sha256")
-            if record["previous_witness_sha256"] != previous:
+            if record["previous_witness_sha256"] != previous_sha:
                 raise PaperCampaignAdmissionError(
                     "admission monotonic witness predecessor mismatch"
                 )
@@ -336,18 +353,65 @@ class PaperCampaignAdmissionCoordinator:
                 raise PaperCampaignAdmissionError(
                     "admission monotonic witness digest mismatch"
                 )
+            if record["event"] == _WITNESS_PREPARE:
+                if pending is not None or record["generation"] != next_generation:
+                    raise PaperCampaignAdmissionError(
+                        "admission witness PREPARE ordering is invalid"
+                    )
+                pending = record
+            else:
+                if (
+                    pending is None
+                    or record["generation"] != pending["generation"]
+                    or record["state_sha256"] != pending["state_sha256"]
+                ):
+                    raise PaperCampaignAdmissionError(
+                        "admission witness COMMIT does not acknowledge PREPARE"
+                    )
+                pending = None
+                next_generation += 1
             records.append(record)
-            previous = record["witness_sha256"]
+            previous_sha = record["witness_sha256"]
         return records
 
-    def _append_witness(self, *, generation: int, state_sha256: str) -> None:
+    @staticmethod
+    def _witness_status(
+        records: list[dict[str, object]],
+    ) -> tuple[dict[str, object] | None, dict[str, object] | None]:
+        committed: dict[str, object] | None = None
+        pending: dict[str, object] | None = None
+        for record in records:
+            if record["event"] == _WITNESS_PREPARE:
+                pending = record
+            else:
+                committed = record
+                pending = None
+        return committed, pending
+
+    def _append_witness(self, *, event: str, generation: int, state_sha256: str) -> None:
         records = self._read_witnesses()
-        if generation != len(records) + 1:
-            raise PaperCampaignAdmissionError(
-                "admission state did not advance beyond monotonic authority"
-            )
+        committed, pending = self._witness_status(records)
+        if event == _WITNESS_PREPARE:
+            expected_generation = 1 if committed is None else committed["generation"] + 1
+            if pending is not None or generation != expected_generation:
+                raise PaperCampaignAdmissionError(
+                    "admission witness PREPARE cannot advance current authority"
+                )
+        elif event == _WITNESS_COMMIT:
+            if (
+                pending is None
+                or pending["generation"] != generation
+                or pending["state_sha256"] != state_sha256
+            ):
+                raise PaperCampaignAdmissionError(
+                    "admission witness COMMIT lacks matching pending PREPARE"
+                )
+        else:
+            raise PaperCampaignAdmissionError("invalid admission witness event")
         body = {
             "witness_schema_version": _WITNESS_SCHEMA_VERSION,
+            "sequence": len(records) + 1,
+            "event": event,
             "generation": generation,
             "state_identity": self._state_identity,
             "state_name": self.state_path.name,
@@ -441,23 +505,42 @@ class PaperCampaignAdmissionCoordinator:
 
     def _read(self) -> dict[str, object]:
         state = self._read_local()
-        witnesses = self._read_witnesses()
-        generation = state["generation"]
-        if len(witnesses) < generation:
+        records = self._read_witnesses()
+        if not records:
             raise PaperCampaignAdmissionError(
-                "admission monotonic authority is behind local journal"
+                "admission state is missing independent monotonic authority"
             )
-        anchored = witnesses[generation - 1]
-        if anchored["state_sha256"] != state["state_sha256"]:
-            raise PaperCampaignAdmissionError(
-                "admission journal does not match monotonic authority"
-            )
-        if len(witnesses) == generation:
+        committed, pending = self._witness_status(records)
+        if pending is None:
+            if (
+                committed is None
+                or state["generation"] != committed["generation"]
+                or state["state_sha256"] != committed["state_sha256"]
+            ):
+                raise PaperCampaignAdmissionError(
+                    "admission journal is older than monotonic authority"
+                )
             return state
-        if len(witnesses) == generation + 1:
+        if (
+            state["generation"] == pending["generation"]
+            and state["state_sha256"] == pending["state_sha256"]
+        ):
+            self._append_witness(
+                event=_WITNESS_COMMIT,
+                generation=pending["generation"],
+                state_sha256=pending["state_sha256"],
+            )
+            return state
+        previous_generation = pending["generation"] - 1
+        if (
+            committed is not None
+            and state["generation"] == previous_generation
+            and state["generation"] == committed["generation"]
+            and state["state_sha256"] == committed["state_sha256"]
+        ):
             return state
         raise PaperCampaignAdmissionError(
-            "admission journal is older than monotonic authority"
+            "admission journal conflicts with pending monotonic publication"
         )
 
     def _write(self, admissions: dict[str, object]) -> None:
@@ -465,30 +548,34 @@ class PaperCampaignAdmissionCoordinator:
             current = self._read()
             generation = current["generation"] + 1
         else:
-            witnesses = self._read_witnesses()
-            if witnesses:
+            records = self._read_witnesses()
+            if records:
                 raise PaperCampaignAdmissionError(
                     "cannot recreate admission journal behind monotonic authority"
                 )
             generation = 1
         state = _state_for(admissions, generation)
-        witnesses = self._read_witnesses()
-        if len(witnesses) == generation - 1:
+        records = self._read_witnesses()
+        _, pending = self._witness_status(records)
+        if pending is None:
             self._append_witness(
+                event=_WITNESS_PREPARE,
                 generation=generation,
                 state_sha256=state["state_sha256"],
             )
-        elif len(witnesses) == generation:
-            pending = witnesses[-1]
-            if pending["state_sha256"] != state["state_sha256"]:
-                raise PaperCampaignAdmissionError(
-                    "pending admission witness conflicts with recovered publication"
-                )
-        else:
+        elif (
+            pending["generation"] != generation
+            or pending["state_sha256"] != state["state_sha256"]
+        ):
             raise PaperCampaignAdmissionError(
-                "admission monotonic authority generation cannot be reconciled"
+                "pending admission witness conflicts with recovered publication"
             )
         atomic_write_json(self.state_path, state)
+        self._append_witness(
+            event=_WITNESS_COMMIT,
+            generation=generation,
+            state_sha256=state["state_sha256"],
+        )
         self._read()
 
     @staticmethod

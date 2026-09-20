@@ -35,7 +35,15 @@ _SCOPE_FIELDS = (
     "contradiction_state",
 )
 _TERMINAL_STATUSES = frozenset(
-    {"scored", "deadline_missed", "failed", "cancelled", "abstained", "null"}
+    {
+        "scored",
+        "deadline_missed",
+        "timeout",
+        "failed",
+        "cancelled",
+        "abstained",
+        "null",
+    }
 )
 
 

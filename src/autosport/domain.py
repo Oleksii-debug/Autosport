@@ -12,6 +12,8 @@ from typing import Any
 
 
 _MAX_SERIALIZED_METADATA_NESTING = 64
+_SEMANTIC_ID_CHARS = frozenset("abcdefghijklmnopqrstuvwxyz0123456789._:/-")
+_RESERVED_SEMANTIC_IDENTITIES = frozenset({"unknown", "mixed", "unspecified"})
 
 
 class MarketType(str, Enum):
@@ -46,6 +48,19 @@ def _canonical_string_value(value: object, field_name: str) -> str:
     return _require_utf8_encodable(value, field_name)
 
 
+def _canonical_semantic_identity(value: object, field_name: str) -> str:
+    identity = _canonical_string_value(value, field_name)
+    if identity != identity.lower():
+        raise ValueError(f"{field_name} must be a lowercase canonical semantic identity")
+    if any(character not in _SEMANTIC_ID_CHARS for character in identity):
+        raise ValueError(
+            f"{field_name} must use lowercase ASCII letters, digits, '.', '_', ':', '/', or '-' only"
+        )
+    if identity in _RESERVED_SEMANTIC_IDENTITIES:
+        raise ValueError(f"{field_name} must not use reserved identity {identity!r}")
+    return identity
+
+
 def _timezone_aware_iso8601_value(value: object, field_name: str) -> str:
     timestamp = _canonical_string_value(value, field_name)
     try:
@@ -66,6 +81,13 @@ def _optional_canonical_string(raw: dict[str, Any], field_name: str) -> str | No
     if value is None:
         return None
     return _canonical_string_value(value, field_name)
+
+
+def _optional_semantic_identity(raw: dict[str, Any], field_name: str) -> str | None:
+    value = raw.get(field_name)
+    if value is None:
+        return None
+    return _canonical_semantic_identity(value, field_name)
 
 
 _RESERVED_EVENT_SPORT_IDENTITIES = frozenset({"unknown", "mixed"})
@@ -234,10 +256,21 @@ class MarketEvent:
     score_state: str | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
     sport: str | None = None
+    competition_id: str | None = None
+    market_semantics_id: str | None = None
+    provider_source_class: str | None = None
 
     def __post_init__(self) -> None:
         if self.sport is not None:
             _canonical_sport_value(self.sport)
+        for field_name in (
+            "competition_id",
+            "market_semantics_id",
+            "provider_source_class",
+        ):
+            value = getattr(self, field_name)
+            if value is not None:
+                _canonical_semantic_identity(value, field_name)
 
     @property
     def quote_key(self) -> str:
@@ -291,6 +324,9 @@ class MarketEvent:
         score_state = _optional_canonical_string(raw, "score_state")
         metadata = _serialized_metadata(raw)
         sport = _optional_sport(raw)
+        competition_id = _optional_semantic_identity(raw, "competition_id")
+        market_semantics_id = _optional_semantic_identity(raw, "market_semantics_id")
+        provider_source_class = _optional_semantic_identity(raw, "provider_source_class")
 
         return cls(
             event_id=event_id,
@@ -307,6 +343,9 @@ class MarketEvent:
             score_state=score_state,
             metadata=metadata,
             sport=sport,
+            competition_id=competition_id,
+            market_semantics_id=market_semantics_id,
+            provider_source_class=provider_source_class,
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -327,6 +366,12 @@ class MarketEvent:
         }
         if self.sport is not None:
             payload["sport"] = self.sport
+        if self.competition_id is not None:
+            payload["competition_id"] = self.competition_id
+        if self.market_semantics_id is not None:
+            payload["market_semantics_id"] = self.market_semantics_id
+        if self.provider_source_class is not None:
+            payload["provider_source_class"] = self.provider_source_class
         return payload
 
 

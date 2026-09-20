@@ -266,8 +266,13 @@ class VOCProductionOrchestrator:
 
     @staticmethod
     def _admission_payload(precompute: Mapping[str, Any]) -> dict[str, Any]:
-        if precompute.get("schema_version") != 1:
+        version = precompute.get("schema_version")
+        if version not in {1, 2}:
             raise ModelComputeRouterError("VOC precompute admission version is unsupported")
+        # Router schema v2 adds immutable ResearchProtocol/cohort publication
+        # witnesses.  The DecisionLedger admission intentionally remains schema v1;
+        # project only its common fields here without mutating/downgrading the
+        # router-owned v2 authority that terminal-aware scoring later revalidates.
         scope = precompute.get("scope")
         expected_scope = {
             "sport_id",

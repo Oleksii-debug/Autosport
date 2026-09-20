@@ -8,6 +8,7 @@ import pytest
 from autosport.external_validity_baseline import (
     BaselineDefinition,
     BaselineKind,
+    EvaluationContractFamily,
     ExternalValidityError,
     FrozenBaselineProtocol,
     FrozenEvidenceScope,
@@ -15,6 +16,7 @@ from autosport.external_validity_baseline import (
     REQUIRED_BASELINE_KINDS,
     build_external_validity_report,
 )
+from autosport.opportunity import StrategyClass
 
 
 T0 = "2026-01-01T00:00:00+00:00"
@@ -82,6 +84,10 @@ def _protocol(
     *,
     scope: FrozenEvidenceScope | None = None,
     mutate_market_config: bool = False,
+    strategy_class: StrategyClass = StrategyClass.PREDICTIVE_EDGE,
+    evaluation_contract_family: EvaluationContractFamily = (
+        EvaluationContractFamily.PREDICTIVE_FORECAST_VALUE
+    ),
 ) -> FrozenBaselineProtocol:
     return FrozenBaselineProtocol(
         protocol_id="extval:test:v1",
@@ -89,6 +95,8 @@ def _protocol(
         evidence_scope=scope or _scope(),
         candidate_id="candidate:complex",
         candidate_artifact_sha256=SHA_F,
+        strategy_class=strategy_class,
+        evaluation_contract_family=evaluation_contract_family,
         evaluation_semantics="paper-net-utility",
         evaluation_contract_sha256=_hash("paper-net-utility-contract:v1"),
         primary_metric="net_utility",
@@ -378,11 +386,90 @@ def test_protocol_requires_all_baseline_kinds_in_canonical_order():
             evidence_scope=_scope(),
             candidate_id="candidate:complex",
             candidate_artifact_sha256=SHA_F,
+            strategy_class=StrategyClass.PREDICTIVE_EDGE,
+            evaluation_contract_family=(
+                EvaluationContractFamily.PREDICTIVE_FORECAST_VALUE
+            ),
             evaluation_semantics="paper-net-utility",
             evaluation_contract_sha256=_hash("paper-net-utility-contract:v1"),
             primary_metric="net_utility",
             uncertainty_method="frozen-bootstrap-v1",
             baselines=definitions[:-1],
+        )
+
+
+@pytest.mark.parametrize(
+    ("strategy_class", "evaluation_contract_family"),
+    (
+        (
+            StrategyClass.PREDICTIVE_EDGE,
+            EvaluationContractFamily.PREDICTIVE_FORECAST_VALUE,
+        ),
+        (
+            StrategyClass.LIVE_PRICE_MOVEMENT,
+            EvaluationContractFamily.LIVE_PRICE_EXECUTION,
+        ),
+        (StrategyClass.ARBITRAGE, EvaluationContractFamily.ARBITRAGE_EXECUTION),
+        (StrategyClass.DUTCHING, EvaluationContractFamily.DUTCHING_EXECUTION),
+        (
+            StrategyClass.HEDGE_REBALANCE,
+            EvaluationContractFamily.HEDGE_PORTFOLIO_RISK,
+        ),
+        (StrategyClass.HYBRID, EvaluationContractFamily.HYBRID_COMPOSITE),
+    ),
+)
+def test_protocol_binds_canonical_strategy_to_evaluation_contract_family(
+    strategy_class: StrategyClass,
+    evaluation_contract_family: EvaluationContractFamily,
+):
+    protocol = _protocol(
+        strategy_class=strategy_class,
+        evaluation_contract_family=evaluation_contract_family,
+    )
+
+    payload = protocol.to_payload()
+    assert payload["schema_version"] == 2
+    assert payload["strategy_class"] == strategy_class.value
+    assert payload["evaluation_contract_family"] == evaluation_contract_family.value
+
+
+@pytest.mark.parametrize(
+    ("strategy_class", "wrong_family"),
+    (
+        (
+            StrategyClass.PREDICTIVE_EDGE,
+            EvaluationContractFamily.ARBITRAGE_EXECUTION,
+        ),
+        (
+            StrategyClass.LIVE_PRICE_MOVEMENT,
+            EvaluationContractFamily.PREDICTIVE_FORECAST_VALUE,
+        ),
+        (
+            StrategyClass.ARBITRAGE,
+            EvaluationContractFamily.PREDICTIVE_FORECAST_VALUE,
+        ),
+        (
+            StrategyClass.DUTCHING,
+            EvaluationContractFamily.PREDICTIVE_FORECAST_VALUE,
+        ),
+        (
+            StrategyClass.HEDGE_REBALANCE,
+            EvaluationContractFamily.PREDICTIVE_FORECAST_VALUE,
+        ),
+        (
+            StrategyClass.HYBRID,
+            EvaluationContractFamily.PREDICTIVE_FORECAST_VALUE,
+        ),
+    ),
+)
+def test_strategy_evaluation_contract_family_mismatch_fails_closed(
+    strategy_class: StrategyClass,
+    wrong_family: EvaluationContractFamily,
+):
+    with pytest.raises(ExternalValidityError, match="evaluation contract family"):
+        _protocol(
+            strategy_class=strategy_class,
+            evaluation_contract_family=wrong_family,
         )
 
 

@@ -93,7 +93,7 @@ def _qualification() -> ForecastCalibrationQualification:
 
 def _forecast() -> ForecastRecord:
     return ForecastRecord(
-        quote_key="soccer|event-authority|market-authority|selection-authority",
+        quote_key=_quote().quote_key,
         probability=Decimal("0.56"),
         model_id="fixture-model",
         model_version="model-1",
@@ -291,7 +291,6 @@ def test_durable_resolution_mints_opaque_exact_object_authority_and_restart_fail
     assert evidence.as_of == _DECISION_TIME
     assert evidence.valid_until == _DECISION_TIME
 
-    # Durable audit evidence alone is deliberately not a transferable capability.
     caller_ref = _ref(forecast, evidence)
     assert caller_ref.predictive_eligibility_reason(
         decision,
@@ -311,7 +310,6 @@ def test_durable_resolution_mints_opaque_exact_object_authority_and_restart_fail
         expected_model_id=forecast.model_id,
     ) is None
 
-    # Same fields in a different object, including serialization/restart, do not mint.
     reconstructed = ForecastRef.from_dict(authorized.to_dict())
     assert reconstructed.predictive_eligibility_reason(
         decision,

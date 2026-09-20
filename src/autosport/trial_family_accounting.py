@@ -219,6 +219,11 @@ class TrialAttemptView:
     aborted_at: str | None = None
     abort_reason: str | None = None
 
+class _AttemptReplay(RuntimeError):
+    def __init__(self, attempt: TrialAttemptView) -> None:
+        super().__init__('exact trial attempt replay')
+        self.attempt = attempt
+
 @dataclass(frozen=True, slots=True)
 class TrialFamilySnapshot:
     as_of: str
@@ -273,8 +278,9 @@ class TrialFamilyAccountingStore:
         registry_path = registry.path.resolve(strict=False)
         if registry_path.parent != workspace:
             raise ValueError('ScientificRegistry must use the same workspace root as trial-family accounting')
+        canonical_registry = ScientificRegistry(registry_path)
         relative_registry = registry_path.relative_to(workspace).as_posix()
-        family = TrialFamilyDefinition.resolve(registry, plan)
+        family = TrialFamilyDefinition.resolve(canonical_registry, plan)
         authority = MonotonicWorkspaceAuthority(workspace=workspace, domain=_AUTHORITY_DOMAIN, key=family.family_id, authority_root=authority_root)
         if target.exists():
             existing = cls(target, workspace_root=workspace, authority_root=authority_root)
@@ -534,27 +540,38 @@ class TrialFamilyAccountingStore:
         if type(candidate) is not TrialCandidateLineage:
             raise TypeError('candidate must be TrialCandidateLineage')
         _iso(created_at, 'created_at')
-        plan = self.plan
-        member = plan.member(member_authority_id)
-        if candidate.semantic_sha256 != member.semantic_variant_sha256:
-            raise ValueError('candidate lineage does not match frozen family member')
-        attempts = self._attempts()
-        for prior in attempts:
-            if prior.semantic_attempt_id == semantic_attempt_id:
-                if prior.member_authority_id == member.member_authority_id and prior.candidate == candidate and (prior.created_at == created_at):
-                    return prior
-                raise ValueError('conflicting duplicate semantic attempt')
-        ordinal = len(attempts) + 1
-        attempt_id = _digest({'family_id': self.family.family_id, 'semantic_attempt_id': semantic_attempt_id, 'ordinal': ordinal, 'member_authority_id': member.member_authority_id, 'candidate': candidate.to_payload(), 'created_at': created_at})
-        payload = {'attempt_id': attempt_id, 'semantic_attempt_id': semantic_attempt_id, 'ordinal': ordinal, 'member_authority_id': member.member_authority_id, 'hypothesis_id': member.hypothesis_id, 'candidate': candidate.to_payload(), 'created_at': created_at}
+        candidate_payload = candidate.to_payload()
+        base_payload = {'semantic_attempt_id': semantic_attempt_id, 'member_authority_id': member_authority_id, 'candidate': candidate_payload, 'created_at': created_at}
+        created_attempt_id: str | None = None
 
-        def bind_registry_prefix(state: dict[str, Any], base_payload: dict[str, Any]) -> dict[str, Any]:
+        def bind_attempt_under_lock(state: dict[str, Any], base: dict[str, Any]) -> dict[str, Any]:
+            nonlocal created_attempt_id
+            family = TrialFamilyDefinition.from_payload(state['family'])
+            plan = ExperimentFamilyPlan.from_payload(state['multiplicity_plan'])
+            member = plan.member(member_authority_id)
+            if candidate.semantic_sha256 != member.semantic_variant_sha256:
+                raise ValueError('candidate lineage does not match frozen family member')
+            attempts = self._replay_events(family, plan, tuple(state['events']), cutoff=None)
+            for prior in attempts:
+                if prior.semantic_attempt_id != semantic_attempt_id:
+                    continue
+                if prior.member_authority_id == member.member_authority_id and prior.candidate == candidate and prior.created_at == created_at:
+                    raise _AttemptReplay(prior)
+                raise ValueError('conflicting duplicate semantic attempt')
+            ordinal = len(attempts) + 1
+            attempt_id = _digest({'family_id': family.family_id, 'semantic_attempt_id': semantic_attempt_id, 'ordinal': ordinal, 'member_authority_id': member.member_authority_id, 'candidate': candidate_payload, 'created_at': created_at})
+            created_attempt_id = attempt_id
             registry_state = self._registry(state)._read()
             record_count = len(registry_state['records'])
-            return {**base_payload, 'registry_record_count': record_count, 'registry_prefix_sha256': _registry_prefix_sha256(registry_state, record_count)}
+            return {'attempt_id': attempt_id, 'semantic_attempt_id': semantic_attempt_id, 'ordinal': ordinal, 'member_authority_id': member.member_authority_id, 'hypothesis_id': member.hypothesis_id, 'candidate': candidate_payload, 'created_at': created_at, 'registry_record_count': record_count, 'registry_prefix_sha256': _registry_prefix_sha256(registry_state, record_count)}
 
-        self._append_event('ATTEMPT_STARTED', created_at, payload, locked_payload_factory=bind_registry_prefix)
-        return next((v for v in self._attempts() if v.attempt_id == attempt_id))
+        try:
+            self._append_event('ATTEMPT_STARTED', created_at, base_payload, locked_payload_factory=bind_attempt_under_lock)
+        except _AttemptReplay as replay:
+            return replay.attempt
+        if created_attempt_id is None:
+            raise RuntimeError('trial attempt publication did not produce an attempt identity')
+        return next((v for v in self._attempts() if v.attempt_id == created_attempt_id))
 
     @staticmethod
     def _require_experiment_matches(attempt: TrialAttemptView, family: TrialFamilyDefinition, payload: Mapping[str, Any]) -> None:
@@ -562,6 +579,20 @@ class TrialFamilyAccountingStore:
         for field, wanted in expected.items():
             if payload.get(field) != wanted:
                 raise ValueError(f'Experiment {field} does not match durable trial candidate/research protocol')
+
+    @staticmethod
+    def _require_evaluation_bundle_matches(attempt: TrialAttemptView, family: TrialFamilyDefinition, experiment_available_at: str, bundle: Any) -> None:
+        expected = {
+            'dataset_snapshot_id': attempt.candidate.dataset_snapshot_id,
+            'protocol_sha256': family.protocol_sha256,
+            'evaluated_strategy_version_id': attempt.candidate.strategy_version_id,
+            'evaluated_model_version_id': attempt.candidate.model_version_id,
+        }
+        for field, wanted in expected.items():
+            if bundle.payload.get(field) != wanted:
+                raise ValueError(f'Experiment EvaluationBundle {field} does not match durable trial candidate/research protocol')
+        if _instant(bundle.available_at, 'EvaluationBundle.available_at') > _instant(experiment_available_at, 'Experiment.available_at'):
+            raise ValueError('Experiment EvaluationBundle became available after the Experiment result')
 
     def _require_canonical_registry(self, registry: ScientificRegistry, state: dict[str, Any]) -> ScientificRegistry:
         if type(registry) is not ScientificRegistry:
@@ -599,29 +630,32 @@ class TrialFamilyAccountingStore:
         attempt_id, experiment_id = (_sha256(attempt_id, 'attempt_id'), _text(experiment_id, 'experiment_id'))
         state = self._read_state()
         registry = self._require_canonical_registry(registry, state)
-        attempts = self._replay_events(TrialFamilyDefinition.from_payload(state['family']), ExperimentFamilyPlan.from_payload(state['multiplicity_plan']), tuple(state['events']), cutoff=None)
+        family = TrialFamilyDefinition.from_payload(state['family'])
+        plan = ExperimentFamilyPlan.from_payload(state['multiplicity_plan'])
+        attempts = self._replay_events(family, plan, tuple(state['events']), cutoff=None)
         attempt = next((v for v in attempts if v.attempt_id == attempt_id), None)
         if attempt is None:
             raise ValueError('attempt_id is not in the durable trial family')
         for prior in attempts:
-            if prior.attempt_id != attempt_id and prior.status is TrialAttemptStatus.COMPLETED and (prior.experiment_id == experiment_id):
+            if prior.attempt_id != attempt_id and prior.status is TrialAttemptStatus.COMPLETED and prior.experiment_id == experiment_id:
                 raise ValueError('experiment_id is already consumed by another family attempt')
         entry = registry.get('Experiment', experiment_id)
         if entry is None:
             raise ValueError('Experiment is missing from ScientificRegistry')
         start_payload = self._attempt_start_payload(state, attempt_id)
         self._require_experiment_after_attempt_witness(registry, start_payload, experiment_id)
-        family = TrialFamilyDefinition.from_payload(state['family'])
         self._require_experiment_matches(attempt, family, entry.payload)
-        bundle_id = _text(entry.payload.get('evaluation_bundle_id'), 'evaluation_bundle_id')
-        if registry.get('EvaluationBundle', bundle_id) is None:
-            raise ValueError('Experiment EvaluationBundle is missing from ScientificRegistry')
-        outcome = ResearchOutcome(entry.payload.get('outcome'))
         available = _iso(entry.available_at, 'Experiment.available_at')
+        bundle_id = _text(entry.payload.get('evaluation_bundle_id'), 'evaluation_bundle_id')
+        bundle = registry.get('EvaluationBundle', bundle_id)
+        if bundle is None:
+            raise ValueError('Experiment EvaluationBundle is missing from ScientificRegistry')
+        self._require_evaluation_bundle_matches(attempt, family, available, bundle)
+        outcome = ResearchOutcome(entry.payload.get('outcome'))
         if _instant(available, 'Experiment.available_at') < _instant(attempt.created_at, 'attempt.created_at'):
             raise ValueError('Experiment result predates trial attempt')
         if attempt.status is TrialAttemptStatus.COMPLETED:
-            if attempt.experiment_id == experiment_id and attempt.experiment_record_sha256 == entry.record_sha256 and (attempt.result_available_at == available) and (attempt.outcome is outcome):
+            if attempt.experiment_id == experiment_id and attempt.experiment_record_sha256 == entry.record_sha256 and attempt.result_available_at == available and attempt.outcome is outcome:
                 return attempt
             raise ValueError('attempt already completed with conflicting Experiment')
         if attempt.status is TrialAttemptStatus.ABORTED:
@@ -671,6 +705,7 @@ class TrialFamilyAccountingStore:
             bundle = registry.get('EvaluationBundle', evidence.evaluation_bundle_id)
             if bundle is None or experiment.payload.get('evaluation_bundle_id') != evidence.evaluation_bundle_id or bundle.payload.get('bundle_sha256') != evidence.evaluation_bundle_sha256:
                 raise ValueError('sequential look EvaluationBundle does not match durable registry truth')
+            self._require_evaluation_bundle_matches(attempt, family, experiment.available_at, bundle)
             prior_assessments = store.assessments()
             causal_times = [_instant(raw['event_at'], 'event_at') for raw in state['events']] + [_instant(value.evidence.observed_at, 'observed_at') for value in prior_assessments]
             if causal_times and _instant(evidence.observed_at, 'observed_at') < max(causal_times):
@@ -734,6 +769,11 @@ class TrialFamilyAccountingStore:
                 if durable_experiment is None or durable_experiment.record_sha256 != attempt.experiment_record_sha256:
                     raise ValueError('completed attempt no longer matches durable ScientificRegistry truth')
                 self._require_experiment_matches(attempt, family, durable_experiment.payload)
+                bundle_id = _text(durable_experiment.payload.get('evaluation_bundle_id'), 'evaluation_bundle_id')
+                bundle = registry.get('EvaluationBundle', bundle_id)
+                if bundle is None:
+                    raise ValueError('completed attempt EvaluationBundle is missing from ScientificRegistry')
+                self._require_evaluation_bundle_matches(attempt, family, durable_experiment.available_at, bundle)
         target_looks = [a for a in self._sequential().assessments() if a.evidence.experiment_id == evidence.experiment_id and _instant(a.evidence.observed_at, 'observed_at') <= _instant(evidence.created_at, 'created_at')]
         if not target_looks:
             raise ValueError('promotion eligibility requires registered sequential evidence')

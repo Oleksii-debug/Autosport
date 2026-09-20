@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import hashlib
 import json
 from dataclasses import dataclass
@@ -441,6 +442,97 @@ class PaperExecutionAdoptionRuntime:
             self.config,
         )
 
+    def assert_recoverable_book_state(
+        self,
+        *,
+        pre_action_book: PaperBook,
+        prepared: PreparedPaperExecution,
+        trigger_id: str,
+        started_at: str,
+        materialize_exposure: bool,
+    ) -> None:
+        """Reject restart state not explained by the exact durable #623 run."""
+        if not isinstance(pre_action_book, PaperBook):
+            raise TypeError("pre_action_book must be PaperBook")
+        if not isinstance(prepared, PreparedPaperExecution):
+            raise TypeError("prepared must be PreparedPaperExecution")
+        if type(materialize_exposure) is not bool:
+            raise TypeError("materialize_exposure must be bool")
+
+        if self._same_book_state(self.book, pre_action_book):
+            return
+        if not materialize_exposure:
+            raise PaperExecutionAdoptionError(
+                "SHADOW recovery PaperBook differs from exact pre-action state"
+            )
+
+        run_id = self.expected_run_id(prepared, trigger_id)
+        run = self.ledger.load_run(
+            run_id=run_id,
+            trigger_id=trigger_id,
+            plan=prepared.execution_plan,
+            config=self.config,
+            started_at=started_at,
+            observation_evidence_ids={},
+        )
+        if run is None:
+            raise PaperExecutionAdoptionError(
+                "PaperBook changed before any durable #623 run evidence"
+            )
+
+        expected = copy.deepcopy(pre_action_book)
+        action_by_id = {
+            action.action_id: action for action in prepared.execution_plan.actions
+        }
+        binding_by_id = {
+            binding.action_id: binding for binding in prepared.exposure_bindings
+        }
+        for attempt in run.attempts:
+            if attempt.outcome not in {
+                PaperAttemptOutcome.ACCEPTED,
+                PaperAttemptOutcome.PARTIAL,
+            }:
+                continue
+            action = action_by_id.get(attempt.action_id)
+            binding = binding_by_id.get(attempt.action_id)
+            if action is None or binding is None:
+                raise PaperExecutionAdoptionError(
+                    "durable attempt is not bound to prepared execution action"
+                )
+            if attempt.execution_odds is None or attempt.execution_stake is None:
+                raise PaperExecutionAdoptionError(
+                    "accepted-equivalent durable attempt lacks execution truth"
+                )
+            expected.open_ticket(
+                [
+                    TicketLeg(
+                        event_id=attempt.event_id,
+                        market_id=attempt.market_id,
+                        selection_id=attempt.selection_id,
+                        locked_odds=attempt.execution_odds,
+                        sport=binding.sport,
+                    )
+                ],
+                attempt.execution_stake,
+                reason=(
+                    f"paper execution adoption; "
+                    f"decision_id={prepared.execution_plan.decision_id}; "
+                    f"run_id={attempt.run_id}; "
+                    f"{self._TICKET_MARKER}{attempt.attempt_id}"
+                ),
+                placed_at=attempt.execution_observed_at,
+                provider_source_ids=(attempt.bookmaker_id,),
+                provider_accounts=((attempt.bookmaker_id, attempt.account_id),),
+                bankroll_id=binding.bankroll_id,
+                currency=binding.currency,
+            )
+
+        if not self._same_book_state(self.book, expected):
+            raise PaperExecutionAdoptionError(
+                "PaperBook restart state is not the exact pre-action or "
+                "#623-authorized post-action state"
+            )
+
     def execute(
         self,
         *,
@@ -524,18 +616,23 @@ class PaperExecutionAdoptionRuntime:
         return PaperExecutionAdoptionResult(run=run, ticket_ids=tuple(ticket_ids))
 
     @staticmethod
+    def _same_book_state(left: PaperBook, right: PaperBook) -> bool:
+        return (
+            left.initial_bankroll == right.initial_bankroll
+            and left.balance == right.balance
+            and left.tickets == right.tickets
+            and left._lifecycle == right._lifecycle
+            and left._settlement_times == right._settlement_times
+        )
+
+    @classmethod
     def _assert_same_book_state(
+        cls,
         left: PaperBook,
         right: PaperBook,
         message: str,
     ) -> None:
-        if (
-            left.initial_bankroll != right.initial_bankroll
-            or left.balance != right.balance
-            or left.tickets != right.tickets
-            or left._lifecycle != right._lifecycle
-            or left._settlement_times != right._settlement_times
-        ):
+        if not cls._same_book_state(left, right):
             raise PaperExecutionAdoptionError(message)
 
     def _materialize_attempt(

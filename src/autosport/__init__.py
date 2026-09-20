@@ -48,6 +48,11 @@ from . import _dataset_snapshot_lineage_publication as _dataset_snapshot_lineage
 from . import _dataset_snapshot_lineage_publication_provenance as _dataset_snapshot_lineage_publication_provenance  # noqa: F401,E402
 from . import _dataset_snapshot_lineage_publication_trust_root as _dataset_snapshot_lineage_publication_trust_root  # noqa: F401,E402
 
+# Point-in-time feature evidence is positive only when the exact dataset lineage
+# manifest already commits the exact typed DatasetSnapshot/FeatureSet/artifact
+# provenance relation. The guard reuses the existing lineage/registry authorities.
+from . import _point_in_time_feature_provenance_guard as _point_in_time_feature_provenance_guard  # noqa: F401,E402
+
 # Campaign/provider applicability needs a stable authenticated Betfair account
 # discriminator, but application/session credentials must never become evidence.
 from . import _campaign_provider_scope_devapp_identity as _campaign_provider_scope_devapp_identity  # noqa: F401,E402

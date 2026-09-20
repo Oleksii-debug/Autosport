@@ -106,6 +106,7 @@ class _ProductSource:
     stream_epoch = "epoch-1"
     settlement_authority_id = "provider-a-results-v1"
     settlement_configuration_sha256 = SHA_A
+    settlement_resolver_implementation_id = "provider-a-results-resolver-v1"
 
     def __init__(self) -> None:
         self.resolution: SettlementResolution | None = None

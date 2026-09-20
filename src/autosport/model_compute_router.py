@@ -2272,9 +2272,9 @@ class ModelComputeRouterStore:
                 raise ModelComputeRouterError(
                     "VOC shadow execution availability predates completion"
                 )
-            if available_at > deadline:
+            if available_at > deadline and completed_at <= deadline:
                 raise ModelComputeRouterError(
-                    "VOC positive shadow execution became available after deadline"
+                    "VOC shadow execution completed on time but was unavailable by deadline"
                 )
             if authority_recorded_at < available_at:
                 raise ModelComputeRouterError(
@@ -3462,9 +3462,9 @@ class ModelComputeRouterStore:
             "VOC precompute decision_deadline",
             precompute["decision_deadline"],
         )
-        if available > deadline:
+        if available > deadline and completed <= deadline:
             raise ModelComputeRouterError(
-                "VOC positive shadow execution became available after deadline"
+                "VOC shadow execution completed on time but was unavailable by deadline"
             )
         authority_recorded_at = _time(
             "VOC shadow authority_recorded_at", _authority_now()

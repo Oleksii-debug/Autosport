@@ -455,5 +455,50 @@ class VOCPrecomputeAdmissionTests(unittest.TestCase):
             )
 
 
+    def test_true_deadline_miss_shadow_is_durable_negative_evidence(self) -> None:
+        with patch(
+            "autosport.model_compute_router._authority_now",
+            return_value=T_TIMEOUT,
+        ):
+            late = self.router.record_voc_shadow_execution(
+                request_id="request-1",
+                role="challenger",
+                output_sha256=SHA_B,
+                action="CLOUD",
+                abstained=False,
+                completed_at=T_TIMEOUT,
+                available_at=T_TIMEOUT,
+                actual_cost=Decimal("0.20"),
+                evidence_sha256=SHA_B,
+            )
+        self.assertEqual(late["completed_at"], T_TIMEOUT)
+        self.assertEqual(late["available_at"], T_TIMEOUT)
+        reopened = ModelComputeRouterStore(self.router_path)
+        self.assertEqual(
+            reopened.get_voc_shadow_execution("request-1", "challenger"),
+            late,
+        )
+
+    def test_on_time_completion_unavailable_by_deadline_remains_rejected(self) -> None:
+        with patch(
+            "autosport.model_compute_router._authority_now",
+            return_value=T_TIMEOUT,
+        ):
+            with self.assertRaisesRegex(
+                ModelComputeRouterError,
+                "completed on time but was unavailable by deadline",
+            ):
+                self.router.record_voc_shadow_execution(
+                    request_id="request-1",
+                    role="challenger",
+                    output_sha256=SHA_B,
+                    action="CLOUD",
+                    abstained=False,
+                    completed_at=T_DEADLINE,
+                    available_at=T_TIMEOUT,
+                    actual_cost=Decimal("0.20"),
+                    evidence_sha256=SHA_B,
+                )
+
 if __name__ == "__main__":
     unittest.main()

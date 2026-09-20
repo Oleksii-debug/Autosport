@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import hashlib
-import hmac
 import json
 
 import pytest
@@ -11,7 +9,6 @@ from autosport.provider_observation_authority import (
     CompleteGameBoardEvidenceStore,
     CompleteGameBoardRequest,
     CompleteGameBoardSnapshot,
-    ProviderObservationIntegrityError,
     ProviderObservationUnsupportedError,
 )
 
@@ -51,58 +48,6 @@ def _forged_snapshot() -> CompleteGameBoardSnapshot:
     )
 
 
-def _canonical_json(value: object) -> str:
-    return json.dumps(
-        value,
-        ensure_ascii=False,
-        sort_keys=True,
-        separators=(",", ":"),
-        allow_nan=False,
-    )
-
-
-def _old_unsigned_receipt(
-    store: CompleteGameBoardEvidenceStore,
-    snapshot: CompleteGameBoardSnapshot,
-) -> dict[str, object]:
-    return {
-        "schema": "autosport.provider_acquisition_receipt",
-        "schema_version": 1,
-        "workspace_sha256": hashlib.sha256(
-            str(store.workspace).encode("utf-8")
-        ).hexdigest(),
-        "evidence_sha256": snapshot.evidence_sha256,
-        "state_sha256": store._state_sha256(snapshot),
-        "semantic_binding_sha256": store._semantic_binding_sha256(snapshot),
-    }
-
-
-def _seed_attacker_receipt(
-    root,
-    store: CompleteGameBoardEvidenceStore,
-    snapshot: CompleteGameBoardSnapshot,
-) -> None:
-    workspace_sha256 = hashlib.sha256(str(store.workspace).encode("utf-8")).hexdigest()
-    forged_receipt_root = root / "provider-acquisition-receipt-v1" / workspace_sha256
-    forged_receipt_root.mkdir(parents=True, exist_ok=True)
-    key = b"caller-controlled-provider-key!!"[:32]
-    assert len(key) == 32
-    (forged_receipt_root / "receipt.key").write_text(key.hex(), encoding="ascii")
-    unsigned = _old_unsigned_receipt(store, snapshot)
-    receipt = dict(unsigned)
-    receipt["hmac_sha256"] = hmac.new(
-        key,
-        _canonical_json(unsigned).encode("utf-8"),
-        hashlib.sha256,
-    ).hexdigest()
-    receipts = forged_receipt_root / "receipts"
-    receipts.mkdir(parents=True, exist_ok=True)
-    (receipts / f"{snapshot.evidence_sha256}.json").write_text(
-        json.dumps(receipt, indent=2, sort_keys=True),
-        encoding="utf-8",
-    )
-
-
 def _publish_forged_evidence_and_generic_history(
     store: CompleteGameBoardEvidenceStore,
     snapshot: CompleteGameBoardSnapshot,
@@ -137,7 +82,7 @@ def _publish_forged_evidence_and_generic_history(
     )
 
 
-def test_caller_selected_generic_root_cannot_supply_provider_receipt_trust(tmp_path) -> None:
+def test_caller_selected_generic_root_cannot_recreate_provider_origin(tmp_path) -> None:
     workspace = (tmp_path / "workspace").resolve()
     caller_root = (tmp_path / "caller-machine-authority").resolve()
     store = CompleteGameBoardEvidenceStore(workspace, authority_root=caller_root)
@@ -147,11 +92,11 @@ def test_caller_selected_generic_root_cannot_supply_provider_receipt_trust(tmp_p
         forged,
         authority_root=caller_root,
     )
-    _seed_attacker_receipt(caller_root, store, forged)
 
+    # Even a complete, matching local continuity history is not remote provenance.
     with pytest.raises(
-        ProviderObservationIntegrityError,
-        match="production-owned acquisition receipt",
+        ProviderObservationUnsupportedError,
+        match="restart cannot reissue provider-origin authority",
     ):
         CompleteGameBoardEvidenceStore(
             workspace,
@@ -159,7 +104,7 @@ def test_caller_selected_generic_root_cannot_supply_provider_receipt_trust(tmp_p
         ).load(forged.evidence_sha256)
 
 
-def test_monotonic_root_env_override_cannot_supply_provider_receipt_trust(
+def test_monotonic_root_env_override_cannot_recreate_provider_origin(
     tmp_path,
     monkeypatch,
 ) -> None:
@@ -169,34 +114,20 @@ def test_monotonic_root_env_override_cannot_supply_provider_receipt_trust(
     store = CompleteGameBoardEvidenceStore(workspace)
     forged = _forged_snapshot()
 
-    # The supported environment override is deliberately authoritative for the
-    # generic rollback journal. Reproduce the predecessor attack in full: exact
-    # evidence + matching generic history + a correctly signed receipt/key under
-    # the overridden root. Provider-origin verification must ignore all of it.
+    # The documented override may select the generic rollback journal. It still
+    # cannot turn locally authored durable state into provider-origin authority.
     _publish_forged_evidence_and_generic_history(store, forged, authority_root=None)
-    _seed_attacker_receipt(attacker_root, store, forged)
 
     with pytest.raises(
-        ProviderObservationIntegrityError,
-        match="production-owned acquisition receipt",
+        ProviderObservationUnsupportedError,
+        match="restart cannot reissue provider-origin authority",
     ):
         CompleteGameBoardEvidenceStore(workspace).load(forged.evidence_sha256)
 
 
-def test_consumer_store_cannot_mint_production_root_receipt_for_forged_snapshot(
-    tmp_path,
-    monkeypatch,
-) -> None:
-    product_root = (tmp_path / "generic-machine-authority").resolve()
-    monkeypatch.setenv("AUTOSPORT_MONOTONIC_AUTHORITY_ROOT", str(product_root))
-    workspace = (tmp_path / "workspace").resolve()
-    store = CompleteGameBoardEvidenceStore(workspace)
+def test_local_receipt_signing_surface_is_non_authorizing(tmp_path) -> None:
+    store = CompleteGameBoardEvidenceStore((tmp_path / "workspace").resolve())
     forged = _forged_snapshot()
-
-    # The generic rollback journal is intentionally public and caller-mintable.
-    # Even after publishing exact bytes plus matching history, consumer code must
-    # have no store operation that can obtain/sign/write provider-origin credentials.
-    _publish_forged_evidence_and_generic_history(store, forged, authority_root=None)
 
     denied = (
         lambda: store._receipt_root(),
@@ -205,16 +136,12 @@ def test_consumer_store_cannot_mint_production_root_receipt_for_forged_snapshot(
         lambda: store._read_receipt_key(create=True),
         lambda: store._unsigned_receipt(forged),
         lambda: store._receipt_hmac(b"x" * 32, {"forged": True}),
+        lambda: store._write_receipt(forged),
+        lambda: store._verify_receipt(forged),
     )
     for operation in denied:
         with pytest.raises(
             ProviderObservationUnsupportedError,
-            match="signing material is not a consumer API",
+            match="local receipt signing is not provider-origin authority",
         ):
             operation()
-
-    with pytest.raises(
-        ProviderObservationIntegrityError,
-        match="production-owned acquisition receipt",
-    ):
-        CompleteGameBoardEvidenceStore(workspace).load(forged.evidence_sha256)

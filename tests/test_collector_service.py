@@ -191,7 +191,11 @@ class HeadlessCollectorServiceTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             page = catalog_page(1, "event-1")
             epoch_2_delta = replace(
-                make_delta(delta_id="e2-d1", position=1),
+                make_delta(
+                    delta_id="e2-d1",
+                    position=0,
+                    gap_state=GapState.CURSOR_RESET,
+                ),
                 stream_epoch="epoch-2",
             )
             epoch_1_return = make_delta(delta_id="e1-d1", position=1)
@@ -239,7 +243,11 @@ class HeadlessCollectorServiceTests(unittest.TestCase):
             )
 
             epoch_2_delta = replace(
-                make_delta(delta_id="e2-d1", position=1),
+                make_delta(
+                    delta_id="e2-d1",
+                    position=0,
+                    gap_state=GapState.CURSOR_RESET,
+                ),
                 stream_epoch="epoch-2",
             )
             source = FakeCollectorSource(

@@ -77,8 +77,53 @@ def _decimal(value: object, field: str) -> Decimal:
 def _decimal_text(value: Decimal) -> str:
     if not value.is_finite():
         raise ExternalValidityError("decimal must be finite")
-    text = format(value.normalize(), "f")
-    return "0" if text in ("", "-0") else text
+
+    sign, digits, exponent = value.as_tuple()
+    if not digits or all(digit == 0 for digit in digits):
+        return "0"
+
+    coefficient = "".join(str(digit) for digit in digits)
+    if exponent >= 0:
+        text = coefficient + ("0" * exponent)
+    else:
+        point = len(coefficient) + exponent
+        if point > 0:
+            text = coefficient[:point] + "." + coefficient[point:]
+        else:
+            text = "0." + ("0" * (-point)) + coefficient
+        text = text.rstrip("0").rstrip(".")
+
+    return "-" + text if sign else text
+
+
+def _decimal_difference(left: Decimal, right: Decimal) -> Decimal:
+    """Subtract finite Decimals exactly without ambient-context rounding."""
+
+    if not left.is_finite() or not right.is_finite():
+        raise ExternalValidityError("decimal difference requires finite values")
+
+    def coefficient_and_exponent(value: Decimal) -> tuple[int, int]:
+        sign, digits, exponent = value.as_tuple()
+        coefficient = 0
+        for digit in digits:
+            coefficient = (coefficient * 10) + digit
+        if sign:
+            coefficient = -coefficient
+        return coefficient, exponent
+
+    left_coefficient, left_exponent = coefficient_and_exponent(left)
+    right_coefficient, right_exponent = coefficient_and_exponent(right)
+    common_exponent = min(left_exponent, right_exponent)
+    exact_coefficient = (
+        left_coefficient * (10 ** (left_exponent - common_exponent))
+        - right_coefficient * (10 ** (right_exponent - common_exponent))
+    )
+    if exact_coefficient == 0:
+        return Decimal(0)
+
+    sign = 1 if exact_coefficient < 0 else 0
+    digits = tuple(int(ch) for ch in str(abs(exact_coefficient)))
+    return Decimal((sign, digits, common_exponent))
 
 
 def _digest(payload: Mapping[str, Any] | Sequence[Any]) -> str:
@@ -578,15 +623,15 @@ def build_external_validity_report(
                 baseline_definition_sha256=definition.definition_sha256,
                 candidate_metric_value=candidate.metric_value,
                 baseline_metric_value=result.metric_value,
-                candidate_minus_baseline=_decimal_text(candidate_value - baseline_value),
-                difference_lower_bound=_decimal_text(candidate_low - baseline_high),
-                difference_upper_bound=_decimal_text(candidate_high - baseline_low),
+                candidate_minus_baseline=_decimal_text(_decimal_difference(candidate_value, baseline_value)),
+                difference_lower_bound=_decimal_text(_decimal_difference(candidate_low, baseline_high)),
+                difference_upper_bound=_decimal_text(_decimal_difference(candidate_high, baseline_low)),
                 candidate_abstention_count=candidate.abstention_count,
                 baseline_abstention_count=result.abstention_count,
                 abstention_delta=candidate.abstention_count - result.abstention_count,
                 candidate_total_cost=candidate.total_cost,
                 baseline_total_cost=result.total_cost,
-                total_cost_delta=_decimal_text(candidate_cost - baseline_cost),
+                total_cost_delta=_decimal_text(_decimal_difference(candidate_cost, baseline_cost)),
                 baseline_evaluation_sha256=result.identity_sha256,
             )
         )

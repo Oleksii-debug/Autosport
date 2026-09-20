@@ -11,6 +11,7 @@ from .paper_execution_adoption import (
 from .paper_execution_reality import PaperAttemptOutcome
 
 
+_ORIGINAL_PREPARE = PaperExecutionAdoptionRuntime.prepare
 _ORIGINAL_EXECUTE = PaperExecutionAdoptionRuntime.execute
 _LIVE_DECISION_PREFIX = "live-"
 _PRE_ACTION_BOOK_FILE_NAME = "live_decision_pre_action_book.json"
@@ -19,17 +20,19 @@ _ACCEPTED_EQUIVALENT = frozenset(
 )
 
 
-def _load_live_pre_action_book(runtime: PaperExecutionAdoptionRuntime) -> PaperBook | None:
-    """Return the exact durable pre-action witness for a persistent live decision."""
-    path = Path(runtime.paper_book_path).parent / _PRE_ACTION_BOOK_FILE_NAME
+def _load_pre_action_path(path: Path, *, label: str) -> PaperBook | None:
     if not path.exists():
         return None
     try:
         return PaperBook.load(path)
     except (OSError, TypeError, ValueError) as exc:
-        raise PaperExecutionAdoptionError(
-            "live recovery pre-action PaperBook is unreadable"
-        ) from exc
+        raise PaperExecutionAdoptionError(f"{label} pre-action PaperBook is unreadable") from exc
+
+
+def _load_live_pre_action_book(runtime: PaperExecutionAdoptionRuntime) -> PaperBook | None:
+    """Return the exact durable pre-action witness for a persistent live decision."""
+    path = Path(runtime.paper_book_path).parent / _PRE_ACTION_BOOK_FILE_NAME
+    return _load_pre_action_path(path, label="live recovery")
 
 
 def _exact_assert_recoverable_book_state(
@@ -172,6 +175,35 @@ def _exact_assert_recoverable_book_state(
         )
 
 
+def _guarded_prepare(
+    self: PaperExecutionAdoptionRuntime,
+    *,
+    plan,
+    intents,
+    decision_id: str,
+):
+    prepared = _ORIGINAL_PREPARE(
+        self,
+        plan=plan,
+        intents=intents,
+        decision_id=decision_id,
+    )
+    if (
+        prepared is None
+        and type(decision_id) is str
+        and decision_id.startswith(_LIVE_DECISION_PREFIX)
+    ):
+        pre_action_book = _load_live_pre_action_book(self)
+        if (
+            pre_action_book is not None
+            and not self._same_book_state(self.book, pre_action_book)
+        ):
+            raise PaperExecutionAdoptionError(
+                "live no-execution recovery PaperBook differs from exact pre-action state"
+            )
+    return prepared
+
+
 def _guarded_execute(
     self: PaperExecutionAdoptionRuntime,
     *,
@@ -207,14 +239,54 @@ def _guarded_execute(
     )
 
 
-def _install() -> None:
+def _install_runtime_guards() -> None:
     if getattr(PaperExecutionAdoptionRuntime, "_autosport_append_recovery_installed", False):
         return
     PaperExecutionAdoptionRuntime.assert_recoverable_book_state = (
         _exact_assert_recoverable_book_state
     )
+    PaperExecutionAdoptionRuntime.prepare = _guarded_prepare
     PaperExecutionAdoptionRuntime.execute = _guarded_execute
     PaperExecutionAdoptionRuntime._autosport_append_recovery_installed = True
 
 
-_install()
+def _install_live_loop_guard() -> None:
+    # Import only after the execution runtime is fully patched. Python package
+    # imports execute __init__ before submodule resolution, so this also makes the
+    # no-runtime APPEND_PENDING fence authoritative for direct live-loop imports.
+    from . import live_decision_loop as live
+
+    cls = live.PersistentLiveDecisionLoop
+    if getattr(cls, "_autosport_append_recovery_installed", False):
+        return
+    original = cls._recover_unfinished_progress
+
+    def guarded_recover(loop):
+        progress = loop._progress
+        if (
+            progress is not None
+            and progress.phase == "append_pending"
+            and loop.paper_execution is None
+        ):
+            try:
+                pre_action_book = _load_pre_action_path(
+                    loop.pre_action_book_path,
+                    label="live no-runtime recovery",
+                )
+            except PaperExecutionAdoptionError as exc:
+                raise live.LiveDecisionProgressError(str(exc)) from exc
+            if (
+                pre_action_book is not None
+                and not loop._same_book_state(loop.book, pre_action_book)
+            ):
+                raise live.LiveDecisionProgressError(
+                    "append-pending PaperBook changed without exact execution authority"
+                )
+        return original(loop)
+
+    cls._recover_unfinished_progress = guarded_recover
+    cls._autosport_append_recovery_installed = True
+
+
+_install_runtime_guards()
+_install_live_loop_guard()

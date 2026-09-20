@@ -14,6 +14,7 @@ from autosport.monetary_cost_authority import (
     MonetaryEvidenceQuality,
     MonetarySourceClass,
     MonetarySourceSnapshot,
+    SharedAllocationSnapshot,
 )
 
 
@@ -23,6 +24,14 @@ T2 = T0 + timedelta(minutes=2)
 
 
 class Resolver:
+    def __init__(self, values):
+        self.values = values
+
+    def resolve(self, locator: str, *, as_of: datetime):
+        return self.values.get(locator)
+
+
+class AllocationResolver:
     def __init__(self, values):
         self.values = values
 
@@ -54,6 +63,19 @@ def _rehash(record: dict[str, object]) -> None:
         "source_class": record["source_class"],
         "snapshot": record["snapshot"],
     }
+    record["sha256"] = hashlib.sha256(
+        json.dumps(
+            payload,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        ).encode("utf-8")
+    ).hexdigest()
+
+
+def _rehash_allocation(record: dict[str, object]) -> None:
+    payload = {key: value for key, value in record.items() if key != "sha256"}
     record["sha256"] = hashlib.sha256(
         json.dumps(
             payload,
@@ -118,4 +140,60 @@ def test_restart_rejects_rehashed_forged_branch_before_either_tip_can_resolve(tm
         MonetaryCostAuthority(
             tmp_path,
             source_resolvers={MonetarySourceClass.PROVIDER_BILLING: resolver},
+        )
+
+
+def test_restart_rejects_rehashed_allocation_with_forged_campaign_coverage(tmp_path) -> None:
+    source = _snapshot(evidence_id="price-1", amount="10", digest_char="a")
+    resolver = Resolver({"source": source})
+    bootstrap = MonetaryCostAuthority(
+        tmp_path,
+        source_resolvers={MonetarySourceClass.FIXED_ADMIN: resolver},
+    )
+    source_ref = bootstrap.capture_source(
+        MonetarySourceClass.FIXED_ADMIN,
+        "source",
+        as_of=T1,
+    )
+    allocation = SharedAllocationSnapshot(
+        authority_id="allocation-ledger-cache",
+        evidence_id="allocation-1",
+        content_sha256="d" * 64,
+        source_ref=source_ref,
+        shares=(("campaign-a", Decimal("1")),),
+        observed_at=T0,
+        available_at=T1,
+        provenance="resolver:non-authoritative-allocation",
+    )
+    authority = MonetaryCostAuthority(
+        tmp_path,
+        source_resolvers={MonetarySourceClass.FIXED_ADMIN: resolver},
+        allocation_resolver=AllocationResolver({"allocation": allocation}),
+    )
+    authority.capture_allocation("allocation", as_of=T1)
+
+    path = tmp_path / "monetary-cost-authority.json"
+    raw = json.loads(path.read_text(encoding="utf-8"))
+    allocation_record = raw["allocations"][0]
+    allocation_record["shares"] = [["campaign-b", "1"]]
+    _rehash_allocation(allocation_record)
+    path.write_text(
+        json.dumps(
+            raw,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(
+        MonetaryAuthorityError,
+        match="allocation must cover source campaigns exactly",
+    ):
+        MonetaryCostAuthority(
+            tmp_path,
+            source_resolvers={MonetarySourceClass.FIXED_ADMIN: resolver},
+            allocation_resolver=AllocationResolver({"allocation": allocation}),
         )

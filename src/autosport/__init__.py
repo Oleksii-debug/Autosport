@@ -21,3 +21,7 @@ from . import _provider_transport_origin as _provider_transport_origin  # noqa: 
 # provider frame JSON extensible/content-bound, but reject unknown local envelope
 # fields before normalization or monotonic integrity validation.
 from . import _provider_observation_payload_strictness as _provider_observation_payload_strictness  # noqa: F401,E402
+
+# Product chrome describes one finished Autosport product. Keep internal/versioned
+# strategy and evidence identities intact while removing legacy V1 product framing.
+from . import _whole_product_title_guard as _whole_product_title_guard  # noqa: F401,E402

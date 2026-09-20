@@ -3282,6 +3282,21 @@ class ModelComputeRouterStore:
         self._live_request_ids.add(request.request_id)
         return decision
 
+    def get_request(
+        self, request_id: str
+    ) -> ComputeRouteRequest | None:
+        """Re-resolve the immutable canonical request owned by this route store."""
+
+        _text("request_id", request_id)
+        record = self._routes.get(request_id)
+        return (
+            None
+            if record is None
+            else ComputeRouteRequest.from_payload(
+                record["request"]
+            )
+        )
+
     def get_decision(
         self, request_id: str
     ) -> ComputeRouteDecision | None:

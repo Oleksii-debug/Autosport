@@ -259,40 +259,47 @@ def _canonical_agent_call(
                 "paper-value canonical call lacks chosen stake authority"
             )
 
-        if goal is None:
-            # A fresh call appends its DecisionRecord before execute(), so
-            # ``persisted`` is already non-None here. The local RiskDecision is the
-            # causal proof that this invocation actually traversed the fresh gate.
-            risk = local.get("risk", _FRAME_MISSING)
-            if risk is not _FRAME_MISSING and getattr(risk, "allowed", None) is True:
-                risk_authority = "fresh-risk-evaluation"
-            elif _has_durable_execution_reservation(runtime, decision_id):
-                risk_authority = "durable-execution-recovery"
-            else:
-                if persisted is _FRAME_MISSING or wrapper_frame is None:
-                    raise PaperExecutionAdoptionError(
-                        "recovered legacy paper-value decision lacks canonical risk re-evaluation"
-                    )
-                wrapper = wrapper_frame.f_locals
-                if (
-                    wrapper.get("self") is not agent
-                    or wrapper.get("event") is not event
-                    or wrapper.get("context") is not context
-                    or wrapper.get("decision_id") != decision_id
-                    or wrapper.get("risk_authority") != "fresh-risk-evaluation"
-                ):
-                    raise PaperExecutionAdoptionError(
-                        "recovered legacy paper-value risk authority is not bound to this call"
-                    )
-                risk_authority = "fresh-risk-evaluation"
+        # A fresh call appends its DecisionRecord before execute(), so ``persisted``
+        # is already non-None here. The local RiskDecision is the causal proof that
+        # this invocation actually traversed the fresh gate before publication.
+        risk = local.get("risk", _FRAME_MISSING)
+        if risk is not _FRAME_MISSING and getattr(risk, "allowed", None) is True:
+            risk_authority = "fresh-risk-evaluation"
+        elif _has_durable_execution_reservation(runtime, decision_id):
+            risk_authority = "durable-execution-recovery"
+        elif goal is None:
+            if persisted is _FRAME_MISSING or wrapper_frame is None:
+                raise PaperExecutionAdoptionError(
+                    "recovered legacy paper-value decision lacks canonical risk re-evaluation"
+                )
+            wrapper = wrapper_frame.f_locals
+            if (
+                wrapper.get("self") is not agent
+                or wrapper.get("event") is not event
+                or wrapper.get("context") is not context
+                or wrapper.get("decision_id") != decision_id
+                or wrapper.get("risk_authority") != "fresh-risk-evaluation"
+            ):
+                raise PaperExecutionAdoptionError(
+                    "recovered legacy paper-value risk authority is not bound to this call"
+                )
+            risk_authority = "fresh-risk-evaluation"
         else:
-            if persisted is None:
-                risk = local.get("risk", _FRAME_MISSING)
-                if risk is _FRAME_MISSING or getattr(risk, "allowed", None) is not True:
-                    raise PaperExecutionAdoptionError(
-                        "economic paper-value execution has not passed canonical risk evaluation"
-                    )
-            risk_authority = "economic-decision"
+            proposal_context = local.get("proposal_context", _FRAME_MISSING)
+            if proposal_context is _FRAME_MISSING:
+                raise PaperExecutionAdoptionError(
+                    "recovered economic paper-value decision lacks proposal risk evidence"
+                )
+            recovered_risk = risk_policy.evaluate(
+                context.paper_book,
+                chosen_stake,
+                context=proposal_context,
+            )
+            if not recovered_risk.allowed:
+                raise PaperExecutionAdoptionError(
+                    "recovered economic paper-value decision no longer proves its first execution risk gate"
+                )
+            risk_authority = "fresh-risk-evaluation"
 
         return (
             ledger,
@@ -416,8 +423,8 @@ def _authorize_descriptor(
     started_at: str,
 ) -> PreparedPaperExecution:
     # Successful resolution is the positive proof: exact durable decision truth is
-    # re-resolved while the canonical agent frame is live, and goal-less restart
-    # either passes risk now or resumes an already-reserved exact #623 run.
+    # re-resolved while the canonical agent frame is live, and restart either
+    # passes its exact risk gate now or resumes an already-reserved exact #623 run.
     _resolve_durable_paper_value_decision(
         self,
         descriptor=descriptor,

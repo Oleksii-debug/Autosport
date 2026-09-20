@@ -679,10 +679,7 @@ class PaperAbstentionLearningRuntime:
             live_checkpoint = None
 
         if live_checkpoint is not None:
-            if (
-                snapshot.transition_id is not None
-                and live_checkpoint.last_transition_id == snapshot.transition_id
-            ):
+            if live_checkpoint.last_transition_id is not None:
                 transition = Transition(
                     environment_id=self.environment.environment_id,
                     episode_id=self.environment.episode.episode_id,
@@ -694,11 +691,16 @@ class PaperAbstentionLearningRuntime:
                     decision_at=action.decided_at,
                     resolved_at=resolved_at,
                 )
-                if transition.transition_id != snapshot.transition_id:
+                if transition.transition_id == live_checkpoint.last_transition_id:
+                    if snapshot.transition_id not in {None, transition.transition_id}:
+                        raise PaperAbstentionLearningError(
+                            "resolved environment checkpoint conflicts with AgentLoop transition"
+                        )
+                    return transition
+                if snapshot.transition_id == live_checkpoint.last_transition_id:
                     raise PaperAbstentionLearningError(
                         "resolved environment checkpoint conflicts with AgentLoop transition"
                     )
-                return transition
 
             if live_checkpoint.checkpoint_id != snapshot.environment_checkpoint_id:
                 raise PaperAbstentionLearningError(

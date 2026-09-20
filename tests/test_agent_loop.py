@@ -1740,3 +1740,219 @@ def test_restart_rejects_self_consistent_cross_linked_agent_memory(tmp_path):
 
     rewrite_with_valid_state_digest(runtime.path, original)
     assert AgentLoopRuntime(runtime.path).snapshot().research_run_id is not None
+
+
+def _abstention_environment():
+    base = _environment()
+    return CausalLearningEnvironment(
+        base.identity,
+        episode_key=base.episode.episode_key,
+        policy_id=base.episode.policy_id,
+        admissible_actions=frozenset(
+            {*base.episode.admissible_actions, "ABSTAIN"}
+        ),
+    )
+
+
+def _commit_abstention(runtime, environment, observation, *, reason="NO_EDGE"):
+    runtime.begin_observation(
+        observation,
+        environment_identity=environment.identity,
+        at="2026-09-19T13:00:01Z",
+    )
+    _advance_to_action(runtime)
+    action = Action(
+        environment_id=environment.environment_id,
+        observation_id=observation.observation_id,
+        action_type="ABSTAIN",
+        decided_at="2026-09-19T13:00:05Z",
+        parameters=(("paper_abstention_reason_code", reason),),
+    )
+    receipt = runtime.commit_abstention(
+        action,
+        episode=environment.episode,
+        observation=observation,
+        at="2026-09-19T13:00:05Z",
+    )
+    return action, receipt
+
+
+def test_abstention_is_durable_no_effect_and_reuses_same_checkpoint(tmp_path):
+    environment = _abstention_environment()
+    runtime = _runtime(tmp_path, environment)
+    baseline = environment.checkpoint()
+    observation = _observation(environment)
+
+    action, receipt = _commit_abstention(runtime, environment, observation)
+    assert receipt.newly_committed is True
+    assert receipt.may_execute is False
+    assert receipt.external_effect_state is ExternalEffectState.NONE
+
+    snapshot = runtime.snapshot()
+    assert snapshot.phase is AgentLoopPhase.CHECKPOINT
+    assert snapshot.action_id == action.action_id
+    assert snapshot.transition_id is None
+    assert snapshot.outcome_id is None
+    assert snapshot.reward_id is None
+    assert snapshot.attribution_id is None
+    assert snapshot.postmortem_id is None
+    assert snapshot.environment_checkpoint_id == baseline.checkpoint_id
+    assert environment.checkpoint() == baseline
+
+    raw = json_load(runtime.path)
+    assert len(raw["decisions"]) == 1
+    assert raw["decisions"][0]["action_type"] == "ABSTAIN"
+    assert raw["decisions"][0]["may_execute"] is False
+    assert raw["decisions"][0]["external_effect_state"] == ExternalEffectState.NONE.value
+    assert raw["resolutions"] == []
+    assert raw["attributions"] == []
+    assert raw["postmortems"] == []
+
+    acknowledged = runtime.commit_checkpoint(
+        baseline,
+        at="2026-09-19T13:00:06Z",
+    )
+    assert acknowledged.environment_checkpoint_id == baseline.checkpoint_id
+    assert acknowledged.checkpointed_transition_id is None
+
+    reopened = AgentLoopRuntime(runtime.path)
+    next_observation = _observation(environment, suffix="2")
+    started = reopened.begin_observation(
+        next_observation,
+        environment_identity=environment.identity,
+        at="2026-09-19T13:00:07Z",
+    )
+    assert started.phase is AgentLoopPhase.OBSERVE
+    assert started.action_id is None
+
+
+def test_abstention_cannot_enter_normal_action_or_resolution_authority(tmp_path):
+    environment = _abstention_environment()
+    runtime = _runtime(tmp_path, environment)
+    observation = _observation(environment)
+    runtime.begin_observation(
+        observation,
+        environment_identity=environment.identity,
+        at="2026-09-19T13:00:01Z",
+    )
+    _advance_to_action(runtime)
+    action = Action(
+        environment_id=environment.environment_id,
+        observation_id=observation.observation_id,
+        action_type="ABSTAIN",
+        decided_at="2026-09-19T13:00:05Z",
+        parameters=(("paper_abstention_reason_code", "NO_EDGE"),),
+    )
+    with pytest.raises(AgentLoopError, match="commit_abstention"):
+        runtime.commit_action(
+            action,
+            episode=environment.episode,
+            observation=observation,
+            effect_state=ExternalEffectState.NONE,
+            at="2026-09-19T13:00:05Z",
+        )
+
+    runtime.commit_abstention(
+        action,
+        episode=environment.episode,
+        observation=observation,
+        at="2026-09-19T13:00:05Z",
+    )
+    raw = json_load(runtime.path)
+    forged_outcome = Outcome(
+        environment_id=environment.environment_id,
+        action_id=action.action_id,
+        revealed_at="2026-09-19T13:01:00Z",
+        truth=EvidenceTruth.OBSERVED,
+        evidence=(("kind", "forged-abstention-outcome"),),
+    )
+    forged_reward = RewardEvidence(
+        environment_id=environment.environment_id,
+        action_id=action.action_id,
+        outcome_id=forged_outcome.outcome_id,
+        reward=Decimal("0"),
+        available_at="2026-09-19T13:01:01Z",
+        truth=EvidenceTruth.OBSERVED,
+        evidence=(("kind", "forged-zero-reward"),),
+    )
+    forged_transition = Transition(
+        environment_id=environment.environment_id,
+        episode_id=environment.episode.episode_id,
+        step_index=1,
+        observation_id=observation.observation_id,
+        action_id=action.action_id,
+        outcome_id=forged_outcome.outcome_id,
+        reward_id=forged_reward.reward_id,
+        decision_at=action.decided_at,
+        resolved_at="2026-09-19T13:01:02Z",
+    )
+    raw["resolutions"].append(
+        {
+            "transition_id": forged_transition.transition_id,
+            "action_id": action.action_id,
+            "outcome_id": forged_outcome.outcome_id,
+            "reward_id": forged_reward.reward_id,
+            "reward_value": "0",
+            "truth": EvidenceTruth.OBSERVED.value,
+            "simulation_model_id": None,
+            "reward_available_at": "2026-09-19T13:01:01Z",
+        }
+    )
+    rewrite_with_valid_state_digest(runtime.path, raw)
+    with pytest.raises(AgentLoopError, match="ABSTAIN decision cannot bind"):
+        AgentLoopRuntime(runtime.path)
+
+
+def test_abstention_exact_retry_is_idempotent_but_reason_change_conflicts(tmp_path):
+    environment = _abstention_environment()
+    runtime = _runtime(tmp_path, environment)
+    observation = _observation(environment)
+    action, first = _commit_abstention(runtime, environment, observation)
+    assert first.newly_committed is True
+
+    exact = AgentLoopRuntime(runtime.path).commit_abstention(
+        action,
+        episode=environment.episode,
+        observation=observation,
+        at="2026-09-19T13:00:06Z",
+    )
+    assert exact.newly_committed is False
+    assert exact.may_execute is False
+
+    reopened = AgentLoopRuntime(runtime.path)
+    reopened.begin_observation(
+        observation,
+        environment_identity=environment.identity,
+        at="2026-09-19T13:00:07Z",
+    )
+    _advance_to_action(reopened)
+    changed = Action(
+        environment_id=environment.environment_id,
+        observation_id=observation.observation_id,
+        action_type="ABSTAIN",
+        decided_at=action.decided_at,
+        parameters=(("paper_abstention_reason_code", "CHANGED_REASON"),),
+    )
+    with pytest.raises(
+        ConflictingAgentLoopEvidenceError,
+        match="already bound to another durable action",
+    ):
+        reopened.commit_abstention(
+            changed,
+            episode=environment.episode,
+            observation=observation,
+            at="2026-09-19T13:00:08Z",
+        )
+
+
+def test_self_consistent_abstention_executable_rewrite_fails_closed(tmp_path):
+    environment = _abstention_environment()
+    runtime = _runtime(tmp_path, environment)
+    observation = _observation(environment)
+    _commit_abstention(runtime, environment, observation)
+
+    malformed = json_load(runtime.path)
+    malformed["decisions"][0]["may_execute"] = True
+    rewrite_with_valid_state_digest(runtime.path, malformed)
+    with pytest.raises(AgentLoopError, match="ABSTAIN decision must be durable no-effect"):
+        AgentLoopRuntime(runtime.path)

@@ -25,7 +25,7 @@ from autosport.sport_domain_fitness import (
 )
 from autosport.voc_evaluation import VOCEvaluationStore
 from autosport.voc_outcome_scoring import build_canonical_voc_authority_resolver
-from test_voc_outcome_scoring import (
+from tests.test_voc_outcome_scoring import (
     CanonicalOutcomeDerivedVOCScoreAuthorityTests,
     SHA_A,
     SHA_B,

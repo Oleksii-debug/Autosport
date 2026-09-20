@@ -459,6 +459,11 @@ def _durable_record_for_call(
     ledger = context.decision_ledger
     if not isinstance(ledger, JsonlDecisionLedger):
         return None
+    # A fresh strategy call may legitimately point at a ledger path that has not
+    # been created yet. Absence is pristine "no durable decision" state; once the
+    # path exists, any unreadable/malformed content remains a hard failure.
+    if not ledger.path.exists():
+        return None
     try:
         matches = tuple(
             item

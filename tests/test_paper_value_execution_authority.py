@@ -24,7 +24,7 @@ from autosport.risk import PaperRiskPolicy
 
 
 _GENERAL_RECOVERY_ERROR = (
-    "durable GENERAL paper-value action lacks caller-non-mintable risk provenance"
+    "durable GENERAL paper-value action lacks canonical risk admission witness"
 )
 
 

@@ -4,7 +4,6 @@ from pathlib import Path
 
 import pytest
 
-import autosport._historical_capture_authority_guard as guard
 from autosport.historical_snapshot import (
     assert_historical_snapshot_capture_authoritative,
     capture_authoritative_historical_snapshot,
@@ -15,6 +14,9 @@ from autosport.parlayapi_provider import (
     ParlayApiTableTennisProvider,
     ProviderPayloadError,
 )
+
+
+ORIGIN_ERROR = "independently re-resolved canonical production-origin evidence"
 
 
 def _injected_provider() -> ParlayApiTableTennisProvider:
@@ -46,24 +48,20 @@ def test_caller_injected_transport_and_clock_cannot_mint_capture_authority(
         evidence_path=tmp_path / "evidence.json",
     )
 
-    with pytest.raises(ProviderPayloadError, match="canonical production capture path"):
+    with pytest.raises(ProviderPayloadError, match=ORIGIN_ERROR):
         assert_historical_snapshot_capture_authoritative(capture)
 
 
-def test_production_owned_constructor_path_mints_capture_authority(
+def test_api_key_only_constructor_also_fails_closed_without_re_resolvable_origin(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    # Tests replace only the private constructor symbol. The public capture API has
-    # no provider/transport/clock injection seam on its authoritative path.
-    provider = _injected_provider()
-    monkeypatch.setattr(guard, "ParlayApiTableTennisProvider", lambda *args, **kwargs: provider)
-
-    capture = capture_authoritative_historical_snapshot(
-        api_key="test-key",
-        requested_at="2026-01-04T10:00:00Z",
-        output_path=tmp_path / "market.jsonl",
-        evidence_path=tmp_path / "evidence.json",
-    )
-
-    assert_historical_snapshot_capture_authoritative(capture)
+    # Hiding transport/clock injection behind a module-private constructor is not
+    # an origin-attestation boundary in Python.  Until provider origin is
+    # independently re-resolvable, this path must fail before minting authority.
+    with pytest.raises(ProviderPayloadError, match=ORIGIN_ERROR):
+        capture_authoritative_historical_snapshot(
+            api_key="test-key",
+            requested_at="2026-01-04T10:00:00Z",
+            output_path=tmp_path / "market.jsonl",
+            evidence_path=tmp_path / "evidence.json",
+        )

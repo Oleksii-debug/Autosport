@@ -8,7 +8,13 @@ from pathlib import Path
 import sys
 import textwrap
 import tokenize
-from types import CodeType, FunctionType
+from types import (
+    BuiltinFunctionType,
+    BuiltinMethodType,
+    CodeType,
+    FunctionType,
+    ModuleType,
+)
 
 
 class ResolverSemanticIdentityError(ValueError):
@@ -220,20 +226,95 @@ def _compiled_resolver_code(
     return current
 
 
-def function_semantic_sha256(resolver: FunctionType) -> str:
-    """Return a Python-version-stable authority fingerprint and verify loaded code.
+def _all_referenced_names(code: CodeType) -> set[str]:
+    names = set(code.co_names)
+    for constant in code.co_consts:
+        if type(constant) is CodeType:
+            names.update(_all_referenced_names(constant))
+    return names
 
-    The durable digest comes from canonical source tokens, so install paths, source
-    line numbers, bytecode revisions and exception-table encodings do not make an
-    unchanged resolver look like a different authority after a supported Python
-    runtime upgrade.
 
-    Before returning that durable digest, the loaded function is compared with the
-    code produced from the canonical module source by this same interpreter. The
-    comparison therefore detects in-memory code replacement while avoiding
-    persistence of version-specific bytecode.
-    """
+def _owner_class(resolver: FunctionType) -> type | None:
+    parts = _qualname_parts(resolver)
+    if len(parts) < 2:
+        return None
+    module = sys.modules.get(resolver.__module__)
+    if module is None:
+        raise ResolverSemanticIdentityError("resolver module is not loaded")
+    owner: object = module
+    for part in parts[:-1]:
+        try:
+            owner = getattr(owner, part)
+        except AttributeError as exc:
+            raise ResolverSemanticIdentityError(
+                "resolver owner class cannot be resolved"
+            ) from exc
+    if type(owner) is not type:
+        raise ResolverSemanticIdentityError(
+            "resolver owner must be an exact concrete class"
+        )
+    return owner
 
+
+def _dependency_payload(
+    value: object,
+    *,
+    visiting: set[str],
+) -> object:
+    if type(value) is FunctionType:
+        return ["function", _function_semantic_payload(value, visiting=visiting)]
+    if type(value) in (BuiltinFunctionType, BuiltinMethodType):
+        module_name = getattr(value, "__module__", None)
+        qualname = getattr(value, "__qualname__", getattr(value, "__name__", None))
+        if type(module_name) is not str or type(qualname) is not str:
+            raise ResolverSemanticIdentityError(
+                "referenced builtin callable lacks stable identity"
+            )
+        return ["builtin", module_name, qualname]
+    if type(value) is ModuleType:
+        module_name = getattr(value, "__name__", None)
+        if type(module_name) is not str or not module_name:
+            raise ResolverSemanticIdentityError(
+                "referenced module lacks stable identity"
+            )
+        return ["module", module_name]
+    if type(value) is type:
+        return ["type", value.__module__, value.__qualname__]
+    try:
+        return ["constant", _constant_payload(value)]
+    except ResolverSemanticIdentityError as exc:
+        raise ResolverSemanticIdentityError(
+            "resolver references unsupported mutable or opaque global authority"
+        ) from exc
+
+
+def _class_dependency(
+    owner: type | None,
+    name: str,
+    *,
+    visiting: set[str],
+) -> object | None:
+    if owner is None:
+        return None
+    raw = vars(owner).get(name)
+    if raw is None:
+        return None
+    if type(raw) is staticmethod or type(raw) is classmethod:
+        raw = raw.__func__
+    elif type(raw) is property:
+        if raw.fget is None:
+            raise ResolverSemanticIdentityError(
+                "resolver references property without a getter"
+            )
+        raw = raw.fget
+    return _dependency_payload(raw, visiting=visiting)
+
+
+def _function_semantic_payload(
+    resolver: FunctionType,
+    *,
+    visiting: set[str],
+) -> dict[str, object]:
     if type(resolver) is not FunctionType:
         raise ResolverSemanticIdentityError("resolver must be an exact Python function")
 
@@ -245,4 +326,49 @@ def function_semantic_sha256(resolver: FunctionType) -> str:
         raise ResolverSemanticIdentityError(
             "resolver executable semantics do not match canonical module source"
         )
-    return _source_semantic_sha256(segment)
+
+    source_sha256 = _source_semantic_sha256(segment)
+    semantic_key = f"{resolver.__module__}.{resolver.__qualname__}"
+    if semantic_key in visiting:
+        return {
+            "source_sha256": source_sha256,
+            "cycle": True,
+        }
+
+    next_visiting = set(visiting)
+    next_visiting.add(semantic_key)
+    owner = _owner_class(resolver)
+    dependencies: dict[str, object] = {}
+    for name in sorted(_all_referenced_names(resolver.__code__)):
+        class_dependency = _class_dependency(
+            owner,
+            name,
+            visiting=next_visiting,
+        )
+        if class_dependency is not None:
+            dependencies[f"class:{name}"] = class_dependency
+            continue
+        if name in resolver.__globals__:
+            dependencies[f"global:{name}"] = _dependency_payload(
+                resolver.__globals__[name],
+                visiting=next_visiting,
+            )
+
+    return {
+        "source_sha256": source_sha256,
+        "dependencies": dependencies,
+    }
+
+
+def function_semantic_sha256(resolver: FunctionType) -> str:
+    """Fingerprint resolver source plus referenced authority-bearing dependencies.
+
+    The persisted digest is derived from canonical source tokens and a recursively
+    sealed graph of referenced Python helpers/constants, not from version-specific
+    bytecode. Each Python function in that graph is also checked against the code
+    compiled from its canonical module source by the current interpreter, so runtime
+    code mutation is rejected before an authority-bearing read.
+    """
+
+    payload = _function_semantic_payload(resolver, visiting=set())
+    return hashlib.sha256(_canonical_json(payload).encode("utf-8")).hexdigest()

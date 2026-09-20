@@ -69,6 +69,11 @@ from . import _dataset_snapshot_lineage_publication_trust_root as _dataset_snaps
 # the supported denominator path consumes the exact live CompleteGameBoardSnapshot.
 from . import _evaluation_universe_structural_gate as _evaluation_universe_structural_gate  # noqa: F401,E402
 
+# Product-origin re-resolution must reject caller-polymorphic authority objects before
+# any public property/method dispatch or iterable execution. Install this exact-type
+# mint fence before #638 records the resulting canonical semantic-session issuance.
+from . import _pre_evaluation_product_origin_type_fence as _pre_evaluation_product_origin_type_fence  # noqa: F401,E402
+
 # Provider membership alone cannot authorize caller-created decision semantics. The
 # production denominator must consume the exact product-owned pre-evaluation semantic
 # capability before freezing the initial row set.

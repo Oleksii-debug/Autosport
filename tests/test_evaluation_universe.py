@@ -6,7 +6,11 @@ from tempfile import TemporaryDirectory
 
 import pytest
 
-from autosport.evaluation_intake import ObservationIntakeLedger
+from autosport.evaluation_intake import (
+    EvaluationIntakeError,
+    ObservationEnumerationWitness,
+    ObservationIntakeLedger,
+)
 from autosport.evaluation_universe import (
     AttritionReason,
     EvaluationRow,
@@ -24,6 +28,45 @@ from autosport.evaluation_universe import (
 H = "a" * 64
 H2 = "b" * 64
 H3 = "c" * 64
+
+
+class _Resolver:
+    def __init__(self, witnesses: tuple[ObservationEnumerationWitness, ...]) -> None:
+        self._witnesses = {item.enumeration_id: item for item in witnesses}
+
+    def resolve_enumeration(self, enumeration_id: str) -> ObservationEnumerationWitness:
+        return self._witnesses[enumeration_id]
+
+
+def _witness(
+    index: int,
+    item: "EvaluationRow",
+    *,
+    exhaustive: bool = True,
+    gap_free: bool = True,
+    row_keys: tuple[str, ...] | None = None,
+) -> ObservationEnumerationWitness:
+    return ObservationEnumerationWitness(
+        enumeration_id=f"enumeration-{index}",
+        session_id="session-1",
+        source_id="source-1",
+        campaign_id="campaign-1",
+        research_protocol_id="protocol-1",
+        protocol_sha256=H,
+        universe_id="universe-1",
+        cycle_index=index,
+        source_range_id=f"range-{index}",
+        stream_epoch="epoch-1",
+        start_cursor=f"cursor-{index}-start",
+        end_cursor=f"cursor-{index}-end",
+        acquisition_sha256=H3,
+        row_keys=row_keys or (item.row_key,),
+        exhaustive=exhaustive,
+        gap_free=gap_free,
+        committed_at=f"2026-09-20T00:04:{index:02d}Z",
+        evaluation_not_before=f"2026-09-20T00:04:{index:02d}Z",
+        outcome_reveal_not_before=item.outcome_reveal_not_before,
+    )
 
 
 def row(
@@ -99,22 +142,18 @@ def row(
 
 
 def intake(workspace, rows: tuple[EvaluationRow, ...]) -> ObservationIntakeLedger:
-    ledger = ObservationIntakeLedger(workspace, authority_id="intake-1")
     unique = {item.row_key: item for item in rows}
-    for index, item in enumerate(sorted(unique.values(), key=lambda value: value.row_key), 1):
-        ledger.append_cycle(
-            session_id="session-1",
-            source_id="source-1",
-            campaign_id="campaign-1",
-            research_protocol_id="protocol-1",
-            protocol_sha256=H,
-            universe_id="universe-1",
-            cycle_index=index,
-            committed_at=f"2026-09-20T00:04:{index:02d}Z",
-            outcome_reveal_not_before=item.outcome_reveal_not_before,
-            row_keys=(item.row_key,),
-            source_state="PRE_RESULT_COMMITTED",
-        )
+    witnesses = tuple(
+        _witness(index, item)
+        for index, item in enumerate(sorted(unique.values(), key=lambda value: value.row_key), 1)
+    )
+    ledger = ObservationIntakeLedger(
+        workspace,
+        authority_id="intake-1",
+        enumeration_resolver=_Resolver(witnesses),
+    )
+    for witness in witnesses:
+        ledger.append_cycle(enumeration_id=witness.enumeration_id)
     return ledger
 
 
@@ -204,21 +243,18 @@ def test_stale_quote_is_explicit_pre_execution_attrition():
 
 
 def test_intake_membership_committed_after_freeze_fails_closed(tmp_path):
-    item = row("late")
-    ledger = ObservationIntakeLedger(tmp_path, authority_id="intake-1")
-    ledger.append_cycle(
-        session_id="session-1",
-        source_id="source-1",
-        campaign_id="campaign-1",
-        research_protocol_id="protocol-1",
-        protocol_sha256=H,
-        universe_id="universe-1",
-        cycle_index=1,
+    item = row("late", reveal_at="2026-09-20T00:11:00Z")
+    witness = replace(
+        _witness(1, item),
         committed_at="2026-09-20T00:05:01Z",
-        outcome_reveal_not_before=item.outcome_reveal_not_before,
-        row_keys=(item.row_key,),
-        source_state="PRE_RESULT_COMMITTED",
+        evaluation_not_before="2026-09-20T00:05:01Z",
     )
+    ledger = ObservationIntakeLedger(
+        tmp_path,
+        authority_id="intake-1",
+        enumeration_resolver=_Resolver((witness,)),
+    )
+    ledger.append_cycle(enumeration_id=witness.enumeration_id)
     with pytest.raises(EvaluationUniverseError, match="after universe freeze"):
         build_frozen_universe(
             intake_ledger=ledger,
@@ -279,20 +315,16 @@ def test_store_detects_payload_tamper(tmp_path):
 
 def test_row_reveal_boundary_must_equal_pre_result_intake(tmp_path):
     item = row("candidate")
-    ledger = ObservationIntakeLedger(tmp_path, authority_id="intake-1")
-    ledger.append_cycle(
-        session_id="session-1",
-        source_id="source-1",
-        campaign_id="campaign-1",
-        research_protocol_id="protocol-1",
-        protocol_sha256=H,
-        universe_id="universe-1",
-        cycle_index=1,
-        committed_at="2026-09-20T00:04:01Z",
+    witness = replace(
+        _witness(1, item),
         outcome_reveal_not_before="2026-09-20T00:11:00Z",
-        row_keys=(item.row_key,),
-        source_state="PRE_RESULT_COMMITTED",
     )
+    ledger = ObservationIntakeLedger(
+        tmp_path,
+        authority_id="intake-1",
+        enumeration_resolver=_Resolver((witness,)),
+    )
+    ledger.append_cycle(enumeration_id=witness.enumeration_id)
     with pytest.raises(EvaluationUniverseError, match="reveal boundary"):
         build_frozen_universe(
             intake_ledger=ledger,
@@ -303,3 +335,18 @@ def test_row_reveal_boundary_must_equal_pre_result_intake(tmp_path):
             frozen_at="2026-09-20T00:05:00Z",
             rows=(item,),
         )
+
+
+def test_incomplete_or_gapped_enumeration_cannot_authorize_denominator(tmp_path):
+    item = row("candidate")
+    for witness in (
+        _witness(1, item, exhaustive=False),
+        _witness(1, item, gap_free=False),
+    ):
+        ledger = ObservationIntakeLedger(
+            tmp_path / witness.enumeration_id,
+            authority_id="intake-1",
+            enumeration_resolver=_Resolver((witness,)),
+        )
+        with pytest.raises(EvaluationIntakeError, match="exhaustive gap-free"):
+            ledger.append_cycle(enumeration_id=witness.enumeration_id)

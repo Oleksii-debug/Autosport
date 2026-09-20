@@ -2138,6 +2138,9 @@ class ModelComputeRouterStore:
         self._execution_authority_path = self.path.with_name(
             f"{self.path.name}.execution-authority.jsonl"
         )
+        self._voc_shadow_authority_path = self.path.with_name(
+            f"{self.path.name}.voc-shadow-authority.jsonl"
+        )
         self._routes: dict[str, dict[str, Any]] = {}
         self._executions: dict[
             str, ComputeExecutionEvidence
@@ -2146,12 +2149,174 @@ class ModelComputeRouterStore:
         self._execution_authority_records: list[
             dict[str, Any]
         ] = []
+        self._voc_shadow_authority_records: list[
+            dict[str, Any]
+        ] = []
         self._live_request_ids: set[str] = set()
         self._publication_interrupted = False
         if self.path.exists():
             self._load()
         else:
             self._persist()
+        self._voc_shadow_authority_records = (
+            self._validate_voc_shadow_authority_records(
+                self._read_voc_shadow_authority_records()
+            )
+        )
+
+    def _read_voc_shadow_authority_records(
+        self,
+    ) -> list[dict[str, Any]]:
+        if not self._voc_shadow_authority_path.exists():
+            return []
+        try:
+            lines = self._voc_shadow_authority_path.read_text(
+                encoding="utf-8"
+            ).splitlines()
+        except (OSError, UnicodeDecodeError) as exc:
+            raise ModelComputeRouterError(
+                "VOC shadow execution authority journal is unreadable"
+            ) from exc
+        records: list[dict[str, Any]] = []
+        previous_sha256: str | None = None
+        for expected_sequence, line in enumerate(lines, start=1):
+            if not line:
+                raise ModelComputeRouterError(
+                    "VOC shadow execution authority journal contains a blank record"
+                )
+            try:
+                raw = json.loads(line)
+            except json.JSONDecodeError as exc:
+                raise ModelComputeRouterError(
+                    "VOC shadow execution authority journal contains invalid JSON"
+                ) from exc
+            record = _validate_voc_shadow_authority_record(raw)
+            if record["authority_sequence"] != expected_sequence:
+                raise ModelComputeRouterError(
+                    "VOC shadow execution authority sequence is not contiguous"
+                )
+            if record["previous_authority_sha256"] != previous_sha256:
+                raise ModelComputeRouterError(
+                    "VOC shadow execution authority predecessor mismatch"
+                )
+            records.append(record)
+            previous_sha256 = record["authority_sha256"]
+        return records
+
+    def _validate_voc_shadow_authority_records(
+        self,
+        records: Sequence[Mapping[str, Any]],
+    ) -> list[dict[str, Any]]:
+        validated: list[dict[str, Any]] = []
+        seen: set[tuple[str, str]] = set()
+        for source in records:
+            record = _validate_voc_shadow_authority_record(dict(source))
+            request_id = record["request_id"]
+            role = record["role"]
+            key = (request_id, role)
+            if key in seen:
+                raise ModelComputeRouterError(
+                    "VOC shadow execution authority duplicates request role"
+                )
+            seen.add(key)
+            precompute = self.get_voc_precompute_admission(request_id)
+            if precompute is None:
+                raise ModelComputeRouterError(
+                    "VOC shadow execution authority lacks canonical precompute admission"
+                )
+            if (
+                record["route_record_sha256"]
+                != precompute["route_record_sha256"]
+            ):
+                raise ModelComputeRouterError(
+                    "VOC shadow execution authority route digest mismatch"
+                )
+            expected_identity = precompute[
+                f"{role}_compute_identity"
+            ]
+            if record["candidate_identity"] != expected_identity:
+                raise ModelComputeRouterError(
+                    "VOC shadow execution authority candidate identity mismatch"
+                )
+            admitted_at = _instant(
+                "VOC precompute admitted_at",
+                precompute["admitted_at"],
+            )
+            completed_at = _instant(
+                "VOC shadow completed_at", record["completed_at"]
+            )
+            available_at = _instant(
+                "VOC shadow available_at", record["available_at"]
+            )
+            authority_recorded_at = _instant(
+                "VOC shadow authority_recorded_at",
+                record["authority_recorded_at"],
+            )
+            precompute_recorded_at = _instant(
+                "VOC precompute authority_recorded_at",
+                precompute["authority_recorded_at"],
+            )
+            deadline = _instant(
+                "VOC precompute decision_deadline",
+                precompute["decision_deadline"],
+            )
+            if completed_at < admitted_at:
+                raise ModelComputeRouterError(
+                    "VOC shadow execution predates precompute admission"
+                )
+            if available_at < completed_at:
+                raise ModelComputeRouterError(
+                    "VOC shadow execution availability predates completion"
+                )
+            if available_at > deadline:
+                raise ModelComputeRouterError(
+                    "VOC positive shadow execution became available after deadline"
+                )
+            if authority_recorded_at < available_at:
+                raise ModelComputeRouterError(
+                    "VOC shadow execution authority predates evidence availability"
+                )
+            if authority_recorded_at < precompute_recorded_at:
+                raise ModelComputeRouterError(
+                    "VOC shadow execution authority predates precompute authority"
+                )
+            expected_latency = _seconds(completed_at, admitted_at)
+            if Decimal(record["actual_latency_seconds"]) != expected_latency:
+                raise ModelComputeRouterError(
+                    "VOC shadow execution latency is not derived from canonical timestamps"
+                )
+            validated.append(record)
+        return validated
+
+    def _append_voc_shadow_authority(
+        self,
+        record: Mapping[str, Any],
+    ) -> None:
+        encoded = json.dumps(
+            record,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        )
+        self._voc_shadow_authority_path.parent.mkdir(
+            parents=True, exist_ok=True
+        )
+        try:
+            with self._voc_shadow_authority_path.open(
+                "a",
+                encoding="utf-8",
+                newline="\n",
+            ) as handle:
+                handle.write(encoded)
+                handle.write("\n")
+                handle.flush()
+                os.fsync(handle.fileno())
+        except OSError as exc:
+            raise ModelComputeRouterError(
+                "VOC shadow execution authority journal is unwritable"
+            ) from exc
+        self._voc_shadow_authority_records.append(dict(record))
 
     def _read_execution_authority_records(
         self,
@@ -3162,6 +3327,183 @@ class ModelComputeRouterStore:
             if resolved is not None:
                 values.append(resolved)
         return tuple(values)
+
+    def get_voc_shadow_execution(
+        self,
+        request_id: str,
+        role: str,
+    ) -> dict[str, Any] | None:
+        request = _text("request_id", request_id)
+        role_text = _text("role", role)
+        if role_text not in {"baseline", "challenger"}:
+            raise ModelComputeRouterError(
+                "VOC shadow execution role is invalid"
+            )
+        matches = [
+            record
+            for record in self._voc_shadow_authority_records
+            if (
+                record["request_id"] == request
+                and record["role"] == role_text
+            )
+        ]
+        if len(matches) > 1:
+            raise ModelComputeRouterError(
+                "VOC shadow execution authority is ambiguous"
+            )
+        if not matches:
+            return None
+        return json.loads(
+            json.dumps(
+                matches[0],
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+                allow_nan=False,
+            )
+        )
+
+    def record_voc_shadow_execution(
+        self,
+        *,
+        request_id: str,
+        role: str,
+        output_sha256: str,
+        action: str,
+        abstained: bool,
+        completed_at: str,
+        available_at: str,
+        actual_cost: Decimal,
+        evidence_sha256: str,
+    ) -> dict[str, Any]:
+        """Append production-owned paired-shadow execution evidence once."""
+
+        request = _text("request_id", request_id)
+        role_text = _text("role", role)
+        if role_text not in {"baseline", "challenger"}:
+            raise ModelComputeRouterError(
+                "VOC shadow execution role is invalid"
+            )
+        if request not in self._live_request_ids:
+            raise ModelComputeRouterError(
+                "VOC shadow execution requires a live precompute route; "
+                "historical/restarted requests cannot be backfilled"
+            )
+        precompute = self.get_voc_precompute_admission(request)
+        if precompute is None:
+            raise ModelComputeRouterError(
+                "VOC shadow execution requires canonical precompute admission"
+            )
+        existing = self.get_voc_shadow_execution(request, role_text)
+        if existing is not None:
+            candidate = _voc_shadow_authority_record(
+                authority_sequence=existing["authority_sequence"],
+                previous_authority_sha256=existing[
+                    "previous_authority_sha256"
+                ],
+                authority_recorded_at=existing[
+                    "authority_recorded_at"
+                ],
+                request_id=request,
+                role=role_text,
+                route_record_sha256=precompute[
+                    "route_record_sha256"
+                ],
+                candidate_identity=precompute[
+                    f"{role_text}_compute_identity"
+                ],
+                output_sha256=output_sha256,
+                action=action,
+                abstained=abstained,
+                completed_at=completed_at,
+                available_at=available_at,
+                actual_cost=actual_cost,
+                actual_latency_seconds=Decimal(
+                    existing["actual_latency_seconds"]
+                ),
+                evidence_sha256=evidence_sha256,
+            )
+            if candidate != existing:
+                raise ModelComputeRouterError(
+                    "immutable VOC shadow execution conflicts with stored authority"
+                )
+            return existing
+
+        admitted_at = _instant(
+            "VOC precompute admitted_at", precompute["admitted_at"]
+        )
+        completed = _instant(
+            "VOC shadow completed_at", completed_at
+        )
+        available = _instant(
+            "VOC shadow available_at", available_at
+        )
+        if completed < admitted_at:
+            raise ModelComputeRouterError(
+                "VOC shadow execution predates precompute admission"
+            )
+        if available < completed:
+            raise ModelComputeRouterError(
+                "VOC shadow execution availability predates completion"
+            )
+        deadline = _instant(
+            "VOC precompute decision_deadline",
+            precompute["decision_deadline"],
+        )
+        if available > deadline:
+            raise ModelComputeRouterError(
+                "VOC positive shadow execution became available after deadline"
+            )
+        authority_recorded_at = _time(
+            "VOC shadow authority_recorded_at", _authority_now()
+        )
+        if _instant(
+            "VOC shadow authority_recorded_at",
+            authority_recorded_at,
+        ) < available:
+            raise ModelComputeRouterError(
+                "VOC shadow execution authority predates evidence availability"
+            )
+        prior_sha = (
+            None
+            if not self._voc_shadow_authority_records
+            else self._voc_shadow_authority_records[-1][
+                "authority_sha256"
+            ]
+        )
+        record = _voc_shadow_authority_record(
+            authority_sequence=len(
+                self._voc_shadow_authority_records
+            )
+            + 1,
+            previous_authority_sha256=prior_sha,
+            authority_recorded_at=authority_recorded_at,
+            request_id=request,
+            role=role_text,
+            route_record_sha256=precompute[
+                "route_record_sha256"
+            ],
+            candidate_identity=precompute[
+                f"{role_text}_compute_identity"
+            ],
+            output_sha256=output_sha256,
+            action=action,
+            abstained=abstained,
+            completed_at=completed_at,
+            available_at=available_at,
+            actual_cost=actual_cost,
+            actual_latency_seconds=_seconds(
+                completed, admitted_at
+            ),
+            evidence_sha256=evidence_sha256,
+        )
+        self._append_voc_shadow_authority(record)
+        # Revalidate the append against the same durable route authority before
+        # returning it to the caller.
+        self._validate_voc_shadow_authority_records(
+            self._voc_shadow_authority_records
+        )
+        return self.get_voc_shadow_execution(request, role_text) or record
 
     def record_execution(
         self,

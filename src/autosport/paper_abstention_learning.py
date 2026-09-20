@@ -369,11 +369,18 @@ class PaperAbstentionLearningRuntime:
         if starting:
             try:
                 baseline = self.environment.checkpoint()
-            except LearningEnvironmentError as exc:
-                raise PaperAbstentionLearningError(
-                    "new abstention requires an exact resolved checkpoint"
-                ) from exc
-            if baseline.checkpoint_id != snapshot.environment_checkpoint_id:
+            except LearningEnvironmentError:
+                # An exact same-process retry can legitimately arrive here with the
+                # canonical action still pending after durable intent publication
+                # failed.  CausalLearningEnvironment.act() below is the authority
+                # for reusing that exact pending action and rejecting a conflicting
+                # unresolved action; requiring a clean checkpoint first would make
+                # the documented exact retry impossible.
+                baseline = None
+            if (
+                baseline is not None
+                and baseline.checkpoint_id != snapshot.environment_checkpoint_id
+            ):
                 raise PaperAbstentionLearningError(
                     "AgentLoop checkpoint differs from active environment"
                 )

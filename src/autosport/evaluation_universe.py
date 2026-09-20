@@ -1280,6 +1280,10 @@ def _validate_canonical_intake_rows(
             raise EvaluationUniverseIntegrityError(
                 "row intake record escapes canonical snapshot identity"
             )
+        if row.row_id != intake_ledger.row_evidence_sha256(row.row_key):
+            raise EvaluationUniverseIntegrityError(
+                "row evidence does not match immutable upstream intake evidence"
+            )
         intake_committed = _instant(record.committed_at, "intake committed_at")
         evaluation_not_before = _instant(
             record.evaluation_not_before,

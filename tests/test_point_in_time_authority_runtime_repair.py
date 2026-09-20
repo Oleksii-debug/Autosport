@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+import subprocess
+import sys
 from unittest.mock import patch
 
 import pytest
@@ -124,6 +126,69 @@ def test_feature_authority_rejects_exact_registry_instance_method_shadow() -> No
         )
 
     assert dispatched is False
+
+
+def test_point_in_time_module_reload_cannot_restore_legacy_positive_bind() -> None:
+    script = r'''
+import importlib
+import autosport.point_in_time_evidence as evidence
+from autosport.dataset_snapshot_lineage import DatasetSnapshotLineageAuthority
+from autosport.scientific_registry import DatasetSnapshot, FeatureSet
+
+reloaded = importlib.reload(evidence)
+snapshot = DatasetSnapshot(
+    dataset_snapshot_id="reload-snapshot",
+    manifest_sha256="a" * 64,
+    source_identity="provider:reload-falsifier",
+    license_identity="terms:v1",
+    causal_cutoff="2026-09-20T10:00:00Z",
+    available_at_utc="2026-09-20T10:01:00Z",
+)
+feature_set = FeatureSet(
+    feature_set_id="reload.feature.v1",
+    version="v1",
+    definition_sha256="b" * 64,
+    source_sha256="c" * 64,
+    available_at_utc="2026-09-20T10:01:30Z",
+)
+
+try:
+    reloaded.PointInTimeFeatureAuthority.bind(
+        dataset_snapshot=snapshot,
+        feature_set=feature_set,
+        feature_payload_sha256="d" * 64,
+        decision_cutoff_utc="2099-01-01T00:00:00Z",
+    )
+except TypeError as exc:
+    assert "lineage_authority" in str(exc)
+else:
+    raise AssertionError("reload restored the legacy caller-mintable four-argument bind")
+
+class ForgedLineageAuthority(DatasetSnapshotLineageAuthority):
+    pass
+
+forged = object.__new__(ForgedLineageAuthority)
+try:
+    reloaded.PointInTimeFeatureAuthority.bind(
+        dataset_snapshot=snapshot,
+        feature_set=feature_set,
+        feature_provenance=object(),
+        lineage_authority=forged,
+        decision_cutoff_utc="2099-01-01T00:00:00Z",
+    )
+except reloaded.PointInTimeEvidenceError as exc:
+    assert "lineage_authority must be an exact DatasetSnapshotLineageAuthority" in str(exc)
+else:
+    raise AssertionError("reload removed the exact lineage capability fence")
+'''
+    completed = subprocess.run(
+        [sys.executable, "-c", script],
+        cwd=Path(__file__).resolve().parents[1],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stdout + completed.stderr
 
 
 @pytest.mark.skipif(os.name == "nt", reason="Windows intentionally has no directory fsync contract")

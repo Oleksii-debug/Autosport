@@ -40,6 +40,7 @@ def _protocol(
     dataset_manifest_sha256: str = _sha("dataset-manifest"),
     available_at: str = "2026-08-01T00:00:00Z",
     feature_set_version: str = "features-v1",
+    causal_cutoff: str = "2026-09-01T00:00:00Z",
 ) -> ResearchProtocol:
     binding = ScientificProtocolBinding(
         research_protocol_id="protocol-v1",
@@ -50,7 +51,7 @@ def _protocol(
         inclusion_criteria="causal pre-decision evidence only",
         exclusion_criteria="future or revised evidence excluded",
         lawful_source_requirements="lawful immutable source evidence",
-        causal_cutoff="2026-09-01T00:00:00Z",
+        causal_cutoff=causal_cutoff,
         evaluation_design="walk-forward holdout",
         feature_set_version=feature_set_version,
         uncertainty_method="bootstrap-v1",
@@ -62,6 +63,10 @@ def _protocol(
         expected_artifacts=("evaluation",),
         code_config_sha256=_sha("config"),
         frozen_at_utc="2026-08-01T00:00:00Z",
+        feature_set_id="features-main",
+        feature_definition_sha256=_sha("feature-definition"),
+        feature_source_sha256=_sha("feature-source"),
+        config_id="paper-agent-config-v1",
     )
     return ResearchProtocol(
         binding=binding,
@@ -342,7 +347,10 @@ def test_later_append_only_snapshot_keeps_scope_but_changes_exact_authority() ->
     later = _resolve(
         event=later_event,
         dataset=later_dataset,
-        protocol=_protocol(dataset_manifest_sha256=later_dataset.manifest_sha256),
+        protocol=_protocol(
+            dataset_manifest_sha256=later_dataset.manifest_sha256,
+            causal_cutoff=later_dataset.causal_cutoff,
+        ),
         environment=later_environment,
         decision_ts="2026-09-09T00:00:00Z",
     )

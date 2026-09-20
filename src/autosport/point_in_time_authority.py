@@ -447,9 +447,9 @@ class HoldoutConsumptionLedger(_legacy.HoldoutConsumptionLedger):
 
     def _new_transaction_id_unlocked(self, receipt_sha256: str) -> str:
         # Authority transaction identity is an attempt identity, not the semantic
-        # receipt identity.  A PREPARE that was durably ABORTed must never be
+        # receipt identity. A PREPARE that was durably ABORTed must never be
         # reused on an exact semantic retry, because shared authority correctly
-        # refuses to COMMIT a terminal ABORT.  The append-only history length is
+        # refuses to COMMIT a terminal ABORT. The append-only history length is
         # stable under the enclosing workspace writer lock and gives each retry a
         # fresh deterministic attempt id without weakening receipt idempotency.
         next_record = len(self._authority_history_unlocked()) + 1
@@ -471,12 +471,79 @@ class HoldoutConsumptionLedger(_legacy.HoldoutConsumptionLedger):
                 "holdout ledger rejected by independent monotonic authority"
             ) from exc
 
+    def _repair_pending_partial_publish_unlocked(
+        self,
+    ) -> _legacy._LedgerState | None:
+        # The local semantic authority is a ledger+anchor pair written in that
+        # order. A process death after the ledger rename but before the anchor
+        # rename leaves a mechanically recognizable partial publish. Repair only
+        # when the external PREPARE commits to this exact ledger digest and final
+        # receipt binding, and the surviving old anchor still matches the prior
+        # committed digest. Any other mismatch remains fail-closed.
+        if not self.path.exists():
+            return None
+        try:
+            ledger_text = self.path.read_text(encoding="utf-8")
+            state = super()._decode_ledger(ledger_text)
+            raw = _legacy.strict_json_loads(ledger_text)
+        except (OSError, TypeError, ValueError, _legacy.HoldoutConsumptionError):
+            return None
+        if not isinstance(raw, dict) or not state.receipts:
+            return None
+        history = self._authority_history_unlocked()
+        if not history:
+            return None
+        pending = history[-1]
+        binding = state.receipts[-1].receipt_sha256
+        expected_previous = pending.previous_committed_state_sha256 or _legacy._ZERO_SHA256
+        if (
+            pending.phase.value != "PREPARE"
+            or pending.intended_state_sha256 != state.ledger_sha256
+            or pending.semantic_binding_sha256 != binding
+            or raw.get("previous_ledger_sha256") != expected_previous
+        ):
+            return None
+
+        if self.anchor_path.exists():
+            if state.generation <= 1:
+                return None
+            try:
+                anchor = super()._decode_anchor(
+                    self.anchor_path.read_text(encoding="utf-8")
+                )
+            except (OSError, TypeError, ValueError, _legacy.HoldoutConsumptionError):
+                return None
+            if (
+                anchor["generation"] != state.generation - 1
+                or anchor["receipt_count"] != state.generation - 1
+                or anchor["ledger_sha256"] != pending.previous_committed_state_sha256
+            ):
+                return None
+        elif (
+            state.generation != 1
+            or pending.previous_committed_state_sha256 is not None
+        ):
+            return None
+
+        atomic_write_json(self.anchor_path, self._anchor_payload(state))
+        verified = super()._load_unlocked()
+        if verified != state:
+            raise _legacy.HoldoutConsumptionError(
+                "repaired holdout ledger pair did not verify"
+            )
+        return state
+
     def _load_with_authority_unlocked(self) -> _legacy._LedgerState:
         # Preserve all legacy ledger/anchor integrity checks before consulting the
-        # external freshness root.  This keeps malformed/half-published local
-        # state fail-closed rather than asking the generic authority to guess
-        # domain semantics.
-        state = super()._load_unlocked()
+        # external freshness root. The only repairable exception is the exact
+        # PREPARE-backed crash prefix where the new ledger was atomically published
+        # but its matching anchor was not yet published.
+        try:
+            state = super()._load_unlocked()
+        except _legacy.HoldoutConsumptionError:
+            state = self._repair_pending_partial_publish_unlocked()
+            if state is None:
+                raise
         self._recover_authority_unlocked(state)
         return state
 
@@ -532,7 +599,7 @@ class HoldoutConsumptionLedger(_legacy.HoldoutConsumptionLedger):
         )
 
         # Global order is protected workspace lock -> shared authority lock, as
-        # required by MonotonicWorkspaceAuthority.  The authority stores only
+        # required by MonotonicWorkspaceAuthority. The authority stores only
         # opaque ledger digests/bindings; this ledger remains the semantic truth.
         with WorkspaceEconomicLock(self.workspace):
             current = self._load_with_authority_unlocked()
@@ -592,7 +659,7 @@ class HoldoutConsumptionLedger(_legacy.HoldoutConsumptionLedger):
                     semantic_binding_sha256=binding,
                 )
             except MonotonicWorkspaceAuthorityError as exc:
-                # The complete local pair is intentionally left intact.  On
+                # The complete local pair is intentionally left intact. On
                 # restart, recover() identifies the exact pending attempt from
                 # the external history and can commit only its matching digest
                 # and receipt binding.

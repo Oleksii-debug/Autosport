@@ -105,12 +105,12 @@ class CollectorRetentionCompactionTests(unittest.TestCase):
         self.assertTrue(collector.append(first))
         self.assertTrue(collector.append(terminal))
         self.assertTrue(collector.append(next_epoch))
-        collector.activate_runtime_stream_epoch(
+        collector._record_runtime_stream_epoch_from_service(
             source_id="source-x",
             stream_epoch="epoch-1",
             activated_at="2026-01-01T00:00:08+00:00",
         )
-        collector.activate_runtime_stream_epoch(
+        collector._record_runtime_stream_epoch_from_service(
             source_id="source-x",
             stream_epoch="epoch-2",
             activated_at="2026-01-01T00:00:09+00:00",
@@ -293,7 +293,7 @@ class CollectorRetentionCompactionTests(unittest.TestCase):
             self.assertEqual(old_plan.current_stream_epoch, "epoch-2")
             self.assertEqual(old_plan.active_epoch_generation, 2)
 
-            generation = collector.activate_runtime_stream_epoch(
+            generation = collector._record_runtime_stream_epoch_from_service(
                 source_id="source-x",
                 stream_epoch="epoch-1",
                 activated_at="2026-01-01T00:00:10+00:00",
@@ -411,12 +411,12 @@ class CollectorRetentionCompactionTests(unittest.TestCase):
             )
             for delta in (first, terminal, correction, next_epoch):
                 collector.append(delta)
-            collector.activate_runtime_stream_epoch(
+            collector._record_runtime_stream_epoch_from_service(
                 source_id="source-x",
                 stream_epoch="epoch-1",
                 activated_at="2026-01-01T00:00:08+00:00",
             )
-            collector.activate_runtime_stream_epoch(
+            collector._record_runtime_stream_epoch_from_service(
                 source_id="source-x",
                 stream_epoch="epoch-2",
                 activated_at="2026-01-01T00:00:09+00:00",

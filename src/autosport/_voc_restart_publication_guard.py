@@ -54,8 +54,13 @@ class _ScopedLiveRequestIds(set[str]):
         super().__init__(values)
         self._store = store
 
+    def process_contains(self, value: str) -> bool:
+        """Return only real process-live membership, ignoring recovery grants."""
+
+        return set.__contains__(self, value)
+
     def __contains__(self, value: object) -> bool:
-        if super().__contains__(value):
+        if set.__contains__(self, value):
             return True
         if type(value) is not str:
             return False
@@ -67,6 +72,16 @@ class _ScopedLiveRequestIds(set[str]):
         )
 
 
+def _is_process_live(
+    store: router.ModelComputeRouterStore,
+    request_id: str,
+) -> bool:
+    live_ids = store._live_request_ids
+    if isinstance(live_ids, _ScopedLiveRequestIds):
+        return live_ids.process_contains(request_id)
+    return request_id in live_ids
+
+
 def _restart_grant(
     orchestrator: production.VOCProductionOrchestrator,
     *,
@@ -75,7 +90,7 @@ def _restart_grant(
     admission_sha256: str | None,
 ) -> _RestartPublicationGrant | None:
     store = orchestrator.router_store
-    if request_id in store._live_request_ids:
+    if _is_process_live(store, request_id):
         return None
     if store.get_voc_shadow_execution(request_id, role) is not None:
         return None
@@ -224,7 +239,7 @@ def _install() -> None:
         actual_cost,
         evidence_sha256: str,
     ) -> dict[str, Any]:
-        if request_id in self._live_request_ids:
+        if _is_process_live(self, request_id):
             return original_record_shadow(
                 self,
                 request_id=request_id,

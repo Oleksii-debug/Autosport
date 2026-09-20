@@ -1746,6 +1746,13 @@ class PersistentLiveDecisionLoop:
         duplicate = False
         execution_result = None
         with WorkspaceEconomicLock(self.workspace):
+            if (
+                decision_context_sha256_override is None
+                and self._decision_context_sha256() != decision_context_sha256
+            ):
+                raise LiveDecisionProgressError(
+                    "PaperBook/runtime context changed before promotion lock"
+                )
             durable_progress = self._load_progress()
             if (
                 durable_progress is None

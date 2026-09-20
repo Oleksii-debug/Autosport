@@ -8,7 +8,10 @@ from autosport.product_runtime import (
     _settlement_authority_identity,
     build_autonomous_product_runtime,
 )
-from autosport.resolver_semantics import function_semantic_sha256
+from autosport.resolver_semantics import (
+    ResolverSemanticIdentityError,
+    function_semantic_sha256,
+)
 
 
 SHA_A = "a" * 64
@@ -51,6 +54,7 @@ def test_resolver_semantic_fingerprint_ignores_install_relocation() -> None:
     resolver = _ProductSource.resolve
     original_code = resolver.__code__
     original = function_semantic_sha256(resolver)
+    assert original == "b64b17edee2de42e77cf0cab0ab844a798fb960af2d836b8cd830d6558f69d6d"
     try:
         resolver.__code__ = original_code.replace(
             co_filename=r"C:\\relocated\\autosport\\provider.py",
@@ -61,13 +65,17 @@ def test_resolver_semantic_fingerprint_ignores_install_relocation() -> None:
         resolver.__code__ = original_code
 
 
-def test_resolver_semantic_fingerprint_changes_on_executable_replacement() -> None:
+def test_resolver_semantic_fingerprint_rejects_executable_replacement() -> None:
     resolver = _ProductSource.resolve
     original_code = resolver.__code__
-    original = function_semantic_sha256(resolver)
+    function_semantic_sha256(resolver)
     try:
         resolver.__code__ = _replacement_resolve.__code__
-        assert function_semantic_sha256(resolver) != original
+        with pytest.raises(
+            ResolverSemanticIdentityError,
+            match="executable semantics do not match canonical module source",
+        ):
+            function_semantic_sha256(resolver)
     finally:
         resolver.__code__ = original_code
 
@@ -90,15 +98,18 @@ def test_product_runtime_restart_rejects_semantic_replacement_with_same_declared
     try:
         resolver.__code__ = _replacement_resolve.__code__
         mutated_source = _ProductSource()
-        mutated_identity = _settlement_authority_identity(
-            source=mutated_source,
-            source_id=mutated_source.source_id,
-            outcome_authority=mutated_source,
-        )
-        assert mutated_identity != original_identity
         with pytest.raises(
             ProductCompositionError,
-            match="settlement authority identity conflicts with durable product composition",
+            match="settlement resolve semantics cannot be fingerprinted safely",
+        ):
+            _settlement_authority_identity(
+                source=mutated_source,
+                source_id=mutated_source.source_id,
+                outcome_authority=mutated_source,
+            )
+        with pytest.raises(
+            ProductCompositionError,
+            match="settlement resolve semantics cannot be fingerprinted safely",
         ):
             build_autonomous_product_runtime(
                 workspace=tmp_path,

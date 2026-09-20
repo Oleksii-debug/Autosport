@@ -297,6 +297,68 @@ def test_evaluation_cannot_start_before_complete_membership_is_immutable(tmp_pat
         )
 
 
+def test_all_rows_wait_for_complete_multi_cycle_evaluation_boundary(tmp_path):
+    candidate = row("candidate")
+    no_quote = row("no-quote", slot_state=SlotState.NO_QUOTE)
+    first = _witness(1, candidate)
+    second = replace(
+        _witness(2, no_quote),
+        committed_at="2026-09-20T00:00:10Z",
+        evaluation_not_before="2026-09-20T00:00:11Z",
+    )
+    ledger = ObservationIntakeLedger(
+        tmp_path,
+        authority_id="intake-1",
+        enumeration_resolver=_Resolver((first, second)),
+    )
+    ledger.append_cycle(enumeration_id=first.enumeration_id)
+    ledger.append_cycle(enumeration_id=second.enumeration_id)
+
+    with pytest.raises(EvaluationUniverseError, match="detection began before"):
+        build_frozen_universe(
+            intake_ledger=ledger,
+            universe_id="universe-1",
+            campaign_id="campaign-1",
+            research_protocol_id="protocol-1",
+            protocol_sha256=H,
+            frozen_at="2026-09-20T00:00:14Z",
+            rows=(candidate, no_quote),
+        )
+
+
+def test_multi_cycle_rows_are_valid_after_complete_evaluation_boundary(tmp_path):
+    candidate = row(
+        "candidate",
+        detection_at="2026-09-20T00:00:12Z",
+        decision_at="2026-09-20T00:00:13Z",
+    )
+    no_quote = row("no-quote", slot_state=SlotState.NO_QUOTE)
+    first = _witness(1, candidate)
+    second = replace(
+        _witness(2, no_quote),
+        committed_at="2026-09-20T00:00:10Z",
+        evaluation_not_before="2026-09-20T00:00:11Z",
+    )
+    ledger = ObservationIntakeLedger(
+        tmp_path,
+        authority_id="intake-1",
+        enumeration_resolver=_Resolver((first, second)),
+    )
+    ledger.append_cycle(enumeration_id=first.enumeration_id)
+    ledger.append_cycle(enumeration_id=second.enumeration_id)
+
+    frozen = build_frozen_universe(
+        intake_ledger=ledger,
+        universe_id="universe-1",
+        campaign_id="campaign-1",
+        research_protocol_id="protocol-1",
+        protocol_sha256=H,
+        frozen_at="2026-09-20T00:00:14Z",
+        rows=(candidate, no_quote),
+    )
+    assert frozen.row_ids == tuple(sorted((candidate.row_id, no_quote.row_id)))
+
+
 def test_store_round_trip_and_append_only_restart(tmp_path):
     workspace = tmp_path / "workspace"
     authority = tmp_path / "authority"

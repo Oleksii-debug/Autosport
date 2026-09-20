@@ -175,6 +175,21 @@ class PaperCampaignAdmissionTests(unittest.TestCase):
                 fixture.coordinator(execution_ledger=spoof)
             self.assertFalse(SpoofingLedger.events_called)
 
+    def test_decision_ledger_subclass_cannot_spoof_execution_origin(self) -> None:
+        class SpoofingDecisionLedger(JsonlDecisionLedger):
+            verified_records_called = False
+
+            def verified_records(self, *args, **kwargs):
+                type(self).verified_records_called = True
+                return super().verified_records(*args, **kwargs)
+
+        with tempfile.TemporaryDirectory() as directory:
+            fixture = AdmissionFixture(Path(directory))
+            spoof = SpoofingDecisionLedger(fixture.workspace / "decisions.jsonl")
+            with self.assertRaisesRegex(TypeError, "exact JsonlDecisionLedger"):
+                fixture.coordinator(decision_ledger=spoof)
+            self.assertFalse(SpoofingDecisionLedger.verified_records_called)
+
 
 if __name__ == "__main__":
     unittest.main()

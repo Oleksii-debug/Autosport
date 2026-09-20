@@ -248,6 +248,7 @@ class AdmissionFixture:
         *,
         resumed: bool = False,
         execution_ledger: PaperExecutionLedger | None = None,
+        decision_ledger: JsonlDecisionLedger | None = None,
     ) -> PaperCampaignAdmissionCoordinator:
         environment = (
             CausalLearningEnvironment.resume(
@@ -260,11 +261,13 @@ class AdmissionFixture:
             if resumed
             else self.environment
         )
-        decision_ledger = JsonlDecisionLedger(self.workspace / "decisions.jsonl")
+        canonical_decision_ledger = JsonlDecisionLedger(
+            self.workspace / "decisions.jsonl"
+        )
         bridge = PaperSettlementLearningBridge(
             self.workspace / "paper-learning-bridge.json",
             paper_book_path=self.workspace / "paper_book.json",
-            decision_ledger=decision_ledger,
+            decision_ledger=canonical_decision_ledger,
             agent_loop=AgentLoopRuntime(self.workspace / "agent-loop.json"),
             economic_goal=self.goal,
             risk_policy=self.risk,
@@ -277,7 +280,11 @@ class AdmissionFixture:
             return PaperCampaignAdmissionCoordinator(
                 self.workspace / "paper-campaign-admission.json",
                 paper_book_path=self.workspace / "paper_book.json",
-                decision_ledger=decision_ledger,
+                decision_ledger=(
+                    decision_ledger
+                    if decision_ledger is not None
+                    else canonical_decision_ledger
+                ),
                 runtime=runtime,
                 execution_ledger=(
                     execution_ledger

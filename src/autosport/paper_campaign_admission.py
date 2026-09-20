@@ -96,8 +96,11 @@ class PaperCampaignAdmissionCoordinator(_base.PaperCampaignAdmissionCoordinator)
         runtime: PaperCampaignRuntime,
         execution_ledger: PaperExecutionLedger,
     ) -> None:
-        # This is a capability boundary, not a duck-typing boundary.  A subclass
-        # could override events() and synthesize execution authority at read time.
+        # These are capability boundaries, not duck-typing boundaries.  A subclass
+        # could override verified_records() or events() and synthesize authority
+        # without consulting the canonical durable ledger bytes.
+        if type(decision_ledger) is not JsonlDecisionLedger:
+            raise TypeError("decision_ledger must be exact JsonlDecisionLedger")
         if type(execution_ledger) is not PaperExecutionLedger:
             raise TypeError("execution_ledger must be exact PaperExecutionLedger")
         super().__init__(

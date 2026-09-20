@@ -5,6 +5,10 @@ Autosport's provider surface to writes. It obtains Betfair's authenticated
 ``getDeveloperAppKeys`` metadata through the canonical live transport and derives an
 opaque account discriminator from non-secret provider ids only. Application keys
 and session tokens are never placed into authority DTOs, digests, or logs.
+
+It also owns restart-safe re-verification for this provider scope. Campaign decision
+facts remain frozen at the session cutoff, while a later authenticated provider
+re-read keeps its real later availability timestamp instead of being backdated.
 """
 from __future__ import annotations
 
@@ -21,7 +25,12 @@ from .betfair_account_readonly import (
     UrllibBetfairHttpTransport,
 )
 from .bookmaker_capability import BookmakerCapabilityProfile
-from .real_execution_ledger import ExecutionAction
+from .campaign_economic_authority import FinalizedCampaignAuthority
+from .real_execution_ledger import (
+    ExecutionAction,
+    ExternalReceiptIdentity,
+    RealExecutionLedger,
+)
 from .supervised_provider_evidence import (
     ProviderEvidenceError,
     VerifiedProviderEffectEvidence,
@@ -46,6 +55,18 @@ class _CanonicalClientOrigin:
     transport: object
     clock: object
     credentials: object
+
+
+@dataclass(frozen=True, slots=True)
+class _VerifiedEffectIdentity:
+    external_receipt_id: str
+    selection_id: str
+    status: str
+    accepted_odds: str
+    accepted_stake: str
+
+
+_CAPTURE_EFFECT_IDENTITIES: WeakKeyDictionary = WeakKeyDictionary()
 
 
 def _install_client_origin_registry() -> WeakKeyDictionary:
@@ -331,7 +352,7 @@ def _capture_provider_scope_raw(
     parsed = tuple(scope._instant(value, "provider source time") for value in times)
     start = times[parsed.index(min(parsed))]
     end = times[parsed.index(max(parsed))]
-    return scope.VerifiedBetfairProviderScopeCapture(
+    capture = scope.VerifiedBetfairProviderScopeCapture(
         venue_id=effect.bookmaker_id,
         client_account_scope=effect.account_id,
         authenticated_account_id=(
@@ -355,6 +376,14 @@ def _capture_provider_scope_raw(
         source_interval_end=end,
         available_at=end,
     )
+    _CAPTURE_EFFECT_IDENTITIES[capture] = _VerifiedEffectIdentity(
+        external_receipt_id=effect.external_receipt_id,
+        selection_id=effect.selection_id,
+        status=effect.status.value,
+        accepted_odds=str(effect.accepted_odds),
+        accepted_stake=str(effect.accepted_stake),
+    )
+    return capture
 
 
 def _install_capture_authority() -> None:
@@ -401,6 +430,10 @@ def _install_capture_authority() -> None:
             raise scope.CampaignProviderScopeError(
                 "provider scope capture changed after source verification"
             )
+        if _CAPTURE_EFFECT_IDENTITIES.get(capture) is None:
+            raise scope.CampaignProviderScopeError(
+                "provider scope lost canonical provider-effect identity"
+            )
 
     scope.capture_betfair_provider_scope = authoritative_capture
     scope.assert_provider_scope_capture_authoritative = assert_authoritative
@@ -408,3 +441,316 @@ def _install_capture_authority() -> None:
 
 _install_capture_authority()
 del _install_capture_authority
+
+
+def _assert_durable_effect_reverification(
+    execution_ledger: RealExecutionLedger,
+    *,
+    plan_id: str,
+    attempt_id: str,
+    action: ExecutionAction,
+    capture: scope.VerifiedBetfairProviderScopeCapture,
+    campaign_as_of: datetime,
+) -> None:
+    """Bind a fresh provider re-read to the same durable external effect."""
+
+    binding = execution_ledger.provider_evidence_binding(attempt_id)
+    if binding is None:
+        raise scope.CampaignProviderScopeError(
+            "execution attempt lacks durable provider evidence binding"
+        )
+    binding_at = scope._instant(
+        binding.get("observed_at"),
+        "provider binding observed_at",
+    )
+    readback_at = scope._instant(
+        capture.readback_observed_at,
+        "readback observed_at",
+    )
+    if (
+        binding.get("evidence_id") == capture.provider_evidence_id
+        and binding_at == readback_at
+    ):
+        return
+
+    # A changed evidence-instance id is admissible only for a later restart/read.
+    # It must resolve the same durable external receipt for the same action. This
+    # prevents a fresh provider observation from rewriting historical campaign
+    # facts while allowing source authority to be reacquired after process loss.
+    if readback_at <= campaign_as_of:
+        raise scope.CampaignProviderScopeError(
+            "durable provider evidence binding drifted before campaign cutoff"
+        )
+    if binding_at > readback_at:
+        raise scope.CampaignProviderScopeError(
+            "provider re-verification predates durable provider evidence"
+        )
+    effect_identity = _CAPTURE_EFFECT_IDENTITIES.get(capture)
+    if effect_identity is None:
+        raise scope.CampaignProviderScopeError(
+            "provider re-verification lost canonical external receipt identity"
+        )
+    if effect_identity.selection_id != action.selection_id:
+        raise scope.CampaignProviderScopeError(
+            "provider re-verification selection conflicts with execution action"
+        )
+    saga = execution_ledger.saga(plan_id)
+    receipt = ExternalReceiptIdentity(
+        action.bookmaker_id,
+        action.account_id,
+        effect_identity.external_receipt_id,
+    )
+    if saga.receipts.get(receipt) != attempt_id:
+        raise scope.CampaignProviderScopeError(
+            "provider re-verification external receipt is not durable attempt identity"
+        )
+
+
+def _resolve_campaign_provider_scope_restart_safe(
+    authority: FinalizedCampaignAuthority,
+    *,
+    session_id: str,
+    execution_ledger: RealExecutionLedger,
+    plan_id: str,
+    attempt_id: str,
+    capture: scope.VerifiedBetfairProviderScopeCapture,
+    expected_applicability_digest: str | None = None,
+) -> scope.CampaignProviderScopeProjection:
+    """Resolve applicability while separating T0 decision facts from T1 verification."""
+
+    if not isinstance(authority, FinalizedCampaignAuthority):
+        raise scope.CampaignProviderScopeError(
+            "campaign authority is not canonical"
+        )
+    scope.assert_provider_scope_capture_authoritative(capture)
+    campaign_projection = authority.projection()
+    campaign = authority._campaign
+    run_registry = campaign._run_registry
+    if run_registry is None:
+        raise scope.CampaignProviderScopeError(
+            "finalized campaign lost canonical RunRegistry binding"
+        )
+    sessions = [item for item in campaign.sessions if item.session_id == session_id]
+    if len(sessions) != 1:
+        raise scope.CampaignProviderScopeError(
+            "campaign session is not uniquely resolved"
+        )
+    session = sessions[0]
+    session_refs = [
+        item
+        for item in campaign_projection.session_refs
+        if item.evidence_id == session.evidence_id
+        and item.evidence_sha256 == session.evidence_sha256
+    ]
+    if len(session_refs) != 1:
+        raise scope.CampaignProviderScopeError(
+            "session is not exact finalized campaign membership"
+        )
+
+    summary, run_summary_sha256, records = scope._decision_prefix_records(
+        run_registry, session.run_id
+    )
+    plan, action, plan_event = scope._execution_plan_action(
+        execution_ledger,
+        plan_id=plan_id,
+        action_id=capture.action_id,
+        attempt_id=attempt_id,
+    )
+    run_records = [
+        record
+        for record in records
+        if getattr(record, "replay_run_id", None) == session.run_id
+    ]
+    decision, _portfolio_plan = scope._portfolio_execution_membership(
+        run_records,
+        plan,
+    )
+
+    if (
+        action.bookmaker_id != capture.venue_id
+        or action.event_id != capture.event_id
+        or action.market_id != capture.market_id
+        or action.action_id != capture.action_id
+    ):
+        raise scope.CampaignProviderScopeError(
+            "provider capture conflicts with reserved execution action"
+        )
+
+    observations = tuple(
+        scope._canonical_instant(value, "campaign observation timestamp")
+        for value in session.observation_timestamps
+    )
+    quote_at = scope._canonical_instant(
+        action.quote_observed_at,
+        "action quote_observed_at",
+    )
+    if quote_at not in observations:
+        raise scope.CampaignProviderScopeError(
+            "execution quote is not exact campaign observation membership"
+        )
+
+    window_start = scope._instant(
+        session.evaluation_window_start,
+        "evaluation_window_start",
+    )
+    window_end = scope._instant(
+        session.evaluation_window_end,
+        "evaluation_window_end",
+    )
+    source_start = scope._instant(
+        capture.source_interval_start,
+        "source_interval_start",
+    )
+    source_end = scope._instant(
+        capture.source_interval_end,
+        "source_interval_end",
+    )
+    as_of = scope._instant(session.as_of, "session as_of")
+    if source_start > window_end or source_end < window_start:
+        raise scope.CampaignProviderScopeError(
+            "provider source interval does not intersect campaign interval"
+        )
+
+    # Decision-causing facts are frozen at T0. Provider identity/readback may be
+    # reacquired later at T1 and must retain that later availability truth.
+    if scope._instant(action.quote_observed_at, "action quote_observed_at") > as_of:
+        raise scope.CampaignProviderScopeError(
+            "execution quote postdates campaign authority"
+        )
+    if scope._instant(plan.created_at, "plan created_at") > as_of:
+        raise scope.CampaignProviderScopeError(
+            "execution plan postdates campaign authority"
+        )
+    if scope._instant(plan_event["recorded_at"], "plan recorded_at") > as_of:
+        raise scope.CampaignProviderScopeError(
+            "execution reservation postdates campaign authority"
+        )
+    if scope._instant(
+        getattr(decision, "observed_ts", None),
+        "portfolio decision observed_ts",
+    ) > as_of:
+        raise scope.CampaignProviderScopeError(
+            "portfolio decision postdates campaign authority"
+        )
+    if any(
+        scope._instant(value, "campaign observation timestamp") > as_of
+        for value in session.observation_timestamps
+    ):
+        raise scope.CampaignProviderScopeError(
+            "campaign observation postdates campaign authority"
+        )
+
+    _assert_durable_effect_reverification(
+        execution_ledger,
+        plan_id=plan_id,
+        attempt_id=attempt_id,
+        action=action,
+        capture=capture,
+        campaign_as_of=as_of,
+    )
+
+    causal = summary.get("campaign_causal_membership")
+    if (
+        not isinstance(causal, dict)
+        or causal.get("observation_membership_sha256")
+        != session.observation_membership_sha256
+    ):
+        raise scope.CampaignProviderScopeError(
+            "campaign causal membership drifted"
+        )
+
+    resolved = scope.CampaignProviderScopeProjection(
+        campaign_id=campaign_projection.campaign_id,
+        campaign_version=campaign_projection.campaign_version,
+        campaign_sha256=campaign_projection.campaign_sha256,
+        session_id=session.session_id,
+        run_id=session.run_id,
+        session_evidence_id=session.evidence_id,
+        session_evidence_sha256=session.evidence_sha256,
+        run_summary_sha256=run_summary_sha256,
+        decision_id=decision.decision_id,
+        plan_id=plan.plan_id,
+        plan_fingerprint=plan.fingerprint,
+        action_id=action.action_id,
+        provider_capture_sha256=capture.capture_sha256,
+        provider_evidence_id=capture.provider_evidence_id,
+        provider_source_sha256=capture.provider_source_sha256,
+        venue_id=capture.venue_id,
+        authenticated_account_id=capture.authenticated_account_id,
+        event_id=capture.event_id,
+        market_id=capture.market_id,
+        source_interval_start=capture.source_interval_start,
+        source_interval_end=capture.source_interval_end,
+        observed_at=capture.readback_observed_at,
+        available_at=capture.available_at,
+    )
+    if expected_applicability_digest is not None:
+        if (
+            scope._sha(
+                expected_applicability_digest,
+                "expected_applicability_digest",
+            )
+            != resolved.applicability_digest
+        ):
+            raise scope.CampaignProviderScopeError(
+                "re-resolved provider scope digest drifted"
+            )
+    return resolved
+
+
+def _install_restart_safe_projection_authority() -> None:
+    issued: dict[int, tuple[object, str]] = {}
+
+    def authoritative_resolve(
+        authority: FinalizedCampaignAuthority,
+        *,
+        session_id: str,
+        execution_ledger: RealExecutionLedger,
+        plan_id: str,
+        attempt_id: str,
+        capture: scope.VerifiedBetfairProviderScopeCapture,
+        expected_applicability_digest: str | None = None,
+    ) -> scope.CampaignProviderScopeProjection:
+        projection = _resolve_campaign_provider_scope_restart_safe(
+            authority,
+            session_id=session_id,
+            execution_ledger=execution_ledger,
+            plan_id=plan_id,
+            attempt_id=attempt_id,
+            capture=capture,
+            expected_applicability_digest=expected_applicability_digest,
+        )
+        key = id(projection)
+
+        def forget(_weakref: object, *, projection_key: int = key) -> None:
+            issued.pop(projection_key, None)
+
+        issued[key] = (
+            ref(projection, forget),
+            projection.applicability_digest,
+        )
+        return projection
+
+    def assert_authoritative(
+        projection: scope.CampaignProviderScopeProjection,
+    ) -> None:
+        if not isinstance(projection, scope.CampaignProviderScopeProjection):
+            raise scope.CampaignProviderScopeError(
+                "campaign provider scope projection type is not canonical"
+            )
+        record = issued.get(id(projection))
+        if record is None or record[0]() is not projection:
+            raise scope.CampaignProviderScopeError(
+                "campaign provider scope projection was not issued by canonical resolver"
+            )
+        if record[1] != projection.applicability_digest:
+            raise scope.CampaignProviderScopeError(
+                "campaign provider scope projection changed after resolution"
+            )
+
+    scope.resolve_campaign_provider_scope = authoritative_resolve
+    scope.assert_campaign_provider_scope_authoritative = assert_authoritative
+
+
+_install_restart_safe_projection_authority()
+del _install_restart_safe_projection_authority

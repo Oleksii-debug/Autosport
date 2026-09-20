@@ -9,13 +9,14 @@ or fabricates PAPER exposure itself.
 
 from __future__ import annotations
 
+import json
 from contextvars import ContextVar
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Mapping
 
 from . import _paper_campaign_admission_base as _base
-from .decision_ledger import JsonlDecisionLedger
+from .decision_ledger import DecisionLedgerIntegrityError, JsonlDecisionLedger
 from .domain import PaperTicket
 from .learning_environment import Observation
 from .paper import PaperBook
@@ -50,6 +51,23 @@ _EXECUTION_FIELDS = frozenset(
 _ACCEPTED_EQUIVALENT = frozenset(
     {PaperAttemptOutcome.ACCEPTED, PaperAttemptOutcome.PARTIAL}
 )
+_RESERVATION_FIELDS = frozenset(
+    {
+        "trigger_id",
+        "plan_id",
+        "plan_fingerprint",
+        "model_fingerprint",
+        "started_at",
+        "action_ids",
+        "observation_evidence_ids",
+    }
+)
+_LIVE_DECISION_SCHEMA = "autosport.persistent_live_decision"
+_LIVE_DECISION_SCHEMA_VERSION = 2
+_EXECUTION_ADOPTION_SCHEMA = "autosport.paper_execution_adoption"
+_EXECUTION_ADOPTION_SCHEMA_VERSION = 1
+_LEGACY_EXECUTION_AUTHORITY_SCHEMA = "paper_value.execution_authority"
+_LEGACY_EXECUTION_AUTHORITY_SCHEMA_VERSION = 1
 
 
 @dataclass(frozen=True, slots=True)
@@ -78,8 +96,10 @@ class PaperCampaignAdmissionCoordinator(_base.PaperCampaignAdmissionCoordinator)
         runtime: PaperCampaignRuntime,
         execution_ledger: PaperExecutionLedger,
     ) -> None:
-        if not isinstance(execution_ledger, PaperExecutionLedger):
-            raise TypeError("execution_ledger must be PaperExecutionLedger")
+        # This is a capability boundary, not a duck-typing boundary.  A subclass
+        # could override events() and synthesize execution authority at read time.
+        if type(execution_ledger) is not PaperExecutionLedger:
+            raise TypeError("execution_ledger must be exact PaperExecutionLedger")
         super().__init__(
             state_path,
             paper_book_path=paper_book_path,
@@ -130,12 +150,162 @@ class PaperCampaignAdmissionCoordinator(_base.PaperCampaignAdmissionCoordinator)
         )
         self._read()
 
+    @staticmethod
+    def _reservation_payload(event: object) -> Mapping[str, object]:
+        if not isinstance(event, Mapping):
+            raise PaperCampaignAdmissionError("PAPER execution reservation is invalid")
+        payload = event.get("payload")
+        if not isinstance(payload, Mapping) or set(payload) != _RESERVATION_FIELDS:
+            raise PaperCampaignAdmissionError(
+                "PAPER execution reservation schema is invalid"
+            )
+        for field in (
+            "trigger_id",
+            "plan_id",
+            "plan_fingerprint",
+            "model_fingerprint",
+            "started_at",
+        ):
+            value = payload.get(field)
+            if type(value) is not str or not value.strip():
+                raise PaperCampaignAdmissionError(
+                    f"PAPER execution reservation {field} is invalid"
+                )
+        action_ids = payload.get("action_ids")
+        if (
+            type(action_ids) is not list
+            or not action_ids
+            or any(type(item) is not str or not item.strip() for item in action_ids)
+            or len(set(action_ids)) != len(action_ids)
+        ):
+            raise PaperCampaignAdmissionError(
+                "PAPER execution reservation action_ids are invalid"
+            )
+        evidence = payload.get("observation_evidence_ids")
+        if (
+            type(evidence) is not dict
+            or set(evidence) != set(action_ids)
+            or any(
+                type(key) is not str
+                or type(value) is not str
+                or not value.strip()
+                for key, value in evidence.items()
+            )
+        ):
+            raise PaperCampaignAdmissionError(
+                "PAPER execution reservation observation evidence is invalid"
+            )
+        return payload
+
+    @staticmethod
+    def _matches_live_execution_decision(
+        record_payload: Mapping[str, object],
+        *,
+        decision_id: str,
+        run_id: str,
+        reservation: Mapping[str, object],
+    ) -> bool:
+        if (
+            record_payload.get("schema") != _LIVE_DECISION_SCHEMA
+            or record_payload.get("schema_version") != _LIVE_DECISION_SCHEMA_VERSION
+            or record_payload.get("material_action_id") != decision_id
+        ):
+            return False
+        adoption = record_payload.get("paper_execution")
+        if not isinstance(adoption, Mapping):
+            return False
+        return (
+            adoption.get("schema") == _EXECUTION_ADOPTION_SCHEMA
+            and adoption.get("schema_version") == _EXECUTION_ADOPTION_SCHEMA_VERSION
+            and adoption.get("plan_id") == reservation["plan_id"]
+            and adoption.get("plan_fingerprint") == reservation["plan_fingerprint"]
+            and adoption.get("model_fingerprint") == reservation["model_fingerprint"]
+            and adoption.get("run_id") == run_id
+            and type(adoption.get("intent_evidence_json")) is str
+            and bool(str(adoption.get("intent_evidence_json")).strip())
+        )
+
+    @staticmethod
+    def _matches_legacy_execution_decision(
+        record_payload: Mapping[str, object],
+        *,
+        decision_id: str,
+        run_id: str,
+        reservation: Mapping[str, object],
+    ) -> bool:
+        if record_payload.get("schema") == _LIVE_DECISION_SCHEMA:
+            return False
+        if (
+            record_payload.get("material_action_id") != decision_id
+            or record_payload.get("execution_plan_id") != reservation["plan_id"]
+            or record_payload.get("execution_plan_fingerprint")
+            != reservation["plan_fingerprint"]
+            or record_payload.get("execution_run_id") != run_id
+        ):
+            return False
+        raw_authority = record_payload.get("execution_authority_json")
+        if type(raw_authority) is not str or not raw_authority.strip():
+            return False
+        try:
+            authority = json.loads(raw_authority)
+        except (json.JSONDecodeError, TypeError):
+            return False
+        return (
+            type(authority) is dict
+            and authority.get("schema") == _LEGACY_EXECUTION_AUTHORITY_SCHEMA
+            and authority.get("schema_version")
+            == _LEGACY_EXECUTION_AUTHORITY_SCHEMA_VERSION
+            and authority.get("decision_id") == decision_id
+        )
+
+    def _resolved_execution_decision_id(
+        self,
+        *,
+        run_id: str,
+        reservation: Mapping[str, object],
+    ) -> str:
+        trigger_id = _text(reservation.get("trigger_id"), "execution trigger_id")
+        try:
+            records = self.decision_ledger.verified_records()
+        except DecisionLedgerIntegrityError as exc:
+            raise PaperCampaignAdmissionError(
+                "Decision Ledger cannot prove PAPER execution origin"
+            ) from exc
+        matches = [record for record in records if record.decision_id == trigger_id]
+        if len(matches) != 1:
+            raise PaperCampaignAdmissionError(
+                "PAPER execution must originate from one pre-existing durable decision"
+            )
+        record = matches[0]
+        payload = record.payload
+        if not isinstance(payload, Mapping):
+            raise PaperCampaignAdmissionError(
+                "PAPER execution decision payload is invalid"
+            )
+        live = self._matches_live_execution_decision(
+            payload,
+            decision_id=trigger_id,
+            run_id=run_id,
+            reservation=reservation,
+        )
+        legacy = self._matches_legacy_execution_decision(
+            payload,
+            decision_id=trigger_id,
+            run_id=run_id,
+            reservation=reservation,
+        )
+        if live == legacy:
+            raise PaperCampaignAdmissionError(
+                "PAPER execution decision lacks one canonical execution authority"
+            )
+        return trigger_id
+
     def _execution_attempt(
         self,
         *,
         run_id: str,
         attempt_id: str,
-    ) -> PaperLegAttempt:
+    ) -> tuple[PaperLegAttempt, Mapping[str, object]]:
         run_id = _text(run_id, "execution_run_id")
         attempt_id = _text(attempt_id, "execution_attempt_id")
         try:
@@ -154,6 +324,7 @@ class PaperCampaignAdmissionCoordinator(_base.PaperCampaignAdmissionCoordinator)
             raise PaperCampaignAdmissionError(
                 "admission requires one completed canonical PAPER execution run"
             )
+        reservation = self._reservation_payload(reservations[0])
         attempts: list[PaperLegAttempt] = []
         try:
             for event in events:
@@ -173,10 +344,10 @@ class PaperCampaignAdmissionCoordinator(_base.PaperCampaignAdmissionCoordinator)
             raise PaperCampaignAdmissionError(
                 "admission execution attempt belongs to another run"
             )
-        action_ids = reservations[0].get("payload", {}).get("action_ids")
+        action_ids = reservation["action_ids"]
+        assert isinstance(action_ids, list)
         if (
-            type(action_ids) is not list
-            or attempt.sequence >= len(action_ids)
+            attempt.sequence >= len(action_ids)
             or action_ids[attempt.sequence] != attempt.action_id
         ):
             raise PaperCampaignAdmissionError(
@@ -190,16 +361,24 @@ class PaperCampaignAdmissionCoordinator(_base.PaperCampaignAdmissionCoordinator)
             raise PaperCampaignAdmissionError(
                 "accepted PAPER execution lacks exact execution odds/stake"
             )
-        return attempt
+        return attempt, reservation
 
     def _execution_ticket(
         self,
         binding: _ExecutionAdmissionBinding,
     ) -> PaperTicket:
-        attempt = self._execution_attempt(
+        attempt, reservation = self._execution_attempt(
             run_id=binding.run_id,
             attempt_id=binding.attempt_id,
         )
+        resolved_decision_id = self._resolved_execution_decision_id(
+            run_id=binding.run_id,
+            reservation=reservation,
+        )
+        if binding.decision_id != resolved_decision_id:
+            raise PaperCampaignAdmissionError(
+                "caller execution_decision_id conflicts with durable execution origin"
+            )
         try:
             book = PaperBook.load(self.paper_book_path)
         except (OSError, TypeError, ValueError) as exc:
@@ -221,7 +400,7 @@ class PaperCampaignAdmissionCoordinator(_base.PaperCampaignAdmissionCoordinator)
             )
         expected_reason = (
             "paper execution adoption; "
-            f"decision_id={binding.decision_id}; "
+            f"decision_id={resolved_decision_id}; "
             f"run_id={binding.run_id}; {marker}"
         )
         if ticket.strategy_reason != expected_reason:

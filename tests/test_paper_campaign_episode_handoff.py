@@ -77,7 +77,7 @@ class PaperCampaignEpisodeHandoffTests(unittest.TestCase):
     ):
         return handoff.start_next_episode(
             root / "child-agent-loop.json",
-            ScientificRegistry(root / "registry.json"),
+            ScientificRegistry.initialize_pristine(root / "registry.json"),
             FactoryArtifactStore(root / "artifacts"),
             identity=environment.identity,
             as_of=_legacy.T4,
@@ -217,7 +217,7 @@ class PaperCampaignEpisodeHandoffTests(unittest.TestCase):
             ):
                 handoff.start_next_episode(
                     root / "child-agent-loop.json",
-                    ScientificRegistry(root / "registry.json"),
+                    ScientificRegistry.initialize_pristine(root / "registry.json"),
                     FactoryArtifactStore(root / "artifacts"),
                     identity=environment.identity,
                     as_of=_legacy.T4,

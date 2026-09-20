@@ -77,7 +77,7 @@ class PaperCampaignEpisodeHandoffGuardTests(unittest.TestCase):
     ):
         return handoff.start_next_episode(
             root / child_name,
-            ScientificRegistry(root / "registry.json"),
+            ScientificRegistry.initialize_pristine(root / "registry.json"),
             FactoryArtifactStore(root / "artifacts"),
             identity=environment.identity,
             as_of=_legacy.T4,

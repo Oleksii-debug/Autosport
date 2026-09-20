@@ -14,7 +14,7 @@ from datetime import datetime, timezone
 from decimal import Decimal
 from enum import StrEnum
 from pathlib import Path
-from typing import Any, Final, Iterable
+from typing import Any, Callable, Final, Iterable
 
 from .integrity import atomic_write_json
 from .learning_environment import (
@@ -907,9 +907,17 @@ class NightResearchCurriculum:
                 "dispatch requires exact durably persisted selection evidence"
             )
 
-    def dispatch(self, record: CurriculumSelectionRecord, *, deadline_at: str | None = None) -> CurriculumDispatchReceipt:
+    def dispatch(
+        self,
+        record: CurriculumSelectionRecord,
+        *,
+        deadline_at: str | None = None,
+        before_reservation: Callable[[CurriculumSelectionRecord], None] | None = None,
+    ) -> CurriculumDispatchReceipt:
         if not isinstance(record, CurriculumSelectionRecord):
             raise ResearchCurriculumError("record must be CurriculumSelectionRecord")
+        if before_reservation is not None and not callable(before_reservation):
+            raise TypeError("before_reservation must be callable")
         with WorkspaceEconomicLock(self.path.parent):
             state = self._locked_state()
             self._require_persisted_selection(state, record)
@@ -950,6 +958,13 @@ class NightResearchCurriculum:
                     raise ResearchCurriculumError("curriculum is not active")
                 if state["consumed_budget_units"] + record.budget_units > self.max_budget_units:
                     raise ResearchCurriculumError("curriculum budget exhausted")
+                # The caller guard runs under the same workspace lock immediately
+                # before this downstream PENDING reservation becomes the dispatch
+                # linearization point.  A scheduler PAUSE/STOP that committed first
+                # is therefore observed; one that waits behind this lock is later
+                # than the already-started immutable dispatch and cannot orphan it.
+                if before_reservation is not None:
+                    before_reservation(record)
                 state["dispatches"][record.selection_id] = reservation
                 state["consumed_budget_units"] += record.budget_units
                 state["state_version"] += 1
@@ -986,7 +1001,18 @@ class NightResearchCurriculum:
             self._write(state)
         return CurriculumDispatchReceipt(record.selection_id, receipt)
 
-    def select_and_dispatch(self, candidates: Iterable[ReplayCandidate], *, purpose: CurriculumPurpose, selector_policy_version: str, as_of: str, seed: int, budget_units: int, deadline_at: str | None = None) -> CurriculumDispatchReceipt:
+    def select_and_dispatch(
+        self,
+        candidates: Iterable[ReplayCandidate],
+        *,
+        purpose: CurriculumPurpose,
+        selector_policy_version: str,
+        as_of: str,
+        seed: int,
+        budget_units: int,
+        deadline_at: str | None = None,
+        before_reservation: Callable[[CurriculumSelectionRecord], None] | None = None,
+    ) -> CurriculumDispatchReceipt:
         record = self.select(
             candidates,
             purpose=purpose,
@@ -995,7 +1021,11 @@ class NightResearchCurriculum:
             seed=seed,
             budget_units=budget_units,
         )
-        return self.dispatch(record, deadline_at=deadline_at)
+        return self.dispatch(
+            record,
+            deadline_at=deadline_at,
+            before_reservation=before_reservation,
+        )
 
     def record_outcome(self, selection_id: str, *, outcome: CurriculumOutcome, at: str, scientific_evidence_id: str | None = None) -> None:
         _sha(selection_id, "selection_id")

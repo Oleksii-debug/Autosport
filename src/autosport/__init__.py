@@ -15,6 +15,10 @@ from . import _voc_admission_identity_guard as _voc_admission_identity_guard  # 
 # after restart, but historical requests never become generically live again.
 from . import _voc_restart_publication_guard as _voc_restart_publication_guard  # noqa: F401,E402
 
+# Once both paired shadow outputs are canonical, freeze the pre-outcome scoring
+# record from product-owned router authority instead of caller-authored values.
+from . import _voc_product_evidence_guard as _voc_product_evidence_guard  # noqa: F401,E402
+
 # Provider completeness is positive only for an exact live canonical acquisition.
 # Local persisted bytes/journals remain integrity evidence and fail closed across
 # restart because the current provider contract supplies no non-caller-mintable

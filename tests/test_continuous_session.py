@@ -510,24 +510,6 @@ class ContinuousSessionCoordinatorTests(unittest.TestCase):
 
             ledger = JsonlDecisionLedger(root / "decisions.jsonl")
             decision_action = "OPEN_PAPER_VALUE_TICKET"
-            decision = DecisionRecord(
-                replay_run_id="paper-learning-run",
-                agent="paper-learning-fixture",
-                observed_ts="2026-09-19T21:19:00+00:00",
-                action=decision_action,
-                payload={
-                    "ticket_id": ticket.ticket_id,
-                    "quote_key": leg.quote_key,
-                    "stake": str(ticket.stake),
-                },
-                context_hash="paper-learning-context",
-                decision_id="paper-learning-decision-1",
-                decision_kind=ECONOMIC_DECISION_KIND,
-            )
-            ledger.append_economic(
-                decision,
-                EconomicDecisionAuthority(goal, risk),
-            )
 
             identity = EnvironmentIdentity(
                 source_id="paper-learning-source",
@@ -560,6 +542,24 @@ class ContinuousSessionCoordinatorTests(unittest.TestCase):
                 observed_at="2026-09-19T21:19:00+00:00",
                 available_at="2026-09-19T21:19:01+00:00",
                 evidence=(("market_state", "paper-learning-snapshot"),),
+            )
+            decision = DecisionRecord(
+                replay_run_id="paper-learning-run",
+                agent="paper-learning-fixture",
+                observed_ts=observation.observed_at,
+                action=decision_action,
+                payload={
+                    "ticket_id": ticket.ticket_id,
+                    "quote_key": leg.quote_key,
+                    "stake": str(ticket.stake),
+                },
+                context_hash=observation.observation_id,
+                decision_id="paper-learning-decision-1",
+                decision_kind=ECONOMIC_DECISION_KIND,
+            )
+            ledger.append_economic(
+                decision,
+                EconomicDecisionAuthority(goal, risk),
             )
             runtime.begin_observation(
                 observation,

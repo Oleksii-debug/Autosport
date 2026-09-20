@@ -316,7 +316,11 @@ def test_bound_materialization_cannot_overwrite_concurrent_source_generation(
 
     def source_writer() -> None:
         try:
-            fresh_identity = ParticipantIdentityRegistry(identity.path)
+            # Reuse the already-canonical identity selector here. Re-opening the
+            # identity file would correctly block on the bound transaction's
+            # identity fence before this thread can reach the opponent persist
+            # attempt that this test is specifically trying to interleave.
+            fresh_identity = identity
             fresh_opponent = OpponentIntelligenceStore(opponent.path, fresh_identity)
             writer_loaded.set()
             try:

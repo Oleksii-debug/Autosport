@@ -153,8 +153,8 @@ def _authorities(
     )
     monkeypatch.setattr(
         bridge,
-        "_stable_source_account_id",
-        lambda value: stable_account_id,
+        "_stable_source_account_identity",
+        lambda value: (stable_account_id, NOW - timedelta(seconds=30)),
     )
     return source, campaign
 
@@ -183,6 +183,8 @@ def test_issue_binds_source_money_to_exact_campaign_session(
     assert evidence.amount == Decimal("2.25")
     assert evidence.currency == "EUR"
     assert evidence.incurred_at == receipt.settled_at
+    assert evidence.available_at == NOW - timedelta(seconds=30)
+    assert evidence.observed_at == NOW - timedelta(seconds=30)
     assert evidence.source.evidence_id == receipt.receipt_id
     assert evidence.source.sha256 == receipt.record_sha256
     assert {(value.kind, value.evidence_id) for value in evidence.memberships} == {
@@ -236,7 +238,11 @@ def test_account_or_market_mismatch_fails_closed(
             as_of=NOW,
         )
 
-    monkeypatch.setattr(bridge, "_stable_source_account_id", lambda value: STABLE_ACCOUNT)
+    monkeypatch.setattr(
+        bridge,
+        "_stable_source_account_identity",
+        lambda value: (STABLE_ACCOUNT, NOW - timedelta(seconds=30)),
+    )
     with pytest.raises(
         bridge.BetfairCommissionCostEvidenceError,
         match="commission market",
@@ -251,7 +257,7 @@ def test_account_or_market_mismatch_fails_closed(
         )
 
 
-def test_future_scope_and_corrections_do_not_backfill_cost_truth(
+def test_future_scope_account_identity_and_corrections_do_not_backfill_cost_truth(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     receipt = _receipt()
@@ -270,6 +276,29 @@ def test_future_scope_and_corrections_do_not_backfill_cost_truth(
             as_of=NOW,
         )
 
+    monkeypatch.setattr(
+        bridge,
+        "_stable_source_account_identity",
+        lambda value: (STABLE_ACCOUNT, NOW + timedelta(seconds=1)),
+    )
+    with pytest.raises(
+        bridge.BetfairCommissionCostEvidenceError,
+        match="future account-identity verification",
+    ):
+        bridge.issue_betfair_commission_cost_evidence(
+            source=source,
+            campaign=campaign,
+            provider_scope=_scope(),
+            receipt_id=receipt.receipt_id,
+            record_sha256=receipt.record_sha256,
+            as_of=NOW,
+        )
+
+    monkeypatch.setattr(
+        bridge,
+        "_stable_source_account_identity",
+        lambda value: (STABLE_ACCOUNT, NOW - timedelta(seconds=30)),
+    )
     corrected = _receipt(supersedes_receipt_id="f" * 64)
     monkeypatch.setattr(
         BetfairMarketCommissionAuthority,

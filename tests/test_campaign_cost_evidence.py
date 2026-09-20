@@ -166,7 +166,7 @@ def _complete_costs(*, provider_amount: Decimal = Decimal("2.5")) -> tuple[CostE
             source=_source("fixed-zero", "5"),
         ),
     )
-    assert tuple(sorted(item.cost_class for item in values, key=lambda item: item.value)) == REQUIRED_COST_CLASSES
+    assert tuple(sorted((item.cost_class for item in values), key=lambda item: item.value)) == REQUIRED_COST_CLASSES
     return tuple(sorted(values, key=lambda item: item.cost_evidence_id))
 
 

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
@@ -10,7 +11,13 @@ import os
 from pathlib import Path
 import re
 import tempfile
-from typing import Any, Mapping, Protocol
+import threading
+from typing import Any, Iterator, Mapping, Protocol
+
+if os.name == "nt":
+    import msvcrt
+else:
+    import fcntl
 
 from .campaign_cost_evidence import CostEvidence, CostSourceRef
 from .campaign_economic_authority import FinalizedCampaignAuthority
@@ -21,6 +28,9 @@ _SOURCE_PREFIX = "economics.monetary-source.v2"
 _ALLOCATION_PREFIX = "economics.monetary-allocation.v2"
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _CURRENCY = re.compile(r"^[A-Z]{3}$")
+_STORE_LOCKS_GUARD = threading.Lock()
+_STORE_LOCKS: dict[str, threading.RLock] = {}
+_STORE_LOCK_LOCAL = threading.local()
 
 
 class MonetaryAuthorityError(ValueError):
@@ -355,13 +365,17 @@ class MonetaryCostAuthority:
     ) -> None:
         self.root = Path(root).absolute()
         self.root.mkdir(parents=True, exist_ok=True)
+        self._store_path = self.root / "monetary-cost-authority.json"
+        self._store_sha256: str | None = None
         self._resolvers = dict(source_resolvers)
         self._allocation_resolver = allocation_resolver
         self._sources: dict[
             tuple[MonetarySourceClass, str, str], MonetarySourceRecord
         ] = {}
         self._allocations: dict[str, SharedAllocationSnapshot] = {}
-        self._load()
+        with _durable_store_lock(self._store_path):
+            self._load()
+            self._store_sha256 = _sha256_path(self._store_path)
 
     def capture_source(
         self,
@@ -418,27 +432,29 @@ class MonetaryCostAuthority:
             raise MonetaryAuthorityError(
                 "future-available allocation cannot be captured"
             )
-        self._validate_allocation_source(allocation)
-        if any(
-            previous.source_ref == allocation.source_ref
-            and previous != allocation
-            for previous in self._allocations.values()
-        ):
-            raise MonetaryAuthorityError(
-                "source cannot have competing allocations"
-            )
-        existing = self._allocations.get(allocation.sha256)
-        if existing is not None:
-            if existing != allocation:
-                raise MonetaryAuthorityError("immutable allocation identity changed")
+        with _durable_store_lock(self._store_path):
+            self._assert_store_generation()
+            self._validate_allocation_source(allocation)
+            if any(
+                previous.source_ref == allocation.source_ref
+                and previous != allocation
+                for previous in self._allocations.values()
+            ):
+                raise MonetaryAuthorityError(
+                    "source cannot have competing allocations"
+                )
+            existing = self._allocations.get(allocation.sha256)
+            if existing is not None:
+                if existing != allocation:
+                    raise MonetaryAuthorityError("immutable allocation identity changed")
+                return allocation.ref
+            self._allocations[allocation.sha256] = allocation
+            try:
+                self._persist()
+            except Exception:
+                del self._allocations[allocation.sha256]
+                raise
             return allocation.ref
-        self._allocations[allocation.sha256] = allocation
-        try:
-            self._persist()
-        except Exception:
-            del self._allocations[allocation.sha256]
-            raise
-        return allocation.ref
 
     def resolve_source(
         self,
@@ -491,19 +507,21 @@ class MonetaryCostAuthority:
                 "generic monetary cache cannot store incurred truth"
             )
         key = (record.source_class, item.authority_id, item.evidence_id)
-        previous = self._sources.get(key)
-        if previous is not None:
-            if previous != record:
-                raise MonetaryAuthorityError("immutable source identity changed")
-            return
+        with _durable_store_lock(self._store_path):
+            self._assert_store_generation()
+            previous = self._sources.get(key)
+            if previous is not None:
+                if previous != record:
+                    raise MonetaryAuthorityError("immutable source identity changed")
+                return
 
-        self._sources[key] = record
-        try:
-            self._validate_correction_graph()
-            self._persist()
-        except Exception:
-            del self._sources[key]
-            raise
+            self._sources[key] = record
+            try:
+                self._validate_correction_graph()
+                self._persist()
+            except Exception:
+                del self._sources[key]
+                raise
 
     def _validate_correction_graph(self) -> None:
         """Apply the same correction invariants to live and durable state."""
@@ -541,6 +559,10 @@ class MonetaryCostAuthority:
             ):
                 raise MonetaryAuthorityError(
                     "correction cannot rewrite currency or applicability"
+                )
+            if item.available_at < old.available_at:
+                raise MonetaryAuthorityError(
+                    "correction availability cannot precede predecessor"
                 )
             previous_child = child_by_predecessor.get(predecessor_key)
             if previous_child is not None and previous_child != key:
@@ -609,6 +631,10 @@ class MonetaryCostAuthority:
             raise MonetaryAuthorityError(
                 "allocation must cover source campaigns exactly"
             )
+        if allocation.available_at < source.snapshot.available_at:
+            raise MonetaryAuthorityError(
+                "allocation availability cannot precede source"
+            )
         return source
 
     def _superseder(
@@ -631,9 +657,15 @@ class MonetaryCostAuthority:
             raise MonetaryAuthorityError("correction lineage branches")
         return candidates[0] if candidates else None
 
+    def _assert_store_generation(self) -> None:
+        if _sha256_path(self._store_path) != self._store_sha256:
+            raise MonetaryAuthorityError(
+                "monetary authority cache changed since load; reopen before mutation"
+            )
+
     def _persist(self) -> None:
         _atomic_json(
-            self.root / "monetary-cost-authority.json",
+            self._store_path,
             {
                 "schema_version": SCHEMA_VERSION,
                 "authoritative_incurred": False,
@@ -653,9 +685,10 @@ class MonetaryCostAuthority:
                 ],
             },
         )
+        self._store_sha256 = _sha256_path(self._store_path)
 
     def _load(self) -> None:
-        path = self.root / "monetary-cost-authority.json"
+        path = self._store_path
         if not path.exists():
             return
         try:
@@ -725,6 +758,92 @@ class MonetaryCostAuthority:
                     "durable source has competing allocations"
                 )
             self._allocations[allocation.sha256] = allocation
+
+
+def _resolved_key(path: Path) -> str:
+    try:
+        return str(path.resolve(strict=False))
+    except OSError:
+        return str(path.absolute())
+
+
+def _thread_lock_for(path: Path) -> threading.RLock:
+    key = _resolved_key(path)
+    with _STORE_LOCKS_GUARD:
+        lock = _STORE_LOCKS.get(key)
+        if lock is None:
+            lock = threading.RLock()
+            _STORE_LOCKS[key] = lock
+        return lock
+
+
+def _lock_handle(handle) -> None:
+    if os.name == "nt":
+        handle.seek(0, os.SEEK_END)
+        if handle.tell() == 0:
+            handle.write(b"\0")
+            handle.flush()
+            os.fsync(handle.fileno())
+        handle.seek(0)
+        msvcrt.locking(handle.fileno(), msvcrt.LK_LOCK, 1)
+    else:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+
+
+def _unlock_handle(handle) -> None:
+    if os.name == "nt":
+        handle.seek(0)
+        msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+    else:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
+
+@contextmanager
+def _durable_store_lock(path: Path) -> Iterator[None]:
+    """Serialize one cache generation transaction across threads/processes."""
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    key = _resolved_key(path)
+    thread_lock = _thread_lock_for(path)
+    with thread_lock:
+        held = getattr(_STORE_LOCK_LOCAL, "held", None)
+        if held is None:
+            held = {}
+            _STORE_LOCK_LOCAL.held = held
+        current = held.get(key)
+        if current is not None:
+            current[0] += 1
+            try:
+                yield
+            finally:
+                current[0] -= 1
+            return
+
+        lock_path = path.with_name(f".{path.name}.lock")
+        handle = lock_path.open("a+b")
+        try:
+            _lock_handle(handle)
+            held[key] = [1, handle]
+            try:
+                yield
+            finally:
+                del held[key]
+                _unlock_handle(handle)
+        finally:
+            handle.close()
+
+
+def _sha256_path(path: Path) -> str | None:
+    try:
+        if not path.exists():
+            return None
+        if not path.is_file():
+            raise MonetaryAuthorityError("monetary authority cache path is not a file")
+        return hashlib.sha256(path.read_bytes()).hexdigest()
+    except MonetaryAuthorityError:
+        raise
+    except OSError as exc:
+        raise MonetaryAuthorityError("cannot verify monetary authority cache generation") from exc
 
 
 def _text(value: str, label: str) -> None:

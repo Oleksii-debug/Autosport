@@ -1,24 +1,17 @@
 from __future__ import annotations
 
-"""Seal durable provider-origin receipt issuance behind canonical capture authority.
+"""Seal complete-board provider authority behind canonical acquisition boundaries.
 
 The generic monotonic authority is caller-constructible and remains only a rollback
-fence. Provider origin is a separate trust decision: a durable receipt may be minted
-only while the exact in-process snapshot capability issued by the fixed production
-acquisition path is live.
+fence. Provider origin is a separate trust decision: an in-process capability is
+minted only by the fixed production capture path or after restart verification of an
+already-authenticated durable receipt plus monotonic history. Durable receipt signing
+is then gated by that exact-object capability.
 
-The receipt verifier remains restart-capable, but the consumer-facing evidence store
-no longer returns the machine signing key, exposes a generic receipt signer, or
-exposes the credential/receipt trust-root paths. Credential IO and signing live in
-an installation-local closure used only by the capability-gated writer and the
-restart verifier.
-
-Provider-origin credentials intentionally do *not* use
-``AUTOSPORT_MONOTONIC_AUTHORITY_ROOT`` (nor a constructor ``authority_root``). Those
-selectors exist for the generic rollback journal and are therefore caller-controlled
-by design. The provider receipt instead uses an Autosport-owned per-user application
-state location derived from the OS account home and rejects any workspace that would
-contain, or be contained by, that trust root.
+Consumer code cannot mutate the capability registry, call the former ``_remember``
+issuer, obtain receipt signing material, invoke a generic receipt signer, or select
+the provider credential root. The public/test-configurable generic monotonic root
+continues to fence rollback only.
 """
 
 import hashlib
@@ -26,7 +19,9 @@ import hmac
 import os
 import secrets
 import stat
+import weakref
 from pathlib import Path
+from types import MappingProxyType
 from typing import Mapping
 
 from . import provider_observation_authority as provider
@@ -38,6 +33,88 @@ def _install_guard() -> None:
     if getattr(store_type._write_receipt, "_sealed_provider_receipt_issuer", False):
         return
 
+    # ------------------------------------------------------------------
+    # Ephemeral exact-object authority.
+    #
+    # The predecessor kept both its issuer (_remember) and mutable registry
+    # (_ISSUED) in module globals. Either was enough for ordinary consumer code to
+    # manufacture an in-process capability for a caller-created snapshot. Keep the
+    # mutable registry and issuer only in this lexical scope; expose at most a
+    # read-only diagnostic view of membership.
+    # ------------------------------------------------------------------
+    issued: dict[int, tuple[weakref.ReferenceType, str]] = {}
+
+    def forget_issued(snapshot_id: int, reference: weakref.ReferenceType) -> None:
+        current = issued.get(snapshot_id)
+        if current is not None and current[0] is reference:
+            issued.pop(snapshot_id, None)
+
+    def issue_snapshot(snapshot: provider.CompleteGameBoardSnapshot):
+        snapshot_id = id(snapshot)
+        reference = weakref.ref(
+            snapshot,
+            lambda current, snapshot_id=snapshot_id: forget_issued(snapshot_id, current),
+        )
+        issued[snapshot_id] = (reference, snapshot.evidence_sha256)
+        return snapshot
+
+    def assert_authoritative(snapshot: provider.CompleteGameBoardSnapshot) -> None:
+        if not isinstance(snapshot, provider.CompleteGameBoardSnapshot):
+            raise provider.ProviderObservationUnsupportedError(
+                "complete provider authority requires CompleteGameBoardSnapshot"
+            )
+        current = issued.get(id(snapshot))
+        if (
+            current is None
+            or current[0]() is not snapshot
+            or current[1] != snapshot.evidence_sha256
+        ):
+            raise provider.ProviderObservationUnsupportedError(
+                "snapshot was not issued by canonical provider acquisition evidence"
+            )
+
+    def deny_direct_issuance(*args, **kwargs):
+        del args, kwargs
+        raise provider.ProviderObservationUnsupportedError(
+            "provider authority issuance is not a consumer API"
+        )
+
+    def capture_parlay_complete_game_board(
+        *,
+        api_key: str,
+        request: provider.CompleteGameBoardRequest,
+        timeout_seconds: float = 10.0,
+    ) -> provider.CompleteGameBoardSnapshot:
+        """Acquire and issue only through the fixed production Parlay boundary."""
+
+        if not isinstance(api_key, str) or not api_key or api_key != api_key.strip():
+            raise ValueError("api_key must be non-empty trimmed text")
+        if any(character.isspace() for character in api_key):
+            raise ValueError("api_key must not contain whitespace")
+        if not isinstance(request, provider.CompleteGameBoardRequest):
+            raise TypeError("request must be CompleteGameBoardRequest")
+        if isinstance(timeout_seconds, bool) or not isinstance(
+            timeout_seconds, (int, float)
+        ):
+            raise ValueError("timeout_seconds must be a positive finite number")
+        timeout = float(timeout_seconds)
+        if not provider.math.isfinite(timeout) or timeout <= 0:
+            raise ValueError("timeout_seconds must be a positive finite number")
+        frame = provider._read_production_initial_state(
+            request,
+            api_key=api_key,
+            timeout_seconds=timeout,
+        )
+        snapshot = provider.CompleteGameBoardSnapshot(
+            request=request,
+            captured_at=provider._default_clock(),
+            frame_json=provider._canonical_json(dict(frame)),
+        )
+        return issue_snapshot(snapshot)
+
+    # ------------------------------------------------------------------
+    # Durable provider-origin receipt.
+    # ------------------------------------------------------------------
     def receipt_root(store) -> Path:
         # Do not call default/resolve_monotonic_authority_root here. In particular,
         # AUTOSPORT_MONOTONIC_AUTHORITY_ROOT is an intentional caller/test seam for
@@ -176,10 +253,7 @@ def _install_guard() -> None:
         return secure_existing_key(path)
 
     def write_receipt(store, snapshot) -> None:
-        # This exact-object capability can be obtained only from the fixed canonical
-        # acquisition path (or from a prior receipt+journal verified restart load).
-        # save() calls this writer only after asserting the same capability.
-        provider.assert_complete_game_board_authoritative(snapshot)
+        assert_authoritative(snapshot)
         unsigned = unsigned_receipt(store, snapshot)
         key = load_key(store, create=True)
         receipt = dict(unsigned)
@@ -214,6 +288,23 @@ def _install_guard() -> None:
                 "provider acquisition receipt authentication failed"
             )
 
+    def load_authoritative(store, evidence_sha256: str):
+        """Re-issue only after durable receipt and rollback-fence verification."""
+
+        path = store._path(evidence_sha256)
+        with provider.WorkspaceEconomicLock(store.workspace):
+            snapshot = store._read_path(path)
+            if snapshot.evidence_sha256 != provider._sha(
+                evidence_sha256, "evidence_sha256"
+            ):
+                raise provider.ProviderObservationIntegrityError(
+                    "content-addressed provider evidence path does not match payload"
+                )
+            verify_receipt(store, snapshot)
+            authority = store._authority(snapshot.evidence_sha256)
+            store._recover_provenance(authority, snapshot)
+        return issue_snapshot(snapshot)
+
     def deny_consumer_credential_access(*args, **kwargs):
         del args, kwargs
         raise provider.ProviderObservationUnsupportedError(
@@ -222,10 +313,17 @@ def _install_guard() -> None:
 
     setattr(write_receipt, "_sealed_provider_receipt_issuer", True)
     setattr(verify_receipt, "_sealed_provider_receipt_verifier", True)
+    setattr(capture_parlay_complete_game_board, "_sealed_provider_capture_issuer", True)
+    setattr(load_authoritative, "_sealed_provider_restart_issuer", True)
 
-    # The only positive signing operation is the exact-object capability-gated
-    # writer above. These legacy helpers previously exposed enough material to
-    # manufacture a production-root receipt for caller-created bytes.
+    # Replace every ordinary consumer issuance/signing primitive. The methods that
+    # remain callable either perform the fixed production network acquisition or
+    # first verify the durable origin receipt plus generic rollback history.
+    provider._ISSUED = MappingProxyType(issued)
+    provider._remember = deny_direct_issuance
+    provider.assert_complete_game_board_authoritative = assert_authoritative
+    provider.capture_parlay_complete_game_board = capture_parlay_complete_game_board
+    store_type.load = load_authoritative
     store_type._write_receipt = write_receipt
     store_type._verify_receipt = verify_receipt
     store_type._receipt_root = deny_consumer_credential_access

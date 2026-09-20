@@ -2,20 +2,25 @@ from __future__ import annotations
 
 import pytest
 
+from autosport.dataset_snapshot_lineage import (
+    DatasetSnapshotLineageAuthority,
+    membership_manifest_sha256,
+)
 from autosport.point_in_time_evidence import (
     HoldoutAlreadyConsumedError,
     HoldoutConsumptionLedger,
 )
-from autosport.scientific_registry import DatasetSnapshot
+from autosport.scientific_registry import DatasetSnapshot, ScientificRegistry
 
 
-_SHA = "c" * 64
+_MEMBER_SHA = "c" * 64
+_MANIFEST_SHA = membership_manifest_sha256((_MEMBER_SHA,))
 
 
 def _snapshot(snapshot_id: str) -> DatasetSnapshot:
     return DatasetSnapshot(
         dataset_snapshot_id=snapshot_id,
-        manifest_sha256=_SHA,
+        manifest_sha256=_MANIFEST_SHA,
         source_identity="provider:canonical-feed",
         license_identity="terms:v1",
         causal_cutoff="2026-09-20T10:00:00Z",
@@ -23,13 +28,34 @@ def _snapshot(snapshot_id: str) -> DatasetSnapshot:
     )
 
 
+def _canonical_lineage(tmp_path):
+    first = _snapshot("snapshot-a")
+    alias = _snapshot("renamed-alias")
+    registry = ScientificRegistry.initialize_pristine(tmp_path / "scientific-registry.json")
+    registry.append(first)
+    registry.append(alias)
+    lineage = DatasetSnapshotLineageAuthority.initialize_pristine(
+        tmp_path / "dataset-snapshot-lineage.json",
+        registry,
+        authority_root=tmp_path.parent / f"{tmp_path.name}-lineage-authority",
+    )
+    lineage.register(snapshot_id=first.dataset_snapshot_id, member_sha256=(_MEMBER_SHA,))
+    lineage.register(
+        snapshot_id=alias.dataset_snapshot_id,
+        member_sha256=(_MEMBER_SHA,),
+        parent_snapshot_id=first.dataset_snapshot_id,
+    )
+    return lineage, first, alias
+
+
 def test_stale_ledger_instance_reloads_before_consuming(tmp_path) -> None:
     path = tmp_path / "holdout.json"
-    first_process_view = HoldoutConsumptionLedger(path)
-    stale_process_view = HoldoutConsumptionLedger(path)
+    lineage, first, alias = _canonical_lineage(tmp_path)
+    first_process_view = HoldoutConsumptionLedger(path, lineage_authority=lineage)
+    stale_process_view = HoldoutConsumptionLedger(path, lineage_authority=lineage)
 
     first_process_view.consume(
-        dataset_snapshot=_snapshot("snapshot-a"),
+        dataset_snapshot=first,
         research_protocol_id="protocol-42",
         confirmation_trial_family_id="family-9",
         consumer_identity="experiment:a",
@@ -39,7 +65,7 @@ def test_stale_ledger_instance_reloads_before_consuming(tmp_path) -> None:
 
     with pytest.raises(HoldoutAlreadyConsumedError, match="already consumed"):
         stale_process_view.consume(
-            dataset_snapshot=_snapshot("renamed-alias"),
+            dataset_snapshot=alias,
             research_protocol_id="protocol-42",
             confirmation_trial_family_id="family-9",
             consumer_identity="experiment:b",
@@ -50,11 +76,12 @@ def test_stale_ledger_instance_reloads_before_consuming(tmp_path) -> None:
 
 def test_stale_ledger_instance_observes_consumption_on_read(tmp_path) -> None:
     path = tmp_path / "holdout.json"
-    first_process_view = HoldoutConsumptionLedger(path)
-    stale_process_view = HoldoutConsumptionLedger(path)
+    lineage, first, _ = _canonical_lineage(tmp_path)
+    first_process_view = HoldoutConsumptionLedger(path, lineage_authority=lineage)
+    stale_process_view = HoldoutConsumptionLedger(path, lineage_authority=lineage)
 
     first_process_view.consume(
-        dataset_snapshot=_snapshot("snapshot-a"),
+        dataset_snapshot=first,
         research_protocol_id="protocol-42",
         confirmation_trial_family_id="family-9",
         consumer_identity="experiment:a",

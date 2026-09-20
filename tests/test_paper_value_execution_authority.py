@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from datetime import timedelta
 from decimal import Decimal
 
@@ -103,6 +104,20 @@ def _executed_general_action(tmp_path):
     agent.on_market_event(event, context)
     assert len(book.tickets) == 1
     return book, runtime, event, ledger, policy, context
+
+
+def _restarted_general_context(tmp_path, policy: PaperRiskPolicy):
+    book = PaperBook.load(tmp_path / "paper-book.json")
+    runtime = _runtime(tmp_path, book)
+    ledger = JsonlDecisionLedger(tmp_path / "decisions.jsonl")
+    context = AgentContext(
+        book,
+        replay_run_id="replay-a",
+        decision_ledger=ledger,
+        paper_execution=runtime,
+        paper_provider_accounts=(("provider-a", "account-a"),),
+    )
+    return book, runtime, context
 
 
 def test_public_paper_value_prepare_is_descriptor_only(tmp_path) -> None:
@@ -271,10 +286,11 @@ def test_canonical_goal_less_agent_path_still_executes_after_risk_pass(tmp_path)
     assert event.quote_key
 
 
-def test_durable_general_action_is_detected_before_missing_forecast_gate(tmp_path) -> None:
-    book, _, event, _, policy, context = _executed_general_action(tmp_path)
-    balance = book.balance
-    ticket_ids = tuple(book.tickets)
+def test_durable_general_action_restarts_before_missing_forecast_gate(tmp_path) -> None:
+    original_book, _, event, _, policy, _ = _executed_general_action(tmp_path)
+    balance = original_book.balance
+    ticket_ids = tuple(original_book.tickets)
+    book, runtime, context = _restarted_general_context(tmp_path, policy)
     recovering = PaperValueAgent(
         {},
         stake=Decimal("1.00"),
@@ -282,17 +298,19 @@ def test_durable_general_action_is_detected_before_missing_forecast_gate(tmp_pat
         risk_policy=policy,
     )
 
-    with pytest.raises(PaperExecutionAdoptionError, match=_GENERAL_RECOVERY_ERROR):
-        recovering.on_market_event(event, context)
+    recovering.on_market_event(event, context)
 
     assert book.balance == balance
     assert tuple(book.tickets) == ticket_ids
+    assert len(book.tickets) == 1
+    assert any(item.get("event_type") == "RUN_RESERVED" for item in runtime.ledger.events())
 
 
-def test_durable_general_action_is_detected_before_changed_edge_gate(tmp_path) -> None:
-    book, _, event, _, policy, context = _executed_general_action(tmp_path)
-    balance = book.balance
-    ticket_ids = tuple(book.tickets)
+def test_durable_general_action_restarts_before_changed_edge_gate(tmp_path) -> None:
+    original_book, _, event, _, policy, _ = _executed_general_action(tmp_path)
+    balance = original_book.balance
+    ticket_ids = tuple(original_book.tickets)
+    book, _, context = _restarted_general_context(tmp_path, policy)
     recovering = PaperValueAgent(
         {event.quote_key: _forecast(event, probability="0.40")},
         stake=Decimal("1.00"),
@@ -300,17 +318,18 @@ def test_durable_general_action_is_detected_before_changed_edge_gate(tmp_path) -
         risk_policy=policy,
     )
 
-    with pytest.raises(PaperExecutionAdoptionError, match=_GENERAL_RECOVERY_ERROR):
-        recovering.on_market_event(event, context)
+    recovering.on_market_event(event, context)
 
     assert book.balance == balance
     assert tuple(book.tickets) == ticket_ids
+    assert len(book.tickets) == 1
 
 
-def test_durable_general_action_is_detected_before_closed_status_gate(tmp_path) -> None:
-    book, _, event, _, policy, context = _executed_general_action(tmp_path)
-    balance = book.balance
-    ticket_ids = tuple(book.tickets)
+def test_durable_general_action_restarts_before_closed_status_gate(tmp_path) -> None:
+    original_book, _, event, _, policy, _ = _executed_general_action(tmp_path)
+    balance = original_book.balance
+    ticket_ids = tuple(original_book.tickets)
+    book, _, context = _restarted_general_context(tmp_path, policy)
     closed_payload = event.to_dict()
     closed_payload["status"] = "closed"
     closed_event = MarketEvent.from_dict(closed_payload)
@@ -322,8 +341,42 @@ def test_durable_general_action_is_detected_before_closed_status_gate(tmp_path) 
         risk_policy=policy,
     )
 
-    with pytest.raises(PaperExecutionAdoptionError, match=_GENERAL_RECOVERY_ERROR):
-        recovering.on_market_event(closed_event, context)
+    recovering.on_market_event(closed_event, context)
 
     assert book.balance == balance
     assert tuple(book.tickets) == ticket_ids
+    assert len(book.tickets) == 1
+
+
+def test_tampered_general_risk_admission_fails_closed_on_restart(tmp_path) -> None:
+    original_book, _, event, _, policy, _ = _executed_general_action(tmp_path)
+    witness_root = tmp_path / ".paper-value-risk-admissions"
+    witnesses = tuple(
+        path
+        for path in witness_root.glob("*.json")
+        if not path.name.endswith(".pre-action.json")
+    )
+    assert len(witnesses) == 1
+    witness = witnesses[0]
+    payload = json.loads(witness.read_text(encoding="utf-8"))
+    payload["risk_policy_sha256"] = "0" * 64
+    witness.write_text(
+        json.dumps(payload, ensure_ascii=False, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+
+    book, _, context = _restarted_general_context(tmp_path, policy)
+    recovering = PaperValueAgent(
+        {},
+        stake=Decimal("1.00"),
+        minimum_expected_profit_per_unit=Decimal("0"),
+        risk_policy=policy,
+    )
+    with pytest.raises(
+        PaperExecutionAdoptionError,
+        match="risk admission witness digest mismatch",
+    ):
+        recovering.on_market_event(event, context)
+
+    assert book.balance == original_book.balance
+    assert tuple(book.tickets) == tuple(original_book.tickets)

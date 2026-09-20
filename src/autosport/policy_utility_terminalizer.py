@@ -16,8 +16,12 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import StrEnum
+import json
+import os
 from pathlib import Path
+import tempfile
 
+from .integrity import durable_path_lock
 from .learning_environment import Action, RewardEvidence, Transition
 from .policy_update_authority import (
     UtilityBoundUpdateEvidence,
@@ -121,6 +125,86 @@ class PolicyUtilityBlockedLearningReceipt:
             )
 
 
+def _encoded_evidence_line(evidence: PolicyUtilityEvidence) -> bytes:
+    return (
+        json.dumps(
+            evidence.to_dict(),
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=True,
+            allow_nan=False,
+        )
+        + "\n"
+    ).encode("utf-8")
+
+
+def _atomic_compare_and_append(
+    store: PolicyUtilityStore,
+    evidence: PolicyUtilityEvidence,
+) -> bool:
+    """Cross-process, crash-safe compare-and-append to the canonical JSONL store.
+
+    ``PolicyUtilityStore`` predates product-level exactly-once terminalization and
+    documents cross-process fencing as a composition-root responsibility.  The
+    terminalizer is now that product boundary, so it supplies the missing durable
+    path fence and publishes a complete replacement image atomically.  A crash
+    before ``os.replace`` leaves the previous canonical image authoritative; a
+    crash after it leaves the complete successor image authoritative.  Temporary
+    files are not evidence and are ignored on restart.
+    """
+
+    path = store.path
+    path.parent.mkdir(parents=True, exist_ok=True)
+
+    with durable_path_lock(path):
+        existing = store.list()
+        for prior in existing:
+            if prior.semantic_key == evidence.semantic_key:
+                if prior.evidence_id == evidence.evidence_id:
+                    return False
+                raise PolicyUtilityError(
+                    "policy utility semantic drift for existing causal update key"
+                )
+            if prior.evidence_id == evidence.evidence_id:
+                raise PolicyUtilityError("policy utility evidence_id collision")
+
+        previous = path.read_bytes() if path.exists() else b""
+        if previous and not previous.endswith(b"\n"):
+            raise PolicyUtilityError(
+                "policy utility store lacks canonical trailing record boundary"
+            )
+
+        temporary: Path | None = None
+        try:
+            with tempfile.NamedTemporaryFile(
+                "wb",
+                dir=path.parent,
+                prefix=f".{path.name}.",
+                suffix=".tmp",
+                delete=False,
+            ) as handle:
+                temporary = Path(handle.name)
+                handle.write(previous)
+                handle.write(_encoded_evidence_line(evidence))
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temporary, path)
+            temporary = None
+        finally:
+            if temporary is not None:
+                try:
+                    temporary.unlink()
+                except FileNotFoundError:
+                    pass
+
+        persisted = store.get(evidence.evidence_id)
+        if persisted != evidence:
+            raise PolicyUtilityTerminalizationError(
+                "published policy utility evidence failed exact reload verification"
+            )
+        return True
+
+
 class PolicyUtilityTerminalizer:
     """Close incomplete policy utility evidence exactly once.
 
@@ -148,9 +232,9 @@ class PolicyUtilityTerminalizer:
     ) -> PolicyUtilityTerminalReceipt:
         """Persist one blocked/inconclusive terminal and return its receipt.
 
-        The append operation is replay-safe: the same causal semantic key and
-        digest return ``persisted=False`` on retry, while changed evidence for
-        that key fails closed inside ``PolicyUtilityStore``.
+        The append operation is replay-safe across processes and restart: the same
+        causal semantic key and digest return ``persisted=False`` on retry, while
+        changed evidence for that key fails closed before publication.
         """
 
         if type(evidence) is not PolicyUtilityEvidence:
@@ -169,7 +253,7 @@ class PolicyUtilityTerminalizer:
                 "unsupported utility completeness for terminalization"
             )
 
-        persisted = self._store.append(evidence)
+        persisted = _atomic_compare_and_append(self._store, evidence)
         return PolicyUtilityTerminalReceipt(
             evidence_id=evidence.evidence_id,
             semantic_key=evidence.semantic_key,

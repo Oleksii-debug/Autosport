@@ -96,6 +96,11 @@ class _FakeOpponentAuthority:
 class _LowLevelSportMemoryRuntime(_PublicSportMemoryRuntime):
     """Unit-test harness for deterministic core semantics, not a product API."""
 
+    def _require_durable_positive_authority(self) -> None:
+        # Unit tests exercise the deterministic storage engine directly. Product
+        # authority remains default-deny on the actual public runtime.
+        return None
+
     def materialize(self, *args, **kwargs):
         return _guard._ORIGINAL_MATERIALIZE(self, *args, **kwargs)
 

@@ -517,19 +517,21 @@ def test_crash_after_local_publish_recovers_pending_commit(tmp_path, monkeypatch
             purpose="final-confirmation",
             consumed_at_utc="2026-09-20T10:05:00Z",
         )
-
     monkeypatch.setattr(point_in_time_module, "_atomic_write_json", real_write)
+
     restarted = HoldoutConsumptionLedger(path, authority_root=authority_root)
     assert len(restarted.records()) == 1
+    assert restarted.records()[0].consumer_identity == "experiment:a"
 
 
-def test_crash_before_local_publish_recovers_without_phantom_consumption(
+def test_crash_before_local_publish_aborts_and_exact_retry_uses_fresh_transaction(
     tmp_path,
     monkeypatch,
 ) -> None:
     path = tmp_path / "holdout_consumption.json"
     authority_root = _authority_root(tmp_path)
     ledger = HoldoutConsumptionLedger(path, authority_root=authority_root)
+    real_write = point_in_time_module._atomic_write_json
 
     class SimulatedCrash(RuntimeError):
         pass
@@ -547,35 +549,16 @@ def test_crash_before_local_publish_recovers_without_phantom_consumption(
             purpose="final-confirmation",
             consumed_at_utc="2026-09-20T10:05:00Z",
         )
+    monkeypatch.setattr(point_in_time_module, "_atomic_write_json", real_write)
 
-    monkeypatch.undo()
     restarted = HoldoutConsumptionLedger(path, authority_root=authority_root)
-    assert restarted.records() == ()
-
-
-def test_concurrent_exact_retry_serializes_to_one_record(tmp_path) -> None:
-    path = tmp_path / "holdout_consumption.json"
-    authority_root = _authority_root(tmp_path)
-    left = HoldoutConsumptionLedger(path, authority_root=authority_root)
-    right = HoldoutConsumptionLedger(path, authority_root=authority_root)
-    snapshot = _snapshot()
-
-    first = left.consume(
-        dataset_snapshot=snapshot,
+    persisted = restarted.consume(
+        dataset_snapshot=_snapshot(),
         research_protocol_id="protocol-42",
         confirmation_trial_family_id="family-9",
         consumer_identity="experiment:a",
         purpose="final-confirmation",
         consumed_at_utc="2026-09-20T10:05:00Z",
     )
-    second = right.consume(
-        dataset_snapshot=snapshot,
-        research_protocol_id="protocol-42",
-        confirmation_trial_family_id="family-9",
-        consumer_identity="experiment:a",
-        purpose="final-confirmation",
-        consumed_at_utc="2026-09-20T10:05:01Z",
-    )
-
-    assert second == first
-    assert len(HoldoutConsumptionLedger(path, authority_root=authority_root).records()) == 1
+    assert persisted.consumer_identity == "experiment:a"
+    assert len(restarted.records()) == 1

@@ -20,7 +20,10 @@ from autosport.learning_environment import (
     Observation,
 )
 from autosport.paper import PaperBook
-from autosport.paper_campaign_admission import PaperCampaignAdmissionCoordinator
+from autosport.paper_campaign_admission import (
+    PaperCampaignAdmissionCoordinator,
+    PaperCampaignAdmissionError,
+)
 from autosport.paper_campaign_runtime import PaperCampaignRuntime
 from autosport.paper_settlement_learning import PaperSettlementLearningBridge
 from autosport.risk import PaperRiskPolicy
@@ -188,6 +191,99 @@ class PaperCampaignAdmissionWitnessRecoveryTests(unittest.TestCase):
                 )
             )
             self.assertEqual(state["admissions"]["witness-admission"]["phase"], "COMMITTED")
+
+    @staticmethod
+    def _partial_candidate_then_error(path: Path, payload: str) -> None:
+        prefix = payload[: max(1, len(payload) // 2)]
+        with path.open("w", encoding="utf-8", newline="\n") as handle:
+            handle.write(prefix)
+            handle.flush()
+            os.fsync(handle.fileno())
+        raise OSError("simulated short witness candidate write")
+
+    def test_partial_prepared_witness_candidate_never_corrupts_live_authority(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            fixture = _Fixture(Path(directory))
+            coordinator = fixture.coordinator()
+            witness_before = coordinator._witness_path.read_bytes()
+
+            with patch.object(
+                coordinator,
+                "_write_witness_candidate",
+                side_effect=self._partial_candidate_then_error,
+            ):
+                with self.assertRaisesRegex(
+                    PaperCampaignAdmissionError,
+                    "durability barrier failed",
+                ):
+                    fixture.admit(coordinator)
+
+            self.assertEqual(coordinator._witness_path.read_bytes(), witness_before)
+            receipt = fixture.admit(fixture.coordinator(resumed=True))
+            fixture.assert_one_effect(self, receipt.action_id)
+
+    def test_partial_committed_witness_candidate_recovers_exactly_once(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            fixture = _Fixture(Path(directory))
+            coordinator = fixture.coordinator()
+            original = coordinator._write_witness_candidate
+
+            def fail_only_commit(path: Path, payload: str) -> None:
+                last = json.loads(payload.rstrip().splitlines()[-1])
+                if last["event"] == "COMMIT" and last["generation"] > 1:
+                    self._partial_candidate_then_error(path, payload)
+                original(path, payload)
+
+            with patch.object(
+                coordinator,
+                "_write_witness_candidate",
+                side_effect=fail_only_commit,
+            ):
+                with self.assertRaisesRegex(
+                    PaperCampaignAdmissionError,
+                    "durability barrier failed",
+                ):
+                    fixture.admit(coordinator)
+
+            durable_action_id = AgentLoopRuntime(
+                fixture.workspace / "agent-loop.json"
+            ).snapshot().action_id
+            self.assertIsNotNone(durable_action_id)
+            fixture.assert_one_effect(self, durable_action_id)
+
+            receipt = fixture.admit(fixture.coordinator(resumed=True))
+            self.assertEqual(receipt.action_id, durable_action_id)
+            fixture.assert_one_effect(self, durable_action_id)
+
+    def test_complete_witness_record_corruption_still_fails_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            fixture = _Fixture(Path(directory))
+            coordinator = fixture.coordinator()
+            lines = coordinator._witness_path.read_text(encoding="utf-8").splitlines()
+            first = json.loads(lines[0])
+            first["state_sha256"] = "0" * 64
+            lines[0] = json.dumps(first, sort_keys=True, separators=(",", ":"))
+            coordinator._witness_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+            with self.assertRaisesRegex(
+                PaperCampaignAdmissionError,
+                "witness digest mismatch",
+            ):
+                fixture.coordinator(resumed=True)
+
+    def test_valid_old_complete_witness_prefix_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            fixture = _Fixture(Path(directory))
+            coordinator = fixture.coordinator()
+            old_witness = coordinator._witness_path.read_bytes()
+            fixture.admit(coordinator)
+            coordinator._witness_path.write_bytes(old_witness)
+
+            with self.assertRaisesRegex(
+                PaperCampaignAdmissionError,
+                "older than monotonic authority",
+            ):
+                fixture.coordinator(resumed=True)
 
     def test_committed_witness_fsync_before_local_replace_recovers_exactly_once(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

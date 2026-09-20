@@ -10,6 +10,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import tempfile
 from dataclasses import dataclass
 from decimal import Decimal
 from pathlib import Path
@@ -421,18 +422,50 @@ class PaperCampaignAdmissionCoordinator:
             ),
         }
         record = {**body, "witness_sha256": _digest(body)}
-        existed = self._witness_path.exists()
+        self._publish_witness_records((*records, record))
+
+    @staticmethod
+    def _write_witness_candidate(path: Path, payload: str) -> None:
+        with path.open("w", encoding="utf-8", newline="\n") as handle:
+            handle.write(payload)
+            handle.flush()
+            os.fsync(handle.fileno())
+
+    def _publish_witness_records(
+        self,
+        records: tuple[dict[str, object], ...],
+    ) -> None:
+        """Publish the complete witness journal atomically.
+
+        The live authority file is never appended in place.  A short/partial write
+        can therefore damage only the temporary candidate; restart continues from
+        the last fully published witness prefix.
+        """
+
+        payload = "".join(_json(record) + "\n" for record in records)
+        temporary: Path | None = None
         try:
-            with self._witness_path.open("a", encoding="utf-8", newline="\n") as handle:
-                handle.write(_json(record) + "\n")
-                handle.flush()
-                os.fsync(handle.fileno())
-            if not existed:
-                _sync_authority_directory(self._witness_path.parent)
+            fd, name = tempfile.mkstemp(
+                dir=self._witness_path.parent,
+                prefix=f".{self._witness_path.name}.",
+                suffix=".tmp",
+            )
+            os.close(fd)
+            temporary = Path(name)
+            self._write_witness_candidate(temporary, payload)
+            os.replace(temporary, self._witness_path)
+            temporary = None
+            _sync_authority_directory(self._witness_path.parent)
         except OSError as exc:
             raise PaperCampaignAdmissionError(
                 "admission monotonic witness durability barrier failed"
             ) from exc
+        finally:
+            if temporary is not None:
+                try:
+                    temporary.unlink()
+                except FileNotFoundError:
+                    pass
 
     def _read_local(self) -> dict[str, object]:
         try:

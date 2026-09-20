@@ -29,6 +29,7 @@ from autosport.learning_environment import (
     RewardEvidence,
     Transition,
 )
+from autosport.policy_deployment import ActivationBinding, DeploymentScope
 from autosport.scientific_registry import ScientificRegistry
 from autosport.strategy_model_factory import FactoryArtifactStore
 from autosport.transparent_bandit_policy import BanditPolicyState
@@ -101,7 +102,7 @@ def _activation_authority(policy):
             "environment_sha256": policy.environment_id,
             "config_sha256": policy.config_sha256,
             "model_version_id": MODEL_ID,
-        }
+        },
     )
     model = SimpleNamespace(
         record_type="ModelVersion",
@@ -114,7 +115,7 @@ def _activation_authority(policy):
             "config_sha256": policy.config_sha256,
             "research_protocol_id": policy.protocol_id,
             "seed": policy.seed,
-        }
+        },
     )
     promotion = SimpleNamespace(
         record_type="PromotionDecision",
@@ -361,6 +362,7 @@ def test_champion_evidence_cannot_arrive_after_agent_loop_start(tmp_path):
             at=T2,
         )
 
+
 def test_resume_rejects_checkpoint_older_than_durable_agent_loop(tmp_path):
     identity = EnvironmentIdentity(
         "lawful-provider:paper",
@@ -512,3 +514,88 @@ def test_resume_rejects_checkpoint_older_than_durable_agent_loop(tmp_path):
                 admissible_actions=frozenset({"WAIT"}),
             )
 
+
+def test_direct_cross_session_call_cannot_self_authorize_scope_and_binding(tmp_path):
+    training = EnvironmentIdentity(
+        "lawful-provider:paper",
+        "champion-agent-config-v1",
+        "paper-dataset-training-v1",
+        PROTOCOL_ID,
+        T1,
+        17,
+    )
+    deployment = EnvironmentIdentity(
+        "lawful-provider:paper",
+        "champion-agent-config-v1",
+        "paper-dataset-later-v2",
+        PROTOCOL_ID,
+        T3,
+        17,
+    )
+    _, champion = _learned_champion(training)
+    registry = ScientificRegistry.initialize_pristine(tmp_path / "registry.json")
+    store = FactoryArtifactStore(tmp_path / "artifacts")
+    persist_policy_state(store, champion)
+    scope = DeploymentScope(
+        canonical_strategy_id=STRATEGY_ID,
+        sport_domain="football",
+        competition_scope="caller-invented-league",
+        market_semantics_id="caller-invented-market",
+        provider_source_class="caller-provider",
+        feature_schema_id="caller-features",
+        protocol_id=PROTOCOL_ID,
+        action_semantics_id="caller-actions",
+        reward_definition_id="caller-reward",
+        config_sha256=CONFIG_SHA256,
+    )
+    binding = ActivationBinding(
+        policy_id=champion.policy_id,
+        policy_artifact_sha256=store.sha256(
+            "transparent-bandit-policy", champion.policy_id
+        ),
+        training_environment_id=training.environment_id,
+        training_data_id=training.data_id,
+        training_dataset_record_sha256="1" * 64,
+        training_cutoff_ts=training.cutoff_ts,
+        promotion_decision_id="promotion-champion-agent-v1",
+        promotion_decision_record_sha256="6" * 64,
+        promotion_evidence_id="5" * 64,
+        promotion_evidence_record_sha256="4" * 64,
+        evaluation_bundle_id="evaluation-champion-agent-v1",
+        evaluation_bundle_record_sha256="7" * 64,
+        deployment_scope_id=scope.scope_id,
+        deployment_environment_id=deployment.environment_id,
+        deployment_data_id=deployment.data_id,
+        deployment_dataset_record_sha256="2" * 64,
+        dataset_lineage_proof_sha256="9" * 64,
+        deployment_cutoff_ts=deployment.cutoff_ts,
+        snapshot_available_at=T3,
+        activation_at=T4,
+        admissible_actions=("WAIT",),
+        economic_goal_fingerprint=GOAL_SHA256,
+        risk_fingerprint=RISK_SHA256,
+    )
+
+    with pytest.raises(
+        ChampionAgentEpisodeError,
+        match="requires canonical semantic resolver inputs",
+    ):
+        ChampionAgentEpisode.initialize_pristine(
+            tmp_path / "caller-bypass-loop.json",
+            registry,
+            store,
+            identity=deployment,
+            as_of=T4,
+            canonical_strategy_id=STRATEGY_ID,
+            config_sha256=CONFIG_SHA256,
+            episode_key="caller-bypass",
+            admissible_actions=frozenset({"WAIT"}),
+            loop_id="caller-bypass-loop",
+            economic_goal_fingerprint=GOAL_SHA256,
+            risk_fingerprint=RISK_SHA256,
+            source_sha256=SOURCE_SHA256,
+            at=T4,
+            training_identity=training,
+            deployment_scope=scope,
+            activation_binding=binding,
+        )

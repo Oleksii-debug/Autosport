@@ -406,6 +406,7 @@ class AgentLoopSnapshot:
     resume_phase: AgentLoopPhase | None
     updated_at: str
     state_sha256: str
+    activation_binding_id: str | None = None
 
 
 class AgentLoopRuntime:
@@ -431,6 +432,7 @@ class AgentLoopRuntime:
         source_sha256: str,
         config_sha256: str,
         at: str,
+        activation_binding_id: str | None = None,
     ) -> "AgentLoopRuntime":
         if not isinstance(environment_checkpoint, EnvironmentCheckpoint):
             raise TypeError("environment_checkpoint must be EnvironmentCheckpoint")
@@ -452,6 +454,10 @@ class AgentLoopRuntime:
             "source_sha256": _sha256(source_sha256, "source_sha256"),
             "config_sha256": _sha256(config_sha256, "config_sha256"),
         }
+        if activation_binding_id is not None:
+            identity["activation_binding_id"] = _sha256(
+                activation_binding_id, "activation_binding_id"
+            )
         initial = {
             "schema": AGENT_LOOP_SCHEMA,
             "schema_version": AGENT_LOOP_SCHEMA_VERSION,
@@ -595,7 +601,7 @@ class AgentLoopRuntime:
         if set(state) != required:
             raise AgentLoopError("AgentLoop state fields mismatch")
         identity = state["identity"]
-        if type(identity) is not dict or set(identity) != {
+        identity_fields = {
             "loop_id",
             "environment_id",
             "episode_id",
@@ -604,7 +610,15 @@ class AgentLoopRuntime:
             "risk_fingerprint",
             "source_sha256",
             "config_sha256",
-        }:
+        }
+        if (
+            type(identity) is not dict
+            or set(identity)
+            not in (
+                identity_fields,
+                identity_fields | {"activation_binding_id"},
+            )
+        ):
             raise AgentLoopError("AgentLoop identity fields mismatch")
         _text(identity["loop_id"], "loop_id")
         for key in (
@@ -616,6 +630,8 @@ class AgentLoopRuntime:
             "config_sha256",
         ):
             _sha256(identity[key], key)
+        if "activation_binding_id" in identity:
+            _sha256(identity["activation_binding_id"], "activation_binding_id")
         _text(identity["policy_id"], "policy_id")
         AgentLoopPhase(state["phase"])
         if (
@@ -1542,6 +1558,7 @@ class AgentLoopRuntime:
             ),
             updated_at=state["updated_at"],
             state_sha256=state["state_sha256"],
+            activation_binding_id=identity.get("activation_binding_id"),
         )
 
     def invoke_skill(

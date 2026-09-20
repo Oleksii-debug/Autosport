@@ -33,6 +33,7 @@ from autosport.voc_evaluation import (
 from autosport.voc_outcome_scoring import (
     CanonicalOutcomeDerivedVOCScoreAuthority,
     CanonicalVOCOutcomeSource,
+    append_paired_voc_admission,
     build_canonical_voc_authority_resolver,
 )
 
@@ -961,7 +962,57 @@ class CanonicalOutcomeDerivedVOCScoreAuthorityTests(unittest.TestCase):
     def test_positive_voc_accepts_exact_preoutcome_router_shadow_execution(self):
         paired = self._evaluation()
         self.registry.append(paired)
+        successful = next(
+            record
+            for record in self.ledger.verified_records()
+            if getattr(record, "decision_id", None)
+            == f"decision-{paired.evaluation_id}"
+        )
         router = self._precommit_router(paired)
+        append_paired_voc_admission(
+            self.ledger,
+            admission_id=f"explicit:{paired.evaluation_id}",
+            decision_context_sha256=paired.decision_context_sha256,
+            decision_input_sha256=paired.decision_input_sha256,
+            decision_deadline=paired.decision_deadline,
+            research_protocol_id=paired.research_protocol_id,
+            cohort_id="voc-cohort-derived",
+            task_class=paired.task_class,
+            scope={
+                "sport_id": paired.sport_id,
+                "league_id": paired.league_id,
+                "regime_id": paired.regime_id,
+                "urgency_id": paired.urgency_id,
+                "contradiction_state": paired.contradiction_state,
+            },
+            baseline_compute_identity={
+                "candidate_id": paired.baseline_candidate_id,
+                "backend_id": paired.baseline_backend_id,
+                "model_id": paired.baseline_model_id,
+                "config_sha256": paired.baseline_config_sha256,
+            },
+            challenger_compute_identity={
+                "candidate_id": paired.challenger_candidate_id,
+                "backend_id": paired.challenger_backend_id,
+                "model_id": paired.challenger_model_id,
+                "config_sha256": paired.challenger_config_sha256,
+            },
+            replay_run_id="replay-voc-derived-explicit-admission",
+            agent="voc-derived-test",
+            recorded_at=T_DECISION,
+        )
+        self.ledger.append(
+            DecisionRecord(
+                replay_run_id="replay-voc-derived-explicit-terminal",
+                agent="voc-derived-test",
+                observed_ts=T_DECISION,
+                action=successful.action,
+                payload=successful.to_dict()["payload"],
+                context_hash=paired.decision_input_sha256,
+                decision_id=f"decision-{paired.evaluation_id}-explicit-terminal",
+                recorded_at=T_BINDING,
+            )
+        )
 
         score = self._authority(compute_execution_store=router).resolve(
             paired.evaluation_id,

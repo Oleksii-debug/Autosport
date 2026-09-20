@@ -4,6 +4,7 @@ import importlib.util
 import json
 import tempfile
 from pathlib import Path
+from unittest import mock
 
 
 _BASE_PATH = Path(__file__).with_name("_paper_campaign_runtime_tests_base.py")
@@ -61,7 +62,12 @@ class PaperCampaignRuntimeTests(_legacy.PaperCampaignRuntimeTests):
 
             first = runtime.finalize_ticket(ticket_id=ticket_id, at=_legacy.T5)
             second = runtime.finalize_ticket(ticket_id=ticket_id, at=_legacy.T6)
+            after_deadline = runtime.finalize_ticket(
+                ticket_id=ticket_id,
+                at="2026-09-20T04:00:01+00:00",
+            )
             self.assertEqual(first, second)
+            self.assertEqual(first, after_deadline)
 
             state = json.loads(
                 (root / "agent-loop.json").read_text(encoding="utf-8")
@@ -77,6 +83,7 @@ class PaperCampaignRuntimeTests(_legacy.PaperCampaignRuntimeTests):
             self.assertEqual(state["postmortems"][0]["created_at"], _legacy.T4)
             # The external research request is still made at the real T5 call.
             self.assertEqual(state["research_handoffs"][0]["requested_at"], _legacy.T5)
+            self.assertEqual(len(state["research_handoffs"]), 1)
             durable = json.loads(
                 (root / "paper-learning-bridge.json.campaign.json").read_text(
                     encoding="utf-8"
@@ -257,6 +264,105 @@ class PaperCampaignRuntimeTests(_legacy.PaperCampaignRuntimeTests):
             self.assertEqual(
                 durable["plans"][ticket_id]["reflection_available_at"],
                 _legacy.T4,
+            )
+
+    def test_post_deadline_restart_after_durable_handoff_commits_checkpoint(self) -> None:
+        """A durable research handoff survives a crash before checkpoint commit."""
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            registry = _legacy.ScientificRegistry.initialize_pristine(
+                root / "scientific_registry.json"
+            )
+            supervisor = _legacy.ResearchSupervisor.initialize_pristine(
+                root / "research_supervisor.json", registry
+            )
+            plan = _legacy.PaperReflectionPlan(
+                summary_code="RESTART_AFTER_HANDOFF",
+                reason_code="RESTART_AFTER_HANDOFF_REASON",
+                research_question_statement="What explains this PAPER review?",
+                research_budget_units=2,
+                research_deadline_at="2026-09-20T04:00:00+00:00",
+            )
+            (
+                leg,
+                _book,
+                ticket_id,
+                _decision,
+                environment,
+                baseline,
+                _observation,
+                bridge,
+                runtime,
+            ) = _legacy._fixture(
+                root,
+                reflection_plan=plan,
+                research_supervisor=supervisor,
+            )
+            resolutions = _legacy._settle(root, leg, "win")
+            bridge.reconcile_after_settlement(
+                paper_book_path=root / "paper_book.json",
+                resolutions=resolutions,
+                settled_ticket_ids=(ticket_id,),
+                at=_legacy.T4,
+            )
+
+            with mock.patch.object(
+                _legacy.AgentLoopRuntime,
+                "commit_checkpoint",
+                autospec=True,
+                side_effect=RuntimeError("simulated crash before checkpoint commit"),
+            ):
+                with self.assertRaisesRegex(
+                    RuntimeError,
+                    "simulated crash before checkpoint commit",
+                ):
+                    runtime.finalize_ticket(ticket_id=ticket_id, at=_legacy.T5)
+
+            crashed = json.loads(
+                (root / "agent-loop.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(crashed["phase"], _legacy.AgentLoopPhase.CHECKPOINT.value)
+            self.assertEqual(len(crashed["research_handoffs"]), 1)
+            self.assertIsNotNone(crashed["research_handoffs"][0]["run_id"])
+
+            resumed_environment = _legacy.CausalLearningEnvironment.resume(
+                environment.identity,
+                episode_key=environment.episode.episode_key,
+                policy_id=environment.episode.policy_id,
+                admissible_actions=frozenset(environment.episode.admissible_actions),
+                checkpoint=baseline,
+            )
+            recovered_bridge = _legacy.PaperSettlementLearningBridge(
+                root / "paper-learning-bridge.json",
+                paper_book_path=root / "paper_book.json",
+                decision_ledger=_legacy.JsonlDecisionLedger(root / "decisions.jsonl"),
+                agent_loop=_legacy.AgentLoopRuntime(root / "agent-loop.json"),
+                economic_goal=bridge.economic_goal,
+                risk_policy=bridge.risk_policy,
+            )
+            recovered = _legacy.PaperCampaignRuntime(
+                environment=resumed_environment,
+                settlement_bridge=recovered_bridge,
+                reflection_plan=plan,
+                research_supervisor=supervisor,
+            )
+            receipt = recovered.finalize_ticket(
+                ticket_id=ticket_id,
+                at="2026-09-20T04:00:01+00:00",
+            )
+
+            final_state = json.loads(
+                (root / "agent-loop.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(len(final_state["research_handoffs"]), 1)
+            self.assertEqual(
+                final_state["environment_checkpoint_id"],
+                receipt.checkpoint_id,
+            )
+            self.assertEqual(
+                final_state["checkpointed_transition_id"],
+                receipt.transition_id,
             )
 
 

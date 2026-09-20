@@ -226,3 +226,29 @@ def test_unsupported_destination_is_rejected_before_worker_start(
     assert status_values == [expected]
     assert log_values == [expected]
     assert start_calls == []
+
+def test_completed_export_does_not_echo_selected_filename_to_status_or_log(
+    tmp_path: Path,
+) -> None:
+    app = _partial_app()
+    sensitive_output = tmp_path / "token=SUPERSECRET-credentials.json"
+    status_values: list[str] = []
+    log_values: list[str] = []
+    app.__dict__.update(
+        _closing=False,
+        status=SimpleNamespace(set=status_values.append),
+        _append_log=log_values.append,
+        _set_replay_controls_busy=lambda _busy: None,
+        evidence_export_worker=SimpleNamespace(
+            poll=lambda: SimpleNamespace(error=None, output=sensitive_output)
+        ),
+    )
+
+    app._poll_evidence_export_worker()
+
+    expected = text("ui.status.evidence_export.complete")
+    assert status_values == [expected]
+    assert log_values == [expected]
+    for forbidden in ("SUPERSECRET", "credentials.json", "token="):
+        assert forbidden not in expected
+

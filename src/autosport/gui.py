@@ -715,6 +715,8 @@ class AutosportApp(tk.Tk):
         )
         if not output:
             return
+        if self.__dict__.get("_closing", False):
+            return
 
         # File dialogs run a nested Tk loop. Recheck workspace identity and every
         # mutating worker after the user returns so Ctrl+E cannot race recovery.
@@ -775,8 +777,7 @@ class AutosportApp(tk.Tk):
             messagebox.showerror(text("ui.dialog.title"), message_text)
             return
 
-        filename = message.output.name if message.output is not None else "autosport-evidence.json"
-        message_text = text("ui.status.evidence_export.complete", filename=filename)
+        message_text = text("ui.status.evidence_export.complete")
         self.status.set(message_text)
         self._append_log(message_text)
 

@@ -39,6 +39,10 @@ _PROVENANCE_GUARD_MODULE_NAME = (
 # Diagnostic only.  Installation/deduplication below never trusts this public
 # marker as possession proof; the exact first finder object is the authority.
 _RELOAD_FINDER_MARKER = "_autosport_point_in_time_reload_finder_v1"
+_SOURCE_AUTHORITY_REQUIRED = (
+    "positive point-in-time feature evidence requires an independent "
+    "source-owned feature artifact authority"
+)
 
 
 def _fsync_directory_fail_closed(path: Path) -> None:
@@ -83,7 +87,16 @@ def _reject_instance_method_shadows(
 
 
 def _bind_exact_lineage_authority(*, lineage_authority, **kwargs):
-    """Reject caller-polymorphic lineage/registry authority before any positive read."""
+    """Validate canonical lineage facts, then fail closed without source authority.
+
+    ``FeatureArtifactProvenance.issue`` hashes caller-provided bytes and
+    ``DatasetSnapshotLineageAuthority.register`` accepts caller-provided member
+    digests.  Those two durable objects therefore cannot, by themselves, establish
+    that the feature artifact was independently owned by ingestion/dataset source
+    authority.  Keep every existing negative/cutoff/provenance check active by
+    delegating first, but never turn a syntactically valid self-authored lineage into
+    positive evidence until a source-owned artifact/member capability is available.
+    """
 
     if type(lineage_authority) is not DatasetSnapshotLineageAuthority:
         raise evidence.PointInTimeEvidenceError(
@@ -103,7 +116,8 @@ def _bind_exact_lineage_authority(*, lineage_authority, **kwargs):
         ScientificRegistry,
         authority_name="lineage_authority.registry",
     )
-    return _PRISTINE_BIND(lineage_authority=lineage_authority, **kwargs)
+    _PRISTINE_BIND(lineage_authority=lineage_authority, **kwargs)
+    raise evidence.PointInTimeEvidenceError(_SOURCE_AUTHORITY_REQUIRED)
 
 
 def _refresh_monotonic_authority(ledger: evidence.HoldoutConsumptionLedger) -> None:

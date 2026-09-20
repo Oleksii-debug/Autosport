@@ -45,6 +45,29 @@ def test_valid_prefix_rollback_cannot_fork_scientific_registry(tmp_path, monkeyp
     assert b"winning-fork" not in registry.path.read_bytes()
 
 
+def test_valid_prefix_rollback_cannot_be_consumed_as_current_registry_truth(tmp_path, monkeypatch):
+    authority_root = tmp_path / "machine-authority"
+    monkeypatch.setenv("AUTOSPORT_MONOTONIC_AUTHORITY_ROOT", str(authority_root.resolve()))
+
+    registry = ScientificRegistry.initialize_pristine(tmp_path / "workspace" / "scientific.json")
+    registry.append(_question("prefix", T0))
+    prefix_bytes = registry.path.read_bytes()
+
+    registry.append(_question("current", T1))
+    current_bytes = registry.path.read_bytes()
+    assert current_bytes != prefix_bytes
+
+    registry.path.write_bytes(prefix_bytes)
+    with pytest.raises(MonotonicAuthorityRollbackError, match="rolled back|unproven|authority"):
+        ScientificRegistry(registry.path)
+    assert registry.path.read_bytes() == prefix_bytes
+
+    registry.path.write_bytes(current_bytes)
+    reopened = ScientificRegistry(registry.path)
+    assert reopened.get("ResearchQuestion", "prefix") is not None
+    assert reopened.get("ResearchQuestion", "current") is not None
+
+
 def test_normal_scientific_registry_successors_remain_appendable(tmp_path, monkeypatch):
     authority_root = tmp_path / "machine-authority"
     monkeypatch.setenv("AUTOSPORT_MONOTONIC_AUTHORITY_ROOT", str(authority_root.resolve()))

@@ -5,6 +5,10 @@ Scientific evidence belongs to ``ScientificRegistry`` and market evidence belong
 stable across restart: environment, episode/admissible action universe, and the exact
 versioned meanings of those actions.  Records are append-only and hash chained; every
 read revalidates the full file before exposing an authority by ID.
+
+Runtime availability is a store-owned first-seen boundary. Callers cannot backdate it:
+new records are timestamped by an injected/default UTC clock, while exact retries reuse
+the immutable timestamp already durably recorded.
 """
 
 from __future__ import annotations
@@ -13,7 +17,9 @@ import hashlib
 import json
 import os
 import tempfile
+from collections.abc import Callable
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from threading import RLock
 from typing import Final, Mapping
@@ -22,9 +28,9 @@ from .learning_environment import EnvironmentIdentity, Episode
 
 
 STORE_SCHEMA: Final = "autosport.deployment_runtime_authority_store"
-STORE_SCHEMA_VERSION: Final = 1
+STORE_SCHEMA_VERSION: Final = 2
 RECORD_SCHEMA: Final = "autosport.deployment_runtime_authority"
-RECORD_SCHEMA_VERSION: Final = 1
+RECORD_SCHEMA_VERSION: Final = 2
 _EMPTY_CHAIN_SHA256: Final = hashlib.sha256(b"").hexdigest()
 _HEX: Final = frozenset("0123456789abcdef")
 
@@ -50,9 +56,7 @@ def _sha(value: object, name: str) -> str:
     return text
 
 
-def _timestamp(value: object, name: str) -> str:
-    from datetime import datetime, timezone
-
+def _instant(value: object, name: str) -> datetime:
     text = _text(value, name)
     try:
         parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
@@ -60,7 +64,15 @@ def _timestamp(value: object, name: str) -> str:
         raise DeploymentRuntimeAuthorityError(f"{name} must be timezone-aware ISO-8601") from exc
     if parsed.tzinfo is None or parsed.utcoffset() is None:
         raise DeploymentRuntimeAuthorityError(f"{name} must be timezone-aware ISO-8601")
-    return parsed.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+    return parsed.astimezone(timezone.utc)
+
+
+def _timestamp(value: object, name: str) -> str:
+    return _instant(value, name).isoformat().replace("+00:00", "Z")
+
+
+def _utc_now_timestamp() -> str:
+    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
 def _canonical_json(value: object) -> str:
@@ -379,13 +391,26 @@ class DeploymentRuntimeAuthorityRecord:
 class DeploymentRuntimeAuthorityStore:
     """One local durable append-only authority file with full-read validation."""
 
-    def __init__(self, path: str | Path) -> None:
+    def __init__(
+        self,
+        path: str | Path,
+        *,
+        clock: Callable[[], str] | None = None,
+    ) -> None:
         self.path = Path(path)
+        self._clock = clock or _utc_now_timestamp
+        if not callable(self._clock):
+            raise DeploymentRuntimeAuthorityError("runtime authority store clock must be callable")
         self._lock = RLock()
         self._read_validated_records()
 
     @classmethod
-    def initialize_pristine(cls, path: str | Path) -> "DeploymentRuntimeAuthorityStore":
+    def initialize_pristine(
+        cls,
+        path: str | Path,
+        *,
+        clock: Callable[[], str] | None = None,
+    ) -> "DeploymentRuntimeAuthorityStore":
         destination = Path(path)
         destination.parent.mkdir(parents=True, exist_ok=True)
         if destination.exists():
@@ -398,7 +423,7 @@ class DeploymentRuntimeAuthorityStore:
                 "records": [],
             },
         )
-        return cls(destination)
+        return cls(destination, clock=clock)
 
     @staticmethod
     def _write_atomic_path(path: Path, payload: Mapping[str, object]) -> None:
@@ -456,18 +481,32 @@ class DeploymentRuntimeAuthorityStore:
         records_raw = payload["records"]
         assert isinstance(records_raw, list)
         previous = _EMPTY_CHAIN_SHA256
+        previous_available_at: datetime | None = None
         seen_ids: set[str] = set()
         records: list[DeploymentRuntimeAuthorityRecord] = []
         for raw in records_raw:
             record = DeploymentRuntimeAuthorityRecord.from_dict(raw)
             if record.previous_record_sha256 != previous:
                 raise DeploymentRuntimeAuthorityError("runtime authority hash chain is broken")
+            current_available_at = _instant(record.available_at, "available_at")
+            if previous_available_at is not None and current_available_at < previous_available_at:
+                raise DeploymentRuntimeAuthorityError(
+                    "runtime authority first-seen time moved backwards"
+                )
             if record.runtime_authority_id in seen_ids:
                 raise DeploymentRuntimeAuthorityError("duplicate runtime authority identity")
             seen_ids.add(record.runtime_authority_id)
             records.append(record)
             previous = record.record_sha256
+            previous_available_at = current_available_at
         return tuple(records)
+
+    def _observed_now(self) -> str:
+        try:
+            value = self._clock()
+        except Exception as exc:
+            raise DeploymentRuntimeAuthorityError("runtime authority store clock failed") from exc
+        return _timestamp(value, "runtime authority store clock")
 
     def append(
         self,
@@ -476,26 +515,41 @@ class DeploymentRuntimeAuthorityStore:
         episode: Episode,
         action_semantics_version: str,
         action_semantics_meanings: tuple[tuple[str, str], ...],
-        available_at: str,
     ) -> DeploymentRuntimeAuthorityRecord:
         with self._lock:
             records = self._read_validated_records()
             previous = records[-1].record_sha256 if records else _EMPTY_CHAIN_SHA256
+
+            # Compute the immutable semantic identity before consulting the clock so an
+            # exact retry returns the original first-seen record even if time advanced.
+            probe = DeploymentRuntimeAuthorityRecord.create(
+                environment=environment,
+                episode=episode,
+                action_semantics_version=action_semantics_version,
+                action_semantics_meanings=action_semantics_meanings,
+                available_at=records[-1].available_at if records else "1970-01-01T00:00:00Z",
+                previous_record_sha256=previous,
+            )
+            for existing in records:
+                if existing.runtime_authority_id == probe.runtime_authority_id:
+                    return existing
+
+            observed_at = self._observed_now()
+            if records and _instant(observed_at, "runtime authority store clock") < _instant(
+                records[-1].available_at,
+                "previous runtime authority available_at",
+            ):
+                raise DeploymentRuntimeAuthorityError(
+                    "runtime authority store clock moved backwards"
+                )
             candidate = DeploymentRuntimeAuthorityRecord.create(
                 environment=environment,
                 episode=episode,
                 action_semantics_version=action_semantics_version,
                 action_semantics_meanings=action_semantics_meanings,
-                available_at=available_at,
+                available_at=observed_at,
                 previous_record_sha256=previous,
             )
-            for existing in records:
-                if existing.runtime_authority_id == candidate.runtime_authority_id:
-                    if existing == candidate:
-                        return existing
-                    raise DeploymentRuntimeAuthorityError(
-                        "runtime authority identity already exists with different evidence"
-                    )
             payload = {
                 "schema": STORE_SCHEMA,
                 "schema_version": STORE_SCHEMA_VERSION,

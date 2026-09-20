@@ -9,6 +9,7 @@ or fabricates PAPER exposure itself.
 
 from __future__ import annotations
 
+import hashlib
 import json
 from contextvars import ContextVar
 from dataclasses import dataclass
@@ -61,6 +62,10 @@ _RESERVATION_FIELDS = frozenset(
         "action_ids",
         "observation_evidence_ids",
     }
+)
+_DECISION_ORIGIN_EVENT = "DECISION_ORIGIN_BOUND"
+_DECISION_ORIGIN_FIELDS = frozenset(
+    {"decision_id", "decision_record_sha256", "decision_record_ordinal"}
 )
 _LIVE_DECISION_SCHEMA = "autosport.persistent_live_decision"
 _LIVE_DECISION_SCHEMA_VERSION = 2
@@ -201,6 +206,42 @@ class PaperCampaignAdmissionCoordinator(_base.PaperCampaignAdmissionCoordinator)
         return payload
 
     @staticmethod
+    def _decision_origin_payload(event: object) -> Mapping[str, object]:
+        if not isinstance(event, Mapping):
+            raise PaperCampaignAdmissionError("PAPER decision-origin event is invalid")
+        payload = event.get("payload")
+        if not isinstance(payload, Mapping) or set(payload) != _DECISION_ORIGIN_FIELDS:
+            raise PaperCampaignAdmissionError(
+                "PAPER decision-origin payload schema is invalid"
+            )
+        decision_id = payload.get("decision_id")
+        digest = payload.get("decision_record_sha256")
+        ordinal = payload.get("decision_record_ordinal")
+        if type(decision_id) is not str or not decision_id or decision_id.strip() != decision_id:
+            raise PaperCampaignAdmissionError("PAPER decision-origin decision_id is invalid")
+        if (
+            type(digest) is not str
+            or len(digest) != 64
+            or digest.lower() != digest
+            or any(ch not in "0123456789abcdef" for ch in digest)
+        ):
+            raise PaperCampaignAdmissionError("PAPER decision-origin digest is invalid")
+        if type(ordinal) is not int or ordinal < 0:
+            raise PaperCampaignAdmissionError("PAPER decision-origin ordinal is invalid")
+        return payload
+
+    @staticmethod
+    def _decision_record_sha256(record) -> str:
+        payload = json.dumps(
+            record.to_dict(),
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        ).encode("utf-8")
+        return hashlib.sha256(payload).hexdigest()
+
+    @staticmethod
     def _matches_live_execution_decision(
         record_payload: Mapping[str, object],
         *,
@@ -266,6 +307,7 @@ class PaperCampaignAdmissionCoordinator(_base.PaperCampaignAdmissionCoordinator)
         *,
         run_id: str,
         reservation: Mapping[str, object],
+        origin: Mapping[str, object],
     ) -> str:
         trigger_id = _text(reservation.get("trigger_id"), "execution trigger_id")
         try:
@@ -274,12 +316,28 @@ class PaperCampaignAdmissionCoordinator(_base.PaperCampaignAdmissionCoordinator)
             raise PaperCampaignAdmissionError(
                 "Decision Ledger cannot prove PAPER execution origin"
             ) from exc
-        matches = [record for record in records if record.decision_id == trigger_id]
+        if origin.get("decision_id") != trigger_id:
+            raise PaperCampaignAdmissionError(
+                "PAPER pre-execution decision-origin identity conflicts with reservation"
+            )
+        ordinal = origin.get("decision_record_ordinal")
+        if type(ordinal) is not int or ordinal < 0 or ordinal >= len(records):
+            raise PaperCampaignAdmissionError(
+                "PAPER pre-execution decision-origin record is unavailable"
+            )
+        record = records[ordinal]
+        if (
+            record.decision_id != trigger_id
+            or self._decision_record_sha256(record) != origin.get("decision_record_sha256")
+        ):
+            raise PaperCampaignAdmissionError(
+                "PAPER pre-execution decision-origin commitment no longer matches Decision Ledger"
+            )
+        matches = [candidate for candidate in records if candidate.decision_id == trigger_id]
         if len(matches) != 1:
             raise PaperCampaignAdmissionError(
                 "PAPER execution must originate from one pre-existing durable decision"
             )
-        record = matches[0]
         payload = record.payload
         if not isinstance(payload, Mapping):
             raise PaperCampaignAdmissionError(
@@ -308,7 +366,7 @@ class PaperCampaignAdmissionCoordinator(_base.PaperCampaignAdmissionCoordinator)
         *,
         run_id: str,
         attempt_id: str,
-    ) -> tuple[PaperLegAttempt, Mapping[str, object]]:
+    ) -> tuple[PaperLegAttempt, Mapping[str, object], Mapping[str, object]]:
         run_id = _text(run_id, "execution_run_id")
         attempt_id = _text(attempt_id, "execution_attempt_id")
         try:
@@ -321,13 +379,31 @@ class PaperCampaignAdmissionCoordinator(_base.PaperCampaignAdmissionCoordinator)
             raise PaperCampaignAdmissionError(
                 "admission execution run is missing from canonical ledger"
             )
+        origins = [
+            event for event in events if event.get("event_type") == _DECISION_ORIGIN_EVENT
+        ]
         reservations = [event for event in events if event.get("event_type") == "RUN_RESERVED"]
         completions = [event for event in events if event.get("event_type") == "RUN_COMPLETED"]
+        if len(origins) != 1:
+            raise PaperCampaignAdmissionError(
+                "admission requires one pre-execution decision-origin commitment"
+            )
         if len(reservations) != 1 or len(completions) != 1:
             raise PaperCampaignAdmissionError(
                 "admission requires one completed canonical PAPER execution run"
             )
-        reservation = self._reservation_payload(reservations[0])
+        origin_event = origins[0]
+        reservation_event = reservations[0]
+        if (
+            type(origin_event.get("sequence")) is not int
+            or type(reservation_event.get("sequence")) is not int
+            or origin_event["sequence"] >= reservation_event["sequence"]
+        ):
+            raise PaperCampaignAdmissionError(
+                "PAPER decision origin was not committed before execution reservation"
+            )
+        origin = self._decision_origin_payload(origin_event)
+        reservation = self._reservation_payload(reservation_event)
         attempts: list[PaperLegAttempt] = []
         try:
             for event in events:
@@ -364,19 +440,20 @@ class PaperCampaignAdmissionCoordinator(_base.PaperCampaignAdmissionCoordinator)
             raise PaperCampaignAdmissionError(
                 "accepted PAPER execution lacks exact execution odds/stake"
             )
-        return attempt, reservation
+        return attempt, reservation, origin
 
     def _execution_ticket(
         self,
         binding: _ExecutionAdmissionBinding,
     ) -> PaperTicket:
-        attempt, reservation = self._execution_attempt(
+        attempt, reservation, origin = self._execution_attempt(
             run_id=binding.run_id,
             attempt_id=binding.attempt_id,
         )
         resolved_decision_id = self._resolved_execution_decision_id(
             run_id=binding.run_id,
             reservation=reservation,
+            origin=origin,
         )
         if binding.decision_id != resolved_decision_id:
             raise PaperCampaignAdmissionError(

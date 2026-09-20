@@ -77,6 +77,7 @@ class CampaignEconomicEvidenceStore:
             return version.version_id
 
         current = self.latest()
+        self._require_exact_retry_after_abort(version, current)
         if current is None:
             if version.previous_version_id is not None:
                 raise CampaignEconomicStoreError(
@@ -283,6 +284,34 @@ class CampaignEconomicEvidenceStore:
             )
         return True
 
+    def _require_exact_retry_after_abort(
+        self,
+        version: CampaignEconomicEvidenceVersion,
+        current: CampaignEconomicEvidenceVersion | None,
+    ) -> None:
+        """Do not let a durable aborted PREPARE silently change semantic intent."""
+        history = self._authority.read_history()
+        if not history:
+            return
+        aborted = history[-1]
+        if aborted.phase is not AuthorityPhase.ABORT:
+            return
+        current_id = None if current is None else current.version_id
+        if aborted.previous_committed_state_sha256 != current_id:
+            raise CampaignEconomicStoreError(
+                "aborted economic publication predecessor conflicts with current state"
+            )
+        if not self._is_publication_tx_id(
+            aborted.intended_state_sha256, aborted.tx_id
+        ):
+            raise CampaignEconomicStoreError(
+                "aborted economic publication has invalid transaction identity"
+            )
+        if version.version_id != aborted.intended_state_sha256:
+            raise CampaignEconomicStoreError(
+                "aborted economic publication requires exact semantic retry"
+            )
+
     def _next_publication_tx_id(
         self,
         version: CampaignEconomicEvidenceVersion,
@@ -326,7 +355,12 @@ class CampaignEconomicEvidenceStore:
         if not tx_id.startswith(prefix):
             return False
         suffix = tx_id[len(prefix) :]
-        return suffix.isdigit() and suffix != "0" and not suffix.startswith("0")
+        return (
+            suffix.isascii()
+            and suffix.isdigit()
+            and suffix != "0"
+            and not suffix.startswith("0")
+        )
 
     def _chain_from(
         self, head: CampaignEconomicEvidenceVersion

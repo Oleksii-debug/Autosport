@@ -1,1 +1,0 @@
-"""Autosport test package."""

@@ -61,10 +61,11 @@ def _guarded_materialize(self, *args, **kwargs):
 
 
 def _guarded_record_consumption(self, *args, **kwargs):
-    # Low-level runtimes remain available for deterministic unit seams, but an
-    # actual product-bound runtime may not be explicitly dispatched through the
-    # base implementation to bypass its source-generation transaction wrapper.
-    if _is_bound_product_runtime(self) and not _called_from_bound_method(
+    # Durable decision-use evidence is product authority just like materialized
+    # memory. Low-level runtimes remain available only through explicit test seams;
+    # the public/base/subclass path must never persist consumption without the
+    # canonical bound wrapper revalidating the current checkpoint/source roots.
+    if not _is_bound_product_runtime(self) or not _called_from_bound_method(
         self, "record_consumption"
     ):
         raise _impl.SportMemoryError(

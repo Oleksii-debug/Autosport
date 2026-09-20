@@ -160,6 +160,35 @@ def test_bound_consumption_requires_current_generation_without_persisting(tmp_pa
     assert runtime_path.read_bytes() == durable_before
 
 
+def test_reopened_public_base_runtime_cannot_persist_stale_consumption(tmp_path):
+    identity, opponent, _, runtime_path, runtime, artifact = _bound_runtime(tmp_path)
+    generation = runtime.authority_generation_sha256
+    durable_before = runtime_path.read_bytes()
+
+    # Drift the canonical identity root after the bound artifact was issued, then
+    # reopen only the low-level durable file using the old readable generation.
+    # This used to bypass BoundSportMemoryRuntime._refresh_bound_authority because
+    # a fresh base object bound the current runtime-file root and could append.
+    newer_identity = ParticipantIdentityRegistry(identity.path)
+    newer_identity.add_entity(_entity("p-casey", EntityKind.PARTICIPANT))
+    bypass = SportMemoryRuntime(
+        runtime_path,
+        opponent,
+        authority_generation_sha256=generation,
+    )
+
+    with pytest.raises(SportMemoryError, match="canonical generation verification"):
+        bypass.record_consumption(
+            decision_id="decision-unbound-bypass",
+            memory_id=artifact.memory_id,
+            decision_cutoff=T4,
+            consumed_at=T5,
+            expected_scope=_scope(),
+        )
+
+    assert runtime_path.read_bytes() == durable_before
+
+
 def test_second_open_runtime_cannot_erase_first_consumption(tmp_path):
     identity, opponent, checkpoint_path, runtime_path, first, artifact = _bound_runtime(
         tmp_path

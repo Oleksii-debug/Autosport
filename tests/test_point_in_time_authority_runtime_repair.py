@@ -191,6 +191,123 @@ else:
     assert completed.returncode == 0, completed.stdout + completed.stderr
 
 
+def test_point_in_time_reload_orders_preserve_exact_capability_fences() -> None:
+    script = r'''
+import importlib
+import autosport.point_in_time_evidence as evidence
+import autosport._point_in_time_feature_provenance_guard as provenance_guard
+from autosport.dataset_snapshot_lineage import DatasetSnapshotLineageAuthority
+from autosport.scientific_registry import ScientificRegistry
+
+
+def assert_exact_capability_fences():
+    try:
+        evidence.PointInTimeFeatureAuthority.bind(
+            dataset_snapshot=object(),
+            feature_set=object(),
+            feature_payload_sha256="d" * 64,
+            decision_cutoff_utc="2099-01-01T00:00:00Z",
+        )
+    except TypeError as exc:
+        assert "lineage_authority" in str(exc)
+    else:
+        raise AssertionError("reload order restored legacy four-argument positive bind")
+
+    lineage_dispatched = False
+
+    class ForgedLineageAuthority(DatasetSnapshotLineageAuthority):
+        def record(self, snapshot_id: str):
+            nonlocal lineage_dispatched
+            lineage_dispatched = True
+            raise AssertionError("lineage subtype must never dispatch")
+
+    forged_lineage = object.__new__(ForgedLineageAuthority)
+    try:
+        evidence.PointInTimeFeatureAuthority.bind(
+            dataset_snapshot=object(),
+            feature_set=object(),
+            feature_provenance=object(),
+            lineage_authority=forged_lineage,
+            decision_cutoff_utc="2099-01-01T00:00:00Z",
+        )
+    except evidence.PointInTimeEvidenceError as exc:
+        assert "lineage_authority must be an exact DatasetSnapshotLineageAuthority" in str(exc)
+    else:
+        raise AssertionError("reload order removed exact lineage subtype fence")
+    assert lineage_dispatched is False
+
+    registry_dispatched = False
+
+    class ForgedRegistry(ScientificRegistry):
+        def get(self, record_type: str, record_id: str):
+            nonlocal registry_dispatched
+            registry_dispatched = True
+            raise AssertionError("registry subtype must never dispatch")
+
+    nested = object.__new__(DatasetSnapshotLineageAuthority)
+    nested.registry = object.__new__(ForgedRegistry)
+    try:
+        evidence.PointInTimeFeatureAuthority.bind(
+            dataset_snapshot=object(),
+            feature_set=object(),
+            feature_provenance=object(),
+            lineage_authority=nested,
+            decision_cutoff_utc="2099-01-01T00:00:00Z",
+        )
+    except evidence.PointInTimeEvidenceError as exc:
+        assert "lineage_authority.registry must be an exact ScientificRegistry" in str(exc)
+    else:
+        raise AssertionError("reload order removed exact nested registry fence")
+    assert registry_dispatched is False
+
+    shadow_dispatched = False
+
+    def forged_record(snapshot_id: str):
+        nonlocal shadow_dispatched
+        shadow_dispatched = True
+        raise AssertionError("instance shadow must never dispatch")
+
+    shadowed = object.__new__(DatasetSnapshotLineageAuthority)
+    shadowed.registry = object.__new__(ScientificRegistry)
+    shadowed.record = forged_record
+    try:
+        evidence.PointInTimeFeatureAuthority.bind(
+            dataset_snapshot=object(),
+            feature_set=object(),
+            feature_provenance=object(),
+            lineage_authority=shadowed,
+            decision_cutoff_utc="2099-01-01T00:00:00Z",
+        )
+    except evidence.PointInTimeEvidenceError as exc:
+        assert "shadows trusted concrete authority method: record" in str(exc)
+    else:
+        raise AssertionError("reload order removed exact-instance method-shadow fence")
+    assert shadow_dispatched is False
+
+
+assert_exact_capability_fences()
+
+provenance_guard = importlib.reload(provenance_guard)
+assert_exact_capability_fences()
+
+evidence = importlib.reload(evidence)
+provenance_guard = importlib.reload(provenance_guard)
+assert_exact_capability_fences()
+
+provenance_guard = importlib.reload(provenance_guard)
+evidence = importlib.reload(evidence)
+assert_exact_capability_fences()
+'''
+    completed = subprocess.run(
+        [sys.executable, "-c", script],
+        cwd=Path(__file__).resolve().parents[1],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+
+
 @pytest.mark.skipif(os.name == "nt", reason="Windows intentionally has no directory fsync contract")
 def test_holdout_atomic_publication_fails_when_directory_open_for_sync_is_unavailable(
     tmp_path: Path,

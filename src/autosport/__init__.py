@@ -48,3 +48,8 @@ from . import _evaluation_universe_structural_gate as _evaluation_universe_struc
 # production denominator must consume the exact product-owned pre-evaluation semantic
 # capability before freezing the initial row set.
 from . import _provider_evaluation_semantic_gate as _provider_evaluation_semantic_gate  # noqa: F401,E402
+
+# A live #662 origin alone is transferable and cannot prove which exact semantic
+# session the product derived. Record the canonical derivation result per live origin
+# and require that exact semantic digest before #638 denominator admission.
+from . import _provider_evaluation_semantic_issuance as _provider_evaluation_semantic_issuance  # noqa: F401,E402

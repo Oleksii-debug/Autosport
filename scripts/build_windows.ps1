@@ -27,4 +27,9 @@ if (-not (Test-Path -LiteralPath $skipGateHelper -PathType Leaf)) {
 $coreText = [System.IO.File]::ReadAllText($coreScript)
 $candidateCoreText = ConvertTo-WindowsCandidateCoreText -CoreText $coreText
 $candidateCore = [scriptblock]::Create($candidateCoreText)
-& $candidateCore
+
+# Dot-source the transformed core into this wrapper's script scope. The original
+# builder deliberately uses $script: variables from its python shim; invoking the
+# generated scriptblock with `&` would put plain assignments in a child scope while
+# those $script: lookups still resolve here, breaking the builder before packaging.
+. $candidateCore

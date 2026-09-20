@@ -424,6 +424,106 @@ def _global_type_attribute_dependencies(
     return dependencies
 
 
+def _default_constructor_dependency(owner: type) -> object:
+    """Represent a zero-argument constructor without executing it.
+
+    Instance-dispatch dependencies are admitted only when construction uses the
+    exact inherited object defaults. Any custom __new__/__init__ remains
+    unsupported and fails closed rather than being invoked during fingerprinting.
+    """
+
+    resolved_new_owner: type | None = None
+    resolved_init_owner: type | None = None
+    for candidate in owner.__mro__:
+        namespace = vars(candidate)
+        if resolved_new_owner is None and "__new__" in namespace:
+            resolved_new_owner = candidate
+        if resolved_init_owner is None and "__init__" in namespace:
+            resolved_init_owner = candidate
+        if resolved_new_owner is not None and resolved_init_owner is not None:
+            break
+
+    if resolved_new_owner is not object or resolved_init_owner is not object:
+        raise ResolverSemanticIdentityError(
+            "referenced global type constructor cannot be represented safely"
+        )
+
+    return [
+        "default-object-constructor",
+        f"{owner.__module__}.{owner.__qualname__}",
+    ]
+
+
+def _global_type_instance_dependencies(
+    segment: str,
+    resolver: FunctionType,
+    *,
+    visiting: set[str],
+) -> dict[str, object]:
+    """Seal safe zero-argument Class().method dispatch without construction."""
+
+    try:
+        tree = ast.parse(segment)
+    except (SyntaxError, ValueError) as exc:
+        raise ResolverSemanticIdentityError(
+            "resolver source cannot be inspected for global type instance dependencies"
+        ) from exc
+
+    dependencies: dict[str, object] = {}
+    executable_types = (
+        FunctionType,
+        BuiltinFunctionType,
+        BuiltinMethodType,
+        ModuleType,
+        type,
+    )
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Attribute):
+            continue
+        call = node.value
+        if not isinstance(call, ast.Call) or not isinstance(call.func, ast.Name):
+            continue
+
+        root_name = call.func.id
+        root = resolver.__globals__.get(root_name)
+        if type(root) is not type:
+            continue
+        if call.args or call.keywords:
+            raise ResolverSemanticIdentityError(
+                "referenced global type constructor arguments cannot be represented safely"
+            )
+
+        constructor_payload = _default_constructor_dependency(root)
+        value, step, dispatch_owner = _resolve_global_type_attribute(
+            root,
+            node.attr,
+        )
+        if type(value) not in executable_types:
+            continue
+
+        if type(value) is FunctionType:
+            dependency_payload: object = [
+                "function",
+                _function_semantic_payload(
+                    value,
+                    visiting=visiting,
+                    runtime_owner=dispatch_owner,
+                ),
+            ]
+        else:
+            dependency_payload = _dependency_payload(value, visiting=visiting)
+
+        key = f"global-type-instance:{root_name}().{node.attr}"
+        dependencies[key] = [
+            "global-type-instance-dispatch",
+            f"{root.__module__}.{root.__qualname__}",
+            constructor_payload,
+            step,
+            dependency_payload,
+        ]
+    return dependencies
+
+
 def _owner_class(resolver: FunctionType) -> type | None:
     parts = _qualname_parts(resolver)
     if len(parts) < 2:
@@ -579,6 +679,13 @@ def _function_semantic_payload(
     )
     dependencies.update(
         _global_type_attribute_dependencies(
+            segment,
+            resolver,
+            visiting=next_visiting,
+        )
+    )
+    dependencies.update(
+        _global_type_instance_dependencies(
             segment,
             resolver,
             visiting=next_visiting,

@@ -25,7 +25,11 @@ import json
 import re
 from typing import Any, Mapping, Sequence
 
-from .model_compute_router import ComputeRouteDecision, ModelComputeRouterStore
+from .model_compute_router import (
+    ComputeRouteDecision,
+    ComputeRouteRequest,
+    ModelComputeRouterStore,
+)
 from .portfolio_plan import OpportunityIntent
 
 
@@ -44,6 +48,9 @@ class ProspectiveModelComputeMoneyStatus(StrEnum):
 
 
 class ProspectiveModelComputeMoneyReason(StrEnum):
+    NO_PRODUCT_OWNED_INTENT_REQUEST_BINDING = (
+        "NO_PRODUCT_OWNED_INTENT_REQUEST_BINDING"
+    )
     NO_PREDECISION_MONETARY_TARIFF_AUTHORITY = (
         "NO_PREDECISION_MONETARY_TARIFF_AUTHORITY"
     )
@@ -178,13 +185,9 @@ class ProspectiveModelComputeMoneyEvidence:
             raise ProspectiveModelComputeMoneyError(
                 "schema v1 cannot represent positive monetary authority"
             )
-        if (
-            type(self.reason) is not ProspectiveModelComputeMoneyReason
-            or self.reason
-            is not ProspectiveModelComputeMoneyReason.NO_PREDECISION_MONETARY_TARIFF_AUTHORITY
-        ):
+        if type(self.reason) is not ProspectiveModelComputeMoneyReason:
             raise ProspectiveModelComputeMoneyError(
-                "schema v1 UNKNOWN_UNPROVEN requires the canonical missing-tariff reason"
+                "schema v1 UNKNOWN_UNPROVEN requires a canonical fail-closed reason"
             )
         if any(value is not None for value in (self.amount, self.currency, self.tariff_sha256)):
             raise ProspectiveModelComputeMoneyError(
@@ -228,6 +231,7 @@ def _make_unknown_evidence(
     router_decided_at: datetime,
     router_request_sha256: str,
     router_decision_sha256: str,
+    reason: ProspectiveModelComputeMoneyReason,
 ) -> ProspectiveModelComputeMoneyEvidence:
     """Create the sole schema-v1 state without any positive-authority inputs."""
 
@@ -244,11 +248,7 @@ def _make_unknown_evidence(
         "status",
         ProspectiveModelComputeMoneyStatus.UNKNOWN_UNPROVEN,
     )
-    object.__setattr__(
-        item,
-        "reason",
-        ProspectiveModelComputeMoneyReason.NO_PREDECISION_MONETARY_TARIFF_AUTHORITY,
-    )
+    object.__setattr__(item, "reason", reason)
     object.__setattr__(item, "amount", None)
     object.__setattr__(item, "currency", None)
     object.__setattr__(item, "tariff_sha256", None)
@@ -263,15 +263,17 @@ def resolve_prospective_model_compute_money(
     request_id: str,
     decision_at: datetime,
 ) -> ProspectiveModelComputeMoneyEvidence:
-    """Bind a live intent to canonical compute-route truth without inventing money.
+    """Re-resolve route truth and fail closed where intent origin is unproven.
 
-    The current router's ``max_cost`` / measured compute-cost values are compute
-    economics used by routing/VOC. They do not carry a monetary currency or a
-    product-owned billing/tariff identity. Consequently schema v1 can return only
-    ``UNKNOWN_UNPROVEN``.
+    decision_at is assertion-only. The authoritative cutoff is the canonical
+    OpportunityIntent.risk_context.proposal_ts. The current router owns an
+    immutable full request record, but no integrated product authority yet proves
+    that a stored request was produced for one exact OpportunityIntent.
+    Therefore schema v1 explicitly reports that missing origin relation and never
+    upgrades a caller-supplied digest equality into authority.
     """
 
-    # Capability checks happen before any authority-bearing property/method read.
+    # Exact capability checks happen before any authority-bearing read.
     if type(intent) is not OpportunityIntent:
         raise ProspectiveModelComputeMoneyError(
             "intent must be the exact canonical OpportunityIntent type"
@@ -281,8 +283,47 @@ def resolve_prospective_model_compute_money(
             "router_store must be the exact canonical ModelComputeRouterStore type"
         )
 
+    proposal_ts = getattr(intent.risk_context, "proposal_ts", None)
+    if proposal_ts is None:
+        raise ProspectiveModelComputeMoneyError(
+            "canonical OpportunityIntent lacks a product-owned proposal decision cutoff"
+        )
+    cutoff = _instant(proposal_ts, "intent risk_context proposal_ts")
+    asserted_cutoff = _instant(decision_at, "decision_at")
+    if asserted_cutoff != cutoff:
+        raise ProspectiveModelComputeMoneyError(
+            "caller decision_at does not match canonical OpportunityIntent proposal_ts"
+        )
+
     canonical_request_id = _text(request_id, "request_id")
-    cutoff = _instant(decision_at, "decision_at")
+    request = router_store.get_request(canonical_request_id)
+    if request is None:
+        raise ProspectiveModelComputeMoneyError(
+            "canonical model-compute route request is missing"
+        )
+    if type(request) is not ComputeRouteRequest:
+        raise ProspectiveModelComputeMoneyError(
+            "canonical router returned a non-canonical ComputeRouteRequest"
+        )
+    if _text(request.request_id, "router request request_id") != canonical_request_id:
+        raise ProspectiveModelComputeMoneyError(
+            "canonical model-compute request identity mismatch"
+        )
+    request_created_at = _instant(request.created_at, "router request created_at")
+    if request_created_at > cutoff:
+        raise ProspectiveModelComputeMoneyError(
+            "canonical model-compute request is from after the intent decision cutoff"
+        )
+    request_payload = request.payload()
+    if not isinstance(request_payload, Mapping):
+        raise ProspectiveModelComputeMoneyError(
+            "canonical model-compute request payload is invalid"
+        )
+    if request_payload.get("request_id") != canonical_request_id:
+        raise ProspectiveModelComputeMoneyError(
+            "canonical model-compute request payload identity mismatch"
+        )
+
     decision = router_store.get_decision(canonical_request_id)
     if decision is None:
         raise ProspectiveModelComputeMoneyError(
@@ -313,22 +354,32 @@ def resolve_prospective_model_compute_money(
         )
 
     intent_sha256 = _sha256(intent.intent_sha256, "intent.intent_sha256")
-    opportunity = intent.opportunity
+    intent_evidence_sha256 = _sha256(
+        intent.evidence.evidence_sha256,
+        "intent.evidence.evidence_sha256",
+    )
     opportunity_id = _text(
-        getattr(opportunity, "opportunity_id", None),
+        getattr(intent.opportunity, "opportunity_id", None),
         "intent opportunity_id",
     )
 
-    # Public ModelComputeRouterStore re-resolves the exact canonical decision by
-    # request id but intentionally exposes no full-request getter. Seal that
-    # canonical request identity plus the complete decision payload; do not reach
-    # into private store state merely to manufacture a stronger-looking proof.
+    # The persisted request is router-owned immutable route evidence, but its
+    # decision_input/evidence fields are not, by themselves, a product-owned
+    # OpportunityIntent-origin certificate. Even exact equality is therefore only
+    # an assertion. Keep the evidence explicitly unbound until an integrated
+    # producer-origin authority can be re-resolved here.
+    _ = (
+        request.decision_input_sha256 == intent_sha256
+        and request.decision_evidence_sha256 == intent_evidence_sha256
+    )
+
     return _make_unknown_evidence(
         intent_sha256=intent_sha256,
         opportunity_id=opportunity_id,
         request_id=canonical_request_id,
         decision_at=cutoff,
         router_decided_at=router_decided_at,
-        router_request_sha256=_digest({"request_id": canonical_request_id}),
+        router_request_sha256=_digest(request_payload),
         router_decision_sha256=_digest(decision_payload),
+        reason=ProspectiveModelComputeMoneyReason.NO_PRODUCT_OWNED_INTENT_REQUEST_BINDING,
     )

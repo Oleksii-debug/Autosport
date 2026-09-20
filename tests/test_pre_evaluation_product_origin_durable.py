@@ -31,6 +31,7 @@ from autosport.pre_evaluation_evidence import (
 from autosport.pre_evaluation_product_origin import (
     PreEvaluationProductOriginError,
     derive_product_owned_pre_evaluation_session,
+    persist_pre_evaluation_cost_contract_authority,
 )
 from autosport.pre_evaluation_semantics import (
     PreEvaluationCostContract,
@@ -204,23 +205,6 @@ def _bound(snapshot: CompleteGameBoardSnapshot, provider: ProviderSelectionBindi
     )
 
 
-def _write_cost_contract(path: Path, contract: PreEvaluationCostContract) -> None:
-    path.write_text(
-        json.dumps(
-            {
-                "schema": "autosport.pre_evaluation_cost_contract",
-                "schema_version": 1,
-                "contract_id": contract.contract_id,
-                "max_cost_micros": contract.max_cost_micros,
-                "contract_sha256": contract.contract_sha256,
-            },
-            sort_keys=True,
-            separators=(",", ":"),
-        ),
-        encoding="utf-8",
-    )
-
-
 def _persist_intent_authority(
     *,
     ledger: JsonlDecisionLedger,
@@ -275,9 +259,13 @@ def test_durable_product_origin_survives_restart_and_rejects_forged_intent(
         risk_policy=risk_policy,
         graph=graph,
     )
-    cost_path = tmp_path / "pre-evaluation-cost.json"
     contract = PreEvaluationCostContract(contract_id="cost-v1", max_cost_micros=10)
-    _write_cost_contract(cost_path, contract)
+    persist_pre_evaluation_cost_contract_authority(
+        ledger=ledger,
+        material_action_id="pre-evaluation-origin-1",
+        risk_policy=risk_policy,
+        contract=contract,
+    )
     kwargs = {
         "snapshot": snapshot,
         "bound": _bound(snapshot, provider),
@@ -287,12 +275,12 @@ def test_durable_product_origin_survives_restart_and_rejects_forged_intent(
         "book": book,
         "dependency_graph": graph,
         "material_action_id": "pre-evaluation-origin-1",
-        "cost_contract_path": cost_path,
     }
 
     first = derive_product_owned_pre_evaluation_session(
         **kwargs,
         ledger=ledger,
+        expected_cost_contract_sha256=contract.contract_sha256,
     )
     restarted = derive_product_owned_pre_evaluation_session(
         **kwargs,
@@ -300,10 +288,32 @@ def test_durable_product_origin_survives_restart_and_rejects_forged_intent(
     )
 
     assert restarted.authority_digest == first.authority_digest
+    assert restarted.origin.cost_contract_sha256 == contract.contract_sha256
     slot = restarted.resolve_slot(provider.row_key)
     assert slot.decision_stage is SemanticFunnelStage.ELIGIBLE
     assert slot.attrition_reason is SemanticAttritionReason.THEORETICAL_ONLY
     assert slot.opportunity_intent_sha256 == intent.intent_sha256
+
+    alternate = PreEvaluationCostContract(contract_id="cost-v2", max_cost_micros=999)
+    with pytest.raises(
+        PreEvaluationProductOriginError,
+        match="expected cost contract does not match durable product selection",
+    ):
+        derive_product_owned_pre_evaluation_session(
+            **kwargs,
+            ledger=JsonlDecisionLedger(ledger_path),
+            expected_cost_contract_sha256=alternate.contract_sha256,
+        )
+    with pytest.raises(
+        PreEvaluationProductOriginError,
+        match="selection conflicts",
+    ):
+        persist_pre_evaluation_cost_contract_authority(
+            ledger=JsonlDecisionLedger(ledger_path),
+            material_action_id="pre-evaluation-origin-1",
+            risk_policy=risk_policy,
+            contract=alternate,
+        )
 
     forged_intent = replace(intent, config_sha256="f" * 64)
     forged_graph = PortfolioDependencyGraph.for_inputs(book, (forged_intent,))

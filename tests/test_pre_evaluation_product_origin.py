@@ -181,7 +181,6 @@ def test_structurally_valid_but_unissued_provider_snapshot_cannot_mint_origin(
             **inputs,
             ledger=JsonlDecisionLedger(tmp_path / "ledger.jsonl"),
             material_action_id="material-action-1",
-            cost_contract_path=tmp_path / "cost.json",
         )
 
 
@@ -197,5 +196,4 @@ def test_issued_provider_snapshot_cannot_authorize_absent_selection(
             **inputs,
             ledger=JsonlDecisionLedger(tmp_path / "ledger.jsonl"),
             material_action_id="material-action-1",
-            cost_contract_path=tmp_path / "cost.json",
         )

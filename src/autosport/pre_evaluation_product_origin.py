@@ -8,7 +8,7 @@ when the same inputs can be re-resolved from three independent product-owned roo
 
 * a runtime-issued complete provider board;
 * the durable economic Decision Ledger record for the exact portfolio plan/intents;
-* an immutable product cost-contract file whose digest is part of the final authority.
+* a durable product cost-contract selection bound to the exact economic Decision Ledger record.
 
 The returned wrapper is deliberately a distinct type.  Downstream denominator code
 must consume ``ProductOwnedPreEvaluationSemanticSession`` rather than treating a bare
@@ -20,11 +20,10 @@ from __future__ import annotations
 from dataclasses import dataclass
 from hashlib import sha256
 import json
-from pathlib import Path
 from typing import Iterable, Mapping
 import weakref
 
-from .decision_ledger import JsonlDecisionLedger
+from .decision_ledger import DecisionRecord, JsonlDecisionLedger
 from .paper import PaperBook
 from .portfolio_plan import OpportunityIntent, PortfolioDependencyGraph
 from .pre_evaluation_binding import BoundPreEvaluationSession
@@ -44,6 +43,11 @@ from .risk import PaperRiskPolicy
 _SCHEMA = "autosport.pre_evaluation_product_origin"
 _SCHEMA_VERSION = 1
 _COST_SCHEMA = "autosport.pre_evaluation_cost_contract"
+_COST_SELECTION_SCHEMA = "autosport.pre_evaluation_cost_contract_selection"
+_COST_SELECTION_AGENT = "pre-evaluation-cost-contract"
+_COST_SELECTION_ACTION = "SELECT_PRE_EVALUATION_COST_CONTRACT"
+_COST_SELECTION_MATERIAL_ACTION_KEY = "pre_evaluation_material_action_id"
+_COST_SELECTION_CONTRACT_KEY = "cost_contract"
 _HEX = frozenset("0123456789abcdef")
 _ISSUED: dict[int, tuple[weakref.ReferenceType["PreEvaluationProductOrigin"], str]] = {}
 
@@ -101,14 +105,20 @@ def _load_json_object(name: str, raw: object) -> Mapping[str, object]:
     return parsed
 
 
-def _load_cost_contract(path: str | Path) -> PreEvaluationCostContract:
-    source = Path(path)
-    try:
-        raw = json.loads(source.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
-        raise PreEvaluationProductOriginError(
-            "product cost-contract authority is missing or unreadable"
-        ) from exc
+
+def _cost_contract_payload(contract: PreEvaluationCostContract) -> dict[str, object]:
+    if not isinstance(contract, PreEvaluationCostContract):
+        raise TypeError("contract must be PreEvaluationCostContract")
+    return {
+        "schema": _COST_SCHEMA,
+        "schema_version": 1,
+        "contract_id": contract.contract_id,
+        "max_cost_micros": contract.max_cost_micros,
+        "contract_sha256": contract.contract_sha256,
+    }
+
+
+def _cost_contract_from_payload(raw: object) -> PreEvaluationCostContract:
     expected = {
         "schema",
         "schema_version",
@@ -116,13 +126,13 @@ def _load_cost_contract(path: str | Path) -> PreEvaluationCostContract:
         "max_cost_micros",
         "contract_sha256",
     }
-    if type(raw) is not dict or set(raw) != expected:
+    if not isinstance(raw, Mapping) or set(raw) != expected:
         raise PreEvaluationProductOriginError(
-            "product cost-contract authority has unexpected fields"
+            "durable product cost-contract authority has unexpected fields"
         )
     if raw["schema"] != _COST_SCHEMA or raw["schema_version"] != 1:
         raise PreEvaluationProductOriginError(
-            "unsupported product cost-contract authority schema"
+            "unsupported durable product cost-contract authority schema"
         )
     try:
         contract = PreEvaluationCostContract(
@@ -131,14 +141,214 @@ def _load_cost_contract(path: str | Path) -> PreEvaluationCostContract:
         )
     except (TypeError, ValueError) as exc:
         raise PreEvaluationProductOriginError(
-            "product cost-contract authority is invalid"
+            "durable product cost-contract authority is invalid"
         ) from exc
     if raw["contract_sha256"] != contract.contract_sha256:
         raise PreEvaluationProductOriginError(
-            "product cost-contract digest does not bind exact configuration"
+            "durable product cost-contract digest does not bind exact configuration"
         )
     return contract
 
+
+def _cost_selection_payload(
+    *,
+    material_action_id: str,
+    economic_record: DecisionRecord,
+    contract: PreEvaluationCostContract,
+) -> dict[str, object]:
+    return {
+        "schema": _COST_SELECTION_SCHEMA,
+        "schema_version": 1,
+        _COST_SELECTION_MATERIAL_ACTION_KEY: _text(
+            _COST_SELECTION_MATERIAL_ACTION_KEY, material_action_id
+        ),
+        "economic_decision_id": _text(
+            "economic_decision_id", economic_record.decision_id
+        ),
+        "economic_decision_context_hash": _sha(
+            "economic_decision_context_hash", economic_record.context_hash
+        ),
+        _COST_SELECTION_CONTRACT_KEY: _cost_contract_payload(contract),
+    }
+
+
+def _cost_selection_records(
+    ledger: JsonlDecisionLedger,
+    *,
+    material_action_id: str,
+) -> tuple[DecisionRecord, ...]:
+    material_action_id = _text("material_action_id", material_action_id)
+    matches: list[DecisionRecord] = []
+    for record in ledger.verified_records():
+        payload = record.payload
+        is_selection = (
+            record.agent == _COST_SELECTION_AGENT
+            or record.action == _COST_SELECTION_ACTION
+            or payload.get("schema") == _COST_SELECTION_SCHEMA
+        )
+        if not is_selection:
+            continue
+        if (
+            record.agent != _COST_SELECTION_AGENT
+            or record.action != _COST_SELECTION_ACTION
+            or set(payload)
+            != {
+                "schema",
+                "schema_version",
+                _COST_SELECTION_MATERIAL_ACTION_KEY,
+                "economic_decision_id",
+                "economic_decision_context_hash",
+                _COST_SELECTION_CONTRACT_KEY,
+            }
+            or payload.get("schema") != _COST_SELECTION_SCHEMA
+            or payload.get("schema_version") != 1
+        ):
+            raise PreEvaluationProductOriginError(
+                "durable product cost-contract selection record is malformed"
+            )
+        selected_action = _text(
+            _COST_SELECTION_MATERIAL_ACTION_KEY,
+            payload.get(_COST_SELECTION_MATERIAL_ACTION_KEY),
+        )
+        if selected_action == material_action_id:
+            matches.append(record)
+    if len(matches) > 1:
+        raise PreEvaluationProductOriginError(
+            "multiple durable product cost-contract selections exist for material action"
+        )
+    return tuple(matches)
+
+
+def persist_pre_evaluation_cost_contract_authority(
+    *,
+    ledger: JsonlDecisionLedger,
+    material_action_id: str,
+    risk_policy: PaperRiskPolicy,
+    contract: PreEvaluationCostContract,
+) -> DecisionRecord:
+    """Bind one immutable cost contract to an existing durable economic decision.
+
+    Selection is append-only and keyed by the same material action as the canonical
+    PortfolioPlan decision.  A restarted resolver therefore replays product-owned
+    selection instead of accepting a caller-selected filesystem path.
+    """
+
+    if not isinstance(ledger, JsonlDecisionLedger):
+        raise TypeError("ledger must be JsonlDecisionLedger")
+    if not isinstance(risk_policy, PaperRiskPolicy):
+        raise TypeError("risk_policy must be PaperRiskPolicy")
+    if not isinstance(contract, PreEvaluationCostContract):
+        raise TypeError("contract must be PreEvaluationCostContract")
+    material_action_id = _text("material_action_id", material_action_id)
+    goal = risk_policy.economic_goal
+    if goal is None:
+        raise PreEvaluationProductOriginError(
+            "cost-contract selection requires canonical EconomicGoal authority"
+        )
+    try:
+        economic_record = ledger.verified_economic_decision_for_material_action(
+            material_action_id,
+            goal,
+            risk_policy=risk_policy,
+        )
+    except Exception as exc:
+        raise PreEvaluationProductOriginError(
+            "durable economic decision cannot authorize cost-contract selection"
+        ) from exc
+    if economic_record is None:
+        raise PreEvaluationProductOriginError(
+            "cost-contract selection requires an existing durable economic decision"
+        )
+
+    expected_payload = _cost_selection_payload(
+        material_action_id=material_action_id,
+        economic_record=economic_record,
+        contract=contract,
+    )
+    expected_context_hash = _digest(expected_payload)
+    existing = _cost_selection_records(
+        ledger,
+        material_action_id=material_action_id,
+    )
+    if existing:
+        record = existing[0]
+        selected = _cost_contract_from_payload(
+            record.payload.get(_COST_SELECTION_CONTRACT_KEY)
+        )
+        if (
+            record.context_hash != expected_context_hash
+            or record.payload.get("economic_decision_id") != economic_record.decision_id
+            or record.payload.get("economic_decision_context_hash")
+            != economic_record.context_hash
+            or selected != contract
+        ):
+            raise PreEvaluationProductOriginError(
+                "durable product cost-contract selection conflicts with requested contract"
+            )
+        return record
+
+    decision_id = f"pre-eval-cost:{expected_context_hash[:32]}"
+    record = DecisionRecord(
+        replay_run_id=economic_record.replay_run_id,
+        agent=_COST_SELECTION_AGENT,
+        observed_ts=economic_record.observed_ts,
+        action=_COST_SELECTION_ACTION,
+        payload=expected_payload,
+        context_hash=expected_context_hash,
+        decision_id=decision_id,
+        recorded_at=economic_record.recorded_at,
+    )
+    try:
+        ledger.append(record)
+    except Exception as exc:
+        raise PreEvaluationProductOriginError(
+            "durable product cost-contract selection could not be persisted"
+        ) from exc
+    return record
+
+
+def _validated_durable_cost_contract(
+    *,
+    ledger: JsonlDecisionLedger,
+    material_action_id: str,
+    economic_record: DecisionRecord,
+    expected_cost_contract_sha256: str | None,
+) -> PreEvaluationCostContract:
+    matches = _cost_selection_records(
+        ledger,
+        material_action_id=material_action_id,
+    )
+    if not matches:
+        raise PreEvaluationProductOriginError(
+            "durable product cost-contract selection is absent"
+        )
+    record = matches[0]
+    contract = _cost_contract_from_payload(
+        record.payload.get(_COST_SELECTION_CONTRACT_KEY)
+    )
+    expected_payload = _cost_selection_payload(
+        material_action_id=material_action_id,
+        economic_record=economic_record,
+        contract=contract,
+    )
+    if (
+        record.context_hash != _digest(expected_payload)
+        or record.payload.get("economic_decision_id") != economic_record.decision_id
+        or record.payload.get("economic_decision_context_hash")
+        != economic_record.context_hash
+    ):
+        raise PreEvaluationProductOriginError(
+            "durable product cost-contract selection is detached from economic decision"
+        )
+    if expected_cost_contract_sha256 is not None:
+        expected_digest = _sha(
+            "expected_cost_contract_sha256", expected_cost_contract_sha256
+        )
+        if expected_digest != contract.contract_sha256:
+            raise PreEvaluationProductOriginError(
+                "expected cost contract does not match durable product selection"
+            )
+    return contract
 
 def _selection_labels(market_key: str) -> tuple[str, str]:
     if market_key in {"h2h", "spreads"}:
@@ -241,7 +451,7 @@ def _validated_durable_plan(
     risk_policy: PaperRiskPolicy,
     book: PaperBook,
     dependency_graph: PortfolioDependencyGraph,
-) -> tuple[str, str]:
+) -> tuple[DecisionRecord, str]:
     if not isinstance(ledger, JsonlDecisionLedger):
         raise TypeError("ledger must be JsonlDecisionLedger")
     material_action_id = _text("material_action_id", material_action_id)
@@ -313,7 +523,7 @@ def _validated_durable_plan(
         raise PreEvaluationProductOriginError(
             "caller intents do not equal durable product-owned intent evidence"
         )
-    return record.context_hash, portfolio_sha256
+    return record, portfolio_sha256
 
 
 @dataclass(frozen=True, slots=True, weakref_slot=True)
@@ -412,7 +622,7 @@ def resolve_pre_evaluation_product_origin(
     dependency_graph: PortfolioDependencyGraph,
     ledger: JsonlDecisionLedger,
     material_action_id: str,
-    cost_contract_path: str | Path,
+    expected_cost_contract_sha256: str | None = None,
 ) -> tuple[PreEvaluationProductOrigin, PreEvaluationCostContract]:
     """Re-resolve every positive semantic input from durable product-owned roots."""
 
@@ -438,7 +648,7 @@ def resolve_pre_evaluation_product_origin(
         bound=bound,
         provider_selections=providers,
     )
-    decision_context_hash, portfolio_sha256 = _validated_durable_plan(
+    decision_record, portfolio_sha256 = _validated_durable_plan(
         ledger=ledger,
         material_action_id=material_action_id,
         intents=intents,
@@ -446,7 +656,12 @@ def resolve_pre_evaluation_product_origin(
         book=book,
         dependency_graph=dependency_graph,
     )
-    cost_contract = _load_cost_contract(cost_contract_path)
+    cost_contract = _validated_durable_cost_contract(
+        ledger=ledger,
+        material_action_id=material_action_id,
+        economic_record=decision_record,
+        expected_cost_contract_sha256=expected_cost_contract_sha256,
+    )
     bound_digest = PreEvaluationSemanticAuthority._semantic_bound_authority_digest(bound)
     provider_bindings_sha256 = _digest(_provider_bindings_payload(providers))
     origin = PreEvaluationProductOrigin(
@@ -456,7 +671,7 @@ def resolve_pre_evaluation_product_origin(
         provider_bindings_sha256=provider_bindings_sha256,
         intent_sha256s=tuple(intent.intent_sha256 for intent in intents),
         durable_decision_context_hash=_sha(
-            "durable_decision_context_hash", decision_context_hash
+            "durable_decision_context_hash", decision_record.context_hash
         ),
         risk_policy_sha256=risk_policy.provenance_sha256,
         portfolio_sha256=portfolio_sha256,
@@ -526,7 +741,7 @@ def derive_product_owned_pre_evaluation_session(
     dependency_graph: PortfolioDependencyGraph,
     ledger: JsonlDecisionLedger,
     material_action_id: str,
-    cost_contract_path: str | Path,
+    expected_cost_contract_sha256: str | None = None,
 ) -> ProductOwnedPreEvaluationSemanticSession:
     """Production entrypoint: re-resolve origin first, then derive exact semantics."""
 
@@ -541,7 +756,7 @@ def derive_product_owned_pre_evaluation_session(
         dependency_graph=dependency_graph,
         ledger=ledger,
         material_action_id=material_action_id,
-        cost_contract_path=cost_contract_path,
+        expected_cost_contract_sha256=expected_cost_contract_sha256,
     )
     session = PreEvaluationSemanticAuthority(cost_contract).derive_session(
         bound=bound,

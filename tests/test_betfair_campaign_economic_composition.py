@@ -10,8 +10,8 @@ from autosport.betfair_campaign_economic_composition import (
     derive_campaign_economics_with_betfair_commission,
 )
 from autosport.campaign_cost_evidence import (
-    CampaignEconomicEvidenceVersion,
     CostClass,
+    CostEvidenceError,
     CostSourceRef,
     EconomicCompleteness,
     derive_campaign_economics,
@@ -169,12 +169,9 @@ def test_one_verified_receipt_cannot_launder_other_same_class_cost(
 def test_previous_version_requires_exact_capability(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    class ForgedPrevious(CampaignEconomicEvidenceVersion):
-        pass
-
     receipt = _receipt()
     source, campaign, _ = _authorities(monkeypatch, receipt=receipt)
-    with pytest.raises(Exception, match="exact CampaignEconomicEvidenceVersion"):
+    with pytest.raises(CostEvidenceError, match="exact CampaignEconomicEvidenceVersion"):
         derive_campaign_economics_with_betfair_commission(
             source=source,
             campaign=campaign,

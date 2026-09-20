@@ -1,11 +1,21 @@
 from __future__ import annotations
 
+import hashlib
+import json
 import tempfile
 import unittest
 from decimal import Decimal
 from pathlib import Path
 
 from autosport.decision_ledger import DecisionRecord, JsonlDecisionLedger
+from autosport.model_compute_router import (
+    ComputeCandidate,
+    ComputeRouteRequest,
+    ComputeRoutingPolicy,
+    ComputeTier,
+    DataClassification,
+    ModelComputeRouterStore,
+)
 from autosport.voc_evaluation import VOCEvaluationError
 from autosport.voc_outcome_scoring import (
     append_paired_voc_admission,
@@ -24,7 +34,8 @@ class VOCPrecomputeAdmissionTests(unittest.TestCase):
     def setUp(self) -> None:
         self.tempdir = tempfile.TemporaryDirectory()
         self.addCleanup(self.tempdir.cleanup)
-        self.path = Path(self.tempdir.name) / "decision-ledger.jsonl"
+        root = Path(self.tempdir.name)
+        self.path = root / "decision-ledger.jsonl"
         self.ledger = JsonlDecisionLedger(self.path)
         self.scope = {
             "sport_id": "table_tennis",
@@ -35,13 +46,13 @@ class VOCPrecomputeAdmissionTests(unittest.TestCase):
         }
         self.baseline = {
             "candidate_id": "baseline",
-            "backend_id": "local",
+            "backend_id": "baseline-backend",
             "model_id": "baseline-model",
             "config_sha256": SHA_B,
         }
         self.challenger = {
             "candidate_id": "challenger",
-            "backend_id": "cloud",
+            "backend_id": "challenger-backend",
             "model_id": "challenger-model",
             "config_sha256": SHA_C,
         }
@@ -64,6 +75,47 @@ class VOCPrecomputeAdmissionTests(unittest.TestCase):
         )
         self.context_sha = self.ledger.append(context)
 
+        self.router_path = root / "router.json"
+        self.router = ModelComputeRouterStore(self.router_path)
+        candidate = ComputeCandidate(
+            candidate_id="challenger",
+            tier=ComputeTier.LOCAL,
+            backend_id="challenger-backend",
+            model_id="challenger-model",
+            config_sha256=SHA_C,
+            capabilities=("route-voc",),
+            estimated_cost=Decimal("1"),
+            estimated_latency_seconds=Decimal("1"),
+        )
+        request = ComputeRouteRequest(
+            request_id="request-1",
+            created_at=T_DECISION,
+            decision_deadline=T_DEADLINE,
+            required_capability="route-voc",
+            data_classification=DataClassification.PUBLIC,
+            allow_cloud=False,
+            max_cost=Decimal("10"),
+            response_ttl_seconds=Decimal("10"),
+            baseline_candidate_id="challenger",
+            cloud_candidate_id=None,
+            decision_input_sha256=SHA_A,
+            decision_evidence_sha256=None,
+            voc_regime_id="regime-voc",
+            voc_urgency_id="normal",
+            voc_contradiction_state="none",
+        )
+        policy = ComputeRoutingPolicy(
+            policy_id="terminal-measurement-test",
+            policy_version=1,
+            cloud_enabled=False,
+        )
+        self.router.route(
+            request,
+            (candidate,),
+            policy,
+            as_of=T_DECISION,
+        )
+
     def _admit(self) -> str:
         return append_paired_voc_admission(
             self.ledger,
@@ -82,25 +134,46 @@ class VOCPrecomputeAdmissionTests(unittest.TestCase):
             recorded_at=T_DECISION,
         )
 
-    def test_admission_is_preoutput_and_terminal_survives_restart(self) -> None:
+    def _record_timeout_execution(
+        self,
+        *,
+        execution_id: str = "execution-timeout-1",
+        actual_cost: Decimal = Decimal("0.25"),
+        latency: Decimal = Decimal("10"),
+    ):
+        return self.router.record_execution(
+            execution_id=execution_id,
+            request_id="request-1",
+            completed_at=T_TIMEOUT,
+            available_at=T_TIMEOUT,
+            backend_id="challenger-backend",
+            model_id="challenger-model",
+            config_sha256=SHA_C,
+            actual_cost=actual_cost,
+            actual_latency_seconds=latency,
+            evidence_sha256=SHA_B,
+            as_of=T_TIMEOUT,
+        )
+
+    def test_terminal_binds_canonical_execution_and_survives_restart(self) -> None:
         admission_sha = self._admit()
+        execution = self._record_timeout_execution()
         terminal_sha = append_paired_voc_terminal(
             self.ledger,
+            compute_execution_store=self.router,
             admission_sha256=admission_sha,
             status="timeout",
-            observed_extra_compute_cost=Decimal("0.25"),
-            observed_extra_latency_seconds=Decimal("10"),
+            execution_id=execution.execution_id,
             replay_run_id="replay-terminal",
             agent="voc-admission-test",
             recorded_at=T_TIMEOUT,
         )
 
         records = JsonlDecisionLedger(self.path).verified_records()
-        self.assertEqual([record.action for record in records], [
-            "VOC_ROUTE_CONTEXT",
-            "VOC_PAIRED_ADMISSION",
-            "VOC_PAIRED_TERMINAL",
-        ])
+        self.assertEqual(
+            [record.action for record in records],
+            ["VOC_ROUTE_CONTEXT", "VOC_PAIRED_ADMISSION", "VOC_PAIRED_TERMINAL"],
+        )
         admission = records[1].payload["voc_paired_admission"]
         self.assertEqual(admission["decision_context_sha256"], self.context_sha)
         self.assertEqual(admission["baseline_compute_identity"], self.baseline)
@@ -109,18 +182,21 @@ class VOCPrecomputeAdmissionTests(unittest.TestCase):
         self.assertEqual(admission["cohort_id"], "cohort-1")
         self.assertNotIn("baseline_output_sha256", admission)
         self.assertNotIn("challenger_output_sha256", admission)
-        self.assertNotIn("baseline_action", admission)
-        self.assertNotIn("challenger_action", admission)
 
         terminal = records[2].payload["voc_terminal"]
+        self.assertEqual(terminal["schema_version"], 2)
         self.assertEqual(terminal["admission_sha256"], admission_sha)
         self.assertEqual(terminal["status"], "timeout")
-        self.assertEqual(terminal["observed_extra_compute_cost"], "0.25")
-        self.assertEqual(terminal["observed_extra_latency_seconds"], "10")
+        self.assertEqual(terminal["execution_id"], execution.execution_id)
+        self.assertEqual(
+            terminal["execution_record_sha256"], execution.execution_record_sha256
+        )
+        self.assertNotIn("observed_extra_compute_cost", terminal)
+        self.assertNotIn("observed_extra_latency_seconds", terminal)
         self.assertEqual(
             terminal_sha,
-            __import__("hashlib").sha256(
-                __import__("json").dumps(
+            hashlib.sha256(
+                json.dumps(
                     records[2].to_dict(),
                     ensure_ascii=False,
                     sort_keys=True,
@@ -130,18 +206,42 @@ class VOCPrecomputeAdmissionTests(unittest.TestCase):
             ).hexdigest(),
         )
 
+        reopened = ModelComputeRouterStore(self.router_path)
+        self.assertEqual(
+            reopened.total_actual_cost("request-1"), Decimal("0.25")
+        )
+
+    def test_missing_or_forged_zero_measurement_cannot_terminalize(self) -> None:
+        admission_sha = self._admit()
+        with self.assertRaisesRegex(
+            VOCEvaluationError,
+            "canonical compute execution is missing",
+        ):
+            append_paired_voc_terminal(
+                self.ledger,
+                compute_execution_store=self.router,
+                admission_sha256=admission_sha,
+                status="timeout",
+                execution_id="caller-forged-zero-measurement",
+                replay_run_id="replay-terminal-forged-zero",
+                agent="voc-admission-test",
+                recorded_at=T_TIMEOUT,
+            )
+        self.assertEqual(len(self.ledger.verified_records()), 2)
+
     def test_timeout_cannot_be_backdated_before_frozen_deadline(self) -> None:
         admission_sha = self._admit()
+        execution = self._record_timeout_execution()
         with self.assertRaisesRegex(
             VOCEvaluationError,
             "recorded before the frozen deadline",
         ):
             append_paired_voc_terminal(
                 self.ledger,
+                compute_execution_store=self.router,
                 admission_sha256=admission_sha,
                 status="timeout",
-                observed_extra_compute_cost=Decimal("0.25"),
-                observed_extra_latency_seconds=Decimal("1"),
+                execution_id=execution.execution_id,
                 replay_run_id="replay-terminal-early",
                 agent="voc-admission-test",
                 recorded_at="2026-09-20T00:00:05Z",

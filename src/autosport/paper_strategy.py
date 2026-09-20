@@ -261,57 +261,68 @@ class PaperValueAgent:
             return
 
         goal = self.risk_policy.economic_goal
-        if goal is not None and context.decision_ledger is None:
+        ledger = context.decision_ledger
+        if goal is not None and ledger is None:
             return
 
         material_action_id = self._material_action_id(context, event)
-        persisted = None
-        chosen_stake: Decimal | None = None
-        if goal is not None:
-            ledger = context.decision_ledger
-            assert ledger is not None
-            if getattr(ledger, "path", None) is not None and ledger.path.exists():
+        persisted: DecisionRecord | None = None
+        if ledger is not None and getattr(ledger, "path", None) is not None and ledger.path.exists():
+            if goal is None:
+                matches = tuple(
+                    record
+                    for record in ledger.verified_records()
+                    if record.decision_id == material_action_id
+                )
+                if len(matches) > 1:
+                    raise PaperDecisionReconciliationRequired(
+                        "duplicate durable paper-value decision identity"
+                    )
+                persisted = matches[0] if matches else None
+            else:
                 persisted = ledger.verified_economic_decision_for_material_action(
                     material_action_id,
                     goal,
                     risk_policy=self.risk_policy,
                 )
-            if persisted is None:
-                orphaned_execution = [
-                    item
-                    for item in runtime.ledger.events()
-                    if item.get("event_type") == "RUN_RESERVED"
-                    and item.get("payload", {}).get("trigger_id")
-                    == material_action_id
-                ]
-                if orphaned_execution:
-                    raise PaperDecisionReconciliationRequired(
-                        "#623 execution history exists without its durable "
-                        "paper-value economic decision"
-                    )
-            if persisted is not None:
-                payload = persisted.payload
-                if (
-                    persisted.replay_run_id != context.replay_run_id
-                    or persisted.agent != self.name
-                    or persisted.action != _MATERIAL_ACTION_NAME
-                    or persisted.observed_ts != event.observed_ts
-                    or payload.get("material_action_id") != material_action_id
-                    or payload.get("quote_key") != event.quote_key
-                ):
-                    raise PaperDecisionReconciliationRequired(
-                        "durable paper-value decision identity changed across restart"
-                    )
-                try:
-                    chosen_stake = Decimal(str(payload["requested_stake"]))
-                except Exception as exc:
-                    raise PaperDecisionReconciliationRequired(
-                        "durable paper-value decision lacks canonical requested stake"
-                    ) from exc
-                if not chosen_stake.is_finite() or chosen_stake <= 0:
-                    raise PaperDecisionReconciliationRequired(
-                        "durable paper-value requested stake is invalid"
-                    )
+
+        if persisted is None and ledger is not None:
+            orphaned_execution = [
+                item
+                for item in runtime.ledger.events()
+                if item.get("event_type") == "RUN_RESERVED"
+                and item.get("payload", {}).get("trigger_id") == material_action_id
+            ]
+            if orphaned_execution:
+                raise PaperDecisionReconciliationRequired(
+                    "#623 execution history exists without its durable "
+                    "paper-value decision"
+                )
+
+        chosen_stake: Decimal | None = None
+        if persisted is not None:
+            payload = persisted.payload
+            if (
+                persisted.replay_run_id != context.replay_run_id
+                or persisted.agent != self.name
+                or persisted.action != _MATERIAL_ACTION_NAME
+                or persisted.observed_ts != event.observed_ts
+                or payload.get("material_action_id") != material_action_id
+                or payload.get("quote_key") != event.quote_key
+            ):
+                raise PaperDecisionReconciliationRequired(
+                    "durable paper-value decision identity changed across restart"
+                )
+            try:
+                chosen_stake = Decimal(str(payload["requested_stake"]))
+            except Exception as exc:
+                raise PaperDecisionReconciliationRequired(
+                    "durable paper-value decision lacks canonical requested stake"
+                ) from exc
+            if not chosen_stake.is_finite() or chosen_stake <= 0:
+                raise PaperDecisionReconciliationRequired(
+                    "durable paper-value requested stake is invalid"
+                )
 
         if chosen_stake is None:
             chosen_stake = (
@@ -368,9 +379,7 @@ class PaperValueAgent:
         )
         expected_run_id = runtime.expected_run_id(prepared, material_action_id)
 
-        if goal is not None:
-            ledger = context.decision_ledger
-            assert ledger is not None
+        if ledger is not None:
             if persisted is None:
                 payload = {
                     "quote_key": event.quote_key,
@@ -408,25 +417,44 @@ class PaperValueAgent:
                     payload=payload,
                     context_hash=context.market_context_hash(),
                     decision_id=material_action_id,
-                    decision_kind=ECONOMIC_DECISION_KIND,
+                    decision_kind=(
+                        ECONOMIC_DECISION_KIND if goal is not None else "GENERAL"
+                    ),
                 )
                 try:
-                    ledger.append_economic(
-                        record,
-                        EconomicDecisionAuthority(goal, self.risk_policy),
-                    )
+                    if goal is None:
+                        ledger.append(record)
+                    else:
+                        ledger.append_economic(
+                            record,
+                            EconomicDecisionAuthority(goal, self.risk_policy),
+                        )
                 except Exception:
                     if not self._decision_is_durable(context, record, goal):
                         raise
-                persisted = ledger.verified_economic_decision_for_material_action(
-                    material_action_id,
-                    goal,
-                    risk_policy=self.risk_policy,
-                )
-                if persisted is None:
-                    raise PaperDecisionReconciliationRequired(
-                        "paper-value decision append did not become durable"
+
+                if goal is None:
+                    matches = tuple(
+                        durable
+                        for durable in ledger.verified_records()
+                        if durable.decision_id == material_action_id
                     )
+                    if len(matches) != 1:
+                        raise PaperDecisionReconciliationRequired(
+                            "paper-value decision append did not become uniquely durable"
+                        )
+                    persisted = matches[0]
+                else:
+                    persisted = ledger.verified_economic_decision_for_material_action(
+                        material_action_id,
+                        goal,
+                        risk_policy=self.risk_policy,
+                    )
+                    if persisted is None:
+                        raise PaperDecisionReconciliationRequired(
+                            "paper-value decision append did not become durable"
+                        )
+
             payload = persisted.payload
             if (
                 payload.get("requested_stake") != str(chosen_stake)

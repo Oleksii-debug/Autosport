@@ -1,21 +1,21 @@
 """Compatibility harness for the pre-authority portfolio-plan test corpus.
 
-The preserved implementation file contains historical synthetic positive predictive
-fixtures. Production now requires an exact ForecastRef object whose identity was
-minted by durable registry resolution. Historical portfolio tests keep using their
-synthetic durable payloads, but this wrapper authorizes only exact base-class fixture
-objects by reaching into the resolver closure from test code. No production mint or
-transferable token API is exposed, and subclass polymorphism is not used as authority.
+The preserved implementation file predates runtime predictive-authority resolution.
+Those historical tests still exercise all structural eligibility, uncertainty and
+portfolio semantics, while dedicated predictive-authority tests exercise the modern
+resolver-owned runtime gate.  This wrapper therefore bypasses only that new runtime
+capability check inside the historical suite; it never mutates or introspects the
+production authority store and exposes no production mint path.
 """
 
 from __future__ import annotations
 
 import importlib.util
-from dataclasses import replace
 from pathlib import Path
+from unittest.mock import patch
 
 from autosport import predictive_authority as _runtime_authority
-from autosport.opportunity import ForecastRef
+from autosport.opportunity import Opportunity
 
 
 _IMPL_PATH = Path(__file__).with_name("_test_portfolio_plan_impl.py")
@@ -28,51 +28,44 @@ if _SPEC is None or _SPEC.loader is None:
 _IMPL = importlib.util.module_from_spec(_SPEC)
 _SPEC.loader.exec_module(_IMPL)
 
-
-def _test_only_authority_store() -> dict[int, tuple[ForecastRef, str]]:
-    resolver = _runtime_authority.resolve_authoritative_forecast_ref
-    closure = resolver.__closure__ or ()
-    by_name = {
-        name: cell.cell_contents
-        for name, cell in zip(resolver.__code__.co_freevars, closure, strict=True)
-    }
-    store = by_name.get("authorized")
-    if not isinstance(store, dict):
-        raise RuntimeError("predictive resolver authority closure is unavailable")
-    return store
+_REAL_BUILD_PORTFOLIO_PLAN = _IMPL.build_portfolio_plan
 
 
-def _authorize_historical_fixture(
-    forecast: ForecastRef,
-    decision_time: str,
-) -> ForecastRef:
-    if type(forecast) is not ForecastRef:
-        raise RuntimeError("historical fixture authority requires exact ForecastRef")
-    fingerprint = _runtime_authority._runtime_fingerprint(forecast, decision_time)
-    if fingerprint is None:
-        raise RuntimeError("historical predictive fixture lacks canonical fingerprint")
-    _test_only_authority_store()[id(forecast)] = (forecast, fingerprint)
-    return forecast
+def _historical_structural_predictive_reason(
+    self: Opportunity,
+    decision_time,
+    *,
+    expected_model_id,
+):
+    """Preserve pre-authority structural checks for the historical test corpus."""
+
+    if not self.claims_probability_edge:
+        return None
+    for forecast in self.forecasts:
+        reason = _runtime_authority._ORIGINAL_FORECAST_ELIGIBILITY_REASON(
+            forecast,
+            decision_time,
+            expected_model_id=expected_model_id,
+        )
+        if reason is not None:
+            return reason
+    return None
+
+
+def _historical_build_portfolio_plan(*args, **kwargs):
+    with patch.object(
+        Opportunity,
+        "predictive_eligibility_reason",
+        new=_historical_structural_predictive_reason,
+    ):
+        return _REAL_BUILD_PORTFOLIO_PLAN(*args, **kwargs)
+
+
+_IMPL.build_portfolio_plan = _historical_build_portfolio_plan
 
 
 class PortfolioPlanTests(_IMPL.PortfolioPlanTests):
-    @classmethod
-    def _opportunity(cls, *args, **kwargs):
-        opportunity = _IMPL.PortfolioPlanTests._opportunity.__func__(
-            cls,
-            *args,
-            **kwargs,
-        )
-        forecasts = tuple(
-            _authorize_historical_fixture(
-                ForecastRef.from_dict(forecast.to_dict()),
-                cls.DECISION_TS,
-            )
-            if forecast.predictive_eligibility is not None
-            else forecast
-            for forecast in opportunity.forecasts
-        )
-        return replace(opportunity, forecasts=forecasts)
+    pass
 
 
 if __name__ == "__main__":

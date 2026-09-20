@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any, Mapping
 
 from .scientific_registry import DatasetSnapshot, promotion_holdout_access_id
+from .workspace_lock import WorkspaceEconomicLock
 
 
 _SCHEMA_VERSION = 1
@@ -31,6 +32,12 @@ class HoldoutAlreadyConsumedError(PointInTimeEvidenceError):
 
 class EvidenceLedgerCorruptError(PointInTimeEvidenceError):
     """Durable holdout evidence failed structural or digest validation."""
+
+
+class _HoldoutLedgerLock(WorkspaceEconomicLock):
+    """Dedicated crash-releasing lock; do not serialize unrelated economic writers."""
+
+    FILE_NAME = ".holdout-consumption.lock"
 
 
 def _text(value: object, name: str) -> str:
@@ -215,8 +222,8 @@ class HoldoutConsumption:
     consumed_at_utc: str
 
     def __post_init__(self) -> None:
+        _sha256(self.holdout_access_id, "holdout_access_id")
         for name in (
-            "holdout_access_id",
             "research_protocol_id",
             "confirmation_trial_family_id",
             "source_identity",
@@ -227,6 +234,15 @@ class HoldoutConsumption:
             _text(getattr(self, name), name)
         _sha256(self.dataset_manifest_sha256, "dataset_manifest_sha256")
         _instant(self.consumed_at_utc, "consumed_at_utc")
+        expected_access_id = promotion_holdout_access_id(
+            research_protocol_id=self.research_protocol_id,
+            dataset_manifest_sha256=self.dataset_manifest_sha256,
+            source_identity=self.source_identity,
+            license_identity=self.license_identity,
+            confirmation_trial_family_id=self.confirmation_trial_family_id,
+        )
+        if self.holdout_access_id != expected_access_id:
+            raise PointInTimeEvidenceError("holdout_access_id does not match canonical source identity")
 
     @property
     def consumption_id(self) -> str:
@@ -270,6 +286,8 @@ class HoldoutConsumptionLedger:
 
     Stable holdout identity deliberately excludes ``dataset_snapshot_id`` so renaming
     or reloading the same immutable bytes cannot manufacture a fresh confirmation set.
+    Mutations reload under a dedicated cross-process lock before deciding whether the
+    holdout is unused, preventing stale ledger instances from losing a concurrent use.
     """
 
     def __init__(self, path: str | Path) -> None:
@@ -284,10 +302,13 @@ class HoldoutConsumptionLedger:
 
     def records(self) -> tuple[HoldoutConsumption, ...]:
         with self._lock:
-            return tuple(self._records[key] for key in sorted(self._records))
+            with _HoldoutLedgerLock(self._path.parent):
+                self._load()
+                return tuple(self._records[key] for key in sorted(self._records))
 
     def _load(self) -> None:
         if not self._path.exists():
+            self._records = {}
             return
         try:
             raw = self._path.read_text(encoding="utf-8")
@@ -354,7 +375,9 @@ class HoldoutConsumptionLedger:
             confirmation_trial_family_id=confirmation_trial_family_id,
         )
         with self._lock:
-            existing = self._records.get(access_id)
+            with _HoldoutLedgerLock(self._path.parent):
+                self._load()
+                existing = self._records.get(access_id)
         if existing is not None:
             raise HoldoutAlreadyConsumedError(
                 f"holdout {access_id} was already consumed by {existing.consumer_identity}"
@@ -396,20 +419,22 @@ class HoldoutConsumptionLedger:
         )
 
         with self._lock:
-            existing = self._records.get(access_id)
-            if existing is not None:
-                if (
-                    existing.consumer_identity == record.consumer_identity
-                    and existing.purpose == record.purpose
-                ):
-                    return existing
-                raise HoldoutAlreadyConsumedError(
-                    f"holdout {access_id} was already consumed by {existing.consumer_identity}"
-                )
-            self._records[access_id] = record
-            try:
-                self._persist()
-            except BaseException:
-                del self._records[access_id]
-                raise
-            return record
+            with _HoldoutLedgerLock(self._path.parent):
+                self._load()
+                existing = self._records.get(access_id)
+                if existing is not None:
+                    if (
+                        existing.consumer_identity == record.consumer_identity
+                        and existing.purpose == record.purpose
+                    ):
+                        return existing
+                    raise HoldoutAlreadyConsumedError(
+                        f"holdout {access_id} was already consumed by {existing.consumer_identity}"
+                    )
+                self._records[access_id] = record
+                try:
+                    self._persist()
+                except BaseException:
+                    del self._records[access_id]
+                    raise
+                return record

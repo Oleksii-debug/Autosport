@@ -1,5 +1,6 @@
 import tempfile
 import unittest
+from unittest.mock import patch
 from decimal import Decimal
 from pathlib import Path
 
@@ -317,17 +318,18 @@ class PaperValueEconomicGoalIntegrationTests(unittest.TestCase):
             self._assert_decision_binds_ticket(records[0], book)
 
     def test_economic_ledger_post_write_error_keeps_verified_ticket_commit(self) -> None:
-        class RaiseAfterCommitLedger(JsonlDecisionLedger):
-            def append_economic(self, record, contract):
-                super().append_economic(record, contract)
-                raise OSError("injected post-write fsync uncertainty")
+        original_append_economic = JsonlDecisionLedger.append_economic
+
+        def raise_after_commit(ledger, record, contract):
+            original_append_economic(ledger, record, contract)
+            raise OSError("injected post-write fsync uncertainty")
 
         goal = self._goal()
         event = self._event()
         agent = self._agent(event, goal)
         with tempfile.TemporaryDirectory() as tmp:
             ledger_path = Path(tmp) / "decisions.jsonl"
-            ledger = RaiseAfterCommitLedger(ledger_path)
+            ledger = JsonlDecisionLedger(ledger_path)
             book = PaperBook("100")
             context = AgentContext(
                 book,
@@ -336,23 +338,31 @@ class PaperValueEconomicGoalIntegrationTests(unittest.TestCase):
                 decision_ledger=ledger,
             )
 
-            # The append reports an uncertain error only after durable bytes exist.
-            # Verified readback resolves the transaction as committed, so the paper
-            # ticket remains and the synthetic transport error is not surfaced.
-            agent.on_market_event(event, context)
+            # Preserve the exact ledger authority required by the execution-origin
+            # fence while injecting the same post-write uncertainty at the method
+            # boundary. This keeps the test focused on durable readback recovery.
+            with patch.object(
+                JsonlDecisionLedger,
+                "append_economic",
+                new=raise_after_commit,
+            ):
+                # The append reports an uncertain error only after durable bytes exist.
+                # Verified readback resolves the transaction as committed, so the paper
+                # ticket remains and the synthetic transport error is not surfaced.
+                agent.on_market_event(event, context)
 
-            self.assertEqual(book.balance, Decimal("98"))
-            self.assertEqual(len(book.tickets), 1)
-            records = ledger.verified_records()
-            self.assertEqual(len(records), 1)
-            self._assert_decision_binds_ticket(records[0], book)
+                self.assertEqual(book.balance, Decimal("98"))
+                self.assertEqual(len(book.tickets), 1)
+                records = ledger.verified_records()
+                self.assertEqual(len(records), 1)
+                self._assert_decision_binds_ticket(records[0], book)
 
-            # _acted must agree with the proven durable commit and prevent a duplicate
-            # position if the same event is delivered again in the same process.
-            agent.on_market_event(event, context)
-            self.assertEqual(book.balance, Decimal("98"))
-            self.assertEqual(len(book.tickets), 1)
-            self.assertEqual(len(ledger.verified_records()), 1)
+                # _acted must agree with the proven durable commit and prevent a duplicate
+                # position if the same event is delivered again in the same process.
+                agent.on_market_event(event, context)
+                self.assertEqual(book.balance, Decimal("98"))
+                self.assertEqual(len(book.tickets), 1)
+                self.assertEqual(len(ledger.verified_records()), 1)
 
     def test_post_write_same_id_different_decision_fails_closed(self) -> None:
         class WrongDecisionAfterCommitLedger(JsonlDecisionLedger):

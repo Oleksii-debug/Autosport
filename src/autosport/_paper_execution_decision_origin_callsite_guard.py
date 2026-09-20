@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import inspect
+from functools import wraps
 from pathlib import Path
 from types import FrameType
 
@@ -14,6 +15,8 @@ from .paper_execution_adoption import PaperExecutionAdoptionError, PaperExecutio
 
 _RUNTIME_EXECUTE_SENTINEL = "_autosport_decision_origin_pristine_runtime_execute"
 _CALLSITE_IDENTITY_SENTINEL = "_autosport_decision_origin_frozen_callsites"
+_LIVE_INIT_SENTINEL = "_autosport_decision_origin_pristine_live_init"
+_LIVE_INIT_GUARD_SENTINEL = "_autosport_decision_origin_live_init_guard"
 
 # The true execution implementation must be preserved once, before any origin
 # wrapper can be recaptured by importlib.reload(_paper_execution_decision_origin).
@@ -53,6 +56,11 @@ if not hasattr(PaperExecutionAdoptionRuntime, _CALLSITE_IDENTITY_SENTINEL):
     _DECISION_RECORD_CLASS,
 ) = getattr(PaperExecutionAdoptionRuntime, _CALLSITE_IDENTITY_SENTINEL)
 
+if not hasattr(_LIVE_LOOP_CLASS, _LIVE_INIT_SENTINEL):
+    setattr(_LIVE_LOOP_CLASS, _LIVE_INIT_SENTINEL, _LIVE_LOOP_CLASS.__init__)
+_STABLE_LIVE_INIT = getattr(_LIVE_LOOP_CLASS, _LIVE_INIT_SENTINEL)
+_STABLE_LIVE_INIT_SIGNATURE = inspect.signature(_STABLE_LIVE_INIT)
+
 
 def _resolved_path(value: object) -> Path:
     try:
@@ -76,6 +84,42 @@ def _require_workspace_decision_ledger(
     if actual != expected:
         raise _origin.PaperExecutionDecisionOriginError(
             f"{producer} decision origin requires canonical workspace decisions.jsonl"
+        )
+
+
+@wraps(_STABLE_LIVE_INIT)
+def _live_init_with_canonical_decision_ledger(self, *args, **kwargs) -> None:
+    """Treat a caller-supplied live ledger as an assertion, never path authority."""
+
+    bound = _STABLE_LIVE_INIT_SIGNATURE.bind(self, *args, **kwargs)
+    bound.apply_defaults()
+    workspace = bound.arguments.get("workspace")
+    supplied_ledger = bound.arguments.get("decision_ledger")
+    supplied_runtime = bound.arguments.get("paper_execution")
+    if supplied_runtime is not None and supplied_ledger is not None:
+        if type(supplied_ledger) is not JsonlDecisionLedger:
+            raise _origin.PaperExecutionDecisionOriginError(
+                "live decision origin requires exact JsonlDecisionLedger authority"
+            )
+        _require_workspace_decision_ledger(
+            supplied_ledger,
+            workspace,
+            producer="live",
+        )
+
+    _STABLE_LIVE_INIT(self, *args, **kwargs)
+
+    runtime = getattr(self, "paper_execution", None)
+    if runtime is not None:
+        ledger = getattr(self, "decision_ledger", None)
+        if type(ledger) is not JsonlDecisionLedger:
+            raise _origin.PaperExecutionDecisionOriginError(
+                "live decision origin requires exact JsonlDecisionLedger authority"
+            )
+        _require_workspace_decision_ledger(
+            ledger,
+            getattr(self, "workspace", workspace),
+            producer="live",
         )
 
 
@@ -299,6 +343,9 @@ def _execute_with_exact_product_callsite(
 
 
 def _install() -> None:
+    if not getattr(_LIVE_LOOP_CLASS, _LIVE_INIT_GUARD_SENTINEL, False):
+        _LIVE_LOOP_CLASS.__init__ = _live_init_with_canonical_decision_ledger
+        setattr(_LIVE_LOOP_CLASS, _LIVE_INIT_GUARD_SENTINEL, True)
     if getattr(PaperExecutionAdoptionRuntime, "_autosport_decision_origin_callsite_guard", False):
         return
     PaperExecutionAdoptionRuntime.execute = _execute_with_exact_product_callsite

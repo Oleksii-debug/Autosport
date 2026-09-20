@@ -139,6 +139,29 @@ def test_partial_gui_instance_without_export_worker_is_not_routed_to_tk_getattr(
     assert app._dataset_selection_blocker() is None
 
 
+def test_export_evidence_uses_active_workspace_without_tk_getattr_fallback(
+    monkeypatch, tmp_path: Path
+) -> None:
+    app = _partial_app()
+    active_workspace = tmp_path / "active"
+    chooser_kwargs: dict[str, object] = {}
+    app.__dict__.update(
+        _closing=False,
+        _active_workspace=active_workspace,
+    )
+    assert "workspace" not in app.__dict__
+
+    def fake_chooser(**kwargs):
+        chooser_kwargs.update(kwargs)
+        return ""
+
+    monkeypatch.setattr(gui.filedialog, "asksaveasfilename", fake_chooser)
+
+    app.export_evidence()
+
+    assert chooser_kwargs["initialdir"] == str(active_workspace.parent)
+
+
 def test_control_e_path_is_blocked_while_recovery_worker_is_busy(
     monkeypatch, tmp_path: Path
 ) -> None:

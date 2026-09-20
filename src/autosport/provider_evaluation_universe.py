@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterable, Mapping
@@ -17,10 +17,10 @@ from .evaluation_universe import (
     EvaluationUniverseStore,
     SlotState,
 )
-from .event_lifecycle import (
-    ContinuousEventLifecycle,
-    EventPhase,
-    canonical_event_identity,
+from .event_lifecycle import ContinuousEventLifecycle
+from .provider_event_reveal_authority import (
+    ProviderEventRevealAuthorityError,
+    resolve_provider_event_reveal,
 )
 from .provider_observation_authority import (
     CompleteGameBoardSnapshot,
@@ -30,7 +30,7 @@ from .provider_observation_authority import (
 
 _PROVIDER_ID = "parlayapi"
 _CONSUMER_KIND = "parlay-complete-game-board-evaluation-v2"
-_REVEAL_AUTHORITY_KIND = "continuous-event-lifecycle-scheduled-start-v1"
+_REVEAL_AUTHORITY_KIND = "parlay-complete-board-commence-time-v1"
 _MAX_ISSUED_UNIVERSES = 256
 _ISSUED_UNIVERSES: dict[int, tuple[EvaluationUniverse, str, str]] = {}
 
@@ -74,11 +74,21 @@ def _canonical_json(value: object) -> str:
             allow_nan=False,
         )
     except (TypeError, ValueError) as exc:
-        raise ProviderEvaluationUniverseError("provider member evidence must be finite JSON") from exc
+        raise ProviderEvaluationUniverseError(
+            "provider member evidence must be finite JSON"
+        ) from exc
 
 
 def _digest(value: object) -> str:
     return hashlib.sha256(_canonical_json(value).encode("utf-8")).hexdigest()
+
+
+def _row_semantic_sha256(row: EvaluationRow) -> str:
+    """Bind the complete immutable pre-outcome row payload into provider intake."""
+
+    if not isinstance(row, EvaluationRow):
+        raise ProviderEvaluationUniverseError("rows must contain EvaluationRow values")
+    return _digest(asdict(row))
 
 
 @dataclass(frozen=True, slots=True)
@@ -155,67 +165,29 @@ def _resolve_event_reveal_binding(
     event_id: str,
     event_lifecycle: ContinuousEventLifecycle,
 ) -> _EventRevealBinding:
-    """Resolve one conservative pre-result boundary from the canonical lifecycle store.
+    """Resolve start/reveal only from authenticated complete-board provider bytes.
 
-    The builder deliberately accepts no caller-authored reveal timestamp. A positive
-    path exists only when the existing lifecycle authority had already observed the
-    exact event as PRE_MATCH no later than the provider snapshot and had already bound
-    an immutable scheduled_start_at. Anything later/ambiguous fails closed.
+    ``ContinuousEventLifecycle`` remains an exact compatibility input for the existing
+    consumer API, but its caller-fed catalog state is deliberately not positive reveal
+    authority.  The start boundary comes from the live-issued provider snapshot's
+    source-reported ``commence_time`` instead.
     """
 
     if type(event_lifecycle) is not ContinuousEventLifecycle:
         raise ProviderEvaluationUniverseError(
             "complete-board reveal boundary requires canonical ContinuousEventLifecycle"
         )
-    identity = canonical_event_identity(
-        source_id=snapshot.request.source_id,
-        sport=snapshot.request.sport_key,
-        event_id=event_id,
-    )
-    record = event_lifecycle.get(identity)
-    if record is None:
+    try:
+        evidence = resolve_provider_event_reveal(snapshot, event_id=event_id)
+    except ProviderEventRevealAuthorityError as exc:
         raise ProviderEvaluationUniverseError(
-            "canonical event lifecycle has no exact provider event reveal authority"
-        )
-    if (
-        record.identity != identity
-        or record.source_id != snapshot.request.source_id
-        or record.sport != snapshot.request.sport_key
-        or record.event_id != event_id
-    ):
-        raise ProviderEvaluationUniverseError(
-            "event lifecycle reveal authority identity mismatch"
-        )
-    if record.phase is not EventPhase.PRE_MATCH:
-        raise ProviderEvaluationUniverseError(
-            "complete-board evaluation requires canonical PRE_MATCH lifecycle evidence"
-        )
-    if record.scheduled_start_at is None or record.last_discovered_at is None:
-        raise ProviderEvaluationUniverseError(
-            "event lifecycle lacks an immutable pre-result scheduled-start boundary"
-        )
-    captured = _instant(snapshot.captured_at, "provider captured_at")
-    discovered = _instant(record.last_discovered_at, "lifecycle last_discovered_at")
-    reveal = _instant(record.scheduled_start_at, "lifecycle scheduled_start_at")
-    if discovered > captured:
-        raise ProviderEvaluationUniverseError(
-            "event reveal authority was discovered after the provider snapshot"
-        )
-    if reveal <= captured:
-        raise ProviderEvaluationUniverseError(
-            "provider snapshot is not strictly before the canonical event reveal boundary"
-        )
-    authority_sha256 = _digest(
-        {
-            "kind": _REVEAL_AUTHORITY_KIND,
-            "record": record.to_dict(),
-        }
-    )
+            "authoritative provider board cannot prove a pre-result event start boundary"
+        ) from exc
     return _EventRevealBinding(
-        event_id=event_id,
-        authority_id=f"{_REVEAL_AUTHORITY_KIND}:{identity}",
-        authority_sha256=authority_sha256,
-        outcome_reveal_not_before=record.scheduled_start_at,
+        event_id=evidence.event_id,
+        authority_id=evidence.authority_id,
+        authority_sha256=evidence.authority_sha256,
+        outcome_reveal_not_before=evidence.outcome_reveal_not_before,
     )
 
 
@@ -224,7 +196,7 @@ def complete_game_board_member_specs(
     *,
     event_lifecycle: ContinuousEventLifecycle | None = None,
 ) -> tuple[CompleteBoardMemberSpec, ...]:
-    """Derive every selection slot and bind each event to canonical reveal evidence."""
+    """Derive every selection slot from one authoritative complete provider board."""
 
     assert_complete_game_board_authoritative(snapshot)
     frame = snapshot.frame
@@ -295,11 +267,7 @@ def complete_game_board_member_specs(
                     "outcome_reveal_not_before": binding.outcome_reveal_not_before,
                 }
             )
-            # The row key itself carries the exact authority digest, so every persisted
-            # EvaluationRow mechanically binds to the lifecycle evidence used to mint it.
-            row_key = (
-                f"parlay-board:{member_sha256}:reveal:{binding.authority_sha256}"
-            )
+            row_key = f"parlay-board:{member_sha256}:reveal:{binding.authority_sha256}"
             if row_key in seen:
                 raise ProviderEvaluationUniverseError(
                     "provider complete board produced duplicate selection membership"
@@ -350,7 +318,10 @@ def _validate_row_against_member(
         raise ProviderEvaluationUniverseError(
             "evaluation row does not match exact provider selection membership"
         )
-    if _instant(row.source_at, "row source_at") != _instant(member.source_at, "member source_at"):
+    if _instant(row.source_at, "row source_at") != _instant(
+        member.source_at,
+        "member source_at",
+    ):
         raise ProviderEvaluationUniverseError(
             "evaluation row source_at does not match provider member evidence"
         )
@@ -365,11 +336,17 @@ def _validate_row_against_member(
         raise ProviderEvaluationUniverseError(
             "evaluation row must be committed after provider capture and before evaluation"
         )
-    if row.detection_at is not None and _instant(row.detection_at, "detection_at") < evaluation:
+    if row.detection_at is not None and _instant(
+        row.detection_at,
+        "detection_at",
+    ) < evaluation:
         raise ProviderEvaluationUniverseError(
             "row detection cannot precede complete provider membership authority"
         )
-    if row.decision_at is not None and _instant(row.decision_at, "decision_at") < evaluation:
+    if row.decision_at is not None and _instant(
+        row.decision_at,
+        "decision_at",
+    ) < evaluation:
         raise ProviderEvaluationUniverseError(
             "row decision cannot precede complete provider membership authority"
         )
@@ -392,7 +369,7 @@ def _validate_row_against_member(
             "authoritative outcome_reveal_not_before",
         ):
             raise ProviderEvaluationUniverseError(
-                "row reveal boundary must equal canonical per-event lifecycle authority"
+                "row reveal boundary must equal canonical per-event provider authority"
             )
         if row.slot_state in {SlotState.NO_EVENT, SlotState.SOURCE_OUTAGE}:
             raise ProviderEvaluationUniverseError(
@@ -443,7 +420,7 @@ def build_frozen_universe_from_complete_game_board(
     frozen_at: str,
     rows: Iterable[EvaluationRow],
 ) -> EvaluationUniverse:
-    """Freeze every provider slot with immutable per-event pre-result authority."""
+    """Freeze every provider slot with immutable provider-owned reveal evidence."""
 
     assert_complete_game_board_authoritative(snapshot)
     authority_id = _text(authority_id, "authority_id")
@@ -489,9 +466,13 @@ def build_frozen_universe_from_complete_game_board(
         raise ProviderEvaluationUniverseError(
             "provider evaluation denominator requires explicit membership rows"
         )
+    if not all(isinstance(row, EvaluationRow) for row in materialized):
+        raise ProviderEvaluationUniverseError("rows must contain EvaluationRow values")
     by_key = {row.row_key: row for row in materialized}
     if len(by_key) != len(materialized):
-        raise ProviderEvaluationUniverseError("provider evaluation row_key values must be unique")
+        raise ProviderEvaluationUniverseError(
+            "provider evaluation row_key values must be unique"
+        )
     expected_keys = tuple(member.row_key for member in members)
     if tuple(sorted(by_key)) != tuple(sorted(expected_keys)):
         raise ProviderEvaluationUniverseError(
@@ -505,6 +486,13 @@ def build_frozen_universe_from_complete_game_board(
             evaluation_not_before=evaluation_not_before,
         )
 
+    row_semantic_sha256s = [
+        {
+            "row_key": row.row_key,
+            "row_sha256": _row_semantic_sha256(row),
+        }
+        for row in sorted(materialized, key=lambda item: item.row_key)
+    ]
     root_sha256 = _digest(
         {
             "kind": _CONSUMER_KIND,
@@ -526,6 +514,7 @@ def build_frozen_universe_from_complete_game_board(
                 }
                 for item in members
             ],
+            "row_semantic_sha256s": row_semantic_sha256s,
             "evaluation_not_before": evaluation_not_before,
         }
     )
@@ -575,7 +564,10 @@ class _ProviderIntakeLedger(ObservationIntakeLedger):
             raise EvaluationUniverseIntegrityError(
                 "provider consumer snapshot must be ObservationIntakeSnapshot"
             )
-        if snapshot.authority_id != self.authority_id or snapshot.source_id != self.source_id:
+        if (
+            snapshot.authority_id != self.authority_id
+            or snapshot.source_id != self.source_id
+        ):
             raise EvaluationUniverseIntegrityError(
                 "provider consumer snapshot authority/source identity mismatch"
             )
@@ -593,7 +585,7 @@ class _ProviderIntakeLedger(ObservationIntakeLedger):
 
 
 class ProviderEvaluationUniverseStore:
-    """Persist #638's derived consumer state without reissuing provider origin after restart."""
+    """Persist #638's derived state without reissuing provider origin after restart."""
 
     def __init__(
         self,
@@ -623,9 +615,7 @@ class ProviderEvaluationUniverseStore:
 
     def save(self, ledger: EvaluationUniverseLedger) -> None:
         if not isinstance(ledger, EvaluationUniverseLedger):
-            raise ProviderEvaluationUniverseError(
-                "ledger must be EvaluationUniverseLedger"
-            )
+            raise ProviderEvaluationUniverseError("ledger must be EvaluationUniverseLedger")
         if (
             ledger.universe.intake_snapshot.authority_id != self.authority_id
             or ledger.universe.intake_snapshot.source_id != self.source_id

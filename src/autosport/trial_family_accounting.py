@@ -581,7 +581,7 @@ class TrialFamilyAccountingStore:
                 raise ValueError(f'Experiment {field} does not match durable trial candidate/research protocol')
 
     @staticmethod
-    def _require_evaluation_bundle_matches(attempt: TrialAttemptView, family: TrialFamilyDefinition, experiment_available_at: str, bundle: Any) -> None:
+    def _require_evaluation_bundle_matches(attempt: TrialAttemptView, family: TrialFamilyDefinition, registry: ScientificRegistry, experiment_id: str, experiment_available_at: str, bundle: Any) -> None:
         expected = {
             'dataset_snapshot_id': attempt.candidate.dataset_snapshot_id,
             'protocol_sha256': family.protocol_sha256,
@@ -593,6 +593,8 @@ class TrialFamilyAccountingStore:
                 raise ValueError(f'Experiment EvaluationBundle {field} does not match durable trial candidate/research protocol')
         if _instant(bundle.available_at, 'EvaluationBundle.available_at') > _instant(experiment_available_at, 'Experiment.available_at'):
             raise ValueError('Experiment EvaluationBundle became available after the Experiment result')
+        if not ScientificRegistry.causal_precedes(registry, 'EvaluationBundle', bundle.record_id, 'Experiment', experiment_id):
+            raise ValueError('Experiment EvaluationBundle must be durably published before the Experiment')
 
     def _require_canonical_registry(self, registry: ScientificRegistry, state: dict[str, Any]) -> ScientificRegistry:
         if type(registry) is not ScientificRegistry:
@@ -650,7 +652,7 @@ class TrialFamilyAccountingStore:
         bundle = registry.get('EvaluationBundle', bundle_id)
         if bundle is None:
             raise ValueError('Experiment EvaluationBundle is missing from ScientificRegistry')
-        self._require_evaluation_bundle_matches(attempt, family, available, bundle)
+        self._require_evaluation_bundle_matches(attempt, family, registry, experiment_id, available, bundle)
         outcome = ResearchOutcome(entry.payload.get('outcome'))
         if _instant(available, 'Experiment.available_at') < _instant(attempt.created_at, 'attempt.created_at'):
             raise ValueError('Experiment result predates trial attempt')
@@ -705,7 +707,7 @@ class TrialFamilyAccountingStore:
             bundle = registry.get('EvaluationBundle', evidence.evaluation_bundle_id)
             if bundle is None or experiment.payload.get('evaluation_bundle_id') != evidence.evaluation_bundle_id or bundle.payload.get('bundle_sha256') != evidence.evaluation_bundle_sha256:
                 raise ValueError('sequential look EvaluationBundle does not match durable registry truth')
-            self._require_evaluation_bundle_matches(attempt, family, experiment.available_at, bundle)
+            self._require_evaluation_bundle_matches(attempt, family, registry, evidence.experiment_id, experiment.available_at, bundle)
             prior_assessments = store.assessments()
             causal_times = [_instant(raw['event_at'], 'event_at') for raw in state['events']] + [_instant(value.evidence.observed_at, 'observed_at') for value in prior_assessments]
             if causal_times and _instant(evidence.observed_at, 'observed_at') < max(causal_times):
@@ -773,7 +775,7 @@ class TrialFamilyAccountingStore:
                 bundle = registry.get('EvaluationBundle', bundle_id)
                 if bundle is None:
                     raise ValueError('completed attempt EvaluationBundle is missing from ScientificRegistry')
-                self._require_evaluation_bundle_matches(attempt, family, durable_experiment.available_at, bundle)
+                self._require_evaluation_bundle_matches(attempt, family, registry, durable_experiment.record_id, durable_experiment.available_at, bundle)
         target_looks = [a for a in self._sequential().assessments() if a.evidence.experiment_id == evidence.experiment_id and _instant(a.evidence.observed_at, 'observed_at') <= _instant(evidence.created_at, 'created_at')]
         if not target_looks:
             raise ValueError('promotion eligibility requires registered sequential evidence')

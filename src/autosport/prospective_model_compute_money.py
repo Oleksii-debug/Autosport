@@ -6,14 +6,14 @@ The existing model-compute router owns compute request/route identity and measur
 compute-unit cost, but current product truth does not expose a product-owned,
 pre-decision monetary tariff (amount + currency + tariff identity) for that route.
 This adapter therefore binds an exact live OpportunityIntent to the canonical
-router decision and emits explicit UNKNOWN_UNPROVEN monetary truth.  It never
+router decision and emits explicit UNKNOWN_UNPROVEN monetary truth. It never
 converts credits/tokens/dimensionless compute cost into money and never accepts a
 caller-authored monetary amount, currency, tariff, zero, or applicability claim.
 
-A future positive adapter may extend the resolver only when the canonical router
-(or a product-owned billing authority bound to it) can re-resolve an exact
-pre-decision monetary quote.  Until then KNOWN_AMOUNT/KNOWN_ZERO are intentionally
-unreachable rather than forgeable.
+Schema v1 deliberately cannot represent positive monetary truth. A future positive
+adapter must introduce a product-owned re-resolving billing authority instead of
+trusting a caller-constructible Python object. Until then UNKNOWN_UNPROVEN is the
+only representable state.
 """
 
 from dataclasses import dataclass
@@ -30,9 +30,7 @@ from .portfolio_plan import OpportunityIntent
 
 
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
-_CURRENCY_RE = re.compile(r"^[A-Z]{3}$")
 _SCHEMA_VERSION = 1
-_RESULT_TOKEN = object()
 
 
 class ProspectiveModelComputeMoneyError(ValueError):
@@ -40,9 +38,9 @@ class ProspectiveModelComputeMoneyError(ValueError):
 
 
 class ProspectiveModelComputeMoneyStatus(StrEnum):
+    """Schema-v1 status. Positive money is intentionally not representable."""
+
     UNKNOWN_UNPROVEN = "UNKNOWN_UNPROVEN"
-    KNOWN_ZERO = "KNOWN_ZERO"
-    KNOWN_AMOUNT = "KNOWN_AMOUNT"
 
 
 class ProspectiveModelComputeMoneyReason(StrEnum):
@@ -136,7 +134,12 @@ def _digest(value: object) -> str:
 
 @dataclass(frozen=True, slots=True, init=False)
 class ProspectiveModelComputeMoneyEvidence:
-    """Resolver-sealed prospective monetary truth for one canonical compute route."""
+    """Fail-closed prospective evidence for one canonical compute route.
+
+    Schema v1 intentionally exposes monetary fields only as ``None``. Keeping those
+    fields in the serialized shape makes the missing authority explicit while
+    preventing a caller from minting a positive exact-type result.
+    """
 
     intent_sha256: str
     opportunity_id: str
@@ -146,51 +149,15 @@ class ProspectiveModelComputeMoneyEvidence:
     router_request_sha256: str
     router_decision_sha256: str
     status: ProspectiveModelComputeMoneyStatus
-    reason: ProspectiveModelComputeMoneyReason | None
-    amount: Decimal | None
-    currency: str | None
-    tariff_sha256: str | None
+    reason: ProspectiveModelComputeMoneyReason
+    amount: None
+    currency: None
+    tariff_sha256: None
 
     def __init__(self, *_args: object, **_kwargs: object) -> None:
         raise ProspectiveModelComputeMoneyError(
             "ProspectiveModelComputeMoneyEvidence is created only by the canonical resolver"
         )
-
-    @classmethod
-    def _from_resolver(
-        cls,
-        *,
-        intent_sha256: str,
-        opportunity_id: str,
-        request_id: str,
-        decision_at: datetime,
-        router_decided_at: datetime,
-        router_request_sha256: str,
-        router_decision_sha256: str,
-        status: ProspectiveModelComputeMoneyStatus,
-        reason: ProspectiveModelComputeMoneyReason | None,
-        amount: Decimal | None,
-        currency: str | None,
-        tariff_sha256: str | None,
-        _token: object,
-    ) -> "ProspectiveModelComputeMoneyEvidence":
-        if _token is not _RESULT_TOKEN:
-            raise ProspectiveModelComputeMoneyError("invalid resolver authority token")
-        item = object.__new__(cls)
-        object.__setattr__(item, "intent_sha256", intent_sha256)
-        object.__setattr__(item, "opportunity_id", opportunity_id)
-        object.__setattr__(item, "request_id", request_id)
-        object.__setattr__(item, "decision_at", decision_at)
-        object.__setattr__(item, "router_decided_at", router_decided_at)
-        object.__setattr__(item, "router_request_sha256", router_request_sha256)
-        object.__setattr__(item, "router_decision_sha256", router_decision_sha256)
-        object.__setattr__(item, "status", status)
-        object.__setattr__(item, "reason", reason)
-        object.__setattr__(item, "amount", amount)
-        object.__setattr__(item, "currency", currency)
-        object.__setattr__(item, "tariff_sha256", tariff_sha256)
-        item._validate()
-        return item
 
     def _validate(self) -> None:
         _sha256(self.intent_sha256, "intent_sha256")
@@ -204,47 +171,33 @@ class ProspectiveModelComputeMoneyEvidence:
             )
         _sha256(self.router_request_sha256, "router_request_sha256")
         _sha256(self.router_decision_sha256, "router_decision_sha256")
-        if not isinstance(self.status, ProspectiveModelComputeMoneyStatus):
-            raise ProspectiveModelComputeMoneyError("status is invalid")
-
-        if self.status is ProspectiveModelComputeMoneyStatus.UNKNOWN_UNPROVEN:
-            if self.reason is None:
-                raise ProspectiveModelComputeMoneyError(
-                    "UNKNOWN_UNPROVEN requires an explicit reason"
-                )
-            if any(value is not None for value in (self.amount, self.currency, self.tariff_sha256)):
-                raise ProspectiveModelComputeMoneyError(
-                    "UNKNOWN_UNPROVEN cannot expose an authoritative monetary value"
-                )
-            return
-
-        if self.reason is not None:
+        if (
+            type(self.status) is not ProspectiveModelComputeMoneyStatus
+            or self.status is not ProspectiveModelComputeMoneyStatus.UNKNOWN_UNPROVEN
+        ):
             raise ProspectiveModelComputeMoneyError(
-                "known monetary evidence cannot carry an unknown reason"
+                "schema v1 cannot represent positive monetary authority"
             )
-        if not isinstance(self.amount, Decimal) or not self.amount.is_finite():
-            raise ProspectiveModelComputeMoneyError("known amount must be a finite Decimal")
-        if self.amount < 0 or (self.amount.is_zero() and self.amount.is_signed()):
-            raise ProspectiveModelComputeMoneyError("known amount must be non-negative")
-        if type(self.currency) is not str or _CURRENCY_RE.fullmatch(self.currency) is None:
+        if (
+            type(self.reason) is not ProspectiveModelComputeMoneyReason
+            or self.reason
+            is not ProspectiveModelComputeMoneyReason.NO_PREDECISION_MONETARY_TARIFF_AUTHORITY
+        ):
             raise ProspectiveModelComputeMoneyError(
-                "known monetary evidence requires an uppercase three-letter currency"
+                "schema v1 UNKNOWN_UNPROVEN requires the canonical missing-tariff reason"
             )
-        _sha256(self.tariff_sha256, "tariff_sha256")
-        if self.status is ProspectiveModelComputeMoneyStatus.KNOWN_ZERO:
-            if self.amount != Decimal("0"):
-                raise ProspectiveModelComputeMoneyError("KNOWN_ZERO requires amount=0")
-        elif self.status is ProspectiveModelComputeMoneyStatus.KNOWN_AMOUNT:
-            if self.amount == Decimal("0"):
-                raise ProspectiveModelComputeMoneyError(
-                    "KNOWN_AMOUNT must be positive; use KNOWN_ZERO"
-                )
+        if any(value is not None for value in (self.amount, self.currency, self.tariff_sha256)):
+            raise ProspectiveModelComputeMoneyError(
+                "schema v1 cannot expose an authoritative monetary value"
+            )
 
     @property
     def evidence_id(self) -> str:
+        self._validate()
         return _digest(self.to_dict(include_evidence_id=False))
 
     def to_dict(self, *, include_evidence_id: bool = True) -> dict[str, Any]:
+        self._validate()
         payload: dict[str, Any] = {
             "schema": "autosport.prospective_model_compute_money",
             "schema_version": _SCHEMA_VERSION,
@@ -256,14 +209,57 @@ class ProspectiveModelComputeMoneyEvidence:
             "router_request_sha256": self.router_request_sha256,
             "router_decision_sha256": self.router_decision_sha256,
             "status": self.status.value,
-            "reason": None if self.reason is None else self.reason.value,
-            "amount": None if self.amount is None else str(self.amount),
-            "currency": self.currency,
-            "tariff_sha256": self.tariff_sha256,
+            "reason": self.reason.value,
+            "amount": None,
+            "currency": None,
+            "tariff_sha256": None,
         }
         if include_evidence_id:
             payload["evidence_id"] = _digest(payload)
         return payload
+
+
+def _make_unknown_evidence(
+    *,
+    intent_sha256: str,
+    opportunity_id: str,
+    request_id: str,
+    decision_at: datetime,
+    router_decided_at: datetime,
+    router_request_sha256: str,
+    router_decision_sha256: str,
+) -> ProspectiveModelComputeMoneyEvidence:
+    """Create the sole schema-v1 state.
+
+    The helper has no monetary/status parameters, so importing this private helper
+    does not create a positive authority surface. Product consumers must still
+    treat the returned object as fail-closed UNKNOWN evidence, never as a future
+    positive billing capability.
+    """
+
+    item = object.__new__(ProspectiveModelComputeMoneyEvidence)
+    object.__setattr__(item, "intent_sha256", intent_sha256)
+    object.__setattr__(item, "opportunity_id", opportunity_id)
+    object.__setattr__(item, "request_id", request_id)
+    object.__setattr__(item, "decision_at", decision_at)
+    object.__setattr__(item, "router_decided_at", router_decided_at)
+    object.__setattr__(item, "router_request_sha256", router_request_sha256)
+    object.__setattr__(item, "router_decision_sha256", router_decision_sha256)
+    object.__setattr__(
+        item,
+        "status",
+        ProspectiveModelComputeMoneyStatus.UNKNOWN_UNPROVEN,
+    )
+    object.__setattr__(
+        item,
+        "reason",
+        ProspectiveModelComputeMoneyReason.NO_PREDECISION_MONETARY_TARIFF_AUTHORITY,
+    )
+    object.__setattr__(item, "amount", None)
+    object.__setattr__(item, "currency", None)
+    object.__setattr__(item, "tariff_sha256", None)
+    item._validate()
+    return item
 
 
 def resolve_prospective_model_compute_money(
@@ -276,9 +272,9 @@ def resolve_prospective_model_compute_money(
     """Bind a live intent to canonical compute-route truth without inventing money.
 
     The current router's ``max_cost`` / measured compute-cost values are compute
-    economics used by routing/VOC.  They do not carry a monetary currency or a
-    product-owned billing/tariff identity.  Consequently they are deliberately not
-    converted to ``KNOWN_AMOUNT`` or ``KNOWN_ZERO`` here.
+    economics used by routing/VOC. They do not carry a monetary currency or a
+    product-owned billing/tariff identity. Consequently schema v1 can return only
+    ``UNKNOWN_UNPROVEN``.
     """
 
     # Capability checks happen before any authority-bearing property/method read.
@@ -330,10 +326,10 @@ def resolve_prospective_model_compute_money(
         "intent opportunity_id",
     )
 
-    # There is intentionally no positive branch in schema v1.  The canonical
-    # route payload is nevertheless sealed into the evidence identity so later
-    # billing work cannot silently substitute another request/model/backend route.
-    return ProspectiveModelComputeMoneyEvidence._from_resolver(
+    # Seal the complete canonical request/route identity into fail-closed evidence.
+    # A future monetary implementation must be a new product-owned re-resolution
+    # authority; it must not expand this caller-visible object into positive truth.
+    return _make_unknown_evidence(
         intent_sha256=intent_sha256,
         opportunity_id=opportunity_id,
         request_id=canonical_request_id,
@@ -341,10 +337,4 @@ def resolve_prospective_model_compute_money(
         router_decided_at=router_decided_at,
         router_request_sha256=_digest(request_payload),
         router_decision_sha256=_digest(decision_payload),
-        status=ProspectiveModelComputeMoneyStatus.UNKNOWN_UNPROVEN,
-        reason=ProspectiveModelComputeMoneyReason.NO_PREDECISION_MONETARY_TARIFF_AUTHORITY,
-        amount=None,
-        currency=None,
-        tariff_sha256=None,
-        _token=_RESULT_TOKEN,
     )

@@ -60,6 +60,8 @@ _HOLDOUT_LINEAGE_REQUIRED = (
     "holdout consumption requires an exact canonical DatasetSnapshotLineageAuthority"
 )
 _HOLDOUT_LINEAGE_BINDING_DOMAIN = "data.point-in-time-holdout-lineage-binding-v1"
+_CANONICAL_REGISTRY_FILENAME = "scientific-registry.json"
+_CANONICAL_LINEAGE_FILENAME = "dataset-snapshot-lineage.json"
 
 # importlib.reload reuses this module globals dictionary. Keep lineage object
 # pins off mutable ledger instances and preserve them across repair self-reload.
@@ -201,6 +203,18 @@ def _require_product_lineage_composition(
     ):
         raise evidence.PointInTimeEvidenceError(
             "holdout lineage must belong to the canonical holdout workspace"
+        )
+    if _canonical_path_identity(lineage.path) != _canonical_path_identity(
+        workspace / _CANONICAL_LINEAGE_FILENAME
+    ):
+        raise evidence.PointInTimeEvidenceError(
+            "holdout lineage path is not the canonical product lineage path"
+        )
+    if _canonical_path_identity(lineage.registry.path) != _canonical_path_identity(
+        workspace / _CANONICAL_REGISTRY_FILENAME
+    ):
+        raise evidence.PointInTimeEvidenceError(
+            "holdout registry path is not the canonical product registry path"
         )
     if lineage_root != expected_root or ledger_root != expected_root:
         raise evidence.PointInTimeEvidenceError(

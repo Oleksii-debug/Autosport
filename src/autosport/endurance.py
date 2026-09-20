@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import time
 import tracemalloc
 from dataclasses import asdict, dataclass
@@ -25,6 +26,7 @@ from .storage import SQLiteMarketStore
 _ENDURANCE_PAPER_DECIMAL_PRECISION = 28
 _ENDURANCE_PAPER_DECIMAL_EMIN = -999999
 _ENDURANCE_PAPER_DECIMAL_EMAX = 999999
+_SOURCE_SHA_HEX = frozenset("0123456789abcdef")
 
 
 @dataclass(frozen=True, slots=True)
@@ -77,7 +79,9 @@ class EnduranceReport:
     paper_economics_verified: bool
     corrupt_health_rejected: bool
     corrupt_paper_book_rejected: bool
+    source_sha: str | None
     stable_invariant_fingerprint: str
+    performance_observation_fingerprint: str | None
     ingest_elapsed_seconds: float
     duplicate_elapsed_seconds: float
     replay_elapsed_seconds: float
@@ -137,6 +141,19 @@ def _fingerprint(payload: dict[str, Any]) -> str:
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
+def _source_sha_from_environment() -> str | None:
+    value = os.environ.get("AUTOSPORT_SOURCE_SHA")
+    if value is None:
+        return None
+    if (
+        len(value) != 40
+        or value != value.strip()
+        or any(character not in _SOURCE_SHA_HEX for character in value)
+    ):
+        raise ValueError("AUTOSPORT_SOURCE_SHA must be lowercase 40-character Git SHA-1 hex")
+    return value
+
+
 def _paper_economic_oracle_context() -> Context:
     context = Context(
         prec=_ENDURANCE_PAPER_DECIMAL_PRECISION,
@@ -174,6 +191,7 @@ def run_endurance(
     """Exercise deterministic ingestion/replay/restart/settlement invariants under a bounded synthetic load."""
 
     cfg = config or EnduranceConfig()
+    source_sha = _source_sha_from_environment()
     root = Path(workspace)
     primary = root / "primary"
     mirror = root / "mirror"
@@ -433,6 +451,22 @@ def run_endurance(
         }
         fingerprint = _fingerprint(stable_payload)
         _current_memory, peak_memory = tracemalloc.get_traced_memory()
+        accepted_events_per_second = (
+            accepted_first / ingest_elapsed if ingest_elapsed > 0 else float("inf")
+        )
+        performance_observation_fingerprint = None
+        if source_sha is not None:
+            performance_observation_fingerprint = _fingerprint(
+                {
+                    "source_sha": source_sha,
+                    "history_events": len(history),
+                    "accepted_events_per_second": accepted_events_per_second,
+                    "peak_traced_memory_bytes": peak_memory,
+                    "ingest_elapsed_seconds": ingest_elapsed,
+                    "replay_elapsed_seconds": replay_elapsed,
+                    "restart_elapsed_seconds": restart_elapsed,
+                }
+            )
         report = EnduranceReport(
             status="PASS" if not failures else "FAIL",
             failures=tuple(failures),
@@ -458,13 +492,15 @@ def run_endurance(
             paper_economics_verified=paper_economics_verified,
             corrupt_health_rejected=corrupt_health_rejected,
             corrupt_paper_book_rejected=corrupt_paper_rejected,
+            source_sha=source_sha,
             stable_invariant_fingerprint=fingerprint,
+            performance_observation_fingerprint=performance_observation_fingerprint,
             ingest_elapsed_seconds=ingest_elapsed,
             duplicate_elapsed_seconds=duplicate_elapsed,
             replay_elapsed_seconds=replay_elapsed,
             restart_elapsed_seconds=restart_elapsed,
             mirror_ingest_elapsed_seconds=mirror_elapsed,
-            accepted_events_per_second=(accepted_first / ingest_elapsed) if ingest_elapsed > 0 else float("inf"),
+            accepted_events_per_second=accepted_events_per_second,
             peak_traced_memory_bytes=peak_memory,
         )
         if output_path is not None:

@@ -191,6 +191,49 @@ class VOCPrecomputeAdmissionTests(unittest.TestCase):
                 },
             )
 
+    def test_shadow_output_cannot_predate_physical_precompute_authority(self) -> None:
+        path = self.router_path.with_name("router-post-output-precommit.json")
+        router = ModelComputeRouterStore(path)
+        with patch(
+            "autosport.model_compute_router._authority_now",
+            return_value="2026-09-20T00:00:04Z",
+        ):
+            router.route(
+                self.request,
+                self.candidates,
+                self.policy,
+                as_of=T_DECISION,
+                voc_precompute_admission={
+                    "admission_id": "admission-physical-fence",
+                    "research_protocol_id": "protocol-1",
+                    "cohort_id": "cohort-1",
+                    "baseline_candidate_id": "baseline",
+                    "challenger_candidate_id": "challenger",
+                    "sport_id": "table_tennis",
+                    "league_id": "league-voc",
+                },
+            )
+
+        with patch(
+            "autosport.model_compute_router._authority_now",
+            return_value="2026-09-20T00:00:05Z",
+        ):
+            with self.assertRaisesRegex(
+                ModelComputeRouterError,
+                "predates physical precompute authority",
+            ):
+                router.record_voc_shadow_execution(
+                    request_id="request-1",
+                    role="baseline",
+                    output_sha256=SHA_A,
+                    action="BASE",
+                    abstained=False,
+                    completed_at="2026-09-20T00:00:03Z",
+                    available_at="2026-09-20T00:00:03Z",
+                    actual_cost=Decimal("0.10"),
+                    evidence_sha256=SHA_A,
+                )
+
     def test_shadow_execution_authority_is_append_only_and_restart_safe(self) -> None:
         with patch(
             "autosport.model_compute_router._authority_now",

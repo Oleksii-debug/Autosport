@@ -19,6 +19,10 @@ from . import _voc_restart_publication_guard as _voc_restart_publication_guard  
 # record from product-owned router authority instead of caller-authored values.
 from . import _voc_product_evidence_guard as _voc_product_evidence_guard  # noqa: F401,E402
 
+# Failed/late/cancelled paired attempts close from immutable router execution
+# authority exactly once, preserving denominator evidence across restart.
+from . import _voc_product_negative_terminal_guard as _voc_product_negative_terminal_guard  # noqa: F401,E402
+
 # Provider completeness is positive only for an exact live canonical acquisition.
 # Local persisted bytes/journals remain integrity evidence and fail closed across
 # restart because the current provider contract supplies no non-caller-mintable

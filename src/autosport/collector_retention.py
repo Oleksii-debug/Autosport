@@ -47,6 +47,7 @@ class CollectorRetentionPlan:
     retained_delta_ids: tuple[str, ...]
     pinned_delta_ids: tuple[str, ...]
     unacknowledged_delta_ids: tuple[str, ...]
+    epoch_activation_delta_id: str
     terminal_checkpoint_delta_id: str
     desktop_transport_anchor_delta_id: str | None
     max_commit_seq: int
@@ -74,8 +75,9 @@ class CollectorRetentionManager:
       store history and is never caller-selectable or compacted;
     - only deltas with a durable canonical desktop application acknowledgement
       may be deleted;
-    - the stream terminal checkpoint and latest acknowledged transport anchor are
-      retained so restart/delivery cursors remain usable;
+    - each epoch's first durable activation witness, terminal checkpoint and latest
+      acknowledged transport anchor are retained so epoch authority and
+      restart/delivery cursors remain usable;
     - durable DECISION/REPLAY pins are retained;
     - revision ancestors of every retained row are retained;
     - preview/apply uses a content-bound plan and revalidates under BEGIN IMMEDIATE;
@@ -379,6 +381,8 @@ class CollectorRetentionManager:
 
         protected = set(pinned)
         protected.update(unacknowledged)
+        epoch_activation_delta_id = rows[0]["delta_id"]
+        protected.add(epoch_activation_delta_id)
         protected.add(checkpoint.last_delta_id)
         if latest_acked is not None:
             protected.add(latest_acked)
@@ -418,6 +422,7 @@ class CollectorRetentionManager:
             "retained_delta_ids": list(retained_ids),
             "pinned_delta_ids": sorted(pinned),
             "unacknowledged_delta_ids": sorted(unacknowledged),
+            "epoch_activation_delta_id": epoch_activation_delta_id,
             "terminal_checkpoint_delta_id": checkpoint.last_delta_id,
             "desktop_transport_anchor_delta_id": latest_acked,
         }
@@ -438,6 +443,7 @@ class CollectorRetentionManager:
             retained_delta_ids=retained_ids,
             pinned_delta_ids=tuple(sorted(pinned)),
             unacknowledged_delta_ids=tuple(sorted(unacknowledged)),
+            epoch_activation_delta_id=epoch_activation_delta_id,
             terminal_checkpoint_delta_id=checkpoint.last_delta_id,
             desktop_transport_anchor_delta_id=latest_acked,
             max_commit_seq=int(rows[-1]["commit_seq"]),

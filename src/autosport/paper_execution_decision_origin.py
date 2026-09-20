@@ -30,6 +30,27 @@ _DECISION_ORIGIN_EVENT = "DECISION_ORIGIN_BOUND"
 _DECISION_ORIGIN_FIELDS = frozenset(
     {"decision_id", "decision_record_sha256", "decision_record_ordinal"}
 )
+_RUNTIME_AUTHORITY_METHODS = frozenset(
+    {
+        "expected_run_id",
+        "execute",
+        "_require_minted",
+        "_materialize_attempt",
+        "_ticket_matches_attempt",
+        "_assert_same_book_state",
+    }
+)
+_EXECUTION_LEDGER_AUTHORITY_METHODS = frozenset(
+    {
+        "events",
+        "_append_event",
+        "reserve_run",
+        "load_run",
+        "record_attempt",
+        "complete_run",
+    }
+)
+_DECISION_LEDGER_AUTHORITY_METHODS = frozenset({"verified_records"})
 
 
 class PaperExecutionDecisionOriginError(RuntimeError):
@@ -42,6 +63,60 @@ class PaperExecutionDecisionOrigin:
     decision_id: str
     decision_record_sha256: str
     decision_record_ordinal: int
+
+
+def _reject_instance_method_shadows(
+    value: object,
+    *,
+    names: frozenset[str],
+    label: str,
+) -> None:
+    """Reject exact instances that shadow class-owned authority methods.
+
+    Exact-type fences alone are insufficient for normal Python classes because a
+    caller can assign a non-data-descriptor method name into ``__dict__`` while
+    ``type(value)`` remains unchanged.  Authority calls below are class-qualified
+    as a second fence; this check also protects class methods that make internal
+    ``self.method(...)`` calls while executing the canonical runtime.
+    """
+
+    namespace = getattr(value, "__dict__", None)
+    if not isinstance(namespace, dict):
+        return
+    shadowed = sorted(name for name in names if name in namespace)
+    if shadowed:
+        joined = ", ".join(shadowed)
+        raise TypeError(f"{label} has instance-shadowed authority method(s): {joined}")
+
+
+def _assert_origin_capabilities(
+    *,
+    runtime: PaperExecutionAdoptionRuntime,
+    decision_ledger: JsonlDecisionLedger,
+) -> PaperExecutionLedger:
+    if type(runtime) is not PaperExecutionAdoptionRuntime:
+        raise TypeError("runtime must be exact PaperExecutionAdoptionRuntime")
+    if type(decision_ledger) is not JsonlDecisionLedger:
+        raise TypeError("decision_ledger must be exact JsonlDecisionLedger")
+    ledger = runtime.ledger
+    if type(ledger) is not PaperExecutionLedger:
+        raise TypeError("runtime ledger must be exact PaperExecutionLedger")
+    _reject_instance_method_shadows(
+        runtime,
+        names=_RUNTIME_AUTHORITY_METHODS,
+        label="PAPER execution runtime",
+    )
+    _reject_instance_method_shadows(
+        ledger,
+        names=_EXECUTION_LEDGER_AUTHORITY_METHODS,
+        label="PAPER execution ledger",
+    )
+    _reject_instance_method_shadows(
+        decision_ledger,
+        names=_DECISION_LEDGER_AUTHORITY_METHODS,
+        label="Decision Ledger",
+    )
+    return ledger
 
 
 def _record_sha256(record) -> str:
@@ -93,12 +168,10 @@ def bind_preexecution_decision_origin(
     than being retroactively blessed.
     """
 
-    if type(runtime) is not PaperExecutionAdoptionRuntime:
-        raise TypeError("runtime must be exact PaperExecutionAdoptionRuntime")
-    if type(decision_ledger) is not JsonlDecisionLedger:
-        raise TypeError("decision_ledger must be exact JsonlDecisionLedger")
-    if type(runtime.ledger) is not PaperExecutionLedger:
-        raise TypeError("runtime ledger must be exact PaperExecutionLedger")
+    ledger = _assert_origin_capabilities(
+        runtime=runtime,
+        decision_ledger=decision_ledger,
+    )
     if not isinstance(prepared, PreparedPaperExecution):
         raise TypeError("prepared must be PreparedPaperExecution")
     if type(trigger_id) is not str or not trigger_id or trigger_id.strip() != trigger_id:
@@ -109,7 +182,7 @@ def bind_preexecution_decision_origin(
         )
 
     try:
-        records = decision_ledger.verified_records()
+        records = JsonlDecisionLedger.verified_records(decision_ledger)
     except DecisionLedgerIntegrityError as exc:
         raise PaperExecutionDecisionOriginError(
             "Decision Ledger cannot prove pre-execution origin"
@@ -125,14 +198,18 @@ def bind_preexecution_decision_origin(
         )
     ordinal, record = matches[0]
     digest = _record_sha256(record)
-    run_id = runtime.expected_run_id(prepared, trigger_id)
+    run_id = PaperExecutionAdoptionRuntime.expected_run_id(
+        runtime,
+        prepared,
+        trigger_id,
+    )
     expected_payload = {
         "decision_id": trigger_id,
         "decision_record_sha256": digest,
         "decision_record_ordinal": ordinal,
     }
 
-    existing = runtime.ledger.events(run_id)
+    existing = PaperExecutionLedger.events(ledger, run_id)
     origins = [
         event for event in existing if event.get("event_type") == _DECISION_ORIGIN_EVENT
     ]
@@ -141,14 +218,15 @@ def bind_preexecution_decision_origin(
             raise PaperExecutionDecisionOriginError(
                 "cannot bind decision origin after PAPER execution has started"
             )
-        runtime.ledger._append_event(
+        PaperExecutionLedger._append_event(
+            ledger,
             event_type=_DECISION_ORIGIN_EVENT,
             run_id=run_id,
             key=f"{run_id}:decision-origin",
             payload=expected_payload,
         )
 
-    events = runtime.ledger.events(run_id)
+    events = PaperExecutionLedger.events(ledger, run_id)
     origins = [event for event in events if event.get("event_type") == _DECISION_ORIGIN_EVENT]
     if len(origins) != 1:
         raise PaperExecutionDecisionOriginError(
@@ -194,7 +272,11 @@ def execute_with_decision_origin(
         prepared=prepared,
         trigger_id=trigger_id,
     )
-    return runtime.execute(
+    # Re-check after the binding call so a caller cannot mutate an accepted exact
+    # runtime between the authority commitment and execution dispatch.
+    _assert_origin_capabilities(runtime=runtime, decision_ledger=decision_ledger)
+    return PaperExecutionAdoptionRuntime.execute(
+        runtime,
         prepared=prepared,
         trigger_id=trigger_id,
         started_at=started_at,

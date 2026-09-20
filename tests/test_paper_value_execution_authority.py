@@ -85,7 +85,7 @@ def test_public_paper_value_prepare_is_descriptor_only(tmp_path) -> None:
 
     with pytest.raises(
         PaperExecutionAdoptionError,
-        match="requires an active canonical PaperValueAgent call",
+        match="requires the canonical PaperValueAgent execution path",
     ):
         runtime.execute(
             prepared=descriptor,
@@ -145,7 +145,7 @@ def test_caller_authored_general_decision_and_ambient_context_cannot_authorize(
     )
     with pytest.raises(
         PaperExecutionAdoptionError,
-        match="requires an active canonical PaperValueAgent call",
+        match="requires the canonical PaperValueAgent execution path",
     ):
         runtime.execute(
             prepared=descriptor,
@@ -226,7 +226,7 @@ def test_forged_general_restart_decision_cannot_skip_goal_less_risk_gate(
 
     assert book.balance == Decimal("100.00")
     assert not book.tickets
-    assert runtime.ledger.events() == ()
+    assert not runtime.ledger.events()
 
 
 def test_canonical_goal_less_agent_path_still_executes_after_risk_pass(tmp_path) -> None:

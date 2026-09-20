@@ -5,7 +5,7 @@ import threading
 from dataclasses import dataclass
 from pathlib import Path
 
-from .evidence_export import export_evidence_manifest
+from .evidence_export import _resolve_output_destination, export_evidence_manifest
 
 
 def _safe_worker_error(exc: BaseException) -> str:
@@ -23,6 +23,15 @@ def _safe_worker_error(exc: BaseException) -> str:
     ):
         name = "BaseException"
     return f"{name}: evidence export failed"
+
+
+def resolve_evidence_output_destination(
+    workspace: str | Path,
+    output: str | Path,
+) -> Path:
+    """Preflight a GUI destination through the canonical exporter destination law."""
+
+    return _resolve_output_destination(Path(workspace), Path(output))
 
 
 @dataclass(frozen=True, slots=True)

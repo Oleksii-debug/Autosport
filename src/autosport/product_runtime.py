@@ -35,6 +35,7 @@ from .market_mirror_runtime import (
     MarketMirror,
 )
 from .paper import PaperBook
+from .resolver_semantics import ResolverSemanticIdentityError, function_semantic_sha256
 from .storage import SQLiteMarketStore
 
 
@@ -193,6 +194,12 @@ def _settlement_authority_identity(
         raise ProductCompositionError(
             "source-owned settlement resolve method cannot close over mutable authority"
         )
+    try:
+        resolver_semantic_sha256 = function_semantic_sha256(resolver)
+    except ResolverSemanticIdentityError as exc:
+        raise ProductCompositionError(
+            "source-owned settlement resolve semantics cannot be fingerprinted safely"
+        ) from exc
     resolver_owner = _ManifestStore._text(
         f"{resolver.__module__}.{resolver.__qualname__}",
         "settlement resolver owner",
@@ -246,6 +253,7 @@ def _settlement_authority_identity(
         "implementation": implementation,
         "resolver_owner": resolver_owner,
         "resolver_implementation_id": resolver_implementation_id,
+        "resolver_semantic_sha256": resolver_semantic_sha256,
     }
     encoded = json.dumps(
         payload,

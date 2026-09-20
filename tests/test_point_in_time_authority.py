@@ -33,6 +33,21 @@ SHA_C = "c" * 64
 SHA_D = "d" * 64
 SHA_E = "e" * 64
 SHA_F = "f" * 64
+FEATURE_MANIFEST_PAYLOAD = {
+    "schema": "autosport.feature_definition_manifest",
+    "schema_version": 1,
+    "features": {"participant.form.trailing_5": SHA_E},
+}
+FEATURE_MANIFEST_JSON = json.dumps(
+    FEATURE_MANIFEST_PAYLOAD,
+    ensure_ascii=False,
+    sort_keys=True,
+    separators=(",", ":"),
+    allow_nan=False,
+)
+FEATURE_MANIFEST_SHA256 = hashlib.sha256(
+    FEATURE_MANIFEST_JSON.encode("utf-8")
+).hexdigest()
 BASE = datetime(2026, 1, 1, tzinfo=UTC)
 
 
@@ -68,7 +83,7 @@ def _feature_set(
     return FeatureSet(
         feature_set_id,
         "v1",
-        SHA_B,
+        FEATURE_MANIFEST_SHA256,
         SHA_C,
         _iso(available_at),
     )
@@ -127,10 +142,10 @@ def _source_store(
     membership = FeatureMembershipAuthority.create(
         feature_set_id="features-1",
         feature_set_version="v1",
-        feature_definition_sha256=SHA_B,
+        feature_definition_sha256=FEATURE_MANIFEST_SHA256,
+        feature_manifest_json=FEATURE_MANIFEST_JSON,
         feature_source_sha256=SHA_C,
         feature_name="participant.form.trailing_5",
-        member_definition_sha256=SHA_E,
         available_at=feature_available_at,
     )
     store.register_feature_membership(membership)
@@ -397,6 +412,51 @@ def test_revision_rejects_unknown_or_forged_availability_witness(tmp_path) -> No
         match="witness time mismatch",
     ):
         store.register_revision(backdated)
+
+
+def test_feature_membership_cannot_mint_nonexistent_member(tmp_path) -> None:
+    forged_manifest = json.dumps(
+        {
+            "schema": "autosport.feature_definition_manifest",
+            "schema_version": 1,
+            "features": {
+                "participant.form.trailing_5": SHA_E,
+                "participant.form.future_leak": SHA_A,
+            },
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    )
+
+    with pytest.raises(
+        SourceRevisionAuthorityError,
+        match="manifest digest does not match",
+    ):
+        FeatureMembershipAuthority.create(
+            feature_set_id="features-1",
+            feature_set_version="v1",
+            feature_definition_sha256=FEATURE_MANIFEST_SHA256,
+            feature_manifest_json=forged_manifest,
+            feature_source_sha256=SHA_C,
+            feature_name="participant.form.future_leak",
+            available_at=BASE + timedelta(minutes=15),
+        )
+
+    with pytest.raises(
+        SourceRevisionAuthorityError,
+        match="not present in canonical feature manifest",
+    ):
+        FeatureMembershipAuthority.create(
+            feature_set_id="features-1",
+            feature_set_version="v1",
+            feature_definition_sha256=FEATURE_MANIFEST_SHA256,
+            feature_manifest_json=FEATURE_MANIFEST_JSON,
+            feature_source_sha256=SHA_C,
+            feature_name="participant.form.future_leak",
+            available_at=BASE + timedelta(minutes=15),
+        )
 
 
 def test_unknown_feature_name_cannot_reuse_registered_feature_set(tmp_path) -> None:

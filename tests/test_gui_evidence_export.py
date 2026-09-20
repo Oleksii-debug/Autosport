@@ -58,7 +58,7 @@ def test_export_worker_calls_canonical_exporter_and_reports_output(
     assert worker.busy is False
 
 
-def test_export_worker_reports_structural_failure_without_secret_text(
+def test_export_worker_reports_structural_failure_without_secret_or_human_text(
     monkeypatch, tmp_path: Path
 ) -> None:
     secret = r"token=SUPERSECRET C:\Users\name\credentials.json"
@@ -75,8 +75,14 @@ def test_export_worker_reports_structural_failure_without_secret_text(
     message = worker.poll()
     assert message is not None
     assert message.output is None
-    assert message.error == "RuntimeError: evidence export failed"
-    for forbidden in ("SUPERSECRET", "credentials.json", "token=", r"C:\Users"):
+    assert message.error == "RuntimeError"
+    for forbidden in (
+        "SUPERSECRET",
+        "credentials.json",
+        "token=",
+        r"C:\Users",
+        "evidence export failed",
+    ):
         assert forbidden not in message.error
     assert worker.busy is False
 

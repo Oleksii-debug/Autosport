@@ -19,6 +19,11 @@ from .agent_loop import AgentLoopPhase
 from .champion_agent_episode import ChampionAgentEpisode, ChampionAgentEpisodeError
 from .integrity import atomic_write_json
 from .learning_environment import EnvironmentIdentity, LearningEnvironmentError
+from .monotonic_workspace_authority import (
+    AuthorityPhase,
+    MonotonicWorkspaceAuthority,
+    MonotonicWorkspaceAuthorityError,
+)
 from .paper_campaign_runtime import PaperCampaignRuntime
 from .scientific_registry import ScientificRegistry
 from .strategy_model_factory import FactoryArtifactStore
@@ -30,6 +35,7 @@ HANDOFF_SCHEMA_VERSION: Final = 1
 _HEX: Final = frozenset("0123456789abcdef")
 _PREPARED: Final = "PREPARED"
 _COMMITTED: Final = "COMMITTED"
+_CONSUMPTION_AUTHORITY_DOMAIN: Final = "paper-campaign-episode-handoff-consumption-v1"
 
 
 class PaperCampaignEpisodeHandoffError(RuntimeError):
@@ -68,6 +74,10 @@ def _timestamp(value: object, name: str) -> str:
             f"{name} must be timezone-aware ISO-8601"
         )
     return parsed.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def _as_datetime(value: object, name: str) -> datetime:
+    return datetime.fromisoformat(_timestamp(value, name).replace("Z", "+00:00"))
 
 
 def _canonical_json(value: object) -> str:
@@ -218,6 +228,53 @@ class PaperCampaignEpisodeHandoff:
             _sha(checkpoint_id, "parent_checkpoint_id")
             self._validate_record(checkpoint_id, record)
         return state
+
+    def _consumption_authority(
+        self, parent_checkpoint_id: str
+    ) -> MonotonicWorkspaceAuthority:
+        try:
+            return MonotonicWorkspaceAuthority(
+                workspace=self.state_path.parent.resolve(strict=False),
+                domain=_CONSUMPTION_AUTHORITY_DOMAIN,
+                key=_sha(parent_checkpoint_id, "parent_checkpoint_id"),
+            )
+        except (OSError, MonotonicWorkspaceAuthorityError) as exc:
+            raise PaperCampaignEpisodeHandoffError(
+                "cannot establish independent parent-checkpoint consumption authority"
+            ) from exc
+
+    def _recover_consumption_authority(
+        self,
+        parent_checkpoint_id: str,
+        record: object | None,
+    ) -> MonotonicWorkspaceAuthority:
+        observed: str | None = None
+        if record is not None:
+            self._validate_record(parent_checkpoint_id, record)
+            assert isinstance(record, dict)
+            if record["status"] == _COMMITTED:
+                observed = _sha(record["handoff_id"], "handoff_id")
+        authority = self._consumption_authority(parent_checkpoint_id)
+        try:
+            history = authority.read_history()
+            pending = (
+                history[-1]
+                if history and history[-1].phase is AuthorityPhase.PREPARE
+                else None
+            )
+            if pending is not None and observed == pending.intended_state_sha256:
+                authority.recover(
+                    observed_state_sha256=observed,
+                    tx_id=pending.tx_id,
+                    semantic_binding_sha256=pending.semantic_binding_sha256,
+                )
+            else:
+                authority.recover(observed_state_sha256=observed)
+        except MonotonicWorkspaceAuthorityError as exc:
+            raise PaperCampaignEpisodeHandoffError(
+                "parent checkpoint consumption state is missing, rolled back, or unproven"
+            ) from exc
+        return authority
 
     @staticmethod
     def _prepared_semantic(record: dict[str, object]) -> dict[str, object]:
@@ -402,6 +459,13 @@ class PaperCampaignEpisodeHandoff:
             _text(action, "admissible action")
 
         parent_snapshot, parent_checkpoint = self._parent_witness()
+        canonical_at = _timestamp(at, "prepared_at")
+        if _as_datetime(canonical_at, "prepared_at") < _as_datetime(
+            parent_snapshot.updated_at, "parent_updated_at"
+        ):
+            raise PaperCampaignEpisodeHandoffError(
+                "next episode cannot begin before the sealed parent CHECKPOINT"
+            )
         if identity.environment_id != parent_checkpoint.environment_id:
             raise PaperCampaignEpisodeHandoffError(
                 "same-environment handoff cannot change environment identity"
@@ -458,7 +522,7 @@ class PaperCampaignEpisodeHandoff:
             "risk_fingerprint": canonical_risk,
             "source_sha256": canonical_source,
             "admissible_actions": sorted(admissible_actions),
-            "prepared_at": _timestamp(at, "prepared_at"),
+            "prepared_at": canonical_at,
         }
         prepare_id = _digest(prepared_semantic)
         prepared_record: dict[str, object] = {
@@ -474,6 +538,9 @@ class PaperCampaignEpisodeHandoff:
         with WorkspaceEconomicLock(self.state_path.parent):
             state = self._read_state()
             existing = state["handoffs"].get(parent_checkpoint.checkpoint_id)
+            self._recover_consumption_authority(
+                parent_checkpoint.checkpoint_id, existing
+            )
             if existing is None:
                 state["handoffs"][parent_checkpoint.checkpoint_id] = prepared_record
                 self._write_state(state["handoffs"])
@@ -528,9 +595,6 @@ class PaperCampaignEpisodeHandoff:
                 "canonical child episode does not satisfy the frozen handoff witness"
             )
 
-        # The parent must still be the exact sealed checkpoint that authorized
-        # PREPARED.  If another actor advanced it concurrently, never publish a
-        # successful handoff from stale authority.
         current_parent, current_checkpoint = self._parent_witness()
         if (
             current_parent.state_sha256 != parent_snapshot.state_sha256
@@ -562,6 +626,9 @@ class PaperCampaignEpisodeHandoff:
                 raise PaperCampaignEpisodeHandoffError(
                     "prepared handoff witness disappeared before commit"
                 )
+            authority = self._recover_consumption_authority(
+                parent_checkpoint.checkpoint_id, current
+            )
             self._validate_record(parent_checkpoint.checkpoint_id, current)
             if current["prepare_id"] != prepare_id:
                 raise PaperCampaignEpisodeHandoffError(
@@ -573,8 +640,39 @@ class PaperCampaignEpisodeHandoff:
                         "committed child identity conflicts with exact retry"
                     )
             else:
-                state["handoffs"][parent_checkpoint.checkpoint_id] = committed_record
-                self._write_state(state["handoffs"])
+                binding = _digest(
+                    {
+                        "kind": "paper-campaign-parent-consumption-v1",
+                        "parent_checkpoint_id": parent_checkpoint.checkpoint_id,
+                        "prepare_id": prepare_id,
+                        "handoff_id": handoff_id,
+                        "child_episode_id": child.environment.episode.episode_id,
+                        "child_initial_checkpoint_id": child_checkpoint.checkpoint_id,
+                    }
+                )
+                try:
+                    history = authority.read_history()
+                    tx_id = (
+                        f"paper-campaign-handoff:{len(history) + 1}:"
+                        f"{prepare_id[:24]}"
+                    )
+                    authority.prepare(
+                        tx_id=tx_id,
+                        observed_state_sha256=None,
+                        intended_state_sha256=handoff_id,
+                        semantic_binding_sha256=binding,
+                    )
+                    state["handoffs"][parent_checkpoint.checkpoint_id] = committed_record
+                    self._write_state(state["handoffs"])
+                    authority.commit(
+                        tx_id=tx_id,
+                        observed_state_sha256=handoff_id,
+                        semantic_binding_sha256=binding,
+                    )
+                except MonotonicWorkspaceAuthorityError as exc:
+                    raise PaperCampaignEpisodeHandoffError(
+                        "cannot durably consume parent checkpoint for child episode"
+                    ) from exc
 
         receipt = PaperCampaignEpisodeHandoffReceipt(
             handoff_id=handoff_id,

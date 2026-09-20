@@ -163,7 +163,7 @@ def _intent(snapshot: CompleteGameBoardSnapshot) -> OpportunityIntent:
         proposal_ts=DECISION_TS,
     )
     opportunity = Opportunity(
-        strategy_class=StrategyClass.PREDICTIVE_EDGE,
+        strategy_class=StrategyClass.LIVE_PRICE_MOVEMENT,
         decision=OpportunityDecision.ACTIONABLE,
         quotes=(QuoteRef.from_market_event(quote, market_snapshot_hash=SNAPSHOT_SHA),),
     )

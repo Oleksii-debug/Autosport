@@ -223,19 +223,42 @@ def _settlement_resolution_authority_digest(
     return hashlib.sha256(encoded).hexdigest()
 
 
-def _seal_settlement_resolution(
-    resolution: SettlementResolution,
-) -> SettlementResolution:
-    """Seal one exact external-authority result for in-process product consumption.
+def _resolve_authoritative_settlement(
+    outcome_authority: SettlementOutcomeAuthority,
+    record: EventLifecycleRecord,
+    *,
+    as_of: str,
+) -> SettlementResolution | None:
+    """Resolve and seal one settlement through the configured external authority.
 
-    The capability is deliberately ephemeral. On restart the configured external
-    outcome authority must resolve the settlement again; persisted/caller-created
-    DTO bytes cannot recreate product origin.
+    There is intentionally no raw DTO-to-capability helper. The only supported
+    issuer path executes SettlementOutcomeAuthority.resolve against the exact
+    lifecycle record, validates event/reference binding and causal availability,
+    then attaches an ephemeral payload-bound capability. After restart the
+    external authority must be consulted again.
     """
 
+    if type(record) is not EventLifecycleRecord:
+        raise TypeError("record must be exact EventLifecycleRecord")
+    resolve = getattr(outcome_authority, "resolve", None)
+    if not callable(resolve):
+        raise TypeError("outcome_authority.resolve must be callable")
+    resolution = resolve(record, as_of=as_of)
+    if resolution is None:
+        return None
     if type(resolution) is not SettlementResolution:
-        raise TypeError("resolution must be exact SettlementResolution")
-    resolution.validate(as_of=resolution.available_at)
+        raise ContinuousSessionError(
+            "outcome authority must return exact SettlementResolution or None"
+        )
+    if resolution.event_identity != record.identity:
+        raise ContinuousSessionError(
+            "settlement evidence event identity does not match lifecycle identity"
+        )
+    if resolution.settlement_ref != record.settlement_ref:
+        raise ContinuousSessionError(
+            "settlement evidence reference does not match lifecycle evidence"
+        )
+    resolution.validate(as_of=as_of)
     token = _SettlementAuthorityToken()
     sealed = replace(resolution, _authority_token=token)
     _SETTLEMENT_AUTHORITY_DIGESTS[token] = (
@@ -851,23 +874,14 @@ class ContinuousSessionCoordinator:
         for record in self.lifecycle.records():
             if record.phase is not EventPhase.COMPLETED or record.settlement_ref is None:
                 continue
-            resolution = self.outcome_authority.resolve(record, as_of=as_of)
+            resolution = _resolve_authoritative_settlement(
+                self.outcome_authority,
+                record,
+                as_of=as_of,
+            )
             if resolution is None:
                 continue
-            if not isinstance(resolution, SettlementResolution):
-                raise ContinuousSessionError(
-                    "outcome authority must return SettlementResolution or None"
-                )
-            if resolution.event_identity != record.identity:
-                raise ContinuousSessionError(
-                    "settlement evidence event identity does not match lifecycle identity"
-                )
-            if resolution.settlement_ref != record.settlement_ref:
-                raise ContinuousSessionError(
-                    "settlement evidence reference does not match lifecycle evidence"
-                )
-            resolution.validate(as_of=as_of)
-            resolutions.append(_seal_settlement_resolution(resolution))
+            resolutions.append(resolution)
         return tuple(resolutions)
 
     def _load_book(self) -> PaperBook:

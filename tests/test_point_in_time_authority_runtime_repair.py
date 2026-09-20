@@ -356,7 +356,7 @@ def finder_count():
     return sum(bool(getattr(finder, MARKER, False)) for finder in sys.meta_path)
 
 
-def assert_positive_bind_and_holdout_load(root: Path):
+def assert_fail_closed_bind_and_holdout_load(root: Path):
     workspace = root / "feature-workspace"
     workspace.mkdir(parents=True, exist_ok=True)
     feature_set = FeatureSet(
@@ -397,14 +397,18 @@ def assert_positive_bind_and_holdout_load(root: Path):
         authority_root=root / "lineage-authority",
     )
     lineage.register(snapshot_id=snapshot.dataset_snapshot_id, member_sha256=members)
-    result = evidence.PointInTimeFeatureAuthority.bind(
-        dataset_snapshot=snapshot,
-        feature_set=feature_set,
-        feature_provenance=provenance,
-        lineage_authority=lineage,
-        decision_cutoff_utc="2099-01-01T00:00:00Z",
-    )
-    assert result.feature_provenance_sha256 == provenance.provenance_sha256
+    try:
+        evidence.PointInTimeFeatureAuthority.bind(
+            dataset_snapshot=snapshot,
+            feature_set=feature_set,
+            feature_provenance=provenance,
+            lineage_authority=lineage,
+            decision_cutoff_utc="2099-01-01T00:00:00Z",
+        )
+    except evidence.PointInTimeEvidenceError as exc:
+        assert "independent source-owned feature artifact authority" in str(exc)
+    else:
+        raise AssertionError("self-authored feature lineage minted positive evidence")
 
     holdout_workspace = root / "holdout-workspace"
     holdout_workspace.mkdir(parents=True, exist_ok=True)
@@ -422,7 +426,7 @@ repair = importlib.reload(repair)
 assert finder_count() == 1
 
 with tempfile.TemporaryDirectory() as directory:
-    assert_positive_bind_and_holdout_load(Path(directory))
+    assert_fail_closed_bind_and_holdout_load(Path(directory))
 
 # The sibling reload hooks still have exactly one effective meta-path owner after
 # runtime-repair self-reload.  Repeating both orders must not stack a second hook.

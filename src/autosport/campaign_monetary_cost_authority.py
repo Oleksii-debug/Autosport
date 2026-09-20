@@ -6,6 +6,7 @@ from decimal import Decimal, InvalidOperation
 from enum import StrEnum
 import hashlib
 import json
+import os
 from pathlib import Path
 import re
 from typing import Any, Mapping, Sequence
@@ -22,7 +23,7 @@ from .campaign_cost_evidence import (
 from .campaign_economic_authority import CanonicalMembershipRef
 
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 RECEIPT_FAMILY = "autosport.monetary.receipt.v1"
 ALLOCATION_FAMILY = "autosport.monetary.allocation.v1"
 CURRENCY_FAMILY = "autosport.monetary.campaign-currency.v1"
@@ -43,6 +44,13 @@ class MonetarySourceClass(StrEnum):
     COMPUTE_BILLING = "COMPUTE_BILLING"
     EXECUTION_RECEIPT = "EXECUTION_RECEIPT"
     FIXED_CAMPAIGN_ADMIN = "FIXED_CAMPAIGN_ADMIN"
+
+
+class MonetaryEvidenceQuality(StrEnum):
+    INCURRED_ACTUAL = "INCURRED_ACTUAL"
+    ESTIMATE = "ESTIMATE"
+    SIMULATED = "SIMULATED"
+    UNVERIFIED = "UNVERIFIED"
 
 
 @dataclass(frozen=True, slots=True)
@@ -183,6 +191,10 @@ class MonetaryReceipt:
     shared_source: bool
     campaign_sha256: str | None
     memberships: tuple[CanonicalMembershipRef, ...]
+    quality: MonetaryEvidenceQuality = MonetaryEvidenceQuality.INCURRED_ACTUAL
+    covered_start: datetime | None = None
+    covered_end: datetime | None = None
+    upstream_refs: tuple[CostSourceRef, ...] = ()
     supersedes_receipt_ids: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
@@ -190,6 +202,8 @@ class MonetaryReceipt:
         _text(self.source_evidence_id, "source_evidence_id")
         _sha256(self.source_sha256, "source_sha256")
         _sha256(self.provenance_sha256, "provenance_sha256")
+        if not isinstance(self.quality, MonetaryEvidenceQuality):
+            raise MonetaryCostAuthorityError("quality must be MonetaryEvidenceQuality")
         for label, value in (
             ("incurred_start", self.incurred_start),
             ("incurred_end", self.incurred_end),
@@ -203,15 +217,33 @@ class MonetaryReceipt:
             raise MonetaryCostAuthorityError("observed_at cannot be after available_at")
         if self.incurred_end > self.available_at:
             raise MonetaryCostAuthorityError("incurred cost cannot be available before it occurred")
-        if self.treatment is CostTreatment.INFORMATIONAL:
+
+        covered_start = self.incurred_start if self.covered_start is None else self.covered_start
+        covered_end = self.incurred_end if self.covered_end is None else self.covered_end
+        _utc(covered_start, "covered_start")
+        _utc(covered_end, "covered_end")
+        if covered_end < covered_start:
+            raise MonetaryCostAuthorityError("covered_end cannot precede covered_start")
+        object.__setattr__(self, "covered_start", covered_start)
+        object.__setattr__(self, "covered_end", covered_end)
+
+        if self.quality is MonetaryEvidenceQuality.INCURRED_ACTUAL:
+            if self.treatment is CostTreatment.INFORMATIONAL:
+                raise MonetaryCostAuthorityError(
+                    "incurred monetary evidence cannot be informational-only"
+                )
+        elif self.treatment is not CostTreatment.INFORMATIONAL:
             raise MonetaryCostAuthorityError(
-                "authoritative incurred monetary receipt cannot be informational-only"
+                "estimate/simulated/unverified money must remain informational-only"
             )
+
         _validate_source_class(self.cost_class, self.source_class)
         _sorted_unique(self.memberships, "memberships")
+        _sorted_unique(self.upstream_refs, "upstream_refs")
         _sorted_unique(self.supersedes_receipt_ids, "supersedes_receipt_ids")
         for receipt_id in self.supersedes_receipt_ids:
             _sha256(receipt_id, "superseded receipt id")
+
         if self.shared_source:
             if self.campaign_sha256 is not None or self.memberships:
                 raise MonetaryCostAuthorityError(
@@ -245,6 +277,8 @@ class MonetaryReceipt:
         )
 
     def payload(self) -> dict[str, Any]:
+        assert self.covered_start is not None
+        assert self.covered_end is not None
         return {
             "schema_version": SCHEMA_VERSION,
             "cost_class": self.cost_class.value,
@@ -256,12 +290,16 @@ class MonetaryReceipt:
             "money": self.money.to_dict(),
             "incurred_start": _datetime_text(self.incurred_start),
             "incurred_end": _datetime_text(self.incurred_end),
+            "covered_start": _datetime_text(self.covered_start),
+            "covered_end": _datetime_text(self.covered_end),
             "observed_at": _datetime_text(self.observed_at),
             "available_at": _datetime_text(self.available_at),
             "treatment": self.treatment.value,
             "shared_source": self.shared_source,
             "campaign_sha256": self.campaign_sha256,
             "memberships": [_membership_dict(item) for item in self.memberships],
+            "quality": self.quality.value,
+            "upstream_refs": [item.to_dict() for item in self.upstream_refs],
             "supersedes_receipt_ids": list(self.supersedes_receipt_ids),
         }
 
@@ -284,12 +322,16 @@ class MonetaryReceipt:
             "money",
             "incurred_start",
             "incurred_end",
+            "covered_start",
+            "covered_end",
             "observed_at",
             "available_at",
             "treatment",
             "shared_source",
             "campaign_sha256",
             "memberships",
+            "quality",
+            "upstream_refs",
             "supersedes_receipt_ids",
             "receipt_id",
             "record_sha256",
@@ -318,11 +360,16 @@ class MonetaryReceipt:
                 _membership_from_dict(_mapping(value, "membership"))
                 for value in _list(raw["memberships"], "memberships")
             ),
+            quality=MonetaryEvidenceQuality(_string(raw["quality"], "quality")),
+            covered_start=_parse_datetime(raw["covered_start"], "covered_start"),
+            covered_end=_parse_datetime(raw["covered_end"], "covered_end"),
+            upstream_refs=tuple(
+                CostSourceRef.from_dict(_mapping(value, "upstream_ref"))
+                for value in _list(raw["upstream_refs"], "upstream_refs")
+            ),
             supersedes_receipt_ids=tuple(
                 _string(value, "superseded receipt id")
-                for value in _list(
-                    raw["supersedes_receipt_ids"], "supersedes_receipt_ids"
-                )
+                for value in _list(raw["supersedes_receipt_ids"], "supersedes_receipt_ids")
             ),
         )
         if _string(raw["receipt_id"], "receipt_id") != item.receipt_id:
@@ -452,12 +499,12 @@ class AllocationPlan:
 
 
 class CampaignMonetaryCostAuthority:
-    """Content-addressed incurred-money evidence authority for campaign economics.
+    """Durable, content-addressed authority for incurred campaign money evidence.
 
-    `derive_campaign_economics` trusts a monetary cost only after this authority
-    can reconstruct the exact CostEvidence from durable source receipt bytes.
-    Arbitrary caller-authored CostEvidence therefore cannot mint an incurred-money
-    claim merely by setting `OBSERVED_INCURRED` or an amount/currency.
+    A #645 CostEvidence qualifies only if this resolver can reconstruct it from
+    exact persisted receipt and allocation bytes whose external source identity
+    is separately bound. Failed/conflicting publication may leave content-addressed
+    bytes, but unbound bytes can never qualify as incurred truth.
     """
 
     def __init__(self, root: str | Path) -> None:
@@ -467,6 +514,8 @@ class CampaignMonetaryCostAuthority:
         self.currency_dir = self.root / "campaign-currency"
         self.source_index_dir = self.root / "source-index"
         self.allocation_index_dir = self.root / "allocation-by-receipt"
+        self.correction_index_dir = self.root / "correction-by-receipt"
+        self.campaign_currency_index_dir = self.root / "currency-by-campaign"
 
     def publish_currency(self, evidence: CampaignCurrencyEvidence) -> CostSourceRef:
         if type(evidence) is not CampaignCurrencyEvidence:
@@ -480,13 +529,27 @@ class CampaignMonetaryCostAuthority:
             source_evidence_id=evidence.source_evidence_id,
             record_id=evidence.evidence_id,
         )
+        self._write_binding_once(
+            self.campaign_currency_index_dir / f"{evidence.campaign_sha256}.json",
+            {
+                "campaign_sha256": evidence.campaign_sha256,
+                "currency": evidence.currency,
+                "evidence_id": evidence.evidence_id,
+            },
+            conflict_message="campaign already has a different canonical currency authority",
+        )
         return evidence.ref
 
     def publish_receipt(self, receipt: MonetaryReceipt) -> CostSourceRef:
         if type(receipt) is not MonetaryReceipt:
             raise MonetaryCostAuthorityError("receipt has invalid type")
+        if receipt.shared_source and receipt.supersedes_receipt_ids:
+            raise MonetaryCostAuthorityError(
+                "shared receipt corrections require an explicit future allocation-lineage authority"
+            )
         for prior_id in receipt.supersedes_receipt_ids:
             prior = self._load_receipt(prior_id)
+            self._require_receipt_bound(prior)
             if prior.cost_class is not receipt.cost_class:
                 raise MonetaryCostAuthorityError("receipt correction cannot cross cost class")
             if prior.source_class is not receipt.source_class:
@@ -495,6 +558,8 @@ class CampaignMonetaryCostAuthority:
                 raise MonetaryCostAuthorityError("receipt correction cannot change currency")
             if prior.shared_source != receipt.shared_source:
                 raise MonetaryCostAuthorityError("receipt correction cannot change sharing mode")
+            if prior.quality is not receipt.quality:
+                raise MonetaryCostAuthorityError("receipt correction cannot change evidence quality")
             if not receipt.shared_source and (
                 prior.campaign_sha256 != receipt.campaign_sha256
                 or prior.memberships != receipt.memberships
@@ -506,6 +571,7 @@ class CampaignMonetaryCostAuthority:
                 raise MonetaryCostAuthorityError(
                     "receipt correction cannot become available before predecessor"
                 )
+
         self._write_record(
             self.receipts_dir / f"{receipt.receipt_id}.json", receipt.to_dict()
         )
@@ -515,12 +581,19 @@ class CampaignMonetaryCostAuthority:
             source_evidence_id=receipt.source_evidence_id,
             record_id=receipt.receipt_id,
         )
+        for prior_id in receipt.supersedes_receipt_ids:
+            self._write_binding_once(
+                self.correction_index_dir / f"{prior_id}.json",
+                {"prior_receipt_id": prior_id, "replacement_receipt_id": receipt.receipt_id},
+                conflict_message="receipt already has a different append-only correction",
+            )
         return receipt.ref
 
     def publish_allocation(self, plan: AllocationPlan) -> CostSourceRef:
         if type(plan) is not AllocationPlan:
             raise MonetaryCostAuthorityError("allocation has invalid type")
         receipt = self._load_receipt(plan.receipt_id)
+        self._require_receipt_bound(receipt)
         if receipt.record_sha256 != plan.receipt_sha256:
             raise MonetaryCostAuthorityError("allocation references wrong receipt digest")
         if not receipt.shared_source:
@@ -540,9 +613,8 @@ class CampaignMonetaryCostAuthority:
         self._write_record(
             self.allocations_dir / f"{plan.allocation_id}.json", plan.to_dict()
         )
-        index_path = self.allocation_index_dir / f"{receipt.receipt_id}.json"
         self._write_binding_once(
-            index_path,
+            self.allocation_index_dir / f"{receipt.receipt_id}.json",
             {"receipt_id": receipt.receipt_id, "allocation_id": plan.allocation_id},
             conflict_message="source receipt already has a different allocation plan",
         )
@@ -560,12 +632,31 @@ class CampaignMonetaryCostAuthority:
         _sha256(campaign_sha256, "campaign_sha256")
         _utc(as_of, "as_of")
         evidence = self._load_currency(ref.evidence_id)
+        self._require_source_bound(
+            namespace="currency",
+            source_authority=evidence.source_authority,
+            source_evidence_id=evidence.source_evidence_id,
+            record_id=evidence.evidence_id,
+        )
         if evidence.record_sha256 != ref.sha256:
             raise MonetaryCostAuthorityIntegrityError(
                 "campaign currency reference digest mismatch"
             )
         if evidence.campaign_sha256 != campaign_sha256:
             raise MonetaryCostAuthorityError("currency evidence belongs to another campaign")
+        binding = self._read_record(
+            self.campaign_currency_index_dir / f"{campaign_sha256}.json",
+            "campaign currency binding",
+        )
+        expected_binding = {
+            "campaign_sha256": campaign_sha256,
+            "currency": evidence.currency,
+            "evidence_id": evidence.evidence_id,
+        }
+        if dict(binding) != expected_binding:
+            raise MonetaryCostAuthorityIntegrityError(
+                "campaign currency evidence is not the canonical campaign binding"
+            )
         if evidence.available_at > as_of:
             raise MonetaryCostAuthorityError(
                 "future-available campaign currency cannot be backdated"
@@ -578,21 +669,25 @@ class CampaignMonetaryCostAuthority:
         receipt_id: str,
         campaign_sha256: str,
         memberships: Sequence[CanonicalMembershipRef],
+        required_interval: tuple[datetime, datetime] | None = None,
     ) -> CostEvidence:
         receipt = self._load_receipt(receipt_id)
+        self._require_receipt_bound(receipt)
+        if receipt.quality is not MonetaryEvidenceQuality.INCURRED_ACTUAL:
+            raise MonetaryCostAuthorityError(
+                "estimate/simulated/unverified evidence cannot mint incurred cost truth"
+            )
         membership_tuple = tuple(memberships)
         _sorted_unique(membership_tuple, "memberships")
         _sha256(campaign_sha256, "campaign_sha256")
+        self._validate_required_interval(receipt, required_interval)
+
         allocation_ref: CostSourceRef | None = None
         money = receipt.money
         observed_at = receipt.observed_at
         available_at = receipt.available_at
 
         if receipt.shared_source:
-            if receipt.supersedes_receipt_ids:
-                raise MonetaryCostAuthorityError(
-                    "shared receipt corrections require a new conserved allocation lineage"
-                )
             plan = self._allocation_for_receipt(receipt.receipt_id)
             target_matches = [
                 item
@@ -616,10 +711,12 @@ class CampaignMonetaryCostAuthority:
 
         supersedes_cost_ids: list[str] = []
         for prior_id in receipt.supersedes_receipt_ids:
+            self._require_correction_binding(prior_id, receipt.receipt_id)
             prior = self.build_cost_evidence(
                 receipt_id=prior_id,
                 campaign_sha256=campaign_sha256,
                 memberships=membership_tuple,
+                required_interval=required_interval,
             )
             supersedes_cost_ids.append(prior.cost_evidence_id)
 
@@ -646,7 +743,13 @@ class CampaignMonetaryCostAuthority:
             supersedes_cost_evidence_ids=tuple(sorted(supersedes_cost_ids)),
         )
 
-    def qualify_cost(self, cost: CostEvidence, *, as_of: datetime) -> CostEvidence:
+    def qualify_cost(
+        self,
+        cost: CostEvidence,
+        *,
+        as_of: datetime,
+        required_interval: tuple[datetime, datetime] | None = None,
+    ) -> CostEvidence:
         if type(cost) is not CostEvidence:
             raise MonetaryCostAuthorityError("cost evidence has invalid type")
         _utc(as_of, "as_of")
@@ -658,6 +761,7 @@ class CampaignMonetaryCostAuthority:
             receipt_id=cost.source.evidence_id,
             campaign_sha256=cost.campaign_sha256,
             memberships=cost.memberships,
+            required_interval=required_interval,
         )
         if canonical.source.sha256 != cost.source.sha256:
             raise MonetaryCostAuthorityIntegrityError("receipt source digest mismatch")
@@ -671,10 +775,32 @@ class CampaignMonetaryCostAuthority:
             )
         return canonical
 
+    def _validate_required_interval(
+        self,
+        receipt: MonetaryReceipt,
+        required_interval: tuple[datetime, datetime] | None,
+    ) -> None:
+        if required_interval is None:
+            return
+        if len(required_interval) != 2:
+            raise MonetaryCostAuthorityError("required_interval must contain start and end")
+        start, end = required_interval
+        _utc(start, "required_interval start")
+        _utc(end, "required_interval end")
+        if end < start:
+            raise MonetaryCostAuthorityError("required_interval end precedes start")
+        assert receipt.covered_start is not None
+        assert receipt.covered_end is not None
+        if receipt.covered_start > start or receipt.covered_end < end:
+            raise MonetaryCostAuthorityError(
+                "receipt coverage does not contain the required campaign interval"
+            )
+
     def _load_receipt(self, receipt_id: str) -> MonetaryReceipt:
         _sha256(receipt_id, "receipt_id")
-        path = self.receipts_dir / f"{receipt_id}.json"
-        raw = self._read_record(path, "monetary receipt")
+        raw = self._read_record(
+            self.receipts_dir / f"{receipt_id}.json", "monetary receipt"
+        )
         item = MonetaryReceipt.from_dict(raw)
         if item.receipt_id != receipt_id:
             raise MonetaryCostAuthorityIntegrityError("receipt filename identity mismatch")
@@ -682,8 +808,9 @@ class CampaignMonetaryCostAuthority:
 
     def _load_currency(self, evidence_id: str) -> CampaignCurrencyEvidence:
         _sha256(evidence_id, "currency evidence_id")
-        path = self.currency_dir / f"{evidence_id}.json"
-        raw = self._read_record(path, "campaign currency evidence")
+        raw = self._read_record(
+            self.currency_dir / f"{evidence_id}.json", "campaign currency evidence"
+        )
         item = CampaignCurrencyEvidence.from_dict(raw)
         if item.evidence_id != evidence_id:
             raise MonetaryCostAuthorityIntegrityError(
@@ -693,8 +820,9 @@ class CampaignMonetaryCostAuthority:
 
     def _load_allocation(self, allocation_id: str) -> AllocationPlan:
         _sha256(allocation_id, "allocation_id")
-        path = self.allocations_dir / f"{allocation_id}.json"
-        raw = self._read_record(path, "allocation plan")
+        raw = self._read_record(
+            self.allocations_dir / f"{allocation_id}.json", "allocation plan"
+        )
         item = AllocationPlan.from_dict(raw)
         if item.allocation_id != allocation_id:
             raise MonetaryCostAuthorityIntegrityError(
@@ -703,17 +831,24 @@ class CampaignMonetaryCostAuthority:
         return item
 
     def _allocation_for_receipt(self, receipt_id: str) -> AllocationPlan:
-        path = self.allocation_index_dir / f"{receipt_id}.json"
-        raw = self._read_record(path, "allocation binding")
+        raw = self._read_record(
+            self.allocation_index_dir / f"{receipt_id}.json", "allocation binding"
+        )
         _exact_keys(raw, {"receipt_id", "allocation_id"}, "allocation binding")
         if _string(raw["receipt_id"], "receipt_id") != receipt_id:
             raise MonetaryCostAuthorityIntegrityError("allocation binding receipt mismatch")
-        plan = self._load_allocation(
-            _string(raw["allocation_id"], "allocation_id")
-        )
+        plan = self._load_allocation(_string(raw["allocation_id"], "allocation_id"))
         if plan.receipt_id != receipt_id:
             raise MonetaryCostAuthorityIntegrityError("allocation points to wrong receipt")
         return plan
+
+    def _source_index_path(
+        self, *, namespace: str, source_authority: str, source_evidence_id: str
+    ) -> Path:
+        material = "\0".join(
+            (namespace, source_authority, source_evidence_id)
+        ).encode("utf-8")
+        return self.source_index_dir / f"{hashlib.sha256(material).hexdigest()}.json"
 
     def _bind_source_once(
         self,
@@ -723,12 +858,12 @@ class CampaignMonetaryCostAuthority:
         source_evidence_id: str,
         record_id: str,
     ) -> None:
-        material = "\0".join(
-            (namespace, source_authority, source_evidence_id)
-        ).encode("utf-8")
-        key = hashlib.sha256(material).hexdigest()
         self._write_binding_once(
-            self.source_index_dir / f"{key}.json",
+            self._source_index_path(
+                namespace=namespace,
+                source_authority=source_authority,
+                source_evidence_id=source_evidence_id,
+            ),
             {
                 "namespace": namespace,
                 "source_authority": source_authority,
@@ -739,6 +874,54 @@ class CampaignMonetaryCostAuthority:
                 "same external source identity was presented with conflicting immutable evidence"
             ),
         )
+
+    def _require_source_bound(
+        self,
+        *,
+        namespace: str,
+        source_authority: str,
+        source_evidence_id: str,
+        record_id: str,
+    ) -> None:
+        raw = self._read_record(
+            self._source_index_path(
+                namespace=namespace,
+                source_authority=source_authority,
+                source_evidence_id=source_evidence_id,
+            ),
+            "source identity binding",
+        )
+        expected = {
+            "namespace": namespace,
+            "source_authority": source_authority,
+            "source_evidence_id": source_evidence_id,
+            "record_id": record_id,
+        }
+        if dict(raw) != expected:
+            raise MonetaryCostAuthorityIntegrityError(
+                "source identity binding does not authorize this record"
+            )
+
+    def _require_receipt_bound(self, receipt: MonetaryReceipt) -> None:
+        self._require_source_bound(
+            namespace=receipt.source_class.value,
+            source_authority=receipt.source_authority,
+            source_evidence_id=receipt.source_evidence_id,
+            record_id=receipt.receipt_id,
+        )
+
+    def _require_correction_binding(self, prior_id: str, replacement_id: str) -> None:
+        raw = self._read_record(
+            self.correction_index_dir / f"{prior_id}.json", "correction binding"
+        )
+        expected = {
+            "prior_receipt_id": prior_id,
+            "replacement_receipt_id": replacement_id,
+        }
+        if dict(raw) != expected:
+            raise MonetaryCostAuthorityIntegrityError(
+                "correction lineage does not authorize this replacement"
+            )
 
     def _write_binding_once(
         self,
@@ -756,13 +939,7 @@ class CampaignMonetaryCostAuthority:
 
     def _write_record(self, path: Path, payload: Mapping[str, Any]) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
-        text = json.dumps(
-            dict(payload),
-            ensure_ascii=False,
-            sort_keys=True,
-            separators=(",", ":"),
-            allow_nan=False,
-        ) + "\n"
+        text = _canonical_json_text(payload)
         if path.exists():
             existing = path.read_text(encoding="utf-8")
             if existing != text:
@@ -774,6 +951,8 @@ class CampaignMonetaryCostAuthority:
             with path.open("x", encoding="utf-8", newline="\n") as handle:
                 handle.write(text)
                 handle.flush()
+                os.fsync(handle.fileno())
+            _fsync_directory(path.parent)
         except FileExistsError:
             existing = path.read_text(encoding="utf-8")
             if existing != text:
@@ -793,14 +972,7 @@ class CampaignMonetaryCostAuthority:
             raise MonetaryCostAuthorityIntegrityError(f"invalid {label} JSON") from exc
         if not isinstance(raw, dict):
             raise MonetaryCostAuthorityIntegrityError(f"{label} must be a JSON object")
-        canonical = json.dumps(
-            raw,
-            ensure_ascii=False,
-            sort_keys=True,
-            separators=(",", ":"),
-            allow_nan=False,
-        ) + "\n"
-        if canonical != text:
+        if _canonical_json_text(raw) != text:
             raise MonetaryCostAuthorityIntegrityError(f"{label} is not canonical JSON")
         return raw
 
@@ -947,12 +1119,26 @@ def _parse_datetime(value: Any, label: str) -> datetime:
     return parsed
 
 
-def _digest(payload: Mapping[str, Any]) -> str:
-    encoded = json.dumps(
+def _canonical_json_text(payload: Mapping[str, Any]) -> str:
+    return json.dumps(
         dict(payload),
         ensure_ascii=False,
         sort_keys=True,
         separators=(",", ":"),
         allow_nan=False,
-    ).encode("utf-8")
-    return hashlib.sha256(encoded).hexdigest()
+    ) + "\n"
+
+
+def _digest(payload: Mapping[str, Any]) -> str:
+    return hashlib.sha256(_canonical_json_text(payload)[:-1].encode("utf-8")).hexdigest()
+
+
+def _fsync_directory(path: Path) -> None:
+    if os.name == "nt":
+        return
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+    descriptor = os.open(path, flags)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)

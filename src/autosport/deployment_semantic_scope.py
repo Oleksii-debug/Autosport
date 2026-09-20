@@ -312,9 +312,14 @@ class DeploymentSemanticScope:
             "reward_definition_id": self.reward_definition_id,
         }
 
+    def compatibility_payload(self) -> dict[str, object]:
+        payload = self.identity_payload()
+        payload.pop("research_protocol_sha256")
+        return payload
+
     @property
     def scope_id(self) -> str:
-        return _digest(self.identity_payload())
+        return _digest(self.compatibility_payload())
 
     def to_dict(self) -> dict[str, object]:
         return {**self.identity_payload(), "scope_id": self.scope_id}
@@ -421,6 +426,7 @@ class DeploymentSemanticAuthority:
                 "schema": "autosport.deployment_semantic_scope.authority",
                 "schema_version": 1,
                 "scope_id": self.scope.scope_id,
+                "research_protocol_sha256": self.scope.research_protocol_sha256,
                 "decision_ts": _instant_id(self.decision_ts, "decision_ts"),
                 "market_event_dedupe_key": self.market_event_dedupe_key,
                 "market_event_payload_sha256": self.market_event_payload_sha256,

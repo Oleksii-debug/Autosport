@@ -333,8 +333,12 @@ def test_materialize_derived_snapshots_preserves_bound_source_generation(tmp_pat
         min_support=1,
     )
     raw = json.loads(opponent.path.read_text(encoding="utf-8"))
-    assert raw["rating_snapshots"]
-    assert raw["feature_snapshots"]
+    assert artifact.rating_snapshot_id in {
+        item["snapshot_id"] for item in raw["rating_snapshots"]
+    }
+    assert artifact.feature_snapshot_id in {
+        item["snapshot_id"] for item in raw["feature_snapshots"]
+    }
 
     # build_snapshots durably wrote derived cache output into the opponent file.
     # That must not invalidate the immutable upstream generation that authorized
@@ -358,6 +362,61 @@ def test_materialize_derived_snapshots_preserves_bound_source_generation(tmp_pat
         )
         == checkpoint
     )
+
+
+def test_missing_derived_snapshots_fail_closed_under_same_source_generation(tmp_path):
+    identity, opponent = _canonical_stores(tmp_path, populated=True)
+    checkpoint_path, runtime_path = _paths(tmp_path)
+    runtime = initialize_or_open_bound_sport_memory_runtime(
+        runtime_path,
+        checkpoint_path,
+        identity,
+        opponent,
+    )
+    artifact = runtime.materialize(
+        participant_entity_id="p-alex",
+        scope=_scope(),
+        causal_cutoff=T2,
+        published_at=T3,
+        code_sha256=SHA_A,
+        dependency_sha256=SHA_B,
+        min_support=1,
+    )
+
+    # Removing only derived cache records leaves performances/invalidations, and
+    # therefore the immutable source generation, unchanged. The bound runtime must
+    # still reject restart because its durable artifact explicitly references the
+    # removed content-addressed snapshots.
+    raw = json.loads(opponent.path.read_text(encoding="utf-8"))
+    raw["rating_snapshots"] = [
+        item
+        for item in raw["rating_snapshots"]
+        if item["snapshot_id"] != artifact.rating_snapshot_id
+    ]
+    raw["feature_snapshots"] = [
+        item
+        for item in raw["feature_snapshots"]
+        if item["snapshot_id"] != artifact.feature_snapshot_id
+    ]
+    opponent.path.write_text(
+        json.dumps(raw, sort_keys=True, separators=(",", ":")) + "\n",
+        encoding="utf-8",
+    )
+
+    reopened_identity = ParticipantIdentityRegistry(identity.path)
+    pruned_opponent = OpponentIntelligenceStore(
+        opponent.path, reopened_identity
+    )
+    with pytest.raises(
+        SportMemoryCheckpointError,
+        match="missing canonical opponent snapshot",
+    ):
+        open_bound_sport_memory_runtime(
+            runtime_path,
+            checkpoint_path,
+            reopened_identity,
+            pruned_opponent,
+        )
 
 
 def test_checkpoint_parser_rejects_unknown_fields_and_boolean_version(tmp_path):

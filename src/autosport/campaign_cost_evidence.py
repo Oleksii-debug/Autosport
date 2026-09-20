@@ -1,30 +1,29 @@
 from __future__ import annotations
 
-from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 from enum import StrEnum
 import hashlib
 import json
-import os
-from pathlib import Path
 import re
-import tempfile
-from typing import Any, Iterator, Mapping, Protocol, Sequence
+from typing import Any, Mapping, Sequence
+
+from .campaign_economic_authority import (
+    CanonicalCampaignProjection,
+    CanonicalMembershipRef,
+    CanonicalSessionRef,
+    FinalizedCampaignAuthority,
+)
 
 
-SCHEMA_VERSION = 2
-_HEX64_RE = re.compile(r"^[0-9a-f]{64}$")
+SCHEMA_VERSION = 3
+_SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _CURRENCY_RE = re.compile(r"^[A-Z]{3}$")
 
 
 class CostEvidenceError(ValueError):
     """Raised when campaign economic evidence is malformed or inconsistent."""
-
-
-class CostStoreError(RuntimeError):
-    """Raised when durable campaign-economic evidence cannot be trusted."""
 
 
 class CostTruth(StrEnum):
@@ -50,7 +49,7 @@ class CostClass(StrEnum):
     FIXED_CAMPAIGN = "FIXED_CAMPAIGN"
 
 
-REQUIRED_COST_CLASSES = tuple(sorted(CostClass, key=lambda item: item.value))
+REQUIRED_COST_CLASSES = tuple(sorted(CostClass, key=lambda value: value.value))
 
 
 class CostUnit(StrEnum):
@@ -73,51 +72,30 @@ class EconomicCompleteness(StrEnum):
 
 
 @dataclass(frozen=True, order=True, slots=True)
-class AuthorityRef:
+class CostSourceRef:
     family: str
     evidence_id: str
     sha256: str
 
     def __post_init__(self) -> None:
-        _require_text(self.family, "authority family")
-        _require_text(self.evidence_id, "authority evidence_id")
-        _require_sha256(self.sha256, "authority sha256")
+        _text(self.family, "source family")
+        _text(self.evidence_id, "source evidence_id")
+        _sha256(self.sha256, "source sha256")
 
     def to_dict(self) -> dict[str, str]:
-        return {"family": self.family, "evidence_id": self.evidence_id, "sha256": self.sha256}
+        return {
+            "family": self.family,
+            "evidence_id": self.evidence_id,
+            "sha256": self.sha256,
+        }
 
     @classmethod
-    def from_dict(cls, payload: Mapping[str, Any]) -> "AuthorityRef":
-        _require_exact_keys(payload, {"family", "evidence_id", "sha256"}, "AuthorityRef")
+    def from_dict(cls, raw: Mapping[str, Any]) -> "CostSourceRef":
+        _exact_keys(raw, {"family", "evidence_id", "sha256"}, "CostSourceRef")
         return cls(
-            family=_require_string(payload["family"], "family"),
-            evidence_id=_require_string(payload["evidence_id"], "evidence_id"),
-            sha256=_require_string(payload["sha256"], "sha256"),
-        )
-
-
-@dataclass(frozen=True, order=True, slots=True)
-class MembershipRef:
-    kind: str
-    evidence_id: str
-    sha256: str
-
-    def __post_init__(self) -> None:
-        if self.kind not in {"SESSION", "RUN", "EVALUATION"}:
-            raise CostEvidenceError("membership kind must be SESSION, RUN, or EVALUATION")
-        _require_text(self.evidence_id, "membership evidence_id")
-        _require_sha256(self.sha256, "membership sha256")
-
-    def to_dict(self) -> dict[str, str]:
-        return {"kind": self.kind, "evidence_id": self.evidence_id, "sha256": self.sha256}
-
-    @classmethod
-    def from_dict(cls, payload: Mapping[str, Any]) -> "MembershipRef":
-        _require_exact_keys(payload, {"kind", "evidence_id", "sha256"}, "MembershipRef")
-        return cls(
-            kind=_require_string(payload["kind"], "kind"),
-            evidence_id=_require_string(payload["evidence_id"], "evidence_id"),
-            sha256=_require_string(payload["sha256"], "sha256"),
+            family=_string(raw["family"], "family"),
+            evidence_id=_string(raw["evidence_id"], "evidence_id"),
+            sha256=_string(raw["sha256"], "sha256"),
         )
 
 
@@ -127,9 +105,9 @@ class CostEvidence:
     truth: CostTruth
     basis: CostBasis | None
     treatment: CostTreatment
-    source: AuthorityRef
+    source: CostSourceRef
     campaign_sha256: str
-    memberships: tuple[MembershipRef, ...]
+    memberships: tuple[CanonicalMembershipRef, ...]
     unit: CostUnit
     currency: str | None
     amount: Decimal | None
@@ -137,31 +115,32 @@ class CostEvidence:
     available_at: datetime
     incurred_at: datetime | None = None
     shared_source: bool = False
-    allocation_authority: AuthorityRef | None = None
+    allocation_source: CostSourceRef | None = None
     supersedes_cost_evidence_ids: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
-        _require_sha256(self.campaign_sha256, "campaign_sha256")
-        _require_utc(self.observed_at, "observed_at")
-        _require_utc(self.available_at, "available_at")
+        _sha256(self.campaign_sha256, "campaign_sha256")
+        _utc(self.observed_at, "observed_at")
+        _utc(self.available_at, "available_at")
         if self.observed_at > self.available_at:
             raise CostEvidenceError("observed_at cannot be later than available_at")
         if self.incurred_at is not None:
-            _require_utc(self.incurred_at, "incurred_at")
+            _utc(self.incurred_at, "incurred_at")
             if self.incurred_at > self.available_at:
                 raise CostEvidenceError("incurred_at cannot be later than available_at")
-        _require_sorted_unique(self.memberships, "memberships")
-        _require_sorted_unique(self.supersedes_cost_evidence_ids, "supersedes_cost_evidence_ids")
+        _sorted_unique(self.memberships, "memberships")
+        _sorted_unique(self.supersedes_cost_evidence_ids, "supersedes ids")
         for evidence_id in self.supersedes_cost_evidence_ids:
-            _require_sha256(evidence_id, "supersedes cost evidence id")
+            _sha256(evidence_id, "superseded cost evidence id")
 
         if self.unit is CostUnit.MONEY:
-            if self.currency is not None and not _CURRENCY_RE.fullmatch(self.currency):
-                raise CostEvidenceError("money currency must be an uppercase three-letter code")
+            if self.currency is None or _CURRENCY_RE.fullmatch(self.currency) is None:
+                raise CostEvidenceError("money cost requires an uppercase three-letter currency")
         elif self.currency is not None:
-            raise CostEvidenceError("non-money cost evidence cannot carry currency")
+            raise CostEvidenceError("non-money cost cannot carry currency")
+
         if self.amount is not None:
-            _require_decimal(self.amount, "amount")
+            _finite_decimal(self.amount, "amount")
             if self.amount < 0:
                 raise CostEvidenceError("cost amount cannot be negative")
 
@@ -170,7 +149,7 @@ class CostEvidence:
                 raise CostEvidenceError("KNOWN_ZERO requires amount=0 and a basis")
         elif self.truth is CostTruth.KNOWN_AMOUNT:
             if self.amount is None or self.basis is None:
-                raise CostEvidenceError("KNOWN_AMOUNT requires an amount and a basis")
+                raise CostEvidenceError("KNOWN_AMOUNT requires amount and a basis")
         elif self.truth is CostTruth.UNKNOWN_UNPROVEN:
             if self.amount is not None or self.basis is not None:
                 raise CostEvidenceError("UNKNOWN_UNPROVEN cannot carry amount or basis")
@@ -180,21 +159,21 @@ class CostEvidence:
             if self.amount is not None:
                 raise CostEvidenceError("NOT_APPLICABLE cannot carry an amount")
             if self.basis is not CostBasis.AUTHORITATIVE_DECLARATION:
-                raise CostEvidenceError("NOT_APPLICABLE requires authoritative declaration evidence")
+                raise CostEvidenceError("NOT_APPLICABLE requires authoritative declaration basis")
             if self.treatment is not CostTreatment.INFORMATIONAL:
                 raise CostEvidenceError("NOT_APPLICABLE must remain INFORMATIONAL")
 
-        if self.shared_source and self.truth in {CostTruth.KNOWN_ZERO, CostTruth.KNOWN_AMOUNT}:
-            if self.treatment is CostTreatment.SUBTRACT_FROM_GROSS and self.allocation_authority is None:
-                raise CostEvidenceError("shared subtractive cost requires immutable allocation authority")
-        if not self.shared_source and self.allocation_authority is not None:
-            raise CostEvidenceError("allocation authority is only valid for shared-source cost evidence")
+        if self.shared_source and self.treatment is CostTreatment.SUBTRACT_FROM_GROSS:
+            if self.allocation_source is None:
+                raise CostEvidenceError("shared subtractive cost requires allocation authority")
+        if not self.shared_source and self.allocation_source is not None:
+            raise CostEvidenceError("allocation source requires shared_source=true")
 
     @property
     def cost_evidence_id(self) -> str:
-        return _sha256_json(self.to_payload_dict())
+        return _digest(self.payload())
 
-    def to_payload_dict(self) -> dict[str, Any]:
+    def payload(self) -> dict[str, Any]:
         return {
             "schema_version": SCHEMA_VERSION,
             "cost_class": self.cost_class.value,
@@ -203,7 +182,7 @@ class CostEvidence:
             "treatment": self.treatment.value,
             "source": self.source.to_dict(),
             "campaign_sha256": self.campaign_sha256,
-            "memberships": [item.to_dict() for item in self.memberships],
+            "memberships": [_membership_dict(item) for item in self.memberships],
             "unit": self.unit.value,
             "currency": self.currency,
             "amount": None if self.amount is None else _decimal_text(self.amount),
@@ -211,127 +190,63 @@ class CostEvidence:
             "available_at": _datetime_text(self.available_at),
             "incurred_at": None if self.incurred_at is None else _datetime_text(self.incurred_at),
             "shared_source": self.shared_source,
-            "allocation_authority": None if self.allocation_authority is None else self.allocation_authority.to_dict(),
+            "allocation_source": None if self.allocation_source is None else self.allocation_source.to_dict(),
             "supersedes_cost_evidence_ids": list(self.supersedes_cost_evidence_ids),
         }
 
     def to_dict(self) -> dict[str, Any]:
-        payload = self.to_payload_dict()
-        payload["cost_evidence_id"] = self.cost_evidence_id
-        return payload
+        raw = self.payload()
+        raw["cost_evidence_id"] = self.cost_evidence_id
+        return raw
 
     @classmethod
-    def from_dict(cls, payload: Mapping[str, Any]) -> "CostEvidence":
+    def from_dict(cls, raw: Mapping[str, Any]) -> "CostEvidence":
         expected = {
-            "schema_version", "cost_class", "truth", "basis", "treatment", "source",
-            "campaign_sha256", "memberships", "unit", "currency", "amount", "observed_at",
-            "available_at", "incurred_at", "shared_source", "allocation_authority",
-            "supersedes_cost_evidence_ids", "cost_evidence_id",
+            "schema_version", "cost_class", "truth", "basis", "treatment",
+            "source", "campaign_sha256", "memberships", "unit", "currency",
+            "amount", "observed_at", "available_at", "incurred_at",
+            "shared_source", "allocation_source", "supersedes_cost_evidence_ids",
+            "cost_evidence_id",
         }
-        _require_exact_keys(payload, expected, "CostEvidence")
-        if payload["schema_version"] != SCHEMA_VERSION:
+        _exact_keys(raw, expected, "CostEvidence")
+        if raw["schema_version"] != SCHEMA_VERSION:
             raise CostEvidenceError("unsupported cost evidence schema_version")
-        allocation = payload["allocation_authority"]
-        basis = payload["basis"]
-        amount = payload["amount"]
-        incurred = payload["incurred_at"]
+        basis_raw = raw["basis"]
+        amount_raw = raw["amount"]
+        incurred_raw = raw["incurred_at"]
+        allocation_raw = raw["allocation_source"]
         item = cls(
-            cost_class=CostClass(_require_string(payload["cost_class"], "cost_class")),
-            truth=CostTruth(_require_string(payload["truth"], "truth")),
-            basis=None if basis is None else CostBasis(_require_string(basis, "basis")),
-            treatment=CostTreatment(_require_string(payload["treatment"], "treatment")),
-            source=AuthorityRef.from_dict(_require_mapping(payload["source"], "source")),
-            campaign_sha256=_require_string(payload["campaign_sha256"], "campaign_sha256"),
-            memberships=tuple(MembershipRef.from_dict(_require_mapping(v, "membership")) for v in _require_list(payload["memberships"], "memberships")),
-            unit=CostUnit(_require_string(payload["unit"], "unit")),
-            currency=_optional_string(payload["currency"], "currency"),
-            amount=None if amount is None else _parse_decimal(amount, "amount"),
-            observed_at=_parse_datetime(payload["observed_at"], "observed_at"),
-            available_at=_parse_datetime(payload["available_at"], "available_at"),
-            incurred_at=None if incurred is None else _parse_datetime(incurred, "incurred_at"),
-            shared_source=_require_bool(payload["shared_source"], "shared_source"),
-            allocation_authority=None if allocation is None else AuthorityRef.from_dict(_require_mapping(allocation, "allocation_authority")),
-            supersedes_cost_evidence_ids=tuple(_require_string(v, "supersedes cost evidence id") for v in _require_list(payload["supersedes_cost_evidence_ids"], "supersedes_cost_evidence_ids")),
+            cost_class=CostClass(_string(raw["cost_class"], "cost_class")),
+            truth=CostTruth(_string(raw["truth"], "truth")),
+            basis=None if basis_raw is None else CostBasis(_string(basis_raw, "basis")),
+            treatment=CostTreatment(_string(raw["treatment"], "treatment")),
+            source=CostSourceRef.from_dict(_mapping(raw["source"], "source")),
+            campaign_sha256=_string(raw["campaign_sha256"], "campaign_sha256"),
+            memberships=tuple(
+                _membership_from_dict(_mapping(value, "membership"))
+                for value in _list(raw["memberships"], "memberships")
+            ),
+            unit=CostUnit(_string(raw["unit"], "unit")),
+            currency=_optional_string(raw["currency"], "currency"),
+            amount=None if amount_raw is None else _parse_decimal(amount_raw, "amount"),
+            observed_at=_parse_datetime(raw["observed_at"], "observed_at"),
+            available_at=_parse_datetime(raw["available_at"], "available_at"),
+            incurred_at=None if incurred_raw is None else _parse_datetime(incurred_raw, "incurred_at"),
+            shared_source=_bool(raw["shared_source"], "shared_source"),
+            allocation_source=None if allocation_raw is None else CostSourceRef.from_dict(_mapping(allocation_raw, "allocation_source")),
+            supersedes_cost_evidence_ids=tuple(
+                _string(value, "superseded cost evidence id")
+                for value in _list(raw["supersedes_cost_evidence_ids"], "supersedes_cost_evidence_ids")
+            ),
         )
-        stored = _require_string(payload["cost_evidence_id"], "cost_evidence_id")
-        if stored != item.cost_evidence_id:
+        if _string(raw["cost_evidence_id"], "cost_evidence_id") != item.cost_evidence_id:
             raise CostEvidenceError("cost evidence digest mismatch")
         return item
 
 
 @dataclass(frozen=True, slots=True)
-class ResolvedCostAuthority:
-    """Canonical resolver output. A raw AuthorityRef alone is never sufficient."""
-
-    source: AuthorityRef
-    cost_class: CostClass
-    truth: CostTruth
-    basis: CostBasis | None
-    treatment: CostTreatment
-    campaign_sha256: str
-    memberships: tuple[MembershipRef, ...]
-    unit: CostUnit
-    currency: str | None
-    amount: Decimal | None
-    observed_at: datetime
-    available_at: datetime
-    incurred_at: datetime | None
-    shared_source: bool
-    allocation_authority: AuthorityRef | None
-
-    def matches(self, evidence: CostEvidence) -> bool:
-        return (
-            self.source == evidence.source
-            and self.cost_class is evidence.cost_class
-            and self.truth is evidence.truth
-            and self.basis is evidence.basis
-            and self.treatment is evidence.treatment
-            and self.campaign_sha256 == evidence.campaign_sha256
-            and self.memberships == evidence.memberships
-            and self.unit is evidence.unit
-            and self.currency == evidence.currency
-            and self.amount == evidence.amount
-            and self.observed_at == evidence.observed_at
-            and self.available_at == evidence.available_at
-            and self.incurred_at == evidence.incurred_at
-            and self.shared_source == evidence.shared_source
-            and self.allocation_authority == evidence.allocation_authority
-        )
-
-
-@dataclass(frozen=True, slots=True)
-class ResolvedCurrencyAuthority:
-    source: AuthorityRef
-    campaign_sha256: str
-    currency: str
-
-    def __post_init__(self) -> None:
-        _require_sha256(self.campaign_sha256, "currency campaign_sha256")
-        if not _CURRENCY_RE.fullmatch(self.currency):
-            raise CostEvidenceError("resolved campaign currency must be a three-letter code")
-
-
-class CostAuthorityResolver(Protocol):
-    """Bridge to canonical provider/compute/execution/billing authorities.
-
-    Implementations must resolve by immutable id+digest from canonical stores or
-    in-process verified capabilities. Returning data reconstructed from the
-    caller's CostEvidence is not authoritative.
-    """
-
-    def resolve_cost(self, source: AuthorityRef) -> ResolvedCostAuthority | None: ...
-
-    def resolve_currency(self, source: AuthorityRef) -> ResolvedCurrencyAuthority | None: ...
-
-
-@dataclass(frozen=True, slots=True)
 class CampaignEconomicEvidenceVersion:
-    campaign_sha256: str
-    session_evidence_refs: tuple[AuthorityRef, ...]
-    membership_refs: tuple[MembershipRef, ...]
-    gross_run_pnl: Decimal
-    currency: str | None
-    currency_authority: AuthorityRef | None
+    campaign_authority: CanonicalCampaignProjection
     costs: tuple[CostEvidence, ...]
     as_of: datetime
     previous_version_id: str | None
@@ -342,46 +257,41 @@ class CampaignEconomicEvidenceVersion:
     incomplete_reasons: tuple[str, ...]
 
     def __post_init__(self) -> None:
-        _require_sha256(self.campaign_sha256, "campaign_sha256")
-        _require_decimal(self.gross_run_pnl, "gross_run_pnl")
-        _require_decimal(self.known_cost_total, "known_cost_total")
+        _utc(self.as_of, "as_of")
+        _sorted_unique(self.costs, "costs", key=lambda value: value.cost_evidence_id)
+        _finite_decimal(self.known_cost_total, "known_cost_total")
         if self.known_cost_total < 0:
             raise CostEvidenceError("known_cost_total cannot be negative")
         if self.net_after_known_costs is not None:
-            _require_decimal(self.net_after_known_costs, "net_after_known_costs")
-        _require_utc(self.as_of, "as_of")
-        if self.currency is not None and not _CURRENCY_RE.fullmatch(self.currency):
-            raise CostEvidenceError("campaign currency must be a three-letter code")
-        if (self.currency is None) != (self.currency_authority is None):
-            raise CostEvidenceError("currency and currency_authority must be present together")
-        _require_sorted_unique(self.session_evidence_refs, "session_evidence_refs")
-        _require_sorted_unique(self.membership_refs, "membership_refs")
-        _require_sorted_unique(self.costs, "costs", key=lambda item: item.cost_evidence_id)
-        _require_sorted_unique(self.incomplete_reasons, "incomplete_reasons")
+            _finite_decimal(self.net_after_known_costs, "net_after_known_costs")
+        _sorted_unique(self.incomplete_reasons, "incomplete_reasons")
         if (self.previous_version_id is None) != (self.previous_version_sha256 is None):
-            raise CostEvidenceError("previous version id and digest must be present together")
+            raise CostEvidenceError("predecessor id and digest must be present together")
         if self.previous_version_id is not None:
-            _require_sha256(self.previous_version_id, "previous_version_id")
-            _require_sha256(self.previous_version_sha256 or "", "previous_version_sha256")
+            _sha256(self.previous_version_id, "previous_version_id")
+            _sha256(self.previous_version_sha256 or "", "previous_version_sha256")
+
+    @property
+    def campaign_sha256(self) -> str:
+        return self.campaign_authority.campaign_sha256
+
+    @property
+    def gross_run_pnl(self) -> Decimal:
+        return self.campaign_authority.gross_run_pnl
 
     @property
     def version_id(self) -> str:
-        return _sha256_json(self.to_payload_dict())
+        return _digest(self.payload())
 
     @property
     def record_sha256(self) -> str:
         return self.version_id
 
-    def to_payload_dict(self) -> dict[str, Any]:
+    def payload(self) -> dict[str, Any]:
         return {
             "schema_version": SCHEMA_VERSION,
-            "campaign_sha256": self.campaign_sha256,
-            "session_evidence_refs": [item.to_dict() for item in self.session_evidence_refs],
-            "membership_refs": [item.to_dict() for item in self.membership_refs],
-            "gross_run_pnl": _decimal_text(self.gross_run_pnl),
-            "currency": self.currency,
-            "currency_authority": None if self.currency_authority is None else self.currency_authority.to_dict(),
-            "costs": [item.to_dict() for item in self.costs],
+            "campaign_authority": _projection_dict(self.campaign_authority),
+            "costs": [value.to_dict() for value in self.costs],
             "as_of": _datetime_text(self.as_of),
             "previous_version_id": self.previous_version_id,
             "previous_version_sha256": self.previous_version_sha256,
@@ -392,421 +302,295 @@ class CampaignEconomicEvidenceVersion:
         }
 
     def to_dict(self) -> dict[str, Any]:
-        payload = self.to_payload_dict()
-        payload["version_id"] = self.version_id
-        payload["record_sha256"] = self.record_sha256
-        return payload
+        raw = self.payload()
+        raw["version_id"] = self.version_id
+        raw["record_sha256"] = self.record_sha256
+        return raw
 
     @classmethod
-    def from_dict(cls, payload: Mapping[str, Any]) -> "CampaignEconomicEvidenceVersion":
+    def from_dict(cls, raw: Mapping[str, Any]) -> "CampaignEconomicEvidenceVersion":
         expected = {
-            "schema_version", "campaign_sha256", "session_evidence_refs", "membership_refs",
-            "gross_run_pnl", "currency", "currency_authority", "costs", "as_of",
+            "schema_version", "campaign_authority", "costs", "as_of",
             "previous_version_id", "previous_version_sha256", "known_cost_total",
-            "net_after_known_costs", "completeness", "incomplete_reasons", "version_id",
-            "record_sha256",
+            "net_after_known_costs", "completeness", "incomplete_reasons",
+            "version_id", "record_sha256",
         }
-        _require_exact_keys(payload, expected, "CampaignEconomicEvidenceVersion")
-        if payload["schema_version"] != SCHEMA_VERSION:
-            raise CostEvidenceError("unsupported campaign economic evidence schema_version")
-        currency_authority = payload["currency_authority"]
-        net = payload["net_after_known_costs"]
+        _exact_keys(raw, expected, "CampaignEconomicEvidenceVersion")
+        if raw["schema_version"] != SCHEMA_VERSION:
+            raise CostEvidenceError("unsupported economic evidence schema_version")
+        net_raw = raw["net_after_known_costs"]
         item = cls(
-            campaign_sha256=_require_string(payload["campaign_sha256"], "campaign_sha256"),
-            session_evidence_refs=tuple(AuthorityRef.from_dict(_require_mapping(v, "session evidence ref")) for v in _require_list(payload["session_evidence_refs"], "session_evidence_refs")),
-            membership_refs=tuple(MembershipRef.from_dict(_require_mapping(v, "membership ref")) for v in _require_list(payload["membership_refs"], "membership_refs")),
-            gross_run_pnl=_parse_decimal(payload["gross_run_pnl"], "gross_run_pnl"),
-            currency=_optional_string(payload["currency"], "currency"),
-            currency_authority=None if currency_authority is None else AuthorityRef.from_dict(_require_mapping(currency_authority, "currency_authority")),
-            costs=tuple(CostEvidence.from_dict(_require_mapping(v, "cost")) for v in _require_list(payload["costs"], "costs")),
-            as_of=_parse_datetime(payload["as_of"], "as_of"),
-            previous_version_id=_optional_string(payload["previous_version_id"], "previous_version_id"),
-            previous_version_sha256=_optional_string(payload["previous_version_sha256"], "previous_version_sha256"),
-            known_cost_total=_parse_decimal(payload["known_cost_total"], "known_cost_total"),
-            net_after_known_costs=None if net is None else _parse_decimal(net, "net_after_known_costs"),
-            completeness=EconomicCompleteness(_require_string(payload["completeness"], "completeness")),
-            incomplete_reasons=tuple(_require_string(v, "incomplete reason") for v in _require_list(payload["incomplete_reasons"], "incomplete_reasons")),
+            campaign_authority=_projection_from_dict(_mapping(raw["campaign_authority"], "campaign_authority")),
+            costs=tuple(
+                CostEvidence.from_dict(_mapping(value, "cost"))
+                for value in _list(raw["costs"], "costs")
+            ),
+            as_of=_parse_datetime(raw["as_of"], "as_of"),
+            previous_version_id=_optional_string(raw["previous_version_id"], "previous_version_id"),
+            previous_version_sha256=_optional_string(raw["previous_version_sha256"], "previous_version_sha256"),
+            known_cost_total=_parse_decimal(raw["known_cost_total"], "known_cost_total"),
+            net_after_known_costs=None if net_raw is None else _parse_decimal(net_raw, "net_after_known_costs"),
+            completeness=EconomicCompleteness(_string(raw["completeness"], "completeness")),
+            incomplete_reasons=tuple(
+                _string(value, "incomplete reason")
+                for value in _list(raw["incomplete_reasons"], "incomplete_reasons")
+            ),
         )
-        if _require_string(payload["version_id"], "version_id") != item.version_id:
+        if _string(raw["version_id"], "version_id") != item.version_id:
             raise CostEvidenceError("economic version id mismatch")
-        if _require_string(payload["record_sha256"], "record_sha256") != item.record_sha256:
+        if _string(raw["record_sha256"], "record_sha256") != item.record_sha256:
             raise CostEvidenceError("economic record digest mismatch")
         return item
 
 
 def derive_campaign_economics(
     *,
-    campaign_sha256: str,
-    session_evidence_refs: Sequence[AuthorityRef],
-    membership_refs: Sequence[MembershipRef],
-    gross_run_pnl: Decimal,
-    currency: str | None,
-    currency_authority: AuthorityRef | None,
+    campaign: FinalizedCampaignAuthority,
     costs: Sequence[CostEvidence],
     as_of: datetime,
-    resolver: CostAuthorityResolver,
     previous: CampaignEconomicEvidenceVersion | None = None,
 ) -> CampaignEconomicEvidenceVersion:
-    _require_sha256(campaign_sha256, "campaign_sha256")
-    _require_decimal(gross_run_pnl, "gross_run_pnl")
-    _require_utc(as_of, "as_of")
-    session_refs = tuple(sorted(session_evidence_refs))
-    memberships = tuple(sorted(membership_refs))
-    cost_items = tuple(sorted(costs, key=lambda item: item.cost_evidence_id))
-    _require_sorted_unique(session_refs, "session_evidence_refs")
-    _require_sorted_unique(memberships, "membership_refs")
-    _require_sorted_unique(cost_items, "costs", key=lambda item: item.cost_evidence_id)
+    """Derive fail-closed campaign economics from canonical campaign truth.
 
-    reasons: set[str] = set()
-    estimated = False
-    if currency is None or currency_authority is None:
-        reasons.add("MISSING_CAMPAIGN_CURRENCY_AUTHORITY")
-    else:
-        if not _CURRENCY_RE.fullmatch(currency):
-            raise CostEvidenceError("campaign currency must be a three-letter code")
-        resolved_currency = resolver.resolve_currency(currency_authority)
-        if (
-            resolved_currency is None
-            or resolved_currency.source != currency_authority
-            or resolved_currency.campaign_sha256 != campaign_sha256
-            or resolved_currency.currency != currency
-        ):
-            reasons.add("UNRESOLVED_CAMPAIGN_CURRENCY_AUTHORITY")
+    The current product has no canonical campaign-wide money currency/billing
+    authority on main. Therefore this function deliberately records candidate
+    cost evidence without allowing any caller-authored source reference,
+    NOT_APPLICABLE declaration, public provider price, configured estimate, or
+    dimensionless compute metric to close professional net-economics truth.
+    """
 
-    allowed_memberships = set(memberships)
-    source_keys: set[tuple[str, str, str]] = set()
-    resolved_by_id: dict[str, ResolvedCostAuthority] = {}
+    if type(campaign) is not FinalizedCampaignAuthority:
+        raise CostEvidenceError("campaign must be FinalizedCampaignAuthority")
+    _utc(as_of, "as_of")
+    projection = campaign.projection()
+    cost_items = tuple(sorted(costs, key=lambda value: value.cost_evidence_id))
+    _sorted_unique(cost_items, "costs", key=lambda value: value.cost_evidence_id)
+
+    allowed_memberships = set(projection.membership_refs)
+    seen_sources: set[tuple[str, str, str]] = set()
     for cost in cost_items:
-        if cost.campaign_sha256 != campaign_sha256:
+        if cost.campaign_sha256 != projection.campaign_sha256:
             raise CostEvidenceError("cost evidence belongs to a different campaign")
         if cost.available_at > as_of:
-            raise CostEvidenceError("future-available cost evidence cannot be backdated into this version")
+            raise CostEvidenceError("future-available cost evidence cannot be backdated")
         if not set(cost.memberships).issubset(allowed_memberships):
-            raise CostEvidenceError("cost evidence contains membership outside the finalized campaign")
+            raise CostEvidenceError("cost membership is outside the finalized campaign")
         source_key = (cost.source.family, cost.source.evidence_id, cost.source.sha256)
-        if source_key in source_keys:
-            raise CostEvidenceError("same immutable source cost evidence cannot appear twice")
-        source_keys.add(source_key)
-        resolved = resolver.resolve_cost(cost.source)
-        if resolved is None or not resolved.matches(cost):
-            reasons.add(f"UNRESOLVED_SOURCE_AUTHORITY:{cost.cost_class.value}:{cost.cost_evidence_id}")
-        else:
-            resolved_by_id[cost.cost_evidence_id] = resolved
+        if source_key in seen_sources:
+            raise CostEvidenceError("same immutable cost source cannot be counted twice")
+        seen_sources.add(source_key)
 
     if previous is not None:
-        if previous.campaign_sha256 != campaign_sha256:
-            raise CostEvidenceError("successor version cannot cross campaign identity")
-        if previous.session_evidence_refs != session_refs or previous.membership_refs != memberships:
-            raise CostEvidenceError("successor version cannot rewrite finalized membership")
-        if previous.gross_run_pnl != gross_run_pnl:
-            raise CostEvidenceError("cost correction cannot rewrite authoritative gross run P&L")
-        if previous.currency != currency or previous.currency_authority != currency_authority:
-            raise CostEvidenceError("cost correction cannot silently rewrite campaign currency authority")
+        if previous.campaign_authority != projection:
+            raise CostEvidenceError("successor cannot rewrite finalized campaign authority")
         if as_of < previous.as_of:
-            raise CostEvidenceError("successor economic evidence cannot move as_of backwards")
-        _validate_successor_costs(previous.costs, cost_items)
+            raise CostEvidenceError("successor cannot move as_of backwards")
+        _validate_successor(previous.costs, cost_items)
 
-    superseded_ids = {superseded for item in cost_items for superseded in item.supersedes_cost_evidence_ids}
-    effective = tuple(item for item in cost_items if item.cost_evidence_id not in superseded_ids)
+    superseded = {
+        evidence_id
+        for cost in cost_items
+        for evidence_id in cost.supersedes_cost_evidence_ids
+    }
+    effective = tuple(
+        cost for cost in cost_items if cost.cost_evidence_id not in superseded
+    )
 
-    known_total = Decimal("0")
-    by_class: dict[CostClass, list[CostEvidence]] = {item: [] for item in REQUIRED_COST_CLASSES}
+    reasons: set[str] = {"MISSING_CAMPAIGN_CURRENCY_AUTHORITY"}
+    by_class: dict[CostClass, list[CostEvidence]] = {
+        value: [] for value in REQUIRED_COST_CLASSES
+    }
     for cost in effective:
         by_class[cost.cost_class].append(cost)
-        resolved = resolved_by_id.get(cost.cost_evidence_id)
-        if resolved is None:
-            continue
-        if cost.truth in {CostTruth.KNOWN_ZERO, CostTruth.KNOWN_AMOUNT}:
-            if cost.basis in {CostBasis.CONFIGURED_ESTIMATE, CostBasis.SYNTHETIC_ESTIMATE}:
-                estimated = True
-            if cost.treatment is CostTreatment.INFORMATIONAL:
-                reasons.add(f"INFORMATIONAL_ONLY:{cost.cost_class.value}")
-                continue
-            if cost.unit is not CostUnit.MONEY:
-                reasons.add(f"NON_MONEY_UNIT:{cost.cost_class.value}")
-                continue
-            if currency is None or cost.currency is None:
-                reasons.add(f"UNRESOLVED_CURRENCY:{cost.cost_class.value}")
-                continue
-            if cost.currency != currency:
-                reasons.add(f"CROSS_CURRENCY:{cost.cost_class.value}:{cost.currency}")
-                continue
-            if cost.treatment is CostTreatment.SUBTRACT_FROM_GROSS:
-                known_total += cost.amount or Decimal("0")
+        reasons.add(f"UNRESOLVED_COST_AUTHORITY:{cost.cost_class.value}")
+        if cost.truth is CostTruth.UNKNOWN_UNPROVEN:
+            reasons.add(f"UNRESOLVED_COST_CLASS:{cost.cost_class.value}")
+        if cost.basis in {CostBasis.CONFIGURED_ESTIMATE, CostBasis.SYNTHETIC_ESTIMATE}:
+            reasons.add(f"ESTIMATE_ONLY:{cost.cost_class.value}")
+        if cost.unit is not CostUnit.MONEY:
+            reasons.add(f"NON_MONEY_UNIT:{cost.cost_class.value}")
+        if cost.treatment is CostTreatment.INFORMATIONAL:
+            reasons.add(f"INFORMATIONAL_ONLY:{cost.cost_class.value}")
 
     for cost_class in REQUIRED_COST_CLASSES:
-        evidence = by_class[cost_class]
-        if not evidence:
+        if not by_class[cost_class]:
             reasons.add(f"MISSING_COST_CLASS:{cost_class.value}")
-            continue
-        if any(item.cost_evidence_id not in resolved_by_id for item in evidence):
-            reasons.add(f"UNVERIFIED_COST_CLASS:{cost_class.value}")
-            continue
-        if any(item.truth is CostTruth.UNKNOWN_UNPROVEN for item in evidence):
-            reasons.add(f"UNRESOLVED_COST_CLASS:{cost_class.value}")
-            continue
-        applicable = [item for item in evidence if item.truth is not CostTruth.NOT_APPLICABLE]
-        if not applicable:
-            continue
-        if not any(item.truth in {CostTruth.KNOWN_ZERO, CostTruth.KNOWN_AMOUNT} for item in applicable):
-            reasons.add(f"NO_KNOWN_COST:{cost_class.value}")
-
-    net_after_known = None if currency is None else gross_run_pnl - known_total
-    if reasons:
-        completeness = EconomicCompleteness.INCOMPLETE_NET_ECONOMICS
-    elif estimated:
-        completeness = EconomicCompleteness.ESTIMATED_NET_ECONOMICS
-    else:
-        completeness = EconomicCompleteness.COMPLETE_NET_ECONOMICS
 
     return CampaignEconomicEvidenceVersion(
-        campaign_sha256=campaign_sha256,
-        session_evidence_refs=session_refs,
-        membership_refs=memberships,
-        gross_run_pnl=gross_run_pnl,
-        currency=currency,
-        currency_authority=currency_authority,
+        campaign_authority=projection,
         costs=cost_items,
         as_of=as_of,
         previous_version_id=None if previous is None else previous.version_id,
         previous_version_sha256=None if previous is None else previous.record_sha256,
-        known_cost_total=known_total,
-        net_after_known_costs=net_after_known,
-        completeness=completeness,
+        known_cost_total=Decimal("0"),
+        net_after_known_costs=None,
+        completeness=EconomicCompleteness.INCOMPLETE_NET_ECONOMICS,
         incomplete_reasons=tuple(sorted(reasons)),
     )
 
 
-def _validate_successor_costs(previous: Sequence[CostEvidence], current: Sequence[CostEvidence]) -> None:
-    previous_by_id = {item.cost_evidence_id: item for item in previous}
-    current_ids = {item.cost_evidence_id for item in current}
+def _validate_successor(
+    previous: Sequence[CostEvidence], current: Sequence[CostEvidence]
+) -> None:
+    previous_by_id = {value.cost_evidence_id: value for value in previous}
+    current_ids = {value.cost_evidence_id for value in current}
     superseders: dict[str, CostEvidence] = {}
-    for item in current:
-        for superseded_id in item.supersedes_cost_evidence_ids:
+    for value in current:
+        for superseded_id in value.supersedes_cost_evidence_ids:
             if superseded_id not in previous_by_id:
-                raise CostEvidenceError("cost correction may supersede only evidence from the immediate predecessor")
+                raise CostEvidenceError("correction may supersede only predecessor cost evidence")
             if superseded_id in current_ids:
-                raise CostEvidenceError("superseded prior cost must not remain active in the successor")
+                raise CostEvidenceError("superseded prior cost must not remain active")
             if superseded_id in superseders:
-                raise CostEvidenceError("one prior cost cannot be superseded by multiple successor records")
+                raise CostEvidenceError("one prior cost cannot have multiple replacements")
             prior = previous_by_id[superseded_id]
-            if prior.cost_class is not item.cost_class:
+            if prior.cost_class is not value.cost_class:
                 raise CostEvidenceError("cost correction cannot cross cost class")
-            if prior.campaign_sha256 != item.campaign_sha256 or prior.memberships != item.memberships:
-                raise CostEvidenceError("cost correction cannot rewrite campaign membership")
-            superseders[superseded_id] = item
-    for prior_id in previous_by_id:
-        if prior_id not in current_ids and prior_id not in superseders:
+            if prior.campaign_sha256 != value.campaign_sha256:
+                raise CostEvidenceError("cost correction cannot cross campaign identity")
+            if prior.memberships != value.memberships:
+                raise CostEvidenceError("cost correction cannot rewrite membership")
+            superseders[superseded_id] = value
+    for previous_id in previous_by_id:
+        if previous_id not in current_ids and previous_id not in superseders:
             raise CostEvidenceError("successor cannot silently drop prior cost evidence")
 
 
-class CampaignEconomicEvidenceStore:
-    """Append-only sidecar that re-derives every claimed aggregate before trust."""
+def _projection_dict(value: CanonicalCampaignProjection) -> dict[str, Any]:
+    return {
+        "campaign_id": value.campaign_id,
+        "campaign_version": value.campaign_version,
+        "campaign_sha256": value.campaign_sha256,
+        "session_refs": [
+            {"evidence_id": item.evidence_id, "evidence_sha256": item.evidence_sha256}
+            for item in value.session_refs
+        ],
+        "membership_refs": [_membership_dict(item) for item in value.membership_refs],
+        "gross_run_pnl": _decimal_text(value.gross_run_pnl),
+    }
 
-    def __init__(self, root: str | os.PathLike[str], *, resolver: CostAuthorityResolver) -> None:
-        self.root = Path(root)
-        self.resolver = resolver
 
-    def append(self, version: CampaignEconomicEvidenceVersion) -> str:
-        campaign_dir = self._campaign_dir(version.campaign_sha256)
-        versions_dir = campaign_dir / "versions"
-        versions_dir.mkdir(parents=True, exist_ok=True)
-        with _exclusive_file_lock(campaign_dir / ".publish.lock"):
-            current = self.latest(version.campaign_sha256)
-            if current is None:
-                if version.previous_version_id is not None:
-                    raise CostStoreError("first stored version cannot name a predecessor")
-            else:
-                if version.version_id == current.version_id:
-                    return version.version_id
-                if version.previous_version_id != current.version_id or version.previous_version_sha256 != current.record_sha256:
-                    raise CostStoreError("economic evidence successor does not extend the current head")
-            self._validate_derived(version, current)
-            path = versions_dir / f"{version.version_id}.json"
-            encoded = _canonical_json_bytes(version.to_dict())
-            if path.exists():
-                if path.read_bytes() != encoded:
-                    raise CostStoreError("existing immutable economic version conflicts with retry")
-            else:
-                _create_immutable_file(path, encoded)
-            _atomic_replace_json(
-                campaign_dir / "head.json",
-                {
-                    "schema_version": SCHEMA_VERSION,
-                    "campaign_sha256": version.campaign_sha256,
-                    "version_id": version.version_id,
-                    "record_sha256": version.record_sha256,
-                },
+def _projection_from_dict(raw: Mapping[str, Any]) -> CanonicalCampaignProjection:
+    _exact_keys(
+        raw,
+        {
+            "campaign_id", "campaign_version", "campaign_sha256", "session_refs",
+            "membership_refs", "gross_run_pnl",
+        },
+        "CanonicalCampaignProjection",
+    )
+    version = raw["campaign_version"]
+    if type(version) is not int or version < 1:
+        raise CostEvidenceError("campaign_version must be a positive integer")
+    sessions: list[CanonicalSessionRef] = []
+    for item in _list(raw["session_refs"], "session_refs"):
+        data = _mapping(item, "session_ref")
+        _exact_keys(data, {"evidence_id", "evidence_sha256"}, "session_ref")
+        sessions.append(
+            CanonicalSessionRef(
+                evidence_id=_string(data["evidence_id"], "evidence_id"),
+                evidence_sha256=_string(data["evidence_sha256"], "evidence_sha256"),
             )
-            return version.version_id
-
-    def latest(self, campaign_sha256: str) -> CampaignEconomicEvidenceVersion | None:
-        _require_sha256(campaign_sha256, "campaign_sha256")
-        head_path = self._campaign_dir(campaign_sha256) / "head.json"
-        if not head_path.exists():
-            return None
-        head = _strict_json_bytes(head_path.read_bytes(), "economic head")
-        _require_exact_keys(head, {"schema_version", "campaign_sha256", "version_id", "record_sha256"}, "economic head")
-        if head["schema_version"] != SCHEMA_VERSION or head["campaign_sha256"] != campaign_sha256:
-            raise CostStoreError("economic head identity/schema mismatch")
-        version_id = _require_string(head["version_id"], "head version_id")
-        if _require_string(head["record_sha256"], "head record_sha256") != version_id:
-            raise CostStoreError("economic head digest mismatch")
-        latest = self._load_raw(campaign_sha256, version_id)
-        chain = self._validate_chain_from_head(latest)
-        all_ids = self._version_file_ids(campaign_sha256)
-        if all_ids != {item.version_id for item in chain}:
-            raise CostStoreError("economic store contains orphaned or rolled-back version history")
-        return latest
-
-    def load(self, campaign_sha256: str, version_id: str) -> CampaignEconomicEvidenceVersion:
-        target = self._load_raw(campaign_sha256, version_id)
-        chain = self._validate_chain_from_head(target)
-        return chain[-1]
-
-    def verify_chain(self, campaign_sha256: str) -> tuple[CampaignEconomicEvidenceVersion, ...]:
-        latest = self.latest(campaign_sha256)
-        if latest is None:
-            return ()
-        return self._validate_chain_from_head(latest)
-
-    def _validate_chain_from_head(self, head: CampaignEconomicEvidenceVersion) -> tuple[CampaignEconomicEvidenceVersion, ...]:
-        reverse: list[CampaignEconomicEvidenceVersion] = []
-        seen: set[str] = set()
-        current = head
-        while True:
-            if current.version_id in seen:
-                raise CostStoreError("economic evidence chain contains a cycle")
-            seen.add(current.version_id)
-            previous = None
-            if current.previous_version_id is not None:
-                previous = self._load_raw(current.campaign_sha256, current.previous_version_id)
-                if current.previous_version_sha256 != previous.record_sha256:
-                    raise CostStoreError("economic evidence predecessor digest mismatch")
-            self._validate_derived(current, previous)
-            reverse.append(current)
-            if previous is None:
-                break
-            current = previous
-        reverse.reverse()
-        return tuple(reverse)
-
-    def _validate_derived(self, version: CampaignEconomicEvidenceVersion, previous: CampaignEconomicEvidenceVersion | None) -> None:
-        expected = derive_campaign_economics(
-            campaign_sha256=version.campaign_sha256,
-            session_evidence_refs=version.session_evidence_refs,
-            membership_refs=version.membership_refs,
-            gross_run_pnl=version.gross_run_pnl,
-            currency=version.currency,
-            currency_authority=version.currency_authority,
-            costs=version.costs,
-            as_of=version.as_of,
-            resolver=self.resolver,
-            previous=previous,
         )
-        if expected != version:
-            raise CostStoreError("campaign economic derived fields do not match canonical re-derivation")
-
-    def _load_raw(self, campaign_sha256: str, version_id: str) -> CampaignEconomicEvidenceVersion:
-        _require_sha256(campaign_sha256, "campaign_sha256")
-        _require_sha256(version_id, "version_id")
-        path = self._campaign_dir(campaign_sha256) / "versions" / f"{version_id}.json"
-        try:
-            payload = _strict_json_bytes(path.read_bytes(), "economic version")
-        except FileNotFoundError as exc:
-            raise CostStoreError("economic evidence version is missing") from exc
-        try:
-            version = CampaignEconomicEvidenceVersion.from_dict(payload)
-        except (CostEvidenceError, ValueError, TypeError) as exc:
-            raise CostStoreError("economic evidence version failed integrity validation") from exc
-        if version.campaign_sha256 != campaign_sha256 or version.version_id != version_id:
-            raise CostStoreError("economic evidence path identity mismatch")
-        return version
-
-    def _version_file_ids(self, campaign_sha256: str) -> set[str]:
-        directory = self._campaign_dir(campaign_sha256) / "versions"
-        if not directory.exists():
-            return set()
-        ids: set[str] = set()
-        for path in directory.glob("*.json"):
-            version_id = path.stem
-            _require_sha256(version_id, "version filename")
-            ids.add(version_id)
-        return ids
-
-    def _campaign_dir(self, campaign_sha256: str) -> Path:
-        return self.root / "campaign_economics" / campaign_sha256
+    return CanonicalCampaignProjection(
+        campaign_id=_string(raw["campaign_id"], "campaign_id"),
+        campaign_version=version,
+        campaign_sha256=_string(raw["campaign_sha256"], "campaign_sha256"),
+        session_refs=tuple(sessions),
+        membership_refs=tuple(
+            _membership_from_dict(_mapping(item, "membership_ref"))
+            for item in _list(raw["membership_refs"], "membership_refs")
+        ),
+        gross_run_pnl=_parse_decimal(raw["gross_run_pnl"], "gross_run_pnl"),
+    )
 
 
-def _require_text(value: str, label: str) -> None:
-    if not isinstance(value, str) or not value.strip() or value != value.strip():
-        raise CostEvidenceError(f"{label} must be a non-empty trimmed string")
+def _membership_dict(value: CanonicalMembershipRef) -> dict[str, str]:
+    return {"kind": value.kind, "evidence_id": value.evidence_id, "sha256": value.sha256}
 
 
-def _require_sha256(value: str, label: str) -> None:
-    if not isinstance(value, str) or not _HEX64_RE.fullmatch(value):
-        raise CostEvidenceError(f"{label} must be a lowercase sha256 hex digest")
+def _membership_from_dict(raw: Mapping[str, Any]) -> CanonicalMembershipRef:
+    _exact_keys(raw, {"kind", "evidence_id", "sha256"}, "membership_ref")
+    return CanonicalMembershipRef(
+        kind=_string(raw["kind"], "kind"),
+        evidence_id=_string(raw["evidence_id"], "evidence_id"),
+        sha256=_string(raw["sha256"], "sha256"),
+    )
 
 
-def _require_utc(value: datetime, label: str) -> None:
+def _text(value: str, label: str) -> None:
+    if not isinstance(value, str) or not value or value != value.strip():
+        raise CostEvidenceError(f"{label} must be a non-empty canonical string")
+
+
+def _sha256(value: str, label: str) -> None:
+    if not isinstance(value, str) or _SHA256_RE.fullmatch(value) is None:
+        raise CostEvidenceError(f"{label} must be lowercase SHA-256 hex")
+
+
+def _utc(value: datetime, label: str) -> None:
     if not isinstance(value, datetime) or value.tzinfo is None or value.utcoffset() is None:
         raise CostEvidenceError(f"{label} must be timezone-aware")
     if value.utcoffset() != timezone.utc.utcoffset(value):
         raise CostEvidenceError(f"{label} must be expressed in UTC")
 
 
-def _require_decimal(value: Decimal, label: str) -> None:
+def _finite_decimal(value: Decimal, label: str) -> None:
     if not isinstance(value, Decimal) or not value.is_finite():
         raise CostEvidenceError(f"{label} must be a finite Decimal")
 
 
-def _require_sorted_unique(values: Sequence[Any], label: str, *, key: Any | None = None) -> None:
+def _sorted_unique(
+    values: Sequence[Any], label: str, *, key: Any | None = None
+) -> None:
     try:
         if len(set(values)) != len(values):
             raise CostEvidenceError(f"duplicate {label}")
     except TypeError as exc:
-        raise CostEvidenceError(f"{label} must contain hashable immutable values") from exc
+        raise CostEvidenceError(f"{label} must contain immutable values") from exc
     expected = tuple(sorted(values, key=key)) if key is not None else tuple(sorted(values))
     if tuple(values) != expected:
         raise CostEvidenceError(f"{label} must be sorted deterministically")
 
 
-def _require_exact_keys(payload: Mapping[str, Any], expected: set[str], label: str) -> None:
-    actual = set(payload.keys())
+def _exact_keys(raw: Mapping[str, Any], expected: set[str], label: str) -> None:
+    actual = set(raw)
     if actual != expected:
-        raise CostEvidenceError(f"{label} keys mismatch: missing={sorted(expected-actual)}, extra={sorted(actual-expected)}")
+        raise CostEvidenceError(
+            f"{label} keys mismatch: missing={sorted(expected - actual)}, extra={sorted(actual - expected)}"
+        )
 
 
-def _require_string(value: Any, label: str) -> str:
+def _string(value: Any, label: str) -> str:
     if not isinstance(value, str):
         raise CostEvidenceError(f"{label} must be a string")
     return value
 
 
 def _optional_string(value: Any, label: str) -> str | None:
-    return None if value is None else _require_string(value, label)
+    return None if value is None else _string(value, label)
 
 
-def _require_bool(value: Any, label: str) -> bool:
+def _bool(value: Any, label: str) -> bool:
     if not isinstance(value, bool):
-        raise CostEvidenceError(f"{label} must be a bool")
+        raise CostEvidenceError(f"{label} must be bool")
     return value
 
 
-def _require_mapping(value: Any, label: str) -> Mapping[str, Any]:
+def _mapping(value: Any, label: str) -> Mapping[str, Any]:
     if not isinstance(value, dict):
         raise CostEvidenceError(f"{label} must be an object")
     return value
 
 
-def _require_list(value: Any, label: str) -> list[Any]:
+def _list(value: Any, label: str) -> list[Any]:
     if not isinstance(value, list):
         raise CostEvidenceError(f"{label} must be an array")
     return value
 
 
 def _decimal_text(value: Decimal) -> str:
-    _require_decimal(value, "decimal")
+    _finite_decimal(value, "decimal")
     if value == 0:
         return "0"
     text = format(value, "f")
@@ -816,142 +600,44 @@ def _decimal_text(value: Decimal) -> str:
 
 
 def _parse_decimal(value: Any, label: str) -> Decimal:
-    text = _require_string(value, label)
+    text = _string(value, label)
     try:
-        result = Decimal(text)
+        parsed = Decimal(text)
     except InvalidOperation as exc:
-        raise CostEvidenceError(f"{label} is not a Decimal") from exc
-    _require_decimal(result, label)
-    if _decimal_text(result) != text:
-        raise CostEvidenceError(f"{label} is not in canonical decimal form")
-    return result
+        raise CostEvidenceError(f"{label} is not Decimal-compatible") from exc
+    _finite_decimal(parsed, label)
+    if _decimal_text(parsed) != text:
+        raise CostEvidenceError(f"{label} is not canonical decimal text")
+    return parsed
 
 
 def _datetime_text(value: datetime) -> str:
-    _require_utc(value, "datetime")
+    _utc(value, "datetime")
     return value.isoformat(timespec="microseconds").replace("+00:00", "Z")
 
 
 def _parse_datetime(value: Any, label: str) -> datetime:
-    text = _require_string(value, label)
+    text = _string(value, label)
     if not text.endswith("Z"):
-        raise CostEvidenceError(f"{label} must use canonical UTC Z notation")
+        raise CostEvidenceError(f"{label} must use UTC Z notation")
     try:
         parsed = datetime.fromisoformat(text[:-1] + "+00:00")
     except ValueError as exc:
-        raise CostEvidenceError(f"{label} is not a valid datetime") from exc
+        raise CostEvidenceError(f"{label} is invalid") from exc
     if _datetime_text(parsed) != text:
-        raise CostEvidenceError(f"{label} is not in canonical datetime form")
+        raise CostEvidenceError(f"{label} is not canonical datetime text")
     return parsed
 
 
-def _canonical_json_bytes(payload: Mapping[str, Any]) -> bytes:
-    return (json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False) + "\n").encode("utf-8")
+def _canonical_json(payload: Mapping[str, Any]) -> str:
+    return json.dumps(
+        payload,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    )
 
 
-def _sha256_json(payload: Mapping[str, Any]) -> str:
-    return hashlib.sha256(_canonical_json_bytes(payload)).hexdigest()
-
-
-def _strict_json_bytes(raw: bytes, label: str) -> Mapping[str, Any]:
-    try:
-        text = raw.decode("utf-8")
-    except UnicodeDecodeError as exc:
-        raise CostStoreError(f"{label} is not UTF-8") from exc
-
-    def reject_duplicates(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
-        result: dict[str, Any] = {}
-        for key, value in pairs:
-            if key in result:
-                raise CostStoreError(f"{label} contains duplicate key {key!r}")
-            result[key] = value
-        return result
-
-    try:
-        payload = json.loads(
-            text,
-            object_pairs_hook=reject_duplicates,
-            parse_constant=lambda value: (_ for _ in ()).throw(CostStoreError(f"{label} contains non-standard numeric constant {value}")),
-        )
-    except json.JSONDecodeError as exc:
-        raise CostStoreError(f"{label} is not valid JSON") from exc
-    if not isinstance(payload, dict):
-        raise CostStoreError(f"{label} must contain a JSON object")
-    return payload
-
-
-def _create_immutable_file(path: Path, content: bytes) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-    try:
-        with os.fdopen(fd, "wb", closefd=False) as handle:
-            handle.write(content)
-            handle.flush()
-            os.fsync(handle.fileno())
-    finally:
-        os.close(fd)
-    _fsync_dir(path.parent)
-
-
-def _atomic_replace_json(path: Path, payload: Mapping[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp_name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
-    tmp_path = Path(tmp_name)
-    try:
-        with os.fdopen(fd, "wb") as handle:
-            handle.write(_canonical_json_bytes(payload))
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(tmp_path, path)
-        _fsync_dir(path.parent)
-    finally:
-        try:
-            tmp_path.unlink()
-        except FileNotFoundError:
-            pass
-
-
-def _fsync_dir(path: Path) -> None:
-    if os.name == "nt":
-        return
-    flags = os.O_RDONLY | (getattr(os, "O_DIRECTORY", 0))
-    fd = os.open(path, flags)
-    try:
-        os.fsync(fd)
-    finally:
-        os.close(fd)
-
-
-@contextmanager
-def _exclusive_file_lock(path: Path) -> Iterator[None]:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    handle = path.open("a+b")
-    try:
-        if os.name == "nt":
-            import msvcrt
-            handle.seek(0, os.SEEK_END)
-            if handle.tell() == 0:
-                handle.write(b"0")
-                handle.flush()
-            handle.seek(0)
-            try:
-                msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
-            except OSError as exc:
-                raise CostStoreError("campaign economic evidence publication lock is busy") from exc
-            try:
-                yield
-            finally:
-                handle.seek(0)
-                msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
-        else:
-            import fcntl
-            try:
-                fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-            except OSError as exc:
-                raise CostStoreError("campaign economic evidence publication lock is busy") from exc
-            try:
-                yield
-            finally:
-                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
-    finally:
-        handle.close()
+def _digest(payload: Mapping[str, Any]) -> str:
+    return hashlib.sha256(_canonical_json(payload).encode("utf-8")).hexdigest()

@@ -385,6 +385,13 @@ class RevisionPolicyAuthority:
         if keys != _POLICY_KEYS:
             raise SourceRevisionAuthorityError("revision policy fields mismatch")
         record_sha256 = _sha256(body["record_sha256"], "record_sha256")
+        raw_authority = {
+            key: value for key, value in body.items() if key != "record_sha256"
+        }
+        if _digest(raw_authority) != record_sha256:
+            raise SourceRevisionAuthorityError(
+                "revision policy record digest mismatch"
+            )
         policy = cls(
             revision_policy_id=body["revision_policy_id"],
             source_identity=body["source_identity"],

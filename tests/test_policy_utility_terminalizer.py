@@ -84,7 +84,7 @@ def _blocked_learning_case():
         config_id="terminalizer-config-v1",
         data_id="terminalizer-dataset-v1",
         protocol_id="rq-terminalizer-001",
-        cutoff_ts="2026-09-20T12:00:00Z",
+        cutoff_ts="2026-09-20T12:00:02Z",
         seed=41,
     )
     environment = CausalLearningEnvironment(

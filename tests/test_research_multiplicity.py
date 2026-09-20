@@ -192,6 +192,57 @@ def test_family_split_or_merge_cannot_reuse_existing_store(tmp_path) -> None:
         SequentialMultiplicityEvidenceStore.initialize_pristine(path, merged_plan)
 
 
+def test_family_split_or_merge_cannot_reset_via_second_store(tmp_path) -> None:
+    first_path = tmp_path / "family-a.json"
+    plan = _plan()
+    member = plan.members[0]
+    store = SequentialMultiplicityEvidenceStore.initialize_pristine(first_path, plan)
+    store.append(_look(plan, member, index=1, p="0.5", bundle_char="e"))
+
+    split_plan = _plan(members=(member,))
+    with pytest.raises(ValueError, match="already enrolled"):
+        SequentialMultiplicityEvidenceStore.initialize_pristine(
+            tmp_path / "family-b.json", split_plan
+        )
+
+    with pytest.raises(ValueError, match="already enrolled"):
+        SequentialMultiplicityEvidenceStore.initialize_pristine(
+            tmp_path / "family-copy.json", plan
+        )
+
+    extra = _member("candidate C", hypothesis="8", variant="9")
+    merged_plan = _plan(members=(*plan.members, extra))
+    with pytest.raises(ValueError, match="already enrolled"):
+        SequentialMultiplicityEvidenceStore.initialize_pristine(
+            tmp_path / "family-merged.json", merged_plan
+        )
+
+    reopened = SequentialMultiplicityEvidenceStore(first_path)
+    assert len(reopened.assessments(member.member_authority_id)) == 1
+
+
+def test_missing_workspace_enrollment_authority_fails_closed(tmp_path) -> None:
+    path = tmp_path / "multiplicity.json"
+    plan = _plan()
+    SequentialMultiplicityEvidenceStore.initialize_pristine(path, plan)
+    (tmp_path / SequentialMultiplicityEvidenceStore.ENROLLMENT_FILE).unlink()
+
+    with pytest.raises(ValueError, match="enrollment authority is missing"):
+        SequentialMultiplicityEvidenceStore(path)
+
+
+def test_deleted_enrolled_store_cannot_be_recreated_pristine(tmp_path) -> None:
+    path = tmp_path / "multiplicity.json"
+    plan = _plan()
+    member = plan.members[0]
+    store = SequentialMultiplicityEvidenceStore.initialize_pristine(path, plan)
+    store.append(_look(plan, member, index=1, p="0.5", bundle_char="e"))
+    path.unlink()
+
+    with pytest.raises(ValueError, match="refusing pristine reset"):
+        SequentialMultiplicityEvidenceStore.initialize_pristine(path, plan)
+
+
 def test_negative_result_is_terminal_and_survives_restart(tmp_path) -> None:
     path = tmp_path / "multiplicity.json"
     plan = _plan()

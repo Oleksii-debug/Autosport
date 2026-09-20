@@ -136,3 +136,112 @@ def test_global_classmethod_rebind_changes_authority_identity_and_restart_fails(
         replacement=_replacement_class,
         descriptor_type=classmethod,
     )
+
+
+class _InheritedGlobalResolverBase:
+    @staticmethod
+    def _semantic_helper(record: EventLifecycleRecord, *, as_of: str):
+        return None
+
+    @classmethod
+    def resolve_inherited(cls, record: EventLifecycleRecord, *, as_of: str):
+        return cls._semantic_helper(record, as_of=as_of)
+
+
+class _InheritedGlobalResolverChild(_InheritedGlobalResolverBase):
+    pass
+
+
+def _replacement_inherited_helper(
+    record: EventLifecycleRecord,
+    *,
+    as_of: str,
+):
+    if as_of == "never":
+        raise AssertionError("replacement inherited helper semantics")
+    return None
+
+
+class _InheritedClassHelperProductSource(_ProductSource):
+    settlement_resolver_implementation_id = "provider-a-inherited-global-class-helper-v1"
+
+    def resolve(self, record: EventLifecycleRecord, *, as_of: str):
+        return _InheritedGlobalResolverChild.resolve_inherited(record, as_of=as_of)
+
+
+def test_inherited_global_classmethod_binds_concrete_runtime_owner_and_restart_fails(
+    tmp_path,
+) -> None:
+    source = _InheritedClassHelperProductSource()
+    runtime = build_autonomous_product_runtime(
+        workspace=tmp_path,
+        source=source,
+        clock=lambda: NOW,
+        outcome_authority=source,
+    )
+    expected_identity = runtime.manifest.settlement_authority_identity
+    runtime.close()
+
+    assert "_semantic_helper" not in vars(_InheritedGlobalResolverChild)
+    try:
+        _InheritedGlobalResolverChild._semantic_helper = staticmethod(
+            _replacement_inherited_helper
+        )
+        rebound_source = _InheritedClassHelperProductSource()
+        rebound_identity = _settlement_authority_identity(
+            source=rebound_source,
+            source_id=rebound_source.source_id,
+            outcome_authority=rebound_source,
+        )
+        assert rebound_identity != expected_identity
+        with pytest.raises(
+            ProductCompositionError,
+            match="settlement authority identity conflicts with durable product composition",
+        ):
+            build_autonomous_product_runtime(
+                workspace=tmp_path,
+                source=rebound_source,
+                clock=lambda: NOW,
+                outcome_authority=rebound_source,
+            )
+    finally:
+        delattr(_InheritedGlobalResolverChild, "_semantic_helper")
+
+
+class _CountingDescriptor:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def __get__(self, instance, owner):
+        self.calls += 1
+        return _replacement_static
+
+
+class _DescriptorGlobalResolverHelper:
+    unsafe = _CountingDescriptor()
+
+
+class _DescriptorProductSource(_ProductSource):
+    settlement_resolver_implementation_id = "provider-a-unsafe-global-descriptor-v1"
+
+    def resolve(self, record: EventLifecycleRecord, *, as_of: str):
+        return _DescriptorGlobalResolverHelper.unsafe(record, as_of=as_of)
+
+
+def test_global_custom_descriptor_fails_closed_without_invoking_get() -> None:
+    descriptor = vars(_DescriptorGlobalResolverHelper)["unsafe"]
+    assert type(descriptor) is _CountingDescriptor
+    descriptor.calls = 0
+    source = _DescriptorProductSource()
+
+    with pytest.raises(
+        ProductCompositionError,
+        match="source-owned settlement resolve semantics cannot be fingerprinted safely",
+    ):
+        _settlement_authority_identity(
+            source=source,
+            source_id=source.source_id,
+            outcome_authority=source,
+        )
+
+    assert descriptor.calls == 0

@@ -7,6 +7,7 @@ from unittest.mock import patch
 
 from autosport.experiential_learning import PolicyRetestSpec, run_policy_retest
 from autosport.learning_environment import Action, EvidenceTruth, RewardEvidence, Transition
+from autosport.policy_update_authority import UtilityBoundUpdateEvidence
 from autosport.scientific_registry import ScientificRegistry
 from autosport.strategy_model_factory import (
     ExperimentRunner,
@@ -199,6 +200,51 @@ class ExperientialLearningFactoryBridgeTests(unittest.TestCase):
                     )
                 )
                 delegated.assert_not_called()
+
+    def test_retest_rejects_utility_evidence_subclass_before_field_admission(self) -> None:
+        predecessor, successor, evidence = self._lineage()
+
+        class ForgedUtilityBoundUpdateEvidence(UtilityBoundUpdateEvidence):
+            pass
+
+        transition = evidence.transition
+        self.assertIsNotNone(transition)
+        forged = ForgedUtilityBoundUpdateEvidence(
+            environment_id=predecessor.environment_id,
+            episode_id=transition.episode_id,
+            transition_id=evidence.transition_id,
+            action_id=evidence.action_id,
+            reward_id=evidence.reward_id,
+            utility_evidence_id="4" * 64,
+            utility_semantic_key="test.blocked-utility-v1",
+            predecessor_policy_id=predecessor.policy_id,
+            successor_policy_id=predecessor.policy_id,
+            reason_codes=("utility_authority_unresolved",),
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            registry = ScientificRegistry.initialize_pristine(root / "scientific_registry.json")
+            runner = ExperimentRunner(registry, FactoryArtifactStore(root / "artifacts"))
+            with patch.object(
+                ScientificRegistry,
+                "get",
+                autospec=True,
+                return_value=self._protocol_entry(successor),
+            ):
+                with self.assertRaisesRegex(
+                    TypeError, "must be exact UtilityBoundUpdateEvidence"
+                ):
+                    run_policy_retest(
+                        runner,
+                        predecessor_policy=predecessor,
+                        challenger_policy=successor,
+                        update_evidence=evidence,
+                        spec=self._spec(),
+                        points=(),
+                        rule=PromotionRule("mse", 0.0),
+                        utility_update_evidence=forged,
+                        evaluation_cases=(),
+                    )
 
     def test_retest_rejects_policy_successor_rebinding_before_factory_call(self) -> None:
         predecessor, successor, evidence = self._lineage()

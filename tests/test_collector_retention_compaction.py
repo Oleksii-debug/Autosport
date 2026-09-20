@@ -90,6 +90,41 @@ def acknowledge(store: DesktopDeltaCheckpointStore, delta: CollectorDelta) -> No
     )
 
 
+def _seed_runtime_epoch_for_test(
+    store: CollectorDeltaStore,
+    *,
+    source_id: str,
+    stream_epoch: str,
+    activated_at: str,
+) -> int:
+    """Test-only fixture; production epoch publication belongs to the service."""
+
+    connection = store._connect()
+    try:
+        connection.execute("BEGIN IMMEDIATE")
+        current = connection.execute(
+            "SELECT generation, stream_epoch FROM collector_epoch_activations_v1 "
+            "WHERE source_id=? ORDER BY generation DESC LIMIT 1",
+            (source_id,),
+        ).fetchone()
+        if current is not None and current["stream_epoch"] == stream_epoch:
+            connection.commit()
+            return int(current["generation"])
+        generation = 1 if current is None else int(current["generation"]) + 1
+        connection.execute(
+            "INSERT INTO collector_epoch_activations_v1("
+            "source_id, generation, stream_epoch, activated_at"
+            ") VALUES(?,?,?,?)",
+            (source_id, generation, stream_epoch, activated_at),
+        )
+        connection.commit()
+        return generation
+    finally:
+        if connection.in_transaction:
+            connection.rollback()
+        connection.close()
+
+
 class CollectorRetentionCompactionTests(unittest.TestCase):
     def make_history(self, root: str):
         path = Path(root) / "collector.sqlite"
@@ -105,12 +140,12 @@ class CollectorRetentionCompactionTests(unittest.TestCase):
         self.assertTrue(collector.append(first))
         self.assertTrue(collector.append(terminal))
         self.assertTrue(collector.append(next_epoch))
-        collector._record_runtime_stream_epoch_from_service(
+        _seed_runtime_epoch_for_test(collector,
             source_id="source-x",
             stream_epoch="epoch-1",
             activated_at="2026-01-01T00:00:08+00:00",
         )
-        collector._record_runtime_stream_epoch_from_service(
+        _seed_runtime_epoch_for_test(collector,
             source_id="source-x",
             stream_epoch="epoch-2",
             activated_at="2026-01-01T00:00:09+00:00",
@@ -283,6 +318,18 @@ class CollectorRetentionCompactionTests(unittest.TestCase):
             acknowledge(desktop, next_epoch)
             manager = CollectorRetentionManager(collector)
 
+            before_authority = collector.runtime_stream_epoch("source-x")
+            with self.assertRaises(AttributeError):
+                collector._record_runtime_stream_epoch_from_service(  # type: ignore[attr-defined]
+                    source_id="source-x",
+                    stream_epoch="fabricated-epoch",
+                    activated_at="2026-01-01T00:00:10+00:00",
+                )
+            self.assertEqual(
+                collector.runtime_stream_epoch("source-x"),
+                before_authority,
+            )
+
             # The active epoch comes from the service-owned durable activation
             # journal, not retained delta ordering or a caller assertion.
             with self.assertRaisesRegex(
@@ -321,7 +368,7 @@ class CollectorRetentionCompactionTests(unittest.TestCase):
             self.assertEqual(old_plan.current_stream_epoch, "epoch-2")
             self.assertEqual(old_plan.active_epoch_generation, 2)
 
-            generation = collector._record_runtime_stream_epoch_from_service(
+            generation = _seed_runtime_epoch_for_test(collector,
                 source_id="source-x",
                 stream_epoch="epoch-1",
                 activated_at="2026-01-01T00:00:10+00:00",
@@ -345,7 +392,7 @@ class CollectorRetentionCompactionTests(unittest.TestCase):
 
             # Even if the current epoch returns to the same value as preview, the
             # monotonic generation makes the ABA transition stale.
-            generation = collector._record_runtime_stream_epoch_from_service(
+            generation = _seed_runtime_epoch_for_test(collector,
                 source_id="source-x",
                 stream_epoch="epoch-2",
                 activated_at="2026-01-01T00:00:11+00:00",
@@ -432,6 +479,7 @@ class CollectorRetentionCompactionTests(unittest.TestCase):
             self.assertTrue(recovered.recovered_existing_journal)
             self.assertTrue(recovered.reclamation_complete)
             self.assertEqual(recovered.compacted_at, "2026-01-02T00:00:00+00:00")
+            self.assertEqual(recovered.bytes_before, first_result.bytes_before)
             self.assertEqual(len(recovered_manager.compaction_journal()), 1)
             self.assertTrue(
                 recovered_manager.compaction_journal()[0]["reclamation_complete"]
@@ -456,12 +504,12 @@ class CollectorRetentionCompactionTests(unittest.TestCase):
             )
             for delta in (first, terminal, correction, next_epoch):
                 collector.append(delta)
-            collector._record_runtime_stream_epoch_from_service(
+            _seed_runtime_epoch_for_test(collector,
                 source_id="source-x",
                 stream_epoch="epoch-1",
                 activated_at="2026-01-01T00:00:08+00:00",
             )
-            collector._record_runtime_stream_epoch_from_service(
+            _seed_runtime_epoch_for_test(collector,
                 source_id="source-x",
                 stream_epoch="epoch-2",
                 activated_at="2026-01-01T00:00:09+00:00",

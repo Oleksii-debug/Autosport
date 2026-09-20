@@ -127,12 +127,24 @@ class CollectorRetentionManager:
                 "source_id TEXT NOT NULL,"
                 "stream_epoch TEXT NOT NULL,"
                 "compacted_at TEXT NOT NULL,"
+                "bytes_before INTEGER NOT NULL CHECK(bytes_before >= 0),"
                 "deleted_count INTEGER NOT NULL CHECK(deleted_count >= 0),"
                 "deleted_delta_ids_json TEXT NOT NULL,"
                 "retained_delta_ids_json TEXT NOT NULL,"
                 "reclamation_complete INTEGER NOT NULL "
                 "CHECK(reclamation_complete IN (0,1)))"
             )
+            journal_columns = {
+                row["name"]
+                for row in connection.execute(
+                    f"PRAGMA table_info({self._JOURNAL_TABLE})"
+                ).fetchall()
+            }
+            if "bytes_before" not in journal_columns:
+                connection.execute(
+                    f"ALTER TABLE {self._JOURNAL_TABLE} "
+                    "ADD COLUMN bytes_before INTEGER CHECK(bytes_before >= 0)"
+                )
             connection.commit()
         except sqlite3.DatabaseError as exc:
             if connection.in_transaction:
@@ -489,13 +501,21 @@ class CollectorRetentionManager:
             )
         return tuple(decoded)
 
+    @staticmethod
+    def _stored_nonnegative_int(value: object, field: str) -> int:
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            raise CollectorRetentionError(
+                f"collector compaction journal {field} is invalid"
+            )
+        return value
+
     def _existing_terminal(
         self,
         connection: sqlite3.Connection,
         plan: CollectorRetentionPlan,
-    ) -> tuple[str, bool] | None:
+    ) -> tuple[str, bool, int] | None:
         row = connection.execute(
-            f"SELECT source_id, stream_epoch, compacted_at, deleted_count, "
+            f"SELECT source_id, stream_epoch, compacted_at, bytes_before, deleted_count, "
             f"deleted_delta_ids_json, retained_delta_ids_json, reclamation_complete "
             f"FROM {self._JOURNAL_TABLE} WHERE plan_id=?",
             (plan.plan_id,),
@@ -507,6 +527,9 @@ class CollectorRetentionManager:
         )
         retained = self._decode_journal_ids(
             row["retained_delta_ids_json"], "retained_delta_ids"
+        )
+        journal_bytes_before = self._stored_nonnegative_int(
+            row["bytes_before"], "bytes_before"
         )
         if (
             row["source_id"] != plan.source_id
@@ -520,7 +543,11 @@ class CollectorRetentionManager:
                 "collector compaction journal conflicts with the requested plan"
             )
         _instant(row["compacted_at"], "compacted_at")
-        return row["compacted_at"], bool(row["reclamation_complete"])
+        return (
+            row["compacted_at"],
+            bool(row["reclamation_complete"]),
+            journal_bytes_before,
+        )
 
     def _reclaim_pages(self) -> None:
         connection = self.collector._connect()
@@ -574,7 +601,11 @@ class CollectorRetentionManager:
             connection.execute("BEGIN IMMEDIATE")
             existing = self._existing_terminal(connection, plan)
             if existing is not None:
-                terminal_compacted_at, reclamation_complete = existing
+                (
+                    terminal_compacted_at,
+                    reclamation_complete,
+                    bytes_before,
+                ) = existing
                 recovered_existing_journal = True
                 connection.commit()
             else:
@@ -619,14 +650,16 @@ class CollectorRetentionManager:
                 reclamation_complete = not bool(deleted)
                 connection.execute(
                     f"INSERT INTO {self._JOURNAL_TABLE}("
-                    "plan_id, source_id, stream_epoch, compacted_at, deleted_count, "
-                    "deleted_delta_ids_json, retained_delta_ids_json, reclamation_complete"
-                    ") VALUES(?,?,?,?,?,?,?,?)",
+                    "plan_id, source_id, stream_epoch, compacted_at, bytes_before, "
+                    "deleted_count, deleted_delta_ids_json, retained_delta_ids_json, "
+                    "reclamation_complete"
+                    ") VALUES(?,?,?,?,?,?,?,?,?)",
                     (
                         plan.plan_id,
                         plan.source_id,
                         plan.stream_epoch,
                         compacted_at,
+                        bytes_before,
                         len(deleted),
                         json.dumps(list(deleted), separators=(",", ":")),
                         json.dumps(list(plan.retained_delta_ids), separators=(",", ":")),
@@ -695,7 +728,7 @@ class CollectorRetentionManager:
         connection = self.collector._connect()
         try:
             rows = connection.execute(
-                f"SELECT plan_id, source_id, stream_epoch, compacted_at, "
+                f"SELECT plan_id, source_id, stream_epoch, compacted_at, bytes_before, "
                 f"deleted_count, deleted_delta_ids_json, retained_delta_ids_json, "
                 f"reclamation_complete "
                 f"FROM {self._JOURNAL_TABLE} ORDER BY rowid"
@@ -706,6 +739,9 @@ class CollectorRetentionManager:
                     "source_id": row["source_id"],
                     "stream_epoch": row["stream_epoch"],
                     "compacted_at": row["compacted_at"],
+                    "bytes_before": self._stored_nonnegative_int(
+                        row["bytes_before"], "bytes_before"
+                    ),
                     "deleted_count": row["deleted_count"],
                     "deleted_delta_ids": self._decode_journal_ids(
                         row["deleted_delta_ids_json"], "deleted_delta_ids"

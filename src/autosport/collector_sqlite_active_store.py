@@ -177,50 +177,6 @@ class CollectorDeltaStore(_SQLiteCollectorDeltaStore):
                     )
         return delta
 
-    def _record_runtime_stream_epoch_from_service(
-        self,
-        *,
-        source_id: str,
-        stream_epoch: str,
-        activated_at: str,
-    ) -> int:
-        """Persist the collector runtime's active epoch as append-only authority.
-
-        The service calls this at successful construction and at the start of every
-        cycle. Repeating the same epoch is idempotent; reactivation of any different
-        epoch appends a new generation so preview/apply can detect ABA transitions.
-        """
-
-        source_id = _text(source_id, "source_id")
-        stream_epoch = _text(stream_epoch, "stream_epoch")
-        _instant(activated_at, "activated_at")
-        connection = self._connect()
-        try:
-            connection.execute("BEGIN IMMEDIATE")
-            current = connection.execute(
-                "SELECT generation, stream_epoch FROM collector_epoch_activations_v1 "
-                "WHERE source_id=? ORDER BY generation DESC LIMIT 1",
-                (source_id,),
-            ).fetchone()
-            if current is not None and current["stream_epoch"] == stream_epoch:
-                connection.commit()
-                return int(current["generation"])
-            generation = 1 if current is None else int(current["generation"]) + 1
-            connection.execute(
-                "INSERT INTO collector_epoch_activations_v1("
-                "source_id, generation, stream_epoch, activated_at"
-                ") VALUES(?,?,?,?)",
-                (source_id, generation, stream_epoch, activated_at),
-            )
-            connection.commit()
-            return generation
-        except sqlite3.DatabaseError as exc:
-            if connection.in_transaction:
-                connection.rollback()
-            raise ValueError("invalid causal collector active-epoch authority") from exc
-        finally:
-            connection.close()
-
     def runtime_stream_epoch(self, source_id: str) -> tuple[str, int] | None:
         """Return the latest product-owned active epoch and monotonic generation."""
 

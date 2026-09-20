@@ -6,6 +6,7 @@ import json
 import math
 import random
 import signal
+import sqlite3
 import threading
 import time
 from dataclasses import dataclass
@@ -501,11 +502,72 @@ class HeadlessCollectorService:
             source_id=source_id,
             started_at=started_at,
         )
-        self.delta_store._record_runtime_stream_epoch_from_service(
-            source_id=source_id,
-            stream_epoch=stream_epoch,
+        self._record_runtime_stream_epoch(
             activated_at=started_at,
+            expected_stream_epoch=stream_epoch,
         )
+
+    def _record_runtime_stream_epoch(
+        self,
+        *,
+        activated_at: str,
+        expected_stream_epoch: str | None = None,
+    ) -> int:
+        """Publish the exact executing source epoch into durable retention authority.
+
+        The canonical store exposes no activation writer. This method derives
+        source_id/stream_epoch from this executing service composition, so a holder
+        of CollectorDeltaStore cannot substitute a caller-selected epoch. Retention
+        only reads the append-only generation under its deletion transaction.
+        """
+
+        _CollectorServiceState._instant(activated_at, "activated_at")
+        source_id = getattr(self.source, "source_id", None)
+        stream_epoch = getattr(self.source, "stream_epoch", None)
+        if not isinstance(source_id, str) or not source_id.strip():
+            raise CollectorServiceError(
+                "source.source_id must remain a non-empty string"
+            )
+        if not isinstance(stream_epoch, str) or not stream_epoch.strip():
+            raise CollectorServiceError(
+                "source.stream_epoch must remain a non-empty string"
+            )
+        if (
+            expected_stream_epoch is not None
+            and stream_epoch != expected_stream_epoch
+        ):
+            raise CollectorServiceError(
+                "source.stream_epoch changed during active-epoch publication"
+            )
+
+        connection = self.delta_store._connect()
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            current = connection.execute(
+                "SELECT generation, stream_epoch FROM collector_epoch_activations_v1 "
+                "WHERE source_id=? ORDER BY generation DESC LIMIT 1",
+                (source_id,),
+            ).fetchone()
+            if current is not None and current["stream_epoch"] == stream_epoch:
+                connection.commit()
+                return int(current["generation"])
+            generation = 1 if current is None else int(current["generation"]) + 1
+            connection.execute(
+                "INSERT INTO collector_epoch_activations_v1("
+                "source_id, generation, stream_epoch, activated_at"
+                ") VALUES(?,?,?,?)",
+                (source_id, generation, stream_epoch, activated_at),
+            )
+            connection.commit()
+            return generation
+        except sqlite3.DatabaseError as exc:
+            if connection.in_transaction:
+                connection.rollback()
+            raise CollectorServiceError(
+                "cannot persist collector active-epoch authority"
+            ) from exc
+        finally:
+            connection.close()
 
     @property
     def source_id(self) -> str:
@@ -587,10 +649,9 @@ class HeadlessCollectorService:
                 raise CollectorServiceError(
                     "source.stream_epoch must remain a non-empty string"
                 )
-            self.delta_store._record_runtime_stream_epoch_from_service(
-                source_id=self.source_id,
-                stream_epoch=cycle_stream_epoch,
+            self._record_runtime_stream_epoch(
                 activated_at=attempt_at,
+                expected_stream_epoch=cycle_stream_epoch,
             )
             self._check_storage_budget()
             catalog_changes = self._bounded_provider_call(

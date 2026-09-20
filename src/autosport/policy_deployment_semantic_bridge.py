@@ -490,8 +490,6 @@ def validate_canonical_activation_binding(
             raise PolicyDeploymentSemanticBridgeError(
                 "canonical semantic authority changed across restart"
             )
-    else:
-        persist_semantic_binding(loop_path, resolved.semantic_binding)
 
     validate_activation_binding(
         activation_binding,
@@ -506,6 +504,8 @@ def validate_canonical_activation_binding(
         economic_goal_fingerprint=economic_goal_fingerprint,
         risk_fingerprint=risk_fingerprint,
     )
+    if not require_existing_semantic_binding:
+        persist_semantic_binding(loop_path, resolved.semantic_binding)
     return resolved
 
 

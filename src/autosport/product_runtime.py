@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import marshal
 from types import FunctionType
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -194,14 +193,29 @@ def _settlement_authority_identity(
         raise ProductCompositionError(
             "source-owned settlement resolve method cannot close over mutable authority"
         )
-    try:
-        resolver_sha256 = hashlib.sha256(
-            marshal.dumps(resolver.__code__)
-        ).hexdigest()
-    except (TypeError, ValueError) as exc:
-        raise ProductCompositionError(
-            "source-owned settlement resolve implementation cannot be fingerprinted"
-        ) from exc
+    resolver_owner = _ManifestStore._text(
+        f"{resolver.__module__}.{resolver.__qualname__}",
+        "settlement resolver owner",
+    )
+    declared_implementation_id = getattr(
+        type(source),
+        "settlement_resolver_implementation_id",
+        None,
+    )
+    if declared_implementation_id is None:
+        resolver_implementation_id = resolver_owner
+    else:
+        if (
+            type(instance_dict) is dict
+            and "settlement_resolver_implementation_id" in instance_dict
+        ):
+            raise ProductCompositionError(
+                "source-owned settlement authority forbids per-instance implementation identity shadowing"
+            )
+        resolver_implementation_id = _ManifestStore._text(
+            declared_implementation_id,
+            "settlement_resolver_implementation_id",
+        )
     authority_id = _ManifestStore._text(
         getattr(source, "settlement_authority_id", None),
         "settlement_authority_id",
@@ -229,7 +243,8 @@ def _settlement_authority_identity(
         "authority_id": authority_id,
         "configuration_sha256": configuration_sha256,
         "implementation": implementation,
-        "resolve_sha256": resolver_sha256,
+        "resolver_owner": resolver_owner,
+        "resolver_implementation_id": resolver_implementation_id,
     }
     encoded = json.dumps(
         payload,

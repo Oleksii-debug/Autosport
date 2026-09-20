@@ -10,7 +10,17 @@ bridge plan anchor cannot substitute different reflection semantics.
 from __future__ import annotations
 
 from . import _paper_campaign_runtime_base as _base
-from .learning_environment import Action, EnvironmentCheckpoint, Observation
+from .learning_environment import (
+    Action,
+    EnvironmentCheckpoint,
+    Observation,
+    Outcome,
+    RewardEvidence,
+)
+from .paper_abstention_learning import (
+    PaperAbstentionFinalizationReceipt,
+    PaperAbstentionLearningRuntime,
+)
 from .paper_settlement_learning import PaperSettlementLearningWitness
 
 
@@ -76,6 +86,63 @@ class PaperCampaignRuntime(_base.PaperCampaignRuntime):
             self._reflection_commitment_id(committed_at=decision_at),
         )
         return tuple(sorted((*parameters, committed)))
+
+    def _canonical_abstention_runtime(self) -> PaperAbstentionLearningRuntime:
+        """Reuse the campaign-bound environment and AgentLoop for WAIT/NO_BET."""
+
+        runtime = getattr(self, "_abstention_learning_runtime", None)
+        if runtime is None:
+            runtime = PaperAbstentionLearningRuntime(
+                environment=self.environment,
+                agent_loop=self.agent_loop,
+            )
+            self._abstention_learning_runtime = runtime
+        return runtime
+
+    def begin_abstention(
+        self,
+        *,
+        observation: Observation,
+        action_type: str,
+        decision_at: str,
+        parameters: tuple[tuple[str, str], ...] = (),
+        at: str,
+    ) -> Action:
+        """Route a no-ticket WAIT/NO_BET through the canonical campaign entrypoint."""
+
+        return self._canonical_abstention_runtime().begin_abstention(
+            observation=observation,
+            action_type=action_type,
+            decision_at=decision_at,
+            parameters=parameters,
+            at=at,
+        )
+
+    def finalize_abstention(
+        self,
+        *,
+        observation: Observation,
+        action: Action,
+        outcome: Outcome,
+        reward: RewardEvidence,
+        at: str,
+    ) -> PaperAbstentionFinalizationReceipt:
+        """Finalize no-ticket learning without touching settlement authority."""
+
+        abstention_runtime = self._canonical_abstention_runtime()
+        receipt = abstention_runtime.finalize_abstention(
+            observation=observation,
+            action=action,
+            outcome=outcome,
+            reward=reward,
+            at=at,
+        )
+        # The helper resumes from the exact committed checkpoint. Keep the
+        # canonical campaign object on that same environment authority so the
+        # next observation starts from the durable checkpoint just returned.
+        self.environment = abstention_runtime.environment
+        self._environment_checkpoint_id = receipt.checkpoint_id
+        return receipt
 
     def _bound_reflection_commitment(
         self,
@@ -206,6 +273,7 @@ class PaperCampaignRuntime(_base.PaperCampaignRuntime):
 
 
 __all__ = [
+    "PaperAbstentionFinalizationReceipt",
     "PaperCampaignFinalizationReceipt",
     "PaperCampaignLearningHandoff",
     "PaperCampaignRuntime",

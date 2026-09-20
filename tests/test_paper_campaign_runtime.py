@@ -385,5 +385,171 @@ class PaperCampaignRuntimeTests(_legacy.PaperCampaignRuntimeTests):
             )
 
 
+    def _abstention_runtime(self, root: Path):
+        goal = _legacy.EconomicGoalContract(
+            goal_id="abstention-goal",
+            revision=1,
+            bankroll_id="abstention-bankroll",
+            currency="USD",
+        )
+        risk = _legacy.PaperRiskPolicy(economic_goal=goal)
+        book = _legacy.PaperBook("100")
+        book.save(root / "paper_book.json")
+        identity = _legacy.EnvironmentIdentity(
+            source_id="abstention-source",
+            config_id="abstention-config",
+            data_id="abstention-data",
+            protocol_id="abstention-protocol",
+            cutoff_ts="2026-09-20T03:01:00+00:00",
+            seed=23,
+        )
+        environment = _legacy.CausalLearningEnvironment(
+            identity,
+            episode_key="abstention-episode",
+            policy_id="abstention-policy",
+            admissible_actions=frozenset({"ABSTAIN", "PAPER_PROPOSAL"}),
+        )
+        baseline = environment.checkpoint()
+        loop = _legacy.AgentLoopRuntime.initialize_pristine(
+            root / "agent-loop.json",
+            loop_id="abstention-loop",
+            environment_checkpoint=baseline,
+            policy_id=environment.episode.policy_id,
+            economic_goal_fingerprint=_legacy.provenance_for(goal).contract_sha256,
+            risk_fingerprint=risk.provenance_sha256,
+            source_sha256="d" * 64,
+            config_sha256="e" * 64,
+            at=_legacy.T0,
+        )
+        ledger = _legacy.JsonlDecisionLedger(root / "decisions.jsonl")
+        bridge = _legacy.PaperSettlementLearningBridge(
+            root / "paper-learning-bridge.json",
+            paper_book_path=root / "paper_book.json",
+            decision_ledger=ledger,
+            agent_loop=loop,
+            economic_goal=goal,
+            risk_policy=risk,
+        )
+        runtime = _legacy.PaperCampaignRuntime(
+            environment=environment,
+            settlement_bridge=bridge,
+        )
+        observation = _legacy.Observation(
+            environment_id=environment.environment_id,
+            observed_at=_legacy.T0,
+            available_at=_legacy.T1,
+            evidence=(("market_state", "no-edge-snapshot"),),
+        )
+        return goal, risk, environment, baseline, observation, ledger, runtime
+
+    def test_abstention_closes_without_ticket_settlement_or_fake_reward(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (
+                goal,
+                risk,
+                environment,
+                baseline,
+                observation,
+                ledger,
+                runtime,
+            ) = self._abstention_runtime(root)
+
+            first = runtime.commit_abstention(
+                observation=observation,
+                decision_at=_legacy.T2,
+                reason_code="NO_ADMISSIBLE_EDGE",
+                at=_legacy.T2,
+                parameters=(("policy_signal", "below-threshold"),),
+            )
+            self.assertTrue(first.newly_committed)
+            self.assertEqual(first.observation_id, observation.observation_id)
+            self.assertEqual(first.checkpoint_id, baseline.checkpoint_id)
+            self.assertEqual(environment.checkpoint().checkpoint_id, baseline.checkpoint_id)
+
+            raw = json.loads((root / "agent-loop.json").read_text(encoding="utf-8"))
+            self.assertEqual(raw["phase"], _legacy.AgentLoopPhase.CHECKPOINT.value)
+            self.assertEqual(len(raw["decisions"]), 1)
+            self.assertEqual(raw["decisions"][0]["action_type"], "ABSTAIN")
+            self.assertFalse(raw["decisions"][0]["may_execute"])
+            self.assertEqual(raw["decisions"][0]["external_effect_state"], "NONE")
+            self.assertEqual(raw["resolutions"], [])
+            self.assertEqual(raw["attributions"], [])
+            self.assertEqual(raw["postmortems"], [])
+            self.assertEqual(raw["checkpointed_transition_id"], None)
+            campaign_state = json.loads(
+                (root / "paper-learning-bridge.json.campaign.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+            self.assertEqual(campaign_state["plans"], {})
+
+            resumed_environment = _legacy.CausalLearningEnvironment.resume(
+                environment.identity,
+                episode_key=environment.episode.episode_key,
+                policy_id=environment.episode.policy_id,
+                admissible_actions=frozenset(environment.episode.admissible_actions),
+                checkpoint=baseline,
+            )
+            recovered_bridge = _legacy.PaperSettlementLearningBridge(
+                root / "paper-learning-bridge.json",
+                paper_book_path=root / "paper_book.json",
+                decision_ledger=ledger,
+                agent_loop=_legacy.AgentLoopRuntime(root / "agent-loop.json"),
+                economic_goal=goal,
+                risk_policy=risk,
+            )
+            recovered = _legacy.PaperCampaignRuntime(
+                environment=resumed_environment,
+                settlement_bridge=recovered_bridge,
+            )
+            exact = recovered.commit_abstention(
+                observation=observation,
+                decision_at=_legacy.T2,
+                reason_code="NO_ADMISSIBLE_EDGE",
+                at=_legacy.T4,
+                parameters=(("policy_signal", "below-threshold"),),
+            )
+            self.assertFalse(exact.newly_committed)
+            self.assertEqual(exact.action_id, first.action_id)
+
+            before_conflict = (root / "agent-loop.json").read_bytes()
+            with self.assertRaisesRegex(
+                _legacy.PaperCampaignRuntimeError,
+                "rejected campaign abstention",
+            ):
+                recovered.commit_abstention(
+                    observation=observation,
+                    decision_at=_legacy.T2,
+                    reason_code="CHANGED_REASON",
+                    at=_legacy.T5,
+                    parameters=(("policy_signal", "below-threshold"),),
+                )
+            self.assertEqual(
+                (root / "agent-loop.json").read_bytes(),
+                before_conflict,
+            )
+
+            next_observation = _legacy.Observation(
+                environment_id=resumed_environment.environment_id,
+                observed_at=_legacy.T4,
+                available_at=_legacy.T4,
+                evidence=(("market_state", "second-no-edge-snapshot"),),
+            )
+            second = recovered.commit_abstention(
+                observation=next_observation,
+                decision_at=_legacy.T5,
+                reason_code="NO_ADMISSIBLE_EDGE",
+                at=_legacy.T5,
+            )
+            self.assertTrue(second.newly_committed)
+            self.assertEqual(second.checkpoint_id, baseline.checkpoint_id)
+            final = json.loads((root / "agent-loop.json").read_text(encoding="utf-8"))
+            self.assertEqual(len(final["decisions"]), 2)
+            self.assertEqual(final["resolutions"], [])
+            self.assertEqual(final["attributions"], [])
+            self.assertEqual(final["postmortems"], [])
+
+
 if __name__ == "__main__":
     _legacy.unittest.main()

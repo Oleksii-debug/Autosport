@@ -8,6 +8,7 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Mapping
 
+from . import _paper_execution_reality_legacy as _paper_impl
 from .domain import PaperTicket, TicketLeg
 from .opportunity import QuoteRef
 from .paper import PaperBook
@@ -324,6 +325,19 @@ class PaperExecutionAdoptionRuntime:
             execution_plan=execution_plan,
             exposure_bindings=tuple(bindings),
             intent_evidence_json=intent_evidence_json,
+        )
+
+    def expected_run_id(
+        self,
+        prepared: PreparedPaperExecution,
+        trigger_id: str,
+    ) -> str:
+        if not isinstance(prepared, PreparedPaperExecution):
+            raise TypeError("prepared must be PreparedPaperExecution")
+        return _paper_impl._run_id(
+            prepared.execution_plan,
+            trigger_id,
+            self.config,
         )
 
     def execute(

@@ -504,5 +504,240 @@ class PaperCampaignRuntimeTests(_legacy.PaperCampaignRuntimeTests):
 
 
 
+    def test_abstention_helper_rebinds_after_ticket_checkpoint_advances(self) -> None:
+        """A ticket finalization cannot leave the next WAIT on a stale environment."""
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            goal = _legacy.EconomicGoalContract(
+                goal_id="mixed-path-goal",
+                revision=1,
+                bankroll_id="mixed-path-bankroll",
+                currency="USD",
+            )
+            risk = _legacy.PaperRiskPolicy(economic_goal=goal)
+            paper_path = root / "paper_book.json"
+            _legacy.PaperBook("100").save(paper_path)
+
+            identity = _legacy.EnvironmentIdentity(
+                source_id="mixed-path-source",
+                config_id="mixed-path-config",
+                data_id="mixed-path-data",
+                protocol_id="mixed-path-protocol",
+                cutoff_ts="2026-09-20T04:00:00+00:00",
+                seed=43,
+            )
+            environment = _legacy.CausalLearningEnvironment(
+                identity,
+                episode_key="mixed-path-episode",
+                policy_id="mixed-path-policy",
+                admissible_actions=frozenset({"WAIT", "NO_BET", "PAPER_PROPOSAL"}),
+            )
+            baseline = environment.checkpoint()
+            loop = _legacy.AgentLoopRuntime.initialize_pristine(
+                root / "agent-loop.json",
+                loop_id="mixed-path-loop",
+                environment_checkpoint=baseline,
+                policy_id=environment.episode.policy_id,
+                economic_goal_fingerprint=_legacy.provenance_for(goal).contract_sha256,
+                risk_fingerprint=risk.provenance_sha256,
+                source_sha256="a" * 64,
+                config_sha256="b" * 64,
+                at=_legacy.T0,
+            )
+            ledger = _legacy.JsonlDecisionLedger(root / "decisions.jsonl")
+            bridge = _legacy.PaperSettlementLearningBridge(
+                root / "paper-learning-bridge.json",
+                paper_book_path=paper_path,
+                decision_ledger=ledger,
+                agent_loop=loop,
+                economic_goal=goal,
+                risk_policy=risk,
+            )
+            runtime = _legacy.PaperCampaignRuntime(
+                environment=environment,
+                settlement_bridge=bridge,
+            )
+
+            first_observation = _legacy.Observation(
+                environment_id=environment.environment_id,
+                observed_at=_legacy.T0,
+                available_at=_legacy.T1,
+                evidence=(("opportunity", "first-wait"),),
+            )
+            first_action = runtime.begin_abstention(
+                observation=first_observation,
+                action_type="WAIT",
+                decision_at=_legacy.T2,
+                at=_legacy.T2,
+            )
+            first_outcome = Outcome(
+                environment_id=environment.environment_id,
+                action_id=first_action.action_id,
+                revealed_at=_legacy.T3,
+                truth=EvidenceTruth.OBSERVED,
+                evidence=(("market_resolution", "first-wait-observed"),),
+            )
+            first_reward = RewardEvidence(
+                environment_id=environment.environment_id,
+                action_id=first_action.action_id,
+                outcome_id=first_outcome.outcome_id,
+                reward=Decimal("0"),
+                available_at=_legacy.T4,
+                truth=EvidenceTruth.OBSERVED,
+                evidence=(("reward_basis", "first-wait-explicit"),),
+            )
+            first_receipt = runtime.finalize_abstention(
+                observation=first_observation,
+                action=first_action,
+                outcome=first_outcome,
+                reward=first_reward,
+                at=_legacy.T4,
+            )
+            stale_helper = runtime._abstention_learning_runtime
+            self.assertIs(stale_helper.environment, runtime.environment)
+            self.assertEqual(
+                runtime.environment.checkpoint().checkpoint_id,
+                first_receipt.checkpoint_id,
+            )
+
+            leg = _legacy.TicketLeg(
+                event_id="mixed-path-event-1",
+                market_id="winner",
+                selection_id="home",
+                locked_odds=Decimal("2.00"),
+                sport="table_tennis",
+            )
+            book = _legacy.PaperBook.load(paper_path)
+            ticket = book.open_ticket(
+                (leg,),
+                Decimal("10"),
+                placed_at="2026-09-20T03:01:10+00:00",
+                bankroll_id=goal.bankroll_id,
+                currency=goal.currency,
+            )
+            book.save(paper_path)
+
+            ticket_observation = _legacy.Observation(
+                environment_id=runtime.environment.environment_id,
+                observed_at="2026-09-20T03:01:00+00:00",
+                available_at="2026-09-20T03:01:01+00:00",
+                evidence=(("market_state", "mixed-ticket"),),
+            )
+            decision = _legacy.DecisionRecord(
+                replay_run_id="mixed-path-run",
+                agent="mixed-path-fixture",
+                observed_ts=ticket_observation.observed_at,
+                action="OPEN_PAPER_TICKET",
+                payload={
+                    "ticket_id": ticket.ticket_id,
+                    "quote_key": leg.quote_key,
+                    "stake": str(ticket.stake),
+                },
+                context_hash=ticket_observation.observation_id,
+                decision_id="mixed-path-decision",
+                decision_kind=_legacy.ECONOMIC_DECISION_KIND,
+            )
+            ledger.append_economic(
+                decision,
+                _legacy.EconomicDecisionAuthority(goal, risk),
+            )
+            runtime.begin_and_bind_paper_ticket(
+                ticket_id=ticket.ticket_id,
+                decision_id=decision.decision_id,
+                observation=ticket_observation,
+                action_type="PAPER_PROPOSAL",
+                decision_at="2026-09-20T03:01:05+00:00",
+                parameters=(
+                    ("economic_decision_id", decision.decision_id),
+                    ("paper_ticket_id", ticket.ticket_id),
+                ),
+                at="2026-09-20T03:01:05+00:00",
+            )
+
+            settlement = _legacy.SettlementEngine()
+            settlement.record({leg.quote_key: "win"})
+            settled = tuple(settlement.settle_ready(book))
+            self.assertEqual(settled, (ticket.ticket_id,))
+            book.save(paper_path)
+            resolutions = (
+                _legacy.SettlementResolution(
+                    event_identity=f"mixed-provider:{leg.event_id}",
+                    settlement_ref="mixed-result-1",
+                    quote_outcomes={leg.quote_key: "win"},
+                    evidence_id="mixed-evidence-1",
+                    evidence_sha256="e" * 64,
+                    available_at="2026-09-20T03:01:20+00:00",
+                ),
+            )
+            bridge.reconcile_after_settlement(
+                paper_book_path=paper_path,
+                resolutions=resolutions,
+                settled_ticket_ids=settled,
+                at="2026-09-20T03:01:20+00:00",
+            )
+            ticket_receipt = runtime.finalize_ticket(
+                ticket_id=ticket.ticket_id,
+                at="2026-09-20T03:01:30+00:00",
+            )
+            ticket_checkpoint = runtime.environment.checkpoint()
+            self.assertEqual(ticket_checkpoint.checkpoint_id, ticket_receipt.checkpoint_id)
+            self.assertIsNot(stale_helper.environment, runtime.environment)
+
+            next_observation = _legacy.Observation(
+                environment_id=runtime.environment.environment_id,
+                observed_at="2026-09-20T03:01:40+00:00",
+                available_at="2026-09-20T03:01:41+00:00",
+                evidence=(("opportunity", "second-wait"),),
+            )
+            next_action = runtime.begin_abstention(
+                observation=next_observation,
+                action_type="WAIT",
+                decision_at="2026-09-20T03:01:45+00:00",
+                at="2026-09-20T03:01:45+00:00",
+            )
+            rebound_helper = runtime._abstention_learning_runtime
+            self.assertIsNot(rebound_helper, stale_helper)
+            self.assertIs(rebound_helper.environment, runtime.environment)
+            self.assertEqual(
+                runtime.agent_loop.snapshot().environment_checkpoint_id,
+                ticket_checkpoint.checkpoint_id,
+            )
+
+            next_outcome = Outcome(
+                environment_id=runtime.environment.environment_id,
+                action_id=next_action.action_id,
+                revealed_at="2026-09-20T03:01:50+00:00",
+                truth=EvidenceTruth.OBSERVED,
+                evidence=(("market_resolution", "second-wait-observed"),),
+            )
+            next_reward = RewardEvidence(
+                environment_id=runtime.environment.environment_id,
+                action_id=next_action.action_id,
+                outcome_id=next_outcome.outcome_id,
+                reward=Decimal("0"),
+                available_at="2026-09-20T03:02:00+00:00",
+                truth=EvidenceTruth.OBSERVED,
+                evidence=(("reward_basis", "second-wait-explicit"),),
+            )
+            second_receipt = runtime.finalize_abstention(
+                observation=next_observation,
+                action=next_action,
+                outcome=next_outcome,
+                reward=next_reward,
+                at="2026-09-20T03:02:00+00:00",
+            )
+            final_snapshot = runtime.agent_loop.snapshot()
+            self.assertIs(final_snapshot.phase, _legacy.AgentLoopPhase.CHECKPOINT)
+            self.assertEqual(
+                final_snapshot.environment_checkpoint_id,
+                second_receipt.checkpoint_id,
+            )
+            self.assertNotEqual(
+                ticket_checkpoint.checkpoint_id,
+                second_receipt.checkpoint_id,
+            )
+
+
 if __name__ == "__main__":
     _legacy.unittest.main()

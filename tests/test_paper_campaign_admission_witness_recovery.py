@@ -230,7 +230,7 @@ class PaperCampaignAdmissionWitnessRecoveryTests(unittest.TestCase):
 
             def fail_only_commit(path: Path, payload: str) -> None:
                 last = json.loads(payload.rstrip().splitlines()[-1])
-                if last["event"] == "COMMIT" and last["generation"] > 1:
+                if last["event"] == "COMMIT" and last["generation"] >= 3:
                     self._partial_candidate_then_error(path, payload)
                 original(path, payload)
 

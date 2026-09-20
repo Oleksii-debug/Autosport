@@ -14,7 +14,10 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Final
 
-from .continuous_session import SettlementResolution
+from .continuous_session import (
+    SettlementResolution,
+    _is_authoritative_settlement_resolution,
+)
 from .domain import MarketEvent
 from .learning_environment import EvidenceTruth
 from .opponent_intelligence import (
@@ -990,6 +993,10 @@ class SportMemoryResultMaterializer:
             raise TypeError("binding must be exact SportMemoryResultBinding")
         if type(settlement) is not SettlementResolution:
             raise TypeError("settlement must be exact SettlementResolution")
+        if not _is_authoritative_settlement_resolution(settlement):
+            raise SportMemoryResultMaterializationError(
+                "settlement must come from product-owned outcome-authority resolution"
+            )
         cutoff = _instant("as_of", as_of)
         try:
             SettlementResolution.validate(settlement, as_of=as_of)

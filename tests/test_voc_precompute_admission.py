@@ -109,7 +109,7 @@ class VOCPrecomputeAdmissionTests(unittest.TestCase):
             allow_cloud=False,
             max_cost=Decimal("10"),
             response_ttl_seconds=Decimal("10"),
-            baseline_candidate_id="challenger",
+            baseline_candidate_id="baseline",
             cloud_candidate_id=None,
             decision_input_sha256=SHA_A,
             decision_evidence_sha256=self.context_sha,

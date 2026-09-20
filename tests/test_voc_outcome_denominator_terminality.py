@@ -3,6 +3,7 @@ from __future__ import annotations
 import importlib.util
 import sys
 import unittest
+from collections.abc import Mapping
 from pathlib import Path
 
 from autosport.decision_ledger import DecisionRecord
@@ -38,14 +39,14 @@ class VOCOutcomeDenominatorTerminalityTests(unittest.TestCase):
         successful = next(
             record
             for record in records
-            if isinstance(record.payload, dict)
-            and isinstance(record.payload.get("voc_binding"), dict)
+            if isinstance(record.payload, Mapping)
+            and isinstance(record.payload.get("voc_binding"), Mapping)
         )
         source_context = next(
             record
             for record in records
-            if isinstance(record.payload, dict)
-            and isinstance(record.payload.get("voc_current_context"), dict)
+            if isinstance(record.payload, Mapping)
+            and isinstance(record.payload.get("voc_current_context"), Mapping)
         )
 
         missing_input = _FIXTURE.digest(

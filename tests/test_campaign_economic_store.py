@@ -8,6 +8,7 @@ import shutil
 
 import pytest
 
+import autosport.campaign_economic_store as economic_store_module
 from autosport.campaign_cost_evidence import (
     EconomicCompleteness,
     derive_campaign_economics,
@@ -65,6 +66,77 @@ def test_store_exact_retry_restart_and_chain_roundtrip(tmp_path: Path) -> None:
             campaign=authority,
             authority_root=authority_root,
         )
+        assert restarted.latest() == second
+        assert restarted.verify_chain() == (first, second)
+    finally:
+        fixture.doCleanups()
+
+
+def test_successor_retry_recovers_crash_after_version_before_head(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fixture, authority = _fixture_authority()
+    try:
+        workspace, authority_root = _paths(tmp_path)
+        first_cost = _cost(authority, amount=Decimal("2"))
+        first = derive_campaign_economics(
+            campaign=authority,
+            costs=(first_cost,),
+            as_of=T1,
+        )
+        replacement = _cost(
+            authority,
+            source_digit="d",
+            amount=Decimal("4"),
+            available_at=T2,
+            supersedes=(first_cost.cost_evidence_id,),
+        )
+        second = derive_campaign_economics(
+            campaign=authority,
+            costs=(replacement,),
+            as_of=T2,
+            previous=first,
+        )
+        store = CampaignEconomicEvidenceStore(
+            workspace,
+            campaign=authority,
+            authority_root=authority_root,
+        )
+        store.append(first)
+
+        original_atomic_json = economic_store_module._atomic_json
+        crashed = False
+
+        def crash_before_successor_head(path: Path, raw: dict[str, object]) -> None:
+            nonlocal crashed
+            if (
+                not crashed
+                and path.name == "head.json"
+                and raw.get("version_id") == second.version_id
+            ):
+                crashed = True
+                raise RuntimeError("injected crash after immutable successor publish")
+            original_atomic_json(path, raw)
+
+        monkeypatch.setattr(
+            economic_store_module,
+            "_atomic_json",
+            crash_before_successor_head,
+        )
+        with pytest.raises(RuntimeError, match="injected crash"):
+            store.append(second)
+        monkeypatch.setattr(
+            economic_store_module,
+            "_atomic_json",
+            original_atomic_json,
+        )
+
+        restarted = CampaignEconomicEvidenceStore(
+            workspace,
+            campaign=authority,
+            authority_root=authority_root,
+        )
+        assert restarted.append(second) == second.version_id
         assert restarted.latest() == second
         assert restarted.verify_chain() == (first, second)
     finally:

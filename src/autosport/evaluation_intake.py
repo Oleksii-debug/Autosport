@@ -74,6 +74,30 @@ def _keys(values: object) -> tuple[str, ...]:
     return items
 
 
+def _row_evidence(
+    values: object,
+) -> tuple[tuple[str, str], ...]:
+    if not isinstance(values, tuple) or not values:
+        raise EvaluationIntakeError(
+            "row_evidence_sha256 must be a non-empty tuple"
+        )
+    items: list[tuple[str, str]] = []
+    for item in values:
+        if not isinstance(item, tuple) or len(item) != 2:
+            raise EvaluationIntakeError(
+                "row_evidence_sha256 entries must be (row_key, sha256) tuples"
+            )
+        row_key = _text(item[0], "row_evidence row_key")
+        row_sha256 = _sha(item[1], "row_evidence sha256")
+        items.append((row_key, row_sha256))
+    result = tuple(items)
+    if result != tuple(sorted(result)) or len({key for key, _ in result}) != len(result):
+        raise EvaluationIntakeError(
+            "row_evidence_sha256 must use sorted unique row keys"
+        )
+    return result
+
+
 @dataclass(frozen=True, slots=True)
 class ObservationEnumerationWitness:
     """Upstream acquisition proof for one exhaustive, gap-free observation range."""
@@ -92,6 +116,7 @@ class ObservationEnumerationWitness:
     end_cursor: str
     acquisition_sha256: str
     row_keys: tuple[str, ...]
+    row_evidence_sha256: tuple[tuple[str, str], ...]
     exhaustive: bool
     gap_free: bool
     committed_at: str
@@ -125,6 +150,15 @@ class ObservationEnumerationWitness:
             _sha(self.acquisition_sha256, "acquisition_sha256"),
         )
         object.__setattr__(self, "row_keys", _keys(self.row_keys))
+        object.__setattr__(
+            self,
+            "row_evidence_sha256",
+            _row_evidence(self.row_evidence_sha256),
+        )
+        if tuple(key for key, _ in self.row_evidence_sha256) != self.row_keys:
+            raise EvaluationIntakeError(
+                "row_evidence_sha256 must bind every authoritative row_key exactly once"
+            )
         if type(self.cycle_index) is not int or self.cycle_index <= 0:
             raise EvaluationIntakeError("cycle_index must be a positive integer")
         if type(self.exhaustive) is not bool or type(self.gap_free) is not bool:
@@ -161,6 +195,10 @@ class ObservationEnumerationWitness:
             "end_cursor": self.end_cursor,
             "acquisition_sha256": self.acquisition_sha256,
             "row_keys": list(self.row_keys),
+            "row_evidence_sha256": [
+                {"row_key": key, "sha256": sha256}
+                for key, sha256 in self.row_evidence_sha256
+            ],
             "exhaustive": self.exhaustive,
             "gap_free": self.gap_free,
             "committed_at": _timestamp(self.committed_at, "committed_at"),
@@ -744,5 +782,20 @@ class ObservationIntakeLedger:
         if len(matches) != 1:
             raise EvaluationIntakeIntegrityError(
                 "row_key must resolve to exactly one canonical intake record"
+            )
+        return matches[0]
+
+    def row_evidence_sha256(self, row_key: str) -> str:
+        row_key = _text(row_key, "row_key")
+        record = self.record_for_row(row_key)
+        witness = self._verify_enumeration(record)
+        matches = [
+            sha256
+            for key, sha256 in witness.row_evidence_sha256
+            if key == row_key
+        ]
+        if len(matches) != 1:
+            raise EvaluationIntakeIntegrityError(
+                "row_key must resolve to exactly one immutable upstream row evidence digest"
             )
         return matches[0]

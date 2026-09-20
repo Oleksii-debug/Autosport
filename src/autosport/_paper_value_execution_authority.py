@@ -204,7 +204,7 @@ def _descriptor_from_durable_record(
     record: DecisionRecord,
     *,
     current_event: MarketEvent,
-) -> tuple[PaperValueExecutionDescriptor, MarketEvent, Decimal, str]:
+) -> tuple[PaperValueExecutionDescriptor, MarketEvent, Decimal, str, dict[str, object]]:
     """Rebuild the exact immutable execution descriptor from durable decision bytes."""
 
     payload = record.payload
@@ -268,13 +268,12 @@ def _descriptor_from_durable_record(
         raise PaperExecutionAdoptionError(
             "durable paper-value provider account authority is invalid"
         )
-    account_id = provider_account[1]
 
     descriptor = runtime.prepare_paper_value_action(
         event=durable_event,
         stake=stake,
         decision_id=record.decision_id,
-        account_id=account_id,
+        account_id=provider_account[1],
         bankroll_id=authority.get("bankroll_id"),
         currency=authority.get("currency"),
     )
@@ -290,7 +289,7 @@ def _descriptor_from_durable_record(
             raise PaperExecutionAdoptionError(
                 f"durable paper-value decision conflicts with execution authority: {key}"
             )
-    return descriptor, durable_event, stake, expected_run_id
+    return descriptor, durable_event, stake, expected_run_id, authority
 
 
 def _first_execution_risk_authority(
@@ -300,8 +299,27 @@ def _first_execution_risk_authority(
     durable_event: MarketEvent,
     stake: Decimal,
     expected_run_id: str,
+    authority: dict[str, object],
 ) -> str:
-    """Prove first execution risk or recognize the exact already-reserved #623 run."""
+    """Prove restart authority without promoting generic ledger bytes to risk truth."""
+
+    goal = agent.risk_policy.economic_goal
+    if goal is None:
+        # A GENERAL DecisionRecord and a #623 simulation run are both generic,
+        # caller-constructible evidence. Neither proves that PaperRiskPolicy and
+        # the strategy gate actually authorized the historical first execution.
+        # Fail loudly rather than silently returning behind fresh proposal gates.
+        raise PaperExecutionAdoptionError(
+            "durable GENERAL paper-value action lacks caller-non-mintable risk provenance"
+        )
+
+    if (
+        authority.get("bankroll_id") != goal.bankroll_id
+        or authority.get("currency") != goal.currency
+    ):
+        raise PaperExecutionAdoptionError(
+            "durable paper-value execution authority conflicts with economic goal identity"
+        )
 
     runtime = context.paper_execution
     assert isinstance(runtime, PaperExecutionAdoptionRuntime)
@@ -312,23 +330,12 @@ def _first_execution_risk_authority(
     ):
         return "durable-execution-recovery"
 
-    # GENERAL DecisionRecord is intentionally not sufficient first-execution
-    # authority: JsonlDecisionLedger.append() is a generic public append seam. A
-    # crash in the tiny decision-before-RUN_RESERVED window therefore fails loudly
-    # rather than turning caller-authored bytes into action authority.
-    goal = agent.risk_policy.economic_goal
-    if goal is None:
-        raise PaperExecutionAdoptionError(
-            "durable GENERAL paper-value decision lacks exact #623 first-execution authority"
-        )
-
     if paper_quote_rejection_reason(durable_event, stake) is not None:
         raise PaperExecutionAdoptionError(
             "durable economic paper-value decision no longer proves quote execution safety"
         )
-    provider_account = json.loads(record.payload["execution_authority_json"])[
-        "provider_account"
-    ]
+    provider_account = authority["provider_account"]
+    assert isinstance(provider_account, list)
     leg = TicketLeg(
         durable_event.event_id,
         durable_event.market_id,
@@ -369,7 +376,13 @@ def _resume_durable_paper_value(
         raise PaperExecutionAdoptionError(
             "durable paper-value recovery lacks canonical #623 runtime"
         )
-    descriptor, durable_event, stake, expected_run_id = _descriptor_from_durable_record(
+    (
+        descriptor,
+        durable_event,
+        stake,
+        expected_run_id,
+        authority,
+    ) = _descriptor_from_durable_record(
         runtime,
         record,
         current_event=event,
@@ -381,6 +394,7 @@ def _resume_durable_paper_value(
         durable_event,
         stake,
         expected_run_id,
+        authority,
     )
     result = runtime.execute(
         prepared=descriptor,
@@ -502,6 +516,7 @@ def _canonical_agent_call(
             or event.observed_ts != started_at
             or local.get("material_action_id") != decision_id
             or agent._material_action_id(context, event) != decision_id
+            or local.get("prepared") is not descriptor
         ):
             raise PaperExecutionAdoptionError(
                 "paper-value canonical call identity does not match execution descriptor"
@@ -579,16 +594,6 @@ def _resolve_durable_paper_value_decision(
                 raise PaperExecutionAdoptionError(
                     "legacy paper-value execution requires GENERAL decision authority"
                 )
-            if risk_authority == "durable-execution-recovery":
-                expected_run_id = self.expected_run_id(descriptor, decision_id)
-                if not _run_reserved(
-                    self,
-                    decision_id,
-                    run_id=expected_run_id,
-                ):
-                    raise PaperExecutionAdoptionError(
-                        "legacy paper-value recovery lacks exact durable #623 execution authority"
-                    )
         else:
             economic = ledger.verified_economic_decision_for_material_action(
                 decision_id,
@@ -714,6 +719,8 @@ def _on_market_event(self: PaperValueAgent, event, context) -> None:
     runtime = context.paper_execution
     if runtime is None:
         return _ORIGINAL_ON_MARKET_EVENT(self, event, context)
+    if event.quote_key in self._acted:
+        return
 
     ledger = context.decision_ledger
     if ledger is None:

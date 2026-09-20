@@ -5,12 +5,15 @@ import json
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from decimal import Decimal
-from typing import Iterable, Protocol
+from typing import TYPE_CHECKING, Iterable, Protocol
 
 from .decision_ledger import DecisionRecord, JsonlDecisionLedger
 from .domain import MarketEvent, TicketLeg
 from .market_mirror import MarketMirror
 from .paper import PaperBook
+
+if TYPE_CHECKING:
+    from .paper_execution_adoption import PaperExecutionAdoptionRuntime
 
 
 def validate_agent_names(agent_names: Iterable[object]) -> tuple[str, ...]:
@@ -87,6 +90,8 @@ class AgentContext:
     event_count: int = 0
     replay_run_id: str = "unbound"
     decision_ledger: JsonlDecisionLedger | None = None
+    paper_execution: "PaperExecutionAdoptionRuntime | None" = None
+    paper_provider_accounts: tuple[tuple[str, str], ...] = ()
     notes: list[str] = field(default_factory=list)
     market_mirror: MarketMirror = field(default_factory=MarketMirror)
 
@@ -97,6 +102,8 @@ class AgentContext:
         event_count: int = 0,
         replay_run_id: str = "unbound",
         decision_ledger: JsonlDecisionLedger | None = None,
+        paper_execution: "PaperExecutionAdoptionRuntime | None" = None,
+        paper_provider_accounts: tuple[tuple[str, str], ...] = (),
         notes: list[str] | None = None,
         market_mirror: MarketMirror | None = None,
     ) -> None:
@@ -111,6 +118,49 @@ class AgentContext:
         self.event_count = event_count
         self.replay_run_id = replay_run_id
         self.decision_ledger = decision_ledger
+        if paper_execution is not None:
+            from .paper_execution_adoption import PaperExecutionAdoptionRuntime
+            if not isinstance(paper_execution, PaperExecutionAdoptionRuntime):
+                raise TypeError(
+                    "paper_execution must be PaperExecutionAdoptionRuntime or None"
+                )
+            if paper_execution.book is not paper_book:
+                raise ValueError(
+                    "paper_execution must materialize into the AgentContext PaperBook"
+                )
+        if type(paper_provider_accounts) is not tuple:
+            raise TypeError("paper_provider_accounts must be a canonical tuple")
+        normalized_accounts: list[tuple[str, str]] = []
+        for binding in paper_provider_accounts:
+            if type(binding) is not tuple or len(binding) != 2:
+                raise ValueError(
+                    "paper_provider_accounts must contain (source_id, account_id) tuples"
+                )
+            source_id, account_id = binding
+            if (
+                type(source_id) is not str
+                or not source_id
+                or source_id.strip() != source_id
+                or type(account_id) is not str
+                or not account_id
+                or account_id.strip() != account_id
+            ):
+                raise ValueError(
+                    "paper_provider_accounts must contain canonical non-empty text"
+                )
+            normalized_accounts.append((source_id, account_id))
+        canonical_accounts = tuple(normalized_accounts)
+        if (
+            canonical_accounts != tuple(sorted(canonical_accounts))
+            or len(canonical_accounts) != len(set(canonical_accounts))
+            or len({source_id for source_id, _ in canonical_accounts})
+            != len(canonical_accounts)
+        ):
+            raise ValueError(
+                "paper_provider_accounts must be sorted, unique, and source-scoped"
+            )
+        self.paper_execution = paper_execution
+        self.paper_provider_accounts = canonical_accounts
         self.notes = [] if notes is None else notes
         if market_mirror is not None and not isinstance(market_mirror, MarketMirror):
             raise TypeError("market_mirror must be a MarketMirror")

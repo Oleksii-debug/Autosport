@@ -144,6 +144,22 @@ class CampaignEconomicEvidenceStore:
         return version.version_id
 
     def latest(self) -> CampaignEconomicEvidenceVersion | None:
+        history = self._authority.read_history()
+        if history and history[-1].phase is AuthorityPhase.PREPARE:
+            pending = history[-1]
+            prepared_path = self._versions_dir() / f"{pending.intended_state_sha256}.json"
+            if prepared_path.exists():
+                prepared_version = self._load_raw(pending.intended_state_sha256)
+                if self._recover_exact_prepared_publish(prepared_version):
+                    chain = self._chain_from(prepared_version)
+                    if self._version_ids() != {
+                        value.version_id for value in chain
+                    }:
+                        raise CampaignEconomicStoreError(
+                            "economic store contains orphaned or rolled-back local history"
+                        )
+                    return prepared_version
+
         head_id = self._read_head_id()
         if head_id is None:
             if self._version_ids():

@@ -1,19 +1,12 @@
 """Canonical realized-VOC authority with explicit pre-compute admission.
 
 The qualified causal scorer remains in ``_voc_outcome_scoring_base``.  This
-wrapper adds the missing experiment-admission/terminal layer:
-
-* an explicit ``VOC_PAIRED_ADMISSION`` record is written before candidate
-  outputs and binds protocol/cohort, deadline, scope and both compute identities;
-* every explicit admission must close exactly once, either with the existing
-  successful ``voc_binding`` + ``voc_scoring_evidence`` record or a typed
-  non-scored terminal record;
-* non-scored terminals contribute a protocol-derived, never-positive realized
-  VOC observation instead of disappearing or making all history unusable.
-
-Legacy cohorts that predate the explicit admission record remain readable through
-the previous fail-closed route-context path.  Once an explicit admission exists
-for a cohort window, generic route contexts are no longer denominator authority.
+wrapper adds explicit pre-output admission and fail-closed terminal semantics.
+Negative terminals never carry caller-authored cost/latency values: they bind an
+immutable ``ModelComputeRouterStore`` execution-authority record and scoring
+re-resolves the canonical measurement before applying penalties.  Mixed legacy
+and explicit admission windows fail closed until a frozen migration boundary is
+part of protocol authority, so legacy denominator members cannot disappear.
 """
 
 from __future__ import annotations
@@ -27,6 +20,12 @@ from typing import Any
 
 from . import _voc_outcome_scoring_base as _base
 from .decision_ledger import DecisionRecord, JsonlDecisionLedger
+from .model_compute_router import (
+    ComputeExecutionEvidence,
+    ExecutionDisposition,
+    ModelComputeRouterError,
+    ModelComputeRouterStore,
+)
 
 # Preserve the existing public module surface while overriding only the authority
 # whose denominator/terminal semantics changed.
@@ -69,8 +68,8 @@ _TERMINAL_FIELDS = frozenset(
         "schema_version",
         "admission_sha256",
         "status",
-        "observed_extra_compute_cost",
-        "observed_extra_latency_seconds",
+        "execution_id",
+        "execution_record_sha256",
     }
 )
 _NEGATIVE_TERMINAL_STATUSES = frozenset(
@@ -96,15 +95,20 @@ def _compute_identity(
 def _nested_identity(value: object, *, field: str) -> dict[str, str]:
     if not isinstance(value, Mapping) or set(value) != set(_IDENTITY_FIELDS):
         raise _base.VOCEvaluationError(f"{field} schema is invalid")
-    result = {
-        "candidate_id": _base._text(value.get("candidate_id"), field=f"{field} candidate_id"),
-        "backend_id": _base._text(value.get("backend_id"), field=f"{field} backend_id"),
-        "model_id": _base._text(value.get("model_id"), field=f"{field} model_id"),
+    return {
+        "candidate_id": _base._text(
+            value.get("candidate_id"), field=f"{field} candidate_id"
+        ),
+        "backend_id": _base._text(
+            value.get("backend_id"), field=f"{field} backend_id"
+        ),
+        "model_id": _base._text(
+            value.get("model_id"), field=f"{field} model_id"
+        ),
         "config_sha256": _base._sha256(
             value.get("config_sha256"), field=f"{field} config_sha256"
         ),
     }
-    return result
 
 
 def _nested_scope(value: object, *, field: str) -> dict[str, str]:
@@ -130,6 +134,117 @@ def _ledger_records(
     by_sha = {digest: record for digest, record in ordered}
     order = {digest: index for index, (digest, _) in enumerate(ordered)}
     return ordered, by_sha, order
+
+
+def _canonical_execution(
+    store: ModelComputeRouterStore,
+    execution_id: object,
+) -> ComputeExecutionEvidence:
+    """Resolve one execution only from the verified router execution authority."""
+
+    if not isinstance(store, ModelComputeRouterStore):
+        raise TypeError("compute_execution_store must be ModelComputeRouterStore")
+    execution_key = _base._text(execution_id, field="VOC terminal execution_id")
+    evidence = store._executions.get(execution_key)
+    if evidence is None:
+        raise _base.VOCEvaluationError(
+            "VOC terminal canonical compute execution is missing"
+        )
+    try:
+        evidence.verify_record_sha256()
+    except ModelComputeRouterError as exc:
+        raise _base.VOCEvaluationError(
+            "VOC terminal canonical compute execution record is invalid"
+        ) from exc
+    authority_records = [
+        record
+        for record in store._execution_authority_records
+        if record.get("execution_id") == evidence.execution_id
+        and record.get("execution_record_sha256")
+        == evidence.execution_record_sha256
+    ]
+    if len(authority_records) != 1:
+        raise _base.VOCEvaluationError(
+            "VOC terminal execution lacks unique canonical execution authority"
+        )
+    authority_execution = authority_records[0].get("execution")
+    if authority_execution != evidence.payload():
+        raise _base.VOCEvaluationError(
+            "VOC terminal execution does not match canonical execution authority"
+        )
+    return evidence
+
+
+def _execution_matches_admission(
+    store: ModelComputeRouterStore,
+    evidence: ComputeExecutionEvidence,
+    *,
+    admission_record: object,
+    admission: Mapping[str, Any],
+    context_record: object,
+    terminal_at: datetime,
+) -> None:
+    challenger = _nested_identity(
+        admission.get("challenger_compute_identity"),
+        field="VOC admission challenger_compute_identity",
+    )
+    if (
+        evidence.backend_id != challenger["backend_id"]
+        or evidence.model_id != challenger["model_id"]
+        or evidence.config_sha256 != challenger["config_sha256"]
+    ):
+        raise _base.VOCEvaluationError(
+            "VOC terminal canonical execution does not match challenger compute identity"
+        )
+    context_payload = getattr(context_record, "payload", None)
+    context = (
+        context_payload.get(_CONTEXT_KEY)
+        if isinstance(context_payload, Mapping)
+        else None
+    )
+    if not isinstance(context, Mapping):
+        raise _base.VOCEvaluationError(
+            "VOC terminal canonical route context is invalid"
+        )
+    request_id = _base._text(
+        context.get("request_id"), field="VOC terminal route request_id"
+    )
+    decision = store.get_decision(request_id)
+    if decision is None:
+        raise _base.VOCEvaluationError(
+            "VOC terminal execution is not bound to its canonical route request"
+        )
+    if (
+        evidence.decision_id != decision.decision_id
+        or decision.candidate_id != challenger["candidate_id"]
+        or decision.backend_id != challenger["backend_id"]
+        or decision.model_id != challenger["model_id"]
+        or decision.config_sha256 != challenger["config_sha256"]
+    ):
+        raise _base.VOCEvaluationError(
+            "VOC terminal execution route decision does not match paired admission"
+        )
+    admitted_at = _base._instant(
+        getattr(admission_record, "recorded_at"), field="VOC admission recorded_at"
+    )
+    completed_at = _base._instant(
+        evidence.completed_at, field="VOC terminal execution completed_at"
+    )
+    observed_at = _base._instant(
+        evidence.observed_at, field="VOC terminal execution observed_at"
+    )
+    if completed_at < admitted_at:
+        raise _base.VOCEvaluationError(
+            "VOC terminal canonical execution predates paired admission"
+        )
+    if observed_at > terminal_at:
+        raise _base.VOCEvaluationError(
+            "VOC terminal predates canonical execution measurement availability"
+        )
+    if evidence.disposition is ExecutionDisposition.ACCEPTED:
+        raise _base.VOCEvaluationError(
+            "VOC negative terminal cannot bind an accepted compute execution"
+        )
 
 
 def append_paired_voc_admission(
@@ -160,7 +275,9 @@ def append_paired_voc_admission(
     decision_input = _base._sha256(
         decision_input_sha256, field="VOC admission decision_input_sha256"
     )
-    deadline = _base._instant(decision_deadline, field="VOC admission decision_deadline")
+    deadline = _base._instant(
+        decision_deadline, field="VOC admission decision_deadline"
+    )
     recorded = _base._instant(recorded_at, field="VOC admission recorded_at")
     if deadline <= recorded:
         raise _base.VOCEvaluationError(
@@ -248,41 +365,33 @@ def append_paired_voc_admission(
 def append_paired_voc_terminal(
     decision_ledger: JsonlDecisionLedger,
     *,
+    compute_execution_store: ModelComputeRouterStore,
     admission_sha256: str,
     status: str,
-    observed_extra_compute_cost: Decimal,
-    observed_extra_latency_seconds: Decimal,
+    execution_id: str,
     replay_run_id: str,
     agent: str,
     recorded_at: str,
 ) -> str:
-    """Close an admitted non-scored attempt with conservative measured penalties."""
+    """Close an admitted failed attempt using canonical router measurements only."""
 
     if not isinstance(decision_ledger, JsonlDecisionLedger):
         raise TypeError("decision_ledger must be JsonlDecisionLedger")
+    if not isinstance(compute_execution_store, ModelComputeRouterStore):
+        raise TypeError("compute_execution_store must be ModelComputeRouterStore")
     admission_sha = _base._sha256(
         admission_sha256, field="VOC terminal admission_sha256"
     )
     status_text = _base._text(status, field="VOC terminal status")
     if status_text not in _NEGATIVE_TERMINAL_STATUSES:
         raise _base.VOCEvaluationError("VOC terminal status is unsupported")
-    if not isinstance(observed_extra_compute_cost, Decimal):
-        raise TypeError("observed_extra_compute_cost must be Decimal")
-    if not isinstance(observed_extra_latency_seconds, Decimal):
-        raise TypeError("observed_extra_latency_seconds must be Decimal")
-    if (
-        not observed_extra_compute_cost.is_finite()
-        or observed_extra_compute_cost < 0
-        or not observed_extra_latency_seconds.is_finite()
-        or observed_extra_latency_seconds < 0
-    ):
-        raise _base.VOCEvaluationError(
-            "VOC terminal observed penalties must be finite non-negative"
-        )
 
     _, by_sha, _ = _ledger_records(decision_ledger)
     admission_record = by_sha.get(admission_sha)
-    if admission_record is None or getattr(admission_record, "action", None) != _ADMISSION_ACTION:
+    if (
+        admission_record is None
+        or getattr(admission_record, "action", None) != _ADMISSION_ACTION
+    ):
         raise _base.VOCEvaluationError("VOC terminal admission is missing")
     admission_payload = getattr(admission_record, "payload", None)
     admission = (
@@ -305,16 +414,34 @@ def append_paired_voc_terminal(
         raise _base.VOCEvaluationError(
             "VOC deadline terminal was recorded before the frozen deadline"
         )
+    context_sha = _base._sha256(
+        admission.get("decision_context_sha256"),
+        field="VOC admission decision_context_sha256",
+    )
+    context_record = by_sha.get(context_sha)
+    if context_record is None:
+        raise _base.VOCEvaluationError(
+            "VOC terminal paired admission route context is missing"
+        )
+    evidence = _canonical_execution(compute_execution_store, execution_id)
+    _execution_matches_admission(
+        compute_execution_store,
+        evidence,
+        admission_record=admission_record,
+        admission=admission,
+        context_record=context_record,
+        terminal_at=terminal_at,
+    )
     decision_input = _base._sha256(
         admission.get("decision_input_sha256"),
         field="VOC admission decision_input_sha256",
     )
     terminal = {
-        "schema_version": 1,
+        "schema_version": 2,
         "admission_sha256": admission_sha,
         "status": status_text,
-        "observed_extra_compute_cost": str(observed_extra_compute_cost),
-        "observed_extra_latency_seconds": str(observed_extra_latency_seconds),
+        "execution_id": evidence.execution_id,
+        "execution_record_sha256": evidence.execution_record_sha256,
     }
     return decision_ledger.append(
         DecisionRecord(
@@ -336,6 +463,22 @@ class CanonicalOutcomeDerivedVOCScoreAuthority(
     _base.CanonicalOutcomeDerivedVOCScoreAuthority
 ):
     """Realized-VOC scorer with pre-compute enrollment and failure learning."""
+
+    def __init__(
+        self,
+        *,
+        compute_execution_store: ModelComputeRouterStore | None = None,
+        **kwargs: Any,
+    ) -> None:
+        if (
+            compute_execution_store is not None
+            and not isinstance(compute_execution_store, ModelComputeRouterStore)
+        ):
+            raise TypeError(
+                "compute_execution_store must be ModelComputeRouterStore or None"
+            )
+        super().__init__(**kwargs)
+        self.compute_execution_store = compute_execution_store
 
     @staticmethod
     def _matching_binding(
@@ -415,8 +558,7 @@ class CanonicalOutcomeDerivedVOCScoreAuthority(
                 expected_protocol_id is not None
                 and protocol_id != expected_protocol_id
             ) or (
-                expected_cohort_id is not None
-                and cohort_id != expected_cohort_id
+                expected_cohort_id is not None and cohort_id != expected_cohort_id
             ):
                 continue
             admission_id = _base._text(
@@ -478,6 +620,42 @@ class CanonicalOutcomeDerivedVOCScoreAuthority(
             matches[admission_sha] = (record, raw)
         return matches
 
+    def _terminal_execution(
+        self,
+        *,
+        terminal: Mapping[str, Any],
+        admission_record: object,
+        admission: Mapping[str, Any],
+        context_record: object,
+        terminal_record: object,
+    ) -> ComputeExecutionEvidence:
+        store = self.compute_execution_store
+        if store is None:
+            raise _base.VOCEvaluationError(
+                "VOC negative terminal requires canonical compute execution authority"
+            )
+        evidence = _canonical_execution(store, terminal.get("execution_id"))
+        record_sha = _base._sha256(
+            terminal.get("execution_record_sha256"),
+            field="VOC terminal execution_record_sha256",
+        )
+        if evidence.execution_record_sha256 != record_sha:
+            raise _base.VOCEvaluationError(
+                "VOC terminal execution reference does not match canonical measurement"
+            )
+        _execution_matches_admission(
+            store,
+            evidence,
+            admission_record=admission_record,
+            admission=admission,
+            context_record=context_record,
+            terminal_at=_base._instant(
+                getattr(terminal_record, "recorded_at"),
+                field="VOC terminal recorded_at",
+            ),
+        )
+        return evidence
+
     def _terminal_for_admission(
         self,
         *,
@@ -498,8 +676,11 @@ class CanonicalOutcomeDerivedVOCScoreAuthority(
             admission.get("decision_input_sha256"),
             field="VOC admission decision_input_sha256",
         )
+        context_record: object | None = None
         candidates: list[tuple[str, object, Mapping[str, Any], str]] = []
         for record_sha, record in ordered:
+            if record_sha == context_sha:
+                context_record = record
             if order[record_sha] <= order[admission_sha]:
                 continue
             payload = getattr(record, "payload", None)
@@ -515,6 +696,10 @@ class CanonicalOutcomeDerivedVOCScoreAuthority(
             ):
                 candidates.append((record_sha, record, payload, "terminal"))
 
+        if context_record is None:
+            raise _base.VOCEvaluationError(
+                "VOC paired admission canonical route context is missing"
+            )
         if not candidates:
             raise _base.VOCEvaluationError(
                 "eligible VOC paired admission lacks terminal record"
@@ -562,21 +747,13 @@ class CanonicalOutcomeDerivedVOCScoreAuthority(
         terminal = payload.get(_TERMINAL_KEY)
         if not isinstance(terminal, Mapping) or set(terminal) != _TERMINAL_FIELDS:
             raise _base.VOCEvaluationError("VOC terminal schema is invalid")
-        if terminal.get("schema_version") != 1:
-            raise _base.VOCEvaluationError("VOC terminal schema version is unsupported")
+        if terminal.get("schema_version") != 2:
+            raise _base.VOCEvaluationError(
+                "VOC terminal schema version is unsupported"
+            )
         status = _base._text(terminal.get("status"), field="VOC terminal status")
         if status not in _NEGATIVE_TERMINAL_STATUSES:
             raise _base.VOCEvaluationError("VOC terminal status is unsupported")
-        _base._decimal(
-            terminal.get("observed_extra_compute_cost"),
-            field="VOC terminal observed_extra_compute_cost",
-            nonnegative=True,
-        )
-        _base._decimal(
-            terminal.get("observed_extra_latency_seconds"),
-            field="VOC terminal observed_extra_latency_seconds",
-            nonnegative=True,
-        )
         deadline = _base._instant(
             admission.get("decision_deadline"), field="VOC admission decision_deadline"
         )
@@ -587,38 +764,38 @@ class CanonicalOutcomeDerivedVOCScoreAuthority(
             raise _base.VOCEvaluationError(
                 "VOC deadline terminal predates frozen decision deadline"
             )
+        self._terminal_execution(
+            terminal=terminal,
+            admission_record=admission_record,
+            admission=admission,
+            context_record=context_record,
+            terminal_record=record,
+        )
         return record_sha, record, payload, kind
 
-    def _legacy_eligible_cohort_decisions(
+    def _matching_route_contexts(
         self,
         *,
         ordered: list[tuple[str, object]],
-        by_sha: dict[str, object],
         recorded_from: datetime,
         recorded_through: datetime,
         expected_task_class: str,
         expected_scope: Mapping[str, str],
-        expected_baseline: Mapping[str, str],
-        expected_challenger: Mapping[str, str],
-    ) -> dict[str, str]:
-        """Read pre-admission-format cohorts without allowing silent omission."""
-
-        admissions: dict[str, tuple[str, str]] = {}
+    ) -> set[str]:
+        matches: set[str] = set()
         request_ids: set[str] = set()
         for context_sha, record in ordered:
+            if getattr(record, "action", None) != _CONTEXT_ACTION:
+                continue
             recorded_at = _base._instant(
                 getattr(record, "recorded_at"), field="VOC cohort context recorded_at"
             )
             if recorded_at < recorded_from or recorded_at > recorded_through:
                 continue
-            if getattr(record, "action", None) != _CONTEXT_ACTION:
-                continue
             payload = getattr(record, "payload", None)
             context = payload.get(_CONTEXT_KEY) if isinstance(payload, Mapping) else None
             if not isinstance(context, Mapping):
-                raise _base.VOCEvaluationError(
-                    "canonical VOC route context is missing"
-                )
+                raise _base.VOCEvaluationError("canonical VOC route context is missing")
             if (
                 context.get("task_class") != expected_task_class
                 or _scope(context) != dict(expected_scope)
@@ -640,11 +817,47 @@ class CanonicalOutcomeDerivedVOCScoreAuthority(
                     "precommitted VOC eligibility range reuses request identity"
                 )
             request_ids.add(request_id)
-            admissions[context_sha] = (request_id, decision_input)
+            matches.add(context_sha)
+        return matches
 
-        if not admissions:
+    def _legacy_eligible_cohort_decisions(
+        self,
+        *,
+        ordered: list[tuple[str, object]],
+        by_sha: dict[str, object],
+        recorded_from: datetime,
+        recorded_through: datetime,
+        expected_task_class: str,
+        expected_scope: Mapping[str, str],
+        expected_baseline: Mapping[str, str],
+        expected_challenger: Mapping[str, str],
+    ) -> dict[str, str]:
+        """Read pre-admission-format cohorts without allowing silent omission."""
+
+        context_shas = self._matching_route_contexts(
+            ordered=ordered,
+            recorded_from=recorded_from,
+            recorded_through=recorded_through,
+            expected_task_class=expected_task_class,
+            expected_scope=expected_scope,
+        )
+        if not context_shas:
             raise _base.VOCEvaluationError(
                 "precommitted VOC eligibility range contains no canonical admissions"
+            )
+        admissions: dict[str, tuple[str, str]] = {}
+        for context_sha in context_shas:
+            record = by_sha[context_sha]
+            payload = getattr(record, "payload", None)
+            context = payload.get(_CONTEXT_KEY) if isinstance(payload, Mapping) else None
+            if not isinstance(context, Mapping):
+                raise _base.VOCEvaluationError("canonical VOC route context is missing")
+            admissions[context_sha] = (
+                _base._text(context.get("request_id"), field="VOC context request_id"),
+                _base._sha256(
+                    context.get("decision_input_sha256"),
+                    field="VOC context decision_input_sha256",
+                ),
             )
 
         eligible: dict[str, str] = {}
@@ -671,7 +884,7 @@ class CanonicalOutcomeDerivedVOCScoreAuthority(
                 raise _base.VOCEvaluationError(
                     "eligible VOC admission has ambiguous terminal paired records"
                 )
-            record_sha, record, payload = terminals[0]
+            record_sha, _, payload = terminals[0]
             binding = payload.get("voc_binding")
             evidence = payload.get(_base._SCORING_EVIDENCE_KEY)
             if not isinstance(binding, Mapping) or not isinstance(evidence, Mapping):
@@ -738,6 +951,25 @@ class CanonicalOutcomeDerivedVOCScoreAuthority(
                 expected_challenger=expected_challenger,
             )
 
+        matching_contexts = self._matching_route_contexts(
+            ordered=ordered,
+            recorded_from=recorded_from,
+            recorded_through=recorded_through,
+            expected_task_class=expected_task_class,
+            expected_scope=expected_scope,
+        )
+        explicit_contexts = {
+            _base._sha256(
+                admission.get("decision_context_sha256"),
+                field="VOC admission decision_context_sha256",
+            )
+            for _, admission in explicit.values()
+        }
+        if matching_contexts - explicit_contexts:
+            raise _base.VOCEvaluationError(
+                "mixed legacy and explicit VOC cohort formats require a frozen migration boundary"
+            )
+
         eligible: dict[str, str] = {}
         protocol_ids: set[str] = set()
         cohort_ids: set[str] = set()
@@ -749,7 +981,9 @@ class CanonicalOutcomeDerivedVOCScoreAuthority(
                 )
             )
             cohort_ids.add(
-                _base._text(admission.get("cohort_id"), field="VOC admission cohort_id")
+                _base._text(
+                    admission.get("cohort_id"), field="VOC admission cohort_id"
+                )
             )
             record_sha, _, payload, kind = self._terminal_for_admission(
                 admission_sha=admission_sha,
@@ -762,9 +996,6 @@ class CanonicalOutcomeDerivedVOCScoreAuthority(
                 expected_challenger=expected_challenger,
             )
             if kind != "scored":
-                # Negative terminals remain denominator members but do not need a
-                # PairedVOCEvaluation registry object.  _derive_score incorporates
-                # their conservative contribution below.
                 continue
             evidence = payload[_base._SCORING_EVIDENCE_KEY]
             evaluation_id = _base._text(
@@ -799,9 +1030,7 @@ class CanonicalOutcomeDerivedVOCScoreAuthority(
             )
         binding = protocol_entry.payload.get("binding")
         design_text = (
-            binding.get("evaluation_design")
-            if isinstance(binding, Mapping)
-            else None
+            binding.get("evaluation_design") if isinstance(binding, Mapping) else None
         )
         if type(design_text) is not str:
             raise _base.VOCEvaluationError(
@@ -891,11 +1120,10 @@ class CanonicalOutcomeDerivedVOCScoreAuthority(
             cohort_available_at, field="VOC cohort available_at"
         )
         failures: list[tuple[_base.OutcomeDerivedVOCScore, str, dict[str, str]]] = []
-        # All non-scored terminals share one conservative dependency cluster.
         failure_cluster = _base._digest(
             {
                 "schema": "autosport.voc_terminal_failure_cluster",
-                "schema_version": 1,
+                "schema_version": 2,
                 "research_protocol_id": evaluation.research_protocol_id,
                 "cohort_id": cohort_id,
                 "scope": expected_scope,
@@ -923,16 +1151,24 @@ class CanonicalOutcomeDerivedVOCScoreAuthority(
                 raise _base.VOCEvaluationError(
                     "VOC cohort froze before a terminal admission outcome"
                 )
-            extra_cost = _base._decimal(
-                terminal.get("observed_extra_compute_cost"),
-                field="VOC terminal observed_extra_compute_cost",
-                nonnegative=True,
+            context_sha = _base._sha256(
+                admission.get("decision_context_sha256"),
+                field="VOC admission decision_context_sha256",
             )
-            extra_latency = _base._decimal(
-                terminal.get("observed_extra_latency_seconds"),
-                field="VOC terminal observed_extra_latency_seconds",
-                nonnegative=True,
+            context_record = by_sha.get(context_sha)
+            if context_record is None:
+                raise _base.VOCEvaluationError(
+                    "VOC terminal canonical route context is missing"
+                )
+            execution = self._terminal_execution(
+                terminal=terminal,
+                admission_record=admission_record,
+                admission=admission,
+                context_record=context_record,
+                terminal_record=terminal_record,
             )
+            extra_cost = execution.actual_cost
+            extra_latency = execution.actual_latency_seconds
             with localcontext(_base._ARITHMETIC_CONTEXT):
                 compute_penalty = +(extra_cost * compute_multiplier)
                 latency_penalty = +(extra_latency * latency_rate)
@@ -940,10 +1176,13 @@ class CanonicalOutcomeDerivedVOCScoreAuthority(
             source_sha = _base._digest(
                 {
                     "schema": "autosport.canonical_voc_terminal_score_sources",
-                    "schema_version": 1,
+                    "schema_version": 2,
                     "admission_sha256": admission_sha,
                     "terminal_sha256": terminal_sha,
                     "terminal_status": terminal.get("status"),
+                    "execution_id": execution.execution_id,
+                    "execution_record_sha256": execution.execution_record_sha256,
+                    "execution_evidence_sha256": execution.evidence_sha256,
                     "research_protocol_sha256": evaluation.research_protocol_sha256,
                     "scoring_rule_sha256": evaluation.scoring_rule_sha256,
                 }
@@ -984,6 +1223,8 @@ class CanonicalOutcomeDerivedVOCScoreAuthority(
                         "terminal_status": _base._text(
                             terminal.get("status"), field="VOC terminal status"
                         ),
+                        "execution_id": execution.execution_id,
+                        "execution_record_sha256": execution.execution_record_sha256,
                         "terminal_source_artifact_sha256": source_sha,
                     },
                 )
@@ -1079,7 +1320,7 @@ class CanonicalOutcomeDerivedVOCScoreAuthority(
         source_artifact_sha256 = _base._digest(
             {
                 "schema": "autosport.canonical_voc_cohort_score_sources",
-                "schema_version": 3,
+                "schema_version": 4,
                 "target_evaluation_id": evaluation.evaluation_id,
                 "cohort_id": cohort_id,
                 "cohort_sha256": cohort_sha256,
@@ -1121,8 +1362,9 @@ def build_canonical_voc_authority_resolver(
     source_record_file: str,
     source_record_sha256: str,
     additional_outcome_sources: tuple[_base.CanonicalVOCOutcomeSource, ...] = (),
+    compute_execution_store: ModelComputeRouterStore | None = None,
 ) -> _base.CanonicalVOCAuthorityResolver:
-    """Build the production resolver with pre-compute terminal-aware authority."""
+    """Build the production resolver with terminal-aware canonical authority."""
 
     score_authority = CanonicalOutcomeDerivedVOCScoreAuthority(
         decision_ledger=decision_ledger,
@@ -1132,6 +1374,7 @@ def build_canonical_voc_authority_resolver(
         source_record_file=source_record_file,
         source_record_sha256=source_record_sha256,
         additional_outcome_sources=additional_outcome_sources,
+        compute_execution_store=compute_execution_store,
     )
     return _base.CanonicalVOCAuthorityResolver(
         decision_ledger=decision_ledger,

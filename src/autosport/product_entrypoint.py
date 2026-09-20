@@ -53,7 +53,14 @@ class _SignalStopRequest:
         return 128 + self.signal_number
 
 
-def _validated_source(source_factory: str) -> object:
+def _normalized_workspace(value: object, *, label: str) -> Path:
+    try:
+        return Path(value).expanduser().resolve(strict=False)
+    except (TypeError, ValueError, OSError, RuntimeError) as exc:
+        raise ProductEntrypointError(f"{label} workspace cannot be resolved") from exc
+
+
+def _validated_source(source_factory: str, *, workspace: str | Path) -> object:
     factory = _load_source_factory(source_factory)
     source = factory()
     for field in ("source_id", "stream_epoch"):
@@ -66,6 +73,20 @@ def _validated_source(source_factory: str) -> object:
         if not callable(getattr(source, method, None)):
             raise ProductEntrypointError(
                 f"product source must provide callable {method}"
+            )
+
+    # A source that owns durable product state must be bound to the same canonical
+    # workspace as the supported runtime before the composition root creates any
+    # runtime files. Generic stateless/external source factories remain compatible.
+    source_workspace = getattr(source, "workspace", None)
+    if source_workspace is not None:
+        expected_workspace = _normalized_workspace(workspace, label="product runtime")
+        observed_workspace = _normalized_workspace(
+            source_workspace, label="product source"
+        )
+        if observed_workspace != expected_workspace:
+            raise ProductEntrypointError(
+                "product source workspace must match product runtime workspace"
             )
     return source
 
@@ -140,9 +161,9 @@ def run_product(
         raise ValueError("unbounded product run requires a positive poll interval")
 
     # Validate the complete production source capability before the composition root
-    # creates a workspace or durable manifest. Missing event resolution must never be
-    # hidden by a synthesized MarketEvent or a test-only fallback.
-    source = _validated_source(source_factory)
+    # creates a workspace or durable manifest. Missing event resolution or a split
+    # source/runtime workspace must never be hidden by runtime initialization.
+    source = _validated_source(source_factory, workspace=workspace)
     runtime = build_autonomous_product_runtime(
         workspace=workspace,
         source=source,

@@ -77,6 +77,32 @@ def _old_unsigned_receipt(
     }
 
 
+def _seed_attacker_receipt(
+    root,
+    store: CompleteGameBoardEvidenceStore,
+    snapshot: CompleteGameBoardSnapshot,
+) -> None:
+    workspace_sha256 = hashlib.sha256(str(store.workspace).encode("utf-8")).hexdigest()
+    forged_receipt_root = root / "provider-acquisition-receipt-v1" / workspace_sha256
+    forged_receipt_root.mkdir(parents=True, exist_ok=True)
+    key = b"caller-controlled-provider-key!!"[:32]
+    assert len(key) == 32
+    (forged_receipt_root / "receipt.key").write_text(key.hex(), encoding="ascii")
+    unsigned = _old_unsigned_receipt(store, snapshot)
+    receipt = dict(unsigned)
+    receipt["hmac_sha256"] = hmac.new(
+        key,
+        _canonical_json(unsigned).encode("utf-8"),
+        hashlib.sha256,
+    ).hexdigest()
+    receipts = forged_receipt_root / "receipts"
+    receipts.mkdir(parents=True, exist_ok=True)
+    (receipts / f"{snapshot.evidence_sha256}.json").write_text(
+        json.dumps(receipt, indent=2, sort_keys=True),
+        encoding="utf-8",
+    )
+
+
 def _publish_forged_evidence_and_generic_history(
     store: CompleteGameBoardEvidenceStore,
     snapshot: CompleteGameBoardSnapshot,
@@ -121,30 +147,7 @@ def test_caller_selected_generic_root_cannot_supply_provider_receipt_trust(tmp_p
         forged,
         authority_root=caller_root,
     )
-
-    # Seed the exact caller-root receipt/key layout trusted by the predecessor.
-    # This uses only test-owned bytes and standard HMAC, not product issuer helpers.
-    workspace_sha256 = hashlib.sha256(str(workspace).encode("utf-8")).hexdigest()
-    forged_receipt_root = (
-        caller_root / "provider-acquisition-receipt-v1" / workspace_sha256
-    )
-    forged_receipt_root.mkdir(parents=True, exist_ok=True)
-    key = b"caller-controlled-provider-key!!"[:32]
-    assert len(key) == 32
-    (forged_receipt_root / "receipt.key").write_text(key.hex(), encoding="ascii")
-    unsigned = _old_unsigned_receipt(store, forged)
-    receipt = dict(unsigned)
-    receipt["hmac_sha256"] = hmac.new(
-        key,
-        _canonical_json(unsigned).encode("utf-8"),
-        hashlib.sha256,
-    ).hexdigest()
-    receipts = forged_receipt_root / "receipts"
-    receipts.mkdir(parents=True, exist_ok=True)
-    (receipts / f"{forged.evidence_sha256}.json").write_text(
-        json.dumps(receipt, indent=2, sort_keys=True),
-        encoding="utf-8",
-    )
+    _seed_attacker_receipt(caller_root, store, forged)
 
     with pytest.raises(
         ProviderObservationIntegrityError,
@@ -156,11 +159,35 @@ def test_caller_selected_generic_root_cannot_supply_provider_receipt_trust(tmp_p
         ).load(forged.evidence_sha256)
 
 
+def test_monotonic_root_env_override_cannot_supply_provider_receipt_trust(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    attacker_root = (tmp_path / "attacker-machine-authority").resolve()
+    monkeypatch.setenv("AUTOSPORT_MONOTONIC_AUTHORITY_ROOT", str(attacker_root))
+    workspace = (tmp_path / "workspace").resolve()
+    store = CompleteGameBoardEvidenceStore(workspace)
+    forged = _forged_snapshot()
+
+    # The supported environment override is deliberately authoritative for the
+    # generic rollback journal. Reproduce the predecessor attack in full: exact
+    # evidence + matching generic history + a correctly signed receipt/key under
+    # the overridden root. Provider-origin verification must ignore all of it.
+    _publish_forged_evidence_and_generic_history(store, forged, authority_root=None)
+    _seed_attacker_receipt(attacker_root, store, forged)
+
+    with pytest.raises(
+        ProviderObservationIntegrityError,
+        match="production-owned acquisition receipt",
+    ):
+        CompleteGameBoardEvidenceStore(workspace).load(forged.evidence_sha256)
+
+
 def test_consumer_store_cannot_mint_production_root_receipt_for_forged_snapshot(
     tmp_path,
     monkeypatch,
 ) -> None:
-    product_root = (tmp_path / "product-machine-authority").resolve()
+    product_root = (tmp_path / "generic-machine-authority").resolve()
     monkeypatch.setenv("AUTOSPORT_MONOTONIC_AUTHORITY_ROOT", str(product_root))
     workspace = (tmp_path / "workspace").resolve()
     store = CompleteGameBoardEvidenceStore(workspace)

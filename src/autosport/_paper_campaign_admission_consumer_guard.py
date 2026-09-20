@@ -22,6 +22,7 @@ from .paper_campaign_admission import (
 )
 from .paper_campaign_runtime import PaperCampaignRuntime
 from .paper_execution_reality import PaperExecutionLedger
+from .paper_settlement_learning import PaperSettlementLearningBridge
 
 _GUARD_MARKER = "__autosport_exact_admission_authority_guard_v4__"
 _ORIGINAL_INIT = PaperCampaignAdmissionCoordinator.__init__
@@ -35,6 +36,7 @@ _RUNTIME_METHODS = (
     "_parameters_with_reflection_commitment",
     "begin_and_bind_paper_ticket",
 )
+_BRIDGE_METHODS = ("_read",)
 
 
 def _has_instance_shadow(value: object, method_name: str) -> bool:
@@ -52,6 +54,11 @@ def _reject_instance_shadow(value: object, method_name: str, label: str) -> None
 def _reject_runtime_shadows(runtime: PaperCampaignRuntime) -> None:
     for method_name in _RUNTIME_METHODS:
         _reject_instance_shadow(runtime, method_name, "PAPER campaign runtime")
+
+
+def _reject_bridge_shadows(bridge: PaperSettlementLearningBridge) -> None:
+    for method_name in _BRIDGE_METHODS:
+        _reject_instance_shadow(bridge, method_name, "PAPER settlement-learning bridge")
 
 
 def _canonical_decision_path(state_path: object) -> Path:
@@ -101,7 +108,9 @@ def _binding_for(self: PaperCampaignAdmissionCoordinator):
 def _assert_runtime_binding(
     self: PaperCampaignAdmissionCoordinator,
     runtime: PaperCampaignRuntime,
-    settlement_bridge: object,
+    settlement_bridge: PaperSettlementLearningBridge,
+    environment: object,
+    agent_loop: object,
 ) -> None:
     if self.runtime is not runtime:
         raise PaperCampaignAdmissionError(
@@ -115,7 +124,21 @@ def _assert_runtime_binding(
         raise PaperCampaignAdmissionError(
             "PAPER campaign settlement authority changed after admission construction"
         )
+    if type(settlement_bridge) is not PaperSettlementLearningBridge:
+        raise PaperCampaignAdmissionError(
+            "PAPER campaign settlement authority must remain exact "
+            "PaperSettlementLearningBridge"
+        )
+    if runtime.environment is not environment:
+        raise PaperCampaignAdmissionError(
+            "PAPER campaign environment authority changed after admission construction"
+        )
+    if settlement_bridge.agent_loop is not agent_loop:
+        raise PaperCampaignAdmissionError(
+            "PAPER campaign AgentLoop authority changed after admission construction"
+        )
     _reject_runtime_shadows(runtime)
+    _reject_bridge_shadows(settlement_bridge)
 
 
 def _guarded_init(
@@ -129,7 +152,12 @@ def _guarded_init(
 ) -> None:
     if type(runtime) is not PaperCampaignRuntime:
         raise TypeError("runtime must be exact PaperCampaignRuntime")
+    if type(runtime.settlement_bridge) is not PaperSettlementLearningBridge:
+        raise TypeError(
+            "runtime settlement_bridge must be exact PaperSettlementLearningBridge"
+        )
     _reject_runtime_shadows(runtime)
+    _reject_bridge_shadows(runtime.settlement_bridge)
     expected_decision_path = _canonical_decision_path(state_path)
     if type(decision_ledger) is JsonlDecisionLedger:
         _assert_decision_ledger_path(decision_ledger, expected_decision_path)
@@ -159,6 +187,8 @@ def _guarded_init(
             expected_decision_path,
             runtime,
             runtime.settlement_bridge,
+            runtime.environment,
+            runtime.settlement_bridge.agent_loop,
             RLock(),
         )
 
@@ -170,10 +200,18 @@ def _guarded_resolved_execution_decision_id(self, *args, **kwargs):
         expected_decision_path,
         runtime,
         settlement_bridge,
+        environment,
+        agent_loop,
         lock,
     ) = _binding_for(self)
     with lock:
-        _assert_runtime_binding(self, runtime, settlement_bridge)
+        _assert_runtime_binding(
+            self,
+            runtime,
+            settlement_bridge,
+            environment,
+            agent_loop,
+        )
         if self.decision_ledger is not decision_ledger:
             raise PaperCampaignAdmissionError(
                 "Decision Ledger authority changed after admission construction"
@@ -198,10 +236,18 @@ def _guarded_execution_attempt(self, *args, **kwargs):
         _expected_decision_path,
         runtime,
         settlement_bridge,
+        environment,
+        agent_loop,
         lock,
     ) = _binding_for(self)
     with lock:
-        _assert_runtime_binding(self, runtime, settlement_bridge)
+        _assert_runtime_binding(
+            self,
+            runtime,
+            settlement_bridge,
+            environment,
+            agent_loop,
+        )
         if self.execution_ledger is not execution_ledger:
             raise PaperCampaignAdmissionError(
                 "PAPER execution authority changed after admission construction"

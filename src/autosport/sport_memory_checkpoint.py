@@ -82,10 +82,22 @@ def _require_distinct_paths(*paths: Path) -> None:
         )
 
 
-def _validated_roots(
+def _validated_authorities(
     identity_registry: ParticipantIdentityRegistry,
     opponent_store: OpponentIntelligenceStore,
-) -> tuple[str, str]:
+) -> tuple[
+    ParticipantIdentityRegistry,
+    OpponentIntelligenceStore,
+    str,
+    str,
+]:
+    """Re-open and return the exact canonical authorities whose roots are hashed.
+
+    Caller-owned in-memory objects are accepted only as path/binding selectors.
+    Runtime reads must use the freshly re-opened authority objects returned here,
+    otherwise a stale caller object could be paired with newer persisted roots.
+    """
+
     if not isinstance(identity_registry, ParticipantIdentityRegistry):
         raise TypeError("identity_registry must be ParticipantIdentityRegistry")
     if not isinstance(opponent_store, OpponentIntelligenceStore):
@@ -107,7 +119,9 @@ def _validated_roots(
     # These constructors are the existing authorities' own validation boundary.
     try:
         verified_identity = ParticipantIdentityRegistry(identity_path)
-        OpponentIntelligenceStore(opponent_path, verified_identity)
+        verified_opponent = OpponentIntelligenceStore(
+            opponent_path, verified_identity
+        )
     except Exception as exc:
         raise SportMemoryCheckpointError(
             "canonical identity/opponent stores failed source validation"
@@ -119,7 +133,12 @@ def _validated_roots(
         raise SportMemoryCheckpointError(
             "canonical authority roots changed during checkpoint validation"
         )
-    return identity_after, opponent_after
+    return (
+        verified_identity,
+        verified_opponent,
+        identity_after,
+        opponent_after,
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -165,7 +184,7 @@ class SportMemoryAuthorityCheckpoint:
         identity_registry: ParticipantIdentityRegistry,
         opponent_store: OpponentIntelligenceStore,
     ) -> "SportMemoryAuthorityCheckpoint":
-        identity_root, opponent_root = _validated_roots(
+        _, _, identity_root, opponent_root = _validated_authorities(
             identity_registry, opponent_store
         )
         generation = _canonical_digest(
@@ -187,17 +206,9 @@ class SportMemoryAuthorityCheckpoint:
         identity_registry: ParticipantIdentityRegistry,
         opponent_store: OpponentIntelligenceStore,
     ) -> None:
-        identity_root, opponent_root = _validated_roots(
-            identity_registry, opponent_store
+        _verify_checkpoint_against_authorities(
+            self, identity_registry, opponent_store
         )
-        if identity_root != self.identity_root_sha256:
-            raise SportMemoryCheckpointError(
-                "participant identity root drift/rollback detected"
-            )
-        if opponent_root != self.opponent_root_sha256:
-            raise SportMemoryCheckpointError(
-                "opponent intelligence root drift/rollback detected"
-            )
 
 
 def _checkpoint_from_raw(raw: object) -> SportMemoryAuthorityCheckpoint:
@@ -231,11 +242,58 @@ def _checkpoint_from_raw(raw: object) -> SportMemoryAuthorityCheckpoint:
     )
 
 
-def initialize_sport_memory_authority_checkpoint(
+def _read_checkpoint(path: Path) -> SportMemoryAuthorityCheckpoint:
+    try:
+        raw: Any = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise SportMemoryCheckpointError(
+            "cannot load sport-memory authority checkpoint"
+        ) from exc
+    return _checkpoint_from_raw(raw)
+
+
+def _verify_checkpoint_against_authorities(
+    checkpoint: SportMemoryAuthorityCheckpoint,
+    identity_registry: ParticipantIdentityRegistry,
+    opponent_store: OpponentIntelligenceStore,
+) -> OpponentIntelligenceStore:
+    _, verified_opponent, identity_root, opponent_root = _validated_authorities(
+        identity_registry, opponent_store
+    )
+    if identity_root != checkpoint.identity_root_sha256:
+        raise SportMemoryCheckpointError(
+            "participant identity root drift/rollback detected"
+        )
+    if opponent_root != checkpoint.opponent_root_sha256:
+        raise SportMemoryCheckpointError(
+            "opponent intelligence root drift/rollback detected"
+        )
+    return verified_opponent
+
+
+def _load_verified_checkpoint_and_opponent(
     path: Path,
     identity_registry: ParticipantIdentityRegistry,
     opponent_store: OpponentIntelligenceStore,
-) -> SportMemoryAuthorityCheckpoint:
+) -> tuple[SportMemoryAuthorityCheckpoint, OpponentIntelligenceStore]:
+    checkpoint_path = Path(path)
+    _require_distinct_paths(
+        checkpoint_path,
+        Path(identity_registry.path),
+        Path(opponent_store.path),
+    )
+    checkpoint = _read_checkpoint(checkpoint_path)
+    verified_opponent = _verify_checkpoint_against_authorities(
+        checkpoint, identity_registry, opponent_store
+    )
+    return checkpoint, verified_opponent
+
+
+def _initialize_checkpoint_and_opponent(
+    path: Path,
+    identity_registry: ParticipantIdentityRegistry,
+    opponent_store: OpponentIntelligenceStore,
+) -> tuple[SportMemoryAuthorityCheckpoint, OpponentIntelligenceStore]:
     checkpoint_path = Path(path)
     _require_distinct_paths(
         checkpoint_path,
@@ -246,6 +304,7 @@ def initialize_sport_memory_authority_checkpoint(
         raise SportMemoryCheckpointError(
             "sport-memory authority checkpoint already exists"
         )
+
     checkpoint = SportMemoryAuthorityCheckpoint.capture(
         identity_registry, opponent_store
     )
@@ -255,6 +314,28 @@ def initialize_sport_memory_authority_checkpoint(
         raise SportMemoryCheckpointError(
             "cannot persist sport-memory authority checkpoint"
         ) from exc
+
+    # Re-read both the durable checkpoint and the canonical upstream stores after
+    # publication. This closes the checkpoint-publication window and returns the
+    # exact fresh opponent object whose bytes match the committed generation.
+    persisted, verified_opponent = _load_verified_checkpoint_and_opponent(
+        checkpoint_path, identity_registry, opponent_store
+    )
+    if persisted != checkpoint:
+        raise SportMemoryCheckpointError(
+            "persisted sport-memory authority checkpoint changed during initialization"
+        )
+    return persisted, verified_opponent
+
+
+def initialize_sport_memory_authority_checkpoint(
+    path: Path,
+    identity_registry: ParticipantIdentityRegistry,
+    opponent_store: OpponentIntelligenceStore,
+) -> SportMemoryAuthorityCheckpoint:
+    checkpoint, _ = _initialize_checkpoint_and_opponent(
+        path, identity_registry, opponent_store
+    )
     return checkpoint
 
 
@@ -263,20 +344,9 @@ def load_verified_sport_memory_authority_checkpoint(
     identity_registry: ParticipantIdentityRegistry,
     opponent_store: OpponentIntelligenceStore,
 ) -> SportMemoryAuthorityCheckpoint:
-    checkpoint_path = Path(path)
-    _require_distinct_paths(
-        checkpoint_path,
-        Path(identity_registry.path),
-        Path(opponent_store.path),
+    checkpoint, _ = _load_verified_checkpoint_and_opponent(
+        path, identity_registry, opponent_store
     )
-    try:
-        raw: Any = json.loads(checkpoint_path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
-        raise SportMemoryCheckpointError(
-            "cannot load sport-memory authority checkpoint"
-        ) from exc
-    checkpoint = _checkpoint_from_raw(raw)
-    checkpoint.verify_current_roots(identity_registry, opponent_store)
     return checkpoint
 
 
@@ -298,12 +368,12 @@ def open_bound_sport_memory_runtime(
     )
     if not runtime.exists():
         raise SportMemoryCheckpointError("sport-memory runtime does not exist")
-    authority = load_verified_sport_memory_authority_checkpoint(
+    authority, verified_opponent = _load_verified_checkpoint_and_opponent(
         checkpoint, identity_registry, opponent_store
     )
     return SportMemoryRuntime(
         runtime,
-        opponent_store,
+        verified_opponent,
         authority_generation_sha256=authority.generation_sha256,
     )
 
@@ -332,7 +402,7 @@ def initialize_or_open_bound_sport_memory_runtime(
     )
 
     if checkpoint.exists():
-        authority = load_verified_sport_memory_authority_checkpoint(
+        authority, verified_opponent = _load_verified_checkpoint_and_opponent(
             checkpoint, identity_registry, opponent_store
         )
     else:
@@ -340,18 +410,18 @@ def initialize_or_open_bound_sport_memory_runtime(
             raise SportMemoryCheckpointError(
                 "sport-memory runtime exists without canonical authority checkpoint"
             )
-        authority = initialize_sport_memory_authority_checkpoint(
+        authority, verified_opponent = _initialize_checkpoint_and_opponent(
             checkpoint, identity_registry, opponent_store
         )
 
     if runtime.exists():
         return SportMemoryRuntime(
             runtime,
-            opponent_store,
+            verified_opponent,
             authority_generation_sha256=authority.generation_sha256,
         )
     return SportMemoryRuntime.initialize_pristine(
         runtime,
-        opponent_store,
+        verified_opponent,
         authority_generation_sha256=authority.generation_sha256,
     )

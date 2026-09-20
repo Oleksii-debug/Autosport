@@ -487,6 +487,8 @@ class HeadlessCollectorService:
         self.delta_store = delta_store
         self.lifecycle = lifecycle
         self.source = source
+        self._source_identity = source
+        self._source_id = source_id
         self.config = config or CollectorServiceConfig()
         self.clock = clock or (lambda: datetime.now(timezone.utc).isoformat())
         self.sleep = sleep or time.sleep
@@ -505,28 +507,26 @@ class HeadlessCollectorService:
         self._record_runtime_stream_epoch(
             activated_at=started_at,
             expected_stream_epoch=stream_epoch,
+            allow_transition=False,
         )
 
-    def _record_runtime_stream_epoch(
+    def _require_source_identity(
         self,
         *,
-        activated_at: str,
         expected_stream_epoch: str | None = None,
-    ) -> int:
-        """Publish the exact executing source epoch into durable retention authority.
+    ) -> CollectorServiceSource:
+        """Return the configured source only while its product identity is intact."""
 
-        The canonical store exposes no activation writer. This method derives
-        source_id/stream_epoch from this executing service composition, so a holder
-        of CollectorDeltaStore cannot substitute a caller-selected epoch. Retention
-        only reads the append-only generation under its deletion transaction.
-        """
-
-        _CollectorServiceState._instant(activated_at, "activated_at")
-        source_id = getattr(self.source, "source_id", None)
-        stream_epoch = getattr(self.source, "stream_epoch", None)
-        if not isinstance(source_id, str) or not source_id.strip():
+        source = self._source_identity
+        if self.source is not source:
             raise CollectorServiceError(
-                "source.source_id must remain a non-empty string"
+                "collector source instance cannot be replaced during this service run"
+            )
+        source_id = getattr(source, "source_id", None)
+        stream_epoch = getattr(source, "stream_epoch", None)
+        if source_id != self._source_id:
+            raise CollectorServiceError(
+                "source.source_id changed after collector service construction"
             )
         if not isinstance(stream_epoch, str) or not stream_epoch.strip():
             raise CollectorServiceError(
@@ -537,8 +537,30 @@ class HeadlessCollectorService:
             and stream_epoch != expected_stream_epoch
         ):
             raise CollectorServiceError(
-                "source.stream_epoch changed during active-epoch publication"
+                "source.stream_epoch changed during active collector cycle"
             )
+        return source
+
+    def _record_runtime_stream_epoch(
+        self,
+        *,
+        activated_at: str,
+        expected_stream_epoch: str | None = None,
+        allow_transition: bool = True,
+    ) -> int:
+        """Publish only a product-admitted source epoch into retention authority.
+
+        Construction may bootstrap an empty activation journal, but it cannot move
+        an existing epoch. Later transitions are published only after run_cycle has
+        successfully admitted canonical provider data into the durable collector.
+        """
+
+        _CollectorServiceState._instant(activated_at, "activated_at")
+        source = self._require_source_identity(
+            expected_stream_epoch=expected_stream_epoch
+        )
+        source_id = self._source_id
+        stream_epoch = source.stream_epoch
 
         connection = self.delta_store._connect()
         try:
@@ -549,6 +571,9 @@ class HeadlessCollectorService:
                 (source_id,),
             ).fetchone()
             if current is not None and current["stream_epoch"] == stream_epoch:
+                connection.commit()
+                return int(current["generation"])
+            if current is not None and not allow_transition:
                 connection.commit()
                 return int(current["generation"])
             generation = 1 if current is None else int(current["generation"]) + 1
@@ -571,7 +596,7 @@ class HeadlessCollectorService:
 
     @property
     def source_id(self) -> str:
-        return self.source.source_id
+        return self._source_id
 
     def status(self) -> dict[str, object]:
         """Durable operator-readable state; provider messages/secrets are excluded."""
@@ -641,25 +666,18 @@ class HeadlessCollectorService:
         _CollectorServiceState._instant(attempt_at, "attempt_at")
         self._state.record_attempt(at=attempt_at)
         try:
-            cycle_stream_epoch = getattr(self.source, "stream_epoch", None)
-            if (
-                not isinstance(cycle_stream_epoch, str)
-                or not cycle_stream_epoch.strip()
-            ):
-                raise CollectorServiceError(
-                    "source.stream_epoch must remain a non-empty string"
-                )
-            self._record_runtime_stream_epoch(
-                activated_at=attempt_at,
-                expected_stream_epoch=cycle_stream_epoch,
-            )
+            cycle_source = self._require_source_identity()
+            cycle_stream_epoch = cycle_source.stream_epoch
             self._check_storage_budget()
             catalog_changes = self._bounded_provider_call(
                 lambda: self.lifecycle.refresh_once(
-                    self.source.fetch_catalog_page,
+                    cycle_source.fetch_catalog_page,
                     source_id=self.source_id,
                     discovered_at=self.clock(),
                 )
+            )
+            self._require_source_identity(
+                expected_stream_epoch=cycle_stream_epoch
             )
             if not isinstance(catalog_changes, tuple):
                 raise TypeError("lifecycle refresh must return a tuple")
@@ -672,11 +690,14 @@ class HeadlessCollectorService:
                 self.source_id, cycle_stream_epoch
             )
             raw_deltas = self._bounded_provider_call(
-                lambda: self.source.fetch_deltas(
+                lambda: cycle_source.fetch_deltas(
                     checkpoint,
                     records,
                     self.config.max_items,
                 )
+            )
+            self._require_source_identity(
+                expected_stream_epoch=cycle_stream_epoch
             )
             if not isinstance(raw_deltas, tuple):
                 raise TypeError("source.fetch_deltas must return a tuple")
@@ -712,8 +733,16 @@ class HeadlessCollectorService:
                     duplicates.append(delta.delta_id)
                 self._check_storage_budget()
 
+            self._require_source_identity(
+                expected_stream_epoch=cycle_stream_epoch
+            )
             completed_at = self.clock()
             _CollectorServiceState._instant(completed_at, "completed_at")
+            if raw_deltas:
+                self._record_runtime_stream_epoch(
+                    activated_at=completed_at,
+                    expected_stream_epoch=cycle_stream_epoch,
+                )
             self._state.record_success(
                 at=completed_at,
                 committed=len(committed),

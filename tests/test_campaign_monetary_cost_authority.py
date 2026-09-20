@@ -104,6 +104,7 @@ def _receipt(
     currency: str = "EUR",
     shared: bool = False,
     supersedes: tuple[str, ...] = (),
+    available_at: datetime = T1,
 ) -> MonetaryReceipt:
     projection = campaign.projection()
     return MonetaryReceipt(
@@ -117,7 +118,7 @@ def _receipt(
         incurred_start=T0,
         incurred_end=T0,
         observed_at=T0,
-        available_at=T1,
+        available_at=available_at,
         treatment=CostTreatment.SUBTRACT_FROM_GROSS,
         shared_source=shared,
         campaign_sha256=None if shared else projection.campaign_sha256,
@@ -150,7 +151,9 @@ def _resolved_receipt(receipt: MonetaryReceipt) -> ResolvedMonetaryReceipt:
         receipt=receipt,
         resolver_family=_resolver_family(receipt.cost_class),
         resolver_evidence_id=f"native-resolution:{receipt.source_evidence_id}",
-        resolver_sha256=_sha(f"native-resolution:{receipt.receipt_id}"),
+        resolver_sha256=_sha(
+            f"native-source:{receipt.source_class.value}:{receipt.source_sha256}"
+        ),
     )
 
 
@@ -160,14 +163,16 @@ def _resolved_currency(evidence: CampaignCurrencyEvidence) -> ResolvedCampaignCu
     return _issue_resolved_currency(
         evidence=evidence,
         resolver_evidence_id=f"owner-currency:{evidence.source_evidence_id}",
-        resolver_sha256=_sha(f"owner-currency:{evidence.evidence_id}"),
+        resolver_sha256=_sha(f"owner-currency-source:{evidence.source_sha256}"),
     )
 
 
 def _admit_receipt(
     authority: CampaignMonetaryCostAuthority, receipt: MonetaryReceipt
-) -> CostSourceRef:
-    return authority.publish_receipt(_resolved_receipt(receipt))
+) -> MonetaryReceipt:
+    resolution = _resolved_receipt(receipt)
+    authority.publish_receipt(resolution)
+    return resolution.receipt
 
 
 def _admit_currency(
@@ -191,8 +196,6 @@ def test_raw_self_consistent_forged_receipt_and_currency_cannot_cross_admission_
         )
         forged_currency = _currency(campaign, suffix="caller-forged-currency")
 
-        # Raw bytes may be retained as candidates for audit, but candidate storage
-        # is intentionally not a positive monetary authority.
         authority.store_receipt_candidate(forged_receipt)
         authority.store_currency_candidate(forged_currency)
 
@@ -200,9 +203,6 @@ def test_raw_self_consistent_forged_receipt_and_currency_cannot_cross_admission_
             authority.publish_receipt(forged_receipt)  # type: ignore[arg-type]
         with pytest.raises(MonetaryCostAuthorityError, match="ResolvedCampaignCurrency"):
             authority.publish_currency(forged_currency)  # type: ignore[arg-type]
-
-        # Opaque admission capabilities cannot be constructed through their public
-        # constructors even when every forged field/digest is internally consistent.
         with pytest.raises(TypeError, match="cannot be caller-constructed"):
             ResolvedMonetaryReceipt(
                 forged_receipt,
@@ -272,16 +272,18 @@ def test_package_owned_resolver_capabilities_can_drive_complete_economics_plumbi
         costs: list[CostEvidence] = []
         projection = campaign.projection()
         for index, cost_class in enumerate(CostClass, start=1):
-            receipt = _receipt(
-                campaign,
-                cost_class=cost_class,
-                amount=str(index),
-                suffix=f"resolved-{index}",
+            canonical = _admit_receipt(
+                authority,
+                _receipt(
+                    campaign,
+                    cost_class=cost_class,
+                    amount=str(index),
+                    suffix=f"resolved-{index}",
+                ),
             )
-            _admit_receipt(authority, receipt)
             costs.append(
                 authority.build_cost_evidence(
-                    receipt_id=receipt.receipt_id,
+                    receipt_id=canonical.receipt_id,
                     campaign_sha256=projection.campaign_sha256,
                     memberships=projection.membership_refs,
                 )
@@ -295,10 +297,43 @@ def test_package_owned_resolver_capabilities_can_drive_complete_economics_plumbi
             currency_ref=currency_ref,
         )
         assert version.gross_run_pnl == Decimal("60")
-        assert version.known_cost_total == Decimal("15")
-        assert version.net_after_known_costs == Decimal("45")
+        # Execution slippage + fees are already embedded in finalized PAPER P&L,
+        # so resolver-owned treatment prevents double subtraction.
+        assert version.known_cost_total == Decimal("8")
+        assert version.net_after_known_costs == Decimal("52")
         assert version.completeness is EconomicCompleteness.COMPLETE_NET_ECONOMICS
         assert version.incomplete_reasons == ()
+    finally:
+        fixture.doCleanups()
+
+
+def test_caller_requested_execution_treatment_cannot_change_canonical_net_semantics(
+    tmp_path,
+) -> None:
+    fixture, campaign = _fixture_authority()
+    try:
+        authority = CampaignMonetaryCostAuthority(tmp_path / "money")
+        raw_subtract = _receipt(
+            campaign,
+            cost_class=CostClass.EXECUTION_FEES_COMMISSION_TAX,
+            amount="7",
+            suffix="execution-fee-treatment",
+        )
+        raw_embedded = replace(raw_subtract, treatment=CostTreatment.EMBEDDED_IN_GROSS)
+        resolved_subtract = _resolved_receipt(raw_subtract)
+        resolved_embedded = _resolved_receipt(raw_embedded)
+
+        assert resolved_subtract.receipt == resolved_embedded.receipt
+        assert resolved_subtract.receipt.treatment is CostTreatment.EMBEDDED_IN_GROSS
+        authority.publish_receipt(resolved_subtract)
+        authority.publish_receipt(resolved_embedded)
+        projection = campaign.projection()
+        cost = authority.build_cost_evidence(
+            receipt_id=resolved_subtract.receipt.receipt_id,
+            campaign_sha256=projection.campaign_sha256,
+            memberships=projection.membership_refs,
+        )
+        assert cost.treatment is CostTreatment.EMBEDDED_IN_GROSS
     finally:
         fixture.doCleanups()
 
@@ -351,17 +386,19 @@ def test_cross_currency_cost_stays_fail_closed_without_fx_authority(tmp_path) ->
         costs: list[CostEvidence] = []
         projection = campaign.projection()
         for index, cost_class in enumerate(CostClass, start=1):
-            receipt = _receipt(
-                campaign,
-                cost_class=cost_class,
-                amount="1",
-                suffix=f"currency-{index}",
-                currency="USD" if cost_class is CostClass.MODEL_COMPUTE_AI else "EUR",
+            canonical = _admit_receipt(
+                authority,
+                _receipt(
+                    campaign,
+                    cost_class=cost_class,
+                    amount="1",
+                    suffix=f"currency-{index}",
+                    currency="USD" if cost_class is CostClass.MODEL_COMPUTE_AI else "EUR",
+                ),
             )
-            _admit_receipt(authority, receipt)
             costs.append(
                 authority.build_cost_evidence(
-                    receipt_id=receipt.receipt_id,
+                    receipt_id=canonical.receipt_id,
                     campaign_sha256=projection.campaign_sha256,
                     memberships=projection.membership_refs,
                 )
@@ -375,8 +412,8 @@ def test_cross_currency_cost_stays_fail_closed_without_fx_authority(tmp_path) ->
         )
         assert version.completeness is EconomicCompleteness.INCOMPLETE_NET_ECONOMICS
         assert "CURRENCY_MISMATCH:MODEL_COMPUTE_AI" in version.incomplete_reasons
-        assert version.known_cost_total == Decimal("4")
-        assert version.net_after_known_costs == Decimal("56")
+        assert version.known_cost_total == Decimal("2")
+        assert version.net_after_known_costs == Decimal("58")
     finally:
         fixture.doCleanups()
 
@@ -385,14 +422,16 @@ def test_shared_cost_requires_admitted_receipt_and_one_conserving_allocation(tmp
     fixture, campaign = _fixture_authority()
     try:
         authority = CampaignMonetaryCostAuthority(tmp_path / "money")
-        receipt = _receipt(
-            campaign,
-            cost_class=CostClass.PROVIDER_DATA,
-            amount="10",
-            suffix="shared-provider",
-            shared=True,
+        canonical = _admit_receipt(
+            authority,
+            _receipt(
+                campaign,
+                cost_class=CostClass.PROVIDER_DATA,
+                amount="10",
+                suffix="shared-provider",
+                shared=True,
+            ),
         )
-        _admit_receipt(authority, receipt)
         projection = campaign.projection()
         other_membership = (
             CanonicalMembershipRef("RUN", "other-run", _sha("other-run")),
@@ -415,8 +454,8 @@ def test_shared_cost_requires_admitted_receipt_and_one_conserving_allocation(tmp
             )
         )
         bad = AllocationPlan(
-            receipt_id=receipt.receipt_id,
-            receipt_sha256=receipt.record_sha256,
+            receipt_id=canonical.receipt_id,
+            receipt_sha256=canonical.record_sha256,
             targets=tuple(
                 sorted(
                     (
@@ -433,15 +472,15 @@ def test_shared_cost_requires_admitted_receipt_and_one_conserving_allocation(tmp
             authority.publish_allocation(bad)
 
         plan = AllocationPlan(
-            receipt_id=receipt.receipt_id,
-            receipt_sha256=receipt.record_sha256,
+            receipt_id=canonical.receipt_id,
+            receipt_sha256=canonical.record_sha256,
             targets=targets,
             observed_at=T1,
             available_at=T1,
         )
         authority.publish_allocation(plan)
         cost = authority.build_cost_evidence(
-            receipt_id=receipt.receipt_id,
+            receipt_id=canonical.receipt_id,
             campaign_sha256=projection.campaign_sha256,
             memberships=projection.membership_refs,
         )
@@ -456,15 +495,17 @@ def test_duplicate_external_source_identity_with_conflicting_amount_is_rejected(
     fixture, campaign = _fixture_authority()
     try:
         authority = CampaignMonetaryCostAuthority(tmp_path / "money")
-        first = _receipt(
-            campaign,
-            cost_class=CostClass.PROVIDER_DATA,
-            amount="2",
-            suffix="invoice-42",
+        first = _admit_receipt(
+            authority,
+            _receipt(
+                campaign,
+                cost_class=CostClass.PROVIDER_DATA,
+                amount="2",
+                suffix="invoice-42",
+            ),
         )
-        _admit_receipt(authority, first)
         conflicting = replace(first, money=MoneyAmount(Decimal("3"), "EUR"))
-        with pytest.raises(MonetaryCostAuthorityError, match="conflicting immutable evidence"):
+        with pytest.raises(MonetaryCostAuthorityError, match="external source identity"):
             _admit_receipt(authority, conflicting)
         with pytest.raises(MonetaryCostAuthorityIntegrityError, match="resolver admission"):
             authority.build_cost_evidence(
@@ -476,39 +517,97 @@ def test_duplicate_external_source_identity_with_conflicting_amount_is_rejected(
         fixture.doCleanups()
 
 
-def test_correction_is_append_only_and_projects_exact_cost_supersession(tmp_path) -> None:
+def test_correction_makes_predecessor_non_effective_and_projects_exact_supersession(tmp_path) -> None:
     fixture, campaign = _fixture_authority()
     try:
         authority = CampaignMonetaryCostAuthority(tmp_path / "money")
         projection = campaign.projection()
-        first = _receipt(
-            campaign,
-            cost_class=CostClass.PROVIDER_DATA,
-            amount="2",
-            suffix="invoice-v1",
+        first = _admit_receipt(
+            authority,
+            _receipt(
+                campaign,
+                cost_class=CostClass.PROVIDER_DATA,
+                amount="2",
+                suffix="invoice-v1",
+            ),
         )
-        _admit_receipt(authority, first)
         first_cost = authority.build_cost_evidence(
             receipt_id=first.receipt_id,
             campaign_sha256=projection.campaign_sha256,
             memberships=projection.membership_refs,
         )
-        corrected = _receipt(
-            campaign,
-            cost_class=CostClass.PROVIDER_DATA,
-            amount="3",
-            suffix="invoice-v2",
-            supersedes=(first.receipt_id,),
+        corrected = _admit_receipt(
+            authority,
+            _receipt(
+                campaign,
+                cost_class=CostClass.PROVIDER_DATA,
+                amount="3",
+                suffix="invoice-v2",
+                supersedes=(first.receipt_id,),
+            ),
         )
-        _admit_receipt(authority, corrected)
         corrected_cost = authority.build_cost_evidence(
             receipt_id=corrected.receipt_id,
             campaign_sha256=projection.campaign_sha256,
             memberships=projection.membership_refs,
         )
         assert corrected_cost.supersedes_cost_evidence_ids == (first_cost.cost_evidence_id,)
-        assert (authority.receipts_dir / f"{first.receipt_id}.json").exists()
-        assert (authority.receipts_dir / f"{corrected.receipt_id}.json").exists()
+        with pytest.raises(MonetaryCostAuthorityError, match="superseded"):
+            authority.build_cost_evidence(
+                receipt_id=first.receipt_id,
+                campaign_sha256=projection.campaign_sha256,
+                memberships=projection.membership_refs,
+            )
+        with pytest.raises(MonetaryCostAuthorityError, match="superseded"):
+            authority.qualify_cost(first_cost, as_of=T2)
+        assert authority.qualify_cost(corrected_cost, as_of=T2) == corrected_cost
+    finally:
+        fixture.doCleanups()
+
+
+def test_monotonic_state_rejects_local_rollback_that_would_revive_stale_receipt(tmp_path) -> None:
+    fixture, campaign = _fixture_authority()
+    try:
+        workspace = tmp_path / "money"
+        machine_authority = tmp_path / "machine-authority"
+        authority = CampaignMonetaryCostAuthority(
+            workspace,
+            authority_root=machine_authority,
+        )
+        projection = campaign.projection()
+        first = _admit_receipt(
+            authority,
+            _receipt(
+                campaign,
+                cost_class=CostClass.PROVIDER_DATA,
+                amount="2",
+                suffix="rollback-v1",
+            ),
+        )
+        first_cost = authority.build_cost_evidence(
+            receipt_id=first.receipt_id,
+            campaign_sha256=projection.campaign_sha256,
+            memberships=projection.membership_refs,
+        )
+        old_state = authority.state_path.read_bytes()
+        _admit_receipt(
+            authority,
+            _receipt(
+                campaign,
+                cost_class=CostClass.PROVIDER_DATA,
+                amount="3",
+                suffix="rollback-v2",
+                supersedes=(first.receipt_id,),
+            ),
+        )
+
+        authority.state_path.write_bytes(old_state)
+        restarted = CampaignMonetaryCostAuthority(
+            workspace,
+            authority_root=machine_authority,
+        )
+        with pytest.raises(MonetaryCostAuthorityIntegrityError, match="monotonic"):
+            restarted.qualify_cost(first_cost, as_of=T2)
     finally:
         fixture.doCleanups()
 
@@ -518,13 +617,15 @@ def test_restart_readback_detects_receipt_tamper(tmp_path) -> None:
     try:
         root = tmp_path / "money"
         authority = CampaignMonetaryCostAuthority(root)
-        receipt = _receipt(
-            campaign,
-            cost_class=CostClass.PROVIDER_DATA,
-            amount="2",
-            suffix="tamper",
+        receipt = _admit_receipt(
+            authority,
+            _receipt(
+                campaign,
+                cost_class=CostClass.PROVIDER_DATA,
+                amount="2",
+                suffix="tamper",
+            ),
         )
-        _admit_receipt(authority, receipt)
         projection = campaign.projection()
         cost = authority.build_cost_evidence(
             receipt_id=receipt.receipt_id,

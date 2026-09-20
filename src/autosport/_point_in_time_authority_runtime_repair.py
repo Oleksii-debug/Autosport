@@ -16,6 +16,7 @@ from .monotonic_workspace_authority import (
     MonotonicWorkspaceAuthority,
     MonotonicWorkspaceAuthorityError,
 )
+from .scientific_registry import ScientificRegistry
 
 
 _ORIGINAL_BIND = evidence.PointInTimeFeatureAuthority.bind
@@ -23,11 +24,15 @@ _ORIGINAL_LOAD = evidence.HoldoutConsumptionLedger._load
 
 
 def _bind_exact_lineage_authority(*, lineage_authority, **kwargs):
-    """Reject caller-polymorphic lineage authority before any authority read."""
+    """Reject caller-polymorphic lineage/registry authority before any positive read."""
 
     if type(lineage_authority) is not DatasetSnapshotLineageAuthority:
         raise evidence.PointInTimeEvidenceError(
             "lineage_authority must be an exact DatasetSnapshotLineageAuthority"
+        )
+    if type(lineage_authority.registry) is not ScientificRegistry:
+        raise evidence.PointInTimeEvidenceError(
+            "lineage_authority.registry must be an exact ScientificRegistry"
         )
     return _ORIGINAL_BIND(lineage_authority=lineage_authority, **kwargs)
 
@@ -69,7 +74,7 @@ def _load_with_fresh_authority(self: evidence.HoldoutConsumptionLedger) -> None:
 
 # The provenance guard is imported first by autosport.__init__, so wrapping here
 # preserves all of its canonical DatasetSnapshot/FeatureSet/provenance/publication
-# checks while fencing the capability before they can dispatch to caller code.
+# checks while fencing the capabilities before they can dispatch to caller code.
 evidence.PointInTimeFeatureAuthority.bind = staticmethod(_bind_exact_lineage_authority)
 evidence.HoldoutConsumptionLedger._load = _load_with_fresh_authority
 

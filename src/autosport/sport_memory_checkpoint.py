@@ -457,17 +457,22 @@ class BoundSportMemoryRuntime(SportMemoryRuntime):
         return verified_opponent
 
     def materialize(self, **kwargs):
-        # The opponent store is a whole-file canonical authority. Hold the same
-        # durable path lock used by atomic_write_json from the pre-refresh through
-        # snapshot publication and post-publication projection verification. A
-        # concurrent canonical source writer therefore cannot publish G2 between
-        # our G verification and a stale derived-snapshot whole-file replace.
-        with durable_path_lock(Path(self._bound_opponent_selector.path)):
-            self._refresh_bound_authority()
-            artifact = super().materialize(**kwargs)
-            verified_opponent = self._refresh_bound_authority()
-            _verify_runtime_snapshot_bindings(self, verified_opponent)
-            return artifact
+        # Identity and opponent source evidence jointly define the authority
+        # generation. Fence both canonical stores for the complete verified
+        # publication transaction. Sorting resolved paths gives every caller the
+        # same lock order, while atomic_write_json can safely re-enter either lock.
+        identity_path = Path(self._bound_identity_selector.path)
+        opponent_path = Path(self._bound_opponent_selector.path)
+        first_path, second_path = sorted(
+            (identity_path, opponent_path), key=lambda path: str(_resolved(path))
+        )
+        with durable_path_lock(first_path):
+            with durable_path_lock(second_path):
+                self._refresh_bound_authority()
+                artifact = super().materialize(**kwargs)
+                verified_opponent = self._refresh_bound_authority()
+                _verify_runtime_snapshot_bindings(self, verified_opponent)
+                return artifact
 
 
 def _new_bound_runtime(

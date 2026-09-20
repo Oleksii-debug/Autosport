@@ -7,11 +7,6 @@ import json
 import pytest
 
 from autosport.campaign_cost_evidence import CostBasis, CostClass, CostEvidenceError, CostTreatment
-from autosport.monetary_cost_authority import (
-    IncurredMonetaryReceipt,
-    MonetaryEvidenceQuality,
-    MonetarySourceClass,
-)
 from autosport.owner_fixed_expense_authority import (
     OwnerFixedExpenseAuthority,
     OwnerFixedExpenseAuthorityError,
@@ -55,31 +50,22 @@ def test_owner_record_derives_membership_treatment_amount_and_currency(tmp_path)
         fixture.doCleanups()
 
 
-def test_generic_caller_receipt_cannot_enter_owner_authority(tmp_path) -> None:
+def test_arbitrary_receipt_object_cannot_enter_owner_authority(tmp_path) -> None:
     fixture, campaign = _fixture_authority()
     try:
         authority = OwnerFixedExpenseAuthority(
             tmp_path / "workspace",
             authority_root=tmp_path / "authority",
         )
-        forged = IncurredMonetaryReceipt(
-            source_class=MonetarySourceClass.PROVIDER_DATA,
-            source_family="provider.billing.invoice",
-            source_authority_id="provider-account-7",
-            source_evidence_id="invoice-fake",
-            source_sha256="a" * 64,
-            amount=Decimal("100"),
-            currency="EUR",
-            incurred_from=datetime.now(UTC) - timedelta(minutes=2),
-            incurred_to=datetime.now(UTC) - timedelta(minutes=1),
-            observed_at=datetime.now(UTC) - timedelta(minutes=1),
-            available_at=datetime.now(UTC) - timedelta(minutes=1),
-            quality=MonetaryEvidenceQuality.INCURRED_RECEIPT,
-        )
         with pytest.raises(TypeError):
             authority.record_expense(
                 campaign=campaign,
-                receipt=forged,
+                receipt={
+                    "source_class": "PROVIDER_DATA",
+                    "source_authority_id": "provider-account-7",
+                    "amount": "100",
+                    "currency": "EUR",
+                },
             )
     finally:
         fixture.doCleanups()

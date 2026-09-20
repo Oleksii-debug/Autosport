@@ -5,6 +5,7 @@ import json
 
 import pytest
 
+from autosport import _sport_memory_authority_guard as _guard
 from autosport.opponent_intelligence import (
     FeatureSnapshot,
     IdentityView,
@@ -13,7 +14,7 @@ from autosport.opponent_intelligence import (
 )
 from autosport.sport_memory_runtime import (
     SportMemoryError,
-    SportMemoryRuntime,
+    SportMemoryRuntime as _PublicSportMemoryRuntime,
     SportMemoryScope,
 )
 
@@ -83,6 +84,16 @@ class _ViewAuthority:
         return rating, feature
 
 
+class _LowLevelSportMemoryRuntime(_PublicSportMemoryRuntime):
+    """Unit-test harness for deterministic identity-view core semantics."""
+
+    def materialize(self, *args, **kwargs):
+        return _guard._ORIGINAL_MATERIALIZE(self, *args, **kwargs)
+
+
+SportMemoryRuntime = _LowLevelSportMemoryRuntime
+
+
 def _scope() -> SportMemoryScope:
     return SportMemoryScope(
         sport_id="tennis",
@@ -92,7 +103,7 @@ def _scope() -> SportMemoryScope:
 
 
 def _materialize(
-    runtime: SportMemoryRuntime,
+    runtime: _PublicSportMemoryRuntime,
     *,
     view: IdentityView = IdentityView.AS_KNOWN_AT_DECISION,
 ):

@@ -5,6 +5,9 @@ from datetime import timedelta
 from decimal import Decimal
 
 from autosport import _paper_execution_decision_origin as origin_module
+from autosport import _paper_execution_decision_origin_callsite_guard as callsite_guard
+from autosport import _paper_execution_decision_origin_instance_guard as instance_guard
+from autosport import _paper_execution_decision_origin_resume_guard as resume_guard
 from autosport.paper import PaperBook
 from autosport.paper_execution_adoption import (
     PaperExecutionAdoptionRuntime,
@@ -73,59 +76,66 @@ def test_repeated_origin_module_reload_preserves_originless_reserve_load_and_exe
     importlib.reload(origin_module)
     importlib.reload(origin_module)
 
-    config = _config()
-    plan = _plan()
-    ledger = PaperExecutionLedger(tmp_path / "paper-execution.jsonl")
+    try:
+        config = _config()
+        plan = _plan()
+        ledger = PaperExecutionLedger(tmp_path / "paper-execution.jsonl")
 
-    ledger.reserve_run(
-        run_id="manual-originless-reload-run",
-        trigger_id=plan.decision_id,
-        plan=plan,
-        config=config,
-        started_at=STARTED_AT,
-        observation_evidence_ids={},
-    )
-    manual = ledger.load_run(
-        run_id="manual-originless-reload-run",
-        trigger_id=plan.decision_id,
-        plan=plan,
-        config=config,
-        started_at=STARTED_AT,
-        observation_evidence_ids={},
-    )
-    assert manual is not None
-    assert ledger.reservation_decision_origin("manual-originless-reload-run") is None
-
-    runtime = PaperExecutionAdoptionRuntime(
-        book=PaperBook("100"),
-        ledger=ledger,
-        config=config,
-        max_quote_age=timedelta(seconds=60),
-        paper_book_path=tmp_path / "paper-book.json",
-    )
-    action = plan.actions[0]
-    prepared = runtime._mint_prepared(
-        PreparedPaperExecution(
-            execution_plan=plan,
-            exposure_bindings=(
-                PaperExposureBinding(
-                    action_id=action.action_id,
-                    sport=None,
-                    bankroll_id=None,
-                    currency=None,
-                ),
-            ),
-            intent_evidence_json="{}",
+        ledger.reserve_run(
+            run_id="manual-originless-reload-run",
+            trigger_id=plan.decision_id,
+            plan=plan,
+            config=config,
+            started_at=STARTED_AT,
+            observation_evidence_ids={},
         )
-    )
+        manual = ledger.load_run(
+            run_id="manual-originless-reload-run",
+            trigger_id=plan.decision_id,
+            plan=plan,
+            config=config,
+            started_at=STARTED_AT,
+            observation_evidence_ids={},
+        )
+        assert manual is not None
+        assert ledger.reservation_decision_origin("manual-originless-reload-run") is None
 
-    result = runtime.execute(
-        prepared=prepared,
-        trigger_id=plan.decision_id,
-        started_at=STARTED_AT,
-        materialize_exposure=False,
-    )
+        runtime = PaperExecutionAdoptionRuntime(
+            book=PaperBook("100"),
+            ledger=ledger,
+            config=config,
+            max_quote_age=timedelta(seconds=60),
+            paper_book_path=tmp_path / "paper-book.json",
+        )
+        action = plan.actions[0]
+        prepared = runtime._mint_prepared(
+            PreparedPaperExecution(
+                execution_plan=plan,
+                exposure_bindings=(
+                    PaperExposureBinding(
+                        action_id=action.action_id,
+                        sport=None,
+                        bankroll_id=None,
+                        currency=None,
+                    ),
+                ),
+                intent_evidence_json="{}",
+            )
+        )
 
-    assert result.run.plan_id == plan.plan_id
-    assert result.run.trigger_id == plan.decision_id
-    assert ledger.reservation_decision_origin(result.run.run_id) is None
+        result = runtime.execute(
+            prepared=prepared,
+            trigger_id=plan.decision_id,
+            started_at=STARTED_AT,
+            materialize_exposure=False,
+        )
+
+        assert result.run.plan_id == plan.plan_id
+        assert result.run.trigger_id == plan.decision_id
+        assert ledger.reservation_decision_origin(result.run.run_id) is None
+    finally:
+        # Restore the public helper binding and refresh guard globals so this
+        # regression is order-independent for the rest of the full test suite.
+        importlib.reload(instance_guard)
+        importlib.reload(callsite_guard)
+        importlib.reload(resume_guard)

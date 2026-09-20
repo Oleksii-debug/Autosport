@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
 import hashlib
 import json
 from dataclasses import dataclass
@@ -488,7 +489,7 @@ def _portfolio_execution_membership(
             getattr(record, "agent", None) == _PORTFOLIO_PLAN_DECISION_AGENT
             and getattr(record, "action", None) == _PORTFOLIO_PLAN_DECISION_ACTION
             and getattr(record, "decision_kind", None) == ECONOMIC_DECISION_KIND
-            and type(payload) is dict
+            and isinstance(payload, Mapping)
             and payload.get(_PORTFOLIO_PLAN_SHA256_PAYLOAD_KEY)
             == plan_sha256
         ):

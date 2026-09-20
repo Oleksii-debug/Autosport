@@ -182,6 +182,48 @@ def test_semantic_attempt_exact_retry_is_idempotent_but_conflict_fails_closed(tm
         store.start_attempt(semantic_attempt_id="attempt-semantic-1", member_authority_id=member.member_authority_id, candidate=candidate, created_at=T2)
 
 
+def test_exact_duplicate_start_converges_across_stale_interleaving(tmp_path, monkeypatch):
+    _, _, _, candidate, member, _, store = _foundation(tmp_path)
+    peer = TrialFamilyAccountingStore(store.path, workspace_root=store.workspace_root, authority_root=store.authority_root)
+    original_append = TrialFamilyAccountingStore._append_event
+    injected = False
+    peer_attempt = None
+
+    def interleaving_append(instance, kind, event_at, payload, **kwargs):
+        nonlocal injected, peer_attempt
+        if instance is store and kind == "ATTEMPT_STARTED" and not injected:
+            injected = True
+            peer_attempt = peer.start_attempt(semantic_attempt_id="concurrent-exact", member_authority_id=member.member_authority_id, candidate=candidate, created_at=T1)
+        return original_append(instance, kind, event_at, payload, **kwargs)
+
+    monkeypatch.setattr(TrialFamilyAccountingStore, "_append_event", interleaving_append)
+    result = store.start_attempt(semantic_attempt_id="concurrent-exact", member_authority_id=member.member_authority_id, candidate=candidate, created_at=T1)
+    assert injected and peer_attempt is not None
+    assert result == peer_attempt
+    assert len(store.attempts()) == 1
+
+
+def test_conflicting_duplicate_start_fails_closed_after_stale_interleaving(tmp_path, monkeypatch):
+    _, _, _, candidate, member, _, store = _foundation(tmp_path)
+    peer = TrialFamilyAccountingStore(store.path, workspace_root=store.workspace_root, authority_root=store.authority_root)
+    original_append = TrialFamilyAccountingStore._append_event
+    injected = False
+
+    def interleaving_append(instance, kind, event_at, payload, **kwargs):
+        nonlocal injected
+        if instance is store and kind == "ATTEMPT_STARTED" and not injected:
+            injected = True
+            peer.start_attempt(semantic_attempt_id="concurrent-conflict", member_authority_id=member.member_authority_id, candidate=candidate, created_at=T2)
+        return original_append(instance, kind, event_at, payload, **kwargs)
+
+    monkeypatch.setattr(TrialFamilyAccountingStore, "_append_event", interleaving_append)
+    with pytest.raises(ValueError, match="conflicting duplicate semantic"):
+        store.start_attempt(semantic_attempt_id="concurrent-conflict", member_authority_id=member.member_authority_id, candidate=candidate, created_at=T1)
+    assert injected
+    attempts = store.attempts()
+    assert len(attempts) == 1 and attempts[0].created_at == T2
+
+
 def test_backdated_append_is_rejected_and_asof_remains_causal(tmp_path):
     _, _, _, candidate, member, _, store = _foundation(tmp_path)
     store.start_attempt(semantic_attempt_id="t1", member_authority_id=member.member_authority_id, candidate=candidate, created_at=T1)
@@ -233,6 +275,18 @@ def test_completion_requires_durable_experiment_exact_protocol_and_candidate(tmp
     registry2.append(wrong_candidate)
     with pytest.raises(ValueError, match="config_sha256"):
         store2.complete_attempt(attempt_id=attempt2.attempt_id, experiment_id=wrong_candidate.experiment_id, registry=registry2)
+
+
+def test_completion_rejects_foreign_evaluation_bundle_lineage(tmp_path):
+    registry, _, _, candidate, member, plan, store = _foundation(tmp_path)
+    attempt = store.start_attempt(semantic_attempt_id="foreign-bundle", member_authority_id=member.member_authority_id, candidate=candidate, created_at=T1)
+    foreign_bundle = EvaluationBundleRef("eval-foreign", SHA_A, SHA_C, "dataset-foreign", plan.protocol_sha256, (SHA_C, SHA_D), T2, evaluated_strategy_version_id="strategy-1", evaluated_model_version_id="model-1")
+    registry.append(foreign_bundle)
+    experiment = replace(_experiment(experiment_id="foreign-bundle-experiment"), evaluation_bundle_id=foreign_bundle.evaluation_bundle_id)
+    registry.append(experiment)
+    with pytest.raises(ValueError, match="EvaluationBundle dataset_snapshot_id"):
+        store.complete_attempt(attempt_id=attempt.attempt_id, experiment_id=experiment.experiment_id, registry=registry)
+    assert store.attempts()[0].status is TrialAttemptStatus.OPEN
 
 
 def test_completion_rejects_experiment_published_before_attempt_start(tmp_path):

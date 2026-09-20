@@ -40,7 +40,7 @@ class PaperCampaignAdmissionWitnessRecoveryTests(unittest.TestCase):
             self.assertEqual(len(PaperBook.load(fixture.workspace / "paper_book.json").tickets), 1)
             self.assertEqual(
                 JsonlDecisionLedger(fixture.workspace / "decisions.jsonl").verify_integrity(),
-                0,
+                1,
             )
             receipt = fixture.admit(fixture.coordinator(resumed=True))
             self.assertEqual(receipt.ticket_id, fixture.execution_ticket_id)
@@ -92,7 +92,7 @@ class PaperCampaignAdmissionWitnessRecoveryTests(unittest.TestCase):
             self.assertEqual(len(PaperBook.load(fixture.workspace / "paper_book.json").tickets), 1)
             self.assertEqual(
                 JsonlDecisionLedger(fixture.workspace / "decisions.jsonl").verify_integrity(),
-                1,
+                2,
             )
 
             receipt = fixture.admit(fixture.coordinator(resumed=True))

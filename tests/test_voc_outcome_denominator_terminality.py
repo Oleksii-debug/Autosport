@@ -213,14 +213,15 @@ class VOCOutcomeDenominatorTerminalityTests(unittest.TestCase):
         # The same frozen window then begins writing explicit admissions.  Even
         # with a scored terminal for that explicit member, the older legacy
         # member may not silently disappear from the denominator.
+        router = fixture._precommit_router(target)
         admission_sha = append_paired_voc_admission(
             fixture.ledger,
-            admission_id="explicit-success-after-legacy",
+            admission_id=f"explicit:{target.evaluation_id}",
             decision_context_sha256=source_context_sha,
             decision_input_sha256=target.decision_input_sha256,
             decision_deadline=target.decision_deadline,
             research_protocol_id=target.research_protocol_id,
-            cohort_id="mixed-format-cohort",
+            cohort_id="voc-cohort-derived",
             task_class=target.task_class,
             scope={
                 "sport_id": target.sport_id,
@@ -263,7 +264,10 @@ class VOCOutcomeDenominatorTerminalityTests(unittest.TestCase):
             VOCEvaluationError,
             "mixed legacy and explicit VOC cohort formats require a frozen migration boundary",
         ):
-            fixture._authority().resolve(target.evaluation_id, as_of=_FIXTURE.T_AS_OF)
+            fixture._authority(compute_execution_store=router).resolve(
+                target.evaluation_id,
+                as_of=_FIXTURE.T_AS_OF,
+            )
 
 
 if __name__ == "__main__":

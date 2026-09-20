@@ -34,7 +34,11 @@ from .participant_identity import (
     ParticipantIdentityError,
     ParticipantIdentityRegistry,
 )
-from .product_runtime import AutonomousProductRuntime
+from .product_runtime import (
+    AutonomousProductRuntime,
+    ProductCompositionError,
+    _settlement_authority_identity,
+)
 from .storage import SQLiteMarketStore
 
 
@@ -396,6 +400,20 @@ class SportMemoryResultMaterializer:
             raise TypeError(
                 "product runtime lacks durable settlement authority identity"
             )
+        try:
+            computed_identity = _settlement_authority_identity(
+                source=runtime.collector.source,
+                source_id=runtime.manifest.source_id,
+                outcome_authority=outcome_authority,
+            )
+        except ProductCompositionError as exc:
+            raise TypeError(
+                "product runtime settlement authority identity cannot be verified"
+            ) from exc
+        if computed_identity != authority_identity:
+            raise TypeError(
+                "product runtime settlement authority identity does not match manifest"
+            )
         self.opponent_store = opponent_store
         self._runtime = runtime
         self._coordinator = coordinator
@@ -438,6 +456,20 @@ class SportMemoryResultMaterializer:
             )
         if not callable(getattr(self._outcome_authority, "resolve", None)):
             raise TypeError("outcome_authority capability changed after construction")
+        try:
+            current_identity = _settlement_authority_identity(
+                source=self._runtime.collector.source,
+                source_id=self._runtime.manifest.source_id,
+                outcome_authority=self._outcome_authority,
+            )
+        except ProductCompositionError as exc:
+            raise TypeError(
+                "product-owned settlement authority identity changed after construction"
+            ) from exc
+        if current_identity != self._settlement_authority_identity:
+            raise TypeError(
+                "product-owned settlement authority identity changed after construction"
+            )
         registry = self.opponent_store.identity_registry
         if type(registry) is not ParticipantIdentityRegistry:
             raise TypeError("identity_registry capability changed after construction")

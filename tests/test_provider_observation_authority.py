@@ -174,10 +174,16 @@ def test_capture_mints_authority_only_for_exact_complete_provider_frame(tmp_path
     path = store.save(snapshot)
     assert path.name == f"{snapshot.evidence_sha256}.json"
 
-    restarted = _store(tmp_path).load(snapshot.evidence_sha256)
-    assert restarted.to_payload() == snapshot.to_payload()
-    assert restarted is not snapshot
-    assert_complete_game_board_authoritative(restarted)
+    # Local durable bytes/journals are integrity evidence, not remote-origin
+    # attestation. A restarted process must reacquire before positive authority.
+    with pytest.raises(
+        ProviderObservationUnsupportedError,
+        match="restart cannot reissue provider-origin authority",
+    ):
+        _store(tmp_path).load(snapshot.evidence_sha256)
+
+    # The still-live exact object keeps its ephemeral production-capture capability.
+    assert_complete_game_board_authoritative(snapshot)
 
 
 def test_caller_constructed_lookalike_does_not_have_production_authority():
@@ -219,7 +225,7 @@ def test_manually_written_self_consistent_bytes_cannot_regain_authority(tmp_path
 
     with pytest.raises(
         ProviderObservationIntegrityError,
-        match="not proven by production-owned acquisition receipt",
+        match="independent machine-state acquisition authority",
     ):
         _store(tmp_path).load(forged.evidence_sha256)
     with pytest.raises(ProviderObservationUnsupportedError):

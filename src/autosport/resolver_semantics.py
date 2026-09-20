@@ -234,6 +234,67 @@ def _all_referenced_names(code: CodeType) -> set[str]:
     return names
 
 
+def _attribute_chain(node: ast.AST) -> tuple[str, tuple[str, ...]] | None:
+    attributes: list[str] = []
+    current = node
+    while isinstance(current, ast.Attribute):
+        attributes.append(current.attr)
+        current = current.value
+    if not isinstance(current, ast.Name) or not attributes:
+        return None
+    return current.id, tuple(reversed(attributes))
+
+
+def _module_attribute_dependencies(
+    segment: str,
+    resolver: FunctionType,
+    *,
+    visiting: set[str],
+) -> dict[str, object]:
+    try:
+        tree = ast.parse(segment)
+    except (SyntaxError, ValueError) as exc:
+        raise ResolverSemanticIdentityError(
+            "resolver source cannot be inspected for module dependencies"
+        ) from exc
+
+    dependencies: dict[str, object] = {}
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Attribute):
+            continue
+        chain = _attribute_chain(node)
+        if chain is None:
+            continue
+        root_name, attributes = chain
+        root = resolver.__globals__.get(root_name)
+        if type(root) is not ModuleType:
+            continue
+
+        value: object = root
+        for attribute in attributes:
+            try:
+                value = getattr(value, attribute)
+            except AttributeError as exc:
+                raise ResolverSemanticIdentityError(
+                    "referenced module attribute cannot be resolved"
+                ) from exc
+
+        # Seal executable/module dependencies reached through module-qualified
+        # source expressions. Ordinary data attributes remain represented by the
+        # resolver source itself and by any directly referenced canonical globals.
+        if type(value) not in (
+            FunctionType,
+            BuiltinFunctionType,
+            BuiltinMethodType,
+            ModuleType,
+            type,
+        ):
+            continue
+        key = f"module:{root_name}.{'.'.join(attributes)}"
+        dependencies[key] = _dependency_payload(value, visiting=visiting)
+    return dependencies
+
+
 def _owner_class(resolver: FunctionType) -> type | None:
     parts = _qualname_parts(resolver)
     if len(parts) < 2:
@@ -296,9 +357,18 @@ def _class_dependency(
 ) -> object | None:
     if owner is None:
         return None
-    raw = vars(owner).get(name)
-    if raw is None:
+
+    resolved_owner: type | None = None
+    raw: object = None
+    for candidate in owner.__mro__:
+        namespace = vars(candidate)
+        if name in namespace:
+            resolved_owner = candidate
+            raw = namespace[name]
+            break
+    if resolved_owner is None:
         return None
+
     if type(raw) is staticmethod or type(raw) is classmethod:
         raw = raw.__func__
     elif type(raw) is property:
@@ -307,13 +377,18 @@ def _class_dependency(
                 "resolver references property without a getter"
             )
         raw = raw.fget
-    return _dependency_payload(raw, visiting=visiting)
+    return [
+        "class-attribute",
+        f"{resolved_owner.__module__}.{resolved_owner.__qualname__}",
+        _dependency_payload(raw, visiting=visiting),
+    ]
 
 
 def _function_semantic_payload(
     resolver: FunctionType,
     *,
     visiting: set[str],
+    runtime_owner: type | None = None,
 ) -> dict[str, object]:
     if type(resolver) is not FunctionType:
         raise ResolverSemanticIdentityError("resolver must be an exact Python function")
@@ -337,7 +412,19 @@ def _function_semantic_payload(
 
     next_visiting = set(visiting)
     next_visiting.add(semantic_key)
-    owner = _owner_class(resolver)
+    declared_owner = _owner_class(resolver)
+    if runtime_owner is not None:
+        if type(runtime_owner) is not type:
+            raise ResolverSemanticIdentityError(
+                "runtime resolver owner must be an exact class"
+            )
+        if declared_owner is not None and declared_owner not in runtime_owner.__mro__:
+            raise ResolverSemanticIdentityError(
+                "runtime resolver owner does not inherit the declaring owner"
+            )
+        owner = runtime_owner
+    else:
+        owner = declared_owner
     dependencies: dict[str, object] = {}
     for name in sorted(_all_referenced_names(resolver.__code__)):
         class_dependency = _class_dependency(
@@ -354,13 +441,25 @@ def _function_semantic_payload(
                 visiting=next_visiting,
             )
 
+    dependencies.update(
+        _module_attribute_dependencies(
+            segment,
+            resolver,
+            visiting=next_visiting,
+        )
+    )
+
     return {
         "source_sha256": source_sha256,
         "dependencies": dependencies,
     }
 
 
-def function_semantic_sha256(resolver: FunctionType) -> str:
+def function_semantic_sha256(
+    resolver: FunctionType,
+    *,
+    runtime_owner: type | None = None,
+) -> str:
     """Fingerprint resolver source plus referenced authority-bearing dependencies.
 
     The persisted digest is derived from canonical source tokens and a recursively
@@ -370,5 +469,9 @@ def function_semantic_sha256(resolver: FunctionType) -> str:
     code mutation is rejected before an authority-bearing read.
     """
 
-    payload = _function_semantic_payload(resolver, visiting=set())
+    payload = _function_semantic_payload(
+        resolver,
+        visiting=set(),
+        runtime_owner=runtime_owner,
+    )
     return hashlib.sha256(_canonical_json(payload).encode("utf-8")).hexdigest()

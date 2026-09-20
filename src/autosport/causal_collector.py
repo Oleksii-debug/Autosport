@@ -21,6 +21,8 @@ for _name, _value in vars(_legacy).items():
 
 from .collector_sqlite_active_store import CollectorDeltaStore as CollectorDeltaStore
 
+# Preserve the established public import/pickle identity for the replacement class.
+CollectorDeltaStore.__module__ = __name__
 # Legacy-defined callables resolve postponed annotations and any module-global store
 # reference through their defining module. Point that global at the same canonical
 # class exported here so reflection/runtime lookup cannot resurrect the JSON store.

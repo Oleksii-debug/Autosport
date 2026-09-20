@@ -698,10 +698,10 @@ class CanonicalOutcomeDerivedVOCScoreAuthority(
                 admission.get("decision_context_sha256"),
                 field="VOC admission decision_context_sha256",
             ),
-            "decision_deadline": _base._time(
+            "decision_deadline": _base._instant(
                 admission.get("decision_deadline"),
                 field="VOC admission decision_deadline",
-            ),
+            ).isoformat().replace("+00:00", "Z"),
             "research_protocol_id": _base._text(
                 admission.get("research_protocol_id"),
                 field="VOC admission research_protocol_id",

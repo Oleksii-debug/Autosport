@@ -17,6 +17,8 @@ from decimal import Decimal, InvalidOperation
 from enum import Enum
 from typing import Any, Mapping, Sequence
 
+from .opportunity import StrategyClass
+
 
 class ExternalValidityError(ValueError):
     """Raised when external-validity comparison evidence is inconsistent."""
@@ -32,6 +34,29 @@ class BaselineKind(str, Enum):
     FIXED_SELECTION_THRESHOLD = "fixed-selection-threshold"
     FIXED_FRACTIONAL_STAKING = "fixed-fractional-staking"
     EQUAL_WEIGHT_PORTFOLIO = "equal-weight-candidate-portfolio"
+
+
+class EvaluationContractFamily(str, Enum):
+    """Typed strategy-specific proof/metric family for external-validity evaluation."""
+
+    PREDICTIVE_FORECAST_VALUE = "predictive-forecast-value"
+    LIVE_PRICE_EXECUTION = "live-price-execution"
+    ARBITRAGE_EXECUTION = "arbitrage-execution"
+    DUTCHING_EXECUTION = "dutching-execution"
+    HEDGE_PORTFOLIO_RISK = "hedge-portfolio-risk"
+    HYBRID_COMPOSITE = "hybrid-composite"
+
+
+_REQUIRED_CONTRACT_FAMILY_BY_STRATEGY: dict[
+    StrategyClass, EvaluationContractFamily
+] = {
+    StrategyClass.PREDICTIVE_EDGE: EvaluationContractFamily.PREDICTIVE_FORECAST_VALUE,
+    StrategyClass.LIVE_PRICE_MOVEMENT: EvaluationContractFamily.LIVE_PRICE_EXECUTION,
+    StrategyClass.ARBITRAGE: EvaluationContractFamily.ARBITRAGE_EXECUTION,
+    StrategyClass.DUTCHING: EvaluationContractFamily.DUTCHING_EXECUTION,
+    StrategyClass.HEDGE_REBALANCE: EvaluationContractFamily.HEDGE_PORTFOLIO_RISK,
+    StrategyClass.HYBRID: EvaluationContractFamily.HYBRID_COMPOSITE,
+}
 
 
 REQUIRED_BASELINE_KINDS: tuple[BaselineKind, ...] = tuple(BaselineKind)
@@ -256,13 +281,15 @@ class FrozenBaselineProtocol:
     evidence_scope: FrozenEvidenceScope
     candidate_id: str
     candidate_artifact_sha256: str
+    strategy_class: StrategyClass
+    evaluation_contract_family: EvaluationContractFamily
     evaluation_semantics: str
     evaluation_contract_sha256: str
     primary_metric: str
     uncertainty_method: str
     baselines: tuple[BaselineDefinition, ...]
 
-    SCHEMA_VERSION = 1
+    SCHEMA_VERSION = 2
 
     def __post_init__(self) -> None:
         _text(self.protocol_id, "protocol_id")
@@ -275,6 +302,17 @@ class FrozenBaselineProtocol:
             "candidate_artifact_sha256",
             _sha256(self.candidate_artifact_sha256, "candidate_artifact_sha256"),
         )
+        if not isinstance(self.strategy_class, StrategyClass):
+            raise ExternalValidityError("strategy_class must use canonical StrategyClass")
+        if not isinstance(self.evaluation_contract_family, EvaluationContractFamily):
+            raise ExternalValidityError(
+                "evaluation_contract_family must use EvaluationContractFamily"
+            )
+        required_family = _REQUIRED_CONTRACT_FAMILY_BY_STRATEGY[self.strategy_class]
+        if self.evaluation_contract_family is not required_family:
+            raise ExternalValidityError(
+                "evaluation contract family is incompatible with canonical strategy_class"
+            )
         _text(self.evaluation_semantics, "evaluation_semantics")
         object.__setattr__(
             self,
@@ -312,6 +350,8 @@ class FrozenBaselineProtocol:
             "evidence_scope_sha256": self.evidence_scope.identity_sha256,
             "candidate_id": self.candidate_id,
             "candidate_artifact_sha256": self.candidate_artifact_sha256,
+            "strategy_class": self.strategy_class.value,
+            "evaluation_contract_family": self.evaluation_contract_family.value,
             "evaluation_semantics": self.evaluation_semantics,
             "evaluation_contract_sha256": self.evaluation_contract_sha256,
             "primary_metric": self.primary_metric,

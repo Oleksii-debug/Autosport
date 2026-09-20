@@ -33,6 +33,10 @@ from .market_mirror_runtime import (
     FocusedMirrorDependencyIndex,
 )
 from .paper import PaperBook
+from .paper_execution_adoption import (
+    PaperExecutionAdoptionRuntime,
+    PreparedPaperExecution,
+)
 from .portfolio_plan import (
     PortfolioDependencyGraph,
     PortfolioPlan,
@@ -76,6 +80,8 @@ class LiveCycleResult:
     plan: PortfolioPlan | None = None
     decision_id: str | None = None
     detail: str = ""
+    paper_execution_run_id: str | None = None
+    paper_execution_attempt_ids: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -668,6 +674,7 @@ class PersistentLiveDecisionLoop:
     """
 
     PROGRESS_FILE_NAME = "live_decision_progress.json"
+    PRE_ACTION_BOOK_FILE_NAME = "live_decision_pre_action_book.json"
     CONTROL_FILE_NAME = "live_decision_control.json"
     INPUTS_FILE_NAME = "live_decision_inputs.json"
     AGENT_ID = "persistent-live-decision-loop"
@@ -684,6 +691,7 @@ class PersistentLiveDecisionLoop:
         scientific_registry: ScientificRegistry,
         provider: MarketProvider | None = None,
         decision_ledger: JsonlDecisionLedger | None = None,
+        paper_execution: PaperExecutionAdoptionRuntime | None = None,
         ingestion_policy: IngestionPolicy | None = None,
         max_quote_age: timedelta | None = None,
         bounds: LiveLoopBounds | None = None,
@@ -743,6 +751,21 @@ class PersistentLiveDecisionLoop:
         self.decision_ledger = decision_ledger or JsonlDecisionLedger(
             self.workspace / "decisions.jsonl"
         )
+        if paper_execution is not None:
+            if not isinstance(paper_execution, PaperExecutionAdoptionRuntime):
+                raise TypeError(
+                    "paper_execution must be PaperExecutionAdoptionRuntime or None"
+                )
+            if paper_execution.book is not book:
+                raise ValueError(
+                    "paper_execution must materialize into the live loop PaperBook"
+                )
+            canonical_book_path = self.workspace / "paper_book.json"
+            if paper_execution.paper_book_path != canonical_book_path:
+                raise ValueError(
+                    "paper_execution must persist the canonical live workspace PaperBook"
+                )
+        self.paper_execution = paper_execution
         self.ingestion_policy = ingestion_policy
         self.max_quote_age = max_quote_age
         self.bounds = bounds or LiveLoopBounds()
@@ -845,6 +868,7 @@ class PersistentLiveDecisionLoop:
             self._observe = observation_runner
 
         self.progress_path = self.workspace / self.PROGRESS_FILE_NAME
+        self.pre_action_book_path = self.workspace / self.PRE_ACTION_BOOK_FILE_NAME
         self.control_path = self.workspace / self.CONTROL_FILE_NAME
         self._progress = self._load_progress()
         if self._progress is not None and self._progress.loop_id != self.loop_id:
@@ -1155,6 +1179,7 @@ class PersistentLiveDecisionLoop:
         )
         result = self._persist_plan(
             plan=plan,
+            intents=intents,
             market_state_sha256=current_market_sha,
             affected_input_ids=affected,
             gate=_GATE_NORMAL,
@@ -1203,10 +1228,22 @@ class PersistentLiveDecisionLoop:
                 "live intent factory strategy-version provenance changed"
             )
 
-    def _decision_context_sha256(self) -> str:
+    @staticmethod
+    def _same_book_state(left: PaperBook, right: PaperBook) -> bool:
+        return (
+            left.initial_bankroll == right.initial_bankroll
+            and left.balance == right.balance
+            and left.tickets == right.tickets
+            and left._lifecycle == right._lifecycle
+            and left._settlement_times == right._settlement_times
+        )
+
+    def _decision_context_sha256_for_book(self, book: PaperBook) -> str:
         self._verify_intent_factory_provenance()
+        if not isinstance(book, PaperBook):
+            raise TypeError("book must be PaperBook")
         book_state_sha256 = self.authority.risk_policy.risk_of_ruin_portfolio_sha256(
-            self.book
+            book
         )
         if book_state_sha256 is None:
             raise LiveDecisionProgressError(
@@ -1232,6 +1269,9 @@ class PersistentLiveDecisionLoop:
             }
         )
 
+    def _decision_context_sha256(self) -> str:
+        return self._decision_context_sha256_for_book(self.book)
+
     def _recover_unfinished_progress(self) -> LiveCycleResult:
         progress = self._progress
         if progress is None or progress.phase not in {
@@ -1250,10 +1290,40 @@ class PersistentLiveDecisionLoop:
             progress.decision_ts,
         )
         self.intent_provenance.assert_available_at(decision_time)
-        if progress.decision_context_sha256 != self._decision_context_sha256():
+
+        # PENDING publication persists the exact pre-action PaperBook separately
+        # from the crash cursor. That snapshot remains the decision/risk authority
+        # even when #623 has already durably materialized accepted exposure into
+        # the canonical PaperBook before progress reaches COMMITTED.
+        if self.pre_action_book_path.exists():
+            try:
+                pre_action_book = PaperBook.load(self.pre_action_book_path)
+            except (OSError, TypeError, ValueError) as exc:
+                raise LiveDecisionProgressError(
+                    "unfinished live decision pre-action PaperBook is unreadable"
+                ) from exc
+        else:
+            # Compatibility with progress written before the snapshot seam:
+            # recovery is permitted only while the current book still proves the
+            # original decision context.
+            pre_action_book = self.book
+
+        if (
+            progress.decision_context_sha256
+            != self._decision_context_sha256_for_book(pre_action_book)
+        ):
             raise LiveDecisionProgressError(
                 "unfinished live decision runtime context changed across restart"
             )
+        if (
+            progress.phase == _PHASE_PENDING
+            and not self._same_book_state(self.book, pre_action_book)
+        ):
+            raise LiveDecisionProgressError(
+                "unfinished live decision runtime context changed: "
+                "PaperBook changed before durable decision"
+            )
+
         if progress.gate == _GATE_NORMAL:
             self._refresh_intents_from_replay(
                 progress.registered_input_ids,
@@ -1261,31 +1331,107 @@ class PersistentLiveDecisionLoop:
                 expected_market_state_sha256=progress.market_state_sha256,
             )
             intents = self._all_cached_intents()
+        else:
+            intents = ()
+
+        # Once the exact economic DecisionRecord is durable, it is the immutable
+        # pre-action plan authority. In particular, an accepted #623 attempt may
+        # already have published the canonical PaperBook while progress is still
+        # APPEND_PENDING; never re-size/re-decide economics from that post-action
+        # state.
+        durable_record = None
+        if (
+            progress.phase == _PHASE_APPEND_PENDING
+            and progress.ledger_offset is not None
+        ):
+            durable_record = self._verified_ledger_record_at_offset(
+                progress.ledger_offset
+            )
+
+        if durable_record is not None:
+            if progress.decision_id is None or progress.plan_sha256 is None:
+                raise LiveDecisionProgressError(
+                    "append-pending recovery lacks reserved decision identity"
+                )
+            verify_economic_goal_binding(
+                durable_record,
+                self.authority.contract,
+                self.authority.risk_policy,
+            )
+            if (
+                durable_record.decision_id != progress.decision_id
+                or durable_record.payload.get("plan_sha256")
+                != progress.plan_sha256
+                or durable_record.payload.get("market_state_sha256")
+                != progress.market_state_sha256
+                or durable_record.payload.get("decision_context_sha256")
+                != progress.decision_context_sha256
+                or durable_record.payload.get("gate") != progress.gate
+                or durable_record.payload.get(MATERIAL_ACTION_ID_PAYLOAD_KEY)
+                != progress.decision_id
+            ):
+                raise LiveDecisionProgressError(
+                    "append-pending durable decision conflicts with progress"
+                )
+            try:
+                # DecisionRecord freezes mappings/lists after verification. Re-enter
+                # the canonical JSON parser through its detached representation
+                # rather than weakening PortfolioPlan.from_dict to trust mappings.
+                detached_payload = durable_record.to_dict()["payload"]
+                plan = PortfolioPlan.from_dict(detached_payload.get("plan"))
+            except (KeyError, TypeError, ValueError) as exc:
+                raise LiveDecisionProgressError(
+                    "append-pending durable PortfolioPlan is invalid"
+                ) from exc
+            if plan.plan_sha256 != progress.plan_sha256:
+                raise LiveDecisionProgressError(
+                    "append-pending durable PortfolioPlan identity changed"
+                )
+            if (
+                tuple(getattr(intent, "intent_id", None) for intent in intents)
+                != plan.intent_ids
+                or tuple(
+                    getattr(intent, "intent_sha256", None) for intent in intents
+                )
+                != plan.intent_sha256s
+                or tuple(
+                    getattr(
+                        getattr(intent, "opportunity_class", None),
+                        "value",
+                        None,
+                    )
+                    for intent in intents
+                )
+                != plan.opportunity_classes
+            ):
+                raise LiveDecisionProgressError(
+                    "append-pending replayed intents conflict with durable PortfolioPlan"
+                )
+        else:
             graph = (
                 None
                 if not intents
-                else PortfolioDependencyGraph.for_inputs(self.book, intents)
+                else PortfolioDependencyGraph.for_inputs(pre_action_book, intents)
             )
-        else:
-            intents = ()
-            graph = None
+            plan = build_portfolio_plan(
+                pre_action_book,
+                intents,
+                self.authority.risk_policy,
+                decision_ts,
+                dependency_graph=graph,
+                market_outcome_authorities=(),
+            )
 
-        plan = build_portfolio_plan(
-            self.book,
-            intents,
-            self.authority.risk_policy,
-            decision_ts,
-            dependency_graph=graph,
-            market_outcome_authorities=(),
-        )
         result = self._persist_plan(
             plan=plan,
+            intents=intents,
             market_state_sha256=progress.market_state_sha256,
             affected_input_ids=progress.affected_input_ids,
             gate=progress.gate,
             detail=(
                 "recovered unfinished durable live decision before provider polling"
             ),
+            decision_context_sha256_override=progress.decision_context_sha256,
         )
         self._pending_affected.clear()
         self._needs_cache_rebuild = True
@@ -1490,6 +1636,7 @@ class PersistentLiveDecisionLoop:
         )
         result = self._persist_plan(
             plan=plan,
+            intents=(),
             market_state_sha256=market_sha,
             affected_input_ids=affected,
             gate=_GATE_PROVIDER_GAP,
@@ -1510,12 +1657,20 @@ class PersistentLiveDecisionLoop:
         self,
         *,
         plan: PortfolioPlan,
+        intents: tuple[object, ...],
         market_state_sha256: str,
         affected_input_ids: tuple[str, ...],
         gate: str,
         detail: str = "",
+        decision_context_sha256_override: str | None = None,
     ) -> LiveCycleResult:
-        decision_context_sha256 = self._decision_context_sha256()
+        if decision_context_sha256_override is None:
+            decision_context_sha256 = self._decision_context_sha256()
+        else:
+            decision_context_sha256 = _canonical_sha256(
+                "recovery decision_context_sha256",
+                decision_context_sha256_override,
+            )
         provenance = self.intent_provenance
         context_payload = {
             "schema": "autosport.live_decision_context",
@@ -1532,34 +1687,76 @@ class PersistentLiveDecisionLoop:
         }
         context_hash = _canonical_json_sha256(context_payload)
         decision_id = f"live-{context_hash}"
+        prepared_execution: PreparedPaperExecution | None = None
+        expected_execution_payload = None
+        has_positive_execution_stake = any(stake > 0 for stake in plan.stakes)
+        if has_positive_execution_stake and self.paper_execution is None:
+            raise LiveDecisionProgressError(
+                "positive PAPER/SHADOW plan requires canonical #623 execution adoption"
+            )
+        if self.paper_execution is not None:
+            prepared_execution = self.paper_execution.prepare(
+                plan=plan,
+                intents=intents,
+                decision_id=decision_id,
+            )
+            if prepared_execution is not None:
+                expected_execution_payload = {
+                    "schema": "autosport.paper_execution_adoption",
+                    "schema_version": 1,
+                    "plan_id": prepared_execution.execution_plan.plan_id,
+                    "plan_fingerprint": prepared_execution.execution_plan.fingerprint,
+                    "model_fingerprint": self.paper_execution.config.fingerprint,
+                    "run_id": self.paper_execution.expected_run_id(
+                        prepared_execution,
+                        decision_id,
+                    ),
+                    "intent_evidence_json": prepared_execution.intent_evidence_json,
+                }
+
+        record_payload = {
+            "schema": "autosport.persistent_live_decision",
+            "schema_version": 2,
+            "loop_id": self.loop_id,
+            "mode": self.mode.value,
+            "gate": gate,
+            "market_state_sha256": market_state_sha256,
+            "decision_context_sha256": decision_context_sha256,
+            "intent_strategy_version_id": provenance.strategy_version_id,
+            "intent_model_version_id": provenance.model_version_id,
+            "intent_provenance_sha256": provenance.provenance_sha256,
+            "affected_input_ids": list(affected_input_ids),
+            "plan_sha256": plan.plan_sha256,
+            "plan": plan.to_dict(),
+            MATERIAL_ACTION_ID_PAYLOAD_KEY: decision_id,
+        }
+        if expected_execution_payload is not None:
+            # Keep the established top-level live-decision schema/version so the
+            # decision identity remains stable; execution adoption is additive,
+            # separately versioned evidence.
+            record_payload["paper_execution"] = expected_execution_payload
+
         record = DecisionRecord(
             replay_run_id=f"live:{self.loop_id}",
             agent=self.AGENT_ID,
             observed_ts=plan.decision_ts,
             action=f"LIVE_{plan.action.value.upper()}",
-            payload={
-                "schema": "autosport.persistent_live_decision",
-                "schema_version": 2,
-                "loop_id": self.loop_id,
-                "mode": self.mode.value,
-                "gate": gate,
-                "market_state_sha256": market_state_sha256,
-                "decision_context_sha256": decision_context_sha256,
-                "intent_strategy_version_id": provenance.strategy_version_id,
-                "intent_model_version_id": provenance.model_version_id,
-                "intent_provenance_sha256": provenance.provenance_sha256,
-                "affected_input_ids": list(affected_input_ids),
-                "plan_sha256": plan.plan_sha256,
-                "plan": plan.to_dict(),
-                MATERIAL_ACTION_ID_PAYLOAD_KEY: decision_id,
-            },
+            payload=record_payload,
             context_hash=context_hash,
             decision_id=decision_id,
             decision_kind=ECONOMIC_DECISION_KIND,
         )
 
         duplicate = False
+        execution_result = None
         with WorkspaceEconomicLock(self.workspace):
+            if (
+                decision_context_sha256_override is None
+                and self._decision_context_sha256() != decision_context_sha256
+            ):
+                raise LiveDecisionProgressError(
+                    "PaperBook/runtime context changed before promotion lock"
+                )
             durable_progress = self._load_progress()
             if (
                 durable_progress is None
@@ -1652,11 +1849,32 @@ class PersistentLiveDecisionLoop:
                     raise DecisionLedgerIntegrityError(
                         "reserved live decision identity conflicts with durable evidence"
                     )
+                if existing.payload.get("paper_execution") != expected_execution_payload:
+                    raise DecisionLedgerIntegrityError(
+                        "durable live decision execution-adoption evidence changed"
+                    )
                 duplicate = True
             else:
                 self.decision_ledger.append_economic(record, self.authority)
                 if self.post_append_hook is not None:
                     self.post_append_hook()
+
+            # Execution attempts are durable before progress becomes COMMITTED.
+            # A crash after the #623 attempt but before PaperBook materialization
+            # therefore re-enters this same append-pending identity and resumes
+            # the exact run instead of fabricating a fresh fill.
+            if prepared_execution is not None:
+                execution_result = self.paper_execution.execute(
+                    prepared=prepared_execution,
+                    trigger_id=decision_id,
+                    started_at=plan.decision_ts,
+                    materialize_exposure=(self.mode is LiveDecisionMode.PAPER),
+                )
+                assert expected_execution_payload is not None
+                if execution_result.run.run_id != expected_execution_payload["run_id"]:
+                    raise DecisionLedgerIntegrityError(
+                        "durable PAPER execution run identity drifted after decision publication"
+                    )
 
             committed = _Progress(
                 loop_id=self.loop_id,
@@ -1680,6 +1898,16 @@ class PersistentLiveDecisionLoop:
             plan=plan,
             decision_id=decision_id,
             detail=detail,
+            paper_execution_run_id=(
+                None if execution_result is None else execution_result.run.run_id
+            ),
+            paper_execution_attempt_ids=(
+                ()
+                if execution_result is None
+                else tuple(
+                    attempt.attempt_id for attempt in execution_result.run.attempts
+                )
+            ),
         )
 
     def _write_pending(
@@ -1692,20 +1920,31 @@ class PersistentLiveDecisionLoop:
     ) -> None:
         _, decision_time = _canonical_timestamp("decision_ts", decision_ts)
         self.intent_provenance.assert_available_at(decision_time)
-        pending = _Progress(
-            loop_id=self.loop_id,
-            phase=_PHASE_PENDING,
-            decision_ts=decision_ts,
-            market_state_sha256=market_state_sha256,
-            decision_context_sha256=self._decision_context_sha256(),
-            affected_input_ids=affected_input_ids,
-            registered_input_ids=self.dependencies.input_ids,
-            decision_id=None,
-            plan_sha256=None,
-            ledger_offset=None,
-            gate=gate,
-        )
         with WorkspaceEconomicLock(self.workspace):
+            # The snapshot is written before the cursor: a crash before cursor
+            # publication leaves only ignorable stale snapshot bytes, while every
+            # visible PENDING cursor has an exact pre-action portfolio witness.
+            self.book.save(self.pre_action_book_path)
+            durable_pre_action = PaperBook.load(self.pre_action_book_path)
+            if not self._same_book_state(durable_pre_action, self.book):
+                raise LiveDecisionProgressError(
+                    "pre-action PaperBook durability verification failed"
+                )
+            pending = _Progress(
+                loop_id=self.loop_id,
+                phase=_PHASE_PENDING,
+                decision_ts=decision_ts,
+                market_state_sha256=market_state_sha256,
+                decision_context_sha256=self._decision_context_sha256_for_book(
+                    durable_pre_action
+                ),
+                affected_input_ids=affected_input_ids,
+                registered_input_ids=self.dependencies.input_ids,
+                decision_id=None,
+                plan_sha256=None,
+                ledger_offset=None,
+                gate=gate,
+            )
             atomic_write_json(self.progress_path, pending.to_dict())
         self._progress = pending
 

@@ -6,6 +6,9 @@ __version__ = "0.1.0"
 # facade subclasses or calls the legacy compatibility implementation.
 from . import _paper_execution_anti_rollback as _paper_execution_anti_rollback  # noqa: F401,E402
 from . import _paper_execution_freshness as _paper_execution_freshness  # noqa: F401,E402
+from . import _paper_execution_append_recovery as _paper_execution_append_recovery  # noqa: F401,E402
+from . import _paper_value_execution_authority as _paper_value_execution_authority  # noqa: F401,E402
+from . import _paper_value_risk_admission_recovery as _paper_value_risk_admission_recovery  # noqa: F401,E402
 
 # Bind explicit realized-VOC admissions to the exact canonical ResearchProtocol
 # and protocol-derived cohort before the scoring facade is imported by consumers.

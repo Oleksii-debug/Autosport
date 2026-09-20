@@ -88,7 +88,6 @@ def _delayed_migration_worker(path_text, ready, proceed, result_queue):
         result_queue.put(("ok", ""))
 
 
-
 class CollectorSQLiteStoreTests(unittest.TestCase):
     def test_new_store_is_sqlite_and_reopens_without_changing_contract(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -372,6 +371,44 @@ class CollectorSQLiteStoreTests(unittest.TestCase):
                 store.deltas_available_through(
                     as_of="2026-01-01T00:01:00+00:00"
                 )
+
+    def test_stream_checkpoint_tamper_cannot_admit_cursor_rollback(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "collector.json"
+            store = CollectorDeltaStore(path)
+            first = make_delta(delta_id="d0", cursor_position=0)
+            latest = make_delta(delta_id="d2", cursor_position=2)
+            self.assertTrue(store.append(first))
+            self.assertTrue(store.append(latest))
+
+            connection = sqlite3.connect(path)
+            try:
+                connection.execute(
+                    "UPDATE collector_streams "
+                    "SET last_cursor=?, last_position=?, last_delta_id=? "
+                    "WHERE source_id=? AND stream_epoch=?",
+                    ("0", 0, first.delta_id, "source-x", "epoch-1"),
+                )
+                connection.commit()
+            finally:
+                connection.close()
+
+            reopened = CollectorDeltaStore(path)
+            with self.assertRaisesRegex(
+                ValueError,
+                "stream checkpoint conflicts with immutable delta history",
+            ):
+                reopened.stream_checkpoint("source-x", "epoch-1")
+
+            stale = make_delta(delta_id="d1-late", cursor_position=1)
+            with self.assertRaisesRegex(
+                ValueError,
+                "stream checkpoint conflicts with immutable delta history",
+            ):
+                reopened.append(stale)
+
+            self.assertIsNone(reopened.get(stale.delta_id))
+            self.assertEqual(reopened.get(latest.delta_id), latest)
 
     def test_concurrent_same_delta_admission_is_exactly_once_without_sleep(self):
         with tempfile.TemporaryDirectory() as tmp:

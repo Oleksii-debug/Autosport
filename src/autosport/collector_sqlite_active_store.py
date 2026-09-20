@@ -8,6 +8,7 @@ from .causal_collector_legacy import (
     CollectorDelta,
     CursorRegressionError,
     DeltaConflictError,
+    StreamCheckpoint,
     _text,
 )
 from .collector_sqlite_store import (
@@ -31,7 +32,6 @@ _INDEXED_PROJECTION_FIELDS = (
 _DELTA_SELECT_COLUMNS = ", ".join(
     ("commit_seq", *_INDEXED_PROJECTION_FIELDS, "payload_sha256", "payload_json")
 )
-
 
 
 class CollectorDeltaStore(_SQLiteCollectorDeltaStore):
@@ -176,6 +176,73 @@ class CollectorDeltaStore(_SQLiteCollectorDeltaStore):
         return delta
 
     @classmethod
+    def _verified_stream_checkpoint(
+        cls,
+        connection: sqlite3.Connection,
+        source_id: str,
+        stream_epoch: str,
+    ) -> StreamCheckpoint | None:
+        """Bind the mutable stream projection to immutable canonical delta history."""
+
+        delta_epochs = {
+            row["stream_epoch"]
+            for row in connection.execute(
+                "SELECT DISTINCT stream_epoch FROM collector_deltas WHERE source_id=?",
+                (source_id,),
+            ).fetchall()
+        }
+        stream_epochs = {
+            row["stream_epoch"]
+            for row in connection.execute(
+                "SELECT stream_epoch FROM collector_streams WHERE source_id=?",
+                (source_id,),
+            ).fetchall()
+        }
+        if delta_epochs != stream_epochs:
+            raise ValueError(
+                "collector stream checkpoint conflicts with immutable delta history"
+            )
+
+        row = connection.execute(
+            "SELECT last_cursor, last_position, last_delta_id "
+            "FROM collector_streams WHERE source_id=? AND stream_epoch=?",
+            (source_id, stream_epoch),
+        ).fetchone()
+        if row is None:
+            return None
+
+        checkpoint = StreamCheckpoint(
+            source_id=source_id,
+            stream_epoch=stream_epoch,
+            last_cursor=row["last_cursor"],
+            last_position=row["last_position"],
+            last_delta_id=row["last_delta_id"],
+        )
+        checkpoint.validate()
+        target = cls._delta_by_id(connection, checkpoint.last_delta_id)
+        if (
+            target is None
+            or target.source_id != source_id
+            or target.stream_epoch != stream_epoch
+            or target.source_cursor != checkpoint.last_cursor
+            or target.cursor_position != checkpoint.last_position
+            or target.revision_of is not None
+        ):
+            raise ValueError(
+                "collector stream checkpoint conflicts with immutable delta history"
+            )
+        higher = connection.execute(
+            "SELECT 1 FROM collector_deltas "
+            "WHERE source_id=? AND stream_epoch=? AND cursor_position>? LIMIT 1",
+            (source_id, stream_epoch, checkpoint.last_position),
+        ).fetchone()
+        if higher is not None:
+            raise ValueError(
+                "collector stream checkpoint conflicts with immutable delta history"
+            )
+        return checkpoint
+
+    @classmethod
     def _append_connection(
         cls,
         connection: sqlite3.Connection,
@@ -193,7 +260,19 @@ class CollectorDeltaStore(_SQLiteCollectorDeltaStore):
                     f"delta {delta.delta_id} conflicts with immutable evidence"
                 )
             return False
-        return super()._append_connection(connection, delta)
+        cls._verified_stream_checkpoint(
+            connection,
+            delta.source_id,
+            delta.stream_epoch,
+        )
+        changed = super()._append_connection(connection, delta)
+        if changed:
+            cls._verified_stream_checkpoint(
+                connection,
+                delta.source_id,
+                delta.stream_epoch,
+            )
+        return changed
 
     def _all(self) -> list[CollectorDelta]:
         connection = self._connect()
@@ -248,6 +327,25 @@ class CollectorDeltaStore(_SQLiteCollectorDeltaStore):
                 (source_id, after_seq, max_items),
             ).fetchall()
             return tuple(self._row_delta(row) for row in rows)
+        except sqlite3.DatabaseError as exc:
+            raise ValueError("invalid causal collector store") from exc
+        finally:
+            connection.close()
+
+    def stream_checkpoint(
+        self,
+        source_id: str,
+        stream_epoch: str,
+    ) -> StreamCheckpoint | None:
+        _text(source_id, "source_id")
+        _text(stream_epoch, "stream_epoch")
+        connection = self._connect()
+        try:
+            return self._verified_stream_checkpoint(
+                connection,
+                source_id,
+                stream_epoch,
+            )
         except sqlite3.DatabaseError as exc:
             raise ValueError("invalid causal collector store") from exc
         finally:

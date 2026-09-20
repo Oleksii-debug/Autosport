@@ -438,7 +438,6 @@ class EvaluationRow:
                 raise
             raise EvaluationUniverseIntegrityError("invalid evaluation row payload") from exc
 
-
 @dataclass(frozen=True, slots=True, init=False)
 class EvaluationUniverse:
     """Frozen membership. Public construction is only through canonical intake resolution."""
@@ -657,7 +656,6 @@ class CanonicalPaperExecutionResolver:
         if not isinstance(ledger, PaperExecutionLedger):
             raise TypeError("ledger must be PaperExecutionLedger")
         self.ledger = ledger
-
     def resolve(
         self,
         *,
@@ -1279,6 +1277,10 @@ def _validate_canonical_intake_rows(
             record.evaluation_not_before,
             "intake evaluation_not_before",
         )
+        if evaluation_not_before > frozen:
+            raise EvaluationUniverseError(
+                "canonical intake evaluation boundary is after universe freeze"
+            )
         if _instant(row.committed_at, "row committed_at") > intake_committed:
             raise EvaluationUniverseError(
                 "row evidence was committed after canonical intake membership"
@@ -1296,10 +1298,6 @@ def _validate_canonical_intake_rows(
         ) < evaluation_not_before:
             raise EvaluationUniverseError(
                 "row decision began before complete intake membership was immutable"
-            )
-        if evaluation_not_before > frozen:
-            raise EvaluationUniverseError(
-                "canonical intake evaluation boundary is after universe freeze"
             )
         if row.outcome_reveal_not_before is None or _instant(
             row.outcome_reveal_not_before,

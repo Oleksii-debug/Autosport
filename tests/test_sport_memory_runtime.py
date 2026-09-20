@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from hashlib import sha256
+import json
 
 import pytest
 
+from autosport import _sport_memory_authority_guard as _guard
 from autosport.opponent_intelligence import (
     FeatureSnapshot,
     IdentityView,
@@ -12,7 +15,7 @@ from autosport.opponent_intelligence import (
 )
 from autosport.sport_memory_runtime import (
     SportMemoryError,
-    SportMemoryRuntime,
+    SportMemoryRuntime as _PublicSportMemoryRuntime,
     SportMemoryScope,
 )
 
@@ -90,6 +93,16 @@ class _FakeOpponentAuthority:
         return rating, feature
 
 
+class _LowLevelSportMemoryRuntime(_PublicSportMemoryRuntime):
+    """Unit-test harness for deterministic core semantics, not a product API."""
+
+    def materialize(self, *args, **kwargs):
+        return _guard._ORIGINAL_MATERIALIZE(self, *args, **kwargs)
+
+
+SportMemoryRuntime = _LowLevelSportMemoryRuntime
+
+
 def _scope(
     *,
     sport_id: str = "tennis",
@@ -103,7 +116,7 @@ def _scope(
     )
 
 
-def _materialize(runtime: SportMemoryRuntime):
+def _materialize(runtime: _PublicSportMemoryRuntime):
     return runtime.materialize(
         participant_entity_id="participant-1",
         scope=_scope(),
@@ -112,6 +125,33 @@ def _materialize(runtime: SportMemoryRuntime):
         code_sha256=SHA_C,
         dependency_sha256=SHA_D,
     )
+
+
+def _artifact_digest(raw: dict[str, object]) -> str:
+    body = {key: value for key, value in raw.items() if key != "memory_id"}
+    encoded = json.dumps(
+        body,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
+        allow_nan=False,
+    ).encode("utf-8")
+    return sha256(encoded).hexdigest()
+
+
+def test_public_base_runtime_cannot_mint_durable_positive_memory(tmp_path):
+    path = tmp_path / "public-sport-memory.json"
+    runtime = _PublicSportMemoryRuntime.initialize_pristine(
+        path,
+        _FakeOpponentAuthority(),
+        authority_generation_sha256=SHA_3,
+    )
+
+    with pytest.raises(SportMemoryError, match="canonical bound authority"):
+        _materialize(runtime)
+
+    raw = json.loads(path.read_text(encoding="utf-8"))
+    assert raw["artifacts"] == []
 
 
 def test_provider_specific_scope_fails_closed_until_canonical_provider_authority():
@@ -241,8 +281,6 @@ def test_restart_rejects_forged_provider_label_on_same_canonical_snapshot(tmp_pa
     )
     _materialize(runtime)
 
-    import json
-
     payload = json.loads(path.read_text(encoding="utf-8"))
     payload["artifacts"][0]["scope"]["provider_id"] = "provider-b"
     path.write_text(json.dumps(payload, sort_keys=True, indent=2) + "\n", encoding="utf-8")
@@ -269,6 +307,29 @@ def test_restart_fails_closed_on_mixed_authority_generation(tmp_path):
             path,
             _FakeOpponentAuthority(),
             authority_generation_sha256=SHA_B,
+        )
+
+
+def test_restart_rejects_self_consistent_artifact_from_another_generation(tmp_path):
+    path = tmp_path / "sport-memory.json"
+    runtime = SportMemoryRuntime.initialize_pristine(
+        path,
+        _FakeOpponentAuthority(),
+        authority_generation_sha256=SHA_3,
+    )
+    _materialize(runtime)
+
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    artifact = payload["artifacts"][0]
+    artifact["authority_generation_sha256"] = SHA_B
+    artifact["memory_id"] = _artifact_digest(artifact)
+    path.write_text(json.dumps(payload, sort_keys=True, indent=2) + "\n", encoding="utf-8")
+
+    with pytest.raises(SportMemoryError, match="artifact authority generation"):
+        SportMemoryRuntime(
+            path,
+            _FakeOpponentAuthority(),
+            authority_generation_sha256=SHA_3,
         )
 
 

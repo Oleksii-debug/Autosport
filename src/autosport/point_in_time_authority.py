@@ -23,6 +23,8 @@ from ._point_in_time_authority_legacy import *  # noqa: F403
 from .historical_snapshot import (
     HISTORICAL_CAPTURE_WITNESS_KIND,
     HistoricalSnapshotAuthority,
+    HistoricalSnapshotCapture,
+    assert_historical_snapshot_capture_authoritative,
     resolve_historical_snapshot_authority,
 )
 from .integrity import atomic_write_json
@@ -251,10 +253,18 @@ class SourceRevisionAuthorityStore(_legacy.SourceRevisionAuthorityStore):
         self,
         *,
         availability_witness_id: str,
-        market_path: str | Path,
-        evidence_path: str | Path,
+        capture: HistoricalSnapshotCapture,
         recorded_at: datetime,
     ) -> _legacy.AvailabilityWitnessAuthority:
+        try:
+            assert_historical_snapshot_capture_authoritative(capture)
+        except (TypeError, ValueError) as exc:
+            raise _legacy.SourceRevisionAuthorityError(
+                "historical provider capture was not issued by canonical capture path"
+            ) from exc
+
+        market_path = Path(capture.output_path)
+        evidence_path = Path(capture.evidence_path)
         try:
             authority = resolve_historical_snapshot_authority(
                 market_path=market_path,
@@ -264,6 +274,17 @@ class SourceRevisionAuthorityStore(_legacy.SourceRevisionAuthorityStore):
             raise _legacy.SourceRevisionAuthorityError(
                 "canonical provider capture evidence cannot be resolved"
             ) from exc
+        if (
+            authority.source_revision_sha256 != capture.response_sha256
+            or authority.source_as_of != capture.snapshot_at
+            or authority.available_at != capture.captured_at
+            or hashlib.sha256(market_path.read_bytes()).hexdigest()
+            != capture.market_sha256
+        ):
+            raise _legacy.SourceRevisionAuthorityError(
+                "canonical provider capture files changed after issuance"
+            )
+
         witness = self._expected_provider_witness(
             availability_witness_id=availability_witness_id,
             authority=authority,
@@ -329,10 +350,16 @@ class SourceRevisionAuthorityStore(_legacy.SourceRevisionAuthorityStore):
         revision: _legacy.SourceRevisionAuthority,
     ) -> str:
         if isinstance(revision, _legacy.SourceRevisionAuthority):
-            # Re-resolve the canonical provider-backed authorities first, then
-            # let the legacy registrar keep its established mismatch diagnostics.
-            self.resolve_witness(revision.availability_witness_id)
-            self.resolve_policy(revision.revision_policy_id)
+            # Validate the referenced immutable authority digests before any
+            # mutation, then re-resolve provider-backed provenance.
+            self.resolve_policy(
+                revision.revision_policy_id,
+                expected_sha256=revision.revision_policy_record_sha256,
+            )
+            self.resolve_witness(
+                revision.availability_witness_id,
+                expected_sha256=revision.availability_witness_record_sha256,
+            )
         return super().register_revision(revision)
 
     def resolve_revision(

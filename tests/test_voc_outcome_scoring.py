@@ -23,6 +23,7 @@ from autosport.voc_evaluation import (
 )
 from autosport.voc_outcome_scoring import (
     CanonicalOutcomeDerivedVOCScoreAuthority,
+    CanonicalVOCOutcomeSource,
     build_canonical_voc_authority_resolver,
 )
 
@@ -117,6 +118,49 @@ class CanonicalOutcomeDerivedVOCScoreAuthorityTests(unittest.TestCase):
         (self.root / self.outcome_file).write_bytes(outcome_bytes)
         self.outcome_sha256 = hashlib.sha256(outcome_bytes).hexdigest()
 
+        second_assessment = assess_betfair_historical_market_definition_authority(
+            market_id="1.23456790",
+            market_definition={
+                "eventId": "event-voc-2",
+                "eventTypeId": "2593174",
+                "marketType": "MATCH_ODDS",
+                "status": "OPEN",
+                "runners": [{"id": "303"}, {"id": "404"}],
+            },
+            provider_publish_at=T_AUTHORITY,
+            observed_at=T_AUTHORITY,
+        )
+        self.assertEqual(
+            second_assessment.status,
+            OutcomeAuthorityStatus.PROVEN_EXHAUSTIVE,
+        )
+        self.assertIsNotNone(second_assessment.authority)
+        self.second_outcome_authority = second_assessment.authority
+        assert self.second_outcome_authority is not None
+        second_quote_keys = self.second_outcome_authority.quote_keys
+        second_record = {
+            "schema_version": 2,
+            "source": self.second_outcome_authority.identity.source_id,
+            "record_id": "voc-outcome-event-voc-2",
+            "revision_id": "voc-outcome-event-voc-2-r1",
+            "revision": 1,
+            "revision_kind": "initial",
+            "recorded_at": T_REVEAL,
+            "quote_outcomes": {
+                second_quote_keys[0]: "loss",
+                second_quote_keys[1]: "win",
+            },
+        }
+        second_bytes = json.dumps(
+            second_record,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        self.second_outcome_file = "voc-outcome-2.json"
+        (self.root / self.second_outcome_file).write_bytes(second_bytes)
+        self.second_outcome_sha256 = hashlib.sha256(second_bytes).hexdigest()
+
     def tearDown(self) -> None:
         self.tmp.cleanup()
 
@@ -143,6 +187,7 @@ class CanonicalOutcomeDerivedVOCScoreAuthorityTests(unittest.TestCase):
         baseline_output_sha256: str = SHA_D,
         challenger_output_sha256: str = SHA_E,
         sample_challenger_completed_at: str | None = None,
+        quote_keys: tuple[str, ...] | None = None,
     ) -> tuple[str, str]:
         source_context = {
             "request_id": f"source:{evaluation_id}",
@@ -169,6 +214,7 @@ class CanonicalOutcomeDerivedVOCScoreAuthorityTests(unittest.TestCase):
         sample_challenger_completed_at = (
             sample_challenger_completed_at or T_CHALLENGER
         )
+        quote_keys = self.quote_keys if quote_keys is None else quote_keys
         scoring_evidence = {
             "schema_version": 1,
             "evaluation_id": evaluation_id,
@@ -182,7 +228,7 @@ class CanonicalOutcomeDerivedVOCScoreAuthorityTests(unittest.TestCase):
             "samples": [
                 {
                     "sample_id": f"{evaluation_id}:quote-101",
-                    "quote_key": self.quote_keys[0],
+                    "quote_key": quote_keys[0],
                     "baseline_compute_cost": "0.10",
                     "challenger_compute_cost": "0.20",
                     "baseline_completed_at": T_BASELINE,
@@ -190,7 +236,7 @@ class CanonicalOutcomeDerivedVOCScoreAuthorityTests(unittest.TestCase):
                 },
                 {
                     "sample_id": f"{evaluation_id}:quote-202",
-                    "quote_key": self.quote_keys[1],
+                    "quote_key": quote_keys[1],
                     "baseline_compute_cost": "0.10",
                     "challenger_compute_cost": "0.20",
                     "baseline_completed_at": T_BASELINE,
@@ -260,6 +306,12 @@ class CanonicalOutcomeDerivedVOCScoreAuthorityTests(unittest.TestCase):
             "task_class": "route-voc",
             "estimand": "incremental_net_voc",
             "cohort_id": "voc-cohort-derived",
+            "cohort_eligibility": {
+                "kind": "decision-ledger-window-v1",
+                "decision_recorded_from": T_DECISION,
+                "decision_recorded_through": T_BINDING,
+            },
+            "outcome_cluster_rule": "provider-independent-market-v1",
             "evaluator_source_sha256": SHA_D,
             "scope": {
                 "sport_id": "table_tennis",
@@ -333,13 +385,16 @@ class CanonicalOutcomeDerivedVOCScoreAuthorityTests(unittest.TestCase):
         forged_claim: bool = False,
         sample_challenger_completed_at: str | None = None,
         register_cohort: bool = True,
+        outcome_authority=None,
     ) -> PairedVOCEvaluation:
+        authority = self.outcome_authority if outcome_authority is None else outcome_authority
         context_sha, decision_sha = self._append_pre_outcome_evidence(
             evaluation_id=evaluation_id,
             decision_input_sha256=decision_input_sha256,
             baseline_output_sha256=baseline_output_sha256,
             challenger_output_sha256=challenger_output_sha256,
             sample_challenger_completed_at=sample_challenger_completed_at,
+            quote_keys=authority.quote_keys,
         )
         scoring_sha, multiple_sha, holdout, _, _ = self._protocol_and_holdout()
         if forged_claim:
@@ -385,7 +440,7 @@ class CanonicalOutcomeDerivedVOCScoreAuthorityTests(unittest.TestCase):
             decision_deadline=T_DEADLINE,
             baseline_completed_at=T_BASELINE,
             challenger_completed_at=T_CHALLENGER,
-            outcome_evidence_sha256=self.outcome_authority.authority_sha256,
+            outcome_evidence_sha256=authority.authority_sha256,
             outcome_revealed_at=T_REVEAL,
             evaluated_at=T_EVALUATED,
             scoring_rule_id="voc-realized-v1",
@@ -447,6 +502,11 @@ class CanonicalOutcomeDerivedVOCScoreAuthorityTests(unittest.TestCase):
                         "model_id": ordered[0].challenger_model_id,
                         "config_sha256": ordered[0].challenger_config_sha256,
                     },
+                    "eligibility": {
+                        "kind": "decision-ledger-window-v1",
+                        "decision_recorded_from": T_DECISION,
+                        "decision_recorded_through": T_BINDING,
+                    },
                     "members": [
                         {
                             "evaluation_id": item.evaluation_id,
@@ -468,6 +528,14 @@ class CanonicalOutcomeDerivedVOCScoreAuthorityTests(unittest.TestCase):
             outcome_source_root=self.root,
             source_record_file=self.outcome_file,
             source_record_sha256=self.outcome_sha256,
+            additional_outcome_sources=(
+                CanonicalVOCOutcomeSource(
+                    authority=self.second_outcome_authority,
+                    source_root=self.root,
+                    source_record_file=self.second_outcome_file,
+                    source_record_sha256=self.second_outcome_sha256,
+                ),
+            ),
         )
 
     def _append_scientific_qualification(
@@ -578,6 +646,14 @@ class CanonicalOutcomeDerivedVOCScoreAuthorityTests(unittest.TestCase):
             outcome_source_root=self.root,
             source_record_file=self.outcome_file,
             source_record_sha256=self.outcome_sha256,
+            additional_outcome_sources=(
+                CanonicalVOCOutcomeSource(
+                    authority=self.second_outcome_authority,
+                    source_root=self.root,
+                    source_record_file=self.second_outcome_file,
+                    source_record_sha256=self.second_outcome_sha256,
+                ),
+            ),
         )
         self.assertEqual(resolver.resolve(paired, as_of=T_AS_OF), paired)
 
@@ -596,6 +672,14 @@ class CanonicalOutcomeDerivedVOCScoreAuthorityTests(unittest.TestCase):
             outcome_source_root=self.root,
             source_record_file=self.outcome_file,
             source_record_sha256=self.outcome_sha256,
+            additional_outcome_sources=(
+                CanonicalVOCOutcomeSource(
+                    authority=self.second_outcome_authority,
+                    source_root=self.root,
+                    source_record_file=self.second_outcome_file,
+                    source_record_sha256=self.second_outcome_sha256,
+                ),
+            ),
         )
         restarted_store = VOCEvaluationStore(
             store_path,
@@ -634,7 +718,7 @@ class CanonicalOutcomeDerivedVOCScoreAuthorityTests(unittest.TestCase):
         ):
             self._authority().resolve(paired.evaluation_id, as_of=T_AS_OF)
 
-    def test_cohort_counts_distinct_decision_episodes_and_rejects_reuse(self):
+    def test_same_market_decisions_do_not_inflate_outcome_cluster_ess(self):
         first = self._evaluation(register_cohort=False)
         second = self._evaluation(
             evaluation_id="voc-derived-2",
@@ -646,14 +730,75 @@ class CanonicalOutcomeDerivedVOCScoreAuthorityTests(unittest.TestCase):
         self.registry.append(first)
         self.registry.append(second)
         self._append_cohort(first, second)
+        score = self._authority().resolve(first.evaluation_id, as_of=T_AS_OF)
+        self.assertIsNotNone(score)
+        assert score is not None
+        self.assertEqual(score.paired_sample_count, 2)
+        self.assertEqual(score.effective_sample_size, 1)
+        self.assertEqual(score.incremental_value_interval_low, Decimal("1.35"))
+        self.assertEqual(score.incremental_value_interval_high, Decimal("1.35"))
 
+    def test_independent_markets_contribute_independent_outcome_cluster_support(self):
+        first = self._evaluation(register_cohort=False)
+        second = self._evaluation(
+            evaluation_id="voc-derived-2",
+            decision_input_sha256=digest({"episode": 2, "kind": "input"}),
+            baseline_output_sha256=digest({"episode": 2, "kind": "baseline"}),
+            challenger_output_sha256=digest({"episode": 2, "kind": "challenger"}),
+            register_cohort=False,
+            outcome_authority=self.second_outcome_authority,
+        )
+        self.registry.append(first)
+        self.registry.append(second)
+        self._append_cohort(first, second)
         score = self._authority().resolve(first.evaluation_id, as_of=T_AS_OF)
         self.assertIsNotNone(score)
         assert score is not None
         self.assertEqual(score.paired_sample_count, 2)
         self.assertEqual(score.effective_sample_size, 2)
-        self.assertEqual(score.incremental_value_interval_low, Decimal("1.35"))
-        self.assertEqual(score.incremental_value_interval_high, Decimal("1.35"))
+
+    def test_cohort_rejects_omitted_eligible_episode(self):
+        first = self._evaluation(register_cohort=False)
+        second = self._evaluation(
+            evaluation_id="voc-derived-2",
+            decision_input_sha256=digest({"episode": 2, "kind": "input"}),
+            baseline_output_sha256=digest({"episode": 2, "kind": "baseline"}),
+            challenger_output_sha256=digest({"episode": 2, "kind": "challenger"}),
+            register_cohort=False,
+        )
+        self.registry.append(first)
+        self.registry.append(second)
+        self._append_cohort(first)
+        with self.assertRaisesRegex(
+            VOCEvaluationError,
+            "does not equal precommitted eligible DecisionLedger population",
+        ):
+            self._authority().resolve(first.evaluation_id, as_of=T_AS_OF)
+
+    def test_cohort_rejects_member_registered_after_cohort_freeze(self):
+        first = self._evaluation(register_cohort=False)
+        second = self._evaluation(
+            evaluation_id="voc-derived-2",
+            decision_input_sha256=digest({"episode": 2, "kind": "input"}),
+            baseline_output_sha256=digest({"episode": 2, "kind": "baseline"}),
+            challenger_output_sha256=digest({"episode": 2, "kind": "challenger"}),
+            register_cohort=False,
+        )
+        self.registry.append(first)
+        self.registry.append(
+            RawScientificRecord(
+                record_type="PairedVOCEvaluation",
+                record_id=second.evaluation_id,
+                available_at=T_AS_OF,
+                payload=second.to_payload(),
+            )
+        )
+        self._append_cohort(first, second)
+        with self.assertRaisesRegex(
+            VOCEvaluationError,
+            "registered after cohort freeze",
+        ):
+            self._authority().resolve(first.evaluation_id, as_of=T_AS_OF)
 
     def test_cohort_rejects_duplicate_decision_episode_identity(self):
         first = self._evaluation(register_cohort=False)
@@ -705,6 +850,14 @@ class CanonicalOutcomeDerivedVOCScoreAuthorityTests(unittest.TestCase):
             outcome_source_root=self.root,
             source_record_file=self.outcome_file,
             source_record_sha256=self.outcome_sha256,
+            additional_outcome_sources=(
+                CanonicalVOCOutcomeSource(
+                    authority=self.second_outcome_authority,
+                    source_root=self.root,
+                    source_record_file=self.second_outcome_file,
+                    source_record_sha256=self.second_outcome_sha256,
+                ),
+            ),
         )
         with self.assertRaisesRegex(
             VOCEvaluationError,

@@ -24,7 +24,10 @@ from autosport.sport_domain_fitness import (
     SportDomainFitnessObservation,
 )
 from autosport.voc_evaluation import VOCEvaluationStore
-from autosport.voc_outcome_scoring import build_canonical_voc_authority_resolver
+from autosport.voc_outcome_scoring import (
+    CanonicalVOCOutcomeSource,
+    build_canonical_voc_authority_resolver,
+)
 from test_voc_outcome_scoring import (
     CanonicalOutcomeDerivedVOCScoreAuthorityTests,
     digest,
@@ -92,6 +95,7 @@ class CanonicalVOCOutcomeRouterIntegrationTests(unittest.TestCase):
             baseline_output_sha256=digest({"episode": 2, "kind": "baseline"}),
             challenger_output_sha256=digest({"episode": 2, "kind": "challenger"}),
             register_cohort=False,
+            outcome_authority=self.fixture.second_outcome_authority,
         )
         self.fixture.registry.append(paired)
         self.fixture.registry.append(second)
@@ -113,6 +117,14 @@ class CanonicalVOCOutcomeRouterIntegrationTests(unittest.TestCase):
             outcome_source_root=self.fixture.root,
             source_record_file=self.fixture.outcome_file,
             source_record_sha256=self.fixture.outcome_sha256,
+            additional_outcome_sources=(
+                CanonicalVOCOutcomeSource(
+                    authority=self.fixture.second_outcome_authority,
+                    source_root=self.fixture.root,
+                    source_record_file=self.fixture.second_outcome_file,
+                    source_record_sha256=self.fixture.second_outcome_sha256,
+                ),
+            ),
         )
         first_store = VOCEvaluationStore(
             store_path,
@@ -129,6 +141,14 @@ class CanonicalVOCOutcomeRouterIntegrationTests(unittest.TestCase):
             outcome_source_root=self.fixture.root,
             source_record_file=self.fixture.outcome_file,
             source_record_sha256=self.fixture.outcome_sha256,
+            additional_outcome_sources=(
+                CanonicalVOCOutcomeSource(
+                    authority=self.fixture.second_outcome_authority,
+                    source_root=self.fixture.root,
+                    source_record_file=self.fixture.second_outcome_file,
+                    source_record_sha256=self.fixture.second_outcome_sha256,
+                ),
+            ),
         )
         restarted_store = VOCEvaluationStore(
             store_path,

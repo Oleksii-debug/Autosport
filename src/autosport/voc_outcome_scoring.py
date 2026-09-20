@@ -12,6 +12,7 @@ from __future__ import annotations
 import hashlib
 import json
 from collections.abc import Mapping
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from decimal import Context, Decimal, InvalidOperation, ROUND_HALF_EVEN, localcontext
 from pathlib import Path
@@ -84,6 +85,7 @@ _COHORT_FIELDS = frozenset(
         "scope",
         "baseline_compute_identity",
         "challenger_compute_identity",
+        "eligibility",
         "members",
     }
 )
@@ -95,6 +97,11 @@ _COHORT_MEMBER_FIELDS = frozenset(
         "decision_evidence_sha256",
     }
 )
+_COHORT_ELIGIBILITY_FIELDS = frozenset(
+    {"kind", "decision_recorded_from", "decision_recorded_through"}
+)
+_COHORT_ELIGIBILITY_KIND = "decision-ledger-window-v1"
+_OUTCOME_CLUSTER_RULE = "provider-independent-market-v1"
 
 
 def _text(value: object, *, field: str) -> str:
@@ -220,6 +227,41 @@ def _net_value(
         )
 
 
+@dataclass(frozen=True, slots=True)
+class CanonicalVOCOutcomeSource:
+    """Verified market outcome source usable by aggregate VOC scoring."""
+
+    authority: MarketSettlementOutcomeAuthority
+    source_root: str | Path
+    source_record_file: str
+    source_record_sha256: str
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.authority, MarketSettlementOutcomeAuthority):
+            raise TypeError("authority must be MarketSettlementOutcomeAuthority")
+        object.__setattr__(self, "source_root", Path(self.source_root))
+        object.__setattr__(
+            self,
+            "source_record_file",
+            _text(self.source_record_file, field="VOC outcome source_record_file"),
+        )
+        object.__setattr__(
+            self,
+            "source_record_sha256",
+            _sha256(self.source_record_sha256, field="VOC outcome source_record_sha256"),
+        )
+
+    @property
+    def cluster_sha256(self) -> str:
+        return _digest(
+            {
+                "schema": "autosport.voc_outcome_cluster",
+                "schema_version": 1,
+                "market_key": list(self.authority.identity.market_key),
+            }
+        )
+
+
 class CanonicalOutcomeDerivedVOCScoreAuthority:
     """Derive one VOC score from pre-outcome ledger evidence and revealed settlement.
 
@@ -247,6 +289,7 @@ class CanonicalOutcomeDerivedVOCScoreAuthority:
         outcome_source_root: str | Path,
         source_record_file: str,
         source_record_sha256: str,
+        additional_outcome_sources: tuple[CanonicalVOCOutcomeSource, ...] = (),
     ) -> None:
         if not isinstance(decision_ledger, JsonlDecisionLedger):
             raise TypeError("decision_ledger must be JsonlDecisionLedger")
@@ -254,18 +297,34 @@ class CanonicalOutcomeDerivedVOCScoreAuthority:
             raise TypeError("scientific_registry must be ScientificRegistry")
         if not isinstance(outcome_authority, MarketSettlementOutcomeAuthority):
             raise TypeError("outcome_authority must be MarketSettlementOutcomeAuthority")
+        if type(additional_outcome_sources) is not tuple:
+            raise TypeError("additional_outcome_sources must be a tuple")
         self.decision_ledger = decision_ledger
         self.scientific_registry = scientific_registry
         self.outcome_authority = outcome_authority
-        self.outcome_source_root = Path(outcome_source_root)
-        self.source_record_file = _text(
-            source_record_file,
-            field="VOC outcome source_record_file",
+        primary = CanonicalVOCOutcomeSource(
+            authority=outcome_authority,
+            source_root=outcome_source_root,
+            source_record_file=source_record_file,
+            source_record_sha256=source_record_sha256,
         )
-        self.source_record_sha256 = _sha256(
-            source_record_sha256,
-            field="VOC outcome source_record_sha256",
-        )
+        self.outcome_source_root = primary.source_root
+        self.source_record_file = primary.source_record_file
+        self.source_record_sha256 = primary.source_record_sha256
+        sources = {primary.authority.authority_sha256: primary}
+        for source in additional_outcome_sources:
+            if not isinstance(source, CanonicalVOCOutcomeSource):
+                raise TypeError(
+                    "additional_outcome_sources must contain CanonicalVOCOutcomeSource"
+                )
+            identity = source.authority.authority_sha256
+            prior = sources.get(identity)
+            if prior is not None and prior != source:
+                raise VOCEvaluationError(
+                    "conflicting canonical VOC outcome sources share one authority identity"
+                )
+            sources[identity] = source
+        self._outcome_sources = sources
 
     def _evaluation(self, evaluation_id: str, *, as_of: datetime) -> PairedVOCEvaluation | None:
         entry = self.scientific_registry.get("PairedVOCEvaluation", evaluation_id)
@@ -467,23 +526,29 @@ class CanonicalOutcomeDerivedVOCScoreAuthority:
         evaluation: PairedVOCEvaluation,
         *,
         as_of: datetime,
-    ) -> tuple[dict[str, str], str, str]:
-        path = self.outcome_source_root / self.source_record_file
+    ) -> tuple[dict[str, str], str, str, str]:
+        source = self._outcome_sources.get(evaluation.outcome_evidence_sha256)
+        if source is None:
+            raise VOCEvaluationError(
+                "paired VOC outcome evidence has no verified canonical source"
+            )
+        authority = source.authority
+        path = source.source_root / source.source_record_file
         try:
             payload = path.read_bytes()
         except OSError as exc:
             raise VOCEvaluationError("canonical VOC outcome source record is unreadable") from exc
         actual_sha = hashlib.sha256(payload).hexdigest()
-        if actual_sha != self.source_record_sha256:
+        if actual_sha != source.source_record_sha256:
             raise VOCEvaluationError("canonical VOC outcome source SHA-256 mismatch")
         raw = _strict_json_object(payload, context="canonical VOC outcome source record")
         try:
             lineage = validate_outcome_source_lineage(
-                source_root=self.outcome_source_root,
-                source_record_file=self.source_record_file,
-                source_record_sha256=self.source_record_sha256,
+                source_root=source.source_root,
+                source_record_file=source.source_record_file,
+                source_record_sha256=source.source_record_sha256,
                 source_record=raw,
-                expected_source_identity=self.outcome_authority.identity.source_id,
+                expected_source_identity=authority.identity.source_id,
             )
         except ValueError as exc:
             raise VOCEvaluationError("canonical VOC outcome lineage verification failed") from exc
@@ -496,29 +561,34 @@ class CanonicalOutcomeDerivedVOCScoreAuthority:
         if revealed_at > as_of:
             raise VOCEvaluationError("canonical VOC outcome is not causally available")
         try:
-            self.outcome_authority.assert_available_as_of(revealed_at)
+            authority.assert_available_as_of(revealed_at)
         except (TypeError, ValueError) as exc:
             raise VOCEvaluationError(
                 "market outcome authority was not available by outcome reveal"
             ) from exc
-        if set(lineage.quote_outcomes) != set(self.outcome_authority.quote_keys):
+        if set(lineage.quote_outcomes) != set(authority.quote_keys):
             raise VOCEvaluationError(
                 "canonical VOC revealed outcome does not cover the authoritative quote roster"
             )
         matching_states = [
             state
-            for state in self.outcome_authority.terminal_states
-            if self.outcome_authority.settlement_by_quote(state) == lineage.quote_outcomes
+            for state in authority.terminal_states
+            if authority.settlement_by_quote(state) == lineage.quote_outcomes
         ]
         if len(matching_states) != 1:
             raise VOCEvaluationError(
                 "canonical VOC revealed outcome is not one authoritative terminal state"
             )
-        if evaluation.outcome_evidence_sha256 != self.outcome_authority.authority_sha256:
+        if evaluation.outcome_evidence_sha256 != authority.authority_sha256:
             raise VOCEvaluationError(
                 "paired VOC outcome evidence does not match market outcome authority"
             )
-        return dict(lineage.quote_outcomes), lineage.recorded_at, actual_sha
+        return (
+            dict(lineage.quote_outcomes),
+            lineage.recorded_at,
+            actual_sha,
+            source.cluster_sha256,
+        )
 
     @staticmethod
     def _action_utility(
@@ -540,6 +610,105 @@ class CanonicalOutcomeDerivedVOCScoreAuthority:
                 f"frozen VOC scoring rule does not define action {action!r} for {outcome}"
             )
         return _decimal(values[action], field=f"VOC utility for {outcome}/{action}")
+
+    def _eligible_cohort_decisions(
+        self,
+        *,
+        recorded_from: datetime,
+        recorded_through: datetime,
+        expected_task_class: str,
+        expected_scope: Mapping[str, str],
+        expected_baseline: Mapping[str, str],
+        expected_challenger: Mapping[str, str],
+    ) -> dict[str, str]:
+        try:
+            self.decision_ledger.verified_snapshot()
+            records = self.decision_ledger.verified_records()
+        except DecisionLedgerIntegrityError as exc:
+            raise VOCEvaluationError("canonical DecisionLedger verification failed") from exc
+
+        by_sha = {_digest(record.to_dict()): record for record in records}
+        eligible: dict[str, str] = {}
+        for record_sha, record in by_sha.items():
+            recorded_at = _instant(
+                record.recorded_at,
+                field="VOC cohort DecisionRecord.recorded_at",
+            )
+            if recorded_at < recorded_from or recorded_at > recorded_through:
+                continue
+            payload = record.payload
+            if not isinstance(payload, Mapping):
+                continue
+            binding = payload.get("voc_binding")
+            evidence = payload.get(_SCORING_EVIDENCE_KEY)
+            if not isinstance(binding, Mapping) or not isinstance(evidence, Mapping):
+                continue
+            binding_scope = {
+                "sport_id": binding.get("sport_id"),
+                "league_id": binding.get("league_id"),
+                "regime_id": binding.get("regime_id"),
+                "urgency_id": binding.get("urgency_id"),
+                "contradiction_state": binding.get("contradiction_state"),
+            }
+            binding_baseline = {
+                "candidate_id": binding.get("baseline_candidate_id"),
+                "backend_id": binding.get("baseline_backend_id"),
+                "model_id": binding.get("baseline_model_id"),
+                "config_sha256": binding.get("baseline_config_sha256"),
+            }
+            binding_challenger = {
+                "candidate_id": binding.get("challenger_candidate_id"),
+                "backend_id": binding.get("challenger_backend_id"),
+                "model_id": binding.get("challenger_model_id"),
+                "config_sha256": binding.get("challenger_config_sha256"),
+            }
+            if (
+                binding_scope != dict(expected_scope)
+                or binding_baseline != dict(expected_baseline)
+                or binding_challenger != dict(expected_challenger)
+            ):
+                continue
+            context_sha = _sha256(
+                binding.get("decision_context_sha256"),
+                field="eligible VOC decision_context_sha256",
+            )
+            context_record = by_sha.get(context_sha)
+            if context_record is None or not isinstance(context_record.payload, Mapping):
+                raise VOCEvaluationError(
+                    "eligible VOC decision is missing canonical decision context"
+                )
+            current_context = context_record.payload.get("voc_current_context")
+            if not isinstance(current_context, Mapping):
+                raise VOCEvaluationError(
+                    "eligible VOC decision context is missing canonical scope"
+                )
+            context_scope = {
+                "sport_id": current_context.get("sport_id"),
+                "league_id": current_context.get("league_id"),
+                "regime_id": current_context.get("regime_id"),
+                "urgency_id": current_context.get("urgency_id"),
+                "contradiction_state": current_context.get("contradiction_state"),
+            }
+            if (
+                current_context.get("task_class") != expected_task_class
+                or context_scope != dict(expected_scope)
+            ):
+                continue
+            evaluation_id = _text(
+                evidence.get("evaluation_id"),
+                field="eligible VOC evaluation_id",
+            )
+            prior = eligible.get(evaluation_id)
+            if prior is not None and prior != record_sha:
+                raise VOCEvaluationError(
+                    "precommitted VOC eligibility range contains duplicate evaluation identity"
+                )
+            eligible[evaluation_id] = record_sha
+        if not eligible:
+            raise VOCEvaluationError(
+                "precommitted VOC eligibility range contains no canonical decisions"
+            )
+        return dict(sorted(eligible.items()))
 
     def _cohort_members(
         self,
@@ -564,6 +733,39 @@ class CanonicalOutcomeDerivedVOCScoreAuthority:
             raise VOCEvaluationError("canonical VOC cohort design is invalid JSON") from exc
         if type(design) is not dict:
             raise VOCEvaluationError("canonical VOC cohort design must be an object")
+        if design.get("outcome_cluster_rule") != _OUTCOME_CLUSTER_RULE:
+            raise VOCEvaluationError(
+                "canonical VOC cohort outcome-cluster rule is missing or unsupported"
+            )
+        eligibility = design.get("cohort_eligibility")
+        if type(eligibility) is not dict or set(eligibility) != _COHORT_ELIGIBILITY_FIELDS:
+            raise VOCEvaluationError("canonical VOC cohort eligibility schema is invalid")
+        if eligibility.get("kind") != _COHORT_ELIGIBILITY_KIND:
+            raise VOCEvaluationError("canonical VOC cohort eligibility kind is unsupported")
+        recorded_from = _instant(
+            eligibility.get("decision_recorded_from"),
+            field="VOC cohort decision_recorded_from",
+        )
+        recorded_through = _instant(
+            eligibility.get("decision_recorded_through"),
+            field="VOC cohort decision_recorded_through",
+        )
+        if recorded_from > recorded_through:
+            raise VOCEvaluationError("canonical VOC cohort eligibility window is reversed")
+        if _instant(
+            protocol_entry.available_at,
+            field="ResearchProtocol.available_at",
+        ) > recorded_from:
+            raise VOCEvaluationError(
+                "VOC cohort eligibility window was not precommitted before decisions"
+            )
+        if recorded_through >= _instant(
+            evaluation.outcome_revealed_at,
+            field="outcome_revealed_at",
+        ):
+            raise VOCEvaluationError(
+                "VOC cohort eligibility window must close before outcome reveal"
+            )
         cohort_id = _text(design.get("cohort_id"), field="VOC cohort_id")
         entry = self.scientific_registry.get("VOCCohort", cohort_id)
         if entry is None:
@@ -571,11 +773,19 @@ class CanonicalOutcomeDerivedVOCScoreAuthority:
         cohort_available_at = _instant(entry.available_at, field="VOCCohort.available_at")
         if cohort_available_at > as_of:
             raise VOCEvaluationError("canonical VOC cohort is not causally available")
+        if cohort_available_at < recorded_through:
+            raise VOCEvaluationError(
+                "canonical VOC cohort froze before its eligibility window closed"
+            )
         payload = entry.payload
         if type(payload) is not dict or set(payload) != _COHORT_FIELDS:
             raise VOCEvaluationError("canonical VOC cohort schema is invalid")
         if payload.get("cohort_id") != cohort_id:
             raise VOCEvaluationError("canonical VOC cohort identity mismatch")
+        if payload.get("eligibility") != eligibility:
+            raise VOCEvaluationError(
+                "canonical VOC cohort eligibility does not match precommitted protocol"
+            )
         denominator = payload.get("denominator")
         raw_members = payload.get("members")
         if (
@@ -625,7 +835,14 @@ class CanonicalOutcomeDerivedVOCScoreAuthority:
                 raise VOCEvaluationError(
                     f"canonical VOC cohort {field} does not match target evaluation"
                 )
-
+        eligible_population = self._eligible_cohort_decisions(
+            recorded_from=recorded_from,
+            recorded_through=recorded_through,
+            expected_task_class=evaluation.task_class,
+            expected_scope=expected_scope,
+            expected_baseline=expected_baseline,
+            expected_challenger=expected_challenger,
+        )
         members: list[PairedVOCEvaluation] = []
         member_ids: list[str] = []
         decision_context_ids: set[str] = set()
@@ -660,7 +877,19 @@ class CanonicalOutcomeDerivedVOCScoreAuthority:
             member_ids.append(member_id)
             decision_context_ids.add(context_sha)
             decision_ids.add(decision_sha)
-            member = self._evaluation(member_id, as_of=as_of)
+            member_entry = self.scientific_registry.get(
+                "PairedVOCEvaluation", member_id
+            )
+            if member_entry is None:
+                raise VOCEvaluationError("canonical VOC cohort member is missing")
+            if _instant(
+                member_entry.available_at,
+                field="PairedVOCEvaluation.available_at",
+            ) > cohort_available_at:
+                raise VOCEvaluationError(
+                    "canonical VOC cohort member was registered after cohort freeze"
+                )
+            member = self._evaluation(member_id, as_of=cohort_available_at)
             if member is None:
                 raise VOCEvaluationError("canonical VOC cohort member is missing")
             if (
@@ -704,8 +933,6 @@ class CanonicalOutcomeDerivedVOCScoreAuthority:
                 or member_scope != expected_scope
                 or member_baseline != expected_baseline
                 or member_challenger != expected_challenger
-                or member.outcome_evidence_sha256
-                != evaluation.outcome_evidence_sha256
                 or member.provenance is not evaluation.provenance
             ):
                 raise VOCEvaluationError(
@@ -720,12 +947,15 @@ class CanonicalOutcomeDerivedVOCScoreAuthority:
             raise VOCEvaluationError(
                 "target PairedVOCEvaluation is outside the canonical VOC cohort"
             )
-        return (
-            cohort_id,
-            entry.available_at,
-            _digest(payload),
-            tuple(members),
-        )
+        actual_population = {
+            member.evaluation_id: member.decision_evidence_sha256
+            for member in members
+        }
+        if actual_population != eligible_population:
+            raise VOCEvaluationError(
+                "canonical VOC cohort does not equal precommitted eligible DecisionLedger population"
+            )
+        return (cohort_id, entry.available_at, _digest(payload), tuple(members))
 
     def _derive_episode_score(
         self,
@@ -865,7 +1095,7 @@ class CanonicalOutcomeDerivedVOCScoreAuthority:
                 "decision_evidence_sha256": evaluation.decision_evidence_sha256,
                 "decision_record_sha256": decision_record_sha256,
                 "outcome_source_record_sha256": outcome_source_sha256,
-                "outcome_authority_sha256": self.outcome_authority.authority_sha256,
+                "outcome_authority_sha256": evaluation.outcome_evidence_sha256,
                 "scoring_rule_sha256": evaluation.scoring_rule_sha256,
                 "research_protocol_sha256": evaluation.research_protocol_sha256,
                 "sample_ids": sample_ids,
@@ -875,7 +1105,7 @@ class CanonicalOutcomeDerivedVOCScoreAuthority:
         return OutcomeDerivedVOCScore(
             evaluation_id=evaluation.evaluation_id,
             available_at=evaluation.evaluated_at,
-            outcome_evidence_sha256=self.outcome_authority.authority_sha256,
+            outcome_evidence_sha256=evaluation.outcome_evidence_sha256,
             scoring_rule_sha256=evaluation.scoring_rule_sha256,
             research_protocol_sha256=evaluation.research_protocol_sha256,
             holdout_access_id=evaluation.holdout_access_id,
@@ -902,17 +1132,16 @@ class CanonicalOutcomeDerivedVOCScoreAuthority:
         as_of: datetime,
     ) -> OutcomeDerivedVOCScore:
         cohort_id, cohort_available_at, cohort_sha256, members = self._cohort_members(
-            evaluation,
-            as_of=as_of,
+            evaluation, as_of=as_of
         )
         episode_scores: list[OutcomeDerivedVOCScore] = []
+        episode_clusters: list[str] = []
         member_sources: list[dict[str, str]] = []
         for member in members:
             evidence, decision_record_sha256 = self._decision_scoring_evidence(member)
             rule = self._scoring_rule(member)
-            outcomes, _, outcome_source_sha256 = self._revealed_outcomes(
-                member,
-                as_of=as_of,
+            outcomes, _, outcome_source_sha256, outcome_cluster_sha256 = (
+                self._revealed_outcomes(member, as_of=as_of)
             )
             episode = self._derive_episode_score(
                 evaluation=member,
@@ -923,43 +1152,64 @@ class CanonicalOutcomeDerivedVOCScoreAuthority:
                 outcome_source_sha256=outcome_source_sha256,
             )
             episode_scores.append(episode)
+            episode_clusters.append(outcome_cluster_sha256)
             member_sources.append(
                 {
                     "evaluation_id": member.evaluation_id,
                     "evaluation_sha256": member.evaluation_sha256,
                     "episode_source_artifact_sha256": episode.source_artifact_sha256,
+                    "outcome_cluster_sha256": outcome_cluster_sha256,
                 }
             )
+        clustered: dict[str, list[OutcomeDerivedVOCScore]] = {}
+        for cluster_sha256, episode in zip(episode_clusters, episode_scores):
+            clustered.setdefault(cluster_sha256, []).append(episode)
+        ordered_clusters = [clustered[key] for key in sorted(clustered)]
 
-        baseline_utility = _mean(
-            [score.baseline_utility for score in episode_scores],
-            field="cohort baseline utility",
+        def cluster_weighted_mean(attribute: str, *, field: str) -> Decimal:
+            return _mean(
+                [
+                    _mean(
+                        [getattr(score, attribute) for score in cluster],
+                        field=f"{field} within outcome cluster",
+                    )
+                    for cluster in ordered_clusters
+                ],
+                field=field,
+            )
+
+        baseline_utility = cluster_weighted_mean(
+            "baseline_utility", field="cohort baseline utility"
         )
-        challenger_utility = _mean(
-            [score.challenger_utility for score in episode_scores],
-            field="cohort challenger utility",
+        challenger_utility = cluster_weighted_mean(
+            "challenger_utility", field="cohort challenger utility"
         )
-        compute_cost_penalty = _mean(
-            [score.compute_cost_penalty for score in episode_scores],
-            field="cohort compute cost penalty",
+        compute_cost_penalty = cluster_weighted_mean(
+            "compute_cost_penalty", field="cohort compute cost penalty"
         )
-        latency_opportunity_cost_penalty = _mean(
-            [score.latency_opportunity_cost_penalty for score in episode_scores],
+        latency_opportunity_cost_penalty = cluster_weighted_mean(
+            "latency_opportunity_cost_penalty",
             field="cohort latency opportunity cost penalty",
         )
-        measured_compute_cost = _mean(
-            [score.measured_compute_cost for score in episode_scores],
-            field="cohort measured compute cost",
+        measured_compute_cost = cluster_weighted_mean(
+            "measured_compute_cost", field="cohort measured compute cost"
         )
-        episode_net_values = [score.net_value for score in episode_scores]
+        cluster_net_values = [
+            _mean(
+                [score.net_value for score in cluster],
+                field="net VOC within outcome cluster",
+            )
+            for cluster in ordered_clusters
+        ]
         source_artifact_sha256 = _digest(
             {
                 "schema": "autosport.canonical_voc_cohort_score_sources",
-                "schema_version": 1,
+                "schema_version": 2,
                 "target_evaluation_id": evaluation.evaluation_id,
                 "cohort_id": cohort_id,
                 "cohort_sha256": cohort_sha256,
                 "members": member_sources,
+                "outcome_clusters": sorted(clustered),
             }
         )
         return OutcomeDerivedVOCScore(
@@ -978,10 +1228,10 @@ class CanonicalOutcomeDerivedVOCScoreAuthority:
             latency_opportunity_cost_penalty=latency_opportunity_cost_penalty,
             measured_compute_cost=measured_compute_cost,
             paired_sample_count=len(episode_scores),
-            effective_sample_size=len(episode_scores),
+            effective_sample_size=len(ordered_clusters),
             support_fraction=_ONE,
-            incremental_value_interval_low=min(episode_net_values),
-            incremental_value_interval_high=max(episode_net_values),
+            incremental_value_interval_low=min(cluster_net_values),
+            incremental_value_interval_high=max(cluster_net_values),
             source_artifact_sha256=source_artifact_sha256,
         )
 
@@ -1000,7 +1250,7 @@ class CanonicalOutcomeDerivedVOCScoreAuthority:
             return None
         evidence, decision_record_sha256 = self._decision_scoring_evidence(evaluation)
         rule = self._scoring_rule(evaluation)
-        outcomes, _, outcome_source_sha256 = self._revealed_outcomes(
+        outcomes, _, outcome_source_sha256, _ = self._revealed_outcomes(
             evaluation,
             as_of=cutoff,
         )
@@ -1040,6 +1290,7 @@ def build_canonical_voc_authority_resolver(
     outcome_source_root: str | Path,
     source_record_file: str,
     source_record_sha256: str,
+    additional_outcome_sources: tuple[CanonicalVOCOutcomeSource, ...] = (),
 ) -> CanonicalVOCAuthorityResolver:
     """Build the production VOC resolver with the non-self-attested scorer wired in."""
 
@@ -1050,6 +1301,7 @@ def build_canonical_voc_authority_resolver(
         outcome_source_root=outcome_source_root,
         source_record_file=source_record_file,
         source_record_sha256=source_record_sha256,
+        additional_outcome_sources=additional_outcome_sources,
     )
     return CanonicalVOCAuthorityResolver(
         decision_ledger=decision_ledger,

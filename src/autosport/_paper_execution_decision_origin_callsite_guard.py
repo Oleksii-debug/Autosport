@@ -8,6 +8,68 @@ from . import _paper_value_execution_authority as _paper_value_authority
 from . import live_decision_loop as _live_decision_loop
 from .decision_ledger import JsonlDecisionLedger
 from .paper_execution_adoption import PaperExecutionAdoptionError, PaperExecutionAdoptionRuntime
+from .paper_execution_reality import PaperExecutionLedger
+
+
+_ORIGINAL_VERIFIED_DECISION_ORIGIN = _origin.verified_decision_origin
+_ORIGINAL_ORIGIN_RESERVE = _origin._reserve_run_with_decision_origin
+
+
+def _reject_callable_instance_shadows(instance: object, exact_type: type, *, label: str) -> None:
+    """Reject exact instances that shadow class callables used as authority."""
+
+    state = getattr(instance, "__dict__", None)
+    if type(state) is not dict:
+        return
+    for name in state:
+        descriptor = inspect.getattr_static(exact_type, name, None)
+        if callable(descriptor) or isinstance(descriptor, (classmethod, staticmethod)):
+            raise _origin.PaperExecutionDecisionOriginError(
+                f"{label} exact instance shadows authority method {name}"
+            )
+
+
+def _verified_decision_origin_without_instance_method_shadow(
+    ledger: JsonlDecisionLedger,
+    decision_id: str,
+):
+    if type(ledger) is not JsonlDecisionLedger:
+        raise _origin.PaperExecutionDecisionOriginError(
+            "decision origin requires exact JsonlDecisionLedger authority"
+        )
+    _reject_callable_instance_shadows(
+        ledger,
+        JsonlDecisionLedger,
+        label="decision ledger",
+    )
+    return _ORIGINAL_VERIFIED_DECISION_ORIGIN(ledger, decision_id)
+
+
+def _reserve_run_without_instance_method_shadow(
+    self: PaperExecutionLedger,
+    *,
+    run_id: str,
+    trigger_id: str,
+    plan,
+    config,
+    started_at: str,
+    observation_evidence_ids,
+) -> None:
+    if type(self) is PaperExecutionLedger:
+        _reject_callable_instance_shadows(
+            self,
+            PaperExecutionLedger,
+            label="paper execution ledger",
+        )
+    return _ORIGINAL_ORIGIN_RESERVE(
+        self,
+        run_id=run_id,
+        trigger_id=trigger_id,
+        plan=plan,
+        config=config,
+        started_at=started_at,
+        observation_evidence_ids=observation_evidence_ids,
+    )
 
 
 def _origin_from_direct_caller(
@@ -195,6 +257,10 @@ def _execute_with_exact_product_callsite(
 
 
 def _install() -> None:
+    _origin.verified_decision_origin = _verified_decision_origin_without_instance_method_shadow
+    _origin._reserve_run_with_decision_origin = _reserve_run_without_instance_method_shadow
+    PaperExecutionLedger.reserve_run = _reserve_run_without_instance_method_shadow
+
     if getattr(PaperExecutionAdoptionRuntime, "_autosport_decision_origin_callsite_guard", False):
         return
     PaperExecutionAdoptionRuntime.execute = _execute_with_exact_product_callsite

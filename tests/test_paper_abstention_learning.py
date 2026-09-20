@@ -4,6 +4,7 @@ import json
 import tempfile
 import unittest
 from decimal import Decimal
+from unittest.mock import patch
 from pathlib import Path
 
 from autosport.agent_loop import AgentLoopPhase, AgentLoopRuntime, ExternalEffectState
@@ -95,6 +96,29 @@ def _evidence(action, *, reward_value: str, truth: EvidenceTruth):
         simulation_model_id=model_id,
     )
     return outcome, reward
+
+
+def _resume_runtime(
+    root: Path,
+    environment: CausalLearningEnvironment,
+    baseline,
+):
+    resumed_environment = CausalLearningEnvironment.resume(
+        environment.identity,
+        episode_key=environment.episode.episode_key,
+        policy_id=environment.episode.policy_id,
+        admissible_actions=frozenset(environment.episode.admissible_actions),
+        checkpoint=baseline,
+    )
+    resumed_loop = AgentLoopRuntime(root / "agent-loop.json")
+    return (
+        resumed_environment,
+        resumed_loop,
+        PaperAbstentionLearningRuntime(
+            environment=resumed_environment,
+            agent_loop=resumed_loop,
+        ),
+    )
 
 
 class PaperAbstentionLearningTests(unittest.TestCase):
@@ -255,6 +279,182 @@ class PaperAbstentionLearningTests(unittest.TestCase):
             self.assertEqual(len(raw["attributions"]), 1)
             self.assertEqual(len(raw["postmortems"]), 1)
             self.assertEqual(raw["phase"], AgentLoopPhase.CHECKPOINT.value)
+
+    def test_pre_action_crash_boundaries_resume_exact_intent(self) -> None:
+        crash_cases = (
+            ("after_begin_observation", "begin", 0),
+            ("after_observe_advance", "advance", 1),
+            ("after_assess_advance", "advance", 2),
+            ("after_plan_advance", "advance", 3),
+            ("after_decide_advance", "advance", 4),
+            ("after_environment_act_before_commit", "before_commit", 0),
+            ("after_commit_action", "after_commit", 0),
+        )
+        for label, crash_kind, target in crash_cases:
+            with self.subTest(label=label), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                environment, baseline, loop, observation, runtime = _runtime(root)
+                kwargs = {
+                    "observation": observation,
+                    "action_type": "WAIT",
+                    "decision_at": T2,
+                    "parameters": (("reason", "no-edge"),),
+                    "at": T2,
+                }
+
+                if crash_kind == "begin":
+                    original = loop.begin_observation
+
+                    def crash_after_begin(*args, **call_kwargs):
+                        original(*args, **call_kwargs)
+                        raise RuntimeError("simulated process crash")
+
+                    context = patch.object(
+                        loop,
+                        "begin_observation",
+                        side_effect=crash_after_begin,
+                    )
+                elif crash_kind == "advance":
+                    original = loop.advance
+                    calls = 0
+
+                    def crash_after_advance(*args, **call_kwargs):
+                        nonlocal calls
+                        result = original(*args, **call_kwargs)
+                        calls += 1
+                        if calls == target:
+                            raise RuntimeError("simulated process crash")
+                        return result
+
+                    context = patch.object(
+                        loop,
+                        "advance",
+                        side_effect=crash_after_advance,
+                    )
+                elif crash_kind == "before_commit":
+                    context = patch.object(
+                        loop,
+                        "commit_action",
+                        side_effect=RuntimeError("simulated process crash"),
+                    )
+                else:
+                    original = loop.commit_action
+
+                    def crash_after_commit(*args, **call_kwargs):
+                        original(*args, **call_kwargs)
+                        raise RuntimeError("simulated process crash")
+
+                    context = patch.object(
+                        loop,
+                        "commit_action",
+                        side_effect=crash_after_commit,
+                    )
+
+                with context:
+                    with self.assertRaisesRegex(RuntimeError, "simulated process crash"):
+                        runtime.begin_abstention(**kwargs)
+
+                _resumed_environment, resumed_loop, recovered = _resume_runtime(
+                    root,
+                    environment,
+                    baseline,
+                )
+                action = recovered.begin_abstention(**kwargs)
+
+                self.assertEqual(resumed_loop.snapshot().phase, AgentLoopPhase.WAIT_OUTCOME)
+                self.assertEqual(resumed_loop.snapshot().action_id, action.action_id)
+                raw = json.loads((root / "agent-loop.json").read_text(encoding="utf-8"))
+                self.assertEqual(len(raw["decisions"]), 1)
+                self.assertEqual(raw["decisions"][0]["action_id"], action.action_id)
+
+    def test_pre_action_restart_rejects_conflicting_retry_payload(self) -> None:
+        mutations = (
+            ("action_type", {"action_type": "NO_BET"}),
+            ("decision_at", {"decision_at": T3}),
+            ("parameters", {"parameters": (("reason", "changed"),)}),
+        )
+        for label, mutation in mutations:
+            with self.subTest(label=label), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                environment, baseline, loop, observation, runtime = _runtime(root)
+                original = loop.begin_observation
+
+                def crash_after_begin(*args, **call_kwargs):
+                    original(*args, **call_kwargs)
+                    raise RuntimeError("simulated process crash")
+
+                base_kwargs = {
+                    "observation": observation,
+                    "action_type": "WAIT",
+                    "decision_at": T2,
+                    "parameters": (("reason", "no-edge"),),
+                    "at": T2,
+                }
+                with patch.object(
+                    loop,
+                    "begin_observation",
+                    side_effect=crash_after_begin,
+                ):
+                    with self.assertRaises(RuntimeError):
+                        runtime.begin_abstention(**base_kwargs)
+
+                _env, _loop, recovered = _resume_runtime(root, environment, baseline)
+                retry = dict(base_kwargs)
+                retry.update(mutation)
+                with self.assertRaisesRegex(
+                    PaperAbstentionLearningError,
+                    "durable abstention intent conflicts with retry payload",
+                ):
+                    recovered.begin_abstention(**retry)
+
+    def test_pre_action_restart_rejects_changed_observation_and_missing_intent(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            environment, baseline, loop, observation, runtime = _runtime(root)
+            original = loop.begin_observation
+
+            def crash_after_begin(*args, **call_kwargs):
+                original(*args, **call_kwargs)
+                raise RuntimeError("simulated process crash")
+
+            kwargs = {
+                "observation": observation,
+                "action_type": "WAIT",
+                "decision_at": T2,
+                "parameters": (("reason", "no-edge"),),
+                "at": T2,
+            }
+            with patch.object(
+                loop,
+                "begin_observation",
+                side_effect=crash_after_begin,
+            ):
+                with self.assertRaises(RuntimeError):
+                    runtime.begin_abstention(**kwargs)
+
+            changed_observation = Observation(
+                environment_id=environment.environment_id,
+                observed_at=T0,
+                available_at=T1,
+                evidence=(("opportunity", "different-observation"),),
+            )
+            _env, _loop, recovered = _resume_runtime(root, environment, baseline)
+            with self.assertRaisesRegex(
+                PaperAbstentionLearningError,
+                "durable AgentLoop observation differs",
+            ):
+                recovered.begin_abstention(
+                    **{**kwargs, "observation": changed_observation}
+                )
+
+            intent_path = root / "agent-loop.json.paper-abstention-intents.json"
+            intent_path.unlink()
+            _env, _loop, recovered = _resume_runtime(root, environment, baseline)
+            with self.assertRaisesRegex(
+                PaperAbstentionLearningError,
+                "durable abstention intent is missing",
+            ):
+                recovered.begin_abstention(**kwargs)
 
     def test_finalize_requires_explicit_reward_evidence(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

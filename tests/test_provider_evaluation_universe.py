@@ -14,6 +14,12 @@ from autosport.evaluation_universe import (
     FunnelStage,
     SlotState,
 )
+from autosport.event_lifecycle import (
+    CatalogEvent,
+    CatalogPage,
+    ContinuousEventLifecycle,
+    EventPhase,
+)
 from autosport.provider_evaluation_universe import (
     ProviderEvaluationUniverseError,
     ProviderEvaluationUniverseStore,
@@ -110,6 +116,39 @@ def _capture(monkeypatch, frame: dict[str, object] | None = None):
     )
 
 
+def _event_lifecycle(
+    tmp_path,
+    *,
+    event_id: str = "event-1",
+    scheduled_start_at: str = REVEAL_NOT_BEFORE,
+    discovered_at: str = CAPTURED_AT,
+    source_id: str | None = None,
+    sport: str | None = None,
+) -> ContinuousEventLifecycle:
+    request = _request()
+    lifecycle = ContinuousEventLifecycle(tmp_path / "event-lifecycle.json")
+    lifecycle.apply_page(
+        CatalogPage(
+            source_id=source_id or request.source_id,
+            stream_epoch="epoch-1",
+            cursor="cursor-1",
+            position=0,
+            events=(
+                CatalogEvent(
+                    source_id=source_id or request.source_id,
+                    sport=sport or request.sport_key,
+                    event_id=event_id,
+                    phase=EventPhase.PRE_MATCH,
+                    available_at="2026-09-20T07:59:50Z",
+                    scheduled_start_at=scheduled_start_at,
+                ),
+            ),
+        ),
+        discovered_at=discovered_at,
+    )
+    return lifecycle
+
+
 def _candidate_row(snapshot, member) -> EvaluationRow:
     return EvaluationRow(
         row_key=member.row_key,
@@ -147,7 +186,7 @@ def _candidate_row(snapshot, member) -> EvaluationRow:
         execution_action_id=None,
         decision_quote_id=None,
         cost_contract_sha256=COST_SHA,
-        outcome_reveal_not_before=REVEAL_NOT_BEFORE,
+        outcome_reveal_not_before=member.outcome_reveal_not_before,
         dependence_cluster_keys=("event:event-1",),
     )
 
@@ -189,14 +228,15 @@ def _empty_row(snapshot, member) -> EvaluationRow:
         execution_action_id=None,
         decision_quote_id=None,
         cost_contract_sha256=COST_SHA,
-        outcome_reveal_not_before=REVEAL_NOT_BEFORE,
+        outcome_reveal_not_before=None,
         dependence_cluster_keys=("source:table_tennis",),
     )
 
 
-def _build(snapshot, rows):
+def _build(snapshot, rows, *, event_lifecycle=None, frozen_at: str = FROZEN_AT):
     return build_frozen_universe_from_complete_game_board(
         snapshot=snapshot,
+        event_lifecycle=event_lifecycle,
         authority_id="provider-intake-1",
         session_id="session-1",
         universe_id="universe-1",
@@ -204,8 +244,7 @@ def _build(snapshot, rows):
         research_protocol_id="protocol-1",
         protocol_sha256=PROTOCOL_SHA,
         evaluation_not_before=EVALUATION_NOT_BEFORE,
-        outcome_reveal_not_before=REVEAL_NOT_BEFORE,
-        frozen_at=FROZEN_AT,
+        frozen_at=frozen_at,
         rows=rows,
     )
 
@@ -214,9 +253,16 @@ def test_live_complete_board_freezes_every_selection_and_resumes_after_restart(
     tmp_path, monkeypatch
 ):
     snapshot = _capture(monkeypatch)
-    members = complete_game_board_member_specs(snapshot)
+    lifecycle = _event_lifecycle(tmp_path)
+    members = complete_game_board_member_specs(snapshot, event_lifecycle=lifecycle)
     assert len(members) == 6
-    universe = _build(snapshot, tuple(_candidate_row(snapshot, member) for member in members))
+    assert all(member.reveal_authority_sha256 is not None for member in members)
+    assert all(":reveal:" in member.row_key for member in members)
+    universe = _build(
+        snapshot,
+        tuple(_candidate_row(snapshot, member) for member in members),
+        event_lifecycle=lifecycle,
+    )
     assert universe.intake_snapshot.source_id == "parlayapi:table_tennis"
     assert universe.intake_snapshot.expected_row_keys == tuple(
         sorted(member.row_key for member in members)
@@ -242,45 +288,127 @@ def test_live_complete_board_freezes_every_selection_and_resumes_after_restart(
     assert loaded is not None
     assert loaded.universe.universe_sha256 == universe.universe_sha256
     assert loaded.universe.intake_snapshot.root_sha256 == universe.intake_snapshot.root_sha256
+    assert loaded.universe.rows == universe.rows
+    assert all(row.outcome_reveal_not_before == REVEAL_NOT_BEFORE for row in loaded.universe.rows)
 
 
-def test_caller_constructed_value_equal_provider_snapshot_cannot_mint_denominator():
+def test_caller_constructed_value_equal_provider_snapshot_cannot_mint_denominator(tmp_path):
     lookalike = CompleteGameBoardSnapshot(
         request=_request(),
         captured_at=CAPTURED_AT,
         frame_json=json.dumps(_frame()),
     )
+    lifecycle = _event_lifecycle(tmp_path)
     with pytest.raises(Exception, match="not issued by canonical provider acquisition evidence"):
-        complete_game_board_member_specs(lookalike)
+        complete_game_board_member_specs(lookalike, event_lifecycle=lifecycle)
 
 
-def test_complete_board_rejects_selection_cherry_pick(monkeypatch):
+def test_complete_board_rejects_selection_cherry_pick(tmp_path, monkeypatch):
     snapshot = _capture(monkeypatch)
-    members = complete_game_board_member_specs(snapshot)
+    lifecycle = _event_lifecycle(tmp_path)
+    members = complete_game_board_member_specs(snapshot, event_lifecycle=lifecycle)
     rows = tuple(_candidate_row(snapshot, member) for member in members[:-1])
     with pytest.raises(
         ProviderEvaluationUniverseError,
         match="must equal every canonical complete-board selection member",
     ):
-        _build(snapshot, rows)
+        _build(snapshot, rows, event_lifecycle=lifecycle)
 
 
-def test_complete_board_rejects_member_identity_relabel(monkeypatch):
+def test_complete_board_rejects_member_identity_relabel(tmp_path, monkeypatch):
     snapshot = _capture(monkeypatch)
-    members = complete_game_board_member_specs(snapshot)
+    lifecycle = _event_lifecycle(tmp_path)
+    members = complete_game_board_member_specs(snapshot, event_lifecycle=lifecycle)
     rows = [_candidate_row(snapshot, member) for member in members]
     rows[0] = replace(rows[0], selection_id="forged-selection")
     with pytest.raises(
         ProviderEvaluationUniverseError,
         match="does not match exact provider selection membership",
     ):
-        _build(snapshot, tuple(rows))
+        _build(snapshot, tuple(rows), event_lifecycle=lifecycle)
+
+
+def test_complete_board_rejects_caller_forged_later_reveal_boundary(tmp_path, monkeypatch):
+    snapshot = _capture(monkeypatch)
+    lifecycle = _event_lifecycle(tmp_path)
+    members = complete_game_board_member_specs(snapshot, event_lifecycle=lifecycle)
+    rows = [_candidate_row(snapshot, member) for member in members]
+    rows[0] = replace(rows[0], outcome_reveal_not_before="2026-09-20T10:00:00Z")
+    with pytest.raises(
+        ProviderEvaluationUniverseError,
+        match="must equal canonical per-event lifecycle authority",
+    ):
+        _build(snapshot, tuple(rows), event_lifecycle=lifecycle)
+
+
+def test_freeze_after_authoritative_reveal_rejects_even_if_rows_forge_later_boundary(
+    tmp_path, monkeypatch
+):
+    snapshot = _capture(monkeypatch)
+    lifecycle = _event_lifecycle(tmp_path)
+    members = complete_game_board_member_specs(snapshot, event_lifecycle=lifecycle)
+    rows = tuple(
+        replace(
+            _candidate_row(snapshot, member),
+            outcome_reveal_not_before="2026-09-20T10:00:00Z",
+        )
+        for member in members
+    )
+    with pytest.raises(
+        ProviderEvaluationUniverseError,
+        match="strictly before every canonical event reveal boundary",
+    ):
+        _build(
+            snapshot,
+            rows,
+            event_lifecycle=lifecycle,
+            frozen_at="2026-09-20T09:30:00Z",
+        )
+
+
+def test_complete_board_rejects_mismatched_event_reveal_authority(tmp_path, monkeypatch):
+    snapshot = _capture(monkeypatch)
+    lifecycle = _event_lifecycle(tmp_path, event_id="event-2")
+    with pytest.raises(
+        ProviderEvaluationUniverseError,
+        match="no exact provider event reveal authority",
+    ):
+        complete_game_board_member_specs(snapshot, event_lifecycle=lifecycle)
+
+
+def test_complete_board_rejects_reveal_authority_discovered_after_snapshot(
+    tmp_path, monkeypatch
+):
+    snapshot = _capture(monkeypatch)
+    lifecycle = _event_lifecycle(
+        tmp_path,
+        discovered_at="2026-09-20T08:00:30Z",
+    )
+    with pytest.raises(
+        ProviderEvaluationUniverseError,
+        match="discovered after the provider snapshot",
+    ):
+        complete_game_board_member_specs(snapshot, event_lifecycle=lifecycle)
+
+
+def test_complete_board_requires_concrete_canonical_lifecycle(tmp_path, monkeypatch):
+    snapshot = _capture(monkeypatch)
+    with pytest.raises(
+        ProviderEvaluationUniverseError,
+        match="requires canonical event lifecycle reveal authority",
+    ):
+        complete_game_board_member_specs(snapshot, event_lifecycle=None)
 
 
 def test_deserialized_consumer_state_cannot_be_first_durable_commit(tmp_path, monkeypatch):
     snapshot = _capture(monkeypatch)
-    members = complete_game_board_member_specs(snapshot)
-    universe = _build(snapshot, tuple(_candidate_row(snapshot, member) for member in members))
+    lifecycle = _event_lifecycle(tmp_path)
+    members = complete_game_board_member_specs(snapshot, event_lifecycle=lifecycle)
+    universe = _build(
+        snapshot,
+        tuple(_candidate_row(snapshot, member) for member in members),
+        event_lifecycle=lifecycle,
+    )
     deserialized = EvaluationUniverse.from_payload(universe.to_payload())
 
     store = ProviderEvaluationUniverseStore(
@@ -323,6 +451,7 @@ def test_empty_complete_board_requires_explicit_no_event_member(tmp_path, monkey
     members = complete_game_board_member_specs(snapshot)
     assert len(members) == 1
     assert members[0].event_id is None
+    assert members[0].outcome_reveal_not_before is None
 
     universe = _build(snapshot, (_empty_row(snapshot, members[0]),))
     store = ProviderEvaluationUniverseStore(

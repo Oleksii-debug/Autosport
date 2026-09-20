@@ -42,12 +42,12 @@ class CollectorRetentionPlan:
     source_id: str
     stream_epoch: str
     current_stream_epoch: str
+    active_epoch_generation: int
     plan_id: str
     delete_delta_ids: tuple[str, ...]
     retained_delta_ids: tuple[str, ...]
     pinned_delta_ids: tuple[str, ...]
     unacknowledged_delta_ids: tuple[str, ...]
-    epoch_activation_delta_id: str
     terminal_checkpoint_delta_id: str
     desktop_transport_anchor_delta_id: str | None
     max_commit_seq: int
@@ -71,13 +71,12 @@ class CollectorRetentionManager:
     """Explicit safety boundary for collector retention and physical compaction.
 
     Safety rules:
-    - the current durably activated collector epoch is resolved from canonical
-      store history and is never caller-selectable or compacted;
+    - the current collector epoch is resolved from the service-owned durable
+      activation journal and is never caller-selectable or compacted;
     - only deltas with a durable canonical desktop application acknowledgement
       may be deleted;
-    - each epoch's first durable activation witness, terminal checkpoint and latest
-      acknowledged transport anchor are retained so epoch authority and
-      restart/delivery cursors remain usable;
+    - the stream terminal checkpoint and latest acknowledged transport anchor are
+      retained so restart/delivery cursors remain usable;
     - durable DECISION/REPLAY pins are retained;
     - revision ancestors of every retained row are retained;
     - preview/apply uses a content-bound plan and revalidates under BEGIN IMMEDIATE;
@@ -289,26 +288,27 @@ class CollectorRetentionManager:
     def _resolved_current_stream_epoch(
         connection: sqlite3.Connection,
         source_id: str,
-    ) -> str:
-        """Resolve the current durable epoch from product-owned activation history.
-
-        The first commit of an epoch is its durable activation witness. Selecting the
-        epoch with the newest first commit remains stable if a late correction for an
-        older epoch is appended later, unlike a caller argument or last-row heuristic.
-        If no durable epoch exists there is nothing safe to compact.
-        """
+    ) -> tuple[str, int]:
+        """Resolve service-owned current epoch plus monotonic activation generation."""
 
         row = connection.execute(
-            "SELECT stream_epoch, MIN(commit_seq) AS activated_seq "
-            "FROM collector_deltas WHERE source_id=? "
-            "GROUP BY stream_epoch ORDER BY activated_seq DESC LIMIT 1",
+            "SELECT stream_epoch, generation FROM collector_epoch_activations_v1 "
+            "WHERE source_id=? ORDER BY generation DESC LIMIT 1",
             (source_id,),
         ).fetchone()
         if row is None:
             raise CollectorRetentionError(
-                "collector source has no durable current stream epoch"
+                "collector source has no product-owned active stream epoch"
             )
-        return _text(row["stream_epoch"], "current_stream_epoch")
+        generation = row["generation"]
+        if isinstance(generation, bool) or not isinstance(generation, int) or generation <= 0:
+            raise CollectorRetentionError(
+                "collector active stream epoch generation is invalid"
+            )
+        return (
+            _text(row["stream_epoch"], "current_stream_epoch"),
+            generation,
+        )
 
     def _build_plan(
         self,
@@ -318,8 +318,8 @@ class CollectorRetentionManager:
         stream_epoch: str,
         desktop_checkpoint: DesktopDeltaCheckpointStore,
     ) -> CollectorRetentionPlan:
-        current_stream_epoch = self._resolved_current_stream_epoch(
-            connection, source_id
+        current_stream_epoch, active_epoch_generation = (
+            self._resolved_current_stream_epoch(connection, source_id)
         )
         if stream_epoch == current_stream_epoch:
             raise CollectorRetentionError(
@@ -381,8 +381,6 @@ class CollectorRetentionManager:
 
         protected = set(pinned)
         protected.update(unacknowledged)
-        epoch_activation_delta_id = rows[0]["delta_id"]
-        protected.add(epoch_activation_delta_id)
         protected.add(checkpoint.last_delta_id)
         if latest_acked is not None:
             protected.add(latest_acked)
@@ -414,6 +412,7 @@ class CollectorRetentionManager:
             "source_id": source_id,
             "stream_epoch": stream_epoch,
             "current_stream_epoch": current_stream_epoch,
+            "active_epoch_generation": active_epoch_generation,
             "rows": [
                 [row["commit_seq"], row["delta_id"], row["payload_sha256"]]
                 for row in rows
@@ -422,7 +421,6 @@ class CollectorRetentionManager:
             "retained_delta_ids": list(retained_ids),
             "pinned_delta_ids": sorted(pinned),
             "unacknowledged_delta_ids": sorted(unacknowledged),
-            "epoch_activation_delta_id": epoch_activation_delta_id,
             "terminal_checkpoint_delta_id": checkpoint.last_delta_id,
             "desktop_transport_anchor_delta_id": latest_acked,
         }
@@ -438,12 +436,12 @@ class CollectorRetentionManager:
             source_id=source_id,
             stream_epoch=stream_epoch,
             current_stream_epoch=current_stream_epoch,
+            active_epoch_generation=active_epoch_generation,
             plan_id=plan_id,
             delete_delta_ids=delete_ids,
             retained_delta_ids=retained_ids,
             pinned_delta_ids=tuple(sorted(pinned)),
             unacknowledged_delta_ids=tuple(sorted(unacknowledged)),
-            epoch_activation_delta_id=epoch_activation_delta_id,
             terminal_checkpoint_delta_id=checkpoint.last_delta_id,
             desktop_transport_anchor_delta_id=latest_acked,
             max_commit_seq=int(rows[-1]["commit_seq"]),
@@ -593,6 +591,23 @@ class CollectorRetentionManager:
                 deleted = plan.delete_delta_ids
                 if deleted:
                     placeholders = ",".join("?" for _ in deleted)
+                    connection.execute(
+                        "INSERT INTO collector_delta_tombstones_v1("
+                        "delta_id, source_id, stream_epoch, payload_sha256, "
+                        "compacted_at, plan_id"
+                        ") SELECT delta_id, source_id, stream_epoch, payload_sha256, ?, ? "
+                        f"FROM collector_deltas WHERE delta_id IN ({placeholders})",
+                        (compacted_at, plan.plan_id, *deleted),
+                    )
+                    tombstone_count = connection.execute(
+                        "SELECT COUNT(*) FROM collector_delta_tombstones_v1 "
+                        f"WHERE plan_id=? AND delta_id IN ({placeholders})",
+                        (plan.plan_id, *deleted),
+                    ).fetchone()[0]
+                    if tombstone_count != len(deleted):
+                        raise CollectorRetentionPlanStaleError(
+                            "collector retention tombstones did not bind every deleted identity"
+                        )
                     cursor = connection.execute(
                         f"DELETE FROM collector_deltas WHERE delta_id IN ({placeholders})",
                         deleted,

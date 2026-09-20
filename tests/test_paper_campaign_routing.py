@@ -25,7 +25,12 @@ def _handoff(
     prepared: tuple[str, ...] = (),
     transitions: tuple[str, ...] = (),
     has_outbox: bool = False,
+    terminal: bool | None = None,
 ) -> PaperCampaignLearningHandoff:
+    if terminal is None:
+        terminal = has_outbox
+    transition_id = f"transition-{ticket_id}"
+    checkpoint_id = f"checkpoint-{ticket_id}"
     handoff = Mock(spec=PaperCampaignLearningHandoff)
     handoff.ticket_id = ticket_id
     agent_loop = Mock()
@@ -33,10 +38,23 @@ def _handoff(
         environment_id=environment_id,
         episode_id=episode_id,
         action_id=action_id,
+        transition_id=transition_id if terminal else None,
+        checkpointed_transition_id=transition_id if terminal else None,
+        environment_checkpoint_id=checkpoint_id if terminal else "checkpoint-baseline",
+        attribution_id="attribution-id" if terminal else None,
+        postmortem_id="postmortem-id" if terminal else None,
     )
     bridge = Mock()
     if has_outbox:
-        bridge.resolution_witness.return_value = object()
+        bridge.resolution_witness.return_value = SimpleNamespace(
+            transition=SimpleNamespace(
+                transition_id=transition_id,
+                environment_id=environment_id,
+                episode_id=episode_id,
+                action_id=action_id,
+            ),
+            next_checkpoint=SimpleNamespace(checkpoint_id=checkpoint_id),
+        )
     else:
         bridge.resolution_witness.side_effect = PaperSettlementLearningBridgeError(
             "ticket has no durable learner outbox"
@@ -118,20 +136,72 @@ class PaperCampaignRouteStoreTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "campaign_routes.json"
             store = PaperCampaignRouteStore(path)
-            route = store.register(
-                _handoff(
-                    "ticket-1",
-                    environment_id="env-1",
-                    episode_id="episode-1",
-                    action_id="action-1",
-                )
+            handoff = _handoff(
+                "ticket-1",
+                environment_id="env-1",
+                episode_id="episode-1",
+                action_id="action-1",
+                has_outbox=True,
             )
-            finalized = store.mark_finalized(route)
+            route = store.register(handoff)
+            finalized = store.mark_finalized(route, handoff=handoff)
             self.assertEqual(finalized.status, "FINALIZED")
-            self.assertEqual(store.mark_finalized(finalized), finalized)
+            self.assertEqual(
+                store.mark_finalized(finalized, handoff=handoff),
+                finalized,
+            )
             self.assertEqual(
                 PaperCampaignRouteStore(path).get("ticket-1").status,
                 "FINALIZED",
+            )
+
+    def test_route_cannot_be_finalized_without_terminal_campaign_evidence(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "campaign_routes.json"
+            store = PaperCampaignRouteStore(path)
+            handoff = _handoff(
+                "ticket-1",
+                environment_id="env-1",
+                episode_id="episode-1",
+                action_id="action-1",
+                has_outbox=True,
+                terminal=False,
+            )
+            route = store.register(handoff)
+
+            with self.assertRaisesRegex(
+                PaperCampaignRouteError,
+                "has not reached canonical terminal checkpoint",
+            ):
+                store.mark_finalized(route, handoff=handoff)
+
+            self.assertEqual(store.get("ticket-1").status, "ACTIVE")
+            self.assertEqual(
+                PaperCampaignRouteStore(path).get("ticket-1").status,
+                "ACTIVE",
+            )
+
+    def test_route_cannot_be_finalized_before_learner_outbox_exists(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "campaign_routes.json"
+            store = PaperCampaignRouteStore(path)
+            handoff = _handoff(
+                "ticket-1",
+                environment_id="env-1",
+                episode_id="episode-1",
+                action_id="action-1",
+            )
+            route = store.register(handoff)
+
+            with self.assertRaisesRegex(
+                PaperCampaignRouteError,
+                "lacks canonical terminal settlement evidence",
+            ):
+                store.mark_finalized(route, handoff=handoff)
+
+            self.assertEqual(
+                PaperCampaignRouteStore(path).get("ticket-1").status,
+                "ACTIVE",
             )
 
 

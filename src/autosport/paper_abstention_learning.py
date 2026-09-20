@@ -10,8 +10,12 @@ canonical learning environment can validate.
 
 from __future__ import annotations
 
+import hashlib
+import json
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from pathlib import Path
+
 
 from .agent_loop import (
     AgentLoopError,
@@ -24,6 +28,8 @@ from .agent_loop import (
     OutcomeAttribution,
     ReflectionPostmortem,
 )
+from .integrity import atomic_write_json
+from .json_integrity import strict_json_loads
 from .learning_environment import (
     Action,
     CausalLearningEnvironment,
@@ -35,15 +41,37 @@ from .learning_environment import (
     RewardEvidence,
     Transition,
 )
+from .workspace_lock import WorkspaceEconomicLock
 
 
 ABSTENTION_ACTION_TYPES = frozenset({"NO_BET", "WAIT"})
 _ABSTENTION_SUMMARY = "PAPER_ABSTENTION_REQUIRES_CAUSAL_REVIEW"
 _ABSTENTION_REASON = "ABSTENTION_OUTCOME_ONLY_NO_CAUSAL_DECOMPOSITION"
+_INTENT_SCHEMA = "autosport.paper_abstention_intents"
+_INTENT_SCHEMA_VERSION = 1
 
 
 class PaperAbstentionLearningError(RuntimeError):
     """Abstention evidence conflicts with the canonical causal authorities."""
+
+
+def _canonical_json(value: object) -> str:
+    try:
+        return json.dumps(
+            value,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        )
+    except (TypeError, ValueError, UnicodeEncodeError) as exc:
+        raise PaperAbstentionLearningError(
+            "abstention intent is outside canonical JSON domain"
+        ) from exc
+
+
+def _digest(value: object) -> str:
+    return hashlib.sha256(_canonical_json(value).encode("utf-8")).hexdigest()
 
 
 def _instant(value: str, name: str) -> datetime:
@@ -110,6 +138,185 @@ class PaperAbstentionLearningRuntime:
         self.environment = environment
         self.agent_loop = agent_loop
 
+    @property
+    def _intent_path(self) -> Path:
+        return self.agent_loop.path.with_name(
+            f"{self.agent_loop.path.name}.paper-abstention-intents.json"
+        )
+
+    @staticmethod
+    def _intent_digest_payload(record: dict[str, object]) -> dict[str, object]:
+        return {
+            "schema": _INTENT_SCHEMA,
+            "schema_version": _INTENT_SCHEMA_VERSION,
+            "environment_id": record["environment_id"],
+            "episode_id": record["episode_id"],
+            "policy_id": record["policy_id"],
+            "observation_id": record["observation_id"],
+            "action_id": record["action_id"],
+            "action_type": record["action_type"],
+            "decided_at": record["decided_at"],
+            "parameters": record["parameters"],
+        }
+
+    def _intent_record(
+        self,
+        *,
+        observation: Observation,
+        action: Action,
+    ) -> dict[str, object]:
+        record: dict[str, object] = {
+            "environment_id": self.environment.environment_id,
+            "episode_id": self.environment.episode.episode_id,
+            "policy_id": self.environment.episode.policy_id,
+            "observation_id": observation.observation_id,
+            "action_id": action.action_id,
+            "action_type": action.action_type,
+            "decided_at": _timestamp(action.decided_at, "action.decided_at"),
+            "parameters": [[key, value] for key, value in action.parameters],
+        }
+        record["intent_sha256"] = _digest(self._intent_digest_payload(record))
+        return record
+
+    def _read_intents(self) -> list[dict[str, object]]:
+        path = self._intent_path
+        if not path.exists():
+            return []
+        try:
+            raw = strict_json_loads(path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, ValueError) as exc:
+            raise PaperAbstentionLearningError(
+                "durable abstention intent journal is unreadable"
+            ) from exc
+        if (
+            type(raw) is not dict
+            or set(raw) != {"schema", "schema_version", "records"}
+            or raw.get("schema") != _INTENT_SCHEMA
+            or raw.get("schema_version") != _INTENT_SCHEMA_VERSION
+        ):
+            raise PaperAbstentionLearningError(
+                "durable abstention intent journal schema mismatch"
+            )
+        raw_records = raw.get("records")
+        if type(raw_records) is not list:
+            raise PaperAbstentionLearningError(
+                "durable abstention intent records must be a list"
+            )
+        records: list[dict[str, object]] = []
+        seen_observations: set[str] = set()
+        required = {
+            "environment_id",
+            "episode_id",
+            "policy_id",
+            "observation_id",
+            "action_id",
+            "action_type",
+            "decided_at",
+            "parameters",
+            "intent_sha256",
+        }
+        for raw_record in raw_records:
+            if type(raw_record) is not dict or set(raw_record) != required:
+                raise PaperAbstentionLearningError(
+                    "durable abstention intent record fields mismatch"
+                )
+            record: dict[str, object] = dict(raw_record)
+            for key in (
+                "environment_id",
+                "episode_id",
+                "policy_id",
+                "observation_id",
+                "action_id",
+                "action_type",
+                "decided_at",
+                "intent_sha256",
+            ):
+                value = record[key]
+                if type(value) is not str or not value or value != value.strip():
+                    raise PaperAbstentionLearningError(
+                        f"durable abstention intent {key} is invalid"
+                    )
+            if record["action_type"] not in ABSTENTION_ACTION_TYPES:
+                raise PaperAbstentionLearningError(
+                    "durable abstention intent action_type is invalid"
+                )
+            if record["decided_at"] != _timestamp(
+                record["decided_at"], "durable intent decided_at"  # type: ignore[arg-type]
+            ):
+                raise PaperAbstentionLearningError(
+                    "durable abstention intent decided_at is not canonical"
+                )
+            parameters = record["parameters"]
+            if type(parameters) is not list:
+                raise PaperAbstentionLearningError(
+                    "durable abstention intent parameters must be a list"
+                )
+            for item in parameters:
+                if (
+                    type(item) is not list
+                    or len(item) != 2
+                    or any(type(value) is not str for value in item)
+                ):
+                    raise PaperAbstentionLearningError(
+                        "durable abstention intent parameter is invalid"
+                    )
+            observation_id = record["observation_id"]
+            assert isinstance(observation_id, str)
+            if observation_id in seen_observations:
+                raise PaperAbstentionLearningError(
+                    "durable abstention intent duplicates observation identity"
+                )
+            seen_observations.add(observation_id)
+            expected = _digest(self._intent_digest_payload(record))
+            if record["intent_sha256"] != expected:
+                raise PaperAbstentionLearningError(
+                    "durable abstention intent digest mismatch"
+                )
+            records.append(record)
+        return records
+
+    def _ensure_durable_intent(
+        self,
+        *,
+        observation: Observation,
+        action: Action,
+        phase: AgentLoopPhase,
+    ) -> None:
+        candidate = self._intent_record(observation=observation, action=action)
+        path = self._intent_path
+        with WorkspaceEconomicLock(path.parent):
+            records = self._read_intents()
+            existing = next(
+                (
+                    record
+                    for record in records
+                    if record["observation_id"] == observation.observation_id
+                ),
+                None,
+            )
+            if existing is not None:
+                if existing != candidate:
+                    raise PaperAbstentionLearningError(
+                        "durable abstention intent conflicts with retry payload"
+                    )
+                return
+            if phase not in {
+                AgentLoopPhase.BOOTSTRAP,
+                AgentLoopPhase.CHECKPOINT,
+            }:
+                raise PaperAbstentionLearningError(
+                    "durable abstention intent is missing for in-progress AgentLoop"
+                )
+            records.append(candidate)
+            atomic_write_json(
+                path,
+                {
+                    "schema": _INTENT_SCHEMA,
+                    "schema_version": _INTENT_SCHEMA_VERSION,
+                    "records": records,
+                },
+            )
+
     def begin_abstention(
         self,
         *,
@@ -121,9 +328,9 @@ class PaperAbstentionLearningRuntime:
     ) -> Action:
         """Commit one externally-admissible WAIT/NO_BET choice with no side effect.
 
-        Exact retries are idempotent.  The canonical environment still owns the
-        admissible-action set, so this method cannot introduce WAIT/NO_BET when the
-        episode did not authorize it.
+        Exact retries are idempotent, including restart from every durable pre-action
+        AgentLoop phase. The action intent is committed before the first phase mutation
+        so a crash cannot let a retry substitute another WAIT/NO_BET payload.
         """
 
         if action_type not in ABSTENTION_ACTION_TYPES:
@@ -138,7 +345,28 @@ class PaperAbstentionLearningRuntime:
         _timestamp(decision_at, "decision_at")
 
         snapshot = self.agent_loop.snapshot()
-        if snapshot.phase in {AgentLoopPhase.BOOTSTRAP, AgentLoopPhase.CHECKPOINT}:
+        starting = snapshot.phase in {
+            AgentLoopPhase.BOOTSTRAP,
+            AgentLoopPhase.CHECKPOINT,
+        }
+        resumable = {
+            AgentLoopPhase.OBSERVE,
+            AgentLoopPhase.ASSESS,
+            AgentLoopPhase.PLAN,
+            AgentLoopPhase.DECIDE,
+            AgentLoopPhase.ACT_OR_ABSTAIN,
+            AgentLoopPhase.WAIT_OUTCOME,
+        }
+        if not starting and snapshot.phase not in resumable:
+            raise PaperAbstentionLearningError(
+                "abstention requires a new or resumable pre-outcome AgentLoop phase"
+            )
+        if not starting and snapshot.observation_id != observation.observation_id:
+            raise PaperAbstentionLearningError(
+                "durable AgentLoop observation differs from abstention retry"
+            )
+
+        if starting:
             try:
                 baseline = self.environment.checkpoint()
             except LearningEnvironmentError as exc:
@@ -149,27 +377,6 @@ class PaperAbstentionLearningRuntime:
                 raise PaperAbstentionLearningError(
                     "AgentLoop checkpoint differs from active environment"
                 )
-            try:
-                self.agent_loop.begin_observation(
-                    observation,
-                    environment_identity=self.environment.identity,
-                    at=now,
-                )
-                for phase in (
-                    AgentLoopPhase.OBSERVE,
-                    AgentLoopPhase.ASSESS,
-                    AgentLoopPhase.PLAN,
-                    AgentLoopPhase.DECIDE,
-                ):
-                    self.agent_loop.advance(expected=phase, at=now)
-            except AgentLoopError as exc:
-                raise PaperAbstentionLearningError(
-                    "AgentLoop rejected abstention observation"
-                ) from exc
-        elif snapshot.phase is not AgentLoopPhase.WAIT_OUTCOME:
-            raise PaperAbstentionLearningError(
-                "abstention requires BOOTSTRAP, CHECKPOINT, or exact WAIT_OUTCOME retry"
-            )
 
         try:
             action = self.environment.act(
@@ -178,6 +385,51 @@ class PaperAbstentionLearningRuntime:
                 decision_at=decision_at,
                 parameters=parameters,
             )
+        except LearningEnvironmentError as exc:
+            raise PaperAbstentionLearningError(
+                "canonical environment rejected abstention intent"
+            ) from exc
+
+        self._ensure_durable_intent(
+            observation=observation,
+            action=action,
+            phase=snapshot.phase,
+        )
+
+        try:
+            if starting:
+                self.agent_loop.begin_observation(
+                    observation,
+                    environment_identity=self.environment.identity,
+                    at=now,
+                )
+            snapshot = self.agent_loop.snapshot()
+            if snapshot.observation_id != observation.observation_id:
+                raise PaperAbstentionLearningError(
+                    "durable AgentLoop observation differs from abstention intent"
+                )
+            while snapshot.phase in {
+                AgentLoopPhase.OBSERVE,
+                AgentLoopPhase.ASSESS,
+                AgentLoopPhase.PLAN,
+                AgentLoopPhase.DECIDE,
+            }:
+                self.agent_loop.advance(expected=snapshot.phase, at=now)
+                snapshot = self.agent_loop.snapshot()
+            if snapshot.phase not in {
+                AgentLoopPhase.ACT_OR_ABSTAIN,
+                AgentLoopPhase.WAIT_OUTCOME,
+            }:
+                raise PaperAbstentionLearningError(
+                    "abstention retry did not converge to action commitment"
+                )
+            if (
+                snapshot.phase is AgentLoopPhase.WAIT_OUTCOME
+                and snapshot.action_id != action.action_id
+            ):
+                raise PaperAbstentionLearningError(
+                    "durable AgentLoop action differs from abstention retry"
+                )
             receipt = self.agent_loop.commit_action(
                 action,
                 episode=self.environment.episode,
@@ -185,9 +437,11 @@ class PaperAbstentionLearningRuntime:
                 effect_state=ExternalEffectState.NONE,
                 at=now,
             )
-        except (LearningEnvironmentError, AgentLoopError) as exc:
+        except PaperAbstentionLearningError:
+            raise
+        except AgentLoopError as exc:
             raise PaperAbstentionLearningError(
-                "canonical authorities rejected abstention action"
+                "AgentLoop rejected abstention action"
             ) from exc
         if (
             receipt.action_id != action.action_id

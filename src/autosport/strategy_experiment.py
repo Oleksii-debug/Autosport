@@ -173,6 +173,10 @@ class ScientificProtocolBinding:
     code_config_sha256: str
     frozen_at_utc: str
     protocol_version: int = 1
+    feature_set_id: str | None = None
+    feature_definition_sha256: str | None = None
+    feature_source_sha256: str | None = None
+    config_id: str | None = None
 
     def __post_init__(self) -> None:
         for field in (
@@ -200,9 +204,25 @@ class ScientificProtocolBinding:
         _require_text_tuple(self.expected_artifacts, "expected_artifacts")
         if type(self.protocol_version) is not int or self.protocol_version < 1:
             raise ValueError("protocol_version must be an integer >= 1")
+        feature_binding = (
+            self.feature_set_id,
+            self.feature_definition_sha256,
+            self.feature_source_sha256,
+        )
+        if any(value is not None for value in feature_binding):
+            if any(value is None for value in feature_binding):
+                raise ValueError(
+                    "exact feature binding requires feature_set_id, "
+                    "feature_definition_sha256, and feature_source_sha256"
+                )
+            _require_text(self.feature_set_id, "feature_set_id")
+            _require_sha256(self.feature_definition_sha256, "feature_definition_sha256")
+            _require_sha256(self.feature_source_sha256, "feature_source_sha256")
+        if self.config_id is not None:
+            _require_text(self.config_id, "config_id")
 
     def canonical_dict(self) -> dict[str, Any]:
-        return {
+        payload = {
             "protocol_version": self.protocol_version,
             "research_protocol_id": self.research_protocol_id,
             "research_question_id": self.research_question_id,
@@ -225,6 +245,13 @@ class ScientificProtocolBinding:
             "code_config_sha256": self.code_config_sha256.lower(),
             "frozen_at_utc": self.frozen_at_utc,
         }
+        if self.feature_set_id is not None:
+            payload["feature_set_id"] = self.feature_set_id
+            payload["feature_definition_sha256"] = self.feature_definition_sha256.lower()
+            payload["feature_source_sha256"] = self.feature_source_sha256.lower()
+        if self.config_id is not None:
+            payload["config_id"] = self.config_id
+        return payload
 
     @property
     def binding_sha256(self) -> str:

@@ -12,6 +12,7 @@ from .evaluation_intake import ObservationIntakeLedger, ObservationIntakeSnapsho
 from .integrity import atomic_write_json
 from .json_integrity import strict_json_loads
 from .monotonic_workspace_authority import (
+    AuthorityPhase,
     MonotonicWorkspaceAuthority,
     MonotonicWorkspaceAuthorityError,
 )
@@ -438,6 +439,7 @@ class EvaluationRow:
                 raise
             raise EvaluationUniverseIntegrityError("invalid evaluation row payload") from exc
 
+
 @dataclass(frozen=True, slots=True, init=False)
 class EvaluationUniverse:
     """Frozen membership. Public construction is only through canonical intake resolution."""
@@ -656,6 +658,7 @@ class CanonicalPaperExecutionResolver:
         if not isinstance(ledger, PaperExecutionLedger):
             raise TypeError("ledger must be PaperExecutionLedger")
         self.ledger = ledger
+
     def resolve(
         self,
         *,
@@ -1178,19 +1181,39 @@ class EvaluationUniverseStore:
     ) -> None:
         observed = None if ledger is None else ledger.ledger_sha256
         try:
+            history = self.monotonic_authority.read_history()
+            pending = (
+                history[-1]
+                if history and history[-1].phase is AuthorityPhase.PREPARE
+                else None
+            )
             if ledger is None:
                 self.monotonic_authority.recover(observed_state_sha256=None)
             else:
                 binding = self._semantic_binding(ledger)
-                self.monotonic_authority.recover(
-                    observed_state_sha256=observed,
-                    tx_id=f"evaluation-universe:{observed}",
-                    semantic_binding_sha256=binding,
-                )
+                if pending is not None and pending.intended_state_sha256 == observed:
+                    if pending.semantic_binding_sha256 != binding:
+                        raise EvaluationUniverseIntegrityError(
+                            "prepared evaluation-universe semantic binding mismatches published state"
+                        )
+                    self.monotonic_authority.recover(
+                        observed_state_sha256=observed,
+                        tx_id=pending.tx_id,
+                        semantic_binding_sha256=binding,
+                    )
+                else:
+                    self.monotonic_authority.recover(
+                        observed_state_sha256=observed,
+                    )
         except MonotonicWorkspaceAuthorityError as exc:
             raise EvaluationUniverseIntegrityError(
                 "evaluation-universe state is stale, deleted, rolled back, or unproven"
             ) from exc
+
+    def _next_tx_id(self, intended_state_sha256: str) -> str:
+        history = self.monotonic_authority.read_history()
+        attempt = len(history) + 1
+        return f"evaluation-universe:{attempt}:{intended_state_sha256[:32]}"
 
     def load(self) -> EvaluationUniverseLedger | None:
         with WorkspaceEconomicLock(self.workspace):
@@ -1228,7 +1251,7 @@ class EvaluationUniverseStore:
             observed = None if existing is None else existing.ledger_sha256
             intended = ledger.ledger_sha256
             binding = self._semantic_binding(ledger)
-            tx_id = f"evaluation-universe:{intended}"
+            tx_id = self._next_tx_id(intended)
             try:
                 self.monotonic_authority.prepare(
                     tx_id=tx_id,

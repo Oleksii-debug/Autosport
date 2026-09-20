@@ -55,6 +55,25 @@ def _iso(value: datetime) -> str:
     return value.isoformat().replace("+00:00", "Z")
 
 
+def _policy_content() -> tuple[str, str]:
+    payload = {
+        "schema": "autosport.revision_availability_policy",
+        "schema_version": 1,
+        "source_identity": "lawful-provider:fixture",
+        "policy_version": "1",
+        "witness_kind": "provider-publication-metadata",
+        "availability_semantics": "source_as_of<=available_at",
+    }
+    text = json.dumps(
+        payload,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    )
+    return text, hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
 def _witness_content(
     *,
     source_as_of: datetime,
@@ -143,12 +162,10 @@ def _source_store(
     SourceRevisionAuthority,
 ]:
     store = SourceRevisionAuthorityStore.initialize_pristine(tmp_path)
-    policy = RevisionPolicyAuthority(
+    policy_content_json, _ = _policy_content()
+    policy = RevisionPolicyAuthority.create(
         revision_policy_id="provider-publication-time-v1",
-        source_identity="lawful-provider:fixture",
-        policy_version="1",
-        policy_content_sha256=SHA_E,
-        witness_kind="provider-publication-metadata",
+        policy_content_json=policy_content_json,
         frozen_at=BASE - timedelta(days=1),
     )
     store.register_policy(policy)
@@ -372,6 +389,34 @@ def test_revision_with_arbitrary_policy_digest_cannot_be_registered(tmp_path) ->
 
     with pytest.raises(SourceRevisionAuthorityError, match="policy digest mismatch"):
         store.register_revision(forged)
+
+
+def test_revision_policy_content_is_hash_bound_and_canonical() -> None:
+    content, digest = _policy_content()
+    policy = RevisionPolicyAuthority.create(
+        revision_policy_id="provider-publication-time-v1",
+        policy_content_json=content,
+        frozen_at=BASE - timedelta(days=1),
+    )
+    assert policy.policy_content_sha256 == digest
+
+    forged = content.replace(
+        "source_as_of<=available_at",
+        "available_at<=source_as_of",
+    )
+    with pytest.raises(
+        SourceRevisionAuthorityError,
+        match="unsupported revision policy availability semantics|content digest mismatch",
+    ):
+        RevisionPolicyAuthority(
+            revision_policy_id=policy.revision_policy_id,
+            source_identity=policy.source_identity,
+            policy_version=policy.policy_version,
+            policy_content_sha256=policy.policy_content_sha256,
+            policy_content_json=forged,
+            witness_kind=policy.witness_kind,
+            frozen_at=policy.frozen_at,
+        )
 
 
 def test_availability_witness_content_is_hash_bound_and_canonical() -> None:

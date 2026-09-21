@@ -141,6 +141,15 @@ def test_limit_and_tie_order_are_deterministic(tmp_path):
     assert limited == (all_hits[0],)
 
 
+def test_query_tolerates_surrounding_operator_whitespace(tmp_path):
+    _path, registry = _with_postmortem(tmp_path)
+
+    canonical = search_negative_results(registry, "candidate", as_of=T3)
+    padded = search_negative_results(registry, "  candidate  ", as_of=T3)
+
+    assert padded == canonical
+
+
 def test_search_is_advisory_and_exposes_no_repeat_or_promotion_authority(tmp_path):
     _path, registry = _with_postmortem(tmp_path)
 

@@ -69,12 +69,31 @@ class SettlementResolution:
         available = _instant(self.available_at, "available_at")
         if available > cutoff:
             raise ValueError("settlement evidence is not causally available at session cutoff")
-        if type(self.quote_outcomes) is not dict or not self.quote_outcomes:
+        if (
+            type(self.quote_outcomes) is not dict
+            and not isinstance(self.quote_outcomes, _ValidatedQuoteOutcomes)
+        ) or not self.quote_outcomes:
             raise ValueError("quote_outcomes must be a non-empty exact dict")
         for quote_key, outcome in self.quote_outcomes.items():
             _text(quote_key, "quote_outcomes quote_key")
             if type(outcome) is not str or outcome not in {"win", "loss", "void"}:
                 raise ValueError("quote_outcomes contains unsupported outcome")
+
+        quote_outcomes_sha256 = _settlement_quote_outcomes_sha256(self.quote_outcomes)
+        if isinstance(self.quote_outcomes, _ValidatedQuoteOutcomes):
+            if self.quote_outcomes.validated_sha256 != quote_outcomes_sha256:
+                raise ValueError(
+                    "settlement resolution quote_outcomes changed after validation"
+                )
+        else:
+            object.__setattr__(
+                self,
+                "quote_outcomes",
+                _ValidatedQuoteOutcomes(
+                    self.quote_outcomes,
+                    validated_sha256=quote_outcomes_sha256,
+                ),
+            )
 
 
 class SettlementOutcomeAuthority(Protocol):
@@ -178,6 +197,46 @@ def _sha256(value: object, field: str) -> str:
     ):
         raise ValueError(f"{field} must be a lowercase SHA-256 hex digest")
     return value
+
+
+class _ValidatedQuoteOutcomes(dict[str, str]):
+    """Mutable compatibility view carrying the exact content sealed at validation."""
+
+    __slots__ = ("_validated_sha256",)
+
+    def __init__(
+        self,
+        values: dict[str, str],
+        *,
+        validated_sha256: str,
+    ) -> None:
+        super().__init__(values)
+        self._validated_sha256 = validated_sha256
+
+    @property
+    def validated_sha256(self) -> str:
+        return self._validated_sha256
+
+
+def _settlement_quote_outcomes_sha256(outcomes: dict[str, str]) -> str:
+    if (
+        type(outcomes) is not dict
+        and not isinstance(outcomes, _ValidatedQuoteOutcomes)
+    ) or not outcomes:
+        raise ValueError("quote_outcomes must be a non-empty exact dict")
+    canonical: list[list[str]] = []
+    for quote_key in sorted(outcomes):
+        _text(quote_key, "quote_outcomes quote_key")
+        outcome = outcomes[quote_key]
+        if type(outcome) is not str or outcome not in {"win", "loss", "void"}:
+            raise ValueError("quote_outcomes contains unsupported outcome")
+        canonical.append([quote_key, outcome])
+    payload = json.dumps(
+        canonical,
+        ensure_ascii=False,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()
 
 
 class _ContinuousSessionState:
@@ -466,22 +525,8 @@ class _ContinuousSessionState:
 
     @staticmethod
     def _quote_outcomes_sha256(evidence: SettlementResolution) -> str:
-        outcomes = evidence.quote_outcomes
-        if type(outcomes) is not dict or not outcomes:
-            raise ValueError("quote_outcomes must be a non-empty exact dict")
-        canonical: list[list[str]] = []
-        for quote_key in sorted(outcomes):
-            _text(quote_key, "quote_outcomes quote_key")
-            outcome = outcomes[quote_key]
-            if type(outcome) is not str or outcome not in {"win", "loss", "void"}:
-                raise ValueError("quote_outcomes contains unsupported outcome")
-            canonical.append([quote_key, outcome])
-        payload = json.dumps(
-            canonical,
-            ensure_ascii=False,
-            separators=(",", ":"),
-        ).encode("utf-8")
-        return hashlib.sha256(payload).hexdigest()
+        evidence.validate(as_of=evidence.available_at)
+        return _settlement_quote_outcomes_sha256(evidence.quote_outcomes)
 
     @staticmethod
     def _normalized_settlement_evidence(
@@ -868,6 +913,25 @@ class ContinuousSessionCoordinator:
             return PaperBook.load(self.paper_book_path)
         return PaperBook(self.initial_bankroll)
 
+    @staticmethod
+    def _settlement_handoff_snapshot(
+        resolutions: tuple[SettlementResolution, ...],
+    ) -> tuple[SettlementResolution, ...]:
+        detached: list[SettlementResolution] = []
+        for resolution in resolutions:
+            resolution.validate(as_of=resolution.available_at)
+            snapshot = SettlementResolution(
+                event_identity=resolution.event_identity,
+                settlement_ref=resolution.settlement_ref,
+                quote_outcomes=dict(resolution.quote_outcomes),
+                evidence_id=resolution.evidence_id,
+                evidence_sha256=resolution.evidence_sha256,
+                available_at=resolution.available_at,
+            )
+            snapshot.validate(as_of=snapshot.available_at)
+            detached.append(snapshot)
+        return tuple(detached)
+
     def _settle(
         self,
         *,
@@ -877,6 +941,11 @@ class ContinuousSessionCoordinator:
             return (), ()
         unique: dict[str, SettlementResolution] = {}
         for resolution in resolutions:
+            if not isinstance(resolution, SettlementResolution):
+                raise TypeError("resolutions must contain SettlementResolution values")
+            # Revalidate immediately before any PaperBook mutation. First validation
+            # detaches caller-owned aliases; later validation detects in-object drift.
+            resolution.validate(as_of=resolution.available_at)
             unique.setdefault(resolution.evidence_id, resolution)
 
         with WorkspaceEconomicLock(self.workspace):
@@ -1003,7 +1072,9 @@ class ContinuousSessionCoordinator:
             self._state.validate_settlement_evidence(
                 settlement_evidence=resolutions
             )
+            handoff_resolutions: tuple[SettlementResolution, ...] | None = None
             if self.settlement_learning_handoff is not None:
+                handoff_resolutions = self._settlement_handoff_snapshot(resolutions)
                 prepare = getattr(
                     self.settlement_learning_handoff,
                     "prepare_settlement",
@@ -1012,14 +1083,19 @@ class ContinuousSessionCoordinator:
                 if prepare is not None:
                     prepare(
                         paper_book_path=self.paper_book_path,
-                        resolutions=resolutions,
+                        resolutions=handoff_resolutions,
                         at=now,
                     )
+                    # A preparatory callback may not rewrite the outcome payload that
+                    # canonical settlement is about to consume.
+                    for resolution in handoff_resolutions:
+                        resolution.validate(as_of=resolution.available_at)
             settled, evidence_ids = self._settle(resolutions=resolutions)
             if self.settlement_learning_handoff is not None:
+                assert handoff_resolutions is not None
                 self.settlement_learning_handoff.reconcile_after_settlement(
                     paper_book_path=self.paper_book_path,
-                    resolutions=resolutions,
+                    resolutions=handoff_resolutions,
                     settled_ticket_ids=settled,
                     at=now,
                 )

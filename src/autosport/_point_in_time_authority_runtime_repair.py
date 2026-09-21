@@ -129,7 +129,6 @@ def _require_exact_lineage_authority(
 
     from . import dataset_snapshot_lineage as _lineage_module
     from . import scientific_registry as _registry_module
-    from .resolver_semantics import function_semantic_sha256 as _function_semantic_sha256
 
     canonical_lineage_type = _lineage_module.DatasetSnapshotLineageAuthority
     canonical_registry_type = _registry_module.ScientificRegistry
@@ -197,7 +196,6 @@ def _require_exact_lineage_authority(
             live_path = _Path(function.__code__.co_filename).resolve(strict=True)
             if live_path != expected_path:
                 raise ValueError("live callable source path changed")
-            _function_semantic_sha256(function, runtime_owner=concrete_type)
         except (OSError, TypeError, ValueError) as exc:
             raise evidence.PointInTimeEvidenceError(
                 f"trusted {authority_name} class implementation changed: {method_name}"

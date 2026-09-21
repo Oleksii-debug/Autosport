@@ -524,6 +524,10 @@ class ExperimentRecord:
     model_version_id: str | None = None
     completed_at: str | None = None
     notes: str = ""
+    repeat_of_experiment_id: str | None = None
+    repeat_postmortem_id: str | None = None
+    retest_condition: str | None = None
+    repeat_evidence: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         for name in ("experiment_id", "research_protocol_id", "dataset_snapshot_id",
@@ -544,6 +548,24 @@ class ExperimentRecord:
             raise ValueError("completed_at must not precede created_at")
         if type(self.notes) is not str:
             raise ValueError("notes must be a string")
+        repeat_fields = (
+            self.repeat_of_experiment_id,
+            self.repeat_postmortem_id,
+            self.retest_condition,
+        )
+        has_repeat_provenance = any(value is not None for value in repeat_fields) or bool(self.repeat_evidence)
+        if has_repeat_provenance:
+            if any(value is None for value in repeat_fields):
+                raise ValueError(
+                    "repeat experiment provenance requires repeat_of_experiment_id, "
+                    "repeat_postmortem_id and retest_condition"
+                )
+            _text(self.repeat_of_experiment_id, "repeat_of_experiment_id")
+            _text(self.repeat_postmortem_id, "repeat_postmortem_id")
+            _text(self.retest_condition, "retest_condition")
+            _text_tuple(self.repeat_evidence, "repeat_evidence")
+        elif not isinstance(self.repeat_evidence, tuple):
+            raise ValueError("repeat_evidence must be a tuple")
 
     @property
     def record_type(self) -> str: return "Experiment"
@@ -560,13 +582,21 @@ class ExperimentRecord:
                         "strategy_version_id": self.strategy_version_id,
                         "seed": self.seed, "config_sha256": self.config_sha256.lower()})
     def to_payload(self) -> dict[str, Any]:
-        return {"experiment_id": self.experiment_id, "research_protocol_id": self.research_protocol_id,
-                "dataset_snapshot_id": self.dataset_snapshot_id, "feature_set_id": self.feature_set_id,
-                "model_version_id": self.model_version_id, "strategy_version_id": self.strategy_version_id,
-                "evaluation_bundle_id": self.evaluation_bundle_id, "seed": self.seed,
-                "config_sha256": self.config_sha256.lower(), "outcome": self.outcome.value,
-                "created_at": self.created_at, "completed_at": self.completed_at,
-                "fingerprint": self.fingerprint, "notes": self.notes}
+        payload = {"experiment_id": self.experiment_id, "research_protocol_id": self.research_protocol_id,
+                   "dataset_snapshot_id": self.dataset_snapshot_id, "feature_set_id": self.feature_set_id,
+                   "model_version_id": self.model_version_id, "strategy_version_id": self.strategy_version_id,
+                   "evaluation_bundle_id": self.evaluation_bundle_id, "seed": self.seed,
+                   "config_sha256": self.config_sha256.lower(), "outcome": self.outcome.value,
+                   "created_at": self.created_at, "completed_at": self.completed_at,
+                   "fingerprint": self.fingerprint, "notes": self.notes}
+        if self.repeat_of_experiment_id is not None:
+            payload.update({
+                "repeat_of_experiment_id": self.repeat_of_experiment_id,
+                "repeat_postmortem_id": self.repeat_postmortem_id,
+                "retest_condition": self.retest_condition,
+                "repeat_evidence": list(self.repeat_evidence),
+            })
+        return payload
 
 
 @dataclass(frozen=True, slots=True)
@@ -1065,6 +1095,125 @@ class ScientificRegistry:
                 "promotion evidence availability precedes matching experiment completion"
             )
 
+    @staticmethod
+    def _validate_postmortem_causal_inputs(
+        state: Mapping[str, Any],
+        postmortem: Mapping[str, Any],
+    ) -> None:
+        payload = postmortem.get("payload")
+        if not isinstance(payload, Mapping):
+            raise DuplicateExperimentFingerprintError("postmortem payload is invalid")
+        experiment_id = payload.get("experiment_id")
+        experiment = next(
+            (
+                raw
+                for raw in state["records"]
+                if raw["record_type"] == "Experiment" and raw["record_id"] == experiment_id
+            ),
+            None,
+        )
+        if experiment is None:
+            raise DuplicateExperimentFingerprintError(
+                "negative-result postmortem references missing experiment"
+            )
+        experiment_outcome = experiment["payload"].get("outcome")
+        if experiment_outcome == ResearchOutcome.POSITIVE.value:
+            raise DuplicateExperimentFingerprintError(
+                "positive experiment cannot create negative-result postmortem authority"
+            )
+        if payload.get("classification") != experiment_outcome:
+            raise DuplicateExperimentFingerprintError(
+                "postmortem classification does not match durable experiment outcome"
+            )
+        if _instant(postmortem["available_at"], "Postmortem.available_at") < _instant(
+            experiment["available_at"], "Experiment.available_at"
+        ):
+            raise DuplicateExperimentFingerprintError(
+                "postmortem cannot predate experiment completion"
+            )
+
+    @staticmethod
+    def _validate_negative_repeat_authorization(
+        state: Mapping[str, Any],
+        entry: Mapping[str, Any],
+        matching_experiments: list[Mapping[str, Any]],
+    ) -> None:
+        payload = entry["payload"]
+        repeat_of_experiment_id = payload.get("repeat_of_experiment_id")
+        repeat_postmortem_id = payload.get("repeat_postmortem_id")
+        retest_condition = payload.get("retest_condition")
+        repeat_evidence = payload.get("repeat_evidence")
+        if not all(
+            isinstance(value, str) and value
+            for value in (
+                repeat_of_experiment_id,
+                repeat_postmortem_id,
+                retest_condition,
+            )
+        ):
+            raise DuplicateExperimentFingerprintError(
+                "negative-result repeat requires durable repeat provenance"
+            )
+        if (
+            not isinstance(repeat_evidence, list)
+            or not repeat_evidence
+            or any(not isinstance(value, str) or not value for value in repeat_evidence)
+            or len(repeat_evidence) != len(set(repeat_evidence))
+        ):
+            raise DuplicateExperimentFingerprintError(
+                "negative-result repeat requires non-empty unique repeat evidence"
+            )
+        prior = next(
+            (
+                raw
+                for raw in matching_experiments
+                if raw["record_id"] == repeat_of_experiment_id
+            ),
+            None,
+        )
+        if prior is None:
+            raise DuplicateExperimentFingerprintError(
+                "repeat_of_experiment_id must name an existing experiment with the same fingerprint"
+            )
+        prior_outcome = prior["payload"].get("outcome")
+        if prior_outcome == ResearchOutcome.POSITIVE.value:
+            raise DuplicateExperimentFingerprintError(
+                "negative-result repeat provenance cannot target a positive experiment"
+            )
+        postmortem = next(
+            (
+                raw
+                for raw in state["records"]
+                if raw["record_type"] == "Postmortem"
+                and raw["record_id"] == repeat_postmortem_id
+            ),
+            None,
+        )
+        if postmortem is None:
+            raise DuplicateExperimentFingerprintError(
+                "repeat_postmortem_id must name an existing durable postmortem"
+            )
+        postmortem_payload = postmortem["payload"]
+        if postmortem_payload.get("experiment_id") != repeat_of_experiment_id:
+            raise DuplicateExperimentFingerprintError(
+                "repeat postmortem does not belong to repeat_of experiment"
+            )
+        if postmortem_payload.get("classification") != prior_outcome:
+            raise DuplicateExperimentFingerprintError(
+                "repeat postmortem classification does not match prior experiment outcome"
+            )
+        conditions = postmortem_payload.get("retest_conditions")
+        if not isinstance(conditions, list) or retest_condition not in conditions:
+            raise DuplicateExperimentFingerprintError(
+                "retest_condition is not authorized by the durable postmortem"
+            )
+        if _instant(postmortem["available_at"], "Postmortem.available_at") > _instant(
+            payload["created_at"], "Experiment.created_at"
+        ):
+            raise DuplicateExperimentFingerprintError(
+                "repeat experiment cannot predate its authorizing postmortem"
+            )
+
     def _append_entry_locked(
         self,
         state: dict[str, Any],
@@ -1074,6 +1223,8 @@ class ScientificRegistry:
     ) -> str:
         if entry["record_type"] == "PromotionEvidence":
             self._validate_promotion_evidence_causal_inputs(state, entry)
+        if entry["record_type"] == "Postmortem":
+            self._validate_postmortem_causal_inputs(state, entry)
         for existing in state["records"]:
             if (existing["record_type"], existing["record_id"]) == (
                 entry["record_type"], entry["record_id"]
@@ -1095,13 +1246,26 @@ class ScientificRegistry:
                     raise ConflictingScientificRecordError(
                         "evaluation bundle is already bound to a different experiment fingerprint"
                     )
-            if not allow_repeat_experiment and any(
-                existing["record_type"] == "Experiment"
-                and existing["payload"].get("fingerprint") == fingerprint
+            matching_experiments = [
+                existing
                 for existing in state["records"]
-            ):
+                if existing["record_type"] == "Experiment"
+                and existing["payload"].get("fingerprint") == fingerprint
+            ]
+            if matching_experiments and not allow_repeat_experiment:
                 raise DuplicateExperimentFingerprintError(
                     "experiment fingerprint already has durable history; inspect negative/null results before repeating"
+                )
+            negative_history = [
+                existing
+                for existing in matching_experiments
+                if existing["payload"].get("outcome") != ResearchOutcome.POSITIVE.value
+            ]
+            if negative_history:
+                self._validate_negative_repeat_authorization(
+                    state,
+                    entry,
+                    negative_history,
                 )
         state["records"].append(entry)
         atomic_write_json(self.path, state)

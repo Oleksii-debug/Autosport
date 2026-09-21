@@ -40,9 +40,12 @@ class _Coordinator:
         self.cycle_index = 0
         self.state = "STOPPED"
         self.stop_reason: str | None = None
+        self.resume_error: Exception | None = None
 
     def resume(self) -> None:
         self.resume_calls += 1
+        if self.resume_error is not None:
+            raise self.resume_error
         self.state = "RUNNING"
         self.stop_reason = None
 
@@ -190,6 +193,24 @@ class ProductOperatorControllerTests(unittest.TestCase):
             self.assertEqual(stopped.state, "STOPPED")
             self.assertEqual(collector.stop_reasons, ["external_surface_stop"])
             self.assertEqual(coordinator.stop_reasons, ["external_surface_stop"])
+            operator.close()
+
+    def test_partial_start_failure_is_compensated_to_canonical_stop(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            runtime, collector, coordinator, _ = self._runtime(directory)
+            operator = ProductOperatorController(runtime)
+            coordinator.resume_error = RuntimeError("injected session resume failure")
+
+            with self.assertRaisesRegex(RuntimeError, "injected session resume failure"):
+                operator.start()
+
+            self.assertEqual(collector.resume_calls, 1)
+            self.assertEqual(coordinator.resume_calls, 1)
+            self.assertEqual(collector.stop_reasons, ["operator_start_failed"])
+            self.assertEqual(coordinator.stop_reasons, ["operator_start_failed"])
+            snapshot = operator.status()
+            self.assertEqual(snapshot.state, "STOPPED")
+            self.assertEqual(snapshot.canonical_status.stop_reason, "operator_start_failed")
             operator.close()
 
     def test_tick_before_start_and_invalid_stop_reason_have_zero_effect(self) -> None:

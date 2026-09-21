@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
+from threading import Barrier
 
 import pytest
 
@@ -117,6 +119,29 @@ def test_partial_state_is_never_silently_rebootstrapped(tmp_path):
         initialize_research_control_runtime(tmp_path, max_budget_units=8)
     assert not runtime.paths.scheduler.exists()
 
+
+
+def test_concurrent_first_initialization_has_one_creator_and_no_partial_state(tmp_path):
+    barrier = Barrier(2)
+
+    def initialize_once():
+        barrier.wait()
+        try:
+            initialize_research_control_runtime(tmp_path, max_budget_units=8)
+        except ResearchControlRuntimeError as exc:
+            return ("error", str(exc))
+        return ("created", None)
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        outcomes = tuple(executor.map(lambda _: initialize_once(), range(2)))
+
+    assert sum(kind == "created" for kind, _ in outcomes) == 1
+    errors = [message for kind, message in outcomes if kind == "error"]
+    assert len(errors) == 1
+    assert "use open_research_control_runtime" in errors[0]
+
+    reopened = open_research_control_runtime(tmp_path, max_budget_units=8)
+    assert all(path.exists() for path in reopened.paths.all())
 
 def test_existing_complete_state_requires_explicit_open(tmp_path):
     initialize_research_control_runtime(tmp_path, max_budget_units=8)

@@ -1,0 +1,162 @@
+from __future__ import annotations
+
+from datetime import datetime, timezone
+import json
+
+import pytest
+
+from autosport.betfair_account_readonly import (
+    BetfairReadOnlyClient,
+    BetfairReadOnlyError,
+    BetfairSessionCredentials,
+)
+
+
+FIXED_NOW = datetime(2026, 9, 21, 20, 40, tzinfo=timezone.utc)
+
+
+class FakeTransport:
+    def __init__(self, payload: bytes) -> None:
+        self.payload = payload
+        self.calls = 0
+
+    def post(self, url: str, *, headers, body: bytes, timeout_seconds: float) -> bytes:
+        self.calls += 1
+        return self.payload
+
+
+def _error_payload(*, data: object | None, code: int = -32099, message: str = "ANGX-0007") -> bytes:
+    error: dict[str, object] = {"code": code, "message": message}
+    if data is not None:
+        error["data"] = data
+    return json.dumps(
+        {"jsonrpc": "2.0", "error": error, "id": 1},
+        separators=(",", ":"),
+    ).encode("utf-8")
+
+
+def _client(payload: bytes) -> BetfairReadOnlyClient:
+    return BetfairReadOnlyClient(
+        BetfairSessionCredentials("app-secret", "session-secret"),
+        transport=FakeTransport(payload),
+        clock=lambda: FIXED_NOW,
+    )
+
+
+@pytest.mark.parametrize(
+    ("exception_key", "provider_code", "read_method"),
+    [
+        ("AccountAPINGException", "INVALID_APP_KEY", "read_account_funds"),
+        ("APINGException", "TOO_MANY_REQUESTS", "read_current_orders_page"),
+    ],
+)
+def test_official_structured_error_data_preserves_typed_provider_code_without_details_leak(
+    exception_key: str,
+    provider_code: str,
+    read_method: str,
+) -> None:
+    secret_detail = "errorDetails contains app-secret and session-secret"
+    payload = _error_payload(
+        data={
+            exception_key: {
+                "errorCode": provider_code,
+                "errorDetails": secret_detail,
+            }
+        }
+    )
+    client = _client(payload)
+
+    with pytest.raises(BetfairReadOnlyError) as raised:
+        getattr(client, read_method)()
+
+    error = raised.value
+    assert error.json_rpc_code == -32099
+    assert error.provider_error_code == provider_code
+    rendered = str(error)
+    assert "app-secret" not in rendered
+    assert "session-secret" not in rendered
+    assert secret_detail not in rendered
+
+
+def test_unrelated_nested_known_token_cannot_mint_provider_error_authority() -> None:
+    client = _client(
+        _error_payload(
+            data={
+                "unrelated": {
+                    "errorCode": "TOO_MANY_REQUESTS",
+                    "errorDetails": "not an APING exception container",
+                }
+            }
+        )
+    )
+
+    with pytest.raises(BetfairReadOnlyError) as raised:
+        client.read_account_funds()
+
+    assert raised.value.json_rpc_code == -32099
+    assert raised.value.provider_error_code is None
+
+
+@pytest.mark.parametrize("bad_code", [True, 17, " too_many_requests ", "TOO MANY REQUESTS"])
+def test_malformed_structured_error_code_remains_unclassified(bad_code: object) -> None:
+    client = _client(
+        _error_payload(data={"APINGException": {"errorCode": bad_code}})
+    )
+
+    with pytest.raises(BetfairReadOnlyError) as raised:
+        client.read_current_orders_page()
+
+    assert raised.value.json_rpc_code == -32099
+    assert raised.value.provider_error_code is None
+
+
+def test_conflicting_supported_exception_containers_fail_closed() -> None:
+    client = _client(
+        _error_payload(
+            data={
+                "APINGException": {"errorCode": "TOO_MANY_REQUESTS"},
+                "AccountAPINGException": {"errorCode": "INVALID_APP_KEY"},
+            }
+        )
+    )
+
+    with pytest.raises(BetfairReadOnlyError) as raised:
+        client.read_account_funds()
+
+    assert raised.value.json_rpc_code == -32099
+    assert raised.value.provider_error_code is None
+
+
+def test_generic_jsonrpc_error_keeps_rpc_code_without_inventing_provider_semantics() -> None:
+    client = _client(_error_payload(data=None, code=-32603, message="Internal error"))
+
+    with pytest.raises(BetfairReadOnlyError) as raised:
+        client.read_account_funds()
+
+    assert raised.value.json_rpc_code == -32603
+    assert raised.value.provider_error_code is None
+
+
+def test_error_envelope_wins_over_result_even_when_result_looks_valid() -> None:
+    payload = json.dumps(
+        {
+            "jsonrpc": "2.0",
+            "result": {
+                "availableToBetBalance": 100,
+                "exposure": 0,
+                "retainedCommission": 0,
+                "exposureLimit": -1000,
+            },
+            "error": {
+                "code": -32099,
+                "message": "ANGX-0007",
+                "data": {"AccountAPINGException": {"errorCode": "INVALID_APP_KEY"}},
+            },
+            "id": 1,
+        },
+        separators=(",", ":"),
+    ).encode("utf-8")
+    client = _client(payload)
+
+    with pytest.raises(BetfairReadOnlyError, match="both error and result"):
+        client.read_account_funds()

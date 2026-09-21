@@ -130,7 +130,7 @@ class ReplayStopTests(unittest.TestCase):
                 speed=0.0,
             )
             self.assertGreater(result.replay.event_count, 0)
-            self.assertTrue(result.result_path.is_file())
+            self.assertTrue(Path(result.result_path).is_file())
 
     def test_windows_stop_surface_uses_catalog_and_unique_uia_id(self):
         self.assertEqual(text("ui.windows.replay_stop.button"), "Зупинити повтор")

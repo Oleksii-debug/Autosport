@@ -1,8 +1,10 @@
 import json
 import tempfile
 import unittest
+from contextlib import contextmanager
 from dataclasses import replace
 from pathlib import Path
+from unittest.mock import patch
 
 from autosport.causal_collector import (
     AckConflictError,
@@ -376,6 +378,191 @@ class CollectorDeltaTests(unittest.TestCase):
                 2,
             )
             self.assertEqual(second_consumer.drain(as_of="2026-01-01T00:00:11+00:00"), ())
+
+    def test_checkpoint_first_open_preserves_peer_state_created_at_lock_boundary(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "desktop.json"
+            peer_state = {
+                "schema_version": 1,
+                "acks": [
+                    {
+                        "delta_id": "peer-delta",
+                        "canonical_event_digest": "1" * 64,
+                        "acknowledged_at": "2026-01-01T00:00:05+00:00",
+                        "application_receipt_id": "receipt-peer",
+                        "applied_at": "2026-01-01T00:00:04+00:00",
+                    }
+                ],
+                "streams": {},
+            }
+
+            @contextmanager
+            def peer_publishes_before_lock_owner_reads(_workspace):
+                path.write_text(
+                    json.dumps(peer_state, sort_keys=True, separators=(",", ":")) + "\n",
+                    encoding="utf-8",
+                )
+                yield
+
+            with patch(
+                "autosport.causal_collector_legacy.WorkspaceEconomicLock",
+                side_effect=peer_publishes_before_lock_owner_reads,
+            ):
+                checkpoint = DesktopDeltaCheckpointStore(path)
+
+            self.assertTrue(checkpoint.has_ack("peer-delta"))
+            self.assertEqual(
+                json.loads(path.read_text(encoding="utf-8")),
+                peer_state,
+            )
+
+    def test_checkpoint_ack_refreshes_state_after_serialization_boundary(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "desktop.json"
+            first = DesktopDeltaCheckpointStore(path)
+            second = DesktopDeltaCheckpointStore(path)
+            first_delta = self.make_delta(delta_id="d1", cursor_position=1)
+            second_delta = self.make_delta(
+                delta_id="d2",
+                cursor_position=2,
+                payload=event_payload(event_id="e2"),
+            )
+            first_receipt = DesktopApplicationReceipt(
+                delta_id=first_delta.delta_id,
+                canonical_event_digest=first_delta.canonical_event_digest,
+                receipt_id="receipt-d1",
+                applied_at="2026-01-01T00:00:04+00:00",
+            )
+            second_receipt = DesktopApplicationReceipt(
+                delta_id=second_delta.delta_id,
+                canonical_event_digest=second_delta.canonical_event_digest,
+                receipt_id="receipt-d2",
+                applied_at="2026-01-01T00:00:04+00:00",
+            )
+            interleaved = []
+
+            @contextmanager
+            def interleaving_lock():
+                if not interleaved:
+                    interleaved.append(True)
+                    self.assertTrue(
+                        second.ack(
+                            second_delta,
+                            application_receipt=second_receipt,
+                            acknowledged_at="2026-01-01T00:00:05+00:00",
+                        )
+                    )
+                yield
+
+            first._workspace_lock = interleaving_lock  # type: ignore[method-assign]
+            self.assertTrue(
+                first.ack(
+                    first_delta,
+                    application_receipt=first_receipt,
+                    acknowledged_at="2026-01-01T00:00:05+00:00",
+                )
+            )
+
+            reopened = DesktopDeltaCheckpointStore(path)
+            self.assertTrue(reopened.has_ack("d1"))
+            self.assertTrue(reopened.has_ack("d2"))
+            checkpoint = reopened.stream_checkpoint("source-x", "epoch-1")
+            self.assertIsNotNone(checkpoint)
+            self.assertEqual(checkpoint.last_position, 2)
+            self.assertEqual(checkpoint.last_delta_id, "d2")
+
+    def test_consumer_rechecks_peer_ack_after_serialization_boundary(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            collector = CollectorDeltaStore(root / "collector.json")
+            desktop_path = root / "desktop.json"
+            primary_checkpoint = DesktopDeltaCheckpointStore(desktop_path)
+            peer_checkpoint = DesktopDeltaCheckpointStore(desktop_path)
+            delta = self.make_delta()
+            collector.append(delta)
+            receipt = DesktopApplicationReceipt(
+                delta_id=delta.delta_id,
+                canonical_event_digest=delta.canonical_event_digest,
+                receipt_id="receipt-d1",
+                applied_at="2026-01-01T00:00:04+00:00",
+            )
+            applied = []
+            interleaved = []
+
+            @contextmanager
+            def peer_ack_before_locked_read():
+                if not interleaved:
+                    interleaved.append(True)
+                    self.assertTrue(
+                        peer_checkpoint.ack(
+                            delta,
+                            application_receipt=receipt,
+                            acknowledged_at="2026-01-01T00:00:05+00:00",
+                        )
+                    )
+                yield
+
+            primary_checkpoint._workspace_lock = peer_ack_before_locked_read  # type: ignore[method-assign]
+            consumer = DesktopDeltaConsumer(
+                collector,
+                primary_checkpoint,
+                resolve_event=lambda _: event_payload(),
+                apply_event=lambda current, event: (
+                    applied.append(current.delta_id)
+                    or receipt
+                ),
+                lookup_application_receipt=lambda current: None,
+            )
+
+            self.assertEqual(
+                consumer.drain(as_of="2026-01-01T00:00:05+00:00"),
+                (),
+            )
+            self.assertEqual(applied, [])
+            self.assertTrue(DesktopDeltaCheckpointStore(desktop_path).has_ack("d1"))
+
+    def test_consumer_refreshes_durable_receipt_after_serialization_boundary(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            collector = CollectorDeltaStore(root / "collector.json")
+            checkpoint = DesktopDeltaCheckpointStore(root / "desktop.json")
+            receipt_store = DurableApplicationReceiptStore(root / "application-receipts.json")
+            delta = self.make_delta()
+            collector.append(delta)
+            receipt = DesktopApplicationReceipt(
+                delta_id=delta.delta_id,
+                canonical_event_digest=delta.canonical_event_digest,
+                receipt_id="receipt-d1",
+                applied_at="2026-01-01T00:00:04+00:00",
+            )
+            published = []
+            reapplied = []
+
+            @contextmanager
+            def receipt_publish_before_locked_read():
+                if not published:
+                    published.append(True)
+                    receipt_store.put(receipt)
+                yield
+
+            checkpoint._workspace_lock = receipt_publish_before_locked_read  # type: ignore[method-assign]
+            consumer = DesktopDeltaConsumer(
+                collector,
+                checkpoint,
+                resolve_event=lambda _: event_payload(),
+                apply_event=lambda current, event: (
+                    reapplied.append(current.delta_id)
+                    or receipt
+                ),
+                lookup_application_receipt=receipt_store.get,
+            )
+
+            self.assertEqual(
+                consumer.drain(as_of="2026-01-01T00:00:05+00:00"),
+                ("d1",),
+            )
+            self.assertEqual(reapplied, [])
+            self.assertTrue(DesktopDeltaCheckpointStore(root / "desktop.json").has_ack("d1"))
 
     def test_consumer_rejects_separate_health_application_boundary(self):
         payload = event_payload()

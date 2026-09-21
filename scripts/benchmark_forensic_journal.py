@@ -5,6 +5,8 @@ from datetime import datetime, timedelta, timezone
 import json
 import os
 from pathlib import Path
+import platform
+import sys
 import tempfile
 from time import perf_counter_ns
 from typing import Iterable
@@ -85,10 +87,13 @@ def seed_forensic_history(path: Path, record_count: int) -> str:
 
 
 def benchmark_case(record_count: int, directory: Path) -> dict[str, int]:
-    """Measure one restart, one append, and one explicit verify for one history size."""
+    """Measure fixture seed, restart, one append, and explicit verify separately."""
 
     path = Path(directory) / f"forensic-{record_count}.jsonl"
+
+    seed_started = perf_counter_ns()
     seed_forensic_history(path, record_count)
+    seed_ns = perf_counter_ns() - seed_started
     seeded_bytes = path.stat().st_size
 
     open_started = perf_counter_ns()
@@ -117,6 +122,7 @@ def benchmark_case(record_count: int, directory: Path) -> dict[str, int]:
         "seeded_file_bytes": seeded_bytes,
         "file_bytes_after_append": path.stat().st_size,
         "record_count_after_append": integrity.record_count,
+        "seed_ns": seed_ns,
         "open_ns": open_ns,
         "append_ns": append_ns,
         "verify_ns": verify_ns,
@@ -133,6 +139,22 @@ def run_benchmark(sizes: Iterable[int]) -> list[dict[str, int]]:
     with tempfile.TemporaryDirectory(prefix="autosport-forensic-benchmark-") as temp_dir:
         root = Path(temp_dir)
         return [benchmark_case(size, root) for size in normalized]
+
+
+def benchmark_document(sizes: Iterable[int]) -> dict[str, object]:
+    """Return comparable measurement evidence with environment/source binding."""
+
+    return {
+        "schema_version": 1,
+        "clock": "perf_counter_ns",
+        "threshold_semantics": "NONE_MEASUREMENT_ONLY",
+        "source_sha": os.environ.get("AUTOSPORT_SOURCE_SHA", "UNKNOWN"),
+        "python_version": platform.python_version(),
+        "python_implementation": platform.python_implementation(),
+        "platform": platform.platform(),
+        "executable": sys.executable,
+        "results": run_benchmark(sizes),
+    }
 
 
 def _parse_args() -> argparse.Namespace:
@@ -154,15 +176,9 @@ def _parse_args() -> argparse.Namespace:
 
 def main() -> int:
     args = _parse_args()
-    results = run_benchmark(args.sizes)
     print(
         json.dumps(
-            {
-                "schema_version": 1,
-                "clock": "perf_counter_ns",
-                "threshold_semantics": "NONE_MEASUREMENT_ONLY",
-                "results": results,
-            },
+            benchmark_document(args.sizes),
             sort_keys=True,
             separators=(",", ":"),
         )

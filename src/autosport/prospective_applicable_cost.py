@@ -22,6 +22,7 @@ from .prospective_model_compute_money import (
 
 _SCHEMA_VERSION = 2
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+_MODEL_SOURCE_FAMILY = "autosport.prospective_model_compute_money"
 
 
 class ProspectiveApplicableCostError(ValueError):
@@ -131,15 +132,67 @@ _STATUS_AXES: dict[
 }
 
 
-@dataclass(frozen=True, slots=True)
+_COMPONENT_SEMANTICS: dict[
+    CostClass,
+    tuple[
+        ProspectiveCostResolutionStatus,
+        ProspectiveApplicableCostReason,
+        tuple[ProspectiveCostDependencyAxis, ...],
+        str | None,
+    ],
+] = {
+    CostClass.MODEL_COMPUTE_AI: (
+        ProspectiveCostResolutionStatus.UNKNOWN_UNPROVEN,
+        ProspectiveApplicableCostReason.MODEL_COMPUTE_AUTHORITY_UNRESOLVED,
+        (),
+        _MODEL_SOURCE_FAMILY,
+    ),
+    CostClass.PROVIDER_DATA: (
+        ProspectiveCostResolutionStatus.UNKNOWN_UNPROVEN,
+        ProspectiveApplicableCostReason.NO_PROSPECTIVE_PROVIDER_DATA_AUTHORITY,
+        (),
+        None,
+    ),
+    CostClass.FIXED_CAMPAIGN: (
+        ProspectiveCostResolutionStatus.UNKNOWN_UNPROVEN,
+        ProspectiveApplicableCostReason.NO_PROSPECTIVE_FIXED_ALLOCATION_AUTHORITY,
+        (),
+        None,
+    ),
+    CostClass.EXECUTION_SLIPPAGE: (
+        ProspectiveCostResolutionStatus.EXECUTION_STATE_DEPENDENT,
+        ProspectiveApplicableCostReason.EXECUTION_SLIPPAGE_DEPENDS_ON_EXECUTION,
+        (ProspectiveCostDependencyAxis.EXECUTION_STATE,),
+        None,
+    ),
+    CostClass.EXECUTION_FEES_COMMISSION_TAX: (
+        ProspectiveCostResolutionStatus.EXECUTION_AND_TERMINAL_STATE_DEPENDENT,
+        ProspectiveApplicableCostReason.EXECUTION_FEES_DEPEND_ON_EXECUTION_OR_TERMINAL_STATE,
+        (
+            ProspectiveCostDependencyAxis.EXECUTION_STATE,
+            ProspectiveCostDependencyAxis.TERMINAL_STATE,
+        ),
+        None,
+    ),
+}
+
+
+@dataclass(frozen=True, slots=True, init=False)
 class ProspectiveApplicableCostComponent:
+    """Resolver-issued schema-v2 component; public construction is disabled."""
+
     cost_class: CostClass
     status: ProspectiveCostResolutionStatus
     reason: ProspectiveApplicableCostReason
-    dependency_axes: tuple[ProspectiveCostDependencyAxis, ...] = ()
-    source_family: str | None = None
-    source_evidence_id: str | None = None
-    source_sha256: str | None = None
+    dependency_axes: tuple[ProspectiveCostDependencyAxis, ...]
+    source_family: str | None
+    source_evidence_id: str | None
+    source_sha256: str | None
+
+    def __init__(self, *_args: object, **_kwargs: object) -> None:
+        raise ProspectiveApplicableCostError(
+            "prospective applicable-cost components are resolver-owned"
+        )
 
     def __post_init__(self) -> None:
         if type(self.cost_class) is not CostClass:
@@ -163,16 +216,44 @@ class ProspectiveApplicableCostComponent:
             raise ProspectiveApplicableCostError(
                 "status and dependency_axes must describe the same dependency dimensions"
             )
+
+        expected = _COMPONENT_SEMANTICS.get(self.cost_class)
+        if expected is None:
+            raise ProspectiveApplicableCostError(
+                "cost_class has no schema-v2 prospective semantic authority"
+            )
+        expected_status, expected_reason, expected_axes, expected_source_family = expected
+        if (
+            self.status is not expected_status
+            or self.reason is not expected_reason
+            or self.dependency_axes != expected_axes
+        ):
+            raise ProspectiveApplicableCostError(
+                "cost component does not match the canonical schema-v2 semantic tuple"
+            )
+
         refs = (self.source_family, self.source_evidence_id, self.source_sha256)
-        if any(value is None for value in refs):
+        if expected_source_family is None:
             if any(value is not None for value in refs):
                 raise ProspectiveApplicableCostError(
-                    "source authority fields must be all present or all absent"
+                    "this cost class cannot carry source authority in schema v2"
                 )
-        else:
-            _text(self.source_family, "source_family")
-            _sha256(self.source_evidence_id, "source_evidence_id")
-            _sha256(self.source_sha256, "source_sha256")
+            return
+
+        if self.source_family != expected_source_family:
+            raise ProspectiveApplicableCostError(
+                "cost component source family does not match canonical authority"
+            )
+        if self.source_evidence_id is None or self.source_sha256 is None:
+            raise ProspectiveApplicableCostError(
+                "canonical source authority requires evidence id and SHA-256"
+            )
+        evidence_id = _sha256(self.source_evidence_id, "source_evidence_id")
+        source_sha256 = _sha256(self.source_sha256, "source_sha256")
+        if evidence_id != source_sha256:
+            raise ProspectiveApplicableCostError(
+                "schema-v2 model source evidence id and source SHA-256 must match"
+            )
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -188,18 +269,23 @@ class ProspectiveApplicableCostComponent:
         }
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True, slots=True, init=False)
 class ProspectiveApplicableCostResolution:
+    """Resolver-issued fail-closed aggregate; public construction is disabled."""
+
     intent_sha256: str
     opportunity_id: str
     portfolio_plan_sha256: str
     decision_at: datetime
     components: tuple[ProspectiveApplicableCostComponent, ...]
-    completeness: ProspectiveApplicableCostCompleteness = (
-        ProspectiveApplicableCostCompleteness.INCOMPLETE
-    )
-    total_subtractable_amount: None = None
-    currency: None = None
+    completeness: ProspectiveApplicableCostCompleteness
+    total_subtractable_amount: None
+    currency: None
+
+    def __init__(self, *_args: object, **_kwargs: object) -> None:
+        raise ProspectiveApplicableCostError(
+            "prospective applicable-cost resolutions are resolver-owned"
+        )
 
     def __post_init__(self) -> None:
         _sha256(self.intent_sha256, "intent_sha256")
@@ -214,6 +300,8 @@ class ProspectiveApplicableCostResolution:
             raise ProspectiveApplicableCostError(
                 "components must contain exact ProspectiveApplicableCostComponent values"
             )
+        for item in self.components:
+            item.__post_init__()
         classes = tuple(item.cost_class for item in self.components)
         expected = tuple(sorted(REQUIRED_COST_CLASSES, key=lambda value: value.value))
         if classes != expected:
@@ -252,28 +340,6 @@ class ProspectiveApplicableCostResolution:
         if include_evidence_id:
             payload["evidence_id"] = _digest(payload)
         return payload
-
-
-def _unresolved(
-    cost_class: CostClass,
-    reason: ProspectiveApplicableCostReason,
-    *,
-    status: ProspectiveCostResolutionStatus = (
-        ProspectiveCostResolutionStatus.UNKNOWN_UNPROVEN
-    ),
-    source_family: str | None = None,
-    source_evidence_id: str | None = None,
-    source_sha256: str | None = None,
-) -> ProspectiveApplicableCostComponent:
-    return ProspectiveApplicableCostComponent(
-        cost_class=cost_class,
-        status=status,
-        dependency_axes=_STATUS_AXES[status],
-        reason=reason,
-        source_family=source_family,
-        source_evidence_id=source_evidence_id,
-        source_sha256=source_sha256,
-    )
 
 
 def resolve_prospective_applicable_costs(
@@ -372,28 +438,50 @@ def resolve_prospective_applicable_costs(
             "model-compute evidence decision cutoff mismatch"
         )
 
+    def issue_component(
+        cost_class: CostClass,
+        reason: ProspectiveApplicableCostReason,
+        *,
+        status: ProspectiveCostResolutionStatus = (
+            ProspectiveCostResolutionStatus.UNKNOWN_UNPROVEN
+        ),
+        source_family: str | None = None,
+        source_evidence_id: str | None = None,
+        source_sha256: str | None = None,
+    ) -> ProspectiveApplicableCostComponent:
+        component = object.__new__(ProspectiveApplicableCostComponent)
+        object.__setattr__(component, "cost_class", cost_class)
+        object.__setattr__(component, "status", status)
+        object.__setattr__(component, "reason", reason)
+        object.__setattr__(component, "dependency_axes", _STATUS_AXES[status])
+        object.__setattr__(component, "source_family", source_family)
+        object.__setattr__(component, "source_evidence_id", source_evidence_id)
+        object.__setattr__(component, "source_sha256", source_sha256)
+        component.__post_init__()
+        return component
+
     components = {
-        CostClass.MODEL_COMPUTE_AI: _unresolved(
+        CostClass.MODEL_COMPUTE_AI: issue_component(
             CostClass.MODEL_COMPUTE_AI,
             ProspectiveApplicableCostReason.MODEL_COMPUTE_AUTHORITY_UNRESOLVED,
-            source_family="autosport.prospective_model_compute_money",
+            source_family=_MODEL_SOURCE_FAMILY,
             source_evidence_id=model_evidence_id,
             source_sha256=model_evidence_id,
         ),
-        CostClass.PROVIDER_DATA: _unresolved(
+        CostClass.PROVIDER_DATA: issue_component(
             CostClass.PROVIDER_DATA,
             ProspectiveApplicableCostReason.NO_PROSPECTIVE_PROVIDER_DATA_AUTHORITY,
         ),
-        CostClass.FIXED_CAMPAIGN: _unresolved(
+        CostClass.FIXED_CAMPAIGN: issue_component(
             CostClass.FIXED_CAMPAIGN,
             ProspectiveApplicableCostReason.NO_PROSPECTIVE_FIXED_ALLOCATION_AUTHORITY,
         ),
-        CostClass.EXECUTION_SLIPPAGE: _unresolved(
+        CostClass.EXECUTION_SLIPPAGE: issue_component(
             CostClass.EXECUTION_SLIPPAGE,
             ProspectiveApplicableCostReason.EXECUTION_SLIPPAGE_DEPENDS_ON_EXECUTION,
             status=ProspectiveCostResolutionStatus.EXECUTION_STATE_DEPENDENT,
         ),
-        CostClass.EXECUTION_FEES_COMMISSION_TAX: _unresolved(
+        CostClass.EXECUTION_FEES_COMMISSION_TAX: issue_component(
             CostClass.EXECUTION_FEES_COMMISSION_TAX,
             ProspectiveApplicableCostReason.EXECUTION_FEES_DEPEND_ON_EXECUTION_OR_TERMINAL_STATE,
             status=ProspectiveCostResolutionStatus.EXECUTION_AND_TERMINAL_STATE_DEPENDENT,
@@ -403,10 +491,19 @@ def resolve_prospective_applicable_costs(
         components[cost_class]
         for cost_class in sorted(REQUIRED_COST_CLASSES, key=lambda value: value.value)
     )
-    return ProspectiveApplicableCostResolution(
-        intent_sha256=intent_sha256,
-        opportunity_id=opportunity_id,
-        portfolio_plan_sha256=portfolio_plan_sha256,
-        decision_at=cutoff,
-        components=ordered,
+
+    resolution = object.__new__(ProspectiveApplicableCostResolution)
+    object.__setattr__(resolution, "intent_sha256", intent_sha256)
+    object.__setattr__(resolution, "opportunity_id", opportunity_id)
+    object.__setattr__(resolution, "portfolio_plan_sha256", portfolio_plan_sha256)
+    object.__setattr__(resolution, "decision_at", cutoff)
+    object.__setattr__(resolution, "components", ordered)
+    object.__setattr__(
+        resolution,
+        "completeness",
+        ProspectiveApplicableCostCompleteness.INCOMPLETE,
     )
+    object.__setattr__(resolution, "total_subtractable_amount", None)
+    object.__setattr__(resolution, "currency", None)
+    resolution.__post_init__()
+    return resolution

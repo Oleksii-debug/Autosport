@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from math import isfinite
 from types import MappingProxyType
 from typing import Mapping, Sequence
 
@@ -309,7 +310,11 @@ def _deep_freeze_value(value: object, field: str) -> object:
         return _deep_freeze_mapping(value, field)
     if isinstance(value, (list, tuple)):
         return tuple(_deep_freeze_value(item, field) for item in value)
-    if value is None or isinstance(value, (str, int, float, bool)):
+    if isinstance(value, float):
+        if not isfinite(value):
+            raise BetfairCatalogError(f"{field} contains a non-finite JSON number")
+        return value
+    if value is None or isinstance(value, (str, int, bool)):
         return value
     raise BetfairCatalogError(f"{field} contains a non-JSON-compatible value")
 

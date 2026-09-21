@@ -16,6 +16,15 @@ from typing import Any, Mapping
 
 from .decision_ledger import JsonlDecisionLedger, DecisionRecord
 from .pre_evaluation_binding import BoundPreEvaluationSession
+from .pre_evaluation_product_origin import (
+    ProductOwnedPreEvaluationSemanticSession,
+    assert_pre_evaluation_product_origin_authoritative,
+)
+from .pre_evaluation_semantics import PreEvaluationSemanticAuthority
+from .provider_observation_authority import (
+    CompleteGameBoardSnapshot,
+    assert_complete_game_board_authoritative,
+)
 from .scientific_registry import ForwardCapturePlan, ScientificRegistry
 
 
@@ -285,15 +294,16 @@ class ForwardEvidenceCrossLayerBinding:
         return _digest(self.to_payload())
 
 
-def bind_forward_evidence(
+def _bind_forward_evidence_lineage(
     *,
     registry: ScientificRegistry,
     ledger: JsonlDecisionLedger,
     capture_plan_id: str,
     bound_session: BoundPreEvaluationSession,
     evaluation_bundle_id: str,
+    require_legacy_slot_times: bool,
 ) -> ForwardEvidenceCrossLayerBinding:
-    """Bind one precommitted plan to one exact forward session and later evaluation."""
+    """Verify immutable forward lineage without conferring product-origin authority."""
 
     if not isinstance(registry, ScientificRegistry):
         raise TypeError("registry must be ScientificRegistry")
@@ -370,24 +380,25 @@ def bind_forward_evidence(
             "forward capture plan slot membership must exactly equal bound provider members"
         )
 
-    schedule = {slot.slot_id: slot for slot in plan.slots}
-    for member in bound_session.members:
-        slot = bound_session.resolve_slot(member.row_key)
-        planned = schedule[member.row_key]
-        scheduled_ns = _epoch_ns(planned.scheduled_at_utc, "scheduled_at_utc")
-        latest_ns = scheduled_ns + planned.max_lateness_s * 1_000_000_000
-        if not scheduled_ns <= slot.evaluated_at_ns <= latest_ns:
-            raise ValueError(
-                f"pre-evaluation time is outside precommitted capture interval for {member.row_key}"
-            )
-        if slot.facts is None:
-            raise ValueError(
-                f"forward evidence is incomplete for planned slot {member.row_key}"
-            )
-        if not scheduled_ns <= slot.facts.observed_at_ns <= slot.evaluated_at_ns:
-            raise ValueError(
-                f"observation time is outside precommitted capture interval for {member.row_key}"
-            )
+    if require_legacy_slot_times:
+        schedule = {slot.slot_id: slot for slot in plan.slots}
+        for member in bound_session.members:
+            slot = bound_session.resolve_slot(member.row_key)
+            planned = schedule[member.row_key]
+            scheduled_ns = _epoch_ns(planned.scheduled_at_utc, "scheduled_at_utc")
+            latest_ns = scheduled_ns + planned.max_lateness_s * 1_000_000_000
+            if not scheduled_ns <= slot.evaluated_at_ns <= latest_ns:
+                raise ValueError(
+                    f"pre-evaluation time is outside precommitted capture interval for {member.row_key}"
+                )
+            if slot.facts is None:
+                raise ValueError(
+                    f"forward evidence is incomplete for planned slot {member.row_key}"
+                )
+            if not scheduled_ns <= slot.facts.observed_at_ns <= slot.evaluated_at_ns:
+                raise ValueError(
+                    f"observation time is outside precommitted capture interval for {member.row_key}"
+                )
 
     binding = ForwardEvidenceCrossLayerBinding(
         capture_plan_id=plan.capture_plan_id,
@@ -407,3 +418,152 @@ def bind_forward_evidence(
     # computed here so callers cannot claim a binding without materializing it.
     binding.authority_sha256
     return binding
+
+def bind_structural_forward_evidence(
+    *,
+    registry: ScientificRegistry,
+    ledger: JsonlDecisionLedger,
+    capture_plan_id: str,
+    bound_session: BoundPreEvaluationSession,
+    evaluation_bundle_id: str,
+) -> ForwardEvidenceCrossLayerBinding:
+    """Test/replay helper for legacy structural slot timing.
+
+    This function proves internal registry/ledger/slot consistency only.  It does not
+    prove provider origin and must not be used as production forward-observation
+    authority.
+    """
+
+    return _bind_forward_evidence_lineage(
+        registry=registry,
+        ledger=ledger,
+        capture_plan_id=capture_plan_id,
+        bound_session=bound_session,
+        evaluation_bundle_id=evaluation_bundle_id,
+        require_legacy_slot_times=True,
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class ProductOwnedForwardEvidenceBinding:
+    """Production forward binding anchored in issued provider/product capabilities."""
+
+    structural: ForwardEvidenceCrossLayerBinding
+    product_semantic_authority_sha256: str
+    product_origin_sha256: str
+    provider_evidence_sha256: str
+    provider_captured_at: str
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.structural, ForwardEvidenceCrossLayerBinding):
+            raise TypeError("structural must be ForwardEvidenceCrossLayerBinding")
+        for name in (
+            "product_semantic_authority_sha256",
+            "product_origin_sha256",
+            "provider_evidence_sha256",
+        ):
+            object.__setattr__(self, name, _sha(name, getattr(self, name)))
+        _instant(self.provider_captured_at, "provider_captured_at")
+        if self.provider_evidence_sha256 != self.structural.provider_evidence_sha256:
+            raise ValueError("product-owned provider evidence does not match structural lineage")
+
+    def to_payload(self) -> dict[str, object]:
+        return {
+            "schema_version": SCHEMA_VERSION,
+            "authority_family": f"{AUTHORITY_FAMILY}.product-origin",
+            "structural": self.structural.to_payload(),
+            "structural_authority_sha256": self.structural.authority_sha256,
+            "product_semantic_authority_sha256": self.product_semantic_authority_sha256,
+            "product_origin_sha256": self.product_origin_sha256,
+            "provider_evidence_sha256": self.provider_evidence_sha256,
+            "provider_captured_at": self.provider_captured_at,
+        }
+
+    @property
+    def authority_sha256(self) -> str:
+        return _digest(self.to_payload())
+
+
+def bind_forward_evidence(
+    *,
+    registry: ScientificRegistry,
+    ledger: JsonlDecisionLedger,
+    capture_plan_id: str,
+    bound_session: BoundPreEvaluationSession,
+    product_session: ProductOwnedPreEvaluationSemanticSession,
+    provider_snapshot: CompleteGameBoardSnapshot,
+    evaluation_bundle_id: str,
+) -> ProductOwnedForwardEvidenceBinding:
+    """Production entrypoint for one exact precommitted forward observation.
+
+    Positive authority requires both independently issued capabilities: the canonical
+    provider snapshot and the product-owned semantic session re-resolved from durable
+    economic/product roots.  Caller-constructed legacy facts are not used as
+    production timing authority.
+    """
+
+    if not isinstance(product_session, ProductOwnedPreEvaluationSemanticSession):
+        raise TypeError(
+            "product_session must be ProductOwnedPreEvaluationSemanticSession"
+        )
+    if not isinstance(provider_snapshot, CompleteGameBoardSnapshot):
+        raise TypeError("provider_snapshot must be CompleteGameBoardSnapshot")
+
+    assert_pre_evaluation_product_origin_authoritative(product_session.origin)
+    assert_complete_game_board_authoritative(provider_snapshot)
+
+    structural = _bind_forward_evidence_lineage(
+        registry=registry,
+        ledger=ledger,
+        capture_plan_id=capture_plan_id,
+        bound_session=bound_session,
+        evaluation_bundle_id=evaluation_bundle_id,
+        require_legacy_slot_times=False,
+    )
+
+    expected_bound = PreEvaluationSemanticAuthority._semantic_bound_authority_digest(
+        bound_session
+    )
+    if product_session.session.bound_authority_digest != expected_bound:
+        raise ValueError("product-owned semantic session binds a different denominator")
+    if product_session.session.denominator_context_digest != bound_session.context.digest:
+        raise ValueError("product-owned semantic session context mismatch")
+    if product_session.origin.denominator_context_digest != bound_session.context.digest:
+        raise ValueError("product-owned origin context mismatch")
+    if product_session.origin.provider_evidence_sha256 != provider_snapshot.evidence_sha256:
+        raise ValueError("product-owned origin does not bind the supplied provider snapshot")
+    if provider_snapshot.evidence_sha256 != bound_session.context.provider_evidence_sha256:
+        raise ValueError("provider snapshot does not match denominator provider evidence")
+
+    semantic_members = {
+        slot.row_key: slot.member_sha256 for slot in product_session.slots
+    }
+    bound_members = {
+        member.row_key: member.member_sha256 for member in bound_session.members
+    }
+    if semantic_members != bound_members:
+        raise ValueError("product-owned semantic member set differs from denominator")
+
+    plan_entry = registry.get("ForwardCapturePlan", capture_plan_id)
+    if plan_entry is None:
+        raise ValueError("forward capture plan is missing from ScientificRegistry")
+    plan = ForwardCapturePlan.from_payload(plan_entry.payload)
+    captured_ns = _epoch_ns(provider_snapshot.captured_at, "provider captured_at")
+    for planned in plan.slots:
+        scheduled_ns = _epoch_ns(planned.scheduled_at_utc, "scheduled_at_utc")
+        latest_ns = scheduled_ns + planned.max_lateness_s * 1_000_000_000
+        if not scheduled_ns <= captured_ns <= latest_ns:
+            raise ValueError(
+                f"provider snapshot capture is outside precommitted interval for {planned.slot_id}"
+            )
+
+    binding = ProductOwnedForwardEvidenceBinding(
+        structural=structural,
+        product_semantic_authority_sha256=product_session.authority_digest,
+        product_origin_sha256=product_session.origin.origin_digest,
+        provider_evidence_sha256=provider_snapshot.evidence_sha256,
+        provider_captured_at=provider_snapshot.captured_at,
+    )
+    binding.authority_sha256
+    return binding
+

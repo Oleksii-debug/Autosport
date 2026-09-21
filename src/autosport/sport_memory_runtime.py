@@ -700,6 +700,29 @@ class SportMemoryRuntime:
             **payload,
         )
 
+    def verify_matchup_evidence(
+        self,
+        matchup: SportMemoryMatchupEvidence,
+    ) -> SportMemoryMatchupEvidence:
+        """Re-resolve and verify a matchup against canonical latest-as-of memory."""
+        self._require_durable_positive_authority()
+        if type(matchup) is not SportMemoryMatchupEvidence:
+            raise TypeError("matchup must be SportMemoryMatchupEvidence")
+        if _digest(matchup.payload(include_id=False)) != matchup.matchup_id:
+            raise SportMemoryError("sport-memory matchup digest mismatch")
+        canonical = self.matchup_as_of(
+            matchup.subject_participant_entity_id,
+            matchup.opponent_participant_entity_id,
+            matchup.scope,
+            as_of=matchup.as_of,
+            view=matchup.identity_view,
+        )
+        if canonical != matchup:
+            raise SportMemoryError(
+                "sport-memory matchup is not canonical latest-as-of evidence"
+            )
+        return canonical
+
     def record_matchup_consumption(
         self,
         *,
@@ -724,8 +747,7 @@ class SportMemoryRuntime:
         cutoff_instant = _instant("decision_cutoff", decision_cutoff)
         if _instant("matchup as_of", matchup.as_of) > cutoff_instant:
             raise SportMemoryError("matchup was selected after decision cutoff")
-        if _digest(matchup.payload(include_id=False)) != matchup.matchup_id:
-            raise SportMemoryError("sport-memory matchup digest mismatch")
+        self.verify_matchup_evidence(matchup)
 
         subject = self.record_consumption(
             decision_id=decision_id,

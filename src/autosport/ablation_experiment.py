@@ -14,7 +14,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from decimal import Decimal, localcontext
 from enum import StrEnum
-from typing import Any, Iterable
+from typing import Iterable
 
 
 _HEX = frozenset("0123456789abcdef")
@@ -43,6 +43,10 @@ def _instant(value: object, name: str) -> datetime:
     if parsed.tzinfo is None or parsed.utcoffset() is None:
         raise ValueError(f"{name} must include timezone")
     return parsed.astimezone(timezone.utc)
+
+
+def _instant_text(value: object, name: str) -> str:
+    return _instant(value, name).isoformat().replace("+00:00", "Z")
 
 
 def _decimal(value: object, name: str) -> Decimal:
@@ -218,9 +222,21 @@ class AblationProtocol:
         _text(self.protocol_id, "protocol_id")
         if not isinstance(self.mode, AblationMode):
             raise ValueError("mode must be AblationMode")
-        _sha256(self.scientific_protocol_sha256, "scientific_protocol_sha256")
-        _sha256(self.case_population_sha256, "case_population_sha256")
-        _instant(self.causal_cutoff, "causal_cutoff")
+        object.__setattr__(
+            self,
+            "scientific_protocol_sha256",
+            _sha256(self.scientific_protocol_sha256, "scientific_protocol_sha256"),
+        )
+        object.__setattr__(
+            self,
+            "case_population_sha256",
+            _sha256(self.case_population_sha256, "case_population_sha256"),
+        )
+        object.__setattr__(
+            self,
+            "causal_cutoff",
+            _instant_text(self.causal_cutoff, "causal_cutoff"),
+        )
         _text(self.primary_metric, "primary_metric")
         if not isinstance(self.baseline, AblationCellSpec):
             raise ValueError("baseline must be AblationCellSpec")
@@ -270,8 +286,8 @@ class AblationProtocol:
             "kind": "autosport-ablation-protocol-v1",
             "protocol_id": self.protocol_id,
             "mode": self.mode.value,
-            "scientific_protocol_sha256": self.scientific_protocol_sha256.lower(),
-            "case_population_sha256": self.case_population_sha256.lower(),
+            "scientific_protocol_sha256": self.scientific_protocol_sha256,
+            "case_population_sha256": self.case_population_sha256,
             "causal_cutoff": self.causal_cutoff,
             "primary_metric": self.primary_metric,
             "baseline": self.baseline.to_dict(),
@@ -299,16 +315,28 @@ class AblationCellObservation:
 
     def __post_init__(self) -> None:
         _text(self.cell_id, "cell_id")
-        _sha256(self.cell_spec_sha256, "cell_spec_sha256")
-        _sha256(self.run_evidence_sha256, "run_evidence_sha256")
+        object.__setattr__(
+            self,
+            "cell_spec_sha256",
+            _sha256(self.cell_spec_sha256, "cell_spec_sha256"),
+        )
+        object.__setattr__(
+            self,
+            "run_evidence_sha256",
+            _sha256(self.run_evidence_sha256, "run_evidence_sha256"),
+        )
         _decimal(self.metric_value, "metric_value")
-        _instant(self.evidence_available_at, "evidence_available_at")
+        object.__setattr__(
+            self,
+            "evidence_available_at",
+            _instant_text(self.evidence_available_at, "evidence_available_at"),
+        )
 
     def to_dict(self) -> dict[str, object]:
         return {
             "cell_id": self.cell_id,
-            "cell_spec_sha256": self.cell_spec_sha256.lower(),
-            "run_evidence_sha256": self.run_evidence_sha256.lower(),
+            "cell_spec_sha256": self.cell_spec_sha256,
+            "run_evidence_sha256": self.run_evidence_sha256,
             "metric_value": _decimal_text(self.metric_value),
             "evidence_available_at": self.evidence_available_at,
         }
@@ -340,6 +368,10 @@ class AblationContrast:
 @dataclass(frozen=True, slots=True)
 class AblationReport:
     protocol_sha256: str
+    scientific_protocol_sha256: str
+    case_population_sha256: str
+    mode: AblationMode
+    causal_cutoff: str
     primary_metric: str
     evaluated_at: str
     baseline_run_evidence_sha256: str
@@ -350,12 +382,17 @@ class AblationReport:
             "schema_version": 1,
             "kind": "autosport-ablation-report-v1",
             "protocol_sha256": self.protocol_sha256,
+            "scientific_protocol_sha256": self.scientific_protocol_sha256,
+            "case_population_sha256": self.case_population_sha256,
+            "mode": self.mode.value,
+            "causal_cutoff": self.causal_cutoff,
             "primary_metric": self.primary_metric,
             "evaluated_at": self.evaluated_at,
             "baseline_run_evidence_sha256": self.baseline_run_evidence_sha256,
             "contrasts": [contrast.to_dict() for contrast in self.contrasts],
             "truth": {
                 "recommendation_only": True,
+                "external_metric_evidence_must_be_resolved": True,
                 "factor_contributions_additive": False,
                 "active_strategy_mutation": False,
                 "real_money_execution": False,
@@ -394,7 +431,8 @@ def evaluate_ablation(
 
     if not isinstance(protocol, AblationProtocol):
         raise TypeError("protocol must be AblationProtocol")
-    evaluated = _instant(evaluated_at, "evaluated_at")
+    evaluated_text = _instant_text(evaluated_at, "evaluated_at")
+    evaluated = _instant(evaluated_text, "evaluated_at")
     if evaluated < _instant(protocol.causal_cutoff, "causal_cutoff"):
         raise ValueError("evaluation cannot precede causal cutoff")
 
@@ -449,8 +487,12 @@ def evaluate_ablation(
     )
     return AblationReport(
         protocol_sha256=protocol.protocol_sha256,
+        scientific_protocol_sha256=protocol.scientific_protocol_sha256,
+        case_population_sha256=protocol.case_population_sha256,
+        mode=protocol.mode,
+        causal_cutoff=protocol.causal_cutoff,
         primary_metric=protocol.primary_metric,
-        evaluated_at=evaluated_at,
+        evaluated_at=evaluated_text,
         baseline_run_evidence_sha256=baseline_observation.run_evidence_sha256,
         contrasts=contrasts,
     )

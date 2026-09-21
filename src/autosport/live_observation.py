@@ -13,6 +13,7 @@ from .market_bus import MarketEventBus, MarketEventDeliveryError
 from .market_mirror import MarketMirror
 from .market_mirror_runtime import BoundedMirrorInvalidationBuffer
 from .providers import MarketProvider, ProviderBatch
+from .secret_redaction import safe_exception_text
 from .session import ObservationResult
 from .storage import SQLiteMarketStore
 
@@ -74,7 +75,7 @@ class OneShotObservationWorker:
             # failure: publish one terminal error and let poll() restore idle state.
             self._thread = None
             self._messages.put(
-                ObservationWorkerMessage(error=f"{type(exc).__name__}: {exc}")
+                ObservationWorkerMessage(error=safe_exception_text(exc))
             )
             return True
         return True
@@ -87,7 +88,7 @@ class OneShotObservationWorker:
             # not terminate the GUI process. Publish a terminal failure so poll()
             # clears the single-flight state instead of leaving live observation
             # permanently busy after the worker thread has already died.
-            message = ObservationWorkerMessage(error=f"{type(exc).__name__}: {exc}")
+            message = ObservationWorkerMessage(error=safe_exception_text(exc))
         self._messages.put(message)
 
     def poll(self) -> ObservationWorkerMessage | None:

@@ -853,6 +853,10 @@ def _parse_place_orders_response(
         raise BetfairPlaceOrdersAmbiguous(
             "placeOrders execution/instruction statuses conflict"
         )
+    if instruction.status == "FAILURE" and instruction.bet_id is None:
+        raise BetfairPlaceOrdersAmbiguous(
+            "failed placeOrders instruction lacks provider betId identity"
+        )
     if status == "FAILURE" and result.get("errorCode") is None:
         raise BetfairPlaceOrdersAmbiguous(
             "failed placeOrders execution requires provider errorCode"

@@ -243,3 +243,30 @@ def test_matching_exceptionname_preserves_provider_semantics() -> None:
 
     assert raised.value.json_rpc_code == -32099
     assert raised.value.provider_error_code == "TIMEOUT_ERROR"
+
+
+@pytest.mark.parametrize(
+    ("read_method", "wrong_exception"),
+    [
+        ("read_account_funds", "APINGException"),
+        ("read_current_orders_page", "AccountAPINGException"),
+    ],
+)
+def test_wrong_service_exception_container_cannot_mint_provider_semantics(
+    read_method: str,
+    wrong_exception: str,
+) -> None:
+    client = _client(
+        _error_payload(
+            data={
+                "exceptionname": wrong_exception,
+                wrong_exception: {"errorCode": "TOO_MANY_REQUESTS"},
+            }
+        )
+    )
+
+    with pytest.raises(BetfairReadOnlyError) as raised:
+        getattr(client, read_method)()
+
+    assert raised.value.json_rpc_code == -32099
+    assert raised.value.provider_error_code is None

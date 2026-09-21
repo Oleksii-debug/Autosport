@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 from dataclasses import dataclass, replace
+from datetime import datetime
 from decimal import Decimal
 from enum import Enum
 from typing import Any
@@ -14,7 +15,13 @@ from .betfair_account_readonly import (
     BetfairExecutionReadbackEnvelope,
     BetfairReadOnlyError,
 )
-from .real_execution_ledger import ExecutionAction
+from .real_execution_ledger import (
+    AttemptState,
+    ExecutionAction,
+    ExecutionLedgerError,
+    ExecutionPlan,
+    RealExecutionLedger,
+)
 
 
 SCHEMA_VERSION = 1
@@ -28,6 +35,13 @@ class RealizedMatchSource(str, Enum):
     INCOMPLETE_EVIDENCE = "INCOMPLETE_EVIDENCE"
     CURRENT_ORDER = "CURRENT_ORDER"
     CLEARED_BET = "CLEARED_BET"
+
+
+_SOURCE_RANK = {
+    RealizedMatchSource.INCOMPLETE_EVIDENCE: 0,
+    RealizedMatchSource.CURRENT_ORDER: 1,
+    RealizedMatchSource.CLEARED_BET: 2,
+}
 
 
 def _decimal_text(value: Decimal) -> str:
@@ -54,28 +68,33 @@ def _sha256(value: Any) -> str:
     return hashlib.sha256(_canonical(value)).hexdigest()
 
 
-def _provider_ref(value: object) -> str:
-    if (
-        type(value) is not str
-        or not value
-        or len(value) > 32
-        or any(character not in "0123456789abcdef" for character in value)
-    ):
+def _timestamp(value: str, name: str) -> datetime:
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except (AttributeError, ValueError) as exc:
         raise RealizedMatchEvidenceError(
-            "provider_order_ref must be <=32 lowercase hex characters"
+            f"{name} must be ISO-8601"
+        ) from exc
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        raise RealizedMatchEvidenceError(
+            f"{name} must be timezone-aware"
         )
-    return value
+    return parsed
 
 
 @dataclass(frozen=True, slots=True, weakref_slot=True)
 class BetfairRealizedMatchEvidence:
-    """Read-only projection of exact provider matched-price/size truth.
+    """Read-only projection of provider matched-price/size truth.
 
     This object is not a provider write, settlement, or execution-state authority.
     Positive authority is valid only when ``assert_authoritative`` succeeds.
     """
 
     source: RealizedMatchSource
+    plan_id: str
+    plan_fingerprint: str
+    attempt_id: str
+    attempt_state: AttemptState
     action_id: str
     bookmaker_id: str
     account_id: str
@@ -96,6 +115,7 @@ class BetfairRealizedMatchEvidence:
     source_payload_sha256: str | None
     readback_observed_at: str
     readback_evidence_sha256: str
+    ledger_snapshot_sha256: str
     finalized: bool
     evidence_id: str
     schema_version: int = SCHEMA_VERSION
@@ -104,6 +124,10 @@ class BetfairRealizedMatchEvidence:
         return {
             "schema_version": self.schema_version,
             "source": self.source.value,
+            "plan_id": self.plan_id,
+            "plan_fingerprint": self.plan_fingerprint,
+            "attempt_id": self.attempt_id,
+            "attempt_state": self.attempt_state.value,
             "action_id": self.action_id,
             "bookmaker_id": self.bookmaker_id,
             "account_id": self.account_id,
@@ -136,6 +160,7 @@ class BetfairRealizedMatchEvidence:
             "source_payload_sha256": self.source_payload_sha256,
             "readback_observed_at": self.readback_observed_at,
             "readback_evidence_sha256": self.readback_evidence_sha256,
+            "ledger_snapshot_sha256": self.ledger_snapshot_sha256,
             "finalized": self.finalized,
         }
 
@@ -168,6 +193,82 @@ class BetfairRealizedMatchEvidence:
         raise RealizedMatchEvidenceError(
             "realized match evidence was not issued by canonical resolver"
         )
+
+
+@dataclass(frozen=True, slots=True)
+class _AttemptBinding:
+    action: ExecutionAction
+    provider_order_ref: str
+    state: AttemptState
+    plan_fingerprint: str
+    ledger_snapshot_sha256: str
+
+
+def _attempt_binding(
+    plan: ExecutionPlan,
+    ledger: RealExecutionLedger,
+    attempt_id: str,
+) -> _AttemptBinding:
+    if not isinstance(plan, ExecutionPlan):
+        raise TypeError("plan must be ExecutionPlan")
+    if not isinstance(ledger, RealExecutionLedger):
+        raise TypeError("ledger must be RealExecutionLedger")
+    if type(attempt_id) is not str or not attempt_id.strip():
+        raise RealizedMatchEvidenceError(
+            "attempt_id must be non-empty text"
+        )
+
+    try:
+        before = ledger.verified_snapshot()
+        saga = ledger.saga(plan.plan_id)
+        if saga.plan_fingerprint != plan.fingerprint:
+            raise RealizedMatchEvidenceError(
+                "caller plan does not match durable execution plan fingerprint"
+            )
+        action_id = saga.attempt_action_ids.get(attempt_id)
+        state = saga.attempts.get(attempt_id)
+        if action_id is None or state is None:
+            raise RealizedMatchEvidenceError(
+                "attempt is not durably bound to the execution plan"
+            )
+        actions = tuple(
+            action for action in plan.actions if action.action_id == action_id
+        )
+        if len(actions) != 1:
+            raise RealizedMatchEvidenceError(
+                "durable attempt action cannot be resolved uniquely"
+            )
+        action = actions[0]
+        provider_order_ref = ledger.provider_order_reference(
+            attempt_id=attempt_id,
+            provider_id=action.bookmaker_id,
+        )
+        if provider_order_ref is None:
+            raise RealizedMatchEvidenceError(
+                "attempt lacks durable provider order reference"
+            )
+        after = ledger.verified_snapshot()
+    except RealizedMatchEvidenceError:
+        raise
+    except (ExecutionLedgerError, KeyError, OSError) as exc:
+        raise RealizedMatchEvidenceError(
+            "durable execution attempt cannot be verified"
+        ) from exc
+
+    if (
+        before.sha256 != after.sha256
+        or before.event_count != after.event_count
+    ):
+        raise RealizedMatchEvidenceError(
+            "execution ledger changed during realized-match resolution"
+        )
+    return _AttemptBinding(
+        action=action,
+        provider_order_ref=provider_order_ref,
+        state=state,
+        plan_fingerprint=saga.plan_fingerprint,
+        ledger_snapshot_sha256=after.sha256,
+    )
 
 
 def _identity_check(
@@ -267,9 +368,10 @@ def _flatten_rows(
 def _make_evidence(
     *,
     source: RealizedMatchSource,
-    action: ExecutionAction,
+    plan: ExecutionPlan,
+    binding: _AttemptBinding,
+    attempt_id: str,
     readback: BetfairExecutionReadbackEnvelope,
-    provider_order_ref: str,
     bet_id: str | None,
     provider_matched_odds: Decimal | None,
     provider_matched_stake: Decimal | None,
@@ -279,6 +381,7 @@ def _make_evidence(
     source_payload_sha256: str | None,
     finalized: bool,
 ) -> BetfairRealizedMatchEvidence:
+    action = binding.action
     unrealized = (
         action.requested_stake - provider_matched_stake
         if provider_matched_stake is not None
@@ -286,6 +389,10 @@ def _make_evidence(
     )
     draft = BetfairRealizedMatchEvidence(
         source=source,
+        plan_id=plan.plan_id,
+        plan_fingerprint=binding.plan_fingerprint,
+        attempt_id=attempt_id,
+        attempt_state=binding.state,
         action_id=action.action_id,
         bookmaker_id=action.bookmaker_id,
         account_id=action.account_id,
@@ -293,7 +400,7 @@ def _make_evidence(
         market_id=action.market_id,
         selection_id=action.selection_id,
         side=action.side,
-        provider_order_ref=provider_order_ref,
+        provider_order_ref=binding.provider_order_ref,
         bet_id=bet_id,
         requested_odds=action.requested_odds,
         requested_stake=action.requested_stake,
@@ -306,6 +413,7 @@ def _make_evidence(
         source_payload_sha256=source_payload_sha256,
         readback_observed_at=readback.observed_at,
         readback_evidence_sha256=readback.evidence_sha256,
+        ledger_snapshot_sha256=binding.ledger_snapshot_sha256,
         finalized=finalized,
         evidence_id="pending",
     )
@@ -316,18 +424,22 @@ def _make_evidence(
 
 
 def _resolve_betfair_realized_match(
-    action: ExecutionAction,
+    plan: ExecutionPlan,
+    ledger: RealExecutionLedger,
     readback: BetfairExecutionReadbackEnvelope,
     *,
-    expected_provider_order_ref: str,
+    attempt_id: str,
 ) -> BetfairRealizedMatchEvidence:
-    if not isinstance(action, ExecutionAction):
-        raise TypeError("action must be ExecutionAction")
     if not isinstance(readback, BetfairExecutionReadbackEnvelope):
         raise TypeError("readback must be BetfairExecutionReadbackEnvelope")
 
-    provider_order_ref = _provider_ref(expected_provider_order_ref)
-    selection_id = _identity_check(action, readback, provider_order_ref)
+    binding = _attempt_binding(plan, ledger, attempt_id)
+    action = binding.action
+    selection_id = _identity_check(
+        action,
+        readback,
+        binding.provider_order_ref,
+    )
     current, cleared = _flatten_rows(readback)
 
     for row in (*current, *cleared):
@@ -335,7 +447,20 @@ def _resolve_betfair_realized_match(
             row,
             action=action,
             selection_id=selection_id,
-            provider_order_ref=provider_order_ref,
+            provider_order_ref=binding.provider_order_ref,
+        )
+
+    if (
+        (current or cleared)
+        and binding.state
+        in {
+            AttemptState.RESERVED,
+            AttemptState.REJECTED,
+            AttemptState.RECONCILED_NOT_FOUND,
+        }
+    ):
+        raise RealizedMatchEvidenceError(
+            "provider order evidence conflicts with durable attempt state"
         )
 
     bet_ids = {row.bet_id for row in (*current, *cleared)}
@@ -372,9 +497,10 @@ def _resolve_betfair_realized_match(
             )
         return _make_evidence(
             source=RealizedMatchSource.CLEARED_BET,
-            action=action,
+            plan=plan,
+            binding=binding,
+            attempt_id=attempt_id,
             readback=readback,
-            provider_order_ref=provider_order_ref,
             bet_id=row.bet_id,
             provider_matched_odds=(
                 row.price_matched if row.size_settled > 0 else None
@@ -426,9 +552,10 @@ def _resolve_betfair_realized_match(
             )
         return _make_evidence(
             source=RealizedMatchSource.CURRENT_ORDER,
-            action=action,
+            plan=plan,
+            binding=binding,
+            attempt_id=attempt_id,
             readback=readback,
-            provider_order_ref=provider_order_ref,
             bet_id=row.bet_id,
             provider_matched_odds=(
                 row.average_price_matched if row.size_matched > 0 else None
@@ -443,9 +570,10 @@ def _resolve_betfair_realized_match(
 
     return _make_evidence(
         source=RealizedMatchSource.INCOMPLETE_EVIDENCE,
-        action=action,
+        plan=plan,
+        binding=binding,
+        attempt_id=attempt_id,
         readback=readback,
-        provider_order_ref=provider_order_ref,
         bet_id=None,
         provider_matched_odds=None,
         provider_matched_stake=None,
@@ -458,17 +586,93 @@ def _resolve_betfair_realized_match(
 
 
 def resolve_betfair_realized_match(
-    action: ExecutionAction,
+    plan: ExecutionPlan,
+    ledger: RealExecutionLedger,
     readback: BetfairExecutionReadbackEnvelope,
     *,
-    expected_provider_order_ref: str,
+    attempt_id: str,
 ) -> BetfairRealizedMatchEvidence:
     """Resolve matched-price/size truth without mutating execution state."""
     return _resolve_betfair_realized_match(
-        action,
+        plan,
+        ledger,
         readback,
-        expected_provider_order_ref=expected_provider_order_ref,
+        attempt_id=attempt_id,
     )
+
+
+def validate_betfair_realized_match_revision(
+    previous: BetfairRealizedMatchEvidence,
+    current: BetfairRealizedMatchEvidence,
+) -> BetfairRealizedMatchEvidence:
+    """Reject stale/regressive realized-match projections."""
+    if not isinstance(previous, BetfairRealizedMatchEvidence):
+        raise TypeError("previous must be BetfairRealizedMatchEvidence")
+    if not isinstance(current, BetfairRealizedMatchEvidence):
+        raise TypeError("current must be BetfairRealizedMatchEvidence")
+    previous.assert_authoritative()
+    current.assert_authoritative()
+
+    immutable_fields = (
+        "plan_id",
+        "plan_fingerprint",
+        "attempt_id",
+        "action_id",
+        "bookmaker_id",
+        "account_id",
+        "event_id",
+        "market_id",
+        "selection_id",
+        "side",
+        "provider_order_ref",
+        "requested_odds",
+        "requested_stake",
+    )
+    if any(
+        getattr(previous, field) != getattr(current, field)
+        for field in immutable_fields
+    ):
+        raise RealizedMatchEvidenceError(
+            "realized match revision changes immutable execution identity"
+        )
+    if _timestamp(
+        current.readback_observed_at,
+        "current readback_observed_at",
+    ) < _timestamp(
+        previous.readback_observed_at,
+        "previous readback_observed_at",
+    ):
+        raise RealizedMatchEvidenceError(
+            "realized match revision moves provider observation backward"
+        )
+    if _SOURCE_RANK[current.source] < _SOURCE_RANK[previous.source]:
+        raise RealizedMatchEvidenceError(
+            "realized match revision regresses provider evidence source"
+        )
+    if previous.provider_matched_stake is not None:
+        if current.provider_matched_stake is None:
+            raise RealizedMatchEvidenceError(
+                "realized match revision loses known matched stake"
+            )
+        if current.provider_matched_stake < previous.provider_matched_stake:
+            raise RealizedMatchEvidenceError(
+                "realized match revision decreases matched stake"
+            )
+        if (
+            current.provider_matched_stake
+            == previous.provider_matched_stake
+            and current.provider_matched_stake > 0
+            and current.provider_matched_odds
+            != previous.provider_matched_odds
+        ):
+            raise RealizedMatchEvidenceError(
+                "realized match revision changes matched odds without new matched stake"
+            )
+    if previous.finalized and not current.finalized:
+        raise RealizedMatchEvidenceError(
+            "realized match revision reopens finalized provider evidence"
+        )
+    return current
 
 
 def _install_realized_match_authority() -> None:
@@ -477,15 +681,17 @@ def _install_realized_match_authority() -> None:
     validate_integrity = BetfairRealizedMatchEvidence._validate_integrity
 
     def authoritative_resolve(
-        action: ExecutionAction,
+        plan: ExecutionPlan,
+        ledger: RealExecutionLedger,
         readback: BetfairExecutionReadbackEnvelope,
         *,
-        expected_provider_order_ref: str,
+        attempt_id: str,
     ) -> BetfairRealizedMatchEvidence:
         evidence = raw_resolve(
-            action,
+            plan,
+            ledger,
             readback,
-            expected_provider_order_ref=expected_provider_order_ref,
+            attempt_id=attempt_id,
         )
         evidence_id = id(evidence)
 

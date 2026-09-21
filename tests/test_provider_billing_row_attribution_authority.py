@@ -378,7 +378,7 @@ def test_rebound_lower_opener_dispatch_cannot_mint_provider_issuance(
     assert called is False
 
 
-def test_public_installed_opener_cannot_mint_provider_issuance() -> None:
+def test_rebound_https_handler_dispatch_cannot_mint_provider_issuance(\n    monkeypatch: pytest.MonkeyPatch,\n) -> None:\n    called = False\n\n    def fake_https_open(_self: object, *_args: object, **_kwargs: object):\n        nonlocal called\n        called = True\n        raise AssertionError("rebound HTTPS handler must not execute")\n\n    monkeypatch.setattr(_urllib_request.HTTPSHandler, "https_open", fake_https_open)\n    with pytest.raises(\n        BetfairProviderBillingInputsAuthorityError,\n        match="HTTPS handler executable drifted",\n    ):\n        read_verified_betfair_provider_billing_inputs(\n            BetfairSessionCredentials("k", "t")\n        )\n    assert called is False\n\n\ndef test_public_installed_opener_cannot_mint_provider_issuance() -> None:
     called = False
 
     class _AttackerOpener:

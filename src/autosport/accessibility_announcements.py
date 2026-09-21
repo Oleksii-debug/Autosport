@@ -84,15 +84,24 @@ class AnnouncementEvent:
             raise ValueError("episode_id is valid only for assertive announcement events")
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True, slots=True, init=False)
 class AnnouncementDecision:
-    """Policy result consumed by a future Windows announcement emitter."""
+    """Product-issued policy result consumed by a future Windows emitter.
+
+    Callers may inspect decisions but cannot construct an emitted decision
+    directly at the normal API surface. AnnouncementGate is the issuance path.
+    """
 
     emit: bool
     priority: AnnouncementPriority
     text: str | None
     reason: str
     move_focus: bool = False
+
+    def __init__(self, *args: object, **kwargs: object) -> None:
+        raise TypeError(
+            "AnnouncementDecision is product-issued; use AnnouncementGate.decide()"
+        )
 
     def __post_init__(self) -> None:
         if type(self.emit) is not bool:
@@ -113,6 +122,29 @@ class AnnouncementDecision:
         if self.move_focus:
             raise ValueError("announcement policy must never request focus movement")
         _require_trimmed("reason", self.reason)
+
+
+def _issue_announcement_decision(
+    *,
+    emit: bool,
+    priority: AnnouncementPriority,
+    text: str | None,
+    reason: str,
+    move_focus: bool = False,
+) -> AnnouncementDecision:
+    """Issue one validated decision from the product-owned policy path."""
+
+    decision = object.__new__(AnnouncementDecision)
+    for name, value in (
+        ("emit", emit),
+        ("priority", priority),
+        ("text", text),
+        ("reason", reason),
+        ("move_focus", move_focus),
+    ):
+        object.__setattr__(decision, name, value)
+    decision.__post_init__()
+    return decision
 
 
 class AnnouncementGate:
@@ -166,7 +198,7 @@ class AnnouncementGate:
             return _suppressed(duplicate_reason)
 
         self._remember(key)
-        return AnnouncementDecision(
+        return _issue_announcement_decision(
             emit=True,
             priority=intended,
             text=event.text,
@@ -189,7 +221,7 @@ def priority_for_kind(kind: AnnouncementKind) -> AnnouncementPriority:
 
 
 def _suppressed(reason: str) -> AnnouncementDecision:
-    return AnnouncementDecision(
+    return _issue_announcement_decision(
         emit=False,
         priority=AnnouncementPriority.SILENT,
         text=None,

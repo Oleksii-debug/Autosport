@@ -7,6 +7,7 @@ import tempfile
 
 import pytest
 
+import autosport.betfair_account_readonly as betfair_account_readonly
 from autosport.betfair_account_readonly import (
     BetfairReadOnlyClient,
     BetfairReadOnlyError,
@@ -98,7 +99,9 @@ class MarketBookTransport:
         ).encode("utf-8")
 
 
-def _bound() -> BoundSupervisedExecutionPlan:
+def _bound(decision_at: datetime = NOW) -> BoundSupervisedExecutionPlan:
+    quote_at = decision_at - timedelta(seconds=1)
+    expires_at = decision_at + timedelta(seconds=5)
     action = ExecutionAction(
         action_id=ACTION_ID,
         bookmaker_id="betfair",
@@ -110,15 +113,15 @@ def _bound() -> BoundSupervisedExecutionPlan:
         requested_odds=Decimal("2.00"),
         requested_stake=Decimal("12"),
         quote_id="quote-1",
-        quote_observed_at="2026-09-21T09:59:59+00:00",
-        expires_at="2026-09-21T10:00:05+00:00",
+        quote_observed_at=quote_at.isoformat(),
+        expires_at=expires_at.isoformat(),
     )
     provisional = ExecutionPlan(
         plan_id="provisional",
         bookmaker_profile_version="profile-set-1",
         decision_id="decision-1",
         approval_id="approval-1",
-        created_at="2026-09-21T09:59:59+00:00",
+        created_at=quote_at.isoformat(),
         actions=(action,),
     )
     bindings = (
@@ -135,7 +138,7 @@ def _bound() -> BoundSupervisedExecutionPlan:
         ExecutionLegConstraint(
             leg_id=ACTION_ID,
             side="BACK",
-            quote_expires_at="2026-09-21T10:00:05+00:00",
+            quote_expires_at=expires_at.isoformat(),
             max_slippage_fraction=Decimal("0"),
         ),
     )
@@ -169,6 +172,45 @@ def _bound() -> BoundSupervisedExecutionPlan:
     )
 
 
+class _FakeUrlResponse:
+    def __init__(self, payload: bytes) -> None:
+        self._payload = payload
+
+    def __enter__(self) -> "_FakeUrlResponse":
+        return self
+
+    def __exit__(self, exc_type, exc, traceback) -> bool:
+        return False
+
+    def read(self, limit: int) -> bytes:
+        return self._payload[:limit]
+
+
+def _canonical_client(
+    monkeypatch: pytest.MonkeyPatch,
+    transport: MarketBookTransport,
+) -> BetfairReadOnlyClient:
+    def fake_urlopen(request, timeout: float) -> _FakeUrlResponse:
+        headers = {key.lower(): value for key, value in request.header_items()}
+        payload = transport.post(
+            request.full_url,
+            headers={
+                "X-Application": headers["x-application"],
+                "X-Authentication": headers["x-authentication"],
+            },
+            body=request.data or b"",
+            timeout_seconds=timeout,
+        )
+        return _FakeUrlResponse(payload)
+
+    monkeypatch.setattr(betfair_account_readonly, "urlopen", fake_urlopen)
+    return BetfairReadOnlyClient(
+        BetfairSessionCredentials("app-key", "session-token"),
+        venue_id="betfair",
+        account_id="acct-1",
+    )
+
+
 def _client(transport: MarketBookTransport) -> BetfairReadOnlyClient:
     return BetfairReadOnlyClient(
         BetfairSessionCredentials("app-key", "session-token"),
@@ -185,10 +227,15 @@ def _reserved_ledger(tmp: str, bound: BoundSupervisedExecutionPlan) -> RealExecu
     return ledger
 
 
-def test_authenticated_market_book_receipt_can_issue_racy_positive_depth() -> None:
+def test_authenticated_market_book_receipt_can_issue_racy_positive_depth(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     transport = MarketBookTransport()
-    receipt = _client(transport).read_market_book_depth("1.234", 42)
-    bound = _bound()
+    receipt = _canonical_client(monkeypatch, transport).read_market_book_depth(
+        "1.234", 42
+    )
+    decision_at = datetime.now(timezone.utc)
+    bound = _bound(decision_at)
 
     with tempfile.TemporaryDirectory() as tmp:
         result = assess_authoritative_betfair_execution_feasibility(
@@ -196,8 +243,8 @@ def test_authenticated_market_book_receipt_can_issue_racy_positive_depth() -> No
             bound,
             receipt,
             action_id=ACTION_ID,
-            decision_at=NOW,
-            max_snapshot_age=timedelta(seconds=1),
+            decision_at=decision_at,
+            max_snapshot_age=timedelta(seconds=2),
         )
 
     assert result.state is FeasibilityState.SNAPSHOT_DEPTH_SUFFICIENT_BUT_RACY
@@ -208,32 +255,40 @@ def test_authenticated_market_book_receipt_can_issue_racy_positive_depth() -> No
     assert transport.calls
 
 
-def test_forged_structurally_equal_receipt_cannot_issue_positive_truth() -> None:
-    receipt = _client(MarketBookTransport()).read_market_book_depth("1.234", 42)
+def test_forged_structurally_equal_receipt_cannot_issue_positive_truth(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    receipt = _canonical_client(
+        monkeypatch, MarketBookTransport()
+    ).read_market_book_depth("1.234", 42)
     forged = replace(receipt)
-    bound = _bound()
+    decision_at = datetime.now(timezone.utc)
+    bound = _bound(decision_at)
 
     with tempfile.TemporaryDirectory() as tmp:
         ledger = _reserved_ledger(tmp, bound)
         with pytest.raises(
             BetfairReadOnlyError,
-            match="was not issued by canonical Betfair read IO",
+            match="lacks canonical direct Betfair provider IO origin",
         ):
             assess_authoritative_betfair_execution_feasibility(
                 ledger,
                 bound,
                 forged,
                 action_id=ACTION_ID,
-                decision_at=NOW,
-                max_snapshot_age=timedelta(seconds=1),
+                decision_at=decision_at,
+                max_snapshot_age=timedelta(seconds=2),
             )
 
 
-def test_response_level_delayed_data_fails_closed() -> None:
-    receipt = _client(
-        MarketBookTransport(delayed=True)
+def test_response_level_delayed_data_fails_closed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    receipt = _canonical_client(
+        monkeypatch, MarketBookTransport(delayed=True)
     ).read_market_book_depth("1.234", 42)
-    bound = _bound()
+    decision_at = datetime.now(timezone.utc)
+    bound = _bound(decision_at)
 
     with tempfile.TemporaryDirectory() as tmp:
         result = assess_authoritative_betfair_execution_feasibility(
@@ -241,19 +296,22 @@ def test_response_level_delayed_data_fails_closed() -> None:
             bound,
             receipt,
             action_id=ACTION_ID,
-            decision_at=NOW,
-            max_snapshot_age=timedelta(seconds=1),
+            decision_at=decision_at,
+            max_snapshot_age=timedelta(seconds=2),
         )
 
     assert result.state is FeasibilityState.UNKNOWN_UNPROVEN
     assert "DELAYED_SOURCE" in result.reasons
 
 
-def test_non_active_runner_fails_closed() -> None:
-    receipt = _client(
-        MarketBookTransport(selection_status="REMOVED")
+def test_non_active_runner_fails_closed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    receipt = _canonical_client(
+        monkeypatch, MarketBookTransport(selection_status="REMOVED")
     ).read_market_book_depth("1.234", 42)
-    bound = _bound()
+    decision_at = datetime.now(timezone.utc)
+    bound = _bound(decision_at)
 
     with tempfile.TemporaryDirectory() as tmp:
         result = assess_authoritative_betfair_execution_feasibility(
@@ -261,22 +319,26 @@ def test_non_active_runner_fails_closed() -> None:
             bound,
             receipt,
             action_id=ACTION_ID,
-            decision_at=NOW,
-            max_snapshot_age=timedelta(seconds=1),
+            decision_at=decision_at,
+            max_snapshot_age=timedelta(seconds=2),
         )
 
     assert result.state is FeasibilityState.UNKNOWN_UNPROVEN
     assert "SELECTION_NOT_ACTIVE" in result.reasons
 
 
-def test_back_uses_available_to_back_not_available_to_lay() -> None:
-    receipt = _client(
+def test_back_uses_available_to_back_not_available_to_lay(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    receipt = _canonical_client(
+        monkeypatch,
         MarketBookTransport(
             back_sizes=(("2.00", "3"), ("1.99", "100")),
             lay_sizes=(("2.10", "999"),),
-        )
+        ),
     ).read_market_book_depth("1.234", 42)
-    bound = _bound()
+    decision_at = datetime.now(timezone.utc)
+    bound = _bound(decision_at)
 
     with tempfile.TemporaryDirectory() as tmp:
         result = assess_authoritative_betfair_execution_feasibility(
@@ -284,8 +346,8 @@ def test_back_uses_available_to_back_not_available_to_lay() -> None:
             bound,
             receipt,
             action_id=ACTION_ID,
-            decision_at=NOW,
-            max_snapshot_age=timedelta(seconds=1),
+            decision_at=decision_at,
+            max_snapshot_age=timedelta(seconds=2),
         )
 
     assert result.state is FeasibilityState.UNKNOWN_UNPROVEN
@@ -293,9 +355,14 @@ def test_back_uses_available_to_back_not_available_to_lay() -> None:
     assert "DISPLAYED_DEPTH_INSUFFICIENT" in result.reasons
 
 
-def test_unreserved_bound_plan_cannot_cross_product_authority_seam() -> None:
-    receipt = _client(MarketBookTransport()).read_market_book_depth("1.234", 42)
-    bound = _bound()
+def test_unreserved_bound_plan_cannot_cross_product_authority_seam(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    receipt = _canonical_client(
+        monkeypatch, MarketBookTransport()
+    ).read_market_book_depth("1.234", 42)
+    decision_at = datetime.now(timezone.utc)
+    bound = _bound(decision_at)
 
     with tempfile.TemporaryDirectory() as tmp:
         ledger = RealExecutionLedger(Path(tmp) / "real.jsonl")
@@ -305,6 +372,56 @@ def test_unreserved_bound_plan_cannot_cross_product_authority_seam() -> None:
                 bound,
                 receipt,
                 action_id=ACTION_ID,
+                decision_at=decision_at,
+                max_snapshot_age=timedelta(seconds=2),
+            )
+
+
+def test_injected_transport_and_clock_cannot_mint_positive_provider_origin() -> None:
+    receipt = _client(MarketBookTransport()).read_market_book_depth("1.234", 42)
+    bound = _bound()
+
+    with tempfile.TemporaryDirectory() as tmp:
+        with pytest.raises(
+            BetfairReadOnlyError,
+            match="lacks canonical direct Betfair provider IO origin",
+        ):
+            assess_authoritative_betfair_execution_feasibility(
+                _reserved_ledger(tmp, bound),
+                bound,
+                receipt,
+                action_id=ACTION_ID,
                 decision_at=NOW,
                 max_snapshot_age=timedelta(seconds=1),
+            )
+
+
+@pytest.mark.parametrize("mutated_field", ["transport", "clock"])
+def test_post_construction_io_origin_swap_cannot_mint_positive_authority(
+    monkeypatch: pytest.MonkeyPatch,
+    mutated_field: str,
+) -> None:
+    transport = MarketBookTransport()
+    client = _canonical_client(monkeypatch, transport)
+    if mutated_field == "transport":
+        client._transport = transport
+    else:
+        client._clock = lambda: READ_AT
+
+    receipt = client.read_market_book_depth("1.234", 42)
+    decision_at = datetime.now(timezone.utc)
+    bound = _bound(decision_at)
+
+    with tempfile.TemporaryDirectory() as tmp:
+        with pytest.raises(
+            BetfairReadOnlyError,
+            match="lacks canonical direct Betfair provider IO origin",
+        ):
+            assess_authoritative_betfair_execution_feasibility(
+                _reserved_ledger(tmp, bound),
+                bound,
+                receipt,
+                action_id=ACTION_ID,
+                decision_at=decision_at,
+                max_snapshot_age=timedelta(seconds=2),
             )

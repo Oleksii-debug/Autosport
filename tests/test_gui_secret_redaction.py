@@ -6,7 +6,7 @@ from unittest.mock import patch
 
 import pytest
 
-from autosport.gui import _safe_exception_text
+from autosport.gui import AutosportApp, _safe_exception_text
 from autosport.secret_redaction import REDACTED
 from autosport.windows_gui import WindowsAutosportApp, _safe_exception_detail
 
@@ -61,9 +61,11 @@ def test_operator_gui_exception_type_name_cannot_carry_secret(renderer) -> None:
     assert REDACTED in rendered
     assert "safe detail" in rendered
 
+
 def test_gui_exception_renderers_preserve_empty_message_semantics() -> None:
     assert _safe_exception_text(RuntimeError()) == "RuntimeError"
     assert _safe_exception_detail(RuntimeError()) == "RuntimeError: "
+
 
 class _Value:
     def __init__(self) -> None:

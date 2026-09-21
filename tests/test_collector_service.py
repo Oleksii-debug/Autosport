@@ -416,6 +416,63 @@ class HeadlessCollectorServiceTests(unittest.TestCase):
                 ("epoch-2", 2),
             )
 
+    def test_old_duplicate_cannot_aba_regress_active_epoch(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            page = catalog_page(1, "event-1")
+            epoch_1_first = make_delta(delta_id="e1-first", position=1)
+            epoch_2 = replace(
+                make_delta(
+                    delta_id="e2-first",
+                    position=0,
+                    gap_state=GapState.CURSOR_RESET,
+                ),
+                stream_epoch="epoch-2",
+            )
+            epoch_1_return = make_delta(delta_id="e1-return", position=2)
+            source = FakeCollectorSource(
+                [page, page, page, page],
+                [
+                    (epoch_1_first,),
+                    (epoch_2,),
+                    (epoch_1_first,),
+                    (epoch_1_return,),
+                ],
+            )
+            service = self.make_service(tmp, source)
+
+            first = service.run_cycle()
+            self.assertEqual(first.committed_delta_ids, ("e1-first",))
+            self.assertEqual(
+                service.delta_store.runtime_stream_epoch("source-x"),
+                ("epoch-1", 1),
+            )
+
+            source.stream_epoch = "epoch-2"
+            second = service.run_cycle()
+            self.assertEqual(second.committed_delta_ids, ("e2-first",))
+            self.assertEqual(
+                service.delta_store.runtime_stream_epoch("source-x"),
+                ("epoch-2", 2),
+            )
+
+            source.stream_epoch = "epoch-1"
+            replay = service.run_cycle()
+            self.assertEqual(replay.committed_delta_ids, ())
+            self.assertEqual(replay.duplicate_delta_ids, ("e1-first",))
+            self.assertEqual(
+                service.delta_store.runtime_stream_epoch("source-x"),
+                ("epoch-2", 2),
+            )
+
+            # A genuinely new durable E1 commit is a new transition witness and
+            # may reactivate E1 with a fresh monotonic generation.
+            returned = service.run_cycle()
+            self.assertEqual(returned.committed_delta_ids, ("e1-return",))
+            self.assertEqual(
+                service.delta_store.runtime_stream_epoch("source-x"),
+                ("epoch-1", 3),
+            )
+
     def test_replaced_source_instance_cannot_mint_epoch_authority(self):
         with tempfile.TemporaryDirectory() as tmp:
             page = catalog_page(1, "event-1")

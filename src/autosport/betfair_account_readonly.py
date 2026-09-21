@@ -777,11 +777,14 @@ class BetfairReadOnlyClient:
         )
         if not isinstance(requested_capabilities, frozenset):
             raise TypeError("requested_capabilities must be a frozenset")
+        if BookmakerCapability.BET_READBACK in requested_capabilities:
+            raise BetfairReadOnlyError(
+                "BET_READBACK requires action-bound read_execution_readback evidence"
+            )
         supported = {
             BookmakerCapability.BALANCE_READ,
             BookmakerCapability.OPEN_POSITIONS_READ,
             BookmakerCapability.SETTLED_POSITIONS_READ,
-            BookmakerCapability.BET_READBACK,
         }
         if any(c not in supported for c in requested_capabilities):
             raise BetfairReadOnlyError("requested capability is not implemented by the Betfair account adapter")

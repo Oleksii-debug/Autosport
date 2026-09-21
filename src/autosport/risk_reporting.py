@@ -13,6 +13,7 @@ from dataclasses import dataclass
 from decimal import Decimal, DecimalException, localcontext
 
 from .economic_goal import EconomicGoalContract
+from .economic_goal_provenance import provenance_for
 from .paper import PaperBook
 from .risk import PaperRiskPolicy
 
@@ -39,6 +40,9 @@ class PaperRiskReport:
     portfolio_risk_state_sha256: str
     goal_id: str
     goal_revision: int
+    bankroll_id: str
+    currency: str
+    goal_contract_sha256: str
     initial_bankroll: Decimal
     current_equity: Decimal
     peak_equity: Decimal
@@ -69,6 +73,7 @@ def build_paper_risk_report(
     if type(goal) is not EconomicGoalContract:
         raise TypeError("goal must be canonical EconomicGoalContract")
 
+    goal_provenance = provenance_for(goal)
     before_sha256 = PaperRiskPolicy.risk_of_ruin_portfolio_sha256(book)
     if before_sha256 is None:
         raise ValueError("canonical PAPER risk state cannot be reported")
@@ -95,6 +100,9 @@ def build_paper_risk_report(
         portfolio_risk_state_sha256=after_sha256,
         goal_id=goal.goal_id,
         goal_revision=goal.revision,
+        bankroll_id=goal.bankroll_id,
+        currency=goal.currency,
+        goal_contract_sha256=goal_provenance.contract_sha256,
         initial_bankroll=metrics.initial_bankroll,
         current_equity=metrics.current_equity,
         peak_equity=metrics.peak_equity,

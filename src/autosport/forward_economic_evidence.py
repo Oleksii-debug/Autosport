@@ -325,4 +325,154 @@ class ResolvedPolicyOutcome:
             if self.execution_evidence_sha256 is not None or self.settlement_evidence_sha256 is not None:
                 raise ForwardEconomicEvidenceError("NONE cannot carry execution or settlement evidence")
             if self.execution_accepted_at is not None or self.settlement_available_at is not None:
-                raise ForwardEconomic
+                raise ForwardEconomicEvidenceError(
+                    "NONE cannot carry execution acceptance or settlement availability"
+                )
+            if pnl != 0:
+                raise ForwardEconomicEvidenceError("NONE must have exactly zero money P&L")
+            return
+        odds = _positive_decimal(self.accepted_odds, "accepted_odds")
+        if odds <= 1:
+            raise ForwardEconomicEvidenceError("accepted_odds must exceed one")
+        stake = _positive_decimal(self.accepted_stake, "accepted_stake")
+        _sha256(self.execution_evidence_sha256, "execution_evidence_sha256")
+        accepted = _instant(self.execution_accepted_at, "execution_accepted_at")
+        _sha256(self.settlement_evidence_sha256, "settlement_evidence_sha256")
+        available = _instant(self.settlement_available_at, "settlement_available_at")
+        if accepted < committed:
+            raise ForwardEconomicEvidenceError(
+                "execution acceptance cannot predate the committed decision"
+            )
+        if available <= accepted:
+            raise ForwardEconomicEvidenceError(
+                "settlement must become available after accepted execution"
+            )
+        with localcontext() as context:
+            context.prec = _DECIMAL_PRECISION
+            if self.side is BetSide.BACK:
+                low, high = -stake, (odds - Decimal(1)) * stake
+            else:
+                low, high = -(odds - Decimal(1)) * stake, stake
+        if pnl < low or pnl > high:
+            raise ForwardEconomicEvidenceError("money P&L is outside accepted side/odds/stake bounds")
+
+
+class EconomicAuthorityResolver(Protocol):
+    """Integration seam: product code resolves canonical execution+settlement truth."""
+
+    @property
+    def authority_sha256(self) -> str: ...
+
+    def resolve(
+        self,
+        *,
+        policy_id: str,
+        sequence: int,
+        universe_event_sha256: str,
+        decision_sha256: str,
+    ) -> ResolvedPolicyOutcome: ...
+
+
+@dataclass(frozen=True, slots=True)
+class ForwardEconomicStep:
+    sequence: int
+    universe_event_sha256: str
+    challenger_decision_sha256: str
+    champion_decision_sha256: str
+    challenger_side: BetSide
+    champion_side: BetSide
+    challenger_net_pnl_currency: Decimal
+    champion_net_pnl_currency: Decimal
+    challenger_normalized_pnl: Decimal
+    paired_normalized_pnl: Decimal
+    absolute_low: Decimal
+    absolute_high: Decimal
+    paired_low: Decimal
+    paired_high: Decimal
+    absolute_log_e_after: Decimal
+    paired_log_e_after: Decimal
+    challenger_execution_evidence_sha256: str | None
+    challenger_execution_accepted_at: datetime | None
+    challenger_settlement_evidence_sha256: str | None
+    challenger_settlement_available_at: datetime | None
+    champion_execution_evidence_sha256: str | None
+    champion_execution_accepted_at: datetime | None
+    champion_settlement_evidence_sha256: str | None
+    champion_settlement_available_at: datetime | None
+
+    def to_payload(self) -> dict[str, object]:
+        return {
+            "sequence": self.sequence,
+            "universe_event_sha256": self.universe_event_sha256,
+            "challenger_decision_sha256": self.challenger_decision_sha256,
+            "champion_decision_sha256": self.champion_decision_sha256,
+            "challenger_side": self.challenger_side.value,
+            "champion_side": self.champion_side.value,
+            "challenger_net_pnl_currency": _decimal_text(self.challenger_net_pnl_currency),
+            "champion_net_pnl_currency": _decimal_text(self.champion_net_pnl_currency),
+            "challenger_normalized_pnl": _decimal_text(self.challenger_normalized_pnl),
+            "paired_normalized_pnl": _decimal_text(self.paired_normalized_pnl),
+            "absolute_low": _decimal_text(self.absolute_low),
+            "absolute_high": _decimal_text(self.absolute_high),
+            "paired_low": _decimal_text(self.paired_low),
+            "paired_high": _decimal_text(self.paired_high),
+            "absolute_log_e_after": _decimal_text(self.absolute_log_e_after),
+            "paired_log_e_after": _decimal_text(self.paired_log_e_after),
+            "challenger_execution_evidence_sha256": self.challenger_execution_evidence_sha256,
+            "challenger_execution_accepted_at": (
+                None
+                if self.challenger_execution_accepted_at is None
+                else _instant_text(self.challenger_execution_accepted_at)
+            ),
+            "challenger_settlement_evidence_sha256": self.challenger_settlement_evidence_sha256,
+            "challenger_settlement_available_at": (
+                None
+                if self.challenger_settlement_available_at is None
+                else _instant_text(self.challenger_settlement_available_at)
+            ),
+            "champion_execution_evidence_sha256": self.champion_execution_evidence_sha256,
+            "champion_execution_accepted_at": (
+                None
+                if self.champion_execution_accepted_at is None
+                else _instant_text(self.champion_execution_accepted_at)
+            ),
+            "champion_settlement_evidence_sha256": self.champion_settlement_evidence_sha256,
+            "champion_settlement_available_at": (
+                None
+                if self.champion_settlement_available_at is None
+                else _instant_text(self.champion_settlement_available_at)
+            ),
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class ForwardEconomicEvidenceSummary:
+    protocol_sha256: str
+    observed_events: int
+    next_sequence: int
+    challenger_total_pnl_currency: Decimal
+    champion_total_pnl_currency: Decimal
+    challenger_peak_pnl_currency: Decimal
+    challenger_max_drawdown_currency: Decimal
+    absolute_log_e: Decimal
+    paired_log_e: Decimal
+    log_threshold: Decimal
+    absolute_threshold_crossed: bool
+    paired_threshold_crossed: bool
+    minimum_events_satisfied: bool
+    drawdown_guard_passed: bool
+    scientific_promotion_gate_passed: bool
+    evidence_sha256: str
+    promotion_authority: bool = False
+
+    def to_payload(self) -> dict[str, object]:
+        return {
+            "schema_version": 1,
+            "protocol_sha256": self.protocol_sha256,
+            "observed_events": self.observed_events,
+            "next_sequence": self.next_sequence,
+            "challenger_total_pnl_currency": _decimal_text(self.challenger_total_pnl_currency),
+            "champion_total_pnl_currency": _decimal_text(self.champion_total_pnl_currency),
+            "challenger_peak_pnl_currency": _decimal_text(self.challenger_peak_pnl_currency),
+            "challenger_max_drawdown_currency": _decimal_text(self.challenger_max_drawdown_currency),
+            "absolute_log_e": _decimal_text(self.absol

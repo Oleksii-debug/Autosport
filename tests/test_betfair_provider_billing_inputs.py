@@ -25,7 +25,9 @@ class _Clock:
 
     def __call__(self) -> datetime:
         self._tick += 1
-        return datetime(2026, 9, 21, 1, 50, self._tick, tzinfo=timezone.utc)
+        return datetime(
+            2026, 9, 21, 1, 50, self._tick, tzinfo=timezone.utc
+        )
 
 
 class _Transport:
@@ -68,7 +70,7 @@ class _Transport:
                             "subscriptionRequired": False,
                             "ownerManaged": False,
                             "active": True,
-                            "vendorId": 3,
+                            "vendorId": "vendor-3",
                         },
                         {
                             "owner": "owner",
@@ -79,7 +81,7 @@ class _Transport:
                             "subscriptionRequired": False,
                             "ownerManaged": False,
                             "active": True,
-                            "vendorId": 3,
+                            "vendorId": "vendor-3",
                         },
                     ],
                 }
@@ -106,7 +108,9 @@ class _Transport:
         ).encode("utf-8")
 
 
-def _client(*, application_key: str = "live-key-123") -> tuple[BetfairReadOnlyClient, _Transport]:
+def _client(
+    *, application_key: str = "live-key-123"
+) -> tuple[BetfairReadOnlyClient, _Transport]:
     transport = _Transport(application_key)
     client = BetfairReadOnlyClient(
         BetfairSessionCredentials(application_key, "session-secret"),
@@ -131,6 +135,7 @@ def test_captures_exact_entitlement_and_statement_without_minting_cost() -> None
     assert observation.entitlement.account_id == "account-A"
     assert observation.entitlement.active is True
     assert observation.entitlement.delay_data is False
+    assert observation.entitlement.vendor_id == "vendor-3"
     assert observation.entitlement.application_key_sha256 == hashlib.sha256(
         b"live-key-123"
     ).hexdigest()
@@ -145,7 +150,9 @@ def test_captures_exact_entitlement_and_statement_without_minting_cost() -> None
         "AccountAPING/v1.0/getDeveloperAppKeys",
         "AccountAPING/v1.0/getAccountStatement",
     ]
-    assert all(call["url"] == ACCOUNT_JSON_RPC_ENDPOINT for call in transport.calls)
+    assert all(
+        call["url"] == ACCOUNT_JSON_RPC_ENDPOINT for call in transport.calls
+    )
     assert transport.calls[2]["request"]["params"] == {
         "fromRecord": 0,
         "recordCount": 100,
@@ -160,7 +167,13 @@ def test_missing_statement_rows_are_preserved_as_absence_not_zero() -> None:
     client, transport = _client()
     original_post = transport.post
 
-    def post(url: str, *, headers: dict[str, str], body: bytes, timeout_seconds: float) -> bytes:
+    def post(
+        url: str,
+        *,
+        headers: dict[str, str],
+        body: bytes,
+        timeout_seconds: float,
+    ) -> bytes:
         request = json.loads(body)
         if request["method"] == "AccountAPING/v1.0/getAccountStatement":
             transport.calls.append(
@@ -175,7 +188,10 @@ def test_missing_statement_rows_are_preserved_as_absence_not_zero() -> None:
                 {
                     "jsonrpc": "2.0",
                     "id": request["id"],
-                    "result": {"accountStatement": [], "moreAvailable": False},
+                    "result": {
+                        "accountStatement": [],
+                        "moreAvailable": False,
+                    },
                 },
                 separators=(",", ":"),
             ).encode("utf-8")
@@ -208,14 +224,23 @@ def test_rejects_provider_rpc_error_without_exposing_provider_message() -> None:
     client, transport = _client()
     original_post = transport.post
 
-    def post(url: str, *, headers: dict[str, str], body: bytes, timeout_seconds: float) -> bytes:
+    def post(
+        url: str,
+        *,
+        headers: dict[str, str],
+        body: bytes,
+        timeout_seconds: float,
+    ) -> bytes:
         request = json.loads(body)
         if request["method"] == "AccountAPING/v1.0/getDeveloperAppKeys":
             return json.dumps(
                 {
                     "jsonrpc": "2.0",
                     "id": request["id"],
-                    "error": {"code": -32099, "message": "secret provider detail"},
+                    "error": {
+                        "code": -32099,
+                        "message": "secret provider detail",
+                    },
                 }
             ).encode("utf-8")
         return original_post(

@@ -89,6 +89,19 @@ class CorrelatedExposureAdversarialTests(unittest.TestCase):
             for context, stake in zip(contexts, stakes, strict=True)
         }
 
+    def test_single_candidate_without_correlation_metadata_preserves_existing_allocation(
+        self,
+    ) -> None:
+        context = self._context("event-a", "market-a", "selection-a")
+        decision = self._policy(self._goal()).derive_goal_stake_vector(
+            PaperBook("100"),
+            (Decimal("0.25"),),
+            contexts=(context,),
+        )
+
+        self.assertEqual(decision.action, "STAKE_VECTOR")
+        self.assertEqual(decision.stakes, (Decimal("25"),))
+
     def test_duplicate_candidate_identity_fails_closed_without_amplifying_risk(self) -> None:
         context = self._context("event-a", "market-a", "selection-a")
         decision = self._policy(self._goal()).derive_goal_stake_vector(
@@ -141,6 +154,7 @@ class CorrelatedExposureAdversarialTests(unittest.TestCase):
         book.open_ticket(
             (self._leg("event-existing", "market-existing", "selection-existing"),),
             Decimal("80"),
+            placed_at="2026-09-16T14:00:00+00:00",
         )
         first = self._context("event-risk", "market-a", "selection-a", sequence=1)
         second = self._context("event-risk", "market-b", "selection-b", sequence=2)
@@ -152,7 +166,7 @@ class CorrelatedExposureAdversarialTests(unittest.TestCase):
         )
 
         self.assertEqual(decision.action, "STAKE_VECTOR")
-        self.assertEqual(decision.stakes, (Decimal("10.00"), Decimal("0")))
+        self.assertEqual(decision.stakes, (Decimal("10"), Decimal("0")))
         self.assertEqual(book.balance, Decimal("20"))
         self.assertEqual(len(book.tickets), 1)
 
@@ -163,6 +177,7 @@ class CorrelatedExposureAdversarialTests(unittest.TestCase):
         book.open_ticket(
             (self._leg("event-existing", "market-existing", "selection-existing"),),
             Decimal("80"),
+            placed_at="2026-09-16T14:00:00+00:00",
         )
         first = self._context("event-risk", "market-risk", "selection-a", sequence=1)
         second = self._context("event-risk", "market-risk", "selection-b", sequence=2)
@@ -174,7 +189,7 @@ class CorrelatedExposureAdversarialTests(unittest.TestCase):
         )
 
         self.assertEqual(decision.action, "STAKE_VECTOR")
-        self.assertEqual(decision.stakes, (Decimal("10.00"), Decimal("0")))
+        self.assertEqual(decision.stakes, (Decimal("10"), Decimal("0")))
 
     def test_same_provider_account_candidates_are_common_mode_concentration(self) -> None:
         goal = self._goal(max_provider_concentration_fraction=Decimal("0.15"))
@@ -183,6 +198,7 @@ class CorrelatedExposureAdversarialTests(unittest.TestCase):
         book.open_ticket(
             (self._leg("event-existing", "market-existing", "selection-existing"),),
             Decimal("80"),
+            placed_at="2026-09-16T14:00:00+00:00",
             provider_source_ids=("provider-0",),
             provider_accounts=(("provider-0", "account-0"),),
             bankroll_id=goal.bankroll_id,
@@ -212,7 +228,7 @@ class CorrelatedExposureAdversarialTests(unittest.TestCase):
         )
 
         self.assertEqual(decision.action, "STAKE_VECTOR")
-        self.assertEqual(decision.stakes, (Decimal("10.00"), Decimal("0")))
+        self.assertEqual(decision.stakes, (Decimal("10"), Decimal("0")))
 
     def test_restart_replays_the_same_identity_bound_vector(self) -> None:
         goal = self._goal()
@@ -221,6 +237,7 @@ class CorrelatedExposureAdversarialTests(unittest.TestCase):
         book.open_ticket(
             (self._leg("event-existing", "market-existing", "selection-existing"),),
             Decimal("20"),
+            placed_at="2026-09-16T14:00:00+00:00",
         )
         contexts = (
             self._context(

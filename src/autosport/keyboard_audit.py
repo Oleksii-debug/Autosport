@@ -79,22 +79,30 @@ def summarize_keyboard_contract(
     focus_results: dict[str, bool],
     tab_reachable_controls: list[str],
     reverse_tab_reachable_controls: list[str] | None = None,
+    *,
+    require_replay_stop: bool = False,
 ) -> dict[str, Any]:
+    action_bindings = dict(_ACTION_BINDINGS)
+    focusable_controls = list(_FOCUSABLE_CONTROLS)
+    if not require_replay_stop:
+        action_bindings.pop("<Control-s>", None)
+        focusable_controls.remove("stop_replay")
+
     failures: list[str] = []
-    for sequence in (*_ACTION_BINDINGS, *_FOCUS_BINDINGS):
+    for sequence in (*action_bindings, *_FOCUS_BINDINGS):
         if not bindings.get(sequence, False):
             failures.append(f"{sequence}: keyboard binding missing")
     for sequence, control in _FOCUS_BINDINGS.items():
         if not focus_results.get(sequence, False):
             failures.append(f"{sequence}: did not move focus to {control}")
-    missing_tab = [name for name in _FOCUSABLE_CONTROLS if name not in tab_reachable_controls]
+    missing_tab = [name for name in focusable_controls if name not in tab_reachable_controls]
     if missing_tab:
         failures.append("Tab traversal cannot reach: " + ", ".join(missing_tab))
     if reverse_tab_reachable_controls is None:
         failures.append("Shift+Tab traversal evidence missing")
     else:
         missing_reverse_tab = [
-            name for name in _FOCUSABLE_CONTROLS if name not in reverse_tab_reachable_controls
+            name for name in focusable_controls if name not in reverse_tab_reachable_controls
         ]
         if missing_reverse_tab:
             failures.append("Shift+Tab traversal cannot reach: " + ", ".join(missing_reverse_tab))
@@ -131,11 +139,11 @@ def summarize_keyboard_contract(
             ]
         return AUTOMATION_IDS[name]
 
-    expected_ids = {name: automation_id_for(name) for name in _FOCUSABLE_CONTROLS}
+    expected_ids = {name: automation_id_for(name) for name in focusable_controls}
     return {
         "status": "PASS" if not failures else "FAIL",
         "action_shortcuts_bound": {
-            sequence: bool(bindings.get(sequence, False)) for sequence in _ACTION_BINDINGS
+            sequence: bool(bindings.get(sequence, False)) for sequence in action_bindings
         },
         "focus_shortcuts_executed": {
             sequence: {
@@ -276,6 +284,7 @@ def run_keyboard_audit(output_path: str | Path) -> int:
             _execute_focus_shortcuts(app, dialog),
             _tab_reachable_controls(app, workbench_dialog=dialog),
             _tab_reachable_controls(app, reverse=True, workbench_dialog=dialog),
+            require_replay_stop=True,
         )
     except Exception as exc:
         report = {

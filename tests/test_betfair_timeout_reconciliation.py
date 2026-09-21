@@ -127,7 +127,15 @@ def _effect(observed_at: str, provider_ref: str) -> VerifiedProviderEffectEviden
     )
 
 
-def _resolve(monkeypatch, ledger, action, provider_ref, evidence):
+def _resolve(
+    monkeypatch,
+    ledger,
+    action,
+    provider_ref,
+    evidence,
+    *,
+    absence_floor: str | None = None,
+):
     calls = []
 
     def fake_verify(actual_action, profile, **kwargs):
@@ -135,6 +143,11 @@ def _resolve(monkeypatch, ledger, action, provider_ref, evidence):
         return evidence
 
     monkeypatch.setattr(timeout_resolution, "verify_betfair_provider_state", fake_verify)
+    monkeypatch.setattr(
+        timeout_resolution,
+        "_absence_capture_floor",
+        lambda readback: absence_floor or evidence.observed_at,
+    )
     result = timeout_resolution.resolve_betfair_timeout_provider_state(
         ledger,
         action,
@@ -180,6 +193,27 @@ def test_complete_empty_exactly_at_visibility_horizon_can_issue_absence(
     assert result.definitive is True
     assert result.evidence is evidence
     timeout_resolution.assert_betfair_timeout_absence_authoritative(evidence)
+
+
+def test_capture_started_before_deadline_cannot_become_absence_when_last_rpc_finishes_late(
+    tmp_path, monkeypatch
+) -> None:
+    ledger, action, provider_ref, _ = _ledger_with_timeout(tmp_path, monkeypatch)
+    assert provider_ref is not None
+    evidence = _absence("2026-09-21T18:00:16+00:00", provider_ref)
+    result = _resolve(
+        monkeypatch,
+        ledger,
+        action,
+        provider_ref,
+        evidence,
+        absence_floor="2026-09-21T18:00:14.900000+00:00",
+    )
+
+    assert result.kind is timeout_resolution.BetfairTimeoutResolutionKind.INDETERMINATE_BEFORE_VISIBILITY_HORIZON
+    assert result.evidence is None
+    with pytest.raises(timeout_resolution.BetfairTimeoutResolutionError):
+        timeout_resolution.assert_betfair_timeout_absence_authoritative(evidence)
 
 
 def test_bound_absence_not_issued_by_timeout_resolver_is_rejected() -> None:

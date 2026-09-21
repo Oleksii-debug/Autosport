@@ -1,4 +1,5 @@
-from decimal import Decimal
+from decimal import Decimal, localcontext
+from fractions import Fraction
 
 import pytest
 
@@ -33,44 +34,44 @@ def test_standard_limit_reserve(side, price, size, expected):
         size=D(size),
     )
     assert result.reserve == D(expected)
-    assert result.unrounded_reserve == D(expected)
+    assert result.raw_reserve == Fraction(D(expected))
     assert result.execution_authority is False
 
 
 @pytest.mark.parametrize(
-    ("side", "target_type", "price", "target", "expected"),
+    ("side", "target_type", "price", "target", "raw"),
     [
         (
             BetfairOrderSide.BACK,
             BetfairBetTargetType.PAYOUT,
             "10",
             "10",
-            "1",
+            Fraction(1),
         ),
         (
             BetfairOrderSide.BACK,
             BetfairBetTargetType.BACKERS_PROFIT,
             "6",
             "10",
-            "2",
+            Fraction(2),
         ),
         (
             BetfairOrderSide.LAY,
             BetfairBetTargetType.PAYOUT,
             "10",
             "10",
-            "9",
+            Fraction(9),
         ),
         (
             BetfairOrderSide.LAY,
             BetfairBetTargetType.BACKERS_PROFIT,
             "10",
             "10",
-            "10",
+            Fraction(10),
         ),
     ],
 )
-def test_target_mode_exact_formula(side, target_type, price, target, expected):
+def test_target_mode_exact_formula(side, target_type, price, target, raw):
     result = derive_betfair_order_reserve(
         side=side,
         order_type=BetfairOrderType.LIMIT,
@@ -79,11 +80,12 @@ def test_target_mode_exact_formula(side, target_type, price, target, expected):
         target_size=D(target),
         currency_quantum=D("0.01"),
     )
-    assert result.reserve == D(expected)
+    assert result.raw_reserve == raw
+    assert Fraction(result.reserve) >= raw
     assert result.execution_authority is False
 
 
-def test_target_mode_reserve_rounds_up_not_down():
+def test_target_mode_repeating_ratio_is_exact_before_rounding():
     result = derive_betfair_order_reserve(
         side=BetfairOrderSide.BACK,
         order_type=BetfairOrderType.LIMIT,
@@ -92,7 +94,8 @@ def test_target_mode_reserve_rounds_up_not_down():
         target_size=D("1"),
         currency_quantum=D("0.01"),
     )
-    assert result.unrounded_reserve == D("1") / D("3")
+    assert result.raw_reserve == Fraction(1, 3)
+    assert result.backer_stake_equivalent == Fraction(1, 3)
     assert result.reserve == D("0.34")
 
 
@@ -105,8 +108,36 @@ def test_target_mode_non_cent_quantum_rounds_up():
         target_size=D("1"),
         currency_quantum=D("0.05"),
     )
-    assert result.reserve >= result.unrounded_reserve
+    assert Fraction(result.reserve) >= result.raw_reserve
     assert result.reserve % D("0.05") == 0
+
+
+def test_standard_lay_reserve_is_independent_of_decimal_context():
+    with localcontext() as ctx:
+        ctx.prec = 4
+        result = derive_betfair_order_reserve(
+            side=BetfairOrderSide.LAY,
+            order_type=BetfairOrderType.LIMIT,
+            price=D("123.4567"),
+            size=D("98.7654"),
+        )
+    assert Fraction(result.reserve) == result.raw_reserve
+    assert result.reserve == D("12094.48495818")
+
+
+def test_target_reserve_is_independent_of_decimal_context():
+    with localcontext() as ctx:
+        ctx.prec = 4
+        result = derive_betfair_order_reserve(
+            side=BetfairOrderSide.BACK,
+            order_type=BetfairOrderType.LIMIT,
+            price=D("3"),
+            target_type=BetfairBetTargetType.PAYOUT,
+            target_size=D("1"),
+            currency_quantum=D("0.01"),
+        )
+    assert result.raw_reserve == Fraction(1, 3)
+    assert result.reserve == D("0.34")
 
 
 @pytest.mark.parametrize("order_type", [
@@ -126,6 +157,7 @@ def test_bsp_close_order_reserves_explicit_liability(order_type, side):
         **kwargs,
     )
     assert result.reserve == D("12.34")
+    assert result.raw_reserve == Fraction(D("12.34"))
     assert result.execution_authority is False
 
 
@@ -138,7 +170,8 @@ def test_each_way_back_standard_limit_doubles_reserve():
         each_way=True,
     )
     assert result.reserve == D("20")
-    assert result.backer_stake_equivalent == D("10")
+    assert result.raw_reserve == Fraction(20)
+    assert result.backer_stake_equivalent == Fraction(10)
 
 
 @pytest.mark.parametrize(

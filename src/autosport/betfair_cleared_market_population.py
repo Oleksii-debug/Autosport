@@ -178,7 +178,116 @@ class BetfairClearedMarketPopulation:
             "cross_call_atomicity_proven": self.cross_call_atomicity_proven,
             "permanent_finality_proven": self.permanent_finality_proven,
             "grants_execution_authority": self.grants_execution_authority,
+            "evidence_sha256": self.evidence_sha256,
         }
+
+    def to_dict(self) -> dict[str, object]:
+        """Return deterministic integrity evidence; this does not mint source authority."""
+        return self.payload()
+
+    @classmethod
+    def from_dict(cls, raw: Mapping[str, Any]) -> "BetfairClearedMarketPopulation":
+        """Reopen durable integrity evidence without recreating provider-origin authority."""
+        expected = {
+            "schema",
+            "schema_version",
+            "source_family",
+            "venue_id",
+            "account_id",
+            "adapter_id",
+            "adapter_version",
+            "market_id",
+            "currency",
+            "commission_receipt_id",
+            "commission_record_sha256",
+            "commission_request_scope_sha256",
+            "settled_from",
+            "settled_to",
+            "statuses",
+            "page_size",
+            "rows",
+            "first_pass_pages",
+            "second_pass_pages",
+            "source_interval_start",
+            "source_interval_end",
+            "request_scope_sha256",
+            "population_sha256",
+            "bounded_revalidation_proven",
+            "cross_call_atomicity_proven",
+            "permanent_finality_proven",
+            "grants_execution_authority",
+            "evidence_sha256",
+        }
+        _exact_keys(raw, expected, "population")
+        if raw["schema"] != "autosport.betfair_cleared_market_population":
+            raise BetfairClearedMarketPopulationError("unsupported population schema")
+        if raw["schema_version"] != 1:
+            raise BetfairClearedMarketPopulationError("unsupported population schema version")
+        statuses_raw = _json_list(raw["statuses"], "statuses")
+        rows_raw = _json_list(raw["rows"], "rows")
+        first_pages_raw = _json_list(raw["first_pass_pages"], "first_pass_pages")
+        second_pages_raw = _json_list(raw["second_pass_pages"], "second_pass_pages")
+        value = cls(
+            source_family=_required_text(raw["source_family"], "source_family"),
+            venue_id=_required_text(raw["venue_id"], "venue_id"),
+            account_id=_required_text(raw["account_id"], "account_id"),
+            adapter_id=_required_text(raw["adapter_id"], "adapter_id"),
+            adapter_version=_required_text(raw["adapter_version"], "adapter_version"),
+            market_id=_required_text(raw["market_id"], "market_id"),
+            currency=_required_text(raw["currency"], "currency"),
+            commission_receipt_id=_required_text(
+                raw["commission_receipt_id"], "commission_receipt_id"
+            ),
+            commission_record_sha256=_required_text(
+                raw["commission_record_sha256"], "commission_record_sha256"
+            ),
+            commission_request_scope_sha256=_required_text(
+                raw["commission_request_scope_sha256"],
+                "commission_request_scope_sha256",
+            ),
+            settled_from=_optional_text(raw["settled_from"], "settled_from"),
+            settled_to=_optional_text(raw["settled_to"], "settled_to"),
+            statuses=tuple(_required_text(item, "status") for item in statuses_raw),
+            page_size=_json_int(raw["page_size"], "page_size"),
+            rows=tuple(_row_from_payload(item) for item in rows_raw),
+            first_pass_pages=tuple(
+                _page_from_payload(item) for item in first_pages_raw
+            ),
+            second_pass_pages=tuple(
+                _page_from_payload(item) for item in second_pages_raw
+            ),
+            source_interval_start=_required_text(
+                raw["source_interval_start"], "source_interval_start"
+            ),
+            source_interval_end=_required_text(
+                raw["source_interval_end"], "source_interval_end"
+            ),
+            request_scope_sha256=_required_text(
+                raw["request_scope_sha256"], "request_scope_sha256"
+            ),
+            population_sha256=_required_text(
+                raw["population_sha256"], "population_sha256"
+            ),
+            evidence_sha256=_required_text(raw["evidence_sha256"], "evidence_sha256"),
+            bounded_revalidation_proven=_json_bool(
+                raw["bounded_revalidation_proven"], "bounded_revalidation_proven"
+            ),
+            cross_call_atomicity_proven=_json_bool(
+                raw["cross_call_atomicity_proven"], "cross_call_atomicity_proven"
+            ),
+            permanent_finality_proven=_json_bool(
+                raw["permanent_finality_proven"], "permanent_finality_proven"
+            ),
+            grants_execution_authority=_json_bool(
+                raw["grants_execution_authority"], "grants_execution_authority"
+            ),
+        )
+        _validate_population(value)
+        return value
+
+    def assert_integrity(self) -> None:
+        """Validate durable self-integrity only; source authority is process-local."""
+        _validate_population(self)
 
 
 _ISSUED: dict[int, tuple[object, str]] = {}
@@ -642,6 +751,134 @@ def _validate_population(value: BetfairClearedMarketPopulation) -> None:
     )
     if expected_evidence != value.evidence_sha256:
         raise BetfairClearedMarketPopulationError("population evidence digest mismatch")
+
+
+def _row_from_payload(value: object) -> ClearedMarketBetRow:
+    raw = _json_mapping(value, "row")
+    _exact_keys(
+        raw,
+        {
+            "bet_id",
+            "market_id",
+            "selection_id",
+            "side",
+            "bet_status",
+            "placed_date",
+            "settled_date",
+            "price_requested",
+            "price_matched",
+            "size_settled",
+            "profit",
+            "customer_order_ref",
+            "customer_strategy_ref",
+            "event_id",
+        },
+        "row",
+    )
+    return ClearedMarketBetRow(
+        bet_id=_required_text(raw["bet_id"], "bet_id"),
+        market_id=_required_text(raw["market_id"], "market_id"),
+        selection_id=_json_int(raw["selection_id"], "selection_id"),
+        side=_required_text(raw["side"], "side"),
+        bet_status=_required_text(raw["bet_status"], "bet_status"),
+        placed_date=_required_text(raw["placed_date"], "placed_date"),
+        settled_date=_required_text(raw["settled_date"], "settled_date"),
+        price_requested=_decimal_from_text(raw["price_requested"], "price_requested"),
+        price_matched=_decimal_from_text(raw["price_matched"], "price_matched"),
+        size_settled=_decimal_from_text(raw["size_settled"], "size_settled"),
+        profit=_decimal_from_text(raw["profit"], "profit"),
+        customer_order_ref=_optional_text(
+            raw["customer_order_ref"], "customer_order_ref"
+        ),
+        customer_strategy_ref=_optional_text(
+            raw["customer_strategy_ref"], "customer_strategy_ref"
+        ),
+        event_id=_optional_text(raw["event_id"], "event_id"),
+    )
+
+
+def _page_from_payload(value: object) -> ClearedMarketPageWitness:
+    raw = _json_mapping(value, "page witness")
+    _exact_keys(
+        raw,
+        {
+            "pass_index",
+            "bet_status",
+            "from_record",
+            "row_count",
+            "more_available",
+            "response_sha256",
+            "observed_at",
+        },
+        "page witness",
+    )
+    return ClearedMarketPageWitness(
+        pass_index=_json_int(raw["pass_index"], "pass_index"),
+        bet_status=_required_text(raw["bet_status"], "bet_status"),
+        from_record=_json_int(raw["from_record"], "from_record"),
+        row_count=_json_int(raw["row_count"], "row_count"),
+        more_available=_json_bool(raw["more_available"], "more_available"),
+        response_sha256=_required_text(raw["response_sha256"], "response_sha256"),
+        observed_at=_required_text(raw["observed_at"], "observed_at"),
+    )
+
+
+def _json_mapping(value: object, label: str) -> Mapping[str, object]:
+    if not isinstance(value, Mapping) or any(not isinstance(key, str) for key in value):
+        raise BetfairClearedMarketPopulationError(f"{label} must be a JSON object")
+    return value
+
+
+def _json_list(value: object, label: str) -> list[object]:
+    if not isinstance(value, list):
+        raise BetfairClearedMarketPopulationError(f"{label} must be a JSON array")
+    return value
+
+
+def _exact_keys(
+    raw: Mapping[str, object], expected: set[str], label: str
+) -> None:
+    if set(raw) != expected:
+        raise BetfairClearedMarketPopulationError(f"{label} has unexpected fields")
+
+
+def _required_text(value: object, label: str) -> str:
+    if not isinstance(value, str) or not value or value != value.strip():
+        raise BetfairClearedMarketPopulationError(
+            f"{label} must be non-empty canonical text"
+        )
+    return value
+
+
+def _optional_text(value: object, label: str) -> str | None:
+    return None if value is None else _required_text(value, label)
+
+
+def _json_int(value: object, label: str) -> int:
+    if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+        raise BetfairClearedMarketPopulationError(
+            f"{label} must be a non-negative integer"
+        )
+    return value
+
+
+def _json_bool(value: object, label: str) -> bool:
+    if type(value) is not bool:
+        raise BetfairClearedMarketPopulationError(f"{label} must be bool")
+    return value
+
+
+def _decimal_from_text(value: object, label: str) -> Decimal:
+    text = _required_text(value, label)
+    try:
+        parsed = Decimal(text)
+    except Exception as exc:
+        raise BetfairClearedMarketPopulationError(f"{label} is invalid") from exc
+    if not parsed.is_finite() or _decimal_text(parsed) != text:
+        raise BetfairClearedMarketPopulationError(
+            f"{label} must be canonical finite Decimal text"
+        )
+    return parsed
 
 
 def _canonical_date_range(

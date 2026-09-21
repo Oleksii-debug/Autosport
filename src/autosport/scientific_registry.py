@@ -4,7 +4,7 @@ import hashlib
 import json
 import math
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 from enum import StrEnum
 from pathlib import Path
@@ -21,6 +21,7 @@ _RECORD_TYPES = frozenset(
         "ResearchQuestion",
         "Hypothesis",
         "ResearchProtocol",
+        "ForwardCapturePlan",
         "DatasetSnapshot",
         "FeatureSet",
         "ModelVersion",
@@ -277,6 +278,159 @@ class ResearchProtocol:
                 "environment_sha256": self.environment_sha256.lower(),
                 "dataset_manifest_sha256": self.dataset_manifest_sha256.lower(),
                 "available_at": self.available_at_utc}
+
+
+@dataclass(frozen=True, slots=True)
+class ForwardCaptureSlot:
+    """One predeclared forward-observation slot with bounded execution lateness."""
+
+    slot_id: str
+    scheduled_at_utc: str
+    max_lateness_s: int
+
+    def __post_init__(self) -> None:
+        _text(self.slot_id, "slot_id")
+        _iso(self.scheduled_at_utc, "scheduled_at_utc")
+        if (
+            isinstance(self.max_lateness_s, bool)
+            or not isinstance(self.max_lateness_s, int)
+            or self.max_lateness_s < 0
+        ):
+            raise ValueError("max_lateness_s must be a non-negative integer")
+
+    def to_payload(self) -> dict[str, Any]:
+        return {
+            "slot_id": self.slot_id,
+            "scheduled_at_utc": self.scheduled_at_utc,
+            "max_lateness_s": self.max_lateness_s,
+        }
+
+    @classmethod
+    def from_payload(cls, payload: Mapping[str, Any]) -> "ForwardCaptureSlot":
+        if type(payload) is not dict or set(payload) != {
+            "slot_id",
+            "scheduled_at_utc",
+            "max_lateness_s",
+        }:
+            raise ValueError("forward capture slot fields mismatch")
+        return cls(
+            slot_id=payload["slot_id"],
+            scheduled_at_utc=payload["scheduled_at_utc"],
+            max_lateness_s=payload["max_lateness_s"],
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class ForwardCapturePlan:
+    """Immutable pre-outcome capture schedule for one forward-evidence run."""
+
+    capture_plan_id: str
+    run_id: str
+    campaign_id: str
+    research_protocol_id: str
+    protocol_sha256: str
+    window_open_utc: str
+    window_close_utc: str
+    slots: tuple[ForwardCaptureSlot, ...]
+    created_at: str
+
+    def __post_init__(self) -> None:
+        for name in (
+            "capture_plan_id",
+            "run_id",
+            "campaign_id",
+            "research_protocol_id",
+        ):
+            _text(getattr(self, name), name)
+        _sha256(self.protocol_sha256, "protocol_sha256")
+        created = _instant(self.created_at, "created_at")
+        window_open = _instant(self.window_open_utc, "window_open_utc")
+        window_close = _instant(self.window_close_utc, "window_close_utc")
+        if created >= window_open:
+            raise ValueError("forward capture plan must be created before its observation window")
+        if window_open >= window_close:
+            raise ValueError("forward capture window must have positive duration")
+        if not isinstance(self.slots, tuple) or not self.slots:
+            raise ValueError("forward capture plan slots must be a non-empty tuple")
+        if any(not isinstance(slot, ForwardCaptureSlot) for slot in self.slots):
+            raise ValueError("forward capture plan slots must contain ForwardCaptureSlot values")
+        slot_ids = tuple(slot.slot_id for slot in self.slots)
+        if len(slot_ids) != len(set(slot_ids)):
+            raise ValueError("forward capture plan slot_id values must be unique")
+        canonical = tuple(
+            sorted(
+                self.slots,
+                key=lambda slot: (_instant(slot.scheduled_at_utc, "scheduled_at_utc"), slot.slot_id),
+            )
+        )
+        if self.slots != canonical:
+            raise ValueError("forward capture plan slots must be in canonical schedule order")
+        for slot in self.slots:
+            scheduled = _instant(slot.scheduled_at_utc, "scheduled_at_utc")
+            latest = scheduled + timedelta(seconds=slot.max_lateness_s)
+            if scheduled < window_open or scheduled > window_close:
+                raise ValueError("forward capture slot lies outside the declared observation window")
+            if latest > window_close:
+                raise ValueError("forward capture slot lateness extends beyond the observation window")
+
+    @property
+    def record_type(self) -> str:
+        return "ForwardCapturePlan"
+
+    @property
+    def record_id(self) -> str:
+        return self.capture_plan_id
+
+    @property
+    def available_at(self) -> str:
+        return self.created_at
+
+    @property
+    def capture_plan_sha256(self) -> str:
+        return _digest(self.to_payload())
+
+    def to_payload(self) -> dict[str, Any]:
+        return {
+            "capture_plan_id": self.capture_plan_id,
+            "run_id": self.run_id,
+            "campaign_id": self.campaign_id,
+            "research_protocol_id": self.research_protocol_id,
+            "protocol_sha256": self.protocol_sha256.lower(),
+            "window_open_utc": self.window_open_utc,
+            "window_close_utc": self.window_close_utc,
+            "slots": [slot.to_payload() for slot in self.slots],
+            "created_at": self.created_at,
+        }
+
+    @classmethod
+    def from_payload(cls, payload: Mapping[str, Any]) -> "ForwardCapturePlan":
+        expected = {
+            "capture_plan_id",
+            "run_id",
+            "campaign_id",
+            "research_protocol_id",
+            "protocol_sha256",
+            "window_open_utc",
+            "window_close_utc",
+            "slots",
+            "created_at",
+        }
+        if type(payload) is not dict or set(payload) != expected:
+            raise ValueError("forward capture plan fields mismatch")
+        raw_slots = payload["slots"]
+        if type(raw_slots) is not list:
+            raise ValueError("forward capture plan slots must be a JSON array")
+        return cls(
+            capture_plan_id=payload["capture_plan_id"],
+            run_id=payload["run_id"],
+            campaign_id=payload["campaign_id"],
+            research_protocol_id=payload["research_protocol_id"],
+            protocol_sha256=payload["protocol_sha256"],
+            window_open_utc=payload["window_open_utc"],
+            window_close_utc=payload["window_close_utc"],
+            slots=tuple(ForwardCaptureSlot.from_payload(value) for value in raw_slots),
+            created_at=payload["created_at"],
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -964,7 +1118,38 @@ class ScientificRegistry:
                     # restart. Do not reject the persisted state here.
                     pass
                 fingerprints.add(fingerprint)
+        self._validate_forward_capture_plan_state(records)
         return state
+
+
+    @staticmethod
+    def _validate_forward_capture_plan_state(records: list[dict[str, Any]]) -> None:
+        """Validate durable protocol -> capture-plan ordering and exact protocol identity."""
+        for index, raw in enumerate(records):
+            if raw.get("record_type") != "ForwardCapturePlan":
+                continue
+            plan = ForwardCapturePlan.from_payload(raw.get("payload"))
+            if raw.get("record_id") != plan.record_id:
+                raise ValueError("forward capture plan record_id mismatch")
+            if raw.get("available_at") != plan.available_at:
+                raise ValueError("forward capture plan available_at mismatch")
+            protocols = [
+                value
+                for value in records[:index]
+                if value.get("record_type") == "ResearchProtocol"
+                and value.get("record_id") == plan.research_protocol_id
+            ]
+            if len(protocols) != 1:
+                raise ValueError(
+                    "forward capture plan requires exactly one earlier ResearchProtocol"
+                )
+            protocol = protocols[0]
+            if protocol["payload"].get("protocol_sha256") != plan.protocol_sha256.lower():
+                raise ValueError("forward capture plan protocol_sha256 mismatch")
+            if _instant(protocol["available_at"], "ResearchProtocol.available_at") > _instant(
+                plan.created_at, "ForwardCapturePlan.created_at"
+            ):
+                raise ValueError("forward capture plan predates its ResearchProtocol availability")
 
     @staticmethod
     def _validate_entry(raw_entry: object) -> None:
@@ -1103,6 +1288,8 @@ class ScientificRegistry:
                 raise DuplicateExperimentFingerprintError(
                     "experiment fingerprint already has durable history; inspect negative/null results before repeating"
                 )
+        if entry["record_type"] == "ForwardCapturePlan":
+            self._validate_forward_capture_plan_state([*state["records"], entry])
         state["records"].append(entry)
         atomic_write_json(self.path, state)
         self._read()

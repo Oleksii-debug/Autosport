@@ -4,9 +4,11 @@ from dataclasses import fields
 from datetime import datetime, timezone
 from hashlib import sha256
 import json
+from unittest.mock import patch
 
 import pytest
 
+import autosport.betfair_account_readonly as _readonly
 from autosport.betfair_account_readonly import (
     BetfairReadOnlyClient,
     BetfairSessionCredentials,
@@ -52,61 +54,83 @@ class _Transport:
     ) -> bytes:
         assert headers["X-Application"] == self.application_key
         assert timeout_seconds > 0
-        request = json.loads(body)
-        method = request["method"]
-        if method == "AccountAPING/v1.0/getAccountDetails":
-            result: object = {"currencyCode": "GBP"}
-        elif method == "AccountAPING/v1.0/getDeveloperAppKeys":
-            result = [{
-                "appId": 41,
-                "appName": "autosport",
-                "appVersions": [{
-                    "owner": "provider-owner-A",
-                    "versionId": 7,
-                    "version": "1.0",
-                    "applicationKey": self.application_key,
-                    "delayData": False,
-                    "subscriptionRequired": False,
-                    "ownerManaged": False,
-                    "active": True,
-                    "vendorId": "vendor-3",
-                }],
-            }]
-        elif method == "AccountAPING/v1.0/getAccountStatement":
-            result = {
-                "accountStatement": [{
-                    "refId": "billing-ref-1",
-                    "itemDate": "2026-09-20T09:00:00Z",
-                    "amount": -499,
-                    "balance": 1501,
-                    "itemClass": "UNKNOWN",
-                    "itemClassData": {"source": "provider"},
-                }],
-                "moreAvailable": False,
-            }
-        else:  # pragma: no cover
-            raise AssertionError(method)
-        return json.dumps(
-            {"jsonrpc": "2.0", "id": request["id"], "result": result},
-            separators=(",", ":"),
-        ).encode("utf-8")
+        return _provider_payload(body)
+
+
+class _UrlopenResponse:
+    def __init__(self, payload: bytes) -> None:
+        self.payload = payload
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, _exc_type, _exc, _tb) -> bool:
+        return False
+
+    def read(self, limit: int = -1) -> bytes:
+        if limit < 0:
+            return self.payload
+        return self.payload[:limit]
+
+
+def _provider_payload(body: bytes) -> bytes:
+    request = json.loads(body)
+    method = request["method"]
+    if method == "AccountAPING/v1.0/getAccountDetails":
+        result: object = {"currencyCode": "GBP"}
+    elif method == "AccountAPING/v1.0/getDeveloperAppKeys":
+        result = [{
+            "appId": 41,
+            "appName": "autosport",
+            "appVersions": [{
+                "owner": "provider-owner-A",
+                "versionId": 7,
+                "version": "1.0",
+                "applicationKey": "k",
+                "delayData": False,
+                "subscriptionRequired": False,
+                "ownerManaged": False,
+                "active": True,
+                "vendorId": "vendor-3",
+            }],
+        }]
+    elif method == "AccountAPING/v1.0/getAccountStatement":
+        result = {
+            "accountStatement": [{
+                "refId": "billing-ref-1",
+                "itemDate": "2026-09-20T09:00:00Z",
+                "amount": -499,
+                "balance": 1501,
+                "itemClass": "UNKNOWN",
+                "itemClassData": {"source": "provider"},
+            }],
+            "moreAvailable": False,
+        }
+    else:  # pragma: no cover
+        raise AssertionError(method)
+    return json.dumps(
+        {"jsonrpc": "2.0", "id": request["id"], "result": result},
+        separators=(",", ":"),
+    ).encode("utf-8")
+
+
+def _fake_urlopen(request, *, timeout: float):
+    assert timeout > 0
+    assert request.data is not None
+    return _UrlopenResponse(_provider_payload(request.data))
 
 
 def _source():
-    application_key = "live-key-123"
-    client = BetfairReadOnlyClient(
-        BetfairSessionCredentials(application_key, "session-secret"),
-        transport=_Transport(application_key),
-        clock=_Clock(),
-        venue_id="betfair",
-        account_id="caller-label-is-not-authority",
-    )
-    return read_verified_betfair_provider_billing_inputs(
-        client,
-        record_count=10,
-        statement_from="2026-09-01T00:00:00Z",
-        statement_to="2026-09-21T00:00:00Z",
-    )
+    credentials = BetfairSessionCredentials("k", "t")
+    # Exercise the exact production transport/client construction path. Only the
+    # external urllib call is replaced inside this deterministic test process.
+    with patch.object(_readonly, "urlopen", _fake_urlopen):
+        return read_verified_betfair_provider_billing_inputs(
+            credentials,
+            record_count=10,
+            statement_from="2026-09-01T00:00:00Z",
+            statement_to="2026-09-21T00:00:00Z",
+        )
 
 
 def _combined_source_digest(entitlement: object, statement: object, observed_at: str) -> str:
@@ -281,6 +305,22 @@ def _caller_modified_evidence(
         missing_authorities=evidence.missing_authorities,
         evidence_sha256=digest,
     )
+
+
+def test_caller_injected_client_transport_cannot_enter_verified_provider_issuance() -> None:
+    caller_client = BetfairReadOnlyClient(
+        BetfairSessionCredentials("k", "t"),
+        transport=_Transport("k"),
+        clock=_Clock(),
+        venue_id="caller-venue",
+        account_id="caller-account",
+    )
+
+    with pytest.raises(
+        TypeError,
+        match="credentials must be exact BetfairSessionCredentials",
+    ):
+        read_verified_betfair_provider_billing_inputs(caller_client)
 
 
 def test_verifier_issues_witness_only_for_exact_source_reresolution() -> None:

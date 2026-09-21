@@ -609,14 +609,15 @@ class BetfairSupervisedPlaceOrdersClient:
         customer_ref = sha256(
             f"placeOrders:{provider_ref}".encode("utf-8")
         ).hexdigest()[:32]
+        action_payload = ExecutionAction.to_dict(action)
         instruction = {
             "selectionId": selection_id,
             "handicap": 0,
             "side": action.side,
             "orderType": "LIMIT",
             "limitOrder": {
-                "size": str(action.requested_stake),
-                "price": str(action.requested_odds),
+                "size": action_payload["requested_stake"],
+                "price": action_payload["requested_odds"],
                 "persistenceType": "LAPSE",
             },
             "customerOrderRef": provider_ref,

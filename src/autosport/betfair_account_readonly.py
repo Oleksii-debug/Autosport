@@ -42,12 +42,11 @@ class BetfairReadOnlyError(RuntimeError):
 
     def __init__(
         self,
-        message: str,
-        *,
+        *args: object,
         json_rpc_code: int | None = None,
         provider_error_code: str | None = None,
     ) -> None:
-        super().__init__(message)
+        super().__init__(*args)
         self.json_rpc_code = json_rpc_code
         self.provider_error_code = provider_error_code
 

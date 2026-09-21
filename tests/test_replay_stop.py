@@ -102,9 +102,18 @@ class ReplayStopTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp:
             workspace = Path(temp)
             worker = OneShotReplayWorker()
+            replay_entered = threading.Event()
+            release_replay = threading.Event()
+
+            def stop_after_accepted_request(*_args, **_kwargs):
+                replay_entered.set()
+                if not release_replay.wait(2.0):
+                    raise AssertionError("timed out waiting for accepted STOP request")
+                raise ReplayStopRequested("paper replay stopped by operator")
+
             with patch(
                 "autosport.session.ReplayEngine.run",
-                side_effect=ReplayStopRequested("paper replay stopped by operator"),
+                side_effect=stop_after_accepted_request,
             ):
                 self.assertTrue(
                     worker.start(
@@ -118,6 +127,11 @@ class ReplayStopTests(unittest.TestCase):
                 )
                 thread = worker._thread
                 self.assertIsNotNone(thread)
+                try:
+                    self.assertTrue(replay_entered.wait(1.0))
+                    self.assertTrue(worker.request_stop())
+                finally:
+                    release_replay.set()
                 thread.join(timeout=2.0)
                 self.assertFalse(thread.is_alive())
 

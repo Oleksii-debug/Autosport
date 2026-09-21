@@ -64,9 +64,85 @@ def test_forensic_journal_records_typed_lifecycle_and_survives_restart(tmp_path)
     ]
 
 
+def test_forensic_journal_writer_rejects_impossible_lifecycle_without_appending(
+    tmp_path,
+):
+    path = tmp_path / "forensic.jsonl"
+    journal = ForensicSessionJournal(path, clock=FakeClock())
+
+    with pytest.raises(ForensicJournalIntegrityError, match="active startup"):
+        journal.record_material_event("collector", "source-gap")
+    assert journal.verify().record_count == 0
+
+    startup = journal.record_startup("product")
+    with pytest.raises(ForensicJournalIntegrityError, match="already active"):
+        journal.record_startup("product")
+    shutdown = journal.record_shutdown("product")
+    with pytest.raises(ForensicJournalIntegrityError, match="active startup"):
+        journal.record_heartbeat("agent", HeartbeatState.RUNNING)
+
+    restarted = journal.record_startup("product")
+    heartbeat = journal.record_heartbeat("agent", HeartbeatState.RUNNING)
+    crash = journal.record_crash("product")
+    with pytest.raises(ForensicJournalIntegrityError, match="active startup"):
+        journal.record_shutdown("product")
+
+    assert [
+        startup.sequence,
+        shutdown.sequence,
+        restarted.sequence,
+        heartbeat.sequence,
+        crash.sequence,
+    ] == [1, 2, 3, 4, 5]
+    assert journal.verify().record_count == 5
+
+
+@pytest.mark.parametrize(
+    ("kind", "event_name", "error_match"),
+    [
+        ("STARTUP", "not-startup", "event_name does not match kind"),
+        ("MATERIAL_EVENT", "source-gap", "active startup"),
+    ],
+)
+def test_forensic_journal_rejects_hash_valid_semantically_impossible_first_record(
+    tmp_path, kind, event_name, error_match
+):
+    path = tmp_path / "forensic.jsonl"
+    journal = ForensicSessionJournal(path, clock=FakeClock())
+    journal.record_startup("product")
+
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    payload["kind"] = kind
+    payload["event_name"] = event_name
+    material = dict(payload)
+    material.pop("record_sha256")
+    digest = forensic_journal._record_digest(material)
+    payload["record_sha256"] = digest
+    path.write_text(
+        json.dumps(payload, sort_keys=True, separators=(",", ":")) + "\n",
+        encoding="utf-8",
+    )
+    journal.checkpoint_path.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "record_count": 1,
+                "last_record_sha256": digest,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ForensicJournalIntegrityError, match=error_match):
+        journal.verify()
+
+
 def test_forensic_journal_redacts_secrets_before_persistence_and_export(tmp_path):
     path = tmp_path / "forensic.jsonl"
     journal = ForensicSessionJournal(path, clock=FakeClock())
+    journal.record_startup("product")
 
     record = journal.record_material_event(
         "provider-health",
@@ -101,9 +177,9 @@ def test_forensic_journal_redacts_secrets_before_persistence_and_export(tmp_path
     assert "raw-password" not in exported
     assert "raw-secret" not in exported
     payload = json.loads(exported)
-    assert payload["record_count"] == 1
-    assert payload["records"][0]["schema_version"] == 1
-    assert payload["records"][0]["details"]["api_token"] == "[REDACTED]"
+    assert payload["record_count"] == 2
+    assert payload["records"][1]["schema_version"] == 1
+    assert payload["records"][1]["details"]["api_token"] == "[REDACTED]"
 
 
 @pytest.mark.parametrize(
@@ -123,6 +199,7 @@ def test_forensic_journal_redacts_quoted_secret_assignments_without_partial_leak
 ):
     path = tmp_path / "forensic.jsonl"
     journal = ForensicSessionJournal(path, clock=FakeClock())
+    journal.record_startup("product")
 
     record = journal.record_material_event(
         "provider-health",

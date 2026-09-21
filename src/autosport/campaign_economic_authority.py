@@ -745,10 +745,8 @@ class FinalizedCampaignAuthority:
         raw = self._persisted_payload()
         witness = self._issuance_witness()
         if raw is None:
-            if witness is not None:
-                raise CampaignEconomicAuthorityError(
-                    "campaign denomination issuance is pending durable registry recovery"
-                )
+            # A witness without the co-located cache is an incomplete crash prefix,
+            # not positive authority. issue_denomination_binding() owns recovery.
             return None
         if witness is None:
             raise CampaignEconomicAuthorityError(

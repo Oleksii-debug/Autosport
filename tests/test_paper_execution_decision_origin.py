@@ -7,6 +7,7 @@ import pytest
 
 from autosport import _paper_execution_decision_origin as origin_module
 from autosport import _paper_execution_decision_origin_instance_guard as instance_guard
+from autosport import _paper_execution_decision_origin_resume_guard as resume_guard
 from autosport.decision_ledger import DecisionRecord, JsonlDecisionLedger
 from autosport.paper_execution_reality import (
     EvidenceGrade,
@@ -289,9 +290,52 @@ def test_caller_shaped_context_frame_cannot_mint_product_origin(tmp_path) -> Non
     )
 
     def attacker_frame():
-        # Keep an exact-looking `context` local on the stack. Product origin must
-        # still require an integrated producer's exact code object.
         assert context.paper_execution is runtime
         return origin_module._resolve_product_origin_from_stack(runtime, DECISION_ID)
 
     assert attacker_frame() is None
+
+
+def test_mutable_verified_snapshot_alias_cannot_mint_origin(tmp_path, monkeypatch) -> None:
+    ledger = JsonlDecisionLedger(tmp_path / "sealed-decision.jsonl")
+    durable_digest = ledger.append(_record())
+    attacker_called = False
+
+    def forged_verified_snapshot(_ledger):
+        nonlocal attacker_called
+        attacker_called = True
+        payload = (
+            '{"record":{"decision_id":"decision-origin-test-1"},'
+            '"sha256":"' + ("f" * 64) + '"}\n'
+        ).encode("utf-8")
+        return SimpleNamespace(payload=payload)
+
+    monkeypatch.setattr(instance_guard, "_STABLE_VERIFIED_SNAPSHOT", forged_verified_snapshot)
+    origin = origin_module.verified_decision_origin(ledger, DECISION_ID)
+
+    assert attacker_called is False
+    assert origin.record_sha256 == durable_digest
+
+
+def test_mutable_events_alias_cannot_forge_reservation_origin(tmp_path, monkeypatch) -> None:
+    ledger = PaperExecutionLedger(tmp_path / "sealed-events.jsonl")
+    attacker_called = False
+    forged_origin = origin_module.DecisionRecordOrigin(
+        decision_id=DECISION_ID,
+        record_sha256="e" * 64,
+    )
+
+    def forged_events(_ledger, _run_id=None):
+        nonlocal attacker_called
+        attacker_called = True
+        return (
+            {
+                "event_type": "RUN_RESERVED",
+                "payload": {"decision_origin": forged_origin.to_dict()},
+            },
+        )
+
+    monkeypatch.setattr(resume_guard, "_STABLE_EVENTS", forged_events)
+
+    assert ledger.reservation_decision_origin("never-reserved") is None
+    assert attacker_called is False

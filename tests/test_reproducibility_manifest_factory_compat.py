@@ -31,7 +31,11 @@ def test_manifest_split_authority_matches_canonical_walk_forward_runner():
         TrainingPoint(T3, 4.0, 4.0, T3),
     )
     walk_forward = WalkForwardRunner.run(points, minimum_train_size=1)
-    splits = derive_walk_forward_splits(points, walk_forward.folds)
+    splits = derive_walk_forward_splits(
+        points,
+        walk_forward.folds,
+        minimum_train_size=1,
+    )
 
     assert tuple(
         (split.fold_id, split.training_indices, split.evaluation_index)

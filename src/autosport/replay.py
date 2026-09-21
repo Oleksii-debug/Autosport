@@ -100,10 +100,7 @@ class ReplayRun:
 
 class ReplayEngine:
     def __init__(self, events: Iterable[MarketEvent], firewall: ReplayLeakageFirewall | None = None) -> None:
-        self.events = sorted(
-            events,
-            key=lambda e: (_iso_datetime(e.observed_ts), e.sequence, e.dedupe_key),
-        )
+        self.events = sorted(events, key=_replay_order_key)
         self.firewall = firewall or ReplayLeakageFirewall()
         self.dataset_hash = _dataset_hash(self.events)
 
@@ -142,7 +139,7 @@ class ReplayEngine:
         count = 0
         for event in self.events:
             if speed > 0:
-                current = _iso_seconds(event.observed_ts)
+                current = _event_available_datetime(event).timestamp()
                 if previous is not None:
                     time.sleep(max(0.0, current - previous) / speed)
                 previous = current
@@ -167,14 +164,34 @@ def _dataset_hash(events: list[MarketEvent]) -> str:
     return digest.hexdigest()
 
 
-def _iso_datetime(value: str) -> datetime:
+def _iso_datetime(value: str, *, field_name: str = "observed_ts") -> datetime:
     try:
         parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
     except ValueError as exc:
-        raise ValueError(f"invalid replay observed_ts: {value}") from exc
+        raise ValueError(f"invalid replay {field_name}: {value}") from exc
     if parsed.tzinfo is None:
-        raise ValueError("replay observed_ts must include timezone")
+        raise ValueError(f"replay {field_name} must include timezone")
     return parsed
+
+
+def _event_available_datetime(event: MarketEvent) -> datetime:
+    """Return the first instant when a replay callback may know this event.
+
+    Live decisions cannot consume an event before either its local observation
+    instant or its durable ingestion/receipt instant.  Using the later clock
+    prevents a late-arriving older observation from being replayed into the
+    strategy before the live system could have received it.
+    """
+
+    observed = _iso_datetime(event.observed_ts, field_name="observed_ts")
+    ingested = _iso_datetime(event.ingest_ts, field_name="ingest_ts")
+    return max(observed, ingested)
+
+
+def _replay_order_key(event: MarketEvent) -> tuple[datetime, datetime, int, str]:
+    available = _event_available_datetime(event)
+    observed = _iso_datetime(event.observed_ts, field_name="observed_ts")
+    return (available, observed, event.sequence, event.dedupe_key)
 
 
 def _iso_seconds(value: str) -> float:

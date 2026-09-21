@@ -4,13 +4,15 @@ import pytest
 
 from autosport.bookmaker_routing import (
     ExternalEffect,
+    RoutingContractError,
     RoutingState,
     VenueObservation,
     VenueQuote,
-    route_residual,
 )
-from autosport.bookmaker_routing_plan import plan_equal_split_residual
-from autosport.capital_at_risk import routing_capital_at_risk_truth
+from autosport.capital_at_risk import (
+    parallel_routing_capital_at_risk_truth,
+    sequential_routing_capital_at_risk_truth,
+)
 from autosport.opportunity import QuoteRef
 
 
@@ -62,17 +64,15 @@ def test_full_non_money_moving_proposal_is_not_capital_already_at_risk() -> None
     first = _venue("book-a", "acct-a", "100.00")
     second = _venue("book-b", "acct-b", "100.00")
 
-    proposal = plan_equal_split_residual(
+    truth = parallel_routing_capital_at_risk_truth(
         Decimal("100.00"),
         (first, second),
         routing_request_id=_REQUEST_ID,
         parent_plan_id=_PLAN_ID,
         stake_quantum=Decimal("0.01"),
     )
-    truth = routing_capital_at_risk_truth(proposal)
 
-    assert proposal.state is RoutingState.ROUTE
-    assert proposal.proposed_total == Decimal("100.00")
+    assert truth.routing_state is RoutingState.ROUTE
     assert truth.confirmed_at_risk == Decimal("0")
     assert truth.exact_capital_at_risk == Decimal("0")
     assert truth.non_money_moving_proposed == Decimal("100.00")
@@ -88,7 +88,7 @@ def test_partial_multivenue_execution_counts_only_confirmed_accepted_stake() -> 
         accepted="20.00",
     )
 
-    proposal = plan_equal_split_residual(
+    truth = parallel_routing_capital_at_risk_truth(
         Decimal("100.00"),
         (accepted_venue, remaining_venue),
         (accepted,),
@@ -96,12 +96,8 @@ def test_partial_multivenue_execution_counts_only_confirmed_accepted_stake() -> 
         parent_plan_id=_PLAN_ID,
         stake_quantum=Decimal("0.01"),
     )
-    truth = routing_capital_at_risk_truth(proposal)
 
-    assert proposal.state is RoutingState.PARTIAL
-    assert proposal.confirmed_total == Decimal("20.00")
-    assert proposal.residual_before == Decimal("80.00")
-    assert proposal.proposed_total == Decimal("30.00")
+    assert truth.routing_state is RoutingState.PARTIAL
     assert truth.confirmed_at_risk == Decimal("20.00")
     assert truth.exact_capital_at_risk == Decimal("20.00")
     assert truth.non_money_moving_proposed == Decimal("30.00")
@@ -120,7 +116,7 @@ def test_unknown_external_effect_with_known_acceptance_has_no_exact_exposure_amo
         _observation(uncertain_venue, ExternalEffect.UNKNOWN),
     )
 
-    proposal = plan_equal_split_residual(
+    truth = parallel_routing_capital_at_risk_truth(
         Decimal("100.00"),
         (accepted_venue, uncertain_venue),
         observations,
@@ -128,34 +124,38 @@ def test_unknown_external_effect_with_known_acceptance_has_no_exact_exposure_amo
         parent_plan_id=_PLAN_ID,
         stake_quantum=Decimal("0.01"),
     )
-    truth = routing_capital_at_risk_truth(proposal)
 
-    assert proposal.state is RoutingState.BLOCKED_UNKNOWN
-    assert proposal.confirmed_total == Decimal("20.00")
-    assert proposal.proposed_total == Decimal("0")
+    assert truth.routing_state is RoutingState.BLOCKED_UNKNOWN
     assert truth.confirmed_at_risk == Decimal("20.00")
     assert truth.exact_capital_at_risk is None
     assert truth.non_money_moving_proposed == Decimal("0")
     assert truth.unresolved_external_effect is True
 
 
-def test_low_level_routing_decision_uses_same_capital_at_risk_truth() -> None:
+def test_sequential_routing_uses_same_capital_at_risk_truth() -> None:
     venue = _venue("book-a", "acct-a", "40.00")
 
-    decision = route_residual(
+    truth = sequential_routing_capital_at_risk_truth(
         Decimal("100.00"),
         (venue,),
         routing_request_id=_REQUEST_ID,
     )
-    truth = routing_capital_at_risk_truth(decision)
 
-    assert decision.state is RoutingState.ROUTE
-    assert decision.proposed_stake == Decimal("40.00")
+    assert truth.routing_state is RoutingState.ROUTE
     assert truth.confirmed_at_risk == Decimal("0")
     assert truth.exact_capital_at_risk == Decimal("0")
     assert truth.non_money_moving_proposed == Decimal("40.00")
 
 
-def test_capital_at_risk_truth_rejects_unvalidated_foreign_objects() -> None:
-    with pytest.raises(TypeError, match="RoutingDecision or ParallelRoutingProposal"):
-        routing_capital_at_risk_truth(object())  # type: ignore[arg-type]
+def test_truth_wrapper_preserves_canonical_fail_closed_validation() -> None:
+    selected = _venue("book-a", "acct-a", "40.00")
+    foreign = _venue("book-b", "acct-b", "40.00")
+    invalid_observation = _observation(foreign, ExternalEffect.UNKNOWN)
+
+    with pytest.raises(RoutingContractError, match="unselected venue/account"):
+        sequential_routing_capital_at_risk_truth(
+            Decimal("100.00"),
+            (selected,),
+            (invalid_observation,),
+            routing_request_id=_REQUEST_ID,
+        )

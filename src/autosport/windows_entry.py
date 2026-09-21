@@ -38,9 +38,12 @@ def _probe_workspace_writable(workspace: Path) -> None:
 
     import tempfile
 
+    from autosport.integrity import durable_path_lock
+
     payload = b"autosport workspace atomic publish probe\n"
     source: Path | None = None
     destination: Path | None = None
+    lock_path: Path | None = None
 
     workspace.mkdir(parents=True, exist_ok=True)
     try:
@@ -56,9 +59,10 @@ def _probe_workspace_writable(workspace: Path) -> None:
             probe.flush()
             os.fsync(probe.fileno())
 
-        # Replace an already-existing disposable sibling so the preflight proves
-        # the same stricter publish primitive used by canonical durable writers,
-        # without touching any real Autosport state.
+        # Replace an already-existing disposable sibling while holding the same
+        # per-destination durable path fence used by canonical durable writers.
+        # The probe lock is unique and disposable; canonical state lock files
+        # remain persistent by design and are never removed here.
         with tempfile.NamedTemporaryFile(
             mode="wb",
             dir=workspace,
@@ -67,14 +71,19 @@ def _probe_workspace_writable(workspace: Path) -> None:
             delete=False,
         ) as published_probe:
             destination = Path(published_probe.name)
+        lock_path = destination.with_name(f".{destination.name}.lock")
 
-        os.replace(source, destination)
-        source = None
+        with durable_path_lock(destination):
+            os.replace(source, destination)
+            source = None
 
         if destination.read_bytes() != payload:
             raise OSError("workspace atomic replace did not publish expected probe bytes")
     finally:
-        for candidate in (source, destination):
+        # durable_path_lock intentionally persists sidecars for canonical state,
+        # but this preflight target is uniquely disposable. Clean every probe
+        # artifact only after lock release, including acquisition-failure cases.
+        for candidate in (source, destination, lock_path):
             if candidate is None:
                 continue
             try:

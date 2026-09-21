@@ -203,3 +203,43 @@ def test_non_object_error_data_cannot_mint_provider_semantics(bad_data: object) 
 
     assert raised.value.json_rpc_code == -32099
     assert raised.value.provider_error_code is None
+
+
+@pytest.mark.parametrize(
+    "declared_exception",
+    ["AccountAPINGException", "OtherException", 17, True],
+)
+def test_conflicting_or_malformed_exceptionname_fails_closed(
+    declared_exception: object,
+) -> None:
+    client = _client(
+        _error_payload(
+            data={
+                "exceptionname": declared_exception,
+                "APINGException": {"errorCode": "TOO_MANY_REQUESTS"},
+            }
+        )
+    )
+
+    with pytest.raises(BetfairReadOnlyError) as raised:
+        client.read_current_orders_page()
+
+    assert raised.value.json_rpc_code == -32099
+    assert raised.value.provider_error_code is None
+
+
+def test_matching_exceptionname_preserves_provider_semantics() -> None:
+    client = _client(
+        _error_payload(
+            data={
+                "exceptionname": "APINGException",
+                "APINGException": {"errorCode": "TIMEOUT_ERROR"},
+            }
+        )
+    )
+
+    with pytest.raises(BetfairReadOnlyError) as raised:
+        client.read_current_orders_page()
+
+    assert raised.value.json_rpc_code == -32099
+    assert raised.value.provider_error_code == "TIMEOUT_ERROR"

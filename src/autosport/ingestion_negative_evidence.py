@@ -6,6 +6,8 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Sequence
 
+from .json_integrity import strict_json_loads
+
 _CONTINUOUS_STATUS_SCHEMA_VERSION = 1
 _EVIDENCE_SCHEMA_VERSION = 1
 _CONTINUOUS_STATUS_KIND = "autosport_continuous_local_observation"
@@ -124,8 +126,8 @@ def project_ingestion_negative_evidence(
         )
 
     try:
-        raw = json.loads(raw_text)
-    except json.JSONDecodeError:
+        raw = strict_json_loads(raw_text)
+    except ValueError:
         return _negative_shell(
             path,
             evidence_state="invalid",

@@ -48,14 +48,15 @@ _SENSITIVE_SUFFIXES = (
 )
 
 _URL_USERINFO_RE = re.compile(
-    r"(?i)\b(?P<scheme>(?:https?|wss?)://)(?P<userinfo>[^/@\s]+)@"
+    r"\b(?P<scheme>[A-Za-z][A-Za-z0-9+.-]*://)(?P<userinfo>[^/@\s]+)@"
 )
 _QUERY_PARAM_RE = re.compile(
     r"(?P<prefix>[?&](?P<key>[^=&#\s]+)=)(?P<value>[^&#\s]*)"
 )
 _AUTHORIZATION_VALUE_RE = re.compile(
     r"(?i)(?P<prefix>\bauthorization\s*[:=]\s*)"
-    r"(?P<value>\[REDACTED\]|bearer\s+[^\s,;&}\]]+|[^\s,;&}\]]+)"
+    r"(?P<value>\[REDACTED\]|\"[^\"\r\n]*\"|'[^'\r\n]*'|"
+    r"bearer\s+[^\s,;&}\]]+|[^\s,;&}\]]+)"
 )
 _BEARER_RE = re.compile(
     r"(?i)\b(?P<scheme>bearer)\s+(?P<value>[A-Za-z0-9._~+/=-]{4,})"
@@ -122,8 +123,16 @@ def redact_operator_text(
         raise TypeError("text must be str")
     rendered = str.__str__(text)
 
-    for secret in _secret_values(extra_secret_values):
-        rendered = rendered.replace(secret, REDACTED)
+    secrets = _secret_values(extra_secret_values)
+    if secrets:
+        # Never re-redact the placeholder itself, even when a configured secret
+        # happens to be a substring of the literal REDACTED marker.
+        parts = rendered.split(REDACTED)
+        for index, part in enumerate(parts):
+            for secret in secrets:
+                part = part.replace(secret, REDACTED)
+            parts[index] = part
+        rendered = REDACTED.join(parts)
 
     rendered = _URL_USERINFO_RE.sub(
         lambda match: match.group("scheme") + REDACTED + "@",
@@ -137,7 +146,8 @@ def redact_operator_text(
 
     rendered = _QUERY_PARAM_RE.sub(redact_query, rendered)
     rendered = _AUTHORIZATION_VALUE_RE.sub(
-        lambda match: match.group("prefix") + REDACTED,
+        lambda match: match.group("prefix")
+        + _redacted_value_literal(match.group("value")),
         rendered,
     )
     rendered = _BEARER_RE.sub(

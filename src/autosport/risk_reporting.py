@@ -25,7 +25,7 @@ RISK_OF_RUIN_STATUS_UNKNOWN = "UNKNOWN_REQUIRES_PROVENANCE_BOUND_EVIDENCE"
 class PaperRiskReport:
     """Non-authoritative read projection of canonical PAPER risk facts.
 
-    The state commitment and all historical values are derived from the exact
+    The portfolio-risk state commitment and all historical values are derived from the exact
     ``PaperBook`` lifecycle consumed by risk enforcement. ``drawdown_loss_room``
     is the same conservative additional-loss room used by the active economic
     goal check; it includes currently committed stake as potential loss.
@@ -36,7 +36,7 @@ class PaperRiskReport:
     """
 
     schema: str
-    paper_state_sha256: str
+    portfolio_risk_state_sha256: str
     goal_id: str
     goal_revision: int
     initial_bankroll: Decimal
@@ -71,8 +71,8 @@ def build_paper_risk_report(
 
     metrics = PaperRiskPolicy._historical_risk_metrics(book)
     rooms = PaperRiskPolicy._goal_history_rooms(book, goal)
-    paper_state_sha256 = PaperRiskPolicy.risk_of_ruin_portfolio_sha256(book)
-    if metrics is None or rooms is None or paper_state_sha256 is None:
+    portfolio_risk_state_sha256 = PaperRiskPolicy.risk_of_ruin_portfolio_sha256(book)
+    if metrics is None or rooms is None or portfolio_risk_state_sha256 is None:
         raise ValueError("canonical PAPER risk state cannot be reported")
 
     _, _, drawdown_loss_room, _ = rooms
@@ -86,7 +86,7 @@ def build_paper_risk_report(
 
     return PaperRiskReport(
         schema=RISK_REPORT_SCHEMA,
-        paper_state_sha256=paper_state_sha256,
+        portfolio_risk_state_sha256=portfolio_risk_state_sha256,
         goal_id=goal.goal_id,
         goal_revision=goal.revision,
         initial_bankroll=metrics.initial_bankroll,

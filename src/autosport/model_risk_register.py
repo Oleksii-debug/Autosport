@@ -470,11 +470,19 @@ def build_operator_risk_register_view(
             )
         materialized.append(entry)
 
-    def _sort_key(entry: RiskRegisterEntry) -> tuple[int, int, float, str]:
+    def _sort_key(entry: RiskRegisterEntry) -> tuple[int, int, int, str]:
+        updated = _timestamp_value(entry.updated_at)
+        utc_epoch = datetime(1970, 1, 1, tzinfo=timezone.utc)
+        since_epoch = updated - utc_epoch
+        updated_microseconds = (
+            since_epoch.days * 86_400_000_000
+            + since_epoch.seconds * 1_000_000
+            + since_epoch.microseconds
+        )
         return (
             -_PRIORITY_RANK[entry.operator_priority],
             -_SEVERITY_RANK[entry.severity],
-            -_timestamp_value(entry.updated_at).timestamp(),
+            -updated_microseconds,
             entry.entry_id,
         )
 

@@ -1,18 +1,19 @@
-"""Betfair Exchange/Sportsbook production-scope guard.
+"""Fail-closed Betfair Exchange versus Sportsbook product-family boundary.
 
-This module freezes provider-documented product-domain and Application-Key
-semantics without granting provider access or Autosport execution authority.
+This module owns only the provider product-family distinction. Application-key
+class, market-data freshness, credentials, provider entitlement acquisition and
+execution authority are owned by separate lineages.
 
-Important boundaries:
-- Exchange and Sportsbook are distinct provider/provenance domains.
-- the Sportsbook API is read-only and affiliate-only; it cannot be an execution
-  fallback for the Exchange;
-- a Delayed Exchange Application Key operates against the live production
-  Exchange and is technically bet-placement capable, so it is never a sandbox
-  or dry-run signal;
-- monitor-only Exchange use belongs on a Delayed key; read-only use of a Live
-  key is not a supported Betfair usage mode;
-- key-tier compatibility never enables Autosport provider writes.
+Provider facts represented here:
+- Exchange API market/order operations belong to Betfair Exchange.
+- Exchange API does not expose Betfair Sportsbook odds and cannot place
+  Sportsbook bets.
+- the separate Sportsbook API is read-only and available only to licensed
+  Affiliate partners.
+
+A compatible result is only a static product-family routing fact. It never
+proves provider entitlement, fresh/live data, provider write permission, or
+Autosport execution authority.
 """
 from __future__ import annotations
 
@@ -21,56 +22,84 @@ from enum import Enum
 
 
 class BetfairProductScopeError(ValueError):
-    """Raised when a scope projection is structurally invalid."""
+    """Raised when a product-family projection is structurally invalid."""
 
 
 class BetfairProductDomain(str, Enum):
-    EXCHANGE = "EXCHANGE"
-    SPORTSBOOK = "SPORTSBOOK"
+    EXCHANGE = "BETFAIR_EXCHANGE"
+    SPORTSBOOK = "BETFAIR_SPORTSBOOK"
 
 
-class BetfairExchangeAppKeyTier(str, Enum):
-    DELAYED = "DELAYED"
-    LIVE = "LIVE"
-
-
-class BetfairUsageIntent(str, Enum):
-    MONITOR_ONLY = "MONITOR_ONLY"
-    TRANSACTIONAL = "TRANSACTIONAL"
-
-
-class BetfairOperation(str, Enum):
+class BetfairProductOperation(str, Enum):
     MARKET_READ = "MARKET_READ"
     PLACE_BET = "PLACE_BET"
 
 
-class BetfairScopeState(str, Enum):
+class BetfairProductScopeState(str, Enum):
     COMPATIBLE = "COMPATIBLE"
     DENIED = "DENIED"
 
 
 @dataclass(frozen=True, slots=True)
+class BetfairProductIdentity:
+    """Product-namespaced external identity; cross-product dedupe is impossible."""
+
+    domain: BetfairProductDomain
+    external_id: str
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.domain, BetfairProductDomain):
+            raise BetfairProductScopeError(
+                "domain must be a BetfairProductDomain value"
+            )
+        if (
+            not isinstance(self.external_id, str)
+            or not self.external_id
+            or self.external_id != self.external_id.strip()
+            or "\x00" in self.external_id
+        ):
+            raise BetfairProductScopeError(
+                "external_id must be non-empty canonical text"
+            )
+
+    @property
+    def provenance_key(self) -> str:
+        product = (
+            "exchange"
+            if self.domain is BetfairProductDomain.EXCHANGE
+            else "sportsbook"
+        )
+        return f"betfair.{product}:{self.external_id}"
+
+
+@dataclass(frozen=True, slots=True)
 class BetfairProductScopeDecision:
-    state: BetfairScopeState
+    state: BetfairProductScopeState
     reason_codes: tuple[str, ...]
     domain: BetfairProductDomain
     provenance_domain: str
-    production_environment: bool | None
-    delayed_market_data: bool | None
-    provider_exchange_bet_placement_available: bool
+    product_bet_placement_surface_available: bool
     sportsbook_read_only: bool
     requires_external_affiliate_entitlement: bool
 
     def __post_init__(self) -> None:
-        if not isinstance(self.state, BetfairScopeState):
-            raise BetfairProductScopeError("state must be BetfairScopeState")
+        if not isinstance(self.state, BetfairProductScopeState):
+            raise BetfairProductScopeError(
+                "state must be BetfairProductScopeState"
+            )
         if not isinstance(self.domain, BetfairProductDomain):
-            raise BetfairProductScopeError("domain must be BetfairProductDomain")
-        if self.provenance_domain not in {
-            "betfair.exchange",
-            "betfair.sportsbook",
-        }:
-            raise BetfairProductScopeError("invalid Betfair provenance domain")
+            raise BetfairProductScopeError(
+                "domain must be BetfairProductDomain"
+            )
+        expected_provenance = (
+            "betfair.exchange"
+            if self.domain is BetfairProductDomain.EXCHANGE
+            else "betfair.sportsbook"
+        )
+        if self.provenance_domain != expected_provenance:
+            raise BetfairProductScopeError(
+                "provenance_domain does not match product domain"
+            )
         if not isinstance(self.reason_codes, tuple) or any(
             not isinstance(reason, str) or not reason
             for reason in self.reason_codes
@@ -78,83 +107,58 @@ class BetfairProductScopeDecision:
             raise BetfairProductScopeError(
                 "reason_codes must be an immutable tuple of non-empty strings"
             )
-        if self.production_environment is not None and type(
-            self.production_environment
-        ) is not bool:
-            raise BetfairProductScopeError(
-                "production_environment must be bool or None"
-            )
         for field in (
-            "provider_exchange_bet_placement_available",
+            "product_bet_placement_surface_available",
             "sportsbook_read_only",
             "requires_external_affiliate_entitlement",
         ):
             if type(getattr(self, field)) is not bool:
                 raise BetfairProductScopeError(f"{field} must be bool")
-        if self.delayed_market_data is not None and type(
-            self.delayed_market_data
-        ) is not bool:
-            raise BetfairProductScopeError(
-                "delayed_market_data must be bool or None"
-            )
-        if self.state is BetfairScopeState.COMPATIBLE and self.reason_codes:
+        if (
+            self.state is BetfairProductScopeState.COMPATIBLE
+            and self.reason_codes
+        ):
             raise BetfairProductScopeError(
                 "COMPATIBLE decision cannot carry denial reasons"
             )
-        if self.state is BetfairScopeState.DENIED and not self.reason_codes:
+        if (
+            self.state is BetfairProductScopeState.DENIED
+            and not self.reason_codes
+        ):
             raise BetfairProductScopeError(
                 "DENIED decision requires at least one reason"
             )
 
     @property
     def scope_compatible(self) -> bool:
-        return self.state is BetfairScopeState.COMPATIBLE
-
-    @property
-    def execution_authorized(self) -> bool:
-        """Provider scope compatibility never authorizes an Autosport write."""
-        return False
+        return self.state is BetfairProductScopeState.COMPATIBLE
 
     @property
     def provider_entitlement_authorized(self) -> bool:
-        """A caller projection never proves an external provider entitlement."""
+        """Static caller configuration cannot prove provider-issued entitlement."""
+        return False
+
+    @property
+    def execution_authorized(self) -> bool:
+        """Product-family routing never authorizes an Autosport provider write."""
         return False
 
 
 def evaluate_betfair_product_scope(
     *,
     domain: BetfairProductDomain,
-    operation: BetfairOperation,
-    usage_intent: BetfairUsageIntent,
-    exchange_app_key_tier: BetfairExchangeAppKeyTier | None = None,
+    operation: BetfairProductOperation,
     sportsbook_affiliate_entitled: bool | None = None,
 ) -> BetfairProductScopeDecision:
-    """Evaluate provider product/key compatibility without granting authority.
-
-    sportsbook_affiliate_entitled is a configuration projection only. A
-    positive value can make the static scope compatible, but cannot prove a
-    provider-issued affiliate entitlement; callers still need separate
-    authoritative entitlement evidence and a separate Sportsbook adapter.
-    """
+    """Evaluate product-family routing without duplicating key/freshness authority."""
 
     if not isinstance(domain, BetfairProductDomain):
         raise BetfairProductScopeError(
             "domain must be a BetfairProductDomain value"
         )
-    if not isinstance(operation, BetfairOperation):
+    if not isinstance(operation, BetfairProductOperation):
         raise BetfairProductScopeError(
-            "operation must be a BetfairOperation value"
-        )
-    if not isinstance(usage_intent, BetfairUsageIntent):
-        raise BetfairProductScopeError(
-            "usage_intent must be a BetfairUsageIntent value"
-        )
-    if (
-        exchange_app_key_tier is not None
-        and not isinstance(exchange_app_key_tier, BetfairExchangeAppKeyTier)
-    ):
-        raise BetfairProductScopeError(
-            "exchange_app_key_tier must be BetfairExchangeAppKeyTier or None"
+            "operation must be a BetfairProductOperation value"
         )
     if (
         sportsbook_affiliate_entitled is not None
@@ -164,96 +168,37 @@ def evaluate_betfair_product_scope(
             "sportsbook_affiliate_entitled must be bool or None"
         )
 
-    if domain is BetfairProductDomain.SPORTSBOOK:
-        return _evaluate_sportsbook_scope(
-            operation=operation,
-            usage_intent=usage_intent,
-            exchange_app_key_tier=exchange_app_key_tier,
-            sportsbook_affiliate_entitled=sportsbook_affiliate_entitled,
+    if domain is BetfairProductDomain.EXCHANGE:
+        reasons = (
+            ("SPORTSBOOK_ENTITLEMENT_CANNOT_SCOPE_EXCHANGE",)
+            if sportsbook_affiliate_entitled is not None
+            else ()
+        )
+        return BetfairProductScopeDecision(
+            BetfairProductScopeState.DENIED
+            if reasons
+            else BetfairProductScopeState.COMPATIBLE,
+            reasons,
+            BetfairProductDomain.EXCHANGE,
+            "betfair.exchange",
+            True,
+            False,
+            False,
         )
 
-    return _evaluate_exchange_scope(
-        operation=operation,
-        usage_intent=usage_intent,
-        exchange_app_key_tier=exchange_app_key_tier,
-        sportsbook_affiliate_entitled=sportsbook_affiliate_entitled,
-    )
-
-
-def _evaluate_exchange_scope(
-    *,
-    operation: BetfairOperation,
-    usage_intent: BetfairUsageIntent,
-    exchange_app_key_tier: BetfairExchangeAppKeyTier | None,
-    sportsbook_affiliate_entitled: bool | None,
-) -> BetfairProductScopeDecision:
-    reasons: list[str] = []
-
-    if exchange_app_key_tier is None:
-        reasons.append("EXCHANGE_APP_KEY_TIER_REQUIRED")
-    if sportsbook_affiliate_entitled is not None:
-        reasons.append("SPORTSBOOK_ENTITLEMENT_CANNOT_SCOPE_EXCHANGE")
-
-    if (
-        operation is BetfairOperation.PLACE_BET
-        and usage_intent is not BetfairUsageIntent.TRANSACTIONAL
-    ):
-        reasons.append("PLACE_BET_REQUIRES_TRANSACTIONAL_INTENT")
-
-    if (
-        exchange_app_key_tier is BetfairExchangeAppKeyTier.LIVE
-        and usage_intent is BetfairUsageIntent.MONITOR_ONLY
-    ):
-        reasons.append("LIVE_KEY_MONITOR_ONLY_NOT_PERMITTED")
-
-    delayed = (
-        None
-        if exchange_app_key_tier is None
-        else exchange_app_key_tier is BetfairExchangeAppKeyTier.DELAYED
-    )
-
-    return BetfairProductScopeDecision(
-        BetfairScopeState.DENIED if reasons else BetfairScopeState.COMPATIBLE,
-        tuple(reasons),
-        BetfairProductDomain.EXCHANGE,
-        "betfair.exchange",
-        True,
-        delayed,
-        exchange_app_key_tier
-        in {
-            BetfairExchangeAppKeyTier.DELAYED,
-            BetfairExchangeAppKeyTier.LIVE,
-        },
-        False,
-        False,
-    )
-
-
-def _evaluate_sportsbook_scope(
-    *,
-    operation: BetfairOperation,
-    usage_intent: BetfairUsageIntent,
-    exchange_app_key_tier: BetfairExchangeAppKeyTier | None,
-    sportsbook_affiliate_entitled: bool | None,
-) -> BetfairProductScopeDecision:
-    reasons: list[str] = []
-
-    if exchange_app_key_tier is not None:
-        reasons.append("EXCHANGE_APP_KEY_CANNOT_SCOPE_SPORTSBOOK")
-    if operation is BetfairOperation.PLACE_BET:
-        reasons.append("SPORTSBOOK_API_READ_ONLY")
-    if usage_intent is BetfairUsageIntent.TRANSACTIONAL:
-        reasons.append("SPORTSBOOK_API_HAS_NO_TRANSACTIONAL_SCOPE")
+    reasons_list: list[str] = []
+    if operation is BetfairProductOperation.PLACE_BET:
+        reasons_list.append("SPORTSBOOK_API_READ_ONLY")
     if sportsbook_affiliate_entitled is not True:
-        reasons.append("SPORTSBOOK_AFFILIATE_ENTITLEMENT_REQUIRED")
+        reasons_list.append("SPORTSBOOK_AFFILIATE_ENTITLEMENT_REQUIRED")
 
     return BetfairProductScopeDecision(
-        BetfairScopeState.DENIED if reasons else BetfairScopeState.COMPATIBLE,
-        tuple(reasons),
+        BetfairProductScopeState.DENIED
+        if reasons_list
+        else BetfairProductScopeState.COMPATIBLE,
+        tuple(reasons_list),
         BetfairProductDomain.SPORTSBOOK,
         "betfair.sportsbook",
-        None,
-        None,
         False,
         True,
         True,

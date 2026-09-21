@@ -556,7 +556,7 @@ class HeadlessCollectorService:
         activated_at: str,
         expected_stream_epoch: str | None = None,
         allow_transition: bool = True,
-    ) -> int:
+    ) -> int | None:
         """Publish service-owned epoch authority through the canonical store."""
 
         _CollectorServiceState._instant(activated_at, "activated_at")

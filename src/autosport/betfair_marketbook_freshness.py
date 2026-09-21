@@ -16,17 +16,189 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from hashlib import sha256
 import json
+from secrets import token_hex
 from weakref import ref
 
 from . import betfair_account_readonly as _base
 
 
 _LIST_MARKET_BOOK = "SportsAPING/v1.0/listMarketBook"
+_GET_DEVELOPER_APP_KEYS = "AccountAPING/v1.0/getDeveloperAppKeys"
 _CANONICAL_NETWORK_POST = _base.UrllibBetfairHttpTransport.post
 
 
 class BetfairMarketBookFreshnessError(_base.BetfairReadOnlyError):
     """Raised when canonical MarketBook delay evidence cannot be obtained."""
+
+
+@dataclass(frozen=True, slots=True)
+class _AuthenticatedApplicationKeyContext:
+    """Secret-free provider metadata for the exact application key in use."""
+
+    developer_app_id: int
+    application_version_id: int
+    delay_data: bool
+    active: bool
+    owner_managed: bool
+    authenticated_context_sha256: str
+
+
+def _positive_int(value: object, field: str) -> int:
+    if type(value) is not int or value <= 0:
+        raise BetfairMarketBookFreshnessError(
+            f"{field} must be a positive exact integer"
+        )
+    return value
+
+
+def _authenticated_application_key_context(
+    client: _base.BetfairReadOnlyClient,
+    *,
+    credentials: object,
+) -> _AuthenticatedApplicationKeyContext:
+    """Resolve the exact current App Key through authenticated provider metadata.
+
+    The provider response contains the raw Application Key. It is compared only
+    in memory and is never copied into evidence, logs, or authority digests.
+    """
+
+    if client._credentials is not credentials:
+        raise BetfairMarketBookFreshnessError(
+            "Betfair authenticated context changed before app-key verification"
+        )
+    request_id = client._next_request_id()
+    body = json.dumps(
+        {
+            "jsonrpc": "2.0",
+            "method": _GET_DEVELOPER_APP_KEYS,
+            "params": {},
+            "id": request_id,
+        },
+        ensure_ascii=True,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    payload = client._transport.post(
+        _base.ACCOUNT_JSON_RPC_ENDPOINT,
+        headers={
+            "Accept": "application/json",
+            "Content-Type": "application/json",
+            "X-Authentication": client._credentials.session_token,
+        },
+        body=body,
+        timeout_seconds=client._timeout_seconds,
+    )
+    if not isinstance(payload, bytes):
+        raise BetfairMarketBookFreshnessError(
+            "Betfair developer-app transport must return bytes"
+        )
+    decoded = _base._decode_json(payload)
+    envelope = _base._mapping(decoded, "getDeveloperAppKeys response")
+    if envelope.get("jsonrpc") != "2.0":
+        raise BetfairMarketBookFreshnessError(
+            "getDeveloperAppKeys response has invalid jsonrpc version"
+        )
+    response_id = envelope.get("id")
+    if type(response_id) is not int or response_id != request_id:
+        raise BetfairMarketBookFreshnessError(
+            "getDeveloperAppKeys response id does not match request id"
+        )
+    if "error" in envelope and envelope["error"] is not None:
+        if "result" in envelope:
+            raise BetfairMarketBookFreshnessError(
+                "getDeveloperAppKeys response contains both error and result"
+            )
+        raise BetfairMarketBookFreshnessError(
+            "Betfair JSON-RPC returned an error for getDeveloperAppKeys"
+        )
+    if "result" not in envelope:
+        raise BetfairMarketBookFreshnessError(
+            "getDeveloperAppKeys response is missing result"
+        )
+
+    applications = _base._sequence(
+        envelope["result"], "getDeveloperAppKeys result"
+    )
+    matches: list[tuple[int, int, bool, bool, bool]] = []
+    expected_key = client._credentials.application_key
+    for app_index, raw_app in enumerate(applications):
+        app = _base._mapping(
+            raw_app, f"getDeveloperAppKeys result[{app_index}]"
+        )
+        app_id = _positive_int(app.get("appId"), "developer_app_id")
+        versions = _base._sequence(
+            app.get("appVersions"),
+            f"getDeveloperAppKeys result[{app_index}].appVersions",
+        )
+        for version_index, raw_version in enumerate(versions):
+            version = _base._mapping(
+                raw_version,
+                (
+                    "getDeveloperAppKeys "
+                    f"result[{app_index}].appVersions[{version_index}]"
+                ),
+            )
+            application_key = _base._provider_text(
+                version,
+                "applicationKey",
+                "application_key",
+            )
+            if application_key != expected_key:
+                continue
+            version_id = _positive_int(
+                version.get("versionId"), "application_version_id"
+            )
+            delay_data = _base._provider_bool(version, "delayData")
+            active = _base._provider_bool(version, "active")
+            owner_managed = _base._provider_bool(version, "ownerManaged")
+            matches.append(
+                (app_id, version_id, delay_data, active, owner_managed)
+            )
+
+    if len(matches) != 1:
+        raise BetfairMarketBookFreshnessError(
+            "authenticated Application Key must match exactly one provider app version"
+        )
+    if client._credentials is not credentials:
+        raise BetfairMarketBookFreshnessError(
+            "Betfair authenticated context changed during app-key verification"
+        )
+
+    app_id, version_id, delay_data, active, owner_managed = matches[0]
+    # A random process-local nonce makes this identity session-instance scoped
+    # without hashing or persisting either credential secret. Positive evidence
+    # is deliberately not restart-authoritative and must be reacquired.
+    context_payload = {
+        "schema": "autosport.betfair_authenticated_data_context",
+        "schema_version": 1,
+        "provider": "betfair",
+        "account_endpoint": _base.ACCOUNT_JSON_RPC_ENDPOINT,
+        "betting_endpoint": _base.BETTING_JSON_RPC_ENDPOINT,
+        "adapter_id": _base.ADAPTER_ID,
+        "adapter_version": _base.ADAPTER_VERSION,
+        "developer_app_id": app_id,
+        "application_version_id": version_id,
+        "delay_data": delay_data,
+        "active": active,
+        "owner_managed": owner_managed,
+        "session_instance_nonce": token_hex(32),
+    }
+    context_sha = sha256(
+        json.dumps(
+            context_payload,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=True,
+        ).encode("utf-8")
+    ).hexdigest()
+    return _AuthenticatedApplicationKeyContext(
+        developer_app_id=app_id,
+        application_version_id=version_id,
+        delay_data=delay_data,
+        active=active,
+        owner_managed=owner_managed,
+        authenticated_context_sha256=context_sha,
+    )
 
 
 @dataclass(frozen=True, slots=True, weakref_slot=True)
@@ -41,6 +213,12 @@ class BetfairMarketBookDelayObservation:
     is_market_data_delayed: bool
     observed_at: str
     source_payload_sha256: str
+    authenticated_context_sha256: str | None = None
+    developer_app_id: int | None = None
+    application_version_id: int | None = None
+    application_key_delay_data: bool | None = None
+    application_key_active: bool | None = None
+    application_key_owner_managed: bool | None = None
 
     def __post_init__(self) -> None:
         _base._required_text(self.venue_id, "venue_id")
@@ -57,6 +235,44 @@ class BetfairMarketBookDelayObservation:
         _base._iso_timestamp(self.observed_at, "observed_at")
         _base._sha256_hex(self.source_payload_sha256, "source_payload_sha256")
 
+        context_values = (
+            self.authenticated_context_sha256,
+            self.developer_app_id,
+            self.application_version_id,
+            self.application_key_delay_data,
+            self.application_key_active,
+            self.application_key_owner_managed,
+        )
+        if any(value is not None for value in context_values):
+            if any(value is None for value in context_values):
+                raise BetfairMarketBookFreshnessError(
+                    "authenticated application-key context must be complete or absent"
+                )
+            _base._sha256_hex(
+                self.authenticated_context_sha256,
+                "authenticated_context_sha256",
+            )
+            _positive_int(self.developer_app_id, "developer_app_id")
+            _positive_int(self.application_version_id, "application_version_id")
+            for value, field in (
+                (self.application_key_delay_data, "application_key_delay_data"),
+                (self.application_key_active, "application_key_active"),
+                (self.application_key_owner_managed, "application_key_owner_managed"),
+            ):
+                if type(value) is not bool:
+                    raise BetfairMarketBookFreshnessError(
+                        f"{field} must be exact bool"
+                    )
+
+    @property
+    def application_key_class(self) -> str:
+        if (
+            self.application_key_delay_data is None
+            or self.application_key_active is not True
+        ):
+            return "unknown"
+        return "delayed" if self.application_key_delay_data else "live"
+
     def _authority_fingerprint(self) -> str:
         payload = (
             self.venue_id,
@@ -67,6 +283,12 @@ class BetfairMarketBookDelayObservation:
             self.is_market_data_delayed,
             self.observed_at,
             self.source_payload_sha256,
+            self.authenticated_context_sha256,
+            self.developer_app_id,
+            self.application_version_id,
+            self.application_key_delay_data,
+            self.application_key_active,
+            self.application_key_owner_managed,
         )
         return sha256(repr(payload).encode("utf-8")).hexdigest()
 
@@ -111,6 +333,7 @@ def _read_market_book_delay(
         raise TypeError("client must be an exact BetfairReadOnlyClient")
     market = _base._required_text(market_id, "market_id")
     network_origin = _canonical_network_transport(client)
+    credentials = client._credentials
     request_id = client._next_request_id()
     body = json.dumps(
         {
@@ -187,6 +410,19 @@ def _read_market_book_delay(
             "isMarketDataDelayed must be bool"
         )
 
+    application_context = (
+        _authenticated_application_key_context(
+            client,
+            credentials=credentials,
+        )
+        if network_origin
+        else None
+    )
+    if network_origin and client._credentials is not credentials:
+        raise BetfairMarketBookFreshnessError(
+            "Betfair authenticated context changed during MarketBook capture"
+        )
+
     return BetfairMarketBookDelayObservation(
         venue_id=client._venue_id,
         configured_account_ref=client._account_id,
@@ -196,11 +432,33 @@ def _read_market_book_delay(
         is_market_data_delayed=delayed,
         observed_at=observed_at,
         source_payload_sha256=source_payload_sha256,
+        authenticated_context_sha256=(
+            None
+            if application_context is None
+            else application_context.authenticated_context_sha256
+        ),
+        developer_app_id=(
+            None if application_context is None else application_context.developer_app_id
+        ),
+        application_version_id=(
+            None
+            if application_context is None
+            else application_context.application_version_id
+        ),
+        application_key_delay_data=(
+            None if application_context is None else application_context.delay_data
+        ),
+        application_key_active=(
+            None if application_context is None else application_context.active
+        ),
+        application_key_owner_managed=(
+            None if application_context is None else application_context.owner_managed
+        ),
     )
 
 
 def _install_market_book_authority() -> None:
-    issued: dict[int, tuple[object, str, bool]] = {}
+    issued: dict[int, tuple[object, str, bool, object, object]] = {}
     validate = BetfairMarketBookDelayObservation.__post_init__
 
     def read_market_book_delay(
@@ -218,12 +476,14 @@ def _install_market_book_authority() -> None:
             ref(observation, forget),
             observation._authority_fingerprint(),
             positive_origin,
+            client,
+            client._credentials,
         )
         return observation
 
     def _record(
         self: BetfairMarketBookDelayObservation,
-    ) -> tuple[object, str, bool]:
+    ) -> tuple[object, str, bool, object, object]:
         validate(self)
         record = issued.get(id(self))
         if record is None or record[0]() is not self:
@@ -236,21 +496,46 @@ def _install_market_book_authority() -> None:
             )
         return record
 
-    def assert_authoritative(self: BetfairMarketBookDelayObservation) -> None:
-        record = _record(self)
-        if not self.is_market_data_delayed and not record[2]:
-            raise BetfairMarketBookFreshnessError(
-                "positive market-book observation lacks canonical production network origin"
-            )
-
-    def assert_positive_authoritative(
+    def _assert_positive_record(
         self: BetfairMarketBookDelayObservation,
+        record: tuple[object, str, bool, object, object],
     ) -> None:
-        record = _record(self)
         if not record[2]:
             raise BetfairMarketBookFreshnessError(
                 "positive market-book observation lacks canonical production network origin"
             )
+        if self.authenticated_context_sha256 is None:
+            raise BetfairMarketBookFreshnessError(
+                "positive market-book observation lacks authenticated app-key context"
+            )
+        if self.application_key_class != "live":
+            raise BetfairMarketBookFreshnessError(
+                "positive market-book observation requires active provider LIVE application key"
+            )
+        client = record[3]
+        credentials = record[4]
+        if (
+            type(client) is not _base.BetfairReadOnlyClient
+            or client._credentials is not credentials
+            or not _canonical_network_transport(client)
+        ):
+            raise BetfairMarketBookFreshnessError(
+                "authenticated Betfair context changed after MarketBook capture"
+            )
+        if self.is_market_data_delayed:
+            raise BetfairMarketBookFreshnessError(
+                "positive market-book observation is provider-delayed"
+            )
+
+    def assert_authoritative(self: BetfairMarketBookDelayObservation) -> None:
+        record = _record(self)
+        if not self.is_market_data_delayed:
+            _assert_positive_record(self, record)
+
+    def assert_positive_authoritative(
+        self: BetfairMarketBookDelayObservation,
+    ) -> None:
+        _assert_positive_record(self, _record(self))
 
     globals()["read_market_book_delay"] = read_market_book_delay
     BetfairMarketBookDelayObservation.assert_authoritative = assert_authoritative

@@ -290,11 +290,14 @@ def _assess_execution_feasibility(
         Decimal("0"),
     )
 
+    evidence_valid = not reasons
     if displayed_depth < request.requested_stake:
         reasons.append("DISPLAYED_DEPTH_INSUFFICIENT")
 
-    if reasons:
+    if not evidence_valid:
         state = FeasibilityState.UNKNOWN_UNPROVEN
+    elif displayed_depth < request.requested_stake:
+        state = FeasibilityState.DISPLAYED_DEPTH_AT_SNAPSHOT
     else:
         state = FeasibilityState.SNAPSHOT_DEPTH_SUFFICIENT_BUT_RACY
 

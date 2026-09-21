@@ -542,6 +542,29 @@ def test_failed_run_preserves_undeclared_tool_and_evidence_facts(tmp_path):
     assert SkillRegistry(registry.path).get_run(run.run_id) == run
 
 
+@pytest.mark.parametrize("schema_version", [True, 1.0])
+def test_registry_rejects_self_consistent_non_integer_schema_version_aliases(
+    tmp_path,
+    schema_version,
+):
+    registry = SkillRegistry.initialize(tmp_path / "skills.json")
+    state = json.loads(registry.path.read_text(encoding="utf-8"))
+    state["schema_version"] = schema_version
+    body = {key: value for key, value in state.items() if key != "state_sha256"}
+    canonical = json.dumps(
+        body,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    ).encode("utf-8")
+    state["state_sha256"] = hashlib.sha256(canonical).hexdigest()
+    registry.path.write_text(json.dumps(state), encoding="utf-8")
+
+    with pytest.raises(SkillRegistryError, match="SkillRegistry schema mismatch"):
+        SkillRegistry(registry.path)
+
+
 def test_state_digest_and_internal_run_digests_are_verified(tmp_path):
     registry = _registry(tmp_path)
     definition = _definition("diagnose_provider_gap")

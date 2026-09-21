@@ -36,7 +36,6 @@ class HistoricalMatchCapture:
     capture_sha256: str
     historical_window_hours: int
     historical_window_from: str
-    request_url: str
     product_owned_request_path_verified: bool
     product_owned_acquisition_clock_verified: bool
     provider_response_origin_verified: bool
@@ -146,7 +145,6 @@ def capture_historical_matches(
         "request": {
             "date": requested_date,
             "priced_only": priced_only,
-            "url": url,
         },
         "request_contract_reference": REQUEST_CONTRACT_REFERENCE,
         "captured_at": captured_at,
@@ -163,7 +161,6 @@ def capture_historical_matches(
         "sport_key": provider.sport_key,
         "requested_date": requested_date,
         "priced_only": priced_only,
-        "request_url": url,
         "request_contract_reference": REQUEST_CONTRACT_REFERENCE,
         "captured_at": captured_at,
         "canonical_response_sha256": canonical_response_sha256,
@@ -195,7 +192,6 @@ def capture_historical_matches(
         capture_sha256=capture_sha256,
         historical_window_hours=window_hours,
         historical_window_from=window_from_raw,
-        request_url=url,
         product_owned_request_path_verified=product_owned_request_path_verified,
         product_owned_acquisition_clock_verified=product_owned_acquisition_clock_verified,
         provider_response_origin_verified=provider_response_origin_verified,

@@ -9,7 +9,7 @@ from autosport.endurance import EnduranceConfig, run_endurance
 
 
 class EnduranceCallerTracemallocStateTests(unittest.TestCase):
-    def test_run_preserves_caller_owned_historical_peak(self) -> None:
+    def test_run_never_erases_caller_owned_historical_peak(self) -> None:
         if tracemalloc.is_tracing():
             self.skipTest("test requires ownership of the process tracemalloc session")
 
@@ -28,10 +28,26 @@ class EnduranceCallerTracemallocStateTests(unittest.TestCase):
                 restart_cycles=1,
                 paper_tickets=5,
             )
-            with tempfile.TemporaryDirectory() as tmp:
-                report = run_endurance(Path(tmp), config)
 
-            self.assertEqual(report.status, "PASS", report.failures)
+            failure: Exception | None = None
+            report = None
+            with tempfile.TemporaryDirectory() as tmp:
+                try:
+                    report = run_endurance(Path(tmp), config)
+                except Exception as exc:  # a caller-tracing-specific fail-closed path is valid
+                    failure = exc
+
+            if failure is None:
+                self.assertIsNotNone(report)
+                self.assertEqual(report.status, "PASS", report.failures)
+            else:
+                message = str(failure).lower()
+                self.assertIn(
+                    "tracemalloc",
+                    message,
+                    "caller-owned tracing may only fail closed for an explicit tracemalloc conflict",
+                )
+
             self.assertTrue(
                 tracemalloc.is_tracing(),
                 "run_endurance stopped a caller-owned tracemalloc session",

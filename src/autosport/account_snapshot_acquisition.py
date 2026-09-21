@@ -14,6 +14,7 @@ from hashlib import sha256
 import json
 from pathlib import Path
 import sqlite3
+from weakref import ref
 
 from .betfair_account_readonly import (
     ACCOUNT_JSON_RPC_ENDPOINT,
@@ -261,6 +262,7 @@ class BetfairAccountSnapshotAcquirer:
 
     def _read_provider_snapshot(
         self,
+        client: BetfairReadOnlyClient,
         requested_capabilities: frozenset[BookmakerCapability],
     ) -> tuple[BookmakerAccountSnapshot, BookmakerIntegrationEvidence]:
         if type(requested_capabilities) is not frozenset:
@@ -283,7 +285,11 @@ class BetfairAccountSnapshotAcquirer:
                 "account snapshot acquisition does not authorize capability: " + names
             )
 
-        snapshot = self._client.read_account_snapshot(requested_capabilities)
+        if type(client) is not BetfairReadOnlyClient:
+            raise AccountSnapshotAcquisitionError(
+                "account acquisition client is not the canonical BetfairReadOnlyClient"
+            )
+        snapshot = client.read_account_snapshot(requested_capabilities)
         if type(snapshot) is not BookmakerAccountSnapshot:
             raise AccountSnapshotAcquisitionError(
                 "canonical Betfair client returned a non-canonical account snapshot"
@@ -1041,22 +1047,98 @@ def _snapshot_from_payload(payload: dict[str, object]) -> BookmakerAccountSnapsh
 # pattern: callers can resolve/verify durable evidence, but cannot pass an arbitrary
 # caller-constructed BookmakerAccountSnapshot to a minting function.
 def _install_account_snapshot_acquisition_authority() -> None:
+    issued: dict[int, tuple[object, _AccountSnapshotStore, BetfairReadOnlyClient]] = {}
+    raw_init = BetfairAccountSnapshotAcquirer.__init__
     raw_read = BetfairAccountSnapshotAcquirer._read_provider_snapshot
     raw_record = _AccountSnapshotStore.record
+    raw_resolve = _AccountSnapshotStore.resolve
+
+    def state(
+        self: BetfairAccountSnapshotAcquirer,
+    ) -> tuple[_AccountSnapshotStore, BetfairReadOnlyClient]:
+        record = issued.get(id(self))
+        if record is None or record[0]() is not self:
+            raise AccountSnapshotAcquisitionError(
+                "account snapshot acquirer was not initialized by canonical product authority"
+            )
+        return record[1], record[2]
+
+    def __init__(
+        self: BetfairAccountSnapshotAcquirer,
+        database_path: str | Path,
+        credentials: BetfairSessionCredentials,
+        *,
+        account_id: str = "default-account",
+        timeout_seconds: float = 10.0,
+    ) -> None:
+        raw_init(
+            self,
+            database_path,
+            credentials,
+            account_id=account_id,
+            timeout_seconds=timeout_seconds,
+        )
+        store = self._store
+        client = self._client
+        del self._store
+        del self._client
+        instance_id = id(self)
+
+        def forget(_weakref: object, *, key: int = instance_id) -> None:
+            issued.pop(key, None)
+
+        issued[instance_id] = (ref(self, forget), store, client)
 
     def acquire(
         self: BetfairAccountSnapshotAcquirer,
         requested_capabilities: frozenset[BookmakerCapability],
     ) -> AuthoritativeAccountSnapshot:
-        snapshot, integration = raw_read(self, requested_capabilities)
+        store, client = state(self)
+        snapshot, integration = raw_read(self, client, requested_capabilities)
         return raw_record(
-            self._store,
+            store,
             snapshot,
             integration,
             requested_capabilities,
         )
 
+    def resolve(
+        self: BetfairAccountSnapshotAcquirer,
+        acquisition_id: str,
+    ) -> AuthoritativeAccountSnapshot:
+        store, _ = state(self)
+        return raw_resolve(store, acquisition_id)
+
+    def verify(
+        self: BetfairAccountSnapshotAcquirer,
+        snapshot: BookmakerAccountSnapshot,
+        receipt: AccountSnapshotAcquisitionReceipt,
+    ) -> None:
+        if type(snapshot) is not BookmakerAccountSnapshot:
+            raise AccountSnapshotAcquisitionError(
+                "snapshot must be an exact BookmakerAccountSnapshot"
+            )
+        if type(receipt) is not AccountSnapshotAcquisitionReceipt:
+            raise AccountSnapshotAcquisitionError(
+                "receipt must be an exact AccountSnapshotAcquisitionReceipt"
+            )
+        store, _ = state(self)
+        resolved = raw_resolve(store, receipt.acquisition_id)
+        if resolved.receipt != receipt:
+            raise AccountSnapshotAcquisitionError(
+                "receipt does not match durable acquisition authority"
+            )
+        if _canonical_sha256(_snapshot_payload(snapshot, include_local_times=True)) != (
+            resolved.receipt.snapshot_sha256
+        ):
+            raise AccountSnapshotAcquisitionError(
+                "snapshot does not match durable acquisition receipt"
+            )
+
+    BetfairAccountSnapshotAcquirer.__init__ = __init__
     BetfairAccountSnapshotAcquirer.acquire = acquire
+    BetfairAccountSnapshotAcquirer.resolve = resolve
+    BetfairAccountSnapshotAcquirer.verify = verify
     delattr(BetfairAccountSnapshotAcquirer, "_read_provider_snapshot")
     delattr(_AccountSnapshotStore, "record")
 

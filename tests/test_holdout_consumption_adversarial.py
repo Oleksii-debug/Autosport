@@ -1,10 +1,12 @@
-import json
+from __future__ import annotations
+
+from dataclasses import dataclass
 
 import pytest
 
-from autosport._strategy_model_factory_impl import (
-    _holdout_consumed_by_other_evidence,
-)
+from autosport import _holdout_physical_content_guard as guard
+from autosport import _strategy_model_factory_impl as factory
+from autosport import point_in_time_evidence as evidence
 from autosport.scientific_registry import promotion_holdout_access_id
 
 
@@ -51,21 +53,70 @@ def _attempt(**overrides: object) -> dict[str, object]:
     return payload
 
 
-def test_identical_frozen_attempt_remains_resumable_after_json_round_trip():
-    frozen_attempt = _attempt()
-    persisted_evidence = json.loads(json.dumps(frozen_attempt, sort_keys=True))
-    persisted_evidence.update(
-        {
-            "cohort_id": "dataset-factory",
-            "effective_sample_size": 5,
-            "holdout_consumed": False,
-            "practical_improvement": "0.15",
-        }
+@dataclass(frozen=True)
+class _Record:
+    payload: dict[str, object]
+
+
+class _Registry:
+    def __init__(self, manifests: dict[str, str]) -> None:
+        self._manifests = manifests
+
+    def get(self, kind: str, record_id: str):
+        assert kind == "DatasetSnapshot"
+        manifest = self._manifests.get(record_id)
+        if manifest is None:
+            return None
+        return _Record({"manifest_sha256": manifest})
+
+
+def _consumption(
+    *,
+    manifest: str = SHA_A,
+    protocol_id: str = "protocol-factory",
+    source_identity: str = "lawful-provider:fixture",
+    license_identity: str = "license-evidence:v1",
+    trial_family_id: str = "protocol-factory:confirmation-trial-family",
+    physical: bool,
+) -> evidence.HoldoutConsumption:
+    access = _holdout_id(
+        protocol_id=protocol_id,
+        manifest_sha256=manifest,
+        source_identity=source_identity,
+        license_identity=license_identity,
+        trial_family_id=trial_family_id,
+    )
+    freshness_fn = (
+        guard._physical_freshness_id if physical else guard._LEGACY_FRESHNESS_ID
+    )
+    freshness = freshness_fn(
+        dataset_manifest_sha256=manifest,
+        source_identity=source_identity,
+        license_identity=license_identity,
+        confirmation_trial_family_id=trial_family_id,
+    )
+    return evidence.HoldoutConsumption(
+        holdout_access_id=access,
+        holdout_freshness_id=freshness,
+        research_protocol_id=protocol_id,
+        confirmation_trial_family_id=trial_family_id,
+        dataset_manifest_sha256=manifest,
+        source_identity=source_identity,
+        license_identity=license_identity,
+        consumer_identity="factory:test",
+        purpose="promotion confirmation",
+        consumed_at_utc=T7,
     )
 
-    assert not _holdout_consumed_by_other_evidence(
-        (persisted_evidence,),
-        same_attempt_identity=frozen_attempt,
+
+def test_exact_frozen_attempt_remains_resumable_for_same_physical_holdout() -> None:
+    attempt = _attempt()
+    registry = _Registry({"dataset-factory": SHA_A})
+
+    assert not guard._holdout_consumed_by_physical_evidence(
+        (dict(attempt),),
+        same_attempt_identity=attempt,
+        registry=registry,
     )
 
 
@@ -79,109 +130,238 @@ def test_identical_frozen_attempt_remains_resumable_after_json_round_trip():
         ("candidate_strategy_version_id", "strategy-other"),
         ("candidate_model_version_id", "model-other"),
         ("evaluation_bundle_id", "eval-other"),
-        ("dataset_snapshot_id", "dataset-renamed"),
-        (
-            "confirmation_trial_family_id",
-            "protocol-factory:confirmation-trial-family-other",
-        ),
+        ("dataset_snapshot_id", "dataset-alias"),
+        ("confirmation_trial_family_id", "confirmation-other"),
         ("estimand", "log_loss"),
         ("direction", "HIGHER_IS_BETTER"),
         ("rollback_identity", "strategy-other"),
         ("created_at", "2026-01-09T00:00:00+00:00"),
     ),
 )
-def test_same_holdout_is_consumed_when_any_frozen_attempt_identity_changes(
+def test_same_physical_holdout_is_consumed_when_frozen_attempt_changes(
     field: str,
     changed_value: object,
-):
-    frozen_attempt = _attempt()
-    prior_evidence = _attempt(**{field: changed_value})
-
-    assert _holdout_consumed_by_other_evidence(
-        (prior_evidence,),
-        same_attempt_identity=frozen_attempt,
+) -> None:
+    current = _attempt()
+    prior = _attempt(**{field: changed_value})
+    registry = _Registry(
+        {
+            "dataset-factory": SHA_A,
+            "dataset-alias": SHA_A,
+        }
     )
 
-
-def test_dataset_snapshot_rename_cannot_reopen_same_underlying_holdout():
-    first_snapshot = _attempt(dataset_snapshot_id="dataset-before-rename")
-    renamed_snapshot = _attempt(dataset_snapshot_id="dataset-after-rename")
-
-    assert first_snapshot["holdout_access_id"] == renamed_snapshot["holdout_access_id"]
-    assert _holdout_consumed_by_other_evidence(
-        (first_snapshot,),
-        same_attempt_identity=renamed_snapshot,
+    assert guard._holdout_consumed_by_physical_evidence(
+        (prior,),
+        same_attempt_identity=current,
+        registry=registry,
     )
 
 
 @pytest.mark.parametrize(
-    "missing_field",
+    "changed",
     (
-        "experiment_id",
-        "research_protocol_id",
-        "research_question_id",
-        "hypothesis_id",
-        "candidate_strategy_version_id",
-        "candidate_model_version_id",
-        "evaluation_bundle_id",
-        "dataset_snapshot_id",
-        "confirmation_trial_family_id",
-        "estimand",
-        "direction",
-        "rollback_identity",
-        "created_at",
+        {
+            "research_protocol_id": "protocol-other",
+            "confirmation_trial_family_id": "protocol-other:confirmation-trial-family",
+            "holdout_access_id": _holdout_id(
+                protocol_id="protocol-other",
+                trial_family_id="protocol-other:confirmation-trial-family",
+            ),
+        },
+        {
+            "holdout_access_id": _holdout_id(
+                source_identity="lawful-provider:renamed",
+            ),
+        },
+        {
+            "holdout_access_id": _holdout_id(
+                license_identity="license-evidence:v2",
+            ),
+        },
+        {
+            "confirmation_trial_family_id": "confirmation-family-renamed",
+            "holdout_access_id": _holdout_id(
+                trial_family_id="confirmation-family-renamed",
+            ),
+        },
     ),
 )
-def test_same_holdout_with_incomplete_prior_identity_fails_closed(missing_field: str):
-    frozen_attempt = _attempt()
-    incomplete_prior = _attempt()
-    incomplete_prior.pop(missing_field)
+def test_metadata_relabel_cannot_mint_fresh_capacity_for_same_manifest(
+    changed: dict[str, object],
+) -> None:
+    current = _attempt()
+    prior = _attempt(
+        experiment_id="experiment-prior",
+        dataset_snapshot_id="dataset-alias",
+        **changed,
+    )
+    registry = _Registry(
+        {
+            "dataset-factory": SHA_A,
+            "dataset-alias": SHA_A,
+        }
+    )
 
-    assert _holdout_consumed_by_other_evidence(
-        (incomplete_prior,),
-        same_attempt_identity=frozen_attempt,
+    assert prior["holdout_access_id"] != current["holdout_access_id"]
+    assert guard._holdout_consumed_by_physical_evidence(
+        (prior,),
+        same_attempt_identity=current,
+        registry=registry,
     )
 
 
-def test_distinct_holdout_does_not_consume_current_attempt():
-    frozen_attempt = _attempt()
-    unrelated = _attempt(
-        experiment_id="experiment-unrelated",
-        holdout_access_id=_holdout_id(source_identity="lawful-provider:other"),
+def test_distinct_content_manifest_remains_fresh() -> None:
+    current = _attempt()
+    prior = _attempt(
+        experiment_id="experiment-prior",
+        dataset_snapshot_id="dataset-other",
+        holdout_access_id=_holdout_id(manifest_sha256=SHA_B),
+    )
+    registry = _Registry(
+        {
+            "dataset-factory": SHA_A,
+            "dataset-other": SHA_B,
+        }
     )
 
-    assert not _holdout_consumed_by_other_evidence(
-        (unrelated,),
-        same_attempt_identity=frozen_attempt,
-    )
-
-
-def test_one_conflicting_record_consumes_holdout_regardless_of_record_order():
-    frozen_attempt = _attempt()
-    same = _attempt()
-    conflicting = _attempt(experiment_id="experiment-other")
-
-    assert _holdout_consumed_by_other_evidence(
-        (same, conflicting),
-        same_attempt_identity=frozen_attempt,
-    )
-    assert _holdout_consumed_by_other_evidence(
-        (conflicting, same),
-        same_attempt_identity=frozen_attempt,
+    assert not guard._holdout_consumed_by_physical_evidence(
+        (prior,),
+        same_attempt_identity=current,
+        registry=registry,
     )
 
 
-@pytest.mark.parametrize(
-    "overrides",
-    (
-        {"protocol_id": "protocol-other"},
-        {"manifest_sha256": SHA_B},
-        {"source_identity": "lawful-provider:other"},
-        {"license_identity": "license-evidence:v2"},
-        {"trial_family_id": "protocol-factory:confirmation-trial-family-other"},
-    ),
-)
-def test_holdout_identity_does_not_collapse_distinct_authority(
-    overrides: dict[str, str],
-):
-    assert _holdout_id(**overrides) != _holdout_id()
+def test_missing_prior_dataset_authority_fails_closed() -> None:
+    current = _attempt()
+    prior = _attempt(
+        experiment_id="experiment-prior",
+        dataset_snapshot_id="missing-dataset",
+        holdout_access_id=_holdout_id(source_identity="other-label"),
+    )
+    registry = _Registry({"dataset-factory": SHA_A})
+
+    with pytest.raises(ValueError, match="missing DatasetSnapshot"):
+        guard._holdout_consumed_by_physical_evidence(
+            (prior,),
+            same_attempt_identity=current,
+            registry=registry,
+        )
+
+
+def test_product_factory_helper_uses_registry_physical_identity_context() -> None:
+    current = _attempt()
+    prior = _attempt(
+        experiment_id="experiment-prior",
+        dataset_snapshot_id="dataset-alias",
+        holdout_access_id=_holdout_id(source_identity="renamed-source"),
+    )
+    registry = _Registry(
+        {
+            "dataset-factory": SHA_A,
+            "dataset-alias": SHA_A,
+        }
+    )
+    token = guard._ACTIVE_FACTORY_REGISTRY.set(registry)
+    try:
+        assert factory._holdout_consumed_by_other_evidence(
+            (prior,),
+            same_attempt_identity=current,
+        )
+    finally:
+        guard._ACTIVE_FACTORY_REGISTRY.reset(token)
+
+
+def test_physical_freshness_id_ignores_provenance_and_family_labels() -> None:
+    baseline = guard._physical_freshness_id(
+        dataset_manifest_sha256=SHA_A,
+        source_identity="source-a",
+        license_identity="license-a",
+        confirmation_trial_family_id="family-a",
+    )
+    relabelled = guard._physical_freshness_id(
+        dataset_manifest_sha256=SHA_A,
+        source_identity="source-b",
+        license_identity="license-b",
+        confirmation_trial_family_id="family-b",
+    )
+    distinct = guard._physical_freshness_id(
+        dataset_manifest_sha256=SHA_B,
+        source_identity="source-a",
+        license_identity="license-a",
+        confirmation_trial_family_id="family-a",
+    )
+
+    assert baseline == relabelled
+    assert distinct != baseline
+
+
+def test_legacy_and_physical_ledger_records_are_both_readable() -> None:
+    legacy = _consumption(physical=False)
+    physical = _consumption(
+        manifest=SHA_B,
+        protocol_id="protocol-b",
+        source_identity="source-b",
+        license_identity="license-b",
+        trial_family_id="family-b",
+        physical=True,
+    )
+
+    assert legacy.holdout_freshness_id != guard._physical_freshness_id(
+        dataset_manifest_sha256=SHA_A,
+        source_identity=legacy.source_identity,
+        license_identity=legacy.license_identity,
+        confirmation_trial_family_id=legacy.confirmation_trial_family_id,
+    )
+    assert physical.holdout_freshness_id == guard._physical_freshness_id(
+        dataset_manifest_sha256=SHA_B,
+        source_identity=physical.source_identity,
+        license_identity=physical.license_identity,
+        confirmation_trial_family_id=physical.confirmation_trial_family_id,
+    )
+
+
+def test_legacy_load_reindexes_by_physical_manifest(monkeypatch: pytest.MonkeyPatch) -> None:
+    legacy = _consumption(physical=False)
+
+    class _Ledger:
+        _records = {legacy.holdout_freshness_id: legacy}
+
+    monkeypatch.setattr(guard, "_ORIGINAL_LEDGER_LOAD", lambda self: None)
+    ledger = _Ledger()
+    guard._load_with_physical_reindex(ledger)
+
+    expected = guard._physical_freshness_id(
+        dataset_manifest_sha256=legacy.dataset_manifest_sha256,
+        source_identity=legacy.source_identity,
+        license_identity=legacy.license_identity,
+        confirmation_trial_family_id=legacy.confirmation_trial_family_id,
+    )
+    assert ledger._records == {expected: legacy}
+
+
+def test_conflicting_legacy_aliases_for_same_manifest_fail_closed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    first = _consumption(physical=False)
+    second = _consumption(
+        protocol_id="protocol-other",
+        source_identity="renamed-source",
+        license_identity="renamed-license",
+        trial_family_id="renamed-family",
+        physical=False,
+    )
+    assert first.holdout_freshness_id != second.holdout_freshness_id
+
+    class _Ledger:
+        _records = {
+            first.holdout_freshness_id: first,
+            second.holdout_freshness_id: second,
+        }
+
+    monkeypatch.setattr(guard, "_ORIGINAL_LEDGER_LOAD", lambda self: None)
+    with pytest.raises(
+        evidence.EvidenceLedgerCorruptError,
+        match="multiple consumptions for one physical content manifest",
+    ):
+        guard._load_with_physical_reindex(_Ledger())

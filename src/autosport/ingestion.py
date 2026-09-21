@@ -268,7 +268,7 @@ class IngestionEngine:
             continuity_store, SourceContinuityStore
         ):
             raise TypeError("continuity_store must be SourceContinuityStore or null")
-        if continuity_store is None and health_store is not None:
+        if continuity_store is None and isinstance(health_store, SourceHealthStore):
             continuity_store = SourceContinuityStore(
                 health_store.path.with_name("source_continuity.json")
             )
@@ -289,7 +289,7 @@ class IngestionEngine:
         if resolver is None:
             return None
         witness = resolver(provider, batch)
-        if witness is not None and not isinstance(witness, ProviderContinuityWitness):
+        if witness is not None and type(witness) is not ProviderContinuityWitness:
             raise TypeError(
                 "continuity_witness_resolver must return ProviderContinuityWitness or null"
             )

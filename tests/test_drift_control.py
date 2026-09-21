@@ -4,6 +4,7 @@ from decimal import localcontext
 
 import pytest
 
+import autosport.drift_control as drift_control_module
 from autosport.drift_control import (
     DriftCausalityError,
     DriftKind,
@@ -803,5 +804,49 @@ def test_current_effective_sample_size_governs_minimum_evidence(tmp_path):
     monitor.require_canonical_finding(
         finding.finding_id,
         as_of=EVALUATED_AT,
+    )
+
+def test_legacy_v1_findings_remain_restart_verifiable_after_v2_upgrade(
+    tmp_path,
+    monkeypatch,
+):
+    baseline = _baseline_window(effective_sample_size=1)
+    current = _current_window(effective_sample_size=1)
+    registry = _registry(
+        tmp_path,
+        baseline_window=baseline,
+        current_window=current,
+    )
+    monitor = DriftMonitor(registry)
+    reference = _reference(
+        monitor,
+        baseline=baseline,
+        min_samples=2,
+    )
+
+    monkeypatch.setattr(
+        drift_control_module,
+        "DRIFT_ALGORITHM_VERSION",
+        drift_control_module.LEGACY_DRIFT_ALGORITHM_VERSION_V1,
+    )
+    legacy = monitor.evaluate(
+        reference.reference_id,
+        current,
+        evaluated_at=EVALUATED_AT,
+    )
+    assert legacy.state is DriftState.DRIFT_DETECTED
+
+    monkeypatch.setattr(
+        drift_control_module,
+        "DRIFT_ALGORITHM_VERSION",
+        "autosport.drift.mean-absolute-shift.v2",
+    )
+    reopened = DriftMonitor(ScientificRegistry(registry.path))
+    finding_entry, _, _ = reopened.require_canonical_finding(
+        legacy.finding_id,
+        as_of=EVALUATED_AT,
+    )
+    assert finding_entry.payload["algorithm_version"] == (
+        drift_control_module.LEGACY_DRIFT_ALGORITHM_VERSION_V1
     )
 

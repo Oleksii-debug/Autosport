@@ -315,7 +315,6 @@ class SupervisedConfirmationAuthority:
                 records,
                 digest,
                 clock_high_water,
-                adopt_if_missing=True,
             )
 
     @staticmethod
@@ -410,8 +409,6 @@ class SupervisedConfirmationAuthority:
         records: Sequence[_Record],
         digest: str,
         clock_high_water: str | None,
-        *,
-        adopt_if_missing: bool,
     ) -> None:
         observed = self._monotonic_state_digest(
             records, digest, clock_high_water
@@ -423,29 +420,9 @@ class SupervisedConfirmationAuthority:
             if not history:
                 if observed is None:
                     return
-                if not adopt_if_missing:
-                    raise SupervisedConfirmationIntegrityError(
-                        "confirmation state exists without independent monotonic authority"
-                    )
-                tx_id = self._monotonic_tx_id(
-                    operation="ADOPT_VALIDATED_BASELINE",
-                    observed_state_sha256=None,
-                    intended_state_sha256=observed,
-                    semantic_binding_sha256=binding,
-                    authority_tip_sha256=None,
+                raise SupervisedConfirmationIntegrityError(
+                    "confirmation state exists without independent monotonic authority"
                 )
-                authority.prepare(
-                    tx_id=tx_id,
-                    observed_state_sha256=None,
-                    intended_state_sha256=observed,
-                    semantic_binding_sha256=binding,
-                )
-                authority.commit(
-                    tx_id=tx_id,
-                    observed_state_sha256=observed,
-                    semantic_binding_sha256=binding,
-                )
-                return
 
             latest = history[-1]
             if (
@@ -477,7 +454,6 @@ class SupervisedConfirmationAuthority:
             records,
             digest,
             clock_high_water,
-            adopt_if_missing=True,
         )
         observed = self._monotonic_state_digest(
             records, digest, clock_high_water
@@ -628,7 +604,7 @@ class SupervisedConfirmationAuthority:
                 recover_checkpoint=True
             )
             self._ensure_monotonic_current_locked(
-                records, digest, clock_high_water, adopt_if_missing=True
+                records, digest, clock_high_water
             )
             if review_id in state.reviews:
                 raise SupervisedConfirmationConflictError(
@@ -639,6 +615,10 @@ class SupervisedConfirmationAuthority:
                 raise SupervisedConfirmationConflictError(
                     "decision_id is already bound to different durable decision evidence"
                 )
+            if decision_id in state.receipt_by_decision:
+                raise SupervisedConfirmationConflictError(
+                    "decision already has a durable confirmation receipt"
+                )
             now = self._now()
             if clock_high_water is not None and now < _parse_timestamp(
                 "clock_high_water", clock_high_water
@@ -646,6 +626,15 @@ class SupervisedConfirmationAuthority:
                 raise SupervisedConfirmationConflictError(
                     "product clock moved backwards behind durable confirmation history"
                 )
+            for prior in state.reviews.values():
+                if (
+                    prior.decision_id == decision_id
+                    and prior.review_id not in state.receipt_by_review
+                    and now < _parse_timestamp("expires_at", prior.expires_at)
+                ):
+                    raise SupervisedConfirmationConflictError(
+                        "decision already has an active unconfirmed review"
+                    )
             reviewed_at = _timestamp(now)
             expires_at = _timestamp(now + timedelta(seconds=ttl_seconds))
             payload: dict[str, object] = {
@@ -688,7 +677,7 @@ class SupervisedConfirmationAuthority:
                 recover_checkpoint=True
             )
             self._ensure_monotonic_current_locked(
-                records, digest, clock_high_water, adopt_if_missing=True
+                records, digest, clock_high_water
             )
             review = state.reviews.get(review_id)
             if review is None:
@@ -763,7 +752,7 @@ class SupervisedConfirmationAuthority:
                 recover_checkpoint=True
             )
             self._ensure_monotonic_current_locked(
-                records, digest, clock_high_water, adopt_if_missing=True
+                records, digest, clock_high_water
             )
             receipt = state.receipts.get(receipt_id)
             if receipt is None:
@@ -805,7 +794,7 @@ class SupervisedConfirmationAuthority:
                 recover_checkpoint=True
             )
             self._ensure_monotonic_current_locked(
-                records, digest, clock_high_water, adopt_if_missing=True
+                records, digest, clock_high_water
             )
             receipt = state.receipts.get(receipt_id)
             if receipt is None:
@@ -1013,6 +1002,21 @@ class SupervisedConfirmationAuthority:
                     raise SupervisedConfirmationIntegrityError(
                         "decision_id was rebound to different durable decision evidence"
                     )
+                if review.decision_id in state.receipt_by_decision:
+                    raise SupervisedConfirmationIntegrityError(
+                        "confirmation journal prepares review after durable receipt"
+                    )
+                reviewed_instant = _parse_timestamp("reviewed_at", review.reviewed_at)
+                for prior in state.reviews.values():
+                    if (
+                        prior.decision_id == review.decision_id
+                        and prior.review_id not in state.receipt_by_review
+                        and _parse_timestamp("expires_at", prior.expires_at)
+                        > reviewed_instant
+                    ):
+                        raise SupervisedConfirmationIntegrityError(
+                            "confirmation journal overlaps active reviews for one decision"
+                        )
                 state.decision_sha256_by_id[review.decision_id] = review.decision_sha256
                 state.reviews[review.review_id] = review
                 continue

@@ -263,11 +263,24 @@ def _binary_log_loss(probability: Decimal, outcome: int) -> float:
             "log loss is unbounded for probability=1 and realized outcome=0"
         )
 
+    if outcome == 0 and float(probability) == 0.0:
+        raise ValueError(
+            "positive log loss is not representable as a nonzero binary64 value"
+        )
+
     decimal_tuple = probability.as_tuple()
-    decimal_places = -decimal_tuple.exponent if decimal_tuple.exponent < 0 else 0
+    significant_digits = len(decimal_tuple.digits)
+    while (
+        significant_digits > 1
+        and decimal_tuple.digits[significant_digits - 1] == 0
+    ):
+        significant_digits -= 1
+    trailing_zeros = len(decimal_tuple.digits) - significant_digits
+    effective_exponent = decimal_tuple.exponent + trailing_zeros
+    decimal_places = -effective_exponent if effective_exponent < 0 else 0
     precision = max(
         _LOG_LOSS_MIN_DECIMAL_PRECISION,
-        len(decimal_tuple.digits) + 2,
+        significant_digits + 2,
         decimal_places + 2 if outcome == 0 else 0,
     )
     context = Context(

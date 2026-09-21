@@ -8,10 +8,11 @@ from .windows_gui import WindowsAutosportApp
 
 
 WINDOWS_OPERATIONAL_STATUS_AUTOMATION_ID = 206
+OPERATIONAL_STATUS_FOCUS_SHORTCUT = "<F5>"
 OPERATIONAL_STATUS_ACCESSIBLE_NAME_UK = "Операційний стан Автоспорт"
 OPERATIONAL_STATUS_ACCESSIBLE_DESCRIPTION_UK = (
     "Лише для читання: поточний стан перевірки набору даних, паперового повтору, "
-    "відновлення та живого спостереження. Доступне переходом Tab."
+    "відновлення та живого спостереження. Натисніть F5 для прямого переходу або Tab."
 )
 
 
@@ -75,6 +76,11 @@ class AccessibleWindowsAutosportApp(WindowsAutosportApp):
             self.operational_status,
             WINDOWS_OPERATIONAL_STATUS_AUTOMATION_ID,
         )
+        self.bind(OPERATIONAL_STATUS_FOCUS_SHORTCUT, self._focus_operational_status)
+
+    def _focus_operational_status(self, _event=None) -> str:
+        self.operational_status.focus_set()
+        return "break"
 
 
 def main() -> int:

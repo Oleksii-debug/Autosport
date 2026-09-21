@@ -393,20 +393,46 @@ def _validate_durable_effect_receipts(
     """
 
     events = _verified_ledger_events(ledger)
-    if not any(
-        event.get("plan_id") == parent_plan_id
-        and event.get("event_type") == EventType.PLAN_RESERVED.value
+    plan_events = tuple(
+        event
         for event in events
-    ):
+        if event.get("plan_id") == parent_plan_id
+        and event.get("event_type") == EventType.PLAN_RESERVED.value
+    )
+    if len(plan_events) != 1:
         raise RoutingContractError(
-            "parent plan is absent from durable execution ledger"
+            "parent plan is absent or ambiguous in durable execution ledger"
         )
+    try:
+        actions = plan_events[0]["payload"]["plan"]["actions"]  # type: ignore[index]
+        if not isinstance(actions, list) or not all(
+            isinstance(action, dict)
+            and type(action.get("action_id")) is str
+            and bool(action["action_id"].strip())
+            for action in actions
+        ):
+            raise TypeError("stored plan actions are invalid")
+    except (KeyError, TypeError) as exc:
+        raise RoutingContractError(
+            "durable execution plan payload is invalid"
+        ) from exc
+
+    attempted_action_ids = {
+        event.get("action_id")
+        for event in events
+        if event.get("plan_id") == parent_plan_id
+        and event.get("event_type") == EventType.ATTEMPT_RESERVED.value
+    }
+    unattempted_action_exists = any(
+        action["action_id"] not in attempted_action_ids
+        for action in actions
+    )
 
     attempt_states = _durable_attempt_states(
         events,
         parent_plan_id=parent_plan_id,
     )
-    unresolved_partial = any(
+    unresolved_partial = unattempted_action_exists or any(
         state in {
             AttemptState.RESERVED,
             AttemptState.SUBMITTED,

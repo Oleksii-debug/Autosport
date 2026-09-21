@@ -3,7 +3,6 @@ from __future__ import annotations
 from autosport.decision_ledger import JsonlDecisionLedger
 from autosport.learning_environment import Observation
 from autosport.paper_campaign_admission import PaperCampaignAdmissionError
-from autosport.paper_execution_reality import PaperExecutionLedger
 from paper_campaign_admission_test_support import AdmissionFixture, T2, T3
 
 import pytest
@@ -23,7 +22,7 @@ def test_campaign_observation_is_exact_preexecution_decision_projection(tmp_path
     assert evidence["context_hash"] == source.context_hash
     assert evidence["decision_id"] == source.decision_id
 
-    events = PaperExecutionLedger(fixture.execution_ledger_path).events(fixture.execution_run_id)
+    events = coordinator.execution_ledger.events(fixture.execution_run_id)
     reservation = next(event for event in events if event["event_type"] == "RUN_RESERVED")
     assert not any(event["event_type"] == "DECISION_ORIGIN_BOUND" for event in events)
     assert reservation["payload"]["decision_origin"]["record_sha256"] == evidence[

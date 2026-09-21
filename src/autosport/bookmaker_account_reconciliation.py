@@ -31,6 +31,14 @@ from .bookmaker_capability import (
     BookmakerPositionState,
 )
 from .json_integrity import strict_json_loads
+from .monotonic_workspace_authority import (
+    AuthorityPhase,
+    MonotonicWorkspaceAuthority,
+    MonotonicWorkspaceAuthorityError,
+)
+
+_RECONCILIATION_AUTHORITY_DOMAIN = "provider.account-snapshot-reconciliation-v1"
+_RECONCILIATION_TRANSITION_SCHEMA = "autosport.account-reconciliation-transition-v1"
 
 
 class AccountReconciliationError(RuntimeError):
@@ -216,6 +224,32 @@ def _exact_decimal_difference(left: Decimal, right: Decimal) -> Decimal:
     sign = 1 if coefficient < 0 else 0
     digits = tuple(int(character) for character in str(abs(coefficient)))
     return Decimal((sign, digits, common_exponent))
+
+
+def _authority_tx_prefix(snapshot_id: str) -> str:
+    return f"account-reconciliation:{snapshot_id}:"
+
+
+def _authority_transition_binding(
+    *,
+    previous_state_sha256: str | None,
+    snapshot_id: str,
+    tx_id: str,
+) -> str:
+    payload = {
+        "schema": _RECONCILIATION_TRANSITION_SCHEMA,
+        "schema_version": 1,
+        "previous_state_sha256": previous_state_sha256,
+        "snapshot_id": snapshot_id,
+        "tx_id": tx_id,
+    }
+    encoded = json.dumps(
+        payload,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
+    ).encode("utf-8")
+    return sha256(encoded).hexdigest()
 
 
 def _balance_to_dict(value: BookmakerBalanceObservation) -> dict[str, object]:
@@ -512,8 +546,20 @@ class BookmakerAccountReconciliationStore:
 
     SCHEMA_VERSION = 1
 
-    def __init__(self, path: str | Path) -> None:
+    def __init__(
+        self,
+        path: str | Path,
+        *,
+        authority_root: str | Path | None = None,
+    ) -> None:
         self.path = Path(path)
+        self._workspace = self.path.parent.resolve(strict=False)
+        self._authority = MonotonicWorkspaceAuthority(
+            workspace=self._workspace,
+            domain=_RECONCILIATION_AUTHORITY_DOMAIN,
+            key=f"account-reconciliation:{self.path.name}",
+            authority_root=authority_root,
+        )
 
     def append_snapshot(self, snapshot: BookmakerAccountSnapshot) -> bool:
         if not isinstance(snapshot, BookmakerAccountSnapshot):
@@ -699,18 +745,93 @@ class BookmakerAccountReconciliationStore:
             unexplained_balance_delta=balance_delta,
         )
 
+    def _recover_authority(
+        self,
+        observed_state_sha256: str | None,
+        *,
+        history: list[BookmakerAccountSnapshot] | None = None,
+    ) -> None:
+        try:
+            records = self._authority.read_history()
+            pending = (
+                records[-1]
+                if records and records[-1].phase is AuthorityPhase.PREPARE
+                else None
+            )
+            if (
+                pending is not None
+                and observed_state_sha256 == pending.intended_state_sha256
+            ):
+                if not history:
+                    raise AccountReconciliationIntegrityError(
+                        "prepared account reconciliation state has no snapshot"
+                    )
+                snapshot_id = snapshot_fingerprint(history[-1])
+                prefix = _authority_tx_prefix(snapshot_id)
+                if not pending.tx_id.startswith(prefix):
+                    raise AccountReconciliationIntegrityError(
+                        "account reconciliation authority tx does not bind latest snapshot"
+                    )
+                suffix = pending.tx_id[len(prefix) :]
+                if not suffix.isascii() or not suffix.isdigit() or int(suffix) <= 0:
+                    raise AccountReconciliationIntegrityError(
+                        "account reconciliation authority tx attempt is invalid"
+                    )
+                expected_binding = _authority_transition_binding(
+                    previous_state_sha256=pending.previous_committed_state_sha256,
+                    snapshot_id=snapshot_id,
+                    tx_id=pending.tx_id,
+                )
+                if pending.semantic_binding_sha256 != expected_binding:
+                    raise AccountReconciliationIntegrityError(
+                        "account reconciliation authority semantic binding mismatch"
+                    )
+                self._authority.recover(
+                    observed_state_sha256=observed_state_sha256,
+                    tx_id=pending.tx_id,
+                    semantic_binding_sha256=expected_binding,
+                )
+            else:
+                self._authority.recover(
+                    observed_state_sha256=observed_state_sha256,
+                )
+        except MonotonicWorkspaceAuthorityError as exc:
+            raise AccountReconciliationIntegrityError(
+                "account reconciliation failed independent monotonic authority validation"
+            ) from exc
+
+    def _next_authority_tx_id(self, snapshot_id: str) -> str:
+        prefix = _authority_tx_prefix(snapshot_id)
+        try:
+            records = self._authority.read_history()
+        except MonotonicWorkspaceAuthorityError as exc:
+            raise AccountReconciliationIntegrityError(
+                "account reconciliation monotonic authority history is unreadable"
+            ) from exc
+        attempts: list[int] = []
+        for record in records:
+            if not record.tx_id.startswith(prefix):
+                continue
+            suffix = record.tx_id[len(prefix) :]
+            if suffix.isascii() and suffix.isdigit() and int(suffix) > 0:
+                attempts.append(int(suffix))
+        return f"{prefix}{max(attempts, default=0) + 1}"
+
     def _load_history(self) -> list[BookmakerAccountSnapshot]:
         if not self.path.exists():
+            self._recover_authority(None)
             return []
         try:
-            raw = self.path.read_text(encoding="utf-8")
+            raw_bytes = self.path.read_bytes()
+            raw = raw_bytes.decode("utf-8")
             document = strict_json_loads(raw)
         except (OSError, UnicodeError, ValueError) as exc:
             raise AccountReconciliationIntegrityError(
                 "account reconciliation store is unreadable or corrupt"
             ) from exc
         payload = _exact_keys(document, {"schema_version", "snapshots"}, "store")
-        if payload["schema_version"] != self.SCHEMA_VERSION:
+        schema_version = payload["schema_version"]
+        if type(schema_version) is not int or schema_version != self.SCHEMA_VERSION:
             raise AccountReconciliationIntegrityError(
                 "unsupported account reconciliation schema_version"
             )
@@ -735,13 +856,21 @@ class BookmakerAccountReconciliationStore:
             history.append(snapshot)
         if history:
             self._reconcile(history)
+        state_sha256 = sha256(raw_bytes).hexdigest()
+        self._recover_authority(state_sha256, history=history)
         return history
 
-    def _write_history(
-        self, history: tuple[BookmakerAccountSnapshot, ...] | list[BookmakerAccountSnapshot]
-    ) -> None:
+    @classmethod
+    def _encode_history(
+        cls,
+        history: tuple[BookmakerAccountSnapshot, ...] | list[BookmakerAccountSnapshot],
+    ) -> bytes:
+        if not history:
+            raise AccountReconciliationIntegrityError(
+                "cannot persist empty account reconciliation history"
+            )
         document = {
-            "schema_version": self.SCHEMA_VERSION,
+            "schema_version": cls.SCHEMA_VERSION,
             "snapshots": [
                 {
                     "snapshot_id": snapshot_fingerprint(snapshot),
@@ -750,7 +879,7 @@ class BookmakerAccountReconciliationStore:
                 for snapshot in history
             ],
         }
-        encoded = (
+        return (
             json.dumps(
                 document,
                 sort_keys=True,
@@ -758,14 +887,14 @@ class BookmakerAccountReconciliationStore:
                 ensure_ascii=True,
             )
             + "\n"
-        )
+        ).encode("utf-8")
+
+    def _publish_history_bytes(self, encoded: bytes) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         temp_name: str | None = None
         try:
             with tempfile.NamedTemporaryFile(
-                "w",
-                encoding="utf-8",
-                newline="\n",
+                "wb",
                 dir=self.path.parent,
                 prefix=f".{self.path.name}.",
                 suffix=".tmp",
@@ -794,3 +923,50 @@ class BookmakerAccountReconciliationStore:
                     Path(temp_name).unlink()
                 except FileNotFoundError:
                     pass
+
+    def _write_history(
+        self, history: tuple[BookmakerAccountSnapshot, ...] | list[BookmakerAccountSnapshot]
+    ) -> None:
+        encoded = self._encode_history(history)
+        intended_state_sha256 = sha256(encoded).hexdigest()
+        previous_state_sha256: str | None = None
+        if self.path.exists():
+            try:
+                previous_state_sha256 = sha256(self.path.read_bytes()).hexdigest()
+            except OSError as exc:
+                raise AccountReconciliationIntegrityError(
+                    "cannot read current account reconciliation state before publication"
+                ) from exc
+
+        latest_snapshot_id = snapshot_fingerprint(history[-1])
+        tx_id = self._next_authority_tx_id(latest_snapshot_id)
+        semantic_binding = _authority_transition_binding(
+            previous_state_sha256=previous_state_sha256,
+            snapshot_id=latest_snapshot_id,
+            tx_id=tx_id,
+        )
+        try:
+            self._authority.prepare(
+                tx_id=tx_id,
+                observed_state_sha256=previous_state_sha256,
+                intended_state_sha256=intended_state_sha256,
+                semantic_binding_sha256=semantic_binding,
+            )
+        except MonotonicWorkspaceAuthorityError as exc:
+            raise AccountReconciliationIntegrityError(
+                "account reconciliation monotonic transition was rejected"
+            ) from exc
+
+        self._publish_history_bytes(encoded)
+
+        # Re-read exact durable bytes. If the process crashed after local publication,
+        # the same path on restart performs this recovery and commits the PREPARE only
+        # after reconstructing its semantic binding from the persisted latest snapshot.
+        persisted = self._load_history()
+        intended_ids = tuple(snapshot_fingerprint(item) for item in history)
+        persisted_ids = tuple(snapshot_fingerprint(item) for item in persisted)
+        if persisted_ids != intended_ids:
+            raise AccountReconciliationIntegrityError(
+                "account reconciliation publication did not preserve intended history"
+            )
+

@@ -1,10 +1,10 @@
 """Exact Betfair order capital-reserve arithmetic.
 
-This module is a narrow provider-economic contract.  It converts documented
-Betfair order sizing semantics into capital that must be reserved *before* an
+This module is a narrow provider-economic contract. It converts documented
+Betfair order sizing semantics into capital that must be reserved before an
 order could be considered for execution.
 
-Unquantized ratios are retained as exact rational values.  Decimal is used only
+Unquantized ratios are retained as exact rational values. Decimal is used only
 for caller inputs and the final currency-quantized reserve, so repeating target
 ratios cannot silently under-reserve because of the active Decimal context.
 
@@ -100,82 +100,24 @@ def _round_fraction_up(value: Fraction, quantum: Decimal) -> Decimal:
 
 
 @dataclass(frozen=True, slots=True)
-class BetfairOrderReserve:
-    """Exact provider-economic reserve witness."""
-
-    side: BetfairOrderSide
-    order_type: BetfairOrderType
+class _ReserveCalculation:
     reserve: Decimal
     raw_reserve: Fraction
     backer_stake_equivalent: Fraction | None
-    target_type: BetfairBetTargetType | None
-    target_size: Decimal | None
-    each_way: bool
-    execution_authority: bool = False
-
-    def __post_init__(self) -> None:
-        _enum(self.side, BetfairOrderSide, "side")
-        _enum(self.order_type, BetfairOrderType, "order_type")
-        _decimal(self.reserve, "reserve")
-        if type(self.raw_reserve) is not Fraction or self.raw_reserve <= 0:
-            raise BetfairOrderLiabilityError(
-                "raw_reserve must be positive exact Fraction"
-            )
-        if Fraction(self.reserve) < self.raw_reserve:
-            raise BetfairOrderLiabilityError(
-                "reserve must not be below raw_reserve"
-            )
-        if self.backer_stake_equivalent is not None:
-            if (
-                type(self.backer_stake_equivalent) is not Fraction
-                or self.backer_stake_equivalent <= 0
-            ):
-                raise BetfairOrderLiabilityError(
-                    "backer_stake_equivalent must be positive exact Fraction"
-                )
-        if self.target_type is not None:
-            _enum(
-                self.target_type,
-                BetfairBetTargetType,
-                "target_type",
-            )
-        if self.target_size is not None:
-            _decimal(self.target_size, "target_size")
-        if type(self.each_way) is not bool:
-            raise BetfairOrderLiabilityError("each_way must be bool")
-        if self.execution_authority is not False:
-            raise BetfairOrderLiabilityError(
-                "order reserve never grants execution authority"
-            )
 
 
-def derive_betfair_order_reserve(
+def _derive_components(
     *,
     side: BetfairOrderSide,
     order_type: BetfairOrderType,
-    price: Decimal | None = None,
-    size: Decimal | None = None,
-    liability: Decimal | None = None,
-    target_type: BetfairBetTargetType | None = None,
-    target_size: Decimal | None = None,
-    currency_quantum: Decimal | None = None,
-    each_way: bool = False,
-) -> BetfairOrderReserve:
-    """Derive capital reserve for one documented Betfair sizing mode.
-
-    Supported provider semantics:
-    - standard LIMIT: API ``size`` is backer's stake;
-    - target LIMIT: PAYOUT / BACKERS_PROFIT is converted at the submitted
-      limit price using exact rational arithmetic, then conservatively rounded
-      upward to the caller-supplied currency quantum;
-    - MARKET_ON_CLOSE / LIMIT_ON_CLOSE: API ``liability`` is already the
-      amount reserved (BACK stake or LAY max loss);
-    - EACH_WAY: only standard-size BACK LIMIT is admitted here; documented
-      potential liability is ``size * 2``.
-
-    Unsupported combinations fail closed rather than guessing.
-    """
-
+    price: Decimal | None,
+    size: Decimal | None,
+    liability: Decimal | None,
+    target_type: BetfairBetTargetType | None,
+    target_size: Decimal | None,
+    currency_quantum: Decimal | None,
+    each_way: bool,
+) -> _ReserveCalculation:
     _enum(side, BetfairOrderSide, "side")
     _enum(order_type, BetfairOrderType, "order_type")
     if type(each_way) is not bool:
@@ -189,6 +131,7 @@ def derive_betfair_order_reserve(
             size is not None
             or target_type is not None
             or target_size is not None
+            or currency_quantum is not None
             or each_way
         ):
             raise BetfairOrderLiabilityError(
@@ -204,17 +147,12 @@ def derive_betfair_order_reserve(
                 "MARKET_ON_CLOSE has no preselected price"
             )
         raw = _fraction(amount)
-        return BetfairOrderReserve(
-            side=side,
-            order_type=order_type,
+        return _ReserveCalculation(
             reserve=amount,
             raw_reserve=raw,
             backer_stake_equivalent=(
                 raw if side is BetfairOrderSide.BACK else None
             ),
-            target_type=None,
-            target_size=None,
-            each_way=False,
         )
 
     if liability is not None:
@@ -228,6 +166,10 @@ def derive_betfair_order_reserve(
     price_fraction = _fraction(limit_price)
 
     if target_type is None and target_size is None:
+        if currency_quantum is not None:
+            raise BetfairOrderLiabilityError(
+                "standard LIMIT must not provide currency_quantum"
+            )
         backer_stake_decimal = _decimal(size, "size")
         backer_stake = _fraction(backer_stake_decimal)
         if each_way:
@@ -241,15 +183,10 @@ def derive_betfair_order_reserve(
         else:
             raw_reserve = backer_stake * (price_fraction - 1)
         reserve = _fraction_to_decimal_exact(raw_reserve)
-        return BetfairOrderReserve(
-            side=side,
-            order_type=order_type,
+        return _ReserveCalculation(
             reserve=reserve,
             raw_reserve=raw_reserve,
             backer_stake_equivalent=backer_stake,
-            target_type=None,
-            target_size=None,
-            each_way=each_way,
         )
 
     if size is not None:
@@ -276,13 +213,120 @@ def derive_betfair_order_reserve(
         raw_reserve = backer_stake * (price_fraction - 1)
 
     reserve = _round_fraction_up(raw_reserve, quantum)
-    return BetfairOrderReserve(
-        side=side,
-        order_type=order_type,
+    return _ReserveCalculation(
         reserve=reserve,
         raw_reserve=raw_reserve,
         backer_stake_equivalent=backer_stake,
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class BetfairOrderReserve:
+    """Self-validating exact provider-economic reserve calculation."""
+
+    side: BetfairOrderSide
+    order_type: BetfairOrderType
+    price: Decimal | None
+    size: Decimal | None
+    liability: Decimal | None
+    target_type: BetfairBetTargetType | None
+    target_size: Decimal | None
+    currency_quantum: Decimal | None
+    each_way: bool
+    reserve: Decimal
+    raw_reserve: Fraction
+    backer_stake_equivalent: Fraction | None
+    execution_authority: bool = False
+
+    def __post_init__(self) -> None:
+        if self.execution_authority is not False:
+            raise BetfairOrderLiabilityError(
+                "order reserve never grants execution authority"
+            )
+        expected = _derive_components(
+            side=self.side,
+            order_type=self.order_type,
+            price=self.price,
+            size=self.size,
+            liability=self.liability,
+            target_type=self.target_type,
+            target_size=self.target_size,
+            currency_quantum=self.currency_quantum,
+            each_way=self.each_way,
+        )
+        if type(self.reserve) is not Decimal or self.reserve != expected.reserve:
+            raise BetfairOrderLiabilityError(
+                "reserve does not match exact derivation inputs"
+            )
+        if (
+            type(self.raw_reserve) is not Fraction
+            or self.raw_reserve != expected.raw_reserve
+        ):
+            raise BetfairOrderLiabilityError(
+                "raw_reserve does not match exact derivation inputs"
+            )
+        if self.backer_stake_equivalent is None:
+            backer_stake_matches = expected.backer_stake_equivalent is None
+        else:
+            backer_stake_matches = (
+                type(self.backer_stake_equivalent) is Fraction
+                and self.backer_stake_equivalent
+                == expected.backer_stake_equivalent
+            )
+        if not backer_stake_matches:
+            raise BetfairOrderLiabilityError(
+                "backer_stake_equivalent does not match exact derivation inputs"
+            )
+
+
+def derive_betfair_order_reserve(
+    *,
+    side: BetfairOrderSide,
+    order_type: BetfairOrderType,
+    price: Decimal | None = None,
+    size: Decimal | None = None,
+    liability: Decimal | None = None,
+    target_type: BetfairBetTargetType | None = None,
+    target_size: Decimal | None = None,
+    currency_quantum: Decimal | None = None,
+    each_way: bool = False,
+) -> BetfairOrderReserve:
+    """Derive capital reserve for one documented Betfair sizing mode.
+
+    Supported provider semantics:
+    - standard LIMIT: API 'size' is backer's stake;
+    - target LIMIT: PAYOUT / BACKERS_PROFIT is converted at the submitted
+      limit price using exact rational arithmetic, then conservatively rounded
+      upward to the caller-supplied currency quantum;
+    - MARKET_ON_CLOSE / LIMIT_ON_CLOSE: API 'liability' is already the
+      amount reserved (BACK stake or LAY max loss);
+    - EACH_WAY: only standard-size BACK LIMIT is admitted here; documented
+      potential liability is 'size * 2'.
+
+    Unsupported combinations fail closed rather than guessing.
+    """
+    calculation = _derive_components(
+        side=side,
+        order_type=order_type,
+        price=price,
+        size=size,
+        liability=liability,
         target_type=target_type,
-        target_size=target,
-        each_way=False,
+        target_size=target_size,
+        currency_quantum=currency_quantum,
+        each_way=each_way,
+    )
+    return BetfairOrderReserve(
+        side=side,
+        order_type=order_type,
+        price=price,
+        size=size,
+        liability=liability,
+        target_type=target_type,
+        target_size=target_size,
+        currency_quantum=currency_quantum,
+        each_way=each_way,
+        reserve=calculation.reserve,
+        raw_reserve=calculation.raw_reserve,
+        backer_stake_equivalent=calculation.backer_stake_equivalent,
     )

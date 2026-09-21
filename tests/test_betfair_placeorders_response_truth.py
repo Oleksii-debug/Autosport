@@ -176,7 +176,7 @@ def test_response_echo_rejects_handicap_or_persistence_drift(
     ):
         _parse(payload, action)
 
-@pytest.mark.parametrize("response_id", (True, 1.0, "1"))
+@pytest.mark.parametrize("response_id", (True, 1.5, "1"))
 def test_response_id_rejects_coercible_non_integer_wire_identity(
     response_id: object,
 ) -> None:
@@ -243,4 +243,25 @@ def test_response_echo_rejects_coercible_handicap_identity(
         match="does not bind exact action",
     ):
         _parse(payload, action)
+
+def test_response_echo_accepts_equivalent_integral_numeric_wire_values() -> None:
+    action = _action()
+    payload = _payload(
+        action,
+        execution_status="SUCCESS",
+        instruction_status="SUCCESS",
+        include_size_matched=True,
+        size_matched="5.00",
+        average_price_matched="2.00",
+        bet_id="bet-123",
+        response_id=1.0,
+        selection_id=42.0,
+        handicap=0.0,
+    )
+
+    report = _parse(payload, action)
+
+    assert report.request_id == 1
+    assert report.instruction.bet_id == "bet-123"
+    assert _report_outcome(report, action) is PlaceOrdersOutcome.ACCEPTED
 

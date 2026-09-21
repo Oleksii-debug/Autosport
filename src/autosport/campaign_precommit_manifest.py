@@ -14,6 +14,10 @@ from .json_integrity import strict_json_loads
 
 SCHEMA = "autosport.campaign_precommit_manifest"
 SCHEMA_VERSION = 1
+
+_POSIX_LINK_DIR_FD_SUPPORTED = os.link in os.supports_dir_fd
+_POSIX_UNLINK_DIR_FD_SUPPORTED = os.unlink in os.supports_dir_fd
+_POSIX_LINK_NOFOLLOW_SUPPORTED = os.link in os.supports_follow_symlinks
 _HEX = frozenset("0123456789abcdef")
 _RECORD_FIELDS = {
     "schema",
@@ -192,8 +196,9 @@ def _publish_bound_posix_file_once(
     """Publish complete bytes atomically without exposing a partial canonical leaf."""
 
     if (
-        os.link not in os.supports_dir_fd
-        or os.unlink not in os.supports_dir_fd
+        not _POSIX_LINK_DIR_FD_SUPPORTED
+        or not _POSIX_UNLINK_DIR_FD_SUPPORTED
+        or not _POSIX_LINK_NOFOLLOW_SUPPORTED
     ):
         raise CampaignPrecommitManifestError(
             "platform lacks descriptor-relative no-clobber precommit publication"

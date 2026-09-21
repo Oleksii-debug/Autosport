@@ -7,6 +7,7 @@ from enum import StrEnum
 from pathlib import Path
 from typing import Any, Callable, Mapping
 from .integrity import atomic_write_json, sha256_file
+from ._scientific_registry_read_authority import require_scientific_registry_read_authority
 from .monotonic_workspace_authority import MonotonicWorkspaceAuthority
 from .research_multiplicity import ExperimentFamilyPlan, SequentialDecision, SequentialLookEvidence, SequentialMultiplicityEvidenceStore
 from .scientific_registry import PromotionEvidence, ResearchOutcome, ScientificRegistry
@@ -411,6 +412,10 @@ class TrialFamilyAccountingStore:
 
     def _registry(self, state: dict[str, Any] | None=None) -> ScientificRegistry:
         loaded = self._read_state() if state is None else state
+        # Validate class/executable authority before constructing the registry.
+        # ScientificRegistry.__init__ calls _read(), so checking after construction
+        # would already have executed a caller-rebound read delegate.
+        require_scientific_registry_read_authority()
         return ScientificRegistry(self.workspace_root / loaded['scientific_registry'])
 
     def _sequential(self, state: dict[str, Any] | None=None) -> SequentialMultiplicityEvidenceStore:

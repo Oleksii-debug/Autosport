@@ -13,6 +13,7 @@ from .market_outcomes import (
     OutcomeRosterBasis,
     SettlementSemantics,
     _VERIFIED_AUTHORITY_TOKEN,
+    _canonical_timestamp,
 )
 
 
@@ -156,9 +157,6 @@ def assess_betfair_football_prematch_match_odds_authority(
 
     event_type = _canonical_text("event_type_id", event_type_id)
     observed = _canonical_text("observed_at", observed_at)
-    # Reuse the canonical authority timestamp validator instead of accepting naive time.
-    from .market_outcomes import _canonical_timestamp
-
     _canonical_timestamp("observed_at", observed)
 
     if event_type != _BETFAIR_FOOTBALL_EVENT_TYPE_ID:
@@ -198,12 +196,11 @@ def assess_betfair_football_prematch_match_odds_authority(
         "numberOfRunners": 3,
         "numberOfActiveRunners": 3,
         "runnersVoidable": False,
+        "betDelay": 0,
     }
     for field_name, expected in required_book_truth.items():
         if market_book.get(field_name) != expected:
             return _refused(identity, f"betfair_live_shape_{field_name}_not_exact")
-    if market_book.get("betDelay") not in (0, None):
-        return _refused(identity, "betfair_market_has_nonzero_bet_delay")
     version = market_book.get("version")
     if type(version) is not int or version <= 0:
         return _refused(identity, "betfair_market_version_missing")
@@ -237,6 +234,7 @@ def assess_betfair_football_prematch_match_odds_authority(
         "market_id": identity.market_id,
         "version": version,
         "status": market_book["status"],
+        "betDelay": market_book["betDelay"],
         "inplay": market_book["inplay"],
         "complete": market_book["complete"],
         "numberOfWinners": market_book["numberOfWinners"],
@@ -265,6 +263,7 @@ def assess_betfair_football_prematch_match_odds_authority(
             "market_type": _BETFAIR_MATCH_ODDS,
             "betting_type": _BETFAIR_ODDS,
             "requires_open": True,
+            "requires_bet_delay_zero": True,
             "requires_inplay_false": True,
             "requires_complete": True,
             "requires_runner_count": 3,

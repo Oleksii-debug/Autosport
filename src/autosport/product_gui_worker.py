@@ -97,7 +97,11 @@ class ProductGuiWorker:
         initial_bankroll: str = "10000",
         poll_seconds: float = 30.0,
     ) -> bool:
-        if type(source_factory) is not str or not source_factory or source_factory.strip() != source_factory:
+        if (
+            type(source_factory) is not str
+            or not source_factory
+            or source_factory.strip() != source_factory
+        ):
             raise ValueError("source_factory must be a non-empty trimmed string")
         if (
             isinstance(poll_seconds, bool)
@@ -210,6 +214,8 @@ class ProductGuiWorker:
         runtime: AutonomousProductRuntime | None = None
         started = False
         terminal_error: BaseException | None = None
+        stopped_status: ContinuousSessionStatus | None = None
+        stop_reason: str | None = None
         try:
             runtime = self._runtime_builder(workspace, source_factory, initial_bankroll)
             started_status = runtime.start()
@@ -224,13 +230,6 @@ class ProductGuiWorker:
 
             stop_reason = self._stop_reason
             stopped_status = runtime.stop(stop_reason)
-            self._messages.put(
-                ProductGuiMessage(
-                    kind="STOPPED",
-                    status=stopped_status,
-                    stop_reason=stop_reason,
-                )
-            )
         except BaseException as exc:
             terminal_error = exc
             if runtime is not None and started:
@@ -250,6 +249,14 @@ class ProductGuiWorker:
                     ProductGuiMessage(
                         kind="ERROR",
                         error_type=_safe_error_type(terminal_error),
+                    )
+                )
+            elif stopped_status is not None and stop_reason is not None:
+                self._messages.put(
+                    ProductGuiMessage(
+                        kind="STOPPED",
+                        status=stopped_status,
+                        stop_reason=stop_reason,
                     )
                 )
             with self._lock:

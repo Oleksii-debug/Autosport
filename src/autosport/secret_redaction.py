@@ -22,6 +22,8 @@ _SENSITIVE_NORMALIZED_KEYS = frozenset(
         "pwd",
         "secret",
         "clientsecret",
+        "secretaccesskey",
+        "privatekey",
         "authorization",
         "credential",
         "credentials",
@@ -38,6 +40,8 @@ _SENSITIVE_SUFFIXES = (
     "passwd",
     "pwd",
     "secret",
+    "secretaccesskey",
+    "privatekey",
     "authorization",
     "credential",
     "credentials",
@@ -51,7 +55,7 @@ _QUERY_PARAM_RE = re.compile(
 )
 _AUTHORIZATION_VALUE_RE = re.compile(
     r"(?i)(?P<prefix>\bauthorization\s*[:=]\s*)"
-    r"(?P<value>bearer\s+[^\s,;&}\]]+|[^\s,;&}\]]+)"
+    r"(?P<value>\[REDACTED\]|bearer\s+[^\s,;&}\]]+|[^\s,;&}\]]+)"
 )
 _BEARER_RE = re.compile(
     r"(?i)\b(?P<scheme>bearer)\s+(?P<value>[A-Za-z0-9._~+/=-]{4,})"

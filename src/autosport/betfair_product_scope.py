@@ -55,7 +55,7 @@ class BetfairProductScopeDecision:
     reason_codes: tuple[str, ...]
     domain: BetfairProductDomain
     provenance_domain: str
-    production_environment: bool
+    production_environment: bool | None
     delayed_market_data: bool | None
     provider_exchange_bet_placement_available: bool
     sportsbook_read_only: bool
@@ -78,8 +78,13 @@ class BetfairProductScopeDecision:
             raise BetfairProductScopeError(
                 "reason_codes must be an immutable tuple of non-empty strings"
             )
+        if self.production_environment is not None and type(
+            self.production_environment
+        ) is not bool:
+            raise BetfairProductScopeError(
+                "production_environment must be bool or None"
+            )
         for field in (
-            "production_environment",
             "provider_exchange_bet_placement_available",
             "sportsbook_read_only",
             "requires_external_affiliate_entitlement",
@@ -247,7 +252,7 @@ def _evaluate_sportsbook_scope(
         tuple(reasons),
         BetfairProductDomain.SPORTSBOOK,
         "betfair.sportsbook",
-        True,
+        None,
         None,
         False,
         True,

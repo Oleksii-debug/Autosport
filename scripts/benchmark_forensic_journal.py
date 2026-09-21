@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 import json
 import os
@@ -9,7 +10,8 @@ import platform
 import sys
 import tempfile
 from time import perf_counter_ns
-from typing import Iterable
+from typing import Iterable, Iterator
+from unittest.mock import patch
 
 import autosport.forensic_journal as forensic_journal
 from autosport.forensic_journal import ForensicSessionJournal, HeartbeatState
@@ -25,6 +27,25 @@ def _write_durable(path: Path, payload: bytes) -> None:
         handle.write(payload)
         handle.flush()
         os.fsync(handle.fileno())
+
+
+@contextmanager
+def _probe_journal_reads(path: Path) -> Iterator[dict[str, int]]:
+    """Count exact full-journal read_bytes calls without altering journal semantics."""
+
+    target = Path(path)
+    original_read_bytes = Path.read_bytes
+    counters = {"calls": 0, "bytes": 0}
+
+    def counted(candidate: Path) -> bytes:
+        payload = original_read_bytes(candidate)
+        if candidate == target:
+            counters["calls"] += 1
+            counters["bytes"] += len(payload)
+        return payload
+
+    with patch.object(Path, "read_bytes", new=counted):
+        yield counters
 
 
 def seed_forensic_history(path: Path, record_count: int) -> str:
@@ -97,19 +118,23 @@ def benchmark_case(record_count: int, directory: Path) -> dict[str, int]:
     seeded_bytes = path.stat().st_size
 
     open_started = perf_counter_ns()
-    journal = ForensicSessionJournal(path)
+    with _probe_journal_reads(path) as open_probe:
+        journal = ForensicSessionJournal(path)
     open_ns = perf_counter_ns() - open_started
 
     append_started = perf_counter_ns()
-    appended = journal.record_heartbeat(
-        "forensic-benchmark",
-        HeartbeatState.RUNNING,
-        message="single append after seeded history",
-    )
+    with _probe_journal_reads(path) as append_probe:
+        appended = journal.record_heartbeat(
+            "forensic-benchmark",
+            HeartbeatState.RUNNING,
+            message="single append after seeded history",
+        )
     append_ns = perf_counter_ns() - append_started
+    bytes_after_append = path.stat().st_size
 
     verify_started = perf_counter_ns()
-    integrity = journal.verify()
+    with _probe_journal_reads(path) as verify_probe:
+        integrity = journal.verify()
     verify_ns = perf_counter_ns() - verify_started
 
     if appended.sequence != record_count + 1:
@@ -120,12 +145,20 @@ def benchmark_case(record_count: int, directory: Path) -> dict[str, int]:
     return {
         "history_records": record_count,
         "seeded_file_bytes": seeded_bytes,
-        "file_bytes_after_append": path.stat().st_size,
+        "file_bytes_after_append": bytes_after_append,
         "record_count_after_append": integrity.record_count,
         "seed_ns": seed_ns,
         "open_ns": open_ns,
+        "open_journal_read_calls": open_probe["calls"],
+        "open_journal_read_bytes": open_probe["bytes"],
         "append_ns": append_ns,
+        "append_journal_read_calls": append_probe["calls"],
+        "append_journal_read_bytes": append_probe["bytes"],
         "verify_ns": verify_ns,
+        "verify_journal_read_calls": verify_probe["calls"],
+        "verify_journal_read_bytes": verify_probe["bytes"],
+        "theoretical_append_historical_record_validations": record_count,
+        "theoretical_append_lifecycle_record_visits": 2 * record_count + 1,
     }
 
 
@@ -146,8 +179,11 @@ def benchmark_document(sizes: Iterable[int]) -> dict[str, object]:
 
     return {
         "schema_version": 1,
+        "kind": "autosport.forensic_journal_scaling_profile",
         "clock": "perf_counter_ns",
-        "threshold_semantics": "NONE_MEASUREMENT_ONLY",
+        "measurement_only": True,
+        "performance_threshold_defined": False,
+        "integrity_semantics_modified": False,
         "source_sha": os.environ.get("AUTOSPORT_SOURCE_SHA", "UNKNOWN"),
         "python_version": platform.python_version(),
         "python_implementation": platform.python_implementation(),

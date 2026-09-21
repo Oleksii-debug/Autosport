@@ -200,8 +200,6 @@ def build_betfair_authenticated_client(
     return client
 
 
-
-
 def resolve_betfair_authenticated_account_identity(
     client: BetfairReadOnlyClient,
     *,

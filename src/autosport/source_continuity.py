@@ -9,6 +9,36 @@ from .json_integrity import strict_json_loads
 
 
 _ALLOWED_CONTINUITY_STATUSES = frozenset({"unknown", "verified"})
+_ALLOWED_REASONS = frozenset(
+    {
+        "no_continuity_evidence",
+        "provider_continuity_witness_absent",
+        "provider_anchor_established_without_prior_continuity",
+        "witness_current_token_mismatch",
+        "witness_previous_token_mismatch",
+        "provider_backfill_incomplete",
+        "provider_chain_and_backfill_verified",
+        "provider_failure_since_last_continuity_proof",
+    }
+)
+_SUCCESS_REASONS = frozenset(
+    {
+        "provider_continuity_witness_absent",
+        "provider_anchor_established_without_prior_continuity",
+        "witness_current_token_mismatch",
+        "witness_previous_token_mismatch",
+        "provider_backfill_incomplete",
+        "provider_chain_and_backfill_verified",
+    }
+)
+_TRUSTED_TOKEN_REQUIRED_REASONS = frozenset(
+    {
+        "provider_anchor_established_without_prior_continuity",
+        "witness_previous_token_mismatch",
+        "provider_backfill_incomplete",
+        "provider_chain_and_backfill_verified",
+    }
+)
 _SCHEMA_VERSION = 1
 _STATE_FIELDS = frozenset(
     {
@@ -94,8 +124,47 @@ class SourceContinuityState:
         _instant(self.last_success_at, "last_success_at", nullable=True)
         _instant(self.last_failure_at, "last_failure_at", nullable=True)
         _text(self.reason, "reason")
-        if self.status == "verified" and self.trusted_token is None:
-            raise ValueError("verified continuity requires a trusted provider token")
+        if self.reason not in _ALLOWED_REASONS:
+            raise ValueError("invalid source continuity reason")
+
+        if self.status == "verified":
+            if self.reason != "provider_chain_and_backfill_verified":
+                raise ValueError("verified continuity requires verified-chain reason")
+            if self.trusted_token is None:
+                raise ValueError("verified continuity requires a trusted provider token")
+        elif self.reason == "provider_chain_and_backfill_verified":
+            raise ValueError("verified-chain reason requires verified continuity status")
+
+        if self.reason == "no_continuity_evidence":
+            if any(
+                value is not None
+                for value in (
+                    self.trusted_token,
+                    self.last_observed_cursor,
+                    self.last_success_at,
+                    self.last_failure_at,
+                )
+            ):
+                raise ValueError("no-evidence continuity state must be pristine")
+            return
+
+        if self.reason in _SUCCESS_REASONS and self.last_success_at is None:
+            raise ValueError("success continuity reason requires success evidence time")
+        if (
+            self.reason == "provider_failure_since_last_continuity_proof"
+            and self.last_failure_at is None
+        ):
+            raise ValueError("failure continuity reason requires failure evidence time")
+        if (
+            self.reason in _TRUSTED_TOKEN_REQUIRED_REASONS
+            and self.trusted_token is None
+        ):
+            raise ValueError("continuity reason requires a trusted provider token")
+        if self.reason in {
+            "provider_anchor_established_without_prior_continuity",
+            "provider_chain_and_backfill_verified",
+        } and self.last_observed_cursor != self.trusted_token:
+            raise ValueError("continuity anchor cursor must match trusted provider token")
 
 
 class SourceContinuityStore:
@@ -144,21 +213,21 @@ class SourceContinuityStore:
     def _read_locked(self) -> dict[str, object]:
         try:
             raw = strict_json_loads(self.path.read_text(encoding="utf-8"))
-        except (OSError, UnicodeError, ValueError) as exc:
+            if (
+                not isinstance(raw, dict)
+                or set(raw) != {"schema_version", "sources"}
+                or type(raw.get("schema_version")) is not int
+                or raw.get("schema_version") != _SCHEMA_VERSION
+                or not isinstance(raw.get("sources"), dict)
+            ):
+                raise ValueError("invalid source continuity store shape")
+            sources = raw["sources"]
+            assert isinstance(sources, dict)
+            for source_id, payload in sources.items():
+                _text(source_id, "source_id")
+                self._state_from_payload(source_id, payload)
+        except (OSError, TypeError, UnicodeError, ValueError) as exc:
             raise ValueError("invalid source continuity store") from exc
-        if (
-            not isinstance(raw, dict)
-            or set(raw) != {"schema_version", "sources"}
-            or type(raw.get("schema_version")) is not int
-            or raw.get("schema_version") != _SCHEMA_VERSION
-            or not isinstance(raw.get("sources"), dict)
-        ):
-            raise ValueError("invalid source continuity store")
-        sources = raw["sources"]
-        assert isinstance(sources, dict)
-        for source_id, payload in sources.items():
-            _text(source_id, "source_id")
-            self._state_from_payload(source_id, payload)
         return raw
 
     def get(self, source_id: str) -> SourceContinuityState:

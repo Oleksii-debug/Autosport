@@ -746,8 +746,10 @@ class SportMemoryRuntime:
         ):
             raise SportMemoryError("matchup authority generation changed")
         cutoff_instant = _instant("decision_cutoff", decision_cutoff)
-        if _instant("matchup as_of", matchup.as_of) > cutoff_instant:
-            raise SportMemoryError("matchup was selected after decision cutoff")
+        if _instant("matchup as_of", matchup.as_of) != cutoff_instant:
+            raise SportMemoryError(
+                "matchup as_of must equal decision cutoff"
+            )
         self.verify_matchup_evidence(matchup)
 
         subject = self.record_consumption(

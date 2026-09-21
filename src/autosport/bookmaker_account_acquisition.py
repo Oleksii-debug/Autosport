@@ -13,6 +13,7 @@ execution, transfer, cross-provider atomicity, or real-money authority.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime
 from decimal import Decimal, InvalidOperation
 from hashlib import sha256
 import json
@@ -256,7 +257,7 @@ class BookmakerAccountAcquisitionStore:
             authenticated_account_identity_sha256,
             "authenticated_account_identity_sha256",
         )
-        account_identity_observed_at = _exact_text(
+        account_identity_observed_at = _iso_timestamp(
             account_identity_observed_at,
             "account_identity_observed_at",
         )
@@ -290,6 +291,7 @@ class BookmakerAccountAcquisitionStore:
             snapshot,
             capabilities,
             integration.integration_kind,
+            authenticated_account_identity_sha256,
         )
 
         record_without_receipt = {
@@ -358,6 +360,8 @@ class BookmakerAccountAcquisitionStore:
                     != snapshot.profile.source_payload_sha256
                     or durable.receipt.snapshot_semantic_sha256
                     != snapshot_semantic_sha256
+                    or durable.receipt.authenticated_account_identity_sha256
+                    != authenticated_account_identity_sha256
                 ):
                     raise BookmakerAccountAcquisitionError(
                         "same acquisition_id produced conflicting provider evidence"
@@ -584,6 +588,7 @@ def _observation_key(
     snapshot: BookmakerAccountSnapshot,
     capabilities: frozenset[BookmakerCapability],
     integration_kind: BookmakerIntegrationKind,
+    authenticated_account_identity_sha256: str,
 ) -> str:
     # acquisition_id is the temporal attempt boundary. Provider bytes are bound
     # inside that attempt but never collapse two distinct reads: byte-identical
@@ -591,6 +596,9 @@ def _observation_key(
     return _digest(
         {
             "acquisition_id": acquisition_id,
+            "authenticated_account_identity_sha256": (
+                authenticated_account_identity_sha256
+            ),
             "venue_id": snapshot.profile.venue_id,
             "account_id": snapshot.profile.account_id,
             "adapter_id": snapshot.profile.adapter_id,
@@ -1127,7 +1135,7 @@ def _decode_record(
             record["authenticated_account_identity_sha256"],
             "authenticated_account_identity_sha256",
         ),
-        account_identity_observed_at=_exact_text(
+        account_identity_observed_at=_iso_timestamp(
             record["account_identity_observed_at"],
             "account_identity_observed_at",
         ),
@@ -1152,6 +1160,7 @@ def _decode_record(
         snapshot,
         frozenset(capabilities),
         integration.integration_kind,
+        receipt.authenticated_account_identity_sha256,
     )
     if receipt.observation_key != expected_observation_key:
         raise BookmakerAccountAcquisitionError(
@@ -1186,6 +1195,21 @@ def _exact_text(value: object, field: str) -> str:
             f"{field} must be a non-empty trimmed string"
         )
     return value
+
+
+def _iso_timestamp(value: object, field: str) -> str:
+    text = _exact_text(value, field)
+    try:
+        parsed = datetime.fromisoformat(text)
+    except ValueError as exc:
+        raise BookmakerAccountAcquisitionError(
+            f"{field} must be ISO-8601"
+        ) from exc
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        raise BookmakerAccountAcquisitionError(
+            f"{field} must include a timezone offset"
+        )
+    return text
 
 
 def _exact_int(value: object, field: str) -> int:

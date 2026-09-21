@@ -8,7 +8,6 @@ from decimal import Decimal, InvalidOperation
 from typing import Any
 
 from .real_execution_ledger import (
-    AcknowledgementStatus,
     AttemptState,
     EventType,
     ExecutionLedgerIntegrityError,
@@ -24,19 +23,19 @@ SLIPPAGE_STATUS_KNOWN = "KNOWN"
 SLIPPAGE_STATUS_UNKNOWN = "UNKNOWN"
 SLIPPAGE_STATUS_NOT_APPLICABLE = "NOT_APPLICABLE"
 
-_TERMINAL_STATES = frozenset(
+_ACK_TERMINAL_STATES = frozenset(
     {
         AttemptState.ACCEPTED,
         AttemptState.PARTIAL,
         AttemptState.REJECTED,
     }
 )
+_TERMINAL_STATES = _ACK_TERMINAL_STATES | {AttemptState.RECONCILED_NOT_FOUND}
 
 _CENSOR_REASON_BY_STATE = {
     AttemptState.RESERVED: "RESERVED_NOT_SUBMITTED",
     AttemptState.SUBMITTED: "SUBMITTED_NO_TERMINAL_ACK",
     AttemptState.UNKNOWN: "UNKNOWN_EXTERNAL_EFFECT",
-    AttemptState.RECONCILED_NOT_FOUND: "RECONCILED_NOT_FOUND_NO_TERMINAL_ACK",
 }
 
 
@@ -160,6 +159,21 @@ def _optional_single_event(
     return matches[0] if matches else None
 
 
+def _reconciliation_tuple_present(
+    evidence_id: str | None,
+    source: str | None,
+    observed_at: str | None,
+    external_effect_found: bool | None,
+) -> bool:
+    values = (evidence_id, source, observed_at, external_effect_found)
+    present = tuple(value is not None for value in values)
+    if any(present) and not all(present):
+        raise EmpiricalExecutionEvidenceError(
+            "reconciliation identity/source/time/effect must be all present or all absent"
+        )
+    return all(present)
+
+
 @dataclass(frozen=True, slots=True)
 class EmpiricalExecutionEvidence:
     source_ledger_sha256: str
@@ -191,6 +205,11 @@ class EmpiricalExecutionEvidence:
     provider_evidence_id: str | None
     provider_evidence_source: str | None
     acknowledgement_status: str | None
+
+    reconciliation_evidence_id: str | None
+    reconciliation_evidence_source: str | None
+    reconciliation_evidence_observed_at: str | None
+    reconciliation_external_effect_found: bool | None
 
     requested_odds: Decimal
     requested_stake: Decimal
@@ -250,11 +269,20 @@ class EmpiricalExecutionEvidence:
         _optional_text(self.provider_evidence_source, "provider_evidence_source")
         _optional_text(self.external_receipt_id, "external_receipt_id")
         _optional_text(self.acknowledgement_status, "acknowledgement_status")
+        _optional_text(self.reconciliation_evidence_id, "reconciliation_evidence_id")
+        _optional_text(self.reconciliation_evidence_source, "reconciliation_evidence_source")
 
         if type(self.source_event_count) is not int or self.source_event_count < 1:
             raise EmpiricalExecutionEvidenceError("source_event_count must be positive int")
         if type(self.terminal) is not bool or type(self.right_censored) is not bool:
             raise EmpiricalExecutionEvidenceError("terminal/censor flags must be bool")
+        if (
+            self.reconciliation_external_effect_found is not None
+            and type(self.reconciliation_external_effect_found) is not bool
+        ):
+            raise EmpiricalExecutionEvidenceError(
+                "reconciliation_external_effect_found must be bool when present"
+            )
 
         _timestamp(self.decision_at, "decision_at")
         _timestamp(self.quote_observed_at, "quote_observed_at")
@@ -265,7 +293,18 @@ class EmpiricalExecutionEvidence:
             "provider_evidence_observed_at",
         )
         _optional_timestamp(self.acknowledged_at, "acknowledged_at")
+        _optional_timestamp(
+            self.reconciliation_evidence_observed_at,
+            "reconciliation_evidence_observed_at",
+        )
         _optional_timestamp(self.censor_cutoff_recorded_at, "censor_cutoff_recorded_at")
+
+        reconciliation_present = _reconciliation_tuple_present(
+            self.reconciliation_evidence_id,
+            self.reconciliation_evidence_source,
+            self.reconciliation_evidence_observed_at,
+            self.reconciliation_external_effect_found,
+        )
 
         try:
             state = AttemptState(self.attempt_state)
@@ -289,14 +328,36 @@ class EmpiricalExecutionEvidence:
                 raise EmpiricalExecutionEvidenceError(
                     "terminal attempt cannot carry censor metadata"
                 )
-            if self.acknowledgement_status != state.value:
-                raise EmpiricalExecutionEvidenceError(
-                    "terminal state must match acknowledgement_status"
-                )
-            if self.acknowledged_at is None or self.external_receipt_id is None:
-                raise EmpiricalExecutionEvidenceError(
-                    "terminal attempt requires durable acknowledgement identity"
-                )
+            if state in _ACK_TERMINAL_STATES:
+                if self.acknowledgement_status != state.value:
+                    raise EmpiricalExecutionEvidenceError(
+                        "terminal state must match acknowledgement_status"
+                    )
+                if self.acknowledged_at is None or self.external_receipt_id is None:
+                    raise EmpiricalExecutionEvidenceError(
+                        "acknowledged terminal attempt requires durable acknowledgement identity"
+                    )
+                if reconciliation_present:
+                    raise EmpiricalExecutionEvidenceError(
+                        "acknowledged terminal attempt cannot claim not-found reconciliation"
+                    )
+            elif state is AttemptState.RECONCILED_NOT_FOUND:
+                if (
+                    self.acknowledgement_status is not None
+                    or self.acknowledged_at is not None
+                    or self.external_receipt_id is not None
+                ):
+                    raise EmpiricalExecutionEvidenceError(
+                        "RECONCILED_NOT_FOUND cannot claim terminal acknowledgement"
+                    )
+                if not reconciliation_present:
+                    raise EmpiricalExecutionEvidenceError(
+                        "RECONCILED_NOT_FOUND requires durable reconciliation identity"
+                    )
+                if self.reconciliation_external_effect_found is not False:
+                    raise EmpiricalExecutionEvidenceError(
+                        "RECONCILED_NOT_FOUND requires external_effect_found=false"
+                    )
         else:
             expected_reason = _CENSOR_REASON_BY_STATE.get(state)
             if expected_reason is None:
@@ -330,6 +391,10 @@ class EmpiricalExecutionEvidence:
             ):
                 raise EmpiricalExecutionEvidenceError(
                     "nonterminal attempt cannot claim terminal acknowledgement"
+                )
+            if reconciliation_present:
+                raise EmpiricalExecutionEvidenceError(
+                    "nonterminal attempt cannot claim terminal reconciliation"
                 )
 
         if state is AttemptState.RESERVED and self.submitted_at is not None:
@@ -434,11 +499,11 @@ class EmpiricalExecutionEvidence:
         else:
             if self.slippage_status != SLIPPAGE_STATUS_UNKNOWN:
                 raise EmpiricalExecutionEvidenceError(
-                    "nonterminal attempt requires UNKNOWN slippage status"
+                    "unresolved/not-found attempt requires UNKNOWN slippage status"
                 )
             if any(value is not None for value in slippage_values):
                 raise EmpiricalExecutionEvidenceError(
-                    "nonterminal attempt cannot claim accepted/slippage metrics"
+                    "unresolved/not-found attempt cannot claim accepted/slippage metrics"
                 )
 
         timing_values = (
@@ -497,6 +562,10 @@ class EmpiricalExecutionEvidence:
             "provider_evidence_id": self.provider_evidence_id,
             "provider_evidence_source": self.provider_evidence_source,
             "acknowledgement_status": self.acknowledgement_status,
+            "reconciliation_evidence_id": self.reconciliation_evidence_id,
+            "reconciliation_evidence_source": self.reconciliation_evidence_source,
+            "reconciliation_evidence_observed_at": self.reconciliation_evidence_observed_at,
+            "reconciliation_external_effect_found": self.reconciliation_external_effect_found,
             "requested_odds": _decimal_text(self.requested_odds),
             "requested_stake": _decimal_text(self.requested_stake),
             "slippage_status": self.slippage_status,
@@ -537,9 +606,11 @@ def build_empirical_execution_evidence(
     must not derive causal latency numbers from timestamp subtraction: every causal
     timing metric remains explicitly UNKNOWN until a monotonic witness exists.
 
-    Nonterminal attempts are evidence too. They are returned as explicit
-    right-censored records bound to the verified ledger snapshot observation window.
-    This function is read-only and grants no provider-write, retry, settlement,
+    Unresolved attempts are evidence too. RESERVED/SUBMITTED/UNKNOWN attempts are
+    explicit right-censored observations. RECONCILED_NOT_FOUND is different: the
+    canonical ledger has durably resolved that no external effect exists, so it is a
+    terminal empirical outcome with reconciliation provenance and UNKNOWN slippage.
+    This function remains read-only and grants no provider-write, retry, settlement,
     profitability, real-money, or readiness authority.
     """
     if type(ledger) is not RealExecutionLedger:
@@ -576,6 +647,11 @@ def build_empirical_execution_evidence(
         EventType.EXTERNAL_ACKNOWLEDGEMENT,
         label="empirical evidence",
     )
+    reconciliation_event = _optional_single_event(
+        attempt_events,
+        EventType.RECONCILED_NOT_FOUND,
+        label="empirical evidence",
+    )
     provider_events = [
         event
         for event in attempt_events
@@ -584,20 +660,37 @@ def build_empirical_execution_evidence(
     provider_event = provider_events[-1] if provider_events else None
 
     terminal = state in _TERMINAL_STATES
-    if terminal and acknowledgement_event is None:
-        raise EmpiricalExecutionEvidenceUnavailable(
-            "terminal attempt lacks durable acknowledgement"
-        )
-    if not terminal and acknowledgement_event is not None:
-        raise EmpiricalExecutionEvidenceUnavailable(
-            "nonterminal state conflicts with durable acknowledgement"
-        )
+    if state in _ACK_TERMINAL_STATES:
+        if acknowledgement_event is None:
+            raise EmpiricalExecutionEvidenceUnavailable(
+                "acknowledged terminal attempt lacks durable acknowledgement"
+            )
+        if reconciliation_event is not None:
+            raise EmpiricalExecutionEvidenceUnavailable(
+                "acknowledged terminal attempt conflicts with not-found reconciliation"
+            )
+    elif state is AttemptState.RECONCILED_NOT_FOUND:
+        if acknowledgement_event is not None:
+            raise EmpiricalExecutionEvidenceUnavailable(
+                "RECONCILED_NOT_FOUND conflicts with durable acknowledgement"
+            )
+        if reconciliation_event is None:
+            raise EmpiricalExecutionEvidenceUnavailable(
+                "RECONCILED_NOT_FOUND lacks durable reconciliation"
+            )
+    else:
+        if acknowledgement_event is not None:
+            raise EmpiricalExecutionEvidenceUnavailable(
+                "nonterminal state conflicts with durable acknowledgement"
+            )
+        if reconciliation_event is not None:
+            raise EmpiricalExecutionEvidenceUnavailable(
+                "nonterminal state conflicts with durable not-found reconciliation"
+            )
 
     plan_id = _text(reservation["plan_id"], "plan_id")
     action_id = _text(reservation["action_id"], "action_id")
-    plan_event, action = RealExecutionLedger._action_payload(
-        events, plan_id, action_id
-    )
+    plan_event, action = RealExecutionLedger._action_payload(events, plan_id, action_id)
     plan_payload = plan_event["payload"]
     plan_fingerprint = _sha256(
         plan_payload.get("plan_fingerprint"), "plan_fingerprint"
@@ -638,6 +731,23 @@ def build_empirical_execution_evidence(
         if acknowledgement_event is not None
         else None
     )
+
+    reconciliation = (
+        RealExecutionLedger._reconciliation_snapshot_from_dict(
+            reconciliation_event["payload"]
+        )
+        if reconciliation_event is not None
+        else None
+    )
+    if reconciliation is not None:
+        if reconciliation.attempt_id != attempt:
+            raise EmpiricalExecutionEvidenceUnavailable(
+                "reconciliation attempt identity mismatch"
+            )
+        if reconciliation.external_effect_found is not False:
+            raise EmpiricalExecutionEvidenceUnavailable(
+                "RECONCILED_NOT_FOUND requires external_effect_found=false"
+            )
 
     requested_odds = _decimal(action.get("requested_odds"), "requested_odds")
     requested_stake = _decimal(action.get("requested_stake"), "requested_stake")
@@ -689,7 +799,7 @@ def build_empirical_execution_evidence(
             "verified source snapshot has no durable observation boundary"
         )
 
-    right_censored = not terminal
+    right_censored = state in _CENSOR_REASON_BY_STATE
     censor_reason = _CENSOR_REASON_BY_STATE.get(state) if right_censored else None
     censor_cutoff_recorded_at = (
         _text(events[-1].get("recorded_at"), "censor_cutoff_recorded_at")
@@ -729,6 +839,18 @@ def build_empirical_execution_evidence(
         provider_evidence_source=provider_evidence_source,
         acknowledgement_status=(
             acknowledgement.status.value if acknowledgement is not None else None
+        ),
+        reconciliation_evidence_id=(
+            reconciliation.evidence_id if reconciliation is not None else None
+        ),
+        reconciliation_evidence_source=(
+            reconciliation.source if reconciliation is not None else None
+        ),
+        reconciliation_evidence_observed_at=(
+            reconciliation.observed_at if reconciliation is not None else None
+        ),
+        reconciliation_external_effect_found=(
+            reconciliation.external_effect_found if reconciliation is not None else None
         ),
         requested_odds=requested_odds,
         requested_stake=requested_stake,

@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import tempfile
 import unittest
+from dataclasses import replace
 from decimal import Decimal, ROUND_DOWN, ROUND_UP, localcontext
 from pathlib import Path
 
@@ -91,6 +92,32 @@ class RealExecutionDecimalContextTests(unittest.TestCase):
         self.assertEqual(low_payload, high_payload)
         self.assertEqual(low_payload["accepted_odds"], _ACCEPTED_ODDS)
         self.assertEqual(low_payload["accepted_stake"], _ACCEPTED_STAKE)
+
+    def test_equivalent_decimal_scales_keep_one_semantic_plan_identity(self) -> None:
+        base = _plan()
+        scaled_action = replace(
+            base.actions[0],
+            requested_odds=Decimal("2.5000"),
+            requested_stake=Decimal("10.000"),
+        )
+        canonical_action = replace(
+            base.actions[0],
+            requested_odds=Decimal("2.5"),
+            requested_stake=Decimal("10"),
+        )
+        scaled_plan = replace(base, actions=(scaled_action,))
+        canonical_plan = replace(base, actions=(canonical_action,))
+
+        self.assertEqual(scaled_plan.to_dict(), canonical_plan.to_dict())
+        self.assertEqual(scaled_plan.fingerprint, canonical_plan.fingerprint)
+        self.assertEqual(
+            scaled_plan.to_dict()["actions"][0]["requested_odds"],
+            "2.5",
+        )
+        self.assertEqual(
+            scaled_plan.to_dict()["actions"][0]["requested_stake"],
+            "10",
+        )
 
     def test_low_precision_persistence_reopens_idempotently_at_high_precision(self) -> None:
         plan = _plan()

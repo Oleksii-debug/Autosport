@@ -139,12 +139,21 @@ class HistoricalAcquisitionBundleTests(unittest.TestCase):
                 bundle["request_scope"]["coverage_preflight"],
                 {"date_from": "2026-09-10", "date_to": "2026-09-12"},
             )
+            expected_match_url = (
+                "https://parlay-api.com/v1/historical/sports/table_tennis/matches"
+                "?date=2026-09-10&pricedOnly=true"
+            )
             self.assertEqual(
                 bundle["request_scope"]["match_results"],
-                {"date": "2026-09-10", "priced_only": True},
+                {
+                    "url": expected_match_url,
+                    "date": "2026-09-10",
+                    "priced_only": True,
+                },
             )
             self.assertEqual(bundle["match_results"]["requested_date"], "2026-09-10")
             self.assertTrue(bundle["match_results"]["priced_only"])
+            self.assertEqual(bundle["match_results"]["request_url"], expected_match_url)
             self.assertFalse(bundle["match_results"]["product_owned_request_path_verified"])
             self.assertFalse(bundle["match_results"]["product_owned_acquisition_clock_verified"])
             self.assertFalse(bundle["match_results"]["provider_response_origin_verified"])
@@ -197,6 +206,39 @@ class HistoricalAcquisitionBundleTests(unittest.TestCase):
         self.assertEqual(match_query["date"], ["2026-09-10"])
         self.assertEqual(match_query["pricedOnly"], ["true"])
         self.assertNotIn("unit-test-key", match_url)
+
+    def test_custom_match_origins_change_bundle_request_and_evidence_identity(self) -> None:
+        reports: list[tuple[str, str, str]] = []
+        with tempfile.TemporaryDirectory() as tmp:
+            for index, base_url in enumerate(
+                ("https://origin-a.example", "https://origin-b.example"),
+                start=1,
+            ):
+                transport = _Transport()
+                provider = ParlayApiTableTennisProvider(
+                    "unit-test-key",
+                    base_url=base_url,
+                    transport=transport,
+                    clock=lambda: "2026-09-13T03:00:00+00:00",
+                    sleeper=lambda _: None,
+                )
+                root = Path(tmp) / f"acquisition-{index}"
+                report = capture_historical_acquisition_bundle(
+                    provider,
+                    requested_at=("2026-09-12T10:03:00Z",),
+                    results_date="2026-09-10",
+                    output_dir=root,
+                )
+                bundle = json.loads((root / "bundle.json").read_text(encoding="utf-8"))
+                request_url = bundle["request_scope"]["match_results"]["url"]
+                self.assertEqual(request_url, bundle["match_results"]["request_url"])
+                self.assertFalse(bundle["match_result_product_owned_request_path_verified"])
+                self.assertFalse(bundle["match_result_product_owned_acquisition_clock_verified"])
+                reports.append((request_url, report.request_identity, report.evidence_identity))
+
+        self.assertNotEqual(reports[0][0], reports[1][0])
+        self.assertNotEqual(reports[0][1], reports[1][1])
+        self.assertNotEqual(reports[0][2], reports[1][2])
 
     def test_equivalent_duplicate_snapshot_instants_fail_before_network(self) -> None:
         transport = _Transport()

@@ -140,6 +140,26 @@ def _balance_delta(current: Decimal, previous: Decimal) -> Decimal:
     return result
 
 
+def _require_current_evidence_after_previous(
+    snapshot: BookmakerAccountSnapshot,
+    previous_snapshot_at: datetime,
+) -> None:
+    observations: list[tuple[str, str]] = []
+    if snapshot.balance is not None:
+        observations.append(("balance", snapshot.balance.observed_at))
+    observations.extend(
+        ("open position", item.observed_at) for item in snapshot.open_positions
+    )
+    observations.extend(
+        ("settled position", item.observed_at) for item in snapshot.settled_positions
+    )
+    for label, observed_at in observations:
+        if _timestamp(observed_at) <= previous_snapshot_at:
+            raise BookmakerAccountReconciliationError(
+                f"current {label} evidence must be strictly later than previous snapshot"
+            )
+
+
 def _profile_semantics(snapshot: BookmakerAccountSnapshot) -> tuple[object, ...]:
     profile = snapshot.profile
     return (
@@ -288,10 +308,12 @@ def reconcile_bookmaker_account_snapshots(
         raise BookmakerAccountReconciliationError(
             "snapshot venue/account/adapter identity mismatch"
         )
-    if _timestamp(current.observed_at) <= _timestamp(previous.observed_at):
+    previous_snapshot_at = _timestamp(previous.observed_at)
+    if _timestamp(current.observed_at) <= previous_snapshot_at:
         raise BookmakerAccountReconciliationError(
             "current snapshot must be strictly later than previous snapshot"
         )
+    _require_current_evidence_after_previous(current, previous_snapshot_at)
     if c.profile_version < p.profile_version:
         raise BookmakerAccountReconciliationError(
             "capability profile version rolled back"

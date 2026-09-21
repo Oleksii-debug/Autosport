@@ -30,6 +30,24 @@ ASSERTIVE_KINDS = {
 }
 
 
+def _decision_for_invariant_test(**values):
+    """Bypass the public constructor only to exercise internal invariants."""
+
+    decision = object.__new__(AnnouncementDecision)
+    defaults = dict(
+        emit=True,
+        priority=AnnouncementPriority.POLITE,
+        text="Оновлений стан",
+        reason="EMIT",
+        move_focus=False,
+    )
+    defaults.update(values)
+    for name, value in defaults.items():
+        object.__setattr__(decision, name, value)
+    decision.__post_init__()
+    return decision
+
+
 def _event(
     kind: AnnouncementKind,
     *,
@@ -83,13 +101,11 @@ def test_polite_transition_emits_once_per_state_token(kind):
     duplicate = gate.decide(_event(kind, token="transition-1", text="Changed projection text"))
     next_transition = gate.decide(_event(kind, token="transition-2"))
 
-    assert first == AnnouncementDecision(
-        emit=True,
-        priority=AnnouncementPriority.POLITE,
-        text="Оновлений стан",
-        reason="EMIT",
-        move_focus=False,
-    )
+    assert first.emit is True
+    assert first.priority is AnnouncementPriority.POLITE
+    assert first.text == "Оновлений стан"
+    assert first.reason == "EMIT"
+    assert first.move_focus is False
     assert duplicate.emit is False
     assert duplicate.priority is AnnouncementPriority.SILENT
     assert duplicate.text is None
@@ -128,6 +144,21 @@ def test_caller_cannot_supply_or_escalate_priority():
     assert churn.priority is AnnouncementPriority.SILENT
 
 
+@pytest.mark.parametrize(
+    "priority",
+    (AnnouncementPriority.POLITE, AnnouncementPriority.ASSERTIVE),
+)
+def test_caller_cannot_construct_emit_decision_without_gate(priority):
+    with pytest.raises(TypeError, match="product-issued"):
+        AnnouncementDecision(
+            emit=True,
+            priority=priority,
+            text="Критичне повідомлення",
+            reason="EMIT",
+            move_focus=False,
+        )
+
+
 def test_announcement_policy_never_moves_focus():
     gate = AnnouncementGate()
     decisions = [
@@ -138,11 +169,9 @@ def test_announcement_policy_never_moves_focus():
     assert all(decision.move_focus is False for decision in decisions)
 
     with pytest.raises(ValueError, match="must never request focus movement"):
-        AnnouncementDecision(
-            emit=True,
+        _decision_for_invariant_test(
             priority=AnnouncementPriority.ASSERTIVE,
             text="Критична помилка",
-            reason="EMIT",
             move_focus=True,
         )
 
@@ -208,14 +237,14 @@ def test_runtime_types_fail_closed():
 
 def test_suppressed_decision_cannot_accidentally_carry_announceable_payload():
     with pytest.raises(ValueError, match="must be SILENT"):
-        AnnouncementDecision(
+        _decision_for_invariant_test(
             emit=False,
             priority=AnnouncementPriority.POLITE,
             text=None,
             reason="DUPLICATE_STATE_TRANSITION",
         )
     with pytest.raises(ValueError, match="must not carry announcement text"):
-        AnnouncementDecision(
+        _decision_for_invariant_test(
             emit=False,
             priority=AnnouncementPriority.SILENT,
             text="Do not announce",
@@ -225,7 +254,7 @@ def test_suppressed_decision_cannot_accidentally_carry_announceable_payload():
 
 def test_emitted_decision_cannot_be_silent():
     with pytest.raises(ValueError, match="cannot be SILENT"):
-        AnnouncementDecision(
+        _decision_for_invariant_test(
             emit=True,
             priority=AnnouncementPriority.SILENT,
             text="Impossible",
@@ -268,7 +297,7 @@ def test_emitted_decision_cannot_be_silent():
 )
 def test_malformed_decision_runtime_types_fail_closed(kwargs, message):
     with pytest.raises(TypeError, match=message):
-        AnnouncementDecision(**kwargs)  # type: ignore[arg-type]
+        _decision_for_invariant_test(**kwargs)
 
 
 def test_cross_kind_assertive_events_share_episode_dedupe_identity():

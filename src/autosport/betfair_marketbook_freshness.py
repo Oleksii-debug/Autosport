@@ -5,8 +5,9 @@ It issues one exact ``listMarketBook`` request and turns the required provider
 ``isMarketDataDelayed`` boolean into an origin-bound observation. Positive
 (non-delayed) authority additionally requires the canonical production network
 transport; injected transports remain usable for deterministic negative/parser
-tests but can never mint FRESH truth. The module never performs provider writes
-or stores credentials in evidence.
+tests but can never mint FRESH truth. The client's account label is recorded
+only as a configured reference; listMarketBook does not authenticate that label.
+The module never performs provider writes or stores credentials in evidence.
 """
 
 from __future__ import annotations
@@ -33,7 +34,7 @@ class BetfairMarketBookDelayObservation:
     """Exact provider-native delay observation for one Betfair market."""
 
     venue_id: str
-    account_id: str
+    configured_account_ref: str
     adapter_id: str
     adapter_version: str
     market_id: str
@@ -43,7 +44,7 @@ class BetfairMarketBookDelayObservation:
 
     def __post_init__(self) -> None:
         _base._required_text(self.venue_id, "venue_id")
-        _base._required_text(self.account_id, "account_id")
+        _base._required_text(self.configured_account_ref, "configured_account_ref")
         if self.adapter_id != _base.ADAPTER_ID:
             raise BetfairMarketBookFreshnessError("market-book adapter_id mismatch")
         if self.adapter_version != _base.ADAPTER_VERSION:
@@ -59,7 +60,7 @@ class BetfairMarketBookDelayObservation:
     def _authority_fingerprint(self) -> str:
         payload = (
             self.venue_id,
-            self.account_id,
+            self.configured_account_ref,
             self.adapter_id,
             self.adapter_version,
             self.market_id,
@@ -68,6 +69,12 @@ class BetfairMarketBookDelayObservation:
             self.source_payload_sha256,
         )
         return sha256(repr(payload).encode("utf-8")).hexdigest()
+
+    @property
+    def proves_provider_account_identity(self) -> bool:
+        """MarketBook does not authenticate the caller's configured account label."""
+
+        return False
 
     def assert_authoritative(self) -> None:
         raise BetfairMarketBookFreshnessError(
@@ -182,7 +189,7 @@ def _read_market_book_delay(
 
     return BetfairMarketBookDelayObservation(
         venue_id=client._venue_id,
-        account_id=client._account_id,
+        configured_account_ref=client._account_id,
         adapter_id=_base.ADAPTER_ID,
         adapter_version=_base.ADAPTER_VERSION,
         market_id=market,

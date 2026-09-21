@@ -286,20 +286,25 @@ def evaluate_portfolio_snapshot_coherence(
             stale = tuple(
                 item.component_key
                 for item in selected
-                if as_of - _instant(item.available_at, "available_at")
+                if as_of - _instant(item.observed_at, "observed_at")
                 > timedelta(seconds=max_age)
             )
             if stale:
                 status = SnapshotCoherenceStatus.WAIT_STALE
                 reasons = tuple(f"stale:{key}" for key in stale)
             else:
+                observations = tuple(
+                    _instant(item.observed_at, "observed_at") for item in selected
+                )
                 availability = tuple(
                     _instant(item.available_at, "available_at") for item in selected
                 )
-                skew = max(availability) - min(availability)
-                if skew > timedelta(seconds=max_skew):
+                observation_skew = max(observations) - min(observations)
+                availability_skew = max(availability) - min(availability)
+                cut_skew = max(observation_skew, availability_skew)
+                if cut_skew > timedelta(seconds=max_skew):
                     status = SnapshotCoherenceStatus.WAIT_MIXED_CUT
-                    skew_microseconds = skew // timedelta(microseconds=1)
+                    skew_microseconds = cut_skew // timedelta(microseconds=1)
                     reasons = (f"cut_skew_microseconds:{skew_microseconds}",)
                 else:
                     status = SnapshotCoherenceStatus.COHERENT

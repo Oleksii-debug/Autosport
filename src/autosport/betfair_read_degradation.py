@@ -127,7 +127,7 @@ class BetfairReadDegradation:
         return "BETTING" if self.operation in _BETTING_READ_ONLY_OPERATIONS else "ACCOUNTS"
 
     @property
-    def documented_for_operation(self) -> bool:
+    def documented_for_api_family(self) -> bool:
         return self.error_code in _error_actions_for(self.operation)
 
     @property
@@ -164,7 +164,7 @@ class BetfairReadDegradation:
             "operation": self.operation,
             "error_code": self.error_code,
             "request_uuid": self.request_uuid,
-            "documented_for_operation": self.documented_for_operation,
+            "documented_for_api_family": self.documented_for_api_family,
             "action": self.action.value,
             "automatic_repeat_allowed": self.automatic_repeat_allowed,
             "requires_new_session": self.requires_new_session,

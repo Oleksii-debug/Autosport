@@ -274,23 +274,22 @@ def test_conflicting_second_handle_cannot_widen_or_narrow_durable_budget(
     assert store.append(_delta(1)) is True
     page_size, page_count = _page_geometry(path)
     exact_current_budget = page_size * page_count
+    durable_budget = exact_current_budget + (2 * page_size)
 
-    canonical = CollectorDeltaStore(path, max_bytes=exact_current_budget)
-    assert canonical.configured_max_bytes == exact_current_budget
+    canonical = CollectorDeltaStore(path, max_bytes=durable_budget)
+    assert canonical.configured_max_bytes == durable_budget
 
     with pytest.raises(CollectorStorageBudgetError, match="conflicts with durable"):
-        CollectorDeltaStore(path, max_bytes=exact_current_budget + page_size)
+        CollectorDeltaStore(path, max_bytes=durable_budget + page_size)
 
-    smaller = exact_current_budget - page_size
-    if smaller > 0:
-        with pytest.raises(CollectorStorageBudgetError, match="conflicts with durable"):
-            CollectorDeltaStore(path, max_bytes=smaller)
+    with pytest.raises(CollectorStorageBudgetError, match="conflicts with durable"):
+        CollectorDeltaStore(path, max_bytes=durable_budget - page_size)
 
     # Exact replay is allowed and an unconfigured reopen inherits the same budget.
-    same = CollectorDeltaStore(path, max_bytes=exact_current_budget)
+    same = CollectorDeltaStore(path, max_bytes=durable_budget)
     inherited = CollectorDeltaStore(path)
-    assert same.configured_max_bytes == exact_current_budget
-    assert inherited.configured_max_bytes == exact_current_budget
+    assert same.configured_max_bytes == durable_budget
+    assert inherited.configured_max_bytes == durable_budget
 
 
 def test_first_budget_activation_rebinds_already_open_writer_transaction(

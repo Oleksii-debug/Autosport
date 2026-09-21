@@ -64,7 +64,7 @@ _QUERY_PARAM_RE = re.compile(
 )
 _AUTHORIZATION_VALUE_RE = re.compile(
     r"(?i)(?P<prefix>\bauthorization\s*[:=]\s*)"
-    r"(?P<value>\[REDACTED\]|\"[^\"\r\n]*\"|'[^'\r\n]*'|"
+    r"(?P<value>\[REDACTED\]|\"(?:\\.|[^\"\\\r\n])*\"|'(?:\\.|[^'\\\r\n])*'|"
     r"bearer\s+[^\s,;&}\]]+|[^\s,;&}\]]+)"
 )
 _BEARER_RE = re.compile(
@@ -72,7 +72,7 @@ _BEARER_RE = re.compile(
 )
 _KEY_VALUE_RE = re.compile(
     r"(?i)(?P<prefix>(?P<quote>[\"']?)(?P<key>[A-Za-z0-9_.-]+)(?P=quote)\s*[:=]\s*)"
-    r"(?P<value>\[REDACTED\]|\"[^\"\r\n]*\"|'[^'\r\n]*'|[^\s,;&}\]]+)"
+    r"(?P<value>\[REDACTED\]|\"(?:\\.|[^\"\\\r\n])*\"|'(?:\\.|[^'\\\r\n])*'|[^\s,;&}\]]+)"
 )
 
 

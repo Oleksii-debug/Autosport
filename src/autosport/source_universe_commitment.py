@@ -8,6 +8,14 @@ from .causal_collector import CollectorDeltaStore
 
 
 _CANONICAL_COLLECTOR_CYCLE_EVIDENCE = CollectorDeltaStore.collector_cycle_evidence
+_CANONICAL_READ_SEAM_NAMES = frozenset(
+    {
+        "collector_cycle_evidence",
+        "_connect",
+        "_connect_path",
+        "_cycle_terminal_payload_sha256",
+    }
+)
 
 
 class SourceUniverseCommitmentError(ValueError):
@@ -106,6 +114,15 @@ def build_source_universe_commitment(
 
     if type(store) is not CollectorDeltaStore:
         raise TypeError("store must be the exact canonical CollectorDeltaStore")
+    instance_state = vars(store)
+    rebound = sorted(
+        name for name in _CANONICAL_READ_SEAM_NAMES if name in instance_state
+    )
+    if rebound:
+        raise TypeError(
+            "store canonical durable read seam is instance-rebound: "
+            + ", ".join(rebound)
+        )
     if type(source_id) is not str or not source_id or source_id.strip() != source_id:
         raise SourceUniverseCommitmentError(
             "source_id must be a non-empty trimmed string"

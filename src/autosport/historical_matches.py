@@ -61,6 +61,8 @@ def historical_match_request_url(
         raise ValueError("provider base_url must not contain credentials")
     if parsed_base.scheme != "https" or not parsed_base.netloc:
         raise ValueError("provider base_url must be an absolute HTTPS URL")
+    if parsed_base.path not in ("", "/"):
+        raise ValueError("historical match provenance requires an origin-only provider base_url")
     if parsed_base.query or parsed_base.fragment:
         raise ValueError("provider base_url must not contain query or fragment")
     query_values = {

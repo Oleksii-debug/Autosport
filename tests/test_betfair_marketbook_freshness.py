@@ -74,13 +74,17 @@ def test_injected_transport_parses_non_delayed_payload_but_cannot_mint_positive_
     observation = read_market_book_delay(client, "1.234")
 
     assert observation.venue_id == "betfair-global"
-    assert observation.account_id == "acct-1"
+    assert observation.configured_account_ref == "acct-1"
     assert observation.adapter_id == ADAPTER_ID
     assert observation.adapter_version == ADAPTER_VERSION
     assert observation.market_id == "1.234"
     assert observation.is_market_data_delayed is False
     assert observation.observed_at == NOW.isoformat()
     assert observation.source_payload_sha256 == sha256(payload).hexdigest()
+    assert observation.proves_provider_account_identity is False
+    fields = set(BetfairMarketBookDelayObservation.__dataclass_fields__)
+    assert "configured_account_ref" in fields
+    assert "account_id" not in fields
     with pytest.raises(
         BetfairMarketBookFreshnessError,
         match="lacks canonical production network origin",
@@ -158,7 +162,7 @@ def test_market_rebinding_fails_closed():
 def test_directly_constructed_observation_cannot_mint_provider_authority():
     forged = BetfairMarketBookDelayObservation(
         venue_id="betfair-global",
-        account_id="acct-1",
+        configured_account_ref="acct-1",
         adapter_id=ADAPTER_ID,
         adapter_version=ADAPTER_VERSION,
         market_id="1.234",

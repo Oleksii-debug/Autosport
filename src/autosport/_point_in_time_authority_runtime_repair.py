@@ -123,14 +123,13 @@ def _require_exact_lineage_authority(
     retained in a caller-mutable module global or closure cell.
     """
 
-    import hashlib as _hashlib
-    import marshal as _marshal
     import sys as _sys
     from pathlib import Path as _Path
-    from types import CodeType as _CodeType, FunctionType as _FunctionType
+    from types import FunctionType as _FunctionType
 
     from . import dataset_snapshot_lineage as _lineage_module
     from . import scientific_registry as _registry_module
+    from .resolver_semantics import function_semantic_sha256 as _function_semantic_sha256
 
     canonical_lineage_type = _lineage_module.DatasetSnapshotLineageAuthority
     canonical_registry_type = _registry_module.ScientificRegistry
@@ -198,38 +197,11 @@ def _require_exact_lineage_authority(
             live_path = _Path(function.__code__.co_filename).resolve(strict=True)
             if live_path != expected_path:
                 raise ValueError("live callable source path changed")
-            source = expected_path.read_text(encoding="utf-8")
-            compiled = compile(
-                source,
-                function.__code__.co_filename,
-                "exec",
-                dont_inherit=True,
-                optimize=_sys.flags.optimize,
-            )
-
-            def walk(code: _CodeType):
-                yield code
-                for constant in code.co_consts:
-                    if type(constant) is _CodeType:
-                        yield from walk(constant)
-
-            matches = tuple(
-                candidate
-                for candidate in walk(compiled)
-                if candidate.co_qualname == expected_qualname
-            )
-            if len(matches) != 1:
-                raise ValueError("canonical callable source identity is ambiguous")
-            expected = _hashlib.sha256(_marshal.dumps(matches[0])).digest()
-            actual = _hashlib.sha256(_marshal.dumps(function.__code__)).digest()
+            _function_semantic_sha256(function, runtime_owner=concrete_type)
         except (OSError, TypeError, ValueError) as exc:
             raise evidence.PointInTimeEvidenceError(
-                f"trusted {authority_name} source identity unavailable: {method_name}"
-            ) from exc
-        if actual != expected:
-            raise evidence.PointInTimeEvidenceError(
                 f"trusted {authority_name} class implementation changed: {method_name}"
-            )
+            ) from exc
 
     require_source_backed_method(
         canonical_lineage_type,

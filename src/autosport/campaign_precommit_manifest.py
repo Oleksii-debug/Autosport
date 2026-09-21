@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -181,6 +182,111 @@ def _fsync_bound_parent_directory(directory_fd: int) -> None:
         raise CampaignPrecommitManifestError(
             "cannot fsync campaign precommit directory"
         ) from exc
+
+
+def _publish_bound_posix_file_once(
+    parent_fd: int,
+    name: str,
+    encoded: bytes,
+) -> bool:
+    """Publish complete bytes atomically without exposing a partial canonical leaf."""
+
+    if (
+        os.link not in os.supports_dir_fd
+        or os.unlink not in os.supports_dir_fd
+    ):
+        raise CampaignPrecommitManifestError(
+            "platform lacks descriptor-relative no-clobber precommit publication"
+        )
+
+    temporary_name = f".{name}.{uuid.uuid4().hex}.tmp"
+    descriptor: int | None = None
+    temporary_exists = False
+    published = False
+    primary_error: BaseException | None = None
+
+    try:
+        descriptor = os.open(
+            temporary_name,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+            0o600,
+            dir_fd=parent_fd,
+        )
+        temporary_exists = True
+        with os.fdopen(descriptor, "wb", closefd=True) as handle:
+            descriptor = None
+            handle.write(encoded)
+            handle.flush()
+            os.fsync(handle.fileno())
+
+        try:
+            os.link(
+                temporary_name,
+                name,
+                src_dir_fd=parent_fd,
+                dst_dir_fd=parent_fd,
+                follow_symlinks=False,
+            )
+        except FileExistsError:
+            return False
+        except OSError as exc:
+            raise CampaignPrecommitManifestError(
+                "cannot atomically publish campaign precommit manifest"
+            ) from exc
+
+        published = True
+        _fsync_bound_parent_directory(parent_fd)
+        return True
+    except BaseException as exc:
+        primary_error = exc
+        raise
+    finally:
+        if descriptor is not None:
+            try:
+                os.close(descriptor)
+            except OSError as exc:
+                if primary_error is not None:
+                    try:
+                        primary_error.add_note(
+                            f"campaign precommit temp handle close also failed: {exc}"
+                        )
+                    except BaseException:
+                        pass
+                else:
+                    raise CampaignPrecommitManifestError(
+                        "cannot close campaign precommit temp file"
+                    ) from exc
+
+        cleanup_error: BaseException | None = None
+        if temporary_exists:
+            try:
+                os.unlink(temporary_name, dir_fd=parent_fd)
+            except FileNotFoundError:
+                pass
+            except OSError as exc:
+                cleanup_error = exc
+
+        if published:
+            try:
+                _fsync_bound_parent_directory(parent_fd)
+            except BaseException as exc:
+                if cleanup_error is None:
+                    cleanup_error = exc
+
+        if cleanup_error is not None:
+            if primary_error is not None:
+                try:
+                    primary_error.add_note(
+                        f"campaign precommit temp cleanup also failed: {cleanup_error}"
+                    )
+                except BaseException:
+                    pass
+            else:
+                if isinstance(cleanup_error, CampaignPrecommitManifestError):
+                    raise cleanup_error
+                raise CampaignPrecommitManifestError(
+                    "cannot finalize campaign precommit temp cleanup"
+                ) from cleanup_error
 
 
 def _windows_api_path(path: Path) -> str:
@@ -611,11 +717,13 @@ def _read_bound_windows_file_bytes(parent_handle: int, name: str) -> bytes:
             )
 
 
-def _create_bound_windows_file_once(
+def _publish_bound_windows_file_once(
     parent_handle: int,
     name: str,
     encoded: bytes,
 ) -> bool:
+    """Publish complete bytes by handle-relative no-clobber rename on Windows."""
+
     import ctypes
     from ctypes import wintypes
 
@@ -644,6 +752,16 @@ def _create_bound_windows_file_once(
 
     class FileDispositionInfo(ctypes.Structure):
         _fields_ = [("DeleteFile", ctypes.c_ubyte)]
+
+    name_length = len(name)
+
+    class FileRenameInfo(ctypes.Structure):
+        _fields_ = [
+            ("ReplaceOrFlags", wintypes.DWORD),
+            ("RootDirectory", wintypes.HANDLE),
+            ("FileNameLength", wintypes.DWORD),
+            ("FileName", wintypes.WCHAR * (name_length + 1)),
+        ]
 
     ntdll = ctypes.WinDLL("ntdll")
     kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
@@ -701,21 +819,23 @@ def _create_bound_windows_file_once(
     file_non_directory_file = 0x00000040
     file_open_reparse_point = 0x00200000
     obj_case_insensitive = 0x00000040
+    file_rename_info_class = 3
     file_disposition_info_class = 4
     error_file_exists = 80
     error_already_exists = 183
 
-    name_buffer = ctypes.create_unicode_buffer(name)
-    name_bytes = len(name.encode("utf-16-le"))
-    unicode_name = UnicodeString(
-        name_bytes,
-        name_bytes + 2,
-        ctypes.cast(name_buffer, wintypes.LPWSTR),
+    temporary_name = f".{name}.{uuid.uuid4().hex}.tmp"
+    temporary_buffer = ctypes.create_unicode_buffer(temporary_name)
+    temporary_bytes = len(temporary_name.encode("utf-16-le"))
+    temporary_unicode = UnicodeString(
+        temporary_bytes,
+        temporary_bytes + 2,
+        ctypes.cast(temporary_buffer, wintypes.LPWSTR),
     )
     attributes = ObjectAttributes(
         ctypes.sizeof(ObjectAttributes),
         parent_handle,
-        ctypes.pointer(unicode_name),
+        ctypes.pointer(temporary_unicode),
         obj_case_insensitive,
         None,
         None,
@@ -738,16 +858,14 @@ def _create_bound_windows_file_once(
         0,
     )
     if status < 0:
-        error_code = int(rtl_status_to_dos_error(status))
-        if error_code in {error_file_exists, error_already_exists}:
-            return False
         raise CampaignPrecommitManifestError(
-            "cannot create campaign precommit manifest"
-        ) from ctypes.WinError(error_code)
+            "cannot create campaign precommit temporary file"
+        ) from ctypes.WinError(int(rtl_status_to_dos_error(status)))
 
     handle = int(file_handle.value)
     primary_error: BaseException | None = None
-    created = False
+    published = False
+    collision = False
     try:
         offset = 0
         while offset < len(encoded):
@@ -765,20 +883,42 @@ def _create_bound_windows_file_once(
             if written.value <= 0:
                 raise OSError("Windows campaign precommit wrote zero bytes")
             offset += int(written.value)
+
         if not flush_file_buffers(handle):
             raise ctypes.WinError(ctypes.get_last_error())
-        created = True
-        return True
+
+        rename_info = FileRenameInfo()
+        rename_info.ReplaceOrFlags = 0
+        rename_info.RootDirectory = parent_handle
+        rename_info.FileNameLength = len(name.encode("utf-16-le"))
+        rename_info.FileName = name
+        if not set_file_information(
+            handle,
+            file_rename_info_class,
+            ctypes.byref(rename_info),
+            ctypes.sizeof(rename_info),
+        ):
+            error_code = ctypes.get_last_error()
+            if error_code in {error_file_exists, error_already_exists}:
+                collision = True
+            else:
+                raise ctypes.WinError(error_code)
+        else:
+            published = True
+            if not flush_file_buffers(handle):
+                raise ctypes.WinError(ctypes.get_last_error())
+
+        return published
     except BaseException as exc:
         primary_error = exc
         if isinstance(exc, CampaignPrecommitManifestError):
             raise
         raise CampaignPrecommitManifestError(
-            "cannot durably write campaign precommit manifest"
+            "cannot atomically publish campaign precommit manifest"
         ) from exc
     finally:
         cleanup_error: BaseException | None = None
-        if not created:
+        if not published:
             disposition = FileDispositionInfo(1)
             if not set_file_information(
                 handle,
@@ -789,16 +929,22 @@ def _create_bound_windows_file_once(
                 cleanup_error = ctypes.WinError(ctypes.get_last_error())
         if not close_handle(handle) and cleanup_error is None:
             cleanup_error = ctypes.WinError(ctypes.get_last_error())
+
         if primary_error is not None and cleanup_error is not None:
             try:
                 primary_error.add_note(
-                    f"campaign precommit cleanup also failed: {cleanup_error}"
+                    f"campaign precommit temp cleanup also failed: {cleanup_error}"
                 )
             except BaseException:
                 pass
         elif primary_error is None and cleanup_error is not None:
             raise CampaignPrecommitManifestError(
-                "cannot finalize campaign precommit manifest handle"
+                "cannot finalize campaign precommit temporary file"
+            ) from cleanup_error
+
+        if collision and cleanup_error is not None and primary_error is None:
+            raise CampaignPrecommitManifestError(
+                "cannot remove losing campaign precommit temporary file"
             ) from cleanup_error
 
 
@@ -1033,12 +1179,12 @@ def write_campaign_precommit_manifest_once(
             _open_bound_windows_parent_directory(target.parent)
         )
         try:
-            created = _create_bound_windows_file_once(
+            published = _publish_bound_windows_file_once(
                 parent_handle,
                 name,
                 encoded,
             )
-            if not created:
+            if not published:
                 existing = _read_bound_windows_file_bytes(parent_handle, name)
                 if existing != encoded:
                     raise CampaignPrecommitManifestError(
@@ -1059,40 +1205,18 @@ def write_campaign_precommit_manifest_once(
 
     parent_fd, absolute_parent = _open_bound_posix_parent_directory(target.parent)
     try:
-        try:
-            descriptor = os.open(
-                name,
-                os.O_WRONLY
-                | os.O_CREAT
-                | os.O_EXCL
-                | os.O_NOFOLLOW,
-                0o600,
-                dir_fd=parent_fd,
-            )
-        except FileExistsError:
+        published = _publish_bound_posix_file_once(
+            parent_fd,
+            name,
+            encoded,
+        )
+        if not published:
             existing = _read_bound_posix_file_bytes(parent_fd, name)
             if existing != encoded:
                 raise CampaignPrecommitManifestError(
                     "existing campaign precommit manifest conflicts with precommit"
                 )
-        except OSError as exc:
-            raise CampaignPrecommitManifestError(
-                "cannot create campaign precommit manifest"
-            ) from exc
-        else:
-            try:
-                with os.fdopen(descriptor, "wb", closefd=True) as handle:
-                    handle.write(encoded)
-                    handle.flush()
-                    os.fsync(handle.fileno())
-            except BaseException:
-                try:
-                    os.unlink(name, dir_fd=parent_fd)
-                except OSError:
-                    pass
-                raise
 
-        _fsync_bound_parent_directory(parent_fd)
         _assert_bound_posix_parent_identity(absolute_parent, parent_fd)
         if _read_bound_posix_file_bytes(parent_fd, name) != encoded:
             raise CampaignPrecommitManifestError(

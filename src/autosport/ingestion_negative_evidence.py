@@ -143,7 +143,8 @@ def project_ingestion_negative_evidence(
             reason="status_not_object",
         )
 
-    if raw.get("schema_version") != _CONTINUOUS_STATUS_SCHEMA_VERSION:
+    schema_version = raw.get("schema_version")
+    if not _valid_nonnegative_int(schema_version) or schema_version != _CONTINUOUS_STATUS_SCHEMA_VERSION:
         return _negative_shell(
             path,
             evidence_state="invalid",

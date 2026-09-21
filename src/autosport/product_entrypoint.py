@@ -36,21 +36,26 @@ class _SignalStopRequest:
     def requested(self) -> bool:
         return self.signal_number is not None
 
+    def snapshot(self) -> tuple[str, int] | None:
+        """Return one causally paired terminal reason/exit code for the signal."""
+        signum = self.signal_number
+        if signum is None:
+            return None
+        try:
+            name = signal.Signals(signum).name
+        except ValueError:
+            name = str(signum)
+        return f"signal:{name}", 128 + signum
+
     @property
     def reason(self) -> str:
-        if self.signal_number is None:
-            return "operator_stop"
-        try:
-            name = signal.Signals(self.signal_number).name
-        except ValueError:
-            name = str(self.signal_number)
-        return f"signal:{name}"
+        snapshot = self.snapshot()
+        return "operator_stop" if snapshot is None else snapshot[0]
 
     @property
     def exit_code(self) -> int:
-        if self.signal_number is None:
-            return 0
-        return 128 + self.signal_number
+        snapshot = self.snapshot()
+        return 0 if snapshot is None else snapshot[1]
 
 
 def _normalized_workspace(value: object, *, label: str) -> Path:
@@ -185,12 +190,15 @@ def run_product(
         started = True
         _print_record("product_status", runtime=runtime, value=start_status)
         cycles = 0
+        terminal_exit_code = 0
         while max_cycles is None or cycles < max_cycles:
-            if stop_request.requested:
+            signal_terminal = stop_request.snapshot()
+            if signal_terminal is not None:
+                reason, terminal_exit_code = signal_terminal
                 _print_record(
                     "product_status",
                     runtime=runtime,
-                    value=runtime.stop(stop_request.reason),
+                    value=runtime.stop(reason),
                 )
                 break
 
@@ -198,6 +206,19 @@ def run_product(
             cycles += 1
             _print_record("product_tick", runtime=runtime, value=result)
 
+            # Select one terminal cause exactly once. A signal already observed after
+            # the tick wins over bounded completion; once max_cycles is selected,
+            # a later signal arriving inside runtime.stop() cannot rewrite the process
+            # exit code into a contradictory signal/max-cycles pair.
+            signal_terminal = stop_request.snapshot()
+            if signal_terminal is not None:
+                reason, terminal_exit_code = signal_terminal
+                _print_record(
+                    "product_status",
+                    runtime=runtime,
+                    value=runtime.stop(reason),
+                )
+                break
             if max_cycles is not None and cycles >= max_cycles:
                 _print_record(
                     "product_status",
@@ -205,15 +226,8 @@ def run_product(
                     value=runtime.stop("max_cycles_reached"),
                 )
                 break
-            if stop_request.requested:
-                _print_record(
-                    "product_status",
-                    runtime=runtime,
-                    value=runtime.stop(stop_request.reason),
-                )
-                break
             sleep(float(poll_seconds))
-        return stop_request.exit_code
+        return terminal_exit_code
     except Exception as exc:
         if started:
             if isinstance(exc, ProductRuntimeError):

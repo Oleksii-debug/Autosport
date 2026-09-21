@@ -10,6 +10,7 @@ from pathlib import Path
 from autosport.domain import MarketEvent
 from autosport.event_lifecycle import (
     CatalogConflictError,
+    CatalogLifecycleError,
     CatalogCursorError,
     CatalogEvent,
     CatalogPage,

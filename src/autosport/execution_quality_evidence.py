@@ -267,7 +267,27 @@ class PaperExecutionQualityReport:
     samples: tuple[PaperExecutionQualitySample, ...]
     schema_version: int = SCHEMA_VERSION
 
-    def __post_init__(self) -> None:
+    def __new__(cls, *args, **kwargs):
+        del args, kwargs
+        raise TypeError(
+            "PaperExecutionQualityReport is issued only from a canonical frozen ledger"
+        )
+
+    @classmethod
+    def _construct(cls, **values: object) -> "PaperExecutionQualityReport":
+        values = {"schema_version": SCHEMA_VERSION, **values}
+        expected = set(cls.__dataclass_fields__)
+        if set(values) != expected:
+            raise ExecutionQualityEvidenceError(
+                "execution-quality report construction fields are incomplete"
+            )
+        obj = object.__new__(cls)
+        for name in cls.__dataclass_fields__:
+            object.__setattr__(obj, name, values[name])
+        obj._validate()
+        return obj
+
+    def _validate(self) -> None:
         if self.schema_version != SCHEMA_VERSION:
             raise ExecutionQualityEvidenceError(
                 "unsupported execution-quality report schema"

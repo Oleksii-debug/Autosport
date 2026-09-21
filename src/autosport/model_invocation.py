@@ -244,7 +244,16 @@ def invoke_optional_model(
 
     started = _wall(wall_clock())
     start_mono = _mono_value(monotonic)
+    last_mono = start_mono
     attempts: list[ModelInvocationStatus] = []
+
+    def elapsed_monotonic() -> Decimal:
+        nonlocal last_mono
+        sample = _mono_value(monotonic)
+        if sample < last_mono:
+            raise ModelInvocationError("monotonic clock regressed")
+        last_mono = sample
+        return sample - start_mono
 
     def finish(status: ModelInvocationStatus, reason: str, desc: ModelAdapterDescriptor | None = None, output: str | None = None) -> ModelInvocationCompletion:
         completed = _wall(wall_clock())
@@ -285,9 +294,7 @@ def invoke_optional_model(
     for index in range(policy.max_attempts):
         if bool(cancel()):
             return finish(ModelInvocationStatus.CANCELLED, "CANCELLED_BEFORE_ATTEMPT", desc)
-        elapsed = _mono_value(monotonic) - start_mono
-        if elapsed < _ZERO:
-            raise ModelInvocationError("monotonic clock regressed")
+        elapsed = elapsed_monotonic()
         remaining = request.deadline_seconds - elapsed
         if remaining <= _ZERO:
             return finish(ModelInvocationStatus.TIMEOUT, "DEADLINE_EXHAUSTED_BEFORE_ATTEMPT", desc)
@@ -310,9 +317,7 @@ def invoke_optional_model(
             attempts.append(ModelInvocationStatus.UNAVAILABLE)
             return finish(ModelInvocationStatus.UNAVAILABLE, "BACKEND_FAILURE", desc)
 
-        elapsed = _mono_value(monotonic) - start_mono
-        if elapsed < _ZERO:
-            raise ModelInvocationError("monotonic clock regressed")
+        elapsed = elapsed_monotonic()
         if elapsed > request.deadline_seconds:
             attempts.append(ModelInvocationStatus.TIMEOUT)
             return finish(ModelInvocationStatus.TIMEOUT, "LATE_RESPONSE_DISCARDED", desc)

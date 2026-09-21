@@ -86,6 +86,21 @@ class IncidentRiskRegisterTests(unittest.TestCase):
         with self.assertRaisesRegex(IncidentRiskRegisterError, "positive non-boolean integer"):
             IncidentRiskEntry.from_dict(wrong_revision)
 
+        wrong_schema_version_bool = dict(payload)
+        wrong_schema_version_bool["schema_version"] = True
+        with self.assertRaisesRegex(IncidentRiskRegisterError, "unsupported"):
+            IncidentRiskEntry.from_dict(wrong_schema_version_bool)
+
+        wrong_schema_version_float = dict(payload)
+        wrong_schema_version_float["schema_version"] = 1.0
+        with self.assertRaisesRegex(IncidentRiskRegisterError, "unsupported"):
+            IncidentRiskEntry.from_dict(wrong_schema_version_float)
+
+        wrong_enum_type = dict(payload)
+        wrong_enum_type["severity"] = 3
+        with self.assertRaisesRegex(IncidentRiskRegisterError, "severity must be a JSON string"):
+            IncidentRiskEntry.from_dict(wrong_enum_type)
+
     def test_canonical_text_timestamp_and_tuple_rules_fail_closed(self) -> None:
         with self.assertRaisesRegex(IncidentRiskRegisterError, "canonical trimmed text"):
             self._entry(title=" leading")

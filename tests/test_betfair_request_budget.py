@@ -219,7 +219,7 @@ def test_provider_backpressure_is_durable_and_never_auto_retried(tmp_path) -> No
     clock = _clock()
     state_path = tmp_path / "betfair-request-budget.json"
     pressure = FakeTransport(
-        b'{"jsonrpc":"2.0","error":{"code":-32099,"message":"TOO_MANY_REQUESTS"},"id":1}'
+        b'{"jsonrpc":"2.0","error":{"code":-32099,"message":"ANGX-0003","data":{"APINGException":{"requestUUID":"r-1","errorCode":"TOO_MANY_REQUESTS"}}},"id":1}'
     )
     first = BudgetedBetfairReadTransport(
         pressure,

@@ -120,6 +120,20 @@ class FocusedMirrorDependencyIndex:
                 raise ValueError(f"input_id {normalized_id!r} is already registered")
             self._dependencies[normalized_id] = dependency
             self._matched_keys[normalized_id] = initial_keys
+
+        # Close the registration hand-off race without making this index a second
+        # market-state authority. An update can land after the seed snapshot and its
+        # invalidation can be drained while this dependency is not yet visible to
+        # affected_inputs(). Re-snapshot after publication and merge every currently
+        # matching key; later updates remain covered by the normal invalidation path.
+        registration_keys = {
+            (event.source_id, event.quote_key)
+            for event in self._mirror.snapshot()
+            if dependency.matches(event)
+        }
+        with self._lock:
+            if self._dependencies.get(normalized_id) is dependency:
+                self._matched_keys[normalized_id].update(registration_keys)
         return dependency
 
     def unregister(self, input_id: str) -> bool:

@@ -32,6 +32,9 @@ SUBMITTED = "2026-09-21T10:00:01.250000+00:00"
 PROVIDER = "2026-09-21T10:00:01.700000+00:00"
 ACKED = "2026-09-21T10:00:01.800000+00:00"
 EVIDENCE_ID = "e" * 64
+RECONCILIATION_ID = "r" * 64
+RECONCILIATION_AT = "2026-09-21T10:00:03+00:00"
+RECONCILIATION_SOURCE = "provider-order-readback"
 
 
 def _action(**changes: object) -> ExecutionAction:
@@ -117,6 +120,25 @@ def _ack(
             accepted_stake=accepted_stake,
         )
     )
+
+
+def _reconciled_not_found_ledger(tmp_path) -> RealExecutionLedger:
+    ledger = _ledger(tmp_path)
+    ledger.mark_unknown(
+        "attempt-1",
+        reason="provider timeout after submission",
+        observed_at="2026-09-21T10:00:02+00:00",
+    )
+    ledger.reconcile_not_found(
+        ReconciliationSnapshot(
+            attempt_id="attempt-1",
+            evidence_id=RECONCILIATION_ID,
+            observed_at=RECONCILIATION_AT,
+            external_effect_found=False,
+            source=RECONCILIATION_SOURCE,
+        )
+    )
+    return ledger
 
 
 def _accepted_evidence(tmp_path):
@@ -243,22 +265,8 @@ def test_terminal_ack_without_separate_provider_evidence_still_has_attempt_recor
     assert evidence.adverse_odds_delta is None
 
 
-def test_reconciled_not_found_attempt_remains_right_censored(tmp_path):
-    ledger = _ledger(tmp_path)
-    ledger.mark_unknown(
-        "attempt-1",
-        reason="provider timeout after submission",
-        observed_at="2026-09-21T10:00:02+00:00",
-    )
-    ledger.reconcile_not_found(
-        ReconciliationSnapshot(
-            attempt_id="attempt-1",
-            evidence_id="r" * 64,
-            observed_at="2026-09-21T10:00:03+00:00",
-            external_effect_found=False,
-            source="provider-order-readback",
-        )
-    )
+def test_reconciled_not_found_is_terminal_resolved_no_effect_evidence(tmp_path):
+    ledger = _reconciled_not_found_ledger(tmp_path)
 
     evidence = build_empirical_execution_evidence(
         ledger,
@@ -266,9 +274,48 @@ def test_reconciled_not_found_attempt_remains_right_censored(tmp_path):
     )
 
     assert evidence.attempt_state == "RECONCILED_NOT_FOUND"
-    assert evidence.right_censored is True
-    assert evidence.censor_reason == "RECONCILED_NOT_FOUND_NO_TERMINAL_ACK"
+    assert evidence.terminal is True
+    assert evidence.right_censored is False
+    assert evidence.censor_reason is None
+    assert evidence.censor_cutoff_recorded_at is None
+    assert evidence.censor_cutoff_event_count is None
+    assert evidence.acknowledgement_status is None
+    assert evidence.acknowledged_at is None
+    assert evidence.external_receipt_id is None
+    assert evidence.reconciliation_evidence_id == RECONCILIATION_ID
+    assert evidence.reconciliation_evidence_source == RECONCILIATION_SOURCE
+    assert evidence.reconciliation_evidence_observed_at == RECONCILIATION_AT
+    assert evidence.reconciliation_external_effect_found is False
     assert evidence.slippage_status == SLIPPAGE_STATUS_UNKNOWN
+    assert evidence.accepted_odds is None
+
+
+def test_reconciled_not_found_direct_construction_cannot_forge_positive_effect(tmp_path):
+    evidence = build_empirical_execution_evidence(
+        _reconciled_not_found_ledger(tmp_path),
+        attempt_id="attempt-1",
+    )
+
+    with pytest.raises(
+        EmpiricalExecutionEvidenceError,
+        match="external_effect_found=false",
+    ):
+        replace(evidence, reconciliation_external_effect_found=True)
+
+
+def test_reconciled_not_found_direct_construction_requires_reconciliation_identity(
+    tmp_path,
+):
+    evidence = build_empirical_execution_evidence(
+        _reconciled_not_found_ledger(tmp_path),
+        attempt_id="attempt-1",
+    )
+
+    with pytest.raises(
+        EmpiricalExecutionEvidenceError,
+        match="all present or all absent",
+    ):
+        replace(evidence, reconciliation_evidence_id=None)
 
 
 def test_direct_construction_cannot_mint_known_slippage_without_provider_evidence(
@@ -445,6 +492,25 @@ def test_restart_rebuild_is_byte_identical_for_terminal_record(tmp_path):
 
     assert second.to_dict() == first.to_dict()
     assert second.evidence_sha256 == first.evidence_sha256
+
+
+def test_restart_rebuild_is_byte_identical_for_reconciled_not_found(tmp_path):
+    ledger = _reconciled_not_found_ledger(tmp_path)
+    first = build_empirical_execution_evidence(
+        ledger,
+        attempt_id="attempt-1",
+    )
+
+    restarted = RealExecutionLedger(ledger.path)
+    second = build_empirical_execution_evidence(
+        restarted,
+        attempt_id="attempt-1",
+    )
+
+    assert second.to_dict() == first.to_dict()
+    assert second.evidence_sha256 == first.evidence_sha256
+    assert second.terminal is True
+    assert second.reconciliation_external_effect_found is False
 
 
 def test_restart_rebuild_is_byte_identical_for_censored_record(tmp_path):

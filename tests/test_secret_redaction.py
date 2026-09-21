@@ -58,6 +58,20 @@ class SecretRedactionTests(unittest.TestCase):
         self.assertIn("https://" + REDACTED + "@example.test/path", redacted)
         self.assertIn("market=match", redacted)
 
+    def test_text_redacts_percent_encoded_sensitive_query_keys(self) -> None:
+        source = (
+            "https://example.test/path?"
+            "api%5Fkey=alpha123&access%5Ftoken=bravo456&market=match"
+        )
+
+        redacted = redact_operator_text(source)
+
+        self.assertNotIn("alpha123", redacted)
+        self.assertNotIn("bravo456", redacted)
+        self.assertIn("api%5Fkey=" + REDACTED, redacted)
+        self.assertIn("access%5Ftoken=" + REDACTED, redacted)
+        self.assertIn("market=match", redacted)
+
     def test_text_redaction_is_idempotent(self) -> None:
         source = (
             "Authorization: Bearer alpha123 "

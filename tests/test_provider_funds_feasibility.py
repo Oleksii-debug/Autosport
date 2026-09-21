@@ -373,3 +373,27 @@ def test_provider_currency_contract_accepts_non_iso_provider_code() -> None:
         is ProviderFundsState.SNAPSHOT_SUFFICIENT_BUT_UNRESERVED
     )
     assert report.assessments[0].currency == "USDT"
+
+
+def test_report_identity_binds_allocation_ids_not_only_account_aggregate() -> None:
+    snapshot = _snapshot(
+        venue_id="A",
+        account_id="acct-a",
+        amount="100",
+    )
+    first = assess_provider_funds(
+        (_allocation("leg-original", amount="50"),),
+        (snapshot,),
+        decision_ts=_T2,
+        max_balance_age_seconds=Decimal("10"),
+    )
+    second = assess_provider_funds(
+        (_allocation("leg-different", amount="50"),),
+        (snapshot,),
+        decision_ts=_T2,
+        max_balance_age_seconds=Decimal("10"),
+    )
+
+    assert first.assessments == second.assessments
+    assert first.allocations != second.allocations
+    assert first.report_sha256 != second.report_sha256

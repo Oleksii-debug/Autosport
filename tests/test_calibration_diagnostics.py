@@ -216,6 +216,35 @@ class CalibrationDiagnosticsTests(unittest.TestCase):
             ((0.0, 0.5, 1), (0.5, 1.0, 1)),
         )
 
+    def test_wilson_extreme_observed_rates_preserve_exact_zero_one_bounds(self):
+        zero_record = (self._record("f-zero-only", "0.20"),)
+        zero_outcome = (
+            ForecastOutcomeFact("f-zero-only", 0, "2026-02-10T14:00:00+00:00"),
+        )
+        zero_report = evaluate_calibration_diagnostics(
+            zero_record,
+            zero_outcome,
+            self._window(),
+            bins=1,
+            confidence_level=0.80,
+        )
+        self.assertEqual(zero_report.calibration[0].observed_rate, 0.0)
+        self.assertEqual(zero_report.calibration[0].observed_rate_lower, 0.0)
+
+        one_record = (self._record("f-one-only", "0.80"),)
+        one_outcome = (
+            ForecastOutcomeFact("f-one-only", 1, "2026-02-10T14:00:00+00:00"),
+        )
+        one_report = evaluate_calibration_diagnostics(
+            one_record,
+            one_outcome,
+            self._window(),
+            bins=1,
+            confidence_level=0.80,
+        )
+        self.assertEqual(one_report.calibration[0].observed_rate, 1.0)
+        self.assertEqual(one_report.calibration[0].observed_rate_upper, 1.0)
+
     def test_causal_and_training_boundary_checks_are_preserved(self):
         records, outcomes = self._cohort()
         leaked = (

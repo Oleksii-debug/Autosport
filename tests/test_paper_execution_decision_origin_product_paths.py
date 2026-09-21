@@ -275,7 +275,7 @@ def test_paper_value_rejects_shadowed_material_action_identity(tmp_path) -> None
         agent.on_market_event(event, context)
 
     assert attacker_called is False
-    assert ledger.verified_records() == ()
+    assert not ledger.path.exists()
     runtime = context.paper_execution
     assert isinstance(runtime, PaperExecutionAdoptionRuntime)
     assert runtime.ledger.events() == ()

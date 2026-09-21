@@ -837,6 +837,7 @@ class PersistentLiveDecisionLoop:
     PRE_ACTION_BOOK_FILE_NAME = "live_decision_pre_action_book.json"
     CONTROL_FILE_NAME = "live_decision_control.json"
     INPUTS_FILE_NAME = "live_decision_inputs.json"
+    HEALTH_EVIDENCE_DIR_NAME = "live_decision_provider_health"
     AGENT_ID = "persistent-live-decision-loop"
 
     def __init__(
@@ -1058,7 +1059,8 @@ class PersistentLiveDecisionLoop:
 
         self.progress_path = self.workspace / self.PROGRESS_FILE_NAME
         self.pre_action_book_path = self.workspace / self.PRE_ACTION_BOOK_FILE_NAME
-        self.health_evidence_path = self.workspace / "live_decision_provider_health.json"
+        self.health_evidence_dir = self.workspace / self.HEALTH_EVIDENCE_DIR_NAME
+        self.health_evidence_dir.mkdir(parents=True, exist_ok=True)
         self.control_path = self.workspace / self.CONTROL_FILE_NAME
         self._progress = self._load_progress()
         if self._progress is not None and self._progress.loop_id != self.loop_id:
@@ -2000,7 +2002,10 @@ class PersistentLiveDecisionLoop:
             provider_health_boundaries
         )
         if gate == _GATE_PROVIDER_HEALTH:
-            health_evidence = self._load_health_evidence()
+            health_evidence = self._load_health_evidence(
+                decision_ts=plan.decision_ts,
+                market_state_sha256=market_state_sha256,
+            )
             if (
                 health_evidence is None
                 or health_evidence.loop_id != self.loop_id
@@ -2304,10 +2309,24 @@ class PersistentLiveDecisionLoop:
             health_evidence = None
         with WorkspaceEconomicLock(self.workspace):
             if health_evidence is not None:
-                atomic_write_json(
-                    self.health_evidence_path,
-                    health_evidence.to_dict(),
+                evidence_path = self._health_evidence_path(
+                    decision_ts=decision_ts,
+                    market_state_sha256=market_state_sha256,
                 )
+                if evidence_path.exists():
+                    durable_evidence = self._load_health_evidence(
+                        decision_ts=decision_ts,
+                        market_state_sha256=market_state_sha256,
+                    )
+                    if durable_evidence != health_evidence:
+                        raise LiveDecisionProgressError(
+                            "provider health evidence identity already exists with different bytes"
+                        )
+                else:
+                    atomic_write_json(
+                        evidence_path,
+                        health_evidence.to_dict(),
+                    )
             # The snapshot is written before the cursor: a crash before cursor
             # publication leaves only ignorable stale snapshot bytes, while every
             # visible PENDING cursor has an exact pre-action portfolio witness.
@@ -2561,12 +2580,43 @@ class PersistentLiveDecisionLoop:
                 "committed live progress conflicts with Decision Ledger record"
             )
 
-    def _load_health_evidence(self) -> _HealthEvidence | None:
-        if not self.health_evidence_path.exists():
+    def _health_evidence_path(
+        self,
+        *,
+        decision_ts: str,
+        market_state_sha256: str,
+    ) -> Path:
+        _canonical_timestamp("health evidence decision_ts", decision_ts)
+        _canonical_sha256(
+            "health evidence market_state_sha256",
+            market_state_sha256,
+        )
+        identity = _canonical_json_sha256(
+            {
+                "schema": "autosport.live_decision_provider_health_identity",
+                "schema_version": 1,
+                "loop_id": self.loop_id,
+                "decision_ts": decision_ts,
+                "market_state_sha256": market_state_sha256,
+            }
+        )
+        return self.health_evidence_dir / f"{identity}.json"
+
+    def _load_health_evidence(
+        self,
+        *,
+        decision_ts: str,
+        market_state_sha256: str,
+    ) -> _HealthEvidence | None:
+        evidence_path = self._health_evidence_path(
+            decision_ts=decision_ts,
+            market_state_sha256=market_state_sha256,
+        )
+        if not evidence_path.exists():
             return None
         try:
             raw = strict_json_loads(
-                self.health_evidence_path.read_text(encoding="utf-8")
+                evidence_path.read_text(encoding="utf-8")
             )
             return _HealthEvidence.from_dict(raw)
         except (OSError, TypeError, ValueError) as exc:
@@ -2582,7 +2632,10 @@ class PersistentLiveDecisionLoop:
             raise LiveDecisionProgressError(
                 "provider health evidence requested for non-health-gated progress"
             )
-        evidence = self._load_health_evidence()
+        evidence = self._load_health_evidence(
+            decision_ts=progress.decision_ts,
+            market_state_sha256=progress.market_state_sha256,
+        )
         if (
             evidence is None
             or evidence.loop_id != progress.loop_id

@@ -56,3 +56,8 @@ def test_operator_gui_exception_type_name_cannot_carry_secret(renderer) -> None:
     assert type_secret not in rendered
     assert REDACTED in rendered
     assert "safe detail" in rendered
+
+def test_gui_exception_renderers_preserve_empty_message_semantics() -> None:
+    assert _safe_exception_text(RuntimeError()) == "RuntimeError"
+    assert _safe_exception_detail(RuntimeError()) == "RuntimeError: "
+

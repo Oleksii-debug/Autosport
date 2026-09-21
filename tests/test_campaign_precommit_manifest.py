@@ -220,3 +220,25 @@ def test_record_does_not_claim_execution_or_readiness_authority() -> None:
         "settlement_authoritative",
     }
     assert forbidden.isdisjoint(record)
+
+
+def test_loader_rejects_duplicate_json_keys(tmp_path: Path) -> None:
+    path = tmp_path / "precommit.json"
+    encoded = json.dumps(manifest().to_record(), separators=(",", ":"))
+    encoded = encoded.replace(
+        '"campaign_id":"paper-forward-2026-09-22"',
+        '"campaign_id":"forged","campaign_id":"paper-forward-2026-09-22"',
+        1,
+    )
+    path.write_text(encoded, encoding="utf-8")
+    with pytest.raises(CampaignPrecommitManifestError):
+        load_campaign_precommit_manifest(path)
+
+
+def test_loader_rejects_nonstandard_json_constants(tmp_path: Path) -> None:
+    path = tmp_path / "precommit.json"
+    encoded = json.dumps(manifest().to_record(), separators=(",", ":"))
+    encoded = encoded.replace('"schema_version":1', '"schema_version":NaN', 1)
+    path.write_text(encoded, encoding="utf-8")
+    with pytest.raises(CampaignPrecommitManifestError):
+        load_campaign_precommit_manifest(path)

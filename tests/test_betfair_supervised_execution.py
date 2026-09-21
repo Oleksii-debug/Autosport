@@ -964,11 +964,7 @@ def test_provider_failure_report_is_rejected_not_inferred_from_absence() -> None
             provider_id="betfair",
         )
         assert provider_ref is not None
-        assert result.external_receipt_id is not None
-        assert result.external_receipt_id.startswith(
-            "betfair-response-sha256:"
-        )
-        assert result.external_receipt_id != provider_ref
+        assert result.external_receipt_id is None
 
 
 def test_failure_with_executable_order_state_is_unknown_not_rejected() -> None:

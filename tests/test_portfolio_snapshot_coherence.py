@@ -221,6 +221,20 @@ def test_causal_timestamp_and_canonical_identity_validation_fail_closed() -> Non
         evidence("account-funds", digest="A" * 64)
 
 
+def test_duration_policy_overflow_fails_with_contract_error() -> None:
+    for field in ("max_age_seconds", "max_cut_skew_seconds"):
+        kwargs = {
+            "decision_as_of": "2026-09-21T09:00:10Z",
+            "required_components": ("x",),
+            "components": (evidence("x"),),
+            "max_age_seconds": 10,
+            "max_cut_skew_seconds": 5,
+        }
+        kwargs[field] = 10**100
+        with pytest.raises(PortfolioSnapshotCoherenceError, match="supported duration range"):
+            evaluate_portfolio_snapshot_coherence(**kwargs)
+
+
 def test_required_policy_is_exact_and_canonical() -> None:
     with pytest.raises(PortfolioSnapshotCoherenceError, match="cannot be empty"):
         evaluate_portfolio_snapshot_coherence(

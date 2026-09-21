@@ -139,6 +139,7 @@ def test_sportsbook_affiliate_read_is_only_static_scope_compatibility():
     )
     assert result.scope_compatible is True
     assert result.provenance_domain == "betfair.sportsbook"
+    assert result.production_environment is None
     assert result.delayed_market_data is None
     assert result.requires_external_affiliate_entitlement is True
     assert result.provider_entitlement_authorized is False

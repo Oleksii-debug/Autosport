@@ -65,9 +65,12 @@ class ParlaySportScopeImmutabilityTests(unittest.TestCase):
         self.assertEqual(urlparse(calls[0]).path, "/v1/sports/basketball_nba/odds")
         self.assertEqual(batch.source_id, "parlayapi:basketball_nba")
         self.assertTrue(batch.quotes)
-        self.assertTrue(quote.sport == "basketball_nba" for quote in batch.quotes)
+        self.assertTrue(all(quote.sport == "basketball_nba" for quote in batch.quotes))
         self.assertTrue(
-            quote.metadata["sport_key"] == "basketball_nba" for quote in batch.quotes
+            all(
+                quote.metadata["sport_key"] == "basketball_nba"
+                for quote in batch.quotes
+            )
         )
 
     def test_sport_key_rebinding_cannot_retarget_configured_provider_scope(self) -> None:

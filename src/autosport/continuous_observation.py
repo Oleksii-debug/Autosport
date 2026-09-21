@@ -32,6 +32,10 @@ Reporter = Callable[[str], None]
 ProviderFactory = Callable[..., MarketProvider]
 
 _STATUS_SCHEMA_VERSION = 1
+_STATUS_KIND = "autosport_continuous_local_observation"
+_STATUS_LIFECYCLE_STATES = frozenset(
+    {"starting", "running", "attempting", "provider_unavailable", "failed", "stopped"}
+)
 _MAX_CYCLES = 100_000
 _MAX_RUNTIME_SECONDS = 7 * 24 * 60 * 60
 _MAX_INTERVAL_SECONDS = 60 * 60
@@ -144,10 +148,14 @@ def _read_previous_status(path: Path) -> dict[str, object] | None:
         raise ValueError("continuous observation status is unreadable or invalid JSON") from exc
     if not isinstance(raw, dict) or raw.get("schema_version") != _STATUS_SCHEMA_VERSION:
         raise ValueError("continuous observation status has unsupported schema")
+    if raw.get("kind") != _STATUS_KIND:
+        raise ValueError("continuous observation status has unsupported kind")
     run_id = raw.get("run_id")
     state = raw.get("state")
     if not isinstance(run_id, str) or not run_id or not isinstance(state, str) or not state:
         raise ValueError("continuous observation status is missing run identity/state")
+    if state not in _STATUS_LIFECYCLE_STATES:
+        raise ValueError("continuous observation status has unsupported lifecycle state")
     return raw
 
 
@@ -164,7 +172,7 @@ def _status_payload(
 ) -> dict[str, object]:
     return {
         "schema_version": _STATUS_SCHEMA_VERSION,
-        "kind": "autosport_continuous_local_observation",
+        "kind": _STATUS_KIND,
         "run_id": state.run_id,
         "source_id": state.source_id,
         "state": lifecycle_state,

@@ -46,7 +46,8 @@ def test_standard_back_limit_issues_only_conservative_price_floor() -> None:
     assert evidence.realized_price_exact is False
 
     payload = evidence.to_dict()
-    assert payload["price_floor_odds"] == "2.00"
+    assert payload["price_floor_odds"] == ExecutionAction.to_dict(action)["requested_odds"]
+    assert payload["requested_stake"] == ExecutionAction.to_dict(action)["requested_stake"]
     assert payload["zero_adverse_price_deterioration"] is True
     assert payload["execution_feasibility_proven"] is False
     assert payload["realized_price_exact"] is False
@@ -155,11 +156,23 @@ def test_instruction_projection_identity_survives_decimal_scale_round_trip() -> 
 
     before = module._canonical_instruction_projection(action)
     after = module._canonical_instruction_projection(reloaded_action)
+    before_evidence = module._issue_evidence(
+        bound=_bound_plan,
+        action=action,
+        instruction_sha256=module._digest(before),
+    )
+    after_evidence = module._issue_evidence(
+        bound=_bound_plan,
+        action=reloaded_action,
+        instruction_sha256=module._digest(after),
+    )
 
     assert before == after
     assert before["limitOrder"]["price"] == durable_action["requested_odds"]
     assert before["limitOrder"]["size"] == durable_action["requested_stake"]
     assert module._digest(before) == module._digest(after)
+    assert before_evidence.to_dict() == after_evidence.to_dict()
+    assert before_evidence.evidence_id == after_evidence.evidence_id
 
 
 def _replace_captured_request(

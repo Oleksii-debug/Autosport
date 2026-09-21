@@ -76,6 +76,34 @@ def _time(value: str, name: str) -> datetime:
     return parsed
 
 
+def _absence_capture_floor(readback: BetfairExecutionReadbackEnvelope) -> str:
+    """Return the earliest order-scope read in one canonical absence capture.
+
+    Definitive absence requires every current/cleared page to be observed after the
+    visibility deadline. Using only the envelope's latest `observed_at` would allow a
+    capture started before +15s to become authoritative merely because its final RPC
+    completed later.
+    """
+
+    if not isinstance(readback, BetfairExecutionReadbackEnvelope):
+        raise BetfairTimeoutResolutionError(
+            "absence visibility requires canonical Betfair execution readback"
+        )
+    observed: list[str] = [
+        page.evidence.observed_at for page in readback.current_pages
+    ]
+    for _, pages in readback.cleared_pages_by_status:
+        observed.extend(page.evidence.observed_at for page in pages)
+    if not observed:
+        raise BetfairTimeoutResolutionError(
+            "absence visibility requires non-empty current/cleared page evidence"
+        )
+    return min(
+        observed,
+        key=lambda value: _time(value, "provider order-scope page observed_at"),
+    )
+
+
 def _durable_timeout_authority(
     ledger: RealExecutionLedger,
     action: ExecutionAction,
@@ -172,9 +200,9 @@ def resolve_betfair_timeout_provider_state(
     """Resolve one ambiguous Betfair placement without premature NOT_FOUND.
 
     Positive canonical evidence wins immediately. Canonical complete-empty evidence
-    remains indeterminate until the fixed Betfair visibility horizon has elapsed.
-    The exact boundary is inclusive: an observation at durable-boundary+15s may issue
-    absence; any earlier observation may not.
+    remains indeterminate until the fixed Betfair visibility horizon has elapsed and
+    every order-scope page in the capture was observed at/after that deadline.
+    The exact boundary is inclusive.
 
     Provider/readback incompleteness, identity conflicts, wrong cleared-status
     coverage, or stale evidence continue to fail closed in the canonical verifier.
@@ -214,7 +242,11 @@ def resolve_betfair_timeout_provider_state(
     if not isinstance(evidence, VerifiedProviderAbsenceEvidence):
         raise BetfairTimeoutResolutionError("provider verifier returned non-canonical state")
 
-    if observed < deadline:
+    capture_floor = _time(
+        _absence_capture_floor(readback),
+        "provider order-scope capture floor",
+    )
+    if observed < deadline or capture_floor < deadline:
         return BetfairTimeoutResolution(
             BetfairTimeoutResolutionKind.INDETERMINATE_BEFORE_VISIBILITY_HORIZON,
             timeout_boundary_at,
@@ -281,9 +313,6 @@ def _install_betfair_timeout_absence_authority() -> None:
             raise BetfairTimeoutResolutionError(
                 "timeout absence evidence type is not canonical"
             )
-        # #1197 applies to the product-issued per-instruction reference used by the
-        # ambiguous Betfair write path. Generic historical reconciliation without a
-        # provider-order binding remains governed by its pre-existing authority.
         if evidence.provider_order_ref is None:
             return
         record = issued.get(id(evidence))

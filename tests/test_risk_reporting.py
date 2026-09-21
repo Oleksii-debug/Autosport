@@ -49,7 +49,7 @@ class PaperRiskReportingTests(unittest.TestCase):
 
         self.assertEqual(report.schema, RISK_REPORT_SCHEMA)
         self.assertEqual(
-            report.paper_state_sha256,
+            report.portfolio_risk_state_sha256,
             PaperRiskPolicy.risk_of_ruin_portfolio_sha256(book),
         )
         self.assertEqual(report.initial_bankroll, Decimal("100"))
@@ -156,7 +156,7 @@ class PaperRiskReportingTests(unittest.TestCase):
         after_sha256 = PaperRiskPolicy.risk_of_ruin_portfolio_sha256(book)
         self.assertEqual(report.current_drawdown_amount, Decimal("30"))
         self.assertEqual(report.drawdown_loss_room, Decimal("-10.00"))
-        self.assertEqual(report.paper_state_sha256, before_sha256)
+        self.assertEqual(report.portfolio_risk_state_sha256, before_sha256)
         self.assertEqual(after_sha256, before_sha256)
 
     def test_restart_preserves_exact_report_identity_and_values(self) -> None:

@@ -24,7 +24,7 @@ Clock = Callable[[], str]
 _MAX_SNAPSHOT_BATCHES = 256
 _MAX_BATCH_ATTEMPTS = 2
 _SECRET_ASSIGNMENT = re.compile(
-    r"(?i)\b((?:[A-Z0-9]+_)*(?:API_KEY|APP_KEY|ACCESS_TOKEN|AUTH_TOKEN|CLIENT_SECRET|PASSWORD|PASSWD)|"
+    r"(?i)\b([A-Z0-9_]*(?:API_KEY|APP_KEY|ACCESS_TOKEN|AUTH_TOKEN|CLIENT_SECRET|PASSWORD|PASSWD)|"
     r"api[-_]?key|app[-_]?key|access[-_]?token|auth[-_]?token|client[-_]?secret|password|passwd)"
     r"(\s*[:=]\s*)(?:[\"']?)([^&\s,;\"']+)(?:[\"']?)"
 )

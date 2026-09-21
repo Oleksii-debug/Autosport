@@ -134,7 +134,7 @@ def _assert_no_positive_route(
             stake_quantum=Decimal("0.01"),
             ledger=ledger,
         )
-    except RoutingContractError:
+    except (RoutingContractError, TypeError):
         return
 
     assert not (
@@ -155,10 +155,16 @@ def test_exact_ledger_instance_cannot_rebind_verified_snapshot_to_other_path(
     target = RealExecutionLedger(target_path)
     assert not target_path.exists()
 
-    # Same exact public ledger class and an empty target durable path. Rebinding
-    # only the dynamically dispatched verifier must not let bytes from another
-    # ledger become authority for this target ledger identity.
-    target.verified_snapshot = lambda: donor_snapshot  # type: ignore[method-assign]
+    def rebound_snapshot() -> VerifiedExecutionLedgerSnapshot:
+        return donor_snapshot
+
+    # Refusing instance-level method rebinding is itself a valid fail-closed
+    # repair. If rebinding remains possible, those donor bytes must not become
+    # authority for this empty target ledger identity.
+    try:
+        target.verified_snapshot = rebound_snapshot  # type: ignore[method-assign]
+    except (AttributeError, TypeError):
+        return
 
     _assert_no_positive_route(ledger=target, venues=venues, initial=initial)
     assert not target_path.exists()

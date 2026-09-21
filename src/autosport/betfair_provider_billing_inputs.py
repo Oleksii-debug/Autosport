@@ -111,6 +111,7 @@ class BetfairAccountStatementPageObservation:
     record_count: int
     items: tuple[BetfairAccountStatementItemObservation, ...]
     more_available: bool
+    account_details_evidence: BetfairEvidence
     evidence: BetfairEvidence
 
     def __post_init__(self) -> None:
@@ -130,6 +131,10 @@ class BetfairAccountStatementPageObservation:
             )
         if type(self.more_available) is not bool:
             raise BetfairReadOnlyError("more_available must be bool")
+        if type(self.account_details_evidence) is not BetfairEvidence:
+            raise BetfairReadOnlyError(
+                "account-details evidence must be exact BetfairEvidence"
+            )
         if type(self.evidence) is not BetfairEvidence:
             raise BetfairReadOnlyError(
                 "statement evidence must be exact BetfairEvidence"
@@ -270,12 +275,13 @@ def read_betfair_provider_billing_inputs(
         record_count=record_count,
         items=items,
         more_available=more_available,
+        account_details_evidence=details.evidence,
         evidence=statement_rpc.evidence,
     )
     observed_at = max(
         entitlement.evidence.observed_at,
         statement.evidence.observed_at,
-        details.evidence.observed_at,
+        statement.account_details_evidence.observed_at,
         key=lambda value: _instant(value, "observed_at"),
     )
     return BetfairProviderBillingInputsObservation(
@@ -504,6 +510,9 @@ def _combined_evidence_sha256(
         "application_key_sha256": entitlement.application_key_sha256,
         "entitlement_payload_sha256": (
             entitlement.evidence.source_payload_sha256
+        ),
+        "account_details_payload_sha256": (
+            statement.account_details_evidence.source_payload_sha256
         ),
         "statement_payload_sha256": statement.evidence.source_payload_sha256,
         "currency_code": statement.currency_code,

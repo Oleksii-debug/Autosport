@@ -505,26 +505,17 @@ def test_execution_readback_fails_closed_when_market_event_identity_is_unavailab
     assert len(transport.calls) == 6
 
 
-def test_bet_readback_capability_is_advertised_only_by_real_readonly_adapter():
+def test_bet_readback_capability_requires_action_bound_execution_readback():
     from autosport.bookmaker_capability import BookmakerCapability
 
-    client, _ = client_for(
-        response(
-            {
-                "currencyCode": "GBP",
-                "localeCode": "en",
-                "region": "GBR",
-                "timezone": "Europe/London",
-            },
-            1,
+    client, transport = client_for()
+
+    with pytest.raises(
+        BetfairReadOnlyError,
+        match="action-bound read_execution_readback evidence",
+    ):
+        client.read_account_snapshot(
+            frozenset({BookmakerCapability.BET_READBACK})
         )
-    )
 
-    snapshot = client.read_account_snapshot(
-        frozenset({BookmakerCapability.BET_READBACK})
-    )
-
-    assert snapshot.observed_capabilities == frozenset(
-        {BookmakerCapability.BET_READBACK}
-    )
-    snapshot.profile.require(BookmakerCapability.BET_READBACK)
+    assert transport.calls == []

@@ -69,6 +69,7 @@ _CHILD_CODE = textwrap.dedent(
         marker["transition_id"] = transitions[0]
         if mode in {"after_attribution", "after_postmortem"}:
             witness = bridge.resolution_witness(ticket_id)
+            marker["next_checkpoint_id"] = witness.next_checkpoint.checkpoint_id
             runtime = _runtime
             runtime.agent_loop.advance(
                 expected=legacy.AgentLoopPhase.EVALUATE,
@@ -283,7 +284,10 @@ class PaperCampaignProcessKillRecoveryTests(unittest.TestCase):
             self.assertEqual(before["phase"], _legacy.AgentLoopPhase.REFLECT.value)
             self.assertEqual(len(before["resolutions"]), 1)
             self.assertEqual(len(before["attributions"]), 1)
-            self.assertEqual(before["attributions"][0]["attribution_id"], marker["attribution_id"])
+            self.assertEqual(
+                before["attributions"][0]["attribution_id"],
+                marker["attribution_id"],
+            )
             self.assertEqual(before["postmortems"], [])
             self.assertNotEqual(before["checkpointed_transition_id"], transition_id)
 
@@ -307,8 +311,14 @@ class PaperCampaignProcessKillRecoveryTests(unittest.TestCase):
             self.assertEqual(len(before["resolutions"]), 1)
             self.assertEqual(len(before["attributions"]), 1)
             self.assertEqual(len(before["postmortems"]), 1)
-            self.assertEqual(before["postmortems"][0]["postmortem_id"], marker["postmortem_id"])
-            self.assertNotEqual(before["environment_checkpoint_id"], marker.get("next_checkpoint_id"))
+            self.assertEqual(
+                before["postmortems"][0]["postmortem_id"],
+                marker["postmortem_id"],
+            )
+            self.assertNotEqual(
+                before["environment_checkpoint_id"],
+                marker["next_checkpoint_id"],
+            )
             self.assertNotEqual(before["checkpointed_transition_id"], transition_id)
 
             self._assert_terminal_exactly_once(

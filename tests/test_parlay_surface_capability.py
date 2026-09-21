@@ -47,7 +47,7 @@ def decide(value, **kwargs):
 
 def test_supported_fresh_exact_surface_is_usable():
     result = decide(obs())
-    assert result.technical_support is TechnicalSupport.PROVEN
+    assert result.technical_support is TechnicalSupport.OBSERVED_SUPPORTED
     assert result.data_usability is DataUsability.USABLE
     assert result.provider_write_authorized is False
     assert result.execution_authorized is False
@@ -76,7 +76,7 @@ def test_generic_200_without_market_service_witness_is_unknown():
 
 def test_empty_rows_do_not_destroy_technical_support():
     result = decide(obs(row_count=0, oldest_row_age_seconds=None))
-    assert result.technical_support is TechnicalSupport.PROVEN
+    assert result.technical_support is TechnicalSupport.OBSERVED_SUPPORTED
     assert result.data_usability is DataUsability.EMPTY
 
 def test_props_200_without_market_service_witness_is_unknown():
@@ -97,7 +97,7 @@ def test_props_explicit_market_service_witness_can_be_usable():
         served_markets=("player_points",),
         row_count=8,
     ))
-    assert result.technical_support is TechnicalSupport.PROVEN
+    assert result.technical_support is TechnicalSupport.OBSERVED_SUPPORTED
     assert result.data_usability is DataUsability.USABLE
 
 
@@ -105,7 +105,7 @@ def test_props_explicit_market_service_witness_can_be_usable():
 
 def test_incomplete_pagination_cannot_be_usable():
     result = decide(obs(surface=Surface.PROPS, requested_market=None, served_markets=(), pagination_complete=False))
-    assert result.technical_support is TechnicalSupport.PROVEN
+    assert result.technical_support is TechnicalSupport.OBSERVED_SUPPORTED
     assert result.data_usability is DataUsability.INCOMPLETE
 
 
@@ -130,10 +130,25 @@ def test_future_available_evidence_is_not_causal():
     assert result.reason == "EVIDENCE_NOT_CAUSALLY_AVAILABLE"
 
 
-def test_injected_or_unverified_transport_cannot_mint_support():
-    result = decide(obs(origin_verified=False))
-    assert result.technical_support is TechnicalSupport.UNKNOWN
-    assert result.reason == "PROVIDER_ORIGIN_UNVERIFIED"
+def test_observational_decision_never_resolves_source_authority():
+    result = decide(obs())
+    assert result.technical_support is TechnicalSupport.OBSERVED_SUPPORTED
+    assert result.source_authority_resolved is False
+
+
+def test_caller_cannot_mint_provider_origin_verification():
+    with pytest.raises(TypeError):
+        ParlaySurfaceObservation(
+            sport_key="basketball_nba",
+            surface=Surface.ODDS,
+            observed_at=T0,
+            available_at=T0,
+            status_code=200,
+            origin_verified=True,
+            response_sha256=DIGEST,
+            row_count=1,
+            pagination_complete=True,
+        )
 
 
 @pytest.mark.parametrize("status", [429, 500, 502, 599])

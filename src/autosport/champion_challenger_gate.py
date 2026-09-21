@@ -20,26 +20,40 @@ class PairedLoss:
         if not isinstance(self.evaluation_id, str) or not self.evaluation_id.strip():
             raise PromotionEvidenceError("evaluation_id must be a non-empty string")
         object.__setattr__(self, "evaluation_id", self.evaluation_id.strip())
-        object.__setattr__(self, "champion_loss", _finite_nonnegative(self.champion_loss, "champion_loss"))
-        object.__setattr__(self, "challenger_loss", _finite_nonnegative(self.challenger_loss, "challenger_loss"))
+        object.__setattr__(
+            self, "champion_loss", _finite_nonnegative(self.champion_loss, "champion_loss")
+        )
+        object.__setattr__(
+            self,
+            "challenger_loss",
+            _finite_nonnegative(self.challenger_loss, "challenger_loss"),
+        )
 
 
 @dataclass(frozen=True, slots=True)
 class PromotionPolicy:
-    min_pairs: int = 30
-    min_effective_pairs: int = 20
-    min_mean_improvement: float = 0.0
-    min_win_rate: float = 0.5
-    alpha: float = 0.05
-    tie_tolerance: float = 0.0
+    min_pairs: int
+    min_effective_pairs: int
+    min_mean_improvement: float
+    min_win_rate: float
+    alpha: float
+    tie_tolerance: float
 
     def __post_init__(self) -> None:
         for name in ("min_pairs", "min_effective_pairs"):
             value = getattr(self, name)
             if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
                 raise PromotionEvidenceError(f"{name} must be a positive integer")
-        object.__setattr__(self, "min_mean_improvement", _finite_nonnegative(self.min_mean_improvement, "min_mean_improvement"))
-        object.__setattr__(self, "tie_tolerance", _finite_nonnegative(self.tie_tolerance, "tie_tolerance"))
+        object.__setattr__(
+            self,
+            "min_mean_improvement",
+            _finite_nonnegative(self.min_mean_improvement, "min_mean_improvement"),
+        )
+        object.__setattr__(
+            self,
+            "tie_tolerance",
+            _finite_nonnegative(self.tie_tolerance, "tie_tolerance"),
+        )
         object.__setattr__(self, "min_win_rate", _unit_interval(self.min_win_rate, "min_win_rate"))
         alpha = _real(self.alpha, "alpha")
         if not 0.0 < alpha < 1.0:
@@ -63,7 +77,7 @@ class PromotionDecision:
 
 def evaluate_promotion(
     pairs: Iterable[PairedLoss],
-    policy: PromotionPolicy | None = None,
+    policy: PromotionPolicy,
 ) -> PromotionDecision:
     """Evaluate matched champion/challenger losses with a fail-closed promotion gate.
 
@@ -71,11 +85,15 @@ def evaluate_promotion(
     duplicate paired evidence would otherwise inflate the denominator and is rejected.
     Ties within ``tie_tolerance`` are excluded from the exact sign test and win rate,
     but remain in the mean-improvement calculation and total-pair sufficiency check.
+
+    Policy selection is deliberately outside this evaluator: callers must supply a
+    ``PromotionPolicy``. Unique evaluation IDs prevent duplicate counting but do not
+    prove that evaluation units are statistically independent. The sign test assumes
+    independence across effective pairs; callers testing multiple challengers are
+    responsible for any required multiplicity control.
     """
 
-    if policy is None:
-        policy = PromotionPolicy()
-    elif not isinstance(policy, PromotionPolicy):
+    if not isinstance(policy, PromotionPolicy):
         raise PromotionEvidenceError("policy must be PromotionPolicy")
 
     rows = tuple(pairs)

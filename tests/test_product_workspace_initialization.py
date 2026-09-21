@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from autosport.product_workspace_initialization import (
+@pytest.fixture(autouse=True)\ndef _isolate_machine_identity_state(\n    tmp_path: Path,\n    monkeypatch: pytest.MonkeyPatch,\n) -> None:\n    """Keep current and successor machine-binding roots inside each test sandbox."""\n\n    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "os-application-state"))\n    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "xdg-state"))\n    monkeypatch.delenv("AUTOSPORT_MONOTONIC_AUTHORITY_ROOT", raising=False)\n\n\nfrom autosport.product_workspace_initialization import (
     PRODUCT_WORKSPACE_BINDING_SCHEMA_VERSION,
     ProductWorkspaceInitializationError,
     initialize_product_workspace,
@@ -158,7 +158,7 @@ def test_self_consistent_workspace_vs_machine_identity_conflict_fails_closed(
 
     with pytest.raises(
         ProductWorkspaceInitializationError,
-        match="concurrent product workspace initialization did not converge",
+        match="durable product workspace identity evidence conflicts",
     ):
         initialize_product_workspace(workspace, authority_root=authority_root)
 

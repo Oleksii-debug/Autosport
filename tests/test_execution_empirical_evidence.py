@@ -151,7 +151,7 @@ def _accepted_evidence(tmp_path):
     )
 
 
-def test_terminal_accepted_record_keeps_slippage_but_latency_unknown(tmp_path):
+def test_terminal_accepted_record_keeps_provider_correlation_but_slippage_unknown(tmp_path):
     evidence = _accepted_evidence(tmp_path)
 
     assert evidence.attempt_state == "ACCEPTED"
@@ -159,11 +159,15 @@ def test_terminal_accepted_record_keeps_slippage_but_latency_unknown(tmp_path):
     assert evidence.right_censored is False
     assert evidence.censor_reason is None
     assert evidence.censor_cutoff_recorded_at is None
+    assert evidence.provider_evidence_id == EVIDENCE_ID
+    assert evidence.provider_evidence_observed_at == PROVIDER
 
-    assert evidence.slippage_status == SLIPPAGE_STATUS_KNOWN
-    assert evidence.accepted_minus_requested_odds == Decimal("-0.02")
-    assert evidence.adverse_odds_delta == Decimal("0.02")
-    assert evidence.unaccepted_stake == Decimal("0.00")
+    assert evidence.slippage_status == SLIPPAGE_STATUS_UNKNOWN
+    assert evidence.accepted_odds is None
+    assert evidence.accepted_stake is None
+    assert evidence.accepted_minus_requested_odds is None
+    assert evidence.adverse_odds_delta is None
+    assert evidence.unaccepted_stake is None
 
     assert evidence.causal_timing_status == TIMING_STATUS_UNKNOWN
     assert evidence.causal_timing_reason == TIMING_REASON_NO_MONOTONIC_WITNESS
@@ -318,19 +322,15 @@ def test_reconciled_not_found_direct_construction_requires_reconciliation_identi
         replace(evidence, reconciliation_evidence_id=None)
 
 
-def test_direct_construction_cannot_mint_known_slippage_without_provider_evidence(
+def test_generic_provider_evidence_cannot_mint_known_slippage_by_direct_construction(
     tmp_path,
 ):
-    ledger = _ledger(tmp_path)
-    _ack(ledger)
-    evidence = build_empirical_execution_evidence(
-        ledger,
-        attempt_id="attempt-1",
-    )
+    evidence = _accepted_evidence(tmp_path)
+    assert evidence.provider_evidence_id == EVIDENCE_ID
 
     with pytest.raises(
         EmpiricalExecutionEvidenceError,
-        match="KNOWN slippage requires bound provider evidence",
+        match="typed accepted-price provider evidence",
     ):
         replace(
             evidence,
@@ -343,7 +343,7 @@ def test_direct_construction_cannot_mint_known_slippage_without_provider_evidenc
         )
 
 
-def test_partial_acceptance_preserves_exact_unaccepted_stake(tmp_path):
+def test_partial_acceptance_keeps_unproven_slippage_unknown(tmp_path):
     ledger = _ledger(tmp_path)
     _bind_provider(ledger)
     _ack(
@@ -360,9 +360,12 @@ def test_partial_acceptance_preserves_exact_unaccepted_stake(tmp_path):
 
     assert evidence.attempt_state == "PARTIAL"
     assert evidence.acknowledgement_status == "PARTIAL"
-    assert evidence.slippage_status == SLIPPAGE_STATUS_KNOWN
-    assert evidence.unaccepted_stake == Decimal("1.75")
-    assert evidence.adverse_odds_delta == Decimal("0")
+    assert evidence.provider_evidence_id == EVIDENCE_ID
+    assert evidence.slippage_status == SLIPPAGE_STATUS_UNKNOWN
+    assert evidence.accepted_odds is None
+    assert evidence.accepted_stake is None
+    assert evidence.unaccepted_stake is None
+    assert evidence.adverse_odds_delta is None
 
 
 def test_rejected_attempt_is_not_a_fake_zero_slippage_sample(tmp_path):
@@ -387,7 +390,7 @@ def test_rejected_attempt_is_not_a_fake_zero_slippage_sample(tmp_path):
     assert evidence.unaccepted_stake is None
 
 
-def test_lay_higher_accepted_odds_are_adverse(tmp_path):
+def test_generic_provider_evidence_cannot_mint_lay_slippage(tmp_path):
     ledger = _ledger(
         tmp_path,
         action=_action(side="LAY", requested_odds=Decimal("3.00")),
@@ -400,23 +403,25 @@ def test_lay_higher_accepted_odds_are_adverse(tmp_path):
         attempt_id="attempt-1",
     )
 
-    assert evidence.accepted_minus_requested_odds == Decimal("0.05")
-    assert evidence.adverse_odds_delta == Decimal("0.05")
+    assert evidence.slippage_status == SLIPPAGE_STATUS_UNKNOWN
+    assert evidence.accepted_minus_requested_odds is None
+    assert evidence.adverse_odds_delta is None
 
 
-def test_unsupported_side_cannot_mint_known_slippage_semantics(tmp_path):
+def test_generic_provider_evidence_does_not_require_price_side_semantics(tmp_path):
     ledger = _ledger(tmp_path, action=_action(side="CUSTOM"))
     _bind_provider(ledger)
     _ack(ledger)
 
-    with pytest.raises(
-        EmpiricalExecutionEvidenceUnavailable,
-        match="BACK/LAY",
-    ):
-        build_empirical_execution_evidence(
-            ledger,
-            attempt_id="attempt-1",
-        )
+    evidence = build_empirical_execution_evidence(
+        ledger,
+        attempt_id="attempt-1",
+    )
+
+    assert evidence.provider_evidence_id == EVIDENCE_ID
+    assert evidence.slippage_status == SLIPPAGE_STATUS_UNKNOWN
+    assert evidence.accepted_odds is None
+    assert evidence.adverse_odds_delta is None
 
 
 def test_wall_clock_cross_stage_inversion_is_not_reported_as_latency(tmp_path):
@@ -470,7 +475,7 @@ def test_direct_construction_rejects_slippage_forgery(tmp_path):
 
     with pytest.raises(
         EmpiricalExecutionEvidenceError,
-        match="adverse odds delta is inconsistent",
+        match="UNKNOWN slippage cannot claim accepted-price metrics",
     ):
         replace(evidence, adverse_odds_delta=Decimal("0.01"))
 

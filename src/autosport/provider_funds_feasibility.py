@@ -225,6 +225,7 @@ class ProviderFundsAssessment:
 class ProviderFundsFeasibilityReport:
     decision_ts: str
     max_balance_age_seconds: Decimal
+    allocations: tuple[ProviderFundsAllocation, ...]
     assessments: tuple[ProviderFundsAssessment, ...]
 
     def __post_init__(self) -> None:
@@ -233,6 +234,25 @@ class ProviderFundsFeasibilityReport:
             self.max_balance_age_seconds,
             "max_balance_age_seconds",
         )
+        if type(self.allocations) is not tuple or not self.allocations:
+            raise ProviderFundsFeasibilityError(
+                "allocations must be a non-empty canonical tuple"
+            )
+        if any(
+            type(item) is not ProviderFundsAllocation
+            for item in self.allocations
+        ):
+            raise ProviderFundsFeasibilityError(
+                "allocations must contain exact ProviderFundsAllocation values"
+            )
+        allocation_ids = tuple(item.allocation_id for item in self.allocations)
+        if (
+            allocation_ids != tuple(sorted(allocation_ids))
+            or len(allocation_ids) != len(set(allocation_ids))
+        ):
+            raise ProviderFundsFeasibilityError(
+                "report allocations must be sorted and unique by allocation_id"
+            )
         if type(self.assessments) is not tuple or not self.assessments:
             raise ProviderFundsFeasibilityError(
                 "assessments must be a non-empty canonical tuple"
@@ -282,6 +302,17 @@ class ProviderFundsFeasibilityReport:
             "provider_write_authorized": False,
             "real_money_execution": False,
             "funds_reserved": False,
+            "allocations": [
+                {
+                    "allocation_id": item.allocation_id,
+                    "venue_id": item.venue_id,
+                    "account_id": item.account_id,
+                    "adapter_id": item.adapter_id,
+                    "currency": item.currency,
+                    "amount": _decimal_text(item.amount),
+                }
+                for item in self.allocations
+            ],
             "assessments": [
                 {
                     "venue_id": item.venue_id,
@@ -533,5 +564,6 @@ def assess_provider_funds(
     return ProviderFundsFeasibilityReport(
         decision_ts=decision_raw,
         max_balance_age_seconds=max_age,
+        allocations=tuple(sorted(allocations, key=lambda item: item.allocation_id)),
         assessments=tuple(assessments),
     )

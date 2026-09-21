@@ -516,6 +516,13 @@ def admit_betfair_request(
     if type(policy) is not BetfairRequestBudgetPolicy:
         raise BetfairRequestBudgetError("policy must be an exact BetfairRequestBudgetPolicy")
     now = _nonnegative_int(now_monotonic_ns, "now_monotonic_ns")
+    if any(
+        dispatch.dispatched_monotonic_ns > now
+        for dispatch in state.recent_market_book_dispatches
+    ):
+        raise BetfairRequestBudgetError(
+            "market-book dispatch history cannot be from the future clock state"
+        )
 
     if (
         state.unresolved_external_mutation_ids
@@ -718,4 +725,29 @@ def record_read_backpressure(
         backoffs=tuple(
             sorted(backoffs + (replacement,), key=lambda item: item.pool.value)
         ),
+    )
+
+
+def clear_read_backpressure(
+    state: BetfairRequestBudgetState,
+    *,
+    pool: BetfairRequestPool,
+) -> BetfairRequestBudgetState:
+    """Clear one read-pool backoff after a confirmed successful provider read."""
+
+    if type(state) is not BetfairRequestBudgetState:
+        raise BetfairRequestBudgetError(
+            "state must be an exact BetfairRequestBudgetState"
+        )
+    if type(pool) is not BetfairRequestPool:
+        raise BetfairRequestBudgetError(
+            "pool must be a BetfairRequestPool value"
+        )
+    if pool is BetfairRequestPool.MUTATION:
+        raise BetfairRequestBudgetError(
+            "mutation pool has no automatic read backoff to clear"
+        )
+    return replace(
+        state,
+        backoffs=tuple(item for item in state.backoffs if item.pool is not pool),
     )

@@ -1,6 +1,6 @@
 """Immutable provider settlement-rule version evidence.
 
-This is provenance/policy evidence only.  It never settles a position or infers a
+This is provenance/policy evidence only. It never settles a position or infers a
 provider-specific outcome when the exact applicable rule version is not proven.
 """
 
@@ -76,11 +76,9 @@ class ProviderSettlementRuleVersion:
                 raise ProviderSettlementRuleError(
                     "effective_until must be after effective_from"
                 )
-        observed = _time(self.observed_at, "observed_at")
-        if observed < start:
-            raise ProviderSettlementRuleError(
-                "observed_at cannot predate the rule version effective_from"
-            )
+        # Rules may legitimately be announced before they become effective. Observation
+        # time therefore needs provenance validity, not ordering against effective_from.
+        _time(self.observed_at, "observed_at")
         _text(self.source_ref, "source_ref")
         _sha(self.source_payload_sha256, "source_payload_sha256")
         if (

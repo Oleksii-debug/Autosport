@@ -298,6 +298,21 @@ def test_post_issuance_economic_tampering_is_detected() -> None:
         evidence.assert_authoritative()
 
 
+def test_malformed_terminal_status_tampering_fails_with_domain_error() -> None:
+    readback = _issued_readback(settled=[_row()])
+    evidence = resolve_betfair_cleared_bet_settlement(readback)
+    assert evidence is not None
+
+    forged_row = replace(evidence.terminal_rows[0], bet_status="UNKNOWN_STATUS")
+    object.__setattr__(evidence, "terminal_rows", (forged_row,))
+
+    with pytest.raises(
+        BetfairClearedSettlementEvidenceError,
+        match="unsupported terminal status",
+    ):
+        evidence.assert_authoritative()
+
+
 def test_caller_constructed_evidence_cannot_mint_provider_authority() -> None:
     readback = _issued_readback(settled=[_row()])
     issued = resolve_betfair_cleared_bet_settlement(readback)

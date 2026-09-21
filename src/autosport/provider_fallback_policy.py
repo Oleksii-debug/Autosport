@@ -42,8 +42,8 @@ class ProviderOperationalState(StrEnum):
 
 
 class ProviderFallbackDisposition(StrEnum):
-    USE_PRIMARY_READ = "USE_PRIMARY_READ"
-    USE_FALLBACK_READ = "USE_FALLBACK_READ"
+    PRIMARY_TECHNICALLY_ELIGIBLE = "PRIMARY_TECHNICALLY_ELIGIBLE"
+    FALLBACK_TECHNICALLY_ELIGIBLE = "FALLBACK_TECHNICALLY_ELIGIBLE"
     ABSTAIN = "ABSTAIN"
 
 
@@ -195,12 +195,12 @@ class ProviderFallbackDecision:
 
     @property
     def downstream_source_quality_required(self) -> bool:
-        return True
+        return self.disposition is not ProviderFallbackDisposition.ABSTAIN
 
     @property
     def downstream_semantic_compatibility_required(self) -> bool:
         return (
-            self.disposition is ProviderFallbackDisposition.USE_FALLBACK_READ
+            self.disposition is ProviderFallbackDisposition.FALLBACK_TECHNICALLY_ELIGIBLE
             and self.required_capability in _CROSS_PROVIDER_QUOTE_READ_CAPABILITIES
         )
 
@@ -321,7 +321,7 @@ def resolve_readonly_provider_route(
     if primary_operational.state is ProviderOperationalState.HEALTHY:
         if primary_capability is BookmakerCapabilityState.SUPPORTED:
             return _decision(
-                disposition=ProviderFallbackDisposition.USE_PRIMARY_READ,
+                disposition=ProviderFallbackDisposition.PRIMARY_TECHNICALLY_ELIGIBLE,
                 capability=required_capability,
                 primary=primary,
                 primary_observation=primary_operational,
@@ -401,7 +401,7 @@ def resolve_readonly_provider_route(
             reason=f"FALLBACK_CAPABILITY_{fallback_capability.value.upper()}",
         )
     return _decision(
-        disposition=ProviderFallbackDisposition.USE_FALLBACK_READ,
+        disposition=ProviderFallbackDisposition.FALLBACK_TECHNICALLY_ELIGIBLE,
         capability=required_capability,
         primary=primary,
         primary_observation=primary_operational,

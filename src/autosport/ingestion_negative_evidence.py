@@ -237,7 +237,7 @@ def project_ingestion_negative_evidence(
         reasons.append("runtime_error_present")
     if lifecycle_state == "failed":
         reasons.append("lifecycle_failed")
-    elif lifecycle_state in {"starting", "attempting", "provider_unavailable"}:
+    elif lifecycle_state in {"starting", "running", "attempting", "provider_unavailable"}:
         reasons.append("lifecycle_incomplete")
 
     return IngestionNegativeEvidence(

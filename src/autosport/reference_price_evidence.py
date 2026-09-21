@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Iterable
@@ -107,9 +107,9 @@ class ReferencePriceEvidence:
     median_decimal_odds: Decimal
     min_decimal_odds: Decimal
     max_decimal_odds: Decimal
-    executable_quote_verified: bool = False
-    fair_probability_verified: bool = False
-    fill_fidelity_verified: bool = False
+    executable_quote_verified: bool = field(default=False, init=False)
+    fair_probability_verified: bool = field(default=False, init=False)
+    fill_fidelity_verified: bool = field(default=False, init=False)
 
     @property
     def source_ids(self) -> tuple[str, ...]:
@@ -148,10 +148,6 @@ def _median(values: tuple[Decimal, ...]) -> Decimal:
     if len(ordered) % 2:
         return ordered[midpoint]
     return (ordered[midpoint - 1] + ordered[midpoint]) / Decimal(2)
-
-
-def _event_hash(event: MarketEvent) -> str:
-    return _canonical_json_sha256(event.to_dict())
 
 
 def build_reference_price_evidence(
@@ -263,7 +259,9 @@ def build_reference_price_evidence(
         observed = _instant(event.observed_ts, "event observed_ts")
         ingest = _instant(event.ingest_ts, "event ingest_ts")
         source = (
-            None if event.source_ts is None else _instant(event.source_ts, "event source_ts")
+            None
+            if event.source_ts is None
+            else _instant(event.source_ts, "event source_ts")
         )
         if observed > ingest:
             raise ReferencePriceEvidenceError(
@@ -273,11 +271,11 @@ def build_reference_price_evidence(
             raise ReferencePriceEvidenceError(
                 "reference observation source_ts cannot be after ingest_ts"
             )
-        for timestamp, name in (
-            (observed, "observed_ts"),
-            (ingest, "ingest_ts"),
-            *((() if source is None else ((source, "source_ts"),))),
-        ):
+
+        clocks = [(observed, "observed_ts"), (ingest, "ingest_ts")]
+        if source is not None:
+            clocks.append((source, "source_ts"))
+        for timestamp, name in clocks:
             if timestamp > decision:
                 raise ReferencePriceEvidenceError(
                     f"reference observation {name} is from the future"
@@ -287,8 +285,7 @@ def build_reference_price_evidence(
                     f"reference observation {name} is stale"
                 )
 
-        quote_time = source or observed
-        quote_times.append(quote_time)
+        quote_times.append(source or observed)
         ingest_times.append(ingest)
         observations.append(
             ReferenceObservation(
@@ -307,15 +304,11 @@ def build_reference_price_evidence(
         raise ReferencePriceEvidenceError(
             "reference-price evidence has insufficient distinct sources"
         )
-    if (
-        max(quote_times) - min(quote_times)
-    ).total_seconds() > max_skew:
+    if (max(quote_times) - min(quote_times)).total_seconds() > max_skew:
         raise ReferencePriceEvidenceError(
             "reference source observations exceed maximum contemporaneous skew"
         )
-    if (
-        max(ingest_times) - min(ingest_times)
-    ).total_seconds() > max_skew:
+    if (max(ingest_times) - min(ingest_times)).total_seconds() > max_skew:
         raise ReferencePriceEvidenceError(
             "reference receipt observations exceed maximum contemporaneous skew"
         )
@@ -327,6 +320,7 @@ def build_reference_price_evidence(
     minimum_odds = min(odds)
     maximum_odds = max(odds)
     assert price_semantics is not None
+    normalized_decision_ts = decision.astimezone(timezone.utc).isoformat()
 
     identity_payload = {
         "schema": "autosport.reference_price_evidence",
@@ -338,7 +332,7 @@ def build_reference_price_evidence(
         "market_type": first.market_type.value,
         "market_semantics_id": first.market_semantics_id,
         "price_semantics": price_semantics,
-        "decision_ts": decision.astimezone(timezone.utc).isoformat(),
+        "decision_ts": normalized_decision_ts,
         "max_age_seconds": max_age,
         "max_skew_seconds": max_skew,
         "minimum_sources": minimum,
@@ -359,7 +353,7 @@ def build_reference_price_evidence(
         market_type=first.market_type.value,
         market_semantics_id=first.market_semantics_id,
         price_semantics=price_semantics,
-        decision_ts=identity_payload["decision_ts"],
+        decision_ts=normalized_decision_ts,
         max_age_seconds=max_age,
         max_skew_seconds=max_skew,
         minimum_sources=minimum,

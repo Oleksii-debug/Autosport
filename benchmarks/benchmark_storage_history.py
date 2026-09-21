@@ -3,6 +3,8 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import platform
+import sqlite3
 import tempfile
 import time
 from dataclasses import asdict, dataclass
@@ -38,9 +40,16 @@ class OperationMeasurement:
 
 @dataclass(frozen=True, slots=True)
 class StorageHistoryBenchmarkResult:
+    schema_version: int
     requested_events: int
     persisted_events: int
+    event_count: int
+    selections_per_event: int
+    target_event_id: str
     database_bytes: int
+    python_version: str
+    sqlite_version: str
+    operating_system: str
     write: OperationMeasurement
     full_history_read: OperationMeasurement
     event_history_read: OperationMeasurement
@@ -187,9 +196,16 @@ def run_benchmark(
                 raise RuntimeError("storage benchmark database is unexpectedly empty")
 
             result = StorageHistoryBenchmarkResult(
+                schema_version=1,
                 requested_events=count,
                 persisted_events=persisted_events,
+                event_count=event_count,
+                selections_per_event=selections_per_event,
+                target_event_id=target_event_id,
                 database_bytes=database_bytes,
+                python_version=platform.python_version(),
+                sqlite_version=sqlite3.sqlite_version,
+                operating_system=platform.system(),
                 write=OperationMeasurement(
                     operation="write",
                     rows=persisted_events,

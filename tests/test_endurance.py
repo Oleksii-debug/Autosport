@@ -143,7 +143,7 @@ class EnduranceTests(unittest.TestCase):
         )
         self.assertTrue(constrained.paper_economics_verified)
 
-    def test_endurance_peak_memory_excludes_prior_tracemalloc_history(self):
+    def test_endurance_fails_closed_without_resetting_caller_tracemalloc_history(self):
         config = EnduranceConfig(
             event_count=20,
             quote_keys=10,
@@ -155,17 +155,16 @@ class EnduranceTests(unittest.TestCase):
         if not was_tracing:
             tracemalloc.start()
         try:
-            tracemalloc.reset_peak()
             prior_allocation = bytearray(16 * 1024 * 1024)
-            del prior_allocation
             historical_peak = tracemalloc.get_traced_memory()[1]
+            del prior_allocation
 
             with tempfile.TemporaryDirectory() as tmp:
-                report = run_endurance(Path(tmp), config)
+                with self.assertRaisesRegex(RuntimeError, "tracemalloc ownership conflict"):
+                    run_endurance(Path(tmp), config)
 
-            self.assertEqual(report.status, "PASS", report.failures)
-            self.assertLess(report.peak_traced_memory_bytes, historical_peak)
             self.assertTrue(tracemalloc.is_tracing())
+            self.assertGreaterEqual(tracemalloc.get_traced_memory()[1], historical_peak)
         finally:
             if not was_tracing and tracemalloc.is_tracing():
                 tracemalloc.stop()

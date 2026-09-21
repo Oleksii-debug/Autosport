@@ -177,6 +177,7 @@ def install_collector_storage_budget(store_cls: type[Any]) -> None:
     original_connect = store_cls._connect
     original_connect_path = store_cls._connect_path
     original_initialize_sqlite = store_cls._initialize_sqlite
+    original_append_connection = store_cls._append_connection
     original_append = store_cls.append
     original_runtime_append = getattr(store_cls, "_append_with_runtime_stream_epoch", None)
 
@@ -299,6 +300,24 @@ def install_collector_storage_budget(store_cls: type[Any]) -> None:
             connection.close()
             raise
 
+    def bounded_append_connection(
+        cls: type[Any],
+        connection: sqlite3.Connection,
+        delta: Any,
+    ) -> bool:
+        """Rebind durable budget after BEGIN IMMEDIATE and before append writes.
+
+        This closes the first-activation race where an already-open unconfigured
+        connection could otherwise acquire the writer lock after another handle had
+        durably published a budget. The same SQLite transaction that owns the append
+        now observes and installs the canonical ceiling before any page allocation.
+        """
+
+        durable_budget = _read_durable_budget(connection)
+        if durable_budget is not None:
+            _apply_page_budget(connection, durable_budget)
+        return original_append_connection(connection, delta)
+
     def bounded_append(self: Any, *args: Any, **kwargs: Any) -> bool:
         try:
             return original_append(self, *args, **kwargs)
@@ -306,7 +325,8 @@ def install_collector_storage_budget(store_cls: type[Any]) -> None:
             if _sqlite_full_in_chain(exc):
                 raise CollectorStorageBackpressureError(
                     "RETENTION_REQUIRED: collector SQLite page budget is exhausted; "
-                    "run explicit pin-aware compaction or enlarge max_bytes, then retry"
+                    "run explicit pin-aware compaction within the durable max_bytes, "
+                    "then retry"
                 ) from exc
             raise
 
@@ -318,7 +338,8 @@ def install_collector_storage_budget(store_cls: type[Any]) -> None:
             if _sqlite_full_in_chain(exc):
                 raise CollectorStorageBackpressureError(
                     "RETENTION_REQUIRED: collector SQLite page budget is exhausted; "
-                    "run explicit pin-aware compaction or enlarge max_bytes, then retry"
+                    "run explicit pin-aware compaction within the durable max_bytes, "
+                    "then retry"
                 ) from exc
             raise
 
@@ -329,6 +350,7 @@ def install_collector_storage_budget(store_cls: type[Any]) -> None:
     store_cls._initialize_sqlite = classmethod(bounded_initialize_sqlite)
     store_cls.__init__ = bounded_init
     store_cls._connect = bounded_connect
+    store_cls._append_connection = classmethod(bounded_append_connection)
     store_cls.append = bounded_append
     if original_runtime_append is not None:
         store_cls._append_with_runtime_stream_epoch = bounded_runtime_append

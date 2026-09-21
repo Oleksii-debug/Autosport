@@ -143,222 +143,222 @@ def make_owner_lifecycle(
     transaction.mark_registry_completed()
 
 
-+class CollectorRetentionOwnerAuthorityTests(unittest.TestCase):
-+    def make_manager(self, root: str):
-+        collector = CollectorDeltaStore(Path(root) / "collector.sqlite")
-+        delta = make_delta()
-+        self.assertTrue(collector.append(delta))
-+        return collector, CollectorRetentionManager(collector), delta
-+
-+    def pin_exists(
-+        self,
-+        collector: CollectorDeltaStore,
-+        *,
-+        kind: RetentionPinKind,
-+        owner_id: str,
-+        delta_id: str,
-+    ) -> bool:
-+        connection = collector._connect()
-+        try:
-+            row = connection.execute(
-+                "SELECT 1 FROM collector_retention_pins_v1 "
-+                "WHERE pin_kind=? AND owner_id=? AND delta_id=?",
-+                (kind.value, owner_id, delta_id),
-+            ).fetchone()
-+            return row is not None
-+        finally:
-+            connection.close()
-+
-+    def test_retention_module_run_registry_rebind_cannot_release_live_owner(self):
-+        with tempfile.TemporaryDirectory() as tmp:
-+            collector, manager, delta = self.make_manager(tmp)
-+            make_owner_lifecycle(tmp, complete=False)
-+            manager.pin(
-+                kind=RetentionPinKind.REPLAY,
-+                owner_id="replay:run-7",
-+                delta_id=delta.delta_id,
-+                canonical_event_digest=delta.canonical_event_digest,
-+                created_at="2026-01-01T00:00:07+00:00",
-+            )
-+
-+            attacker_calls = []
-+
-+            class ForgedRunRegistry:
-+                def __init__(self, path):
-+                    attacker_calls.append(("init", str(path)))
-+
-+                def verified_completed_summary_for_run(self, run_id):
-+                    attacker_calls.append(("completed", run_id))
-+                    return ({"decision_ledger_sha256": "0" * 64}, "1" * 64)
-+
-+            with patch.object(retention_module, "RunRegistry", ForgedRunRegistry):
-+                with self.assertRaisesRegex(
-+                    CollectorRetentionError,
-+                    "verified terminal lifecycle authority",
-+                ):
-+                    manager.release_pin(
-+                        kind=RetentionPinKind.REPLAY,
-+                        owner_id="replay:run-7",
-+                        delta_id=delta.delta_id,
-+                        canonical_event_digest=delta.canonical_event_digest,
-+                    )
-+
-+            self.assertEqual(attacker_calls, [])
-+            self.assertTrue(
-+                self.pin_exists(
-+                    collector,
-+                    kind=RetentionPinKind.REPLAY,
-+                    owner_id="replay:run-7",
-+                    delta_id=delta.delta_id,
-+                )
-+            )
-+
-+    def test_retention_module_mirrors_cannot_redirect_terminal_replay_release(self):
-+        with tempfile.TemporaryDirectory() as tmp:
-+            collector, manager, delta = self.make_manager(tmp)
-+            make_owner_lifecycle(tmp, complete=True)
-+            manager.pin(
-+                kind=RetentionPinKind.REPLAY,
-+                owner_id="replay:run-7",
-+                delta_id=delta.delta_id,
-+                canonical_event_digest=delta.canonical_event_digest,
-+                created_at="2026-01-01T00:00:07+00:00",
-+            )
-+
-+            attacker_calls = []
-+
-+            class ForgedRunRegistry:
-+                def __init__(self, path):
-+                    attacker_calls.append(("registry", str(path)))
-+
-+            class ForgedDecisionLedger:
-+                def __init__(self, path):
-+                    attacker_calls.append(("ledger", str(path)))
-+
-+            with (
-+                patch.object(retention_module, "RunRegistry", ForgedRunRegistry),
-+                patch.object(
-+                    retention_module,
-+                    "JsonlDecisionLedger",
-+                    ForgedDecisionLedger,
-+                ),
-+            ):
-+                self.assertTrue(
-+                    manager.release_pin(
-+                        kind=RetentionPinKind.REPLAY,
-+                        owner_id="replay:run-7",
-+                        delta_id=delta.delta_id,
-+                        canonical_event_digest=delta.canonical_event_digest,
-+                    )
-+                )
-+
-+            self.assertEqual(attacker_calls, [])
-+            restarted = CollectorRetentionManager(
-+                CollectorDeltaStore(Path(tmp) / "collector.sqlite")
-+            )
-+            self.assertFalse(
-+                restarted.release_pin(
-+                    kind=RetentionPinKind.REPLAY,
-+                    owner_id="replay:run-7",
-+                    delta_id=delta.delta_id,
-+                    canonical_event_digest=delta.canonical_event_digest,
-+                )
-+            )
-+
-+    def test_retention_module_mirrors_cannot_redirect_terminal_decision_release(self):
-+        with tempfile.TemporaryDirectory() as tmp:
-+            collector, manager, delta = self.make_manager(tmp)
-+            make_owner_lifecycle(tmp, decision_id="decision-42", complete=True)
-+            manager.pin(
-+                kind=RetentionPinKind.DECISION,
-+                owner_id="decision:decision-42",
-+                delta_id=delta.delta_id,
-+                canonical_event_digest=delta.canonical_event_digest,
-+                created_at="2026-01-01T00:00:07+00:00",
-+            )
-+
-+            attacker_calls = []
-+
-+            class ForgedRunRegistry:
-+                def __init__(self, path):
-+                    attacker_calls.append(("registry", str(path)))
-+
-+            class ForgedDecisionLedger:
-+                def __init__(self, path):
-+                    attacker_calls.append(("ledger", str(path)))
-+
-+            with (
-+                patch.object(retention_module, "RunRegistry", ForgedRunRegistry),
-+                patch.object(
-+                    retention_module,
-+                    "JsonlDecisionLedger",
-+                    ForgedDecisionLedger,
-+                ),
-+            ):
-+                self.assertTrue(
-+                    manager.release_pin(
-+                        kind=RetentionPinKind.DECISION,
-+                        owner_id="decision:decision-42",
-+                        delta_id=delta.delta_id,
-+                        canonical_event_digest=delta.canonical_event_digest,
-+                    )
-+                )
-+
-+            self.assertEqual(attacker_calls, [])
-+            self.assertFalse(
-+                self.pin_exists(
-+                    collector,
-+                    kind=RetentionPinKind.DECISION,
-+                    owner_id="decision:decision-42",
-+                    delta_id=delta.delta_id,
-+                )
-+            )
-+
-+    def test_public_authority_entry_method_rebinds_do_not_execute(self):
-+        with tempfile.TemporaryDirectory() as tmp:
-+            _collector, manager, delta = self.make_manager(tmp)
-+            make_owner_lifecycle(tmp, complete=True)
-+            manager.pin(
-+                kind=RetentionPinKind.DECISION,
-+                owner_id="decision:decision-42",
-+                delta_id=delta.delta_id,
-+                canonical_event_digest=delta.canonical_event_digest,
-+                created_at="2026-01-01T00:00:07+00:00",
-+            )
-+
-+            attacker_calls = []
-+
-+            def forged_completed(self, run_id):
-+                attacker_calls.append(("completed", run_id))
-+                return ({"decision_ledger_sha256": "0" * 64}, "1" * 64)
-+
-+            def forged_snapshot(self):
-+                attacker_calls.append(("snapshot", str(self.path)))
-+                raise AssertionError("forged decision-ledger snapshot executed")
-+
-+            with (
-+                patch.object(
-+                    RunRegistry,
-+                    "verified_completed_summary_for_run",
-+                    forged_completed,
-+                ),
-+                patch.object(
-+                    JsonlDecisionLedger,
-+                    "verified_snapshot",
-+                    forged_snapshot,
-+                ),
-+            ):
-+                self.assertTrue(
-+                    manager.release_pin(
-+                        kind=RetentionPinKind.DECISION,
-+                        owner_id="decision:decision-42",
-+                        delta_id=delta.delta_id,
-+                        canonical_event_digest=delta.canonical_event_digest,
-+                    )
-+                )
-+
-+            self.assertEqual(attacker_calls, [])
-+
-+
-+if __name__ == "__main__":
-+    unittest.main()
+class CollectorRetentionOwnerAuthorityTests(unittest.TestCase):
+    def make_manager(self, root: str):
+        collector = CollectorDeltaStore(Path(root) / "collector.sqlite")
+        delta = make_delta()
+        self.assertTrue(collector.append(delta))
+        return collector, CollectorRetentionManager(collector), delta
+
+    def pin_exists(
+        self,
+        collector: CollectorDeltaStore,
+        *,
+        kind: RetentionPinKind,
+        owner_id: str,
+        delta_id: str,
+    ) -> bool:
+        connection = collector._connect()
+        try:
+            row = connection.execute(
+                "SELECT 1 FROM collector_retention_pins_v1 "
+                "WHERE pin_kind=? AND owner_id=? AND delta_id=?",
+                (kind.value, owner_id, delta_id),
+            ).fetchone()
+            return row is not None
+        finally:
+            connection.close()
+
+    def test_retention_module_run_registry_rebind_cannot_release_live_owner(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            collector, manager, delta = self.make_manager(tmp)
+            make_owner_lifecycle(tmp, complete=False)
+            manager.pin(
+                kind=RetentionPinKind.REPLAY,
+                owner_id="replay:run-7",
+                delta_id=delta.delta_id,
+                canonical_event_digest=delta.canonical_event_digest,
+                created_at="2026-01-01T00:00:07+00:00",
+            )
+
+            attacker_calls = []
+
+            class ForgedRunRegistry:
+                def __init__(self, path):
+                    attacker_calls.append(("init", str(path)))
+
+                def verified_completed_summary_for_run(self, run_id):
+                    attacker_calls.append(("completed", run_id))
+                    return ({"decision_ledger_sha256": "0" * 64}, "1" * 64)
+
+            with patch.object(retention_module, "RunRegistry", ForgedRunRegistry):
+                with self.assertRaisesRegex(
+                    CollectorRetentionError,
+                    "verified terminal lifecycle authority",
+                ):
+                    manager.release_pin(
+                        kind=RetentionPinKind.REPLAY,
+                        owner_id="replay:run-7",
+                        delta_id=delta.delta_id,
+                        canonical_event_digest=delta.canonical_event_digest,
+                    )
+
+            self.assertEqual(attacker_calls, [])
+            self.assertTrue(
+                self.pin_exists(
+                    collector,
+                    kind=RetentionPinKind.REPLAY,
+                    owner_id="replay:run-7",
+                    delta_id=delta.delta_id,
+                )
+            )
+
+    def test_retention_module_mirrors_cannot_redirect_terminal_replay_release(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            collector, manager, delta = self.make_manager(tmp)
+            make_owner_lifecycle(tmp, complete=True)
+            manager.pin(
+                kind=RetentionPinKind.REPLAY,
+                owner_id="replay:run-7",
+                delta_id=delta.delta_id,
+                canonical_event_digest=delta.canonical_event_digest,
+                created_at="2026-01-01T00:00:07+00:00",
+            )
+
+            attacker_calls = []
+
+            class ForgedRunRegistry:
+                def __init__(self, path):
+                    attacker_calls.append(("registry", str(path)))
+
+            class ForgedDecisionLedger:
+                def __init__(self, path):
+                    attacker_calls.append(("ledger", str(path)))
+
+            with (
+                patch.object(retention_module, "RunRegistry", ForgedRunRegistry),
+                patch.object(
+                    retention_module,
+                    "JsonlDecisionLedger",
+                    ForgedDecisionLedger,
+                ),
+            ):
+                self.assertTrue(
+                    manager.release_pin(
+                        kind=RetentionPinKind.REPLAY,
+                        owner_id="replay:run-7",
+                        delta_id=delta.delta_id,
+                        canonical_event_digest=delta.canonical_event_digest,
+                    )
+                )
+
+            self.assertEqual(attacker_calls, [])
+            restarted = CollectorRetentionManager(
+                CollectorDeltaStore(Path(tmp) / "collector.sqlite")
+            )
+            self.assertFalse(
+                restarted.release_pin(
+                    kind=RetentionPinKind.REPLAY,
+                    owner_id="replay:run-7",
+                    delta_id=delta.delta_id,
+                    canonical_event_digest=delta.canonical_event_digest,
+                )
+            )
+
+    def test_retention_module_mirrors_cannot_redirect_terminal_decision_release(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            collector, manager, delta = self.make_manager(tmp)
+            make_owner_lifecycle(tmp, decision_id="decision-42", complete=True)
+            manager.pin(
+                kind=RetentionPinKind.DECISION,
+                owner_id="decision:decision-42",
+                delta_id=delta.delta_id,
+                canonical_event_digest=delta.canonical_event_digest,
+                created_at="2026-01-01T00:00:07+00:00",
+            )
+
+            attacker_calls = []
+
+            class ForgedRunRegistry:
+                def __init__(self, path):
+                    attacker_calls.append(("registry", str(path)))
+
+            class ForgedDecisionLedger:
+                def __init__(self, path):
+                    attacker_calls.append(("ledger", str(path)))
+
+            with (
+                patch.object(retention_module, "RunRegistry", ForgedRunRegistry),
+                patch.object(
+                    retention_module,
+                    "JsonlDecisionLedger",
+                    ForgedDecisionLedger,
+                ),
+            ):
+                self.assertTrue(
+                    manager.release_pin(
+                        kind=RetentionPinKind.DECISION,
+                        owner_id="decision:decision-42",
+                        delta_id=delta.delta_id,
+                        canonical_event_digest=delta.canonical_event_digest,
+                    )
+                )
+
+            self.assertEqual(attacker_calls, [])
+            self.assertFalse(
+                self.pin_exists(
+                    collector,
+                    kind=RetentionPinKind.DECISION,
+                    owner_id="decision:decision-42",
+                    delta_id=delta.delta_id,
+                )
+            )
+
+    def test_public_authority_entry_method_rebinds_do_not_execute(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            _collector, manager, delta = self.make_manager(tmp)
+            make_owner_lifecycle(tmp, complete=True)
+            manager.pin(
+                kind=RetentionPinKind.DECISION,
+                owner_id="decision:decision-42",
+                delta_id=delta.delta_id,
+                canonical_event_digest=delta.canonical_event_digest,
+                created_at="2026-01-01T00:00:07+00:00",
+            )
+
+            attacker_calls = []
+
+            def forged_completed(self, run_id):
+                attacker_calls.append(("completed", run_id))
+                return ({"decision_ledger_sha256": "0" * 64}, "1" * 64)
+
+            def forged_snapshot(self):
+                attacker_calls.append(("snapshot", str(self.path)))
+                raise AssertionError("forged decision-ledger snapshot executed")
+
+            with (
+                patch.object(
+                    RunRegistry,
+                    "verified_completed_summary_for_run",
+                    forged_completed,
+                ),
+                patch.object(
+                    JsonlDecisionLedger,
+                    "verified_snapshot",
+                    forged_snapshot,
+                ),
+            ):
+                self.assertTrue(
+                    manager.release_pin(
+                        kind=RetentionPinKind.DECISION,
+                        owner_id="decision:decision-42",
+                        delta_id=delta.delta_id,
+                        canonical_event_digest=delta.canonical_event_digest,
+                    )
+                )
+
+            self.assertEqual(attacker_calls, [])
+
+
+if __name__ == "__main__":
+    unittest.main()

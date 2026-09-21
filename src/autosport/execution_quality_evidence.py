@@ -287,6 +287,7 @@ class PaperExecutionQualityReport:
     research_protocol_id: str
     protocol_sha256: str
     denominator_row_ids: tuple[str, ...]
+    attempted_row_ids: tuple[str, ...]
     stage_counts: tuple[tuple[str, int], ...]
     samples: tuple[PaperExecutionQualitySample, ...]
     schema_version: int = SCHEMA_VERSION
@@ -328,6 +329,14 @@ class PaperExecutionQualityReport:
             raise ExecutionQualityEvidenceError(
                 "denominator row ids must be unique"
             )
+        if (
+            self.attempted_row_ids != tuple(sorted(self.attempted_row_ids))
+            or len(set(self.attempted_row_ids)) != len(self.attempted_row_ids)
+            or not set(self.attempted_row_ids).issubset(set(self.denominator_row_ids))
+        ):
+            raise ExecutionQualityEvidenceError(
+                "attempted rows must be a canonical subset of the frozen denominator"
+            )
         sample_rows = tuple(sample.row_id for sample in self.samples)
         if sample_rows != tuple(sorted(sample_rows)) or len(set(sample_rows)) != len(
             sample_rows
@@ -336,6 +345,11 @@ class PaperExecutionQualityReport:
                 "quality samples must be one per row in canonical order"
             )
         denominator = set(self.denominator_row_ids)
+        attempted = set(self.attempted_row_ids)
+        if not set(sample_rows).issubset(attempted):
+            raise ExecutionQualityEvidenceError(
+                "execution outcomes require a prior ATTEMPTED funnel identity"
+            )
         for sample in self.samples:
             if type(sample) is not PaperExecutionQualitySample:
                 raise ExecutionQualityEvidenceError(
@@ -363,6 +377,14 @@ class PaperExecutionQualityReport:
     @property
     def denominator_count(self) -> int:
         return len(self.denominator_row_ids)
+
+    @property
+    def attempted_count(self) -> int:
+        return len(self.attempted_row_ids)
+
+    @property
+    def attempted_without_execution_outcome_count(self) -> int:
+        return self.attempted_count - len(self.samples)
 
     @property
     def outcome_counts(self) -> tuple[tuple[str, int], ...]:
@@ -406,6 +428,21 @@ class PaperExecutionQualityReport:
         )
 
     @property
+    def known_completion_fraction_distribution(
+        self,
+    ) -> tuple[tuple[Decimal, Decimal], ...]:
+        return tuple(
+            sorted(
+                (
+                    sample.completion_numerator,
+                    sample.requested_stake,
+                )
+                for sample in self.samples
+                if sample.completion_numerator is not None
+            )
+        )
+
+    @property
     def report_sha256(self) -> str:
         return _digest(self.to_payload(include_digest=False))
 
@@ -419,6 +456,11 @@ class PaperExecutionQualityReport:
             "protocol_sha256": self.protocol_sha256,
             "denominator_row_ids": list(self.denominator_row_ids),
             "denominator_count": self.denominator_count,
+            "attempted_row_ids": list(self.attempted_row_ids),
+            "attempted_count": self.attempted_count,
+            "attempted_without_execution_outcome_count": (
+                self.attempted_without_execution_outcome_count
+            ),
             "stage_counts": [list(item) for item in self.stage_counts],
             "outcome_counts": [list(item) for item in self.outcome_counts],
             "rows_without_execution_outcome_count": (
@@ -438,6 +480,13 @@ class PaperExecutionQualityReport:
             "back_adverse_slippage_distribution": [
                 _decimal_text(value)
                 for value in self.back_adverse_slippage_distribution
+            ],
+            "known_completion_fraction_distribution": [
+                {
+                    "filled": _decimal_text(filled),
+                    "requested": _decimal_text(requested),
+                }
+                for filled, requested in self.known_completion_fraction_distribution
             ],
         }
         if include_digest:
@@ -566,6 +615,15 @@ def build_paper_execution_quality_report(
         )
 
     samples.sort(key=lambda sample: sample.row_id)
+    attempted_row_ids = tuple(
+        sorted(
+            {
+                event.row_id
+                for event in ledger.events
+                if event.stage is FunnelStage.ATTEMPTED
+            }
+        )
+    )
     cohort = ledger.cohort()
     return PaperExecutionQualityReport._construct(
         universe_sha256=ledger.universe.universe_sha256,
@@ -573,6 +631,7 @@ def build_paper_execution_quality_report(
         research_protocol_id=ledger.universe.research_protocol_id,
         protocol_sha256=ledger.universe.protocol_sha256,
         denominator_row_ids=ledger.universe.row_ids,
+        attempted_row_ids=attempted_row_ids,
         stage_counts=cohort.stage_counts,
         samples=tuple(samples),
     )

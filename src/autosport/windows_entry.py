@@ -49,7 +49,7 @@ def _run_interactive_gui() -> int:
         _show_workspace_configuration_error(str(exc))
         return 2
 
-    from autosport.windows_gui import main as gui_main
+    from autosport.windows_accessible_gui import main as gui_main
 
     return gui_main()
 
@@ -76,7 +76,7 @@ def main(argv: list[str] | None = None) -> int:
 
         return run_machine_diagnostic(args[1])
     if args and args[0] == "--accessibility-audit-output":
-        from autosport.accessibility_audit import run_accessibility_audit
+        from autosport.windows_accessibility_audit import run_accessibility_audit
 
         return run_accessibility_audit(args[1])
     if args and args[0] == "--keyboard-audit-output":

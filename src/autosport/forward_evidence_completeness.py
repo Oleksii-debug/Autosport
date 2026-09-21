@@ -41,6 +41,11 @@ class DecisionState(StrEnum):
     OTHER_FROZEN_REASON = "OTHER_FROZEN_REASON"
 
 
+class CampaignCloseState(StrEnum):
+    CLOSE_PENDING = "CLOSE_PENDING"
+    CLOSED = "CLOSED"
+
+
 class VerificationCode(StrEnum):
     PASS = "PASS"
     PROTOCOL_PRECOMMIT_FAIL = "PROTOCOL_PRECOMMIT_FAIL"
@@ -53,6 +58,7 @@ class VerificationCode(StrEnum):
     COHORT_OMISSION_DETECTED = "COHORT_OMISSION_DETECTED"
     COHORT_ROOT_MISMATCH = "COHORT_ROOT_MISMATCH"
     COHORT_OPEN = "COHORT_OPEN"
+    COHORT_CLOSE_PENDING = "COHORT_CLOSE_PENDING"
     TEMPORAL_ELIGIBILITY_UNKNOWN = "TEMPORAL_ELIGIBILITY_UNKNOWN"
     DENOMINATOR_INCOMPLETE = "DENOMINATOR_INCOMPLETE"
     STOPPING_RULE_VIOLATION = "STOPPING_RULE_VIOLATION"
@@ -248,6 +254,17 @@ class ForwardOpportunityEnvelope:
             raise ForwardEvidenceCompletenessError(
                 "decision_state must be a DecisionState"
             )
+        if (
+            self.universe_rule_result is UniverseResult.EXCLUDED
+            and self.decision_state is DecisionState.ACTION
+        ):
+            raise ForwardEvidenceCompletenessError(
+                "an excluded candidate cannot have ACTION decision_state"
+            )
+        if self.decision_state is DecisionState.ACTION and self.decision_id is None:
+            raise ForwardEvidenceCompletenessError(
+                "ACTION decision_state requires decision_id"
+            )
         if self.decision_id is not None:
             _text(self.decision_id, "decision_id")
         if self.quote_or_market_identity is not None:
@@ -371,9 +388,9 @@ class CampaignCloseEnvelope:
     first_sequence: int
     last_sequence: int
     close_reason: str
-    anchor_lower: datetime
-    anchor_upper: datetime
-    close_state: str = "CLOSED"
+    close_state: CampaignCloseState = CampaignCloseState.CLOSED
+    anchor_lower: datetime | None = None
+    anchor_upper: datetime | None = None
     predecessor_close_sha256: str | None = None
 
     def __post_init__(self) -> None:
@@ -384,16 +401,32 @@ class CampaignCloseEnvelope:
             "terminal_cohort_root_sha256",
         )
         _text(self.close_reason, "close_reason")
-        lower = _instant(self.anchor_lower, "anchor_lower")
-        upper = _instant(self.anchor_upper, "anchor_upper")
-        if lower > upper:
+        if not isinstance(self.close_state, CampaignCloseState):
             raise ForwardEvidenceCompletenessError(
-                "close anchor lower must not exceed upper"
+                "close_state must be a CampaignCloseState"
             )
-        object.__setattr__(self, "anchor_lower", lower)
-        object.__setattr__(self, "anchor_upper", upper)
-        if self.close_state != "CLOSED":
-            raise ForwardEvidenceCompletenessError("close_state must be CLOSED")
+        if (self.anchor_lower is None) != (self.anchor_upper is None):
+            raise ForwardEvidenceCompletenessError(
+                "close anchor interval must be fully present or fully absent"
+            )
+        if self.close_state is CampaignCloseState.CLOSED:
+            if self.anchor_lower is None or self.anchor_upper is None:
+                raise ForwardEvidenceCompletenessError(
+                    "CLOSED campaign requires an anchored close envelope"
+                )
+        elif self.anchor_lower is not None or self.anchor_upper is not None:
+            raise ForwardEvidenceCompletenessError(
+                "CLOSE_PENDING campaign cannot claim an anchor interval"
+            )
+        if self.anchor_lower is not None and self.anchor_upper is not None:
+            lower = _instant(self.anchor_lower, "anchor_lower")
+            upper = _instant(self.anchor_upper, "anchor_upper")
+            if lower > upper:
+                raise ForwardEvidenceCompletenessError(
+                    "close anchor lower must not exceed upper"
+                )
+            object.__setattr__(self, "anchor_lower", lower)
+            object.__setattr__(self, "anchor_upper", upper)
         if self.predecessor_close_sha256 is not None:
             _sha256(self.predecessor_close_sha256, "predecessor_close_sha256")
         for name in ("final_candidate_count", "first_sequence", "last_sequence"):
@@ -421,9 +454,9 @@ class CampaignCloseEnvelope:
             "first_sequence": self.first_sequence,
             "last_sequence": self.last_sequence,
             "close_reason": self.close_reason,
-            "anchor_lower": _iso(self.anchor_lower),
-            "anchor_upper": _iso(self.anchor_upper),
-            "close_state": self.close_state,
+            "close_state": self.close_state.value,
+            "anchor_lower": _iso(self.anchor_lower) if self.anchor_lower else None,
+            "anchor_upper": _iso(self.anchor_upper) if self.anchor_upper else None,
             "predecessor_close_sha256": (
                 self.predecessor_close_sha256.lower()
                 if self.predecessor_close_sha256 is not None
@@ -621,6 +654,8 @@ def _dedupe_opportunities(
 ]:
     by_sequence: dict[int, ForwardOpportunityEnvelope] = {}
     by_opportunity: dict[str, ForwardOpportunityEnvelope] = {}
+    by_source_receipt: dict[str, ForwardOpportunityEnvelope] = {}
+    by_decision: dict[str, ForwardOpportunityEnvelope] = {}
     successor_by_predecessor: dict[str, str] = {}
     identity_conflict = False
     fork = False
@@ -637,6 +672,22 @@ def _dedupe_opportunities(
             identity_conflict = True
         else:
             by_opportunity[item.opportunity_id] = item
+
+        previous = by_source_receipt.get(item.source_receipt_id)
+        if previous is not None and previous.opportunity_sha256 != item.opportunity_sha256:
+            identity_conflict = True
+        else:
+            by_source_receipt[item.source_receipt_id] = item
+
+        if item.decision_id is not None:
+            previous = by_decision.get(item.decision_id)
+            if (
+                previous is not None
+                and previous.opportunity_sha256 != item.opportunity_sha256
+            ):
+                identity_conflict = True
+            else:
+                by_decision[item.decision_id] = item
 
         prior_successor = successor_by_predecessor.get(
             item.predecessor_opportunity_sha256
@@ -828,6 +879,8 @@ def verify_campaign(evidence: CampaignEvidence) -> VerificationResult:
         codes.append(VerificationCode.EVIDENCE_IDENTITY_CONFLICT)
     elif opportunities:
         close = evidence.closes[-1]
+        if close.close_state is CampaignCloseState.CLOSE_PENDING:
+            codes.append(VerificationCode.COHORT_CLOSE_PENDING)
         if (
             close.campaign_id != protocol.campaign_id
             or close.protocol_sha256 != protocol.protocol_sha256
@@ -866,17 +919,24 @@ def verify_campaign(evidence: CampaignEvidence) -> VerificationResult:
         ):
             codes.append(VerificationCode.TEMPORAL_ELIGIBILITY_UNKNOWN)
 
-    denominator = tuple(sorted(set(evidence.denominator_sequences)))
+    denominator = tuple(sorted(evidence.denominator_sequences))
     expected_denominator = tuple(
         item.candidate_sequence for item in opportunities
     )
     if denominator != expected_denominator:
         codes.append(VerificationCode.DENOMINATOR_INCOMPLETE)
 
-    costs = {
-        item.candidate_sequence: item.all_material_costs_known
-        for item in evidence.cost_evidence
-    }
+    costs: dict[int, bool] = {}
+    cost_conflict = False
+    for item in evidence.cost_evidence:
+        previous = costs.get(item.candidate_sequence)
+        if previous is not None and previous != item.all_material_costs_known:
+            cost_conflict = True
+            costs[item.candidate_sequence] = False
+        elif previous is None:
+            costs[item.candidate_sequence] = item.all_material_costs_known
+    if cost_conflict:
+        codes.append(VerificationCode.EVIDENCE_IDENTITY_CONFLICT)
     if any(not costs.get(sequence, False) for sequence in expected_denominator):
         codes.append(VerificationCode.ECONOMICS_INCOMPLETE)
 
@@ -897,6 +957,7 @@ def verify_campaign(evidence: CampaignEvidence) -> VerificationResult:
 __all__ = [
     "AuthoritativeSourceReceipt",
     "CampaignCloseEnvelope",
+    "CampaignCloseState",
     "CampaignEvidence",
     "CohortRootEnvelope",
     "CostEvidence",

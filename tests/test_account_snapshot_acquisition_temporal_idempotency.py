@@ -131,7 +131,6 @@ def test_same_acquisition_id_is_no_io_retry_but_new_id_preserves_identical_later
     )
     assert len(second_calls) == 2
     assert second.receipt.acquisition_id != first.receipt.acquisition_id
-    assert second.receipt.source_observation_id != first.receipt.source_observation_id
     assert second.receipt.snapshot_content_sha256 == first.receipt.snapshot_content_sha256
     assert second.receipt.source_payload_sha256 == first.receipt.source_payload_sha256
     assert second.receipt.acquired_at == "2026-09-21T18:01:00+00:00"

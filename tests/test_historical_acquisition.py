@@ -4,6 +4,7 @@ import hashlib
 import json
 import tempfile
 import unittest
+from dataclasses import replace
 from pathlib import Path
 from unittest.mock import patch
 from urllib.parse import parse_qs, urlparse
@@ -261,6 +262,82 @@ class HistoricalAcquisitionBundleTests(unittest.TestCase):
                 with self.assertRaisesRegex(
                     ProviderPayloadError,
                     "match_results.capture bytes changed after child capture",
+                ):
+                    capture_historical_acquisition_bundle(
+                        self._provider(transport),
+                        requested_at=("2026-09-12T10:03:00Z",),
+                        results_date="2026-09-10",
+                        output_dir=root,
+                    )
+            self.assertFalse(root.exists())
+
+    def test_returned_match_report_cannot_override_hashed_evidence_semantics(self) -> None:
+        transport = _Transport()
+        real_capture = historical_acquisition.capture_historical_matches
+
+        def forge_returned_report(*args, **kwargs):
+            report = real_capture(*args, **kwargs)
+            return replace(
+                report,
+                requested_date="2026-09-09",
+                request_url="https://attacker.invalid/forged",
+                provider_response_origin_verified=True,
+                trusted_outcome_source_admissible=True,
+            )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "acquisition"
+            with patch.object(
+                historical_acquisition,
+                "capture_historical_matches",
+                side_effect=forge_returned_report,
+            ):
+                capture_historical_acquisition_bundle(
+                    self._provider(transport),
+                    requested_at=("2026-09-12T10:03:00Z",),
+                    results_date="2026-09-10",
+                    output_dir=root,
+                )
+
+            bundle = json.loads((root / "bundle.json").read_text(encoding="utf-8"))
+            result = bundle["match_results"]
+            self.assertEqual(result["requested_date"], "2026-09-10")
+            self.assertTrue(
+                result["request_url"].endswith(
+                    "/v1/historical/sports/table_tennis/matches?date=2026-09-10&pricedOnly=false"
+                )
+            )
+            self.assertFalse(result["provider_response_origin_verified"])
+            self.assertFalse(result["trusted_outcome_source_admissible"])
+            self.assertFalse(bundle["match_result_provider_response_origin_verified"])
+            self.assertFalse(bundle["trusted_outcome_source_admissible"])
+
+    def test_mutated_match_evidence_cannot_promote_bundle_trust(self) -> None:
+        transport = _Transport()
+        real_capture = historical_acquisition.capture_historical_matches
+
+        def mutate_evidence_after_child(*args, **kwargs):
+            report = real_capture(*args, **kwargs)
+            evidence_path = Path(kwargs["evidence_path"])
+            evidence = json.loads(evidence_path.read_text(encoding="utf-8"))
+            evidence["provider_response_origin_verified"] = True
+            evidence["trusted_outcome_source_admissible"] = True
+            evidence_path.write_text(
+                json.dumps(evidence, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+                encoding="utf-8",
+            )
+            return report
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "acquisition"
+            with patch.object(
+                historical_acquisition,
+                "capture_historical_matches",
+                side_effect=mutate_evidence_after_child,
+            ):
+                with self.assertRaisesRegex(
+                    ProviderPayloadError,
+                    "provider_response_origin_verified must remain false",
                 ):
                     capture_historical_acquisition_bundle(
                         self._provider(transport),

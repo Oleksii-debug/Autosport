@@ -244,7 +244,53 @@ def read_verified_scientific_registry_text(path: str | Path) -> str:
                     tx_id=pending.tx_id,
                     semantic_binding_sha256=pending.semantic_binding_sha256,
                 )
-        return destination.read_text(encoding="utf-8")
+        return destination.read_bytes().decode("utf-8")
+
+
+def establish_validated_scientific_registry_read_baseline(
+    path: str | Path,
+    validated_text: str,
+) -> None:
+    """Bind the first validated non-pristine registry image to machine authority.
+
+    The verified reader cannot safely bootstrap a historyless legacy image before
+    the ScientificRegistry parser has validated its complete schema and record
+    digests. The caller therefore returns here only after validation. Re-read the
+    exact bytes under the durable path lock before creating the trust-on-first-use
+    baseline so a concurrent replacement cannot be certified from stale text.
+    """
+
+    if type(validated_text) is not str:
+        raise TypeError("validated_text must be a string")
+
+    destination = Path(path)
+    with durable_path_lock(destination):
+        current_bytes = destination.read_bytes()
+        try:
+            current_text = current_bytes.decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise ValueError("scientific registry must be valid UTF-8 JSON") from exc
+        if current_text != validated_text:
+            raise RuntimeError(
+                "ScientificRegistry bytes changed after validation and before authority baseline"
+            )
+
+        try:
+            payload = json.loads(current_text)
+        except json.JSONDecodeError as exc:
+            raise ValueError("scientific registry must be valid UTF-8 JSON") from exc
+        if type(payload) is not dict or not _looks_like_scientific_registry_state(payload):
+            # Preserve pristine initialization: the empty registry acquires
+            # authority when its first real scientific record is published.
+            return
+
+        observed = hashlib.sha256(current_bytes).hexdigest()
+        authority = _scientific_registry_authority(destination)
+        _recover_or_bootstrap_scientific_registry_authority(
+            authority,
+            destination,
+            observed,
+        )
 
 
 def atomic_write_json(path: str | Path, payload: dict[str, Any]) -> None:

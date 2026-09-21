@@ -79,3 +79,37 @@ def test_normal_scientific_registry_successors_remain_appendable(tmp_path, monke
     reopened = ScientificRegistry(registry.path)
     assert reopened.get("ResearchQuestion", "first") is not None
     assert reopened.get("ResearchQuestion", "second") is not None
+
+def test_historyless_nonempty_registry_first_read_establishes_monotonic_baseline(
+    tmp_path,
+    monkeypatch,
+):
+    authority_root = tmp_path / "machine-authority"
+    monkeypatch.setenv("AUTOSPORT_MONOTONIC_AUTHORITY_ROOT", str(authority_root.resolve()))
+
+    source = ScientificRegistry.initialize_pristine(
+        tmp_path / "source-workspace" / "scientific.json"
+    )
+    source.append(_question("legacy-prefix", T0))
+    legacy_prefix = source.path.read_bytes()
+
+    legacy_path = tmp_path / "legacy-workspace" / "scientific.json"
+    legacy_path.parent.mkdir(parents=True, exist_ok=True)
+    legacy_path.write_bytes(legacy_prefix)
+
+    # A valid non-empty legacy image has no pre-existing machine authority. The
+    # first fully validated read must establish one exact-byte TOFU baseline.
+    reopened = ScientificRegistry(legacy_path)
+    assert reopened.get("ResearchQuestion", "legacy-prefix") is not None
+
+    source.append(_question("replacement", T1))
+    replacement = source.path.read_bytes()
+    assert replacement != legacy_prefix
+    legacy_path.write_bytes(replacement)
+
+    with pytest.raises(MonotonicAuthorityRollbackError, match="rolled back|unproven|authority"):
+        ScientificRegistry(legacy_path)
+
+    # Detection is fail-closed and does not rewrite the observed replacement.
+    assert legacy_path.read_bytes() == replacement
+

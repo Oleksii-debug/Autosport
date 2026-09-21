@@ -451,11 +451,17 @@ class AuthorityRootSelectionBinding:
         if register_path and instance_bound and not path_bound:
             self._ensure_path_binding()
             path_bound = True
+        if register_path and path_bound and not instance_bound:
+            self._ensure_instance_binding()
+            instance_bound = True
         return instance_bound, path_bound
 
     def ensure_bound(self) -> None:
-        self._ensure_instance_binding()
+        # Reserve the lexical workspace path first. Concurrent first-use attempts
+        # selecting different roots cannot leave the losing root authoritative by
+        # winning only an instance-specific receipt.
         self._ensure_path_binding()
+        self._ensure_instance_binding()
 
     def _instance_payload(self) -> dict[str, object]:
         unhashed: dict[str, object] = {

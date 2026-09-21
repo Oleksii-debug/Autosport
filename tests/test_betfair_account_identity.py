@@ -3,7 +3,11 @@ from __future__ import annotations
 import copy
 from dataclasses import replace
 import json
+import os
 import pickle
+from pathlib import Path
+import subprocess
+import sys
 from concurrent.futures import ThreadPoolExecutor
 
 import pytest
@@ -13,6 +17,7 @@ from autosport.betfair_account_identity import (
     BetfairAccountIdentityError,
     BetfairAccountIdentityMode,
     BetfairAuthenticatedAccountIdentity,
+    build_betfair_authenticated_client,
     is_authoritative_betfair_account_identity,
     require_authoritative_betfair_account_identity,
     resolve_betfair_authenticated_account_identity,
@@ -82,12 +87,51 @@ def _client(
     session_token: str = "session-token-a",
     account_label: str = "caller-label-a",
 ) -> BetfairReadOnlyClient:
-    return BetfairReadOnlyClient(
+    return build_betfair_authenticated_client(
         BetfairSessionCredentials(application_key, session_token),
-        venue_id="betfair",
-        account_id=account_label,
+        account_label=account_label,
     )
 
+
+def test_k07_import_order_does_not_patch_client_constructor() -> None:
+    source_root = str(Path(__file__).resolve().parents[1] / "src")
+    env = os.environ.copy()
+    env["PYTHONPATH"] = source_root + os.pathsep + env.get("PYTHONPATH", "")
+    code = """
+from autosport.betfair_account_readonly import BetfairReadOnlyClient, BetfairSessionCredentials
+original_init = BetfairReadOnlyClient.__init__
+client = BetfairReadOnlyClient(BetfairSessionCredentials("app", "token"))
+from autosport import betfair_account_identity as identity
+assert BetfairReadOnlyClient.__init__ is original_init
+try:
+    identity.resolve_betfair_authenticated_account_identity(client)
+except identity.BetfairAccountIdentityError as exc:
+    assert "product-owned" in str(exc)
+else:
+    raise AssertionError("direct pre-import client unexpectedly gained K07 authority")
+"""
+    completed = subprocess.run(
+        [sys.executable, "-c", code],
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stderr
+
+
+def test_direct_default_client_never_gains_k07_provenance(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _install_details_transport(monkeypatch)
+    client = BetfairReadOnlyClient(
+        BetfairSessionCredentials("app-a", "session-a"),
+        venue_id="betfair",
+        account_id="caller-label",
+    )
+
+    with pytest.raises(BetfairAccountIdentityError, match="product-owned"):
+        resolve_betfair_authenticated_account_identity(client)
 
 def test_distinct_authenticated_contexts_do_not_alias_identical_account_details(
     monkeypatch: pytest.MonkeyPatch,

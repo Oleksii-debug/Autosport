@@ -72,6 +72,7 @@ def _initial_seal():
 
 
 def _build_guard(seal):
+    seal_marker = seal[0]
     coordinator_cls = seal[1]
     decision_ledger_cls = seal[2]
     execution_ledger_cls = seal[3]
@@ -85,6 +86,10 @@ def _build_guard(seal):
     execution_events = seal[11]
     authority_bindings = seal[12]
     authority_bindings_lock = seal[13]
+    runtime_methods = _RUNTIME_METHODS
+    bridge_methods = _BRIDGE_METHODS
+    path_cls = Path
+    rlock_factory = RLock
 
     def has_instance_shadow(value: object, method_name: str) -> bool:
         try:
@@ -112,11 +117,11 @@ def _build_guard(seal):
             )
 
     def reject_runtime_shadows(runtime: PaperCampaignRuntime) -> None:
-        for method_name in _RUNTIME_METHODS:
+        for method_name in runtime_methods:
             reject_instance_shadow(runtime, method_name, "PAPER campaign runtime")
 
     def reject_bridge_shadows(bridge: PaperSettlementLearningBridge) -> None:
-        for method_name in _BRIDGE_METHODS:
+        for method_name in bridge_methods:
             reject_instance_shadow(
                 bridge,
                 method_name,
@@ -124,7 +129,7 @@ def _build_guard(seal):
             )
 
     def canonical_decision_path(state_path: object) -> Path:
-        return (Path(state_path).parent / "decisions.jsonl").resolve(strict=False)
+        return (path_cls(state_path).parent / "decisions.jsonl").resolve(strict=False)
 
     def assert_decision_ledger_path(
         decision_ledger: JsonlDecisionLedger,
@@ -136,7 +141,7 @@ def _build_guard(seal):
             raise PaperCampaignAdmissionError(
                 "Decision Ledger path authority is unavailable"
             ) from exc
-        if type(actual_path) is not Path or actual_path.resolve(strict=False) != expected_path:
+        if type(actual_path) is not path_cls or actual_path.resolve(strict=False) != expected_path:
             raise PaperCampaignAdmissionError(
                 "Decision Ledger must be the canonical workspace decisions.jsonl"
             )
@@ -191,6 +196,8 @@ def _build_guard(seal):
         return binding
 
     def guarded_getattribute(self: PaperCampaignAdmissionCoordinator, name: str):
+        if seal[0] != seal_marker:
+            raise RuntimeError("PAPER admission executable authority seal changed")
         value = original_getattribute(self, name)
         if name not in {"decision_ledger", "execution_ledger", "runtime"}:
             return value
@@ -277,6 +284,8 @@ def _build_guard(seal):
         runtime,
         execution_ledger: PaperExecutionLedger,
     ) -> None:
+        if seal[0] != seal_marker:
+            raise RuntimeError("PAPER admission executable authority seal changed")
         if type(runtime) is not runtime_cls:
             raise TypeError("runtime must be exact PaperCampaignRuntime")
         if type(runtime.settlement_bridge) is not settlement_bridge_cls:
@@ -318,10 +327,12 @@ def _build_guard(seal):
                 runtime.settlement_bridge,
                 runtime.environment,
                 runtime.settlement_bridge.agent_loop,
-                RLock(),
+                rlock_factory(),
             )
 
     def guarded_resolved_execution_decision_id(self, *args, **kwargs):
+        if seal[0] != seal_marker:
+            raise RuntimeError("PAPER admission executable authority seal changed")
         (
             decision_ledger,
             execution_ledger,
@@ -375,6 +386,8 @@ def _build_guard(seal):
             return result
 
     def guarded_execution_attempt(self, *args, **kwargs):
+        if seal[0] != seal_marker:
+            raise RuntimeError("PAPER admission executable authority seal changed")
         (
             decision_ledger,
             execution_ledger,

@@ -459,7 +459,7 @@ class CampaignEconomicEvidenceStore:
         }
         if set(raw) != expected:
             raise CampaignEconomicStoreError("economic head schema is invalid")
-        if raw["schema_version"] != 1:
+        if type(raw["schema_version"]) is not int or raw["schema_version"] != 1:
             raise CampaignEconomicStoreError("economic head version is unsupported")
         if raw["campaign_sha256"] != self.campaign_sha256:
             raise CampaignEconomicStoreError("economic head campaign mismatch")

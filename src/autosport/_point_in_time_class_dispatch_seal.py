@@ -2,11 +2,13 @@
 
 The point-in-time holdout path requires exact concrete authority objects, but exact
 ``type(...)`` checks are not sufficient when a caller can replace methods on those
-classes.  This module therefore installs wrappers whose trusted implementation
-identity lives in private closure cells rather than caller-rewriteable module
-snapshots/delegate globals.  Repair-module reload is guarded by two independent
-finders; the backup finder is deliberately not published as the canonical finder so
-removing/replacing that public hook cannot silently drop the seal.
+classes.  The authority-bearing identities in this module therefore live in closure
+cells captured at import time rather than in caller-rebindable module globals.
+
+Runtime-repair reload is guarded by two independent finder instances.  Only the
+canonical finder is intentionally exposed for deterministic compatibility tests; the
+backup finder is retained solely by ``sys.meta_path`` and the installer closure, so
+rewriting/removing the public finder reference cannot silently drop the seal.
 """
 
 from __future__ import annotations
@@ -21,8 +23,6 @@ from . import _point_in_time_authority_runtime_repair as repair
 from .dataset_snapshot_lineage import DatasetSnapshotLineageAuthority
 from .scientific_registry import ScientificRegistry
 
-_REPAIR_MODULE_NAME = repair.__name__
-
 
 def _snapshot_class_namespace(concrete_type: type[Any]) -> tuple[tuple[str, object], ...]:
     """Capture exact class-owned attributes without invoking descriptors."""
@@ -33,17 +33,18 @@ def _snapshot_class_namespace(concrete_type: type[Any]) -> tuple[tuple[str, obje
     return tuple(namespace.items())
 
 
-def _build_seal() -> tuple[
-    Callable[..., object],
-    Callable[..., object],
-    Callable[[], None],
-]:
+def _build_seal(
+    repair_module,
+    lineage_type: type[Any],
+    registry_type: type[Any],
+) -> tuple[Callable[..., object], Callable[..., object], Callable[[], None]]:
     """Build one closure-owned seal with no mutable expected-value globals."""
 
-    trusted_lineage = _snapshot_class_namespace(DatasetSnapshotLineageAuthority)
-    trusted_registry = _snapshot_class_namespace(ScientificRegistry)
-    pristine_require = repair._require_exact_lineage_authority
-    pristine_resolve = repair._resolve_canonical_snapshot
+    trusted_lineage = _snapshot_class_namespace(lineage_type)
+    trusted_registry = _snapshot_class_namespace(registry_type)
+    pristine_require = repair_module._require_exact_lineage_authority
+    pristine_resolve = repair_module._resolve_canonical_snapshot
+    error_type = repair_module.evidence.PointInTimeEvidenceError
 
     def require_unchanged_class_namespace(
         concrete_type: type[Any],
@@ -57,23 +58,19 @@ def _build_seal() -> tuple[
         if set(current_names) != set(expected_names):
             changed = sorted(set(current_names) ^ set(expected_names))
             detail = changed[0] if changed else "namespace"
-            raise repair.evidence.PointInTimeEvidenceError(
-                f"trusted {label} class implementation changed: {detail}"
-            )
+            raise error_type(f"trusted {label} class implementation changed: {detail}")
         for name, expected in trusted:
             if current[name] is not expected:
-                raise repair.evidence.PointInTimeEvidenceError(
-                    f"trusted {label} class implementation changed: {name}"
-                )
+                raise error_type(f"trusted {label} class implementation changed: {name}")
 
     def require_trusted_class_dispatch() -> None:
         require_unchanged_class_namespace(
-            DatasetSnapshotLineageAuthority,
+            lineage_type,
             trusted_lineage,
             label="DatasetSnapshotLineageAuthority",
         )
         require_unchanged_class_namespace(
-            ScientificRegistry,
+            registry_type,
             trusted_registry,
             label="ScientificRegistry",
         )
@@ -87,17 +84,15 @@ def _build_seal() -> tuple[
         return pristine_resolve(ledger, dataset_snapshot)
 
     def install() -> None:
-        repair._require_exact_lineage_authority = sealed_require_exact_lineage_authority
-        repair._resolve_canonical_snapshot = sealed_resolve_canonical_snapshot
+        repair_module._require_exact_lineage_authority = sealed_require_exact_lineage_authority
+        repair_module._resolve_canonical_snapshot = sealed_resolve_canonical_snapshot
 
     return sealed_require_exact_lineage_authority, sealed_resolve_canonical_snapshot, install
 
 
-_SEALED_REQUIRE, _SEALED_RESOLVE, _INSTALL_SEALS = _build_seal()
-# Compatibility names are assertions/tests only.  The live seal and reload loaders
-# retain closure-owned references and never trust these mutable module aliases.
-_sealed_require_exact_lineage_authority = _SEALED_REQUIRE
-_sealed_resolve_canonical_snapshot = _SEALED_RESOLVE
+_sealed_require_exact_lineage_authority, _sealed_resolve_canonical_snapshot, _install_seals = (
+    _build_seal(repair, DatasetSnapshotLineageAuthority, ScientificRegistry)
+)
 
 
 class _RepairReloadLoader(importlib.abc.Loader):
@@ -115,7 +110,7 @@ class _RepairReloadLoader(importlib.abc.Loader):
 
     def exec_module(self, module) -> None:
         self._wrapped.exec_module(module)
-        # Use the loader-owned closure, not a mutable module-global installer.
+        # Use the loader-owned closure, never a mutable module-global installer lookup.
         self._reinstall()
 
 
@@ -124,11 +119,18 @@ class _RepairReloadFinder(importlib.abc.MetaPathFinder):
 
     _autosport_point_in_time_class_dispatch_seal_v1 = True
 
-    def __init__(self, reinstall: Callable[[], None]) -> None:
+    def __init__(
+        self,
+        module_name: str,
+        target_module: object,
+        reinstall: Callable[[], None],
+    ) -> None:
+        self._module_name = module_name
+        self._target_module = target_module
         self._reinstall = reinstall
 
     def find_spec(self, fullname, path, target=None):
-        if fullname != _REPAIR_MODULE_NAME or target is not repair:
+        if fullname != self._module_name or target is not self._target_module:
             return None
         spec = importlib.machinery.PathFinder.find_spec(fullname, path)
         if spec is None or spec.loader is None:
@@ -140,11 +142,18 @@ class _RepairReloadFinder(importlib.abc.MetaPathFinder):
 class _BackupRepairReloadFinder(importlib.abc.MetaPathFinder):
     """Independent fallback if the canonical public finder is removed/replaced."""
 
-    def __init__(self, reinstall: Callable[[], None]) -> None:
+    def __init__(
+        self,
+        module_name: str,
+        target_module: object,
+        reinstall: Callable[[], None],
+    ) -> None:
+        self._module_name = module_name
+        self._target_module = target_module
         self._reinstall = reinstall
 
     def find_spec(self, fullname, path, target=None):
-        if fullname != _REPAIR_MODULE_NAME or target is not repair:
+        if fullname != self._module_name or target is not self._target_module:
             return None
         spec = importlib.machinery.PathFinder.find_spec(fullname, path)
         if spec is None or spec.loader is None:
@@ -153,21 +162,32 @@ class _BackupRepairReloadFinder(importlib.abc.MetaPathFinder):
         return spec
 
 
-_CANONICAL_REPAIR_RELOAD_FINDER = _RepairReloadFinder(_INSTALL_SEALS)
-# The backup is intentionally a different finder class without the public marker.
-# Its live object is retained by sys.meta_path, so rewriting/removing the canonical
-# finder reference alone cannot rewrite the fallback's closure-owned installer.
-_BACKUP_REPAIR_RELOAD_FINDER = _BackupRepairReloadFinder(_INSTALL_SEALS)
+def _make_reload_finder_installer(
+    module_name: str,
+    target_module: object,
+    reinstall: Callable[[], None],
+) -> tuple[_RepairReloadFinder, Callable[[], None]]:
+    canonical = _RepairReloadFinder(module_name, target_module, reinstall)
+    backup = _BackupRepairReloadFinder(module_name, target_module, reinstall)
+
+    def install() -> None:
+        # ``backup`` is deliberately closure-owned: it cannot be replaced by assigning
+        # a similarly named attribute on this module.
+        if not any(finder is backup for finder in sys.meta_path):
+            sys.meta_path.insert(0, backup)
+        if not any(finder is canonical for finder in sys.meta_path):
+            sys.meta_path.insert(0, canonical)
+
+    return canonical, install
 
 
-def _install_reload_finders() -> None:
-    if not any(finder is _BACKUP_REPAIR_RELOAD_FINDER for finder in sys.meta_path):
-        sys.meta_path.insert(0, _BACKUP_REPAIR_RELOAD_FINDER)
-    if not any(finder is _CANONICAL_REPAIR_RELOAD_FINDER for finder in sys.meta_path):
-        sys.meta_path.insert(0, _CANONICAL_REPAIR_RELOAD_FINDER)
+_CANONICAL_REPAIR_RELOAD_FINDER, _install_reload_finders = _make_reload_finder_installer(
+    repair.__name__,
+    repair,
+    _install_seals,
+)
 
-
-_INSTALL_SEALS()
+_install_seals()
 _install_reload_finders()
 
 

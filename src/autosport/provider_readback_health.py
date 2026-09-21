@@ -1,8 +1,9 @@
-"""Fail-closed provider/account readback health evidence.
+"""Fail-closed provider/account readback-health evidence.
 
-This module classifies observability around the canonical BookmakerAccountSnapshot.
-It does not perform provider I/O and does not create a second account, execution,
-routing, or risk authority.
+The canonical :class:`BookmakerAccountSnapshot` remains the account truth object.
+This module only classifies whether the provider reads behind a snapshot are
+sufficiently complete and fresh for consumers to strengthen current-state truth.
+It performs no provider I/O and owns no execution, routing, or risk state.
 """
 from __future__ import annotations
 
@@ -47,15 +48,24 @@ _ISSUER = object()
 
 
 def _text(value: object, field: str) -> str:
-    if not isinstance(value, str) or not value or value != value.strip() or "\x00" in value:
-        raise ProviderReadbackHealthError(f"{field} must be non-empty canonical text")
+    if (
+        not isinstance(value, str)
+        or not value
+        or value != value.strip()
+        or "\x00" in value
+    ):
+        raise ProviderReadbackHealthError(
+            f"{field} must be non-empty canonical text"
+        )
     return value
 
 
 def _sha(value: object, field: str) -> str:
     raw = _text(value, field)
     if len(raw) != 64 or any(ch not in "0123456789abcdef" for ch in raw):
-        raise ProviderReadbackHealthError(f"{field} must be lowercase SHA-256 hex")
+        raise ProviderReadbackHealthError(
+            f"{field} must be lowercase SHA-256 hex"
+        )
     return raw
 
 
@@ -64,10 +74,25 @@ def _time(value: object, field: str) -> datetime:
     try:
         parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
     except ValueError as exc:
-        raise ProviderReadbackHealthError(f"{field} must be ISO-8601") from exc
+        raise ProviderReadbackHealthError(
+            f"{field} must be ISO-8601"
+        ) from exc
     if parsed.tzinfo is None or parsed.utcoffset() is None:
-        raise ProviderReadbackHealthError(f"{field} must be timezone-aware")
+        raise ProviderReadbackHealthError(
+            f"{field} must be timezone-aware"
+        )
     return parsed
+
+
+def _digest(value: object) -> str:
+    raw = json.dumps(
+        value,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
+        allow_nan=False,
+    ).encode("utf-8")
+    return sha256(raw).hexdigest()
 
 
 def _canonical(value: object) -> object:
@@ -75,16 +100,24 @@ def _canonical(value: object) -> object:
         return value.value
     if isinstance(value, Decimal):
         if not value.is_finite():
-            raise ProviderReadbackHealthError("snapshot contains non-finite Decimal")
+            raise ProviderReadbackHealthError(
+                "snapshot contains non-finite Decimal"
+            )
         return str(value)
     if is_dataclass(value):
-        return {field.name: _canonical(getattr(value, field.name)) for field in fields(value)}
+        return {
+            field.name: _canonical(getattr(value, field.name))
+            for field in fields(value)
+        }
     if isinstance(value, frozenset):
         normalized = [_canonical(item) for item in value]
         return sorted(
             normalized,
             key=lambda item: json.dumps(
-                item, sort_keys=True, separators=(",", ":"), ensure_ascii=True
+                item,
+                sort_keys=True,
+                separators=(",", ":"),
+                ensure_ascii=True,
             ),
         )
     if isinstance(value, tuple):
@@ -97,23 +130,23 @@ def _canonical(value: object) -> object:
 
 
 def canonical_snapshot_sha256(snapshot: BookmakerAccountSnapshot) -> str:
-    """Return a deterministic digest of the canonical immutable snapshot."""
+    """Return a deterministic identity for one canonical immutable snapshot."""
     if not isinstance(snapshot, BookmakerAccountSnapshot):
         raise ProviderReadbackHealthError(
             "snapshot must be canonical BookmakerAccountSnapshot"
         )
-    payload = json.dumps(
-        _canonical(snapshot),
-        sort_keys=True,
-        separators=(",", ":"),
-        ensure_ascii=True,
-        allow_nan=False,
-    ).encode("utf-8")
-    return sha256(payload).hexdigest()
+    return _digest(_canonical(snapshot))
 
 
 @dataclass(frozen=True, slots=True)
 class ProviderReadScopeEvidence:
+    """One successful provider read scope.
+
+    ``complete=False`` represents a successful prefix/partial capture (for example
+    page 1 followed by a timeout). Such evidence is useful diagnostically but can
+    never prove an empty or current-complete account state.
+    """
+
     capability: BookmakerCapability
     request_scope_sha256: str
     response_sha256: str
@@ -122,7 +155,9 @@ class ProviderReadScopeEvidence:
 
     def __post_init__(self) -> None:
         if not isinstance(self.capability, BookmakerCapability):
-            raise ProviderReadbackHealthError("capability must be BookmakerCapability")
+            raise ProviderReadbackHealthError(
+                "capability must be BookmakerCapability"
+            )
         _sha(self.request_scope_sha256, "request_scope_sha256")
         _sha(self.response_sha256, "response_sha256")
         _time(self.observed_at, "observed_at")
@@ -134,16 +169,18 @@ class ProviderReadScopeEvidence:
         return _digest(
             {
                 "capability": self.capability.value,
-                "complete": self.complete,
-                "observed_at": self.observed_at,
                 "request_scope_sha256": self.request_scope_sha256,
                 "response_sha256": self.response_sha256,
+                "observed_at": self.observed_at,
+                "complete": self.complete,
             }
         )
 
 
 @dataclass(frozen=True, slots=True)
 class ProviderReadbackHealth:
+    """Product-issued classification around canonical account evidence."""
+
     venue_id: str
     account_id: str
     adapter_id: str
@@ -162,18 +199,30 @@ class ProviderReadbackHealth:
         _text(self.account_id, "account_id")
         _text(self.adapter_id, "adapter_id")
         if not isinstance(self.state, ProviderReadbackHealthState):
-            raise ProviderReadbackHealthError("state must be ProviderReadbackHealthState")
+            raise ProviderReadbackHealthError(
+                "state must be ProviderReadbackHealthState"
+            )
         _time(self.evaluated_at, "evaluated_at")
-        if type(self.freshness_limit_seconds) is not int or self.freshness_limit_seconds < 0:
+        if (
+            type(self.freshness_limit_seconds) is not int
+            or self.freshness_limit_seconds < 0
+        ):
             raise ProviderReadbackHealthError(
                 "freshness_limit_seconds must be non-negative int"
             )
-        if not isinstance(self.required_capabilities, tuple) or not self.required_capabilities:
+        if (
+            not isinstance(self.required_capabilities, tuple)
+            or not self.required_capabilities
+        ):
             raise ProviderReadbackHealthError(
                 "required_capabilities must be a non-empty tuple"
             )
-        if len(set(self.required_capabilities)) != len(self.required_capabilities):
-            raise ProviderReadbackHealthError("required_capabilities contain duplicates")
+        if len(set(self.required_capabilities)) != len(
+            self.required_capabilities
+        ):
+            raise ProviderReadbackHealthError(
+                "required_capabilities contain duplicates"
+            )
         if any(
             not isinstance(capability, BookmakerCapability)
             for capability in self.required_capabilities
@@ -182,7 +231,9 @@ class ProviderReadbackHealth:
                 "required_capabilities must contain BookmakerCapability values"
             )
         if not isinstance(self.successful_scopes, tuple):
-            raise ProviderReadbackHealthError("successful_scopes must be tuple")
+            raise ProviderReadbackHealthError(
+                "successful_scopes must be tuple"
+            )
         if any(
             not isinstance(scope, ProviderReadScopeEvidence)
             for scope in self.successful_scopes
@@ -190,27 +241,40 @@ class ProviderReadbackHealth:
             raise ProviderReadbackHealthError(
                 "successful_scopes must contain ProviderReadScopeEvidence"
             )
-        scope_caps = tuple(scope.capability for scope in self.successful_scopes)
+        scope_caps = tuple(
+            scope.capability for scope in self.successful_scopes
+        )
         if len(set(scope_caps)) != len(scope_caps):
             raise ProviderReadbackHealthError(
                 "successful_scopes contain duplicate capabilities"
             )
         if self.current_snapshot_sha256 is not None:
-            _sha(self.current_snapshot_sha256, "current_snapshot_sha256")
+            _sha(
+                self.current_snapshot_sha256,
+                "current_snapshot_sha256",
+            )
         if self.last_known_snapshot_sha256 is not None:
-            _sha(self.last_known_snapshot_sha256, "last_known_snapshot_sha256")
+            _sha(
+                self.last_known_snapshot_sha256,
+                "last_known_snapshot_sha256",
+            )
         if self.failure_class is not None and not isinstance(
-            self.failure_class, ProviderReadbackFailureClass
+            self.failure_class,
+            ProviderReadbackFailureClass,
         ):
             raise ProviderReadbackHealthError(
                 "failure_class must be ProviderReadbackFailureClass"
             )
+
         if self.state is ProviderReadbackHealthState.FRESH_COMPLETE:
             if _issuer is not _ISSUER:
                 raise ProviderReadbackHealthError(
                     "FRESH_COMPLETE health must be product-issued"
                 )
-            if self.current_snapshot_sha256 is None or self.failure_class is not None:
+            if (
+                self.current_snapshot_sha256 is None
+                or self.failure_class is not None
+            ):
                 raise ProviderReadbackHealthError(
                     "FRESH_COMPLETE requires current snapshot and no failure"
                 )
@@ -218,16 +282,22 @@ class ProviderReadbackHealth:
                 raise ProviderReadbackHealthError(
                     "FRESH_COMPLETE requires every exact required scope"
                 )
-            if any(not scope.complete for scope in self.successful_scopes):
+            if any(
+                not scope.complete for scope in self.successful_scopes
+            ):
                 raise ProviderReadbackHealthError(
                     "FRESH_COMPLETE requires complete scopes"
                 )
 
     @property
     def can_authorize_current_state(self) -> bool:
+        """Only this state may strengthen current bankroll/exposure/emptiness."""
         return self.state is ProviderReadbackHealthState.FRESH_COMPLETE
 
-    def scope_is_authoritative(self, capability: BookmakerCapability) -> bool:
+    def scope_is_authoritative(
+        self,
+        capability: BookmakerCapability,
+    ) -> bool:
         if not self.can_authorize_current_state:
             return False
         return any(
@@ -238,13 +308,20 @@ class ProviderReadbackHealth:
     @property
     def operator_status_uk(self) -> str:
         return {
-            ProviderReadbackHealthState.FRESH_COMPLETE: "дані букмекера актуальні",
-            ProviderReadbackHealthState.FRESH_PARTIAL: "дані букмекера неповні",
-            ProviderReadbackHealthState.STALE_LAST_KNOWN: "дані букмекера застарілі",
-            ProviderReadbackHealthState.UNAVAILABLE_TRANSIENT: "дані букмекера тимчасово недоступні",
-            ProviderReadbackHealthState.UNAUTHORIZED_OR_SESSION_EXPIRED: "сесію букмекера треба відновити",
-            ProviderReadbackHealthState.CONFLICTING: "дані букмекера суперечливі",
-            ProviderReadbackHealthState.UNKNOWN: "стан даних букмекера невідомий",
+            ProviderReadbackHealthState.FRESH_COMPLETE:
+                "дані букмекера актуальні",
+            ProviderReadbackHealthState.FRESH_PARTIAL:
+                "дані букмекера неповні",
+            ProviderReadbackHealthState.STALE_LAST_KNOWN:
+                "дані букмекера застарілі",
+            ProviderReadbackHealthState.UNAVAILABLE_TRANSIENT:
+                "дані букмекера тимчасово недоступні",
+            ProviderReadbackHealthState.UNAUTHORIZED_OR_SESSION_EXPIRED:
+                "сесію букмекера треба відновити",
+            ProviderReadbackHealthState.CONFLICTING:
+                "дані букмекера суперечливі",
+            ProviderReadbackHealthState.UNKNOWN:
+                "стан даних букмекера невідомий",
         }[self.state]
 
     @property
@@ -262,7 +339,8 @@ class ProviderReadbackHealth:
             "evaluated_at": self.evaluated_at,
             "freshness_limit_seconds": self.freshness_limit_seconds,
             "required_capabilities": [
-                capability.value for capability in self.required_capabilities
+                capability.value
+                for capability in self.required_capabilities
             ],
             "successful_scopes": [
                 {
@@ -273,20 +351,14 @@ class ProviderReadbackHealth:
                 for scope in self.successful_scopes
             ],
             "current_snapshot_sha256": self.current_snapshot_sha256,
-            "last_known_snapshot_sha256": self.last_known_snapshot_sha256,
-            "failure_class": None if self.failure_class is None else self.failure_class.value,
+            "last_known_snapshot_sha256":
+                self.last_known_snapshot_sha256,
+            "failure_class": (
+                None
+                if self.failure_class is None
+                else self.failure_class.value
+            ),
         }
-
-
-def _digest(value: object) -> str:
-    raw = json.dumps(
-        value,
-        sort_keys=True,
-        separators=(",", ":"),
-        ensure_ascii=True,
-        allow_nan=False,
-    ).encode("utf-8")
-    return sha256(raw).hexdigest()
 
 
 def _ordered_capabilities(
@@ -294,8 +366,13 @@ def _ordered_capabilities(
 ) -> tuple[BookmakerCapability, ...]:
     values = tuple(capabilities)
     if not values:
-        raise ProviderReadbackHealthError("required_capabilities must not be empty")
-    if any(not isinstance(item, BookmakerCapability) for item in values):
+        raise ProviderReadbackHealthError(
+            "required_capabilities must not be empty"
+        )
+    if any(
+        not isinstance(item, BookmakerCapability)
+        for item in values
+    ):
         raise ProviderReadbackHealthError(
             "required_capabilities must contain BookmakerCapability values"
         )
@@ -316,15 +393,27 @@ def classify_provider_readback_health(
     failure_class: ProviderReadbackFailureClass | None = None,
     last_known_snapshot: BookmakerAccountSnapshot | None = None,
 ) -> ProviderReadbackHealth:
-    """Classify one read attempt without turning failure into an empty observation."""
+    """Classify one read attempt without converting read failure into emptiness."""
     required = _ordered_capabilities(required_capabilities)
     now = _time(evaluated_at, "evaluated_at")
-    if type(freshness_limit_seconds) is not int or freshness_limit_seconds < 0:
+    if (
+        type(freshness_limit_seconds) is not int
+        or freshness_limit_seconds < 0
+    ):
         raise ProviderReadbackHealthError(
             "freshness_limit_seconds must be non-negative int"
         )
-    scopes = tuple(sorted(tuple(successful_scopes), key=lambda item: item.capability.value))
-    if any(not isinstance(scope, ProviderReadScopeEvidence) for scope in scopes):
+
+    scopes = tuple(
+        sorted(
+            tuple(successful_scopes),
+            key=lambda item: item.capability.value,
+        )
+    )
+    if any(
+        not isinstance(scope, ProviderReadScopeEvidence)
+        for scope in scopes
+    ):
         raise ProviderReadbackHealthError(
             "successful_scopes must contain ProviderReadScopeEvidence"
         )
@@ -337,80 +426,114 @@ def classify_provider_readback_health(
             "successful scope is outside required_capabilities"
         )
     if failure_class is not None and not isinstance(
-        failure_class, ProviderReadbackFailureClass
+        failure_class,
+        ProviderReadbackFailureClass,
     ):
         raise ProviderReadbackHealthError(
             "failure_class must be ProviderReadbackFailureClass"
         )
 
-    current_sha = None
-    last_sha = None
-    venue_id = account_id = adapter_id = None
+    scope_times = tuple(
+        _time(scope.observed_at, "successful_scope.observed_at")
+        for scope in scopes
+    )
+    if any(scope_time > now for scope_time in scope_times):
+        raise ProviderReadbackHealthError(
+            "successful scope observation cannot be after health evaluation"
+        )
+    scopes_fresh = all(
+        (now - scope_time).total_seconds()
+        <= freshness_limit_seconds
+        for scope_time in scope_times
+    )
+
+    current_sha: str | None = None
+    last_sha: str | None = None
+    venue_id: str | None = None
+    account_id: str | None = None
+    adapter_id: str | None = None
 
     if snapshot is not None:
         current_sha = canonical_snapshot_sha256(snapshot)
         venue_id = snapshot.profile.venue_id
         account_id = snapshot.profile.account_id
         adapter_id = snapshot.profile.adapter_id
-        observed = set(snapshot.observed_capabilities)
-        if any(scope.capability not in observed for scope in scopes):
+        observed_capabilities = set(snapshot.observed_capabilities)
+        if any(
+            scope.capability not in observed_capabilities
+            for scope in scopes
+        ):
             raise ProviderReadbackHealthError(
                 "successful scope is not present in canonical snapshot"
             )
 
     if last_known_snapshot is not None:
         last_sha = canonical_snapshot_sha256(last_known_snapshot)
-        identity = (
+        last_identity = (
             last_known_snapshot.profile.venue_id,
             last_known_snapshot.profile.account_id,
             last_known_snapshot.profile.adapter_id,
         )
         if venue_id is None:
-            venue_id, account_id, adapter_id = identity
-        elif identity != (venue_id, account_id, adapter_id):
+            venue_id, account_id, adapter_id = last_identity
+        elif last_identity != (venue_id, account_id, adapter_id):
             raise ProviderReadbackHealthError(
                 "last-known snapshot identity differs from current snapshot"
             )
 
-    if venue_id is None:
+    if venue_id is None or account_id is None or adapter_id is None:
         raise ProviderReadbackHealthError(
-            "snapshot or last_known_snapshot is required to bind provider/account identity"
+            "snapshot or last_known_snapshot is required to bind "
+            "provider/account identity"
         )
 
+    snapshot_fresh = False
     if snapshot is not None:
-        observed_at = _time(snapshot.observed_at, "snapshot.observed_at")
-        if observed_at > now:
+        snapshot_time = _time(
+            snapshot.observed_at,
+            "snapshot.observed_at",
+        )
+        if snapshot_time > now:
             raise ProviderReadbackHealthError(
                 "snapshot observation cannot be after health evaluation"
             )
-        age_seconds = (now - observed_at).total_seconds()
-    else:
-        age_seconds = None
+        snapshot_fresh = (
+            (now - snapshot_time).total_seconds()
+            <= freshness_limit_seconds
+        )
 
     required_set = set(required)
     scope_set = {scope.capability for scope in scopes}
-    all_complete = scope_set == required_set and all(scope.complete for scope in scopes)
+    all_complete = (
+        scope_set == required_set
+        and all(scope.complete for scope in scopes)
+    )
     snapshot_covers_required = (
         snapshot is not None
-        and required_set.issubset(set(snapshot.observed_capabilities))
+        and required_set.issubset(
+            set(snapshot.observed_capabilities)
+        )
     )
 
     if failure_class in {
         ProviderReadbackFailureClass.UNAUTHORIZED,
         ProviderReadbackFailureClass.SESSION_EXPIRED,
     }:
-        state = ProviderReadbackHealthState.UNAUTHORIZED_OR_SESSION_EXPIRED
+        state = (
+            ProviderReadbackHealthState
+            .UNAUTHORIZED_OR_SESSION_EXPIRED
+        )
     elif failure_class is ProviderReadbackFailureClass.CONFLICTING:
         state = ProviderReadbackHealthState.CONFLICTING
     elif failure_class is not None:
         state = (
             ProviderReadbackHealthState.FRESH_PARTIAL
-            if scopes
+            if scopes and scopes_fresh
             else ProviderReadbackHealthState.UNAVAILABLE_TRANSIENT
         )
     elif snapshot is None:
         state = ProviderReadbackHealthState.UNKNOWN
-    elif age_seconds is not None and age_seconds > freshness_limit_seconds:
+    elif not snapshot_fresh or not scopes_fresh:
         state = ProviderReadbackHealthState.STALE_LAST_KNOWN
     elif snapshot_covers_required and all_complete:
         state = ProviderReadbackHealthState.FRESH_COMPLETE

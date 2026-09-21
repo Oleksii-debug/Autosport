@@ -308,7 +308,16 @@ class LiveDecisionDisposition:
         predicate_ids = [item.predicate_id for item in values]
         if len(set(predicate_ids)) != len(predicate_ids):
             raise LiveDecisionDispositionError("predicate_id values must be unique")
-        values = tuple(sorted(values, key=lambda item: item.predicate_id))
+        values = tuple(
+            sorted(
+                values,
+                key=lambda item: (
+                    item.truth is not PredicateTruth.PROVEN,
+                    item.truth is PredicateTruth.FAILED,
+                    item.predicate_id,
+                ),
+            )
+        )
         object.__setattr__(self, "predicates", values)
 
         unknown = sum(item.truth is PredicateTruth.UNKNOWN for item in values)

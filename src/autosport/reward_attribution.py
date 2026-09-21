@@ -239,7 +239,11 @@ class RewardAttributionEvidence:
     schema_version: int = SCHEMA_VERSION
 
     def __post_init__(self) -> None:
-        if self.schema != SCHEMA or self.schema_version != SCHEMA_VERSION:
+        if (
+            self.schema != SCHEMA
+            or type(self.schema_version) is not int
+            or self.schema_version != SCHEMA_VERSION
+        ):
             raise RewardAttributionError("unsupported reward attribution schema")
         for name in (
             "environment_id",
@@ -341,7 +345,11 @@ class RewardAttributionEvidence:
             "evidence_id",
         }
         _exact_keys(raw, expected, "RewardAttributionEvidence")
-        if raw["schema"] != SCHEMA or raw["schema_version"] != SCHEMA_VERSION:
+        if (
+            raw["schema"] != SCHEMA
+            or type(raw["schema_version"]) is not int
+            or raw["schema_version"] != SCHEMA_VERSION
+        ):
             raise RewardAttributionError("unsupported reward attribution schema")
         if raw["source_resolved"] is not False or raw["policy_update_eligible"] is not False:
             raise RewardAttributionError(

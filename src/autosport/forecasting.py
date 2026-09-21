@@ -8,7 +8,7 @@ import uuid
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import datetime
-from decimal import Decimal
+from decimal import Context, Decimal, DecimalException, ROUND_HALF_EVEN, localcontext
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -232,13 +232,15 @@ class ForecastEvaluationSummary:
     strategy_versions: tuple[str, ...]
 
 
-def _binary_log_loss(probability: Decimal, outcome: int) -> float:
-    """Return binary log loss without silently clipping declared probabilities.
+_LOG_LOSS_MIN_DECIMAL_PRECISION = 64
 
-    Impossible realized endpoint predictions have unbounded log loss. Autosport
-    fails closed instead of replacing those declared probabilities with epsilon.
-    Interior Decimals that collapse to a binary64 endpoint also fail closed rather
-    than acquiring different evaluation semantics during float conversion.
+
+def _binary_log_loss(probability: Decimal, outcome: int) -> float:
+    """Return binary log loss without changing the declared Decimal probability.
+
+    Impossible realized endpoint predictions have unbounded log loss. Interior
+    loss is evaluated in a deterministic Decimal context sized to preserve the
+    declared decimal scale; only the final summary scalar is converted to float.
     """
 
     if not isinstance(probability, Decimal) or not probability.is_finite():
@@ -261,16 +263,46 @@ def _binary_log_loss(probability: Decimal, outcome: int) -> float:
             "log loss is unbounded for probability=1 and realized outcome=0"
         )
 
-    binary_probability = float(probability)
-    if not 0.0 < binary_probability < 1.0:
+    decimal_tuple = probability.as_tuple()
+    decimal_places = -decimal_tuple.exponent if decimal_tuple.exponent < 0 else 0
+    precision = max(
+        _LOG_LOSS_MIN_DECIMAL_PRECISION,
+        len(decimal_tuple.digits) + 2,
+        decimal_places + 2 if outcome == 0 else 0,
+    )
+    context = Context(
+        prec=precision,
+        rounding=ROUND_HALF_EVEN,
+        Emin=-999_999_999,
+        Emax=999_999_999,
+        capitals=1,
+        clamp=0,
+    )
+    try:
+        with localcontext(context):
+            if outcome == 1:
+                decimal_loss = -probability.ln()
+            else:
+                complement = Decimal(1) - probability
+                if complement <= 0:
+                    raise ValueError(
+                        "interior probability complement is not positive"
+                    )
+                decimal_loss = -complement.ln()
+    except DecimalException as exc:
         raise ValueError(
-            "interior probability cannot be represented as an interior binary64 "
-            "value for log-loss evaluation"
-        )
+            "declared probability cannot be evaluated in the canonical "
+            "Decimal log-loss context"
+        ) from exc
 
-    if outcome == 1:
-        return -math.log(binary_probability)
-    return -math.log1p(-binary_probability)
+    binary_loss = float(decimal_loss)
+    if not math.isfinite(binary_loss):
+        raise ValueError("log loss is not representable as a finite binary64 value")
+    if decimal_loss != 0 and binary_loss == 0.0:
+        raise ValueError(
+            "positive log loss is not representable as a nonzero binary64 value"
+        )
+    return binary_loss
 
 
 def evaluate_forecast_window(

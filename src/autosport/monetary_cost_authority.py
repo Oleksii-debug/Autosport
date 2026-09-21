@@ -243,7 +243,7 @@ class SharedAllocationSnapshot:
                 raise MonetaryAuthorityError("allocation shares must be positive")
         if (
             not self.shares
-            or sum((share for _, share in self.shares), Decimal("0"))
+            or _exact_decimal_sum(tuple(share for _, share in self.shares))
             != Decimal("1")
         ):
             raise MonetaryAuthorityError(
@@ -875,6 +875,43 @@ def _amount(value: Decimal, label: str) -> None:
         raise MonetaryAuthorityError(
             f"{label} must be finite non-negative Decimal"
         )
+
+
+def _exact_decimal_sum(values: tuple[Decimal, ...]) -> Decimal:
+    """Add finite non-negative Decimals without consulting ambient context."""
+    if not values:
+        return Decimal("0")
+
+    parts: list[tuple[int, int]] = []
+    common_exponent: int | None = None
+    for value in values:
+        _amount(value, "exact sum value")
+        decimal_tuple = value.as_tuple()
+        coefficient = 0
+        for digit in decimal_tuple.digits:
+            coefficient = (coefficient * 10) + digit
+        exponent = int(decimal_tuple.exponent)
+        parts.append((coefficient, exponent))
+        if common_exponent is None or exponent < common_exponent:
+            common_exponent = exponent
+
+    assert common_exponent is not None
+    total = sum(
+        coefficient * (10 ** (exponent - common_exponent))
+        for coefficient, exponent in parts
+    )
+    if total == 0:
+        return Decimal("0")
+
+    digits = str(total)
+    if common_exponent >= 0:
+        return Decimal(digits + ("0" * common_exponent))
+    places = -common_exponent
+    if len(digits) > places:
+        text = digits[:-places] + "." + digits[-places:]
+    else:
+        text = "0." + ("0" * (places - len(digits))) + digits
+    return Decimal(text)
 
 
 def _sorted_text(values: tuple[str, ...], label: str) -> None:

@@ -10,6 +10,7 @@ from autosport.bookmaker_routing import (
     VenueQuote,
 )
 from autosport.capital_at_risk import (
+    RoutingCapitalAtRiskTruth,
     parallel_routing_capital_at_risk_truth,
     sequential_routing_capital_at_risk_truth,
 )
@@ -73,13 +74,13 @@ def test_full_non_money_moving_proposal_is_not_capital_already_at_risk() -> None
     )
 
     assert truth.routing_state is RoutingState.ROUTE
-    assert truth.confirmed_at_risk == Decimal("0")
-    assert truth.exact_capital_at_risk == Decimal("0")
+    assert truth.confirmed_routing_notional == Decimal("0")
+    assert truth.exact_capital_at_risk is None
     assert truth.non_money_moving_proposed == Decimal("100.00")
     assert truth.unresolved_external_effect is False
 
 
-def test_partial_multivenue_execution_counts_only_confirmed_accepted_stake() -> None:
+def test_partial_multivenue_acceptance_is_not_generic_exact_capital_at_risk() -> None:
     accepted_venue = _venue("book-a", "acct-a", "20.00")
     remaining_venue = _venue("book-b", "acct-b", "30.00")
     accepted = _observation(
@@ -98,13 +99,13 @@ def test_partial_multivenue_execution_counts_only_confirmed_accepted_stake() -> 
     )
 
     assert truth.routing_state is RoutingState.PARTIAL
-    assert truth.confirmed_at_risk == Decimal("20.00")
-    assert truth.exact_capital_at_risk == Decimal("20.00")
+    assert truth.confirmed_routing_notional == Decimal("20.00")
+    assert truth.exact_capital_at_risk is None
     assert truth.non_money_moving_proposed == Decimal("30.00")
     assert truth.unresolved_external_effect is False
 
 
-def test_unknown_external_effect_with_known_acceptance_has_no_exact_exposure_amount() -> None:
+def test_unknown_external_effect_preserves_notional_but_no_exact_exposure() -> None:
     accepted_venue = _venue("book-a", "acct-a", "20.00")
     uncertain_venue = _venue("book-b", "acct-b", "80.00")
     observations = (
@@ -126,13 +127,13 @@ def test_unknown_external_effect_with_known_acceptance_has_no_exact_exposure_amo
     )
 
     assert truth.routing_state is RoutingState.BLOCKED_UNKNOWN
-    assert truth.confirmed_at_risk == Decimal("20.00")
+    assert truth.confirmed_routing_notional == Decimal("20.00")
     assert truth.exact_capital_at_risk is None
     assert truth.non_money_moving_proposed == Decimal("0")
     assert truth.unresolved_external_effect is True
 
 
-def test_sequential_routing_uses_same_capital_at_risk_truth() -> None:
+def test_sequential_routing_uses_same_fail_closed_exposure_truth() -> None:
     venue = _venue("book-a", "acct-a", "40.00")
 
     truth = sequential_routing_capital_at_risk_truth(
@@ -142,9 +143,10 @@ def test_sequential_routing_uses_same_capital_at_risk_truth() -> None:
     )
 
     assert truth.routing_state is RoutingState.ROUTE
-    assert truth.confirmed_at_risk == Decimal("0")
-    assert truth.exact_capital_at_risk == Decimal("0")
+    assert truth.confirmed_routing_notional == Decimal("0")
+    assert truth.exact_capital_at_risk is None
     assert truth.non_money_moving_proposed == Decimal("40.00")
+    assert truth.unresolved_external_effect is False
 
 
 def test_truth_wrapper_preserves_canonical_fail_closed_validation() -> None:
@@ -158,4 +160,98 @@ def test_truth_wrapper_preserves_canonical_fail_closed_validation() -> None:
             (selected,),
             (invalid_observation,),
             routing_request_id=_REQUEST_ID,
+        )
+
+
+@pytest.mark.parametrize("value", [Decimal("-1"), Decimal("NaN"), Decimal("Infinity")])
+def test_direct_truth_rejects_invalid_confirmed_routing_notional(value: Decimal) -> None:
+    with pytest.raises(RoutingContractError, match="confirmed_routing_notional"):
+        RoutingCapitalAtRiskTruth(
+            routing_state=RoutingState.COMPLETE,
+            confirmed_routing_notional=value,
+            exact_capital_at_risk=None,
+            non_money_moving_proposed=Decimal("0"),
+            unresolved_external_effect=False,
+        )
+
+
+def test_direct_truth_rejects_caller_minted_exact_capital_at_risk() -> None:
+    with pytest.raises(
+        RoutingContractError,
+        match="generic routing evidence cannot establish exact capital at risk",
+    ):
+        RoutingCapitalAtRiskTruth(
+            routing_state=RoutingState.COMPLETE,
+            confirmed_routing_notional=Decimal("20"),
+            exact_capital_at_risk=Decimal("20"),
+            non_money_moving_proposed=Decimal("0"),
+            unresolved_external_effect=False,
+        )
+
+
+@pytest.mark.parametrize(
+    ("state", "unresolved"),
+    [
+        (RoutingState.BLOCKED_UNKNOWN, False),
+        (RoutingState.ROUTE, True),
+    ],
+)
+def test_direct_truth_rejects_unknown_state_flag_mismatch(
+    state: RoutingState,
+    unresolved: bool,
+) -> None:
+    with pytest.raises(RoutingContractError, match="must match BLOCKED_UNKNOWN"):
+        RoutingCapitalAtRiskTruth(
+            routing_state=state,
+            confirmed_routing_notional=Decimal("0"),
+            exact_capital_at_risk=None,
+            non_money_moving_proposed=(
+                Decimal("0") if state is RoutingState.BLOCKED_UNKNOWN else Decimal("1")
+            ),
+            unresolved_external_effect=unresolved,
+        )
+
+
+@pytest.mark.parametrize(
+    ("state", "proposed"),
+    [
+        (RoutingState.BLOCKED_UNKNOWN, Decimal("1")),
+        (RoutingState.COMPLETE, Decimal("1")),
+        (RoutingState.UNEXECUTABLE, Decimal("1")),
+        (RoutingState.ROUTE, Decimal("0")),
+    ],
+)
+def test_direct_truth_rejects_state_proposal_inconsistency(
+    state: RoutingState,
+    proposed: Decimal,
+) -> None:
+    with pytest.raises(RoutingContractError):
+        RoutingCapitalAtRiskTruth(
+            routing_state=state,
+            confirmed_routing_notional=Decimal("1"),
+            exact_capital_at_risk=None,
+            non_money_moving_proposed=proposed,
+            unresolved_external_effect=state is RoutingState.BLOCKED_UNKNOWN,
+        )
+
+
+def test_direct_truth_rejects_partial_without_notional_or_proposal() -> None:
+    with pytest.raises(RoutingContractError, match="PARTIAL"):
+        RoutingCapitalAtRiskTruth(
+            routing_state=RoutingState.PARTIAL,
+            confirmed_routing_notional=Decimal("0"),
+            exact_capital_at_risk=None,
+            non_money_moving_proposed=Decimal("0"),
+            unresolved_external_effect=False,
+        )
+
+
+def test_direct_truth_rejects_non_boolean_unknown_flag() -> None:
+    with pytest.raises(RoutingContractError, match="exact boolean"):
+        RoutingCapitalAtRiskTruth(
+            routing_state=RoutingState.COMPLETE,
+            confirmed_routing_notional=Decimal("20"),
+            exact_capital_at_risk=None,
+            non_money_moving_proposed=Decimal("0"),
+            unresolved_external_effect=1,  # type: ignore[arg-type]
         )

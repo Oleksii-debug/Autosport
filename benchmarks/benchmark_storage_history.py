@@ -160,6 +160,11 @@ def run_benchmark(
                     f"requested={count} persisted={persisted_events}"
                 )
 
+            # The write workload is deliberately outside every read timing.
+            # Release its Python objects so full-history measurement is not
+            # distorted by retaining a second complete in-memory event graph.
+            del events
+
             full_history, full_elapsed = _measure(
                 "full_history_read",
                 store.events,

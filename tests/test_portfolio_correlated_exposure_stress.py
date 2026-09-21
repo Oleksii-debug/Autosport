@@ -213,17 +213,11 @@ def test_direct_constructor_rejects_stake_above_stressed_base_limit() -> None:
 
 def test_serialized_stake_above_stressed_base_limit_fails_closed() -> None:
     proposal = RobustPortfolioProposal.derive(
-        (Decimal("10"),),
-        _evidence(
-            dependency=Decimal("0.5"),
-            pairs=((_A, _B, Decimal("0.5")),),
-        ),
+        (Decimal("10"), Decimal("20")),
+        _evidence(dependency=Decimal("0.5")),
     )
     payload = proposal.to_dict()
-    payload["base_stakes"] = ["10"]
-    payload["proposed_stakes"] = ["9"]
-    payload["dependency_haircut_fraction"] = "0.5"
-    payload["robust_scale"] = "0.5"
+    payload["proposed_stakes"] = ["9", "10"]
 
     with pytest.raises(ValueError, match="cannot exceed its conservative stressed base"):
         RobustPortfolioProposal.from_dict(payload)

@@ -732,7 +732,6 @@ def test_crash_after_local_publish_before_commit_recovers_exact_prepare(
     assert restarted.append_snapshot(first) is False
 
 
-
 def test_reader_cannot_abort_writer_pending_monotonic_transition(
     tmp_path,
     monkeypatch,

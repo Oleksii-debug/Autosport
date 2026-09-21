@@ -40,7 +40,7 @@ def _comparison() -> ProviderQuoteComparison:
         quotes=(
             _quote(
                 "provider-a",
-                "1.00000000000000000000000000000000000",
+                "1.00000000000000000000000000000000001",
                 _HASH_A,
             ),
             _quote(
@@ -54,7 +54,7 @@ def _comparison() -> ProviderQuoteComparison:
 
 def test_displayed_spread_and_hash_ignore_ambient_decimal_precision() -> None:
     comparison = _comparison()
-    expected = Decimal("1.12345678901234567890123456789012345")
+    expected = Decimal("1.12345678901234567890123456789012344")
 
     with localcontext() as context:
         context.prec = 6

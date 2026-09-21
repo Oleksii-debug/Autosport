@@ -35,7 +35,9 @@ def checklist(
     day_evidence: tuple[CampaignDayEvidence, ...],
     campaign_evidence: tuple[CampaignEvidenceRecord, ...],
     human_tested: bool = False,
+    human_test_evidence_ref: str | None = None,
     nvda_verified: bool = False,
+    nvda_evidence_ref: str | None = None,
 ) -> CampaignEvidenceChecklist:
     return CampaignEvidenceChecklist(
         campaign_id="paper-campaign-001",
@@ -46,7 +48,9 @@ def checklist(
         day_evidence=day_evidence,
         campaign_evidence=campaign_evidence,
         human_tested=human_tested,
+        human_test_evidence_ref=human_test_evidence_ref,
         nvda_verified=nvda_verified,
+        nvda_evidence_ref=nvda_evidence_ref,
     )
 
 
@@ -77,7 +81,7 @@ def test_machine_complete_does_not_infer_human_or_nvda_truth() -> None:
     assert assessment.proves_whole_product_complete is False
 
 
-def test_pre_handoff_requires_explicit_human_and_nvda_truth() -> None:
+def test_positive_physical_truth_without_evidence_refs_is_not_handoff_ready() -> None:
     assessment = assess_campaign_evidence(
         checklist(
             day_evidence=complete_days(),
@@ -88,6 +92,29 @@ def test_pre_handoff_requires_explicit_human_and_nvda_truth() -> None:
     )
 
     assert assessment.machine_evidence_complete
+    assert assessment.human_tested
+    assert assessment.nvda_verified
+    assert assessment.human_evidence_complete is False
+    assert assessment.nvda_evidence_complete is False
+    assert assessment.physical_accessibility_evidence_complete is False
+    assert assessment.pre_handoff_ready is False
+
+
+def test_pre_handoff_requires_explicit_human_and_nvda_evidence_refs() -> None:
+    assessment = assess_campaign_evidence(
+        checklist(
+            day_evidence=complete_days(),
+            campaign_evidence=complete_campaign(),
+            human_tested=True,
+            human_test_evidence_ref="artifact://human-windows-walkthrough",
+            nvda_verified=True,
+            nvda_evidence_ref="artifact://nvda-session",
+        )
+    )
+
+    assert assessment.machine_evidence_complete
+    assert assessment.human_evidence_complete
+    assert assessment.nvda_evidence_complete
     assert assessment.physical_accessibility_evidence_complete
     assert assessment.pre_handoff_ready
     assert assessment.proves_real_money_execution is False
@@ -103,7 +130,9 @@ def test_missing_day_is_explicit_and_cannot_disappear_from_completeness() -> Non
             ),
             campaign_evidence=complete_campaign(),
             human_tested=True,
+            human_test_evidence_ref="artifact://human",
             nvda_verified=True,
+            nvda_evidence_ref="artifact://nvda",
         )
     )
 
@@ -220,6 +249,10 @@ def test_checklist_rejects_ambiguous_or_non_multi_day_contracts() -> None:
         )
     with pytest.raises(ValueError, match="bool"):
         CampaignEvidenceChecklist(**{**base, "human_tested": 1})
+    with pytest.raises(ValueError, match="human_test_evidence_ref"):
+        CampaignEvidenceChecklist(
+            **{**base, "human_test_evidence_ref": " human-artifact "}
+        )
 
 
 def test_day_evidence_rejects_duplicates_and_out_of_window_days() -> None:

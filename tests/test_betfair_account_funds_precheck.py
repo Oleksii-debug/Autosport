@@ -21,6 +21,24 @@ DETAILS_SHA = "1" * 64
 FUNDS_SHA = "2" * 64
 
 
+
+class _AdversarialDecimal(Decimal):
+    def __new__(cls, value: str) -> "_AdversarialDecimal":
+        return super().__new__(cls, value)
+
+    def is_finite(self) -> bool:
+        return True
+
+    def __lt__(self, other: object) -> bool:
+        return False
+
+    def __le__(self, other: object) -> bool:
+        return True
+
+    def __ge__(self, other: object) -> bool:
+        return True
+
+
 def evidence(at: datetime, digest: str) -> BetfairEvidence:
     return BetfairEvidence(at.isoformat().replace("+00:00", "Z"), digest)
 
@@ -299,3 +317,36 @@ def test_currency_is_bound_into_precheck_identity(monkeypatch):
 
     assert result.precheck_id != original_id
     assert subject.is_authoritative_funds_precheck(result) is False
+
+def test_decimal_subclass_required_liability_rejected_before_provider_read(monkeypatch):
+    class ForbiddenClient:
+        def __init__(self, *args, **kwargs):
+            raise AssertionError("provider must not be read")
+
+    monkeypatch.setattr(subject, "BetfairReadOnlyClient", ForbiddenClient)
+    required = _AdversarialDecimal("1000000")
+
+    with pytest.raises(
+        subject.BetfairAccountFundsPrecheckError,
+        match="finite non-negative Decimal",
+    ):
+        subject.evaluate_betfair_account_funds(
+            BetfairSessionCredentials("app", "token"),
+            required,
+            required_currency_code="EUR",
+        )
+
+
+def test_decimal_subclass_provider_balance_cannot_mint_sufficiency(monkeypatch):
+    install_client(monkeypatch, balance=_AdversarialDecimal("0"))
+
+    with pytest.raises(
+        subject.BetfairAccountFundsPrecheckError,
+        match="finite non-negative Decimal",
+    ):
+        subject.evaluate_betfair_account_funds(
+            BetfairSessionCredentials("app", "token"),
+            Decimal("1000000"),
+            required_currency_code="EUR",
+        )
+

@@ -80,7 +80,19 @@ class ProductOperatorController:
             status, state = self._canonical_status()
             if state == self._RUNNING:
                 return status
-            status = self._runtime.start()
+            try:
+                status = self._runtime.start()
+            except Exception:
+                # Runtime start spans multiple durable authorities: collector resume
+                # can commit before session resume fails. Canonical STOP compensation
+                # prevents a reported start failure from leaving a half-started graph.
+                # Preserve the original start exception; callers keep the workspace
+                # quarantined if the best-effort compensation itself also fails.
+                try:
+                    self._runtime.stop("operator_start_failed")
+                except Exception:
+                    pass
+                raise
             self._state_value(status)
             return status
 

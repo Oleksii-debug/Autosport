@@ -58,6 +58,14 @@ def _entry_command(*args: str) -> list[str]:
     return [sys.executable, "-m", "autosport.windows_entry", *args]
 
 
+def _independent_child_kwargs() -> dict[str, Any]:
+    if not getattr(sys, "frozen", False):
+        return {}
+    environment = os.environ.copy()
+    environment["PYINSTALLER_RESET_ENVIRONMENT"] = "1"
+    return {"env": environment}
+
+
 def run_process_kill_stage_child(workspace_path: str | Path, ready_path: str | Path) -> int:
     workspace = Path(workspace_path)
     ready = Path(ready_path)
@@ -281,6 +289,7 @@ def audit_process_kill_relaunch(root: Path) -> dict[str, Any]:
         ),
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
+        **_independent_child_kwargs(),
     )
     try:
         deadline = time.monotonic() + _CHILD_START_TIMEOUT_SECONDS
@@ -342,6 +351,7 @@ def audit_process_kill_relaunch(root: Path) -> dict[str, Any]:
         stderr=subprocess.DEVNULL,
         timeout=_CHILD_RECOVERY_TIMEOUT_SECONDS,
         check=False,
+        **_independent_child_kwargs(),
     )
     if recovery.returncode != 0:
         detail = ""

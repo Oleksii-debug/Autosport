@@ -15,6 +15,7 @@ from .gui_evidence_export import (
 )
 from .live_observation import OneShotObservationWorker, observe_workspace_once
 from .localization import text
+from .secret_redaction import redact_operator_text, safe_exception_detail
 from .parlayapi_provider import ParlayApiTableTennisProvider
 from .paths import default_workspace
 from .recovery import reconcile_late_crashes
@@ -88,17 +89,19 @@ def strategy_id_from_display(display: str) -> str:
 
 
 def _safe_exception_text(exc: BaseException) -> str:
-    """Describe a caught failure without allowing hostile metadata/stringification to escape."""
+    """Render localized, secret-safe exception text for operator-facing GUI sinks."""
 
     try:
         name = type.__getattribute__(type(exc), "__name__")
     except BaseException:
         name = "BaseException"
-    try:
-        detail = str(exc)
-    except BaseException:
-        return text("ui.error.exception.message_unavailable", exception_type=name)
-    return f"{name}: {detail}" if detail else name
+
+    detail = safe_exception_detail(exc, unavailable_detail="")
+    if not detail:
+        return redact_operator_text(
+            text("ui.error.exception.message_unavailable", exception_type=name)
+        )
+    return redact_operator_text(f"{name}: {detail}")
 
 
 class AutosportApp(tk.Tk):

@@ -106,6 +106,32 @@ def test_corrupt_registry_fails_closed_on_reopen(tmp_path) -> None:
         )
 
 
+@pytest.mark.parametrize("schema_version", [True, 1.0])
+def test_registry_rejects_non_integer_schema_version_aliases(
+    tmp_path,
+    schema_version,
+) -> None:
+    path = tmp_path / "registry.json"
+    path.write_text(
+        json.dumps(
+            {
+                "schema_version": schema_version,
+                "profiles": [],
+                "governance": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(
+        BookmakerCapabilityRegistryError,
+        match="unsupported capability registry schema_version",
+    ):
+        BookmakerCapabilityRegistry(path).profile_history(
+            "book-a", "acct-a", "adapter-a"
+        )
+
+
 def test_tampered_profile_identity_fails_closed(tmp_path) -> None:
     path = tmp_path / "registry.json"
     registry = BookmakerCapabilityRegistry(path)

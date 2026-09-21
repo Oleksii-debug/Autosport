@@ -33,31 +33,43 @@ def _is_poll_interval_sleep(node: ast.AST) -> bool:
     )
 
 
-def _statement_contains_call(statement: ast.stmt, predicate) -> bool:
-    return any(
-        isinstance(node, ast.Call) and predicate(node)
-        for node in ast.walk(statement)
-    )
+class _LoopCallOrder(ast.NodeVisitor):
+    """Collect relevant calls in one loop without borrowing nested-loop calls."""
+
+    def __init__(self, root: ast.stmt) -> None:
+        self._root = root
+        self.cycle_positions: list[tuple[int, int]] = []
+        self.sleep_positions: list[tuple[int, int]] = []
+
+    def _visit_loop(self, node: ast.stmt) -> None:
+        if node is self._root:
+            self.generic_visit(node)
+
+    def visit_For(self, node: ast.For) -> None:
+        self._visit_loop(node)
+
+    def visit_AsyncFor(self, node: ast.AsyncFor) -> None:
+        self._visit_loop(node)
+
+    def visit_While(self, node: ast.While) -> None:
+        self._visit_loop(node)
+
+    def visit_Call(self, node: ast.Call) -> None:
+        position = (node.lineno, node.col_offset)
+        if _is_self_call(node, "run_cycle"):
+            self.cycle_positions.append(position)
+        if _is_poll_interval_sleep(node):
+            self.sleep_positions.append(position)
+        self.generic_visit(node)
 
 
 def _loop_has_completion_relative_poll_delay(loop: ast.stmt) -> bool:
-    body = getattr(loop, "body", ())
-    cycle_positions = [
-        index
-        for index, statement in enumerate(body)
-        if _statement_contains_call(
-            statement, lambda call: _is_self_call(call, "run_cycle")
-        )
-    ]
-    sleep_positions = [
-        index
-        for index, statement in enumerate(body)
-        if _statement_contains_call(statement, _is_poll_interval_sleep)
-    ]
+    calls = _LoopCallOrder(loop)
+    calls.visit(loop)
     return any(
-        cycle_index < sleep_index
-        for cycle_index in cycle_positions
-        for sleep_index in sleep_positions
+        cycle_position < sleep_position
+        for cycle_position in calls.cycle_positions
+        for sleep_position in calls.sleep_positions
     )
 
 

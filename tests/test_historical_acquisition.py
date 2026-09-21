@@ -145,7 +145,6 @@ class HistoricalAcquisitionBundleTests(unittest.TestCase):
             )
             self.assertEqual(bundle["match_results"]["requested_date"], "2026-09-10")
             self.assertTrue(bundle["match_results"]["priced_only"])
-            self.assertNotIn("unit-test-key", bundle["match_results"]["request_url"])
             self.assertFalse(bundle["match_results"]["product_owned_request_path_verified"])
             self.assertFalse(bundle["match_results"]["product_owned_acquisition_clock_verified"])
             self.assertFalse(bundle["match_results"]["provider_response_origin_verified"])

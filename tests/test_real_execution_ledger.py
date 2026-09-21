@@ -194,7 +194,7 @@ class RealExecutionLedgerTests(unittest.TestCase):
                         status=AcknowledgementStatus.ACCEPTED,
                         acknowledged_at=RECONCILED_AT,
                         accepted_odds="2.5",
-                        accepted_stake="5",
+                        accepted_stake="10",
                     )
                 )
             self.assertEqual(
@@ -219,7 +219,7 @@ class RealExecutionLedgerTests(unittest.TestCase):
                 status=AcknowledgementStatus.ACCEPTED,
                 acknowledged_at=RECONCILED_AT,
                 accepted_odds="2.5",
-                accepted_stake="5",
+                accepted_stake="10",
             )
 
             with self.assertRaisesRegex(
@@ -261,7 +261,7 @@ class RealExecutionLedgerTests(unittest.TestCase):
                 status=AcknowledgementStatus.ACCEPTED,
                 acknowledged_at=RECONCILED_AT,
                 accepted_odds="2.5",
-                accepted_stake="5",
+                accepted_stake="10",
             )
             _bind_submitted_provider_evidence(ledger, bound)
             forged = ExternalAcknowledgement(
@@ -320,6 +320,52 @@ class RealExecutionLedgerTests(unittest.TestCase):
             )
             self.assertEqual(restarted.verify_integrity(), 4)
 
+    def test_pre_hardening_generic_provider_ack_history_reopens(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "real.jsonl"
+            ledger = RealExecutionLedger(path)
+            ledger.reserve_plan(plan(action()))
+            ledger.begin_attempt(
+                plan_id="p1",
+                action_id="a1",
+                attempt_id="try-1",
+                reserved_at=RESERVED_AT,
+            )
+            ledger.mark_submitted("try-1", submitted_at=SUBMITTED_AT)
+            ledger.bind_provider_evidence(
+                attempt_id="try-1",
+                evidence_id="3" * 64,
+                observed_at=RECONCILED_AT,
+                source="pre-hardening-provider-evidence",
+            )
+            acknowledgement = ExternalAcknowledgement(
+                attempt_id="try-1",
+                external_receipt_id="legacy-r1",
+                status=AcknowledgementStatus.ACCEPTED,
+                acknowledged_at=RECONCILED_AT,
+                accepted_odds="2.5",
+                accepted_stake="10",
+            )
+
+            # Reproduce bytes that the pre-hardening writer could durably append:
+            # generic provider evidence followed by a terminal acknowledgement,
+            # without the successor acknowledgement_sha256 field.
+            ledger._append(
+                EventType.EXTERNAL_ACKNOWLEDGEMENT,
+                "p1",
+                "a1",
+                "try-1",
+                acknowledgement.to_dict(),
+            )
+
+            restarted = RealExecutionLedger(path)
+            self.assertEqual(restarted.verify_integrity(), 5)
+            self.assertEqual(
+                restarted.attempt_state("try-1"),
+                AttemptState.ACCEPTED,
+            )
+
+
     def test_restart_rejects_hash_valid_reserved_to_ack_history(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "real.jsonl"
@@ -340,7 +386,7 @@ class RealExecutionLedgerTests(unittest.TestCase):
                     status=AcknowledgementStatus.ACCEPTED,
                     acknowledged_at=RECONCILED_AT,
                     accepted_odds="2.5",
-                    accepted_stake="5",
+                    accepted_stake="10",
                 )
             )
 
@@ -1003,6 +1049,68 @@ class RealExecutionLedgerTests(unittest.TestCase):
             ):
                 restarted.verify_integrity()
 
+    def test_accepted_ack_requires_exact_requested_stake(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            ledger = RealExecutionLedger(Path(tmp) / "real.jsonl")
+            ledger.reserve_plan(plan(action()))
+            ledger.begin_attempt(
+                plan_id="p1",
+                action_id="a1",
+                attempt_id="try-1",
+                reserved_at=RESERVED_AT,
+            )
+            ledger.mark_submitted("try-1", submitted_at=SUBMITTED_AT)
+            acknowledgement = ExternalAcknowledgement(
+                attempt_id="try-1",
+                external_receipt_id="underfilled-accepted",
+                status=AcknowledgementStatus.ACCEPTED,
+                acknowledged_at=RECONCILED_AT,
+                accepted_odds="2.5",
+                accepted_stake="5",
+            )
+            _bind_submitted_provider_evidence(ledger, acknowledgement)
+
+            with self.assertRaisesRegex(
+                ExecutionStateError,
+                "ACCEPTED acknowledgement stake must equal requested",
+            ):
+                ledger.acknowledge(acknowledgement)
+            self.assertEqual(
+                ledger.attempt_state("try-1"),
+                AttemptState.SUBMITTED,
+            )
+
+    def test_partial_ack_requires_strict_underfill(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            ledger = RealExecutionLedger(Path(tmp) / "real.jsonl")
+            ledger.reserve_plan(plan(action()))
+            ledger.begin_attempt(
+                plan_id="p1",
+                action_id="a1",
+                attempt_id="try-1",
+                reserved_at=RESERVED_AT,
+            )
+            ledger.mark_submitted("try-1", submitted_at=SUBMITTED_AT)
+            acknowledgement = ExternalAcknowledgement(
+                attempt_id="try-1",
+                external_receipt_id="full-sized-partial",
+                status=AcknowledgementStatus.PARTIAL,
+                acknowledged_at=RECONCILED_AT,
+                accepted_odds="2.5",
+                accepted_stake="10",
+            )
+            _bind_submitted_provider_evidence(ledger, acknowledgement)
+
+            with self.assertRaisesRegex(
+                ExecutionStateError,
+                "PARTIAL acknowledgement stake must be positive and below",
+            ):
+                ledger.acknowledge(acknowledgement)
+            self.assertEqual(
+                ledger.attempt_state("try-1"),
+                AttemptState.SUBMITTED,
+            )
+
     def test_acknowledgement_cannot_exceed_requested_stake(self):
         with tempfile.TemporaryDirectory() as tmp:
             ledger = RealExecutionLedger(Path(tmp) / "real.jsonl")
@@ -1062,7 +1170,7 @@ class RealExecutionLedgerTests(unittest.TestCase):
                     status=AcknowledgementStatus.ACCEPTED,
                     acknowledged_at=RECONCILED_AT,
                     accepted_odds="2.5",
-                    accepted_stake="5",
+                    accepted_stake="10",
                     reconciliation_evidence_id="readback-1",
                 )
             )
@@ -1134,7 +1242,7 @@ class RealExecutionLedgerTests(unittest.TestCase):
                     status=AcknowledgementStatus.ACCEPTED,
                     acknowledged_at=RECONCILED_AT,
                     accepted_odds="2.5",
-                    accepted_stake="5",
+                    accepted_stake="10",
                 )
             )
 
@@ -1149,19 +1257,34 @@ class RealExecutionLedgerTests(unittest.TestCase):
                 == EventType.EXTERNAL_ACKNOWLEDGEMENT.value
             )
             acknowledgement["event"]["payload"]["accepted_stake"] = "10.01"
-
-            import hashlib
-
-            body = json.dumps(
-                acknowledgement["event"],
-                ensure_ascii=False,
-                sort_keys=True,
-                separators=(",", ":"),
-                allow_nan=False,
-            )
-            acknowledgement["sha256"] = hashlib.sha256(
-                body.encode()
+            acknowledgement_payload = acknowledgement["event"]["payload"]
+            acknowledgement_digest = hashlib.sha256(
+                json.dumps(
+                    acknowledgement_payload,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                    allow_nan=False,
+                ).encode()
             ).hexdigest()
+            provider_evidence = next(
+                envelope
+                for envelope in lines
+                if envelope["event"]["event_type"]
+                == EventType.PROVIDER_EVIDENCE_BOUND.value
+            )
+            provider_evidence["event"]["payload"][
+                "acknowledgement_sha256"
+            ] = acknowledgement_digest
+            for envelope in (provider_evidence, acknowledgement):
+                body = json.dumps(
+                    envelope["event"],
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                    allow_nan=False,
+                )
+                envelope["sha256"] = hashlib.sha256(body.encode()).hexdigest()
             path.write_text(
                 "\n".join(
                     json.dumps(
@@ -1179,7 +1302,7 @@ class RealExecutionLedgerTests(unittest.TestCase):
             restarted = RealExecutionLedger(path)
             with self.assertRaisesRegex(
                 ExecutionLedgerIntegrityError,
-                "provider-bound acknowledgement evidence",
+                "stake exceeds requested action stake",
             ):
                 restarted.verify_integrity()
 
@@ -1203,7 +1326,7 @@ class RealExecutionLedgerTests(unittest.TestCase):
                     status=AcknowledgementStatus.ACCEPTED,
                     acknowledged_at=RECONCILED_AT,
                     accepted_odds="2.5",
-                    accepted_stake="5",
+                    accepted_stake="10",
                 )
             )
 

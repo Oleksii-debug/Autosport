@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
-from decimal import Decimal
+from decimal import Decimal, localcontext
 from hashlib import sha256
 import json
 
@@ -255,6 +255,40 @@ def test_same_ref_and_item_date_siblings_keep_distinct_semantic_identity() -> No
     assert first.ref_id == second.ref_id
     assert first.item_date == second.item_date
     assert first_evidence.evidence_sha256 != second_evidence.evidence_sha256
+
+
+
+
+def test_semantic_identity_is_decimal_context_independent() -> None:
+    raw = _raw("ACCOUNT_CREDIT", "RESULT_WON")
+    captured = _row(
+        raw,
+        amount=Decimal("123456789.12345678901234567890"),
+        balance=Decimal("999999999.999999999999"),
+    )
+
+    with localcontext() as context:
+        context.prec = 2
+        low_precision = classify_betfair_statement_item(captured, raw)
+    with localcontext() as context:
+        context.prec = 50
+        high_precision = classify_betfair_statement_item(captured, raw)
+
+    assert low_precision.evidence_sha256 == high_precision.evidence_sha256
+
+
+def test_caller_mutation_after_classification_cannot_relabel_evidence() -> None:
+    raw = _raw("ACCOUNT_CREDIT", "RESULT_ERR")
+    captured = _row(raw)
+
+    evidence = classify_betfair_statement_item(captured, raw)
+    raw["unknownStatementItem"] = _raw(
+        "ACCOUNT_CREDIT", "RESULT_WON"
+    )["unknownStatementItem"]
+
+    assert evidence.classification_state == "RESTATED_ERROR_LABEL"
+    assert evidence.economic_effect == "NO_NEW_BALANCE_EFFECT"
+    assert evidence.row_item_class_data_sha256 == captured.item_class_data_sha256
 
 
 def test_semantic_evidence_cannot_be_relabelled_without_digest_change() -> None:

@@ -1855,7 +1855,19 @@ class RealExecutionLedger:
                 if event["event_type"] == EventType.PROVIDER_EVIDENCE_BOUND.value
             ]
             if existing:
-                if len(existing) == 1 and existing[0]["payload"] == payload:
+                existing_payload = existing[0]["payload"]
+                legacy_payload = {
+                    "evidence_id": evidence_id,
+                    "observed_at": observed_at,
+                    "source": source,
+                }
+                if len(existing) == 1 and (
+                    existing_payload == payload
+                    or (
+                        acknowledgement_sha256 is None
+                        and existing_payload == legacy_payload
+                    )
+                ):
                     return
                 raise ExecutionIdentityConflict(
                     "attempt already has different provider evidence"

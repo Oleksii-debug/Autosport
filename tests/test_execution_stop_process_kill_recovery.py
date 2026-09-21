@@ -49,6 +49,17 @@ def _initialize_stopped(authority_path: Path) -> None:
     )
 
 
+def _initialize_armed(authority_path: Path) -> None:
+    _initialize_stopped(authority_path)
+    ExecutionStopAuthority(authority_path).arm(
+        operator_id="owner",
+        reason="approved",
+        confirmation_id="initial-arm-confirmation",
+        expected_revision=1,
+        command_id="initial-arm",
+    )
+
+
 def test_process_kill_before_arm_anchor_commit_fails_closed(
     tmp_path: Path,
 ) -> None:
@@ -100,6 +111,53 @@ def test_process_kill_before_arm_anchor_commit_fails_closed(
             reason="must not overwrite torn authority",
             command_id="reinitialize-after-crash",
         )
+
+
+def test_process_kill_before_stop_anchor_commit_cannot_restore_old_armed_state(
+    tmp_path: Path,
+) -> None:
+    authority_path = tmp_path / "execution-stop.jsonl"
+    _initialize_armed(authority_path)
+
+    child = _run_child(
+        authority_path,
+        """
+        import os
+        from pathlib import Path
+
+        from autosport.execution_stop_authority import ExecutionStopAuthority
+
+        path = Path(os.environ["AUTOSPORT_STOP_AUTHORITY_PATH"])
+        authority = ExecutionStopAuthority(path)
+
+        def crash_before_anchor(*, revision: int, record_sha256: str) -> None:
+            assert revision == 3
+            assert len(record_sha256) == 64
+            os._exit(75)
+
+        authority._write_anchor_unlocked = crash_before_anchor
+        authority.stop(
+            operator_id="owner",
+            reason="emergency stop",
+            expected_revision=2,
+            command_id="stop-before-anchor",
+        )
+        raise SystemExit(99)
+        """,
+    )
+
+    assert child.returncode == 75, child.stderr
+
+    restarted = ExecutionStopAuthority(authority_path)
+    decision = restarted.decision()
+    assert decision.allowed is False
+    assert decision.mode is ExecutionAuthorityMode.STOPPED
+    assert decision.revision is None
+
+    with pytest.raises(ExecutionStopIntegrityError, match="older or newer"):
+        restarted.current()
+    with pytest.raises(ExecutionStopIntegrityError, match="older or newer"):
+        restarted.assert_execution_allowed()
 
 
 def test_process_kill_after_arm_anchor_commit_recovers_exact_durable_arm(

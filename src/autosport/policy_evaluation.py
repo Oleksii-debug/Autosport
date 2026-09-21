@@ -508,6 +508,17 @@ def _ordered_cases(cases: Sequence[PolicyEvaluationCase]) -> tuple[PolicyEvaluat
     identities = tuple(case.sample_id for case in ordered)
     if len(identities) != len(set(identities)):
         raise ValueError("policy evaluation sample_id values must be unique")
+
+    semantic_identities: list[str] = []
+    for case in ordered:
+        payload = case.canonical_payload()
+        payload.pop("sample_id")
+        semantic_identities.append(_digest(payload))
+    if len(semantic_identities) != len(set(semantic_identities)):
+        raise ValueError(
+            "policy evaluation cases must not duplicate causal evidence "
+            "under sample_id aliases"
+        )
     return ordered
 
 

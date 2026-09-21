@@ -147,6 +147,12 @@ class ProviderOutputGrant:
                 raise ValueError(
                     "BOUNDED retention requires positive max_retention_seconds"
                 )
+            try:
+                timedelta(seconds=self.max_retention_seconds)
+            except OverflowError as exc:
+                raise ValueError(
+                    "BOUNDED max_retention_seconds exceeds supported datetime range"
+                ) from exc
         elif self.max_retention_seconds is not None:
             raise ValueError(
                 "max_retention_seconds is allowed only for BOUNDED retention"
@@ -348,7 +354,7 @@ class ProviderOutputUseRequest:
             )
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True, slots=True, init=False)
 class ProviderOutputUseDecision:
     allowed: bool
     reason: str
@@ -359,6 +365,12 @@ class ProviderOutputUseDecision:
     decided_at: str
     retention_policy: RetentionPolicy | None
     max_retention_seconds: int | None
+
+    def __init__(self, *args: object, **kwargs: object) -> None:
+        raise TypeError(
+            "ProviderOutputUseDecision is product-issued; "
+            "use decide_provider_output_use()"
+        )
 
     def __post_init__(self) -> None:
         if type(self.allowed) is not bool:
@@ -375,6 +387,59 @@ class ProviderOutputUseDecision:
         object.__setattr__(
             self, "decided_at", _canonical_instant(self.decided_at, "decided_at")
         )
+        if self.retention_policy is not None and not isinstance(
+            self.retention_policy, RetentionPolicy
+        ):
+            raise ValueError("retention_policy is unsupported")
+        if self.retention_policy is RetentionPolicy.BOUNDED:
+            if (
+                isinstance(self.max_retention_seconds, bool)
+                or not isinstance(self.max_retention_seconds, int)
+                or self.max_retention_seconds <= 0
+            ):
+                raise ValueError(
+                    "BOUNDED decision requires positive max_retention_seconds"
+                )
+        elif self.max_retention_seconds is not None:
+            raise ValueError(
+                "max_retention_seconds is allowed only for BOUNDED decision"
+            )
+        if self.allowed:
+            if self.reason != "ALLOWED":
+                raise ValueError("allowed decision must use ALLOWED reason")
+            if self.retention_policy is None:
+                raise ValueError("allowed decision requires exact grant evidence")
+        elif self.reason == "ALLOWED":
+            raise ValueError("denied decision cannot use ALLOWED reason")
+
+
+def _issue_provider_output_use_decision(
+    *,
+    allowed: bool,
+    reason: str,
+    authority_id: str,
+    artifact_sha256: str,
+    purpose: str,
+    artifact_class: str,
+    decided_at: str,
+    retention_policy: RetentionPolicy | None,
+    max_retention_seconds: int | None,
+) -> ProviderOutputUseDecision:
+    decision = object.__new__(ProviderOutputUseDecision)
+    for name, value in (
+        ("allowed", allowed),
+        ("reason", reason),
+        ("authority_id", authority_id),
+        ("artifact_sha256", artifact_sha256),
+        ("purpose", purpose),
+        ("artifact_class", artifact_class),
+        ("decided_at", decided_at),
+        ("retention_policy", retention_policy),
+        ("max_retention_seconds", max_retention_seconds),
+    ):
+        object.__setattr__(decision, name, value)
+    decision.__post_init__()
+    return decision
 
 
 def decide_provider_output_use(
@@ -425,7 +490,7 @@ def decide_provider_output_use(
                     reason = "RETENTION_HORIZON_EXCEEDS_GRANT"
 
     allowed = reason == "ALLOWED"
-    return ProviderOutputUseDecision(
+    return _issue_provider_output_use_decision(
         allowed=allowed,
         reason=reason,
         authority_id=authority.authority_id,

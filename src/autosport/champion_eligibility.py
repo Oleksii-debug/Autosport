@@ -465,16 +465,60 @@ class ChampionEligibilityDecision:
         )
 
 
+def _rederive_decision(
+    registry: ScientificRegistry,
+    decision: ChampionEligibilityDecision,
+) -> ChampionEligibilityDecision:
+    """Re-resolve one decision from canonical drift evidence before authority use."""
+
+    try:
+        rederived = ChampionEligibilityDecision.from_findings(
+            registry,
+            canonical_strategy_id=decision.canonical_strategy_id,
+            strategy_version_id=decision.strategy_version_id,
+            model_version_id=decision.model_version_id,
+            environment_sha256=decision.environment_sha256,
+            protocol_id=decision.protocol_id,
+            config_sha256=decision.config_sha256,
+            sport=decision.sport,
+            league=decision.league,
+            regime=decision.regime,
+            finding_ids=decision.finding_ids,
+            window_start=decision.window_start,
+            window_end=decision.window_end,
+            evaluated_at=decision.evaluated_at,
+            valid_until=decision.valid_until,
+            minimum_samples=decision.minimum_samples,
+            minimum_effective_sample_size=decision.minimum_effective_sample_size,
+            degraded_streak=decision.degraded_streak,
+            recovery_streak=decision.recovery_streak,
+            admissible_actions=decision.admissible_actions,
+            research_trigger_id=decision.research_trigger_id,
+            reason=decision.reason,
+        )
+    except (ChampionEligibilityError, TypeError, ValueError) as exc:
+        raise ChampionEligibilityError(
+            "champion eligibility canonical re-derivation failed"
+        ) from exc
+
+    if rederived.to_payload() != decision.to_payload():
+        raise ChampionEligibilityError(
+            "champion eligibility decision does not match canonical derivation"
+        )
+    return rederived
+
+
 def persist_eligibility_decision(
     registry: ScientificRegistry,
     decision: ChampionEligibilityDecision,
 ) -> str:
     if not isinstance(registry, ScientificRegistry):
         raise TypeError("registry must be ScientificRegistry")
-    if not isinstance(decision, ChampionEligibilityDecision):
-        raise TypeError("decision must be ChampionEligibilityDecision")
-    registry.append(decision)
-    return decision.decision_id
+    if type(decision) is not ChampionEligibilityDecision:
+        raise TypeError("decision must be exact ChampionEligibilityDecision")
+    canonical = _rederive_decision(registry, decision)
+    registry.append(canonical)
+    return canonical.decision_id
 
 
 def bind_research_trigger(
@@ -519,8 +563,9 @@ def validate_activation_eligibility(
     """Pure fail-closed gate for champion activation; runtime actions may only narrow."""
     if not isinstance(registry, ScientificRegistry):
         raise TypeError("registry must be ScientificRegistry")
-    if not isinstance(decision, ChampionEligibilityDecision):
-        raise TypeError("decision must be ChampionEligibilityDecision")
+    if type(decision) is not ChampionEligibilityDecision:
+        raise TypeError("decision must be exact ChampionEligibilityDecision")
+    _rederive_decision(registry, decision)
     if decision.status is not ChampionEligibilityStatus.ELIGIBLE:
         raise ChampionEligibilityError(f"champion eligibility is {decision.status.value}")
     cutoff = _instant(as_of, "as_of")

@@ -96,19 +96,25 @@ def evaluate_promotion(
     if not isinstance(policy, PromotionPolicy):
         raise PromotionEvidenceError("policy must be PromotionPolicy")
 
-    rows = tuple(pairs)
+    try:
+        iterator = iter(pairs)
+    except TypeError as exc:
+        raise PromotionEvidenceError("pairs must be iterable") from exc
+
     seen: set[str] = set()
     improvements: list[float] = []
+    pair_count = 0
     challenger_wins = 0
     champion_wins = 0
     ties = 0
 
-    for index, row in enumerate(rows):
+    for index, row in enumerate(iterator):
         if not isinstance(row, PairedLoss):
             raise PromotionEvidenceError(f"pairs[{index}] must be PairedLoss")
         if row.evaluation_id in seen:
             raise PromotionEvidenceError(f"duplicate evaluation_id: {row.evaluation_id}")
         seen.add(row.evaluation_id)
+        pair_count += 1
         improvement = row.champion_loss - row.challenger_loss
         if not math.isfinite(improvement):
             raise PromotionEvidenceError("loss difference overflowed")
@@ -120,7 +126,6 @@ def evaluate_promotion(
         else:
             ties += 1
 
-    pair_count = len(rows)
     effective = challenger_wins + champion_wins
     try:
         improvement_sum = math.fsum(improvements)

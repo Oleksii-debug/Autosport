@@ -22,6 +22,7 @@ from autosport.real_execution_ledger import (
     ExecutionPlan,
     ExternalAcknowledgement,
     RealExecutionLedger,
+    ReconciliationSnapshot,
 )
 
 QUOTE = "2026-09-21T10:00:00+00:00"
@@ -237,8 +238,62 @@ def test_terminal_ack_without_separate_provider_evidence_still_has_attempt_recor
 
     assert evidence.attempt_state == "ACCEPTED"
     assert evidence.provider_evidence_id is None
-    assert evidence.slippage_status == SLIPPAGE_STATUS_KNOWN
-    assert evidence.accepted_odds == Decimal("2.08")
+    assert evidence.slippage_status == SLIPPAGE_STATUS_UNKNOWN
+    assert evidence.accepted_odds is None
+    assert evidence.adverse_odds_delta is None
+
+
+def test_reconciled_not_found_attempt_remains_right_censored(tmp_path):
+    ledger = _ledger(tmp_path)
+    ledger.mark_unknown(
+        "attempt-1",
+        reason="provider timeout after submission",
+        observed_at="2026-09-21T10:00:02+00:00",
+    )
+    ledger.reconcile_not_found(
+        ReconciliationSnapshot(
+            attempt_id="attempt-1",
+            evidence_id="r" * 64,
+            observed_at="2026-09-21T10:00:03+00:00",
+            external_effect_found=False,
+            source="provider-order-readback",
+        )
+    )
+
+    evidence = build_empirical_execution_evidence(
+        ledger,
+        attempt_id="attempt-1",
+    )
+
+    assert evidence.attempt_state == "RECONCILED_NOT_FOUND"
+    assert evidence.right_censored is True
+    assert evidence.censor_reason == "RECONCILED_NOT_FOUND_NO_TERMINAL_ACK"
+    assert evidence.slippage_status == SLIPPAGE_STATUS_UNKNOWN
+
+
+def test_direct_construction_cannot_mint_known_slippage_without_provider_evidence(
+    tmp_path,
+):
+    ledger = _ledger(tmp_path)
+    _ack(ledger)
+    evidence = build_empirical_execution_evidence(
+        ledger,
+        attempt_id="attempt-1",
+    )
+
+    with pytest.raises(
+        EmpiricalExecutionEvidenceError,
+        match="KNOWN slippage requires bound provider evidence",
+    ):
+        replace(
+            evidence,
+            slippage_status=SLIPPAGE_STATUS_KNOWN,
+            accepted_odds=Decimal("2.08"),
+            accepted_stake=Decimal("5.00"),
+            accepted_minus_requested_odds=Decimal("-0.02"),
+            adverse_odds_delta=Decimal("0.02"),
+            unaccepted_stake=Decimal("0.00"),
+        )
 
 
 def test_partial_acceptance_preserves_exact_unaccepted_stake(tmp_path):

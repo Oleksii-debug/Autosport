@@ -110,7 +110,9 @@ from . import _campaign_provider_scope_stable_projection as _campaign_provider_s
 # Collector retention may physically delete historical rows only from durable desktop
 # application acknowledgement. Pin those reads to the exact checkpoint class so a
 # mutable exact instance cannot shadow methods and mint deletion authority.
-from . import _collector_retention_desktop_ack_authority as _collector_retention_desktop_ack_authority  # noqa: F401,E402\n\n# Snapshot the final product-loaded lineage/registry concrete class surfaces. Exact
+from . import _collector_retention_desktop_ack_authority as _collector_retention_desktop_ack_authority  # noqa: F401,E402
+
+# Snapshot the final product-loaded lineage/registry concrete class surfaces. Exact
 # authority instances must not dispatch through caller-replaced class implementations,
 # and explicit runtime-repair reloads must restore this seal before positive use.
 from . import _point_in_time_class_dispatch_seal as _point_in_time_class_dispatch_seal  # noqa: F401,E402

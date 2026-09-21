@@ -374,6 +374,10 @@ class AuthorityRootSelectionBinding:
         """Validate an existing receipt without creating any pristine state."""
 
         if not self.binding_path.exists():
+            if self.binding_path.is_symlink():
+                raise AuthorityRootSelectionIntegrityError(
+                    "authority-root binding cannot be a symbolic link"
+                )
             return False
         raw = _read_strict_object(self.binding_path)
         if (

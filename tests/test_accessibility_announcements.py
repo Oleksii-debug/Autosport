@@ -269,3 +269,55 @@ def test_emitted_decision_cannot_be_silent():
 def test_malformed_decision_runtime_types_fail_closed(kwargs, message):
     with pytest.raises(TypeError, match=message):
         AnnouncementDecision(**kwargs)  # type: ignore[arg-type]
+
+
+def test_cross_kind_assertive_events_share_episode_dedupe_identity():
+    gate = AnnouncementGate()
+
+    first = gate.decide(
+        _event(
+            AnnouncementKind.AUTHORITY_BLOCKED,
+            token="authority-projection",
+            episode="critical-episode-1",
+            text="Дію заблоковано",
+        )
+    )
+    same_episode_different_kind = gate.decide(
+        _event(
+            AnnouncementKind.CRITICAL_ERROR,
+            token="error-projection",
+            episode="critical-episode-1",
+            text="Критична помилка",
+        )
+    )
+
+    assert first.emit is True
+    assert first.priority is AnnouncementPriority.ASSERTIVE
+    assert same_episode_different_kind.emit is False
+    assert same_episode_different_kind.priority is AnnouncementPriority.SILENT
+    assert same_episode_different_kind.reason == "DUPLICATE_CRITICAL_EPISODE"
+
+
+def test_cross_kind_polite_events_share_state_transition_dedupe_identity():
+    gate = AnnouncementGate()
+
+    first = gate.decide(
+        _event(
+            AnnouncementKind.OPERATION_STARTED,
+            token="operation-transition-1",
+            text="Операцію розпочато",
+        )
+    )
+    same_transition_different_kind = gate.decide(
+        _event(
+            AnnouncementKind.STOP_REQUESTED,
+            token="operation-transition-1",
+            text="Запитано зупинку",
+        )
+    )
+
+    assert first.emit is True
+    assert first.priority is AnnouncementPriority.POLITE
+    assert same_transition_different_kind.emit is False
+    assert same_transition_different_kind.priority is AnnouncementPriority.SILENT
+    assert same_transition_different_kind.reason == "DUPLICATE_STATE_TRANSITION"

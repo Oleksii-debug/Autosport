@@ -1,3 +1,4 @@
+import hashlib
 import json
 import os
 import tempfile
@@ -62,6 +63,31 @@ def plan(*actions: ExecutionAction, plan_id: str = "p1") -> ExecutionPlan:
         created_at=TS,
         actions=tuple(actions or (action(),)),
     )
+
+
+def _bind_submitted_provider_evidence(
+    ledger: RealExecutionLedger,
+    acknowledgement: ExternalAcknowledgement,
+) -> str:
+    evidence_id = hashlib.sha256(
+        f"test-provider-evidence:{acknowledgement.attempt_id}".encode("utf-8")
+    ).hexdigest()
+    ledger._bind_provider_acknowledgement_evidence(
+        attempt_id=acknowledgement.attempt_id,
+        evidence_id=evidence_id,
+        observed_at=acknowledgement.acknowledged_at,
+        source=f"test:provider-response:{acknowledgement.attempt_id}",
+        acknowledgement=acknowledgement,
+    )
+    return evidence_id
+
+
+def _acknowledge_submitted_with_provider_evidence(
+    ledger: RealExecutionLedger,
+    acknowledgement: ExternalAcknowledgement,
+) -> None:
+    _bind_submitted_provider_evidence(ledger, acknowledgement)
+    ledger.acknowledge(acknowledgement)
 
 
 class RealExecutionLedgerTests(unittest.TestCase):
@@ -176,6 +202,89 @@ class RealExecutionLedgerTests(unittest.TestCase):
                 AttemptState.RESERVED,
             )
 
+    def test_submitted_ack_requires_exact_provider_bound_payload(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            ledger = RealExecutionLedger(Path(tmp) / "real.jsonl")
+            ledger.reserve_plan(plan(action()))
+            ledger.begin_attempt(
+                plan_id="p1",
+                action_id="a1",
+                attempt_id="try-1",
+                reserved_at=RESERVED_AT,
+            )
+            ledger.mark_submitted("try-1", submitted_at=SUBMITTED_AT)
+            acknowledgement = ExternalAcknowledgement(
+                attempt_id="try-1",
+                external_receipt_id="r1",
+                status=AcknowledgementStatus.ACCEPTED,
+                acknowledged_at=RECONCILED_AT,
+                accepted_odds="2.5",
+                accepted_stake="5",
+            )
+
+            with self.assertRaisesRegex(
+                ExecutionStateError,
+                "exact provider-bound acknowledgement evidence",
+            ):
+                ledger.acknowledge(acknowledgement)
+
+            ledger.bind_provider_evidence(
+                attempt_id="try-1",
+                evidence_id="1" * 64,
+                observed_at=RECONCILED_AT,
+                source="caller-supplied-generic-evidence",
+            )
+            with self.assertRaisesRegex(
+                ExecutionStateError,
+                "exact provider-bound acknowledgement evidence",
+            ):
+                ledger.acknowledge(acknowledgement)
+            self.assertEqual(
+                ledger.attempt_state("try-1"),
+                AttemptState.SUBMITTED,
+            )
+
+    def test_submitted_ack_must_match_exact_bound_provider_payload(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            ledger = RealExecutionLedger(Path(tmp) / "real.jsonl")
+            ledger.reserve_plan(plan(action()))
+            ledger.begin_attempt(
+                plan_id="p1",
+                action_id="a1",
+                attempt_id="try-1",
+                reserved_at=RESERVED_AT,
+            )
+            ledger.mark_submitted("try-1", submitted_at=SUBMITTED_AT)
+            bound = ExternalAcknowledgement(
+                attempt_id="try-1",
+                external_receipt_id="r1",
+                status=AcknowledgementStatus.ACCEPTED,
+                acknowledged_at=RECONCILED_AT,
+                accepted_odds="2.5",
+                accepted_stake="5",
+            )
+            _bind_submitted_provider_evidence(ledger, bound)
+            forged = ExternalAcknowledgement(
+                attempt_id="try-1",
+                external_receipt_id="r1",
+                status=AcknowledgementStatus.ACCEPTED,
+                acknowledged_at=RECONCILED_AT,
+                accepted_odds="2.4",
+                accepted_stake="5",
+            )
+
+            with self.assertRaisesRegex(
+                ExecutionStateError,
+                "exact provider-bound acknowledgement evidence",
+            ):
+                ledger.acknowledge(forged)
+
+            ledger.acknowledge(bound)
+            self.assertEqual(
+                ledger.attempt_state("try-1"),
+                AttemptState.ACCEPTED,
+            )
+
     def test_restart_rejects_hash_valid_reserved_to_ack_history(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "real.jsonl"
@@ -188,7 +297,7 @@ class RealExecutionLedgerTests(unittest.TestCase):
                 reserved_at=RESERVED_AT,
             )
             ledger.mark_submitted("try-1", submitted_at=SUBMITTED_AT)
-            ledger.acknowledge(
+            _acknowledge_submitted_with_provider_evidence(ledger,
                 ExternalAcknowledgement(
                     attempt_id="try-1",
                     external_receipt_id="r1",
@@ -873,7 +982,7 @@ class RealExecutionLedgerTests(unittest.TestCase):
             with self.assertRaisesRegex(
                 ExecutionStateError, "exceeds requested action stake"
             ):
-                ledger.acknowledge(
+                _acknowledge_submitted_with_provider_evidence(ledger,
                     ExternalAcknowledgement(
                         attempt_id="try-1",
                         external_receipt_id="oversized",
@@ -980,7 +1089,7 @@ class RealExecutionLedgerTests(unittest.TestCase):
                 reserved_at=RESERVED_AT,
             )
             ledger.mark_submitted("try-1", submitted_at=SUBMITTED_AT)
-            ledger.acknowledge(
+            _acknowledge_submitted_with_provider_evidence(ledger,
                 ExternalAcknowledgement(
                     attempt_id="try-1",
                     external_receipt_id="r1",
@@ -1048,7 +1157,7 @@ class RealExecutionLedgerTests(unittest.TestCase):
                 reserved_at=RESERVED_AT,
             )
             ledger.mark_submitted("try-1", submitted_at=SUBMITTED_AT)
-            ledger.acknowledge(
+            _acknowledge_submitted_with_provider_evidence(ledger,
                 ExternalAcknowledgement(
                     attempt_id="try-1",
                     external_receipt_id="r1",
@@ -1127,7 +1236,7 @@ class RealExecutionLedgerTests(unittest.TestCase):
                     attempt_id,
                     submitted_at=SUBMITTED_AT,
                 )
-                ledger.acknowledge(
+                _acknowledge_submitted_with_provider_evidence(ledger,
                     ExternalAcknowledgement(
                         attempt_id=attempt_id,
                         external_receipt_id="same-native-id",
@@ -1137,7 +1246,7 @@ class RealExecutionLedgerTests(unittest.TestCase):
                         accepted_stake="10",
                     )
                 )
-            self.assertEqual(ledger.verify_integrity(), 8)
+            self.assertEqual(ledger.verify_integrity(), 10)
 
     def test_same_provider_account_receipt_cannot_belong_to_two_attempts(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1158,7 +1267,7 @@ class RealExecutionLedgerTests(unittest.TestCase):
             )
             ledger.mark_submitted("t1", submitted_at=SUBMITTED_AT)
             ledger.mark_submitted("t2", submitted_at=SUBMITTED_AT)
-            ledger.acknowledge(
+            _acknowledge_submitted_with_provider_evidence(ledger,
                 ExternalAcknowledgement(
                     attempt_id="t1",
                     external_receipt_id="r",
@@ -1169,7 +1278,7 @@ class RealExecutionLedgerTests(unittest.TestCase):
                 )
             )
             with self.assertRaises(ExecutionIdentityConflict):
-                ledger.acknowledge(
+                _acknowledge_submitted_with_provider_evidence(ledger,
                     ExternalAcknowledgement(
                         attempt_id="t2",
                         external_receipt_id="r",
@@ -1192,7 +1301,7 @@ class RealExecutionLedgerTests(unittest.TestCase):
                 reserved_at=RESERVED_AT,
             )
             ledger.mark_submitted("t1", submitted_at=SUBMITTED_AT)
-            ledger.acknowledge(
+            _acknowledge_submitted_with_provider_evidence(ledger,
                 ExternalAcknowledgement(
                     attempt_id="t1",
                     external_receipt_id="r1",

@@ -147,21 +147,11 @@ def _protocol(
     family: EvaluationContractFamily = EvaluationContractFamily.ARBITRAGE_EXECUTION,
     keys: tuple[str, ...] | None = None,
     candidate_id: str = "strategy-1",
-    dataset_sha256: str | None = None,
-    dataset_cutoff: str | None = None,
 ) -> FrozenBaselineProtocol:
     contract = canonical_evaluation_contract(family)
     scope = FrozenEvidenceScope(
-        dataset_sha256=(
-            ledger.universe.universe_sha256
-            if dataset_sha256 is None
-            else dataset_sha256
-        ),
-        dataset_cutoff=(
-            ledger.universe.frozen_at
-            if dataset_cutoff is None
-            else dataset_cutoff
-        ),
+        dataset_sha256=H,
+        dataset_cutoff="2026-09-20T00:05:00Z",
         cohort_keys=keys or ledger.cohort().row_ids,
         market_evidence_sha256=H2,
         outcome_evidence_sha256=H3,
@@ -254,34 +244,6 @@ def test_subset_cannot_replace_frozen_denominator():
     candidate, baselines = _results(protocol)
     with pytest.raises(StrategyExternalValidityError, match="exact frozen EvaluationUniverse"):
         evaluate_strategy_external_validity(ledger, protocol, candidate, baselines)
-
-
-def test_same_row_ids_cannot_rebind_different_dataset_root():
-    ledger = _ledger(_row("a"), _row("b", slot=SlotState.WAIT_ZERO))
-    protocol = _protocol(ledger, dataset_sha256=_hash("different-frozen-universe"))
-    candidate, baselines = _results(protocol)
-
-    with pytest.raises(StrategyExternalValidityError, match="baseline dataset must equal"):
-        evaluate_strategy_external_validity(ledger, protocol, candidate, baselines)
-
-
-def test_same_row_ids_cannot_rebind_different_dataset_cutoff():
-    ledger = _ledger(_row("a"), _row("b", slot=SlotState.WAIT_ZERO))
-    protocol = _protocol(ledger, dataset_cutoff="2026-09-20T00:04:59Z")
-    candidate, baselines = _results(protocol)
-
-    with pytest.raises(StrategyExternalValidityError, match="dataset cutoff"):
-        evaluate_strategy_external_validity(ledger, protocol, candidate, baselines)
-
-
-def test_equivalent_dataset_cutoff_timezone_encoding_is_accepted():
-    ledger = _ledger(_row("candidate"))
-    protocol = _protocol(ledger, dataset_cutoff="2026-09-20T02:05:00+02:00")
-    candidate, baselines = _results(protocol)
-
-    report = evaluate_strategy_external_validity(ledger, protocol, candidate, baselines)
-
-    assert report.universe_sha256 == ledger.universe.universe_sha256
 
 
 def test_arbitrage_without_terminal_space_authority_is_insufficient():

@@ -324,7 +324,7 @@ class CapabilityEvidenceJournal:
                 raise CapabilityEvidenceError("predecessor is not in this journal")
             if (
                 predecessor.capability is not evidence.capability
-                or predecessor.scope != evidence.scope
+                or _scope_key(predecessor.scope) != _scope_key(evidence.scope)
             ):
                 raise CapabilityEvidenceError("predecessor scope/capability mismatch")
             if _time(evidence.committed_at, "committed_at") <= _time(

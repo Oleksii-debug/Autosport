@@ -262,7 +262,8 @@ class BookmakerAccountAcquisitionStore:
             "integration_evidence_id": integration.evidence_id,
             "integration_kind": integration.integration_kind.value,
             "requested_capabilities": [
-                capability.value for capability in capabilities
+                capability.value
+                for capability in sorted(capabilities, key=lambda item: item.value)
             ],
             "provider_response_sha256": snapshot.profile.source_payload_sha256,
             "snapshot_payload": snapshot_payload,
@@ -490,7 +491,8 @@ def _observation_key(
             "adapter_version": snapshot.profile.adapter_version,
             "provider_response_sha256": snapshot.profile.source_payload_sha256,
             "requested_capabilities": [
-                capability.value for capability in capabilities
+                capability.value
+                for capability in sorted(capabilities, key=lambda item: item.value)
             ],
             "integration_kind": integration_kind.value,
         }

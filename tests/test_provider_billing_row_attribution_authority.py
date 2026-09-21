@@ -378,6 +378,30 @@ def test_rebound_lower_opener_dispatch_cannot_mint_provider_issuance(
     assert called is False
 
 
+def test_public_installed_opener_cannot_mint_provider_issuance() -> None:
+    called = False
+
+    class _AttackerOpener:
+        def open(self, *_args: object, **_kwargs: object):
+            nonlocal called
+            called = True
+            raise AssertionError("installed attacker opener must not execute")
+
+    previous_opener = _urllib_request.__dict__.get("_opener")
+    try:
+        _urllib_request.install_opener(_AttackerOpener())
+        with pytest.raises(
+            BetfairProviderBillingInputsAuthorityError,
+            match="installed network opener drifted",
+        ):
+            read_verified_betfair_provider_billing_inputs(
+                BetfairSessionCredentials("k", "t")
+            )
+        assert called is False
+    finally:
+        _urllib_request.__dict__["_opener"] = previous_opener
+
+
 def test_rebound_client_constructor_cannot_mint_provider_issuance(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from decimal import Decimal
+from functools import partial
 from types import MethodType, SimpleNamespace
 from typing import Mapping
 
@@ -21,17 +22,6 @@ from .betfair_account_readonly import (
     _LIST_MARKET_CATALOGUE,
 )
 
-
-# Pin the canonical executable dependencies when this module is imported. Provider
-# callbacks are allowed to run arbitrary same-process code, so a later class-level
-# monkeypatch must not change the implementation used halfway through one evidence
-# capture operation.
-_CANONICAL_RPC = BetfairReadOnlyClient.__dict__["_rpc"]
-_CANONICAL_NEXT_REQUEST_ID = BetfairReadOnlyClient.__dict__["_next_request_id"]
-_CANONICAL_OBSERVED_AT = BetfairReadOnlyClient.__dict__["_observed_at"]
-_CANONICAL_REDACT_PROVIDER_MESSAGE = BetfairReadOnlyClient.__dict__[
-    "_redact_provider_message"
-]
 
 _CLIENT_AUTHORITY_METHODS = frozenset(
     {
@@ -89,7 +79,12 @@ class BetfairExecutionFeeInputsObservation:
             )
 
 
-def read_betfair_execution_fee_inputs(
+def _read_betfair_execution_fee_inputs(
+    snapshot_client,
+    rpc,
+    next_request_id,
+    observed_at,
+    redact_provider_message,
     client: BetfairReadOnlyClient,
     *,
     market_id: str,
@@ -102,18 +97,21 @@ def read_betfair_execution_fee_inputs(
     provider adapter architecture, or store. Missing, ambiguous, mismatched, or
     malformed data fails closed.
 
-    The caller's mutable client is snapshotted into a private exact client before
-    either provider read. Canonical RPC and its dynamically-dispatched helper
-    implementations, plus one bound transport POST capability, are pinned before
-    provider callbacks. Later caller/client/class/transport dispatch replacement
-    therefore cannot change the executable authority used mid-capture.
+    The public callable binds the canonical snapshot/RPC/helper function objects
+    into the read-only ``functools.partial`` capability when this module is first
+    constructed. ``partial.func`` and ``partial.args`` are read-only attributes,
+    so later pre-call rebinding of writable module mirrors or matching
+    ``BetfairReadOnlyClient`` class attributes cannot replace the executable set
+    used by this observation. The caller's mutable client and one transport POST
+    capability are then snapshotted before provider I/O.
     """
 
-    # Resolve the authority-bearing RPC once for the whole operation before any
-    # provider callback can run. A callback may rebind the module mirror, but it
-    # cannot redirect the second read of this already-started capture.
-    rpc = _CANONICAL_RPC
-    pinned_client, venue_id, account_id = _snapshot_canonical_client(client)
+    pinned_client, venue_id, account_id = snapshot_client(
+        client,
+        next_request_id=next_request_id,
+        observed_at=observed_at,
+        redact_provider_message=redact_provider_message,
+    )
     market = _required_text(market_id, "market_id")
 
     account_response = rpc(
@@ -180,6 +178,10 @@ def read_betfair_execution_fee_inputs(
 
 def _snapshot_canonical_client(
     client: object,
+    *,
+    next_request_id,
+    observed_at,
+    redact_provider_message,
 ) -> tuple[BetfairReadOnlyClient, str, str]:
     """Capture one private exact-client authority image before provider I/O."""
 
@@ -232,15 +234,15 @@ def _snapshot_canonical_client(
         account_id=account_id,
     )
     pinned_client._next_request_id = MethodType(
-        _CANONICAL_NEXT_REQUEST_ID,
+        next_request_id,
         pinned_client,
     )
     pinned_client._observed_at = MethodType(
-        _CANONICAL_OBSERVED_AT,
+        observed_at,
         pinned_client,
     )
     pinned_client._redact_provider_message = MethodType(
-        _CANONICAL_REDACT_PROVIDER_MESSAGE,
+        redact_provider_message,
         pinned_client,
     )
     return pinned_client, venue_id, account_id
@@ -306,3 +308,21 @@ def _required_text(value: object, field: str) -> str:
 
 def _optional_text(value: object, field: str) -> str | None:
     return None if value is None else _required_text(value, field)
+
+
+# Bind the complete provider-executable set into one non-rebindable callable before
+# any caller can reach the public API. Unlike ordinary module aliases, partial's
+# ``func`` and ``args`` attributes are read-only, so replacing module mirrors or
+# matching class attributes later cannot change this capability. The private client
+# receives the same captured helper implementations before provider callbacks run.
+read_betfair_execution_fee_inputs = partial(
+    _read_betfair_execution_fee_inputs,
+    _snapshot_canonical_client,
+    BetfairReadOnlyClient.__dict__["_rpc"],
+    BetfairReadOnlyClient.__dict__["_next_request_id"],
+    BetfairReadOnlyClient.__dict__["_observed_at"],
+    BetfairReadOnlyClient.__dict__["_redact_provider_message"],
+)
+read_betfair_execution_fee_inputs.__name__ = "read_betfair_execution_fee_inputs"
+read_betfair_execution_fee_inputs.__qualname__ = "read_betfair_execution_fee_inputs"
+read_betfair_execution_fee_inputs.__doc__ = _read_betfair_execution_fee_inputs.__doc__

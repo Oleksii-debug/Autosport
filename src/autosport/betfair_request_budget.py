@@ -366,7 +366,7 @@ class BetfairRequestBudget:
                 self._path_key,
                 {pool: 0 for pool in BetfairRequestPool},
             )
-        with WorkspaceEconomicLock(self.path.parent):
+        with durable_path_lock(self.path):
             if self.path.exists():
                 self._read_locked()
             else:
@@ -556,7 +556,7 @@ class BetfairRequestBudget:
         try:
             self._reserve_process_slot(intent)
             reserved = True
-            with WorkspaceEconomicLock(self.path.parent):
+            with durable_path_lock(self.path):
                 state = self._read_locked()
                 self._ensure_monotonic(state, now)
                 self._check_backpressure(state, intent.pool, now)
@@ -573,7 +573,7 @@ class BetfairRequestBudget:
         if not isinstance(pool, BetfairRequestPool):
             raise TypeError("pool must be BetfairRequestPool")
         now = self._now()
-        with WorkspaceEconomicLock(self.path.parent):
+        with durable_path_lock(self.path):
             state = self._read_locked()
             self._ensure_monotonic(state, now)
             backpressure = dict(_mapping(state["backpressure"], "backpressure"))
@@ -596,7 +596,7 @@ class BetfairRequestBudget:
         if not isinstance(pool, BetfairRequestPool):
             raise TypeError("pool must be BetfairRequestPool")
         now = self._now()
-        with WorkspaceEconomicLock(self.path.parent):
+        with durable_path_lock(self.path):
             state = self._read_locked()
             self._ensure_monotonic(state, now)
             backpressure = dict(_mapping(state["backpressure"], "backpressure"))

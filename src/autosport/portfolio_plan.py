@@ -4,7 +4,7 @@ import hashlib
 import json
 from dataclasses import dataclass, field, replace
 from datetime import datetime
-from decimal import Context, Decimal, DecimalException, InvalidOperation, ROUND_HALF_EVEN, localcontext
+from decimal import Context, Decimal, DecimalException, InvalidOperation, ROUND_DOWN, localcontext
 from enum import Enum
 
 from .decision_ledger import (
@@ -646,7 +646,7 @@ class PortfolioDependencyEvidence:
 
 _ROBUST_STRESS_DECIMAL_CONTEXT = Context(
     prec=28,
-    rounding=ROUND_HALF_EVEN,
+    rounding=ROUND_DOWN,
 )
 
 
@@ -717,6 +717,27 @@ class RobustPortfolioProposal:
             raise ValueError("robust proposal scale is not representable") from exc
         if self.robust_scale != expected_scale:
             raise ValueError("robust proposal scale must exactly match stress factors")
+        try:
+            with localcontext(_ROBUST_STRESS_DECIMAL_CONTEXT):
+                stressed_limits = tuple(
+                    base_stake * self.robust_scale
+                    for base_stake in self.base_stakes
+                )
+        except DecimalException as exc:
+            raise ValueError(
+                "robust proposal stressed stake limits are not representable"
+            ) from exc
+        if any(
+            proposed_stake > stressed_limit
+            for proposed_stake, stressed_limit in zip(
+                self.proposed_stakes,
+                stressed_limits,
+                strict=True,
+            )
+        ):
+            raise ValueError(
+                "robust proposal stake cannot exceed its conservative stressed base stake"
+            )
 
     @classmethod
     def derive(

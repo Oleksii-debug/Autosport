@@ -8,6 +8,7 @@ from __future__ import annotations
 import hashlib
 import json
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from enum import StrEnum
 from typing import Sequence
 
@@ -49,6 +50,11 @@ def _digest(value: object) -> str:
     return hashlib.sha256(json.dumps(
         value, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False
     ).encode("utf-8")).hexdigest()
+
+
+def _instant(value: str) -> datetime:
+    """Normalize an already-validated ISO-8601 timestamp for identity comparison."""
+    return datetime.fromisoformat(value.replace("Z", "+00:00")).astimezone(timezone.utc)
 
 
 @dataclass(frozen=True, slots=True)
@@ -152,6 +158,14 @@ def evaluate_strategy_external_validity(
     if protocol.evidence_scope.cohort_keys != cohort.row_ids:
         raise StrategyExternalValidityError(
             "baseline cohort must equal exact frozen EvaluationUniverse row_ids"
+        )
+    if protocol.evidence_scope.dataset_sha256 != ledger.universe.universe_sha256:
+        raise StrategyExternalValidityError(
+            "baseline dataset must equal exact frozen EvaluationUniverse"
+        )
+    if _instant(protocol.evidence_scope.dataset_cutoff) != _instant(ledger.universe.frozen_at):
+        raise StrategyExternalValidityError(
+            "baseline dataset cutoff must equal frozen EvaluationUniverse cutoff"
         )
     baseline_report = build_external_validity_report(protocol, candidate, baseline_results)
 

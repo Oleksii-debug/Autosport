@@ -18,6 +18,12 @@ def _require_canonical_text(value: object, label: str) -> str:
     return value
 
 
+def _require_optional_canonical_text(value: object, label: str) -> str | None:
+    if value is None:
+        return None
+    return _require_canonical_text(value, label)
+
+
 def _require_bool(value: object, label: str) -> bool:
     if type(value) is not bool:
         raise ValueError(f"{label} must be a bool")
@@ -52,7 +58,7 @@ class CampaignDayEvidence:
     records: tuple[CampaignEvidenceRecord, ...]
 
     def __post_init__(self) -> None:
-        if not isinstance(self.day, date):
+        if type(self.day) is not date:
             raise ValueError("day must be a date")
         if type(self.records) is not tuple:
             raise ValueError("records must be a tuple")
@@ -73,11 +79,13 @@ class CampaignEvidenceChecklist:
     day_evidence: tuple[CampaignDayEvidence, ...]
     campaign_evidence: tuple[CampaignEvidenceRecord, ...]
     human_tested: bool = False
+    human_test_evidence_ref: str | None = None
     nvda_verified: bool = False
+    nvda_evidence_ref: str | None = None
 
     def __post_init__(self) -> None:
         _require_canonical_text(self.campaign_id, "campaign_id")
-        if not isinstance(self.start_day, date) or not isinstance(self.end_day, date):
+        if type(self.start_day) is not date or type(self.end_day) is not date:
             raise ValueError("start_day and end_day must be dates")
         if self.end_day <= self.start_day:
             raise ValueError("a multi-day campaign must span at least two calendar days")
@@ -106,7 +114,13 @@ class CampaignEvidenceChecklist:
         if len(campaign_keys) != len(set(campaign_keys)):
             raise ValueError("campaign evidence keys must be unique")
         _require_bool(self.human_tested, "human_tested")
+        _require_optional_canonical_text(
+            self.human_test_evidence_ref, "human_test_evidence_ref"
+        )
         _require_bool(self.nvda_verified, "nvda_verified")
+        _require_optional_canonical_text(
+            self.nvda_evidence_ref, "nvda_evidence_ref"
+        )
 
 
 @dataclass(frozen=True, slots=True, order=True)
@@ -138,7 +152,9 @@ class CampaignEvidenceAssessment:
     missing_campaign_evidence: tuple[str, ...]
     failed_campaign_evidence: tuple[FailedCampaignEvidence, ...]
     human_tested: bool
+    human_test_evidence_ref: str | None
     nvda_verified: bool
+    nvda_evidence_ref: str | None
 
     @property
     def machine_evidence_complete(self) -> bool:
@@ -151,8 +167,16 @@ class CampaignEvidenceAssessment:
         )
 
     @property
+    def human_evidence_complete(self) -> bool:
+        return self.human_tested and self.human_test_evidence_ref is not None
+
+    @property
+    def nvda_evidence_complete(self) -> bool:
+        return self.nvda_verified and self.nvda_evidence_ref is not None
+
+    @property
     def physical_accessibility_evidence_complete(self) -> bool:
-        return self.human_tested and self.nvda_verified
+        return self.human_evidence_complete and self.nvda_evidence_complete
 
     @property
     def pre_handoff_ready(self) -> bool:
@@ -214,7 +238,9 @@ def _evidence_id(
             for record in sorted(checklist.campaign_evidence, key=lambda record: record.key)
         ],
         "human_tested": checklist.human_tested,
+        "human_test_evidence_ref": checklist.human_test_evidence_ref,
         "nvda_verified": checklist.nvda_verified,
+        "nvda_evidence_ref": checklist.nvda_evidence_ref,
         "expected_days": [day.isoformat() for day in expected_days],
     }
     encoded = json.dumps(
@@ -229,9 +255,10 @@ def assess_campaign_evidence(
     """Assess deterministic pre-handoff evidence for a multi-day PAPER campaign.
 
     Missing evidence is represented by absence, failed evidence by an explicit FAILED
-    record. HUMAN_TESTED and NVDA_VERIFIED are caller-supplied truths and are never
-    inferred from machine artifacts. The assessment grants no execution authority and
-    cannot prove real-money execution or whole-product completion.
+    record. HUMAN_TESTED and NVDA_VERIFIED are caller-supplied truths and require
+    their own evidence references before physical acceptance can be complete. The
+    assessment grants no execution authority and cannot prove real-money execution or
+    whole-product completion.
     """
 
     if not isinstance(checklist, CampaignEvidenceChecklist):
@@ -276,5 +303,7 @@ def assess_campaign_evidence(
         missing_campaign_evidence=missing_campaign,
         failed_campaign_evidence=failed_campaign,
         human_tested=checklist.human_tested,
+        human_test_evidence_ref=checklist.human_test_evidence_ref,
         nvda_verified=checklist.nvda_verified,
+        nvda_evidence_ref=checklist.nvda_evidence_ref,
     )

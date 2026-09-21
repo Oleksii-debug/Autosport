@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 from dataclasses import replace
 from pathlib import Path
 
@@ -186,6 +187,71 @@ def test_write_once_refuses_implicit_parent_lineage_creation(tmp_path: Path) -> 
     assert not path.exists()
 
 
+@pytest.mark.skipif(os.name == "nt", reason="POSIX descriptor-relative parent binding")
+def test_write_once_rejects_symlinked_parent_lineage(tmp_path: Path) -> None:
+    real_root = tmp_path / "real-root"
+    real_parent = real_root / "evidence"
+    real_parent.mkdir(parents=True)
+    redirected_root = tmp_path / "redirected-root"
+    redirected_root.symlink_to(real_root, target_is_directory=True)
+    path = redirected_root / "evidence" / "precommit.json"
+
+    with pytest.raises(
+        CampaignPrecommitManifestError,
+        match="without symlink redirection",
+    ):
+        write_campaign_precommit_manifest_once(path, manifest())
+
+    assert not (real_parent / "precommit.json").exists()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX descriptor-relative target binding")
+def test_write_once_rejects_existing_target_symlink(tmp_path: Path) -> None:
+    original = manifest()
+    authoritative = tmp_path / "authoritative.json"
+    write_campaign_precommit_manifest_once(authoritative, original)
+    redirected = tmp_path / "redirected.json"
+    redirected.symlink_to(authoritative)
+
+    with pytest.raises(
+        CampaignPrecommitManifestError,
+        match="cannot verify existing campaign precommit manifest",
+    ):
+        write_campaign_precommit_manifest_once(redirected, original)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX descriptor-relative parent binding")
+def test_write_once_fails_if_parent_identity_changes_during_publication(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = tmp_path / "evidence" / "precommit.json"
+    path.parent.mkdir()
+    moved_parent = tmp_path / "evidence-moved"
+    original_open = precommit_module._open_bound_posix_parent_directory
+
+    def bind_then_swap(parent: Path) -> tuple[int, Path]:
+        descriptor, absolute = original_open(parent)
+        Path(parent).rename(moved_parent)
+        Path(parent).mkdir()
+        return descriptor, absolute
+
+    monkeypatch.setattr(
+        precommit_module,
+        "_open_bound_posix_parent_directory",
+        bind_then_swap,
+    )
+
+    with pytest.raises(
+        CampaignPrecommitManifestError,
+        match="parent identity changed during publication",
+    ):
+        write_campaign_precommit_manifest_once(path, manifest())
+
+    assert not path.exists()
+    assert (moved_parent / "precommit.json").exists()
+
+
 def test_write_once_refuses_conflicting_successor(tmp_path: Path) -> None:
     path = tmp_path / "precommit.json"
     write_campaign_precommit_manifest_once(path, manifest())
@@ -288,38 +354,44 @@ def test_loader_rejects_semantically_equivalent_noncanonical_bytes(
         load_campaign_precommit_manifest(path)
 
 
+@pytest.mark.skipif(os.name == "nt", reason="Windows has no directory-fsync contract")
 def test_write_once_synchronizes_parent_directory_before_success(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     path = tmp_path / "nested" / "precommit.json"
     path.parent.mkdir()
-    calls: list[Path] = []
+    calls: list[int] = []
 
     monkeypatch.setattr(
         precommit_module,
-        "_fsync_parent_directory",
-        lambda parent: calls.append(parent),
+        "_fsync_bound_parent_directory",
+        lambda directory_fd: calls.append(directory_fd),
     )
 
     digest = write_campaign_precommit_manifest_once(path, manifest())
 
     assert digest == manifest().manifest_sha256
-    assert calls == [path.parent]
+    assert len(calls) == 1
 
 
+@pytest.mark.skipif(os.name == "nt", reason="Windows has no directory-fsync contract")
 def test_parent_directory_sync_failure_fails_closed_and_retry_recovers(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     path = tmp_path / "precommit.json"
-    original_sync = precommit_module._fsync_parent_directory
+    original_sync = precommit_module._fsync_bound_parent_directory
     attempts = 0
 
-    def fail_sync(parent: Path) -> None:
+    def fail_sync(directory_fd: int) -> None:
         nonlocal attempts
         attempts += 1
         raise CampaignPrecommitManifestError("synthetic directory durability failure")
 
-    monkeypatch.setattr(precommit_module, "_fsync_parent_directory", fail_sync)
+    monkeypatch.setattr(
+        precommit_module,
+        "_fsync_bound_parent_directory",
+        fail_sync,
+    )
     with pytest.raises(
         CampaignPrecommitManifestError,
         match="synthetic directory durability failure",
@@ -329,7 +401,11 @@ def test_parent_directory_sync_failure_fails_closed_and_retry_recovers(
     assert attempts == 1
     assert path.exists()
 
-    monkeypatch.setattr(precommit_module, "_fsync_parent_directory", original_sync)
+    monkeypatch.setattr(
+        precommit_module,
+        "_fsync_bound_parent_directory",
+        original_sync,
+    )
     digest = write_campaign_precommit_manifest_once(path, manifest())
 
     assert digest == manifest().manifest_sha256

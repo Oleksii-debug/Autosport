@@ -1,17 +1,16 @@
-"""Root-independent selection binding for the monotonic workspace authority.
+"""Root-independent selection binding for monotonic workspace authority.
 
-The selected monotonic authority root is itself security-relevant state.  If a
-workspace with positive history can simply point at a fresh authority root, the
-new root looks pristine and anti-rollback history can be bypassed.
+A caller-selectable monotonic authority root is not itself a trust anchor: after
+positive history exists under root A, choosing a fresh root B can otherwise make
+the same workspace/namespace look pristine.  This module records the root choice
+in Autosport's stable application-state area, deliberately outside
+AUTOSPORT_MONOTONIC_AUTHORITY_ROOT and outside the protected workspace.
 
-This module stores only a small path/identity/root receipt in the canonical
-Autosport application-state area.  Critically, that receipt location ignores
-AUTOSPORT_MONOTONIC_AUTHORITY_ROOT, so changing the selected authority root does
-not change the place used to remember which root already owns a workspace path.
-
-The receipt does not grant domain authority and is not created by read-only
-pristine recovery.  It is established on the first real authority transition
-(or when upgrading already-valid non-empty history).
+The path selector is written before the first authority-bearing write in a
+selected root.  A namespace activation witness is written after the first
+authority record, letting recovery distinguish "selector won but first PREPARE
+never became durable" from "this namespace was used and its selected-root
+history later disappeared".
 """
 
 from __future__ import annotations
@@ -19,6 +18,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import stat
 from dataclasses import dataclass
 from pathlib import Path
@@ -30,6 +30,9 @@ from .json_integrity import strict_json_loads
 ROOT_SELECTION_SCHEMA: Final = "autosport.monotonic_authority.root_selection"
 ROOT_SELECTION_SCHEMA_VERSION: Final = 1
 ROOT_SELECTION_AUTHORITY_ID: Final = "autosport.machine.monotonic.v1"
+NAMESPACE_ACTIVATION_SCHEMA: Final = (
+    "autosport.monotonic_authority.root_selection.namespace_activation"
+)
 
 _ROOT_SELECTION_KEYS: Final = frozenset(
     {
@@ -46,7 +49,19 @@ _ROOT_SELECTION_KEYS: Final = frozenset(
         "binding_sha256",
     }
 )
-_SHA256_LENGTH: Final = 64
+_NAMESPACE_ACTIVATION_KEYS: Final = frozenset(
+    {
+        "schema",
+        "schema_version",
+        "authority_id",
+        "workspace_instance_id",
+        "namespace_sha256",
+        "authority_root_resolved",
+        "authority_root_resolved_sha256",
+        "activation_sha256",
+    }
+)
+_SHA256_RE: Final = re.compile(r"^[0-9a-f]{64}$")
 
 
 class AuthorityRootSelectionError(RuntimeError):
@@ -58,11 +73,11 @@ class AuthorityRootSelectionConfigurationError(AuthorityRootSelectionError):
 
 
 class AuthorityRootSelectionConflictError(AuthorityRootSelectionError):
-    """The selected authority root conflicts with an existing durable receipt."""
+    """The selected authority root conflicts with a durable root receipt."""
 
 
 class AuthorityRootSelectionIntegrityError(AuthorityRootSelectionError):
-    """The durable root-selection receipt is malformed or corrupted."""
+    """A durable root-selection receipt is malformed or corrupted."""
 
 
 def _canonical_bytes(payload: dict[str, object]) -> bytes:
@@ -116,12 +131,38 @@ def _resolved_locator(path: Path) -> str:
     return os.path.normcase(os.path.normpath(str(resolved)))
 
 
-def stable_root_selection_store() -> Path:
-    """Return the non-overridable application-state store for root receipts.
+def _canonical_instance_id(value: object) -> str:
+    if not isinstance(value, str) or not value or value != value.strip():
+        raise AuthorityRootSelectionConfigurationError(
+            "workspace_instance_id must be a non-empty canonical string"
+        )
+    if len(value) > 256 or "\x00" in value or any(ord(ch) < 32 for ch in value):
+        raise AuthorityRootSelectionConfigurationError(
+            "workspace_instance_id contains unsupported characters"
+        )
+    try:
+        value.encode("utf-8")
+    except UnicodeEncodeError as exc:
+        raise AuthorityRootSelectionConfigurationError(
+            "workspace_instance_id contains invalid Unicode"
+        ) from exc
+    return value
 
-    AUTOSPORT_MONOTONIC_AUTHORITY_ROOT is intentionally not consulted here.
-    Otherwise the same environment switch that selects a fresh authority root
-    would also select a fresh root-selection witness.
+
+def _digest(name: str, value: object) -> str:
+    if not isinstance(value, str) or _SHA256_RE.fullmatch(value) is None:
+        raise AuthorityRootSelectionIntegrityError(
+            f"{name} must be a lowercase SHA-256 hex digest"
+        )
+    return value
+
+
+def stable_root_selection_store() -> Path:
+    """Return the stable application-state store for root-selection receipts.
+
+    AUTOSPORT_MONOTONIC_AUTHORITY_ROOT is intentionally ignored.  A root switch
+    must not also switch the witness that says which root already owns the
+    workspace.
     """
 
     local_app_data = os.environ.get("LOCALAPPDATA")
@@ -231,56 +272,232 @@ def _durable_exclusive_json_create(
         raise
 
 
-def _read_strict_object(path: Path) -> dict[str, object]:
+def _path_exists_or_is_link(path: Path) -> bool:
+    return path.exists() or path.is_symlink()
+
+
+def _read_strict_object(
+    path: Path,
+    *,
+    expected_keys: frozenset[str],
+    label: str,
+) -> dict[str, object]:
     try:
         metadata = path.lstat()
     except OSError as exc:
         raise AuthorityRootSelectionIntegrityError(
-            "cannot inspect authority-root binding path"
+            f"cannot inspect {label} path"
         ) from exc
     if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1:
         raise AuthorityRootSelectionIntegrityError(
-            "authority-root binding must be a single-link regular file"
+            f"{label} must be a single-link regular file"
         )
     try:
         text = path.read_text(encoding="utf-8")
     except (OSError, UnicodeError) as exc:
-        raise AuthorityRootSelectionIntegrityError(
-            "cannot read authority-root binding"
-        ) from exc
+        raise AuthorityRootSelectionIntegrityError(f"cannot read {label}") from exc
     try:
         raw = strict_json_loads(text)
     except (TypeError, ValueError) as exc:
         raise AuthorityRootSelectionIntegrityError(
-            "invalid strict JSON in authority-root binding"
+            f"invalid strict JSON in {label}"
         ) from exc
     if not isinstance(raw, dict) or not all(isinstance(key, str) for key in raw):
         raise AuthorityRootSelectionIntegrityError(
-            "authority-root binding must be a JSON object"
+            f"{label} must be a JSON object"
         )
-    if frozenset(raw) != _ROOT_SELECTION_KEYS:
+    if frozenset(raw) != expected_keys:
         raise AuthorityRootSelectionIntegrityError(
-            "authority-root binding keys must match schema exactly"
+            f"{label} keys must match schema exactly"
         )
     return raw
 
 
-def _verify_hash(raw: dict[str, object]) -> None:
-    digest = raw["binding_sha256"]
+def _verify_hash(
+    raw: dict[str, object],
+    *,
+    digest_key: str,
+    label: str,
+) -> str:
+    digest = _digest(digest_key, raw[digest_key])
+    unhashed = dict(raw)
+    unhashed.pop(digest_key)
+    if _payload_hash(unhashed) != digest:
+        raise AuthorityRootSelectionIntegrityError(f"{label} hash mismatch")
+    return digest
+
+
+@dataclass(frozen=True, slots=True)
+class _SelectionContext:
+    workspace_locator: str
+    workspace_locator_sha256: str
+    authority_root_locator: str
+    authority_root_locator_sha256: str
+    authority_root_resolved: str
+    authority_root_resolved_sha256: str
+    store_root: Path
+    binding_path: Path
+
+
+def _selection_context(
+    *,
+    workspace: Path,
+    authority_root: Path,
+) -> _SelectionContext:
+    store_root = stable_root_selection_store()
+    workspace_locator = _lexical_locator(workspace)
+    workspace_locator_sha = hashlib.sha256(
+        workspace_locator.encode("utf-8")
+    ).hexdigest()
+    root_locator = _lexical_locator(authority_root)
+    root_locator_sha = hashlib.sha256(root_locator.encode("utf-8")).hexdigest()
+    root_resolved = _resolved_locator(authority_root)
+    root_resolved_sha = hashlib.sha256(root_resolved.encode("utf-8")).hexdigest()
+
+    resolved_workspace = Path(_resolved_locator(workspace))
+    resolved_store = Path(_resolved_locator(store_root))
     if (
-        not isinstance(digest, str)
-        or len(digest) != _SHA256_LENGTH
-        or any(ch not in "0123456789abcdef" for ch in digest)
+        resolved_store == resolved_workspace
+        or resolved_store.is_relative_to(resolved_workspace)
+        or resolved_workspace.is_relative_to(resolved_store)
+    ):
+        raise AuthorityRootSelectionConfigurationError(
+            "authority-root selection store and protected workspace must be disjoint trees"
+        )
+
+    return _SelectionContext(
+        workspace_locator=workspace_locator,
+        workspace_locator_sha256=workspace_locator_sha,
+        authority_root_locator=root_locator,
+        authority_root_locator_sha256=root_locator_sha,
+        authority_root_resolved=root_resolved,
+        authority_root_resolved_sha256=root_resolved_sha,
+        store_root=store_root,
+        binding_path=(
+            store_root
+            / "workspace-path-bindings"
+            / workspace_locator_sha[:2]
+            / f"{workspace_locator_sha}.json"
+        ),
+    )
+
+
+def _validate_selection_raw(
+    raw: dict[str, object],
+    *,
+    expected_workspace_locator: str | None,
+    expected_workspace_locator_sha256: str | None,
+    selected_authority_root_resolved: str,
+    selected_authority_root_resolved_sha256: str,
+) -> str:
+    if (
+        raw["schema"] != ROOT_SELECTION_SCHEMA
+        or raw["schema_version"] != ROOT_SELECTION_SCHEMA_VERSION
+        or isinstance(raw["schema_version"], bool)
+        or raw["authority_id"] != ROOT_SELECTION_AUTHORITY_ID
     ):
         raise AuthorityRootSelectionIntegrityError(
-            "invalid authority-root binding digest"
+            "authority-root binding identity/schema mismatch"
         )
-    unhashed = dict(raw)
-    unhashed.pop("binding_sha256")
-    if _payload_hash(unhashed) != digest:
+    _verify_hash(raw, digest_key="binding_sha256", label="authority-root binding")
+
+    workspace_locator = raw["workspace_locator"]
+    workspace_locator_sha = raw["workspace_locator_sha256"]
+    if not isinstance(workspace_locator, str) or not workspace_locator:
         raise AuthorityRootSelectionIntegrityError(
-            "authority-root binding hash mismatch"
+            "invalid workspace locator in authority-root binding"
         )
+    if _digest("workspace_locator_sha256", workspace_locator_sha) != hashlib.sha256(
+        workspace_locator.encode("utf-8")
+    ).hexdigest():
+        raise AuthorityRootSelectionIntegrityError(
+            "workspace locator digest mismatch in authority-root binding"
+        )
+    if (
+        expected_workspace_locator is not None
+        and workspace_locator != expected_workspace_locator
+    ):
+        raise AuthorityRootSelectionIntegrityError(
+            "authority-root binding workspace locator mismatch"
+        )
+    if (
+        expected_workspace_locator_sha256 is not None
+        and workspace_locator_sha != expected_workspace_locator_sha256
+    ):
+        raise AuthorityRootSelectionIntegrityError(
+            "authority-root binding workspace locator identity mismatch"
+        )
+
+    root_locator = raw["authority_root_locator"]
+    root_locator_sha = raw["authority_root_locator_sha256"]
+    if not isinstance(root_locator, str) or not root_locator:
+        raise AuthorityRootSelectionIntegrityError(
+            "invalid lexical authority root in root-selection binding"
+        )
+    if _digest("authority_root_locator_sha256", root_locator_sha) != hashlib.sha256(
+        root_locator.encode("utf-8")
+    ).hexdigest():
+        raise AuthorityRootSelectionIntegrityError(
+            "lexical authority-root digest mismatch"
+        )
+
+    root_resolved = raw["authority_root_resolved"]
+    root_resolved_sha = raw["authority_root_resolved_sha256"]
+    if not isinstance(root_resolved, str) or not root_resolved:
+        raise AuthorityRootSelectionIntegrityError(
+            "invalid resolved authority root in root-selection binding"
+        )
+    if _digest("authority_root_resolved_sha256", root_resolved_sha) != hashlib.sha256(
+        root_resolved.encode("utf-8")
+    ).hexdigest():
+        raise AuthorityRootSelectionIntegrityError(
+            "resolved authority-root digest mismatch"
+        )
+    if (
+        root_resolved != selected_authority_root_resolved
+        or root_resolved_sha != selected_authority_root_resolved_sha256
+    ):
+        raise AuthorityRootSelectionConflictError(
+            "workspace is already bound to a different monotonic authority root"
+        )
+    return _canonical_instance_id(raw["workspace_instance_id"])
+
+
+def preflight_authority_root_selection(
+    *,
+    workspace: Path,
+    authority_root: Path,
+    requested_workspace_instance_id: str | None,
+) -> str | None:
+    """Resolve an existing same-path selector before workspace-id allocation.
+
+    This function is read-only.  If a durable selector exists, its immutable
+    workspace instance id becomes the requested id for the selected root.
+    """
+
+    context = _selection_context(workspace=workspace, authority_root=authority_root)
+    if not _path_exists_or_is_link(context.binding_path):
+        return None
+    raw = _read_strict_object(
+        context.binding_path,
+        expected_keys=_ROOT_SELECTION_KEYS,
+        label="authority-root binding",
+    )
+    bound_id = _validate_selection_raw(
+        raw,
+        expected_workspace_locator=context.workspace_locator,
+        expected_workspace_locator_sha256=context.workspace_locator_sha256,
+        selected_authority_root_resolved=context.authority_root_resolved,
+        selected_authority_root_resolved_sha256=context.authority_root_resolved_sha256,
+    )
+    if (
+        requested_workspace_instance_id is not None
+        and _canonical_instance_id(requested_workspace_instance_id) != bound_id
+    ):
+        raise AuthorityRootSelectionConflictError(
+            "requested workspace_instance_id conflicts with authority-root binding"
+        )
+    return bound_id
 
 
 @dataclass(frozen=True, slots=True)
@@ -288,14 +505,7 @@ class AuthorityRootSelectionBinding:
     workspace: Path
     workspace_instance_id: str
     authority_root: Path
-    store_root: Path
-    workspace_locator: str
-    workspace_locator_sha256: str
-    authority_root_locator: str
-    authority_root_locator_sha256: str
-    authority_root_resolved: str
-    authority_root_resolved_sha256: str
-    binding_path: Path
+    context: _SelectionContext
 
     @classmethod
     def resolve(
@@ -305,127 +515,210 @@ class AuthorityRootSelectionBinding:
         workspace_instance_id: str,
         authority_root: Path,
     ) -> "AuthorityRootSelectionBinding":
-        if not isinstance(workspace_instance_id, str) or not workspace_instance_id:
-            raise AuthorityRootSelectionConfigurationError(
-                "workspace_instance_id is required for authority-root selection"
-            )
-
-        store_root = stable_root_selection_store()
-        workspace_locator = _lexical_locator(workspace)
-        workspace_locator_sha = hashlib.sha256(
-            workspace_locator.encode("utf-8")
-        ).hexdigest()
-        root_locator = _lexical_locator(authority_root)
-        root_locator_sha = hashlib.sha256(root_locator.encode("utf-8")).hexdigest()
-        root_resolved = _resolved_locator(authority_root)
-        root_resolved_sha = hashlib.sha256(
-            root_resolved.encode("utf-8")
-        ).hexdigest()
-
-        resolved_workspace = Path(_resolved_locator(workspace))
-        resolved_store = Path(_resolved_locator(store_root))
-        if (
-            resolved_store == resolved_workspace
-            or resolved_store.is_relative_to(resolved_workspace)
-            or resolved_workspace.is_relative_to(resolved_store)
-        ):
-            raise AuthorityRootSelectionConfigurationError(
-                "authority-root selection store and protected workspace must be disjoint trees"
-            )
-
-        binding_path = (
-            store_root
-            / "workspace-path-bindings"
-            / workspace_locator_sha[:2]
-            / f"{workspace_locator_sha}.json"
-        )
         binding = cls(
             workspace=workspace,
-            workspace_instance_id=workspace_instance_id,
+            workspace_instance_id=_canonical_instance_id(workspace_instance_id),
             authority_root=authority_root,
-            store_root=store_root,
-            workspace_locator=workspace_locator,
-            workspace_locator_sha256=workspace_locator_sha,
-            authority_root_locator=root_locator,
-            authority_root_locator_sha256=root_locator_sha,
-            authority_root_resolved=root_resolved,
-            authority_root_resolved_sha256=root_resolved_sha,
-            binding_path=binding_path,
+            context=_selection_context(
+                workspace=workspace,
+                authority_root=authority_root,
+            ),
         )
         binding.validate_existing()
         return binding
 
-    def _payload(self) -> dict[str, object]:
+    @property
+    def store_root(self) -> Path:
+        return self.context.store_root
+
+    @property
+    def binding_path(self) -> Path:
+        return self.context.binding_path
+
+    def namespace_activation_path(self, namespace_sha256: str) -> Path:
+        namespace_sha = _digest("namespace_sha256", namespace_sha256)
+        return (
+            self.store_root
+            / "namespace-activations"
+            / namespace_sha[:2]
+            / f"{namespace_sha}.json"
+        )
+
+    def _selection_payload(self) -> dict[str, object]:
         unhashed: dict[str, object] = {
             "schema": ROOT_SELECTION_SCHEMA,
             "schema_version": ROOT_SELECTION_SCHEMA_VERSION,
             "authority_id": ROOT_SELECTION_AUTHORITY_ID,
-            "workspace_locator": self.workspace_locator,
-            "workspace_locator_sha256": self.workspace_locator_sha256,
+            "workspace_locator": self.context.workspace_locator,
+            "workspace_locator_sha256": self.context.workspace_locator_sha256,
             "workspace_instance_id": self.workspace_instance_id,
-            "authority_root_locator": self.authority_root_locator,
-            "authority_root_locator_sha256": self.authority_root_locator_sha256,
-            "authority_root_resolved": self.authority_root_resolved,
-            "authority_root_resolved_sha256": self.authority_root_resolved_sha256,
+            "authority_root_locator": self.context.authority_root_locator,
+            "authority_root_locator_sha256": self.context.authority_root_locator_sha256,
+            "authority_root_resolved": self.context.authority_root_resolved,
+            "authority_root_resolved_sha256": self.context.authority_root_resolved_sha256,
         }
         return {**unhashed, "binding_sha256": _payload_hash(unhashed)}
 
-    def validate_existing(self) -> bool:
-        """Validate an existing receipt without creating any pristine state."""
-
-        if not self.binding_path.exists():
-            if self.binding_path.is_symlink():
-                raise AuthorityRootSelectionIntegrityError(
-                    "authority-root binding cannot be a symbolic link"
-                )
-            return False
-        raw = _read_strict_object(self.binding_path)
-        if (
-            raw["schema"] != ROOT_SELECTION_SCHEMA
-            or raw["schema_version"] != ROOT_SELECTION_SCHEMA_VERSION
-            or isinstance(raw["schema_version"], bool)
-            or raw["authority_id"] != ROOT_SELECTION_AUTHORITY_ID
-            or raw["workspace_locator"] != self.workspace_locator
-            or raw["workspace_locator_sha256"] != self.workspace_locator_sha256
-        ):
+    def _iter_selection_records(self):
+        root = self.store_root / "workspace-path-bindings"
+        if not root.exists():
+            return
+        try:
+            paths = sorted(root.glob("*/*.json"))
+        except OSError as exc:
             raise AuthorityRootSelectionIntegrityError(
-                "authority-root binding identity/schema mismatch"
-            )
-        _verify_hash(raw)
+                "cannot enumerate authority-root bindings"
+            ) from exc
+        for path in paths:
+            yield path
 
-        if raw["workspace_instance_id"] != self.workspace_instance_id:
-            raise AuthorityRootSelectionConflictError(
-                "workspace path is bound to a different immutable workspace identity"
-            )
-        if (
-            raw["authority_root_locator"] != self.authority_root_locator
-            or raw["authority_root_locator_sha256"]
-            != self.authority_root_locator_sha256
-            or raw["authority_root_resolved"] != self.authority_root_resolved
-            or raw["authority_root_resolved_sha256"]
-            != self.authority_root_resolved_sha256
-        ):
-            raise AuthorityRootSelectionConflictError(
-                "workspace path is already bound to a different monotonic authority root"
-            )
-        return True
+    def _validate_path(self, path: Path, *, current_path: bool) -> str:
+        raw = _read_strict_object(
+            path,
+            expected_keys=_ROOT_SELECTION_KEYS,
+            label="authority-root binding",
+        )
+        return _validate_selection_raw(
+            raw,
+            expected_workspace_locator=(
+                self.context.workspace_locator if current_path else None
+            ),
+            expected_workspace_locator_sha256=(
+                self.context.workspace_locator_sha256 if current_path else None
+            ),
+            selected_authority_root_resolved=self.context.authority_root_resolved,
+            selected_authority_root_resolved_sha256=self.context.authority_root_resolved_sha256,
+        )
+
+    def validate_existing(self) -> bool:
+        """Validate direct or moved/copied root selection without writing."""
+
+        if _path_exists_or_is_link(self.binding_path):
+            bound_id = self._validate_path(self.binding_path, current_path=True)
+            if bound_id != self.workspace_instance_id:
+                raise AuthorityRootSelectionConflictError(
+                    "workspace path is bound to a different immutable workspace identity"
+                )
+            return True
+
+        found_same_identity = False
+        for path in self._iter_selection_records() or ():
+            if path == self.binding_path:
+                continue
+            bound_id = self._validate_path(path, current_path=False)
+            if bound_id == self.workspace_instance_id:
+                found_same_identity = True
+        return found_same_identity
 
     def ensure_bound(self) -> None:
         """Durably reserve this workspace path for the selected authority root."""
 
-        if self.validate_existing():
+        if _path_exists_or_is_link(self.binding_path):
+            if not self.validate_existing():
+                raise AuthorityRootSelectionIntegrityError(
+                    "authority-root binding disappeared during validation"
+                )
             return
+
+        # An existing receipt for this immutable workspace identity, even at a
+        # moved/copied path, must agree on the physical root before a new alias is
+        # registered.  validate_existing() performs that check.
+        self.validate_existing()
         try:
             _durable_exclusive_json_create(
                 self.binding_path,
-                self._payload(),
+                self._selection_payload(),
                 lineage_boundary=self.store_root,
             )
         except FileExistsError:
-            self.validate_existing()
+            if not self.validate_existing():
+                raise AuthorityRootSelectionIntegrityError(
+                    "authority-root binding concurrently disappeared"
+                )
         except AuthorityRootSelectionError:
             raise
         except OSError as exc:
             raise AuthorityRootSelectionIntegrityError(
                 "cannot durably persist authority-root selection binding"
+            ) from exc
+
+    def _activation_payload(self, namespace_sha256: str) -> dict[str, object]:
+        namespace_sha = _digest("namespace_sha256", namespace_sha256)
+        unhashed: dict[str, object] = {
+            "schema": NAMESPACE_ACTIVATION_SCHEMA,
+            "schema_version": ROOT_SELECTION_SCHEMA_VERSION,
+            "authority_id": ROOT_SELECTION_AUTHORITY_ID,
+            "workspace_instance_id": self.workspace_instance_id,
+            "namespace_sha256": namespace_sha,
+            "authority_root_resolved": self.context.authority_root_resolved,
+            "authority_root_resolved_sha256": self.context.authority_root_resolved_sha256,
+        }
+        return {**unhashed, "activation_sha256": _payload_hash(unhashed)}
+
+    def validate_namespace_activation(self, namespace_sha256: str) -> bool:
+        namespace_sha = _digest("namespace_sha256", namespace_sha256)
+        path = self.namespace_activation_path(namespace_sha)
+        if not _path_exists_or_is_link(path):
+            return False
+        raw = _read_strict_object(
+            path,
+            expected_keys=_NAMESPACE_ACTIVATION_KEYS,
+            label="authority-root namespace activation",
+        )
+        if (
+            raw["schema"] != NAMESPACE_ACTIVATION_SCHEMA
+            or raw["schema_version"] != ROOT_SELECTION_SCHEMA_VERSION
+            or isinstance(raw["schema_version"], bool)
+            or raw["authority_id"] != ROOT_SELECTION_AUTHORITY_ID
+            or raw["workspace_instance_id"] != self.workspace_instance_id
+            or raw["namespace_sha256"] != namespace_sha
+        ):
+            raise AuthorityRootSelectionIntegrityError(
+                "authority-root namespace activation identity/schema mismatch"
+            )
+        _verify_hash(
+            raw,
+            digest_key="activation_sha256",
+            label="authority-root namespace activation",
+        )
+        resolved = raw["authority_root_resolved"]
+        resolved_sha = raw["authority_root_resolved_sha256"]
+        if (
+            not isinstance(resolved, str)
+            or _digest("authority_root_resolved_sha256", resolved_sha)
+            != hashlib.sha256(resolved.encode("utf-8")).hexdigest()
+        ):
+            raise AuthorityRootSelectionIntegrityError(
+                "authority-root namespace activation root digest mismatch"
+            )
+        if (
+            resolved != self.context.authority_root_resolved
+            or resolved_sha != self.context.authority_root_resolved_sha256
+        ):
+            raise AuthorityRootSelectionConflictError(
+                "authority namespace is activated under a different monotonic root"
+            )
+        return True
+
+    def ensure_namespace_activated(self, namespace_sha256: str) -> None:
+        self.ensure_bound()
+        path = self.namespace_activation_path(namespace_sha256)
+        if self.validate_namespace_activation(namespace_sha256):
+            return
+        try:
+            _durable_exclusive_json_create(
+                path,
+                self._activation_payload(namespace_sha256),
+                lineage_boundary=self.store_root,
+            )
+        except FileExistsError:
+            if not self.validate_namespace_activation(namespace_sha256):
+                raise AuthorityRootSelectionIntegrityError(
+                    "authority-root namespace activation concurrently disappeared"
+                )
+        except AuthorityRootSelectionError:
+            raise
+        except OSError as exc:
+            raise AuthorityRootSelectionIntegrityError(
+                "cannot durably persist authority-root namespace activation"
             ) from exc

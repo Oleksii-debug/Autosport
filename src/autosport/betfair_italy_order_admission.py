@@ -32,9 +32,10 @@ class ItalianLimitAdmissionState(str, Enum):
 class ItalianLimitInstruction:
     """Minimal provider-faithful LIMIT projection needed by the .it rules.
 
-    ``size`` is Betfair's LIMIT ``size``: the backer's stake on both BACK and
-    LAY instructions. ``bet_target_type`` is present only to reject the
-    PAYOUT/BACKERS_PROFIT feature, which is not enabled for the .it exchange.
+    For standard-size orders, ``size`` is Betfair's LIMIT ``size``: the
+    backer's stake on both BACK and LAY instructions. ``bet_target_type`` is
+    carried only so the .it guard can reject PAYOUT/BACKERS_PROFIT before
+    applying standard-size stake/return semantics.
     """
 
     selection_id: int
@@ -139,7 +140,11 @@ def evaluate_italian_limit_batch(
     for index, instruction in enumerate(instructions):
         prefix = f"I{index}:"
         if instruction.bet_target_type is not None:
+            # .it does not support Betfair target sizing. Do not reinterpret
+            # the target-mode numeric fields as standard backer's stake or
+            # synthesize an EUR10k return from semantics that are unavailable.
             reasons.append(prefix + "TARGET_MODE_UNAVAILABLE_IT")
+            continue
 
         if instruction.side == "BACK":
             if instruction.size < BACK_MIN_STAKE_EUR:

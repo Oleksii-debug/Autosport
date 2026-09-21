@@ -736,3 +736,72 @@ def test_supervisor_rejects_drift_finding_from_incompatible_context(tmp_path):
     unchanged = supervisor.status(contextual.run_id)
     assert unchanged.phase is ResearchPhase.HYPOTHESIS
     assert unchanged.bindings == (("model_version_id", "model-2"),)
+
+def test_reference_effective_sample_size_governs_minimum_evidence(tmp_path):
+    baseline = _baseline_window(effective_sample_size=1)
+    current = _current_window(effective_sample_size=2)
+    registry = _registry(
+        tmp_path,
+        baseline_window=baseline,
+        current_window=current,
+    )
+    monitor = DriftMonitor(registry)
+    reference = _reference(
+        monitor,
+        baseline=baseline,
+        min_samples=2,
+    )
+
+    finding = monitor.evaluate(
+        reference.reference_id,
+        current,
+        evaluated_at=EVALUATED_AT,
+    )
+
+    assert finding.state is DriftState.INSUFFICIENT_EVIDENCE
+    assert finding.insufficiency_reason == "REFERENCE_EFFECTIVE_SAMPLE_SIZE"
+    assert finding.absolute_delta_fraction is None
+
+    finding_entry, reference_entry, observation_entry = monitor.require_canonical_finding(
+        finding.finding_id,
+        as_of=EVALUATED_AT,
+    )
+    assert finding_entry.record_id == finding.finding_id
+    assert reference_entry.record_id == reference.reference_id
+    assert observation_entry.record_id == finding.observation_id
+
+
+def test_current_effective_sample_size_governs_minimum_evidence(tmp_path):
+    baseline = _baseline_window(effective_sample_size=2)
+    current = _current_window(effective_sample_size=1)
+    registry = _registry(
+        tmp_path,
+        baseline_window=baseline,
+        current_window=current,
+    )
+    monitor = DriftMonitor(registry)
+    reference = _reference(
+        monitor,
+        baseline=baseline,
+        min_samples=2,
+    )
+
+    finding = monitor.evaluate(
+        reference.reference_id,
+        current,
+        evaluated_at=EVALUATED_AT,
+    )
+
+    assert finding.state is DriftState.INSUFFICIENT_EVIDENCE
+    assert finding.insufficiency_reason == "CURRENT_EFFECTIVE_SAMPLE_SIZE"
+    assert finding.absolute_delta_fraction is None
+
+    stored = registry.get("DriftFinding", finding.finding_id)
+    assert stored is not None
+    assert stored.payload["algorithm_version"] == "autosport.drift.mean-absolute-shift.v2"
+
+    monitor.require_canonical_finding(
+        finding.finding_id,
+        as_of=EVALUATED_AT,
+    )
+

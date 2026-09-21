@@ -9,6 +9,7 @@ from autosport.real_execution_ledger import (
     AcknowledgementStatus,
     ExecutionAction,
     ExecutionPlan,
+    ExecutionLedgerIntegrityError,
     ExternalAcknowledgement,
     RealExecutionLedger,
 )
@@ -142,6 +143,28 @@ class SettlementExecutionBasisTests(unittest.TestCase):
             self.assertEqual(first, restarted)
             self.assertEqual(first.basis_id, restarted.basis_id)
 
+    def test_basis_identity_survives_unrelated_later_ledger_append(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "execution.jsonl"
+            ledger = _ledger(path)
+            first = derive_settlement_execution_basis(ledger, attempt_id="attempt-1")
+            later = ExecutionAction(
+                action_id="action-2", bookmaker_id="book-b", account_id="account-b",
+                event_id="event-b", market_id="market-b", selection_id="selection-b",
+                side="BACK", requested_odds="3", requested_stake="4", quote_id="quote-b",
+                quote_observed_at=T0, expires_at=EXP,
+            )
+            ledger.reserve_plan(ExecutionPlan(
+                plan_id="plan-2", bookmaker_profile_version="profile-v2",
+                decision_id="decision-2", approval_id="approval-2",
+                created_at=T0, actions=(later,),
+            ))
+            after_append = derive_settlement_execution_basis(
+                ledger, attempt_id="attempt-1"
+            )
+            self.assertEqual(first, after_append)
+            self.assertEqual(first.basis_id, after_append.basis_id)
+
     def test_tampered_ledger_fails_before_basis_projection(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "execution.jsonl"
@@ -151,7 +174,7 @@ class SettlementExecutionBasisTests(unittest.TestCase):
                 raw.replace('"accepted_odds":"2.2"', '"accepted_odds":"9.9"'),
                 encoding="utf-8",
             )
-            with self.assertRaises(Exception):
+            with self.assertRaises(ExecutionLedgerIntegrityError):
                 derive_settlement_execution_basis(
                     RealExecutionLedger(path), attempt_id="attempt-1"
                 )

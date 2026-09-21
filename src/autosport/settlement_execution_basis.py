@@ -52,10 +52,12 @@ def _basis_id(payload: dict[str, object]) -> str:
 
 @dataclass(frozen=True, slots=True)
 class SettlementExecutionBasis:
-    """Immutable evidence that settlement economics must use the accepted fill, not quote intent."""
+    """Immutable fill evidence derived from exact durable execution events."""
 
-    ledger_sha256: str
-    ledger_event_count: int
+    plan_event_sha256: str
+    reservation_event_sha256: str
+    acknowledgement_event_sha256: str
+    reconciliation_event_sha256: str | None
     plan_id: str
     action_id: str
     attempt_id: str
@@ -80,8 +82,10 @@ class SettlementExecutionBasis:
         return {
             "schema": "autosport.settlement_execution_basis",
             "schema_version": 1,
-            "ledger_sha256": self.ledger_sha256,
-            "ledger_event_count": self.ledger_event_count,
+            "plan_event_sha256": self.plan_event_sha256,
+            "reservation_event_sha256": self.reservation_event_sha256,
+            "acknowledgement_event_sha256": self.acknowledgement_event_sha256,
+            "reconciliation_event_sha256": self.reconciliation_event_sha256,
             "plan_id": self.plan_id,
             "action_id": self.action_id,
             "attempt_id": self.attempt_id,
@@ -100,6 +104,7 @@ class SettlementExecutionBasis:
             "accepted_odds": _canonical_decimal(self.accepted_odds),
             "accepted_stake": _canonical_decimal(self.accepted_stake),
             "reconciliation_evidence_id": self.reconciliation_evidence_id,
+            "provider_verified": False,
             "real_money_authorized": False,
             "settlement_outcome_authorized": False,
         }
@@ -110,11 +115,12 @@ def derive_settlement_execution_basis(
     *,
     attempt_id: str,
 ) -> SettlementExecutionBasis:
-    """Project one verified terminal fill from the canonical execution ledger.
+    """Project one terminal fill from the canonical verified execution ledger.
 
-    This does not decide a sporting outcome or authorize money movement. It only
-    freezes the economic fill inputs that a separate settlement authority may
-    consume. REJECTED and non-terminal attempts deliberately have no basis.
+    The relevant event-envelope SHA-256 identities, rather than the mutable
+    whole-ledger tail, anchor this projection so later unrelated appends cannot
+    rewrite historical fill identity. This does not decide a sporting outcome,
+    certify provider signatures, or authorize money movement.
     """
 
     if type(ledger) is not RealExecutionLedger:
@@ -122,36 +128,51 @@ def derive_settlement_execution_basis(
     target_attempt = _text(attempt_id, "attempt_id")
 
     snapshot = ledger.verified_snapshot()
-    events: list[dict[str, object]] = []
+    records: list[tuple[str, dict[str, object]]] = []
     for raw_line in snapshot.payload.splitlines():
         try:
             envelope = json.loads(raw_line.decode("utf-8"))
-        except (UnicodeDecodeError, json.JSONDecodeError) as exc:  # pragma: no cover - verified upstream
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:  # pragma: no cover
             raise SettlementExecutionBasisError(
                 "verified execution snapshot could not be decoded"
             ) from exc
-        if type(envelope) is not dict or type(envelope.get("event")) is not dict:
-            raise SettlementExecutionBasisError("verified execution snapshot envelope is invalid")
-        events.append(envelope["event"])
+        if (
+            type(envelope) is not dict
+            or type(envelope.get("sha256")) is not str
+            or type(envelope.get("event")) is not dict
+        ):
+            raise SettlementExecutionBasisError(
+                "verified execution snapshot envelope is invalid"
+            )
+        records.append((envelope["sha256"], envelope["event"]))
 
-    attempt_events = [event for event in events if event.get("attempt_id") == target_attempt]
+    attempt_records = [
+        (digest, event)
+        for digest, event in records
+        if event.get("attempt_id") == target_attempt
+    ]
     reservations = [
-        event
-        for event in attempt_events
-        if event.get("event_type") == EventType.ATTEMPT_RESERVED.value
+        record
+        for record in attempt_records
+        if record[1].get("event_type") == EventType.ATTEMPT_RESERVED.value
     ]
     acknowledgements = [
-        event
-        for event in attempt_events
-        if event.get("event_type") == EventType.EXTERNAL_ACKNOWLEDGEMENT.value
+        record
+        for record in attempt_records
+        if record[1].get("event_type")
+        == EventType.EXTERNAL_ACKNOWLEDGEMENT.value
     ]
     if len(reservations) != 1:
-        raise SettlementExecutionBasisError("settlement basis requires one durable attempt reservation")
+        raise SettlementExecutionBasisError(
+            "settlement basis requires one durable attempt reservation"
+        )
     if len(acknowledgements) != 1:
-        raise SettlementExecutionBasisError("settlement basis requires one terminal acknowledgement")
+        raise SettlementExecutionBasisError(
+            "settlement basis requires one terminal acknowledgement"
+        )
 
-    reservation = reservations[0]
-    acknowledgement_event = acknowledgements[0]
+    reservation_sha256, reservation = reservations[0]
+    acknowledgement_sha256, acknowledgement_event = acknowledgements[0]
     plan_id = _text(reservation.get("plan_id"), "plan_id")
     action_id = _text(reservation.get("action_id"), "action_id")
     if (
@@ -160,44 +181,65 @@ def derive_settlement_execution_basis(
     ):
         raise SettlementExecutionBasisError("acknowledgement execution identity drift")
 
-    plan_events = [
-        event
-        for event in events
+    plan_records = [
+        (digest, event)
+        for digest, event in records
         if event.get("plan_id") == plan_id
         and event.get("event_type") == EventType.PLAN_RESERVED.value
     ]
-    if len(plan_events) != 1:
-        raise SettlementExecutionBasisError("settlement basis requires one durable plan")
+    if len(plan_records) != 1:
+        raise SettlementExecutionBasisError(
+            "settlement basis requires one durable plan"
+        )
+    plan_sha256, plan_event = plan_records[0]
     try:
-        actions = plan_events[0]["payload"]["plan"]["actions"]
+        actions = plan_event["payload"]["plan"]["actions"]
     except (KeyError, TypeError) as exc:
-        raise SettlementExecutionBasisError("durable execution plan payload is invalid") from exc
+        raise SettlementExecutionBasisError(
+            "durable execution plan payload is invalid"
+        ) from exc
     if type(actions) is not list:
-        raise SettlementExecutionBasisError("durable execution plan actions are invalid")
+        raise SettlementExecutionBasisError(
+            "durable execution plan actions are invalid"
+        )
     matching_actions = [
-        action for action in actions
+        action
+        for action in actions
         if type(action) is dict and action.get("action_id") == action_id
     ]
     if len(matching_actions) != 1:
-        raise SettlementExecutionBasisError("settlement basis action is not unique in durable plan")
+        raise SettlementExecutionBasisError(
+            "settlement basis action is not unique in durable plan"
+        )
     action = matching_actions[0]
 
     payload = acknowledgement_event.get("payload")
     if type(payload) is not dict:
-        raise SettlementExecutionBasisError("durable acknowledgement payload is invalid")
+        raise SettlementExecutionBasisError(
+            "durable acknowledgement payload is invalid"
+        )
     try:
         status = AcknowledgementStatus(payload["status"])
     except (KeyError, ValueError) as exc:
-        raise SettlementExecutionBasisError("durable acknowledgement status is invalid") from exc
-    if status not in {AcknowledgementStatus.ACCEPTED, AcknowledgementStatus.PARTIAL}:
-        raise SettlementExecutionBasisError("rejected execution has no settlement fill basis")
+        raise SettlementExecutionBasisError(
+            "durable acknowledgement status is invalid"
+        ) from exc
+    if status not in {
+        AcknowledgementStatus.ACCEPTED,
+        AcknowledgementStatus.PARTIAL,
+    }:
+        raise SettlementExecutionBasisError(
+            "rejected execution has no settlement fill basis"
+        )
 
     accepted_odds = _decimal(payload.get("accepted_odds"), "accepted_odds")
     accepted_stake = _decimal(payload.get("accepted_stake"), "accepted_stake")
     requested_odds = _decimal(action.get("requested_odds"), "requested_odds")
     requested_stake = _decimal(action.get("requested_stake"), "requested_stake")
     if accepted_stake > requested_stake:
-        raise SettlementExecutionBasisError("accepted_stake exceeds durable requested_stake")
+        raise SettlementExecutionBasisError(
+            "accepted_stake exceeds durable requested_stake"
+        )
 
     fields = {
         name: _text(action.get(name), name)
@@ -211,19 +253,36 @@ def derive_settlement_execution_basis(
             "quote_id",
         )
     }
-    external_receipt_id = _text(payload.get("external_receipt_id"), "external_receipt_id")
+    external_receipt_id = _text(
+        payload.get("external_receipt_id"), "external_receipt_id"
+    )
     acknowledged_at = _text(payload.get("acknowledged_at"), "acknowledged_at")
     reconciliation_evidence_id = payload.get("reconciliation_evidence_id")
+    reconciliation_sha256: str | None = None
     if reconciliation_evidence_id is not None:
         reconciliation_evidence_id = _text(
             reconciliation_evidence_id, "reconciliation_evidence_id"
         )
+        matches = [
+            (digest, event)
+            for digest, event in attempt_records
+            if event.get("event_type") == EventType.RECONCILED_FOUND.value
+            and type(event.get("payload")) is dict
+            and event["payload"].get("evidence_id") == reconciliation_evidence_id
+        ]
+        if len(matches) != 1:
+            raise SettlementExecutionBasisError(
+                "reconciled acknowledgement lacks one exact evidence event"
+            )
+        reconciliation_sha256 = matches[0][0]
 
     identity_payload: dict[str, object] = {
         "schema": "autosport.settlement_execution_basis",
         "schema_version": 1,
-        "ledger_sha256": snapshot.sha256,
-        "ledger_event_count": snapshot.event_count,
+        "plan_event_sha256": plan_sha256,
+        "reservation_event_sha256": reservation_sha256,
+        "acknowledgement_event_sha256": acknowledgement_sha256,
+        "reconciliation_event_sha256": reconciliation_sha256,
         "plan_id": plan_id,
         "action_id": action_id,
         "attempt_id": target_attempt,
@@ -236,12 +295,15 @@ def derive_settlement_execution_basis(
         "accepted_odds": _canonical_decimal(accepted_odds),
         "accepted_stake": _canonical_decimal(accepted_stake),
         "reconciliation_evidence_id": reconciliation_evidence_id,
+        "provider_verified": False,
         "real_money_authorized": False,
         "settlement_outcome_authorized": False,
     }
     return SettlementExecutionBasis(
-        ledger_sha256=snapshot.sha256,
-        ledger_event_count=snapshot.event_count,
+        plan_event_sha256=plan_sha256,
+        reservation_event_sha256=reservation_sha256,
+        acknowledgement_event_sha256=acknowledgement_sha256,
+        reconciliation_event_sha256=reconciliation_sha256,
         plan_id=plan_id,
         action_id=action_id,
         attempt_id=target_attempt,

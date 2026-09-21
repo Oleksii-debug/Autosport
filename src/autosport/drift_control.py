@@ -21,7 +21,11 @@ from .scientific_registry import RegistryEntry, ScientificRegistry
 
 
 DRIFT_SCHEMA_VERSION = 1
-DRIFT_ALGORITHM_VERSION = "autosport.drift.mean-absolute-shift.v1"
+LEGACY_DRIFT_ALGORITHM_VERSION_V1 = "autosport.drift.mean-absolute-shift.v1"
+DRIFT_ALGORITHM_VERSION = "autosport.drift.mean-absolute-shift.v2"
+_SUPPORTED_DRIFT_ALGORITHM_VERSIONS = frozenset(
+    (LEGACY_DRIFT_ALGORITHM_VERSION_V1, DRIFT_ALGORITHM_VERSION)
+)
 _HEX = frozenset("0123456789abcdef")
 
 
@@ -170,6 +174,15 @@ def _canonical_effective_sample_size(
     if value > sample_count:
         raise ValueError("effective_sample_size cannot exceed sample_count")
     return value
+
+
+def _admission_sample_count(
+    sample_count: int,
+    effective_sample_size: int | None,
+) -> int:
+    """Return the statistically admissible count for minimum-evidence gates."""
+
+    return sample_count if effective_sample_size is None else effective_sample_size
 
 
 def _window_evidence_sha256(
@@ -1056,11 +1069,39 @@ class DriftMonitor:
         if isinstance(baseline_count, bool) or not isinstance(baseline_count, int):
             raise DriftLineageError("drift reference has invalid sample_count")
 
+        baseline_effective_sample_size = reference.get("effective_sample_size")
+        try:
+            baseline_effective_sample_size = _canonical_effective_sample_size(
+                baseline_effective_sample_size,
+                baseline_count,
+            )
+        except ValueError as exc:
+            raise DriftLineageError(
+                "drift reference has invalid effective_sample_size"
+            ) from exc
+
+        baseline_admission_count = _admission_sample_count(
+            baseline_count,
+            baseline_effective_sample_size,
+        )
+        current_admission_count = _admission_sample_count(
+            current.sample_count,
+            current.effective_sample_size,
+        )
+
         insufficiency_reason: str | None = None
-        if baseline_count < min_samples:
-            insufficiency_reason = "REFERENCE_SAMPLE_COUNT"
-        elif current.sample_count < min_samples:
-            insufficiency_reason = "CURRENT_SAMPLE_COUNT"
+        if baseline_admission_count < min_samples:
+            insufficiency_reason = (
+                "REFERENCE_EFFECTIVE_SAMPLE_SIZE"
+                if baseline_effective_sample_size is not None
+                else "REFERENCE_SAMPLE_COUNT"
+            )
+        elif current_admission_count < min_samples:
+            insufficiency_reason = (
+                "CURRENT_EFFECTIVE_SAMPLE_SIZE"
+                if current.effective_sample_size is not None
+                else "CURRENT_SAMPLE_COUNT"
+            )
         elif current.source_identity != reference.get("source_identity"):
             insufficiency_reason = "SOURCE_IDENTITY_MISMATCH"
         elif _canonical_scope(
@@ -1152,7 +1193,8 @@ class DriftMonitor:
         finding = finding_entry.payload
         if finding.get("schema_version") != DRIFT_SCHEMA_VERSION:
             raise DriftLineageError("unsupported drift finding schema")
-        if finding.get("algorithm_version") != DRIFT_ALGORITHM_VERSION:
+        algorithm_version = finding.get("algorithm_version")
+        if algorithm_version not in _SUPPORTED_DRIFT_ALGORITHM_VERSIONS:
             raise DriftLineageError("unsupported drift finding algorithm")
         if finding.get("finding_id") != finding_id:
             raise DriftLineageError("drift finding payload identity mismatch")
@@ -1250,7 +1292,7 @@ class DriftMonitor:
         expected_finding_id = _digest(
             {
                 "schema_version": DRIFT_SCHEMA_VERSION,
-                "algorithm_version": DRIFT_ALGORITHM_VERSION,
+                "algorithm_version": algorithm_version,
                 "reference_id": reference_entry.record_id,
                 "observation_id": observation_entry.record_id,
             }
@@ -1282,11 +1324,36 @@ class DriftMonitor:
         ):
             raise DriftLineageError("drift reference sample policy is invalid")
 
+        if algorithm_version == LEGACY_DRIFT_ALGORITHM_VERSION_V1:
+            baseline_admission_count = baseline_count
+            current_admission_count = current.sample_count
+            reference_count_reason = "REFERENCE_SAMPLE_COUNT"
+            current_count_reason = "CURRENT_SAMPLE_COUNT"
+        else:
+            baseline_admission_count = _admission_sample_count(
+                baseline_count,
+                baseline.effective_sample_size,
+            )
+            current_admission_count = _admission_sample_count(
+                current.sample_count,
+                current.effective_sample_size,
+            )
+            reference_count_reason = (
+                "REFERENCE_EFFECTIVE_SAMPLE_SIZE"
+                if baseline.effective_sample_size is not None
+                else "REFERENCE_SAMPLE_COUNT"
+            )
+            current_count_reason = (
+                "CURRENT_EFFECTIVE_SAMPLE_SIZE"
+                if current.effective_sample_size is not None
+                else "CURRENT_SAMPLE_COUNT"
+            )
+
         insufficiency_reason: str | None = None
-        if baseline_count < min_samples:
-            insufficiency_reason = "REFERENCE_SAMPLE_COUNT"
-        elif current.sample_count < min_samples:
-            insufficiency_reason = "CURRENT_SAMPLE_COUNT"
+        if baseline_admission_count < min_samples:
+            insufficiency_reason = reference_count_reason
+        elif current_admission_count < min_samples:
+            insufficiency_reason = current_count_reason
         elif current.source_identity != reference.get("source_identity"):
             insufficiency_reason = "SOURCE_IDENTITY_MISMATCH"
         elif _canonical_scope(
@@ -1342,7 +1409,7 @@ class DriftMonitor:
 
         expected_evidence = _digest(
             {
-                "algorithm_version": DRIFT_ALGORITHM_VERSION,
+                "algorithm_version": algorithm_version,
                 "reference_record_sha256": reference_entry.record_sha256,
                 "observation_record_sha256": observation_entry.record_sha256,
                 "state": state.value,

@@ -7,6 +7,8 @@ from decimal import Decimal
 
 import pytest
 
+import autosport._scientific_registry_read_authority as registry_read_authority
+
 from autosport.monotonic_workspace_authority import MonotonicAuthorityRollbackError
 from autosport.research_multiplicity import (
     ExperimentFamilyMember,
@@ -423,3 +425,180 @@ def test_event_tamper_is_detected_before_authority_acceptance(tmp_path):
     store.path.write_text(json.dumps(payload), encoding="utf-8")
     with pytest.raises(ValueError, match="event digest mismatch"):
         TrialFamilyAccountingStore(store.path, workspace_root=store.workspace_root, authority_root=store.authority_root)
+
+
+def _runtime_registry_attack(monkeypatch, calls: list[str], *, read=True, validate=False, durable_reader=False) -> None:
+    if read:
+        def forged_read(_self):
+            calls.append("read")
+            return {"schema_version": 1, "records": []}
+
+        monkeypatch.setattr(ScientificRegistry, "_read", forged_read)
+
+    if validate:
+        def forged_validate(_entry):
+            calls.append("validate")
+
+        monkeypatch.setattr(
+            ScientificRegistry,
+            "_validate_entry",
+            staticmethod(forged_validate),
+        )
+
+    if durable_reader:
+        def forged_reader(_path):
+            calls.append("durable-reader")
+            return '{"schema_version":1,"records":[]}'
+
+        monkeypatch.setattr(
+            registry_read_authority._integrity,
+            "read_verified_scientific_registry_text",
+            forged_reader,
+        )
+
+
+def test_runtime_read_replacement_cannot_authorize_attempt_start(tmp_path, monkeypatch):
+    registry, _, _, candidate, member, _, store = _foundation(tmp_path)
+    registry_before = registry.path.read_bytes()
+    trial_before = store.path.read_bytes()
+    calls: list[str] = []
+    _runtime_registry_attack(monkeypatch, calls)
+
+    with pytest.raises(RuntimeError, match="ScientificRegistry.*authority|ScientificRegistry.*changed"):
+        store.start_attempt(
+            semantic_attempt_id="runtime-read-attack",
+            member_authority_id=member.member_authority_id,
+            candidate=candidate,
+            created_at=T1,
+        )
+
+    assert calls == []
+    assert registry.path.read_bytes() == registry_before
+    assert store.path.read_bytes() == trial_before
+    assert store.attempts() == ()
+
+
+def test_runtime_validator_replacement_cannot_authorize_completion(tmp_path, monkeypatch):
+    registry, _, bundle, candidate, member, _, store = _foundation(tmp_path)
+    attempt = store.start_attempt(
+        semantic_attempt_id="validator-attack",
+        member_authority_id=member.member_authority_id,
+        candidate=candidate,
+        created_at=T1,
+    )
+    registry.append(bundle)
+    experiment = _experiment(outcome=ResearchOutcome.NEGATIVE)
+    registry.append(experiment)
+
+    registry_before = registry.path.read_bytes()
+    trial_before = store.path.read_bytes()
+    calls: list[str] = []
+    _runtime_registry_attack(monkeypatch, calls, read=False, validate=True)
+
+    with pytest.raises(RuntimeError, match="ScientificRegistry.*authority|ScientificRegistry.*changed"):
+        store.complete_attempt(
+            attempt_id=attempt.attempt_id,
+            experiment_id=experiment.experiment_id,
+            registry=registry,
+        )
+
+    assert calls == []
+    assert registry.path.read_bytes() == registry_before
+    assert store.path.read_bytes() == trial_before
+
+
+def test_runtime_read_validator_and_reader_cosubstitution_cannot_authorize_sequential_write(
+    tmp_path,
+    monkeypatch,
+):
+    registry, _, bundle, candidate, member, plan, store = _foundation(tmp_path)
+    attempt = store.start_attempt(
+        semantic_attempt_id="sequential-runtime-attack",
+        member_authority_id=member.member_authority_id,
+        candidate=candidate,
+        created_at=T1,
+    )
+    registry.append(bundle)
+    experiment = _experiment(outcome=ResearchOutcome.NULL)
+    registry.append(experiment)
+    store.complete_attempt(
+        attempt_id=attempt.attempt_id,
+        experiment_id=experiment.experiment_id,
+        registry=registry,
+    )
+    evidence = _look(plan, member, bundle, experiment, index=1, p="0.5")
+
+    sequential_store = store._sequential()
+    registry_before = registry.path.read_bytes()
+    trial_before = store.path.read_bytes()
+    sequential_before = sequential_store.path.read_bytes()
+    calls: list[str] = []
+    _runtime_registry_attack(
+        monkeypatch,
+        calls,
+        read=True,
+        validate=True,
+        durable_reader=True,
+    )
+
+    with pytest.raises(RuntimeError, match="ScientificRegistry.*authority|ScientificRegistry.*changed"):
+        store.register_sequential_look(
+            attempt_id=attempt.attempt_id,
+            evidence=evidence,
+            registry=registry,
+        )
+
+    assert calls == []
+    assert registry.path.read_bytes() == registry_before
+    assert store.path.read_bytes() == trial_before
+    assert sequential_store.path.read_bytes() == sequential_before
+
+
+def test_runtime_durable_reader_substitution_cannot_authorize_promotion(tmp_path, monkeypatch):
+    registry, _, bundle, candidate, member, plan, store = _foundation(tmp_path)
+    attempt = store.start_attempt(
+        semantic_attempt_id="promotion-runtime-attack",
+        member_authority_id=member.member_authority_id,
+        candidate=candidate,
+        created_at=T1,
+    )
+    registry.append(bundle)
+    experiment = _experiment(outcome=ResearchOutcome.POSITIVE)
+    registry.append(experiment)
+    store.complete_attempt(
+        attempt_id=attempt.attempt_id,
+        experiment_id=experiment.experiment_id,
+        registry=registry,
+    )
+    assert store.register_sequential_look(
+        attempt_id=attempt.attempt_id,
+        evidence=_look(plan, member, bundle, experiment),
+        registry=registry,
+    ) is SequentialDecision.REJECT_NULL
+    evidence = _promotion_evidence(store=store, experiment=experiment, bundle=bundle)
+    registry.append(evidence)
+
+    sequential_store = store._sequential()
+    registry_before = registry.path.read_bytes()
+    trial_before = store.path.read_bytes()
+    sequential_before = sequential_store.path.read_bytes()
+    calls: list[str] = []
+    _runtime_registry_attack(
+        monkeypatch,
+        calls,
+        read=False,
+        validate=False,
+        durable_reader=True,
+    )
+
+    with pytest.raises(RuntimeError, match="ScientificRegistry.*authority|ScientificRegistry.*changed"):
+        store.assert_promotion_evidence_eligible(
+            evidence=evidence,
+            registry=registry,
+            accounted_attempt_count=1,
+        )
+
+    assert calls == []
+    assert registry.path.read_bytes() == registry_before
+    assert store.path.read_bytes() == trial_before
+    assert sequential_store.path.read_bytes() == sequential_before

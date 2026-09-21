@@ -14,7 +14,10 @@ from autosport.campaign_economic_authority import (
     FinalizedCampaignAuthority,
 )
 from autosport.integrity import atomic_write_json
-from autosport.monotonic_workspace_authority import MonotonicAuthorityRollbackError
+from autosport.monotonic_workspace_authority import (
+    MonotonicAuthorityConfigurationError,
+    MonotonicAuthorityRollbackError,
+)
 from autosport.workspace_lock import WorkspaceEconomicLock
 from test_campaign_denomination_runtime import (
     _fixture_authority_with_goal,
@@ -144,6 +147,62 @@ def test_denomination_registry_extensions_reject_rollback_to_preissuance_image(
             match="observed workspace state does not match latest committed authority state",
         ):
             registry._read()
+    finally:
+        fixture.doCleanups()
+
+
+def test_monotonic_root_redirect_cannot_rebootstrap_preissuance_registry_rollback(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monotonic_root_a = tmp_path / "monotonic-authority-a"
+    monotonic_root_b = tmp_path / "monotonic-authority-b"
+    witness_root_a = tmp_path / "denomination-authority-a"
+    witness_root_b = tmp_path / "denomination-authority-b"
+    monkeypatch.setenv("AUTOSPORT_MONOTONIC_AUTHORITY_ROOT", str(monotonic_root_a))
+    monkeypatch.setenv("AUTOSPORT_PAPER_EXECUTION_WITNESS_DIR", str(witness_root_a))
+
+    fixture, authority = _fixture_authority_with_goal(_goal())
+    try:
+        issued = authority.denomination_binding()
+        assert issued is not None
+        registry = authority._registry()
+        current = registry._read()
+        assert "campaign_denomination_bindings" in current
+        assert "campaign_denomination_witness_root" in current
+        assert (
+            fixture.workspace / ".autosport" / "monotonic-authority-root-binding.json"
+        ).is_file()
+
+        rolled_back = dict(current)
+        rolled_back.pop("campaign_denomination_bindings")
+        rolled_back.pop("campaign_denomination_witness_root")
+        encoded = (
+            json.dumps(
+                rolled_back,
+                ensure_ascii=False,
+                indent=2,
+                sort_keys=True,
+                allow_nan=False,
+            )
+            + "\n"
+        ).encode("utf-8")
+        with registry.path.open("wb") as handle:
+            handle.write(encoded)
+            handle.flush()
+            os.fsync(handle.fileno())
+
+        monkeypatch.setenv("AUTOSPORT_MONOTONIC_AUTHORITY_ROOT", str(monotonic_root_b))
+        monkeypatch.setenv("AUTOSPORT_PAPER_EXECUTION_WITNESS_DIR", str(witness_root_b))
+
+        restarted = FinalizedCampaignAuthority(authority._campaign)
+        with pytest.raises(
+            MonotonicAuthorityConfigurationError,
+            match="authority root|authority-root",
+        ):
+            restarted.denomination_binding()
+        assert not list(
+            witness_root_b.glob("*.campaign-denomination-issuance.monotonic-witness.jsonl")
+        )
     finally:
         fixture.doCleanups()
 

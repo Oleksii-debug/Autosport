@@ -23,6 +23,7 @@ from .json_integrity import strict_json_loads
 
 WORKSPACE_BINDING_SCHEMA: Final = "autosport.monotonic_authority.workspace_binding"
 PATH_BINDING_SCHEMA: Final = "autosport.monotonic_authority.workspace_path_binding"
+AUTHORITY_ROOT_BINDING_SCHEMA: Final = "autosport.monotonic_authority.authority_root_binding"
 BINDING_SCHEMA_VERSION: Final = 1
 BINDING_AUTHORITY_ID: Final = "autosport.machine.monotonic.v1"
 
@@ -43,6 +44,17 @@ _PATH_BINDING_KEYS: Final = frozenset(
         "workspace_locator",
         "workspace_locator_sha256",
         "workspace_instance_id",
+        "binding_sha256",
+    }
+)
+_AUTHORITY_ROOT_BINDING_KEYS: Final = frozenset(
+    {
+        "schema",
+        "schema_version",
+        "authority_id",
+        "workspace_instance_id",
+        "authority_root_locator",
+        "authority_root_locator_sha256",
         "binding_sha256",
     }
 )
@@ -114,6 +126,22 @@ def _workspace_locator(workspace: Path) -> str:
             "workspace path for identity binding must be absolute"
         )
     return os.path.normcase(os.path.normpath(str(workspace)))
+
+
+def _authority_root_locator(authority_root: Path) -> str:
+    """Return the resolved machine-root identity pinned by a bound workspace."""
+
+    if not authority_root.is_absolute():
+        raise WorkspaceBindingIntegrityError(
+            "monotonic authority root for identity binding must be absolute"
+        )
+    try:
+        resolved = authority_root.resolve(strict=False)
+    except (OSError, RuntimeError) as exc:
+        raise WorkspaceBindingIntegrityError(
+            "cannot resolve monotonic authority root for identity binding"
+        ) from exc
+    return os.path.normcase(os.path.normpath(str(resolved)))
 
 
 def _fsync_directory(path: Path) -> None:
@@ -246,8 +274,11 @@ class WorkspaceIdentityBinding:
     workspace_instance_id: str
     workspace_marker_path: Path
     path_binding_path: Path
+    authority_root_binding_path: Path
     workspace_locator: str
     workspace_locator_sha256: str
+    authority_root_locator: str
+    authority_root_locator_sha256: str
 
     @classmethod
     def resolve(
@@ -264,7 +295,12 @@ class WorkspaceIdentityBinding:
         )
         locator = _workspace_locator(workspace)
         locator_sha = hashlib.sha256(locator.encode("utf-8")).hexdigest()
+        root_locator = _authority_root_locator(authority_root)
+        root_locator_sha = hashlib.sha256(root_locator.encode("utf-8")).hexdigest()
         workspace_marker = workspace / ".autosport" / "monotonic-workspace-binding.json"
+        authority_root_binding = (
+            workspace / ".autosport" / "monotonic-authority-root-binding.json"
+        )
         path_binding = (
             authority_root
             / "workspace-bindings"
@@ -278,10 +314,23 @@ class WorkspaceIdentityBinding:
             expected_locator=locator,
             expected_locator_sha=locator_sha,
         )
-        durable_ids = {value for value in (workspace_id, path_id) if value is not None}
+        root_id = cls._read_authority_root_binding_id(
+            authority_root_binding,
+            expected_locator=root_locator,
+            expected_locator_sha=root_locator_sha,
+        )
+        if workspace_id is not None and path_id is None and root_id is None:
+            raise WorkspaceBindingConflictError(
+                "bound workspace is missing authority-root binding for the selected "
+                "monotonic authority root"
+            )
+        durable_ids = {
+            value for value in (workspace_id, path_id, root_id) if value is not None
+        }
         if len(durable_ids) > 1:
             raise WorkspaceBindingConflictError(
-                "workspace marker and machine path binding disagree on instance identity"
+                "workspace, machine path, and authority-root bindings disagree on "
+                "instance identity"
             )
         durable_id = next(iter(durable_ids), None)
         if requested is not None and durable_id is not None and requested != durable_id:
@@ -295,8 +344,11 @@ class WorkspaceIdentityBinding:
             workspace_instance_id=resolved_id,
             workspace_marker_path=workspace_marker,
             path_binding_path=path_binding,
+            authority_root_binding_path=authority_root_binding,
             workspace_locator=locator,
             workspace_locator_sha256=locator_sha,
+            authority_root_locator=root_locator,
+            authority_root_locator_sha256=root_locator_sha,
         )
 
     @staticmethod
@@ -340,12 +392,52 @@ class WorkspaceIdentityBinding:
         _verify_binding_hash(raw)
         return _canonical_instance_id(raw["workspace_instance_id"])
 
+    @staticmethod
+    def _read_authority_root_binding_id(
+        path: Path,
+        *,
+        expected_locator: str,
+        expected_locator_sha: str,
+    ) -> str | None:
+        if not path.exists():
+            return None
+        raw = _read_strict_object(path, _AUTHORITY_ROOT_BINDING_KEYS)
+        if (
+            raw["schema"] != AUTHORITY_ROOT_BINDING_SCHEMA
+            or raw["schema_version"] != BINDING_SCHEMA_VERSION
+            or isinstance(raw["schema_version"], bool)
+            or raw["authority_id"] != BINDING_AUTHORITY_ID
+            or type(raw["authority_root_locator"]) is not str
+            or type(raw["authority_root_locator_sha256"]) is not str
+        ):
+            raise WorkspaceBindingIntegrityError(
+                "workspace authority-root binding identity/schema mismatch"
+            )
+        _verify_binding_hash(raw)
+        locator = raw["authority_root_locator"]
+        locator_sha = raw["authority_root_locator_sha256"]
+        if hashlib.sha256(locator.encode("utf-8")).hexdigest() != locator_sha:
+            raise WorkspaceBindingIntegrityError(
+                "workspace authority-root locator digest mismatch"
+            )
+        if locator != expected_locator or locator_sha != expected_locator_sha:
+            raise WorkspaceBindingConflictError(
+                "configured monotonic authority root conflicts with immutable "
+                "workspace authority-root binding"
+            )
+        return _canonical_instance_id(raw["workspace_instance_id"])
+
     def validate_existing(self, *, register_moved_or_copied_path: bool = True) -> tuple[bool, bool]:
         workspace_id = self._read_workspace_marker_id(self.workspace_marker_path)
         path_id = self._read_path_binding_id(
             self.path_binding_path,
             expected_locator=self.workspace_locator,
             expected_locator_sha=self.workspace_locator_sha256,
+        )
+        root_id = self._read_authority_root_binding_id(
+            self.authority_root_binding_path,
+            expected_locator=self.authority_root_locator,
+            expected_locator_sha=self.authority_root_locator_sha256,
         )
         if workspace_id is not None and workspace_id != self.workspace_instance_id:
             raise WorkspaceBindingConflictError(
@@ -355,9 +447,25 @@ class WorkspaceIdentityBinding:
             raise WorkspaceBindingConflictError(
                 "machine path binding reserves this workspace path for another identity"
             )
+        if root_id is not None and root_id != self.workspace_instance_id:
+            raise WorkspaceBindingConflictError(
+                "workspace authority-root binding belongs to another instance identity"
+            )
+        if root_id is None:
+            if (
+                workspace_id == self.workspace_instance_id
+                and path_id == self.workspace_instance_id
+            ):
+                self._ensure_authority_root_binding()
+                root_id = self.workspace_instance_id
+            elif workspace_id == self.workspace_instance_id and path_id is None:
+                raise WorkspaceBindingConflictError(
+                    "bound workspace cannot attach to an unproven monotonic authority root"
+                )
         if (
             register_moved_or_copied_path
             and workspace_id == self.workspace_instance_id
+            and root_id == self.workspace_instance_id
             and path_id is None
         ):
             self._ensure_path_binding()
@@ -365,9 +473,10 @@ class WorkspaceIdentityBinding:
         return workspace_id is not None, path_id is not None
 
     def ensure_bound(self) -> None:
-        """Durably bind this pristine workspace path and local marker to one identity."""
+        """Durably bind this workspace identity to one machine authority root."""
         self._ensure_path_binding()
         self._ensure_workspace_marker()
+        self._ensure_authority_root_binding()
 
     def _workspace_payload(self) -> dict[str, object]:
         unhashed: dict[str, object] = {
@@ -386,6 +495,17 @@ class WorkspaceIdentityBinding:
             "workspace_locator": self.workspace_locator,
             "workspace_locator_sha256": self.workspace_locator_sha256,
             "workspace_instance_id": self.workspace_instance_id,
+        }
+        return {**unhashed, "binding_sha256": _payload_hash(unhashed)}
+
+    def _authority_root_payload(self) -> dict[str, object]:
+        unhashed: dict[str, object] = {
+            "schema": AUTHORITY_ROOT_BINDING_SCHEMA,
+            "schema_version": BINDING_SCHEMA_VERSION,
+            "authority_id": BINDING_AUTHORITY_ID,
+            "workspace_instance_id": self.workspace_instance_id,
+            "authority_root_locator": self.authority_root_locator,
+            "authority_root_locator_sha256": self.authority_root_locator_sha256,
         }
         return {**unhashed, "binding_sha256": _payload_hash(unhashed)}
 
@@ -410,6 +530,37 @@ class WorkspaceIdentityBinding:
             if existing != self.workspace_instance_id:
                 raise WorkspaceBindingConflictError(
                     "workspace marker concurrently bound to another identity"
+                )
+
+    def _ensure_authority_root_binding(self) -> None:
+        existing = self._read_authority_root_binding_id(
+            self.authority_root_binding_path,
+            expected_locator=self.authority_root_locator,
+            expected_locator_sha=self.authority_root_locator_sha256,
+        )
+        if existing is not None:
+            if existing != self.workspace_instance_id:
+                raise WorkspaceBindingConflictError(
+                    "workspace authority-root binding conflicts with immutable "
+                    "instance identity"
+                )
+            return
+        self.workspace.mkdir(parents=True, exist_ok=True)
+        try:
+            _durable_exclusive_json_create(
+                self.authority_root_binding_path,
+                self._authority_root_payload(),
+                lineage_boundary=self.workspace,
+            )
+        except FileExistsError:
+            existing = self._read_authority_root_binding_id(
+                self.authority_root_binding_path,
+                expected_locator=self.authority_root_locator,
+                expected_locator_sha=self.authority_root_locator_sha256,
+            )
+            if existing != self.workspace_instance_id:
+                raise WorkspaceBindingConflictError(
+                    "workspace authority-root binding was concurrently changed"
                 )
 
     def _ensure_path_binding(self) -> None:

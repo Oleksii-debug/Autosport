@@ -1,8 +1,8 @@
 """Typed, non-authoritative ablation experiment contracts.
 
-This module identifies *controlled intervention sets*.  It does not promote a
+This module identifies controlled intervention sets. It does not promote a
 strategy, decompose realized reward, authorize execution, or infer that a
-multi-factor contrast is additive.  Promotion/economic authorities remain in
+multi-factor contrast is additive. Promotion/economic authorities remain in
 their existing modules.
 """
 
@@ -305,9 +305,10 @@ class AblationProtocol:
 
 @dataclass(frozen=True, slots=True)
 class AblationCellObservation:
-    """One exact run/evidence result for a preregistered ablation cell."""
+    """One exact run result bound to one exact frozen ablation protocol."""
 
     cell_id: str
+    protocol_sha256: str
     cell_spec_sha256: str
     run_evidence_sha256: str
     metric_value: Decimal
@@ -315,6 +316,11 @@ class AblationCellObservation:
 
     def __post_init__(self) -> None:
         _text(self.cell_id, "cell_id")
+        object.__setattr__(
+            self,
+            "protocol_sha256",
+            _sha256(self.protocol_sha256, "protocol_sha256"),
+        )
         object.__setattr__(
             self,
             "cell_spec_sha256",
@@ -335,6 +341,7 @@ class AblationCellObservation:
     def to_dict(self) -> dict[str, object]:
         return {
             "cell_id": self.cell_id,
+            "protocol_sha256": self.protocol_sha256,
             "cell_spec_sha256": self.cell_spec_sha256,
             "run_evidence_sha256": self.run_evidence_sha256,
             "metric_value": _decimal_text(self.metric_value),
@@ -427,7 +434,7 @@ def evaluate_ablation(
     *,
     evaluated_at: str,
 ) -> AblationReport:
-    """Evaluate only exact preregistered contrasts; never infer missing contributions."""
+    """Evaluate exact preregistered contrasts under their frozen protocol only."""
 
     if not isinstance(protocol, AblationProtocol):
         raise TypeError("protocol must be AblationProtocol")
@@ -441,6 +448,7 @@ def evaluate_ablation(
         isinstance(value, AblationCellObservation) for value in values
     ):
         raise ValueError("observations must contain AblationCellObservation values")
+
     by_cell: dict[str, AblationCellObservation] = {}
     evidence_ids: set[str] = set()
     for value in values:
@@ -459,12 +467,17 @@ def evaluate_ablation(
         missing = sorted(expected_ids - set(by_cell))
         extra = sorted(set(by_cell) - expected_ids)
         raise ValueError(
-            f"ablation observation matrix is incomplete or unexpected: "
+            "ablation observation matrix is incomplete or unexpected: "
             f"missing={missing} extra={extra}"
         )
 
+    expected_protocol_sha256 = protocol.protocol_sha256
     for cell in cells:
         observation = by_cell[cell.cell_id]
+        if observation.protocol_sha256 != expected_protocol_sha256:
+            raise ValueError(
+                f"ablation observation protocol mismatch: {cell.cell_id}"
+            )
         if observation.cell_spec_sha256 != cell.spec_sha256:
             raise ValueError(
                 f"ablation observation cell specification mismatch: {cell.cell_id}"
@@ -486,7 +499,7 @@ def evaluate_ablation(
         for cell in protocol.interventions
     )
     return AblationReport(
-        protocol_sha256=protocol.protocol_sha256,
+        protocol_sha256=expected_protocol_sha256,
         scientific_protocol_sha256=protocol.scientific_protocol_sha256,
         case_population_sha256=protocol.case_population_sha256,
         mode=protocol.mode,

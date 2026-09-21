@@ -32,6 +32,15 @@ class _RegisteredEvaluationOrigin:
     protocol_sha256: str
 
 
+# Capture the concrete class read surface when this product adapter is imported.
+# Positive provenance must never dispatch through caller-installed instance shadows
+# or a later runtime class rebind. The registry remains the sole storage authority;
+# these references only fence the executable read path used by this adapter.
+_SCIENTIFIC_REGISTRY_GET = ScientificRegistry.get
+_SCIENTIFIC_REGISTRY_READ = ScientificRegistry._read
+_SCIENTIFIC_REGISTRY_VALIDATE_ENTRY = ScientificRegistry._validate_entry
+
+
 def _text(value: object, field: str) -> str:
     if type(value) is not str or not value or value != value.strip() or "\x00" in value:
         raise ExternalValidityRegistryError(
@@ -60,18 +69,46 @@ def _instant(value: object, field: str) -> datetime:
 
 
 def _require_exact_registry_authority(registry: object) -> ScientificRegistry:
-    """Return only the canonical durable registry implementation.
+    """Return only an unshadowed canonical durable registry implementation.
 
-    Registry subclasses are deliberately rejected.  External-validity provenance
-    is scientific evidence, so accepting an overrideable ``get`` method here would
-    create a second, spoofable read authority beside the durable registry itself.
+    Registry subclasses are deliberately rejected. Exact instances are also
+    required to retain only their canonical ``path`` state: Python otherwise lets a
+    caller shadow ``_read``/``get``/``_validate_entry`` on the instance and synthesize
+    registry truth even when the class itself is canonical. Finally, the concrete
+    class functions captured at adapter import must still be installed before any
+    authority-bearing read occurs.
     """
 
     if type(registry) is not ScientificRegistry:
         raise ExternalValidityRegistryError(
             "registry must be the exact ScientificRegistry authority"
         )
+
+    instance_state = vars(registry)
+    if set(instance_state) != {"path"}:
+        raise ExternalValidityRegistryError(
+            "ScientificRegistry instance read authority was rebound"
+        )
+    if (
+        ScientificRegistry.get is not _SCIENTIFIC_REGISTRY_GET
+        or ScientificRegistry._read is not _SCIENTIFIC_REGISTRY_READ
+        or ScientificRegistry._validate_entry is not _SCIENTIFIC_REGISTRY_VALIDATE_ENTRY
+    ):
+        raise ExternalValidityRegistryError(
+            "ScientificRegistry executable read authority was rebound"
+        )
     return registry
+
+
+def _registry_get(
+    registry: ScientificRegistry,
+    record_type: str,
+    record_id: str,
+):
+    """Read through the captured concrete capability after authority validation."""
+
+    canonical_registry = _require_exact_registry_authority(registry)
+    return _SCIENTIFIC_REGISTRY_GET(canonical_registry, record_type, record_id)
 
 
 def _resolve_registered_origin(
@@ -83,7 +120,7 @@ def _resolve_registered_origin(
 ) -> _RegisteredEvaluationOrigin:
     canonical_registry = _require_exact_registry_authority(registry)
     bundle_id = _text(evaluation_bundle_id, "evaluation_bundle_id")
-    bundle = ScientificRegistry.get(canonical_registry, "EvaluationBundle", bundle_id)
+    bundle = _registry_get(canonical_registry, "EvaluationBundle", bundle_id)
     if bundle is None:
         raise ExternalValidityRegistryError(
             f"{evaluation.policy_id}: registered EvaluationBundle is missing: {bundle_id}"
@@ -105,7 +142,7 @@ def _resolve_registered_origin(
         payload.get("protocol_sha256"), "EvaluationBundle.protocol_sha256"
     )
 
-    dataset = ScientificRegistry.get(
+    dataset = _registry_get(
         canonical_registry, "DatasetSnapshot", dataset_snapshot_id
     )
     if dataset is None:
@@ -151,7 +188,7 @@ def build_registered_external_validity_report(
 ) -> ExternalValidityReport:
     """Build a frozen baseline report only from durable registered evaluations.
 
-    `PolicyEvaluation` remains the comparison DTO.  This function supplies no
+    `PolicyEvaluation` remains the comparison DTO. This function supplies no
     new evaluation, ranking, significance, promotion, or execution authority;
     it only proves that each supported DTO refers to an already-durable bundle
     and that all compared bundles share one registered dataset/protocol origin.

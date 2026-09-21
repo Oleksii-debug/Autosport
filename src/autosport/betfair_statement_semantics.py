@@ -128,7 +128,7 @@ def _decode_unknown_statement_item(raw: str) -> Mapping[str, object]:
         raise BetfairStatementSemanticError(
             "unknownStatementItem is not valid JSON"
         ) from exc
-    if not isinstance(decoded, Mapping) or any(
+    if type(decoded) is not dict or any(
         type(key) is not str for key in decoded
     ):
         raise BetfairStatementSemanticError(
@@ -251,11 +251,11 @@ def classify_betfair_statement_item(
         raise TypeError(
             "row must be exact BetfairAccountStatementItemObservation"
         )
-    if not isinstance(item_class_data, Mapping) or any(
+    if type(item_class_data) is not dict or any(
         type(key) is not str for key in item_class_data
     ):
         raise BetfairStatementSemanticError(
-            "item_class_data must be a JSON object"
+            "item_class_data must be an exact JSON object"
         )
     if _canonical_sha256(item_class_data) != row.item_class_data_sha256:
         raise BetfairStatementSemanticError(
@@ -278,9 +278,15 @@ def classify_betfair_statement_item(
             raise BetfairStatementSemanticError(
                 "unknownStatementItem must be non-empty JSON text"
             )
-        nested = _decode_unknown_statement_item(nested_raw)
-        transaction_type = _optional_semantic_text(nested.get("transactionType"))
-        win_lose = _optional_semantic_text(nested.get("winLose"))
+        try:
+            nested = _decode_unknown_statement_item(nested_raw)
+        except BetfairStatementSemanticError:
+            nested = None
+        if nested is not None:
+            transaction_type = _optional_semantic_text(
+                nested.get("transactionType")
+            )
+            win_lose = _optional_semantic_text(nested.get("winLose"))
 
         if (
             transaction_type in _KNOWN_TRANSACTION_TYPES

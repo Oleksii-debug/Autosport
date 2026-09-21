@@ -6,7 +6,12 @@ cross-ledger publisher is the only supported writer because it first proves exac
 durable native sequential evidence and captures the canonical registry prefix under
 the shared workspace lock.
 
-Keep the pre-guard append capability closure-local. A module-global reference would
+Promotion eligibility also composes trial-family, sequential, and registry truth.
+Keep that entire cross-ledger assertion under the same workspace lock so a normal
+concurrent attempt publication cannot land between its precondition read and witness
+re-resolution.
+
+Keep the pre-guard capabilities closure-local. A module-global reference would
 itself be an importable authority bypass once the reserved event kind is recognized
 by replay.
 """
@@ -17,10 +22,14 @@ from typing import Any, Callable
 
 from . import trial_family_accounting as _tfa
 from . import _trial_family_cross_ledger_witness as _witness
+from .workspace_lock import WorkspaceEconomicLock
 
 
 def _install_reserved_witness_mint_guard() -> None:
     original_append_event = _tfa.TrialFamilyAccountingStore._append_event
+    original_assert_promotion = (
+        _tfa.TrialFamilyAccountingStore.assert_promotion_evidence_eligible
+    )
 
     def append_event_without_reserved_witness_mint(
         self: _tfa.TrialFamilyAccountingStore,
@@ -42,7 +51,29 @@ def _install_reserved_witness_mint_guard() -> None:
             locked_payload_factory=locked_payload_factory,
         )
 
+    def assert_promotion_evidence_eligible_linearized(
+        self: _tfa.TrialFamilyAccountingStore,
+        *,
+        evidence: Any,
+        registry: Any,
+        accounted_attempt_count: int,
+    ) -> _tfa.TrialFamilySnapshot:
+        # The wrapped cross-ledger assertion performs multiple authority reads by
+        # design. Serialize the whole composition, not merely each individual read,
+        # so public writers using the same workspace lock cannot create a TOCTOU
+        # between the attempt-count/open-attempt check and witness verification.
+        with WorkspaceEconomicLock(self.workspace_root):
+            return original_assert_promotion(
+                self,
+                evidence=evidence,
+                registry=registry,
+                accounted_attempt_count=accounted_attempt_count,
+            )
+
     _tfa.TrialFamilyAccountingStore._append_event = append_event_without_reserved_witness_mint
+    _tfa.TrialFamilyAccountingStore.assert_promotion_evidence_eligible = (
+        assert_promotion_evidence_eligible_linearized
+    )
 
 
 _install_reserved_witness_mint_guard()

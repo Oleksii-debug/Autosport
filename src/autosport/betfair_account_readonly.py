@@ -915,8 +915,7 @@ def _provider_error_code(data: object) -> str | None:
     if len(present) != 1:
         return None
     exception_key = present[0]
-    declared_exception = data.get("exceptionname")
-    if declared_exception is not None and declared_exception != exception_key:
+    if "exceptionname" in data and data["exceptionname"] != exception_key:
         return None
     exception = data[exception_key]
     if not isinstance(exception, Mapping):

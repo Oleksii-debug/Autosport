@@ -784,6 +784,8 @@ def _parse_place_orders_response(
             str(echoed_selection) == action.selection_id
             and echoed.get("side") == action.side
             and echoed.get("orderType") == "LIMIT"
+            and echoed.get("handicap") == 0
+            and limit.get("persistenceType") == "LAPSE"
             and _positive_decimal(
                 limit.get("price"),
                 "echoed price",

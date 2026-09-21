@@ -174,7 +174,7 @@ def run_product(
     # appending startup, closing the check-to-append race fail-closed.
     verify_journal(journal_path)
     runtime = build_autonomous_product_runtime(
-        workspace=workspace_path,
+        workspace=workspace,
         source=source,
         initial_bankroll=initial_bankroll,
     )

@@ -62,7 +62,7 @@ def snapshot() -> MarketBookSnapshot:
         received_at=NOW - timedelta(milliseconds=100),
         sequence=99,
         has_ordering_gap=False,
-        available_to_back=(
+        available_to_lay=(
             PriceSize(Decimal("2.10"), Decimal("5")),
             PriceSize(Decimal("2.04"), Decimal("4")),
             PriceSize(Decimal("2.00"), Decimal("6")),
@@ -117,6 +117,22 @@ def test_worse_than_limit_price_is_not_counted() -> None:
     assert result.reasons == ("DISPLAYED_DEPTH_INSUFFICIENT",)
 
 
+def test_back_limit_consumes_opposing_available_to_lay_depth() -> None:
+    book = replace(
+        snapshot(),
+        available_to_lay=(
+            PriceSize(Decimal("2.10"), Decimal("3")),
+            PriceSize(Decimal("1.99"), Decimal("100")),
+        ),
+    )
+
+    result = assess(book=book)
+
+    assert result.state is FeasibilityState.DISPLAYED_DEPTH_AT_SNAPSHOT
+    assert result.displayed_acceptable_depth == Decimal("3")
+    assert result.reasons == ("DISPLAYED_DEPTH_INSUFFICIENT",)
+
+
 @pytest.mark.parametrize(
     ("book", "reason"),
     [
@@ -128,6 +144,10 @@ def test_worse_than_limit_price_is_not_counted() -> None:
         (
             replace(snapshot(), observed_at=NOW + timedelta(milliseconds=1)),
             "FUTURE_SNAPSHOT",
+        ),
+        (
+            replace(snapshot(), received_at=NOW + timedelta(milliseconds=1)),
+            "RECEIVED_AFTER_DECISION",
         ),
         (replace(snapshot(), has_ordering_gap=True), "SNAPSHOT_ORDERING_GAP"),
         (replace(snapshot(), status="SUSPENDED"), "MARKET_NOT_OPEN"),
@@ -218,6 +238,22 @@ def test_evidence_digest_changes_when_causal_evidence_changes() -> None:
     first = assess()
     second = assess(
         book=replace(snapshot(), sequence=100, snapshot_digest="book-digest-2")
+    )
+
+    assert first.evidence_digest != second.evidence_digest
+
+
+def test_evidence_digest_binds_opposing_lay_ladder() -> None:
+    first = assess()
+    second = assess(
+        book=replace(
+            snapshot(),
+            available_to_lay=(
+                PriceSize(Decimal("2.10"), Decimal("4")),
+                PriceSize(Decimal("2.04"), Decimal("4")),
+                PriceSize(Decimal("2.00"), Decimal("6")),
+            ),
+        )
     )
 
     assert first.evidence_digest != second.evidence_digest

@@ -168,9 +168,6 @@ def test_rewriting_legacy_trusted_snapshot_cannot_authorize_forged_record(
             available_at=snapshot.available_at_utc,
         )
 
-    # Regression for review 5753770344: a caller-visible expected-value dict must
-    # not be the trust root.  Creating/rewriting the old name has no effect because
-    # the live expected identities are closure-owned.
     monkeypatch.setattr(
         seal,
         "_TRUSTED_LINEAGE_NAMESPACE",
@@ -255,3 +252,47 @@ def test_removing_public_reload_finder_does_not_drop_seal(
     finally:
         sys.meta_path[:] = original_meta_path
         seal._install_reload_finders()
+
+
+def test_rebinding_seal_module_aliases_cannot_redirect_live_guard(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    ledger, snapshot, _ = _canonical_holdout(tmp_path, monkeypatch)
+    dispatched = False
+
+    def forged_record(self, snapshot_id: str):
+        nonlocal dispatched
+        dispatched = True
+        return SimpleNamespace(
+            snapshot_id=snapshot_id,
+            manifest_sha256=snapshot.manifest_sha256,
+            source_identity=snapshot.source_identity,
+            license_identity=snapshot.license_identity,
+            causal_cutoff=snapshot.causal_cutoff,
+            available_at=snapshot.available_at_utc,
+        )
+
+    monkeypatch.setattr(seal, "repair", SimpleNamespace(), raising=False)
+    monkeypatch.setattr(seal, "DatasetSnapshotLineageAuthority", object, raising=False)
+    monkeypatch.setattr(seal, "ScientificRegistry", object, raising=False)
+    monkeypatch.setattr(seal, "sys", SimpleNamespace(meta_path=[]), raising=False)
+    monkeypatch.setattr(seal, "importlib", SimpleNamespace(), raising=False)
+    monkeypatch.setattr(DatasetSnapshotLineageAuthority, "record", forged_record)
+
+    with pytest.raises(
+        evidence.PointInTimeEvidenceError,
+        match="trusted DatasetSnapshotLineageAuthority class implementation changed: record",
+    ):
+        ledger.freshness_id(
+            dataset_snapshot=snapshot,
+            confirmation_trial_family_id="family-v1",
+        )
+
+    assert dispatched is False
+
+
+def test_backup_reload_capability_is_not_a_public_module_global() -> None:
+    assert not hasattr(seal, "_BACKUP_REPAIR_RELOAD_FINDER")
+    assert not hasattr(seal, "_BackupRepairReloadFinder")
+    assert not hasattr(seal, "_RepairReloadLoader")

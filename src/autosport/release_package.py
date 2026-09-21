@@ -467,6 +467,7 @@ def build_windows_package(
         "real_money_execution": False,
         "human_tested": False,
         "nvda_verified": False,
+        "v1_ready": False,
     }
     _write_json(package_dir / "BUILD_INFO.json", build_info)
 
@@ -565,6 +566,8 @@ def verify_windows_package(
     if build_info.get("source_sha") != expected_source_sha:
         raise ValueError("BUILD_INFO source_sha does not match exact candidate head")
     _require_false_truth_labels(build_info, "BUILD_INFO.json")
+    if build_info.get("v1_ready") is not False:
+        raise ValueError("BUILD_INFO.json must record v1_ready=false")
     exe_sha = _sha256_bytes(members["Autosport.exe"])
     if build_info.get("autosport_exe_sha256") != exe_sha:
         raise ValueError("BUILD_INFO Autosport.exe hash mismatch")
@@ -674,6 +677,7 @@ def verify_windows_package(
         "real_money_execution": False,
         "human_tested": False,
         "nvda_verified": False,
+        "v1_ready": False,
     }
 
 

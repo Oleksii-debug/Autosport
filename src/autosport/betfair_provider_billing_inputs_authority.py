@@ -54,6 +54,19 @@ def _build_observation_authority():
     network_open = _readonly.__dict__["urlopen"]
     stdlib_opener_cls = _urllib_request.__dict__["OpenerDirector"]
     stdlib_opener_open = stdlib_opener_cls.__dict__["open"]
+    stdlib_build_opener = _urllib_request.__dict__["build_opener"]
+
+    # ``urllib.request.urlopen`` otherwise resolves the mutable module-global
+    # ``_opener`` at call time. Own that exact dispatch root up front so public
+    # ``install_opener(...)`` cannot redirect positive provider issuance while the
+    # captured ``urlopen``/class/method identities remain unchanged. The object is
+    # closure-retained and identity-fenced before and after every provider read.
+    product_opener = stdlib_build_opener()
+    if type(product_opener) is not stdlib_opener_cls or "open" in vars(product_opener):
+        raise BetfairProviderBillingInputsAuthorityError(
+            "provider billing canonical network opener is invalid"
+        )
+    _urllib_request.__dict__["_opener"] = product_opener
 
     now_utc = datetime.now
     utc = timezone.utc
@@ -94,6 +107,12 @@ def _build_observation_authority():
             or stdlib_opener_cls.__dict__.get("open") is not stdlib_opener_open
         ):
             raise error_cls("provider billing lower network opener drifted")
+        if (
+            _urllib_request.__dict__.get("_opener") is not product_opener
+            or type(product_opener) is not stdlib_opener_cls
+            or "open" in vars(product_opener)
+        ):
+            raise error_cls("provider billing installed network opener drifted")
 
     def projection(source: object) -> tuple[object, ...]:
         entitlement = get_attr(source, "entitlement")
@@ -187,8 +206,8 @@ def _build_observation_authority():
             statement_from=statement_from,
             statement_to=statement_to,
         )
-        # A persistent executable rebind that occurs during provider I/O cannot be
-        # legitimized merely because the returned JSON is syntactically valid.
+        # A persistent executable/global-opener rebind that occurs during provider
+        # I/O cannot be legitimized merely because the returned JSON is valid.
         assert_executable_authority()
         return register(source)
 

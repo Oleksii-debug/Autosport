@@ -307,12 +307,19 @@ def _response(
 ) -> bytes:
     params = request["params"]
     instruction = params["instructions"][0]
+    request_limit = instruction["limitOrder"]
+    response_instruction = dict(instruction)
+    response_instruction["limitOrder"] = {
+        "size": float(Decimal(str(request_limit["size"]))),
+        "price": float(Decimal(str(request_limit["price"]))),
+        "persistenceType": request_limit["persistenceType"],
+    }
     report: dict[str, object] = {
         "status": instruction_status,
-        "instruction": instruction,
+        "instruction": response_instruction,
         "placedDate": READBACK_AT,
-        "averagePriceMatched": str(average),
-        "sizeMatched": str(matched),
+        "averagePriceMatched": float(Decimal(str(average))),
+        "sizeMatched": float(Decimal(str(matched))),
     }
     result: dict[str, object] = {
         "status": execution_status,

@@ -72,6 +72,39 @@ class SecretRedactionTests(unittest.TestCase):
         self.assertIn("access%5Ftoken=" + REDACTED, redacted)
         self.assertIn("market=match", redacted)
 
+    def test_escaped_quotes_inside_sensitive_values_do_not_leak_suffix(self) -> None:
+        cases = (
+            (
+                r'{"api_key":"alpha\"BRAVO-SECRET"}',
+                '{"api_key":"' + REDACTED + '"}',
+            ),
+            (
+                r"{'session_token':'alpha\'BRAVO-SECRET'}",
+                "{'session_token':'" + REDACTED + "'}",
+            ),
+            (
+                r'Authorization: "Bearer alpha\"BRAVO-SECRET" region=eu',
+                'Authorization: "' + REDACTED + '" region=eu',
+            ),
+        )
+
+        for source, expected in cases:
+            with self.subTest(source=source):
+                redacted = redact_operator_text(source)
+                self.assertEqual(redacted, expected)
+                self.assertNotIn("BRAVO-SECRET", redacted)
+
+    def test_safe_exception_text_redacts_escaped_quoted_secret_tail(self) -> None:
+        error = RuntimeError(r'{"api_key":"alpha\"BRAVO-SECRET"}')
+
+        rendered = safe_exception_text(error)
+
+        self.assertEqual(
+            rendered,
+            'RuntimeError: {"api_key":"' + REDACTED + '"}',
+        )
+        self.assertNotIn("BRAVO-SECRET", rendered)
+
     def test_text_redaction_is_idempotent(self) -> None:
         source = (
             "Authorization: Bearer alpha123 "

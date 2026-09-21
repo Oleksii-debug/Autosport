@@ -8,6 +8,7 @@ from pathlib import Path
 from autosport.causal_collector import CollectorDeltaStore
 from autosport.collector_service import (
     CollectorServiceConfig,
+    CollectorServiceError,
     HeadlessCollectorService,
 )
 from autosport.event_lifecycle import CatalogPage, ContinuousEventLifecycle
@@ -66,6 +67,7 @@ def _service(
     *,
     clock: _Clock,
     source: _EmptySource,
+    interval_seconds: float = 10,
 ) -> HeadlessCollectorService:
     return HeadlessCollectorService(
         delta_store=CollectorDeltaStore(Path(root) / "collector.db"),
@@ -74,7 +76,7 @@ def _service(
         state_path=Path(root) / "service.json",
         run_id="run-1",
         config=CollectorServiceConfig(
-            poll_interval_seconds=10,
+            poll_interval_seconds=interval_seconds,
             retry_attempts=1,
             initial_backoff_seconds=1,
             max_backoff_seconds=1,
@@ -178,6 +180,60 @@ class ProspectiveCollectorScheduleTests(unittest.TestCase):
             )
             self.assertTrue(evidence["slots"][1]["started_late"])
             self.assertEqual(restart_clock.sleeps, [])
+
+    def test_schedule_interval_cannot_be_rebound_after_restart(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            first_clock = _Clock("2026-01-01T00:00:00+00:00")
+            first = _service(
+                tmp,
+                clock=first_clock,
+                source=_EmptySource(first_clock, [0], start_position=1),
+            )
+            first.run(max_cycles=1)
+
+            restart_clock = _Clock("2026-01-01T00:00:20+00:00")
+            reopened = _service(
+                tmp,
+                clock=restart_clock,
+                source=_EmptySource(restart_clock, [0], start_position=2),
+                interval_seconds=20,
+            )
+            reopened.resume()
+            with self.assertRaisesRegex(
+                CollectorServiceError,
+                "prospective collector schedule authority",
+            ):
+                reopened.run(max_cycles=1)
+
+            evidence = reopened.delta_store.collector_schedule_evidence(
+                source_id="source-x",
+                run_id="run-1",
+                start_slot_ordinal=0,
+                end_slot_ordinal=0,
+            )
+            self.assertEqual(evidence["interval_seconds"], "10.0")
+            self.assertEqual(restart_clock.sleeps, [])
+
+    def test_unstarted_schedule_window_fails_closed_as_incomplete(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            clock = _Clock("2026-01-01T00:00:00+00:00")
+            service = _service(
+                tmp,
+                clock=clock,
+                source=_EmptySource(clock, [0]),
+            )
+            service.run(max_cycles=1)
+
+            with self.assertRaisesRegex(
+                ValueError,
+                "incomplete or non-contiguous",
+            ):
+                service.delta_store.collector_schedule_evidence(
+                    source_id="source-x",
+                    run_id="run-1",
+                    start_slot_ordinal=0,
+                    end_slot_ordinal=1,
+                )
 
     def test_one_due_slot_cannot_mint_two_cycle_starts(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

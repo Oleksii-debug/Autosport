@@ -49,9 +49,15 @@ def test_receipt_digest_is_deterministic_and_round_trips() -> None:
 def test_rule_and_provider_evidence_are_part_of_receipt_identity() -> None:
     receipt = _receipt()
 
-    assert replace(receipt, rule_version="2026-09-02").receipt_sha256 != receipt.receipt_sha256
+    assert (
+        replace(receipt, rule_version="2026-09-02").receipt_sha256
+        != receipt.receipt_sha256
+    )
     assert replace(receipt, rule_sha256="c" * 64).receipt_sha256 != receipt.receipt_sha256
-    assert replace(receipt, provider_evidence_sha256="d" * 64).receipt_sha256 != receipt.receipt_sha256
+    assert (
+        replace(receipt, provider_evidence_sha256="d" * 64).receipt_sha256
+        != receipt.receipt_sha256
+    )
 
 
 def test_void_and_push_are_distinct_terminal_outcomes() -> None:
@@ -193,4 +199,12 @@ def test_from_dict_rejects_json_bool_revision_alias() -> None:
     raw["revision"] = False
 
     with pytest.raises(ProviderSettlementReceiptError, match="revision must be an integer"):
+        ProviderSettlementReceipt.from_dict(raw)
+
+
+def test_from_dict_rejects_json_bool_schema_version_alias() -> None:
+    raw = _receipt().to_dict()
+    raw["schema_version"] = True
+
+    with pytest.raises(ProviderSettlementReceiptError, match="unsupported settlement"):
         ProviderSettlementReceipt.from_dict(raw)

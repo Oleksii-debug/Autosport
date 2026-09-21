@@ -1,10 +1,10 @@
 """Versioned pre-execution Observation projection for PAPER campaign admission.
 
 The #727 reservation already commits one exact durable DecisionLedger origin before
-any PAPER attempt.  This module turns that committed origin into the only supported
-learning Observation through an explicit, versioned product adapter.  The adapter
+any PAPER attempt. This module turns that committed origin into the only supported
+learning Observation through an explicit, versioned product adapter. The adapter
 uses decision-time bytes only; execution odds/stake/outcome/evidence never enter the
-Observation identity.  It installs before the admission consumer guard so the
+Observation identity. It installs before the admission consumer guard so the
 resulting resolver is captured by the existing executable closure seal.
 """
 
@@ -64,10 +64,8 @@ def _install() -> None:
                 raise error("unsupported live PAPER Observation producer schema")
             producer_contract = live_contract
         else:
-            # The predecessor resolver has already proved this is exactly the
-            # supported legacy paper-value execution-authority contract.  Give that
-            # producer an explicit adapter identity instead of silently treating all
-            # non-live DecisionRecords as interchangeable.
+            # The predecessor resolver has already proved that this record is the
+            # exact supported legacy paper-value execution-authority producer.
             producer_contract = legacy_contract
 
         decision_id = str(authority)
@@ -82,14 +80,17 @@ def _install() -> None:
             raise error("PAPER pre-execution Observation context_hash is invalid")
         if type(observed_ts) is not str or not observed_ts.strip():
             raise error("PAPER pre-execution Observation timestamp is invalid")
-        if origin.get("decision_id") != decision_id or origin.get("record_sha256") != record_sha256:
+        if (
+            origin.get("decision_id") != decision_id
+            or origin.get("record_sha256") != record_sha256
+        ):
             raise error("PAPER pre-execution Observation origin conflicts with reservation")
 
-        # This is deliberately a closed decision-time projection.  The exact
-        # PaperCampaignRuntime environment is separately closure-pinned by the
-        # consumer guard, while every remaining identity component comes from the
-        # already-committed #727 DecisionRecord origin.  No attempt/ticket/outcome
-        # field is available to this projection.
+        # Adapter v1 deliberately preserves the already-reviewed Observation bytes:
+        # the exact runtime environment is closure-pinned by the consumer guard and
+        # every other identity component is committed by the #727 DecisionRecord
+        # digest before execution. The explicit adapter version/producer contract
+        # live on the resolved authority rather than changing learning features.
         observation = observation_type(
             environment_id=self.runtime.environment.environment_id,
             observed_at=observed_ts,
@@ -97,12 +98,9 @@ def _install() -> None:
             evidence=tuple(
                 sorted(
                     (
-                        ("adapter_schema", adapter_schema),
-                        ("adapter_schema_version", str(adapter_schema_version)),
                         ("context_hash", context_hash),
                         ("decision_id", decision_id),
                         ("decision_record_sha256", record_sha256),
-                        ("producer_contract", producer_contract),
                     )
                 )
             ),

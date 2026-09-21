@@ -198,7 +198,11 @@ class HeadlessCollectorServiceTests(unittest.TestCase):
                 ),
                 stream_epoch="epoch-2",
             )
-            epoch_1_return = make_delta(delta_id="e1-d1", position=1)
+            epoch_1_return = make_delta(
+                delta_id="e1-d1",
+                position=0,
+                gap_state=GapState.CURSOR_RESET,
+            )
             source = FakeCollectorSource(
                 [page, page],
                 [(epoch_2_delta,), (epoch_1_return,)],
@@ -272,6 +276,115 @@ class HeadlessCollectorServiceTests(unittest.TestCase):
             self.assertEqual(admitted.committed_delta_ids, ("e2-d1",))
             self.assertEqual(
                 reopened.delta_store.runtime_stream_epoch("source-x"),
+                ("epoch-2", 2),
+            )
+
+    def test_delta_and_epoch_activation_roll_back_together_on_crash(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            page = catalog_page(1, "event-1")
+            epoch_2_delta = replace(
+                make_delta(
+                    delta_id="e2-crash",
+                    position=0,
+                    gap_state=GapState.CURSOR_RESET,
+                ),
+                stream_epoch="epoch-2",
+            )
+            source = FakeCollectorSource([page], [(epoch_2_delta,)])
+            service = self.make_service(tmp, source)
+            source.stream_epoch = "epoch-2"
+
+            def crash_before_commit(_raw):
+                raise RuntimeError("simulated crash before durable commit")
+
+            service.delta_store._write = crash_before_commit
+            with self.assertRaisesRegex(RuntimeError, "simulated crash"):
+                service.run_cycle()
+
+            self.assertEqual(
+                service.delta_store.runtime_stream_epoch("source-x"),
+                ("epoch-1", 1),
+            )
+            self.assertEqual(
+                service.delta_store.deltas_after_commit(source_id="source-x"),
+                (),
+            )
+            reopened = CollectorDeltaStore(Path(tmp) / "collector.json")
+            self.assertEqual(
+                reopened.runtime_stream_epoch("source-x"),
+                ("epoch-1", 1),
+            )
+            self.assertEqual(
+                reopened.deltas_after_commit(source_id="source-x"),
+                (),
+            )
+
+    def test_restart_heals_legacy_durable_epoch_crash_prefix_before_empty_batch(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            page = catalog_page(1, "event-1")
+            first = self.make_service(
+                tmp,
+                FakeCollectorSource([page], [()]),
+            )
+            epoch_2_delta = replace(
+                make_delta(
+                    delta_id="e2-legacy-crash",
+                    position=0,
+                    gap_state=GapState.CURSOR_RESET,
+                ),
+                stream_epoch="epoch-2",
+            )
+
+            # Reproduce the predecessor crash prefix: durable E2 evidence exists,
+            # but the older service died before publishing the matching activation.
+            self.assertTrue(first.delta_store.append(epoch_2_delta))
+            self.assertEqual(
+                first.delta_store.runtime_stream_epoch("source-x"),
+                ("epoch-1", 1),
+            )
+
+            source = FakeCollectorSource([page], [()])
+            source.stream_epoch = "epoch-2"
+            reopened = self.make_service(tmp, source)
+            self.assertEqual(
+                reopened.delta_store.runtime_stream_epoch("source-x"),
+                ("epoch-2", 2),
+            )
+
+            empty = reopened.run_cycle()
+            self.assertEqual(empty.committed_delta_ids, ())
+            self.assertEqual(empty.duplicate_delta_ids, ())
+            self.assertEqual(
+                reopened.delta_store.runtime_stream_epoch("source-x"),
+                ("epoch-2", 2),
+            )
+
+    def test_duplicate_replay_can_heal_durable_epoch_without_new_delta(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            page = catalog_page(1, "event-1")
+            epoch_2_delta = replace(
+                make_delta(
+                    delta_id="e2-duplicate",
+                    position=0,
+                    gap_state=GapState.CURSOR_RESET,
+                ),
+                stream_epoch="epoch-2",
+            )
+            source = FakeCollectorSource([page], [(epoch_2_delta,)])
+            service = self.make_service(tmp, source)
+
+            self.assertTrue(service.delta_store.append(epoch_2_delta))
+            self.assertEqual(
+                service.delta_store.runtime_stream_epoch("source-x"),
+                ("epoch-1", 1),
+            )
+
+            source.stream_epoch = "epoch-2"
+            replay = service.run_cycle()
+            self.assertEqual(replay.committed_delta_ids, ())
+            self.assertEqual(replay.duplicate_delta_ids, ("e2-duplicate",))
+            self.assertEqual(
+                service.delta_store.runtime_stream_epoch("source-x"),
                 ("epoch-2", 2),
             )
 

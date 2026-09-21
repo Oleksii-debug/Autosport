@@ -126,15 +126,17 @@ def _resolve_imports(module: _ParsedModule, module_names: frozenset[str]) -> tup
             if base is None:
                 continue
 
-            if base in module_names and base != module.name:
-                imports.add(base)
-
+            resolved_alias = False
             for alias in node.names:
                 if alias.name == "*":
                     continue
                 candidate = f"{base}.{alias.name}" if base else alias.name
                 if candidate in module_names and candidate != module.name:
                     imports.add(candidate)
+                    resolved_alias = True
+
+            if not resolved_alias and base in module_names and base != module.name:
+                imports.add(base)
 
     return tuple(sorted(imports))
 

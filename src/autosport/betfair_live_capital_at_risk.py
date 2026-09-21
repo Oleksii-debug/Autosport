@@ -25,6 +25,7 @@ from .real_execution_ledger import (
     AttemptState,
     ExecutionAction,
     ExecutionLedgerError,
+    ExternalReceiptIdentity,
     RealExecutionLedger,
 )
 from .supervised_execution import (
@@ -131,6 +132,8 @@ class BetfairLiveCapitalAtRiskEvidence:
     action_id: str
     provider_order_ref: str
     bet_id: str | None
+    readback_observed_at: str
+    readback_request_scope_sha256: str
     readback_evidence_sha256: str
     ledger_snapshot_sha256: str
     execution_authority: bool = False
@@ -182,6 +185,8 @@ class BetfairLiveCapitalAtRiskEvidence:
                 "action_id": self.action_id,
                 "provider_order_ref": self.provider_order_ref,
                 "bet_id": self.bet_id,
+                "readback_observed_at": self.readback_observed_at,
+                "readback_request_scope_sha256": self.readback_request_scope_sha256,
                 "readback_evidence_sha256": self.readback_evidence_sha256,
                 "ledger_snapshot_sha256": self.ledger_snapshot_sha256,
                 "execution_authority": False,
@@ -220,6 +225,27 @@ def _complete_capture(readback: BetfairExecutionReadbackEnvelope) -> bool:
     if tuple(status for status, _ in readback.cleared_pages_by_status) != _CLEARED_STATUSES:
         return False
     return all(_complete_pages(pages) for _, pages in readback.cleared_pages_by_status)
+
+
+def _receipt_matches_attempt(
+    *,
+    saga,
+    action: ExecutionAction,
+    attempt_id: str,
+    attempt_state: AttemptState,
+    bet_id: str,
+) -> bool:
+    if attempt_state not in {AttemptState.ACCEPTED, AttemptState.PARTIAL}:
+        return True
+    try:
+        identity = ExternalReceiptIdentity(
+            action.bookmaker_id,
+            action.account_id,
+            bet_id,
+        )
+    except (TypeError, ValueError):
+        return False
+    return saga.receipts.get(identity) == attempt_id
 
 
 def _row_identity_matches(
@@ -324,6 +350,8 @@ def resolve_betfair_live_capital_at_risk(
             action_id=action.action_id,
             provider_order_ref=provider_ref,
             bet_id=bet_id,
+            readback_observed_at=readback.observed_at,
+            readback_request_scope_sha256=readback.request_scope_sha256,
             readback_evidence_sha256=readback.evidence_sha256,
             ledger_snapshot_sha256=after.sha256,
         )
@@ -408,6 +436,20 @@ def resolve_betfair_live_capital_at_risk(
         return finish(
             BetfairLiveCapitalAtRiskTruth.UNKNOWN,
             BetfairLiveCapitalAtRiskReason.NO_PROVIDER_ROW,
+        )
+
+    only_bet_id = current[0].bet_id if current else cleared[0][1].bet_id
+    if not _receipt_matches_attempt(
+        saga=saga,
+        action=action,
+        attempt_id=attempt_id,
+        attempt_state=state,
+        bet_id=only_bet_id,
+    ):
+        return finish(
+            BetfairLiveCapitalAtRiskTruth.UNKNOWN,
+            BetfairLiveCapitalAtRiskReason.IDENTITY_MISMATCH,
+            bet_id=only_bet_id,
         )
 
     if current:

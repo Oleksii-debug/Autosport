@@ -246,6 +246,28 @@ def test_direct_truth_rejects_partial_without_notional_or_proposal() -> None:
         )
 
 
+def test_direct_truth_rejects_unexecutable_with_confirmed_notional() -> None:
+    with pytest.raises(RoutingContractError, match="UNEXECUTABLE"):
+        RoutingCapitalAtRiskTruth(
+            routing_state=RoutingState.UNEXECUTABLE,
+            confirmed_routing_notional=Decimal("1"),
+            exact_capital_at_risk=None,
+            non_money_moving_proposed=Decimal("0"),
+            unresolved_external_effect=False,
+        )
+
+
+def test_direct_truth_rejects_complete_without_confirmed_notional() -> None:
+    with pytest.raises(RoutingContractError, match="COMPLETE"):
+        RoutingCapitalAtRiskTruth(
+            routing_state=RoutingState.COMPLETE,
+            confirmed_routing_notional=Decimal("0"),
+            exact_capital_at_risk=None,
+            non_money_moving_proposed=Decimal("0"),
+            unresolved_external_effect=False,
+        )
+
+
 def test_direct_truth_rejects_non_boolean_unknown_flag() -> None:
     with pytest.raises(RoutingContractError, match="exact boolean"):
         RoutingCapitalAtRiskTruth(

@@ -240,7 +240,6 @@ class BetfairAccountSnapshotAcquirer:
         database_path: str | Path,
         credentials: BetfairSessionCredentials,
         *,
-        venue_id: str = "betfair",
         account_id: str = "default-account",
         timeout_seconds: float = 10.0,
     ) -> None:
@@ -256,7 +255,7 @@ class BetfairAccountSnapshotAcquirer:
         self._client = BetfairReadOnlyClient(
             credentials,
             timeout_seconds=timeout_seconds,
-            venue_id=venue_id,
+            venue_id="betfair",
             account_id=account_id,
         )
 

@@ -104,6 +104,40 @@ class IngestionNegativeEvidenceTests(unittest.TestCase):
         self.assertTrue(evidence.has_negative_evidence)
         self.assertEqual(evidence.reason_codes, ("status_invalid_json",))
 
+    def test_duplicate_counter_key_is_explicit_invalid_evidence(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "continuous_observation_status.json"
+            path.write_text(
+                '{"schema_version":1,"kind":"autosport_continuous_local_observation",'
+                '"run_id":"run-1","source_id":"provider-a","state":"stopped",'
+                '"attempted_cycles":5,"attempted_cycles":1,"successful_cycles":1,'
+                '"last_error_kind":null,"stop_reason":"max_cycles"}',
+                encoding="utf-8",
+            )
+            evidence = project_ingestion_negative_evidence(path, expected_cycles=5)
+
+        self.assertEqual(evidence.evidence_state, "invalid")
+        self.assertEqual(evidence.denominator_cycles, 5)
+        self.assertEqual(evidence.successful_fraction, 0.0)
+        self.assertTrue(evidence.has_negative_evidence)
+        self.assertEqual(evidence.reason_codes, ("status_invalid_json",))
+
+    def test_duplicate_lifecycle_key_cannot_launder_failed_state(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "continuous_observation_status.json"
+            path.write_text(
+                '{"schema_version":1,"kind":"autosport_continuous_local_observation",'
+                '"run_id":"run-1","source_id":"provider-a","state":"failed","state":"stopped",'
+                '"attempted_cycles":2,"successful_cycles":2,'
+                '"last_error_kind":null,"stop_reason":"max_cycles"}',
+                encoding="utf-8",
+            )
+            evidence = project_ingestion_negative_evidence(path, expected_cycles=2)
+
+        self.assertEqual(evidence.evidence_state, "invalid")
+        self.assertTrue(evidence.has_negative_evidence)
+        self.assertEqual(evidence.reason_codes, ("status_invalid_json",))
+
     def test_bool_counter_is_rejected_even_though_bool_is_int_subclass(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = self._write(Path(tmp), _status(attempted_cycles=True))

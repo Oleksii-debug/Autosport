@@ -23,12 +23,16 @@ def _module_imports(module_name: str) -> frozenset[str]:
     imports: set[str] = set()
 
     for node in ast.walk(tree):
-        if isinstance(node, ast.ImportFrom) and node.level == 1:
-            candidates = (
-                (node.module.split(".", 1)[0],)
-                if node.module
-                else tuple(alias.name.split(".", 1)[0] for alias in node.names)
-            )
+        if isinstance(node, ast.ImportFrom):
+            candidates: tuple[str, ...] = ()
+            if node.level == 1:
+                candidates = (
+                    (node.module.split(".", 1)[0],)
+                    if node.module
+                    else tuple(alias.name.split(".", 1)[0] for alias in node.names)
+                )
+            elif node.level == 0 and node.module and node.module.startswith("autosport."):
+                candidates = (node.module.removeprefix("autosport.").split(".", 1)[0],)
             for candidate in candidates:
                 if candidate in PRODUCT_SHELL_MODULES:
                     imports.add(candidate)

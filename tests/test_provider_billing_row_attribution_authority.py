@@ -120,10 +120,11 @@ def _fake_opener_open(
     _self: object,
     request: object,
     data: bytes | None = None,
-    timeout: float | object = _urllib_request._GLOBAL_DEFAULT_TIMEOUT,
+    timeout: object = None,
 ):
     assert data is None
-    assert timeout is not _urllib_request._GLOBAL_DEFAULT_TIMEOUT
+    assert isinstance(timeout, (int, float)) and not isinstance(timeout, bool)
+    assert timeout > 0
     request_data = getattr(request, "data", None)
     assert request_data is not None
     return _UrlopenResponse(_provider_payload(request_data))

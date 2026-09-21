@@ -43,6 +43,9 @@ SCHEMA: Final = "autosport.paper_settlement_learning_bridge"
 SCHEMA_VERSION: Final = 1
 REWARD_RULE: Final = "paper-net-payout-minus-stake-v1"
 COST_RULE: Final = "paperbook-no-extra-cost-v1"
+OBSERVED_REWARD_REFERENCE_SCHEMA: Final = "autosport.paper_observed_reward_reference"
+OBSERVED_REWARD_REFERENCE_VERSION: Final = 1
+OBSERVED_REWARD_ISSUER: Final = "autosport.paper_settlement_learning"
 BOUND: Final = "BOUND"
 OUTBOX: Final = "OUTBOX"
 ACKED: Final = "ACKED"
@@ -931,6 +934,298 @@ class PaperSettlementLearningBridge:
                 return False
         return True
 
+    @staticmethod
+    def _paper_observed_evidence(
+        binding: dict[str, object],
+        ticket: PaperTicket,
+        *,
+        bundle_sha256: str,
+        revealed_at: str,
+    ) -> tuple[Outcome, RewardEvidence]:
+        canonical_bundle_sha = _sha(bundle_sha256, "settlement_bundle_sha256")
+        canonical_revealed_at = _instant_id(revealed_at, "reward available_at")
+        reward_value = _exact_subtract(ticket.payout, ticket.stake)
+        outcome = Outcome(
+            environment_id=binding["environment_id"],
+            action_id=binding["action_id"],
+            revealed_at=canonical_revealed_at,
+            truth=EvidenceTruth.OBSERVED,
+            evidence=tuple(
+                sorted(
+                    (
+                        ("binding_id", binding["binding_id"]),
+                        ("decision_id", binding["decision_id"]),
+                        ("paper_ticket_sha256", binding["ticket_identity_sha256"]),
+                        ("settlement_bundle_sha256", canonical_bundle_sha),
+                        ("ticket_id", binding["ticket_id"]),
+                        ("ticket_status", ticket.status.value),
+                    )
+                )
+            ),
+        )
+        reward = RewardEvidence(
+            environment_id=binding["environment_id"],
+            action_id=binding["action_id"],
+            outcome_id=outcome.outcome_id,
+            reward=reward_value,
+            available_at=canonical_revealed_at,
+            truth=EvidenceTruth.OBSERVED,
+            evidence=tuple(
+                sorted(
+                    (
+                        ("cost_rule", COST_RULE),
+                        ("reward_rule", REWARD_RULE),
+                        ("settlement_bundle_sha256", canonical_bundle_sha),
+                        ("ticket_id", binding["ticket_id"]),
+                    )
+                )
+            ),
+        )
+        return outcome, reward
+
+    @staticmethod
+    def _observed_reward_reference(
+        binding: dict[str, object],
+        ticket: PaperTicket,
+        *,
+        settlement_bundle_sha256: str,
+        outcome: Outcome,
+        reward: RewardEvidence,
+    ) -> dict[str, object]:
+        if outcome.truth is not EvidenceTruth.OBSERVED or reward.truth is not EvidenceTruth.OBSERVED:
+            raise PaperSettlementLearningBridgeError(
+                "PAPER observed-reward reference requires OBSERVED outcome and reward"
+            )
+        semantic: dict[str, object] = {
+            "schema": OBSERVED_REWARD_REFERENCE_SCHEMA,
+            "schema_version": OBSERVED_REWARD_REFERENCE_VERSION,
+            "issuer": OBSERVED_REWARD_ISSUER,
+            "binding_id": binding["binding_id"],
+            "ticket_id": ticket.ticket_id,
+            "paper_ticket_sha256": binding["ticket_identity_sha256"],
+            "decision_id": binding["decision_id"],
+            "decision_sha256": binding["decision_sha256"],
+            "environment_id": reward.environment_id,
+            "action_id": reward.action_id,
+            "outcome_id": outcome.outcome_id,
+            "reward_id": reward.reward_id,
+            "reward": str(reward.reward),
+            "currency": ticket.currency,
+            "available_at": _instant_id(reward.available_at, "reward available_at"),
+            "reward_rule": REWARD_RULE,
+            "cost_rule": COST_RULE,
+            "ticket_status": ticket.status.value,
+            "ticket_payout": str(ticket.payout),
+            "settlement_bundle_sha256": _sha(
+                settlement_bundle_sha256,
+                "settlement_bundle_sha256",
+            ),
+            "economic_goal_fingerprint": binding["economic_goal_fingerprint"],
+            "risk_fingerprint": binding["risk_fingerprint"],
+        }
+        return {"reference_id": _digest(semantic), **semantic}
+
+    @classmethod
+    def _verify_observed_reward_reference(
+        cls,
+        binding: dict[str, object],
+        ticket: PaperTicket,
+        *,
+        settlement_bundle_sha256: str,
+        outcome: Outcome,
+        reward: RewardEvidence,
+        reference: object,
+        allow_missing_legacy: bool = False,
+    ) -> RewardEvidence:
+        expected_outcome, expected_reward = cls._paper_observed_evidence(
+            binding,
+            ticket,
+            bundle_sha256=settlement_bundle_sha256,
+            revealed_at=reward.available_at,
+        )
+        if outcome != expected_outcome or reward != expected_reward:
+            raise PaperSettlementLearningBridgeError(
+                "observed PAPER reward differs from canonical settlement economics"
+            )
+        expected_reference = cls._observed_reward_reference(
+            binding,
+            ticket,
+            settlement_bundle_sha256=settlement_bundle_sha256,
+            outcome=expected_outcome,
+            reward=expected_reward,
+        )
+        if reference is None and allow_missing_legacy:
+            return expected_reward
+        if type(reference) is not dict or reference != expected_reference:
+            raise PaperSettlementLearningBridgeError(
+                "observed PAPER reward reference differs from product-owned source truth"
+            )
+        return expected_reward
+
+    @staticmethod
+    def _outbox_resolutions(outbox: dict[str, object]) -> tuple[SettlementResolution, ...]:
+        raw_bundle = outbox.get("settlement_evidence")
+        if type(raw_bundle) is not list or not raw_bundle:
+            raise PaperSettlementLearningBridgeError(
+                "durable learner outbox settlement evidence is invalid"
+            )
+        resolutions: list[SettlementResolution] = []
+        expected_fields = {
+            "evidence_id",
+            "evidence_sha256",
+            "event_identity",
+            "settlement_ref",
+            "available_at",
+            "quote_outcomes",
+        }
+        try:
+            for item in raw_bundle:
+                if type(item) is not dict or set(item) != expected_fields:
+                    raise TypeError
+                if type(item["quote_outcomes"]) is not dict:
+                    raise TypeError
+                resolutions.append(
+                    SettlementResolution(
+                        event_identity=item["event_identity"],
+                        settlement_ref=item["settlement_ref"],
+                        quote_outcomes=dict(item["quote_outcomes"]),
+                        evidence_id=item["evidence_id"],
+                        evidence_sha256=item["evidence_sha256"],
+                        available_at=item["available_at"],
+                    )
+                )
+        except (KeyError, TypeError, ValueError) as exc:
+            raise PaperSettlementLearningBridgeError(
+                "durable learner outbox settlement evidence is not canonical"
+            ) from exc
+        return tuple(resolutions)
+
+    @staticmethod
+    def _bound_observation_action(
+        binding: dict[str, object],
+    ) -> tuple[Observation, Action]:
+        try:
+            raw_observation = binding["observation"]
+            observation = Observation(
+                environment_id=raw_observation["environment_id"],
+                observed_at=raw_observation["observed_at"],
+                available_at=raw_observation["available_at"],
+                evidence=tuple(
+                    (item[0], item[1])
+                    for item in raw_observation["evidence"]
+                ),
+            )
+            action = Action(
+                environment_id=binding["environment_id"],
+                observation_id=binding["observation_id"],
+                action_type=binding["action_type"],
+                decided_at=binding["action_decided_at"],
+                parameters=tuple(
+                    (item[0], item[1])
+                    for item in binding["action_parameters"]
+                ),
+            )
+        except (KeyError, TypeError, ValueError, IndexError) as exc:
+            raise PaperSettlementLearningBridgeError(
+                "durable learning binding cannot reconstruct observation/action"
+            ) from exc
+        if (
+            observation.observation_id != binding["observation_id"]
+            or action.action_id != binding["action_id"]
+        ):
+            raise PaperSettlementLearningBridgeError(
+                "durable observation/action identity differs from learning binding"
+            )
+        return observation, action
+
+    def _verified_outbox_objects(
+        self,
+        binding: dict[str, object],
+        outbox: dict[str, object],
+        *,
+        as_of: str,
+    ) -> tuple[Outcome, RewardEvidence, Transition, EnvironmentCheckpoint]:
+        if type(outbox) is not dict:
+            raise PaperSettlementLearningBridgeError("durable learner outbox must be an object")
+        try:
+            outbox_id = _sha(outbox["outbox_id"], "outbox_id")
+            semantic = {key: value for key, value in outbox.items() if key != "outbox_id"}
+            if outbox_id != _digest(semantic):
+                raise PaperSettlementLearningBridgeError(
+                    "durable learner outbox digest mismatch"
+                )
+            if (
+                outbox["binding_id"] != binding["binding_id"]
+                or outbox["ticket_id"] != binding["ticket_id"]
+            ):
+                raise PaperSettlementLearningBridgeError(
+                    "durable learner outbox belongs to another binding"
+                )
+        except KeyError as exc:
+            raise PaperSettlementLearningBridgeError(
+                "durable learner outbox identity is incomplete"
+            ) from exc
+
+        if (
+            binding["economic_goal_fingerprint"] != self.goal_fingerprint
+            or binding["risk_fingerprint"] != self.risk_fingerprint
+        ):
+            raise PaperSettlementLearningBridgeError(
+                "durable learner binding differs from current owner economic authority"
+            )
+
+        book = PaperBook.load(self.paper_book_path)
+        ticket = self._bound_ticket(book, binding)
+        decision = self.decision_ledger.verified_economic_decision(
+            binding["decision_id"],
+            self.economic_goal,
+            risk_policy=self.risk_policy,
+        )
+        if _decision_sha(decision) != binding["decision_sha256"]:
+            raise PaperSettlementLearningBridgeError(
+                "durable economic decision changed after learning binding"
+            )
+        observation, action = self._bound_observation_action(binding)
+        self._decision_matches(decision, ticket, action, observation)
+
+        resolutions = self._outbox_resolutions(outbox)
+        rebuilt = self._bundle(ticket, resolutions, at=as_of)
+        if rebuilt is None:
+            raise PaperSettlementLearningBridgeError(
+                "durable learner outbox no longer has complete settlement evidence"
+            )
+        bundle, known = rebuilt
+        bundle_sha = _digest(bundle)
+        if (
+            bundle != outbox.get("settlement_evidence")
+            or bundle_sha != outbox.get("settlement_bundle_sha256")
+            or dict(sorted(known.items())) != outbox.get("known_quote_outcomes")
+            or ticket.status.value != outbox.get("ticket_status")
+            or str(ticket.payout) != outbox.get("ticket_payout")
+        ):
+            raise PaperSettlementLearningBridgeError(
+                "durable learner outbox differs from current PAPER settlement truth"
+            )
+
+        outcome, reward, transition, checkpoint = self._outbox_objects(outbox)
+        verified_reward = self._verify_observed_reward_reference(
+            binding,
+            ticket,
+            settlement_bundle_sha256=bundle_sha,
+            outcome=outcome,
+            reward=reward,
+            reference=outbox.get("observed_reward_reference"),
+            allow_missing_legacy=True,
+        )
+        if (
+            reward != verified_reward
+            or outbox.get("net_reward") != str(verified_reward.reward)
+        ):
+            raise PaperSettlementLearningBridgeError(
+                "durable learner outbox reward differs from source-resolved reward"
+            )
+        return outcome, verified_reward, transition, checkpoint
+
     @classmethod
     def _bundle(
         cls,
@@ -1103,42 +1398,27 @@ class PaperSettlementLearningBridge:
             (item["available_at"] for item in bundle),
             key=lambda value: _instant(value, "settlement available_at"),
         )
-        reward_value = _exact_subtract(ticket.payout, ticket.stake)
-        outcome = Outcome(
-            environment_id=binding["environment_id"],
-            action_id=binding["action_id"],
+        outcome, reward = self._paper_observed_evidence(
+            binding,
+            ticket,
+            bundle_sha256=bundle_sha,
             revealed_at=revealed_at,
-            truth=EvidenceTruth.OBSERVED,
-            evidence=tuple(
-                sorted(
-                    (
-                        ("binding_id", binding["binding_id"]),
-                        ("decision_id", binding["decision_id"]),
-                        ("paper_ticket_sha256", binding["ticket_identity_sha256"]),
-                        ("settlement_bundle_sha256", bundle_sha),
-                        ("ticket_id", binding["ticket_id"]),
-                        ("ticket_status", ticket.status.value),
-                    )
-                )
-            ),
         )
-        reward = RewardEvidence(
-            environment_id=binding["environment_id"],
-            action_id=binding["action_id"],
-            outcome_id=outcome.outcome_id,
-            reward=reward_value,
-            available_at=revealed_at,
-            truth=EvidenceTruth.OBSERVED,
-            evidence=tuple(
-                sorted(
-                    (
-                        ("cost_rule", COST_RULE),
-                        ("reward_rule", REWARD_RULE),
-                        ("settlement_bundle_sha256", bundle_sha),
-                        ("ticket_id", binding["ticket_id"]),
-                    )
-                )
-            ),
+        reward_value = reward.reward
+        observed_reward_reference = self._observed_reward_reference(
+            binding,
+            ticket,
+            settlement_bundle_sha256=bundle_sha,
+            outcome=outcome,
+            reward=reward,
+        )
+        reward = self._verify_observed_reward_reference(
+            binding,
+            ticket,
+            settlement_bundle_sha256=bundle_sha,
+            outcome=outcome,
+            reward=reward,
+            reference=observed_reward_reference,
         )
         baseline = _checkpoint(binding["baseline_checkpoint"])
         try:
@@ -1206,6 +1486,7 @@ class PaperSettlementLearningBridge:
             "known_quote_outcomes": dict(sorted(known.items())),
             "settlement_evidence": bundle,
             "settlement_bundle_sha256": bundle_sha,
+            "observed_reward_reference": observed_reward_reference,
             "outcome": {
                 "environment_id": outcome.environment_id,
                 "action_id": outcome.action_id,
@@ -1362,7 +1643,18 @@ class PaperSettlementLearningBridge:
 
         acknowledged: list[str] = []
         for ticket_id, outbox in pending:
-            outcome, reward, transition, checkpoint = self._outbox_objects(outbox)
+            with WorkspaceEconomicLock(self.state_path.parent):
+                state = self._read()
+                binding = state["bindings"].get(ticket_id)
+                if binding is None or binding.get("outbox") != outbox:
+                    raise PaperSettlementLearningBridgeError(
+                        "learner outbox changed before product authority verification"
+                    )
+                outcome, reward, transition, checkpoint = self._verified_outbox_objects(
+                    binding,
+                    outbox,
+                    as_of=at,
+                )
             snapshot = self.agent_loop.record_resolution(
                 transition,
                 outcome=outcome,
@@ -1427,28 +1719,18 @@ class PaperSettlementLearningBridge:
                 raise PaperSettlementLearningBridgeError(
                     "ticket has no durable learner outbox"
                 )
-            outcome, reward, transition, checkpoint = self._outbox_objects(outbox)
+            reward_payload = outbox.get("reward")
+            if type(reward_payload) is not dict:
+                raise PaperSettlementLearningBridgeError(
+                    "durable learner outbox reward payload is invalid"
+                )
+            outcome, reward, transition, checkpoint = self._verified_outbox_objects(
+                binding,
+                outbox,
+                as_of=reward_payload.get("available_at"),
+            )
             try:
-                raw_observation = binding["observation"]
-                observation = Observation(
-                    environment_id=raw_observation["environment_id"],
-                    observed_at=raw_observation["observed_at"],
-                    available_at=raw_observation["available_at"],
-                    evidence=tuple(
-                        (item[0], item[1])
-                        for item in raw_observation["evidence"]
-                    ),
-                )
-                action = Action(
-                    environment_id=binding["environment_id"],
-                    observation_id=binding["observation_id"],
-                    action_type=binding["action_type"],
-                    decided_at=binding["action_decided_at"],
-                    parameters=tuple(
-                        (item[0], item[1])
-                        for item in binding["action_parameters"]
-                    ),
-                )
+                observation, action = self._bound_observation_action(binding)
                 witness = PaperSettlementLearningWitness(
                     ticket_id=canonical_ticket_id,
                     binding_id=binding["binding_id"],

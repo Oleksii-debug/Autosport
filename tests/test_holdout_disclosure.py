@@ -44,43 +44,32 @@ def _ledger(tmp_path) -> HoldoutConsumptionLedger:
     )
 
 
-_OUTCOME_KINDS = (
-    DisclosureKind.RAW_LABEL,
-    DisclosureKind.EVENT_OUTCOME,
-    DisclosureKind.AGGREGATE_SCORE,
-    DisclosureKind.PASS_FAIL,
-)
-_PUBLIC_CHANNELS = (
-    DisclosureChannel.UI,
-    DisclosureChannel.HUMAN,
-    DisclosureChannel.LLM,
-    DisclosureChannel.EXPORT,
-    DisclosureChannel.API,
-    DisclosureChannel.LOG,
-)
-
-
-@pytest.mark.parametrize("channel", _PUBLIC_CHANNELS)
-@pytest.mark.parametrize("kind", _OUTCOME_KINDS)
-def test_every_adaptive_outcome_disclosure_consumes_canonical_holdout(
-    tmp_path, channel: DisclosureChannel, kind: DisclosureKind
+@pytest.mark.parametrize("channel", tuple(DisclosureChannel))
+@pytest.mark.parametrize("kind", tuple(DisclosureKind))
+@pytest.mark.parametrize("declared_accessibility", (True, False))
+def test_every_disclosure_descriptor_consumes_canonical_holdout(
+    tmp_path,
+    channel: DisclosureChannel,
+    kind: DisclosureKind,
+    declared_accessibility: bool,
 ) -> None:
     snapshot = _snapshot()
     ledger = _ledger(tmp_path)
-    gate = HoldoutDisclosureGate(ledger)
 
-    decision = gate.record(
+    decision = HoldoutDisclosureGate(ledger).record(
         dataset_snapshot=snapshot,
         research_protocol_id="protocol-v1",
         confirmation_trial_family_id="family-v1",
         channel=channel,
         kind=kind,
-        accessible_to_adaptive_actor=True,
+        accessible_to_adaptive_actor=declared_accessibility,
         disclosed_at_utc=_DISCLOSED_AT,
     )
 
     assert decision.consumed is True
-    assert decision.consumption is not None
+    assert decision.channel is channel
+    assert decision.kind is kind
+    assert decision.accessible_to_adaptive_actor is declared_accessibility
     assert decision.consumption.holdout_freshness_id == ledger.freshness_id(
         dataset_snapshot=snapshot,
         confirmation_trial_family_id="family-v1",
@@ -95,126 +84,7 @@ def test_every_adaptive_outcome_disclosure_consumes_canonical_holdout(
         )
 
 
-@pytest.mark.parametrize("channel", _PUBLIC_CHANNELS)
-@pytest.mark.parametrize("declared_accessibility", (True, False))
-def test_public_metadata_label_cannot_mint_freshness_exemption(
-    tmp_path,
-    channel: DisclosureChannel,
-    declared_accessibility: bool,
-) -> None:
-    snapshot = _snapshot()
-    ledger = _ledger(tmp_path)
-    decision = HoldoutDisclosureGate(ledger).record(
-        dataset_snapshot=snapshot,
-        research_protocol_id="protocol-v1",
-        confirmation_trial_family_id="family-v1",
-        channel=channel,
-        kind=DisclosureKind.NON_OUTCOME_METADATA,
-        accessible_to_adaptive_actor=declared_accessibility,
-        disclosed_at_utc=_DISCLOSED_AT,
-    )
-
-    assert decision.consumed is True
-    assert decision.accessible_to_adaptive_actor is True
-    assert decision.proves_holdout_untouched is False
-    with pytest.raises(HoldoutAlreadyConsumedError):
-        ledger.assert_unused(
-            dataset_snapshot=snapshot,
-            research_protocol_id="protocol-v1",
-            confirmation_trial_family_id="family-v1",
-        )
-
-
-def test_inaccessible_sealed_metadata_does_not_consume(tmp_path) -> None:
-    snapshot = _snapshot()
-    ledger = _ledger(tmp_path)
-    decision = HoldoutDisclosureGate(ledger).record(
-        dataset_snapshot=snapshot,
-        research_protocol_id="protocol-v1",
-        confirmation_trial_family_id="family-v1",
-        channel=DisclosureChannel.SEALED_EVALUATOR,
-        kind=DisclosureKind.NON_OUTCOME_METADATA,
-        accessible_to_adaptive_actor=False,
-        disclosed_at_utc=_DISCLOSED_AT,
-    )
-
-    assert decision.consumed is False
-    ledger.assert_unused(
-        dataset_snapshot=snapshot,
-        research_protocol_id="protocol-v1",
-        confirmation_trial_family_id="family-v1",
-    )
-
-
-def test_accessible_sealed_metadata_consumes_fail_closed(tmp_path) -> None:
-    snapshot = _snapshot()
-    ledger = _ledger(tmp_path)
-    decision = HoldoutDisclosureGate(ledger).record(
-        dataset_snapshot=snapshot,
-        research_protocol_id="protocol-v1",
-        confirmation_trial_family_id="family-v1",
-        channel=DisclosureChannel.SEALED_EVALUATOR,
-        kind=DisclosureKind.NON_OUTCOME_METADATA,
-        accessible_to_adaptive_actor=True,
-        disclosed_at_utc=_DISCLOSED_AT,
-    )
-
-    assert decision.consumed is True
-
-
-@pytest.mark.parametrize("channel", _PUBLIC_CHANNELS)
-@pytest.mark.parametrize("kind", _OUTCOME_KINDS)
-def test_public_outcome_channel_cannot_bypass_with_false_accessibility(
-    tmp_path, channel: DisclosureChannel, kind: DisclosureKind
-) -> None:
-    snapshot = _snapshot()
-    ledger = _ledger(tmp_path)
-
-    decision = HoldoutDisclosureGate(ledger).record(
-        dataset_snapshot=snapshot,
-        research_protocol_id="protocol-v1",
-        confirmation_trial_family_id="family-v1",
-        channel=channel,
-        kind=kind,
-        accessible_to_adaptive_actor=False,
-        disclosed_at_utc=_DISCLOSED_AT,
-    )
-
-    assert decision.consumed is True
-    assert decision.accessible_to_adaptive_actor is True
-    with pytest.raises(HoldoutAlreadyConsumedError):
-        ledger.assert_unused(
-            dataset_snapshot=snapshot,
-            research_protocol_id="protocol-v1",
-            confirmation_trial_family_id="family-v1",
-        )
-
-
-@pytest.mark.parametrize("kind", _OUTCOME_KINDS)
-def test_outcome_signal_kept_inside_sealed_evaluator_does_not_consume(
-    tmp_path, kind: DisclosureKind
-) -> None:
-    snapshot = _snapshot()
-    ledger = _ledger(tmp_path)
-    decision = HoldoutDisclosureGate(ledger).record(
-        dataset_snapshot=snapshot,
-        research_protocol_id="protocol-v1",
-        confirmation_trial_family_id="family-v1",
-        channel=DisclosureChannel.SEALED_EVALUATOR,
-        kind=kind,
-        accessible_to_adaptive_actor=False,
-        disclosed_at_utc=_DISCLOSED_AT,
-    )
-
-    assert decision.consumed is False
-    ledger.assert_unused(
-        dataset_snapshot=snapshot,
-        research_protocol_id="protocol-v1",
-        confirmation_trial_family_id="family-v1",
-    )
-
-
-def test_accessible_signal_consumes_even_if_channel_is_named_sealed_evaluator(
+def test_caller_declared_sealed_inaccessible_cannot_mint_freshness_exemption(
     tmp_path,
 ) -> None:
     snapshot = _snapshot()
@@ -225,15 +95,21 @@ def test_accessible_signal_consumes_even_if_channel_is_named_sealed_evaluator(
         research_protocol_id="protocol-v1",
         confirmation_trial_family_id="family-v1",
         channel=DisclosureChannel.SEALED_EVALUATOR,
-        kind=DisclosureKind.PASS_FAIL,
-        accessible_to_adaptive_actor=True,
+        kind=DisclosureKind.NON_OUTCOME_METADATA,
+        accessible_to_adaptive_actor=False,
         disclosed_at_utc=_DISCLOSED_AT,
     )
 
     assert decision.consumed is True
+    with pytest.raises(HoldoutAlreadyConsumedError):
+        ledger.assert_unused(
+            dataset_snapshot=snapshot,
+            research_protocol_id="protocol-v1",
+            confirmation_trial_family_id="family-v1",
+        )
 
 
-def test_exact_resume_is_idempotent_across_disclosure_channel_and_granularity(
+def test_exact_resume_is_idempotent_across_all_audit_descriptor_changes(
     tmp_path,
 ) -> None:
     snapshot = _snapshot()
@@ -244,9 +120,9 @@ def test_exact_resume_is_idempotent_across_disclosure_channel_and_granularity(
         dataset_snapshot=snapshot,
         research_protocol_id="protocol-v1",
         confirmation_trial_family_id="family-v1",
-        channel=DisclosureChannel.UI,
-        kind=DisclosureKind.AGGREGATE_SCORE,
-        accessible_to_adaptive_actor=True,
+        channel=DisclosureChannel.SEALED_EVALUATOR,
+        kind=DisclosureKind.NON_OUTCOME_METADATA,
+        accessible_to_adaptive_actor=False,
         disclosed_at_utc=_DISCLOSED_AT,
     )
     resumed = gate.record(
@@ -390,7 +266,27 @@ def test_gate_rejects_caller_substituted_policy_types(tmp_path) -> None:
             research_protocol_id="protocol-v1",
             confirmation_trial_family_id="family-v1",
             channel=DisclosureChannel.API,
+            kind="PASS_FAIL",  # type: ignore[arg-type]
+            accessible_to_adaptive_actor=True,
+            disclosed_at_utc=_DISCLOSED_AT,
+        )
+    with pytest.raises(HoldoutDisclosureError):
+        gate.record(
+            dataset_snapshot=_snapshot(),
+            research_protocol_id="protocol-v1",
+            confirmation_trial_family_id="family-v1",
+            channel=DisclosureChannel.API,
             kind=DisclosureKind.PASS_FAIL,
             accessible_to_adaptive_actor=1,  # type: ignore[arg-type]
+            disclosed_at_utc=_DISCLOSED_AT,
+        )
+    with pytest.raises(HoldoutDisclosureError):
+        gate.record(
+            dataset_snapshot=object(),  # type: ignore[arg-type]
+            research_protocol_id="protocol-v1",
+            confirmation_trial_family_id="family-v1",
+            channel=DisclosureChannel.API,
+            kind=DisclosureKind.PASS_FAIL,
+            accessible_to_adaptive_actor=True,
             disclosed_at_utc=_DISCLOSED_AT,
         )

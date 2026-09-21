@@ -148,10 +148,10 @@ class ProviderContinuityState:
             raise ValueError("generation zero cannot contain provider evidence")
         if self.generation > 0 and not all(populated):
             raise ValueError("positive generation requires provider evidence")
-        if self.status is ProviderContinuityStatus.UNINITIALIZED and self.generation != 0:
-            raise ValueError("uninitialized state must use generation zero")
-        if self.status is ProviderContinuityStatus.SYNCHRONIZED and self.generation == 0:
-            raise ValueError("synchronized state requires snapshot generation")
+        if self.generation == 0 and self.status is not ProviderContinuityStatus.UNINITIALIZED:
+            raise ValueError("generation zero must be uninitialized")
+        if self.generation > 0 and self.status is ProviderContinuityStatus.UNINITIALIZED:
+            raise ValueError("positive generation cannot be uninitialized")
 
     @classmethod
     def initial(cls, source_id: str, *, max_silence_ns: int) -> ProviderContinuityState:

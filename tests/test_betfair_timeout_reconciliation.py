@@ -181,6 +181,11 @@ def _resolve(
         "_absence_capture_floor",
         lambda readback: absence_floor or evidence.observed_at,
     )
+    monkeypatch.setattr(
+        timeout_resolution,
+        "_betfair_readback_capture_started_at",
+        lambda readback: evidence.observed_at,
+    )
     result = timeout_resolution.resolve_betfair_timeout_provider_state(
         ledger,
         action,

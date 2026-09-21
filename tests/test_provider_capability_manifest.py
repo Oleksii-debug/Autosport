@@ -87,12 +87,17 @@ def _evidence(
     kind: str = "provider-feature-probe",
     *,
     observed_at: str = _T1,
+    profile: BookmakerCapabilityProfile | None = None,
 ) -> ProviderCapabilityEvidenceRef:
+    profile = profile or _profile()
+    integration = _integration(profile)
     return ProviderCapabilityEvidenceRef(
         kind=kind,
         evidence_ref=f"{kind}-v1",
         evidence_sha256=_HASH_C,
         observed_at=observed_at,
+        profile_id=profile.profile_id,
+        integration_evidence_id=integration.evidence_id,
     )
 
 
@@ -102,13 +107,18 @@ def _fact(
     state: ProviderManifestState = ProviderManifestState.PROVEN,
     values: tuple[str, ...] = (),
     observed_at: str = _T1,
+    profile: BookmakerCapabilityProfile | None = None,
 ) -> ProviderCapabilityManifestFact:
     return ProviderCapabilityManifestFact(
         capability=capability,
         state=state,
         authority=ProviderManifestFactAuthority.EXPLICIT_EVIDENCE,
         values=values,
-        evidence=_evidence(capability.value, observed_at=observed_at),
+        evidence=_evidence(
+            capability.value,
+            observed_at=observed_at,
+            profile=profile,
+        ),
     )
 
 
@@ -288,7 +298,7 @@ def test_poll_and_stream_require_proven_quote_read_capability() -> None:
         ):
             _manifest(
                 profile=no_quotes,
-                extension_facts=(_fact(capability),),
+                extension_facts=(_fact(capability, profile=no_quotes),),
             )
 
 
@@ -311,7 +321,7 @@ def test_ack_and_idempotency_require_proven_submit_capability() -> None:
         ):
             _manifest(
                 profile=no_submit,
-                extension_facts=(_fact(capability),),
+                extension_facts=(_fact(capability, profile=no_submit),),
             )
 
 
@@ -330,7 +340,9 @@ def test_settlement_requires_proven_settled_position_read() -> None:
     ):
         _manifest(
             profile=no_settlement_read,
-            extension_facts=(_fact(ProviderManifestCapability.SETTLEMENT),),
+            extension_facts=(
+                _fact(ProviderManifestCapability.SETTLEMENT, profile=no_settlement_read),
+            ),
         )
 
 
@@ -379,6 +391,56 @@ def test_manifest_rejects_wrong_integration_profile_and_time_order() -> None:
             observed_at=_T0,
             source_ref="projection",
             source_payload_sha256=_HASH_C,
+        )
+
+
+def test_extension_evidence_is_nontransferable_across_profile_or_integration() -> None:
+    profile = _profile()
+    integration = _integration(profile)
+    other_profile = BookmakerCapabilityProfile(
+        venue_id="betfair",
+        account_id="acct-b",
+        adapter_id="betfair-api",
+        adapter_version="1.0",
+        profile_version=3,
+        facts=profile.facts,
+        observed_at=_T0,
+        source_ref="other-profile",
+        source_payload_sha256=_HASH_A,
+    )
+    foreign = ProviderCapabilityManifestFact(
+        capability=ProviderManifestCapability.STREAM,
+        state=ProviderManifestState.PROVEN,
+        authority=ProviderManifestFactAuthority.EXPLICIT_EVIDENCE,
+        evidence=_evidence("stream", profile=other_profile),
+    )
+    with pytest.raises(ProviderCapabilityManifestError, match="exact profile"):
+        build_provider_capability_manifest(
+            profile,
+            integration,
+            manifest_ref="manifest",
+            manifest_version=1,
+            observed_at=_T2,
+            source_ref="projection",
+            source_payload_sha256=_HASH_C,
+            extension_facts=(foreign,),
+        )
+
+    wrong_integration = replace(
+        _evidence("stream", profile=profile),
+        integration_evidence_id="d" * 64,
+    )
+    mismatched = replace(foreign, evidence=wrong_integration)
+    with pytest.raises(ProviderCapabilityManifestError, match="exact integration"):
+        build_provider_capability_manifest(
+            profile,
+            integration,
+            manifest_ref="manifest",
+            manifest_version=1,
+            observed_at=_T2,
+            source_ref="projection",
+            source_payload_sha256=_HASH_C,
+            extension_facts=(mismatched,),
         )
 
 

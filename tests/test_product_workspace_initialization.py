@@ -76,9 +76,9 @@ def test_first_run_publishes_one_versioned_workspace_identity(tmp_path: Path) ->
     assert len(initialized.workspace_instance_id) == 32
     assert initialized.binding_schema_version == PRODUCT_WORKSPACE_BINDING_SCHEMA_VERSION
     assert initialized.workspace_marker_path.is_file()
-    assert initialized.machine_path_binding_path.is_file()
+    assert initialized.path_binding_path.is_file()
     assert initialized.workspace_marker_path.is_relative_to(workspace)
-    assert initialized.machine_path_binding_path.is_relative_to(authority_root)
+    assert initialized.path_binding_path.is_relative_to(authority_root)
 
 
 def test_restart_reopens_exact_same_workspace_identity(tmp_path: Path) -> None:
@@ -87,13 +87,13 @@ def test_restart_reopens_exact_same_workspace_identity(tmp_path: Path) -> None:
 
     first = initialize_product_workspace(workspace, authority_root=authority_root)
     marker_before = first.workspace_marker_path.read_bytes()
-    path_binding_before = first.machine_path_binding_path.read_bytes()
+    path_binding_before = first.path_binding_path.read_bytes()
 
     second = initialize_product_workspace(workspace, authority_root=authority_root)
 
     assert second.workspace_instance_id == first.workspace_instance_id
     assert second.workspace_marker_path.read_bytes() == marker_before
-    assert second.machine_path_binding_path.read_bytes() == path_binding_before
+    assert second.path_binding_path.read_bytes() == path_binding_before
 
 
 def test_interrupted_path_binding_prefix_resumes_same_identity(tmp_path: Path) -> None:
@@ -102,15 +102,15 @@ def test_interrupted_path_binding_prefix_resumes_same_identity(tmp_path: Path) -
     first = initialize_product_workspace(workspace, authority_root=authority_root)
 
     first.workspace_marker_path.unlink()
-    assert first.machine_path_binding_path.is_file()
+    assert first.path_binding_path.is_file()
     assert not first.workspace_marker_path.exists()
 
     recovered = initialize_product_workspace(workspace, authority_root=authority_root)
 
     assert recovered.workspace_instance_id == first.workspace_instance_id
     assert recovered.workspace_marker_path.is_file()
-    assert recovered.machine_path_binding_path.read_bytes() == (
-        first.machine_path_binding_path.read_bytes()
+    assert recovered.path_binding_path.read_bytes() == (
+        first.path_binding_path.read_bytes()
     )
 
 
@@ -148,7 +148,7 @@ def test_self_consistent_workspace_vs_machine_identity_conflict_fails_closed(
     workspace = tmp_path / "workspace"
     authority_root = tmp_path / "machine-state"
     initialized = initialize_product_workspace(workspace, authority_root=authority_root)
-    machine_binding_before = initialized.machine_path_binding_path.read_bytes()
+    machine_binding_before = initialized.path_binding_path.read_bytes()
 
     _rewrite_self_consistent_workspace_id(
         initialized.workspace_marker_path,
@@ -163,7 +163,7 @@ def test_self_consistent_workspace_vs_machine_identity_conflict_fails_closed(
         initialize_product_workspace(workspace, authority_root=authority_root)
 
     assert initialized.workspace_marker_path.read_bytes() == workspace_marker_after_tamper
-    assert initialized.machine_path_binding_path.read_bytes() == machine_binding_before
+    assert initialized.path_binding_path.read_bytes() == machine_binding_before
 
 
 def test_corrupt_binding_digest_fails_without_reinitialization(tmp_path: Path) -> None:
@@ -178,7 +178,7 @@ def test_corrupt_binding_digest_fails_without_reinitialization(tmp_path: Path) -
         encoding="utf-8",
     )
     corrupt_bytes = initialized.workspace_marker_path.read_bytes()
-    machine_binding_before = initialized.machine_path_binding_path.read_bytes()
+    machine_binding_before = initialized.path_binding_path.read_bytes()
 
     with pytest.raises(
         ProductWorkspaceInitializationError,
@@ -187,7 +187,7 @@ def test_corrupt_binding_digest_fails_without_reinitialization(tmp_path: Path) -
         initialize_product_workspace(workspace, authority_root=authority_root)
 
     assert initialized.workspace_marker_path.read_bytes() == corrupt_bytes
-    assert initialized.machine_path_binding_path.read_bytes() == machine_binding_before
+    assert initialized.path_binding_path.read_bytes() == machine_binding_before
 
 
 def test_relative_workspace_is_rejected_before_publication(tmp_path: Path) -> None:
@@ -236,5 +236,5 @@ def test_alias_to_same_workspace_reuses_identity_when_supported(tmp_path: Path) 
 
     assert via_alias.workspace_instance_id == first.workspace_instance_id
     assert via_alias.workspace_marker_path.read_bytes() == first.workspace_marker_path.read_bytes()
-    assert via_alias.machine_path_binding_path.is_file()
-    assert via_alias.machine_path_binding_path != first.machine_path_binding_path
+    assert via_alias.path_binding_path.is_file()
+    assert via_alias.path_binding_path != first.path_binding_path

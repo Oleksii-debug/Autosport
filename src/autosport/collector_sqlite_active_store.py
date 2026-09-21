@@ -581,6 +581,37 @@ class CollectorDeltaStore(_SQLiteCollectorDeltaStore):
             )
             if canonical_due != expected_due:
                 raise ValueError("collector schedule slot due_at is not canonical")
+            attempted_instant = _instant(
+                canonical_attempt,
+                "attempted_at",
+            )
+            expected_due_instant = _instant(
+                expected_due,
+                "expected_due_at",
+            )
+            if attempted_instant < expected_due_instant:
+                raise ValueError(
+                    "collector schedule START cannot precede frozen due_at"
+                )
+            previous_start = connection.execute(
+                "SELECT starts.attempted_at "
+                "FROM collector_schedule_slots_v1 AS slots "
+                "JOIN collector_cycle_starts_v1 AS starts "
+                "ON starts.source_id=slots.source_id "
+                "AND starts.cycle_seq=slots.cycle_seq "
+                "WHERE slots.source_id=? AND slots.run_id=? "
+                "ORDER BY slots.slot_ordinal DESC LIMIT 1",
+                (source_id, run_id),
+            ).fetchone()
+            if previous_start is not None:
+                previous_attempt = _instant(
+                    previous_start["attempted_at"],
+                    "previous_attempted_at",
+                )
+                if attempted_instant < previous_attempt:
+                    raise ValueError(
+                        "collector schedule START time cannot regress"
+                    )
             last = connection.execute(
                 "SELECT MAX(slot_ordinal) FROM collector_schedule_slots_v1 "
                 "WHERE source_id=? AND run_id=?",

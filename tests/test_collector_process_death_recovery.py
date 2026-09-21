@@ -26,7 +26,8 @@ from autosport.event_lifecycle import (
 )
 
 
-_CRASH_EXIT_CODE = 91
+_PRECOMMIT_CRASH_EXIT_CODE = 90
+_POSTCOMMIT_CRASH_EXIT_CODE = 91
 _SOURCE_ID = "source-process-kill"
 _RUN_ID = "process-kill-run-1"
 
@@ -128,49 +129,119 @@ def _service(root: Path) -> HeadlessCollectorService:
     )
 
 
+def _crash_before_sqlite_commit(root: Path) -> None:
+    service = _service(root)
+
+    def die_with_transaction_open(_raw: dict[str, object]) -> None:
+        # _append_with_runtime_stream_epoch calls _write after inserting the delta but
+        # before connection.commit(). A real process exit here leaves SQLite rollback
+        # recovery, not Python cleanup, responsible for removing the partial prefix.
+        os._exit(_PRECOMMIT_CRASH_EXIT_CODE)
+
+    service.delta_store._write = die_with_transaction_open
+    service.run_cycle()
+    raise AssertionError("collector worker did not terminate before SQLite commit")
+
+
 def _crash_after_durable_commit(root: Path) -> None:
     service = _service(root)
 
     def die_before_success_bookkeeping(*, at: str, committed: int, duplicates: int) -> None:
-        # The collector delta transaction has already completed when run_cycle reaches
+        # The collector delta transaction has already committed when run_cycle reaches
         # record_success(). os._exit simulates abrupt process death: no finally blocks,
         # Python cleanup, or graceful service STOP bookkeeping can run.
-        os._exit(_CRASH_EXIT_CODE)
+        os._exit(_POSTCOMMIT_CRASH_EXIT_CODE)
 
     service._state.record_success = die_before_success_bookkeeping
     service.run_cycle()
-    raise AssertionError("collector worker did not terminate at the crash boundary")
+    raise AssertionError("collector worker did not terminate after durable commit")
+
+
+def _worker_environment() -> tuple[Path, dict[str, str]]:
+    repo_root = Path(__file__).resolve().parents[1]
+    env = os.environ.copy()
+    python_path = str(repo_root / "src")
+    existing = env.get("PYTHONPATH")
+    if existing:
+        python_path = os.pathsep.join((python_path, existing))
+    env["PYTHONPATH"] = python_path
+    return repo_root, env
+
+
+def _run_crash_worker(root: Path, mode: str) -> subprocess.CompletedProcess[str]:
+    repo_root, env = _worker_environment()
+    return subprocess.run(
+        [sys.executable, str(Path(__file__).resolve()), mode, str(root)],
+        cwd=repo_root,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=20,
+        check=False,
+    )
 
 
 class CollectorProcessDeathRecoveryTests(unittest.TestCase):
+    def test_uncommitted_delta_rolls_back_after_process_death(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            worker = _run_crash_worker(root, "--crash-before-commit")
+            self.assertEqual(
+                worker.returncode,
+                _PRECOMMIT_CRASH_EXIT_CODE,
+                msg=(
+                    "crash worker did not reach the open-transaction boundary; "
+                    f"stdout={worker.stdout!r} stderr={worker.stderr!r}"
+                ),
+            )
+
+            reopened_store = CollectorDeltaStore(root / "collector.json")
+            self.assertEqual(
+                reopened_store.deltas_after_commit(source_id=_SOURCE_ID),
+                (),
+            )
+            self.assertIsNone(
+                reopened_store.stream_checkpoint(_SOURCE_ID, "epoch-1")
+            )
+            self.assertEqual(
+                reopened_store.runtime_stream_epoch(_SOURCE_ID),
+                ("epoch-1", 1),
+            )
+
+            crashed_state = json.loads(
+                (root / "service.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(crashed_state["cycles_attempted"], 1)
+            self.assertEqual(crashed_state["cycles_succeeded"], 0)
+            self.assertEqual(crashed_state["deltas_committed"], 0)
+            self.assertIsNone(crashed_state["last_error_code"])
+
+            resumed = _service(root)
+            replay = resumed.run_cycle()
+            self.assertEqual(replay.committed_delta_ids, ("process-kill-d1",))
+            self.assertEqual(replay.duplicate_delta_ids, ())
+
+            recovered_store = CollectorDeltaStore(root / "collector.json")
+            recovered = recovered_store.deltas_after_commit(source_id=_SOURCE_ID)
+            self.assertEqual(
+                tuple(item.delta_id for item in recovered),
+                ("process-kill-d1",),
+            )
+            recovered_state = json.loads(
+                (root / "service.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(recovered_state["cycles_attempted"], 2)
+            self.assertEqual(recovered_state["cycles_succeeded"], 1)
+            self.assertEqual(recovered_state["deltas_committed"], 1)
+            self.assertEqual(recovered_state["duplicate_deltas"], 0)
+
     def test_durable_commit_survives_process_death_and_duplicate_replay(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            repo_root = Path(__file__).resolve().parents[1]
-            env = os.environ.copy()
-            python_path = str(repo_root / "src")
-            existing = env.get("PYTHONPATH")
-            if existing:
-                python_path = os.pathsep.join((python_path, existing))
-            env["PYTHONPATH"] = python_path
-
-            worker = subprocess.run(
-                [
-                    sys.executable,
-                    str(Path(__file__).resolve()),
-                    "--crash-worker",
-                    str(root),
-                ],
-                cwd=repo_root,
-                env=env,
-                capture_output=True,
-                text=True,
-                timeout=20,
-                check=False,
-            )
+            worker = _run_crash_worker(root, "--crash-after-commit")
             self.assertEqual(
                 worker.returncode,
-                _CRASH_EXIT_CODE,
+                _POSTCOMMIT_CRASH_EXIT_CODE,
                 msg=(
                     "crash worker did not reach the post-commit boundary; "
                     f"stdout={worker.stdout!r} stderr={worker.stderr!r}"
@@ -179,7 +250,10 @@ class CollectorProcessDeathRecoveryTests(unittest.TestCase):
 
             reopened_store = CollectorDeltaStore(root / "collector.json")
             durable = reopened_store.deltas_after_commit(source_id=_SOURCE_ID)
-            self.assertEqual(tuple(item.delta_id for item in durable), ("process-kill-d1",))
+            self.assertEqual(
+                tuple(item.delta_id for item in durable),
+                ("process-kill-d1",),
+            )
             self.assertEqual(
                 reopened_store.runtime_stream_epoch(_SOURCE_ID),
                 ("epoch-1", 1),
@@ -221,7 +295,9 @@ class CollectorProcessDeathRecoveryTests(unittest.TestCase):
 
 
 if __name__ == "__main__":
-    if len(sys.argv) == 3 and sys.argv[1] == "--crash-worker":
+    if len(sys.argv) == 3 and sys.argv[1] == "--crash-before-commit":
+        _crash_before_sqlite_commit(Path(sys.argv[2]))
+    elif len(sys.argv) == 3 and sys.argv[1] == "--crash-after-commit":
         _crash_after_durable_commit(Path(sys.argv[2]))
     else:
         unittest.main()

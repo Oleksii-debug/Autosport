@@ -65,19 +65,29 @@ def _config() -> PaperExecutionModelConfig:
 class _CanonicalOriginLedger(PaperExecutionLedger):
     """Test-only adapter: reserve through #727, delegate all later state to target."""
 
-    def __init__(self, target: PaperExecutionLedger, origin) -> None:
+    def __init__(
+        self,
+        target: PaperExecutionLedger,
+        origin,
+        runtime: PaperExecutionAdoptionRuntime,
+    ) -> None:
         self._target = target
         self._origin = origin
+        self._runtime = runtime
 
     @property
     def path(self):
         return self._target.path
 
     def reserve_run(self, **kwargs):
-        return origin_instance_guard._STABLE_RESERVE_RUN(
-            origin_instance_guard._CanonicalReservationView(self._target, self._origin),
-            **kwargs,
-        )
+        token = origin_instance_guard._PRODUCT_ORIGIN_RUNTIME.set(self._runtime)
+        try:
+            return origin_instance_guard._STABLE_RESERVE_RUN(
+                origin_instance_guard._CanonicalReservationView(self._target, self._origin),
+                **kwargs,
+            )
+        finally:
+            origin_instance_guard._PRODUCT_ORIGIN_RUNTIME.reset(token)
 
     def load_run(self, **kwargs):
         token = origin_module._DECISION_ORIGIN.set(self._origin)
@@ -96,21 +106,24 @@ class _CanonicalOriginLedger(PaperExecutionLedger):
         return self._target.events(run_id)
 
 
-def _canonical_observation(environment, record, record_sha256: str) -> Observation:
-    return Observation(
-        environment_id=environment.environment_id,
-        observed_at=record.observed_ts,
-        available_at=record.observed_ts,
-        evidence=tuple(
-            sorted(
-                (
-                    ("context_hash", record.context_hash),
-                    ("decision_id", record.decision_id),
-                    ("decision_record_sha256", record_sha256),
-                )
-            )
-        ),
+def _durable_learning_observation(
+    ledger: PaperExecutionLedger,
+    run_id: str,
+) -> Observation:
+    events = ledger.events(run_id)
+    reservation = next(event for event in events if event["event_type"] == "RUN_RESERVED")
+    origin = reservation["payload"]["decision_origin"]
+    raw = origin["learning_observation"]
+    evidence = tuple((item[0], item[1]) for item in raw["evidence"])
+    observation = Observation(
+        environment_id=raw["environment_id"],
+        observed_at=raw["observed_at"],
+        available_at=raw["available_at"],
+        evidence=evidence,
     )
+    if observation.observation_id != raw["observation_id"]:
+        raise AssertionError("fixture durable learning Observation identity changed")
+    return observation
 
 
 class AdmissionFixture:
@@ -149,7 +162,7 @@ class AdmissionFixture:
             admissible_actions=frozenset({"PAPER_PROPOSAL"}),
         )
         # Originless negative fixtures retain a non-authoritative caller observation.
-        # Positive fixtures replace this below with the exact durable decision projection.
+        # Positive fixtures replace this below with exact pre-execution durable bytes.
         self.observation = Observation(
             environment_id=self.environment.environment_id,
             observed_at=T0,
@@ -186,6 +199,7 @@ class AdmissionFixture:
             config=execution_config,
             max_quote_age=timedelta(seconds=60),
             paper_book_path=self.workspace / "paper_book.json",
+            learning_environment=self.environment,
         )
         action = ExecutionAction(
             action_id="admission-execution-action",
@@ -260,18 +274,15 @@ class AdmissionFixture:
         observed = evidence.as_observation()
 
         if seed_execution_decision:
-            records = decision_ledger.verified_records()
-            record = next(item for item in records if item.decision_id == self.execution_decision_id)
             origin = origin_instance_guard._verified_decision_origin_without_instance_dispatch(
                 decision_ledger,
                 self.execution_decision_id,
             )
-            self.observation = _canonical_observation(
-                self.environment,
-                record,
-                origin.record_sha256,
+            canonical_ledger = _CanonicalOriginLedger(
+                execution_ledger,
+                origin,
+                execution_runtime,
             )
-            canonical_ledger = _CanonicalOriginLedger(execution_ledger, origin)
             original_ledger = execution_runtime.ledger
             execution_runtime.ledger = canonical_ledger
             try:
@@ -279,13 +290,17 @@ class AdmissionFixture:
                     execution_runtime,
                     prepared=prepared,
                     trigger_id=self.execution_decision_id,
-                    started_at=T3,
+                    started_at=T2,
                     materialize_exposure=True,
                     observations={action.action_id: observed},
                     evidence_registry=registry,
                 )
             finally:
                 execution_runtime.ledger = original_ledger
+            self.observation = _durable_learning_observation(
+                execution_ledger,
+                self.execution_run_id,
+            )
         else:
             # Deliberately originless: used to prove a later matching decision cannot
             # retroactively bless already-started PAPER execution.
@@ -293,7 +308,7 @@ class AdmissionFixture:
                 execution_runtime,
                 prepared=prepared,
                 trigger_id=self.execution_decision_id,
-                started_at=T3,
+                started_at=T2,
                 materialize_exposure=True,
                 observations={action.action_id: observed},
                 evidence_registry=registry,

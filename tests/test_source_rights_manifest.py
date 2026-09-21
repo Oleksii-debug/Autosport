@@ -253,6 +253,39 @@ class SourceRightsManifestTests(unittest.TestCase):
                 hashlib.sha256(manifest.manifest_bytes).hexdigest(),
             )
 
+    def test_post_load_path_replacement_cannot_expand_authority(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            path = self._write(root)
+            manifest = load_source_rights_manifest(path)
+
+            replacement = self._payload()
+            replacement["authorized_scopes"] = [
+                "historical.internal_research",
+                "historical.read",
+                "historical.redistribute",
+            ]
+            self._write(root, replacement)
+
+            decision = authorize_source_use(
+                manifest,
+                source_identity=manifest.source_identity,
+                required_scope="historical.read",
+                at=datetime(2026, 9, 21, tzinfo=timezone.utc),
+            )
+            self.assertEqual(decision.required_scope, "historical.read")
+
+            with self.assertRaisesRegex(
+                SourceRightsManifestError,
+                "required_scope is not explicitly authorized",
+            ):
+                authorize_source_use(
+                    manifest,
+                    source_identity=manifest.source_identity,
+                    required_scope="historical.redistribute",
+                    at=datetime(2026, 9, 21, tzinfo=timezone.utc),
+                )
+
     def test_copied_manifest_fields_cannot_diverge_from_hash_bound_bytes(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             manifest = load_source_rights_manifest(self._write(Path(tmp)))

@@ -138,3 +138,21 @@ def test_direct_observation_without_provider_source_time_is_rejected() -> None:
         match="authoritative provider source_ts",
     ):
         ReferenceObservation(_canonical_event_json(missing))
+
+
+def test_observation_rejects_canonical_json_with_unknown_event_fields() -> None:
+    payload = _event("provider-a").to_dict()
+    payload["caller_only_shadow"] = "not-part-of-MarketEvent"
+    canonical_with_extra = json.dumps(
+        payload,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    )
+
+    with pytest.raises(
+        ReferencePriceEvidenceError,
+        match="exact canonical MarketEvent bytes",
+    ):
+        ReferenceObservation(canonical_with_extra)

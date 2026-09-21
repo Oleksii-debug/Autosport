@@ -220,6 +220,21 @@ def test_forensic_journal_rejects_oversized_json_integer_before_schema(tmp_path)
         journal.verify()
 
 
+def test_forensic_journal_rejects_oversized_integer_before_durable_append(tmp_path):
+    path = tmp_path / "forensic.jsonl"
+    journal = ForensicSessionJournal(path, clock=FakeClock())
+
+    with pytest.raises(ValueError, match="canonical strict JSON"):
+        journal.record_material_event(
+            "research",
+            "metric",
+            details={"value": int("9" * 641)},
+        )
+
+    assert path.read_bytes() == b""
+    assert journal.verify().record_count == 0
+
+
 def test_forensic_journal_rejects_nonempty_journal_without_checkpoint(tmp_path):
     path = tmp_path / "forensic.jsonl"
     path.write_text('{"untrusted":"legacy"}\n', encoding="utf-8")

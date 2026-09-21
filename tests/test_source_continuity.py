@@ -27,7 +27,7 @@ class SourceContinuityTests(unittest.TestCase):
             self.assertEqual(state.last_observed_cursor, "local-snapshot-cursor")
             self.assertEqual(state.reason, "provider_continuity_witness_absent")
 
-    def test_explicit_provider_chain_requires_anchor_before_verified(self):
+    def test_caller_complete_chain_cannot_mint_verified_continuity(self):
         with tempfile.TemporaryDirectory() as tmp:
             store = self._store(tmp)
             first = store.record_success(
@@ -49,9 +49,9 @@ class SourceContinuityTests(unittest.TestCase):
                 cursor="token-2",
                 witness=ProviderContinuityWitness("token-1", "token-2"),
             )
-            self.assertEqual(second.status, "verified")
-            self.assertEqual(second.trusted_token, "token-2")
-            self.assertEqual(second.reason, "provider_chain_and_backfill_verified")
+            self.assertEqual(second.status, "unknown")
+            self.assertEqual(second.trusted_token, "token-1")
+            self.assertEqual(second.reason, "provider_native_evidence_required")
 
     def test_restart_preserves_trusted_provider_token(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -75,12 +75,13 @@ class SourceContinuityTests(unittest.TestCase):
                 "cursor-source",
                 now="2026-09-21T08:02:00+00:00",
                 cursor="token-3",
-                witness=ProviderContinuityWitness("token-2", "token-3"),
+                witness=ProviderContinuityWitness("token-1", "token-3"),
             )
-            self.assertEqual(state.status, "verified")
-            self.assertEqual(state.trusted_token, "token-3")
+            self.assertEqual(state.status, "unknown")
+            self.assertEqual(state.trusted_token, "token-1")
+            self.assertEqual(state.reason, "provider_native_evidence_required")
 
-    def test_provider_failure_revokes_verified_status_but_keeps_resume_anchor(self):
+    def test_provider_failure_keeps_only_unverified_resume_anchor(self):
         with tempfile.TemporaryDirectory() as tmp:
             store = self._store(tmp)
             store.record_success(
@@ -100,7 +101,7 @@ class SourceContinuityTests(unittest.TestCase):
                 "cursor-source", now="2026-09-21T08:02:00+00:00"
             )
             self.assertEqual(failed.status, "unknown")
-            self.assertEqual(failed.trusted_token, "token-2")
+            self.assertEqual(failed.trusted_token, "token-1")
             self.assertEqual(
                 failed.reason,
                 "provider_failure_since_last_continuity_proof",
@@ -110,10 +111,11 @@ class SourceContinuityTests(unittest.TestCase):
                 "cursor-source",
                 now="2026-09-21T08:03:00+00:00",
                 cursor="token-3",
-                witness=ProviderContinuityWitness("token-2", "token-3"),
+                witness=ProviderContinuityWitness("token-1", "token-3"),
             )
-            self.assertEqual(recovered.status, "verified")
-            self.assertEqual(recovered.trusted_token, "token-3")
+            self.assertEqual(recovered.status, "unknown")
+            self.assertEqual(recovered.trusted_token, "token-1")
+            self.assertEqual(recovered.reason, "provider_native_evidence_required")
 
     def test_resume_token_mismatch_fails_closed_without_moving_trusted_anchor(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -138,7 +140,7 @@ class SourceContinuityTests(unittest.TestCase):
                 witness=ProviderContinuityWitness("wrong-token", "token-99"),
             )
             self.assertEqual(mismatched.status, "unknown")
-            self.assertEqual(mismatched.trusted_token, "token-2")
+            self.assertEqual(mismatched.trusted_token, "token-1")
             self.assertEqual(mismatched.reason, "witness_previous_token_mismatch")
 
     def test_incomplete_backfill_does_not_advance_trusted_anchor(self):
@@ -177,8 +179,9 @@ class SourceContinuityTests(unittest.TestCase):
                 cursor="alpha",
                 witness=ProviderContinuityWitness("zeta", "alpha"),
             )
-            self.assertEqual(state.status, "verified")
-            self.assertEqual(state.trusted_token, "alpha")
+            self.assertEqual(state.status, "unknown")
+            self.assertEqual(state.trusted_token, "zeta")
+            self.assertEqual(state.reason, "provider_native_evidence_required")
 
     def test_current_token_mismatch_fails_closed(self):
         with tempfile.TemporaryDirectory() as tmp:

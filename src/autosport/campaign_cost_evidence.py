@@ -28,6 +28,22 @@ _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _CURRENCY_RE = re.compile(r"^[A-Z]{3}$")
 
 
+def _capture_product_denomination_reader():
+    # Pin the product implementation once.  Exact-type checks alone do not stop
+    # same-process class monkeypatching from replacing a bound method after
+    # import and synthesizing positive denomination authority.
+    reader = FinalizedCampaignAuthority.denomination_binding
+
+    def resolve(campaign: FinalizedCampaignAuthority):
+        return reader(campaign)
+
+    return resolve
+
+
+_PRODUCT_DENOMINATION_READER = _capture_product_denomination_reader()
+del _capture_product_denomination_reader
+
+
 class CostEvidenceError(ValueError):
     """Raised when campaign economic evidence is malformed or inconsistent."""
 
@@ -406,7 +422,7 @@ def derive_campaign_economics(
     _utc(as_of, "as_of")
     projection = campaign.projection()
     try:
-        denomination = campaign.denomination_binding()
+        denomination = _PRODUCT_DENOMINATION_READER(campaign)
     except (CampaignEconomicAuthorityError, CampaignDenominationError) as exc:
         raise CostEvidenceError(
             "campaign denomination authority failed canonical re-resolution"

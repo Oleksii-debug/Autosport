@@ -120,6 +120,34 @@ def test_non_outcome_metadata_does_not_consume_confirmation_capacity(
     )
 
 
+@pytest.mark.parametrize("channel", _PUBLIC_CHANNELS)
+@pytest.mark.parametrize("kind", _OUTCOME_KINDS)
+def test_public_outcome_channel_cannot_bypass_with_false_accessibility(
+    tmp_path, channel: DisclosureChannel, kind: DisclosureKind
+) -> None:
+    snapshot = _snapshot()
+    ledger = _ledger(tmp_path)
+
+    decision = HoldoutDisclosureGate(ledger).record(
+        dataset_snapshot=snapshot,
+        research_protocol_id="protocol-v1",
+        confirmation_trial_family_id="family-v1",
+        channel=channel,
+        kind=kind,
+        accessible_to_adaptive_actor=False,
+        disclosed_at_utc=_DISCLOSED_AT,
+    )
+
+    assert decision.consumed is True
+    assert decision.accessible_to_adaptive_actor is True
+    with pytest.raises(HoldoutAlreadyConsumedError):
+        ledger.assert_unused(
+            dataset_snapshot=snapshot,
+            research_protocol_id="protocol-v1",
+            confirmation_trial_family_id="family-v1",
+        )
+
+
 @pytest.mark.parametrize("kind", _OUTCOME_KINDS)
 def test_outcome_signal_kept_inside_sealed_evaluator_does_not_consume(
     tmp_path, kind: DisclosureKind

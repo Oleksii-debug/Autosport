@@ -747,6 +747,8 @@ def _resolve_boundary_receipts(
         if (
             parent_receipt.campaign_id != receipt.campaign_id
             or parent_receipt.event_or_market_id != receipt.event_or_market_id
+            or parent_receipt.provider_or_authority_id
+            != receipt.provider_or_authority_id
             or parent_receipt.boundary_rule_id != receipt.boundary_rule_id
         ):
             conflict = True

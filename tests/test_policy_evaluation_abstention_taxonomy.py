@@ -1,5 +1,7 @@
 from decimal import Decimal
 
+import pytest
+
 from autosport.learning_environment import EvidenceTruth
 from autosport.policy_evaluation import (
     PolicyEvaluationCase,
@@ -137,3 +139,19 @@ def test_material_bet_remains_an_active_action():
     assert _metrics(result, challenger=False)["abstention_rate"] == Decimal("0")
     assert _metrics(result, challenger=True)["action_rate"] == Decimal("0")
     assert _metrics(result, challenger=True)["abstention_rate"] == Decimal("1")
+
+def test_material_bet_cannot_be_configured_as_custom_abstention():
+    actions = ("BET", "NO_BET", "WAIT")
+    predecessor = _policy("BET", actions)
+    challenger = _policy("NO_BET", actions)
+
+    with pytest.raises(ValueError, match="material PAPER action"):
+        evaluate_policy_pair(
+            predecessor,
+            challenger,
+            (_case(actions),),
+            completed_at=T2,
+            abstain_action="BET",
+            counterfactual_authority=_authority(),
+        )
+

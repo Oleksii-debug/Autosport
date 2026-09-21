@@ -136,6 +136,11 @@ from . import _scientific_registry_read_authority as _scientific_registry_read_a
 # and explicit runtime-repair reloads must restore this seal before positive use.
 from . import _point_in_time_class_dispatch_seal as _point_in_time_class_dispatch_seal  # noqa: F401,E402
 
+# Holdout freshness is physical evaluation content, not a protocol/source/licence/
+# family label. Compose the #716 ledger with registry-backed factory history while
+# retaining old stored freshness ids as readable migration input only.
+from . import _holdout_physical_content_guard as _holdout_physical_content_guard  # noqa: F401,E402
+
 # Sequential multiplicity evidence and PromotionEvidence live in separate durable
 # journals. Seal the registry prefix observed at look registration so a later write
 # can never retroactively authorize an already-durable promotion record.

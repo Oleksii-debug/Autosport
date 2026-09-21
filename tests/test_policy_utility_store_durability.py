@@ -5,12 +5,16 @@ from decimal import Decimal
 import multiprocessing
 from pathlib import Path
 from queue import Empty
+import sys
+from types import SimpleNamespace
 
 import pytest
 
+import autosport.policy_utility_evidence as policy_utility_module
 from autosport.policy_utility_evidence import (
     AuthorityRef,
     DecisionKind,
+    PolicyUtilityError,
     PolicyUtilityEvidence,
     PolicyUtilityStore,
     UtilityCompleteness,
@@ -128,3 +132,78 @@ def test_directory_sync_boundary_failure_returns_no_receipt_and_retry_converges(
     assert reopened.list() == (evidence,)
     assert reopened.append(evidence) is False
     assert reopened.list() == (evidence,)
+
+
+def test_windows_write_through_replace_uses_atomic_write_through_flags(monkeypatch, tmp_path) -> None:
+    source = tmp_path / "source.tmp"
+    destination = tmp_path / "utility.jsonl"
+    source.write_bytes(b"successor")
+    calls: list[tuple[str, str, int]] = []
+
+    class FakeMoveFileEx:
+        argtypes = None
+        restype = None
+
+        def __call__(self, source_path, destination_path, flags):
+            calls.append((source_path, destination_path, flags))
+            return 1
+
+    fake_move = FakeMoveFileEx()
+    fake_ctypes = SimpleNamespace(
+        windll=SimpleNamespace(kernel32=SimpleNamespace(MoveFileExW=fake_move)),
+        c_wchar_p=object(),
+        c_uint=object(),
+        c_int=object(),
+        WinError=lambda: OSError("unexpected Windows replacement failure"),
+    )
+    monkeypatch.setitem(sys.modules, "ctypes", fake_ctypes)
+
+    policy_utility_module._replace_windows_write_through(source, destination)
+
+    assert calls == [(str(source), str(destination), 0x1 | 0x8)]
+
+
+def test_windows_write_through_failure_cannot_report_durable_success(monkeypatch, tmp_path) -> None:
+    source = tmp_path / "source.tmp"
+    destination = tmp_path / "utility.jsonl"
+    source.write_bytes(b"successor")
+
+    class FakeMoveFileEx:
+        argtypes = None
+        restype = None
+
+        def __call__(self, source_path, destination_path, flags):
+            return 0
+
+    fake_move = FakeMoveFileEx()
+    fake_ctypes = SimpleNamespace(
+        windll=SimpleNamespace(kernel32=SimpleNamespace(MoveFileExW=fake_move)),
+        c_wchar_p=object(),
+        c_uint=object(),
+        c_int=object(),
+        WinError=lambda: OSError("injected Windows write-through failure"),
+    )
+    monkeypatch.setitem(sys.modules, "ctypes", fake_ctypes)
+
+    with pytest.raises(OSError, match="write-through failure"):
+        policy_utility_module._replace_windows_write_through(source, destination)
+
+    assert source.read_bytes() == b"successor"
+    assert not destination.exists()
+
+
+def test_store_wraps_durable_replace_failure_and_returns_no_receipt(monkeypatch, tmp_path) -> None:
+    path = tmp_path / "utility.jsonl"
+    evidence = _evidence(episode_id="episode-write-through-failure")
+
+    def fail_durable_replace(source, destination, *, after_posix_replace=None):
+        raise OSError("injected platform durable replace failure")
+
+    monkeypatch.setattr(policy_utility_module, "_durable_replace", fail_durable_replace)
+    store = PolicyUtilityStore(path)
+
+    with pytest.raises(PolicyUtilityError, match="unable to durably publish"):
+        store.append(evidence)
+
+    assert not path.exists()
+    assert not list(tmp_path.glob(f".{path.name}.*.tmp"))

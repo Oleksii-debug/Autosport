@@ -119,6 +119,49 @@ class SettlementReceiptIdentityTests(unittest.TestCase):
                     settlement_evidence=(_resolution(outcome="win"),)
                 )
 
+    def test_outcome_fingerprint_is_durable_and_order_independent(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "continuous_session.json"
+            state = _state(path)
+            first = SettlementResolution(
+                event_identity="provider-a:event-1",
+                settlement_ref="provider-result:1",
+                quote_outcomes={
+                    "quote-b": "void",
+                    "quote-a": "win",
+                },
+                evidence_id="receipt-order",
+                evidence_sha256="b" * 64,
+                available_at=_AT,
+            )
+            state.record_success(
+                at=_AT,
+                full_refresh=False,
+                settlement_evidence=(first,),
+            )
+            raw_state = json.loads(path.read_text(encoding="utf-8"))
+            self.assertEqual(raw_state["schema_version"], 3)
+            fingerprint = raw_state["settlement_evidence"][0][
+                "quote_outcomes_sha256"
+            ]
+            self.assertIsInstance(fingerprint, str)
+            self.assertEqual(len(fingerprint), 64)
+
+            reordered = SettlementResolution(
+                event_identity=first.event_identity,
+                settlement_ref=first.settlement_ref,
+                quote_outcomes={
+                    "quote-a": "win",
+                    "quote-b": "void",
+                },
+                evidence_id=first.evidence_id,
+                evidence_sha256=first.evidence_sha256,
+                available_at=first.available_at,
+            )
+            _state(path).validate_settlement_evidence(
+                settlement_evidence=(reordered,)
+            )
+
     def test_push_is_not_a_canonical_receipt_outcome(self) -> None:
         with self.assertRaisesRegex(ValueError, "unsupported outcome"):
             _resolution(outcome="push").validate(as_of=_AT)

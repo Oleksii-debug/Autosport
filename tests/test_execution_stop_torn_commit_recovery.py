@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import json
 from pathlib import Path
 
 import pytest
@@ -184,16 +186,99 @@ def test_recovery_rejects_anchor_from_different_valid_journal(tmp_path: Path) ->
         _authority(first_path).recover_torn_transition()
 
 
-def test_recovery_rejects_incomplete_journal_anchor_pair(tmp_path: Path) -> None:
+def test_recovery_establishes_first_anchor_for_complete_initial_stop(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = tmp_path / "execution-stop.jsonl"
+    store = _authority(path)
+
+    def fail_first_anchor(*, revision: int, record_sha256: str) -> None:
+        assert revision == 1
+        assert len(record_sha256) == 64
+        raise ExecutionStopIntegrityError("injected first-anchor failure")
+
+    monkeypatch.setattr(store, "_write_anchor_unlocked", fail_first_anchor)
+    with pytest.raises(ExecutionStopIntegrityError, match="first-anchor"):
+        store.initialize_stopped(
+            operator_id="owner",
+            reason="initial safe state",
+            command_id="init-torn",
+        )
+    monkeypatch.undo()
+
+    restarted = _authority(path)
+    assert path.exists()
+    assert not restarted.anchor_path.exists()
+    assert restarted.decision().allowed is False
+
+    recovered = restarted.recover_torn_transition()
+    assert recovered.revision == 1
+    assert recovered.mode is ExecutionAuthorityMode.STOPPED
+    assert recovered.command_id == "init-torn"
+    assert restarted.anchor_path.exists()
+    assert restarted.current() == recovered
+    assert restarted.recover_torn_transition() == recovered
+
+
+def test_recovery_rejects_missing_journal_with_existing_anchor(tmp_path: Path) -> None:
     path = tmp_path / "execution-stop.jsonl"
     store = _init_stopped(path)
-    store.anchor_path.unlink()
+    path.unlink()
 
     with pytest.raises(
         ExecutionStopIntegrityError,
         match="journal/anchor pair is incomplete",
     ):
         _authority(path).recover_torn_transition()
+
+
+def test_recovery_rejects_multiple_records_without_anchor(tmp_path: Path) -> None:
+    path = tmp_path / "execution-stop.jsonl"
+    store = _init_armed(path)
+    store.anchor_path.unlink()
+
+    with pytest.raises(
+        ExecutionStopIntegrityError,
+        match="cannot establish an ambiguous first anchor",
+    ):
+        _authority(path).recover_torn_transition()
+
+
+def test_recovery_never_establishes_first_anchor_for_armed_record(tmp_path: Path) -> None:
+    path = tmp_path / "execution-stop.jsonl"
+    store = _init_stopped(path)
+    record = json.loads(path.read_text(encoding="utf-8"))
+    record["mode"] = ExecutionAuthorityMode.ARMED.value
+    record["confirmation_id"] = "forged-initial-arm"
+    body = {key: value for key, value in record.items() if key != "record_sha256"}
+    canonical = json.dumps(
+        body,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    record["record_sha256"] = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+    path.write_text(
+        json.dumps(
+            record,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        + "\n",
+        encoding="utf-8",
+        newline="\n",
+    )
+    store.anchor_path.unlink()
+
+    restarted = _authority(path)
+    assert restarted.decision().allowed is False
+    with pytest.raises(
+        ExecutionStopIntegrityError,
+        match="cannot establish an ambiguous first anchor",
+    ):
+        restarted.recover_torn_transition()
+    assert not restarted.anchor_path.exists()
 
 
 def test_arm_rollback_recovery_is_safe_if_interrupted_after_journal_replace(

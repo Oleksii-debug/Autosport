@@ -241,6 +241,15 @@ def search_negative_results(
         postmortem_text: list[str] = []
         for postmortem in matching_postmortems:
             post_context = f"Postmortem:{postmortem.record_id}"
+            if not registry.causal_precedes(
+                "Experiment",
+                experiment.record_id,
+                "Postmortem",
+                postmortem.record_id,
+            ):
+                raise NegativeResultRetrievalError(
+                    f"{post_context} does not causally follow {context}"
+                )
             if postmortem.payload.get("classification") != outcome.value:
                 raise NegativeResultRetrievalError(
                     f"{post_context} classification conflicts with experiment outcome"

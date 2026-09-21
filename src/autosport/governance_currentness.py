@@ -36,6 +36,7 @@ class GovernanceCurrentnessReason(str, Enum):
     STALE = "stale"
     AMBIGUOUS_LATEST = "ambiguous_latest"
     TERMS_DOCUMENT_CONFLICT = "terms_document_conflict"
+    TERMS_PERMISSION_CONFLICT = "terms_permission_conflict"
     RECORDED_UNKNOWN = "recorded_unknown"
     QUALIFIED_PERMITTED = "qualified_permitted"
     QUALIFIED_PROHIBITED = "qualified_prohibited"
@@ -247,6 +248,27 @@ def resolve_governance_for_decision(
             max_age_seconds=max_age_seconds,
             state=GovernanceEvidenceState.UNKNOWN,
             reason=GovernanceCurrentnessReason.TERMS_DOCUMENT_CONFLICT,
+            evidence=candidate,
+            evidence_age_seconds=age_seconds,
+        )
+
+    same_document_permissions = {
+        item.automation_permission
+        for item in eligible
+        if (
+            item.terms_version == candidate.terms_version
+            and item.source_payload_sha256 == candidate.source_payload_sha256
+        )
+    }
+    if len(same_document_permissions) != 1:
+        return _result(
+            venue_id=venue_id,
+            account_id=account_id,
+            jurisdiction=jurisdiction,
+            decision_at=decision_at,
+            max_age_seconds=max_age_seconds,
+            state=GovernanceEvidenceState.UNKNOWN,
+            reason=GovernanceCurrentnessReason.TERMS_PERMISSION_CONFLICT,
             evidence=candidate,
             evidence_age_seconds=age_seconds,
         )

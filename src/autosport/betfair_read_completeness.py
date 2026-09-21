@@ -244,6 +244,7 @@ class BetfairReadCompletenessObserver:
                         "cross_page_duplicate",
                     )
                 if not page.more_available:
+                    completeness, failure_code = _provider_end_completeness(pages)
                     return self._paged_result(
                         "listCurrentOrders",
                         query_sha,
@@ -251,8 +252,8 @@ class BetfairReadCompletenessObserver:
                         started,
                         pages,
                         items,
-                        BetfairObservationCompleteness.COMPLETE_FOR_DECLARED_QUERY_WINDOW,
-                        None,
+                        completeness,
+                        failure_code,
                     )
                 if not page.orders:
                     return self._paged_result(
@@ -345,6 +346,7 @@ class BetfairReadCompletenessObserver:
                         "cross_page_duplicate",
                     )
                 if not page.more_available:
+                    completeness, failure_code = _provider_end_completeness(pages)
                     return self._paged_result(
                         "listClearedOrders",
                         query_sha,
@@ -352,8 +354,8 @@ class BetfairReadCompletenessObserver:
                         started,
                         pages,
                         items,
-                        BetfairObservationCompleteness.COMPLETE_FOR_DECLARED_QUERY_WINDOW,
-                        None,
+                        completeness,
+                        failure_code,
                     )
                 if not page.orders:
                     return self._paged_result(
@@ -500,6 +502,28 @@ class BetfairReadCompletenessObserver:
         if not isinstance(value, datetime) or value.tzinfo is None or value.utcoffset() is None:
             raise BetfairReadOnlyError("completeness clock must return timezone-aware datetime")
         return value.isoformat()
+
+
+
+def _provider_end_completeness(
+    pages: list[tuple[int, int, bool, str]],
+) -> tuple[BetfairObservationCompleteness, str | None]:
+    """Grant global completeness only to one provider response.
+
+    Betfair's offset-paginated read operations expose no provider snapshot/version
+    token binding multiple calls into one atomic account-state image.  A later
+    provider-end marker therefore proves traversal exhaustion, not that rows could
+    not shift across offsets while the sweep was in progress.
+    """
+    if len(pages) == 1:
+        return (
+            BetfairObservationCompleteness.COMPLETE_FOR_DECLARED_QUERY_WINDOW,
+            None,
+        )
+    return (
+        BetfairObservationCompleteness.PARTIAL,
+        "cross_call_snapshot_unproven",
+    )
 
 
 def _extend_unique(target: list[object], seen: set[str], rows: tuple[object, ...]) -> bool:

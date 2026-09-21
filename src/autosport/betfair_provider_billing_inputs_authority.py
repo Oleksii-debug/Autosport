@@ -1,11 +1,11 @@
 """Product-owned issuance verification for Betfair provider billing observations.
 
 The descriptive DTOs in :mod:`betfair_provider_billing_inputs` deliberately remain
-serializable/inspectable data.  Their public constructors and deterministic digests
-are therefore not provenance.  Positive consumers must use this module's canonical
+serializable/inspectable data. Their public constructors and deterministic digests
+are therefore not provenance. Positive consumers must use this module's canonical
 read wrapper and validator: the wrapper delegates to the existing authenticated
 provider read capability, then records the exact returned observation in a
-closure-private issuance relation.  A caller-constructed checksum-valid clone is
+closure-private issuance relation. A caller-constructed checksum-valid clone is
 not registered and cannot become provider authority.
 
 This is an in-process observation capability, not a second provider client, billing
@@ -25,11 +25,12 @@ def _build_observation_authority():
     read_impl = _inputs.__dict__["read_betfair_provider_billing_inputs"]
     source_cls = _inputs.__dict__["BetfairProviderBillingInputsObservation"]
     source_post_init = source_cls.__dict__["__post_init__"]
+    base_error_cls = BetfairReadOnlyError
     error_cls = BetfairProviderBillingInputsAuthorityError
     get_attr = object.__getattribute__
 
     # Strongly retaining the issued object prevents id reuse while its issuance is
-    # authoritative.  The stored projection detects object.__setattr__ tampering.
+    # authoritative. The stored projection detects object.__setattr__ tampering.
     issued: dict[int, tuple[object, tuple[object, ...]]] = {}
 
     def projection(source: object) -> tuple[object, ...]:
@@ -42,6 +43,14 @@ def _build_observation_authority():
             get_attr(source, "evidence_sha256"),
         )
 
+    def validate_structure(source: object) -> None:
+        try:
+            source_post_init(source)
+        except base_error_cls as exc:
+            raise error_cls(
+                "provider billing observation failed canonical validation"
+            ) from exc
+
     def register(source: object):
         if type(source) is not source_cls:
             raise error_cls(
@@ -49,7 +58,7 @@ def _build_observation_authority():
             )
         # Re-run the closure-backed canonical structural/digest validator before the
         # observation enters the private issuance relation.
-        source_post_init(source)
+        validate_structure(source)
         issued[id(source)] = (source, projection(source))
         return source
 
@@ -81,9 +90,9 @@ def _build_observation_authority():
             )
         # Structural/digest validation is repeated at every authority use so an
         # issued object cannot be mutated and still rely on its original registry
-        # entry.  The registry projection additionally prevents recomputed-field
+        # entry. The registry projection additionally prevents recomputed-field
         # tampering from replacing the exact issued identity.
-        source_post_init(source)
+        validate_structure(source)
         registered = issued.get(id(source))
         if registered is None or registered[0] is not source:
             raise error_cls(

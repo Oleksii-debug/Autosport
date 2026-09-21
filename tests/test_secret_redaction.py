@@ -202,6 +202,37 @@ class SecretRedactionTests(unittest.TestCase):
         self.assertIn("password=" + REDACTED, rendered)
         self.assertIn("region=us", rendered)
 
+    def test_hostile_exception_type_name_cannot_reach_operator_text(self) -> None:
+        secret = "TYPE-NAME-SECRET-7f31"
+        hostile_type = type(
+            "ProviderError_" + secret + "\nAuthorization",
+            (RuntimeError,),
+            {},
+        )
+
+        rendered = safe_exception_text(
+            hostile_type("message detail is intentionally irrelevant")
+        )
+
+        self.assertNotIn(secret, rendered)
+        self.assertNotIn("Authorization", rendered)
+        self.assertNotIn("\n", rendered)
+        self.assertEqual(
+            rendered,
+            "RuntimeError: message detail is intentionally irrelevant",
+        )
+
+    def test_secret_shaped_identifier_type_falls_back_to_safe_parent(self) -> None:
+        hostile_type = type(
+            "ProviderSecretToken7f31",
+            (ValueError,),
+            {},
+        )
+
+        rendered = safe_exception_text(hostile_type("ordinary detail"))
+
+        self.assertEqual(rendered, "ValueError: ordinary detail")
+
     def test_hostile_exception_string_still_terminalizes_without_secret(self) -> None:
         class HostileRenderedString(str):
             def __format__(self, spec: str) -> str:

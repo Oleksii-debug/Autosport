@@ -5,6 +5,7 @@ import pytest
 from autosport.model_runtime_contract import (
     ModelBackendIdentity,
     ModelBackendMode,
+    ModelEndpointClass,
     ModelInvocationRequest,
     ModelInvocationStatus,
     ModelRuntimeContractError,
@@ -22,7 +23,7 @@ RESPONSE = "4" * 64
 def local_backend(*, config_sha256=CFG_A, model_id="qwen3:8b"):
     return ModelBackendIdentity(
         mode=ModelBackendMode.LOCAL_OLLAMA,
-        endpoint_class="local-loopback-http",
+        endpoint_class=ModelEndpointClass.LOCAL_LOOPBACK_HTTP,
         model_id=model_id,
         request_schema_id="ollama-chat-stream-false-think-false-v1",
         config_sha256=config_sha256,
@@ -32,7 +33,7 @@ def local_backend(*, config_sha256=CFG_A, model_id="qwen3:8b"):
 def external_backend():
     return ModelBackendIdentity(
         mode=ModelBackendMode.EXTERNAL_API,
-        endpoint_class="owner-configured-external-api",
+        endpoint_class=ModelEndpointClass.OWNER_CONFIGURED_EXTERNAL_API,
         model_id="external-model-v1",
         request_schema_id="external-chat-v1",
         config_sha256=CFG_B,
@@ -49,6 +50,35 @@ def request(plan, *, idempotent=True):
         idempotent=idempotent,
     )
 
+
+
+def test_enabled_backend_endpoint_class_is_mode_bound_and_typed():
+    with pytest.raises(ModelRuntimeContractError, match="must use endpoint_class"):
+        ModelBackendIdentity(
+            mode=ModelBackendMode.LOCAL_OLLAMA,
+            endpoint_class=ModelEndpointClass.OWNER_CONFIGURED_EXTERNAL_API,
+            model_id="qwen3:8b",
+            request_schema_id="ollama-chat-stream-false-think-false-v1",
+            config_sha256=CFG_A,
+        )
+
+    with pytest.raises(ModelRuntimeContractError, match="must use endpoint_class"):
+        ModelBackendIdentity(
+            mode=ModelBackendMode.EXTERNAL_API,
+            endpoint_class=ModelEndpointClass.LOCAL_LOOPBACK_HTTP,
+            model_id="external-model-v1",
+            request_schema_id="external-chat-v1",
+            config_sha256=CFG_B,
+        )
+
+    with pytest.raises(ModelRuntimeContractError, match="must be ModelEndpointClass"):
+        ModelBackendIdentity(
+            mode=ModelBackendMode.LOCAL_OLLAMA,
+            endpoint_class="local-loopback-http",
+            model_id="qwen3:8b",
+            request_schema_id="ollama-chat-stream-false-think-false-v1",
+            config_sha256=CFG_A,
+        )
 
 def test_no_llm_is_first_class_zero_attempt_policy_block():
     plan = ModelRuntimePlan(

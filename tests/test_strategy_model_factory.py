@@ -954,7 +954,7 @@ def test_factory_emits_hash_bound_reproducibility_manifest_and_restart_verifies(
     assert manifest.model_artifact_sha256 == registry.get(
         "ModelVersion", "model-v2"
     ).payload["artifact_sha256"]
-    assert manifest.learner_state_sha256 == model_payload["identity_sha256"]
+    assert manifest.learner_state_sha256 == model_payload["learner_state_sha256"]
     assert tuple(split.evaluation_index for split in manifest.splits) == (2, 3)
     assert tuple(len(split.training_indices) for split in manifest.splits) == (2, 3)
 

@@ -171,7 +171,7 @@ class ProviderQuotePoint:
     sequence: int
     decimal_odds: Decimal
     observed_ts: str
-    source_ts: str | None
+    source_ts: str
     ingest_ts: str
     market_event_sha256: str
 
@@ -191,11 +191,7 @@ class ProviderQuotePoint:
                 "quote decimal_odds must be greater than 1"
             )
         observed = _instant(self.observed_ts, "quote observed_ts")
-        source_time = (
-            _instant(self.source_ts, "quote source_ts")
-            if self.source_ts is not None
-            else observed
-        )
+        source_time = _instant(self.source_ts, "quote source_ts")
         ingested = _instant(self.ingest_ts, "quote ingest_ts")
         if source_time > observed or observed > ingested:
             raise ProviderQuoteComparisonError(
@@ -353,7 +349,8 @@ def compare_provider_quotes(
 
     Only exact normalized sport/event/market/selection identities with explicit
     competition and market-semantics identities are comparable. Missing semantics
-    remain observable in the mirror but are excluded here instead of being guessed.
+    or provider source time remain observable in the mirror but are excluded here
+    instead of being guessed or upgraded from local receipt time.
     """
 
     if not isinstance(snapshot, MirrorSnapshot):
@@ -396,11 +393,12 @@ def compare_provider_quotes(
 
         observed = _instant(event.observed_ts, "observed_ts")
         ingested = _instant(event.ingest_ts, "ingest_ts")
-        source_time = (
-            _instant(event.source_ts, "source_ts")
-            if event.source_ts is not None
-            else observed
-        )
+        if event.source_ts is None:
+            # Receipt/observation recency is not provider quote freshness. Keep
+            # receipt-only events observable in the mirror, but never promote
+            # unknown upstream age into a positive fresh-provider comparison.
+            continue
+        source_time = _instant(event.source_ts, "source_ts")
         if source_time > observed or observed > ingested:
             raise ProviderQuoteComparisonError(
                 "quote timestamps must satisfy source_ts <= observed_ts <= ingest_ts"

@@ -856,7 +856,7 @@ class SQLiteMarketStore:
             )
 
             if not cache_is_current:
-                while True:
+                for _attempt in range(3):
                     before_data_version = self._data_version()
                     rows = self.connection.execute(
                         f"SELECT {_HISTORY_COLUMNS_SQL} FROM market_events"
@@ -871,6 +871,24 @@ class SQLiteMarketStore:
                         self._mirror_restore_error = error
                         self._mirror_restore_data_version = after_data_version
                         break
+                else:
+                    # Continuous external writers must not make restore spin forever.
+                    # One final SELECT is itself a coherent SQLite statement snapshot;
+                    # return that valid point-in-time view without caching it under a
+                    # data_version that may already have advanced.
+                    rows = self.connection.execute(
+                        f"SELECT {_HISTORY_COLUMNS_SQL} FROM market_events"
+                    ).fetchall()
+                    history_events = [_event_from_history_row(row) for row in rows]
+                    revision, events, error = _build_market_mirror_restore_snapshot(
+                        history_events
+                    )
+                    if error is not None:
+                        raise ValueError(error)
+                    owned_events = tuple(
+                        MarketEvent.from_dict(event.to_dict()) for event in events
+                    )
+                    return revision, owned_events
 
             if self._mirror_restore_error is not None:
                 raise ValueError(self._mirror_restore_error)

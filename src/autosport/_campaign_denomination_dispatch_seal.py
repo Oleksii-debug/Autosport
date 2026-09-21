@@ -3,10 +3,10 @@ from __future__ import annotations
 """Fail closed if campaign-denomination re-resolution dispatch is replaced.
 
 The campaign economics reader already pins ``denomination_binding`` itself, but that
-method calls a small graph of other class methods.  Pin the complete transitive
+method calls a small graph of other class methods. Pin the complete transitive
 ``FinalizedCampaignAuthority`` read graph after product composition is loaded so a
 same-process class monkeypatch cannot synthesize positive denomination authority
-from missing durable state.
+from missing durable state or bypass the monotonic issuance witness.
 """
 
 from . import campaign_cost_evidence as _cost_evidence
@@ -20,6 +20,8 @@ _GRAPH_METHOD_NAMES = (
     "_binding_source",
     "_derive_binding",
     "_persisted_payload",
+    "_issuance_witness",
+    "_verified_persisted_binding",
     "denomination_binding",
 )
 _AUTHORITY_GRAPH = tuple(

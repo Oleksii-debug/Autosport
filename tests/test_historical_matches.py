@@ -234,6 +234,32 @@ class HistoricalMatchCaptureTests(unittest.TestCase):
                 )
         self.assertEqual(transport.urls, [])
 
+    def test_custom_base_paths_are_rejected_without_persisting_path_secrets(self) -> None:
+        for sentinel in ("TENANT-SECRET-A", "TENANT-SECRET-B"):
+            with self.subTest(sentinel=sentinel):
+                transport = _Transport([])
+                provider = ParlayApiTableTennisProvider(
+                    "unit-test-key",
+                    base_url=f"https://proxy.example/tenant/{sentinel}",
+                    transport=transport,
+                    clock=lambda: "2026-09-13T03:00:00+00:00",
+                    sleeper=lambda _: None,
+                )
+                with tempfile.TemporaryDirectory() as temp:
+                    output = Path(temp) / "matches.json"
+                    evidence = Path(temp) / "matches.evidence.json"
+                    with self.assertRaisesRegex(ValueError, "origin-only provider base_url"):
+                        capture_historical_matches(
+                            provider,
+                            requested_date="2026-09-10",
+                            output_path=output,
+                            evidence_path=evidence,
+                        )
+                    self.assertFalse(output.exists())
+                    self.assertFalse(evidence.exists())
+                    self.assertNotIn(sentinel, "\n".join(path.name for path in Path(temp).iterdir()))
+                self.assertEqual(transport.urls, [])
+
     def test_capture_digest_stays_bound_to_published_bytes_after_path_replacement(self) -> None:
         payload = [{"provider_defined_id": "match-1", "opaque": {"value": 1}}]
         transport = _Transport(payload)

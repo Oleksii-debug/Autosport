@@ -138,6 +138,22 @@ class ProductRuntimeLifecycleCoherenceTests(unittest.TestCase):
         self.assertEqual(coordinator.state, SessionState.STOPPED)
         self.assertEqual(value.status().state, SessionState.STOPPED)
 
+    def test_failed_post_start_coherence_check_also_compensates_to_stop(self) -> None:
+        value, collector, coordinator = runtime(True, SessionState.STOPPED)
+
+        with patch.object(coordinator, "resume", return_value=None):
+            with self.assertRaisesRegex(
+                ProductCompositionError,
+                "lifecycle authorities disagree",
+            ):
+                value.start()
+
+        self.assertTrue(collector.stopped)
+        self.assertEqual(collector.stop_calls, ["runtime_start_failed"])
+        self.assertEqual(coordinator.stop_calls, ["runtime_start_failed"])
+        self.assertEqual(coordinator.state, SessionState.STOPPED)
+        self.assertEqual(value.status().state, SessionState.STOPPED)
+
     def test_partial_stop_blocks_positive_work_until_explicit_stop_recovery(self) -> None:
         value, collector, coordinator = runtime(False, SessionState.RUNNING)
         coordinator.stop_error = RuntimeError("stop failed")

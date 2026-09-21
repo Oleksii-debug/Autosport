@@ -11,6 +11,7 @@ from autosport.betfair_stream_codec import (
     BetfairCrlfJsonDecoder,
     BetfairFrameKind,
     BetfairMarketStreamState,
+    BetfairProviderStreamHealth,
     BetfairQuoteSide,
     decode_market_change_message,
 )
@@ -368,3 +369,85 @@ def test_segmented_messages_require_reassembly_before_state_application(segment_
 
     with pytest.raises(ValueError, match="require reassembly"):
         decode_market_change_message(raw)
+
+
+def test_stream_health_preserves_unreliable_heartbeat_without_refreshing_quotes() -> None:
+    state = BetfairMarketStreamState()
+    healthy = state.apply(decode_market_change_message(_image()))
+    assert healthy.provider_health is BetfairProviderStreamHealth.UP_TO_DATE
+    assert state.provider_health is BetfairProviderStreamHealth.UP_TO_DATE
+    before = state.snapshot()
+
+    unreliable = state.apply(
+        decode_market_change_message(
+            {
+                "op": "mcm",
+                "ct": "HEARTBEAT",
+                "initialClk": "initial-1",
+                "clk": "clk-health-503",
+                "pt": 1001,
+                "status": 503,
+                "mc": [],
+            }
+        )
+    )
+
+    assert unreliable.status is BetfairApplyStatus.HEARTBEAT
+    assert unreliable.provider_health is BetfairProviderStreamHealth.UNRELIABLE
+    assert state.provider_health is BetfairProviderStreamHealth.UNRELIABLE
+    assert state.last_unreliable_publish_time_ms == 1001
+    assert state.snapshot() == before
+
+
+def test_stream_health_is_preserved_on_unreliable_delta_and_recovery_does_not_erase_history() -> None:
+    state = BetfairMarketStreamState()
+    state.apply(decode_market_change_message(_image()))
+    degraded = state.apply(
+        decode_market_change_message(
+            {
+                "op": "mcm",
+                "clk": "clk-health-delta",
+                "pt": 1001,
+                "status": 503,
+                "mc": [{"id": "1.234", "rc": [{"id": 101, "hc": 0, "ltp": 2.3}]}],
+            }
+        )
+    )
+    assert degraded.status is BetfairApplyStatus.APPLIED
+    assert degraded.provider_health is BetfairProviderStreamHealth.UNRELIABLE
+    assert state.last_unreliable_publish_time_ms == 1001
+
+    recovered = state.apply(
+        decode_market_change_message(
+            {
+                "op": "mcm",
+                "ct": "HEARTBEAT",
+                "clk": "clk-health-recovered",
+                "pt": 1002,
+                "status": None,
+                "mc": [],
+            }
+        )
+    )
+    assert recovered.provider_health is BetfairProviderStreamHealth.UP_TO_DATE
+    assert state.provider_health is BetfairProviderStreamHealth.UP_TO_DATE
+    assert state.last_unreliable_publish_time_ms == 1001
+
+
+@pytest.mark.parametrize("status", [0, 500, "503", True, {"code": 503}])
+def test_unknown_or_malformed_stream_health_fails_closed(status: object) -> None:
+    raw = _image()
+    raw["status"] = status
+    with pytest.raises(ValueError, match="unsupported Betfair stream status"):
+        decode_market_change_message(raw)
+
+
+def test_same_clock_different_stream_health_is_not_a_duplicate() -> None:
+    state = BetfairMarketStreamState()
+    raw = _image()
+    state.apply(decode_market_change_message(raw))
+
+    unreliable = dict(raw)
+    unreliable["status"] = 503
+    with pytest.raises(ValueError, match="same Betfair clk"):
+        state.apply(decode_market_change_message(unreliable))

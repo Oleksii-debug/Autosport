@@ -41,6 +41,7 @@ class AccessibilityAuditTests(unittest.TestCase):
                 self._widget(AUTOMATION_IDS["choose_dataset"], "Вибрати replay dataset", patterns=("INVOKE",)),
                 self._widget(AUTOMATION_IDS["run_replay"], "Запустити paper replay", patterns=("INVOKE",)),
                 self._widget(AUTOMATION_IDS["repair_workspace"], "Відновити workspace", patterns=("INVOKE",)),
+                self._widget(AUTOMATION_IDS["export_evidence"], "Експортувати evidence", patterns=("INVOKE",)),
                 self._widget(AUTOMATION_IDS["replay_speed"], "Швидкість replay", role="COMBO_BOX", patterns=("VALUE",)),
                 self._widget(AUTOMATION_IDS["live_mode"], "Режим live observation", role="COMBO_BOX", patterns=("VALUE",)),
                 self._widget(AUTOMATION_IDS["live_refresh"], "Оновити live snapshot", patterns=("INVOKE",)),
@@ -108,7 +109,7 @@ class AccessibilityAuditTests(unittest.TestCase):
     def test_critical_contract_passes_with_names_roles_patterns_rows_and_readonly(self):
         report = self._summarize(self._passing_description())
         self.assertEqual(report["status"], "PASS")
-        self.assertEqual(len(report["critical_controls"]), 27)
+        self.assertEqual(len(report["critical_controls"]), 28)
         bankroll = next(
             item
             for item in report["critical_controls"]
@@ -164,6 +165,25 @@ class AccessibilityAuditTests(unittest.TestCase):
         ]
         self.assertEqual(len(matching_controls), 1)
         self.assertEqual(matching_controls[0]["path"], original.path)
+
+    def test_missing_export_evidence_control_fails_closed(self):
+        description = self._passing_description()
+        widgets = tuple(
+            item
+            for item in description.widgets
+            if item.automation_id != AUTOMATION_IDS["export_evidence"]
+        )
+        report = self._summarize(
+            SimpleNamespace(**{**description.__dict__, "widgets": widgets})
+        )
+        self.assertEqual(report["status"], "FAIL")
+        self.assertTrue(
+            any(
+                f"automation_id={AUTOMATION_IDS['export_evidence']}: critical control not found"
+                == failure
+                for failure in report["failures"]
+            )
+        )
 
     def test_wrong_semantic_roles_fail_closed(self):
         cases = (

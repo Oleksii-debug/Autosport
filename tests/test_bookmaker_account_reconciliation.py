@@ -438,3 +438,33 @@ def test_position_observation_identity_cannot_be_reused_with_conflicting_content
                 ),
             )
         )
+
+
+def test_identical_balance_observation_repeated_in_later_snapshot_is_not_a_new_delta(
+    tmp_path,
+) -> None:
+    store = BookmakerAccountReconciliationStore(tmp_path / "account.json")
+    balance = _balance(
+        _T1,
+        "100",
+        observation_id="balance-same",
+    )
+    assert store.append_snapshot(
+        _snapshot(
+            _T1,
+            capabilities=(BookmakerCapability.BALANCE_READ,),
+            balance=balance,
+        )
+    )
+    assert store.append_snapshot(
+        _snapshot(
+            _T2,
+            capabilities=(BookmakerCapability.BALANCE_READ,),
+            balance=balance,
+        )
+    )
+
+    state = store.latest_state()
+    assert state is not None
+    assert state.latest_balance_observation == balance
+    assert state.unexplained_balance_delta is None

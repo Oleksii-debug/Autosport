@@ -10,6 +10,7 @@ import autosport.source_quality_confidence as source_quality_module
 from autosport.source_quality_confidence import (
     ConfidenceAction,
     SourceClass,
+    SourceQualityAssessment,
     SourceQualityObservation,
     SourceQualityPolicy,
     assess_source_quality,
@@ -102,6 +103,26 @@ def test_accept_enum_remains_forward_compatible_but_is_not_currently_mintable():
         for source_class in SourceClass
         for confidence in (Decimal("0"), Decimal("0.49"), Decimal("0.50"), Decimal("0.80"), Decimal("1"))
     )
+
+
+def test_direct_assessment_construction_cannot_mint_accept():
+    with pytest.raises(ValueError, match="canonical provider authority"):
+        SourceQualityAssessment(
+            action=ConfidenceAction.ACCEPT,
+            effective_confidence=Decimal("1"),
+            reasons=("FORGED_ACCEPT",),
+            corroborated=False,
+        )
+
+
+def test_direct_assessment_construction_cannot_mint_corroboration():
+    with pytest.raises(ValueError, match="canonical corroborator authority"):
+        SourceQualityAssessment(
+            action=ConfidenceAction.DOWNWEIGHT,
+            effective_confidence=Decimal("0.75"),
+            reasons=("FORGED_CORROBORATION",),
+            corroborated=True,
+        )
 
 
 def test_below_downweight_floor_abstains_for_non_official_source():
@@ -212,9 +233,9 @@ def test_corroboration_never_resolves_official_authority():
     assert result.reasons == ("OFFICIAL_API_AUTHORITY_UNRESOLVED",)
 
 
-def test_corroboration_flag_tracks_explicit_identity_set():
+def test_caller_declared_corroborators_do_not_mint_positive_truth():
     result = assess_source_quality(obs(corroborator_ids=("peer-1",)), now=NOW, policy=policy())
-    assert result.corroborated is True
+    assert result.corroborated is False
 
 
 def test_no_corroboration_is_false():
@@ -364,6 +385,7 @@ def test_randomized_fail_closed_invariants_50000_cases():
 
         assert result.action is not ConfidenceAction.ACCEPT
         assert result.effective_confidence == confidence
+        assert result.corroborated is False
         assert result == assess_source_quality(observation, now=NOW, policy=p)
 
         hard_invalid = (
@@ -392,6 +414,7 @@ def test_corroboration_identity_never_escalates_action(source_class, confidence)
     corroborated_result = assess_source_quality(corroborated, now=NOW, policy=policy())
     assert corroborated_result.action is plain_result.action
     assert corroborated_result.effective_confidence == plain_result.effective_confidence
+    assert corroborated_result.corroborated is False
 
 
 def test_exhaustive_fail_closed_truth_matrix():
@@ -416,6 +439,7 @@ def test_exhaustive_fail_closed_truth_matrix():
                             )
                             result = assess_source_quality(observation, now=NOW, policy=p)
                             assert result.action is not ConfidenceAction.ACCEPT
+                            assert result.corroborated is False
 
                             hard_invalid = (
                                 age_seconds < 0

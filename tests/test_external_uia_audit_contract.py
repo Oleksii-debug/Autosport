@@ -4,19 +4,30 @@ from pathlib import Path
 _ROOT = Path(__file__).resolve().parents[1]
 _EXTERNAL_UIA_AUDIT = _ROOT / "scripts" / "external_uia_audit.ps1"
 _WINDOWS_GUI = _ROOT / "src" / "autosport" / "windows_gui.py"
+_WINDOWS_ACCESSIBLE_GUI = _ROOT / "src" / "autosport" / "windows_accessible_gui.py"
 
 
 def test_external_uia_audit_covers_packaged_readonly_surfaces() -> None:
     audit = _EXTERNAL_UIA_AUDIT.read_text(encoding="utf-8")
     windows_gui = _WINDOWS_GUI.read_text(encoding="utf-8")
+    accessible_gui = _WINDOWS_ACCESSIBLE_GUI.read_text(encoding="utf-8")
 
     assert "WINDOWS_BANKROLL_AUTOMATION_ID = 205" in windows_gui
     assert 'text("ui.accessibility.bankroll.name")' in windows_gui
     assert 'text("ui.accessibility.bankroll.description")' in windows_gui
+    assert "WINDOWS_OPERATIONAL_STATUS_AUTOMATION_ID = 206" in accessible_gui
+    assert 'state="readonly"' in accessible_gui
+    assert "takefocus=True" in accessible_gui
 
     expected_bankroll = (
         "[ordered]@{ key = 'bankroll'; automation_id = '205'; "
         "name = 'Віртуальний банк'; required_pattern = 'Value'; "
+        "require_external_focus = $true; expected_control_type = 'ControlType.Edit'; "
+        "require_named_rows = $false; require_value_read_only = $true }"
+    )
+    expected_operational_status = (
+        "[ordered]@{ key = 'operational_status'; automation_id = '206'; "
+        "name = 'Операційний стан Автоспорт'; required_pattern = 'Value'; "
         "require_external_focus = $true; expected_control_type = 'ControlType.Edit'; "
         "require_named_rows = $false; require_value_read_only = $true }"
     )
@@ -39,13 +50,15 @@ def test_external_uia_audit_covers_packaged_readonly_surfaces() -> None:
         "require_named_rows = $false; require_value_read_only = $true; allow_disabled = $true }"
     )
     assert expected_bankroll in audit
+    assert expected_operational_status in audit
     assert expected_shell_state in audit
     assert expected_owner_state in audit
     assert expected_workbench_result in audit
     assert audit.count("automation_id = '205'") == 1
+    assert audit.count("automation_id = '206'") == 1
     assert audit.count("automation_id = '302'") == 1
     assert audit.count("automation_id = '306'") == 1
-    assert audit.count("require_value_read_only = $true") == 4
+    assert audit.count("require_value_read_only = $true") == 5
 
 
 def test_external_uia_audit_requires_semantic_control_type_for_every_critical_control() -> None:
@@ -64,6 +77,7 @@ def test_external_uia_audit_requires_semantic_control_type_for_every_critical_co
         "203": "ControlType.List",
         "204": "ControlType.List",
         "205": "ControlType.Edit",
+        "206": "ControlType.Edit",
         "301": "ControlType.ComboBox",
         "302": "ControlType.Edit",
         "303": "ControlType.Button",

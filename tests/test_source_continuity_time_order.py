@@ -37,7 +37,7 @@ class SourceContinuityEvidenceTimeTests(unittest.TestCase):
             self.assertEqual(state.trusted_token, "token-1")
             self.assertEqual(state.last_failure_at, "2026-09-21T08:02:00+00:00")
 
-    def test_older_failure_cannot_rewrite_newer_verified_success(self):
+    def test_older_failure_cannot_rewrite_newer_unverified_success(self):
         with tempfile.TemporaryDirectory() as tmp:
             store = SourceContinuityStore(Path(tmp) / "source_continuity.json")
             store.record_success(
@@ -59,8 +59,9 @@ class SourceContinuityEvidenceTimeTests(unittest.TestCase):
                 store.record_failure("source", now="2026-09-21T08:01:00+00:00")
 
             state = store.get("source")
-            self.assertEqual(state.status, "verified")
-            self.assertEqual(state.trusted_token, "token-2")
+            self.assertEqual(state.status, "unknown")
+            self.assertEqual(state.trusted_token, "token-1")
+            self.assertEqual(state.reason, "provider_native_evidence_required")
             self.assertIsNone(state.last_failure_at)
 
 

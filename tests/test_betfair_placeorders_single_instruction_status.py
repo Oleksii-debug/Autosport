@@ -47,13 +47,13 @@ def test_single_instruction_processed_with_errors_is_ambiguous() -> None:
                             "side": action.side,
                             "orderType": "LIMIT",
                             "limitOrder": {
-                                "size": str(action.requested_stake),
-                                "price": str(action.requested_odds),
+                                "size": float(action.requested_stake),
+                                "price": float(action.requested_odds),
                                 "persistenceType": "LAPSE",
                             },
                         },
-                        "sizeMatched": "0",
-                        "averagePriceMatched": "0",
+                        "sizeMatched": 0,
+                        "averagePriceMatched": 0,
                     }
                 ],
             },

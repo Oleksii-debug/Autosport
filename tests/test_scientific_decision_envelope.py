@@ -184,6 +184,46 @@ class ScientificDecisionEnvelopeTests(unittest.TestCase):
         with self.assertRaisesRegex(DecisionEnvelopeError, "decision_id"):
             outcome.verify_envelope(changed)
 
+
+    def test_polymorphic_evidence_cannot_override_hash_material(self):
+        class ForgedEvidence(CausalEvidenceRef):
+            def canonical_payload(self):
+                payload = super().canonical_payload()
+                payload["evidence_sha256"] = SHA_C
+                return payload
+
+        forged = ForgedEvidence(
+            evidence_id="feature-forged",
+            kind=EvidenceKind.FEATURE,
+            evidence_sha256=SHA_A,
+            event_at=T0,
+            ingested_at=T1,
+            available_at=T1,
+        )
+        with self.assertRaisesRegex(DecisionEnvelopeError, "exact CausalEvidenceRef"):
+            evidence_snapshot_sha256((forged,), EvidenceKind.FEATURE)
+        with self.assertRaisesRegex(DecisionEnvelopeError, "exact CausalEvidenceRef"):
+            envelope(evidence=(forged, market()))
+
+    def test_polymorphic_envelope_cannot_mint_outcome_binding(self):
+        class ForgedEnvelope(SealedDecisionEnvelope):
+            @property
+            def envelope_sha256(self):
+                return SHA_C
+
+        sealed = envelope()
+        forged = ForgedEnvelope(**{
+            field: getattr(sealed, field)
+            for field in SealedDecisionEnvelope.__dataclass_fields__
+        })
+        with self.assertRaisesRegex(DecisionEnvelopeError, "exact SealedDecisionEnvelope"):
+            DecisionOutcomeAppend.attach(
+                forged,
+                outcome_id="outcome-forged",
+                outcome_sha256=SHA_C,
+                revealed_at=T4,
+            )
+
     def test_evidence_internal_clock_order_is_fail_closed(self):
         with self.assertRaisesRegex(DecisionEnvelopeError, "event_at"):
             market(event_at=T2, ingested_at=T1)

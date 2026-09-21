@@ -9,6 +9,8 @@ from enum import StrEnum
 from pathlib import Path
 from typing import Any, Callable, Mapping
 
+from .workspace_lock import WorkspaceEconomicLock
+
 
 class CausalCollectorError(ValueError):
     pass
@@ -708,6 +710,11 @@ class DesktopDeltaCheckpointStore(_JsonAtomicStore):
     def _empty(self) -> dict[str, Any]:
         return {"schema_version": 1, "acks": [], "streams": {}}
 
+    def _workspace_lock(self) -> WorkspaceEconomicLock:
+        """Serialize checkpoint read/modify/write and application handoff across processes."""
+
+        return WorkspaceEconomicLock(self.path.parent)
+
     def has_ack(self, delta_id: str) -> bool:
         _text(delta_id, "delta_id")
         return any(item.get("delta_id") == delta_id for item in self._read()["acks"])
@@ -730,6 +737,20 @@ class DesktopDeltaCheckpointStore(_JsonAtomicStore):
         return None
 
     def ack(self, delta: CollectorDelta, *, application_receipt: DesktopApplicationReceipt, acknowledged_at: str) -> bool:
+        with self._workspace_lock():
+            return self._ack_locked(
+                delta,
+                application_receipt=application_receipt,
+                acknowledged_at=acknowledged_at,
+            )
+
+    def _ack_locked(
+        self,
+        delta: CollectorDelta,
+        *,
+        application_receipt: DesktopApplicationReceipt,
+        acknowledged_at: str,
+    ) -> bool:
         delta.validate()
         application_receipt.validate()
         if application_receipt.delta_id != delta.delta_id:
@@ -808,8 +829,6 @@ class DesktopDeltaConsumer:
         available = self.collector.deltas_available_through(as_of=as_of, view=view)
         delivered: list[str] = []
         for delta in available:
-            if self.checkpoint.has_ack(delta.delta_id):
-                continue
             if delta.gap_state is GapState.DETECTED:
                 recovered = any(
                     item.gap_state is GapState.RECOVERED
@@ -827,37 +846,45 @@ class DesktopDeltaConsumer:
                     continue
                 raise GapStateError(f"stream gap remains unresolved before delta {delta.delta_id}")
 
-            durable_receipt = self.lookup_application_receipt(delta)
-            if durable_receipt is not None:
-                durable_receipt.validate()
-                if durable_receipt.canonical_event_digest != delta.canonical_event_digest:
-                    raise ApplicationReceiptError(
-                        f"durable application receipt digest conflicts with delta {delta.delta_id}"
+            # The lock covers the complete exactly-once desktop handoff. Every process
+            # re-reads acknowledgement and durable receipt state after acquisition,
+            # then either adopts that completed evidence or owns apply+ack atomically
+            # with respect to all cooperating Autosport desktop consumers.
+            with self.checkpoint._workspace_lock():
+                if self.checkpoint.has_ack(delta.delta_id):
+                    continue
+
+                durable_receipt = self.lookup_application_receipt(delta)
+                if durable_receipt is not None:
+                    durable_receipt.validate()
+                    if durable_receipt.canonical_event_digest != delta.canonical_event_digest:
+                        raise ApplicationReceiptError(
+                            f"durable application receipt digest conflicts with delta {delta.delta_id}"
+                        )
+                    self.checkpoint._ack_locked(
+                        delta,
+                        application_receipt=durable_receipt,
+                        acknowledged_at=now.isoformat(),
                     )
-                self.checkpoint.ack(
+                    delivered.append(delta.delta_id)
+                    continue
+
+                event = self.resolve_event(delta)
+                digest = canonical_event_digest(event)
+                if digest != delta.canonical_event_digest:
+                    raise DeltaConflictError(f"canonical event digest mismatch for delta {delta.delta_id}")
+                receipt = self.apply_event(delta, event)
+                if not isinstance(receipt, DesktopApplicationReceipt):
+                    raise ApplicationReceiptError("apply_event must return a durable DesktopApplicationReceipt")
+                receipt.validate()
+                if receipt.delta_id != delta.delta_id or receipt.canonical_event_digest != digest:
+                    raise ApplicationReceiptError("application receipt is not bound to this delta/digest")
+                self.checkpoint._ack_locked(
                     delta,
-                    application_receipt=durable_receipt,
+                    application_receipt=receipt,
                     acknowledged_at=now.isoformat(),
                 )
                 delivered.append(delta.delta_id)
-                continue
-
-            event = self.resolve_event(delta)
-            digest = canonical_event_digest(event)
-            if digest != delta.canonical_event_digest:
-                raise DeltaConflictError(f"canonical event digest mismatch for delta {delta.delta_id}")
-            receipt = self.apply_event(delta, event)
-            if not isinstance(receipt, DesktopApplicationReceipt):
-                raise ApplicationReceiptError("apply_event must return a durable DesktopApplicationReceipt")
-            receipt.validate()
-            if receipt.delta_id != delta.delta_id or receipt.canonical_event_digest != digest:
-                raise ApplicationReceiptError("application receipt is not bound to this delta/digest")
-            self.checkpoint.ack(
-                delta,
-                application_receipt=receipt,
-                acknowledged_at=now.isoformat(),
-            )
-            delivered.append(delta.delta_id)
         return tuple(delivered)
 
 

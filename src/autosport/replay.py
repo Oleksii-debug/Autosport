@@ -14,6 +14,7 @@ from typing import Callable, Iterable
 
 from .domain import MarketEvent, utc_now_iso
 from .json_integrity import jsonl_bytes_are_blank, strict_json_loads
+from .market_mirror import MarketMirror, MirrorUpdate
 
 
 def _parse_jsonl_event(line: str, line_number: int) -> MarketEvent:
@@ -100,9 +101,13 @@ class ReplayRun:
 
 class ReplayEngine:
     def __init__(self, events: Iterable[MarketEvent], firewall: ReplayLeakageFirewall | None = None) -> None:
-        self.events = sorted(events, key=_replay_order_key)
+        raw_events = list(events)
+        self.events = sorted(raw_events, key=_replay_order_key)
         self.firewall = firewall or ReplayLeakageFirewall()
-        self.dataset_hash = _dataset_hash(self.events)
+        # Dataset identity preserves the pre-causal-delivery ordering contract.
+        # Delivery order may evolve to match live availability semantics without
+        # silently changing durable experiment/dataset identity for the same input.
+        self.dataset_hash = _dataset_hash(raw_events)
 
     @classmethod
     def from_jsonl(cls, path: str | Path, firewall: ReplayLeakageFirewall | None = None) -> "ReplayEngine":
@@ -137,14 +142,23 @@ class ReplayEngine:
         previous: float | None = None
         started = utc_now_iso()
         count = 0
+        replay_mirror = MarketMirror()
         for event in self.events:
             if speed > 0:
                 current = _event_available_datetime(event).timestamp()
                 if previous is not None:
                     time.sleep(max(0.0, current - previous) / speed)
                 previous = current
-            on_event(event)
+
+            # Keep every raw arrival in self.events for audit, but expose only
+            # the same source-local current-state transitions that the live
+            # MarketMirror would make strategy-visible. Lower sequences and
+            # exact duplicates are retained yet suppressed; conflicting reuse
+            # of one source-local sequence fails closed via MarketMirror.apply.
+            update = replay_mirror.apply(event)
             count += 1
+            if update.status == MirrorUpdate.APPLIED:
+                on_event(event)
         self.firewall._complete_replay(completion_capability)
         return ReplayRun(
             run_id=run_id or str(uuid.uuid4()),
@@ -157,11 +171,20 @@ class ReplayEngine:
 
 def _dataset_hash(events: list[MarketEvent]) -> str:
     digest = hashlib.sha256()
-    for event in events:
+    for event in sorted(events, key=_dataset_identity_order_key):
         canonical = json.dumps(event.to_dict(), ensure_ascii=False, sort_keys=True, separators=(",", ":"))
         digest.update(canonical.encode("utf-8"))
         digest.update(b"\n")
     return digest.hexdigest()
+
+
+def _dataset_identity_order_key(event: MarketEvent) -> tuple[datetime, int, str]:
+    """Preserve the historical ReplayEngine dataset-hash ordering contract."""
+    return (
+        _iso_datetime(event.observed_ts, field_name="observed_ts"),
+        event.sequence,
+        event.dedupe_key,
+    )
 
 
 def _iso_datetime(value: str, *, field_name: str = "observed_ts") -> datetime:

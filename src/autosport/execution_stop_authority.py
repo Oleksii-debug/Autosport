@@ -13,9 +13,20 @@ from enum import Enum
 from pathlib import Path
 from typing import Any, Callable, Iterator
 
+from .monotonic_workspace_authority import (
+    AuthorityPhase,
+    MonotonicWorkspaceAuthority,
+    MonotonicWorkspaceAuthorityError,
+)
+
 
 _JOURNAL_SCHEMA_VERSION = 1
 _ANCHOR_SCHEMA_VERSION = 1
+_MONOTONIC_DOMAIN = "execution-stop-authority"
+_MONOTONIC_BINDING_SCHEMA = "autosport.execution_stop_authority.monotonic_binding"
+_MONOTONIC_BINDING_VERSION = 1
+_MONOTONIC_STATE_SCHEMA = "autosport.execution_stop_authority.monotonic_state"
+_MONOTONIC_STATE_VERSION = 1
 
 
 class ExecutionStopAuthorityError(RuntimeError):
@@ -219,6 +230,185 @@ class ExecutionStopAuthority:
     @property
     def anchor_path(self) -> Path:
         return self._anchor_path
+
+    @staticmethod
+    def _monotonic_key(path: Path) -> str:
+        name = os.path.normcase(Path(path).name)
+        return "execution-stop-" + hashlib.sha256(name.encode("utf-8")).hexdigest()
+
+    def _monotonic_authority(self) -> MonotonicWorkspaceAuthority:
+        absolute = Path(os.path.abspath(os.fspath(self.path)))
+        return MonotonicWorkspaceAuthority(
+            workspace=absolute.parent,
+            domain=_MONOTONIC_DOMAIN,
+            key=self._monotonic_key(absolute),
+        )
+
+    def _monotonic_binding(self) -> str:
+        return _digest(
+            {
+                "schema": _MONOTONIC_BINDING_SCHEMA,
+                "schema_version": _MONOTONIC_BINDING_VERSION,
+                "state_key": self._monotonic_key(self.path),
+                "journal_schema_version": _JOURNAL_SCHEMA_VERSION,
+                "anchor_schema_version": _ANCHOR_SCHEMA_VERSION,
+            }
+        )
+
+    def _monotonic_state_digest(self, record: dict[str, Any]) -> str:
+        return _digest(
+            {
+                "schema": _MONOTONIC_STATE_SCHEMA,
+                "schema_version": _MONOTONIC_STATE_VERSION,
+                "state_key": self._monotonic_key(self.path),
+                "revision": record["revision"],
+                "mode": record["mode"],
+                "record_sha256": record["record_sha256"],
+            }
+        )
+
+    @staticmethod
+    def _monotonic_tx_id(
+        *,
+        operation: str,
+        observed_state_sha256: str | None,
+        intended_state_sha256: str,
+        semantic_binding_sha256: str,
+        authority_tip_sha256: str | None,
+    ) -> str:
+        return _digest(
+            {
+                "operation": operation,
+                "observed_state_sha256": observed_state_sha256,
+                "intended_state_sha256": intended_state_sha256,
+                "semantic_binding_sha256": semantic_binding_sha256,
+                "authority_tip_sha256": authority_tip_sha256,
+            }
+        )
+
+    @staticmethod
+    def _raise_monotonic_error(exc: MonotonicWorkspaceAuthorityError) -> None:
+        raise ExecutionStopIntegrityError(
+            f"STOP monotonic authority rejected local state: {exc}"
+        ) from exc
+
+    def _ensure_monotonic_current_unlocked(
+        self,
+        records: list[dict[str, Any]],
+        *,
+        adopt_if_missing: bool,
+    ) -> None:
+        observed = (
+            None if not records else self._monotonic_state_digest(records[-1])
+        )
+        binding = self._monotonic_binding()
+        try:
+            authority = self._monotonic_authority()
+            history = authority.read_history()
+            if not history:
+                if observed is None:
+                    return
+                if not adopt_if_missing:
+                    raise ExecutionStopIntegrityError(
+                        "STOP state exists without independent monotonic authority"
+                    )
+                tx_id = self._monotonic_tx_id(
+                    operation="ADOPT_VALIDATED_BASELINE",
+                    observed_state_sha256=None,
+                    intended_state_sha256=observed,
+                    semantic_binding_sha256=binding,
+                    authority_tip_sha256=None,
+                )
+                authority.prepare(
+                    tx_id=tx_id,
+                    observed_state_sha256=None,
+                    intended_state_sha256=observed,
+                    semantic_binding_sha256=binding,
+                )
+                authority.commit(
+                    tx_id=tx_id,
+                    observed_state_sha256=observed,
+                    semantic_binding_sha256=binding,
+                )
+                return
+
+            latest = history[-1]
+            if (
+                latest.phase is AuthorityPhase.PREPARE
+                and observed == latest.intended_state_sha256
+            ):
+                authority.recover(
+                    observed_state_sha256=observed,
+                    tx_id=latest.tx_id,
+                    semantic_binding_sha256=binding,
+                )
+            else:
+                authority.recover(observed_state_sha256=observed)
+        except MonotonicWorkspaceAuthorityError as exc:
+            self._raise_monotonic_error(exc)
+
+    def _prepare_monotonic_transition_unlocked(
+        self,
+        *,
+        records: list[dict[str, Any]],
+        record: dict[str, Any],
+    ) -> tuple[MonotonicWorkspaceAuthority, str, str, str]:
+        self._ensure_monotonic_current_unlocked(
+            records,
+            adopt_if_missing=True,
+        )
+        observed = (
+            None if not records else self._monotonic_state_digest(records[-1])
+        )
+        intended = self._monotonic_state_digest(record)
+        binding = self._monotonic_binding()
+        try:
+            authority = self._monotonic_authority()
+            history = authority.read_history()
+            tip = None if not history else history[-1].record_sha256
+            tx_id = self._monotonic_tx_id(
+                operation="APPEND_STOP_AUTHORITY_RECORD",
+                observed_state_sha256=observed,
+                intended_state_sha256=intended,
+                semantic_binding_sha256=binding,
+                authority_tip_sha256=tip,
+            )
+            authority.prepare(
+                tx_id=tx_id,
+                observed_state_sha256=observed,
+                intended_state_sha256=intended,
+                semantic_binding_sha256=binding,
+            )
+            return authority, tx_id, binding, intended
+        except MonotonicWorkspaceAuthorityError as exc:
+            self._raise_monotonic_error(exc)
+
+    def _commit_monotonic_transition_unlocked(
+        self,
+        *,
+        authority: MonotonicWorkspaceAuthority,
+        tx_id: str,
+        binding: str,
+        intended_state_sha256: str,
+    ) -> None:
+        records = self._read_journal_unlocked()
+        if not records:
+            raise ExecutionStopIntegrityError(
+                "STOP transition published no durable local state"
+            )
+        observed = self._monotonic_state_digest(records[-1])
+        if observed != intended_state_sha256:
+            raise ExecutionStopIntegrityError(
+                "STOP transition local state differs from monotonic PREPARE"
+            )
+        try:
+            authority.commit(
+                tx_id=tx_id,
+                observed_state_sha256=observed,
+                semantic_binding_sha256=binding,
+            )
+        except MonotonicWorkspaceAuthorityError as exc:
+            self._raise_monotonic_error(exc)
 
     def _read_journal_unlocked(
         self,
@@ -540,6 +730,12 @@ class ExecutionStopAuthority:
             "previous_sha256": previous_sha256,
         }
         record = {**body, "record_sha256": _digest(body)}
+        authority, tx_id, binding, intended_state_sha256 = (
+            self._prepare_monotonic_transition_unlocked(
+                records=records,
+                record=record,
+            )
+        )
         encoded = _canonical(record) + "\n"
         path_existed = self.path.exists()
         try:
@@ -557,6 +753,12 @@ class ExecutionStopAuthority:
             raise ExecutionStopIntegrityError(
                 "STOP authority journal durability barrier failed"
             ) from exc
+        self._commit_monotonic_transition_unlocked(
+            authority=authority,
+            tx_id=tx_id,
+            binding=binding,
+            intended_state_sha256=intended_state_sha256,
+        )
         return self._state_from_record(record)
 
     @staticmethod
@@ -587,6 +789,10 @@ class ExecutionStopAuthority:
                 allow_missing_anchor=True,
             )
             if not records:
+                self._ensure_monotonic_current_unlocked(
+                    records,
+                    adopt_if_missing=False,
+                )
                 raise ExecutionStopStateError(
                     "STOP authority is missing; there is no torn transition to recover"
                 )
@@ -607,6 +813,10 @@ class ExecutionStopAuthority:
                     record_sha256=initial["record_sha256"],
                 )
                 recovered = self._read_journal_unlocked()
+                self._ensure_monotonic_current_unlocked(
+                    recovered,
+                    adopt_if_missing=True,
+                )
                 return self._state_from_record(recovered[-1])
 
             anchor = self._read_anchor_unlocked()
@@ -624,6 +834,10 @@ class ExecutionStopAuthority:
 
             suffix_count = len(records) - anchor_revision
             if suffix_count == 0:
+                self._ensure_monotonic_current_unlocked(
+                    records,
+                    adopt_if_missing=True,
+                )
                 return self._state_from_record(anchored)
             if suffix_count != 1:
                 raise ExecutionStopIntegrityError(
@@ -649,15 +863,27 @@ class ExecutionStopAuthority:
                 self._rewrite_journal_unlocked(records[:anchor_revision])
 
             recovered = self._read_journal_unlocked()
+            self._ensure_monotonic_current_unlocked(
+                recovered,
+                adopt_if_missing=True,
+            )
             return self._state_from_record(recovered[-1])
 
     def current(self) -> ExecutionAuthorityState:
         with self._thread_lock, _exclusive_file_lock(self._lock_path):
             records = self._read_journal_unlocked()
             if not records:
+                self._ensure_monotonic_current_unlocked(
+                    records,
+                    adopt_if_missing=False,
+                )
                 raise ExecutionStopStateError(
                     "STOP authority is missing; execution remains stopped"
                 )
+            self._ensure_monotonic_current_unlocked(
+                records,
+                adopt_if_missing=True,
+            )
             return self._state_from_record(records[-1])
 
     def initialize_stopped(

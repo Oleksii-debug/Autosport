@@ -1,36 +1,62 @@
 """Source-owned first-publication authority for point-in-time feature artifacts.
 
-The evaluator must never be able to manufacture an earlier feature-availability time.
-This store records the first product-observed publication of one exact
-DatasetSnapshot/FeatureSet/payload tuple behind a durable path lock.  The public
-point-in-time binder consumes that persisted record and treats caller values only as
-audit assertions.
+Positive point-in-time evidence needs two independent facts: exact immutable
+DatasetSnapshot/FeatureSet/payload provenance, and proof that the source side had
+actually materialized those bytes by the decision cutoff.  This module owns the
+second fact.
+
+The publication ledger is compositionally bound to the exact canonical
+``DatasetSnapshotLineageAuthority`` workspace/instance/root.  Its local state is
+protected by ``MonotonicWorkspaceAuthority`` with PREPARE -> durable publish ->
+COMMIT, so restoring a valid-old ledger or deleting it cannot silently erase a
+later first-publication fact while the independent machine authority survives.
+
+Low-level publication is deliberately not a public evaluator operation.  The only
+writer is ``SourceFeatureArtifactMaterializer.materialize``: the source-facing
+materialization seam re-resolves the exact registry records, exact lineage proof,
+and exact bytes-derived ``FeatureArtifactProvenance`` before asking the authority to
+stamp NOW.  Callers may resolve/reuse a publication, but cannot mint one by calling
+the authority directly.
 """
 
 from __future__ import annotations
 
 import hashlib
+import inspect
 import json
+import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Final, Mapping
 
 from . import _point_in_time_authority_runtime_repair as runtime_repair
 from . import _point_in_time_feature_provenance_guard as provenance_guard
 from . import point_in_time_evidence as evidence
-from .integrity import atomic_write_json, durable_path_lock
-from .scientific_registry import DatasetSnapshot, FeatureSet
+from .dataset_snapshot_lineage import DatasetSnapshotLineageAuthority
+from .integrity import atomic_write_json
+from .monotonic_workspace_authority import (
+    MonotonicAuthorityRecoveryRequiredError,
+    MonotonicWorkspaceAuthority,
+    MonotonicWorkspaceAuthorityError,
+)
+from .scientific_registry import DatasetSnapshot, FeatureSet, RegistryEntry
+from .workspace_lock import WorkspaceEconomicLock
 
-_SCHEMA = "autosport.source-feature-artifact-authority"
-_SCHEMA_VERSION = 1
-_CANONICAL_FILENAME = "source-feature-artifact-publications.json"
+_SCHEMA: Final = "autosport.source-feature-artifact-authority"
+_SCHEMA_VERSION: Final = 2
+_CANONICAL_FILENAME: Final = "source-feature-artifact-publications.json"
+_MONOTONIC_DOMAIN: Final = "source-feature-artifact-publication"
+_MONOTONIC_KEY: Final = "first-source-materialization-v2"
+_MONOTONIC_BINDING_KIND: Final = "autosport-source-feature-artifact-state-v2"
 _HEX = frozenset("0123456789abcdef")
 
 
 def _text(value: object, name: str) -> str:
-    if type(value) is not str or not value or value != value.strip():
-        raise evidence.PointInTimeEvidenceError(f"{name} must be a non-empty canonical string")
+    if type(value) is not str or not value or value != value.strip() or "\x00" in value:
+        raise evidence.PointInTimeEvidenceError(
+            f"{name} must be a non-empty canonical string"
+        )
     value.encode("utf-8")
     return value
 
@@ -38,7 +64,9 @@ def _text(value: object, name: str) -> str:
 def _sha256(value: object, name: str) -> str:
     text = _text(value, name).lower()
     if len(text) != 64 or any(char not in _HEX for char in text):
-        raise evidence.PointInTimeEvidenceError(f"{name} must be a canonical SHA-256 hex string")
+        raise evidence.PointInTimeEvidenceError(
+            f"{name} must be a canonical SHA-256 hex string"
+        )
     return text
 
 
@@ -47,22 +75,51 @@ def _instant(value: object, name: str) -> datetime:
     try:
         parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
     except ValueError as exc:
-        raise evidence.PointInTimeEvidenceError(f"{name} must be an ISO-8601 timestamp") from exc
+        raise evidence.PointInTimeEvidenceError(
+            f"{name} must be an ISO-8601 timestamp"
+        ) from exc
     if parsed.tzinfo is None or parsed.utcoffset() is None:
         raise evidence.PointInTimeEvidenceError(f"{name} must include a timezone")
     return parsed.astimezone(timezone.utc)
 
 
 def _utc_now() -> str:
-    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+    return (
+        datetime.now(timezone.utc)
+        .isoformat(timespec="microseconds")
+        .replace("+00:00", "Z")
+    )
 
 
 def _canonical_json(payload: Mapping[str, Any]) -> str:
-    return json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False)
+    return json.dumps(
+        payload,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    )
 
 
 def _digest(payload: Mapping[str, Any]) -> str:
     return hashlib.sha256(_canonical_json(payload).encode("utf-8")).hexdigest()
+
+
+def _reject_duplicate_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    result: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in result:
+            raise evidence.PointInTimeEvidenceError(
+                f"duplicate feature publication state key: {key}"
+            )
+        result[key] = value
+    return result
+
+
+def _reject_nonfinite(value: str) -> None:
+    raise evidence.PointInTimeEvidenceError(
+        f"non-finite feature publication state value: {value}"
+    )
 
 
 def _publication_key(dataset_snapshot_id: str, feature_set_id: str) -> str:
@@ -70,24 +127,50 @@ def _publication_key(dataset_snapshot_id: str, feature_set_id: str) -> str:
         {
             "schema": _SCHEMA,
             "schema_version": _SCHEMA_VERSION,
-            "dataset_snapshot_id": _text(dataset_snapshot_id, "dataset_snapshot_id"),
+            "dataset_snapshot_id": _text(
+                dataset_snapshot_id, "dataset_snapshot_id"
+            ),
             "feature_set_id": _text(feature_set_id, "feature_set_id"),
         }
     )
+
+
+def _registry_entry(
+    lineage: DatasetSnapshotLineageAuthority,
+    *,
+    record_type: str,
+    record_id: str,
+    exact_payload: Mapping[str, Any],
+) -> RegistryEntry:
+    entry = lineage.registry.get(record_type, record_id)
+    if entry is None:
+        raise evidence.PointInTimeEvidenceError(
+            f"source materialization requires canonical {record_type}:{record_id}"
+        )
+    if entry.payload != dict(exact_payload):
+        raise evidence.PointInTimeEvidenceError(
+            f"source materialization {record_type} does not match canonical registry bytes"
+        )
+    return entry
 
 
 @dataclass(frozen=True, slots=True)
 class SourceFeatureArtifactPublication:
     publication_key: str
     dataset_snapshot_id: str
+    dataset_record_sha256: str
     dataset_manifest_sha256: str
     source_identity: str
     feature_set_id: str
     feature_version: str
+    feature_record_sha256: str
     feature_definition_sha256: str
     feature_source_sha256: str
     feature_payload_sha256: str
+    feature_provenance_sha256: str
+    lineage_proof_sha256: str
     first_published_at_utc: str
+    publication_sha256: str
 
     def __post_init__(self) -> None:
         _sha256(self.publication_key, "publication_key")
@@ -99,156 +182,435 @@ class SourceFeatureArtifactPublication:
         ):
             _text(getattr(self, name), name)
         for name in (
+            "dataset_record_sha256",
             "dataset_manifest_sha256",
+            "feature_record_sha256",
             "feature_definition_sha256",
             "feature_source_sha256",
             "feature_payload_sha256",
+            "feature_provenance_sha256",
+            "lineage_proof_sha256",
+            "publication_sha256",
         ):
             _sha256(getattr(self, name), name)
         _instant(self.first_published_at_utc, "first_published_at_utc")
-        expected = _publication_key(self.dataset_snapshot_id, self.feature_set_id)
-        if self.publication_key != expected:
-            raise evidence.PointInTimeEvidenceError("publication_key does not match dataset/feature identity")
+        expected_key = _publication_key(
+            self.dataset_snapshot_id, self.feature_set_id
+        )
+        if self.publication_key != expected_key:
+            raise evidence.PointInTimeEvidenceError(
+                "publication_key does not match dataset/feature identity"
+            )
+        if self.publication_sha256 != _digest(self.core_payload()):
+            raise evidence.PointInTimeEvidenceError(
+                "feature publication record digest mismatch"
+            )
 
-    def to_payload(self) -> dict[str, str]:
+    def core_payload(self) -> dict[str, str]:
         return {
             "publication_key": self.publication_key,
             "dataset_snapshot_id": self.dataset_snapshot_id,
+            "dataset_record_sha256": self.dataset_record_sha256.lower(),
             "dataset_manifest_sha256": self.dataset_manifest_sha256.lower(),
             "source_identity": self.source_identity,
             "feature_set_id": self.feature_set_id,
             "feature_version": self.feature_version,
+            "feature_record_sha256": self.feature_record_sha256.lower(),
             "feature_definition_sha256": self.feature_definition_sha256.lower(),
             "feature_source_sha256": self.feature_source_sha256.lower(),
             "feature_payload_sha256": self.feature_payload_sha256.lower(),
+            "feature_provenance_sha256": self.feature_provenance_sha256.lower(),
+            "lineage_proof_sha256": self.lineage_proof_sha256.lower(),
             "first_published_at_utc": self.first_published_at_utc,
         }
 
+    def to_payload(self) -> dict[str, str]:
+        return {**self.core_payload(), "publication_sha256": self.publication_sha256}
+
     @classmethod
-    def from_payload(cls, payload: Mapping[str, Any]) -> "SourceFeatureArtifactPublication":
+    def issue(
+        cls,
+        *,
+        dataset_snapshot: DatasetSnapshot,
+        dataset_record_sha256: str,
+        feature_set: FeatureSet,
+        feature_record_sha256: str,
+        feature_payload_sha256: str,
+        feature_provenance_sha256: str,
+        lineage_proof_sha256: str,
+        first_published_at_utc: str,
+    ) -> "SourceFeatureArtifactPublication":
+        core = {
+            "publication_key": _publication_key(
+                dataset_snapshot.dataset_snapshot_id, feature_set.feature_set_id
+            ),
+            "dataset_snapshot_id": dataset_snapshot.dataset_snapshot_id,
+            "dataset_record_sha256": _sha256(
+                dataset_record_sha256, "dataset_record_sha256"
+            ),
+            "dataset_manifest_sha256": dataset_snapshot.manifest_sha256.lower(),
+            "source_identity": dataset_snapshot.source_identity,
+            "feature_set_id": feature_set.feature_set_id,
+            "feature_version": feature_set.version,
+            "feature_record_sha256": _sha256(
+                feature_record_sha256, "feature_record_sha256"
+            ),
+            "feature_definition_sha256": feature_set.definition_sha256.lower(),
+            "feature_source_sha256": feature_set.source_sha256.lower(),
+            "feature_payload_sha256": _sha256(
+                feature_payload_sha256, "feature_payload_sha256"
+            ),
+            "feature_provenance_sha256": _sha256(
+                feature_provenance_sha256, "feature_provenance_sha256"
+            ),
+            "lineage_proof_sha256": _sha256(
+                lineage_proof_sha256, "lineage_proof_sha256"
+            ),
+            "first_published_at_utc": _text(
+                first_published_at_utc, "first_published_at_utc"
+            ),
+        }
+        return cls(**core, publication_sha256=_digest(core))
+
+    @classmethod
+    def from_payload(
+        cls, payload: Mapping[str, Any]
+    ) -> "SourceFeatureArtifactPublication":
         expected = {
             "publication_key",
             "dataset_snapshot_id",
+            "dataset_record_sha256",
             "dataset_manifest_sha256",
             "source_identity",
             "feature_set_id",
             "feature_version",
+            "feature_record_sha256",
             "feature_definition_sha256",
             "feature_source_sha256",
             "feature_payload_sha256",
+            "feature_provenance_sha256",
+            "lineage_proof_sha256",
             "first_published_at_utc",
+            "publication_sha256",
         }
         if type(payload) is not dict or set(payload) != expected:
-            raise evidence.PointInTimeEvidenceError("feature publication fields mismatch")
+            raise evidence.PointInTimeEvidenceError(
+                "feature publication fields mismatch"
+            )
         return cls(**payload)
 
 
 class SourceFeatureArtifactAuthority:
-    """Durable first-publication store owned by feature materialization/ingestion."""
+    """Monotonic read authority for source-owned first publication facts."""
 
-    def __init__(self, path: str | Path) -> None:
-        self.path = Path(path)
-        if self.path.name != _CANONICAL_FILENAME:
-            raise evidence.PointInTimeEvidenceError(
-                f"feature artifact authority path must end with {_CANONICAL_FILENAME}"
-            )
+    def __init__(self, lineage_authority: DatasetSnapshotLineageAuthority) -> None:
+        runtime_repair._require_exact_lineage_authority(lineage_authority)
+        self.lineage_authority = lineage_authority
+        self.path = lineage_authority.path.with_name(_CANONICAL_FILENAME)
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        with durable_path_lock(self.path):
-            self._load_unlocked()
+        lineage_machine = lineage_authority.monotonic_authority
+        self.monotonic_authority = MonotonicWorkspaceAuthority(
+            workspace=self.path.parent.resolve(strict=False),
+            workspace_instance_id=lineage_machine.workspace_instance_id,
+            domain=_MONOTONIC_DOMAIN,
+            key=_MONOTONIC_KEY,
+            authority_root=lineage_machine.authority_root,
+        )
+        self._authority_binding_sha256 = _digest(
+            {
+                "schema": _SCHEMA,
+                "schema_version": _SCHEMA_VERSION,
+                "lineage_path": str(lineage_authority.path.resolve(strict=False)),
+                "registry_path": str(lineage_authority.registry.path.resolve(strict=False)),
+                "workspace_instance_id": lineage_machine.workspace_instance_id,
+                "authority_root": str(lineage_machine.authority_root.resolve(strict=False)),
+            }
+        )
+        self._bootstrap_or_recover()
+
+    @classmethod
+    def for_lineage(
+        cls, lineage_authority: DatasetSnapshotLineageAuthority
+    ) -> "SourceFeatureArtifactAuthority":
+        return cls(lineage_authority)
 
     @classmethod
     def for_workspace(cls, workspace: str | Path) -> "SourceFeatureArtifactAuthority":
-        return cls(Path(workspace) / _CANONICAL_FILENAME)
+        del workspace
+        raise evidence.PointInTimeEvidenceError(
+            "source feature artifact authority must be bound to the exact canonical lineage authority"
+        )
 
-    def _empty_payload(self) -> dict[str, Any]:
-        core = {"schema": _SCHEMA, "schema_version": _SCHEMA_VERSION, "records": {}}
+    @staticmethod
+    def _state_core(
+        records: Mapping[str, SourceFeatureArtifactPublication]
+    ) -> dict[str, Any]:
+        return {
+            "schema": _SCHEMA,
+            "schema_version": _SCHEMA_VERSION,
+            "records": {
+                key: records[key].to_payload() for key in sorted(records)
+            },
+        }
+
+    @classmethod
+    def _state_sha256(
+        cls, records: Mapping[str, SourceFeatureArtifactPublication]
+    ) -> str:
+        return _digest(cls._state_core(records))
+
+    @classmethod
+    def _state_payload(
+        cls, records: Mapping[str, SourceFeatureArtifactPublication]
+    ) -> dict[str, Any]:
+        core = cls._state_core(records)
         return {**core, "state_sha256": _digest(core)}
 
-    def _load_unlocked(self) -> dict[str, SourceFeatureArtifactPublication]:
-        if not self.path.exists():
-            return {}
+    def _semantic_binding_sha256(self, state_sha256: str) -> str:
+        return _digest(
+            {
+                "kind": _MONOTONIC_BINDING_KIND,
+                "schema_version": 1,
+                "authority_binding_sha256": self._authority_binding_sha256,
+                "state_sha256": _sha256(state_sha256, "state_sha256"),
+            }
+        )
+
+    def _load_unlocked(
+        self,
+    ) -> tuple[dict[str, SourceFeatureArtifactPublication], str]:
         try:
-            raw = json.loads(self.path.read_text(encoding="utf-8"))
-        except (OSError, UnicodeError, json.JSONDecodeError) as exc:
-            raise evidence.PointInTimeEvidenceError("feature artifact authority state is unreadable") from exc
+            raw_text = self.path.read_text(encoding="utf-8")
+        except FileNotFoundError:
+            raise
+        except (OSError, UnicodeError) as exc:
+            raise evidence.PointInTimeEvidenceError(
+                "feature artifact authority state is unreadable"
+            ) from exc
+        try:
+            raw = json.loads(
+                raw_text,
+                object_pairs_hook=_reject_duplicate_keys,
+                parse_constant=_reject_nonfinite,
+            )
+        except json.JSONDecodeError as exc:
+            raise evidence.PointInTimeEvidenceError(
+                "feature artifact authority state is not valid JSON"
+            ) from exc
         expected = {"schema", "schema_version", "records", "state_sha256"}
         if type(raw) is not dict or set(raw) != expected:
-            raise evidence.PointInTimeEvidenceError("feature artifact authority state fields mismatch")
+            raise evidence.PointInTimeEvidenceError(
+                "feature artifact authority state fields mismatch"
+            )
         if raw["schema"] != _SCHEMA or raw["schema_version"] != _SCHEMA_VERSION:
-            raise evidence.PointInTimeEvidenceError("feature artifact authority schema mismatch")
+            raise evidence.PointInTimeEvidenceError(
+                "feature artifact authority schema mismatch"
+            )
         if type(raw["records"]) is not dict:
-            raise evidence.PointInTimeEvidenceError("feature artifact authority records must be an object")
-        core = {"schema": raw["schema"], "schema_version": raw["schema_version"], "records": raw["records"]}
-        if _sha256(raw["state_sha256"], "state_sha256") != _digest(core):
-            raise evidence.PointInTimeEvidenceError("feature artifact authority state digest mismatch")
+            raise evidence.PointInTimeEvidenceError(
+                "feature artifact authority records must be an object"
+            )
         records: dict[str, SourceFeatureArtifactPublication] = {}
         for key, payload in raw["records"].items():
-            key = _sha256(key, "publication key")
+            canonical_key = _sha256(key, "publication key")
             record = SourceFeatureArtifactPublication.from_payload(payload)
-            if record.publication_key != key:
-                raise evidence.PointInTimeEvidenceError("feature publication map key mismatch")
-            records[key] = record
-        return records
+            if record.publication_key != canonical_key:
+                raise evidence.PointInTimeEvidenceError(
+                    "feature publication map key mismatch"
+                )
+            records[canonical_key] = record
+        observed = self._state_sha256(records)
+        if _sha256(raw["state_sha256"], "state_sha256") != observed:
+            raise evidence.PointInTimeEvidenceError(
+                "feature artifact authority state digest mismatch"
+            )
+        return records, observed
 
-    def _write_unlocked(self, records: Mapping[str, SourceFeatureArtifactPublication]) -> None:
-        body = {key: records[key].to_payload() for key in sorted(records)}
-        core: dict[str, Any] = {"schema": _SCHEMA, "schema_version": _SCHEMA_VERSION, "records": body}
-        atomic_write_json(self.path, {**core, "state_sha256": _digest(core)})
+    def _recover_unlocked(
+        self,
+        records: Mapping[str, SourceFeatureArtifactPublication],
+        observed: str,
+    ) -> None:
+        del records
+        try:
+            self.monotonic_authority.recover(observed_state_sha256=observed)
+            return
+        except MonotonicAuthorityRecoveryRequiredError:
+            history = self.monotonic_authority.read_history()
+            if not history:
+                raise evidence.PointInTimeEvidenceError(
+                    "feature artifact authority recovery history disappeared"
+                )
+            pending = history[-1]
+            binding = self._semantic_binding_sha256(observed)
+            if (
+                pending.intended_state_sha256 != observed
+                or pending.semantic_binding_sha256 != binding
+            ):
+                raise evidence.PointInTimeEvidenceError(
+                    "feature artifact authority prepared state cannot be proven"
+                )
+            try:
+                self.monotonic_authority.recover(
+                    observed_state_sha256=observed,
+                    tx_id=pending.tx_id,
+                    semantic_binding_sha256=binding,
+                )
+            except MonotonicWorkspaceAuthorityError as exc:
+                raise evidence.PointInTimeEvidenceError(
+                    "feature artifact authority recovery failed closed"
+                ) from exc
+        except MonotonicWorkspaceAuthorityError as exc:
+            raise evidence.PointInTimeEvidenceError(
+                "feature artifact authority monotonic history rejected workspace state"
+            ) from exc
 
-    def publish(
+    def _read_and_recover_unlocked(
+        self,
+    ) -> tuple[dict[str, SourceFeatureArtifactPublication], str]:
+        records, observed = self._load_unlocked()
+        self._recover_unlocked(records, observed)
+        return records, observed
+
+    def _bootstrap_or_recover(self) -> None:
+        with WorkspaceEconomicLock(self.path.parent):
+            if self.path.exists():
+                self._read_and_recover_unlocked()
+                return
+            try:
+                self.monotonic_authority.recover(observed_state_sha256=None)
+            except MonotonicWorkspaceAuthorityError as exc:
+                raise evidence.PointInTimeEvidenceError(
+                    "feature artifact authority was deleted or rolled back"
+                ) from exc
+            records: dict[str, SourceFeatureArtifactPublication] = {}
+            intended = self._state_sha256(records)
+            binding = self._semantic_binding_sha256(intended)
+            tx_id = f"source-feature-bootstrap-{uuid.uuid4().hex}"
+            try:
+                self.monotonic_authority.prepare(
+                    tx_id=tx_id,
+                    observed_state_sha256=None,
+                    intended_state_sha256=intended,
+                    semantic_binding_sha256=binding,
+                )
+                atomic_write_json(self.path, self._state_payload(records))
+                verified_records, verified = self._load_unlocked()
+                if verified_records or verified != intended:
+                    raise evidence.PointInTimeEvidenceError(
+                        "feature artifact authority bootstrap verification failed"
+                    )
+                self.monotonic_authority.commit(
+                    tx_id=tx_id,
+                    observed_state_sha256=intended,
+                    semantic_binding_sha256=binding,
+                )
+            except MonotonicWorkspaceAuthorityError as exc:
+                raise evidence.PointInTimeEvidenceError(
+                    "feature artifact authority bootstrap failed closed"
+                ) from exc
+
+    def publish(self, **_: object) -> SourceFeatureArtifactPublication:
+        raise evidence.PointInTimeEvidenceError(
+            "direct feature publication is forbidden; publication is owned by the canonical source materialization seam"
+        )
+
+    def _publish_from_materializer(
         self,
         *,
+        materializer: "SourceFeatureArtifactMaterializer",
         dataset_snapshot: DatasetSnapshot,
+        dataset_entry: RegistryEntry,
         feature_set: FeatureSet,
-        feature_payload: bytes,
+        feature_entry: RegistryEntry,
+        feature_provenance: provenance_guard.FeatureArtifactProvenance,
+        lineage_proof_sha256: str,
     ) -> SourceFeatureArtifactPublication:
-        if type(dataset_snapshot) is not DatasetSnapshot:
-            raise evidence.PointInTimeEvidenceError("dataset_snapshot must be an exact DatasetSnapshot")
-        if type(feature_set) is not FeatureSet:
-            raise evidence.PointInTimeEvidenceError("feature_set must be an exact FeatureSet")
-        if type(feature_payload) is not bytes or not feature_payload:
-            raise evidence.PointInTimeEvidenceError("feature_payload must be non-empty immutable bytes")
-        key = _publication_key(dataset_snapshot.dataset_snapshot_id, feature_set.feature_set_id)
-        payload_sha = hashlib.sha256(feature_payload).hexdigest()
-        with durable_path_lock(self.path):
-            records = self._load_unlocked()
+        frame = inspect.currentframe()
+        caller = None if frame is None else frame.f_back
+        if (
+            caller is None
+            or caller.f_code is not SourceFeatureArtifactMaterializer.materialize.__code__
+            or type(materializer) is not SourceFeatureArtifactMaterializer
+            or materializer._authority is not self
+            or materializer.lineage_authority is not self.lineage_authority
+        ):
+            raise evidence.PointInTimeEvidenceError(
+                "source publication capability may only be exercised by the canonical materializer"
+            )
+        key = _publication_key(
+            dataset_snapshot.dataset_snapshot_id, feature_set.feature_set_id
+        )
+        with WorkspaceEconomicLock(self.path.parent):
+            records, observed = self._read_and_recover_unlocked()
             existing = records.get(key)
+            expected_identity = (
+                dataset_entry.record_sha256,
+                dataset_snapshot.manifest_sha256.lower(),
+                dataset_snapshot.source_identity,
+                feature_entry.record_sha256,
+                feature_set.version,
+                feature_set.definition_sha256.lower(),
+                feature_set.source_sha256.lower(),
+                feature_provenance.feature_payload_sha256,
+                feature_provenance.provenance_sha256,
+                _sha256(lineage_proof_sha256, "lineage_proof_sha256"),
+            )
             if existing is not None:
-                expected = (
-                    dataset_snapshot.manifest_sha256.lower(),
-                    dataset_snapshot.source_identity,
-                    feature_set.version,
-                    feature_set.definition_sha256.lower(),
-                    feature_set.source_sha256.lower(),
-                    payload_sha,
-                )
-                actual = (
+                actual_identity = (
+                    existing.dataset_record_sha256,
                     existing.dataset_manifest_sha256,
                     existing.source_identity,
+                    existing.feature_record_sha256,
                     existing.feature_version,
                     existing.feature_definition_sha256,
                     existing.feature_source_sha256,
                     existing.feature_payload_sha256,
+                    existing.feature_provenance_sha256,
+                    existing.lineage_proof_sha256,
                 )
-                if actual != expected:
+                if actual_identity != expected_identity:
                     raise evidence.PointInTimeEvidenceError(
                         "feature artifact publication identity cannot be rebound"
                     )
                 return existing
-            record = SourceFeatureArtifactPublication(
-                publication_key=key,
-                dataset_snapshot_id=dataset_snapshot.dataset_snapshot_id,
-                dataset_manifest_sha256=dataset_snapshot.manifest_sha256.lower(),
-                source_identity=dataset_snapshot.source_identity,
-                feature_set_id=feature_set.feature_set_id,
-                feature_version=feature_set.version,
-                feature_definition_sha256=feature_set.definition_sha256.lower(),
-                feature_source_sha256=feature_set.source_sha256.lower(),
-                feature_payload_sha256=payload_sha,
+            record = SourceFeatureArtifactPublication.issue(
+                dataset_snapshot=dataset_snapshot,
+                dataset_record_sha256=dataset_entry.record_sha256,
+                feature_set=feature_set,
+                feature_record_sha256=feature_entry.record_sha256,
+                feature_payload_sha256=feature_provenance.feature_payload_sha256,
+                feature_provenance_sha256=feature_provenance.provenance_sha256,
+                lineage_proof_sha256=lineage_proof_sha256,
                 first_published_at_utc=_utc_now(),
             )
-            records[key] = record
-            self._write_unlocked(records)
+            updated = dict(records)
+            updated[key] = record
+            intended = self._state_sha256(updated)
+            binding = self._semantic_binding_sha256(intended)
+            tx_id = f"source-feature-publication-{uuid.uuid4().hex}"
+            try:
+                self.monotonic_authority.prepare(
+                    tx_id=tx_id,
+                    observed_state_sha256=observed,
+                    intended_state_sha256=intended,
+                    semantic_binding_sha256=binding,
+                )
+                atomic_write_json(self.path, self._state_payload(updated))
+                verified_records, verified = self._load_unlocked()
+                if verified != intended or verified_records.get(key) != record:
+                    raise evidence.PointInTimeEvidenceError(
+                        "published feature artifact authority state digest mismatch"
+                    )
+                self.monotonic_authority.commit(
+                    tx_id=tx_id,
+                    observed_state_sha256=intended,
+                    semantic_binding_sha256=binding,
+                )
+            except MonotonicWorkspaceAuthorityError as exc:
+                raise evidence.PointInTimeEvidenceError(
+                    "feature artifact publication transaction failed closed"
+                ) from exc
             return record
 
     def resolve(
@@ -256,35 +618,175 @@ class SourceFeatureArtifactAuthority:
         *,
         dataset_snapshot: DatasetSnapshot,
         feature_set: FeatureSet,
-        feature_payload_sha256: str,
+        feature_provenance: provenance_guard.FeatureArtifactProvenance,
     ) -> SourceFeatureArtifactPublication:
-        key = _publication_key(dataset_snapshot.dataset_snapshot_id, feature_set.feature_set_id)
-        with durable_path_lock(self.path):
-            records = self._load_unlocked()
+        if type(dataset_snapshot) is not DatasetSnapshot:
+            raise evidence.PointInTimeEvidenceError(
+                "dataset_snapshot must be an exact DatasetSnapshot"
+            )
+        if type(feature_set) is not FeatureSet:
+            raise evidence.PointInTimeEvidenceError(
+                "feature_set must be an exact FeatureSet"
+            )
+        if type(feature_provenance) is not provenance_guard.FeatureArtifactProvenance:
+            raise evidence.PointInTimeEvidenceError(
+                "feature_provenance must be exact FeatureArtifactProvenance"
+            )
+        dataset_entry = _registry_entry(
+            self.lineage_authority,
+            record_type="DatasetSnapshot",
+            record_id=dataset_snapshot.dataset_snapshot_id,
+            exact_payload=dataset_snapshot.to_payload(),
+        )
+        feature_entry = _registry_entry(
+            self.lineage_authority,
+            record_type="FeatureSet",
+            record_id=feature_set.feature_set_id,
+            exact_payload=feature_set.to_payload(),
+        )
+        lineage_record = self.lineage_authority.record(
+            dataset_snapshot.dataset_snapshot_id
+        )
+        if lineage_record.dataset_record_sha256 != dataset_entry.record_sha256:
+            raise evidence.PointInTimeEvidenceError(
+                "source publication dataset lineage does not match canonical registry record"
+            )
+        if feature_provenance.provenance_sha256 not in lineage_record.member_sha256:
+            raise evidence.PointInTimeEvidenceError(
+                "source publication provenance is not a member of canonical dataset lineage"
+            )
+        key = _publication_key(
+            dataset_snapshot.dataset_snapshot_id, feature_set.feature_set_id
+        )
+        with WorkspaceEconomicLock(self.path.parent):
+            records, _ = self._read_and_recover_unlocked()
         record = records.get(key)
         if record is None:
             raise evidence.PointInTimeEvidenceError(
                 "positive point-in-time feature evidence requires an independent source-owned feature artifact authority"
             )
         expected = (
+            dataset_entry.record_sha256,
             dataset_snapshot.manifest_sha256.lower(),
             dataset_snapshot.source_identity,
+            feature_entry.record_sha256,
             feature_set.version,
             feature_set.definition_sha256.lower(),
             feature_set.source_sha256.lower(),
-            _sha256(feature_payload_sha256, "feature_payload_sha256"),
+            feature_provenance.feature_payload_sha256,
+            feature_provenance.provenance_sha256,
+            lineage_record.proof_sha256,
         )
         actual = (
+            record.dataset_record_sha256,
             record.dataset_manifest_sha256,
             record.source_identity,
+            record.feature_record_sha256,
             record.feature_version,
             record.feature_definition_sha256,
             record.feature_source_sha256,
             record.feature_payload_sha256,
+            record.feature_provenance_sha256,
+            record.lineage_proof_sha256,
         )
         if actual != expected:
-            raise evidence.PointInTimeEvidenceError("source-owned feature artifact authority does not match exact feature")
+            raise evidence.PointInTimeEvidenceError(
+                "source-owned feature artifact authority does not match exact canonical feature lineage"
+            )
         return record
+
+
+class SourceFeatureArtifactMaterializer:
+    """Source-facing seam that may create one first-publication fact.
+
+    It intentionally stores no duplicate feature bytes.  It only re-resolves the
+    canonical registry and lineage, derives provenance from the immutable bytes, and
+    then exercises the low-level publication capability.
+    """
+
+    def __init__(self, lineage_authority: DatasetSnapshotLineageAuthority) -> None:
+        runtime_repair._require_exact_lineage_authority(lineage_authority)
+        self.lineage_authority = lineage_authority
+        self._authority = SourceFeatureArtifactAuthority.for_lineage(
+            lineage_authority
+        )
+
+    @property
+    def authority(self) -> SourceFeatureArtifactAuthority:
+        return self._authority
+
+    def materialize(
+        self,
+        *,
+        dataset_snapshot: DatasetSnapshot,
+        feature_set: FeatureSet,
+        feature_payload: bytes,
+    ) -> SourceFeatureArtifactPublication:
+        if type(dataset_snapshot) is not DatasetSnapshot:
+            raise evidence.PointInTimeEvidenceError(
+                "dataset_snapshot must be an exact DatasetSnapshot"
+            )
+        if type(feature_set) is not FeatureSet:
+            raise evidence.PointInTimeEvidenceError(
+                "feature_set must be an exact FeatureSet"
+            )
+        if type(feature_payload) is not bytes or not feature_payload:
+            raise evidence.PointInTimeEvidenceError(
+                "feature_payload must be non-empty immutable bytes"
+            )
+        dataset_entry = _registry_entry(
+            self.lineage_authority,
+            record_type="DatasetSnapshot",
+            record_id=dataset_snapshot.dataset_snapshot_id,
+            exact_payload=dataset_snapshot.to_payload(),
+        )
+        feature_entry = _registry_entry(
+            self.lineage_authority,
+            record_type="FeatureSet",
+            record_id=feature_set.feature_set_id,
+            exact_payload=feature_set.to_payload(),
+        )
+        feature_provenance = provenance_guard.FeatureArtifactProvenance.issue(
+            dataset_snapshot=dataset_snapshot,
+            feature_set=feature_set,
+            feature_payload=feature_payload,
+        )
+        lineage_record = self.lineage_authority.record(
+            dataset_snapshot.dataset_snapshot_id
+        )
+        if lineage_record.dataset_record_sha256 != dataset_entry.record_sha256:
+            raise evidence.PointInTimeEvidenceError(
+                "source materialization dataset lineage does not match canonical registry record"
+            )
+        if feature_provenance.provenance_sha256 not in lineage_record.member_sha256:
+            raise evidence.PointInTimeEvidenceError(
+                "source materialization provenance is not a member of canonical dataset lineage"
+            )
+        return self._authority._publish_from_materializer(
+            materializer=self,
+            dataset_snapshot=dataset_snapshot,
+            dataset_entry=dataset_entry,
+            feature_set=feature_set,
+            feature_entry=feature_entry,
+            feature_provenance=feature_provenance,
+            lineage_proof_sha256=lineage_record.proof_sha256,
+        )
+
+
+def _same_lineage_authority(
+    left: DatasetSnapshotLineageAuthority,
+    right: DatasetSnapshotLineageAuthority,
+) -> bool:
+    left_machine = left.monotonic_authority
+    right_machine = right.monotonic_authority
+    return (
+        left.path.resolve(strict=False) == right.path.resolve(strict=False)
+        and left.registry.path.resolve(strict=False)
+        == right.registry.path.resolve(strict=False)
+        and left_machine.workspace_instance_id == right_machine.workspace_instance_id
+        and left_machine.authority_root.resolve(strict=False)
+        == right_machine.authority_root.resolve(strict=False)
+    )
 
 
 def _bind_with_source_authority(
@@ -302,20 +804,37 @@ def _bind_with_source_authority(
         raise evidence.PointInTimeEvidenceError(
             "positive point-in-time feature evidence requires an independent source-owned feature artifact authority"
         )
-    if feature_artifact_authority.path.parent.resolve(strict=False) != lineage_authority.path.parent.resolve(strict=False):
-        raise evidence.PointInTimeEvidenceError("feature artifact authority must belong to the canonical lineage workspace")
+    if not _same_lineage_authority(
+        feature_artifact_authority.lineage_authority, lineage_authority
+    ):
+        raise evidence.PointInTimeEvidenceError(
+            "feature artifact authority must be bound to the exact canonical lineage authority"
+        )
+    if type(feature_provenance) is not provenance_guard.FeatureArtifactProvenance:
+        raise evidence.PointInTimeEvidenceError(
+            "feature_provenance must be exact FeatureArtifactProvenance"
+        )
     payload_sha = feature_provenance.feature_payload_sha256
-    if feature_payload_sha256 is not None and _sha256(feature_payload_sha256, "feature_payload_sha256") != payload_sha:
-        raise evidence.PointInTimeEvidenceError("feature payload audit digest does not match canonical provenance")
+    if (
+        feature_payload_sha256 is not None
+        and _sha256(feature_payload_sha256, "feature_payload_sha256") != payload_sha
+    ):
+        raise evidence.PointInTimeEvidenceError(
+            "feature payload audit digest does not match canonical provenance"
+        )
     publication = feature_artifact_authority.resolve(
         dataset_snapshot=dataset_snapshot,
         feature_set=feature_set,
-        feature_payload_sha256=payload_sha,
+        feature_provenance=feature_provenance,
     )
     decision_cutoff = _instant(decision_cutoff_utc, "decision_cutoff_utc")
-    publication_time = _instant(publication.first_published_at_utc, "first_published_at_utc")
+    publication_time = _instant(
+        publication.first_published_at_utc, "first_published_at_utc"
+    )
     if publication_time > decision_cutoff:
-        raise evidence.FutureEvidenceError("feature artifact was not source-published by decision cutoff")
+        raise evidence.FutureEvidenceError(
+            "feature artifact was not source-published by decision cutoff"
+        )
     base = provenance_guard._bind(
         dataset_snapshot=dataset_snapshot,
         feature_set=feature_set,
@@ -348,6 +867,11 @@ def _bind_with_source_authority(
 
 evidence.SourceFeatureArtifactPublication = SourceFeatureArtifactPublication
 evidence.SourceFeatureArtifactAuthority = SourceFeatureArtifactAuthority
+evidence.SourceFeatureArtifactMaterializer = SourceFeatureArtifactMaterializer
 evidence.PointInTimeFeatureAuthority.bind = staticmethod(_bind_with_source_authority)
 
-__all__ = ["SourceFeatureArtifactPublication", "SourceFeatureArtifactAuthority"]
+__all__ = [
+    "SourceFeatureArtifactPublication",
+    "SourceFeatureArtifactAuthority",
+    "SourceFeatureArtifactMaterializer",
+]

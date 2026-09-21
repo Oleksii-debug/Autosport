@@ -38,37 +38,32 @@ class ProductWindowsAutosportApp(WindowsAutosportApp):
 
     def _build(self) -> None:
         super()._build()
-        frame = next(iter(self.winfo_children()), None)
-        if frame is None:
-            raise RuntimeError("Windows GUI root frame is missing")
-
         self.product_status = tk.StringVar(
             value=product_text("ui.product_runtime.status.idle")
         )
-        product_frame = ttk.LabelFrame(
-            frame,
-            text=product_text("ui.product_runtime.frame.title"),
-            padding=(8, 6),
-        )
-        product_frame.pack(fill="x", pady=(12, 0))
+
+        # Preserve the compact Windows geometry: product controls share the
+        # existing live-controls row instead of creating another vertical panel.
+        live_controls = self.live_refresh_button.master
         self.product_start_button = ttk.Button(
-            product_frame,
+            live_controls,
             text=product_text("ui.product_runtime.button.start"),
             command=self.start_product_runtime,
         )
-        self.product_start_button.pack(side="left", padx=(0, 8))
+        self.product_start_button.pack(side="left", padx=(8, 4))
         self.product_stop_button = ttk.Button(
-            product_frame,
+            live_controls,
             text=product_text("ui.product_runtime.button.stop"),
             command=self.stop_product_runtime,
         )
-        self.product_stop_button.pack(side="left", padx=(0, 8))
+        self.product_stop_button.pack(side="left", padx=(0, 4))
         self.product_stop_button.state(["disabled"])
         self.product_status_entry = ttk.Entry(
-            product_frame,
+            live_controls,
             textvariable=self.product_status,
             state="readonly",
             takefocus=True,
+            width=30,
         )
         self.product_status_entry.pack(side="left", fill="x", expand=True)
 
@@ -166,13 +161,18 @@ class ProductWindowsAutosportApp(WindowsAutosportApp):
             return
 
         source_factory = os.environ.get(_PRODUCT_SOURCE_FACTORY_ENV)
-        if source_factory is None or not source_factory.strip():
+        if source_factory is None or not source_factory:
             message = product_text("ui.product_runtime.status.configuration_missing")
             self.product_status.set(message)
             self.status.set(message)
             self.bell()
             return
-        source_factory = source_factory.strip()
+        if source_factory.strip() != source_factory:
+            message = product_text("ui.product_runtime.status.configuration_invalid")
+            self.product_status.set(message)
+            self.status.set(message)
+            self.bell()
+            return
 
         self._active_workspace = Path(self.workspace)
         self._recovery_view = None
@@ -334,6 +334,8 @@ class ProductWindowsAutosportApp(WindowsAutosportApp):
             self._refresh_tickets()
 
     def close_app(self) -> None:
+        if self._product_close_pending:
+            return
         if self._product_busy:
             self._product_close_pending = True
             self.product_worker.request_stop("app_close")

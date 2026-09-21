@@ -10,7 +10,7 @@ from .endurance import EnduranceConfig, run_endurance
 from .integrity import atomic_write_json, ensure_durable_file, sha256_file
 from .paper import PaperBook
 from .run_registry import RunRegistry
-from .run_transaction import RunTransaction
+from .run_transaction import RunTransaction, RunTransactionError
 from .session import AutosportSession
 
 
@@ -122,6 +122,69 @@ def _audit_session_restart(root: Path) -> dict[str, object]:
     }
 
 
+def _audit_corrupt_manifest_rejection(root: Path) -> dict[str, object]:
+    workspace = root / "corrupt-manifest-workspace"
+    workspace.mkdir(parents=True, exist_ok=True)
+    registry = RunRegistry.initialize_pristine(workspace / "run_registry.json")
+    paper_path = workspace / "paper_book.json"
+    ledger_path = workspace / "decisions.jsonl"
+
+    PaperBook("100").save(paper_path)
+    ensure_durable_file(ledger_path)
+    paper_before = paper_path.read_bytes()
+    ledger_before = ledger_path.read_bytes()
+    book_hash = sha256_file(paper_path)
+    ledger_hash = sha256_file(ledger_path)
+
+    run_id = "packaged-restart-corrupt-manifest-audit"
+    market_sha = "c" * 64
+    results_sha = "d" * 64
+    strategy_id = "baseline-v1"
+    experiment_key = registry.begin(
+        market_sha,
+        results_sha,
+        strategy_id,
+        run_id,
+        base_paper_book_sha256=book_hash,
+        base_decision_ledger_sha256=ledger_hash,
+    )
+    tx = RunTransaction.start(
+        workspace,
+        run_id=run_id,
+        experiment_key=experiment_key,
+        market_sha256=market_sha,
+        results_sha256=results_sha,
+        strategy_id=strategy_id,
+        base_paper_book_sha256=book_hash,
+        base_decision_ledger_sha256=ledger_hash,
+    )
+
+    tx.manifest_path.write_bytes(b'{"schema_version":1,"phase":"staging"')
+    try:
+        RunTransaction.recover(
+            workspace,
+            run_id=run_id,
+            registry_item=registry.get(experiment_key),
+            experiment_key=experiment_key,
+        )
+    except RunTransactionError as exc:
+        if "transaction manifest contains invalid JSON" not in str(exc):
+            raise RuntimeError("corrupt transaction manifest failed for an unexpected reason") from exc
+    else:
+        raise RuntimeError("corrupt transaction manifest was accepted during recovery")
+
+    if paper_path.read_bytes() != paper_before or ledger_path.read_bytes() != ledger_before:
+        raise RuntimeError("corrupt-manifest recovery changed canonical economic BASE bytes")
+    if not registry.in_progress():
+        raise RuntimeError("corrupt-manifest recovery silently resolved registry ownership")
+
+    return {
+        "corrupt_manifest_rejected": True,
+        "corrupt_manifest_base_unchanged": True,
+        "corrupt_manifest_registry_unresolved": True,
+    }
+
+
 def _audit_uncommitted_recovery(root: Path) -> dict[str, object]:
     workspace = root / "recovery-workspace"
     workspace.mkdir(parents=True, exist_ok=True)
@@ -182,11 +245,13 @@ def _audit_uncommitted_recovery(root: Path) -> dict[str, object]:
     if sha256_file(paper_path) != book_hash or sha256_file(ledger_path) != ledger_hash:
         raise RuntimeError("recovery changed canonical economic BASE state")
 
+    corrupt_manifest = _audit_corrupt_manifest_rejection(root)
     return {
         "status": "PASS",
         "disposition": recovered.disposition,
         "paper_book_sha256": book_hash,
         "decision_ledger_sha256": ledger_hash,
+        **corrupt_manifest,
     }
 
 
@@ -230,6 +295,13 @@ def run_restart_recovery_audit(output_path: str | Path) -> int:
             "session_restart_status": restart["status"],
             "transaction_recovery_status": recovery["status"],
             "recovery_disposition": recovery["disposition"],
+            "transaction_corrupt_manifest_rejected": recovery.get("corrupt_manifest_rejected", False),
+            "transaction_corrupt_manifest_base_unchanged": recovery.get(
+                "corrupt_manifest_base_unchanged", False
+            ),
+            "transaction_corrupt_manifest_registry_unresolved": recovery.get(
+                "corrupt_manifest_registry_unresolved", False
+            ),
             "persistent_balance": restart["balance"],
             "ticket_count": restart["ticket_count"],
             "paper_book_sha256": restart["paper_book_sha256"],

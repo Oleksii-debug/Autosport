@@ -57,6 +57,7 @@ class ProviderRequalificationTrigger(str, Enum):
     """Changes that invalidate an unchanged certification artifact."""
 
     CAPABILITY_PROFILE_CHANGED = "capability_profile_changed"
+    CAPABILITY_MANIFEST_CHANGED = "capability_manifest_changed"
     INTEGRATION_EVIDENCE_CHANGED = "integration_evidence_changed"
     ADAPTER_CODE_CHANGED = "adapter_code_changed"
     ADAPTER_CONFIG_CHANGED = "adapter_config_changed"
@@ -119,6 +120,9 @@ class ProviderCertificationEvidenceRef:
     account_scope: str
     profile_id: str
     integration_evidence_id: str
+    capability_manifest_ref: str
+    capability_manifest_version: int
+    capability_manifest_sha256: str
     adapter_code_ref: str
     adapter_code_sha256: str
     adapter_config_ref: str
@@ -136,6 +140,9 @@ class ProviderCertificationEvidenceRef:
         _text(self.account_scope, "account_scope")
         _sha256(self.profile_id, "profile_id")
         _sha256(self.integration_evidence_id, "integration_evidence_id")
+        _text(self.capability_manifest_ref, "capability_manifest_ref")
+        _positive_int(self.capability_manifest_version, "capability_manifest_version")
+        _sha256(self.capability_manifest_sha256, "capability_manifest_sha256")
         _text(self.adapter_code_ref, "adapter_code_ref")
         _sha256(self.adapter_code_sha256, "adapter_code_sha256")
         _text(self.adapter_config_ref, "adapter_config_ref")
@@ -151,6 +158,9 @@ class ProviderCertificationEvidenceRef:
             "evidence_id": self.evidence_id,
             "evidence_sha256": self.evidence_sha256,
             "integration_evidence_id": self.integration_evidence_id,
+            "capability_manifest_ref": self.capability_manifest_ref,
+            "capability_manifest_version": self.capability_manifest_version,
+            "capability_manifest_sha256": self.capability_manifest_sha256,
             "kind": self.kind,
             "observed_at": self.observed_at,
             "profile_id": self.profile_id,
@@ -284,9 +294,12 @@ class ProviderCertificationArtifact:
     account_id: str
     adapter_id: str
     adapter_version: str
-    capability_manifest_version: int
+    profile_version: int
     profile_id: str
     profile_observed_at: str
+    capability_manifest_ref: str
+    capability_manifest_version: int
+    capability_manifest_sha256: str
     integration_evidence_id: str
     integration_kind: BookmakerIntegrationKind
     integration_observed_at: str
@@ -315,9 +328,12 @@ class ProviderCertificationArtifact:
             "tested_account_scope",
         ):
             _text(getattr(self, field), field)
-        _positive_int(self.capability_manifest_version, "capability_manifest_version")
+        _positive_int(self.profile_version, "profile_version")
         _sha256(self.profile_id, "profile_id")
         profile_at = _timestamp(self.profile_observed_at, "profile_observed_at")
+        _text(self.capability_manifest_ref, "capability_manifest_ref")
+        _positive_int(self.capability_manifest_version, "capability_manifest_version")
+        _sha256(self.capability_manifest_sha256, "capability_manifest_sha256")
         _sha256(self.integration_evidence_id, "integration_evidence_id")
         integration_at = _timestamp(self.integration_observed_at, "integration_observed_at")
         if integration_at < profile_at:
@@ -390,6 +406,9 @@ class ProviderCertificationArtifact:
             self.tested_account_scope,
             self.profile_id,
             self.integration_evidence_id,
+            self.capability_manifest_ref,
+            self.capability_manifest_version,
+            self.capability_manifest_sha256,
             self.adapter_code_ref,
             self.adapter_code_sha256,
             self.adapter_config_ref,
@@ -401,6 +420,9 @@ class ProviderCertificationArtifact:
                 item.account_scope,
                 item.profile_id,
                 item.integration_evidence_id,
+                item.capability_manifest_ref,
+                item.capability_manifest_version,
+                item.capability_manifest_sha256,
                 item.adapter_code_ref,
                 item.adapter_code_sha256,
                 item.adapter_config_ref,
@@ -481,6 +503,8 @@ class ProviderCertificationArtifact:
             "adapter_id": self.adapter_id,
             "adapter_version": self.adapter_version,
             "allowed_uses": [item.value for item in self.allowed_uses],
+            "capability_manifest_ref": self.capability_manifest_ref,
+            "capability_manifest_sha256": self.capability_manifest_sha256,
             "capability_manifest_version": self.capability_manifest_version,
             "capability_states": [item.to_canonical_dict() for item in self.capability_states],
             "evidence_refs": [item.to_canonical_dict() for item in self.evidence_refs],
@@ -494,6 +518,7 @@ class ProviderCertificationArtifact:
             ],
             "profile_id": self.profile_id,
             "profile_observed_at": self.profile_observed_at,
+            "profile_version": self.profile_version,
             "requalification_triggers": [
                 item.value for item in self.requalification_triggers
             ],
@@ -518,6 +543,9 @@ class ProviderCertificationArtifact:
         profile: BookmakerCapabilityProfile,
         integration: BookmakerIntegrationEvidence,
         *,
+        capability_manifest_ref: str,
+        capability_manifest_version: int,
+        capability_manifest_sha256: str,
         adapter_code_ref: str,
         adapter_code_sha256: str,
         adapter_config_ref: str,
@@ -545,7 +573,7 @@ class ProviderCertificationArtifact:
             self.account_id,
             self.adapter_id,
             self.adapter_version,
-            self.capability_manifest_version,
+            self.profile_version,
             self.profile_id,
             self.profile_observed_at,
             self.integration_evidence_id,
@@ -579,6 +607,20 @@ class ProviderCertificationArtifact:
             raise ProviderCertificationError(
                 "provider certification capability projection does not match current profile"
             )
+        current_manifest = (
+            _text(capability_manifest_ref, "capability_manifest_ref"),
+            _positive_int(capability_manifest_version, "capability_manifest_version"),
+            _sha256(capability_manifest_sha256, "capability_manifest_sha256"),
+        )
+        certified_manifest = (
+            self.capability_manifest_ref,
+            self.capability_manifest_version,
+            self.capability_manifest_sha256,
+        )
+        if current_manifest != certified_manifest:
+            raise ProviderCertificationError(
+                "provider certification requires requalification after capability manifest drift"
+            )
         if _text(adapter_code_ref, "adapter_code_ref") != self.adapter_code_ref:
             raise ProviderCertificationError(
                 "provider certification requires requalification after adapter code reference drift"
@@ -605,6 +647,9 @@ def build_provider_certification(
     profile: BookmakerCapabilityProfile,
     integration: BookmakerIntegrationEvidence,
     *,
+    capability_manifest_ref: str,
+    capability_manifest_version: int,
+    capability_manifest_sha256: str,
     adapter_code_ref: str,
     adapter_code_sha256: str,
     adapter_config_ref: str,
@@ -640,6 +685,12 @@ def build_provider_certification(
     if issued < integration_at:
         raise ProviderCertificationError("issued_at cannot predate integration evidence")
 
+    manifest_ref = _text(capability_manifest_ref, "capability_manifest_ref")
+    manifest_version = _positive_int(
+        capability_manifest_version,
+        "capability_manifest_version",
+    )
+    manifest_sha = _sha256(capability_manifest_sha256, "capability_manifest_sha256")
     code_ref = _text(adapter_code_ref, "adapter_code_ref")
     code_sha = _sha256(adapter_code_sha256, "adapter_code_sha256")
     config_ref = _text(adapter_config_ref, "adapter_config_ref")
@@ -662,9 +713,12 @@ def build_provider_certification(
         account_id=profile.account_id,
         adapter_id=profile.adapter_id,
         adapter_version=profile.adapter_version,
-        capability_manifest_version=profile.profile_version,
+        profile_version=profile.profile_version,
         profile_id=profile.profile_id,
         profile_observed_at=profile.observed_at,
+        capability_manifest_ref=manifest_ref,
+        capability_manifest_version=manifest_version,
+        capability_manifest_sha256=manifest_sha,
         integration_evidence_id=integration.evidence_id,
         integration_kind=integration.integration_kind,
         integration_observed_at=integration.observed_at,

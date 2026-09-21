@@ -8,7 +8,7 @@ from .integrity import atomic_write_json, durable_path_lock
 from .json_integrity import strict_json_loads
 
 
-_ALLOWED_CONTINUITY_STATUSES = frozenset({"unknown", "verified"})
+_ALLOWED_CONTINUITY_STATUSES = frozenset({"unknown"})
 _ALLOWED_REASONS = frozenset(
     {
         "no_continuity_evidence",
@@ -16,9 +16,9 @@ _ALLOWED_REASONS = frozenset(
         "provider_anchor_established_without_prior_continuity",
         "witness_current_token_mismatch",
         "witness_previous_token_mismatch",
+        "witness_previous_token_without_trusted_anchor",
         "provider_backfill_incomplete",
         "provider_native_evidence_required",
-        "provider_chain_and_backfill_verified",
         "provider_failure_since_last_continuity_proof",
     }
 )
@@ -28,18 +28,18 @@ _SUCCESS_REASONS = frozenset(
         "provider_anchor_established_without_prior_continuity",
         "witness_current_token_mismatch",
         "witness_previous_token_mismatch",
+        "witness_previous_token_without_trusted_anchor",
         "provider_backfill_incomplete",
         "provider_native_evidence_required",
-        "provider_chain_and_backfill_verified",
     }
 )
 _TRUSTED_TOKEN_REQUIRED_REASONS = frozenset(
     {
         "provider_anchor_established_without_prior_continuity",
         "witness_previous_token_mismatch",
+        "witness_previous_token_without_trusted_anchor",
         "provider_backfill_incomplete",
         "provider_native_evidence_required",
-        "provider_chain_and_backfill_verified",
     }
 )
 _SCHEMA_VERSION = 1
@@ -135,14 +135,6 @@ class SourceContinuityState:
         if self.reason not in _ALLOWED_REASONS:
             raise ValueError("invalid source continuity reason")
 
-        if self.status == "verified":
-            if self.reason != "provider_chain_and_backfill_verified":
-                raise ValueError("verified continuity requires verified-chain reason")
-            if self.trusted_token is None:
-                raise ValueError("verified continuity requires a trusted provider token")
-        elif self.reason == "provider_chain_and_backfill_verified":
-            raise ValueError("verified-chain reason requires verified continuity status")
-
         if self.reason == "no_continuity_evidence":
             if any(
                 value is not None
@@ -168,10 +160,10 @@ class SourceContinuityState:
             and self.trusted_token is None
         ):
             raise ValueError("continuity reason requires a trusted provider token")
-        if self.reason in {
-            "provider_anchor_established_without_prior_continuity",
-            "provider_chain_and_backfill_verified",
-        } and self.last_observed_cursor != self.trusted_token:
+        if (
+            self.reason == "provider_anchor_established_without_prior_continuity"
+            and self.last_observed_cursor != self.trusted_token
+        ):
             raise ValueError("continuity anchor cursor must match trusted provider token")
 
 
@@ -327,8 +319,11 @@ class SourceContinuityStore:
                 if cursor is None or witness.current_token != cursor:
                     reason = "witness_current_token_mismatch"
                 elif trusted_token is None:
-                    trusted_token = witness.current_token
-                    reason = "provider_anchor_established_without_prior_continuity"
+                    if witness.previous_token is not None:
+                        reason = "witness_previous_token_without_trusted_anchor"
+                    else:
+                        trusted_token = witness.current_token
+                        reason = "provider_anchor_established_without_prior_continuity"
                 elif witness.previous_token != trusted_token:
                     reason = "witness_previous_token_mismatch"
                 elif not witness.backfill_complete:

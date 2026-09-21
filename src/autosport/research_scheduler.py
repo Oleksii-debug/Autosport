@@ -19,7 +19,7 @@ from typing import Any, Callable, Iterable, Protocol
 
 from apscheduler.triggers.interval import IntervalTrigger
 
-from .integrity import atomic_write_json
+from .integrity import atomic_write_json, durable_path_lock
 from .research_curriculum import (
     CurriculumDispatchReceipt,
     CurriculumPurpose,
@@ -1301,18 +1301,31 @@ class ResearchScheduler:
         Existing PENDING reservations recover before PAUSED/STOPPED state is
         consulted. Thus STOP blocks new reservations but cannot orphan a wakeup
         durably reserved before the status transition.
+
+        The scheduler-state workspace lock intentionally is not held across the
+        external trigger sink: pause/STOP must remain able to commit while a
+        delivery is in flight.  A separate crash-releasing durable path lock
+        serializes reserve -> sink -> receipt publication across cooperating
+        scheduler processes, so the same PENDING occurrence cannot be delivered
+        concurrently by duplicate scheduler instances.  Crash-after-acceptance
+        recovery still replays the identical immutable event and therefore
+        relies on the trigger sink's existing idempotent event identity.
         """
 
-        reserved = self._reserve_due(_timestamp(now, "now"))
-        if isinstance(reserved, TickResult):
-            return reserved
-        occurrence_id, event = reserved
-        receipt = self.trigger_sink.accept(event)
-        if not isinstance(receipt, ResearchTriggerReceipt):
-            raise ResearchSchedulerError(
-                "trigger sink must return ResearchTriggerReceipt"
-            )
-        return self._record_accepted(occurrence_id, event, receipt)
+        dispatch_lock_target = self.path.with_name(
+            f"{self.path.name}.occurrence-dispatch"
+        )
+        with durable_path_lock(dispatch_lock_target):
+            reserved = self._reserve_due(_timestamp(now, "now"))
+            if isinstance(reserved, TickResult):
+                return reserved
+            occurrence_id, event = reserved
+            receipt = self.trigger_sink.accept(event)
+            if not isinstance(receipt, ResearchTriggerReceipt):
+                raise ResearchSchedulerError(
+                    "trigger sink must return ResearchTriggerReceipt"
+                )
+            return self._record_accepted(occurrence_id, event, receipt)
 
     def run(
         self,

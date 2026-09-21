@@ -231,8 +231,12 @@ def parse_market_catalogue_result(
     *,
     requested_event_type_ids: Sequence[str],
     requested_max_results: int,
+    requested_market_type_codes: Sequence[str] = (),
 ) -> BetfairMarketCatalogueBatch:
     allowed = frozenset(_unique_ids(requested_event_type_ids, "requested_event_type_ids"))
+    allowed_market_types = frozenset(
+        _unique_codes(requested_market_type_codes, "requested_market_type_codes")
+    )
     limit = _max_results(requested_max_results)
     rows = _rows(result, "listMarketCatalogue result")
     if len(rows) > limit:
@@ -252,6 +256,10 @@ def parse_market_catalogue_result(
                 _mapping(description, f"listMarketCatalogue[{index}].description"),
                 "marketType",
                 "market_type_code",
+            )
+        if allowed_market_types and market_type not in allowed_market_types:
+            raise BetfairCatalogError(
+                "catalogue row escaped the requested marketType scope"
             )
         items.append(
             BetfairCatalogMarket(

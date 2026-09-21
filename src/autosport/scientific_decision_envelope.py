@@ -113,6 +113,7 @@ class CausalEvidenceRef:
         }
 
 
+
 def evidence_snapshot_sha256(
     evidence: tuple[CausalEvidenceRef, ...],
     kind: EvidenceKind,
@@ -123,6 +124,8 @@ def evidence_snapshot_sha256(
         raise DecisionEnvelopeError("evidence must be a tuple")
     if not isinstance(kind, EvidenceKind):
         raise DecisionEnvelopeError("kind must be EvidenceKind")
+    if any(type(item) is not CausalEvidenceRef for item in evidence):
+        raise DecisionEnvelopeError("evidence must contain exact CausalEvidenceRef values")
     selected = sorted(
         (item.canonical_payload() for item in evidence if item.kind is kind),
         key=lambda item: (item["evidence_id"], item["evidence_sha256"]),
@@ -159,8 +162,8 @@ class SealedDecisionEnvelope:
             raise DecisionEnvelopeError("disposition must be DecisionDisposition")
         if not isinstance(self.evidence, tuple) or not self.evidence:
             raise DecisionEnvelopeError("evidence must be a non-empty tuple")
-        if any(not isinstance(item, CausalEvidenceRef) for item in self.evidence):
-            raise DecisionEnvelopeError("evidence must contain only CausalEvidenceRef")
+        if any(type(item) is not CausalEvidenceRef for item in self.evidence):
+            raise DecisionEnvelopeError("evidence must contain exact CausalEvidenceRef values")
 
         decision = _instant(self.decision_at, "decision_at")
         event_watermark = _instant(self.event_watermark, "event_watermark")
@@ -290,8 +293,8 @@ class DecisionOutcomeAppend:
         outcome_sha256: str,
         revealed_at: str,
     ) -> "DecisionOutcomeAppend":
-        if not isinstance(envelope, SealedDecisionEnvelope):
-            raise DecisionEnvelopeError("envelope must be SealedDecisionEnvelope")
+        if type(envelope) is not SealedDecisionEnvelope:
+            raise DecisionEnvelopeError("envelope must be exact SealedDecisionEnvelope")
         if _instant(revealed_at, "revealed_at") <= _instant(
             envelope.decision_at, "decision_at"
         ):
@@ -305,8 +308,8 @@ class DecisionOutcomeAppend:
         )
 
     def verify_envelope(self, envelope: SealedDecisionEnvelope) -> None:
-        if not isinstance(envelope, SealedDecisionEnvelope):
-            raise DecisionEnvelopeError("envelope must be SealedDecisionEnvelope")
+        if type(envelope) is not SealedDecisionEnvelope:
+            raise DecisionEnvelopeError("envelope must be exact SealedDecisionEnvelope")
         if self.decision_id != envelope.decision_id:
             raise DecisionEnvelopeError("outcome decision_id does not match envelope")
         if self.envelope_sha256 != envelope.envelope_sha256:

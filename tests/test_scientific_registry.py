@@ -355,6 +355,30 @@ def test_restart_preserves_negative_memory_and_blocks_duplicate_fingerprint(tmp_
 
 
 
+def test_positive_only_explicit_repeat_survives_restart_without_negative_provenance(tmp_path):
+    path = tmp_path / "scientific_registry.json"
+    registry = ScientificRegistry.initialize_pristine(path)
+    _foundation(registry)
+    experiment = _experiment(outcome=ResearchOutcome.POSITIVE)
+    registry.append(experiment)
+
+    repeat = replace(
+        experiment,
+        experiment_id="experiment-positive-repeat",
+        created_at=T3,
+        completed_at=T3,
+    )
+    registry.append(repeat, allow_repeat_experiment=True)
+
+    reopened = ScientificRegistry(path)
+    matches = reopened.find_experiment_fingerprint(experiment.fingerprint)
+    assert [entry.record_id for entry in matches] == [
+        "experiment-1",
+        "experiment-positive-repeat",
+    ]
+    assert all("repeat_of_experiment_id" not in entry.payload for entry in matches)
+
+
 def test_negative_repeat_requires_durable_postmortem_provenance(tmp_path):
     path = tmp_path / "scientific_registry.json"
     registry = ScientificRegistry.initialize_pristine(path)

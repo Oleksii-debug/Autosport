@@ -2,7 +2,7 @@
 
 This module answers a narrow portfolio question: given provider-local working-cash
 targets plus central unallocated cash, where is capital short and where is there
-modeled surplus?  It deliberately does not read provider accounts, route orders,
+modeled surplus? It deliberately does not read provider accounts, route orders,
 move funds, authorize execution, or assert that provider surplus is transferable.
 """
 
@@ -31,6 +31,7 @@ class ProviderLiquidityAccount:
     """Caller-supplied point-in-time account observation for portfolio review only."""
 
     provider_id: str
+    currency: str
     available_cash: Decimal
     target_working_cash: Decimal
 
@@ -40,6 +41,7 @@ class ProviderLiquidityGap:
     """Deterministic per-provider need/surplus decomposition."""
 
     provider_id: str
+    currency: str
     available_cash: Decimal
     target_working_cash: Decimal
     need: Decimal
@@ -51,11 +53,12 @@ class ProviderLiquidityReview:
     """Read-only review result.
 
     ``modeled_provider_surplus`` is not evidence that money can be withdrawn or
-    transferred.  ``PROVIDER_REBALANCE_CANDIDATE`` therefore remains a review
+    transferred. ``PROVIDER_REBALANCE_CANDIDATE`` therefore remains a review
     state and never authorizes a transfer or an execution.
     """
 
     state: LiquidityReviewState
+    currency: str
     accounts: tuple[ProviderLiquidityGap, ...]
     central_cash: Decimal
     protected_reserve: Decimal
@@ -67,6 +70,15 @@ class ProviderLiquidityReview:
     requires_transfer_feasibility_check: bool
     authorizes_transfer: bool = False
     authorizes_execution: bool = False
+
+
+def _currency(value: str) -> str:
+    if not isinstance(value, str):
+        raise TypeError("currency must be str")
+    currency = value.strip().upper()
+    if len(currency) != 3 or not currency.isascii() or not currency.isalpha():
+        raise ValueError("currency must be a 3-letter ASCII code")
+    return currency
 
 
 def _money(value: Decimal, *, field: str) -> Decimal:
@@ -81,18 +93,20 @@ def _money(value: Decimal, *, field: str) -> Decimal:
 
 def review_provider_liquidity(
     *,
+    currency: str,
     central_cash: Decimal,
     protected_reserve: Decimal,
     accounts: Iterable[ProviderLiquidityAccount],
 ) -> ProviderLiquidityReview:
-    """Review global deployability versus provider-local working-cash targets.
+    """Review deployability versus provider-local working-cash targets.
 
-    The calculation is intentionally conservative about authority:
-    provider-local surplus is only a modeled candidate for rebalancing.  This
-    function cannot prove transfer capability, transfer latency, fees, account
-    limits, provider health, or execution feasibility.
+    All money must be in one explicitly bound currency; mixed-currency arithmetic
+    fails closed. Provider-local surplus is only a modeled candidate for
+    rebalancing. This function cannot prove transfer capability, transfer latency,
+    fees, account limits, provider health, or execution feasibility.
     """
 
+    currency = _currency(currency)
     central_cash = _money(central_cash, field="central_cash")
     protected_reserve = _money(protected_reserve, field="protected_reserve")
     if protected_reserve > central_cash:
@@ -111,6 +125,12 @@ def review_provider_liquidity(
             raise ValueError(f"duplicate provider_id: {provider_id}")
         seen.add(provider_id)
 
+        account_currency = _currency(account.currency)
+        if account_currency != currency:
+            raise ValueError(
+                f"currency mismatch for {provider_id}: "
+                f"expected {currency}, got {account_currency}"
+            )
         available = _money(
             account.available_cash,
             field=f"available_cash[{provider_id}]",
@@ -124,6 +144,7 @@ def review_provider_liquidity(
         gaps.append(
             ProviderLiquidityGap(
                 provider_id=provider_id,
+                currency=currency,
                 available_cash=available,
                 target_working_cash=target,
                 need=need,
@@ -149,6 +170,7 @@ def review_provider_liquidity(
 
     return ProviderLiquidityReview(
         state=state,
+        currency=currency,
         accounts=tuple(gaps),
         central_cash=central_cash,
         protected_reserve=protected_reserve,

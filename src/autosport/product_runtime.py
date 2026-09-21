@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from contextlib import ExitStack
 from types import FunctionType
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -37,10 +38,21 @@ from .market_mirror_runtime import (
 from .paper import PaperBook
 from .resolver_semantics import ResolverSemanticIdentityError, function_semantic_sha256
 from .storage import SQLiteMarketStore
+from .workspace_lock import (
+    WorkspaceEconomicLock,
+    WorkspaceEconomicLockBusyError,
+    WorkspaceEconomicLockError,
+)
 
 
 class ProductCompositionError(RuntimeError):
     """The durable product composition cannot be verified safely."""
+
+
+class _ProductRuntimeLease(WorkspaceEconomicLock):
+    """Crash-releasing single-process authority for one canonical product workspace."""
+
+    FILE_NAME = ".product-runtime.lock"
 
 
 class ProductCollectorSource(CollectorServiceSource, Protocol):
@@ -281,6 +293,7 @@ class AutonomousProductRuntime:
     mirror: MarketMirror
     invalidations: BoundedMirrorInvalidationBuffer
     dependencies: FocusedMirrorDependencyIndex
+    _runtime_lease: _ProductRuntimeLease
 
     def start(self) -> ContinuousSessionStatus:
         self.collector.resume()
@@ -306,7 +319,21 @@ class AutonomousProductRuntime:
         return self.coordinator.tick()
 
     def close(self) -> None:
-        self.market_store.close()
+        try:
+            self.market_store.close()
+        except BaseException as primary_error:
+            try:
+                self._runtime_lease.release()
+            except BaseException as release_error:
+                try:
+                    primary_error.add_note(
+                        "product runtime lease release also failed while closing "
+                        f"market storage: {type(release_error).__name__}: {release_error}"
+                    )
+                except BaseException:
+                    pass
+            raise
+        self._runtime_lease.release()
 
 
 def build_autonomous_product_runtime(
@@ -344,82 +371,99 @@ def build_autonomous_product_runtime(
     root.mkdir(parents=True, exist_ok=True)
     resolved_clock = clock or (lambda: datetime.now(timezone.utc).isoformat())
 
-    settlement_authority_identity = _settlement_authority_identity(
-        source=source,
-        source_id=source_id,
-        outcome_authority=outcome_authority,
-    )
-    manifest = _ManifestStore(root / "product_composition.json").load_or_create(
-        source_id=source_id,
-        initial_bankroll=normalized_bankroll,
-        settlement_authority_identity=settlement_authority_identity,
-    )
-
-    lifecycle = ContinuousEventLifecycle(root / "catalog.json")
-    market_store = SQLiteMarketStore(root / "market.db")
-    mirror = MarketMirror()
-    invalidations = BoundedMirrorInvalidationBuffer(mirror)
-
-    # Rebuild volatile mirror truth from the canonical durable current projection.
+    lease_stack = ExitStack()
     try:
-        for event in market_store.current_by_source().values():
-            invalidations.accept_persisted(event)
-    except Exception:
-        market_store.close()
-        raise
+        runtime_lease = lease_stack.enter_context(_ProductRuntimeLease(root))
+    except WorkspaceEconomicLockBusyError as exc:
+        raise ProductCompositionError(
+            "another Autosport product runtime already owns this workspace"
+        ) from exc
+    except WorkspaceEconomicLockError as exc:
+        raise ProductCompositionError(
+            "cannot establish exclusive product runtime workspace authority"
+        ) from exc
 
-    # Future mirror updates are downstream of the canonical market bus so they are
-    # delivered only after SQLite persistence. If a subscriber fails after persistence,
-    # canonical desktop application recovery can safely replay from durable truth.
-    market_bus = MarketEventBus(market_store)
-    market_bus.subscribe(invalidations.accept_persisted)
-    source_health = SourceHealthStore(root / "source_health.json")
-    canonical_application = CanonicalDesktopApplication(
-        market_bus,
-        source_health,
-        root / "desktop_application.json",
-        clock=resolved_clock,
-    )
+    with lease_stack:
+        settlement_authority_identity = _settlement_authority_identity(
+            source=source,
+            source_id=source_id,
+            outcome_authority=outcome_authority,
+        )
+        manifest = _ManifestStore(root / "product_composition.json").load_or_create(
+            source_id=source_id,
+            initial_bankroll=normalized_bankroll,
+            settlement_authority_identity=settlement_authority_identity,
+        )
 
-    dependencies = FocusedMirrorDependencyIndex(mirror)
-    collector_store = CollectorDeltaStore(root / "collector_deltas.json")
-    collector = HeadlessCollectorService(
-        delta_store=collector_store,
-        lifecycle=lifecycle,
-        source=source,
-        state_path=root / "collector_state.json",
-        run_id=f"product:{source_id}",
-        clock=resolved_clock,
-        sleep=sleep,
-    )
-    desktop = DesktopDeltaConsumer(
-        collector_store,
-        DesktopDeltaCheckpointStore(root / "desktop_acks.json"),
-        resolve_event=source.resolve_event,
-        apply_event=canonical_application.apply,
-        lookup_application_receipt=canonical_application.lookup_receipt,
-    )
-    coordinator = ContinuousSessionCoordinator(
-        workspace=root,
-        collector=collector,
-        lifecycle=lifecycle,
-        market_store=market_store,
-        desktop_consumer=desktop,
-        invalidation_buffer=invalidations,
-        dependency_index=dependencies,
-        outcome_authority=outcome_authority,
-        settlement_learning_handoff=settlement_learning_handoff,
-        clock=resolved_clock,
-        initial_bankroll=manifest.initial_bankroll,
-    )
-    return AutonomousProductRuntime(
-        workspace=root,
-        manifest=manifest,
-        coordinator=coordinator,
-        collector=collector,
-        market_store=market_store,
-        lifecycle=lifecycle,
-        mirror=mirror,
-        invalidations=invalidations,
-        dependencies=dependencies,
-    )
+        lifecycle = ContinuousEventLifecycle(root / "catalog.json")
+        market_store = SQLiteMarketStore(root / "market.db")
+        mirror = MarketMirror()
+        invalidations = BoundedMirrorInvalidationBuffer(mirror)
+
+        # Rebuild volatile mirror truth from the canonical durable current projection.
+        try:
+            for event in market_store.current_by_source().values():
+                invalidations.accept_persisted(event)
+        except Exception:
+            market_store.close()
+            raise
+
+        # Future mirror updates are downstream of the canonical market bus so they are
+        # delivered only after SQLite persistence. If a subscriber fails after persistence,
+        # canonical desktop application recovery can safely replay from durable truth.
+        market_bus = MarketEventBus(market_store)
+        market_bus.subscribe(invalidations.accept_persisted)
+        source_health = SourceHealthStore(root / "source_health.json")
+        canonical_application = CanonicalDesktopApplication(
+            market_bus,
+            source_health,
+            root / "desktop_application.json",
+            clock=resolved_clock,
+        )
+
+        dependencies = FocusedMirrorDependencyIndex(mirror)
+        collector_store = CollectorDeltaStore(root / "collector_deltas.json")
+        collector = HeadlessCollectorService(
+            delta_store=collector_store,
+            lifecycle=lifecycle,
+            source=source,
+            state_path=root / "collector_state.json",
+            run_id=f"product:{source_id}",
+            clock=resolved_clock,
+            sleep=sleep,
+        )
+        desktop = DesktopDeltaConsumer(
+            collector_store,
+            DesktopDeltaCheckpointStore(root / "desktop_acks.json"),
+            resolve_event=source.resolve_event,
+            apply_event=canonical_application.apply,
+            lookup_application_receipt=canonical_application.lookup_receipt,
+        )
+        coordinator = ContinuousSessionCoordinator(
+            workspace=root,
+            collector=collector,
+            lifecycle=lifecycle,
+            market_store=market_store,
+            desktop_consumer=desktop,
+            invalidation_buffer=invalidations,
+            dependency_index=dependencies,
+            outcome_authority=outcome_authority,
+            settlement_learning_handoff=settlement_learning_handoff,
+            clock=resolved_clock,
+            initial_bankroll=manifest.initial_bankroll,
+        )
+        runtime = AutonomousProductRuntime(
+            workspace=root,
+            manifest=manifest,
+            coordinator=coordinator,
+            collector=collector,
+            market_store=market_store,
+            lifecycle=lifecycle,
+            mirror=mirror,
+            invalidations=invalidations,
+            dependencies=dependencies,
+            _runtime_lease=runtime_lease,
+        )
+        # Runtime lifetime, not builder lifetime, owns the process lease.
+        lease_stack.pop_all()
+        return runtime

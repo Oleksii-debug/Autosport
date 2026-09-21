@@ -62,7 +62,7 @@ def snapshot() -> MarketBookSnapshot:
         received_at=NOW - timedelta(milliseconds=100),
         sequence=99,
         has_ordering_gap=False,
-        available_to_lay=(
+        available_to_back=(
             PriceSize(Decimal("2.10"), Decimal("5")),
             PriceSize(Decimal("2.04"), Decimal("4")),
             PriceSize(Decimal("2.00"), Decimal("6")),
@@ -107,6 +107,7 @@ def test_caller_minted_consistent_dtos_cannot_issue_positive_feasibility() -> No
     assert result.displayed_acceptable_depth == Decimal("15")
     assert result.reasons == ("PRODUCT_OWNED_EVIDENCE_UNRESOLVED",)
     assert len(result.evidence_digest) == 64
+    assert len(result.liquidity_overlap_key) == 64
 
 
 def test_worse_than_limit_price_is_not_counted() -> None:
@@ -120,10 +121,10 @@ def test_worse_than_limit_price_is_not_counted() -> None:
     )
 
 
-def test_back_limit_consumes_opposing_available_to_lay_depth() -> None:
+def test_back_limit_consumes_opposing_available_to_back_depth() -> None:
     book = replace(
         snapshot(),
-        available_to_lay=(
+        available_to_back=(
             PriceSize(Decimal("2.10"), Decimal("3")),
             PriceSize(Decimal("1.99"), Decimal("100")),
         ),
@@ -211,12 +212,12 @@ def test_evidence_digest_changes_when_causal_evidence_changes() -> None:
     assert first.evidence_digest != second.evidence_digest
 
 
-def test_evidence_digest_binds_opposing_lay_ladder() -> None:
+def test_evidence_digest_binds_available_to_back_ladder() -> None:
     first = assess()
     second = assess(
         book=replace(
             snapshot(),
-            available_to_lay=(
+            available_to_back=(
                 PriceSize(Decimal("2.10"), Decimal("4")),
                 PriceSize(Decimal("2.04"), Decimal("4")),
                 PriceSize(Decimal("2.00"), Decimal("6")),
@@ -229,3 +230,26 @@ def test_evidence_digest_binds_opposing_lay_ladder() -> None:
 def test_naive_timestamps_are_rejected() -> None:
     with pytest.raises(ValueError, match="timezone-aware"):
         replace(request(), decision_at=NOW.replace(tzinfo=None))
+
+
+def test_overlap_key_is_snapshot_ladder_identity_not_wrapper_identity() -> None:
+    first = assess()
+    second = assess(
+        req=replace(
+            request(),
+            opportunity_id="opp-2",
+            opportunity_digest="opp-digest-2",
+            action_digest="action-digest-2",
+        )
+    )
+    changed = assess(
+        book=replace(
+            snapshot(),
+            snapshot_digest="book-digest-new",
+            market_version=18,
+        ),
+        req=replace(request(), expected_market_version=18),
+    )
+
+    assert first.liquidity_overlap_key == second.liquidity_overlap_key
+    assert first.liquidity_overlap_key != changed.liquidity_overlap_key

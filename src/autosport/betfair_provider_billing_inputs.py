@@ -1,19 +1,27 @@
-"""Authenticated Betfair provider/fixed-billing observations.
+"""Authenticated Betfair provider/fixed-billing source observations.
 
-This module extends the existing exact :class:`BetfairReadOnlyClient` with a
-narrow read capability for developer-app entitlement and account-statement
-evidence. It does not turn public tariffs, missing rows, or shared/fixed charges
-into per-opportunity money. The observations are source evidence only; economic
-allocation remains fail-closed until a product-owned policy binds it.
+This module deliberately stops before economic attribution or allocation.  It reads
+provider-owned application-key entitlement and account-statement evidence through
+an already-authorized :class:`BetfairReadOnlyClient`, but it never turns a public
+tariff, a missing row, an amount/date coincidence, or a caller label into cost truth.
+
+Betfair's Accounts API does not expose a provider-owned literal account identifier in
+the reads consumed here.  Therefore the caller-configured ``BetfairReadOnlyClient``
+``account_id`` is intentionally *not* emitted by this module.  The observations are
+authenticated-source evidence, not proof of a provider account identity.  A later
+billing issuer must still supply/re-resolve that missing identity plus a causal
+billing attribution and product-owned allocation policy before positive economics.
 """
 from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal
+from functools import partial
 from hashlib import sha256
 import json
 import re
+from types import MethodType, SimpleNamespace
 from typing import Callable, Mapping
 
 from .betfair_account_readonly import (
@@ -28,19 +36,20 @@ _GET_ACCOUNT_DETAILS = "AccountAPING/v1.0/getAccountDetails"
 _GET_DEVELOPER_APP_KEYS = "AccountAPING/v1.0/getDeveloperAppKeys"
 _GET_ACCOUNT_STATEMENT = "AccountAPING/v1.0/getAccountStatement"
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+_CLIENT_AUTHORITY_METHODS = frozenset(
+    {"_rpc", "_next_request_id", "_observed_at", "_redact_provider_message"}
+)
 
 
 @dataclass(frozen=True, slots=True)
 class BetfairDeveloperAppEntitlementObservation:
     """Provider-owned state for the exact application key in use.
 
-    The raw application key is intentionally not retained. Matching is performed
-    against the exact authenticated credential before the SHA-256 fingerprint is
-    emitted.
+    The raw application key is never retained.  No account-id field is exposed:
+    the canonical client's local ``account_id`` label is not provider-authenticated.
     """
 
     venue_id: str
-    account_id: str
     application_key_sha256: str
     app_id: int
     app_name: str
@@ -55,7 +64,6 @@ class BetfairDeveloperAppEntitlementObservation:
 
     def __post_init__(self) -> None:
         _required_text(self.venue_id, "venue_id")
-        _required_text(self.account_id, "account_id")
         _sha256_hex(self.application_key_sha256, "application_key_sha256")
         _positive_int(self.app_id, "app_id")
         _required_text(self.app_name, "app_name")
@@ -79,12 +87,7 @@ class BetfairDeveloperAppEntitlementObservation:
 
 @dataclass(frozen=True, slots=True)
 class BetfairAccountStatementItemObservation:
-    """One provider-native account-statement row.
-
-    ``amount`` and ``balance`` preserve provider units in the account currency.
-    ``item_class_data_sha256`` binds the provider detail object without retaining
-    arbitrary account text in the product evidence surface.
-    """
+    """One provider-native statement row, without semantic cost attribution."""
 
     ref_id: str
     item_date: str
@@ -104,11 +107,15 @@ class BetfairAccountStatementItemObservation:
 
 @dataclass(frozen=True, slots=True)
 class BetfairAccountStatementPageObservation:
+    """One exact requested statement page and its causal request scope."""
+
     venue_id: str
-    account_id: str
     currency_code: str
     from_record: int
     record_count: int
+    statement_from: str | None
+    statement_to: str | None
+    request_scope_sha256: str
     items: tuple[BetfairAccountStatementItemObservation, ...]
     more_available: bool
     account_details_evidence: BetfairEvidence
@@ -116,18 +123,39 @@ class BetfairAccountStatementPageObservation:
 
     def __post_init__(self) -> None:
         _required_text(self.venue_id, "venue_id")
-        _required_text(self.account_id, "account_id")
         currency = _required_text(self.currency_code, "currency_code")
         if not currency.isascii() or currency != currency.upper():
             raise BetfairReadOnlyError("currency_code must be uppercase ASCII")
         _nonnegative_int(self.from_record, "from_record")
-        _positive_int(self.record_count, "record_count")
+        _statement_record_count(self.record_count)
+        _optional_instant(self.statement_from, "statement_from")
+        _optional_instant(self.statement_to, "statement_to")
+        if self.statement_from is not None and self.statement_to is not None:
+            if _instant(self.statement_from, "statement_from") > _instant(
+                self.statement_to, "statement_to"
+            ):
+                raise BetfairReadOnlyError(
+                    "statement_from must not be after statement_to"
+                )
+        _sha256_hex(self.request_scope_sha256, "request_scope_sha256")
+        expected_scope = _statement_request_scope_sha256(
+            from_record=self.from_record,
+            record_count=self.record_count,
+            statement_from=self.statement_from,
+            statement_to=self.statement_to,
+        )
+        if self.request_scope_sha256 != expected_scope:
+            raise BetfairReadOnlyError("statement request scope digest mismatch")
         if type(self.items) is not tuple or any(
             type(item) is not BetfairAccountStatementItemObservation
             for item in self.items
         ):
             raise BetfairReadOnlyError(
                 "statement items must be exact canonical tuple"
+            )
+        if len(self.items) > self.record_count:
+            raise BetfairReadOnlyError(
+                "statement response exceeds requested record_count"
             )
         if type(self.more_available) is not bool:
             raise BetfairReadOnlyError("more_available must be bool")
@@ -143,7 +171,7 @@ class BetfairAccountStatementPageObservation:
 
 @dataclass(frozen=True, slots=True)
 class BetfairProviderBillingInputsObservation:
-    """Authenticated entitlement + statement evidence, not cost authority."""
+    """Authenticated source bundle; never prospective cost/allocation authority."""
 
     entitlement: BetfairDeveloperAppEntitlementObservation
     statement: BetfairAccountStatementPageObservation
@@ -159,17 +187,15 @@ class BetfairProviderBillingInputsObservation:
             raise BetfairReadOnlyError(
                 "statement must be exact canonical observation"
             )
-        if (
-            self.entitlement.venue_id != self.statement.venue_id
-            or self.entitlement.account_id != self.statement.account_id
-        ):
+        if self.entitlement.venue_id != self.statement.venue_id:
             raise BetfairReadOnlyError(
-                "provider billing observations disagree on account identity"
+                "provider billing observations disagree on venue identity"
             )
         _instant(self.observed_at, "observed_at")
         _sha256_hex(self.evidence_sha256, "evidence_sha256")
-        expected = _combined_evidence_sha256(self.entitlement, self.statement)
-        if self.evidence_sha256 != expected:
+        if self.evidence_sha256 != _combined_evidence_sha256(
+            self.entitlement, self.statement
+        ):
             raise BetfairReadOnlyError(
                 "provider billing combined evidence digest mismatch"
             )
@@ -178,7 +204,6 @@ class BetfairProviderBillingInputsObservation:
 @dataclass(frozen=True, slots=True, repr=False)
 class _PinnedClient:
     venue_id: str
-    account_id: str
     application_key: str
     session_token: str
     timeout_seconds: float
@@ -193,7 +218,8 @@ class _RpcRead:
     evidence: BetfairEvidence
 
 
-def read_betfair_provider_billing_inputs(
+def _read_betfair_provider_billing_inputs(
+    snapshot_client,
     client: BetfairReadOnlyClient,
     *,
     from_record: int = 0,
@@ -201,24 +227,18 @@ def read_betfair_provider_billing_inputs(
     statement_from: str | None = None,
     statement_to: str | None = None,
 ) -> BetfairProviderBillingInputsObservation:
-    """Capture exact current key entitlement and account-statement evidence.
+    """Capture current-key entitlement and one exact statement page.
 
-    The function uses only the exact canonical client's already-authorized
-    credentials, transport, clock, account identity, and request-id authority.
-    It exposes no provider write method. Absence of a billing row is merely
-    absence of evidence and must never be interpreted as zero cost.
+    Missing rows are absence of evidence, never zero.  A page with
+    ``more_available=True`` is explicitly partial evidence; downstream code must not
+    infer full-window absence from it.  The returned DTO intentionally contains no
+    provider account id because these RPCs do not re-resolve one.
     """
 
     _nonnegative_int(from_record, "from_record")
-    _positive_int(record_count, "record_count")
-    if record_count > 100:
-        raise BetfairReadOnlyError(
-            "record_count exceeds provider statement page limit"
-        )
-    if statement_from is not None:
-        _instant(statement_from, "statement_from")
-    if statement_to is not None:
-        _instant(statement_to, "statement_to")
+    _statement_record_count(record_count)
+    _optional_instant(statement_from, "statement_from")
+    _optional_instant(statement_to, "statement_to")
     if statement_from is not None and statement_to is not None:
         if _instant(statement_from, "statement_from") > _instant(
             statement_to, "statement_to"
@@ -227,7 +247,7 @@ def read_betfair_provider_billing_inputs(
                 "statement_from must not be after statement_to"
             )
 
-    pinned = _snapshot_client(client)
+    pinned = snapshot_client(client)
     details = _read_rpc(pinned, _GET_ACCOUNT_DETAILS, {})
     details_result = _mapping(details.result, "getAccountDetails result")
     currency_code = _provider_text(
@@ -239,18 +259,18 @@ def read_betfair_provider_billing_inputs(
     developer = _read_rpc(pinned, _GET_DEVELOPER_APP_KEYS, {})
     entitlement = _resolve_exact_entitlement(pinned, developer)
 
-    statement_params: dict[str, object] = {
-        "fromRecord": from_record,
-        "recordCount": record_count,
-    }
-    if statement_from is not None or statement_to is not None:
-        item_date_range: dict[str, str] = {}
-        if statement_from is not None:
-            item_date_range["from"] = statement_from
-        if statement_to is not None:
-            item_date_range["to"] = statement_to
-        statement_params["itemDateRange"] = item_date_range
-
+    statement_params = _statement_params(
+        from_record=from_record,
+        record_count=record_count,
+        statement_from=statement_from,
+        statement_to=statement_to,
+    )
+    request_scope_sha256 = _statement_request_scope_sha256(
+        from_record=from_record,
+        record_count=record_count,
+        statement_from=statement_from,
+        statement_to=statement_to,
+    )
     statement_rpc = _read_rpc(
         pinned, _GET_ACCOUNT_STATEMENT, statement_params
     )
@@ -260,6 +280,10 @@ def read_betfair_provider_billing_inputs(
     raw_items = statement_result.get("accountStatement")
     if type(raw_items) is not list:
         raise BetfairReadOnlyError("accountStatement must be a JSON array")
+    if len(raw_items) > record_count:
+        raise BetfairReadOnlyError(
+            "statement response exceeds requested record_count"
+        )
     items = tuple(
         _parse_statement_item(item, index)
         for index, item in enumerate(raw_items)
@@ -269,10 +293,12 @@ def read_betfair_provider_billing_inputs(
         raise BetfairReadOnlyError("statement moreAvailable must be bool")
     statement = BetfairAccountStatementPageObservation(
         venue_id=pinned.venue_id,
-        account_id=pinned.account_id,
         currency_code=currency_code,
         from_record=from_record,
         record_count=record_count,
+        statement_from=statement_from,
+        statement_to=statement_to,
+        request_scope_sha256=request_scope_sha256,
         items=items,
         more_available=more_available,
         account_details_evidence=details.evidence,
@@ -288,22 +314,26 @@ def read_betfair_provider_billing_inputs(
         entitlement=entitlement,
         statement=statement,
         observed_at=observed_at,
-        evidence_sha256=_combined_evidence_sha256(
-            entitlement, statement
-        ),
+        evidence_sha256=_combined_evidence_sha256(entitlement, statement),
     )
 
 
-def _snapshot_client(client: object) -> _PinnedClient:
+def _snapshot_client(
+    client: object,
+    *,
+    next_request_id=BetfairReadOnlyClient.__dict__["_next_request_id"],
+    observed_at=BetfairReadOnlyClient.__dict__["_observed_at"],
+) -> _PinnedClient:
+    """Snapshot one exact read capability without exporting caller account labels."""
+
     if type(client) is not BetfairReadOnlyClient:
         raise TypeError("client must be exact BetfairReadOnlyClient")
     state = vars(client).copy()
-    if any(
-        name in state
-        for name in ("_next_request_id", "_observed_at", "_rpc")
-    ):
+    shadowed = sorted(name for name in _CLIENT_AUTHORITY_METHODS if name in state)
+    if shadowed:
         raise BetfairReadOnlyError(
-            "BetfairReadOnlyClient read authority is instance-shadowed"
+            "BetfairReadOnlyClient read authority is instance-shadowed: "
+            + ", ".join(shadowed)
         )
     credentials = state.get("_credentials")
     if type(credentials) is not BetfairSessionCredentials:
@@ -311,7 +341,6 @@ def _snapshot_client(client: object) -> _PinnedClient:
             "client credentials are not exact canonical credentials"
         )
     venue_id = _required_text(state.get("_venue_id"), "venue_id")
-    account_id = _required_text(state.get("_account_id"), "account_id")
     transport = state.get("_transport")
     post = getattr(transport, "post", None)
     if not callable(post):
@@ -325,26 +354,45 @@ def _snapshot_client(client: object) -> _PinnedClient:
         or timeout <= 0
     ):
         raise BetfairReadOnlyError("client timeout is invalid")
-    next_request_id = BetfairReadOnlyClient._next_request_id.__get__(
-        client, BetfairReadOnlyClient
+    clock = state.get("_clock")
+    if not callable(clock):
+        raise BetfairReadOnlyError("client clock is invalid")
+
+    # Build a private exact-client request-id/clock authority.  The transport POST
+    # capability was already resolved above; later caller/class dispatch mutation
+    # cannot replace the captured canonical helper implementations.
+    pinned_client = BetfairReadOnlyClient(
+        BetfairSessionCredentials(
+            credentials.application_key,
+            credentials.session_token,
+        ),
+        transport=SimpleNamespace(post=post),
+        timeout_seconds=float(timeout),
+        clock=clock,
+        venue_id=venue_id,
+        account_id="non-authoritative-local-binding-not-exported",
     )
-    observed_at = BetfairReadOnlyClient._observed_at.__get__(
-        client, BetfairReadOnlyClient
+    pinned_client._next_request_id = MethodType(  # type: ignore[method-assign]
+        next_request_id, pinned_client
+    )
+    pinned_client._observed_at = MethodType(  # type: ignore[method-assign]
+        observed_at, pinned_client
     )
     return _PinnedClient(
         venue_id=venue_id,
-        account_id=account_id,
         application_key=credentials.application_key,
         session_token=credentials.session_token,
         timeout_seconds=float(timeout),
         post=post,
-        next_request_id=next_request_id,
-        observed_at=observed_at,
+        next_request_id=pinned_client._next_request_id,
+        observed_at=pinned_client._observed_at,
     )
 
 
 def _read_rpc(
-    pinned: _PinnedClient, method: str, params: Mapping[str, object]
+    pinned: _PinnedClient,
+    method: str,
+    params: Mapping[str, object],
 ) -> _RpcRead:
     if method not in {
         _GET_ACCOUNT_DETAILS,
@@ -384,24 +432,54 @@ def _read_rpc(
     observed_at = pinned.observed_at()
     _instant(observed_at, "observed_at")
     evidence = BetfairEvidence(observed_at, sha256(payload).hexdigest())
-    try:
-        decoded = json.loads(
-            payload.decode("utf-8"), parse_float=Decimal, parse_int=int
-        )
-    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+    envelope = _mapping(_decode_json(payload), "JSON-RPC response")
+    if envelope.get("jsonrpc") != "2.0":
+        raise BetfairReadOnlyError("Betfair response has invalid jsonrpc version")
+    response_id = envelope.get("id")
+    if (
+        isinstance(response_id, bool)
+        or not isinstance(response_id, int)
+        or response_id != request_id
+    ):
         raise BetfairReadOnlyError(
-            "Betfair response is not valid UTF-8 JSON"
-        ) from exc
-    envelope = _mapping(decoded, "JSON-RPC response")
-    if envelope.get("jsonrpc") != "2.0" or envelope.get("id") != request_id:
-        raise BetfairReadOnlyError(
-            "Betfair response envelope does not match request"
+            "Betfair response id does not match request id"
         )
-    if "error" in envelope:
+    if "error" in envelope and envelope["error"] is not None:
         raise BetfairReadOnlyError("Betfair provider returned an RPC error")
     if "result" not in envelope:
         raise BetfairReadOnlyError("Betfair response is missing result")
     return _RpcRead(envelope["result"], evidence)
+
+
+def _decode_json(payload: bytes) -> object:
+    def pairs(items: list[tuple[str, object]]) -> dict[str, object]:
+        result: dict[str, object] = {}
+        for key, value in items:
+            if key in result:
+                raise BetfairReadOnlyError(
+                    "Betfair JSON contains duplicate object key"
+                )
+            result[key] = value
+        return result
+
+    def constant(_value: str) -> object:
+        raise BetfairReadOnlyError(
+            "Betfair JSON contains non-standard numeric constant"
+        )
+
+    try:
+        return json.loads(
+            payload.decode("utf-8"),
+            parse_float=Decimal,
+            object_pairs_hook=pairs,
+            parse_constant=constant,
+        )
+    except BetfairReadOnlyError:
+        raise
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        raise BetfairReadOnlyError(
+            "Betfair response is not valid UTF-8 JSON"
+        ) from None
 
 
 def _resolve_exact_entitlement(
@@ -443,7 +521,6 @@ def _resolve_exact_entitlement(
         vendor_id = _required_text(vendor_id, "vendor_id")
     return BetfairDeveloperAppEntitlementObservation(
         venue_id=pinned.venue_id,
-        account_id=pinned.account_id,
         application_key_sha256=sha256(
             pinned.application_key.encode("utf-8")
         ).hexdigest(),
@@ -466,8 +543,56 @@ def _resolve_exact_entitlement(
     )
 
 
+def _statement_params(
+    *,
+    from_record: int,
+    record_count: int,
+    statement_from: str | None,
+    statement_to: str | None,
+) -> dict[str, object]:
+    params: dict[str, object] = {
+        "fromRecord": from_record,
+        "recordCount": record_count,
+    }
+    if statement_from is not None or statement_to is not None:
+        date_range: dict[str, str] = {}
+        if statement_from is not None:
+            date_range["from"] = statement_from
+        if statement_to is not None:
+            date_range["to"] = statement_to
+        params["itemDateRange"] = date_range
+    return params
+
+
+def _statement_request_scope_sha256(
+    *,
+    from_record: int,
+    record_count: int,
+    statement_from: str | None,
+    statement_to: str | None,
+) -> str:
+    payload = {
+        "method": _GET_ACCOUNT_STATEMENT,
+        "params": _statement_params(
+            from_record=from_record,
+            record_count=record_count,
+            statement_from=statement_from,
+            statement_to=statement_to,
+        ),
+    }
+    return sha256(
+        json.dumps(
+            payload,
+            ensure_ascii=True,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+
+
 def _parse_statement_item(
-    value: object, index: int
+    value: object,
+    index: int,
 ) -> BetfairAccountStatementItemObservation:
     row = _mapping(value, f"accountStatement[{index}]")
     item_class_data = row.get("itemClassData")
@@ -504,18 +629,32 @@ def _combined_evidence_sha256(
 ) -> str:
     payload = {
         "schema": "autosport.betfair_provider_billing_inputs",
-        "schema_version": 1,
+        "schema_version": 2,
         "venue_id": entitlement.venue_id,
-        "account_id": entitlement.account_id,
         "application_key_sha256": entitlement.application_key_sha256,
-        "entitlement_payload_sha256": (
-            entitlement.evidence.source_payload_sha256
-        ),
-        "account_details_payload_sha256": (
-            statement.account_details_evidence.source_payload_sha256
-        ),
-        "statement_payload_sha256": statement.evidence.source_payload_sha256,
+        "entitlement_evidence": {
+            "observed_at": entitlement.evidence.observed_at,
+            "source_payload_sha256": entitlement.evidence.source_payload_sha256,
+        },
+        "account_details_evidence": {
+            "observed_at": statement.account_details_evidence.observed_at,
+            "source_payload_sha256": (
+                statement.account_details_evidence.source_payload_sha256
+            ),
+        },
+        "statement_evidence": {
+            "observed_at": statement.evidence.observed_at,
+            "source_payload_sha256": statement.evidence.source_payload_sha256,
+        },
         "currency_code": statement.currency_code,
+        "statement_scope": {
+            "from_record": statement.from_record,
+            "record_count": statement.record_count,
+            "statement_from": statement.statement_from,
+            "statement_to": statement.statement_to,
+            "request_scope_sha256": statement.request_scope_sha256,
+            "more_available": statement.more_available,
+        },
         "statement_rows": [
             {
                 "ref_id": item.ref_id,
@@ -530,7 +669,10 @@ def _combined_evidence_sha256(
     }
     return sha256(
         json.dumps(
-            payload, sort_keys=True, separators=(",", ":")
+            payload,
+            ensure_ascii=True,
+            sort_keys=True,
+            separators=(",", ":"),
         ).encode("utf-8")
     ).hexdigest()
 
@@ -544,7 +686,9 @@ def _mapping(value: object, field: str) -> Mapping[str, object]:
 
 
 def _provider_text(
-    value: Mapping[str, object], key: str, field: str
+    value: Mapping[str, object],
+    key: str,
+    field: str,
 ) -> str:
     if key not in value:
         raise BetfairReadOnlyError(
@@ -554,7 +698,9 @@ def _provider_text(
 
 
 def _provider_positive_int(
-    value: Mapping[str, object], key: str, field: str
+    value: Mapping[str, object],
+    key: str,
+    field: str,
 ) -> int:
     if key not in value:
         raise BetfairReadOnlyError(
@@ -564,7 +710,9 @@ def _provider_positive_int(
 
 
 def _provider_bool(
-    value: Mapping[str, object], key: str, field: str
+    value: Mapping[str, object],
+    key: str,
+    field: str,
 ) -> bool:
     if key not in value or type(value[key]) is not bool:
         raise BetfairReadOnlyError(f"{field} must be provider bool")
@@ -572,21 +720,23 @@ def _provider_bool(
 
 
 def _provider_decimal(
-    value: Mapping[str, object], key: str, field: str
+    value: Mapping[str, object],
+    key: str,
+    field: str,
 ) -> Decimal:
     if key not in value:
         raise BetfairReadOnlyError(
             f"{field} is missing from provider response"
         )
     raw = value[key]
-    if isinstance(raw, bool):
-        raise BetfairReadOnlyError(f"{field} must be provider number")
-    try:
-        result = raw if type(raw) is Decimal else Decimal(str(raw))
-    except (InvalidOperation, ValueError, TypeError) as exc:
+    if type(raw) is Decimal:
+        result = raw
+    elif isinstance(raw, int) and not isinstance(raw, bool):
+        result = Decimal(raw)
+    else:
         raise BetfairReadOnlyError(
-            f"{field} must be provider number"
-        ) from exc
+            f"{field} must be a JSON number decoded without binary float"
+        )
     return _decimal(result, field)
 
 
@@ -626,10 +776,23 @@ def _nonnegative_int(value: object, field: str) -> int:
     return value
 
 
+def _statement_record_count(value: object) -> int:
+    count = _positive_int(value, "record_count")
+    if count > 100:
+        raise BetfairReadOnlyError(
+            "record_count exceeds provider statement page limit"
+        )
+    return count
+
+
 def _decimal(value: object, field: str) -> Decimal:
     if type(value) is not Decimal or not value.is_finite():
         raise BetfairReadOnlyError(f"{field} must be a finite Decimal")
     return value
+
+
+def _optional_instant(value: object, field: str) -> datetime | None:
+    return None if value is None else _instant(value, field)
 
 
 def _instant(value: object, field: str) -> datetime:
@@ -646,3 +809,22 @@ def _instant(value: object, field: str) -> datetime:
     if parsed.tzinfo is None or parsed.utcoffset() is None:
         raise BetfairReadOnlyError(f"{field} must be timezone-aware")
     return parsed.astimezone(timezone.utc)
+
+
+# Freeze the snapshot function object into the public capability.  Its default
+# arguments in turn freeze the canonical request-id/clock implementations that were
+# present when this module was constructed, matching the existing read-only adapter
+# hardening boundary without adding another account-client architecture.
+read_betfair_provider_billing_inputs = partial(
+    _read_betfair_provider_billing_inputs,
+    _snapshot_client,
+)
+read_betfair_provider_billing_inputs.__name__ = (
+    "read_betfair_provider_billing_inputs"
+)
+read_betfair_provider_billing_inputs.__qualname__ = (
+    "read_betfair_provider_billing_inputs"
+)
+read_betfair_provider_billing_inputs.__doc__ = (
+    _read_betfair_provider_billing_inputs.__doc__
+)

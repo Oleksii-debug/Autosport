@@ -199,7 +199,11 @@ def test_matchup_evidence_binds_two_memories_into_normal_opportunity_evidence(
         causal_cutoff=T1,
         reproducibility_sha256=sha256(b"market-replay").hexdigest(),
     )
-    bound = bind_sport_memory_to_opportunity_evidence(base, matchup)
+    bound = bind_sport_memory_to_opportunity_evidence(
+        base,
+        matchup,
+        runtime=runtime,
+    )
     assert bound.reproducibility_sha256 != base.reproducibility_sha256
     assert bound.observed_at == base.observed_at
     assert bound.causal_cutoff == matchup.causal_cutoff
@@ -322,7 +326,11 @@ def test_matchup_selection_and_binding_fail_closed_on_future_evidence(tmp_path):
         SportMemoryError,
         match="selected after opportunity evidence",
     ):
-        bind_sport_memory_to_opportunity_evidence(early_base, matchup)
+        bind_sport_memory_to_opportunity_evidence(
+            early_base,
+            matchup,
+            runtime=runtime,
+        )
 
     with pytest.raises(
         SportMemoryError,

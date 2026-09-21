@@ -57,13 +57,12 @@ def historical_match_request_url(
     if not isinstance(base_url, str) or not base_url:
         raise ValueError("provider base_url must be a non-empty URL")
     parsed_base = urlsplit(base_url)
-    if (
-        parsed_base.username is not None
-        or parsed_base.password is not None
-        or parsed_base.query
-        or parsed_base.fragment
-    ):
-        raise ValueError("provider base_url must not contain credentials, query, or fragment")
+    if parsed_base.username is not None or parsed_base.password is not None:
+        raise ValueError("provider base_url must not contain credentials")
+    if parsed_base.scheme != "https" or not parsed_base.netloc:
+        raise ValueError("provider base_url must be an absolute HTTPS URL")
+    if parsed_base.query or parsed_base.fragment:
+        raise ValueError("provider base_url must not contain query or fragment")
     query_values = {
         "date": requested_date,
         "pricedOnly": "true" if priced_only else "false",
@@ -84,9 +83,11 @@ def capture_historical_matches(
 ) -> HistoricalMatchCapture:
     """Capture provider historical match/result evidence through the documented API surface.
 
-    ParlayAPI documents ``/v1/historical/sports/{sport_key}/matches`` with one
-    required ``date=YYYY-MM-DD`` query parameter and optional ``pricedOnly``.
-    The result archive is intentionally kept opaque here: this capture proves a
+    Autosport intentionally uses the narrow single-date
+    ``/v1/historical/sports/{sport_key}/matches`` request shape with
+    ``date=YYYY-MM-DD`` and ``pricedOnly``.  Broader provider query semantics
+    are not silently admitted by this function.  The result archive is intentionally
+    kept opaque here: this capture proves a
     response identity and runtime entitlement metadata, not quote outcomes,
     historical market coverage, retention rights, or replay-corpus readiness.
 

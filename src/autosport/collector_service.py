@@ -503,20 +503,15 @@ class HeadlessCollectorService:
             source_id=source_id,
             started_at=started_at,
         )
-        self._record_runtime_stream_epoch(
-            activated_at=started_at,
-            expected_stream_epoch=stream_epoch,
-            allow_transition=False,
-        )
         try:
-            self.delta_store._recover_runtime_stream_epoch(
+            self.delta_store._bootstrap_or_recover_runtime_stream_epoch(
                 source_id=self._source_id,
                 stream_epoch=stream_epoch,
                 activated_at=started_at,
             )
         except (TypeError, ValueError) as exc:
             raise CollectorServiceError(
-                "cannot recover collector active-epoch authority"
+                "cannot establish collector active-epoch authority"
             ) from exc
 
     def _require_source_identity(
@@ -549,31 +544,6 @@ class HeadlessCollectorService:
                 "source.stream_epoch changed during active collector cycle"
             )
         return source
-
-    def _record_runtime_stream_epoch(
-        self,
-        *,
-        activated_at: str,
-        expected_stream_epoch: str | None = None,
-        allow_transition: bool = True,
-    ) -> int | None:
-        """Publish service-owned epoch authority through the canonical store."""
-
-        _CollectorServiceState._instant(activated_at, "activated_at")
-        source = self._require_source_identity(
-            expected_stream_epoch=expected_stream_epoch
-        )
-        try:
-            return self.delta_store._record_runtime_stream_epoch(
-                source_id=self._source_id,
-                stream_epoch=source.stream_epoch,
-                activated_at=activated_at,
-                allow_transition=allow_transition,
-            )
-        except (TypeError, ValueError) as exc:
-            raise CollectorServiceError(
-                "cannot persist collector active-epoch authority"
-            ) from exc
 
     def _append_admitted_delta(self, delta: CollectorDelta) -> bool:
         """Commit a validated provider delta and its epoch authority atomically."""

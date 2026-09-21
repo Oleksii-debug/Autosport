@@ -81,6 +81,7 @@ def _requirement(**overrides):
         "scope": _scope(),
         "validation_policy_version": "v1",
         "source_contract_ref": "api-v1",
+        "max_observation_age_seconds": 86400,
     }
     values.update(overrides)
     return CapabilityRequirement(**values)
@@ -141,6 +142,7 @@ def test_documented_place_bet_cannot_satisfy_authenticated_requirement():
         CapabilityScope("betfair", None, "production"),
         "v1",
         "api-v1",
+        86400,
     )
     decision = journal.resolve(
         requirement, {profile.profile_id: profile}, as_of="2026-09-21T10:03:00+00:00"
@@ -152,6 +154,30 @@ def test_documented_place_bet_cannot_satisfy_authenticated_requirement():
 def test_unproven_requirement_cannot_authorize_any_capability():
     with pytest.raises(CapabilityEvidenceError, match="UNPROVEN"):
         _requirement(minimum_strength=CapabilityEvidenceStrength.UNPROVEN)
+
+
+def test_republishing_old_profile_cannot_extend_observation_freshness():
+    profile = _profile()
+    republished = _evidence(
+        profile,
+        committed_at="2026-09-21T10:59:00+00:00",
+        review_due_at="2026-09-22T10:59:00+00:00",
+        source_payload_sha256="b" * 64,
+    )
+    journal = CapabilityEvidenceJournal()
+    journal.publish(republished)
+    journal.publish_availability(
+        _availability(republished, observed_at="2026-09-21T10:59:30+00:00")
+    )
+    decision = _resolve(
+        journal,
+        profile,
+        _requirement(max_observation_age_seconds=3600),
+        as_of="2026-09-21T11:00:00+00:00",
+    )
+    assert not decision.allowed
+    assert decision.lifecycle is CapabilityLifecycleState.REVALIDATION_REQUIRED
+    assert "observation age" in decision.reason
 
 
 def test_account_scope_cannot_generalize():

@@ -145,6 +145,8 @@ def campaign(
         first_sequence=1,
         last_sequence=len(opportunities),
         close_reason="WINDOW_COMPLETE",
+        anchor_lower=BASE + timedelta(seconds=110),
+        anchor_upper=BASE + timedelta(seconds=111),
     )
     boundary = RevealBoundaryReceipt(
         receipt_id="boundary-1",
@@ -180,7 +182,6 @@ def campaign(
             CostEvidence(sequence, True)
             for sequence in range(1, len(opportunities) + 1)
         ),
-        first_candidate_admitted_at=BASE + timedelta(seconds=10),
         safety_margin=timedelta(seconds=1),
     )
 
@@ -218,6 +219,8 @@ def test_terminal_unfavorable_candidate_cannot_be_truncated() -> None:
         first_sequence=1,
         last_sequence=2,
         close_reason="EARLY_CLOSE",
+        anchor_lower=BASE + timedelta(seconds=110),
+        anchor_upper=BASE + timedelta(seconds=111),
     )
     result = verify_campaign(
         replace(
@@ -281,6 +284,8 @@ def test_valid_root_over_favorable_subset_fails_terminal_completeness() -> None:
         first_sequence=1,
         last_sequence=1,
         close_reason="FAVORABLE_PREFIX",
+        anchor_lower=BASE + timedelta(seconds=110),
+        anchor_upper=BASE + timedelta(seconds=111),
     )
     result = verify_campaign(replace(data, cohort_roots=(root,), closes=(close,)))
     assert has(result, VerificationCode.COHORT_ROOT_MISMATCH)
@@ -297,6 +302,21 @@ def test_authoritative_admitted_source_receipt_cannot_disappear() -> None:
     )
     result = verify_campaign(
         replace(data, authoritative_receipts=data.authoritative_receipts + (extra,))
+    )
+    assert has(result, VerificationCode.COHORT_OMISSION_DETECTED)
+
+
+def test_authoritative_excluded_candidate_cannot_disappear() -> None:
+    data = campaign()
+    excluded = AuthoritativeSourceReceipt(
+        receipt_id="receipt-excluded",
+        receipt_sha256=HASH_B,
+        campaign_id=data.protocol.campaign_id,
+        opportunity_id="opportunity-excluded",
+        universe_rule_result=UniverseResult.EXCLUDED,
+    )
+    result = verify_campaign(
+        replace(data, authoritative_receipts=data.authoritative_receipts + (excluded,))
     )
     assert has(result, VerificationCode.COHORT_OMISSION_DETECTED)
 
@@ -483,7 +503,7 @@ def test_optional_stopping_violation_fails_confirmation() -> None:
 
 def test_protocol_must_be_anchored_before_first_candidate_admission() -> None:
     data = campaign()
-    changed = protocol(precommit_anchor_upper=data.first_candidate_admitted_at)
+    changed = protocol(precommit_anchor_upper=data.opportunities[0].observed_lower)
     result = verify_campaign(replace(data, protocol=changed))
     assert has(result, VerificationCode.PROTOCOL_PRECOMMIT_FAIL)
 

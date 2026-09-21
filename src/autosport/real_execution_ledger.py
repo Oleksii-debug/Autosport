@@ -669,6 +669,7 @@ class RealExecutionLedger:
         found_reconciliations: dict[str, dict[str, Any]] = {}
         found_receipt_id: str | None = None
         provider_acknowledgements: dict[str, str] = {}
+        legacy_provider_evidence_seen = False
         for event in events:
             kind = event["event_type"]
             if kind == EventType.ATTEMPT_RESERVED.value:
@@ -759,6 +760,12 @@ class RealExecutionLedger:
                     provider_acknowledgements[
                         acknowledgement_sha256
                     ] = evidence_id
+                else:
+                    # Compatibility is replay-only. Pre-hardening ledgers could
+                    # durably bind generic provider evidence before a terminal
+                    # acknowledgement. The current write path still requires an
+                    # exact acknowledgement digest and cannot create this shape.
+                    legacy_provider_evidence_seen = True
             elif kind == EventType.EXTERNAL_ACKNOWLEDGEMENT.value:
                 if state not in {
                     AttemptState.SUBMITTED,
@@ -791,7 +798,10 @@ class RealExecutionLedger:
                             "reconciliation evidence is only valid for UNKNOWN acknowledgement"
                         )
                     acknowledgement_sha256 = _digest(event["payload"])
-                    if acknowledgement_sha256 not in provider_acknowledgements:
+                    if (
+                        acknowledgement_sha256 not in provider_acknowledgements
+                        and not legacy_provider_evidence_seen
+                    ):
                         raise ExecutionLedgerIntegrityError(
                             "SUBMITTED acknowledgement lacks exact provider-bound "
                             "acknowledgement evidence"
@@ -1199,6 +1209,7 @@ class RealExecutionLedger:
             unknown_time: datetime | None = None
             provider_order_reference_seen = False
             provider_evidence_seen = False
+            legacy_provider_evidence_time: datetime | None = None
             provider_acknowledgements: dict[str, datetime] = {}
             found_reconciliations: dict[str, ExternalEffectReconciliation] = {}
             found_receipt_id: str | None = None
@@ -1404,6 +1415,8 @@ class RealExecutionLedger:
                             provider_acknowledgements[
                                 acknowledgement_sha256
                             ] = evidence_time
+                        else:
+                            legacy_provider_evidence_time = evidence_time
                     elif (
                         followup["event_type"]
                         == EventType.EXTERNAL_ACKNOWLEDGEMENT.value
@@ -1468,6 +1481,8 @@ class RealExecutionLedger:
                                 acknowledgement_sha256
                             )
                             if evidence_time is None:
+                                evidence_time = legacy_provider_evidence_time
+                            if evidence_time is None:
                                 raise ExecutionLedgerIntegrityError(
                                     "SUBMITTED acknowledgement lacks exact "
                                     "provider-bound acknowledgement evidence"
@@ -1484,6 +1499,29 @@ class RealExecutionLedger:
                                 raise ExecutionLedgerIntegrityError(
                                     "stored acknowledgement stake exceeds "
                                     "requested action stake"
+                                )
+                            if (
+                                acknowledgement.status
+                                is AcknowledgementStatus.ACCEPTED
+                                and acknowledgement.accepted_stake
+                                != requested_stake
+                            ):
+                                raise ExecutionLedgerIntegrityError(
+                                    "stored ACCEPTED acknowledgement stake must "
+                                    "equal requested action stake"
+                                )
+                            if (
+                                acknowledgement.status
+                                is AcknowledgementStatus.PARTIAL
+                                and not (
+                                    Decimal("0")
+                                    < acknowledgement.accepted_stake
+                                    < requested_stake
+                                )
+                            ):
+                                raise ExecutionLedgerIntegrityError(
+                                    "stored PARTIAL acknowledgement stake must be "
+                                    "positive and below requested action stake"
                                 )
                     elif (
                         followup["event_type"]
@@ -2375,6 +2413,26 @@ class RealExecutionLedger:
                 if acknowledgement.accepted_stake > requested_stake:
                     raise ExecutionStateError(
                         "acknowledged stake exceeds requested action stake"
+                    )
+                if (
+                    acknowledgement.status is AcknowledgementStatus.ACCEPTED
+                    and acknowledgement.accepted_stake != requested_stake
+                ):
+                    raise ExecutionStateError(
+                        "ACCEPTED acknowledgement stake must equal requested "
+                        "action stake"
+                    )
+                if (
+                    acknowledgement.status is AcknowledgementStatus.PARTIAL
+                    and not (
+                        Decimal("0")
+                        < acknowledgement.accepted_stake
+                        < requested_stake
+                    )
+                ):
+                    raise ExecutionStateError(
+                        "PARTIAL acknowledgement stake must be positive and "
+                        "below requested action stake"
                     )
             probe_event = {
                 "plan_id": first["plan_id"],

@@ -120,6 +120,45 @@ def test_stale_component_waits_even_when_other_components_are_fresh() -> None:
     assert result.reasons == ("stale:open-exposure",)
 
 
+def test_late_arrival_cannot_refresh_an_old_source_observation() -> None:
+    items = list(coherent_components())
+    items[0] = evidence(
+        "account-funds",
+        digest=SHA_A,
+        observed_at="2026-09-21T08:00:00Z",
+        available_at="2026-09-21T09:00:08Z",
+    )
+    result = evaluate(items, max_age_seconds=15, max_cut_skew_seconds=3600)
+    assert result.status is SnapshotCoherenceStatus.WAIT_STALE
+    assert result.reasons == ("stale:account-funds",)
+
+
+def test_equal_arrival_times_do_not_hide_mixed_observation_cuts() -> None:
+    items = (
+        evidence(
+            "account-funds",
+            digest=SHA_A,
+            observed_at="2026-09-21T09:00:00Z",
+            available_at="2026-09-21T09:00:08Z",
+        ),
+        evidence(
+            "open-exposure",
+            digest=SHA_B,
+            observed_at="2026-09-21T09:00:07Z",
+            available_at="2026-09-21T09:00:08Z",
+        ),
+        evidence(
+            "market-liquidity",
+            digest=SHA_C,
+            observed_at="2026-09-21T09:00:06Z",
+            available_at="2026-09-21T09:00:08Z",
+        ),
+    )
+    result = evaluate(items, max_age_seconds=20, max_cut_skew_seconds=5)
+    assert result.status is SnapshotCoherenceStatus.WAIT_MIXED_CUT
+    assert result.reasons == ("cut_skew_microseconds:7000000",)
+
+
 def test_fresh_but_temporally_mixed_inputs_wait() -> None:
     items = (
         evidence("account-funds", digest=SHA_A, available_at="2026-09-21T09:00:01Z"),
@@ -136,7 +175,7 @@ def test_age_and_skew_boundaries_are_inclusive() -> None:
         evidence(
             "account-funds",
             digest=SHA_A,
-            observed_at="2026-09-21T08:59:54Z",
+            observed_at="2026-09-21T08:59:55Z",
             available_at="2026-09-21T08:59:55Z",
         ),
         evidence("open-exposure", digest=SHA_B, available_at="2026-09-21T09:00:00Z"),

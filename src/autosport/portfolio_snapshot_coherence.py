@@ -77,6 +77,12 @@ def _instant_id(value: object, name: str) -> str:
 def _nonnegative_int(value: object, name: str) -> int:
     if type(value) is not int or value < 0:
         raise PortfolioSnapshotCoherenceError(f"{name} must be a non-negative integer")
+    try:
+        timedelta(seconds=value)
+    except OverflowError as exc:
+        raise PortfolioSnapshotCoherenceError(
+            f"{name} must fit the supported duration range"
+        ) from exc
     return value
 
 

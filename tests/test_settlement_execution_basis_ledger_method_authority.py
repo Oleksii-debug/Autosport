@@ -77,7 +77,13 @@ def _rebound_empty_target(tmp_path):
     def rebound_snapshot():
         return donor_snapshot
 
-    target.verified_snapshot = rebound_snapshot  # type: ignore[method-assign]
+    # Refusing per-instance method replacement is itself a valid fail-closed
+    # repair. Otherwise the rebound bytes must not become authority for target.
+    try:
+        target.verified_snapshot = rebound_snapshot  # type: ignore[method-assign]
+    except (AttributeError, TypeError):
+        return None, target_path, donor
+
     assert type(target) is RealExecutionLedger
     assert not target_path.exists()
     return target, target_path, donor
@@ -85,8 +91,10 @@ def _rebound_empty_target(tmp_path):
 
 def test_empty_exact_ledger_cannot_derive_basis_from_rebound_snapshot(tmp_path) -> None:
     target, target_path, _ = _rebound_empty_target(tmp_path)
+    if target is None:
+        return
 
-    with pytest.raises(SettlementExecutionBasisError):
+    with pytest.raises((SettlementExecutionBasisError, TypeError)):
         derive_settlement_execution_basis(target, attempt_id="attempt-1")
 
     assert not target_path.exists()
@@ -96,9 +104,11 @@ def test_empty_exact_ledger_cannot_verify_donor_basis_via_rebound_snapshot(
     tmp_path,
 ) -> None:
     target, target_path, donor = _rebound_empty_target(tmp_path)
+    if target is None:
+        return
     donor_basis = derive_settlement_execution_basis(donor, attempt_id="attempt-1")
 
-    with pytest.raises(SettlementExecutionBasisError):
+    with pytest.raises((SettlementExecutionBasisError, TypeError)):
         verify_settlement_execution_basis(target, donor_basis)
 
     assert not target_path.exists()

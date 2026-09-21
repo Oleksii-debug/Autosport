@@ -141,7 +141,10 @@ def _build_guard(seal):
             raise PaperCampaignAdmissionError(
                 "Decision Ledger path authority is unavailable"
             ) from exc
-        if type(actual_path) is not path_cls or actual_path.resolve(strict=False) != expected_path:
+        if (
+            type(actual_path) is not type(expected_path)
+            or actual_path.resolve(strict=False) != expected_path
+        ):
             raise PaperCampaignAdmissionError(
                 "Decision Ledger must be the canonical workspace decisions.jsonl"
             )

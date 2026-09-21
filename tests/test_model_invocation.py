@@ -10,7 +10,7 @@ from autosport.model_invocation import (
     ModelAdapterDescriptor, ModelAdapterInvalidResponse, ModelAdapterResponse,
     ModelBackendMode, ModelInvocationError, ModelInvocationPolicy,
     ModelInvocationRequest, ModelInvocationResult, ModelInvocationStatus,
-    invoke_optional_model,
+    ModelInvocationCompletion, invoke_optional_model,
 )
 
 SHA = "a" * 64
@@ -133,3 +133,17 @@ def test_invalid_endpoint_retry_bounds_and_monotonic_regression_fail_closed():
     a=Fake(desc(),[ModelAdapterResponse("ok","qwen3:8b")])
     with pytest.raises(ModelInvocationError,match="monotonic clock regressed"):
         run(req(),pol(),{ModelBackendMode.LOCAL_OLLAMA:a},mono=("10","9"))
+
+
+def test_descriptor_requires_real_enum_not_string_alias():
+    with pytest.raises(ModelInvocationError, match="adapter mode"):
+        ModelAdapterDescriptor("LOCAL_OLLAMA", "x", "LOCAL_LOOPBACK_HTTP", "qwen3:8b", SHA)
+
+def test_completion_cannot_rebind_or_expose_response_text():
+    good_adapter=Fake(desc(),[ModelAdapterResponse("trusted","qwen3:8b")])
+    success=run(req(),pol(),{ModelBackendMode.LOCAL_OLLAMA:good_adapter}).result
+    with pytest.raises(ModelInvocationError, match="does not match"):
+        ModelInvocationCompletion(success,"tampered")
+    blocked=run(req(),pol(mode=ModelBackendMode.NO_LLM),{},mono=("0",)).result
+    with pytest.raises(ModelInvocationError, match="non-SUCCESS"):
+        ModelInvocationCompletion(blocked,"leak")

@@ -178,3 +178,64 @@ def test_wrong_credentials_type_rejected_without_network(monkeypatch):
     monkeypatch.setattr(subject, "BetfairReadOnlyClient", ForbiddenClient)
     with pytest.raises(TypeError):
         subject.evaluate_betfair_account_funds(object(), Decimal("1"))
+
+
+def test_issued_authority_expires_at_use_time(monkeypatch):
+    install_client(monkeypatch, balance=Decimal("100"))
+    now = [NOW]
+    monkeypatch.setattr(subject, "_utc_now", lambda: now[0])
+    result = subject.evaluate_betfair_account_funds(
+        BetfairSessionCredentials("app", "token"), Decimal("25")
+    )
+    assert result.passed is True
+    assert subject.require_authoritative_funds_precheck(result) is result
+
+    now[0] = NOW + subject.MAX_FUNDS_EVIDENCE_AGE + timedelta(microseconds=1)
+
+    assert subject.is_authoritative_funds_precheck(result) is False
+    with pytest.raises(subject.BetfairAccountFundsPrecheckError, match="authority"):
+        subject.require_authoritative_funds_precheck(result)
+
+
+def test_inplace_liability_mutation_cannot_upgrade_authority(monkeypatch):
+    install_client(monkeypatch, balance=Decimal("100"))
+    result = subject.evaluate_betfair_account_funds(
+        BetfairSessionCredentials("app", "token"), Decimal("125")
+    )
+    assert result.passed is False
+    assert subject.is_authoritative_funds_precheck(result) is True
+
+    object.__setattr__(result, "required_liability", Decimal("0"))
+
+    assert result.passed is True
+    assert subject.is_authoritative_funds_precheck(result) is False
+    with pytest.raises(subject.BetfairAccountFundsPrecheckError, match="authority"):
+        subject.require_authoritative_funds_precheck(result)
+
+
+@pytest.mark.parametrize(
+    ("field", "replacement"),
+    [
+        ("available_to_bet_balance", Decimal("999999")),
+        (
+            "funds_observed_at",
+            NOW - subject.MAX_FUNDS_EVIDENCE_AGE - timedelta(seconds=1),
+        ),
+        ("account_funds_sha256", "3" * 64),
+        ("account_details_sha256", "4" * 64),
+    ],
+)
+def test_inplace_economic_or_evidence_mutation_revokes_authority(
+    monkeypatch, field, replacement
+):
+    install_client(monkeypatch)
+    result = subject.evaluate_betfair_account_funds(
+        BetfairSessionCredentials("app", "token"), Decimal("25")
+    )
+    assert subject.is_authoritative_funds_precheck(result) is True
+
+    object.__setattr__(result, field, replacement)
+
+    assert subject.is_authoritative_funds_precheck(result) is False
+    with pytest.raises(subject.BetfairAccountFundsPrecheckError, match="authority"):
+        subject.require_authoritative_funds_precheck(result)

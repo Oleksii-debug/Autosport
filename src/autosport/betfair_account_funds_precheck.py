@@ -13,8 +13,9 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from hashlib import sha256
+from hmac import compare_digest
 import json
-from weakref import WeakValueDictionary
+from weakref import ReferenceType, ref
 
 from .betfair_account_readonly import (
     ADAPTER_ID,
@@ -31,7 +32,6 @@ VENUE_ID = "betfair"
 SOURCE_FAMILY = "betfair.account-funds-precheck.v1"
 MAX_FUNDS_EVIDENCE_AGE = timedelta(seconds=30)
 _MAX_FUTURE_SKEW = timedelta(seconds=1)
-_ISSUED: WeakValueDictionary[int, BetfairAccountFundsPrecheck] = WeakValueDictionary()
 
 
 class BetfairAccountFundsPrecheckError(RuntimeError):
@@ -126,6 +126,30 @@ class BetfairAccountFundsPrecheck:
         return sha256(encoded).hexdigest()
 
 
+@dataclass(frozen=True, slots=True)
+class _IssuedFundsPrecheckRecord:
+    value_ref: ReferenceType[BetfairAccountFundsPrecheck]
+    precheck_id: str
+
+
+_ISSUED: dict[int, _IssuedFundsPrecheckRecord] = {}
+
+
+def _remember_issued(result: BetfairAccountFundsPrecheck) -> None:
+    identity = id(result)
+
+    def _discard(dead_ref: ReferenceType[BetfairAccountFundsPrecheck]) -> None:
+        record = _ISSUED.get(identity)
+        if record is not None and record.value_ref is dead_ref:
+            _ISSUED.pop(identity, None)
+
+    value_ref = ref(result, _discard)
+    _ISSUED[identity] = _IssuedFundsPrecheckRecord(
+        value_ref=value_ref,
+        precheck_id=result.precheck_id,
+    )
+
+
 def evaluate_betfair_account_funds(
     credentials: BetfairSessionCredentials,
     required_liability: Decimal,
@@ -182,17 +206,31 @@ def evaluate_betfair_account_funds(
         account_details_sha256=details.evidence.source_payload_sha256,
         account_funds_sha256=funds.evidence.source_payload_sha256,
     )
-    _ISSUED[id(result)] = result
+    _remember_issued(result)
     return result
 
 
 def is_authoritative_funds_precheck(value: object) -> bool:
-    """Return whether *this process* issued the exact canonical precheck object."""
+    """Return whether current, unchanged funds evidence was issued by this process."""
 
-    return (
-        type(value) is BetfairAccountFundsPrecheck
-        and _ISSUED.get(id(value)) is value
-    )
+    if type(value) is not BetfairAccountFundsPrecheck:
+        return False
+    record = _ISSUED.get(id(value))
+    if record is None or record.value_ref() is not value:
+        return False
+    try:
+        if not compare_digest(record.precheck_id, value.precheck_id):
+            return False
+        checked_at = _utc(_utc_now(), "authority checked_at")
+        funds_observed_at = _utc(value.funds_observed_at, "funds_observed_at")
+        evaluated_at = _utc(value.evaluated_at, "evaluated_at")
+    except (AttributeError, TypeError, ValueError, BetfairAccountFundsPrecheckError):
+        return False
+    if checked_at + _MAX_FUTURE_SKEW < evaluated_at:
+        return False
+    if funds_observed_at > checked_at + _MAX_FUTURE_SKEW:
+        return False
+    return checked_at - funds_observed_at <= MAX_FUNDS_EVIDENCE_AGE
 
 
 def require_authoritative_funds_precheck(

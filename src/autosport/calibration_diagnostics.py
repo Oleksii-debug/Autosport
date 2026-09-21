@@ -242,7 +242,13 @@ def _wilson_interval(
         )
         / denominator
     )
-    return max(0.0, center - half), min(1.0, center + half)
+    lower = max(0.0, center - half)
+    upper = min(1.0, center + half)
+    if successes == 0:
+        lower = 0.0
+    if successes == count:
+        upper = 1.0
+    return lower, upper
 
 
 def _distance_to_interval(point: float, lower: float, upper: float) -> float:

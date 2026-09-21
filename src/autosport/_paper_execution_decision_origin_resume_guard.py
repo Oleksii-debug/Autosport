@@ -47,11 +47,13 @@ def _initial_seal():
 
 
 def _build_guard(seal):
-    # Capture the already-sealed origin resolver and product execution context in
-    # this installed wrapper closure. Later module-global replacement is not an
-    # authority source for fresh or durable PaperValue execution.
+    # Capture the already-sealed origin resolver, canonical material-action
+    # derivation and product execution context in this installed wrapper closure.
+    # Later module/instance substitution is not an authority source for fresh or
+    # durable PaperValue execution.
     verified_origin = _instance_guard._verified_decision_origin_without_instance_dispatch
     product_origin_runtime = _instance_guard._PRODUCT_ORIGIN_RUNTIME
+    material_action_id = PaperValueAgent._material_action_id
 
     def stable_raw_events(
         self: PaperExecutionLedger,
@@ -160,7 +162,17 @@ def _build_guard(seal):
         if type(ledger) is not JsonlDecisionLedger:
             return seal[3](self, event, context)
 
-        decision_id = self._material_action_id(context, event)
+        if type(self) is not PaperValueAgent:
+            raise _origin.PaperExecutionDecisionOriginError(
+                "paper-value origin requires exact PaperValueAgent authority"
+            )
+        namespace = getattr(self, "__dict__", None)
+        if isinstance(namespace, dict) and "_material_action_id" in namespace:
+            raise _origin.PaperExecutionDecisionOriginError(
+                "paper-value agent shadows authority method _material_action_id"
+            )
+
+        decision_id = material_action_id(context, event)
         record = _paper_value_authority._durable_record_for_call(
             self,
             event,

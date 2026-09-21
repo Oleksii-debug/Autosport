@@ -223,6 +223,30 @@ def test_partial_acceptance_without_terminal_child_effect_blocks_reroute() -> No
     assert reconciled.legs == ()
 
 
+def test_partial_acceptance_is_not_closed_by_other_child_refusal() -> None:
+    a, b = _venue("book-a", "acct-a"), _venue("book-b", "acct-b")
+    initial = _initial((a, b))
+    accepted_a = bind_leg_receipt(
+        initial.legs[0],
+        effect=ExternalEffect.ACCEPTED,
+        external_receipt_id="external-a-partial-open",
+        confirmed_accepted=Decimal("40.00"),
+    )
+    refused_b = bind_leg_receipt(
+        initial.legs[1],
+        effect=ExternalEffect.MARKET_REFUSED,
+        observation_id="refusal-b-1",
+    )
+
+    reconciled = _reconcile((a, b), (accepted_a, refused_b))
+
+    assert reconciled.state is RoutingState.BLOCKED_UNKNOWN
+    assert reconciled.confirmed_total == Decimal("40.00")
+    assert reconciled.residual_before == Decimal("60.00")
+    assert reconciled.proposed_total == Decimal("0")
+    assert reconciled.legs == ()
+
+
 def test_partial_acceptance_then_refusal_routes_residual_to_other_venue() -> None:
     a, b = _venue("book-a", "acct-a"), _venue("book-b", "acct-b")
     initial = _initial((a, b))

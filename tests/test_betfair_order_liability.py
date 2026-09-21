@@ -1,3 +1,4 @@
+from dataclasses import replace
 from decimal import Decimal, localcontext
 from fractions import Fraction
 
@@ -285,3 +286,105 @@ def test_limit_rejects_liability_field():
             price=D("2"),
             liability=D("10"),
         )
+
+
+def test_reserve_witness_binds_exact_standard_inputs_against_rebinding():
+    result = derive_betfair_order_reserve(
+        side=BetfairOrderSide.LAY,
+        order_type=BetfairOrderType.LIMIT,
+        price=D("3"),
+        size=D("10"),
+    )
+    assert result.price == D("3")
+    assert result.size == D("10")
+    assert result.liability is None
+    assert result.currency_quantum is None
+
+    mutations = (
+        {"reserve": D("10")},
+        {"raw_reserve": Fraction(10)},
+        {"backer_stake_equivalent": Fraction(999)},
+        {"backer_stake_equivalent": 10},
+        {"side": BetfairOrderSide.BACK},
+        {"price": D("2")},
+    )
+    for mutation in mutations:
+        with pytest.raises(BetfairOrderLiabilityError):
+            replace(result, **mutation)
+
+
+def test_target_witness_binds_rounding_quantum_and_target_semantics():
+    result = derive_betfair_order_reserve(
+        side=BetfairOrderSide.BACK,
+        order_type=BetfairOrderType.LIMIT,
+        price=D("3"),
+        target_type=BetfairBetTargetType.PAYOUT,
+        target_size=D("1"),
+        currency_quantum=D("0.01"),
+    )
+    assert result.price == D("3")
+    assert result.size is None
+    assert result.target_size == D("1")
+    assert result.currency_quantum == D("0.01")
+
+    with pytest.raises(BetfairOrderLiabilityError):
+        replace(result, currency_quantum=D("0.10"))
+    with pytest.raises(BetfairOrderLiabilityError):
+        replace(result, target_type=BetfairBetTargetType.BACKERS_PROFIT)
+
+
+def test_each_way_witness_cannot_be_rebound_to_lay():
+    result = derive_betfair_order_reserve(
+        side=BetfairOrderSide.BACK,
+        order_type=BetfairOrderType.LIMIT,
+        price=D("5"),
+        size=D("10"),
+        each_way=True,
+    )
+    with pytest.raises(BetfairOrderLiabilityError):
+        replace(result, side=BetfairOrderSide.LAY)
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        dict(
+            side=BetfairOrderSide.BACK,
+            order_type=BetfairOrderType.LIMIT,
+            price=D("2"),
+            size=D("1"),
+            currency_quantum=D("0.01"),
+        ),
+        dict(
+            side=BetfairOrderSide.BACK,
+            order_type=BetfairOrderType.MARKET_ON_CLOSE,
+            liability=D("1"),
+            currency_quantum=D("0.01"),
+        ),
+        dict(
+            side=BetfairOrderSide.BACK,
+            order_type=BetfairOrderType.LIMIT_ON_CLOSE,
+            price=D("2"),
+            liability=D("1"),
+            currency_quantum=D("0.01"),
+        ),
+    ],
+)
+def test_non_target_modes_reject_semantically_ignored_currency_quantum(kwargs):
+    with pytest.raises(BetfairOrderLiabilityError):
+        derive_betfair_order_reserve(**kwargs)
+
+
+def test_close_order_witness_binds_exact_liability_input():
+    result = derive_betfair_order_reserve(
+        side=BetfairOrderSide.BACK,
+        order_type=BetfairOrderType.LIMIT_ON_CLOSE,
+        price=D("2"),
+        liability=D("12.34"),
+    )
+    assert result.price == D("2")
+    assert result.liability == D("12.34")
+    assert result.size is None
+    assert result.currency_quantum is None
+    with pytest.raises(BetfairOrderLiabilityError):
+        replace(result, liability=D("1"))

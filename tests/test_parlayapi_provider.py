@@ -177,6 +177,70 @@ class ParlayApiProviderTests(unittest.TestCase):
         self.assertEqual(len(attempts), 2)
         self.assertEqual(sleeps, [0.5])
 
+    def test_statusless_transport_failure_retries_once_and_recovers(self):
+        attempts = []
+        sleeps = []
+
+        def transport(url, headers, timeout):
+            attempts.append(url)
+            if len(attempts) == 1:
+                raise ProviderTransportError("provider transport timeout")
+            return HttpJsonResponse([SAMPLE_EVENT], 200, {})
+
+        provider = ParlayApiTableTennisProvider(
+            "key",
+            transport=transport,
+            sleeper=sleeps.append,
+            max_attempts=2,
+            max_backoff_seconds=1.0,
+            clock=lambda: "2026-09-12T20:00:10+00:00",
+        )
+        provider.read_batch(max_items=1)
+        self.assertEqual(len(attempts), 2)
+        self.assertEqual(sleeps, [0.25])
+
+    def test_statusless_transport_failure_stops_at_max_attempts(self):
+        attempts = []
+        sleeps = []
+
+        def transport(url, headers, timeout):
+            attempts.append(url)
+            raise ProviderTransportError("provider transport timeout")
+
+        provider = ParlayApiTableTennisProvider(
+            "key",
+            transport=transport,
+            sleeper=sleeps.append,
+            max_attempts=3,
+            max_backoff_seconds=1.0,
+            clock=lambda: "2026-09-12T20:00:10+00:00",
+        )
+        with self.assertRaisesRegex(ProviderTransportError, "transport timeout"):
+            provider.read_batch(max_items=1)
+        self.assertEqual(len(attempts), 3)
+        self.assertEqual(sleeps, [0.25, 0.5])
+
+    def test_non_retryable_client_error_still_fails_fast(self):
+        attempts = []
+        sleeps = []
+
+        def transport(url, headers, timeout):
+            attempts.append(url)
+            raise ProviderTransportError("unauthorized", 401)
+
+        provider = ParlayApiTableTennisProvider(
+            "key",
+            transport=transport,
+            sleeper=sleeps.append,
+            max_attempts=5,
+            max_backoff_seconds=1.0,
+            clock=lambda: "2026-09-12T20:00:10+00:00",
+        )
+        with self.assertRaisesRegex(ProviderTransportError, "unauthorized"):
+            provider.read_batch(max_items=1)
+        self.assertEqual(len(attempts), 1)
+        self.assertEqual(sleeps, [])
+
     def test_malformed_payload_fails_closed(self):
         provider = ParlayApiTableTennisProvider(
             "key",

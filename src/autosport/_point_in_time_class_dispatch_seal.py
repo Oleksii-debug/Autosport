@@ -1,15 +1,15 @@
-"""Fail closed if point-in-time authority implementations are replaced in-process.
+"""Compatibility reload guard for intrinsic point-in-time dispatch checks.
 
-The point-in-time holdout path requires exact concrete authority objects, but exact
-``type(...)`` checks are not sufficient when a caller can replace methods on those
-classes.  The authority-bearing identities in this module therefore live in closure
-cells captured at import time rather than in caller-rebindable module globals.
+The authoritative point-in-time class-dispatch protection now lives directly in
+``_point_in_time_authority_runtime_repair`` and revalidates the concrete authority
+implementation against its canonical source before authority-bearing dispatch.
+This module deliberately keeps no pristine delegate, class-namespace snapshot, or
+other authority-bearing value in Python closure cells.
 
-Runtime-repair reload is guarded by two independent finder instances.  Only the
-canonical finder is intentionally exposed for deterministic compatibility tests; the
-backup finder, its class, and its loader class are retained solely by ``sys.meta_path``
-and the installer closure.  Rebinding module aliases or replacing/removing the public
-finder therefore cannot silently drop the seal.
+The two reload finders are retained only for compatibility: when present they refresh
+these public test aliases after an explicit repair-module reload.  Removing either or
+both finders cannot weaken the product authority because repair re-execution itself
+restores the intrinsic source-backed checks.
 """
 
 from __future__ import annotations
@@ -17,83 +17,33 @@ from __future__ import annotations
 import importlib.abc
 import importlib.machinery
 import sys
-from types import MappingProxyType
-from typing import Any, Callable
+from typing import Callable
 
 from . import _point_in_time_authority_runtime_repair as repair
-from .dataset_snapshot_lineage import DatasetSnapshotLineageAuthority
-from .scientific_registry import ScientificRegistry
 
 
-def _snapshot_class_namespace(concrete_type: type[Any]) -> tuple[tuple[str, object], ...]:
-    """Capture exact class-owned attributes without invoking descriptors."""
-
-    namespace = concrete_type.__dict__
-    if not isinstance(namespace, MappingProxyType):
-        raise RuntimeError("concrete authority class namespace is not immutable-view backed")
-    return tuple(namespace.items())
+_sealed_require_exact_lineage_authority = repair._require_exact_lineage_authority
+_sealed_resolve_canonical_snapshot = repair._resolve_canonical_snapshot
 
 
-def _build_seal(
-    repair_module,
-    lineage_type: type[Any],
-    registry_type: type[Any],
-) -> tuple[Callable[..., object], Callable[..., object], Callable[[], None]]:
-    """Build one closure-owned seal with no mutable expected-value globals."""
+def _install_seals() -> None:
+    """Refresh compatibility aliases without patching authority-bearing dispatch."""
 
-    trusted_lineage = _snapshot_class_namespace(lineage_type)
-    trusted_registry = _snapshot_class_namespace(registry_type)
-    pristine_require = repair_module._require_exact_lineage_authority
-    pristine_resolve = repair_module._resolve_canonical_snapshot
-    error_type = repair_module.evidence.PointInTimeEvidenceError
+    global _sealed_require_exact_lineage_authority
+    global _sealed_resolve_canonical_snapshot
 
-    def require_unchanged_class_namespace(
-        concrete_type: type[Any],
-        trusted: tuple[tuple[str, object], ...],
-        *,
-        label: str,
-    ) -> None:
-        current = concrete_type.__dict__
-        expected_names = tuple(name for name, _ in trusted)
-        current_names = tuple(current)
-        if set(current_names) != set(expected_names):
-            changed = sorted(set(current_names) ^ set(expected_names))
-            detail = changed[0] if changed else "namespace"
-            raise error_type(f"trusted {label} class implementation changed: {detail}")
-        for name, expected in trusted:
-            if current[name] is not expected:
-                raise error_type(f"trusted {label} class implementation changed: {name}")
-
-    def require_trusted_class_dispatch() -> None:
-        require_unchanged_class_namespace(
-            lineage_type,
-            trusted_lineage,
-            label="DatasetSnapshotLineageAuthority",
+    require = repair._require_exact_lineage_authority
+    resolve = repair._resolve_canonical_snapshot
+    if getattr(require, "__closure__", None) is not None:
+        raise RuntimeError(
+            "intrinsic point-in-time lineage guard unexpectedly captured closure state"
         )
-        require_unchanged_class_namespace(
-            registry_type,
-            trusted_registry,
-            label="ScientificRegistry",
+    if getattr(resolve, "__closure__", None) is not None:
+        raise RuntimeError(
+            "intrinsic point-in-time snapshot resolver unexpectedly captured closure state"
         )
-
-    def sealed_require_exact_lineage_authority(lineage: object, *, holdout: bool = False):
-        require_trusted_class_dispatch()
-        return pristine_require(lineage, holdout=holdout)
-
-    def sealed_resolve_canonical_snapshot(ledger, dataset_snapshot):
-        require_trusted_class_dispatch()
-        return pristine_resolve(ledger, dataset_snapshot)
-
-    def install() -> None:
-        repair_module._require_exact_lineage_authority = sealed_require_exact_lineage_authority
-        repair_module._resolve_canonical_snapshot = sealed_resolve_canonical_snapshot
-
-    return sealed_require_exact_lineage_authority, sealed_resolve_canonical_snapshot, install
-
-
-_sealed_require_exact_lineage_authority, _sealed_resolve_canonical_snapshot, _install_seals = (
-    _build_seal(repair, DatasetSnapshotLineageAuthority, ScientificRegistry)
-)
+    _sealed_require_exact_lineage_authority = require
+    _sealed_resolve_canonical_snapshot = resolve
 
 
 def _make_reload_finder_installer(
@@ -101,11 +51,10 @@ def _make_reload_finder_installer(
     target_module: object,
     reinstall: Callable[[], None],
 ) -> tuple[importlib.abc.MetaPathFinder, Callable[[], None]]:
-    """Create closure-owned canonical+backup reload guards.
+    """Create canonical+backup compatibility reload hooks.
 
-    The backup implementation types deliberately never become module attributes.
-    This makes assignment to the old/public finder, loader, repair-module, class, or
-    ``importlib`` aliases irrelevant to the live backup path.
+    These hooks are not a trust root.  Their only responsibility is keeping the
+    compatibility aliases above synchronized after a normal explicit reload.
     """
 
     loader_base = importlib.abc.Loader

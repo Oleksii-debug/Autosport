@@ -24,9 +24,17 @@ class _RiskContext:
 
 
 class _Intent:
+    intent_id = "intent-729"
     intent_sha256 = "a" * 64
     opportunity = _Opportunity()
     risk_context = _RiskContext()
+
+
+class _Plan:
+    decision_ts = "2026-09-21T00:00:00Z"
+    intent_ids = ("intent-729",)
+    intent_sha256s = ("a" * 64,)
+    plan_sha256 = "d" * 64
 
 
 class _Store:
@@ -51,6 +59,7 @@ class _ModelEvidence:
 
 def _patch_types(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(subject, "OpportunityIntent", _Intent)
+    monkeypatch.setattr(subject, "PortfolioPlan", _Plan)
     monkeypatch.setattr(subject, "ModelComputeRouterStore", _Store)
     monkeypatch.setattr(subject, "ProspectiveModelComputeMoneyEvidence", _ModelEvidence)
 
@@ -70,6 +79,7 @@ def _resolve(monkeypatch: pytest.MonkeyPatch, evidence: _ModelEvidence | None = 
     )
     result = subject.resolve_prospective_applicable_costs(
         intent=_Intent(),
+        plan=_Plan(),
         router_store=_Store(),
         model_request_id="request-729",
         decision_at=DECISION_AT,
@@ -86,6 +96,7 @@ def test_current_product_truth_is_explicitly_incomplete_without_zero_invention(m
     )
     assert result.total_subtractable_amount is None
     assert result.currency is None
+    assert result.portfolio_plan_sha256 == "d" * 64
     assert tuple(item.cost_class for item in result.components) == tuple(
         sorted(REQUIRED_COST_CLASSES, key=lambda value: value.value)
     )
@@ -115,6 +126,7 @@ def test_public_resolver_has_no_caller_money_applicability_or_source_inputs():
     parameters = set(inspect.signature(subject.resolve_prospective_applicable_costs).parameters)
     assert parameters == {
         "intent",
+        "plan",
         "router_store",
         "model_request_id",
         "decision_at",
@@ -139,6 +151,7 @@ def test_schema_v1_cannot_be_minted_complete_or_with_positive_total(monkeypatch)
         subject.ProspectiveApplicableCostResolution(
             intent_sha256=result.intent_sha256,
             opportunity_id=result.opportunity_id,
+            portfolio_plan_sha256=result.portfolio_plan_sha256,
             decision_at=result.decision_at,
             components=result.components,
             completeness="COMPLETE",  # type: ignore[arg-type]
@@ -151,6 +164,7 @@ def test_schema_v1_cannot_be_minted_complete_or_with_positive_total(monkeypatch)
         subject.ProspectiveApplicableCostResolution(
             intent_sha256=result.intent_sha256,
             opportunity_id=result.opportunity_id,
+            portfolio_plan_sha256=result.portfolio_plan_sha256,
             decision_at=result.decision_at,
             components=result.components,
             total_subtractable_amount=Decimal("0"),  # type: ignore[arg-type]
@@ -201,6 +215,7 @@ def test_cross_intent_model_evidence_is_rejected(monkeypatch):
     with pytest.raises(subject.ProspectiveApplicableCostError, match="intent mismatch"):
         subject.resolve_prospective_applicable_costs(
             intent=_Intent(),
+            plan=_Plan(),
             router_store=_Store(),
             model_request_id="request-729",
             decision_at=DECISION_AT,
@@ -218,6 +233,7 @@ def test_cross_opportunity_model_evidence_is_rejected(monkeypatch):
     with pytest.raises(subject.ProspectiveApplicableCostError, match="opportunity mismatch"):
         subject.resolve_prospective_applicable_costs(
             intent=_Intent(),
+            plan=_Plan(),
             router_store=_Store(),
             model_request_id="request-729",
             decision_at=DECISION_AT,
@@ -241,6 +257,7 @@ def test_caller_cannot_move_decision_cutoff(monkeypatch):
     ):
         subject.resolve_prospective_applicable_costs(
             intent=_Intent(),
+            plan=_Plan(),
             router_store=_Store(),
             model_request_id="request-729",
             decision_at=datetime(2026, 9, 21, 0, 1, tzinfo=timezone.utc),
@@ -269,6 +286,7 @@ def test_subclass_substitution_is_rejected_before_authority_read(monkeypatch):
     with pytest.raises(subject.ProspectiveApplicableCostError, match="exact canonical OpportunityIntent"):
         subject.resolve_prospective_applicable_costs(
             intent=IntentSubclass(),
+            plan=_Plan(),
             router_store=_Store(),
             model_request_id="request-729",
             decision_at=DECISION_AT,
@@ -276,7 +294,39 @@ def test_subclass_substitution_is_rejected_before_authority_read(monkeypatch):
     with pytest.raises(subject.ProspectiveApplicableCostError, match="exact canonical ModelComputeRouterStore"):
         subject.resolve_prospective_applicable_costs(
             intent=_Intent(),
+            plan=_Plan(),
             router_store=StoreSubclass(),
+            model_request_id="request-729",
+            decision_at=DECISION_AT,
+        )
+
+    assert called is False
+
+
+def test_cross_plan_substitution_is_rejected_before_model_authority_read(monkeypatch):
+    _patch_types(monkeypatch)
+    called = False
+
+    def resolver(**_kwargs):
+        nonlocal called
+        called = True
+        return _ModelEvidence()
+
+    monkeypatch.setattr(subject, "resolve_prospective_model_compute_money", resolver)
+
+    class WrongPlan(_Plan):
+        intent_ids = ("other-intent",)
+
+    monkeypatch.setattr(subject, "PortfolioPlan", WrongPlan)
+
+    with pytest.raises(
+        subject.ProspectiveApplicableCostError,
+        match="intent_id/intent_sha256 binding mismatch",
+    ):
+        subject.resolve_prospective_applicable_costs(
+            intent=_Intent(),
+            plan=WrongPlan(),
+            router_store=_Store(),
             model_request_id="request-729",
             decision_at=DECISION_AT,
         )
@@ -294,6 +344,7 @@ def test_duplicate_or_missing_required_cost_class_is_rejected(monkeypatch):
         subject.ProspectiveApplicableCostResolution(
             intent_sha256=result.intent_sha256,
             opportunity_id=result.opportunity_id,
+            portfolio_plan_sha256=result.portfolio_plan_sha256,
             decision_at=result.decision_at,
             components=result.components[:-1] + (result.components[0],),
         )

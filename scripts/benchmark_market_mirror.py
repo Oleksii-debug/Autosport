@@ -177,7 +177,7 @@ def _scenario_distinct_insert(
 ) -> dict[str, object]:
     quote_count = len(base_events)
     _positive_int(quote_count, "quote_count")
-    mirrors = iter(MarketMirror() for _ in range(samples))
+    mirrors = iter(tuple(MarketMirror() for _ in range(samples)))
 
     def operation() -> Counter[str]:
         mirror = next(mirrors)
@@ -205,12 +205,14 @@ def _scenario_forward_update(
     quote_count = len(base_events)
     mirror = _prime(base_events)
     batches = iter(
-        _events(
-            quote_count,
-            sequence=sequence,
-            odds="2.01" if sequence % 2 else "2.02",
+        tuple(
+            _events(
+                quote_count,
+                sequence=sequence,
+                odds="2.01" if sequence % 2 else "2.02",
+            )
+            for sequence in range(2, samples + 2)
         )
-        for sequence in range(2, samples + 2)
     )
 
     def operation() -> Counter[str]:

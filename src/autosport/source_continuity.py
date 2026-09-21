@@ -37,7 +37,6 @@ _TRUSTED_TOKEN_REQUIRED_REASONS = frozenset(
     {
         "provider_anchor_established_without_prior_continuity",
         "witness_previous_token_mismatch",
-        "witness_previous_token_without_trusted_anchor",
         "provider_backfill_incomplete",
         "provider_native_evidence_required",
     }

@@ -3,12 +3,7 @@ from __future__ import annotations
 import json
 from decimal import Decimal
 
-import pytest
-
-from autosport.betfair_supervised_execution import (
-    BetfairPlaceOrdersAmbiguous,
-    _parse_place_orders_response,
-)
+from autosport.betfair_supervised_execution import _parse_place_orders_response
 from autosport.real_execution_ledger import ExecutionAction
 
 

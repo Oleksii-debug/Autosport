@@ -17,6 +17,7 @@ class KeyboardAuditTests(unittest.TestCase):
             "<Control-o>": True,
             "<Control-r>": True,
             "<Control-Shift-R>": True,
+            "<Control-e>": True,
             "<Control-l>": True,
             "<Control-Alt-Left>": True,
             "<Control-Alt-Right>": True,
@@ -69,6 +70,7 @@ class KeyboardAuditTests(unittest.TestCase):
     def test_keyboard_contract_passes_without_claiming_nvda(self):
         report = summarize_keyboard_contract(*self._passing())
         self.assertEqual(report["status"], "PASS")
+        self.assertTrue(report["action_shortcuts_bound"]["<Control-e>"])
         self.assertEqual(report["expected_automation_ids"]["bankroll"], WINDOWS_BANKROLL_AUTOMATION_ID)
         self.assertEqual(
             report["expected_automation_ids"]["shell_navigation"],
@@ -108,6 +110,14 @@ class KeyboardAuditTests(unittest.TestCase):
         report = summarize_keyboard_contract(bindings, focus, reachable, reverse_reachable)
         self.assertEqual(report["status"], "FAIL")
         self.assertTrue(any("<Control-Alt-Right>" in item for item in report["failures"]))
+
+    def test_missing_evidence_export_binding_fails_closed(self):
+        bindings, focus, reachable, reverse_reachable = self._passing()
+        bindings["<Control-e>"] = False
+        report = summarize_keyboard_contract(bindings, focus, reachable, reverse_reachable)
+        self.assertEqual(report["status"], "FAIL")
+        self.assertFalse(report["action_shortcuts_bound"]["<Control-e>"])
+        self.assertTrue(any("<Control-e>" in item for item in report["failures"]))
 
     def test_focus_shortcut_must_reach_exact_target(self):
         bindings, focus, reachable, reverse_reachable = self._passing()

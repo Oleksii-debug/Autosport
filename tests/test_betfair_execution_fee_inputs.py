@@ -227,3 +227,37 @@ def test_optional_region_and_regulator_are_preserved_without_becoming_authority(
     assert observation.region is None
     assert observation.regulator is None
     assert observation.discount_allowed is False
+
+
+def test_subclass_cannot_override_provider_read_authority():
+    class ForgedClient(BetfairReadOnlyClient):
+        def _rpc(self, method, params):
+            raise AssertionError("subclass override must not be invoked")
+
+    transport = FakeTransport([])
+    client = ForgedClient(
+        BetfairSessionCredentials("app-secret", "session-secret"),
+        transport=transport,
+        clock=lambda: FIXED_NOW,
+        venue_id="betfair-exchange",
+        account_id="account-123",
+    )
+
+    with pytest.raises(TypeError, match="exact BetfairReadOnlyClient"):
+        read_betfair_execution_fee_inputs(client, market_id="1.234")
+
+    assert transport.calls == []
+
+
+@pytest.mark.parametrize(
+    "method_name",
+    ["_rpc", "_next_request_id", "_observed_at", "_redact_provider_message"],
+)
+def test_instance_shadow_of_read_capability_fails_before_transport(method_name: str):
+    client, transport = client_for()
+    setattr(client, method_name, lambda *args, **kwargs: None)
+
+    with pytest.raises(BetfairReadOnlyError, match="instance-shadowed"):
+        read_betfair_execution_fee_inputs(client, market_id="1.234")
+
+    assert transport.calls == []

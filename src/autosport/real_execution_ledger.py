@@ -1856,13 +1856,26 @@ class RealExecutionLedger:
         action_id: str,
         attempt_id: str,
         reserved_at: str | None = None,
+        expected_snapshot_sha256: str | None = None,
     ) -> ExecutionAttempt:
         _text(attempt_id, "attempt_id")
+        if expected_snapshot_sha256 is not None:
+            _sha256_text(
+                expected_snapshot_sha256,
+                "expected_snapshot_sha256",
+            )
         reserved_at = reserved_at or _now()
         _timestamp(reserved_at, "reserved_at")
 
         def operation() -> ExecutionAttempt:
-            events = self._events()
+            if expected_snapshot_sha256 is None:
+                events = self._events()
+                current_snapshot_sha256 = None
+            else:
+                self._ensure_existing_path_durable()
+                raw = self.path.read_bytes() if self.path.exists() else b""
+                events = self._parse(raw)
+                current_snapshot_sha256 = hashlib.sha256(raw).hexdigest()
             plan_event, action = self._action_payload(
                 events, plan_id, action_id
             )
@@ -1895,6 +1908,13 @@ class RealExecutionLedger:
                     action_id,
                     fingerprint,
                     prior["payload"]["reserved_at"],
+                )
+            if (
+                expected_snapshot_sha256 is not None
+                and current_snapshot_sha256 != expected_snapshot_sha256
+            ):
+                raise ExecutionStateError(
+                    "execution ledger snapshot changed; recompute admission"
                 )
             for event in events:
                 if (

@@ -15,6 +15,7 @@ from .betfair_account_readonly import (
     BetfairEvidence,
     BetfairReadOnlyClient,
     BetfairReadOnlyError,
+    BetfairSessionCredentials,
     _GET_ACCOUNT_DETAILS,
     _LIST_MARKET_CATALOGUE,
 )
@@ -88,15 +89,21 @@ def read_betfair_execution_fee_inputs(
     read-only client; it creates no second transport, credential path, provider
     client, or store. Missing, ambiguous, mismatched, or malformed data fails
     closed.
+
+    The caller's mutable client is snapshotted into a private exact client before
+    either provider read. That removes a validate-then-use race: later replacement
+    of caller identity fields or dynamic method shadows cannot alter which account
+    identity is bound to the captured provider evidence.
     """
 
-    _assert_canonical_client(client)
+    pinned_client, venue_id, account_id = _snapshot_canonical_client(client)
     market = _required_text(market_id, "market_id")
 
-    # Invoke the exact canonical implementation rather than dynamic dispatch. The
-    # preflight below also rejects instance shadows so a caller cannot replace an
-    # authority-bearing read method on an otherwise exact client instance.
-    account_response = BetfairReadOnlyClient._rpc(client, _GET_ACCOUNT_DETAILS, {})
+    account_response = BetfairReadOnlyClient._rpc(
+        pinned_client,
+        _GET_ACCOUNT_DETAILS,
+        {},
+    )
     account = _mapping(account_response.result, "getAccountDetails result")
     currency_code = _provider_text(account, "currencyCode", "currency_code")
     region = _provider_optional_text(account, "region", "region")
@@ -108,7 +115,7 @@ def read_betfair_execution_fee_inputs(
     _provider_percent(discount_rate, "discount_rate_percent")
 
     market_response = BetfairReadOnlyClient._rpc(
-        client,
+        pinned_client,
         _LIST_MARKET_CATALOGUE,
         {
             "filter": {"marketIds": [market]},
@@ -139,8 +146,6 @@ def read_betfair_execution_fee_inputs(
         raise BetfairReadOnlyError("discountAllowed must be bool")
     regulator = _provider_optional_text(description, "regulator", "regulator")
 
-    venue_id = _required_text(getattr(client, "_venue_id", None), "venue_id")
-    account_id = _required_text(getattr(client, "_account_id", None), "account_id")
     return BetfairExecutionFeeInputsObservation(
         venue_id=venue_id,
         account_id=account_id,
@@ -156,18 +161,60 @@ def read_betfair_execution_fee_inputs(
     )
 
 
-def _assert_canonical_client(client: object) -> None:
+def _snapshot_canonical_client(
+    client: object,
+) -> tuple[BetfairReadOnlyClient, str, str]:
+    """Capture one private exact-client authority image before provider I/O."""
+
     if type(client) is not BetfairReadOnlyClient:
         raise TypeError("client must be exact BetfairReadOnlyClient")
-    instance_state = vars(client)
+
+    # One dictionary copy captures the caller-owned instance image before any
+    # provider callback can run. All later RPC work happens on a private client
+    # constructed only from this image, so mutations of the original cannot race
+    # with authority-bearing dynamic dispatch or final identity binding.
+    state = vars(client).copy()
     shadowed = sorted(
-        name for name in _CLIENT_AUTHORITY_METHODS if name in instance_state
+        name for name in _CLIENT_AUTHORITY_METHODS if name in state
     )
     if shadowed:
         raise BetfairReadOnlyError(
             "BetfairReadOnlyClient read capability is instance-shadowed: "
             + ", ".join(shadowed)
         )
+
+    credentials = state.get("_credentials")
+    if type(credentials) is not BetfairSessionCredentials:
+        raise BetfairReadOnlyError(
+            "BetfairReadOnlyClient credentials are not exact canonical credentials"
+        )
+    venue_id = _required_text(state.get("_venue_id"), "venue_id")
+    account_id = _required_text(state.get("_account_id"), "account_id")
+    transport = state.get("_transport")
+    timeout_seconds = state.get("_timeout_seconds")
+    clock = state.get("_clock")
+    if transport is None:
+        raise BetfairReadOnlyError("BetfairReadOnlyClient transport is missing")
+    if not isinstance(timeout_seconds, (int, float)) or isinstance(timeout_seconds, bool):
+        raise BetfairReadOnlyError("BetfairReadOnlyClient timeout is invalid")
+    if timeout_seconds <= 0:
+        raise BetfairReadOnlyError("BetfairReadOnlyClient timeout is invalid")
+    if not callable(clock):
+        raise BetfairReadOnlyError("BetfairReadOnlyClient clock is invalid")
+
+    pinned_credentials = BetfairSessionCredentials(
+        credentials.application_key,
+        credentials.session_token,
+    )
+    pinned_client = BetfairReadOnlyClient(
+        pinned_credentials,
+        transport=transport,
+        timeout_seconds=float(timeout_seconds),
+        clock=clock,
+        venue_id=venue_id,
+        account_id=account_id,
+    )
+    return pinned_client, venue_id, account_id
 
 
 def _mapping(value: object, field: str) -> Mapping[str, object]:

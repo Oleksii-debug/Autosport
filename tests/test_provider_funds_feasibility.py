@@ -351,3 +351,25 @@ def test_snapshot_subclass_is_rejected_as_positive_authority() -> None:
             decision_ts=_T2,
             max_balance_age_seconds=Decimal("10"),
         )
+
+
+def test_provider_currency_contract_accepts_non_iso_provider_code() -> None:
+    report = assess_provider_funds(
+        (_allocation("leg-1", currency="USDT"),),
+        (
+            _snapshot(
+                venue_id="A",
+                account_id="acct-a",
+                amount="100",
+                currency="USDT",
+            ),
+        ),
+        decision_ts=_T2,
+        max_balance_age_seconds=Decimal("10"),
+    )
+
+    assert (
+        report.assessments[0].state
+        is ProviderFundsState.SNAPSHOT_SUFFICIENT_BUT_UNRESERVED
+    )
+    assert report.assessments[0].currency == "USDT"

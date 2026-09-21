@@ -4,6 +4,7 @@ import pytest
 
 from autosport.domain import MarketEvent
 from autosport.providers import CanonicalNormalizer, ProviderQuote
+from autosport.storage import SQLiteMarketStore
 
 
 _TS = "2026-09-21T20:00:00+00:00"
@@ -86,6 +87,31 @@ def test_exchange_side_round_trips_without_changing_selection_identity() -> None
     assert restored == event
     assert restored.selection_id == "runner-1"
     assert restored.exchange_side == "lay"
+
+
+def test_back_and_lay_survive_durable_store_reopen_as_distinct_current_quotes(
+    tmp_path,
+) -> None:
+    path = tmp_path / "exchange-side.db"
+    back = _event(exchange_side="back")
+    lay = _event(exchange_side="lay")
+
+    store = SQLiteMarketStore(path)
+    assert store.append(back) is True
+    assert store.append(lay) is True
+    store.close()
+
+    reopened = SQLiteMarketStore(path)
+    try:
+        events = reopened.events()
+        current = reopened.current_by_source()
+    finally:
+        reopened.close()
+
+    assert {event.exchange_side for event in events} == {"back", "lay"}
+    assert {event.quote_key for event in events} == {back.quote_key, lay.quote_key}
+    assert current[("book", back.quote_key)].exchange_side == "back"
+    assert current[("book", lay.quote_key)].exchange_side == "lay"
 
 
 @pytest.mark.parametrize("exchange_side", ["BACK", "Lay", "back ", "", "buy"])

@@ -76,11 +76,12 @@ def _require_workspace_decision_ledger(
     workspace: object,
     *,
     producer: str,
+    _resolved_path_fn=_resolved_path,
 ) -> None:
     """Fail closed unless authority comes from this product workspace's ledger."""
 
-    expected = _resolved_path(Path(workspace) / "decisions.jsonl")  # type: ignore[arg-type]
-    actual = _resolved_path(getattr(ledger, "path", None))
+    expected = _resolved_path_fn(Path(workspace) / "decisions.jsonl")  # type: ignore[arg-type]
+    actual = _resolved_path_fn(getattr(ledger, "path", None))
     if actual != expected:
         raise _origin.PaperExecutionDecisionOriginError(
             f"{producer} decision origin requires canonical workspace decisions.jsonl"
@@ -88,10 +89,17 @@ def _require_workspace_decision_ledger(
 
 
 @wraps(_STABLE_LIVE_INIT)
-def _live_init_with_canonical_decision_ledger(self, *args, **kwargs) -> None:
+def _live_init_with_canonical_decision_ledger(
+    self,
+    *args,
+    _stable_live_init=_STABLE_LIVE_INIT,
+    _stable_live_init_signature=_STABLE_LIVE_INIT_SIGNATURE,
+    _require_workspace_fn=_require_workspace_decision_ledger,
+    **kwargs,
+) -> None:
     """Treat a caller-supplied live ledger as an assertion, never path authority."""
 
-    bound = _STABLE_LIVE_INIT_SIGNATURE.bind(self, *args, **kwargs)
+    bound = _stable_live_init_signature.bind(self, *args, **kwargs)
     bound.apply_defaults()
     workspace = bound.arguments.get("workspace")
     supplied_ledger = bound.arguments.get("decision_ledger")
@@ -101,13 +109,13 @@ def _live_init_with_canonical_decision_ledger(self, *args, **kwargs) -> None:
             raise _origin.PaperExecutionDecisionOriginError(
                 "live decision origin requires exact JsonlDecisionLedger authority"
             )
-        _require_workspace_decision_ledger(
+        _require_workspace_fn(
             supplied_ledger,
             workspace,
             producer="live",
         )
 
-    _STABLE_LIVE_INIT(self, *args, **kwargs)
+    _stable_live_init(self, *args, **kwargs)
 
     runtime = getattr(self, "paper_execution", None)
     if runtime is not None:
@@ -116,7 +124,7 @@ def _live_init_with_canonical_decision_ledger(self, *args, **kwargs) -> None:
             raise _origin.PaperExecutionDecisionOriginError(
                 "live decision origin requires exact JsonlDecisionLedger authority"
             )
-        _require_workspace_decision_ledger(
+        _require_workspace_fn(
             ledger,
             getattr(self, "workspace", workspace),
             producer="live",
@@ -127,13 +135,24 @@ def _origin_from_direct_caller(
     runtime: PaperExecutionAdoptionRuntime,
     decision_id: str,
     caller: FrameType,
+    *,
+    _live_loop_class=_LIVE_LOOP_CLASS,
+    _live_persist_plan_code=_LIVE_PERSIST_PLAN_CODE,
+    _paper_value_agent_class=_PAPER_VALUE_AGENT_CLASS,
+    _paper_value_fresh_code=_PAPER_VALUE_FRESH_CODE,
+    _paper_value_recovery_code=_PAPER_VALUE_RECOVERY_CODE,
+    _decision_record_class=_DECISION_RECORD_CLASS,
+    _verified_origin=_instance_guard._verified_decision_origin_without_instance_dispatch,
+    _require_workspace_fn=_require_workspace_decision_ledger,
+    _resolved_path_fn=_resolved_path,
+    _exact_context_ledger=_origin._exact_context_ledger,
 ):
     """Resolve origin only when the canonical producer directly calls execute."""
 
     local = caller.f_locals
-    if caller.f_code is _LIVE_PERSIST_PLAN_CODE:
+    if caller.f_code is _live_persist_plan_code:
         owner = local.get("self")
-        if type(owner) is not _LIVE_LOOP_CLASS:
+        if type(owner) is not _live_loop_class:
             raise _origin.PaperExecutionDecisionOriginError(
                 "live decision origin requires exact PersistentLiveDecisionLoop authority"
             )
@@ -146,7 +165,7 @@ def _origin_from_direct_caller(
             raise _origin.PaperExecutionDecisionOriginError(
                 "live decision origin requires exact JsonlDecisionLedger authority"
             )
-        _require_workspace_decision_ledger(
+        _require_workspace_fn(
             ledger,
             getattr(owner, "workspace", None),
             producer="live",
@@ -155,16 +174,16 @@ def _origin_from_direct_caller(
             raise _origin.PaperExecutionDecisionOriginError(
                 "live decision call-site identity does not match execution plan"
             )
-        return _instance_guard._verified_decision_origin_without_instance_dispatch(
+        return _verified_origin(
             ledger,
             decision_id,
         )
 
-    if caller.f_code is _PAPER_VALUE_FRESH_CODE:
+    if caller.f_code is _paper_value_fresh_code:
         context = local.get("context")
         agent = local.get("self")
         event = local.get("event")
-        if type(agent) is not _PAPER_VALUE_AGENT_CLASS:
+        if type(agent) is not _paper_value_agent_class:
             raise _origin.PaperExecutionDecisionOriginError(
                 "paper-value origin requires exact PaperValueAgent authority"
             )
@@ -172,31 +191,31 @@ def _origin_from_direct_caller(
             raise _origin.PaperExecutionDecisionOriginError(
                 "paper-value decision call-site identity does not match execution plan"
             )
-        ledger = _origin._exact_context_ledger(runtime, context)
-        _require_workspace_decision_ledger(
+        ledger = _exact_context_ledger(runtime, context)
+        _require_workspace_fn(
             ledger,
-            _resolved_path(getattr(runtime, "paper_book_path", None)).parent,
+            _resolved_path_fn(getattr(runtime, "paper_book_path", None)).parent,
             producer="paper-value",
         )
-        return _instance_guard._verified_decision_origin_without_instance_dispatch(
+        return _verified_origin(
             ledger,
             decision_id,
         )
 
-    if caller.f_code is _PAPER_VALUE_RECOVERY_CODE:
+    if caller.f_code is _paper_value_recovery_code:
         context = local.get("context")
         record = local.get("record")
-        if type(record) is not _DECISION_RECORD_CLASS or record.decision_id != decision_id:
+        if type(record) is not _decision_record_class or record.decision_id != decision_id:
             raise _origin.PaperExecutionDecisionOriginError(
                 "paper-value recovery call-site identity does not match execution plan"
             )
-        ledger = _origin._exact_context_ledger(runtime, context)
-        _require_workspace_decision_ledger(
+        ledger = _exact_context_ledger(runtime, context)
+        _require_workspace_fn(
             ledger,
-            _resolved_path(getattr(runtime, "paper_book_path", None)).parent,
+            _resolved_path_fn(getattr(runtime, "paper_book_path", None)).parent,
             producer="paper-value",
         )
-        return _instance_guard._verified_decision_origin_without_instance_dispatch(
+        return _verified_origin(
             ledger,
             decision_id,
         )
@@ -208,37 +227,44 @@ def _matching_product_ancestor(
     runtime: PaperExecutionAdoptionRuntime,
     decision_id: str,
     frame: FrameType | None,
+    *,
+    _live_loop_class=_LIVE_LOOP_CLASS,
+    _live_persist_plan_code=_LIVE_PERSIST_PLAN_CODE,
+    _paper_value_agent_class=_PAPER_VALUE_AGENT_CLASS,
+    _paper_value_fresh_code=_PAPER_VALUE_FRESH_CODE,
+    _paper_value_recovery_code=_PAPER_VALUE_RECOVERY_CODE,
+    _decision_record_class=_DECISION_RECORD_CLASS,
 ) -> bool:
     """Detect canonical ancestors only to reject nested execution, never authorize."""
 
     current = frame
     while current is not None:
         local = current.f_locals
-        if current.f_code is _LIVE_PERSIST_PLAN_CODE:
+        if current.f_code is _live_persist_plan_code:
             owner = local.get("self")
             if (
-                type(owner) is _LIVE_LOOP_CLASS
+                type(owner) is _live_loop_class
                 and getattr(owner, "paper_execution", None) is runtime
                 and local.get("decision_id") == decision_id
             ):
                 return True
-        elif current.f_code is _PAPER_VALUE_FRESH_CODE:
+        elif current.f_code is _paper_value_fresh_code:
             context = local.get("context")
             agent = local.get("self")
             event = local.get("event")
             if (
-                type(agent) is _PAPER_VALUE_AGENT_CLASS
+                type(agent) is _paper_value_agent_class
                 and getattr(context, "paper_execution", None) is runtime
                 and event is not None
                 and agent._material_action_id(context, event) == decision_id
             ):
                 return True
-        elif current.f_code is _PAPER_VALUE_RECOVERY_CODE:
+        elif current.f_code is _paper_value_recovery_code:
             context = local.get("context")
             record = local.get("record")
             if (
                 getattr(context, "paper_execution", None) is runtime
-                and type(record) is _DECISION_RECORD_CLASS
+                and type(record) is _decision_record_class
                 and record.decision_id == decision_id
             ):
                 return True
@@ -256,8 +282,9 @@ def _execute_stable(
     observations,
     evidence_registry,
     suspended_action_ids: frozenset[str],
+    _stable_runtime_execute=_STABLE_RUNTIME_EXECUTE,
 ):
-    return _STABLE_RUNTIME_EXECUTE(
+    return _stable_runtime_execute(
         self,
         prepared=prepared,
         trigger_id=trigger_id,
@@ -279,11 +306,21 @@ def _execute_with_exact_product_callsite(
     observations=None,
     evidence_registry=None,
     suspended_action_ids: frozenset[str] = frozenset(),
+    _origin_from_direct_caller_fn=_origin_from_direct_caller,
+    _matching_product_ancestor_fn=_matching_product_ancestor,
+    _execute_stable_fn=_execute_stable,
+    _product_origin_runtime=_instance_guard._PRODUCT_ORIGIN_RUNTIME,
+    _product_origin_callsite_code=_instance_guard._PRODUCT_ORIGIN_CALLSITE_CODE,
+    _paper_value_fresh_code=_PAPER_VALUE_FRESH_CODE,
+    _paper_value_recovery_code=_PAPER_VALUE_RECOVERY_CODE,
 ):
-    # A runtime token can only exist inside this wrapper's own stable execution.
+    # A capability token can only exist inside this wrapper's own stable execution.
     # Seeing one at entry means a caller tried to smuggle product authority across
     # an invocation boundary.
-    if _instance_guard._PRODUCT_ORIGIN_RUNTIME.get() is not None:
+    if (
+        _product_origin_runtime.get() is not None
+        or _product_origin_callsite_code.get() is not None
+    ):
         raise _origin.PaperExecutionDecisionOriginError(
             "caller-supplied product-origin runtime context is not authority"
         )
@@ -295,7 +332,7 @@ def _execute_with_exact_product_callsite(
             raise _origin.PaperExecutionDecisionOriginError(
                 "caller-supplied decision-origin context cannot authorize execution"
             )
-        return _execute_stable(
+        return _execute_stable_fn(
             self,
             prepared=prepared,
             trigger_id=trigger_id,
@@ -313,14 +350,14 @@ def _execute_with_exact_product_callsite(
         origin = (
             None
             if caller is None
-            else _origin_from_direct_caller(self, decision_id, caller)
+            else _origin_from_direct_caller_fn(self, decision_id, caller)
         )
 
         if ambient_origin is not None:
             if (
                 caller is None
                 or caller.f_code
-                not in {_PAPER_VALUE_FRESH_CODE, _PAPER_VALUE_RECOVERY_CODE}
+                not in {_paper_value_fresh_code, _paper_value_recovery_code}
                 or origin is None
                 or origin != ambient_origin
             ):
@@ -330,7 +367,7 @@ def _execute_with_exact_product_callsite(
 
         if origin is None:
             ancestor = None if caller is None else caller.f_back
-            if _matching_product_ancestor(self, decision_id, ancestor):
+            if _matching_product_ancestor_fn(self, decision_id, ancestor):
                 raise PaperExecutionAdoptionError(
                     "nested PAPER execution cannot inherit product decision-origin authority"
                 )
@@ -338,7 +375,7 @@ def _execute_with_exact_product_callsite(
                 raise _origin.PaperExecutionDecisionOriginError(
                     "ambient decision origin cannot authorize non-product execution"
                 )
-            return _execute_stable(
+            return _execute_stable_fn(
                 self,
                 prepared=prepared,
                 trigger_id=trigger_id,
@@ -352,13 +389,18 @@ def _execute_with_exact_product_callsite(
             raise PaperExecutionAdoptionError(
                 "product execution trigger does not match verified DecisionLedger origin"
             )
+        if current is None:
+            raise _origin.PaperExecutionDecisionOriginError(
+                "canonical product callsite frame is unavailable"
+            )
 
         origin_token = None
         if ambient_origin is None:
             origin_token = _origin._DECISION_ORIGIN.set(origin)
-        runtime_token = _instance_guard._PRODUCT_ORIGIN_RUNTIME.set(self)
+        runtime_token = _product_origin_runtime.set(self)
+        callsite_token = _product_origin_callsite_code.set(current.f_code)
         try:
-            return _execute_stable(
+            return _execute_stable_fn(
                 self,
                 prepared=prepared,
                 trigger_id=trigger_id,
@@ -369,7 +411,8 @@ def _execute_with_exact_product_callsite(
                 suspended_action_ids=suspended_action_ids,
             )
         finally:
-            _instance_guard._PRODUCT_ORIGIN_RUNTIME.reset(runtime_token)
+            _product_origin_callsite_code.reset(callsite_token)
+            _product_origin_runtime.reset(runtime_token)
             if origin_token is not None:
                 _origin._DECISION_ORIGIN.reset(origin_token)
     finally:

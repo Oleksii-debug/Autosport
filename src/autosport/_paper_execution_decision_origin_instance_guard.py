@@ -28,10 +28,19 @@ _CALLSITE_EXECUTE_CODE_SENTINEL = (
 )
 _SEAL_MARKER = "autosport.paper_execution_decision_origin.instance_guard.seal.v1"
 
-_PRODUCT_ORIGIN_RUNTIME: ContextVar[PaperExecutionAdoptionRuntime | None] = ContextVar(
-    "autosport_paper_execution_product_origin_runtime",
-    default=None,
-)
+# Preserve the exact context identities across importlib.reload. Installed guard
+# closures keep these objects as their execution-capability channel; replacing a
+# module attribute must never manufacture a new authority channel.
+if "_PRODUCT_ORIGIN_RUNTIME" not in globals():
+    _PRODUCT_ORIGIN_RUNTIME: ContextVar[PaperExecutionAdoptionRuntime | None] = ContextVar(
+        "autosport_paper_execution_product_origin_runtime",
+        default=None,
+    )
+if "_PRODUCT_ORIGIN_CALLSITE_CODE" not in globals():
+    _PRODUCT_ORIGIN_CALLSITE_CODE: ContextVar[object | None] = ContextVar(
+        "autosport_paper_execution_product_origin_callsite_code",
+        default=None,
+    )
 
 
 def _instance_shadows(obj: object, method_name: str) -> bool:
@@ -65,6 +74,12 @@ def _initial_seal():
 
 
 def _build_guard(seal):
+    # Capture the capability contexts in this installed guard closure. The class
+    # sentinel remains a compatibility/debug mirror only; it is no longer read as
+    # positive authorization at reservation time.
+    product_origin_runtime = _PRODUCT_ORIGIN_RUNTIME
+    product_origin_callsite_code = _PRODUCT_ORIGIN_CALLSITE_CODE
+
     def verified_decision_origin_without_instance_dispatch(
         ledger: JsonlDecisionLedger,
         decision_id: str,
@@ -104,16 +119,12 @@ def _build_guard(seal):
     ) -> None:
         """Reject caller-injected ambient origin outside the exact product path."""
 
-        runtime = _PRODUCT_ORIGIN_RUNTIME.get()
+        runtime = product_origin_runtime.get()
         if type(runtime) is not PaperExecutionAdoptionRuntime:
             raise _origin.PaperExecutionDecisionOriginError(
                 "decision origin context is not bound to canonical product execution"
             )
-        expected_callsite_code = getattr(
-            PaperExecutionAdoptionRuntime,
-            _CALLSITE_EXECUTE_CODE_SENTINEL,
-            None,
-        )
+        expected_callsite_code = product_origin_callsite_code.get()
         if expected_callsite_code is None:
             raise _origin.PaperExecutionDecisionOriginError(
                 "canonical product callsite identity is unavailable"

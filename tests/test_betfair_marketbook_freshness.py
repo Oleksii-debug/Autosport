@@ -4,6 +4,7 @@ import json
 
 import pytest
 
+import autosport.betfair_account_readonly as betfair_account_readonly
 from autosport.betfair_account_readonly import (
     ADAPTER_ID,
     ADAPTER_VERSION,
@@ -37,6 +38,20 @@ class FakeTransport:
             }
         )
         return self.payload
+
+
+class FakeNetworkResponse:
+    def __init__(self, payload: bytes) -> None:
+        self.payload = payload
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        return False
+
+    def read(self, max_bytes: int) -> bytes:
+        return self.payload[:max_bytes]
 
 
 def _payload(
@@ -201,3 +216,116 @@ def test_exact_canonical_client_type_is_required():
 
     with pytest.raises(TypeError, match="exact BetfairReadOnlyClient"):
         read_market_book_delay(client, "1.234")
+
+
+def _canonical_network_capture(
+    monkeypatch,
+    *,
+    metadata_application_key: str = "app-secret",
+    delay_data: object = False,
+    active: object = True,
+    market_delayed: object = False,
+):
+    calls = []
+
+    def fake_urlopen(request, timeout):
+        headers = {key.lower(): value for key, value in request.header_items()}
+        body = json.loads(request.data.decode("utf-8"))
+        calls.append((request.full_url, headers, body))
+        request_id = body["id"]
+        if body["method"] == "SportsAPING/v1.0/listMarketBook":
+            payload = {
+                "jsonrpc": "2.0",
+                "result": [
+                    {
+                        "marketId": "1.234",
+                        "isMarketDataDelayed": market_delayed,
+                    }
+                ],
+                "id": request_id,
+            }
+        elif body["method"] == "AccountAPING/v1.0/getDeveloperAppKeys":
+            payload = {
+                "jsonrpc": "2.0",
+                "result": [
+                    {
+                        "appName": "autosport-test",
+                        "appId": 101,
+                        "appVersions": [
+                            {
+                                "owner": "synthetic-owner",
+                                "versionId": 202,
+                                "version": "synthetic-1",
+                                "applicationKey": metadata_application_key,
+                                "delayData": delay_data,
+                                "subscriptionRequired": False,
+                                "ownerManaged": False,
+                                "active": active,
+                            }
+                        ],
+                    }
+                ],
+                "id": request_id,
+            }
+        else:
+            raise AssertionError(f"unexpected Betfair method: {body['method']}")
+        return FakeNetworkResponse(
+            json.dumps(payload, separators=(",", ":")).encode("utf-8")
+        )
+
+    monkeypatch.setattr(betfair_account_readonly, "urlopen", fake_urlopen)
+    client = BetfairReadOnlyClient(
+        BetfairSessionCredentials("app-secret", "session-secret"),
+        venue_id="betfair-global",
+        account_id="configured-account",
+    )
+    observation = read_market_book_delay(client, "1.234")
+    return observation, calls
+
+
+def test_canonical_network_observation_binds_authenticated_live_app_context(monkeypatch):
+    observation, calls = _canonical_network_capture(monkeypatch)
+
+    observation.assert_positive_authoritative()
+    assert observation.application_key_class == "live"
+    assert observation.authenticated_context_sha256 is not None
+    assert observation.developer_app_id == 101
+    assert observation.application_version_id == 202
+    assert observation.application_key_delay_data is False
+    assert observation.application_key_active is True
+    assert observation.application_key_owner_managed is False
+    assert "app-secret" not in repr(observation)
+    assert "session-secret" not in repr(observation)
+
+    developer_call = next(
+        call
+        for call in calls
+        if call[2]["method"] == "AccountAPING/v1.0/getDeveloperAppKeys"
+    )
+    assert "x-authentication" in developer_call[1]
+    assert "x-application" not in developer_call[1]
+    assert b"app-secret" not in json.dumps(developer_call[2]).encode("utf-8")
+    assert b"session-secret" not in json.dumps(developer_call[2]).encode("utf-8")
+
+
+def test_authenticated_metadata_must_match_exact_application_key(monkeypatch):
+    with pytest.raises(
+        BetfairMarketBookFreshnessError,
+        match="must match exactly one provider app version",
+    ):
+        _canonical_network_capture(
+            monkeypatch,
+            metadata_application_key="different-app-key",
+        )
+
+
+@pytest.mark.parametrize("delay_data", [0, 1, "false", None, [], {}])
+def test_authenticated_delay_data_must_be_exact_bool(monkeypatch, delay_data):
+    with pytest.raises(BetfairMarketBookFreshnessError, match="delayData must be bool"):
+        _canonical_network_capture(monkeypatch, delay_data=delay_data)
+
+
+@pytest.mark.parametrize("active", [0, 1, "true", None, [], {}])
+def test_authenticated_app_active_must_be_exact_bool(monkeypatch, active):
+    with pytest.raises(BetfairMarketBookFreshnessError, match="active must be bool"):
+        _canonical_network_capture(monkeypatch, active=active)

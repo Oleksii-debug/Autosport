@@ -1,5 +1,6 @@
 from decimal import Decimal, localcontext
 import json
+from threading import Event, Thread
 
 import pytest
 
@@ -729,3 +730,66 @@ def test_crash_after_local_publish_before_commit_recovers_exact_prepare(
     restarted = BookmakerAccountReconciliationStore(path)
     assert restarted.history() == (first,)
     assert restarted.append_snapshot(first) is False
+
+
+
+def test_reader_cannot_abort_writer_pending_monotonic_transition(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    path = tmp_path / "account.json"
+    store = BookmakerAccountReconciliationStore(path)
+    first = _snapshot(_T1)
+    writer_prepared = Event()
+    allow_publish = Event()
+    reader_started = Event()
+    reader_done = Event()
+    writer_errors: list[BaseException] = []
+    reader_errors: list[BaseException] = []
+    reader_history: list[BookmakerAccountSnapshot] = []
+    original_publish = store._publish_history_bytes
+
+    def held_publish(encoded: bytes) -> None:
+        writer_prepared.set()
+        if not allow_publish.wait(timeout=5):
+            raise RuntimeError("test timed out waiting to publish")
+        original_publish(encoded)
+
+    def writer() -> None:
+        try:
+            store.append_snapshot(first)
+        except BaseException as exc:
+            writer_errors.append(exc)
+
+    def reader() -> None:
+        reader_started.set()
+        try:
+            reader_history.extend(BookmakerAccountReconciliationStore(path).history())
+        except BaseException as exc:
+            reader_errors.append(exc)
+        finally:
+            reader_done.set()
+
+    monkeypatch.setattr(store, "_publish_history_bytes", held_publish)
+    writer_thread = Thread(target=writer)
+    writer_thread.start()
+    assert writer_prepared.wait(timeout=5)
+
+    reader_thread = Thread(target=reader)
+    reader_thread.start()
+    assert reader_started.wait(timeout=5)
+
+    # Recovery is mutating: a reader must wait behind the same store lock while the
+    # writer has an authority PREPARE, otherwise it could observe old local bytes and
+    # abort the writer's pending transaction.
+    assert not reader_done.wait(timeout=0.2)
+
+    allow_publish.set()
+    writer_thread.join(timeout=5)
+    reader_thread.join(timeout=5)
+
+    assert not writer_thread.is_alive()
+    assert not reader_thread.is_alive()
+    assert writer_errors == []
+    assert reader_errors == []
+    assert tuple(reader_history) == (first,)

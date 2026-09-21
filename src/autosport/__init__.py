@@ -135,3 +135,6 @@ from . import _point_in_time_class_dispatch_seal as _point_in_time_class_dispatc
 # the provisional admission facade first, then closure-seal its authority reads.
 from . import _paper_campaign_admission_origin_convergence as _paper_campaign_admission_origin_convergence  # noqa: F401,E402
 from . import _paper_campaign_admission_consumer_guard as _paper_campaign_admission_consumer_guard  # noqa: F401,E402
+# Extend that same executable seal through canonical PaperBook ticket resolution;
+# no new ticket/source authority is introduced here.
+from . import _paper_campaign_admission_ticket_resolution_guard as _paper_campaign_admission_ticket_resolution_guard  # noqa: F401,E402

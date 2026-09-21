@@ -794,6 +794,10 @@ def _parse_place_orders_response(
         raise BetfairPlaceOrdersAmbiguous(
             "placeOrders report has unsupported/nonterminal status"
         )
+    if status == "SUCCESS" and result.get("errorCode") is not None:
+        raise BetfairPlaceOrdersAmbiguous(
+            "successful placeOrders execution must not include errorCode"
+        )
     reports = _sequence(
         result.get("instructionReports"),
         "instructionReports",

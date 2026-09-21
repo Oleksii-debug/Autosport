@@ -108,12 +108,14 @@ _CANONICAL_ARTIFACT_DIRECTORY = "factory-artifacts"
 
 # Capture the concrete authority surface at import.  Positive reads/writes never
 # dispatch through caller-installed instance or class shadows.
-_REGISTRY_GET = ScientificRegistry.get
-_REGISTRY_APPEND = ScientificRegistry.append
-_STORE_READ = FactoryArtifactStore.read
-_STORE_SHA256 = FactoryArtifactStore.sha256
-_STORE_MATERIALIZE = FactoryArtifactStore.materialize
-_STORE_RECEIPT = FactoryArtifactStore.materialization_receipt
+_REGISTRY_TYPE = ScientificRegistry
+_STORE_TYPE = FactoryArtifactStore
+_REGISTRY_GET = _REGISTRY_TYPE.get
+_REGISTRY_APPEND = _REGISTRY_TYPE.append
+_STORE_READ = _STORE_TYPE.read
+_STORE_SHA256 = _STORE_TYPE.sha256
+_STORE_MATERIALIZE = _STORE_TYPE.materialize
+_STORE_RECEIPT = _STORE_TYPE.materialization_receipt
 
 
 def _text(value: object, field: str) -> str:
@@ -191,7 +193,7 @@ def _digest(payload: Mapping[str, Any] | Sequence[Any]) -> str:
 
 
 def _require_registry(registry: object) -> ScientificRegistry:
-    if type(registry) is not ScientificRegistry:
+    if type(registry) is not _REGISTRY_TYPE:
         raise ProductPolicyEvaluationIssuanceError(
             "registry must be the exact ScientificRegistry authority"
         )
@@ -200,8 +202,8 @@ def _require_registry(registry: object) -> ScientificRegistry:
             "ScientificRegistry instance authority was rebound"
         )
     if (
-        ScientificRegistry.get is not _REGISTRY_GET
-        or ScientificRegistry.append is not _REGISTRY_APPEND
+        _REGISTRY_TYPE.get is not _REGISTRY_GET
+        or _REGISTRY_TYPE.append is not _REGISTRY_APPEND
     ):
         raise ProductPolicyEvaluationIssuanceError(
             "ScientificRegistry executable authority was rebound"
@@ -210,7 +212,7 @@ def _require_registry(registry: object) -> ScientificRegistry:
 
 
 def _require_store(store: object) -> FactoryArtifactStore:
-    if type(store) is not FactoryArtifactStore:
+    if type(store) is not _STORE_TYPE:
         raise ProductPolicyEvaluationIssuanceError(
             "artifact_store must be the exact FactoryArtifactStore authority"
         )
@@ -219,10 +221,10 @@ def _require_store(store: object) -> FactoryArtifactStore:
             "FactoryArtifactStore instance authority was rebound"
         )
     if (
-        FactoryArtifactStore.read is not _STORE_READ
-        or FactoryArtifactStore.sha256 is not _STORE_SHA256
-        or FactoryArtifactStore.materialize is not _STORE_MATERIALIZE
-        or FactoryArtifactStore.materialization_receipt is not _STORE_RECEIPT
+        _STORE_TYPE.read is not _STORE_READ
+        or _STORE_TYPE.sha256 is not _STORE_SHA256
+        or _STORE_TYPE.materialize is not _STORE_MATERIALIZE
+        or _STORE_TYPE.materialization_receipt is not _STORE_RECEIPT
     ):
         raise ProductPolicyEvaluationIssuanceError(
             "FactoryArtifactStore executable authority was rebound"
@@ -276,13 +278,23 @@ def _open_canonical_authorities(
             "canonical product FactoryArtifactStore is missing"
         )
     try:
-        registry = ScientificRegistry(registry_path)
-        store = FactoryArtifactStore(artifact_root)
+        registry = _REGISTRY_TYPE(registry_path)
+        store = _STORE_TYPE(artifact_root)
     except (OSError, ValueError) as exc:
         raise ProductPolicyEvaluationIssuanceError(
             "canonical product evaluator authorities cannot be reopened"
         ) from exc
-    return _require_registry(registry), _require_store(store)
+    registry = _require_registry(registry)
+    store = _require_store(store)
+    if registry.path != registry_path:
+        raise ProductPolicyEvaluationIssuanceError(
+            "canonical ScientificRegistry path was redirected"
+        )
+    if store.root != artifact_root:
+        raise ProductPolicyEvaluationIssuanceError(
+            "canonical FactoryArtifactStore root was redirected"
+        )
+    return registry, store
 
 
 def _registry_get(registry: ScientificRegistry, record_type: str, record_id: str):

@@ -93,6 +93,12 @@ def _instant(value: str) -> datetime:
     return datetime.fromisoformat(value.replace("Z", "+00:00"))
 
 
+def _publication_deadline_reached(observation_not_before: str) -> bool:
+    """Return whether a new canonical publication would no longer be prospective."""
+
+    return datetime.now(timezone.utc) >= _instant(observation_not_before)
+
+
 def _canonical_bytes(value: object) -> bytes:
     return json.dumps(
         value,
@@ -192,6 +198,7 @@ def _publish_bound_posix_file_once(
     parent_fd: int,
     name: str,
     encoded: bytes,
+    observation_not_before: str,
 ) -> bool:
     """Publish complete bytes atomically without exposing a partial canonical leaf."""
 
@@ -222,6 +229,11 @@ def _publish_bound_posix_file_once(
             handle.write(encoded)
             handle.flush()
             os.fsync(handle.fileno())
+
+        if _publication_deadline_reached(observation_not_before):
+            raise CampaignPrecommitManifestError(
+                "first campaign precommit publication must precede prospective observation"
+            )
 
         try:
             os.link(
@@ -716,6 +728,7 @@ def _publish_bound_windows_file_once(
     parent_handle: int,
     name: str,
     encoded: bytes,
+    observation_not_before: str,
 ) -> bool:
     """Publish complete bytes by handle-relative no-clobber rename on Windows."""
 
@@ -887,6 +900,10 @@ def _publish_bound_windows_file_once(
         rename_info.RootDirectory = parent_handle
         rename_info.FileNameLength = len(name.encode("utf-16-le"))
         rename_info.FileName = name
+        if _publication_deadline_reached(observation_not_before):
+            raise CampaignPrecommitManifestError(
+                "first campaign precommit publication must precede prospective observation"
+            )
         if not set_file_information(
             handle,
             file_rename_info_class,
@@ -1174,11 +1191,25 @@ def write_campaign_precommit_manifest_once(
             _open_bound_windows_parent_directory(target.parent)
         )
         try:
-            published = _publish_bound_windows_file_once(
-                parent_handle,
-                name,
-                encoded,
-            )
+            if _publication_deadline_reached(manifest.observation_not_before):
+                try:
+                    existing = _read_bound_windows_file_bytes(parent_handle, name)
+                except CampaignPrecommitManifestError as exc:
+                    raise CampaignPrecommitManifestError(
+                        "first campaign precommit publication must precede prospective observation"
+                    ) from exc
+                if existing != encoded:
+                    raise CampaignPrecommitManifestError(
+                        "existing campaign precommit manifest conflicts with precommit"
+                    )
+                published = False
+            else:
+                published = _publish_bound_windows_file_once(
+                    parent_handle,
+                    name,
+                    encoded,
+                    manifest.observation_not_before,
+                )
             if not published:
                 existing = _read_bound_windows_file_bytes(parent_handle, name)
                 if existing != encoded:
@@ -1200,11 +1231,25 @@ def write_campaign_precommit_manifest_once(
 
     parent_fd, absolute_parent = _open_bound_posix_parent_directory(target.parent)
     try:
-        published = _publish_bound_posix_file_once(
-            parent_fd,
-            name,
-            encoded,
-        )
+        if _publication_deadline_reached(manifest.observation_not_before):
+            try:
+                existing = _read_bound_posix_file_bytes(parent_fd, name)
+            except CampaignPrecommitManifestError as exc:
+                raise CampaignPrecommitManifestError(
+                    "first campaign precommit publication must precede prospective observation"
+                ) from exc
+            if existing != encoded:
+                raise CampaignPrecommitManifestError(
+                    "existing campaign precommit manifest conflicts with precommit"
+                )
+            published = False
+        else:
+            published = _publish_bound_posix_file_once(
+                parent_fd,
+                name,
+                encoded,
+                manifest.observation_not_before,
+            )
         if not published:
             existing = _read_bound_posix_file_bytes(parent_fd, name)
             if existing != encoded:

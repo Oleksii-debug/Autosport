@@ -14,14 +14,17 @@ import hashlib
 import importlib.abc
 import importlib.machinery
 import json
+import marshal
 import os
 from pathlib import Path
 import sys
+from types import CodeType, FunctionType
 import weakref
 
 from . import _dataset_snapshot_lineage_publication_trust_root as lineage_trust_root
 from . import dataset_snapshot_lineage as lineage_module
 from . import point_in_time_evidence as evidence
+from . import scientific_registry as registry_module
 from .dataset_snapshot_lineage import DatasetSnapshotLineageAuthority
 from .monotonic_workspace_authority import (
     MonotonicWorkspaceAuthority,
@@ -110,11 +113,103 @@ def _reject_instance_method_shadows(
         )
 
 
+def _walk_code_objects(code: CodeType):
+    """Yield one compiled source tree without executing the source."""
+
+    yield code
+    for constant in code.co_consts:
+        if type(constant) is CodeType:
+            yield from _walk_code_objects(constant)
+
+
+def _canonical_code_sha256(
+    module: object,
+    *,
+    expected_qualname: str,
+    live_function: FunctionType,
+) -> str:
+    """Compile canonical source and return the exact callable bytecode identity."""
+
+    spec = getattr(module, "__spec__", None)
+    origin = getattr(spec, "origin", None)
+    if type(origin) is not str or not origin:
+        raise ValueError("canonical module source origin is unavailable")
+    origin_path = Path(origin).resolve(strict=True)
+    live_path = Path(live_function.__code__.co_filename).resolve(strict=True)
+    if live_path != origin_path:
+        raise ValueError("live callable does not originate from canonical module source")
+    source = origin_path.read_text(encoding="utf-8")
+    compiled = compile(
+        source,
+        live_function.__code__.co_filename,
+        "exec",
+        dont_inherit=True,
+        optimize=sys.flags.optimize,
+    )
+    matches = tuple(
+        candidate
+        for candidate in _walk_code_objects(compiled)
+        if candidate.co_qualname == expected_qualname
+    )
+    if len(matches) != 1:
+        raise ValueError("canonical callable source identity is ambiguous")
+    return hashlib.sha256(marshal.dumps(matches[0])).hexdigest()
+
+
+def _require_source_backed_class_method(
+    concrete_type: type,
+    module: object,
+    *,
+    method_name: str,
+    expected_qualname: str,
+    authority_name: str,
+) -> None:
+    """Reject in-process class dispatch that differs from canonical source bytes."""
+
+    if getattr(module, concrete_type.__name__, None) is not concrete_type:
+        raise evidence.PointInTimeEvidenceError(
+            f"trusted {authority_name} class identity changed"
+        )
+    descriptor = concrete_type.__dict__.get(method_name)
+    if type(descriptor) in (staticmethod, classmethod):
+        function = descriptor.__func__
+    else:
+        function = descriptor
+    if type(function) is not FunctionType:
+        raise evidence.PointInTimeEvidenceError(
+            f"trusted {authority_name} class implementation changed: {method_name}"
+        )
+    if (
+        function.__module__ != getattr(module, "__name__", None)
+        or function.__qualname__ != expected_qualname
+    ):
+        raise evidence.PointInTimeEvidenceError(
+            f"trusted {authority_name} class implementation changed: {method_name}"
+        )
+    try:
+        expected = _canonical_code_sha256(
+            module,
+            expected_qualname=expected_qualname,
+            live_function=function,
+        )
+        actual = hashlib.sha256(marshal.dumps(function.__code__)).hexdigest()
+    except (OSError, TypeError, ValueError) as exc:
+        raise evidence.PointInTimeEvidenceError(
+            f"trusted {authority_name} source identity unavailable: {method_name}"
+        ) from exc
+    if actual != expected:
+        raise evidence.PointInTimeEvidenceError(
+            f"trusted {authority_name} class implementation changed: {method_name}"
+        )
+
+
 def _require_exact_lineage_authority(
     lineage_authority,
     *,
     holdout: bool = False,
 ) -> DatasetSnapshotLineageAuthority:
+    """Require exact capabilities plus canonical source-backed dispatch identity."""
+
     if type(lineage_authority) is not DatasetSnapshotLineageAuthority:
         raise evidence.PointInTimeEvidenceError(
             _HOLDOUT_LINEAGE_REQUIRED if holdout else _FEATURE_LINEAGE_REQUIRED
@@ -132,6 +227,20 @@ def _require_exact_lineage_authority(
             "lineage_authority.monotonic_authority must be an exact "
             "MonotonicWorkspaceAuthority"
         )
+    _require_source_backed_class_method(
+        DatasetSnapshotLineageAuthority,
+        lineage_module,
+        method_name="record",
+        expected_qualname="DatasetSnapshotLineageAuthority.record",
+        authority_name="DatasetSnapshotLineageAuthority",
+    )
+    _require_source_backed_class_method(
+        ScientificRegistry,
+        registry_module,
+        method_name="get",
+        expected_qualname="ScientificRegistry.get",
+        authority_name="ScientificRegistry",
+    )
     _reject_instance_method_shadows(
         lineage_authority,
         DatasetSnapshotLineageAuthority,
@@ -304,8 +413,6 @@ def _persist_or_validate_lineage_identity(
                 semantic_binding_sha256=identity_sha256,
             )
         except MonotonicWorkspaceAuthorityError:
-            # A concurrent opener may have committed the same deterministic
-            # identity after our empty-history read. Recover only that exact tip.
             authority.recover(
                 observed_state_sha256=identity_sha256,
                 tx_id=tx_id,
@@ -430,6 +537,9 @@ def _resolve_canonical_snapshot(
             "dataset_snapshot must be an exact DatasetSnapshot"
         )
     lineage = _bound_lineage_authority(ledger)
+    # Revalidate again immediately before the authority-bearing class dispatch so a
+    # class replacement cannot race an earlier construction-time check.
+    _require_exact_lineage_authority(lineage, holdout=True)
     try:
         record = DatasetSnapshotLineageAuthority.record(
             lineage,

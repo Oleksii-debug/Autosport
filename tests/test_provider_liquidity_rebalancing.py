@@ -83,7 +83,7 @@ def test_global_shortfall_stays_explicit_even_after_modeled_surplus() -> None:
     assert review.modeled_provider_surplus == D("15")
     assert review.need_after_central_cash == D("30")
     assert review.modeled_shortfall_after_surplus == D("15")
-    assert review.requires_transfer_feasibility_check is False
+    assert review.requires_transfer_feasibility_check is True
 
 
 def test_protected_reserve_cannot_be_silently_used() -> None:

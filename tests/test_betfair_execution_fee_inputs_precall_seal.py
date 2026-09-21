@@ -83,18 +83,35 @@ def test_preentry_module_and_matching_class_rebinding_cannot_replace_executables
         forged_calls.append("forged")
         raise AssertionError("pre-entry replacement must never execute")
 
-    # Rebind the old module mirrors (even though source no longer trusts them), the
-    # live class descriptors, and the implementation globals to the same callable.
-    # The exported partial already owns the original snapshot/RPC/helper objects.
+    # Replace the writable mirrors for the reader, parsers, DTO, snapshot
+    # dependencies and RPC constants before entry. The exported partial was
+    # installed earlier and owns the original complete graph.
     for name in (
-        "_CANONICAL_RPC",
-        "_CANONICAL_NEXT_REQUEST_ID",
-        "_CANONICAL_OBSERVED_AT",
-        "_CANONICAL_REDACT_PROVIDER_MESSAGE",
+        "_snapshot_canonical_client",
+        "_read_betfair_execution_fee_inputs",
+        "_mapping",
+        "_provider_text",
+        "_provider_optional_text",
+        "_provider_number",
+        "_provider_percent",
+        "_required_text",
+        "BetfairExecutionFeeInputsObservation",
+        "BetfairSessionCredentials",
+        "BetfairReadOnlyClient",
+        "SimpleNamespace",
+        "MethodType",
     ):
-        monkeypatch.setattr(fee_inputs, name, forged, raising=False)
-    monkeypatch.setattr(fee_inputs, "_snapshot_canonical_client", forged)
-    monkeypatch.setattr(fee_inputs, "_read_betfair_execution_fee_inputs", forged)
+        monkeypatch.setattr(fee_inputs, name, forged)
+    monkeypatch.setattr(
+        fee_inputs,
+        "_GET_ACCOUNT_DETAILS",
+        "attacker/getAccountDetails",
+    )
+    monkeypatch.setattr(
+        fee_inputs,
+        "_LIST_MARKET_CATALOGUE",
+        "attacker/listMarketCatalogue",
+    )
     for name in (
         "_rpc",
         "_next_request_id",

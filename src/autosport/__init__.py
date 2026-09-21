@@ -130,3 +130,8 @@ from . import _collector_retention_desktop_ack_authority as _collector_retention
 # authority instances must not dispatch through caller-replaced class implementations,
 # and explicit runtime-repair reloads must restore this seal before positive use.
 from . import _point_in_time_class_dispatch_seal as _point_in_time_class_dispatch_seal  # noqa: F401,E402
+
+# Campaign denomination is positive only while the complete canonical
+# FinalizedCampaignAuthority re-resolution graph remains the product-loaded graph.
+# Any same-process class monkeypatch fails closed to missing denomination authority.
+from . import _campaign_denomination_dispatch_seal as _campaign_denomination_dispatch_seal  # noqa: F401,E402

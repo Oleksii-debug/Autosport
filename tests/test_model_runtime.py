@@ -167,6 +167,26 @@ class ModelRuntimeContractTests(unittest.TestCase):
                 max_attempts=1,
             )
 
+    def test_raw_enum_values_and_fractional_retry_budget_fail_closed(self) -> None:
+        with self.assertRaisesRegex(ModelRuntimeContractError, "mode must be"):
+            ModelRuntimeConfig(
+                mode="LOCAL_OLLAMA",  # type: ignore[arg-type]
+                endpoint_class=ModelEndpointClass.LOCAL,
+                model_id="model",
+                config_digest=self.config_digest,
+                timeout_seconds=1.0,
+                max_attempts=1,
+            )
+        with self.assertRaisesRegex(ModelRuntimeContractError, "max_attempts must be an integer"):
+            ModelRuntimeConfig(
+                mode=ModelBackendMode.LOCAL_OLLAMA,
+                endpoint_class=ModelEndpointClass.LOCAL,
+                model_id="model",
+                config_digest=self.config_digest,
+                timeout_seconds=1.0,
+                max_attempts=1.5,  # type: ignore[arg-type]
+            )
+
     def _result(
         self,
         *,

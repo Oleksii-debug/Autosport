@@ -106,17 +106,6 @@ def _bool(value: bool, field: str) -> bool:
     return value
 
 
-def _sha256_digest(value: str, field: str) -> str:
-    _text(value, field)
-    if len(value) != 64 or any(
-        character not in "0123456789abcdef" for character in value
-    ):
-        raise ModelRiskRegisterError(
-            f"{field} must be a lowercase 64-character SHA-256 hex digest"
-        )
-    return value
-
-
 def _enum(value: object, enum_type: type[Enum], field: str) -> Enum:
     if not isinstance(value, enum_type):
         raise ModelRiskRegisterError(f"{field} must be a {enum_type.__name__} value")
@@ -348,9 +337,7 @@ class RiskRegisterEntry:
             severity = RiskSeverity(entry_payload["severity"])
             status = RiskStatus(entry_payload["status"])
         except (TypeError, ValueError) as exc:
-            raise ModelRiskRegisterError(
-                "entry contains an unsupported enum value"
-            ) from exc
+            raise ModelRiskRegisterError("entry contains an unsupported enum value") from exc
 
         entry = cls(
             entry_id=entry_payload["entry_id"],
@@ -377,61 +364,105 @@ class RiskRegisterEntry:
         return entry
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True, slots=True, init=False)
 class OperatorRiskRow:
-    """Presentation-ready row that keeps localization authority outside this module."""
+    """Presentation row structurally bound to one validated register entry.
 
-    entry_id: str
-    entry_sha256: str
-    entry_type: RegisterEntryType
-    severity: RiskSeverity
-    status: RiskStatus
-    priority: OperatorPriority
-    title: str
-    summary: str
-    updated_at: str
-    blocks_product_readiness: bool
-    blocks_execution: bool
-    evidence_count: int
+    Legacy field-by-field construction is rejected.  The narrow validation below keeps
+    failures diagnostic for callers migrating from schema v1 while never accepting a
+    row whose digest or presentation facts could diverge from its source entry.
+    """
 
-    def __post_init__(self) -> None:
-        _text(self.entry_id, "entry_id")
-        _sha256_digest(self.entry_sha256, "entry_sha256")
-        _enum(self.entry_type, RegisterEntryType, "entry_type")
-        _enum(self.severity, RiskSeverity, "severity")
-        _enum(self.status, RiskStatus, "status")
-        _enum(self.priority, OperatorPriority, "priority")
-        _text(self.title, "title")
-        _text(self.summary, "summary")
-        object.__setattr__(
-            self, "updated_at", _canonical_timestamp(self.updated_at, "updated_at")
-        )
-        _bool(self.blocks_product_readiness, "blocks_product_readiness")
-        _bool(self.blocks_execution, "blocks_execution")
-        if self.blocks_execution and not self.blocks_product_readiness:
+    entry: RiskRegisterEntry
+
+    def __init__(self, entry: RiskRegisterEntry | None = None, **legacy: object) -> None:
+        if isinstance(entry, RiskRegisterEntry) and not legacy:
+            object.__setattr__(self, "entry", entry)
+            return
+        if entry is not None:
             raise ModelRiskRegisterError(
-                "an execution-blocking row must also block product readiness"
+                "operator rows require a validated RiskRegisterEntry"
             )
-        if self.status is RiskStatus.RESOLVED and (
-            self.blocks_product_readiness or self.blocks_execution
+        digest = legacy.get("entry_sha256")
+        if not isinstance(digest, str) or len(digest) != 64 or any(
+            character not in "0123456789abcdef" for character in digest
         ):
             raise ModelRiskRegisterError(
-                "resolved rows cannot retain readiness/execution blockers"
+                "entry_sha256 must be a lowercase 64-character SHA-256 hex digest"
             )
-        expected_priority = _operator_priority_for(
-            status=self.status,
-            severity=self.severity,
-            blocks_product_readiness=self.blocks_product_readiness,
-            blocks_execution=self.blocks_execution,
+        status = legacy.get("status")
+        severity = legacy.get("severity")
+        priority = legacy.get("priority")
+        blocks_product_readiness = legacy.get("blocks_product_readiness")
+        blocks_execution = legacy.get("blocks_execution")
+        if (
+            isinstance(status, RiskStatus)
+            and isinstance(severity, RiskSeverity)
+            and isinstance(priority, OperatorPriority)
+            and type(blocks_product_readiness) is bool
+            and type(blocks_execution) is bool
+        ):
+            expected_priority = _operator_priority_for(
+                status=status,
+                severity=severity,
+                blocks_product_readiness=blocks_product_readiness,
+                blocks_execution=blocks_execution,
+            )
+            if priority is not expected_priority:
+                raise ModelRiskRegisterError(
+                    "operator row priority is inconsistent with risk facts"
+                )
+        raise ModelRiskRegisterError(
+            "operator rows require a validated RiskRegisterEntry"
         )
-        if self.priority is not expected_priority:
-            raise ModelRiskRegisterError(
-                "operator row priority is inconsistent with risk facts"
-            )
-        if type(self.evidence_count) is not int or self.evidence_count < 0:
-            raise ModelRiskRegisterError(
-                "evidence_count must be a non-negative integer"
-            )
+
+    @property
+    def entry_id(self) -> str:
+        return self.entry.entry_id
+
+    @property
+    def entry_sha256(self) -> str:
+        return self.entry.entry_sha256
+
+    @property
+    def entry_type(self) -> RegisterEntryType:
+        return self.entry.entry_type
+
+    @property
+    def severity(self) -> RiskSeverity:
+        return self.entry.severity
+
+    @property
+    def status(self) -> RiskStatus:
+        return self.entry.status
+
+    @property
+    def priority(self) -> OperatorPriority:
+        return self.entry.operator_priority
+
+    @property
+    def title(self) -> str:
+        return self.entry.title
+
+    @property
+    def summary(self) -> str:
+        return self.entry.summary
+
+    @property
+    def updated_at(self) -> str:
+        return self.entry.updated_at
+
+    @property
+    def blocks_product_readiness(self) -> bool:
+        return self.entry.blocks_product_readiness
+
+    @property
+    def blocks_execution(self) -> bool:
+        return self.entry.blocks_execution
+
+    @property
+    def evidence_count(self) -> int:
+        return len(self.entry.evidence_refs)
 
     @property
     def entry_type_key(self) -> str:
@@ -616,20 +647,7 @@ def build_operator_risk_register_view(
 
     ordered = sorted(materialized, key=_sort_key)
     rows = tuple(
-        OperatorRiskRow(
-            entry_id=entry.entry_id,
-            entry_sha256=entry.entry_sha256,
-            entry_type=entry.entry_type,
-            severity=entry.severity,
-            status=entry.status,
-            priority=entry.operator_priority,
-            title=entry.title,
-            summary=entry.summary,
-            updated_at=entry.updated_at,
-            blocks_product_readiness=entry.blocks_product_readiness,
-            blocks_execution=entry.blocks_execution,
-            evidence_count=len(entry.evidence_refs),
-        )
+        OperatorRiskRow(entry=entry)
         for entry in ordered
     )
     unresolved = tuple(

@@ -56,13 +56,36 @@ class HistoricalMatchCaptureTests(unittest.TestCase):
             capture = json.loads(capture_bytes.decode("utf-8"))
             evidence = json.loads(evidence_path.read_text(encoding="utf-8"))
 
+        parsed = urlparse(transport.urls[0])
+        expected_request_url = transport.urls[0]
         self.assertEqual(capture["payload"], payload)
-        self.assertEqual(capture["request"], {"date": "2026-09-10", "priced_only": False})
+        self.assertEqual(
+            capture["request"],
+            {"date": "2026-09-10", "priced_only": False, "url": expected_request_url},
+        )
         self.assertEqual(evidence["requested_date"], "2026-09-10")
         self.assertFalse(evidence["priced_only"])
+        self.assertEqual(evidence["request_url"], expected_request_url)
+        self.assertEqual(report.request_url, expected_request_url)
         self.assertEqual(report.capture_sha256, hashlib.sha256(capture_bytes).hexdigest())
         self.assertEqual(evidence["capture_sha256"], report.capture_sha256)
         self.assertEqual(evidence["coverage_hint"], "source=test-source")
+        self.assertFalse(capture["trust"]["product_owned_request_path_verified"])
+        self.assertFalse(capture["trust"]["product_owned_acquisition_clock_verified"])
+        self.assertFalse(capture["trust"]["provider_response_origin_verified"])
+        self.assertFalse(capture["trust"]["trusted_outcome_source_admissible"])
+        self.assertEqual(
+            capture["trust"]["response_origin_limitation"],
+            "provider_response_envelope_omits_final_url_and_exact_wire_bytes",
+        )
+        self.assertFalse(evidence["product_owned_request_path_verified"])
+        self.assertFalse(evidence["product_owned_acquisition_clock_verified"])
+        self.assertFalse(evidence["provider_response_origin_verified"])
+        self.assertFalse(evidence["trusted_outcome_source_admissible"])
+        self.assertFalse(report.product_owned_request_path_verified)
+        self.assertFalse(report.product_owned_acquisition_clock_verified)
+        self.assertFalse(report.provider_response_origin_verified)
+        self.assertFalse(report.trusted_outcome_source_admissible)
         self.assertFalse(evidence["provider_result_schema_parsed"])
         self.assertFalse(evidence["sealed_quote_outcomes_derived"])
         self.assertFalse(evidence["point_in_time_odds_market_coverage_verified"])
@@ -71,13 +94,41 @@ class HistoricalMatchCaptureTests(unittest.TestCase):
         self.assertFalse(evidence["licensing_or_retention_verified"])
         self.assertNotIn("unit-test-key", json.dumps(capture) + json.dumps(evidence))
         self.assertEqual(transport.headers[0]["X-API-Key"], "unit-test-key")
-        parsed = urlparse(transport.urls[0])
         self.assertEqual(parsed.path, "/v1/historical/sports/table_tennis/matches")
         query = parse_qs(parsed.query)
         self.assertEqual(set(query), {"date", "pricedOnly"})
         self.assertEqual(query["date"], ["2026-09-10"])
         self.assertEqual(query["pricedOnly"], ["false"])
         self.assertNotIn("unit-test-key", transport.urls[0])
+
+    def test_default_provider_recognizes_only_initial_product_owned_path_and_clock(self) -> None:
+        provider = ParlayApiTableTennisProvider("unit-test-key")
+        self.assertTrue(historical_matches._product_owned_request_path_verified(provider))
+        self.assertTrue(historical_matches._product_owned_acquisition_clock_verified(provider))
+
+    def test_injected_transport_cannot_mint_product_owned_request_path(self) -> None:
+        provider = self._provider(_Transport([]))
+        self.assertFalse(historical_matches._product_owned_request_path_verified(provider))
+        self.assertFalse(historical_matches._product_owned_acquisition_clock_verified(provider))
+
+    def test_custom_origin_cannot_mint_product_owned_request_path(self) -> None:
+        transport = _Transport([])
+        provider = ParlayApiTableTennisProvider(
+            "unit-test-key",
+            base_url="https://example.invalid",
+            transport=transport,
+            clock=lambda: "2026-09-13T03:00:00+00:00",
+            sleeper=lambda _: None,
+        )
+        self.assertFalse(historical_matches._product_owned_request_path_verified(provider))
+
+    def test_provider_subclass_cannot_mint_product_owned_request_path(self) -> None:
+        class DerivedProvider(ParlayApiTableTennisProvider):
+            pass
+
+        provider = DerivedProvider("unit-test-key")
+        self.assertFalse(historical_matches._product_owned_request_path_verified(provider))
+        self.assertFalse(historical_matches._product_owned_acquisition_clock_verified(provider))
 
     def test_capture_digest_stays_bound_to_published_bytes_after_path_replacement(self) -> None:
         payload = [{"provider_defined_id": "match-1", "opaque": {"value": 1}}]

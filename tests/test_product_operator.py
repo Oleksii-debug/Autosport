@@ -100,7 +100,7 @@ class ProductOperatorControllerTests(unittest.TestCase):
             runtime, collector, coordinator, market_store = self._runtime(directory)
             operator = ProductOperatorController(runtime)
 
-            self.assertEqual(operator.status().state, "READY")
+            self.assertEqual(operator.status().state, "STOPPED")
             first_status = operator.start()
             self.assertEqual(first_status.state, "RUNNING")
             self.assertEqual(collector.resume_calls, 1)
@@ -135,6 +135,28 @@ class ProductOperatorControllerTests(unittest.TestCase):
             operator.close()
             self.assertEqual(market_store.close_calls, 1)
             self.assertEqual(operator.status().state, "CLOSED")
+
+    def test_fresh_controller_preserves_canonical_stopped_truth_until_start(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            runtime, collector, coordinator, _ = self._runtime(directory)
+            coordinator.stop_reason = "durable_prior_stop"
+
+            operator = ProductOperatorController(runtime)
+
+            snapshot = operator.status()
+            self.assertEqual(snapshot.state, "STOPPED")
+            self.assertEqual(snapshot.canonical_status.state, "STOPPED")
+            self.assertEqual(snapshot.canonical_status.stop_reason, "durable_prior_stop")
+            self.assertEqual(collector.resume_calls, 0)
+            self.assertEqual(coordinator.resume_calls, 0)
+
+            started = operator.start()
+            self.assertEqual(started.state, "RUNNING")
+            self.assertEqual(operator.status().state, "RUNNING")
+            self.assertEqual(collector.resume_calls, 1)
+            self.assertEqual(coordinator.resume_calls, 1)
+            operator.stop()
+            operator.close()
 
     def test_attach_to_running_runtime_reuses_canonical_state_and_persists_stop(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

@@ -281,6 +281,104 @@ class LiveDecisionReevaluationTests(unittest.TestCase):
                 predecessor,
             )
 
+    def test_positive_new_evidence_requires_policy_decision_after_predecessor_evaluation(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            ledger = JsonlDecisionLedger(Path(temporary) / "decisions.jsonl")
+            authority = _authority()
+            predecessor = _pre_policy(
+                Disposition.WAIT_EVIDENCE,
+                predicate=_predicate(PredicateTruth.UNKNOWN),
+                evaluated_at=T2,
+                expires_at=T10,
+            )
+            persist_live_decision_disposition(predecessor, ledger=ledger)
+
+            stale_binding = _append_zero_policy(
+                ledger,
+                authority,
+                decision_id="zero-policy-stale",
+                decision_at=T1,
+                plan_reason="stale product zero plan",
+                context_digit="1",
+            )
+            stale = _policy_disposition(
+                stale_binding,
+                evaluated_at=T3,
+                expires_at=T10,
+                predecessor=predecessor.disposition_id,
+                trigger=ReevaluationTrigger.NEW_EVIDENCE,
+            )
+            stale = replace(
+                stale,
+                predicates=(_predicate(PredicateTruth.PROVEN, digest="b" * 64),),
+            )
+            with self.assertRaisesRegex(
+                LiveDecisionDispositionError,
+                "policy decision must follow predecessor evaluation",
+            ):
+                verify_reevaluation_transition(
+                    stale,
+                    ledger=ledger,
+                    authority=authority,
+                )
+
+            equal_binding = _append_zero_policy(
+                ledger,
+                authority,
+                decision_id="zero-policy-equal",
+                decision_at=T2,
+                plan_reason="equal-time product zero plan",
+                context_digit="4",
+            )
+            equal = _policy_disposition(
+                equal_binding,
+                evaluated_at=T3,
+                expires_at=T10,
+                predecessor=predecessor.disposition_id,
+                trigger=ReevaluationTrigger.NEW_EVIDENCE,
+            )
+            equal = replace(
+                equal,
+                predicates=(_predicate(PredicateTruth.PROVEN, digest="b" * 64),),
+            )
+            with self.assertRaisesRegex(
+                LiveDecisionDispositionError,
+                "policy decision must follow predecessor evaluation",
+            ):
+                verify_reevaluation_transition(
+                    equal,
+                    ledger=ledger,
+                    authority=authority,
+                )
+
+            fresh_binding = _append_zero_policy(
+                ledger,
+                authority,
+                decision_id="zero-policy-fresh",
+                decision_at=T3,
+                plan_reason="fresh product zero plan",
+                context_digit="a",
+            )
+            fresh = _policy_disposition(
+                fresh_binding,
+                evaluated_at=T5,
+                expires_at=T10,
+                predecessor=predecessor.disposition_id,
+                trigger=ReevaluationTrigger.NEW_EVIDENCE,
+            )
+            fresh = replace(
+                fresh,
+                predicates=(_predicate(PredicateTruth.PROVEN, digest="b" * 64),),
+            )
+            self.assertEqual(
+                verify_reevaluation_transition(
+                    fresh,
+                    ledger=ledger,
+                    authority=authority,
+                ),
+                predecessor,
+            )
+
     def test_cross_market_predecessor_is_rejected_even_with_changed_evidence(self) -> None:
         predecessor = _pre_policy(
             Disposition.WAIT_EVIDENCE,

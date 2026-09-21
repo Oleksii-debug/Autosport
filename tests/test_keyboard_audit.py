@@ -104,6 +104,37 @@ class KeyboardAuditTests(unittest.TestCase):
         self.assertFalse(report["nvda_verified"])
         self.assertFalse(report["real_money_execution"])
 
+    def test_critical_widgets_use_canonical_accessible_log_mirror(self):
+        visible_log = object()
+        accessible_log = object()
+        app = SimpleNamespace(
+            shell_navigation=object(),
+            shell_open_button=object(),
+            shell_state=object(),
+            shell_details=object(),
+            owner_economic_authority_button=object(),
+            owner_economic_authority_state=object(),
+            owner_economic_authority_readback=object(),
+            strategy=object(),
+            research_plan_button=object(),
+            choose_button=object(),
+            run_button=object(),
+            repair_button=object(),
+            speed=object(),
+            live_mode=object(),
+            live_refresh_button=object(),
+            live_quotes=object(),
+            tickets=object(),
+            evaluation=object(),
+            log=visible_log,
+            log_accessible=accessible_log,
+            bank_summary=object(),
+            manual_calculation_button=object(),
+        )
+        controls = keyboard_audit._critical_widgets(app)
+        self.assertIs(controls["log"], accessible_log)
+        self.assertIsNot(controls["log"], visible_log)
+
     def test_missing_action_binding_fails_closed(self):
         bindings, focus, reachable, reverse_reachable = self._passing()
         bindings["<Control-Alt-Right>"] = False

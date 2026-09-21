@@ -392,7 +392,19 @@ class DeploymentRuntimeAuthorityStore:
     """One local durable append-only authority file with full-read validation."""
 
     def __init__(self, path: str | Path) -> None:
-        self.path = Path(path)
+        candidate = Path(path)
+        try:
+            canonical = candidate.resolve(strict=True)
+            link_count = canonical.stat().st_nlink
+        except (OSError, RuntimeError) as exc:
+            raise DeploymentRuntimeAuthorityError(
+                "cannot resolve runtime authority store path"
+            ) from exc
+        if link_count != 1:
+            raise DeploymentRuntimeAuthorityError(
+                "runtime authority store must not be hard-linked"
+            )
+        self.path = canonical
         self._lock = RLock()
         self._read_validated_records()
 
@@ -401,8 +413,14 @@ class DeploymentRuntimeAuthorityStore:
         cls,
         path: str | Path,
     ) -> "DeploymentRuntimeAuthorityStore":
-        destination = Path(path)
-        destination.parent.mkdir(parents=True, exist_ok=True)
+        requested = Path(path)
+        requested.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            destination = requested.parent.resolve(strict=True) / requested.name
+        except (OSError, RuntimeError) as exc:
+            raise DeploymentRuntimeAuthorityError(
+                "cannot resolve runtime authority store parent path"
+            ) from exc
         with durable_path_lock(destination):
             if destination.exists():
                 raise DeploymentRuntimeAuthorityError("runtime authority store already exists")

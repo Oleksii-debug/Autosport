@@ -112,6 +112,71 @@ def test_page_ceiling_rejects_growth_and_rolls_back_canonical_state(tmp_path: Pa
     assert reopened.get("delta-2") is None
 
 
+def test_durable_budget_applies_to_second_unconfigured_canonical_handle(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "collector.sqlite"
+    initial = CollectorDeltaStore(path)
+    first = _delta(1)
+    assert initial.append(first) is True
+    page_size, page_count = _page_geometry(path)
+    exact_current_budget = page_size * page_count
+
+    bounded = CollectorDeltaStore(path, max_bytes=exact_current_budget)
+    assert bounded.configured_max_bytes == exact_current_budget
+    before_size = path.stat().st_size
+
+    # The budget belongs to the canonical database path, not to one Python object.
+    # A second exact canonical handle created without max_bytes must resolve the
+    # durable authority and may not silently reopen an unbounded write path.
+    other = CollectorDeltaStore(path)
+    assert other.configured_max_bytes == exact_current_budget
+    other_connection = other._connect()
+    try:
+        assert (
+            int(other_connection.execute("PRAGMA max_page_count").fetchone()[0])
+            == page_count
+        )
+    finally:
+        other_connection.close()
+
+    second = _delta(2, padding=page_size * 16)
+    with pytest.raises(CollectorStorageBackpressureError, match="RETENTION_REQUIRED"):
+        other.append(second)
+
+    assert other.get("delta-2") is None
+    assert bounded.get("delta-2") is None
+    assert path.stat().st_size == before_size
+    assert path.stat().st_size <= exact_current_budget
+
+
+def test_conflicting_second_handle_cannot_widen_or_narrow_durable_budget(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "collector.sqlite"
+    store = CollectorDeltaStore(path)
+    assert store.append(_delta(1)) is True
+    page_size, page_count = _page_geometry(path)
+    exact_current_budget = page_size * page_count
+
+    canonical = CollectorDeltaStore(path, max_bytes=exact_current_budget)
+    assert canonical.configured_max_bytes == exact_current_budget
+
+    with pytest.raises(CollectorStorageBudgetError, match="conflicts with durable"):
+        CollectorDeltaStore(path, max_bytes=exact_current_budget + page_size)
+
+    smaller = exact_current_budget - page_size
+    if smaller > 0:
+        with pytest.raises(CollectorStorageBudgetError, match="conflicts with durable"):
+            CollectorDeltaStore(path, max_bytes=smaller)
+
+    # Exact replay is allowed and an unconfigured reopen inherits the same budget.
+    same = CollectorDeltaStore(path, max_bytes=exact_current_budget)
+    inherited = CollectorDeltaStore(path)
+    assert same.configured_max_bytes == exact_current_budget
+    assert inherited.configured_max_bytes == exact_current_budget
+
+
 def test_unconfigured_store_preserves_existing_growth_behavior(tmp_path: Path) -> None:
     path = tmp_path / "collector.sqlite"
     store = CollectorDeltaStore(path)

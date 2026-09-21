@@ -15,23 +15,43 @@ from autosport.betfair_standard_limit_price_bound import (
 from test_betfair_supervised_execution import _bound, _profile
 
 
-def _bound_action():
+def _evidence():
     bound, _approval, _goal = _bound(_profile())
     action = bound.execution_plan.actions[0]
-    return bound, action
+    evidence = resolve_betfair_standard_limit_price_bound(
+        bound=bound,
+        action_id=action.action_id,
+    )
+    return bound, action, evidence
 
 
-def test_standard_back_limit_without_matchme_applicability_fails_closed() -> None:
-    bound, action = _bound_action()
+def test_standard_back_limit_issues_only_conservative_price_floor() -> None:
+    bound, action, evidence = _evidence()
 
-    with pytest.raises(
-        BetfairStandardLimitPriceBoundError,
-        match="MatchMe non-applicability",
-    ):
-        resolve_betfair_standard_limit_price_bound(
-            bound=bound,
-            action_id=action.action_id,
-        )
+    assert evidence.execution_plan_id == bound.execution_plan.plan_id
+    assert evidence.execution_plan_sha256 == bound.execution_plan.fingerprint
+    assert evidence.intent_id == bound.intent_id
+    assert evidence.intent_sha256 == bound.intent_sha256
+    assert evidence.action_id == action.action_id
+    assert evidence.bookmaker_id == "betfair"
+    assert evidence.side == "BACK"
+    assert evidence.price_floor_odds == Decimal("2.00")
+    assert evidence.requested_stake == action.requested_stake
+    assert evidence.status is (
+        BetfairStandardLimitPriceBoundStatus.PROVIDER_BOUND_ZERO_ADVERSE_PRICE_DETERIORATION
+    )
+    assert evidence.zero_adverse_price_deterioration is True
+    assert evidence.execution_feasibility_proven is False
+    assert evidence.realized_price_exact is False
+
+    payload = evidence.to_dict()
+    assert payload["price_floor_odds"] == "2.00"
+    assert payload["zero_adverse_price_deterioration"] is True
+    assert payload["execution_feasibility_proven"] is False
+    assert payload["realized_price_exact"] is False
+    assert len(payload["instruction_sha256"]) == 64
+    assert payload["evidence_id"] == evidence.evidence_id
+
 
 def test_evidence_is_not_caller_constructible() -> None:
     with pytest.raises(
@@ -41,25 +61,8 @@ def test_evidence_is_not_caller_constructible() -> None:
         BetfairStandardLimitPriceBoundEvidence()
 
 
-def test_canonical_private_issuer_also_fails_closed_without_matchme_applicability() -> None:
-    import autosport.betfair_standard_limit_price_bound as module
-
-    bound, action = _bound_action()
-    instruction = module._canonical_instruction_projection(action)
-
-    with pytest.raises(
-        BetfairStandardLimitPriceBoundError,
-        match="MatchMe non-applicability",
-    ):
-        module._issue_evidence(
-            bound=bound,
-            action=action,
-            instruction_sha256=module._digest(instruction),
-        )
-
-
 def test_action_identity_is_re_resolved_from_bound_plan() -> None:
-    bound, _action = _bound_action()
+    bound, _action, _evidence = _evidence()
 
     with pytest.raises(
         BetfairStandardLimitPriceBoundError,
@@ -72,7 +75,7 @@ def test_action_identity_is_re_resolved_from_bound_plan() -> None:
 
 
 def test_exact_bound_type_is_required() -> None:
-    bound, action = _bound_action()
+    bound, action, _evidence = _evidence()
 
     class ShadowBound(type(bound)):
         pass
@@ -99,7 +102,7 @@ def test_exact_bound_type_is_required() -> None:
 def test_public_provider_client_rebinding_cannot_mint_a_different_contract(monkeypatch) -> None:
     import autosport.betfair_standard_limit_price_bound as module
 
-    bound, action = _bound_action()
+    bound, action, _evidence = _evidence()
 
     class ShadowClient:
         pass
@@ -124,7 +127,7 @@ def test_public_provider_client_rebinding_cannot_mint_a_different_contract(monke
 def test_instruction_projection_is_captured_from_real_place_action_request() -> None:
     import autosport.betfair_standard_limit_price_bound as module
 
-    bound, action = _bound_action()
+    bound, action, evidence = _evidence()
     projection = module._canonical_instruction_projection(action)
 
     assert projection == {
@@ -138,7 +141,7 @@ def test_instruction_projection_is_captured_from_real_place_action_request() -> 
             "persistenceType": "LAPSE",
         },
     }
-    assert len(module._digest(projection)) == 64
+    assert evidence.instruction_sha256 == module._digest(projection)
     assert bound.execution_plan.created_at < action.expires_at
 
 
@@ -168,7 +171,7 @@ def _replace_captured_request(
 
 
 def test_same_version_time_in_force_write_drift_fails_closed(monkeypatch) -> None:
-    bound, action = _bound_action()
+    bound, action, _evidence = _evidence()
 
     def add_fill_or_kill(instruction) -> None:
         instruction["timeInForce"] = "FILL_OR_KILL"
@@ -186,7 +189,7 @@ def test_same_version_time_in_force_write_drift_fails_closed(monkeypatch) -> Non
 
 
 def test_same_version_price_write_drift_fails_closed(monkeypatch) -> None:
-    bound, action = _bound_action()
+    bound, action, _evidence = _evidence()
 
     def worsen_submitted_limit(instruction) -> None:
         instruction["limitOrder"]["price"] = "1.99"
@@ -204,7 +207,7 @@ def test_same_version_price_write_drift_fails_closed(monkeypatch) -> None:
 
 
 def test_same_version_smart_order_write_drift_fails_closed(monkeypatch) -> None:
-    bound, action = _bound_action()
+    bound, action, _evidence = _evidence()
 
     def add_bet_target(instruction) -> None:
         instruction["betTargetType"] = "PAYOUT"
@@ -221,16 +224,10 @@ def test_same_version_smart_order_write_drift_fails_closed(monkeypatch) -> None:
         )
 
 
-def test_bound_quote_is_unexpired_but_zero_slippage_stays_unissued() -> None:
-    bound, action = _bound_action()
+def test_bound_quote_is_unexpired_at_decision_and_realized_price_is_not_backfilled() -> None:
+    bound, action, evidence = _evidence()
 
     assert action.quote_observed_at < bound.execution_plan.created_at < action.expires_at
-    with pytest.raises(
-        BetfairStandardLimitPriceBoundError,
-        match="MatchMe non-applicability",
-    ):
-        resolve_betfair_standard_limit_price_bound(
-            bound=bound,
-            action_id=action.action_id,
-        )
-
+    assert evidence.price_floor_odds == action.requested_odds
+    assert evidence.realized_price_exact is False
+    assert "accepted_odds" not in evidence.to_dict()

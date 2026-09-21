@@ -153,14 +153,18 @@ def build_list_market_types_request(*, event_type_ids: Sequence[str]) -> Betfair
 def build_list_market_catalogue_request(
     *,
     event_type_ids: Sequence[str],
+    event_ids: Sequence[str] = (),
     market_type_codes: Sequence[str] = (),
     max_results: int = 1000,
     market_start_from: str | None = None,
     market_start_to: str | None = None,
 ) -> BetfairCatalogRequest:
     ids = _unique_ids(event_type_ids, "event_type_ids")
+    scoped_event_ids = _optional_unique_ids(event_ids, "event_ids")
     codes = _unique_codes(market_type_codes, "market_type_codes")
     market_filter: dict[str, object] = {"eventTypeIds": list(ids)}
+    if scoped_event_ids:
+        market_filter["eventIds"] = list(scoped_event_ids)
     if codes:
         market_filter["marketTypeCodes"] = list(codes)
     if market_start_from is not None or market_start_to is not None:
@@ -240,9 +244,13 @@ def parse_market_catalogue_result(
     *,
     requested_event_type_ids: Sequence[str],
     requested_max_results: int,
+    requested_event_ids: Sequence[str] = (),
     requested_market_type_codes: Sequence[str] = (),
 ) -> BetfairMarketCatalogueBatch:
     allowed = frozenset(_unique_ids(requested_event_type_ids, "requested_event_type_ids"))
+    allowed_events = frozenset(
+        _optional_unique_ids(requested_event_ids, "requested_event_ids")
+    )
     allowed_market_types = frozenset(
         _unique_codes(requested_market_type_codes, "requested_market_type_codes")
     )
@@ -258,6 +266,9 @@ def parse_market_catalogue_result(
         if event_type_id not in allowed:
             raise BetfairCatalogError("catalogue row escaped the requested eventType scope")
         event = _mapping(row.get("event"), f"listMarketCatalogue[{index}].event")
+        event_id = _provider_text(event, "id", "event_id")
+        if allowed_events and event_id not in allowed_events:
+            raise BetfairCatalogError("catalogue row escaped the requested event scope")
         description = row.get("description")
         market_type = None
         if description is not None:
@@ -274,7 +285,7 @@ def parse_market_catalogue_result(
             BetfairCatalogMarket(
                 _provider_text(row, "marketId", "market_id"),
                 event_type_id,
-                _provider_text(event, "id", "event_id"),
+                event_id,
                 _provider_text(row, "marketName", "market_name"),
                 _provider_text(row, "marketStartTime", "market_start_time"),
                 market_type,
@@ -367,6 +378,14 @@ def _unique_ids(values: Sequence[str], field: str) -> tuple[str, ...]:
         raise BetfairCatalogError(f"{field} must not be empty")
     _reject_duplicate(iter(values), field)
     return values
+
+
+def _optional_unique_ids(values: Sequence[str], field: str) -> tuple[str, ...]:
+    if isinstance(values, (str, bytes)) or not isinstance(values, Sequence):
+        raise BetfairCatalogError(f"{field} must be a sequence")
+    if not values:
+        return ()
+    return _unique_ids(values, field)
 
 
 def _unique_codes(values: Sequence[str], field: str) -> tuple[str, ...]:

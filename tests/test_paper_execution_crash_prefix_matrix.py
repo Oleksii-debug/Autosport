@@ -52,25 +52,33 @@ def _config(**overrides) -> PaperExecutionModelConfig:
     return PaperExecutionModelConfig(**values)
 
 
-def _action() -> ExecutionAction:
+def _action(
+    action_id: str = "crash-prefix-action",
+    *,
+    stake: str = "10.00",
+) -> ExecutionAction:
     return ExecutionAction(
-        action_id="crash-prefix-action",
+        action_id=action_id,
         bookmaker_id="paper-venue",
         account_id="paper-account",
-        event_id="event-main",
-        market_id="market-main",
-        selection_id="selection-main",
+        event_id=f"event-{action_id}",
+        market_id=f"market-{action_id}",
+        selection_id=f"selection-{action_id}",
         side="BACK",
         requested_odds="2.50",
-        requested_stake="10.00",
-        quote_id="quote-main",
+        requested_stake=stake,
+        quote_id=f"quote-{action_id}",
         quote_observed_at=QUOTE_AT,
         expires_at=EXPIRES_AT,
     )
 
 
-def _prepared(runtime: PaperExecutionAdoptionRuntime) -> PreparedPaperExecution:
-    current = _action()
+def _prepared(
+    runtime: PaperExecutionAdoptionRuntime,
+    *actions: ExecutionAction,
+) -> PreparedPaperExecution:
+    if not actions:
+        actions = (_action(),)
     return runtime._mint_prepared(
         PreparedPaperExecution(
             execution_plan=ExecutionPlan(
@@ -79,15 +87,16 @@ def _prepared(runtime: PaperExecutionAdoptionRuntime) -> PreparedPaperExecution:
                 decision_id="decision-crash-prefix",
                 approval_id="paper-only-no-real-money",
                 created_at=QUOTE_AT,
-                actions=(current,),
+                actions=tuple(actions),
             ),
-            exposure_bindings=(
+            exposure_bindings=tuple(
                 PaperExposureBinding(
                     action_id=current.action_id,
                     sport="soccer",
                     bankroll_id="paper-bankroll",
                     currency="EUR",
-                ),
+                )
+                for current in actions
             ),
             intent_evidence_json='{"schema":"crash-prefix-matrix-test"}',
         )
@@ -149,29 +158,34 @@ class PaperExecutionCrashPrefixMatrixTests(unittest.TestCase):
         prefix: str,
         *,
         model: PaperExecutionModelConfig,
+        actions: tuple[ExecutionAction, ...] | None = None,
+        suspended_action_ids: frozenset[str] = frozenset(),
     ) -> dict[str, object]:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             book_path = root / "paper_book.json"
             ledger_path = root / "paper-execution.jsonl"
+            current_actions = (_action(),) if actions is None else actions
 
             book = PaperBook("100.00")
             runtime = _runtime(root, book, model=model)
             prefix_result = None
             if prefix == _AFTER_ATTEMPT:
                 prefix_result = runtime.execute(
-                    prepared=_prepared(runtime),
+                    prepared=_prepared(runtime, *current_actions),
                     trigger_id=TRIGGER_ID,
                     started_at=STARTED_AT,
                     materialize_exposure=False,
+                    suspended_action_ids=suspended_action_ids,
                 )
                 self.assertEqual(prefix_result.ticket_ids, ())
             elif prefix == _AFTER_BOOK:
                 prefix_result = runtime.execute(
-                    prepared=_prepared(runtime),
+                    prepared=_prepared(runtime, *current_actions),
                     trigger_id=TRIGGER_ID,
                     started_at=STARTED_AT,
                     materialize_exposure=True,
+                    suspended_action_ids=suspended_action_ids,
                 )
             elif prefix != _BEFORE_ATTEMPT:
                 raise AssertionError(f"unknown crash prefix: {prefix}")
@@ -180,7 +194,7 @@ class PaperExecutionCrashPrefixMatrixTests(unittest.TestCase):
             recovered_book = PaperBook.load(book_path)
             recovered_runtime = _runtime(root, recovered_book, model=model)
             recovered = recovered_runtime.execute(
-                prepared=_prepared(recovered_runtime),
+                prepared=_prepared(recovered_runtime, *current_actions),
                 trigger_id=TRIGGER_ID,
                 started_at=STARTED_AT,
                 materialize_exposure=True,
@@ -197,7 +211,7 @@ class PaperExecutionCrashPrefixMatrixTests(unittest.TestCase):
             second_book = PaperBook.load(book_path)
             second_runtime = _runtime(root, second_book, model=model)
             second = second_runtime.execute(
-                prepared=_prepared(second_runtime),
+                prepared=_prepared(second_runtime, *current_actions),
                 trigger_id=TRIGGER_ID,
                 started_at=STARTED_AT,
                 materialize_exposure=True,
@@ -233,6 +247,46 @@ class PaperExecutionCrashPrefixMatrixTests(unittest.TestCase):
         self.assertEqual(run.recovery_decision, RecoveryDecision.NONE)
         self.assertEqual(str(run.worst_case_exposure), "10.00")
         self.assertEqual(baseline["book_semantics"][1], "90.00")
+
+    def test_accepted_then_rejected_plan_converges_without_duplicate_exposure(self) -> None:
+        actions = (
+            _action("crash-prefix-action-1", stake="7.00"),
+            _action("crash-prefix-action-2", stake="11.00"),
+        )
+        suspended = frozenset({"crash-prefix-action-2"})
+        states = {
+            prefix: self._exercise_prefix(
+                prefix,
+                model=_config(),
+                actions=actions,
+                suspended_action_ids=suspended,
+            )
+            for prefix in _PREFIXES
+        }
+        baseline = states[_BEFORE_ATTEMPT]
+        for prefix, state in states.items():
+            with self.subTest(prefix=prefix):
+                self.assertEqual(state["run"], baseline["run"])
+                self.assertEqual(state["ledger_bytes"], baseline["ledger_bytes"])
+                self.assertEqual(state["book_semantics"], baseline["book_semantics"])
+                self.assertEqual(len(state["ticket_ids"]), 1)
+
+        run = baseline["run"]
+        self.assertEqual(
+            tuple(attempt.outcome for attempt in run.attempts),
+            (
+                PaperAttemptOutcome.ACCEPTED,
+                PaperAttemptOutcome.REJECTED,
+            ),
+        )
+        self.assertEqual(run.pending_action_ids, ())
+        self.assertEqual(
+            run.recovery_decision,
+            RecoveryDecision.HEDGE_REVIEW_REQUIRED,
+        )
+        self.assertEqual(str(run.worst_case_exposure), "7.00")
+        self.assertEqual(baseline["book_semantics"][1], "93.00")
+        self.assertEqual(len(baseline["book_semantics"][2]), 1)
 
     def test_unknown_attempt_remains_negative_evidence_without_ghost_exposure(self) -> None:
         states = {

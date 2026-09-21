@@ -158,6 +158,6 @@ def review_provider_liquidity(
         need_after_central_cash=need_after_central,
         modeled_shortfall_after_surplus=modeled_shortfall,
         requires_transfer_feasibility_check=(
-            state is LiquidityReviewState.PROVIDER_REBALANCE_CANDIDATE
+            need_after_central > ZERO and modeled_surplus > ZERO
         ),
     )

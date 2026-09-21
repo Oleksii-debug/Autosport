@@ -4,6 +4,7 @@ import unittest
 from contextlib import contextmanager
 from dataclasses import replace
 from pathlib import Path
+from unittest.mock import patch
 
 from autosport.causal_collector import (
     AckConflictError,
@@ -377,6 +378,43 @@ class CollectorDeltaTests(unittest.TestCase):
                 2,
             )
             self.assertEqual(second_consumer.drain(as_of="2026-01-01T00:00:11+00:00"), ())
+
+    def test_checkpoint_first_open_preserves_peer_state_created_at_lock_boundary(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "desktop.json"
+            peer_state = {
+                "schema_version": 1,
+                "acks": [
+                    {
+                        "delta_id": "peer-delta",
+                        "canonical_event_digest": "1" * 64,
+                        "acknowledged_at": "2026-01-01T00:00:05+00:00",
+                        "application_receipt_id": "receipt-peer",
+                        "applied_at": "2026-01-01T00:00:04+00:00",
+                    }
+                ],
+                "streams": {},
+            }
+
+            @contextmanager
+            def peer_publishes_before_lock_owner_reads(_workspace):
+                path.write_text(
+                    json.dumps(peer_state, sort_keys=True, separators=(",", ":")) + "\n",
+                    encoding="utf-8",
+                )
+                yield
+
+            with patch(
+                "autosport.causal_collector_legacy.WorkspaceEconomicLock",
+                side_effect=peer_publishes_before_lock_owner_reads,
+            ):
+                checkpoint = DesktopDeltaCheckpointStore(path)
+
+            self.assertTrue(checkpoint.has_ack("peer-delta"))
+            self.assertEqual(
+                json.loads(path.read_text(encoding="utf-8")),
+                peer_state,
+            )
 
     def test_checkpoint_ack_refreshes_state_after_serialization_boundary(self):
         with tempfile.TemporaryDirectory() as tmp:

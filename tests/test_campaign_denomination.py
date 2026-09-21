@@ -138,9 +138,11 @@ def test_rehydrate_rejects_missing_or_extra_schema_keys() -> None:
 
 
 def test_currency_is_canonical_and_cannot_be_caller_normalized() -> None:
-    for bad in ("eur", "EURO", " EU", "12A", ""):
+    for bad in ("eur", "EURO", " EU", "12A", "", "SLL"):
         with pytest.raises(CampaignDenominationError, match="currency"):
             binding(currency=bad)
+
+    assert binding(currency="SLE").currency == "SLE"
 
 
 def test_timestamps_must_be_causal_timezone_aware_and_non_future_relative_order() -> None:

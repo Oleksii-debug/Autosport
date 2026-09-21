@@ -487,6 +487,35 @@ def test_snapshot_rejects_capability_without_typed_snapshot_evidence(
             observed_at=_TS,
         )
 
+
+def test_position_provider_status_preserves_legacy_positional_constructor_order() -> None:
+    position = BookmakerPositionObservation(
+        "book-a",
+        "acct-a",
+        "adapter-a",
+        "obs-positional",
+        "external-positional",
+        BookmakerPositionState.OPEN,
+        "EUR",
+        _TS,
+        _HASH,
+        Decimal("10"),
+        "backer_stake",
+        "BACK",
+        Decimal("2.00"),
+        None,
+        "receipt-1",
+        None,
+    )
+
+    assert position.provider_amount == Decimal("10")
+    assert position.provider_amount_semantics == "backer_stake"
+    assert position.provider_side == "BACK"
+    assert position.decimal_odds == Decimal("2.00")
+    assert position.external_receipt_id == "receipt-1"
+    assert position.provider_status is None
+
+
 def test_position_provider_status_is_optional_opaque_evidence() -> None:
     legacy = _position(BookmakerPositionState.OPEN)
     assert legacy.provider_status is None

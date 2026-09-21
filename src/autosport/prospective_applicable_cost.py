@@ -1,15 +1,6 @@
 from __future__ import annotations
 
-"""Fail-closed decision-time aggregate for economically applicable costs.
-
-This module is deliberately smaller than the historical candidate aggregate.  It
-does not accept caller-authored cost/applicability DTOs at all.  Current product
-truth can re-resolve one canonical model-compute monetary boundary, but that
-boundary itself is still UNKNOWN_UNPROVEN; the other required live cost classes
-do not yet have product-owned prospective adapters.  Therefore schema v1 has no
-representable COMPLETE or positive-money state.  Missing authority is explicit
-and never converted to zero.
-"""
+"""Fail-closed decision-time aggregate for economically applicable costs."""
 
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -29,7 +20,7 @@ from .prospective_model_compute_money import (
 )
 
 
-_SCHEMA_VERSION = 1
+_SCHEMA_VERSION = 2
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 
 
@@ -39,11 +30,18 @@ class ProspectiveApplicableCostError(ValueError):
 
 class ProspectiveCostResolutionStatus(StrEnum):
     UNKNOWN_UNPROVEN = "UNKNOWN_UNPROVEN"
+    EXECUTION_STATE_DEPENDENT = "EXECUTION_STATE_DEPENDENT"
     TERMINAL_STATE_DEPENDENT = "TERMINAL_STATE_DEPENDENT"
+    EXECUTION_AND_TERMINAL_STATE_DEPENDENT = "EXECUTION_AND_TERMINAL_STATE_DEPENDENT"
+
+
+class ProspectiveCostDependencyAxis(StrEnum):
+    EXECUTION_STATE = "EXECUTION_STATE"
+    TERMINAL_STATE = "TERMINAL_STATE"
 
 
 class ProspectiveApplicableCostCompleteness(StrEnum):
-    """Schema v1 deliberately has no COMPLETE state."""
+    """Schema v2 deliberately has no COMPLETE state."""
 
     INCOMPLETE = "INCOMPLETE"
 
@@ -116,11 +114,29 @@ def _digest(payload: object) -> str:
     return hashlib.sha256(encoded).hexdigest()
 
 
+_STATUS_AXES: dict[
+    ProspectiveCostResolutionStatus, tuple[ProspectiveCostDependencyAxis, ...]
+] = {
+    ProspectiveCostResolutionStatus.UNKNOWN_UNPROVEN: (),
+    ProspectiveCostResolutionStatus.EXECUTION_STATE_DEPENDENT: (
+        ProspectiveCostDependencyAxis.EXECUTION_STATE,
+    ),
+    ProspectiveCostResolutionStatus.TERMINAL_STATE_DEPENDENT: (
+        ProspectiveCostDependencyAxis.TERMINAL_STATE,
+    ),
+    ProspectiveCostResolutionStatus.EXECUTION_AND_TERMINAL_STATE_DEPENDENT: (
+        ProspectiveCostDependencyAxis.EXECUTION_STATE,
+        ProspectiveCostDependencyAxis.TERMINAL_STATE,
+    ),
+}
+
+
 @dataclass(frozen=True, slots=True)
 class ProspectiveApplicableCostComponent:
     cost_class: CostClass
     status: ProspectiveCostResolutionStatus
     reason: ProspectiveApplicableCostReason
+    dependency_axes: tuple[ProspectiveCostDependencyAxis, ...] = ()
     source_family: str | None = None
     source_evidence_id: str | None = None
     source_sha256: str | None = None
@@ -135,6 +151,17 @@ class ProspectiveApplicableCostComponent:
         if type(self.reason) is not ProspectiveApplicableCostReason:
             raise ProspectiveApplicableCostError(
                 "reason must be exact ProspectiveApplicableCostReason"
+            )
+        if type(self.dependency_axes) is not tuple or any(
+            type(axis) is not ProspectiveCostDependencyAxis
+            for axis in self.dependency_axes
+        ):
+            raise ProspectiveApplicableCostError(
+                "dependency_axes must be a tuple of exact ProspectiveCostDependencyAxis values"
+            )
+        if self.dependency_axes != _STATUS_AXES[self.status]:
+            raise ProspectiveApplicableCostError(
+                "status and dependency_axes must describe the same dependency dimensions"
             )
         refs = (self.source_family, self.source_evidence_id, self.source_sha256)
         if any(value is None for value in refs):
@@ -151,6 +178,7 @@ class ProspectiveApplicableCostComponent:
         return {
             "cost_class": self.cost_class.value,
             "status": self.status.value,
+            "dependency_axes": [axis.value for axis in self.dependency_axes],
             "reason": self.reason.value,
             "amount": None,
             "currency": None,
@@ -197,11 +225,11 @@ class ProspectiveApplicableCostResolution:
             or self.completeness is not ProspectiveApplicableCostCompleteness.INCOMPLETE
         ):
             raise ProspectiveApplicableCostError(
-                "schema v1 cannot represent COMPLETE applicable-cost authority"
+                "schema v2 cannot represent COMPLETE applicable-cost authority"
             )
         if self.total_subtractable_amount is not None or self.currency is not None:
             raise ProspectiveApplicableCostError(
-                "schema v1 cannot represent an authoritative monetary total"
+                "schema v2 cannot represent an authoritative monetary total"
             )
 
     @property
@@ -230,18 +258,17 @@ def _unresolved(
     cost_class: CostClass,
     reason: ProspectiveApplicableCostReason,
     *,
-    terminal_state_dependent: bool = False,
+    status: ProspectiveCostResolutionStatus = (
+        ProspectiveCostResolutionStatus.UNKNOWN_UNPROVEN
+    ),
     source_family: str | None = None,
     source_evidence_id: str | None = None,
     source_sha256: str | None = None,
 ) -> ProspectiveApplicableCostComponent:
     return ProspectiveApplicableCostComponent(
         cost_class=cost_class,
-        status=(
-            ProspectiveCostResolutionStatus.TERMINAL_STATE_DEPENDENT
-            if terminal_state_dependent
-            else ProspectiveCostResolutionStatus.UNKNOWN_UNPROVEN
-        ),
+        status=status,
+        dependency_axes=_STATUS_AXES[status],
         reason=reason,
         source_family=source_family,
         source_evidence_id=source_evidence_id,
@@ -257,14 +284,7 @@ def resolve_prospective_applicable_costs(
     model_request_id: str,
     decision_at: datetime,
 ) -> ProspectiveApplicableCostResolution:
-    """Re-resolve available product-owned prospective cost truth and fail closed.
-
-    Caller-authored amount, currency, applicability, source references, and arbitrary
-    cost DTOs are intentionally absent from this API.  The only delegated source is
-    the canonical model-compute monetary resolver.  Every other required class stays
-    explicit UNKNOWN/terminal-dependent until a product-owned prospective adapter is
-    merged.  Consequently missing classes never become implicit zero or COMPLETE.
-    """
+    """Re-resolve available product-owned prospective cost truth and fail closed."""
 
     if type(intent) is not OpportunityIntent:
         raise ProspectiveApplicableCostError(
@@ -334,7 +354,7 @@ def resolve_prospective_applicable_costs(
         or model_evidence.status is not ProspectiveModelComputeMoneyStatus.UNKNOWN_UNPROVEN
     ):
         raise ProspectiveApplicableCostError(
-            "aggregate schema v1 cannot consume positive model-compute money"
+            "aggregate schema v2 cannot consume positive model-compute money"
         )
     model_evidence_id = _sha256(model_evidence.evidence_id, "model evidence_id")
     if _sha256(model_evidence.intent_sha256, "model intent_sha256") != intent_sha256:
@@ -371,12 +391,12 @@ def resolve_prospective_applicable_costs(
         CostClass.EXECUTION_SLIPPAGE: _unresolved(
             CostClass.EXECUTION_SLIPPAGE,
             ProspectiveApplicableCostReason.EXECUTION_SLIPPAGE_DEPENDS_ON_EXECUTION,
-            terminal_state_dependent=True,
+            status=ProspectiveCostResolutionStatus.EXECUTION_STATE_DEPENDENT,
         ),
         CostClass.EXECUTION_FEES_COMMISSION_TAX: _unresolved(
             CostClass.EXECUTION_FEES_COMMISSION_TAX,
             ProspectiveApplicableCostReason.EXECUTION_FEES_DEPEND_ON_EXECUTION_OR_TERMINAL_STATE,
-            terminal_state_dependent=True,
+            status=ProspectiveCostResolutionStatus.EXECUTION_AND_TERMINAL_STATE_DEPENDENT,
         ),
     }
     ordered = tuple(

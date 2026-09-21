@@ -666,6 +666,8 @@ def test_production_binding_requires_issued_provider_and_product_origin(
         == product_session.authority_digest
     )
     assert result.structural.session_id == plan.session_id
+    assert result.physical_precommit_proven is False
+    assert result.immutable_external_time_anchor_required is True
     assert result.authority_sha256
 
 

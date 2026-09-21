@@ -88,47 +88,50 @@ def _require_workspace_decision_ledger(
         )
 
 
-@wraps(_STABLE_LIVE_INIT)
-def _live_init_with_canonical_decision_ledger(
-    self,
-    *args,
-    _stable_live_init=_STABLE_LIVE_INIT,
-    _stable_live_init_signature=_STABLE_LIVE_INIT_SIGNATURE,
-    _require_workspace_fn=_require_workspace_decision_ledger,
-    **kwargs,
-) -> None:
-    """Treat a caller-supplied live ledger as an assertion, never path authority."""
+def _make_live_init_guard(stable_live_init, stable_signature, require_workspace_fn):
+    @wraps(stable_live_init)
+    def live_init_with_canonical_decision_ledger(self, *args, **kwargs) -> None:
+        """Treat a caller-supplied live ledger as an assertion, never path authority."""
 
-    bound = _stable_live_init_signature.bind(self, *args, **kwargs)
-    bound.apply_defaults()
-    workspace = bound.arguments.get("workspace")
-    supplied_ledger = bound.arguments.get("decision_ledger")
-    supplied_runtime = bound.arguments.get("paper_execution")
-    if supplied_runtime is not None and supplied_ledger is not None:
-        if type(supplied_ledger) is not JsonlDecisionLedger:
-            raise _origin.PaperExecutionDecisionOriginError(
-                "live decision origin requires exact JsonlDecisionLedger authority"
+        bound = stable_signature.bind(self, *args, **kwargs)
+        bound.apply_defaults()
+        workspace = bound.arguments.get("workspace")
+        supplied_ledger = bound.arguments.get("decision_ledger")
+        supplied_runtime = bound.arguments.get("paper_execution")
+        if supplied_runtime is not None and supplied_ledger is not None:
+            if type(supplied_ledger) is not JsonlDecisionLedger:
+                raise _origin.PaperExecutionDecisionOriginError(
+                    "live decision origin requires exact JsonlDecisionLedger authority"
+                )
+            require_workspace_fn(
+                supplied_ledger,
+                workspace,
+                producer="live",
             )
-        _require_workspace_fn(
-            supplied_ledger,
-            workspace,
-            producer="live",
-        )
 
-    _stable_live_init(self, *args, **kwargs)
+        stable_live_init(self, *args, **kwargs)
 
-    runtime = getattr(self, "paper_execution", None)
-    if runtime is not None:
-        ledger = getattr(self, "decision_ledger", None)
-        if type(ledger) is not JsonlDecisionLedger:
-            raise _origin.PaperExecutionDecisionOriginError(
-                "live decision origin requires exact JsonlDecisionLedger authority"
+        runtime = getattr(self, "paper_execution", None)
+        if runtime is not None:
+            ledger = getattr(self, "decision_ledger", None)
+            if type(ledger) is not JsonlDecisionLedger:
+                raise _origin.PaperExecutionDecisionOriginError(
+                    "live decision origin requires exact JsonlDecisionLedger authority"
+                )
+            require_workspace_fn(
+                ledger,
+                getattr(self, "workspace", workspace),
+                producer="live",
             )
-        _require_workspace_fn(
-            ledger,
-            getattr(self, "workspace", workspace),
-            producer="live",
-        )
+
+    return live_init_with_canonical_decision_ledger
+
+
+_live_init_with_canonical_decision_ledger = _make_live_init_guard(
+    _STABLE_LIVE_INIT,
+    _STABLE_LIVE_INIT_SIGNATURE,
+    _require_workspace_decision_ledger,
+)
 
 
 def _origin_from_direct_caller(
@@ -296,86 +299,44 @@ def _execute_stable(
     )
 
 
-def _execute_with_exact_product_callsite(
-    self: PaperExecutionAdoptionRuntime,
-    *,
-    prepared,
-    trigger_id: str,
-    started_at: str,
-    materialize_exposure: bool,
-    observations=None,
-    evidence_registry=None,
-    suspended_action_ids: frozenset[str] = frozenset(),
-    _origin_from_direct_caller_fn=_origin_from_direct_caller,
-    _matching_product_ancestor_fn=_matching_product_ancestor,
-    _execute_stable_fn=_execute_stable,
-    _product_origin_runtime=_instance_guard._PRODUCT_ORIGIN_RUNTIME,
-    _product_origin_callsite_code=_instance_guard._PRODUCT_ORIGIN_CALLSITE_CODE,
-    _paper_value_fresh_code=_PAPER_VALUE_FRESH_CODE,
-    _paper_value_recovery_code=_PAPER_VALUE_RECOVERY_CODE,
+def _make_execute_guard(
+    origin_from_direct_caller_fn,
+    matching_product_ancestor_fn,
+    execute_stable_fn,
+    product_origin_runtime,
+    product_origin_callsite_code,
+    paper_value_fresh_code,
+    paper_value_recovery_code,
 ):
-    # A capability token can only exist inside this wrapper's own stable execution.
-    # Seeing one at entry means a caller tried to smuggle product authority across
-    # an invocation boundary.
-    if (
-        _product_origin_runtime.get() is not None
-        or _product_origin_callsite_code.get() is not None
+    def execute_with_exact_product_callsite(
+        self: PaperExecutionAdoptionRuntime,
+        *,
+        prepared,
+        trigger_id: str,
+        started_at: str,
+        materialize_exposure: bool,
+        observations=None,
+        evidence_registry=None,
+        suspended_action_ids: frozenset[str] = frozenset(),
     ):
-        raise _origin.PaperExecutionDecisionOriginError(
-            "caller-supplied product-origin runtime context is not authority"
-        )
-    ambient_origin = _origin._DECISION_ORIGIN.get()
-
-    decision_id = getattr(getattr(prepared, "execution_plan", None), "decision_id", None)
-    if type(decision_id) is not str or not decision_id:
-        if ambient_origin is not None:
+        # Capability objects and trusted helpers are closure-held and cannot be
+        # replaced through caller kwargs or module-global alias substitution.
+        if (
+            product_origin_runtime.get() is not None
+            or product_origin_callsite_code.get() is not None
+        ):
             raise _origin.PaperExecutionDecisionOriginError(
-                "caller-supplied decision-origin context cannot authorize execution"
+                "caller-supplied product-origin runtime context is not authority"
             )
-        return _execute_stable_fn(
-            self,
-            prepared=prepared,
-            trigger_id=trigger_id,
-            started_at=started_at,
-            materialize_exposure=materialize_exposure,
-            observations=observations,
-            evidence_registry=evidence_registry,
-            suspended_action_ids=suspended_action_ids,
-        )
+        ambient_origin = _origin._DECISION_ORIGIN.get()
 
-    current = inspect.currentframe()
-    caller = None
-    try:
-        caller = current.f_back if current is not None else None
-        origin = (
-            None
-            if caller is None
-            else _origin_from_direct_caller_fn(self, decision_id, caller)
-        )
-
-        if ambient_origin is not None:
-            if (
-                caller is None
-                or caller.f_code
-                not in {_paper_value_fresh_code, _paper_value_recovery_code}
-                or origin is None
-                or origin != ambient_origin
-            ):
-                raise _origin.PaperExecutionDecisionOriginError(
-                    "ambient decision origin is not the exact verified paper-value resume origin"
-                )
-
-        if origin is None:
-            ancestor = None if caller is None else caller.f_back
-            if _matching_product_ancestor_fn(self, decision_id, ancestor):
-                raise PaperExecutionAdoptionError(
-                    "nested PAPER execution cannot inherit product decision-origin authority"
-                )
+        decision_id = getattr(getattr(prepared, "execution_plan", None), "decision_id", None)
+        if type(decision_id) is not str or not decision_id:
             if ambient_origin is not None:
                 raise _origin.PaperExecutionDecisionOriginError(
-                    "ambient decision origin cannot authorize non-product execution"
+                    "caller-supplied decision-origin context cannot authorize execution"
                 )
-            return _execute_stable_fn(
+            return execute_stable_fn(
                 self,
                 prepared=prepared,
                 trigger_id=trigger_id,
@@ -384,40 +345,96 @@ def _execute_with_exact_product_callsite(
                 observations=observations,
                 evidence_registry=evidence_registry,
                 suspended_action_ids=suspended_action_ids,
-            )
-        if trigger_id != origin.decision_id:
-            raise PaperExecutionAdoptionError(
-                "product execution trigger does not match verified DecisionLedger origin"
-            )
-        if current is None:
-            raise _origin.PaperExecutionDecisionOriginError(
-                "canonical product callsite frame is unavailable"
             )
 
-        origin_token = None
-        if ambient_origin is None:
-            origin_token = _origin._DECISION_ORIGIN.set(origin)
-        runtime_token = _product_origin_runtime.set(self)
-        callsite_token = _product_origin_callsite_code.set(current.f_code)
+        current = inspect.currentframe()
+        caller = None
         try:
-            return _execute_stable_fn(
-                self,
-                prepared=prepared,
-                trigger_id=trigger_id,
-                started_at=started_at,
-                materialize_exposure=materialize_exposure,
-                observations=observations,
-                evidence_registry=evidence_registry,
-                suspended_action_ids=suspended_action_ids,
+            caller = current.f_back if current is not None else None
+            origin = (
+                None
+                if caller is None
+                else origin_from_direct_caller_fn(self, decision_id, caller)
             )
+
+            if ambient_origin is not None:
+                if (
+                    caller is None
+                    or caller.f_code
+                    not in {paper_value_fresh_code, paper_value_recovery_code}
+                    or origin is None
+                    or origin != ambient_origin
+                ):
+                    raise _origin.PaperExecutionDecisionOriginError(
+                        "ambient decision origin is not the exact verified paper-value resume origin"
+                    )
+
+            if origin is None:
+                ancestor = None if caller is None else caller.f_back
+                if matching_product_ancestor_fn(self, decision_id, ancestor):
+                    raise PaperExecutionAdoptionError(
+                        "nested PAPER execution cannot inherit product decision-origin authority"
+                    )
+                if ambient_origin is not None:
+                    raise _origin.PaperExecutionDecisionOriginError(
+                        "ambient decision origin cannot authorize non-product execution"
+                    )
+                return execute_stable_fn(
+                    self,
+                    prepared=prepared,
+                    trigger_id=trigger_id,
+                    started_at=started_at,
+                    materialize_exposure=materialize_exposure,
+                    observations=observations,
+                    evidence_registry=evidence_registry,
+                    suspended_action_ids=suspended_action_ids,
+                )
+            if trigger_id != origin.decision_id:
+                raise PaperExecutionAdoptionError(
+                    "product execution trigger does not match verified DecisionLedger origin"
+                )
+            if current is None:
+                raise _origin.PaperExecutionDecisionOriginError(
+                    "canonical product callsite frame is unavailable"
+                )
+
+            origin_token = None
+            if ambient_origin is None:
+                origin_token = _origin._DECISION_ORIGIN.set(origin)
+            runtime_token = product_origin_runtime.set(self)
+            callsite_token = product_origin_callsite_code.set(current.f_code)
+            try:
+                return execute_stable_fn(
+                    self,
+                    prepared=prepared,
+                    trigger_id=trigger_id,
+                    started_at=started_at,
+                    materialize_exposure=materialize_exposure,
+                    observations=observations,
+                    evidence_registry=evidence_registry,
+                    suspended_action_ids=suspended_action_ids,
+                )
+            finally:
+                product_origin_callsite_code.reset(callsite_token)
+                product_origin_runtime.reset(runtime_token)
+                if origin_token is not None:
+                    _origin._DECISION_ORIGIN.reset(origin_token)
         finally:
-            _product_origin_callsite_code.reset(callsite_token)
-            _product_origin_runtime.reset(runtime_token)
-            if origin_token is not None:
-                _origin._DECISION_ORIGIN.reset(origin_token)
-    finally:
-        del current
-        del caller
+            del current
+            del caller
+
+    return execute_with_exact_product_callsite
+
+
+_execute_with_exact_product_callsite = _make_execute_guard(
+    _origin_from_direct_caller,
+    _matching_product_ancestor,
+    _execute_stable,
+    _instance_guard._PRODUCT_ORIGIN_RUNTIME,
+    _instance_guard._PRODUCT_ORIGIN_CALLSITE_CODE,
+    _PAPER_VALUE_FRESH_CODE,
+    _PAPER_VALUE_RECOVERY_CODE,
+)
 
 
 def _install() -> None:

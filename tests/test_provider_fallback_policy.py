@@ -142,7 +142,7 @@ def test_healthy_supported_primary_is_selected_without_authority_widening(tmp_pa
         primary_state=ProviderOperationalState.HEALTHY,
     )
 
-    assert decision.disposition is ProviderFallbackDisposition.USE_PRIMARY_READ
+    assert decision.disposition is ProviderFallbackDisposition.PRIMARY_TECHNICALLY_ELIGIBLE
     assert decision.selected_profile_id == primary.profile_id
     assert decision.reason == "PRIMARY_HEALTHY_SUPPORTED"
     assert decision.source_quality_authority is False
@@ -166,7 +166,7 @@ def test_degraded_or_unavailable_primary_can_use_healthy_supported_fallback(tmp_
         fallback=fallback,
     )
 
-    assert decision.disposition is ProviderFallbackDisposition.USE_FALLBACK_READ
+    assert decision.disposition is ProviderFallbackDisposition.FALLBACK_TECHNICALLY_ELIGIBLE
     assert decision.selected_profile_id == fallback.profile_id
     assert decision.reason == f"PRIMARY_{state.value}_FALLBACK_HEALTHY_SUPPORTED"
     assert decision.source_quality_authority is False
@@ -187,7 +187,7 @@ def test_browser_fallback_remains_only_a_technical_route(tmp_path):
         fallback_kind=BookmakerIntegrationKind.BROWSER_AUTOMATION,
     )
 
-    assert decision.disposition is ProviderFallbackDisposition.USE_FALLBACK_READ
+    assert decision.disposition is ProviderFallbackDisposition.FALLBACK_TECHNICALLY_ELIGIBLE
     assert decision.downstream_source_quality_required is True
     assert decision.source_quality_authority is False
 
@@ -614,7 +614,7 @@ def test_account_scoped_read_can_use_alternate_adapter_for_same_account(tmp_path
         capability=BookmakerCapability.BALANCE_READ,
     )
 
-    assert decision.disposition is ProviderFallbackDisposition.USE_FALLBACK_READ
+    assert decision.disposition is ProviderFallbackDisposition.FALLBACK_TECHNICALLY_ELIGIBLE
     assert decision.selected_profile_id == fallback.profile_id
     assert decision.downstream_semantic_compatibility_required is False
 
@@ -631,7 +631,7 @@ def test_cross_provider_quote_fallback_requires_semantic_compatibility_gate(tmp_
         fallback=fallback,
     )
 
-    assert decision.disposition is ProviderFallbackDisposition.USE_FALLBACK_READ
+    assert decision.disposition is ProviderFallbackDisposition.FALLBACK_TECHNICALLY_ELIGIBLE
     assert decision.downstream_semantic_compatibility_required is True
     assert decision.downstream_source_quality_required is True
 
@@ -657,4 +657,22 @@ def test_partial_fallback_is_rejected_even_when_primary_is_healthy(tmp_path):
             fallback_operational=None,
             decided_at=T3,
         )
+
+def test_abstention_grants_no_downstream_consumption_gate(tmp_path):
+    primary = _profile(
+        venue="primary",
+        account="acct-p",
+        adapter="api-p",
+        state=BookmakerCapabilityState.UNSUPPORTED,
+    )
+    decision = _resolve(
+        _registry(tmp_path, primary),
+        primary,
+        primary_state=ProviderOperationalState.HEALTHY,
+    )
+
+    assert decision.disposition is ProviderFallbackDisposition.ABSTAIN
+    assert decision.downstream_source_quality_required is False
+    assert decision.execution_authority is False
+    assert decision.source_quality_authority is False
 

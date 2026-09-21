@@ -4,6 +4,7 @@ import hashlib
 import json
 import tempfile
 import unittest
+from dataclasses import replace
 from pathlib import Path
 from unittest.mock import patch
 from urllib.parse import parse_qs, urlparse
@@ -261,6 +262,246 @@ class HistoricalAcquisitionBundleTests(unittest.TestCase):
                 with self.assertRaisesRegex(
                     ProviderPayloadError,
                     "match_results.capture bytes changed after child capture",
+                ):
+                    capture_historical_acquisition_bundle(
+                        self._provider(transport),
+                        requested_at=("2026-09-12T10:03:00Z",),
+                        results_date="2026-09-10",
+                        output_dir=root,
+                    )
+            self.assertFalse(root.exists())
+
+    def test_returned_match_report_cannot_override_hashed_evidence_semantics(self) -> None:
+        transport = _Transport()
+        real_capture = historical_acquisition.capture_historical_matches
+
+        def forge_returned_report(*args, **kwargs):
+            report = real_capture(*args, **kwargs)
+            return replace(
+                report,
+                requested_date="2026-09-09",
+                request_url="https://attacker.invalid/forged",
+                provider_response_origin_verified=True,
+                trusted_outcome_source_admissible=True,
+            )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "acquisition"
+            with patch.object(
+                historical_acquisition,
+                "capture_historical_matches",
+                side_effect=forge_returned_report,
+            ):
+                with self.assertRaisesRegex(
+                    ProviderPayloadError,
+                    "returned child report does not match staged evidence",
+                ):
+                    capture_historical_acquisition_bundle(
+                        self._provider(transport),
+                        requested_at=("2026-09-12T10:03:00Z",),
+                        results_date="2026-09-10",
+                        output_dir=root,
+                    )
+            self.assertFalse(root.exists())
+
+    def test_mutated_match_evidence_ordinary_semantics_fail_closed(self) -> None:
+        transport = _Transport()
+        real_capture = historical_acquisition.capture_historical_matches
+
+        def mutate_evidence_after_child(*args, **kwargs):
+            report = real_capture(*args, **kwargs)
+            evidence_path = Path(kwargs["evidence_path"])
+            evidence = json.loads(evidence_path.read_text(encoding="utf-8"))
+            evidence["canonical_response_sha256"] = "0" * 64
+            evidence["captured_at"] = "2026-09-13T03:01:00+00:00"
+            evidence_path.write_text(
+                json.dumps(evidence, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+                encoding="utf-8",
+            )
+            return report
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "acquisition"
+            with patch.object(
+                historical_acquisition,
+                "capture_historical_matches",
+                side_effect=mutate_evidence_after_child,
+            ):
+                with self.assertRaisesRegex(
+                    ProviderPayloadError,
+                    "capture/evidence semantic mismatch|returned child report does not match staged evidence",
+                ):
+                    capture_historical_acquisition_bundle(
+                        self._provider(transport),
+                        requested_at=("2026-09-12T10:03:00Z",),
+                        results_date="2026-09-10",
+                        output_dir=root,
+                    )
+            self.assertFalse(root.exists())
+
+    def test_mutated_match_evidence_cannot_promote_bundle_trust(self) -> None:
+        transport = _Transport()
+        real_capture = historical_acquisition.capture_historical_matches
+
+        def mutate_evidence_after_child(*args, **kwargs):
+            report = real_capture(*args, **kwargs)
+            evidence_path = Path(kwargs["evidence_path"])
+            evidence = json.loads(evidence_path.read_text(encoding="utf-8"))
+            evidence["provider_response_origin_verified"] = True
+            evidence["trusted_outcome_source_admissible"] = True
+            evidence_path.write_text(
+                json.dumps(evidence, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+                encoding="utf-8",
+            )
+            return report
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "acquisition"
+            with patch.object(
+                historical_acquisition,
+                "capture_historical_matches",
+                side_effect=mutate_evidence_after_child,
+            ):
+                with self.assertRaisesRegex(
+                    ProviderPayloadError,
+                    "provider_response_origin_verified must remain false",
+                ):
+                    capture_historical_acquisition_bundle(
+                        self._provider(transport),
+                        requested_at=("2026-09-12T10:03:00Z",),
+                        results_date="2026-09-10",
+                        output_dir=root,
+                    )
+            self.assertFalse(root.exists())
+
+    def test_mutated_child_evidence_cannot_claim_parsed_result_authority(self) -> None:
+        transport = _Transport()
+        real_capture = historical_acquisition.capture_historical_matches
+
+        def mutate_evidence_after_child(*args, **kwargs):
+            report = real_capture(*args, **kwargs)
+            evidence_path = Path(kwargs["evidence_path"])
+            evidence = json.loads(evidence_path.read_text(encoding="utf-8"))
+            evidence["provider_result_schema_parsed"] = True
+            evidence_path.write_text(
+                json.dumps(evidence, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+                encoding="utf-8",
+            )
+            return report
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "acquisition"
+            with patch.object(
+                historical_acquisition,
+                "capture_historical_matches",
+                side_effect=mutate_evidence_after_child,
+            ):
+                with self.assertRaisesRegex(
+                    ProviderPayloadError,
+                    "provider_result_schema_parsed must remain false",
+                ):
+                    capture_historical_acquisition_bundle(
+                        self._provider(transport),
+                        requested_at=("2026-09-12T10:03:00Z",),
+                        results_date="2026-09-10",
+                        output_dir=root,
+                    )
+            self.assertFalse(root.exists())
+
+    def test_returned_snapshot_report_cannot_override_hashed_evidence_semantics(self) -> None:
+        transport = _Transport()
+        real_capture = historical_acquisition.capture_historical_snapshot
+
+        def forge_returned_report(*args, **kwargs):
+            report = real_capture(*args, **kwargs)
+            return replace(
+                report,
+                requested_at="2026-09-11T00:00:00Z",
+                snapshot_at="2026-09-11T00:00:00Z",
+                quote_count=0,
+                market_sha256="0" * 64,
+            )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "acquisition"
+            with patch.object(
+                historical_acquisition,
+                "capture_historical_snapshot",
+                side_effect=forge_returned_report,
+            ):
+                with self.assertRaisesRegex(
+                    ProviderPayloadError,
+                    "returned child report does not match staged evidence",
+                ):
+                    capture_historical_acquisition_bundle(
+                        self._provider(transport),
+                        requested_at=("2026-09-12T10:03:00Z",),
+                        results_date="2026-09-10",
+                        output_dir=root,
+                    )
+            self.assertFalse(root.exists())
+
+    def test_mutated_snapshot_evidence_quote_count_fails_closed(self) -> None:
+        transport = _Transport()
+        real_capture = historical_acquisition.capture_historical_snapshot
+
+        def mutate_evidence_after_child(*args, **kwargs):
+            report = real_capture(*args, **kwargs)
+            evidence_path = Path(kwargs["evidence_path"])
+            evidence = json.loads(evidence_path.read_text(encoding="utf-8"))
+            evidence["quote_count"] = 1
+            evidence["has_data"] = True
+            evidence["point_in_time_snapshot_contains_odds"] = True
+            evidence_path.write_text(
+                json.dumps(evidence, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+                encoding="utf-8",
+            )
+            return report
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "acquisition"
+            with patch.object(
+                historical_acquisition,
+                "capture_historical_snapshot",
+                side_effect=mutate_evidence_after_child,
+            ):
+                with self.assertRaisesRegex(
+                    ProviderPayloadError,
+                    "returned child report does not match staged evidence|row count does not match staged child evidence",
+                ):
+                    capture_historical_acquisition_bundle(
+                        self._provider(transport),
+                        requested_at=("2026-09-12T10:03:00Z",),
+                        results_date="2026-09-10",
+                        output_dir=root,
+                    )
+            self.assertFalse(root.exists())
+
+    def test_mutated_snapshot_evidence_cannot_promote_coverage_truth(self) -> None:
+        transport = _Transport()
+        real_capture = historical_acquisition.capture_historical_snapshot
+
+        def mutate_evidence_after_child(*args, **kwargs):
+            report = real_capture(*args, **kwargs)
+            evidence_path = Path(kwargs["evidence_path"])
+            evidence = json.loads(evidence_path.read_text(encoding="utf-8"))
+            evidence["point_in_time_odds_market_coverage_verified"] = True
+            evidence_path.write_text(
+                json.dumps(evidence, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+                encoding="utf-8",
+            )
+            return report
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "acquisition"
+            with patch.object(
+                historical_acquisition,
+                "capture_historical_snapshot",
+                side_effect=mutate_evidence_after_child,
+            ):
+                with self.assertRaisesRegex(
+                    ProviderPayloadError,
+                    "point_in_time_odds_market_coverage_verified must remain false",
                 ):
                     capture_historical_acquisition_bundle(
                         self._provider(transport),

@@ -649,7 +649,7 @@ def test_provider_delayed_app_key_cannot_mint_positive_non_delayed_evidence(monk
     assert observation.application_key_class == "delayed"
     with pytest.raises(
         BetfairMarketBookFreshnessError,
-        match="requires active provider LIVE application key",
+        match="requires provider LIVE application-key tier",
     ):
         BetfairCapabilityFreshnessEvidence.from_market_book_observation(
             profile,
@@ -666,10 +666,10 @@ def test_inactive_provider_live_key_cannot_mint_positive_freshness(monkeypatch):
         app_active=False,
     )
 
-    assert observation.application_key_class == "unknown"
+    assert observation.application_key_class == "live"
     with pytest.raises(
         BetfairMarketBookFreshnessError,
-        match="requires active provider LIVE application key",
+        match="requires active provider application key",
     ):
         BetfairCapabilityFreshnessEvidence.from_market_book_observation(
             profile,

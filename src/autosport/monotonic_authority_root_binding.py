@@ -387,8 +387,8 @@ def _validate_selection_raw(
     *,
     expected_workspace_locator: str | None,
     expected_workspace_locator_sha256: str | None,
-    selected_authority_root_resolved: str,
-    selected_authority_root_resolved_sha256: str,
+    selected_authority_root_resolved: str | None,
+    selected_authority_root_resolved_sha256: str | None,
 ) -> str:
     if (
         raw["schema"] != ROOT_SELECTION_SCHEMA
@@ -453,13 +453,16 @@ def _validate_selection_raw(
         raise AuthorityRootSelectionIntegrityError(
             "resolved authority-root digest mismatch"
         )
-    if (
-        root_resolved != selected_authority_root_resolved
-        or root_resolved_sha != selected_authority_root_resolved_sha256
-    ):
-        raise AuthorityRootSelectionConflictError(
-            "workspace is already bound to a different monotonic authority root"
-        )
+    if selected_authority_root_resolved is not None:
+        if selected_authority_root_resolved_sha256 is None:
+            raise AssertionError("selected authority-root digest is required")
+        if (
+            root_resolved != selected_authority_root_resolved
+            or root_resolved_sha != selected_authority_root_resolved_sha256
+        ):
+            raise AuthorityRootSelectionConflictError(
+                "workspace is already bound to a different monotonic authority root"
+            )
     return _canonical_instance_id(raw["workspace_instance_id"])
 
 
@@ -578,7 +581,7 @@ class AuthorityRootSelectionBinding:
             expected_keys=_ROOT_SELECTION_KEYS,
             label="authority-root binding",
         )
-        return _validate_selection_raw(
+        bound_id = _validate_selection_raw(
             raw,
             expected_workspace_locator=(
                 self.context.workspace_locator if current_path else None
@@ -586,9 +589,26 @@ class AuthorityRootSelectionBinding:
             expected_workspace_locator_sha256=(
                 self.context.workspace_locator_sha256 if current_path else None
             ),
-            selected_authority_root_resolved=self.context.authority_root_resolved,
-            selected_authority_root_resolved_sha256=self.context.authority_root_resolved_sha256,
+            selected_authority_root_resolved=(
+                self.context.authority_root_resolved if current_path else None
+            ),
+            selected_authority_root_resolved_sha256=(
+                self.context.authority_root_resolved_sha256
+                if current_path
+                else None
+            ),
         )
+        if not current_path and bound_id == self.workspace_instance_id:
+            _validate_selection_raw(
+                raw,
+                expected_workspace_locator=None,
+                expected_workspace_locator_sha256=None,
+                selected_authority_root_resolved=self.context.authority_root_resolved,
+                selected_authority_root_resolved_sha256=(
+                    self.context.authority_root_resolved_sha256
+                ),
+            )
+        return bound_id
 
     def validate_existing(self) -> bool:
         """Validate direct or moved/copied root selection without writing."""

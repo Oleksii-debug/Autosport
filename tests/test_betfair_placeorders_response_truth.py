@@ -162,7 +162,7 @@ def test_explicit_zero_failure_remains_rejected() -> None:
     assert _report_outcome(report, action) is PlaceOrdersOutcome.REJECTED
 
 
-def test_terminal_zero_effect_failure_without_bet_id_remains_rejected() -> None:
+def test_terminal_failure_without_bet_id_requires_readback() -> None:
     action = _action()
     payload = _payload(
         action,
@@ -177,7 +177,37 @@ def test_terminal_zero_effect_failure_without_bet_id_remains_rejected() -> None:
     report = _parse(payload, action)
 
     assert report.instruction.bet_id is None
-    assert _report_outcome(report, action) is PlaceOrdersOutcome.REJECTED
+    assert _report_outcome(report, action) is PlaceOrdersOutcome.UNKNOWN
+
+
+@pytest.mark.parametrize(
+    ("order_status", "expected"),
+    (
+        (None, PlaceOrdersOutcome.UNKNOWN),
+        ("EXECUTABLE", PlaceOrdersOutcome.UNKNOWN),
+        ("EXECUTION_COMPLETE", PlaceOrdersOutcome.PARTIAL),
+    ),
+)
+def test_partial_fill_requires_explicit_terminal_order_status(
+    order_status: str | None,
+    expected: PlaceOrdersOutcome,
+) -> None:
+    action = _action()
+    payload = _payload(
+        action,
+        execution_status="SUCCESS",
+        instruction_status="SUCCESS",
+        include_size_matched=True,
+        size_matched=2,
+        average_price_matched=2,
+        bet_id="bet-partial-123",
+        order_status=order_status,
+    )
+
+    report = _parse(payload, action)
+
+    assert report.instruction.size_matched == Decimal("2")
+    assert _report_outcome(report, action) is expected
 
 
 def test_failure_with_executable_order_status_is_ambiguous() -> None:

@@ -197,14 +197,17 @@ def run_endurance(
     mirror = root / "mirror"
     if primary.exists() or mirror.exists():
         raise ValueError("endurance workspace must be fresh; primary/mirror already exist")
+
+    was_tracing = tracemalloc.is_tracing()
+    if was_tracing:
+        raise RuntimeError(
+            "tracemalloc ownership conflict: run_endurance requires an isolated tracing session"
+        )
+
     primary.mkdir(parents=True, exist_ok=False)
     mirror.mkdir(parents=True, exist_ok=False)
 
-    was_tracing = tracemalloc.is_tracing()
-    if not was_tracing:
-        tracemalloc.start()
-    # Attribute the reported peak to this endurance run, not to unrelated
-    # allocations that happened earlier in a caller-owned tracing session.
+    tracemalloc.start()
     tracemalloc.reset_peak()
 
     store: SQLiteMarketStore | None = None

@@ -17,12 +17,15 @@ deadline before generic execution reconciliation may consume it.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from enum import Enum
 import json
 from weakref import ref
 
-from .betfair_account_readonly import BetfairExecutionReadbackEnvelope
+from .betfair_account_readonly import (
+    BetfairExecutionReadbackEnvelope,
+    BetfairReadOnlyClient,
+)
 from .bookmaker_capability import BookmakerCapabilityProfile
 from .real_execution_ledger import AttemptState, ExecutionAction, RealExecutionLedger
 from .supervised_provider_evidence import (
@@ -74,6 +77,66 @@ def _time(value: str, name: str) -> datetime:
     if parsed.tzinfo is None or parsed.utcoffset() is None:
         raise BetfairTimeoutResolutionError(f"{name} must be timezone-aware")
     return parsed
+
+
+def _install_betfair_readback_capture_start_authority() -> None:
+    """Bind canonical readback object identity to its system capture-start instant.
+
+    The existing BetfairReadOnlyClient origin seal remains authoritative for the
+    readback payload itself.  This second, narrower seal records when that exact
+    canonical capture began so a request started before the provider visibility
+    horizon cannot become negative authority merely because transport latency makes
+    its response timestamps cross the deadline.
+    """
+
+    issued: dict[int, tuple[object, str]] = {}
+    raw_read = BetfairReadOnlyClient.read_execution_readback
+
+    def authoritative_read(
+        self: BetfairReadOnlyClient,
+        *,
+        action_id: str,
+        market_id: str,
+        provider_order_ref: str | None = None,
+        page_size: int = 1000,
+        max_pages: int = 100,
+    ) -> BetfairExecutionReadbackEnvelope:
+        capture_started_at = datetime.now(timezone.utc).isoformat()
+        capture = raw_read(
+            self,
+            action_id=action_id,
+            market_id=market_id,
+            provider_order_ref=provider_order_ref,
+            page_size=page_size,
+            max_pages=max_pages,
+        )
+        capture_id = id(capture)
+
+        def forget(_weakref: object, *, key: int = capture_id) -> None:
+            issued.pop(key, None)
+
+        issued[capture_id] = (
+            ref(capture, forget),
+            capture_started_at,
+        )
+        return capture
+
+    def capture_started_at(
+        readback: BetfairExecutionReadbackEnvelope,
+    ) -> str | None:
+        if not isinstance(readback, BetfairExecutionReadbackEnvelope):
+            return None
+        record = issued.get(id(readback))
+        if record is None or record[0]() is not readback:
+            return None
+        return record[1]
+
+    BetfairReadOnlyClient.read_execution_readback = authoritative_read
+    globals()["_betfair_readback_capture_started_at"] = capture_started_at
+
+
+_install_betfair_readback_capture_start_authority()
+del _install_betfair_readback_capture_start_authority
 
 
 def _absence_capture_floor(readback: BetfairExecutionReadbackEnvelope) -> str:
@@ -285,11 +348,25 @@ def resolve_betfair_timeout_provider_state(
     if not isinstance(evidence, VerifiedProviderAbsenceEvidence):
         raise BetfairTimeoutResolutionError("provider verifier returned non-canonical state")
 
+    capture_started_raw = _betfair_readback_capture_started_at(readback)
+    capture_started = (
+        None
+        if capture_started_raw is None
+        else _time(
+            capture_started_raw,
+            "provider order-scope capture started_at",
+        )
+    )
     capture_floor = _time(
         _absence_capture_floor(readback),
         "provider order-scope capture floor",
     )
-    if observed < deadline or capture_floor < deadline:
+    if (
+        capture_started is None
+        or capture_started < deadline
+        or observed < deadline
+        or capture_floor < deadline
+    ):
         return BetfairTimeoutResolution(
             BetfairTimeoutResolutionKind.INDETERMINATE_BEFORE_VISIBILITY_HORIZON,
             timeout_boundary_at,

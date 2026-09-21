@@ -30,6 +30,10 @@ PRODUCT_RUNTIME_UK_UA: Mapping[str, str] = MappingProxyType(
         "ui.product_runtime.status.configuration_missing": (
             "Тривала PAPER-робота не запущена: змінна AUTOSPORT_PRODUCT_SOURCE_FACTORY не задана."
         ),
+        "ui.product_runtime.status.configuration_invalid": (
+            "Тривала PAPER-робота не запущена: AUTOSPORT_PRODUCT_SOURCE_FACTORY містить "
+            "зайві пробіли або іншу неоднозначну конфігурацію."
+        ),
         "ui.product_runtime.status.operation_busy": (
             "Спочатку завершіть поточну replay/live/recovery/export операцію."
         ),

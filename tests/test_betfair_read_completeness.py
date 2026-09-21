@@ -271,3 +271,39 @@ def test_successful_account_funds_is_complete_and_never_float_money() -> None:
         BetfairObservationCompleteness.COMPLETE_FOR_DECLARED_QUERY_WINDOW
     )
     assert result.witness.authoritative
+
+def test_multi_page_current_orders_end_is_not_atomic_snapshot_completeness() -> None:
+    observer = _observer(
+        _rpc({"currentOrders": [_current_order("bet-1")], "moreAvailable": True}, 1),
+        _rpc({"currentOrders": [_current_order("bet-2")], "moreAvailable": False}, 2),
+    )
+
+    result = observer.read_current_orders(page_size=1)
+
+    assert [row.bet_id for row in result.items] == ["bet-1", "bet-2"]
+    assert len(result.witness.pages) == 2
+    assert result.witness.pages[-1][2] is False
+    assert result.witness.completeness is BetfairObservationCompleteness.PARTIAL
+    assert result.witness.failure_code == "cross_call_snapshot_unproven"
+    assert result.witness.authoritative is False
+    with pytest.raises(BetfairReadOnlyError, match="not complete"):
+        result.assert_complete()
+
+
+def test_multi_page_cleared_orders_end_is_not_atomic_snapshot_completeness() -> None:
+    observer = _observer(
+        _rpc({"clearedOrders": [_cleared_order("bet-1")], "moreAvailable": True}, 1),
+        _rpc({"clearedOrders": [_cleared_order("bet-2")], "moreAvailable": False}, 2),
+    )
+
+    result = observer.read_cleared_orders(page_size=1)
+
+    assert [row.bet_id for row in result.items] == ["bet-1", "bet-2"]
+    assert len(result.witness.pages) == 2
+    assert result.witness.pages[-1][2] is False
+    assert result.witness.completeness is BetfairObservationCompleteness.PARTIAL
+    assert result.witness.failure_code == "cross_call_snapshot_unproven"
+    assert result.witness.authoritative is False
+    with pytest.raises(BetfairReadOnlyError, match="not complete"):
+        result.assert_complete()
+

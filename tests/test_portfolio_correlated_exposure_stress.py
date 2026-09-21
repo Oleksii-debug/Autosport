@@ -126,6 +126,19 @@ def test_serialized_scale_tamper_fails_closed() -> None:
         RobustPortfolioProposal.from_dict(payload)
 
 
+@pytest.mark.parametrize("schema_version", [True, 1.0])
+def test_serialized_schema_version_requires_exact_integer(schema_version: object) -> None:
+    proposal = RobustPortfolioProposal.derive(
+        (Decimal("10"), Decimal("20")),
+        _evidence(),
+    )
+    payload = proposal.to_dict()
+    payload["schema_version"] = schema_version
+
+    with pytest.raises(ValueError, match="unsupported robust proposal schema"):
+        RobustPortfolioProposal.from_dict(payload)
+
+
 def test_serialized_stake_vectors_require_json_lists() -> None:
     proposal = RobustPortfolioProposal.derive(
         (Decimal("10"), Decimal("20")),

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import uuid
 from dataclasses import dataclass, replace
@@ -140,7 +141,7 @@ class ContinuousSessionStatus:
     last_success_at: str | None
     last_error_code: str | None
     last_full_refresh_at: str | None
-    settlement_evidence: tuple[dict[str, str], ...]
+    settlement_evidence: tuple[dict[str, str | None], ...]
     source_provider_unavailable: bool = False
     source_last_success_at: str | None = None
     source_last_error_code: str | None = None
@@ -181,7 +182,8 @@ def _sha256(value: object, field: str) -> str:
 
 class _ContinuousSessionState:
     _SCHEMA = "autosport.continuous_session"
-    _VERSION = 2
+    _LEGACY_VERSION = 2
+    _VERSION = 3
     _FIELDS = {
         "schema",
         "schema_version",
@@ -259,23 +261,39 @@ class _ContinuousSessionState:
             )
             self._read()
 
-    @staticmethod
-    def _validate_settlement_evidence(raw: object) -> tuple[dict[str, str], ...]:
+    @classmethod
+    def _validate_settlement_evidence(
+        cls,
+        raw: object,
+        *,
+        schema_version: int,
+    ) -> tuple[dict[str, str | None], ...]:
         if type(raw) is not list:
             raise ContinuousSessionError("settlement_evidence must be a list")
-        values: list[dict[str, str]] = []
+        values: list[dict[str, str | None]] = []
+        legacy_fields = {
+            "event_identity",
+            "settlement_ref",
+            "evidence_id",
+            "evidence_sha256",
+            "available_at",
+        }
+        current_fields = legacy_fields | {"quote_outcomes_sha256"}
+        if schema_version == cls._LEGACY_VERSION:
+            expected_fields = legacy_fields
+        elif schema_version == cls._VERSION:
+            expected_fields = current_fields
+        else:
+            raise ContinuousSessionError(
+                "unsupported continuous session settlement evidence schema"
+            )
+
         for item in raw:
             if type(item) is not dict:
                 raise ContinuousSessionError(
                     "settlement_evidence entries must be objects"
                 )
-            if set(item) != {
-                "event_identity",
-                "settlement_ref",
-                "evidence_id",
-                "evidence_sha256",
-                "available_at",
-            }:
+            if set(item) != expected_fields:
                 raise ContinuousSessionError(
                     "settlement_evidence entry fields mismatch"
                 )
@@ -284,6 +302,16 @@ class _ContinuousSessionState:
             _text(item["evidence_id"], "settlement_evidence evidence_id")
             _sha256(item["evidence_sha256"], "settlement_evidence evidence_sha256")
             _instant(item["available_at"], "settlement_evidence available_at")
+            quote_outcomes_sha256 = (
+                None
+                if schema_version == cls._LEGACY_VERSION
+                else item["quote_outcomes_sha256"]
+            )
+            if quote_outcomes_sha256 is not None:
+                _sha256(
+                    quote_outcomes_sha256,
+                    "settlement_evidence quote_outcomes_sha256",
+                )
             values.append(
                 {
                     "event_identity": item["event_identity"],
@@ -291,6 +319,7 @@ class _ContinuousSessionState:
                     "evidence_id": item["evidence_id"],
                     "evidence_sha256": item["evidence_sha256"],
                     "available_at": item["available_at"],
+                    "quote_outcomes_sha256": quote_outcomes_sha256,
                 }
             )
         return tuple(values)
@@ -306,7 +335,7 @@ class _ContinuousSessionState:
             type(raw) is not dict
             or set(raw) != self._FIELDS
             or raw["schema"] != self._SCHEMA
-            or raw["schema_version"] != self._VERSION
+            or raw["schema_version"] not in {self._LEGACY_VERSION, self._VERSION}
             or raw["source_id"] != self.source_id
         ):
             raise ContinuousSessionError("continuous session state schema/identity mismatch")
@@ -324,7 +353,11 @@ class _ContinuousSessionState:
                 _instant(raw[name], name)
         if raw["last_error_code"] is not None:
             _text(raw["last_error_code"], "last_error_code")
-        evidence = self._validate_settlement_evidence(raw["settlement_evidence"])
+        schema_version = raw["schema_version"]
+        evidence = self._validate_settlement_evidence(
+            raw["settlement_evidence"],
+            schema_version=schema_version,
+        )
         gap_state = raw["source_gap_state"]
         sync_state = raw["source_sync_state"]
         if (gap_state is None) != (sync_state is None):
@@ -374,6 +407,7 @@ class _ContinuousSessionState:
                 "unresolved source gaps require DETECTED/GAP_DETECTED projection"
             )
         raw["state"] = state.value
+        raw["schema_version"] = self._VERSION
         raw["settlement_evidence"] = [dict(item) for item in evidence]
         return raw
 
@@ -422,9 +456,28 @@ class _ContinuousSessionState:
         self._update(mutate)
 
     @staticmethod
+    def _quote_outcomes_sha256(evidence: SettlementResolution) -> str:
+        outcomes = evidence.quote_outcomes
+        if type(outcomes) is not dict or not outcomes:
+            raise ValueError("quote_outcomes must be a non-empty exact dict")
+        canonical: list[list[str]] = []
+        for quote_key in sorted(outcomes):
+            _text(quote_key, "quote_outcomes quote_key")
+            outcome = outcomes[quote_key]
+            if type(outcome) is not str or outcome not in {"win", "loss", "void"}:
+                raise ValueError("quote_outcomes contains unsupported outcome")
+            canonical.append([quote_key, outcome])
+        payload = json.dumps(
+            canonical,
+            ensure_ascii=False,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        return hashlib.sha256(payload).hexdigest()
+
+    @staticmethod
     def _normalized_settlement_evidence(
         evidence: SettlementResolution,
-    ) -> dict[str, str]:
+    ) -> dict[str, str | None]:
         return {
             "event_identity": evidence.event_identity,
             "settlement_ref": evidence.settlement_ref,
@@ -434,6 +487,9 @@ class _ContinuousSessionState:
                 evidence.available_at,
                 "available_at",
             ).isoformat(),
+            "quote_outcomes_sha256": _ContinuousSessionState._quote_outcomes_sha256(
+                evidence
+            ),
         }
 
     def validate_settlement_evidence(
@@ -449,10 +505,16 @@ class _ContinuousSessionState:
         for evidence in settlement_evidence:
             normalized = self._normalized_settlement_evidence(evidence)
             existing = known.get(evidence.evidence_id)
-            if existing is not None and existing != normalized:
-                raise ContinuousSessionError(
-                    "settlement evidence id conflicts with durable evidence"
-                )
+            if existing is not None:
+                if existing["quote_outcomes_sha256"] is None:
+                    raise ContinuousSessionError(
+                        "legacy settlement evidence cannot be safely rebound without "
+                        "an outcome fingerprint"
+                    )
+                if existing != normalized:
+                    raise ContinuousSessionError(
+                        "settlement evidence id conflicts with durable evidence"
+                    )
             known[evidence.evidence_id] = normalized
 
     def record_source_projection(
@@ -528,6 +590,11 @@ class _ContinuousSessionState:
                 existing = known.get(evidence.evidence_id)
                 normalized = self._normalized_settlement_evidence(evidence)
                 if existing is not None:
+                    if existing["quote_outcomes_sha256"] is None:
+                        raise ContinuousSessionError(
+                            "legacy settlement evidence cannot be safely rebound without "
+                            "an outcome fingerprint"
+                        )
                     if existing != normalized:
                         raise ContinuousSessionError(
                             "settlement evidence id conflicts with durable evidence"

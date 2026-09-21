@@ -7,8 +7,9 @@ cells captured at import time rather than in caller-rebindable module globals.
 
 Runtime-repair reload is guarded by two independent finder instances.  Only the
 canonical finder is intentionally exposed for deterministic compatibility tests; the
-backup finder is retained solely by ``sys.meta_path`` and the installer closure, so
-rewriting/removing the public finder reference cannot silently drop the seal.
+backup finder, its class, and its loader class are retained solely by ``sys.meta_path``
+and the installer closure.  Rebinding module aliases or replacing/removing the public
+finder therefore cannot silently drop the seal.
 """
 
 from __future__ import annotations
@@ -95,88 +96,68 @@ _sealed_require_exact_lineage_authority, _sealed_resolve_canonical_snapshot, _in
 )
 
 
-class _RepairReloadLoader(importlib.abc.Loader):
-    """Re-seal the authority functions after explicit runtime-repair reload."""
-
-    def __init__(self, wrapped: importlib.abc.Loader, reinstall: Callable[[], None]) -> None:
-        self._wrapped = wrapped
-        self._reinstall = reinstall
-
-    def create_module(self, spec):
-        create = getattr(self._wrapped, "create_module", None)
-        if create is None:
-            return None
-        return create(spec)
-
-    def exec_module(self, module) -> None:
-        self._wrapped.exec_module(module)
-        # Use the loader-owned closure, never a mutable module-global installer lookup.
-        self._reinstall()
-
-
-class _RepairReloadFinder(importlib.abc.MetaPathFinder):
-    """Canonical public reload interceptor for the runtime repair module."""
-
-    _autosport_point_in_time_class_dispatch_seal_v1 = True
-
-    def __init__(
-        self,
-        module_name: str,
-        target_module: object,
-        reinstall: Callable[[], None],
-    ) -> None:
-        self._module_name = module_name
-        self._target_module = target_module
-        self._reinstall = reinstall
-
-    def find_spec(self, fullname, path, target=None):
-        if fullname != self._module_name or target is not self._target_module:
-            return None
-        spec = importlib.machinery.PathFinder.find_spec(fullname, path)
-        if spec is None or spec.loader is None:
-            return spec
-        spec.loader = _RepairReloadLoader(spec.loader, self._reinstall)
-        return spec
-
-
-class _BackupRepairReloadFinder(importlib.abc.MetaPathFinder):
-    """Independent fallback if the canonical public finder is removed/replaced."""
-
-    def __init__(
-        self,
-        module_name: str,
-        target_module: object,
-        reinstall: Callable[[], None],
-    ) -> None:
-        self._module_name = module_name
-        self._target_module = target_module
-        self._reinstall = reinstall
-
-    def find_spec(self, fullname, path, target=None):
-        if fullname != self._module_name or target is not self._target_module:
-            return None
-        spec = importlib.machinery.PathFinder.find_spec(fullname, path)
-        if spec is None or spec.loader is None:
-            return spec
-        spec.loader = _RepairReloadLoader(spec.loader, self._reinstall)
-        return spec
-
-
 def _make_reload_finder_installer(
     module_name: str,
     target_module: object,
     reinstall: Callable[[], None],
-) -> tuple[_RepairReloadFinder, Callable[[], None]]:
-    canonical = _RepairReloadFinder(module_name, target_module, reinstall)
-    backup = _BackupRepairReloadFinder(module_name, target_module, reinstall)
+) -> tuple[importlib.abc.MetaPathFinder, Callable[[], None]]:
+    """Create closure-owned canonical+backup reload guards.
+
+    The backup implementation types deliberately never become module attributes.
+    This makes assignment to the old/public finder, loader, repair-module, class, or
+    ``importlib`` aliases irrelevant to the live backup path.
+    """
+
+    loader_base = importlib.abc.Loader
+    finder_base = importlib.abc.MetaPathFinder
+    path_finder = importlib.machinery.PathFinder
+    system_module = sys
+
+    class RepairReloadLoader(loader_base):
+        def __init__(self, wrapped: importlib.abc.Loader) -> None:
+            self._wrapped = wrapped
+
+        def create_module(self, spec):
+            create = getattr(self._wrapped, "create_module", None)
+            if create is None:
+                return None
+            return create(spec)
+
+        def exec_module(self, module) -> None:
+            self._wrapped.exec_module(module)
+            reinstall()
+
+    class CanonicalRepairReloadFinder(finder_base):
+        _autosport_point_in_time_class_dispatch_seal_v1 = True
+
+        def find_spec(self, fullname, path, target=None):
+            if fullname != module_name or target is not target_module:
+                return None
+            spec = path_finder.find_spec(fullname, path)
+            if spec is None or spec.loader is None:
+                return spec
+            spec.loader = RepairReloadLoader(spec.loader)
+            return spec
+
+    class BackupRepairReloadFinder(finder_base):
+        def find_spec(self, fullname, path, target=None):
+            if fullname != module_name or target is not target_module:
+                return None
+            spec = path_finder.find_spec(fullname, path)
+            if spec is None or spec.loader is None:
+                return spec
+            spec.loader = RepairReloadLoader(spec.loader)
+            return spec
+
+    canonical = CanonicalRepairReloadFinder()
+    backup = BackupRepairReloadFinder()
 
     def install() -> None:
-        # ``backup`` is deliberately closure-owned: it cannot be replaced by assigning
-        # a similarly named attribute on this module.
-        if not any(finder is backup for finder in sys.meta_path):
-            sys.meta_path.insert(0, backup)
-        if not any(finder is canonical for finder in sys.meta_path):
-            sys.meta_path.insert(0, canonical)
+        meta_path = system_module.meta_path
+        if not any(finder is backup for finder in meta_path):
+            meta_path.insert(0, backup)
+        if not any(finder is canonical for finder in meta_path):
+            meta_path.insert(0, canonical)
 
     return canonical, install
 

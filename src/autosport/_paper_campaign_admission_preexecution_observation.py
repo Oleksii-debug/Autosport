@@ -58,6 +58,27 @@ _ISSUER_METHOD = "_autosport_issue_predecision_learning_observation"
 _INSTALL_SENTINEL = "_autosport_campaign_preexecution_observation_v3"
 
 
+class _ProductIssuerDescriptor:
+    """Data descriptor that prevents exact-runtime instance shadowing of issuer authority."""
+
+    __slots__ = ("_issuer",)
+
+    def __init__(self, issuer):
+        object.__setattr__(self, "_issuer", issuer)
+
+    def __get__(self, instance, owner=None):
+        issuer = object.__getattribute__(self, "_issuer")
+        if instance is None:
+            return issuer
+        return issuer.__get__(instance, owner or PaperExecutionAdoptionRuntime)
+
+    def __set__(self, instance, value) -> None:
+        raise AttributeError("product learning Observation issuer cannot be rebound")
+
+    def __delete__(self, instance) -> None:
+        raise AttributeError("product learning Observation issuer cannot be deleted")
+
+
 def _observation_payload(observation: Observation) -> dict[str, object]:
     return {
         "schema": _OBSERVATION_SCHEMA,
@@ -343,7 +364,7 @@ def _install() -> None:
     setattr(
         PaperExecutionAdoptionRuntime,
         _ISSUER_METHOD,
-        issue_predecision_learning_observation,
+        _ProductIssuerDescriptor(issue_predecision_learning_observation),
     )
     _origin.DecisionRecordOrigin.to_dict = origin_to_dict
     _origin.DecisionRecordOrigin.from_dict = origin_from_dict

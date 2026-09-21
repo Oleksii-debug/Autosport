@@ -42,6 +42,9 @@ class RestartRecoveryAuditTests(unittest.TestCase):
         return {
             "status": "PASS",
             "disposition": "aborted_uncommitted",
+            "corrupt_manifest_rejected": True,
+            "corrupt_manifest_base_unchanged": True,
+            "corrupt_manifest_registry_unresolved": True,
         }
 
     @staticmethod
@@ -94,6 +97,9 @@ class RestartRecoveryAuditTests(unittest.TestCase):
             self.assertEqual(payload["session_restart_status"], "PASS")
             self.assertEqual(payload["transaction_recovery_status"], "PASS")
             self.assertEqual(payload["recovery_disposition"], "aborted_uncommitted")
+            self.assertTrue(payload["transaction_corrupt_manifest_rejected"])
+            self.assertTrue(payload["transaction_corrupt_manifest_base_unchanged"])
+            self.assertTrue(payload["transaction_corrupt_manifest_registry_unresolved"])
             self.assertGreater(payload["ticket_count"], 0)
             self.assertEqual(len(payload["paper_book_sha256"]), 64)
             self.assertEqual(len(payload["decision_ledger_sha256"]), 64)
@@ -191,6 +197,9 @@ class RestartRecoveryAuditTests(unittest.TestCase):
             payload = json.loads(output.read_text(encoding="utf-8"))
             self.assertEqual(payload["status"], "PASS")
             self.assertEqual(payload["recovery_disposition"], "aborted_uncommitted")
+            self.assertTrue(payload["transaction_corrupt_manifest_rejected"])
+            self.assertTrue(payload["transaction_corrupt_manifest_base_unchanged"])
+            self.assertTrue(payload["transaction_corrupt_manifest_registry_unresolved"])
 
     def test_replace_failure_preserves_previous_evidence_and_cleans_temp_file(self):
         with tempfile.TemporaryDirectory() as tmp:

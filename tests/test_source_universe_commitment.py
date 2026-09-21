@@ -364,7 +364,7 @@ class SourceUniverseCommitmentTests(unittest.TestCase):
                     end_cycle_seq=1,
                 )
 
-    def test_builder_ignores_instance_rebound_cycle_evidence_reader(self):
+    def test_builder_rejects_instance_rebound_cycle_evidence_reader(self):
         with tempfile.TemporaryDirectory() as tmp:
             store = CollectorDeltaStore(Path(tmp) / "collector.db")
             store._begin_collector_cycle(
@@ -384,16 +384,37 @@ class SourceUniverseCommitmentTests(unittest.TestCase):
                 },
             )
 
-            commitment = build_source_universe_commitment(
-                store,
-                source_id="source-x",
-                start_cycle_seq=1,
-                end_cycle_seq=1,
-            )
+            with self.assertRaisesRegex(TypeError, "instance-rebound"):
+                build_source_universe_commitment(
+                    store,
+                    source_id="source-x",
+                    start_cycle_seq=1,
+                    end_cycle_seq=1,
+                )
 
-            self.assertEqual(commitment.pending_count, 1)
-            self.assertFalse(commitment.observation_ledger_complete)
-            self.assertFalse(commitment.provider_observation_complete)
+    def test_builder_rejects_rebound_internal_durable_read_seams(self):
+        for seam_name in (
+            "_connect",
+            "_connect_path",
+            "_cycle_terminal_payload_sha256",
+        ):
+            with self.subTest(seam_name=seam_name), tempfile.TemporaryDirectory() as tmp:
+                store = CollectorDeltaStore(Path(tmp) / "collector.db")
+                store._begin_collector_cycle(
+                    source_id="source-x",
+                    run_id="run-1",
+                    stream_epoch="epoch-1",
+                    attempted_at="2026-01-01T00:00:05+00:00",
+                )
+                setattr(store, seam_name, getattr(store, seam_name))
+
+                with self.assertRaisesRegex(TypeError, "instance-rebound"):
+                    build_source_universe_commitment(
+                        store,
+                        source_id="source-x",
+                        start_cycle_seq=1,
+                        end_cycle_seq=1,
+                    )
 
     def test_verifier_accepts_canonical_candidate_and_returns_rebuilt_projection(self):
         with tempfile.TemporaryDirectory() as tmp:

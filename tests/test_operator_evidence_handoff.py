@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -42,6 +43,45 @@ def test_workspace_manifest_delegates_to_canonical_verifier(
     assert result.human_tested is False
     assert result.nvda_verified is False
     assert result.whole_product_complete is False
+
+
+def test_workspace_direct_construction_and_replace_cannot_mint_pass(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    forged = handoff.WorkspaceEvidenceHandoff(
+        _status="PASS",
+        _manifest_sha256=_MANIFEST_SHA,
+        _file_count=5,
+        _run_summary_count=1,
+        _fixed_evidence_set_complete=True,
+    )
+    with pytest.raises(
+        handoff.OperatorEvidenceHandoffAuthorityError,
+        match="not issued",
+    ):
+        _ = forged.status
+
+    monkeypatch.setattr(
+        handoff,
+        "_verify_evidence_manifest",
+        lambda *_args, **_kwargs: {
+            "manifest_sha256": _MANIFEST_SHA,
+            "file_count": 5,
+            "run_summary_count": 1,
+            "fixed_evidence_set_complete": True,
+            "real_money_execution": False,
+        },
+    )
+    issued = handoff.verify_workspace_manifest("manifest.json", "workspace")
+    issued.assert_product_issued()
+    assert issued.status == "PASS"
+
+    replaced = replace(issued, _manifest_sha256="5" * 64)
+    with pytest.raises(
+        handoff.OperatorEvidenceHandoffAuthorityError,
+        match="not issued",
+    ):
+        _ = replaced.manifest_sha256
 
 
 def test_workspace_manifest_propagates_fail_closed_error(
@@ -186,6 +226,83 @@ def test_nvda_verification_delegates_and_projects_result(
     assert result.human_tested is False
     assert result.nvda_verified is False
     assert result.whole_product_complete is False
+
+
+def test_nvda_direct_construction_and_replace_cannot_mint_pass(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    forged = handoff.NvdaEvidenceHandoff(
+        _status="PASS",
+        _package_sha256=_PACKAGE_SHA,
+        _source_sha=_SOURCE_SHA,
+        _autosport_exe_sha256=_EXE_SHA,
+        _failed_checks=(),
+    )
+    with pytest.raises(
+        handoff.OperatorEvidenceHandoffAuthorityError,
+        match="not issued",
+    ):
+        _ = forged.status
+    with pytest.raises(
+        handoff.OperatorEvidenceHandoffAuthorityError,
+        match="not issued",
+    ):
+        _ = forged.real_money_execution
+
+    report = _valid_nvda_report()
+    report["status"] = "PASS"
+    report["failed_checks"] = []
+    monkeypatch.setattr(
+        handoff,
+        "_validate_nvda_evidence",
+        lambda *_args, **_kwargs: report,
+    )
+    issued = handoff.verify_nvda_handoff(
+        "release.zip",
+        "nvda.json",
+        expected_source_sha=_SOURCE_SHA,
+        expected_package_sha256=_PACKAGE_SHA,
+    )
+    issued.assert_product_issued()
+    assert issued.status == "PASS"
+    assert issued.failed_checks == ()
+
+    replaced = replace(issued, _package_sha256="6" * 64)
+    with pytest.raises(
+        handoff.OperatorEvidenceHandoffAuthorityError,
+        match="not issued",
+    ):
+        _ = replaced.status
+
+
+@pytest.mark.parametrize(
+    ("status", "failed_checks"),
+    [
+        ("PASS", ["primary_tab_flow"]),
+        ("FAIL", []),
+    ],
+)
+def test_nvda_verification_rejects_contradictory_status_and_failed_checks(
+    monkeypatch: pytest.MonkeyPatch,
+    status: str,
+    failed_checks: list[str],
+) -> None:
+    report = _valid_nvda_report()
+    report["status"] = status
+    report["failed_checks"] = failed_checks
+    monkeypatch.setattr(
+        handoff,
+        "_validate_nvda_evidence",
+        lambda *_args, **_kwargs: report,
+    )
+
+    with pytest.raises(ValueError, match="status/failed_checks"):
+        handoff.verify_nvda_handoff(
+            "release.zip",
+            "nvda.json",
+            expected_source_sha=_SOURCE_SHA,
+            expected_package_sha256=_PACKAGE_SHA,
+        )
 
 
 def test_nvda_verification_refuses_machine_physical_promotion(

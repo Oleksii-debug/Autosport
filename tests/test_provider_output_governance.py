@@ -7,6 +7,7 @@ import pytest
 from autosport.provider_output_governance import (
     ProviderOutputGovernanceAuthority,
     ProviderOutputGrant,
+    ProviderOutputUseDecision,
     ProviderOutputUseRequest,
     RetentionPolicy,
     decide_provider_output_use,
@@ -113,6 +114,16 @@ def test_bounded_grant_requires_positive_integer_horizon():
         ProviderOutputGrant("research", "odds_snapshot", RetentionPolicy.BOUNDED, True)
 
 
+def test_bounded_grant_rejects_unrepresentable_horizon():
+    with pytest.raises(ValueError, match="supported datetime range"):
+        ProviderOutputGrant(
+            "research",
+            "odds_snapshot",
+            RetentionPolicy.BOUNDED,
+            10**30,
+        )
+
+
 def test_nonbounded_grants_reject_max_retention_seconds():
     with pytest.raises(ValueError, match="only"):
         ProviderOutputGrant("research", "odds_snapshot", RetentionPolicy.UNBOUNDED, 1)
@@ -178,6 +189,22 @@ def test_exact_grant_allows_bounded_retention_at_boundary():
     assert outcome.reason == "ALLOWED"
     assert outcome.retention_policy is RetentionPolicy.BOUNDED
     assert outcome.max_retention_seconds == 86400
+
+
+def test_positive_decision_cannot_be_minted_with_public_constructor():
+    auth = authority()
+    with pytest.raises(TypeError, match="product-issued"):
+        ProviderOutputUseDecision(
+            allowed=True,
+            reason="ALLOWED",
+            authority_id=auth.authority_id,
+            artifact_sha256=SHA_C,
+            purpose="training",
+            artifact_class="raw_private_output",
+            decided_at=T1,
+            retention_policy=RetentionPolicy.UNBOUNDED,
+            max_retention_seconds=None,
+        )
 
 
 def test_authority_id_mismatch_fails_closed():

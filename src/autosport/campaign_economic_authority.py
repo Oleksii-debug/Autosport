@@ -10,6 +10,10 @@ from pathlib import Path
 from typing import Any, Mapping
 
 from ._paper_execution_anti_rollback import _authority_root, _sync_authority_directory
+from ._scientific_registry_read_authority import (
+    ScientificRegistryReadAuthorityError,
+    require_scientific_registry_read_authority,
+)
 from .campaign_denomination import (
     CampaignDenominationBinding,
     CampaignDenominationError,
@@ -606,7 +610,15 @@ class FinalizedCampaignAuthority:
         )
 
     def _persisted_payload(self) -> Mapping[str, object] | None:
-        state = self._registry()._read()
+        registry = self._registry()
+        try:
+            read_fn, _, _, _ = require_scientific_registry_read_authority()
+        except ScientificRegistryReadAuthorityError:
+            # Dispatch drift is absence of positive denomination authority. Do
+            # not call the rebound registry reader even if it returns plausible
+            # bytes backed by a previously valid issuance witness.
+            return None
+        state = read_fn(registry)
         raw_bindings = state.get(_DENOMINATION_STATE_KEY)
         if raw_bindings is None:
             return None
@@ -670,7 +682,13 @@ class FinalizedCampaignAuthority:
 
         registry = self._registry()
         with WorkspaceEconomicLock(registry.path.parent):
-            state = registry._read()
+            try:
+                read_fn, _, _, _ = require_scientific_registry_read_authority()
+            except ScientificRegistryReadAuthorityError as exc:
+                raise CampaignEconomicAuthorityError(
+                    "ScientificRegistry denomination read authority is not canonical"
+                ) from exc
+            state = read_fn(registry)
             raw_bindings = state.get(_DENOMINATION_STATE_KEY)
             if raw_bindings is not None and type(raw_bindings) is not dict:
                 raise CampaignEconomicAuthorityError(
@@ -725,7 +743,13 @@ class FinalizedCampaignAuthority:
             raw_bindings[key] = candidate_payload
             atomic_write_json(registry.path, state)
 
-            persisted_state = registry._read()
+            try:
+                post_read_fn, _, _, _ = require_scientific_registry_read_authority()
+            except ScientificRegistryReadAuthorityError as exc:
+                raise CampaignEconomicAuthorityError(
+                    "ScientificRegistry denomination read authority changed during publication"
+                ) from exc
+            persisted_state = post_read_fn(registry)
             persisted_index = persisted_state.get(_DENOMINATION_STATE_KEY)
             if type(persisted_index) is not dict:
                 raise CampaignEconomicAuthorityError(

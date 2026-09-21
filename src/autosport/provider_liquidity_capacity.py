@@ -23,6 +23,7 @@ class LiquidityEvidenceStatus(str, Enum):
     STALE_EVIDENCE = "STALE_EVIDENCE"
     FUTURE_EVIDENCE = "FUTURE_EVIDENCE"
     UNUSABLE_MARKET_STATE = "UNUSABLE_MARKET_STATE"
+    CURRENCY_MISMATCH = "CURRENCY_MISMATCH"
 
 
 def _require_positive_finite(value: Decimal, name: str) -> None:
@@ -92,6 +93,7 @@ class LiquiditySnapshot:
     provider: str
     market_id: str
     selection_id: str
+    currency: str
     side: LiquiditySide
     captured_at: datetime
     market_status: str
@@ -103,6 +105,8 @@ class LiquiditySnapshot:
         _require_non_empty(self.provider, "provider")
         _require_non_empty(self.market_id, "market_id")
         _require_non_empty(self.selection_id, "selection_id")
+        _require_non_empty(self.currency, "currency")
+        object.__setattr__(self, "currency", self.currency.strip().upper())
         if not isinstance(self.side, LiquiditySide):
             raise TypeError("side must be LiquiditySide")
         _require_aware(self.captured_at, "captured_at")
@@ -116,6 +120,12 @@ class LiquiditySnapshot:
         prices = [level.price for level in levels]
         if len(prices) != len(set(prices)):
             raise ValueError("levels must not contain duplicate prices")
+        if (
+            self.projection.projection is OfferProjection.EX_BEST_OFFERS
+            and self.projection.depth is not None
+            and len(levels) > self.projection.depth
+        ):
+            raise ValueError("levels exceed declared EX_BEST_OFFERS depth")
         object.__setattr__(self, "levels", levels)
 
 
@@ -123,6 +133,7 @@ class LiquiditySnapshot:
 class LiquidityCapacityAssessment:
     status: LiquidityEvidenceStatus
     requested_size: Decimal
+    requested_currency: str
     limit_price: Decimal
     observed_qualifying_size: Decimal
     snapshot_age: timedelta
@@ -143,6 +154,7 @@ def assess_liquidity_capacity(
     snapshot: LiquiditySnapshot,
     *,
     requested_size: Decimal,
+    requested_currency: str,
     limit_price: Decimal,
     as_of: datetime,
     max_age: timedelta,
@@ -158,6 +170,8 @@ def assess_liquidity_capacity(
     if not isinstance(snapshot, LiquiditySnapshot):
         raise TypeError("snapshot must be LiquiditySnapshot")
     _require_positive_finite(requested_size, "requested_size")
+    _require_non_empty(requested_currency, "requested_currency")
+    requested_currency = requested_currency.strip().upper()
     _require_positive_finite(limit_price, "limit_price")
     _require_aware(as_of, "as_of")
     if not isinstance(max_age, timedelta):
@@ -170,6 +184,7 @@ def assess_liquidity_capacity(
         return LiquidityCapacityAssessment(
             status=LiquidityEvidenceStatus.FUTURE_EVIDENCE,
             requested_size=requested_size,
+            requested_currency=requested_currency,
             limit_price=limit_price,
             observed_qualifying_size=Decimal("0"),
             snapshot_age=age,
@@ -179,15 +194,27 @@ def assess_liquidity_capacity(
         return LiquidityCapacityAssessment(
             status=LiquidityEvidenceStatus.STALE_EVIDENCE,
             requested_size=requested_size,
+            requested_currency=requested_currency,
             limit_price=limit_price,
             observed_qualifying_size=Decimal("0"),
             snapshot_age=age,
             reason="snapshot is older than the allowed evidence age",
         )
+    if snapshot.currency != requested_currency:
+        return LiquidityCapacityAssessment(
+            status=LiquidityEvidenceStatus.CURRENCY_MISMATCH,
+            requested_size=requested_size,
+            requested_currency=requested_currency,
+            limit_price=limit_price,
+            observed_qualifying_size=Decimal("0"),
+            snapshot_age=age,
+            reason="snapshot currency does not match requested stake currency",
+        )
     if snapshot.market_status.upper() != "OPEN" or snapshot.runner_status.upper() != "ACTIVE":
         return LiquidityCapacityAssessment(
             status=LiquidityEvidenceStatus.UNUSABLE_MARKET_STATE,
             requested_size=requested_size,
+            requested_currency=requested_currency,
             limit_price=limit_price,
             observed_qualifying_size=Decimal("0"),
             snapshot_age=age,
@@ -213,6 +240,7 @@ def assess_liquidity_capacity(
     return LiquidityCapacityAssessment(
         status=status,
         requested_size=requested_size,
+        requested_currency=requested_currency,
         limit_price=limit_price,
         observed_qualifying_size=observed,
         snapshot_age=age,

@@ -173,6 +173,23 @@ def test_write_once_round_trip_and_identical_retry(tmp_path: Path) -> None:
     second = write_campaign_precommit_manifest_once(path, original)
     assert first == second == original.manifest_sha256
     assert load_campaign_precommit_manifest(path) == original
+    assert not tuple(path.parent.glob(f".{path.name}.*.tmp"))
+
+
+def test_write_once_ignores_stranded_partial_temp_from_prior_crash(
+    tmp_path: Path,
+) -> None:
+    original = manifest()
+    path = tmp_path / "evidence" / "precommit.json"
+    path.parent.mkdir()
+    stranded = path.parent / f".{path.name}.prior-crash.tmp"
+    stranded.write_bytes(b'{"partial":')
+
+    digest = write_campaign_precommit_manifest_once(path, original)
+
+    assert digest == original.manifest_sha256
+    assert load_campaign_precommit_manifest(path) == original
+    assert stranded.read_bytes() == b'{"partial":'
 
 
 def test_write_once_refuses_implicit_parent_lineage_creation(tmp_path: Path) -> None:
@@ -392,12 +409,16 @@ def test_windows_write_once_and_loader_reject_target_symlink(tmp_path: Path) -> 
 def test_write_once_refuses_conflicting_successor(tmp_path: Path) -> None:
     path = tmp_path / "precommit.json"
     write_campaign_precommit_manifest_once(path, manifest())
+    first_bytes = path.read_bytes()
     changed = manifest(strategy_version_id="strategy-v18")
     with pytest.raises(
         CampaignPrecommitManifestError,
         match="conflicts with precommit",
     ):
         write_campaign_precommit_manifest_once(path, changed)
+
+    assert path.read_bytes() == first_bytes
+    assert load_campaign_precommit_manifest(path) == manifest()
 
 
 def test_manual_byte_tampering_is_detected(tmp_path: Path) -> None:
@@ -489,6 +510,88 @@ def test_loader_rejects_semantically_equivalent_noncanonical_bytes(
         match="bytes are not canonical",
     ):
         load_campaign_precommit_manifest(path)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX no-clobber publication")
+def test_posix_canonical_leaf_is_absent_until_complete_temp_publish(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    original = manifest()
+    path = tmp_path / "evidence" / "precommit.json"
+    path.parent.mkdir()
+    expected = precommit_module._canonical_bytes(original.to_record()) + b"\n"
+    real_link = precommit_module.os.link
+    observed_publish = False
+
+    def inspect_then_link(
+        source: str,
+        destination: str,
+        *,
+        src_dir_fd: int,
+        dst_dir_fd: int,
+        follow_symlinks: bool,
+    ) -> None:
+        nonlocal observed_publish
+        observed_publish = True
+        assert destination == path.name
+        assert not path.exists()
+        descriptor = os.open(
+            source,
+            os.O_RDONLY | os.O_NOFOLLOW,
+            dir_fd=src_dir_fd,
+        )
+        try:
+            with os.fdopen(descriptor, "rb", closefd=True) as handle:
+                assert handle.read() == expected
+        finally:
+            pass
+        real_link(
+            source,
+            destination,
+            src_dir_fd=src_dir_fd,
+            dst_dir_fd=dst_dir_fd,
+            follow_symlinks=follow_symlinks,
+        )
+
+    monkeypatch.setattr(precommit_module.os, "link", inspect_then_link)
+
+    digest = write_campaign_precommit_manifest_once(path, original)
+
+    assert observed_publish is True
+    assert digest == original.manifest_sha256
+    assert path.read_bytes() == expected
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX no-clobber publication")
+def test_posix_publish_failure_leaves_canonical_absent_and_retryable(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    original = manifest()
+    path = tmp_path / "evidence" / "precommit.json"
+    path.parent.mkdir()
+    real_link = precommit_module.os.link
+
+    def fail_publish(*args: object, **kwargs: object) -> None:
+        assert not path.exists()
+        raise OSError("synthetic link failure")
+
+    monkeypatch.setattr(precommit_module.os, "link", fail_publish)
+    with pytest.raises(
+        CampaignPrecommitManifestError,
+        match="atomically publish",
+    ):
+        write_campaign_precommit_manifest_once(path, original)
+
+    assert not path.exists()
+    assert not tuple(path.parent.glob(f".{path.name}.*.tmp"))
+
+    monkeypatch.setattr(precommit_module.os, "link", real_link)
+    digest = write_campaign_precommit_manifest_once(path, original)
+
+    assert digest == original.manifest_sha256
+    assert load_campaign_precommit_manifest(path) == original
 
 
 @pytest.mark.skipif(os.name == "nt", reason="Windows has no directory-fsync contract")

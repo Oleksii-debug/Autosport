@@ -20,6 +20,16 @@ from .betfair_account_readonly import (
 )
 
 
+_CLIENT_AUTHORITY_METHODS = frozenset(
+    {
+        "_rpc",
+        "_next_request_id",
+        "_observed_at",
+        "_redact_provider_message",
+    }
+)
+
+
 @dataclass(frozen=True, slots=True)
 class BetfairExecutionFeeInputsObservation:
     """Exact authenticated provider inputs, not a prospective fee decision.
@@ -56,13 +66,13 @@ class BetfairExecutionFeeInputsObservation:
         if not isinstance(self.discount_allowed, bool):
             raise BetfairReadOnlyError("discount_allowed must be bool")
         _optional_text(self.regulator, "regulator")
-        if not isinstance(self.account_evidence, BetfairEvidence):
+        if type(self.account_evidence) is not BetfairEvidence:
             raise BetfairReadOnlyError(
-                "account_evidence must be canonical BetfairEvidence"
+                "account_evidence must be exact canonical BetfairEvidence"
             )
-        if not isinstance(self.market_evidence, BetfairEvidence):
+        if type(self.market_evidence) is not BetfairEvidence:
             raise BetfairReadOnlyError(
-                "market_evidence must be canonical BetfairEvidence"
+                "market_evidence must be exact canonical BetfairEvidence"
             )
 
 
@@ -80,11 +90,13 @@ def read_betfair_execution_fee_inputs(
     closed.
     """
 
-    if not isinstance(client, BetfairReadOnlyClient):
-        raise TypeError("client must be BetfairReadOnlyClient")
+    _assert_canonical_client(client)
     market = _required_text(market_id, "market_id")
 
-    account_response = client._rpc(_GET_ACCOUNT_DETAILS, {})
+    # Invoke the exact canonical implementation rather than dynamic dispatch. The
+    # preflight below also rejects instance shadows so a caller cannot replace an
+    # authority-bearing read method on an otherwise exact client instance.
+    account_response = BetfairReadOnlyClient._rpc(client, _GET_ACCOUNT_DETAILS, {})
     account = _mapping(account_response.result, "getAccountDetails result")
     currency_code = _provider_text(account, "currencyCode", "currency_code")
     region = _provider_optional_text(account, "region", "region")
@@ -95,7 +107,8 @@ def read_betfair_execution_fee_inputs(
     )
     _provider_percent(discount_rate, "discount_rate_percent")
 
-    market_response = client._rpc(
+    market_response = BetfairReadOnlyClient._rpc(
+        client,
         _LIST_MARKET_CATALOGUE,
         {
             "filter": {"marketIds": [market]},
@@ -141,6 +154,20 @@ def read_betfair_execution_fee_inputs(
         account_evidence=account_response.evidence,
         market_evidence=market_response.evidence,
     )
+
+
+def _assert_canonical_client(client: object) -> None:
+    if type(client) is not BetfairReadOnlyClient:
+        raise TypeError("client must be exact BetfairReadOnlyClient")
+    instance_state = vars(client)
+    shadowed = sorted(
+        name for name in _CLIENT_AUTHORITY_METHODS if name in instance_state
+    )
+    if shadowed:
+        raise BetfairReadOnlyError(
+            "BetfairReadOnlyClient read capability is instance-shadowed: "
+            + ", ".join(shadowed)
+        )
 
 
 def _mapping(value: object, field: str) -> Mapping[str, object]:

@@ -134,3 +134,8 @@ from . import _collector_retention_desktop_ack_authority as _collector_retention
 # authority instances must not dispatch through caller-replaced class implementations,
 # and explicit runtime-repair reloads must restore this seal before positive use.
 from . import _point_in_time_class_dispatch_seal as _point_in_time_class_dispatch_seal  # noqa: F401,E402
+
+# Compose source-feature publication last: same-process writers serialize before the
+# existing crash-releasing OS lock, and legacy provenance-guard reloads cannot
+# silently downgrade the public binding surface back to metadata-only availability.
+from . import _source_feature_artifact_runtime_repair as _source_feature_artifact_runtime_repair  # noqa: F401,E402

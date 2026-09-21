@@ -281,6 +281,14 @@ def _ladder(
 def _runner(raw: object) -> BetfairRunnerChange:
     if type(raw) is not dict:
         raise ValueError("runner change must be a JSON object")
+    unsupported_display_ladders = sorted(
+        field for field in ("bdatb", "bdatl") if field in raw
+    )
+    if unsupported_display_ladders:
+        raise ValueError(
+            "virtual display ladder semantics are not supported by this codec: "
+            + ",".join(unsupported_display_ladders)
+        )
     selection = _int(raw.get("id"), "runner.id", minimum=1)
     handicap = _decimal(raw.get("hc", 0), "runner.hc")
     ltp = _odds(raw["ltp"], "runner.ltp") if "ltp" in raw else None
@@ -317,6 +325,10 @@ def decode_market_change_message(raw: dict[str, Any]) -> BetfairMarketChangeFram
         raise TypeError("raw must be a dict")
     if raw.get("op") != "mcm":
         raise ValueError("only Betfair market-change messages are supported")
+    if raw.get("segmentType") is not None:
+        raise ValueError(
+            "segmented Betfair change messages require reassembly before codec application"
+        )
     ct = raw.get("ct")
     kinds = {
         None: BetfairFrameKind.DELTA,

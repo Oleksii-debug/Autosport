@@ -724,10 +724,20 @@ def _parse_place_orders_response(
         decoded = decoded[0]
     envelope = _mapping(decoded, "placeOrders response")
     response_id = envelope.get("id")
+    response_id_matches = False
+    if (
+        not isinstance(response_id, bool)
+        and isinstance(response_id, (int, Decimal))
+    ):
+        response_id_number = Decimal(response_id)
+        response_id_matches = (
+            response_id_number.is_finite()
+            and response_id_number == response_id_number.to_integral_value()
+            and int(response_id_number) == request_id
+        )
     if (
         envelope.get("jsonrpc") != "2.0"
-        or type(response_id) is not int
-        or response_id != request_id
+        or not response_id_matches
     ):
         raise BetfairPlaceOrdersAmbiguous(
             "placeOrders response does not bind exact JSON-RPC request"

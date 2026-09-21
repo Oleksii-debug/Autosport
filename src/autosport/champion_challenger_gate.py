@@ -3,7 +3,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 import math
 from numbers import Real
+from threading import RLock
 from typing import Iterable
+from weakref import WeakKeyDictionary
 
 
 class PromotionEvidenceError(ValueError):
@@ -61,9 +63,9 @@ class PromotionPolicy:
         object.__setattr__(self, "alpha", alpha)
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True, slots=True, init=False, eq=False, weakref_slot=True)
 class PromotionDecision:
-    promote: bool
+    _promote: bool
     pair_count: int
     effective_pair_count: int
     challenger_wins: int
@@ -73,6 +75,32 @@ class PromotionDecision:
     win_rate: float | None
     one_sided_sign_test_p_value: float | None
     reasons: tuple[str, ...]
+
+    def __init__(self, *args: object, **kwargs: object) -> None:
+        raise PromotionEvidenceError(
+            "PromotionDecision is evaluator-issued; call evaluate_promotion"
+        )
+
+    @property
+    def promote(self) -> bool:
+        _require_issued_decision(self)
+        return self._promote
+
+
+_DecisionSnapshot = tuple[
+    bool,
+    int,
+    int,
+    int,
+    int,
+    int,
+    float,
+    float | None,
+    float | None,
+    tuple[str, ...],
+]
+_ISSUED_DECISIONS: WeakKeyDictionary[PromotionDecision, _DecisionSnapshot] = WeakKeyDictionary()
+_ISSUED_DECISIONS_LOCK = RLock()
 
 
 def evaluate_promotion(
@@ -91,6 +119,10 @@ def evaluate_promotion(
     prove that evaluation units are statistically independent. The sign test assumes
     independence across effective pairs; callers testing multiple challengers are
     responsible for any required multiplicity control.
+
+    The returned decision is process-local evaluator-issued evidence. Copying,
+    constructing, or mutating it cannot mint positive promotion authority. Durable
+    restart/deployment authority remains a separate product integration boundary.
     """
 
     if not isinstance(policy, PromotionPolicy):
@@ -149,7 +181,7 @@ def evaluate_promotion(
     if p_value is None or p_value > policy.alpha:
         reasons.append("sign_test_not_significant")
 
-    return PromotionDecision(
+    return _issue_decision(
         promote=not reasons,
         pair_count=pair_count,
         effective_pair_count=effective,
@@ -161,6 +193,62 @@ def evaluate_promotion(
         one_sided_sign_test_p_value=p_value,
         reasons=tuple(reasons),
     )
+
+
+def _issue_decision(
+    *,
+    promote: bool,
+    pair_count: int,
+    effective_pair_count: int,
+    challenger_wins: int,
+    champion_wins: int,
+    ties: int,
+    mean_improvement: float,
+    win_rate: float | None,
+    one_sided_sign_test_p_value: float | None,
+    reasons: tuple[str, ...],
+) -> PromotionDecision:
+    decision = object.__new__(PromotionDecision)
+    object.__setattr__(decision, "_promote", promote)
+    object.__setattr__(decision, "pair_count", pair_count)
+    object.__setattr__(decision, "effective_pair_count", effective_pair_count)
+    object.__setattr__(decision, "challenger_wins", challenger_wins)
+    object.__setattr__(decision, "champion_wins", champion_wins)
+    object.__setattr__(decision, "ties", ties)
+    object.__setattr__(decision, "mean_improvement", mean_improvement)
+    object.__setattr__(decision, "win_rate", win_rate)
+    object.__setattr__(decision, "one_sided_sign_test_p_value", one_sided_sign_test_p_value)
+    object.__setattr__(decision, "reasons", reasons)
+    snapshot = _decision_snapshot(decision)
+    with _ISSUED_DECISIONS_LOCK:
+        _ISSUED_DECISIONS[decision] = snapshot
+    return decision
+
+
+def _decision_snapshot(decision: PromotionDecision) -> _DecisionSnapshot:
+    return (
+        decision._promote,
+        decision.pair_count,
+        decision.effective_pair_count,
+        decision.challenger_wins,
+        decision.champion_wins,
+        decision.ties,
+        decision.mean_improvement,
+        decision.win_rate,
+        decision.one_sided_sign_test_p_value,
+        decision.reasons,
+    )
+
+
+def _require_issued_decision(decision: PromotionDecision) -> None:
+    try:
+        current = _decision_snapshot(decision)
+    except (AttributeError, TypeError) as exc:
+        raise PromotionEvidenceError("promotion decision is incomplete") from exc
+    with _ISSUED_DECISIONS_LOCK:
+        issued = _ISSUED_DECISIONS.get(decision)
+    if issued is None or issued != current:
+        raise PromotionEvidenceError("promotion decision is not intact evaluator-issued evidence")
 
 
 def _one_sided_sign_test_p_value(wins: int, effective: int) -> float:

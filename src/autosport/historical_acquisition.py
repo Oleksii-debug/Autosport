@@ -205,7 +205,6 @@ def capture_historical_acquisition_bundle(
             "requested_date": result_report.requested_date,
             "priced_only": result_report.priced_only,
             "captured_at": result_report.captured_at,
-            "request_url": result_report.request_url,
             "capture_file": result_relative.as_posix(),
             "evidence_file": result_evidence_relative.as_posix(),
             "capture_sha256": result_report.capture_sha256,

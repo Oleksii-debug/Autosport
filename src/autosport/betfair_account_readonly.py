@@ -113,6 +113,7 @@ class BetfairMarketBookDepthObservation:
     market_id: str
     selection_id: int
     status: str
+    selection_status: str
     is_market_data_delayed: bool
     market_version: int
     inplay: bool
@@ -129,6 +130,7 @@ class BetfairMarketBookDepthObservation:
         _required_text(self.market_id, "market_id")
         _positive_int(self.selection_id, "selection_id")
         _required_text(self.status, "status")
+        _required_text(self.selection_status, "selection_status")
         if type(self.is_market_data_delayed) is not bool:
             raise BetfairReadOnlyError("is_market_data_delayed must be bool")
         _nonnegative_int(self.market_version, "market_version")
@@ -178,6 +180,7 @@ def _market_book_depth_fingerprint(
             "market_id": observation.market_id,
             "selection_id": observation.selection_id,
             "status": observation.status,
+            "selection_status": observation.selection_status,
             "is_market_data_delayed": observation.is_market_data_delayed,
             "market_version": observation.market_version,
             "inplay": observation.inplay,
@@ -763,6 +766,7 @@ class BetfairReadOnlyClient:
             market_id=returned_market,
             selection_id=selection,
             status=_provider_text(book, "status", "status"),
+            selection_status=_provider_text(runner, "status", "runner status"),
             is_market_data_delayed=_provider_bool(book, "isMarketDataDelayed"),
             market_version=_provider_int(book, "version", "version"),
             inplay=_provider_bool(book, "inplay"),

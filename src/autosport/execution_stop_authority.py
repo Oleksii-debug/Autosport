@@ -183,8 +183,17 @@ def _sync_directory(path: Path) -> None:
 
 
 @contextmanager
-def _exclusive_file_lock(path: Path) -> Iterator[None]:
-    """Cross-process lock for one authority journal, with no polling loop."""
+def _exclusive_file_lock(
+    path: Path,
+    *,
+    guard_path: Path | None = None,
+) -> Iterator[None]:
+    """Cross-process lock for one authority journal, with no polling loop.
+
+    On POSIX, an existing canonical journal is locked as a second inode-stable
+    guard.  Unlinking/replacing the pathname-based sidecar can therefore not
+    create a second authority lock domain while the original operation is live.
+    """
 
     path.parent.mkdir(parents=True, exist_ok=True)
     try:
@@ -208,9 +217,57 @@ def _exclusive_file_lock(path: Path) -> Iterator[None]:
                 import fcntl
 
                 fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+                guard_handle = None
                 try:
+                    locked_sidecar = os.fstat(handle.fileno())
+                    try:
+                        current_sidecar = os.stat(path, follow_symlinks=False)
+                    except FileNotFoundError as exc:
+                        raise ExecutionStopIntegrityError(
+                            "STOP authority lock sidecar disappeared during acquisition"
+                        ) from exc
+                    if (
+                        not stat.S_ISREG(locked_sidecar.st_mode)
+                        or locked_sidecar.st_nlink != 1
+                        or (locked_sidecar.st_dev, locked_sidecar.st_ino)
+                        != (current_sidecar.st_dev, current_sidecar.st_ino)
+                    ):
+                        raise ExecutionStopIntegrityError(
+                            "STOP authority lock sidecar identity changed during acquisition"
+                        )
+
+                    if guard_path is not None:
+                        try:
+                            guard_handle = guard_path.open("rb")
+                        except FileNotFoundError:
+                            guard_handle = None
+                        if guard_handle is not None:
+                            fcntl.flock(guard_handle.fileno(), fcntl.LOCK_EX)
+                            locked_guard = os.fstat(guard_handle.fileno())
+                            try:
+                                current_guard = os.stat(
+                                    guard_path, follow_symlinks=False
+                                )
+                            except FileNotFoundError as exc:
+                                raise ExecutionStopIntegrityError(
+                                    "STOP authority journal disappeared during lock acquisition"
+                                ) from exc
+                            if (
+                                not stat.S_ISREG(locked_guard.st_mode)
+                                or locked_guard.st_nlink != 1
+                                or (locked_guard.st_dev, locked_guard.st_ino)
+                                != (current_guard.st_dev, current_guard.st_ino)
+                            ):
+                                raise ExecutionStopIntegrityError(
+                                    "STOP authority journal identity changed during lock acquisition"
+                                )
                     yield
                 finally:
+                    if guard_handle is not None:
+                        try:
+                            fcntl.flock(guard_handle.fileno(), fcntl.LOCK_UN)
+                        finally:
+                            guard_handle.close()
                     fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
     except ExecutionStopAuthorityError:
         raise
@@ -950,7 +1007,7 @@ class ExecutionStopAuthority:
         anchored prefix and is never promoted automatically.
         """
 
-        with self._thread_lock, _exclusive_file_lock(self._lock_path):
+        with self._thread_lock, _exclusive_file_lock(self._lock_path, guard_path=self.path):
             records = self._read_journal_unlocked(
                 require_anchor_match=False,
                 allow_missing_anchor=True,
@@ -1055,7 +1112,7 @@ class ExecutionStopAuthority:
         return self._state_from_record(records[-1])
 
     def current(self) -> ExecutionAuthorityState:
-        with self._thread_lock, _exclusive_file_lock(self._lock_path):
+        with self._thread_lock, _exclusive_file_lock(self._lock_path, guard_path=self.path):
             return self._current_unlocked()
 
     @contextmanager
@@ -1068,7 +1125,7 @@ class ExecutionStopAuthority:
         the positive ARMED check and the protected provider-write boundary.
         """
 
-        with self._thread_lock, _exclusive_file_lock(self._lock_path):
+        with self._thread_lock, _exclusive_file_lock(self._lock_path, guard_path=self.path):
             state = self._current_unlocked()
             if state.mode is not ExecutionAuthorityMode.ARMED:
                 raise ExecutionStoppedError(
@@ -1084,7 +1141,7 @@ class ExecutionStopAuthority:
         reason: str,
         command_id: str | None = None,
     ) -> ExecutionAuthorityState:
-        with self._thread_lock, _exclusive_file_lock(self._lock_path):
+        with self._thread_lock, _exclusive_file_lock(self._lock_path, guard_path=self.path):
             if self.path.exists() or self._anchor_path.exists():
                 records = self._read_journal_unlocked()
                 if records:
@@ -1108,7 +1165,7 @@ class ExecutionStopAuthority:
         expected_revision: int | None = None,
         command_id: str | None = None,
     ) -> ExecutionAuthorityState:
-        with self._thread_lock, _exclusive_file_lock(self._lock_path):
+        with self._thread_lock, _exclusive_file_lock(self._lock_path, guard_path=self.path):
             records = self._read_journal_unlocked()
             actual_revision = 0 if not records else records[-1]["revision"]
             expected = actual_revision if expected_revision is None else expected_revision
@@ -1130,7 +1187,7 @@ class ExecutionStopAuthority:
         expected_revision: int,
         command_id: str | None = None,
     ) -> ExecutionAuthorityState:
-        with self._thread_lock, _exclusive_file_lock(self._lock_path):
+        with self._thread_lock, _exclusive_file_lock(self._lock_path, guard_path=self.path):
             return self._append_unlocked(
                 mode=ExecutionAuthorityMode.ARMED,
                 operator_id=operator_id,

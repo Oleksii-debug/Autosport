@@ -1284,16 +1284,27 @@ class PersistentLiveDecisionLoop:
             for input_id in registered_input_ids:
                 self._pending_affected[input_id] = None
 
-        refresh_input_ids = tuple(self._pending_affected)
-        affected = refresh_input_ids
+        affected = tuple(self._pending_affected)
         if not affected:
             return LiveCycleResult(
                 LiveCycleStatus.NO_CHANGE,
                 detail="no material quote, status, dependency, or freshness invalidation",
             )
 
+        # Default provider decisions bind one coherent health cut across every
+        # cached intent. Rebuild all registered inputs when a material decision is
+        # due so no plan can mix intents produced under different provider-health
+        # horizons. Custom observation runners retain the bounded affected-only path.
+        refresh_input_ids = (
+            registered_input_ids
+            if self._default_health_gate is not None
+            else affected
+        )
         decision_time = now
-        snapshots = self._capture_input_views(refresh_input_ids, decision_time)
+        snapshots, provider_health_boundaries = self._capture_input_views(
+            refresh_input_ids,
+            decision_time,
+        )
         current_market_sha = self._market_state_sha256()
 
         clean_committed_restart = (
@@ -1324,9 +1335,6 @@ class PersistentLiveDecisionLoop:
             _GATE_PROVIDER_HEALTH
             if self._default_health_gate is not None
             else _GATE_NORMAL
-        )
-        provider_health_boundaries = self._current_provider_health_boundaries(
-            decision_time
         )
         self._write_pending(
             decision_ts=decision_ts,
@@ -1756,93 +1764,74 @@ class PersistentLiveDecisionLoop:
         as_of: datetime,
         *,
         incremental: bool = True,
-    ) -> dict[str, MirrorSnapshot]:
-        snapshots: dict[str, MirrorSnapshot] = {}
+    ) -> tuple[
+        dict[str, MirrorSnapshot],
+        tuple[ProviderHealthReplayBoundary, ...],
+    ]:
         reader = (
             self.dependencies.incremental_decision_view
             if incremental
             else self.dependencies.decision_view
         )
-        for input_id in input_ids:
-            snapshot = reader(
+        raw_snapshots = {
+            input_id: reader(
                 input_id,
                 as_of=as_of,
                 max_age=self.max_quote_age,
             )
-            if self._default_health_gate is not None:
-                snapshot = self._health_filter_snapshot(
-                    snapshot,
-                    gate=self._default_health_gate,
+            for input_id in input_ids
+        }
+
+        health_gate = self._default_health_gate
+        health_decisions = {}
+        if health_gate is not None:
+            source_ids = sorted(
+                {
+                    event.source_id
+                    for snapshot in raw_snapshots.values()
+                    for event in snapshot.events
+                }
+            )
+            health_decisions = {
+                source_id: health_gate.provider_health(
+                    source_id,
                     as_of=as_of,
+                )
+                for source_id in source_ids
+            }
+
+        snapshots: dict[str, MirrorSnapshot] = {}
+        for input_id, raw_snapshot in raw_snapshots.items():
+            if health_gate is None:
+                snapshot = raw_snapshot
+            else:
+                snapshot = HealthGatedMirrorSnapshot(
+                    revision=raw_snapshot.revision,
+                    events=tuple(
+                        event
+                        for event in raw_snapshot.events
+                        if health_decisions[event.source_id].eligible
+                    ),
+                    health_boundaries=tuple(
+                        health_decisions[source_id].replay_boundary
+                        for source_id in sorted(
+                            {event.source_id for event in raw_snapshot.events}
+                        )
+                    ),
                 )
             snapshots[input_id] = snapshot
             self._input_market_sha256[input_id] = _canonical_json_sha256(
                 [event.to_dict() for event in snapshot.events]
             )
             self._record_freshness_deadline(input_id, snapshot)
-        return snapshots
 
-    @staticmethod
-    def _health_filter_snapshot(
-        snapshot: MirrorSnapshot,
-        *,
-        gate: HealthGatedMirrorDecisionIndex,
-        as_of: datetime,
-        replay_boundaries: dict[str, ProviderHealthReplayBoundary] | None = None,
-    ) -> HealthGatedMirrorSnapshot:
-        source_ids = tuple(sorted({event.source_id for event in snapshot.events}))
-        if replay_boundaries is not None and set(replay_boundaries) != set(source_ids):
-            raise LiveDecisionProgressError(
-                "provider health replay boundaries do not match decision-visible sources"
+        provider_health_boundaries = _canonical_health_boundaries(
+            tuple(
+                health_decisions[source_id].replay_boundary
+                for source_id in sorted(health_decisions)
             )
-        decisions = {
-            source_id: gate.provider_health(
-                source_id,
-                as_of=as_of,
-                replay_boundary=(
-                    None
-                    if replay_boundaries is None
-                    else replay_boundaries[source_id]
-                ),
-            )
-            for source_id in source_ids
-        }
-        return HealthGatedMirrorSnapshot(
-            revision=snapshot.revision,
-            events=tuple(
-                event
-                for event in snapshot.events
-                if decisions[event.source_id].eligible
-            ),
-            health_boundaries=tuple(
-                decisions[source_id].replay_boundary for source_id in source_ids
-            ),
         )
-
-    def _current_provider_health_boundaries(
-        self,
-        as_of: datetime,
-    ) -> tuple[ProviderHealthReplayBoundary, ...]:
-        gate = self._default_health_gate
-        if gate is None:
-            return ()
-        decisions: dict[str, ProviderHealthReplayBoundary] = {}
-        for input_id in self.dependencies.input_ids:
-            raw = self.dependencies.decision_view(
-                input_id,
-                as_of=as_of,
-                max_age=self.max_quote_age,
-            )
-            for source_id in sorted({event.source_id for event in raw.events}):
-                if source_id in decisions:
-                    continue
-                decisions[source_id] = gate.provider_health(
-                    source_id,
-                    as_of=as_of,
-                ).replay_boundary
-        return _canonical_health_boundaries(
-            tuple(decisions[source_id] for source_id in sorted(decisions))
-        )
+        return snapshots, provider_health_boundaries
 
     def _refresh_intents_from_snapshots(
         self,

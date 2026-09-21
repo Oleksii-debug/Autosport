@@ -4,10 +4,10 @@ from __future__ import annotations
 
 ``BetfairStandardLimitPriceBoundEvidence`` and ``BoundSupervisedExecutionPlan``
 are ordinary Python values, not unforgeable capabilities. Positive product
-authority therefore starts from the existing durable ``RealExecutionLedger``:
-the exact plan id/fingerprint and supervised-approval binding must already be
-product-issued there before the canonical fail-before-I/O request resolver is
-allowed to supply a record for downstream acceptance.
+authority therefore starts from the independent durable supervised-plan issuance
+store. The execution ledger is consulted only after that provenance is restored,
+for exact reservation/approval execution-state continuity. A caller cannot supply
+a bound DTO to this public verifier.
 """
 
 from decimal import Decimal
@@ -19,6 +19,10 @@ from .betfair_standard_limit_price_bound import (
 )
 from .real_execution_ledger import RealExecutionLedger
 from .supervised_execution import BoundSupervisedExecutionPlan
+from .supervised_plan_issuance import (
+    SupervisedPlanIssuanceError,
+    SupervisedPlanIssuanceStore,
+)
 
 
 _EVIDENCE_FIELDS = (
@@ -73,12 +77,12 @@ def _exact_snapshot(
     return tuple(snapshot)
 
 
-def _require_product_owned_bound(
+def _require_execution_state_continuity(
     *,
     ledger: RealExecutionLedger,
     bound: BoundSupervisedExecutionPlan,
 ) -> None:
-    """Bind caller DTO self-consistency to the existing durable product authority."""
+    """Require ledger continuity without allowing ledger rows to mint provenance."""
 
     if type(ledger) is not RealExecutionLedger:
         raise BetfairStandardLimitPriceBoundError(
@@ -86,21 +90,19 @@ def _require_product_owned_bound(
         )
     if type(bound) is not BoundSupervisedExecutionPlan:
         raise BetfairStandardLimitPriceBoundError(
-            "bound must be the exact canonical BoundSupervisedExecutionPlan type"
+            "issued bound must be the exact canonical BoundSupervisedExecutionPlan type"
         )
 
-    # Call class implementations directly so instance-level method shadowing
-    # cannot replace either the deterministic binding proof or ledger reads.
     BoundSupervisedExecutionPlan.verify_binding(bound)
     try:
         saga = RealExecutionLedger.saga(ledger, bound.execution_plan.plan_id)
     except KeyError as exc:
         raise BetfairStandardLimitPriceBoundError(
-            "bound execution plan is not durably reserved by product authority"
+            "product-issued execution plan is not durably reserved"
         ) from exc
     if saga.plan_fingerprint != bound.execution_plan.fingerprint:
         raise BetfairStandardLimitPriceBoundError(
-            "durable execution-plan fingerprint mismatches caller bound"
+            "durable execution-plan fingerprint mismatches product issuance"
         )
     if not RealExecutionLedger.supervised_approval_is_active(
         ledger,
@@ -117,20 +119,35 @@ def verify_betfair_standard_limit_price_bound(
     *,
     evidence: BetfairStandardLimitPriceBoundEvidence,
     ledger: RealExecutionLedger,
-    bound: BoundSupervisedExecutionPlan,
+    issuance_store: SupervisedPlanIssuanceStore,
+    execution_plan_id: str,
     action_id: str,
 ) -> BetfairStandardLimitPriceBoundEvidence:
-    """Accept a candidate record only by product-owned durable re-resolution.
+    """Accept candidate evidence only by durable product issuance re-resolution.
 
-    The candidate record and caller-supplied bound are never the trust root.
-    First the exact execution plan must exist in the canonical durable ledger
-    with the same immutable fingerprint and active supervised-approval binding.
-    Only then does the existing resolver capture the current production
-    ``place_action`` request through its fail-before-I/O transport. Every
-    authority-bearing field is exact-compared, and the fresh record is returned.
+    The caller supplies only identities, never a bound execution DTO. The exact
+    bound+approval unit is reloaded from the rollback-resistant product issuance
+    authority, including current canonical provider-request projection validation.
+    The execution ledger then proves only reservation/approval continuity. Finally
+    the production ``place_action`` request is captured fail-before-I/O again and
+    every authority-bearing evidence field is exact-compared.
     """
 
-    _require_product_owned_bound(ledger=ledger, bound=bound)
+    if type(issuance_store) is not SupervisedPlanIssuanceStore:
+        raise BetfairStandardLimitPriceBoundError(
+            "issuance_store must be the exact canonical SupervisedPlanIssuanceStore type"
+        )
+    try:
+        issued = SupervisedPlanIssuanceStore.load(
+            issuance_store,
+            execution_plan_id,
+        )
+    except SupervisedPlanIssuanceError as exc:
+        raise BetfairStandardLimitPriceBoundError(
+            "durable product supervised-plan issuance is missing or invalid"
+        ) from exc
+    bound = issued.bound
+    _require_execution_state_continuity(ledger=ledger, bound=bound)
     expected = resolve_betfair_standard_limit_price_bound(
         bound=bound,
         action_id=action_id,

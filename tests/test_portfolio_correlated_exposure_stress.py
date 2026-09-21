@@ -88,7 +88,7 @@ def test_robust_stress_derive_isolated_from_ambient_decimal_context() -> None:
 
     assert hostile == expected
     assert expected.robust_scale == Decimal("0.6285600")
-    assert expected.proposed_stakes == (Decimal("6.29"), Decimal("12.58"))
+    assert expected.proposed_stakes == (Decimal("6.29"), Decimal("12.57"))
 
 
 def test_full_dependency_stress_collapses_joint_vector_to_zero() -> None:
@@ -179,3 +179,114 @@ def test_direct_constructor_rejects_invalid_stress_fraction(
 
     with pytest.raises(ValueError, match=field):
         RobustPortfolioProposal(**kwargs)
+
+def test_sub_quantum_stress_never_rounds_exposure_up() -> None:
+    proposal = RobustPortfolioProposal.derive(
+        (Decimal("0.006"), Decimal("0.004")),
+        _evidence(dependency=Decimal("0")),
+    )
+
+    assert proposal.robust_scale == Decimal("1")
+    assert proposal.proposed_stakes == (Decimal("0.00"), Decimal("0.00"))
+    assert all(
+        proposed <= base
+        for proposed, base in zip(
+            proposal.proposed_stakes,
+            proposal.base_stakes,
+            strict=True,
+        )
+    )
+
+
+def test_direct_constructor_rejects_stake_above_stressed_base_limit() -> None:
+    with pytest.raises(ValueError, match="cannot exceed its conservative stressed base"):
+        RobustPortfolioProposal(
+            base_stakes=(Decimal("10"),),
+            proposed_stakes=(Decimal("9"),),
+            dependency_haircut_fraction=Decimal("0.5"),
+            uncertainty_fraction=Decimal("0"),
+            fee_fraction=Decimal("0"),
+            partial_fill_stress_fraction=Decimal("0"),
+            robust_scale=Decimal("0.5"),
+        )
+
+
+def test_serialized_stake_above_stressed_base_limit_fails_closed() -> None:
+    proposal = RobustPortfolioProposal.derive(
+        (Decimal("10"),),
+        _evidence(
+            dependency=Decimal("0.5"),
+            pairs=((_A, _B, Decimal("0.5")),),
+        ),
+    )
+    payload = proposal.to_dict()
+    payload["base_stakes"] = ["10"]
+    payload["proposed_stakes"] = ["9"]
+    payload["dependency_haircut_fraction"] = "0.5"
+    payload["robust_scale"] = "0.5"
+
+    with pytest.raises(ValueError, match="cannot exceed its conservative stressed base"):
+        RobustPortfolioProposal.from_dict(payload)
+
+
+def _three_candidate_evidence(
+    bounds: tuple[Decimal, Decimal, Decimal],
+) -> PortfolioDependencyEvidence:
+    candidate_c = "3" * 64
+    intent_c = "c" * 64
+    return PortfolioDependencyEvidence(
+        evidence_id="dependency-evidence-three-way",
+        portfolio_sha256=_PORTFOLIO,
+        intent_sha256s=(_I1, _I2, intent_c),
+        candidate_sha256s=(_A, _B, candidate_c),
+        population_id="settled-paper-cohort",
+        method="conservative-pairwise-upper-bound",
+        sample_size=30,
+        causal_cutoff="2026-09-20T00:00:00Z",
+        as_of="2026-09-20T00:01:00Z",
+        valid_until="2026-09-21T00:01:00Z",
+        reproducibility_sha256=_REPRO,
+        pairwise_dependency_upper_bounds=(
+            (_A, _B, bounds[0]),
+            (_A, candidate_c, bounds[1]),
+            (_B, candidate_c, bounds[2]),
+        ),
+    )
+
+
+def test_one_high_dependency_edge_dominates_low_dependency_pairs() -> None:
+    proposal = RobustPortfolioProposal.derive(
+        (Decimal("100"), Decimal("80"), Decimal("60")),
+        _three_candidate_evidence(
+            (Decimal("0.01"), Decimal("0.90"), Decimal("0.02"))
+        ),
+    )
+
+    assert proposal.dependency_haircut_fraction == Decimal("0.90")
+    assert proposal.robust_scale == Decimal("0.10")
+    assert proposal.proposed_stakes == (
+        Decimal("10.00"),
+        Decimal("8.00"),
+        Decimal("6.00"),
+    )
+
+
+def test_non_worst_pair_changes_cannot_relax_worst_pair_haircut() -> None:
+    base = (Decimal("100"), Decimal("80"), Decimal("60"))
+    sparse = RobustPortfolioProposal.derive(
+        base,
+        _three_candidate_evidence(
+            (Decimal("0.01"), Decimal("0.90"), Decimal("0.02"))
+        ),
+    )
+    dense = RobustPortfolioProposal.derive(
+        base,
+        _three_candidate_evidence(
+            (Decimal("0.89"), Decimal("0.90"), Decimal("0.88"))
+        ),
+    )
+
+    assert sparse.dependency_haircut_fraction == dense.dependency_haircut_fraction
+    assert sparse.robust_scale == dense.robust_scale
+    assert sparse.proposed_stakes == dense.proposed_stakes
+

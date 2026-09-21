@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from decimal import Decimal
 import multiprocessing
+import os
 from pathlib import Path
 from queue import Empty
 import sys
@@ -109,6 +110,9 @@ def test_directory_sync_boundary_failure_returns_no_receipt_and_retry_converges(
     monkeypatch,
     tmp_path,
 ) -> None:
+    if os.name == "nt":
+        pytest.skip("POSIX directory-fsync boundary")
+
     path = tmp_path / "utility.jsonl"
     evidence = _evidence(episode_id="episode-dir-sync")
 

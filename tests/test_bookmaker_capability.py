@@ -456,3 +456,33 @@ def test_adapter_protocol_remains_read_only_and_structural() -> None:
     assert "place" not in ReadOnlyBookmakerAdapter.__dict__
     assert "cancel" not in ReadOnlyBookmakerAdapter.__dict__
     assert "cashout" not in ReadOnlyBookmakerAdapter.__dict__
+
+
+@pytest.mark.parametrize(
+    "capability",
+    [
+        BookmakerCapability.ACCOUNT_IDENTITY_READ,
+        BookmakerCapability.LIMITS_READ,
+        BookmakerCapability.PREMATCH_QUOTES_READ,
+        BookmakerCapability.LIVE_QUOTES_READ,
+        BookmakerCapability.BETSLIP_READ,
+        BookmakerCapability.PLACE_BET,
+        BookmakerCapability.BET_READBACK,
+        BookmakerCapability.CASHOUT,
+        BookmakerCapability.CANCEL_BET,
+    ],
+)
+def test_snapshot_rejects_capability_without_typed_snapshot_evidence(
+    capability: BookmakerCapability,
+) -> None:
+    profile = _profile(capability)
+
+    with pytest.raises(
+        BookmakerCapabilityError,
+        match="without typed account-snapshot evidence",
+    ):
+        BookmakerAccountSnapshot(
+            profile=profile,
+            observed_capabilities=frozenset({capability}),
+            observed_at=_TS,
+        )

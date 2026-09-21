@@ -291,6 +291,142 @@ class BoundedMirrorInvalidationBufferTests(unittest.TestCase):
             dependencies.all_matching_keys(),
         )
 
+    def test_incremental_batch_views_remain_one_revision_when_market_moves_after_capture(self) -> None:
+        mirror = MarketMirror()
+        runtime = BoundedMirrorInvalidationBuffer(mirror)
+        runtime.accept_persisted(
+            self.event(source_id="provider-a", selection="selection-a", sequence=1)
+        )
+        runtime.accept_persisted(
+            self.event(source_id="provider-a", selection="selection-b", sequence=1)
+        )
+        runtime.drain()
+
+        dependencies = FocusedMirrorDependencyIndex(mirror)
+        dependencies.register(
+            "decision-a",
+            source_ids="provider-a",
+            selection_ids="selection-a",
+        )
+        dependencies.register(
+            "decision-b",
+            source_ids="provider-a",
+            selection_ids="selection-b",
+        )
+
+        real_read = mirror.active_view_for_keys
+
+        def move_market_after_capture(keys, *, as_of, max_age):
+            captured = real_read(keys, as_of=as_of, max_age=max_age)
+            runtime.accept_persisted(
+                self.event(
+                    source_id="provider-a",
+                    selection="selection-a",
+                    sequence=2,
+                    odds="2.10",
+                )
+            )
+            runtime.accept_persisted(
+                self.event(
+                    source_id="provider-a",
+                    selection="selection-b",
+                    sequence=2,
+                    odds="2.20",
+                )
+            )
+            return captured
+
+        with patch.object(
+            mirror,
+            "active_view_for_keys",
+            side_effect=move_market_after_capture,
+        ) as read:
+            views = dependencies.incremental_decision_views(
+                ("decision-a", "decision-b"),
+                as_of=datetime(2026, 9, 16, 19, 0, 10, tzinfo=timezone.utc),
+                max_age=timedelta(minutes=1),
+            )
+
+        self.assertEqual(read.call_count, 1)
+        self.assertEqual(views["decision-a"].revision, views["decision-b"].revision)
+        self.assertEqual(
+            [event.sequence for event in views["decision-a"].events],
+            [1],
+        )
+        self.assertEqual(
+            [event.sequence for event in views["decision-b"].events],
+            [1],
+        )
+        self.assertEqual(
+            mirror.get(
+                "provider-a",
+                "event-1",
+                "market-1",
+                "selection-a",
+            ).sequence,
+            2,
+        )
+        self.assertEqual(
+            mirror.get(
+                "provider-a",
+                "event-1",
+                "market-1",
+                "selection-b",
+            ).sequence,
+            2,
+        )
+
+    def test_incremental_batch_views_preserve_routed_subset_without_full_snapshot(self) -> None:
+        mirror = MarketMirror()
+        runtime = BoundedMirrorInvalidationBuffer(mirror)
+        runtime.accept_persisted(
+            self.event(source_id="provider-a", selection="selection-a", sequence=1)
+        )
+        runtime.accept_persisted(
+            self.event(source_id="provider-a", selection="selection-b", sequence=1)
+        )
+        runtime.accept_persisted(
+            self.event(source_id="provider-a", selection="selection-z", sequence=1)
+        )
+        runtime.drain()
+
+        dependencies = FocusedMirrorDependencyIndex(mirror)
+        dependencies.register(
+            "decision-a",
+            source_ids="provider-a",
+            selection_ids="selection-a",
+        )
+        dependencies.register(
+            "decision-b",
+            source_ids="provider-a",
+            selection_ids="selection-b",
+        )
+
+        with patch.object(
+            mirror,
+            "snapshot",
+            side_effect=AssertionError("whole mirror snapshot is forbidden"),
+        ), patch.object(
+            mirror,
+            "active_view",
+            side_effect=AssertionError("full active view is forbidden"),
+        ):
+            views = dependencies.incremental_decision_views(
+                ("decision-a", "decision-b"),
+                as_of=datetime(2026, 9, 16, 19, 0, 10, tzinfo=timezone.utc),
+                max_age=timedelta(minutes=1),
+            )
+
+        self.assertEqual(
+            [event.selection_id for event in views["decision-a"].events],
+            ["selection-a"],
+        )
+        self.assertEqual(
+            [event.selection_id for event in views["decision-b"].events],
+            ["selection-b"],
+        )
+        self.assertEqual(views["decision-a"].revision, views["decision-b"].revision)
+
     def test_focused_dependency_overflow_fails_safe_to_all_registered_inputs(self) -> None:
         mirror = MarketMirror()
         runtime = BoundedMirrorInvalidationBuffer(mirror, max_dirty_keys=1)

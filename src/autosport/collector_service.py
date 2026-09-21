@@ -843,10 +843,13 @@ class HeadlessCollectorService:
 
         schedule_anchor = self.clock()
         _CollectorServiceState._instant(schedule_anchor, "schedule_anchor")
+        schedule_source = self._require_source_identity()
+        schedule_stream_epoch = schedule_source.stream_epoch
         try:
             self.delta_store._ensure_collector_schedule(
                 source_id=self.source_id,
                 run_id=self._state.run_id,
+                stream_epoch=schedule_stream_epoch,
                 anchor_at=schedule_anchor,
                 interval_seconds=self.config.poll_interval_seconds,
             )

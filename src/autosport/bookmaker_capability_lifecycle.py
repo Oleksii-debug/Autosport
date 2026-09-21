@@ -6,7 +6,7 @@ from datetime import datetime
 from enum import Enum, IntEnum
 from hashlib import sha256
 import json
-from typing import Iterable, Mapping
+from typing import Mapping
 
 from .bookmaker_capability import (
     BookmakerCapability,
@@ -264,6 +264,8 @@ class CapabilityRequirement:
             raise CapabilityEvidenceError("capability must be BookmakerCapability")
         if not isinstance(self.minimum_strength, CapabilityEvidenceStrength):
             raise CapabilityEvidenceError("minimum_strength must be CapabilityEvidenceStrength")
+        if self.minimum_strength is CapabilityEvidenceStrength.UNPROVEN:
+            raise CapabilityEvidenceError("UNPROVEN cannot authorize a capability")
         if type(self.scope) is not CapabilityScope:
             raise CapabilityEvidenceError("scope must be exact CapabilityScope")
         _text(self.validation_policy_version, "validation_policy_version")

@@ -367,7 +367,14 @@ class ParlayApiTableTennisProvider:
             try:
                 return self.transport(url, headers, self.timeout_seconds)
             except ProviderTransportError as exc:
-                retryable = exc.status_code == 429 or (exc.status_code is not None and exc.status_code >= 500)
+                # No HTTP status means the provider never produced a response
+                # (for example DNS/socket/timeout failure). Treat that as transient
+                # availability loss, but keep recovery bounded by the same retry policy.
+                retryable = (
+                    exc.status_code is None
+                    or exc.status_code == 429
+                    or exc.status_code >= 500
+                )
                 if not retryable or attempt >= self.max_attempts:
                     raise
                 requested = exc.retry_after if exc.retry_after is not None else 0.25 * attempt

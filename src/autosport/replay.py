@@ -193,6 +193,3 @@ def _replay_order_key(event: MarketEvent) -> tuple[datetime, datetime, int, str]
     observed = _iso_datetime(event.observed_ts, field_name="observed_ts")
     return (available, observed, event.sequence, event.dedupe_key)
 
-
-def _iso_seconds(value: str) -> float:
-    return _iso_datetime(value).timestamp()

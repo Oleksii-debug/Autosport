@@ -121,15 +121,17 @@ def _is_sha256(value: object) -> bool:
 
 def _canonical_json_bytes(payload: Mapping[str, object]) -> bytes:
     try:
-        return json.dumps(
+        text = json.dumps(
             payload,
             ensure_ascii=False,
             sort_keys=True,
             separators=(",", ":"),
             allow_nan=False,
-        ).encode("utf-8")
-    except (TypeError, ValueError) as exc:
-        raise ValueError("forensic journal payload must be canonical JSON") from exc
+        )
+        strict_json_loads(text)
+        return text.encode("utf-8")
+    except (TypeError, ValueError, UnicodeEncodeError) as exc:
+        raise ValueError("forensic journal payload must be canonical strict JSON") from exc
 
 
 def _record_digest(payload_without_digest: Mapping[str, object]) -> str:

@@ -723,9 +723,11 @@ def _parse_place_orders_response(
             )
         decoded = decoded[0]
     envelope = _mapping(decoded, "placeOrders response")
+    response_id = envelope.get("id")
     if (
         envelope.get("jsonrpc") != "2.0"
-        or envelope.get("id") != request_id
+        or type(response_id) is not int
+        or response_id != request_id
     ):
         raise BetfairPlaceOrdersAmbiguous(
             "placeOrders response does not bind exact JSON-RPC request"
@@ -773,18 +775,38 @@ def _parse_place_orders_response(
         echoed.get("limitOrder"),
         "echoed limitOrder",
     )
-    try:
-        echoed_selection = int(echoed.get("selectionId"))
-    except (TypeError, ValueError) as exc:
+    raw_selection = echoed.get("selectionId")
+    if (
+        isinstance(raw_selection, bool)
+        or not isinstance(raw_selection, (int, Decimal))
+    ):
         raise BetfairPlaceOrdersAmbiguous(
             "placeOrders echoed selection is malformed"
-        ) from exc
+        )
+    selection_number = Decimal(raw_selection)
+    if (
+        not selection_number.is_finite()
+        or selection_number <= 0
+        or selection_number != selection_number.to_integral_value()
+    ):
+        raise BetfairPlaceOrdersAmbiguous(
+            "placeOrders echoed selection is malformed"
+        )
+    echoed_selection = int(selection_number)
+
+    raw_handicap = echoed.get("handicap")
+    handicap_matches = (
+        not isinstance(raw_handicap, bool)
+        and isinstance(raw_handicap, (int, Decimal))
+        and Decimal(raw_handicap).is_finite()
+        and Decimal(raw_handicap) == 0
+    )
     try:
         exact_echo = (
             str(echoed_selection) == action.selection_id
             and echoed.get("side") == action.side
             and echoed.get("orderType") == "LIMIT"
-            and echoed.get("handicap") == 0
+            and handicap_matches
             and limit.get("persistenceType") == "LAPSE"
             and _positive_decimal(
                 limit.get("price"),

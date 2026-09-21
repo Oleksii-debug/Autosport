@@ -429,63 +429,16 @@ class EmpiricalExecutionEvidence:
         )
         if state in {AttemptState.ACCEPTED, AttemptState.PARTIAL}:
             if self.slippage_status == SLIPPAGE_STATUS_KNOWN:
-                if self.provider_evidence_id is None:
-                    raise EmpiricalExecutionEvidenceError(
-                        "KNOWN slippage requires bound provider evidence"
-                    )
-                if any(value is None for value in slippage_values):
-                    raise EmpiricalExecutionEvidenceError(
-                        "KNOWN slippage requires complete accepted-price metrics"
-                    )
-                accepted_odds = _decimal(self.accepted_odds, "accepted_odds")
-                accepted_stake = _decimal(self.accepted_stake, "accepted_stake")
-                accepted_minus = _decimal(
-                    self.accepted_minus_requested_odds,
-                    "accepted_minus_requested_odds",
-                )
-                adverse_delta = _decimal(self.adverse_odds_delta, "adverse_odds_delta")
-                unaccepted_stake = _decimal(self.unaccepted_stake, "unaccepted_stake")
-                if accepted_odds <= 0 or accepted_stake <= 0:
-                    raise EmpiricalExecutionEvidenceError(
-                        "accepted odds/stake must be > 0"
-                    )
-                if accepted_stake > requested_stake:
-                    raise EmpiricalExecutionEvidenceError(
-                        "accepted stake cannot exceed requested stake"
-                    )
-                if accepted_minus != accepted_odds - requested_odds:
-                    raise EmpiricalExecutionEvidenceError(
-                        "accepted-minus-requested odds metric is inconsistent"
-                    )
-                if self.side == "BACK":
-                    expected_adverse = max(
-                        requested_odds - accepted_odds, Decimal("0")
-                    )
-                elif self.side == "LAY":
-                    expected_adverse = max(
-                        accepted_odds - requested_odds, Decimal("0")
-                    )
-                else:
-                    raise EmpiricalExecutionEvidenceError(
-                        "accepted-price evidence supports canonical BACK/LAY only"
-                    )
-                if adverse_delta != expected_adverse:
-                    raise EmpiricalExecutionEvidenceError(
-                        "adverse odds delta is inconsistent"
-                    )
-                expected_unaccepted = requested_stake - accepted_stake
-                if unaccepted_stake != expected_unaccepted or unaccepted_stake < 0:
-                    raise EmpiricalExecutionEvidenceError(
-                        "unaccepted stake metric is inconsistent"
-                    )
-            elif self.slippage_status == SLIPPAGE_STATUS_UNKNOWN:
-                if any(value is not None for value in slippage_values):
-                    raise EmpiricalExecutionEvidenceError(
-                        "UNKNOWN slippage cannot claim accepted-price metrics"
-                    )
-            else:
                 raise EmpiricalExecutionEvidenceError(
-                    "accepted/partial attempt requires KNOWN or UNKNOWN slippage status"
+                    "KNOWN slippage requires typed accepted-price provider evidence"
+                )
+            if self.slippage_status != SLIPPAGE_STATUS_UNKNOWN:
+                raise EmpiricalExecutionEvidenceError(
+                    "accepted/partial attempt requires UNKNOWN slippage status"
+                )
+            if any(value is not None for value in slippage_values):
+                raise EmpiricalExecutionEvidenceError(
+                    "UNKNOWN slippage cannot claim accepted-price metrics"
                 )
         elif state is AttemptState.REJECTED:
             if self.slippage_status != SLIPPAGE_STATUS_NOT_APPLICABLE:
@@ -772,25 +725,9 @@ def build_empirical_execution_evidence(
             raise EmpiricalExecutionEvidenceUnavailable(
                 "accepted acknowledgement lacks accepted odds/stake"
             )
-        if provider_event is not None:
-            accepted_odds = _decimal(acknowledgement.accepted_odds, "accepted_odds")
-            accepted_stake = _decimal(acknowledgement.accepted_stake, "accepted_stake")
-            accepted_minus_requested = accepted_odds - requested_odds
-            side = _text(action.get("side"), "side")
-            if side == "BACK":
-                adverse_delta = max(requested_odds - accepted_odds, Decimal("0"))
-            elif side == "LAY":
-                adverse_delta = max(accepted_odds - requested_odds, Decimal("0"))
-            else:
-                raise EmpiricalExecutionEvidenceUnavailable(
-                    "accepted-price slippage semantics support canonical BACK/LAY only"
-                )
-            unaccepted_stake = requested_stake - accepted_stake
-            if unaccepted_stake < 0:
-                raise EmpiricalExecutionEvidenceUnavailable(
-                    "accepted stake exceeds requested stake"
-                )
-            slippage_status = SLIPPAGE_STATUS_KNOWN
+        # PROVIDER_EVIDENCE_BOUND is generic correlation metadata. Its durable
+        # schema does not bind an external receipt or the accepted odds/stake,
+        # so it cannot promote acknowledgement prices into KNOWN slippage truth.
     elif state is AttemptState.REJECTED:
         slippage_status = SLIPPAGE_STATUS_NOT_APPLICABLE
 

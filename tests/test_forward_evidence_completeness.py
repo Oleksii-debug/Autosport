@@ -12,7 +12,7 @@ from autosport.forward_evidence_completeness import (
     CostEvidence,
     DecisionState,
     ForwardOpportunityEnvelope,
-    ResearchProtocolEnvelope,
+    ForwardEvidenceProtocolEnvelope,
     RevealBoundaryReceipt,
     UniverseResult,
     VerificationCode,
@@ -30,28 +30,18 @@ HASH_E = "e" * 64
 HASH_F = "f" * 64
 
 
-def protocol(**changes: object) -> ResearchProtocolEnvelope:
+def protocol(**changes: object) -> ForwardEvidenceProtocolEnvelope:
     return replace(
-        ResearchProtocolEnvelope(
+        ForwardEvidenceProtocolEnvelope(
             campaign_id="campaign-1",
-            protocol_version="1",
+            scientific_protocol_sha256=HASH_A,
             candidate_universe_rule_id="all-observed-v1",
-            candidate_universe_rule_sha256=HASH_A,
-            inclusion_exclusion_policy_sha256=HASH_B,
-            strategy_or_policy_identity="strategy-a@artifact-1",
-            runtime_identity_sha256=HASH_C,
-            primary_metric_id="net-pnl",
-            protective_metric_set_sha256=HASH_D,
-            minimum_effect_rule="net_pnl_gt_zero",
+            candidate_universe_rule_sha256=HASH_B,
+            forward_evaluation_policy_sha256=HASH_C,
+            runtime_identity_sha256=HASH_D,
             baseline_set_sha256=HASH_E,
-            cost_policy_sha256=HASH_F,
-            dependence_unit="event",
-            inference_method_id="cluster-bootstrap-v1",
-            multiplicity_policy_id="holm-v1",
-            sequential_look_policy_id="alpha-spending-v1",
-            stopping_rule_id="fixed-window-v1",
-            promotion_rule_id="forward-confirm-v1",
-            rollback_rule_id="champion-predecessor-v1",
+            protective_metric_set_sha256=HASH_F,
+            cost_policy_sha256="1" * 64,
             precommit_anchor_lower=BASE,
             precommit_anchor_upper=BASE + timedelta(seconds=1),
         ),
@@ -60,7 +50,7 @@ def protocol(**changes: object) -> ResearchProtocolEnvelope:
 
 
 def opportunity(
-    proto: ResearchProtocolEnvelope,
+    proto: ForwardEvidenceProtocolEnvelope,
     sequence: int,
     *,
     predecessor: str,
@@ -366,14 +356,14 @@ def test_missing_close_is_open_not_confirmatory_pass() -> None:
 
 def test_protocol_change_after_candidates_conflicts_with_committed_records() -> None:
     data = campaign()
-    changed = protocol(primary_metric_id="win-rate")
+    changed = protocol(forward_evaluation_policy_sha256="2" * 64)
     result = verify_campaign(replace(data, protocol=changed))
     assert has(result, VerificationCode.PROTOCOL_HASH_CONFLICT)
 
 
 def test_same_model_label_with_different_runtime_bytes_conflicts() -> None:
     data = campaign()
-    changed = replace(data.opportunities[1], runtime_identity_sha256=HASH_D)
+    changed = replace(data.opportunities[1], runtime_identity_sha256=HASH_C)
     result = verify_campaign(
         replace(
             data,

@@ -466,7 +466,12 @@ def _install_market_book_authority() -> None:
         market_id: str,
     ) -> BetfairMarketBookDelayObservation:
         positive_origin = _canonical_network_transport(client)
+        credentials = client._credentials
         observation = _read_market_book_delay(client, market_id)
+        if positive_origin and client._credentials is not credentials:
+            raise BetfairMarketBookFreshnessError(
+                "Betfair authenticated context changed before authority registration"
+            )
         key = id(observation)
 
         def forget(_weakref: object, *, observation_id: int = key) -> None:
@@ -477,7 +482,7 @@ def _install_market_book_authority() -> None:
             observation._authority_fingerprint(),
             positive_origin,
             client,
-            client._credentials,
+            credentials,
         )
         return observation
 

@@ -99,22 +99,25 @@ def assess(
     )
 
 
-def test_sufficient_displayed_depth_is_explicitly_racy() -> None:
+def test_caller_minted_consistent_dtos_cannot_issue_positive_feasibility() -> None:
     result = assess()
 
-    assert result.state is FeasibilityState.SNAPSHOT_DEPTH_SUFFICIENT_BUT_RACY
-    assert result.sufficient is True
+    assert result.state is FeasibilityState.UNKNOWN_UNPROVEN
+    assert result.sufficient is False
     assert result.displayed_acceptable_depth == Decimal("15")
-    assert result.reasons == ()
+    assert result.reasons == ("PRODUCT_OWNED_EVIDENCE_UNRESOLVED",)
     assert len(result.evidence_digest) == 64
 
 
 def test_worse_than_limit_price_is_not_counted() -> None:
     result = assess(req=replace(request(), requested_stake=Decimal("16")))
 
-    assert result.state is FeasibilityState.DISPLAYED_DEPTH_AT_SNAPSHOT
+    assert result.state is FeasibilityState.UNKNOWN_UNPROVEN
     assert result.displayed_acceptable_depth == Decimal("15")
-    assert result.reasons == ("DISPLAYED_DEPTH_INSUFFICIENT",)
+    assert result.reasons == (
+        "PRODUCT_OWNED_EVIDENCE_UNRESOLVED",
+        "DISPLAYED_DEPTH_INSUFFICIENT",
+    )
 
 
 def test_back_limit_consumes_opposing_available_to_lay_depth() -> None:
@@ -128,47 +131,34 @@ def test_back_limit_consumes_opposing_available_to_lay_depth() -> None:
 
     result = assess(book=book)
 
-    assert result.state is FeasibilityState.DISPLAYED_DEPTH_AT_SNAPSHOT
+    assert result.state is FeasibilityState.UNKNOWN_UNPROVEN
     assert result.displayed_acceptable_depth == Decimal("3")
-    assert result.reasons == ("DISPLAYED_DEPTH_INSUFFICIENT",)
+    assert result.reasons == (
+        "PRODUCT_OWNED_EVIDENCE_UNRESOLVED",
+        "DISPLAYED_DEPTH_INSUFFICIENT",
+    )
 
 
 @pytest.mark.parametrize(
     ("book", "reason"),
     [
         (replace(snapshot(), source_mode=SourceMode.DELAYED), "DELAYED_SOURCE"),
-        (
-            replace(snapshot(), observed_at=NOW - timedelta(seconds=2)),
-            "STALE_SNAPSHOT",
-        ),
-        (
-            replace(snapshot(), observed_at=NOW + timedelta(milliseconds=1)),
-            "FUTURE_SNAPSHOT",
-        ),
-        (
-            replace(snapshot(), received_at=NOW + timedelta(milliseconds=1)),
-            "RECEIVED_AFTER_DECISION",
-        ),
+        (replace(snapshot(), observed_at=NOW - timedelta(seconds=2)), "STALE_SNAPSHOT"),
+        (replace(snapshot(), observed_at=NOW + timedelta(milliseconds=1)), "FUTURE_SNAPSHOT"),
+        (replace(snapshot(), received_at=NOW + timedelta(milliseconds=1)), "RECEIVED_AFTER_DECISION"),
         (replace(snapshot(), has_ordering_gap=True), "SNAPSHOT_ORDERING_GAP"),
         (replace(snapshot(), status="SUSPENDED"), "MARKET_NOT_OPEN"),
         (replace(snapshot(), is_truncated=True), "TRUNCATED_PROJECTION"),
         (replace(snapshot(), virtualise=True), "VIRTUALISED_LADDER_FORBIDDEN"),
-        (
-            replace(snapshot(), rollup_model="STAKE"),
-            "ROLLUP_SUBSTITUTION_FORBIDDEN",
-        ),
+        (replace(snapshot(), rollup_model="STAKE"), "ROLLUP_SUBSTITUTION_FORBIDDEN"),
         (replace(snapshot(), market_version=18), "MARKET_VERSION_MISMATCH"),
         (replace(snapshot(), inplay=True), "INPLAY_MISMATCH"),
         (replace(snapshot(), bet_delay_seconds=5), "BET_DELAY_MISMATCH"),
         (replace(snapshot(), account_id="other"), "ACCOUNT_ID_MISMATCH"),
     ],
 )
-def test_snapshot_uncertainty_fails_closed(
-    book: MarketBookSnapshot,
-    reason: str,
-) -> None:
+def test_snapshot_uncertainty_fails_closed(book: MarketBookSnapshot, reason: str) -> None:
     result = assess(book=book)
-
     assert result.state is FeasibilityState.UNKNOWN_UNPROVEN
     assert result.sufficient is False
     assert reason in result.reasons
@@ -179,41 +169,22 @@ def test_snapshot_uncertainty_fails_closed(
     [
         (replace(request(), side="LAY"), "UNSUPPORTED_SIDE"),
         (replace(request(), order_type="MARKET"), "UNSUPPORTED_ORDER_TYPE"),
-        (
-            replace(request(), leg_count=2),
-            "MULTI_LEG_LIQUIDITY_REUSE_FORBIDDEN",
-        ),
+        (replace(request(), leg_count=2), "MULTI_LEG_LIQUIDITY_REUSE_FORBIDDEN"),
         (replace(request(), fill_or_kill=True), "FILL_OR_KILL_NOT_STANDARD_LIMIT"),
-        (
-            replace(request(), minimum_fill_size=Decimal("5")),
-            "MINIMUM_FILL_NOT_STANDARD_LIMIT",
-        ),
+        (replace(request(), minimum_fill_size=Decimal("5")), "MINIMUM_FILL_NOT_STANDARD_LIMIT"),
         (replace(request(), bet_target_type="PAYOUT"), "BET_TARGET_FORBIDDEN"),
         (replace(request(), smart_order=True), "SMART_ORDER_FORBIDDEN"),
     ],
 )
-def test_nonstandard_or_reusable_order_semantics_fail_closed(
-    req: ExecutionFeasibilityRequest,
-    reason: str,
-) -> None:
+def test_nonstandard_or_reusable_order_semantics_fail_closed(req: ExecutionFeasibilityRequest, reason: str) -> None:
     result = assess(req=req)
-
     assert result.state is FeasibilityState.UNKNOWN_UNPROVEN
     assert reason in result.reasons
 
 
 def test_best_offers_projection_must_bind_depth_and_not_claim_truncation() -> None:
-    unbound = replace(
-        snapshot(),
-        projection_kind=ProjectionKind.EX_BEST_OFFERS,
-        projection_depth=None,
-    )
-    truncated = replace(
-        snapshot(),
-        projection_kind=ProjectionKind.EX_BEST_OFFERS,
-        projection_depth=3,
-        is_truncated=True,
-    )
+    unbound = replace(snapshot(), projection_kind=ProjectionKind.EX_BEST_OFFERS, projection_depth=None)
+    truncated = replace(snapshot(), projection_kind=ProjectionKind.EX_BEST_OFFERS, projection_depth=3, is_truncated=True)
 
     assert assess(book=unbound).state is FeasibilityState.UNKNOWN_UNPROVEN
     assert "BEST_OFFERS_DEPTH_UNBOUND" in assess(book=unbound).reasons
@@ -236,10 +207,7 @@ def test_limit_authority_is_identity_bound_and_fail_closed() -> None:
 
 def test_evidence_digest_changes_when_causal_evidence_changes() -> None:
     first = assess()
-    second = assess(
-        book=replace(snapshot(), sequence=100, snapshot_digest="book-digest-2")
-    )
-
+    second = assess(book=replace(snapshot(), sequence=100, snapshot_digest="book-digest-2"))
     assert first.evidence_digest != second.evidence_digest
 
 
@@ -255,7 +223,6 @@ def test_evidence_digest_binds_opposing_lay_ladder() -> None:
             ),
         )
     )
-
     assert first.evidence_digest != second.evidence_digest
 
 

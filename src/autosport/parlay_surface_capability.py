@@ -119,7 +119,7 @@ class ParlaySurfaceObservation:
     observed_at: datetime
     available_at: datetime
     status_code: int
-    origin_verified: bool
+    provider_origin_verified: bool = field(default=False, init=False)
     response_sha256: str
     row_count: int
     pagination_complete: bool
@@ -146,7 +146,6 @@ class ParlaySurfaceObservation:
         _require_exact_int("status_code", self.status_code, minimum=100)
         if self.status_code > 599:
             raise SurfaceCapabilityError("status_code must be <= 599")
-        _require_exact_bool("origin_verified", self.origin_verified)
         object.__setattr__(self, "response_sha256", _require_digest("response_sha256", self.response_sha256))
         _require_exact_int("row_count", self.row_count)
         _require_exact_bool("pagination_complete", self.pagination_complete)
@@ -210,6 +209,7 @@ class SurfaceCapabilityDecision:
     provider_write_authorized: bool = False
     execution_authorized: bool = False
     real_money_execution: bool = False
+    source_authority_resolved: bool = False
 
     def __post_init__(self) -> None:
         _require_digest("evidence_id", self.evidence_id)
@@ -217,7 +217,7 @@ class SurfaceCapabilityDecision:
             raise SurfaceCapabilityError("technical_support must be exact TechnicalSupport")
         if type(self.data_usability) is not DataUsability:
             raise SurfaceCapabilityError("data_usability must be exact DataUsability")
-        for field_name in ("provider_write_authorized", "execution_authorized", "real_money_execution"):
+        for field_name in ("provider_write_authorized", "execution_authorized", "real_money_execution", "source_authority_resolved"):
             if getattr(self, field_name) is not False:
                 raise SurfaceCapabilityError(f"{field_name} is structurally false")
         if type(self.reason) is not str or not self.reason:
@@ -237,9 +237,10 @@ def evaluate_surface_capability(
 ) -> SurfaceCapabilityDecision:
     """Resolve bounded technical support and current-data usability.
 
-    Positive support is never inferred from sport-catalog membership, a generic HTTP 200,
-    bookmaker registry activity, or an empty response. A requested market needs explicit
-    endpoint-service evidence when the surface exposes such routing metadata.
+    This is an observational prerequisite, not provider-origin authority. Positive
+    observation support is never inferred from sport-catalog membership, a generic HTTP
+    200, bookmaker registry activity, or an empty response. A requested market needs an
+    explicit endpoint-service witness. source_authority_resolved remains structurally false.
     """
 
     if type(observation) is not ParlaySurfaceObservation:
@@ -263,9 +264,6 @@ def evaluate_surface_capability(
 
     if observation.available_at > decision_time:
         return result(TechnicalSupport.UNKNOWN, DataUsability.UNKNOWN, "EVIDENCE_NOT_CAUSALLY_AVAILABLE")
-    if not observation.origin_verified:
-        return result(TechnicalSupport.UNKNOWN, DataUsability.UNKNOWN, "PROVIDER_ORIGIN_UNVERIFIED")
-
     if observation.status_code == 429 or observation.status_code >= 500:
         return result(TechnicalSupport.TRANSIENT_UNKNOWN, DataUsability.UNAVAILABLE, "TRANSIENT_PROVIDER_FAILURE")
     if observation.status_code == 401:

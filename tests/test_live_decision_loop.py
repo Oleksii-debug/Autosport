@@ -243,6 +243,7 @@ class PersistentLiveDecisionLoopTests(unittest.TestCase):
     def _provider_quote(
         cls,
         *,
+        selection: str = "selection-a",
         sequence: int = 1,
         odds: str = "2.00",
     ) -> ProviderQuote:
@@ -250,7 +251,7 @@ class PersistentLiveDecisionLoopTests(unittest.TestCase):
         return ProviderQuote(
             provider_event_id="event-1",
             provider_market_id="market-1",
-            provider_selection_id="selection-a",
+            provider_selection_id=selection,
             decimal_odds=Decimal(odds),
             observed_ts=timestamp,
             sequence=sequence,
@@ -484,6 +485,96 @@ class PersistentLiveDecisionLoopTests(unittest.TestCase):
             self.assertEqual(
                 progress["provider_health_boundaries"][0]["transition_order"],
                 2,
+            )
+            loop.close()
+
+    def test_material_quote_change_rebuilds_same_source_inputs_under_one_health_cut(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            provider = _SequencedProvider(
+                [
+                    ProviderBatch(
+                        "provider-a",
+                        (
+                            self._provider_quote(
+                                selection="selection-a",
+                                sequence=1,
+                            ),
+                            self._provider_quote(
+                                selection="selection-b",
+                                sequence=1,
+                                odds="2.10",
+                            ),
+                        ),
+                        cursor="snapshot-1",
+                    ),
+                    ProviderBatch(
+                        "provider-a",
+                        (
+                            self._provider_quote(
+                                selection="selection-a",
+                                sequence=2,
+                                odds="2.05",
+                            ),
+                        ),
+                        cursor="snapshot-2",
+                    ),
+                ]
+            )
+            factory = _EmptyIntentFactory()
+            loop = self._provider_loop(
+                workspace,
+                provider=provider,
+                factory=factory,
+                clock=_ManualClock(self.START + timedelta(seconds=1)),
+            )
+            self._register_provider_input(loop)
+            loop.register_input(
+                "input-b",
+                source_ids="provider-a",
+                event_ids="provider-a:event-1",
+                market_ids="provider-a:market-1",
+                selection_ids="provider-a:selection-b",
+            )
+
+            self.assertEqual(loop.run_cycle().status, LiveCycleStatus.DECIDED)
+            self.assertEqual(loop.run_cycle().status, LiveCycleStatus.DECIDED)
+
+            self.assertEqual(
+                factory.calls,
+                [
+                    (
+                        "input-a",
+                        (("provider-a:selection-a", 1, "open"),),
+                    ),
+                    (
+                        "input-b",
+                        (("provider-a:selection-b", 1, "open"),),
+                    ),
+                    (
+                        "input-a",
+                        (("provider-a:selection-a", 2, "open"),),
+                    ),
+                    (
+                        "input-b",
+                        (("provider-a:selection-b", 1, "open"),),
+                    ),
+                ],
+            )
+            progress = json.loads(
+                (workspace / loop.PROGRESS_FILE_NAME).read_text(encoding="utf-8")
+            )
+            self.assertEqual(
+                progress["provider_health_boundaries"],
+                [
+                    {
+                        "source_id": "provider-a",
+                        "recorded_at": (
+                            self.START + timedelta(seconds=1)
+                        ).isoformat(),
+                        "transition_order": 2,
+                    }
+                ],
             )
             loop.close()
 

@@ -329,15 +329,31 @@ def _build_capability():
                     "statement evidence must be exact BetfairEvidence"
                 )
 
+    def aggregate_observed_at(
+        entitlement: DeveloperAppEntitlementObservation,
+        statement: AccountStatementPageObservation,
+    ) -> str:
+        observations = (
+            entitlement.observed_at,
+            statement.account_details_evidence.observed_at,
+            statement.statement_evidence.observed_at,
+        )
+        return max(
+            observations,
+            key=lambda value: instant(value, "component observed_at"),
+        )
+
     def combined_evidence_sha256(
         entitlement: DeveloperAppEntitlementObservation,
         statement: AccountStatementPageObservation,
     ) -> str:
+        observed_at = aggregate_observed_at(entitlement, statement)
         return canonical_sha256(
             {
                 "schema": "autosport.betfair_provider_billing_inputs",
-                "schema_version": 3,
+                "schema_version": 4,
                 "venue_id": entitlement.venue_id,
+                "observed_at": observed_at,
                 "entitlement": {
                     "app_id": entitlement.app_id,
                     "app_name": entitlement.app_name,
@@ -405,6 +421,13 @@ def _build_capability():
                     "provider billing observations disagree on venue identity"
                 )
             instant(self.observed_at, "observed_at")
+            expected_observed_at = aggregate_observed_at(
+                self.entitlement, self.statement
+            )
+            if self.observed_at != expected_observed_at:
+                raise error_cls(
+                    "provider billing observed_at must equal latest component observation"
+                )
             sha256_hex(self.evidence_sha256, "evidence_sha256")
             if self.evidence_sha256 != combined_evidence_sha256(
                 self.entitlement, self.statement
@@ -725,12 +748,7 @@ def _build_capability():
             account_details_evidence=details.evidence,
             statement_evidence=statement_rpc.evidence,
         )
-        observed_at = max(
-            entitlement.observed_at,
-            statement.account_details_evidence.observed_at,
-            statement.statement_evidence.observed_at,
-            key=lambda value: instant(value, "observed_at"),
-        )
+        observed_at = aggregate_observed_at(entitlement, statement)
         return ProviderBillingInputsObservation(
             entitlement=entitlement,
             statement=statement,

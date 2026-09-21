@@ -2051,20 +2051,49 @@ class RealExecutionLedger:
                 if event["event_type"]
                 == EventType.ATTEMPT_RESERVED.value
             ]
+            actual_observed_at = _now()
+            observed_time = _timestamp(actual_observed_at, "observed_at")
+            unresolved: list[tuple[dict[str, Any], str]] = []
             for reserved in reserved_events:
                 attempt_id = reserved["attempt_id"]
-                if self._state(
-                    self._attempt_events(events, attempt_id)
-                ) in {AttemptState.RESERVED, AttemptState.SUBMITTED}:
-                    self._append(
-                        EventType.ATTEMPT_UNKNOWN,
-                        reserved["plan_id"],
-                        reserved["action_id"],
-                        attempt_id,
-                        {"reason": reason, "observed_at": _now()},
+                attempt_events = self._attempt_events(events, attempt_id)
+                if self._state(attempt_events) not in {
+                    AttemptState.RESERVED,
+                    AttemptState.SUBMITTED,
+                }:
+                    continue
+                causal_boundaries = [
+                    _timestamp(
+                        reserved["payload"]["reserved_at"], "reserved_at"
                     )
-                    promoted.append(attempt_id)
-                    events = self._events()
+                ]
+                for event in attempt_events:
+                    if (
+                        event["event_type"]
+                        == EventType.ATTEMPT_SUBMITTED.value
+                    ):
+                        causal_boundaries.append(
+                            _timestamp(
+                                event["payload"]["submitted_at"],
+                                "submitted_at",
+                            )
+                        )
+                if observed_time < max(causal_boundaries):
+                    raise ExecutionStateError(
+                        "recovery clock precedes attempt causal boundary"
+                    )
+                unresolved.append((reserved, attempt_id))
+
+            for reserved, attempt_id in unresolved:
+                self._append(
+                    EventType.ATTEMPT_UNKNOWN,
+                    reserved["plan_id"],
+                    reserved["action_id"],
+                    attempt_id,
+                    {"reason": reason, "observed_at": actual_observed_at},
+                )
+                promoted.append(attempt_id)
+                events = self._events()
             return tuple(promoted)
 
         return self._mutate(operation)

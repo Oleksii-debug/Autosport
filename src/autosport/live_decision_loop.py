@@ -125,8 +125,8 @@ PostAppendHook = Callable[[], None]
 
 
 _PROGRESS_SCHEMA = "autosport.live_decision_progress"
-_PROGRESS_VERSION = 1
-_PROGRESS_KEYS = frozenset(
+_PROGRESS_VERSION = 2
+_PROGRESS_KEYS_V1 = frozenset(
     {
         "schema",
         "schema_version",
@@ -143,6 +143,9 @@ _PROGRESS_KEYS = frozenset(
         "gate",
     }
 )
+_PROGRESS_KEYS_V2 = _PROGRESS_KEYS_V1 | frozenset(
+    {"provider_health_boundaries"}
+)
 _PHASE_PENDING = "pending"
 _PHASE_APPEND_PENDING = "append_pending"
 _PHASE_COMMITTED = "committed"
@@ -150,18 +153,6 @@ _GATE_NORMAL = "normal"
 _GATE_PROVIDER_HEALTH = "provider_health"
 _GATE_PROVIDER_GAP = "provider_gap"
 _SHA256_HEX = frozenset("0123456789abcdef")
-_HEALTH_EVIDENCE_SCHEMA = "autosport.live_decision_provider_health"
-_HEALTH_EVIDENCE_VERSION = 1
-_HEALTH_EVIDENCE_KEYS = frozenset(
-    {
-        "schema",
-        "schema_version",
-        "loop_id",
-        "decision_ts",
-        "market_state_sha256",
-        "boundaries",
-    }
-)
 _HEALTH_BOUNDARY_KEYS = frozenset(
     {"source_id", "recorded_at", "transition_order"}
 )
@@ -642,58 +633,6 @@ class _InputSpec:
 
 
 @dataclass(frozen=True, slots=True)
-class _HealthEvidence:
-    loop_id: str
-    decision_ts: str
-    market_state_sha256: str
-    boundaries: tuple[ProviderHealthReplayBoundary, ...]
-
-    def __post_init__(self) -> None:
-        _canonical_text("health evidence loop_id", self.loop_id)
-        _canonical_timestamp("health evidence decision_ts", self.decision_ts)
-        _canonical_sha256(
-            "health evidence market_state_sha256",
-            self.market_state_sha256,
-        )
-        _canonical_health_boundaries(self.boundaries)
-
-    def to_dict(self) -> dict[str, object]:
-        return {
-            "schema": _HEALTH_EVIDENCE_SCHEMA,
-            "schema_version": _HEALTH_EVIDENCE_VERSION,
-            "loop_id": self.loop_id,
-            "decision_ts": self.decision_ts,
-            "market_state_sha256": self.market_state_sha256,
-            "boundaries": _health_boundaries_payload(self.boundaries),
-        }
-
-    @classmethod
-    def from_dict(cls, raw: object) -> "_HealthEvidence":
-        if type(raw) is not dict or set(raw) != _HEALTH_EVIDENCE_KEYS:
-            raise LiveDecisionProgressError(
-                "provider health evidence must contain canonical fields"
-            )
-        if (
-            raw["schema"] != _HEALTH_EVIDENCE_SCHEMA
-            or raw["schema_version"] != _HEALTH_EVIDENCE_VERSION
-        ):
-            raise LiveDecisionProgressError(
-                "unsupported provider health evidence schema"
-            )
-        try:
-            return cls(
-                loop_id=raw["loop_id"],
-                decision_ts=raw["decision_ts"],
-                market_state_sha256=raw["market_state_sha256"],
-                boundaries=_health_boundaries_from_payload(raw["boundaries"]),
-            )
-        except (TypeError, ValueError) as exc:
-            raise LiveDecisionProgressError(
-                "provider health evidence is invalid"
-            ) from exc
-
-
-@dataclass(frozen=True, slots=True)
 class _Progress:
     loop_id: str
     phase: str
@@ -706,6 +645,7 @@ class _Progress:
     plan_sha256: str | None
     ledger_offset: int | None
     gate: str
+    provider_health_boundaries: tuple[ProviderHealthReplayBoundary, ...] = ()
 
     def __post_init__(self) -> None:
         _canonical_text("loop_id", self.loop_id)
@@ -724,6 +664,14 @@ class _Progress:
             _GATE_PROVIDER_GAP,
         }:
             raise LiveDecisionProgressError("unsupported live progress gate")
+        _canonical_health_boundaries(self.provider_health_boundaries)
+        if (
+            self.gate != _GATE_PROVIDER_HEALTH
+            and self.provider_health_boundaries
+        ):
+            raise LiveDecisionProgressError(
+                "provider health boundaries require provider_health gate"
+            )
         if type(self.affected_input_ids) is not tuple:
             raise LiveDecisionProgressError("affected_input_ids must be a tuple")
         for input_id in self.affected_input_ids:
@@ -780,16 +728,41 @@ class _Progress:
             "plan_sha256": self.plan_sha256,
             "ledger_offset": self.ledger_offset,
             "gate": self.gate,
+            "provider_health_boundaries": _health_boundaries_payload(
+                self.provider_health_boundaries
+            ),
         }
 
     @classmethod
     def from_dict(cls, raw: object) -> "_Progress":
-        if type(raw) is not dict or set(raw) != _PROGRESS_KEYS:
+        if type(raw) is not dict:
             raise LiveDecisionProgressError(
                 "live decision progress must contain canonical fields"
             )
-        if raw["schema"] != _PROGRESS_SCHEMA or raw["schema_version"] != _PROGRESS_VERSION:
+        if raw.get("schema") != _PROGRESS_SCHEMA:
             raise LiveDecisionProgressError("unsupported live decision progress schema")
+        schema_version = raw.get("schema_version")
+        if schema_version == 1:
+            if set(raw) != _PROGRESS_KEYS_V1:
+                raise LiveDecisionProgressError(
+                    "live decision progress must contain canonical fields"
+                )
+            if raw.get("gate") == _GATE_PROVIDER_HEALTH:
+                raise LiveDecisionProgressError(
+                    "legacy live progress cannot claim provider health evidence"
+                )
+            provider_health_boundaries = ()
+        elif schema_version == _PROGRESS_VERSION:
+            if set(raw) != _PROGRESS_KEYS_V2:
+                raise LiveDecisionProgressError(
+                    "live decision progress must contain canonical fields"
+                )
+            provider_health_boundaries = _health_boundaries_from_payload(
+                raw["provider_health_boundaries"]
+            )
+        else:
+            raise LiveDecisionProgressError("unsupported live decision progress schema")
+
         input_ids = raw["affected_input_ids"]
         registered_ids = raw["registered_input_ids"]
         if type(input_ids) is not list or any(type(value) is not str for value in input_ids):
@@ -815,10 +788,10 @@ class _Progress:
                 plan_sha256=raw["plan_sha256"],
                 ledger_offset=raw["ledger_offset"],
                 gate=raw["gate"],
+                provider_health_boundaries=provider_health_boundaries,
             )
         except (TypeError, ValueError) as exc:
             raise LiveDecisionProgressError("live decision progress is invalid") from exc
-
 
 class PersistentLiveDecisionLoop:
     """Bounded, restart-safe paper/shadow decision loop over canonical authorities.
@@ -837,7 +810,6 @@ class PersistentLiveDecisionLoop:
     PRE_ACTION_BOOK_FILE_NAME = "live_decision_pre_action_book.json"
     CONTROL_FILE_NAME = "live_decision_control.json"
     INPUTS_FILE_NAME = "live_decision_inputs.json"
-    HEALTH_EVIDENCE_DIR_NAME = "live_decision_provider_health"
     AGENT_ID = "persistent-live-decision-loop"
 
     def __init__(
@@ -1059,8 +1031,6 @@ class PersistentLiveDecisionLoop:
 
         self.progress_path = self.workspace / self.PROGRESS_FILE_NAME
         self.pre_action_book_path = self.workspace / self.PRE_ACTION_BOOK_FILE_NAME
-        self.health_evidence_dir = self.workspace / self.HEALTH_EVIDENCE_DIR_NAME
-        self.health_evidence_dir.mkdir(parents=True, exist_ok=True)
         self.control_path = self.workspace / self.CONTROL_FILE_NAME
         self._progress = self._load_progress()
         if self._progress is not None and self._progress.loop_id != self.loop_id:
@@ -2002,20 +1972,6 @@ class PersistentLiveDecisionLoop:
             provider_health_boundaries
         )
         if gate == _GATE_PROVIDER_HEALTH:
-            health_evidence = self._load_health_evidence(
-                decision_ts=plan.decision_ts,
-                market_state_sha256=market_state_sha256,
-            )
-            if (
-                health_evidence is None
-                or health_evidence.loop_id != self.loop_id
-                or health_evidence.decision_ts != plan.decision_ts
-                or health_evidence.market_state_sha256 != market_state_sha256
-                or health_evidence.boundaries != canonical_health_boundaries
-            ):
-                raise LiveDecisionProgressError(
-                    "provider health evidence changed before durable decision publication"
-                )
             payload_version = 3
         else:
             if canonical_health_boundaries:
@@ -2131,6 +2087,8 @@ class PersistentLiveDecisionLoop:
                 or durable_progress.affected_input_ids != affected_input_ids
                 or durable_progress.registered_input_ids != self.dependencies.input_ids
                 or durable_progress.gate != gate
+                or durable_progress.provider_health_boundaries
+                != canonical_health_boundaries
             ):
                 raise LiveDecisionProgressError(
                     "live decision progress changed before durable ledger publication"
@@ -2160,6 +2118,7 @@ class PersistentLiveDecisionLoop:
                     plan_sha256=plan.plan_sha256,
                     ledger_offset=ledger_offset,
                     gate=gate,
+                    provider_health_boundaries=canonical_health_boundaries,
                 )
                 atomic_write_json(self.progress_path, durable_progress.to_dict())
                 self._progress = durable_progress
@@ -2179,6 +2138,7 @@ class PersistentLiveDecisionLoop:
                     plan_sha256=plan.plan_sha256,
                     ledger_offset=ledger_offset,
                     gate=gate,
+                    provider_health_boundaries=canonical_health_boundaries,
                 )
                 atomic_write_json(self.progress_path, durable_progress.to_dict())
                 self._progress = durable_progress
@@ -2258,6 +2218,7 @@ class PersistentLiveDecisionLoop:
                 plan_sha256=plan.plan_sha256,
                 ledger_offset=ledger_offset,
                 gate=gate,
+                provider_health_boundaries=canonical_health_boundaries,
             )
             atomic_write_json(self.progress_path, committed.to_dict())
             self._progress = committed
@@ -2294,39 +2255,14 @@ class PersistentLiveDecisionLoop:
         canonical_health_boundaries = _canonical_health_boundaries(
             provider_health_boundaries
         )
-        if gate == _GATE_PROVIDER_HEALTH:
-            health_evidence = _HealthEvidence(
-                loop_id=self.loop_id,
-                decision_ts=decision_ts,
-                market_state_sha256=market_state_sha256,
-                boundaries=canonical_health_boundaries,
+        if (
+            gate != _GATE_PROVIDER_HEALTH
+            and canonical_health_boundaries
+        ):
+            raise LiveDecisionProgressError(
+                "provider health boundaries require provider_health gate"
             )
-        else:
-            if canonical_health_boundaries:
-                raise LiveDecisionProgressError(
-                    "provider health boundaries require provider_health gate"
-                )
-            health_evidence = None
         with WorkspaceEconomicLock(self.workspace):
-            if health_evidence is not None:
-                evidence_path = self._health_evidence_path(
-                    decision_ts=decision_ts,
-                    market_state_sha256=market_state_sha256,
-                )
-                if evidence_path.exists():
-                    durable_evidence = self._load_health_evidence(
-                        decision_ts=decision_ts,
-                        market_state_sha256=market_state_sha256,
-                    )
-                    if durable_evidence != health_evidence:
-                        raise LiveDecisionProgressError(
-                            "provider health evidence identity already exists with different bytes"
-                        )
-                else:
-                    atomic_write_json(
-                        evidence_path,
-                        health_evidence.to_dict(),
-                    )
             # The snapshot is written before the cursor: a crash before cursor
             # publication leaves only ignorable stale snapshot bytes, while every
             # visible PENDING cursor has an exact pre-action portfolio witness.
@@ -2350,6 +2286,7 @@ class PersistentLiveDecisionLoop:
                 plan_sha256=None,
                 ledger_offset=None,
                 gate=gate,
+                provider_health_boundaries=canonical_health_boundaries,
             )
             atomic_write_json(self.progress_path, pending.to_dict())
         self._progress = pending
@@ -2532,9 +2469,8 @@ class PersistentLiveDecisionLoop:
                 raise DecisionLedgerIntegrityError(
                     "provider health decision schema requires provider_health gate"
                 )
-            health_evidence = self._health_evidence_for_progress(progress)
             health_payload = _health_boundaries_payload(
-                health_evidence.boundaries
+                progress.provider_health_boundaries
             )
             if (
                 existing.to_dict()["payload"].get(
@@ -2580,80 +2516,11 @@ class PersistentLiveDecisionLoop:
                 "committed live progress conflicts with Decision Ledger record"
             )
 
-    def _health_evidence_path(
-        self,
-        *,
-        decision_ts: str,
-        market_state_sha256: str,
-    ) -> Path:
-        _canonical_timestamp("health evidence decision_ts", decision_ts)
-        _canonical_sha256(
-            "health evidence market_state_sha256",
-            market_state_sha256,
-        )
-        identity = _canonical_json_sha256(
-            {
-                "schema": "autosport.live_decision_provider_health_identity",
-                "schema_version": 1,
-                "loop_id": self.loop_id,
-                "decision_ts": decision_ts,
-                "market_state_sha256": market_state_sha256,
-            }
-        )
-        return self.health_evidence_dir / f"{identity}.json"
-
-    def _load_health_evidence(
-        self,
-        *,
-        decision_ts: str,
-        market_state_sha256: str,
-    ) -> _HealthEvidence | None:
-        evidence_path = self._health_evidence_path(
-            decision_ts=decision_ts,
-            market_state_sha256=market_state_sha256,
-        )
-        if not evidence_path.exists():
-            return None
-        try:
-            raw = strict_json_loads(
-                evidence_path.read_text(encoding="utf-8")
-            )
-            return _HealthEvidence.from_dict(raw)
-        except (OSError, TypeError, ValueError) as exc:
-            raise LiveDecisionProgressError(
-                "cannot verify persisted provider health evidence"
-            ) from exc
-
-    def _health_evidence_for_progress(
-        self,
-        progress: _Progress,
-    ) -> _HealthEvidence:
-        if progress.gate != _GATE_PROVIDER_HEALTH:
-            raise LiveDecisionProgressError(
-                "provider health evidence requested for non-health-gated progress"
-            )
-        evidence = self._load_health_evidence(
-            decision_ts=progress.decision_ts,
-            market_state_sha256=progress.market_state_sha256,
-        )
-        if (
-            evidence is None
-            or evidence.loop_id != progress.loop_id
-            or evidence.decision_ts != progress.decision_ts
-            or evidence.market_state_sha256 != progress.market_state_sha256
-        ):
-            raise LiveDecisionProgressError(
-                "provider health evidence is missing or does not match progress"
-            )
-        return evidence
-
     def _health_boundaries_for_progress(
         self,
         progress: _Progress,
     ) -> tuple[ProviderHealthReplayBoundary, ...]:
-        if progress.gate == _GATE_PROVIDER_HEALTH:
-            return self._health_evidence_for_progress(progress).boundaries
-        return ()
+        return progress.provider_health_boundaries
 
     def _persist_control(self, state: LiveControlState) -> None:
         candidate = _Control(self.loop_id, state)

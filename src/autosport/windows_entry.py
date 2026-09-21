@@ -49,7 +49,7 @@ def _run_interactive_gui() -> int:
         _show_workspace_configuration_error(str(exc))
         return 2
 
-    from autosport.windows_gui import main as gui_main
+    from autosport.product_windows_gui import main as gui_main
 
     return gui_main()
 

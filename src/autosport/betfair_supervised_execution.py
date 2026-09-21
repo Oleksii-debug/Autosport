@@ -981,11 +981,21 @@ def _report_outcome(
 ) -> PlaceOrdersOutcome:
     instruction = report.instruction
     if instruction.status == "FAILURE":
+        # A provider-side failure without a provider order identity is not
+        # authoritative proof that no external effect exists. Keep the
+        # durable attempt UNKNOWN until canonical readback reconciles it.
+        if instruction.bet_id is None:
+            return PlaceOrdersOutcome.UNKNOWN
         return PlaceOrdersOutcome.REJECTED
     if instruction.size_matched == action.requested_stake:
         return PlaceOrdersOutcome.ACCEPTED
     if instruction.size_matched > 0:
-        return PlaceOrdersOutcome.PARTIAL
+        # Standard LIMIT partial fills can leave a live unmatched remainder.
+        # Only explicit provider proof that no unmatched part remains makes
+        # the immediate report terminal PARTIAL.
+        if instruction.order_status == "EXECUTION_COMPLETE":
+            return PlaceOrdersOutcome.PARTIAL
+        return PlaceOrdersOutcome.UNKNOWN
     if instruction.bet_id is not None:
         return PlaceOrdersOutcome.PLACED_UNMATCHED
     return PlaceOrdersOutcome.UNKNOWN
@@ -1161,9 +1171,25 @@ def execute_betfair_supervised_action(
 
     acknowledgement_receipt = receipt
     if outcome is PlaceOrdersOutcome.REJECTED:
-        acknowledgement_receipt = acknowledgement_receipt or (
-            "betfair-rejection-evidence:" + evidence_id
-        )
+        # Rejection acknowledgement must carry a real provider identity.
+        # Never launder Autosport's internal evidence hash into the external
+        # receipt namespace.
+        if acknowledgement_receipt is None:
+            ledger.mark_unknown(
+                attempt_id,
+                reason=(
+                    "betfair_placeOrders_rejection_missing_receipt_"
+                    "requires_readback"
+                ),
+                observed_at=report.observed_at,
+            )
+            return BetfairSupervisedExecutionResult(
+                PlaceOrdersOutcome.UNKNOWN,
+                attempt_id,
+                ledger.attempt_state(attempt_id),
+                evidence_id,
+                None,
+            )
         acknowledgement = ExternalAcknowledgement(
             attempt_id=attempt_id,
             external_receipt_id=acknowledgement_receipt,

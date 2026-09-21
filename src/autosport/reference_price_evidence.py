@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from dataclasses import asdict, dataclass, field
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Iterable
@@ -35,16 +35,53 @@ def _instant(value: object, name: str) -> datetime:
     return parsed.astimezone(timezone.utc)
 
 
-def _canonical_json_sha256(payload: object) -> str:
-    return hashlib.sha256(
-        json.dumps(
+def _canonical_json(payload: object) -> str:
+    try:
+        return json.dumps(
             payload,
             ensure_ascii=False,
             sort_keys=True,
             separators=(",", ":"),
             allow_nan=False,
-        ).encode("utf-8")
-    ).hexdigest()
+        )
+    except (TypeError, ValueError) as exc:
+        raise ReferencePriceEvidenceError("payload must be canonical JSON data") from exc
+
+
+def _canonical_json_sha256(payload: object) -> str:
+    return hashlib.sha256(_canonical_json(payload).encode("utf-8")).hexdigest()
+
+
+def _json_object_exact(raw: object, name: str) -> dict[str, object]:
+    text = _text(raw, name)
+
+    def pairs(values: list[tuple[str, object]]) -> dict[str, object]:
+        result: dict[str, object] = {}
+        for key, value in values:
+            if key in result:
+                raise ReferencePriceEvidenceError(f"{name} contains a duplicate key")
+            result[key] = value
+        return result
+
+    try:
+        payload = json.loads(
+            text,
+            object_pairs_hook=pairs,
+            parse_constant=lambda token: (_ for _ in ()).throw(
+                ReferencePriceEvidenceError(
+                    f"{name} contains non-finite JSON number {token}"
+                )
+            ),
+        )
+    except ReferencePriceEvidenceError:
+        raise
+    except (TypeError, ValueError) as exc:
+        raise ReferencePriceEvidenceError(f"{name} must be valid JSON") from exc
+    if type(payload) is not dict:
+        raise ReferencePriceEvidenceError(f"{name} must encode a JSON object")
+    if _canonical_json(payload) != text:
+        raise ReferencePriceEvidenceError(f"{name} must use canonical JSON encoding")
+    return payload
 
 
 def _bounded_nonnegative_int(value: object, name: str, *, positive: bool = False) -> int:
@@ -56,23 +93,102 @@ def _bounded_nonnegative_int(value: object, name: str, *, positive: bool = False
     return value
 
 
+def _canonical_market_event(event: object) -> MarketEvent:
+    if type(event) is not MarketEvent:
+        raise ReferencePriceEvidenceError(
+            "reference observations must be exact MarketEvent values"
+        )
+    try:
+        return MarketEvent.from_dict(event.to_dict())
+    except (TypeError, ValueError) as exc:
+        raise ReferencePriceEvidenceError(
+            "reference observation is not a canonical MarketEvent"
+        ) from exc
+
+
+def _market_event_from_canonical_json(raw: object) -> MarketEvent:
+    payload = _json_object_exact(raw, "event_canonical_json")
+    try:
+        return MarketEvent.from_dict(payload)
+    except (TypeError, ValueError) as exc:
+        raise ReferencePriceEvidenceError(
+            "event_canonical_json does not encode a canonical MarketEvent"
+        ) from exc
+
+
 @dataclass(frozen=True, slots=True)
 class ReferenceObservation:
-    """One exact canonical market observation used by a reference-price snapshot."""
+    """One exact canonical market observation used by a reference-price snapshot.
 
-    source_id: str
-    event_sha256: str
-    sequence: int
-    decimal_odds: Decimal
-    observed_ts: str
-    source_ts: str | None
-    ingest_ts: str
-    execution_quote_verified: bool
+    Authority-bearing fields are derived from the exact canonical MarketEvent bytes.
+    Callers cannot substitute a hash, price or clock independently of those bytes.
+    """
+
+    event_canonical_json: str
+
+    def __post_init__(self) -> None:
+        event = _market_event_from_canonical_json(self.event_canonical_json)
+        if event.source_ts is None:
+            raise ReferencePriceEvidenceError(
+                "reference observation requires authoritative provider source_ts"
+            )
+
+    @classmethod
+    def from_event(cls, event: MarketEvent) -> "ReferenceObservation":
+        canonical = _canonical_market_event(event)
+        if canonical.source_ts is None:
+            raise ReferencePriceEvidenceError(
+                "reference observation requires authoritative provider source_ts"
+            )
+        return cls(event_canonical_json=_canonical_json(canonical.to_dict()))
+
+    def market_event(self) -> MarketEvent:
+        return _market_event_from_canonical_json(self.event_canonical_json)
+
+    @property
+    def event_sha256(self) -> str:
+        return hashlib.sha256(self.event_canonical_json.encode("utf-8")).hexdigest()
+
+    @property
+    def source_id(self) -> str:
+        return self.market_event().source_id
+
+    @property
+    def sequence(self) -> int:
+        return self.market_event().sequence
+
+    @property
+    def decimal_odds(self) -> Decimal:
+        return self.market_event().decimal_odds
+
+    @property
+    def observed_ts(self) -> str:
+        return self.market_event().observed_ts
+
+    @property
+    def source_ts(self) -> str:
+        value = self.market_event().source_ts
+        assert value is not None
+        return value
+
+    @property
+    def ingest_ts(self) -> str:
+        return self.market_event().ingest_ts
+
+    @property
+    def execution_quote_verified(self) -> bool:
+        value = self.market_event().metadata.get("execution_quote_verified")
+        if type(value) is not bool:
+            raise ReferencePriceEvidenceError(
+                "reference observation requires boolean execution_quote_verified"
+            )
+        return value
 
     def to_dict(self) -> dict[str, object]:
         return {
             "source_id": self.source_id,
             "event_sha256": self.event_sha256,
+            "event_canonical_json": self.event_canonical_json,
             "sequence": self.sequence,
             "decimal_odds": str(self.decimal_odds),
             "observed_ts": self.observed_ts,
@@ -84,14 +200,8 @@ class ReferenceObservation:
 
 @dataclass(frozen=True, slots=True)
 class ReferencePriceEvidence:
-    """Deterministic multi-source observational reference-price evidence.
+    """Deterministic self-validating multi-source observational evidence."""
 
-    This is deliberately weaker than executable-price or fair-probability evidence.
-    It records a contemporaneous cross-source median of like-for-like observed decimal
-    odds and binds the exact canonical MarketEvent bytes that contributed to it.
-    """
-
-    evidence_id: str
     sport: str | None
     event_id: str
     market_id: str
@@ -104,42 +214,26 @@ class ReferencePriceEvidence:
     max_skew_seconds: int
     minimum_sources: int
     observations: tuple[ReferenceObservation, ...]
-    median_decimal_odds: Decimal
-    min_decimal_odds: Decimal
-    max_decimal_odds: Decimal
+    evidence_id: str = field(init=False)
+    median_decimal_odds: Decimal = field(init=False)
+    min_decimal_odds: Decimal = field(init=False)
+    max_decimal_odds: Decimal = field(init=False)
     executable_quote_verified: bool = field(default=False, init=False)
     fair_probability_verified: bool = field(default=False, init=False)
     fill_fidelity_verified: bool = field(default=False, init=False)
+
+    def __post_init__(self) -> None:
+        _validate_reference_price_evidence(self)
 
     @property
     def source_ids(self) -> tuple[str, ...]:
         return tuple(item.source_id for item in self.observations)
 
     def to_dict(self) -> dict[str, object]:
-        return {
-            "schema": "autosport.reference_price_evidence",
-            "schema_version": 1,
-            "evidence_id": self.evidence_id,
-            "sport": self.sport,
-            "event_id": self.event_id,
-            "market_id": self.market_id,
-            "selection_id": self.selection_id,
-            "market_type": self.market_type,
-            "market_semantics_id": self.market_semantics_id,
-            "price_semantics": self.price_semantics,
-            "decision_ts": self.decision_ts,
-            "max_age_seconds": self.max_age_seconds,
-            "max_skew_seconds": self.max_skew_seconds,
-            "minimum_sources": self.minimum_sources,
-            "source_ids": list(self.source_ids),
-            "observations": [item.to_dict() for item in self.observations],
-            "median_decimal_odds": str(self.median_decimal_odds),
-            "min_decimal_odds": str(self.min_decimal_odds),
-            "max_decimal_odds": str(self.max_decimal_odds),
-            "executable_quote_verified": self.executable_quote_verified,
-            "fair_probability_verified": self.fair_probability_verified,
-            "fill_fidelity_verified": self.fill_fidelity_verified,
-        }
+        payload = _evidence_identity_payload(self)
+        payload["evidence_id"] = self.evidence_id
+        payload["source_ids"] = list(self.source_ids)
+        return payload
 
 
 def _median(values: tuple[Decimal, ...]) -> Decimal:
@@ -150,72 +244,85 @@ def _median(values: tuple[Decimal, ...]) -> Decimal:
     return (ordered[midpoint - 1] + ordered[midpoint]) / Decimal(2)
 
 
-def build_reference_price_evidence(
-    events: Iterable[MarketEvent],
-    *,
-    decision_ts: str,
-    max_age_seconds: int,
-    max_skew_seconds: int,
-    minimum_sources: int = 2,
-) -> ReferencePriceEvidence:
-    """Build exact contemporaneous reference-odds evidence from canonical events.
+def _evidence_identity_payload(evidence: ReferencePriceEvidence) -> dict[str, object]:
+    return {
+        "schema": "autosport.reference_price_evidence",
+        "schema_version": 2,
+        "sport": evidence.sport,
+        "event_id": evidence.event_id,
+        "market_id": evidence.market_id,
+        "selection_id": evidence.selection_id,
+        "market_type": evidence.market_type,
+        "market_semantics_id": evidence.market_semantics_id,
+        "price_semantics": evidence.price_semantics,
+        "decision_ts": evidence.decision_ts,
+        "max_age_seconds": evidence.max_age_seconds,
+        "max_skew_seconds": evidence.max_skew_seconds,
+        "minimum_sources": evidence.minimum_sources,
+        "observations": [item.to_dict() for item in evidence.observations],
+        "median_decimal_odds": str(evidence.median_decimal_odds),
+        "min_decimal_odds": str(evidence.min_decimal_odds),
+        "max_decimal_odds": str(evidence.max_decimal_odds),
+        "executable_quote_verified": False,
+        "fair_probability_verified": False,
+        "fill_fidelity_verified": False,
+    }
 
-    Required observations are same-selection, same market semantics, OPEN, received
-    no later than decision time, fresh on source/observation/ingest clocks, and drawn
-    from distinct source_id values. The resulting median is an observational statistic
-    only; no executable-price, fill-fidelity, or fair-probability claim is granted.
-    """
 
+def _validate_reference_price_evidence(evidence: ReferencePriceEvidence) -> None:
+    if evidence.sport is not None:
+        _text(evidence.sport, "sport")
+    _text(evidence.event_id, "event_id")
+    _text(evidence.market_id, "market_id")
+    _text(evidence.selection_id, "selection_id")
+    _text(evidence.market_type, "market_type")
+    if evidence.market_semantics_id is not None:
+        _text(evidence.market_semantics_id, "market_semantics_id")
+    _text(evidence.price_semantics, "price_semantics")
+    decision = _instant(evidence.decision_ts, "decision_ts")
+    normalized_decision = decision.astimezone(timezone.utc).isoformat()
+    object.__setattr__(evidence, "decision_ts", normalized_decision)
     max_age = _bounded_nonnegative_int(
-        max_age_seconds, "max_age_seconds", positive=True
+        evidence.max_age_seconds, "max_age_seconds", positive=True
     )
-    max_skew = _bounded_nonnegative_int(max_skew_seconds, "max_skew_seconds")
+    max_skew = _bounded_nonnegative_int(
+        evidence.max_skew_seconds, "max_skew_seconds"
+    )
     minimum = _bounded_nonnegative_int(
-        minimum_sources, "minimum_sources", positive=True
+        evidence.minimum_sources, "minimum_sources", positive=True
     )
     if minimum < 2:
         raise ReferencePriceEvidenceError("minimum_sources must be at least 2")
-
-    decision = _instant(decision_ts, "decision_ts")
-    materialized = tuple(events)
-    if len(materialized) < minimum:
+    if type(evidence.observations) is not tuple:
+        raise ReferencePriceEvidenceError("observations must be an exact tuple")
+    if len(evidence.observations) < minimum:
         raise ReferencePriceEvidenceError(
             "reference-price evidence has insufficient source observations"
         )
+    if any(type(item) is not ReferenceObservation for item in evidence.observations):
+        raise ReferencePriceEvidenceError(
+            "observations must contain exact ReferenceObservation values"
+        )
 
-    canonical_events: list[MarketEvent] = []
-    event_payloads: list[dict[str, object]] = []
-    for event in materialized:
-        if type(event) is not MarketEvent:
-            raise ReferencePriceEvidenceError(
-                "reference observations must be exact MarketEvent values"
-            )
-        try:
-            payload = event.to_dict()
-            canonical = MarketEvent.from_dict(payload)
-        except (TypeError, ValueError) as exc:
-            raise ReferencePriceEvidenceError(
-                "reference observation is not a canonical MarketEvent"
-            ) from exc
-        canonical_events.append(canonical)
-        event_payloads.append(payload)
-
-    first = canonical_events[0]
+    ordered = tuple(
+        sorted(evidence.observations, key=lambda item: (item.source_id, item.event_sha256))
+    )
+    object.__setattr__(evidence, "observations", ordered)
     identity = (
-        first.sport,
-        first.event_id,
-        first.market_id,
-        first.selection_id,
-        first.market_type.value,
-        first.market_semantics_id,
+        evidence.sport,
+        evidence.event_id,
+        evidence.market_id,
+        evidence.selection_id,
+        evidence.market_type,
+        evidence.market_semantics_id,
     )
     source_ids: set[str] = set()
-    price_semantics: str | None = None
-    observations: list[ReferenceObservation] = []
-    quote_times: list[datetime] = []
+    source_times: list[datetime] = []
     ingest_times: list[datetime] = []
+    odds: list[Decimal] = []
 
-    for event, payload in zip(canonical_events, event_payloads, strict=True):
+    for observation in ordered:
+        event = observation.market_event()
         current_identity = (
             event.sport,
             event.event_id,
@@ -237,45 +344,41 @@ def build_reference_price_evidence(
                 "reference observations require distinct source_id values"
             )
         source_ids.add(event.source_id)
-
-        metadata = event.metadata
-        semantics = metadata.get("price_semantics")
-        executable = metadata.get("execution_quote_verified")
+        semantics = event.metadata.get("price_semantics")
         if type(semantics) is not str or not semantics or semantics.strip() != semantics:
             raise ReferencePriceEvidenceError(
                 "reference observation requires explicit price_semantics"
             )
-        if not isinstance(executable, bool):
-            raise ReferencePriceEvidenceError(
-                "reference observation requires boolean execution_quote_verified"
-            )
-        if price_semantics is None:
-            price_semantics = semantics
-        elif semantics != price_semantics:
+        if semantics != evidence.price_semantics:
             raise ReferencePriceEvidenceError(
                 "reference observations cannot mix price semantics"
+            )
+        executable = event.metadata.get("execution_quote_verified")
+        if type(executable) is not bool:
+            raise ReferencePriceEvidenceError(
+                "reference observation requires boolean execution_quote_verified"
             )
 
         observed = _instant(event.observed_ts, "event observed_ts")
         ingest = _instant(event.ingest_ts, "event ingest_ts")
-        source = (
-            None
-            if event.source_ts is None
-            else _instant(event.source_ts, "event source_ts")
-        )
+        if event.source_ts is None:
+            raise ReferencePriceEvidenceError(
+                "reference observation requires authoritative provider source_ts"
+            )
+        source = _instant(event.source_ts, "event source_ts")
         if observed > ingest:
             raise ReferencePriceEvidenceError(
                 "reference observation observed_ts cannot be after ingest_ts"
             )
-        if source is not None and source > ingest:
+        if source > ingest:
             raise ReferencePriceEvidenceError(
                 "reference observation source_ts cannot be after ingest_ts"
             )
-
-        clocks = [(observed, "observed_ts"), (ingest, "ingest_ts")]
-        if source is not None:
-            clocks.append((source, "source_ts"))
-        for timestamp, name in clocks:
+        for timestamp, name in (
+            (observed, "observed_ts"),
+            (ingest, "ingest_ts"),
+            (source, "source_ts"),
+        ):
             if timestamp > decision:
                 raise ReferencePriceEvidenceError(
                     f"reference observation {name} is from the future"
@@ -284,27 +387,15 @@ def build_reference_price_evidence(
                 raise ReferencePriceEvidenceError(
                     f"reference observation {name} is stale"
                 )
-
-        quote_times.append(source or observed)
+        source_times.append(source)
         ingest_times.append(ingest)
-        observations.append(
-            ReferenceObservation(
-                source_id=event.source_id,
-                event_sha256=_canonical_json_sha256(payload),
-                sequence=event.sequence,
-                decimal_odds=event.decimal_odds,
-                observed_ts=event.observed_ts,
-                source_ts=event.source_ts,
-                ingest_ts=event.ingest_ts,
-                execution_quote_verified=executable,
-            )
-        )
+        odds.append(event.decimal_odds)
 
     if len(source_ids) < minimum:
         raise ReferencePriceEvidenceError(
             "reference-price evidence has insufficient distinct sources"
         )
-    if (max(quote_times) - min(quote_times)).total_seconds() > max_skew:
+    if (max(source_times) - min(source_times)).total_seconds() > max_skew:
         raise ReferencePriceEvidenceError(
             "reference source observations exceed maximum contemporaneous skew"
         )
@@ -313,52 +404,67 @@ def build_reference_price_evidence(
             "reference receipt observations exceed maximum contemporaneous skew"
         )
 
-    observations.sort(key=lambda item: (item.source_id, item.event_sha256))
-    ordered = tuple(observations)
-    odds = tuple(item.decimal_odds for item in ordered)
-    median = _median(odds)
-    minimum_odds = min(odds)
-    maximum_odds = max(odds)
-    assert price_semantics is not None
-    normalized_decision_ts = decision.astimezone(timezone.utc).isoformat()
+    values = tuple(odds)
+    object.__setattr__(evidence, "median_decimal_odds", _median(values))
+    object.__setattr__(evidence, "min_decimal_odds", min(values))
+    object.__setattr__(evidence, "max_decimal_odds", max(values))
+    object.__setattr__(
+        evidence,
+        "evidence_id",
+        _canonical_json_sha256(_evidence_identity_payload(evidence)),
+    )
 
-    identity_payload = {
-        "schema": "autosport.reference_price_evidence",
-        "schema_version": 1,
-        "sport": first.sport,
-        "event_id": first.event_id,
-        "market_id": first.market_id,
-        "selection_id": first.selection_id,
-        "market_type": first.market_type.value,
-        "market_semantics_id": first.market_semantics_id,
-        "price_semantics": price_semantics,
-        "decision_ts": normalized_decision_ts,
-        "max_age_seconds": max_age,
-        "max_skew_seconds": max_skew,
-        "minimum_sources": minimum,
-        "observations": [item.to_dict() for item in ordered],
-        "median_decimal_odds": str(median),
-        "min_decimal_odds": str(minimum_odds),
-        "max_decimal_odds": str(maximum_odds),
-        "executable_quote_verified": False,
-        "fair_probability_verified": False,
-        "fill_fidelity_verified": False,
-    }
+
+def build_reference_price_evidence(
+    events: Iterable[MarketEvent],
+    *,
+    decision_ts: str,
+    max_age_seconds: int,
+    max_skew_seconds: int,
+    minimum_sources: int = 2,
+) -> ReferencePriceEvidence:
+    """Build exact contemporaneous reference-odds evidence from canonical events.
+
+    Every component must provide authoritative provider source_ts. Recent local
+    receipt is never substituted for unknown upstream quote age. The result is
+    observational only and cannot claim executable-price, fill or fair-probability
+    truth.
+    """
+
+    max_age = _bounded_nonnegative_int(
+        max_age_seconds, "max_age_seconds", positive=True
+    )
+    max_skew = _bounded_nonnegative_int(max_skew_seconds, "max_skew_seconds")
+    minimum = _bounded_nonnegative_int(
+        minimum_sources, "minimum_sources", positive=True
+    )
+    if minimum < 2:
+        raise ReferencePriceEvidenceError("minimum_sources must be at least 2")
+    decision = _instant(decision_ts, "decision_ts")
+    materialized = tuple(events)
+    if len(materialized) < minimum:
+        raise ReferencePriceEvidenceError(
+            "reference-price evidence has insufficient source observations"
+        )
+    canonical = tuple(_canonical_market_event(event) for event in materialized)
+    first = canonical[0]
+    semantics = first.metadata.get("price_semantics")
+    if type(semantics) is not str or not semantics or semantics.strip() != semantics:
+        raise ReferencePriceEvidenceError(
+            "reference observation requires explicit price_semantics"
+        )
+    observations = tuple(ReferenceObservation.from_event(event) for event in canonical)
     return ReferencePriceEvidence(
-        evidence_id=_canonical_json_sha256(identity_payload),
         sport=first.sport,
         event_id=first.event_id,
         market_id=first.market_id,
         selection_id=first.selection_id,
         market_type=first.market_type.value,
         market_semantics_id=first.market_semantics_id,
-        price_semantics=price_semantics,
-        decision_ts=normalized_decision_ts,
+        price_semantics=semantics,
+        decision_ts=decision.astimezone(timezone.utc).isoformat(),
         max_age_seconds=max_age,
         max_skew_seconds=max_skew,
         minimum_sources=minimum,
-        observations=ordered,
-        median_decimal_odds=median,
-        min_decimal_odds=minimum_odds,
-        max_decimal_odds=maximum_odds,
+        observations=observations,
     )

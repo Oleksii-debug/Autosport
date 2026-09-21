@@ -102,7 +102,7 @@ _WINDOWS_SHELL_UK_UA = MappingProxyType(
         "ui.windows.manual_calculation.error.single": "Ця операція приймає рівно одне числове значення.",
         "ui.windows.manual_calculation.error.expected_return": "Очікуваний результат потребує 3 значення: ймовірність, коефіцієнт, ставка.",
         "ui.windows.manual_calculation.error.paper_payout": "Паперова виплата потребує 2 значення: ставка, коефіцієнт.",
-        "ui.windows.manual_calculation.error.kelly": "Kelly потребує 4 значення: ймовірність, коефіцієнт, fraction, cap.",
+        "ui.windows.manual_calculation.error.kelly": "Kelly потребує 4 значення: ймовірність, коефіцієнт, частка, ліміт.",
         "ui.windows.manual_calculation.error.unknown": "Невідома ручна операція.",
         "ui.windows.manual_calculation.error.operation_empty": "Операція не вибрана.",
         "ui.windows.shell.frame.title": "Навігація продукту",

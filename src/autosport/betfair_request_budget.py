@@ -534,6 +534,17 @@ def admit_betfair_request(
         )
 
     if (
+        intent.request_pool is BetfairRequestPool.SHARED_ORDER_READ
+        and intent.priority is BetfairRequestPriority.RECONCILIATION
+        and intent.reconciliation_for_request_id
+        not in state.unresolved_external_mutation_ids
+    ):
+        return BetfairAdmission(
+            BetfairAdmissionDecision.THROTTLE,
+            "reconciliation reserve requires a currently unresolved external mutation target",
+        )
+
+    if (
         intent.dedupe_key is not None
         and intent.priority in {
             BetfairRequestPriority.MONITORING,

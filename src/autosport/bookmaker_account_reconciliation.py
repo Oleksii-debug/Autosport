@@ -38,7 +38,9 @@ from .monotonic_workspace_authority import (
 )
 
 _RECONCILIATION_AUTHORITY_DOMAIN = "provider.account-snapshot-reconciliation-v1"
-_RECONCILIATION_TRANSITION_SCHEMA = "autosport.account-reconciliation-transition-v1"
+_RECONCILIATION_TRANSITION_SCHEMA = (
+    "autosport.account-reconciliation-transition-v1"
+)
 
 
 class AccountReconciliationError(RuntimeError):
@@ -590,15 +592,18 @@ class BookmakerAccountReconciliationStore:
             return True
 
     def history(self) -> tuple[BookmakerAccountSnapshot, ...]:
-        return tuple(self._load_history())
+        with _write_lock(self.path):
+            return tuple(self._load_history())
 
     def latest_snapshot(self) -> BookmakerAccountSnapshot | None:
-        history = self._load_history()
-        return history[-1] if history else None
+        with _write_lock(self.path):
+            history = self._load_history()
+            return history[-1] if history else None
 
     def latest_state(self) -> ReconciledAccountState | None:
-        history = self._load_history()
-        return self._reconcile(history) if history else None
+        with _write_lock(self.path):
+            history = self._load_history()
+            return self._reconcile(history) if history else None
 
     @staticmethod
     def _require_same_account(

@@ -699,7 +699,49 @@ def _validate_population(value: BetfairClearedMarketPopulation) -> None:
         raise BetfairClearedMarketPopulationError(
             "population truth flags widen authority beyond observed provider evidence"
         )
+    if type(value.page_size) is not int or value.page_size <= 0 or value.page_size > 1000:
+        raise BetfairClearedMarketPopulationError("population page_size is invalid")
+    for digest_value, label in (
+        (value.commission_receipt_id, "commission_receipt_id"),
+        (value.commission_record_sha256, "commission_record_sha256"),
+        (value.commission_request_scope_sha256, "commission_request_scope_sha256"),
+        (value.request_scope_sha256, "request_scope_sha256"),
+        (value.population_sha256, "population_sha256"),
+        (value.evidence_sha256, "evidence_sha256"),
+    ):
+        _sha256_hex(digest_value, label)
+    canonical_range = _canonical_date_range(value.settled_from, value.settled_to)
+    if value.settled_from != canonical_range.get("from") or value.settled_to != canonical_range.get("to"):
+        raise BetfairClearedMarketPopulationError(
+            "population settlement range is not canonical"
+        )
+    if tuple(sorted(value.rows, key=_row_sort_key)) != value.rows:
+        raise BetfairClearedMarketPopulationError("population rows are not canonically sorted")
+    for row in value.rows:
+        _validate_row_against_scope(row, value.market_id)
     _validate_cross_status_rows(value.rows)
+    _validate_page_witnesses(
+        value.first_pass_pages,
+        rows=value.rows,
+        pass_index=1,
+        page_size=value.page_size,
+    )
+    _validate_page_witnesses(
+        value.second_pass_pages,
+        rows=value.rows,
+        pass_index=2,
+        page_size=value.page_size,
+    )
+    all_pages = (*value.first_pass_pages, *value.second_pass_pages)
+    observed = tuple(_parse_instant(page.observed_at) for page in all_pages)
+    if (
+        not observed
+        or value.source_interval_start != _instant_text(min(observed))
+        or value.source_interval_end != _instant_text(max(observed))
+    ):
+        raise BetfairClearedMarketPopulationError(
+            "population source interval does not match page witnesses"
+        )
     request_scope = {
         "schema": "autosport.betfair_cleared_market_population.request",
         "schema_version": 1,
@@ -751,6 +793,123 @@ def _validate_population(value: BetfairClearedMarketPopulation) -> None:
     )
     if expected_evidence != value.evidence_sha256:
         raise BetfairClearedMarketPopulationError("population evidence digest mismatch")
+
+
+def _validate_row_against_scope(
+    row: ClearedMarketBetRow, market_id: str
+) -> None:
+    if type(row) is not ClearedMarketBetRow:
+        raise BetfairClearedMarketPopulationError(
+            "population row must be exact ClearedMarketBetRow"
+        )
+    _required_text(row.bet_id, "bet_id")
+    if row.market_id != market_id:
+        raise BetfairClearedMarketPopulationError(
+            "population row market does not match request scope"
+        )
+    if (
+        not isinstance(row.selection_id, int)
+        or isinstance(row.selection_id, bool)
+        or row.selection_id <= 0
+    ):
+        raise BetfairClearedMarketPopulationError(
+            "selection_id must be a positive integer"
+        )
+    if row.side not in {"BACK", "LAY"}:
+        raise BetfairClearedMarketPopulationError("population row side is invalid")
+    if row.bet_status not in _STATUSES:
+        raise BetfairClearedMarketPopulationError(
+            "population row terminal status is invalid"
+        )
+    _parse_instant(row.placed_date)
+    _parse_instant(row.settled_date)
+    for value, label in (
+        (row.price_requested, "price_requested"),
+        (row.price_matched, "price_matched"),
+        (row.size_settled, "size_settled"),
+        (row.profit, "profit"),
+    ):
+        _decimal_text(value)
+        if label == "price_requested" and value <= 0:
+            raise BetfairClearedMarketPopulationError(
+                "price_requested must be positive"
+            )
+        if label in {"price_matched", "size_settled"} and value < 0:
+            raise BetfairClearedMarketPopulationError(
+                f"{label} must be non-negative"
+            )
+    _optional_text(row.customer_order_ref, "customer_order_ref")
+    _optional_text(row.customer_strategy_ref, "customer_strategy_ref")
+    _optional_text(row.event_id, "event_id")
+
+
+def _validate_page_witnesses(
+    pages: tuple[ClearedMarketPageWitness, ...],
+    *,
+    rows: tuple[ClearedMarketBetRow, ...],
+    pass_index: int,
+    page_size: int,
+) -> None:
+    if not isinstance(pages, tuple):
+        raise BetfairClearedMarketPopulationError(
+            "population page witnesses must be a tuple"
+        )
+    cursor = 0
+    for status in _STATUSES:
+        offset = 0
+        total = 0
+        saw_terminal = False
+        saw_page = False
+        while cursor < len(pages) and pages[cursor].bet_status == status:
+            page = pages[cursor]
+            saw_page = True
+            if type(page) is not ClearedMarketPageWitness:
+                raise BetfairClearedMarketPopulationError(
+                    "population page witness must be canonical"
+                )
+            if page.pass_index != pass_index:
+                raise BetfairClearedMarketPopulationError(
+                    "population page witness pass index mismatch"
+                )
+            if page.from_record != offset:
+                raise BetfairClearedMarketPopulationError(
+                    "population page witness offset is not exhaustive"
+                )
+            if (
+                not isinstance(page.row_count, int)
+                or isinstance(page.row_count, bool)
+                or page.row_count < 0
+                or page.row_count > page_size
+            ):
+                raise BetfairClearedMarketPopulationError(
+                    "population page witness row_count is invalid"
+                )
+            _sha256_hex(page.response_sha256, "response_sha256")
+            _parse_instant(page.observed_at)
+            total += page.row_count
+            cursor += 1
+            if page.more_available:
+                if page.row_count == 0:
+                    raise BetfairClearedMarketPopulationError(
+                        "population witness has empty moreAvailable page"
+                    )
+                offset += page.row_count
+                continue
+            saw_terminal = True
+            break
+        if not saw_page or not saw_terminal:
+            raise BetfairClearedMarketPopulationError(
+                f"population witness did not exhaust {status}"
+            )
+        expected = sum(1 for row in rows if row.bet_status == status)
+        if total != expected:
+            raise BetfairClearedMarketPopulationError(
+                f"population witness row count mismatch for {status}"
+            )
+    if cursor != len(pages):
+        raise BetfairClearedMarketPopulationError(
+            "population witness contains unexpected status/page ordering"
+        )
 
 
 def _row_from_payload(value: object) -> ClearedMarketBetRow:

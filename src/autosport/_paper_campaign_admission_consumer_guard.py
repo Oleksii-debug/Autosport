@@ -24,8 +24,9 @@ from .paper_campaign_runtime import PaperCampaignRuntime
 from .paper_execution_reality import PaperExecutionLedger
 from .paper_settlement_learning import PaperSettlementLearningBridge
 
-_GUARD_MARKER = "__autosport_exact_admission_authority_guard_v4__"
+_GUARD_MARKER = "__autosport_exact_admission_authority_guard_v5__"
 _ORIGINAL_INIT = PaperCampaignAdmissionCoordinator.__init__
+_ORIGINAL_GETATTRIBUTE = PaperCampaignAdmissionCoordinator.__getattribute__
 _ORIGINAL_RESOLVED_EXECUTION_DECISION_ID = (
     PaperCampaignAdmissionCoordinator._resolved_execution_decision_id
 )
@@ -95,14 +96,83 @@ class _ExactExecutionLedgerReadView:
         return PaperExecutionLedger.events(self._ledger, run_id)
 
 
-def _binding_for(self: PaperCampaignAdmissionCoordinator):
+class _PinnedCoordinatorReadView:
+    """Run legacy resolver logic without routing reads through mutable public fields."""
+
+    __slots__ = ("_coordinator", "decision_ledger", "execution_ledger")
+
+    def __init__(
+        self,
+        coordinator: PaperCampaignAdmissionCoordinator,
+        *,
+        decision_ledger: JsonlDecisionLedger,
+        execution_ledger: PaperExecutionLedger,
+    ) -> None:
+        self._coordinator = coordinator
+        self.decision_ledger = _ExactDecisionLedgerReadView(decision_ledger)
+        self.execution_ledger = _ExactExecutionLedgerReadView(execution_ledger)
+
+    def __getattr__(self, name: str):
+        return getattr(self._coordinator, name)
+
+
+def _binding_for_optional(self: PaperCampaignAdmissionCoordinator):
     with _AUTHORITY_BINDINGS_LOCK:
-        binding = _AUTHORITY_BINDINGS.get(self)
+        return _AUTHORITY_BINDINGS.get(self)
+
+
+def _binding_for(self: PaperCampaignAdmissionCoordinator):
+    binding = _binding_for_optional(self)
     if binding is None:
         raise PaperCampaignAdmissionError(
             "PAPER admission authority binding is unavailable"
         )
     return binding
+
+
+def _guarded_getattribute(self: PaperCampaignAdmissionCoordinator, name: str):
+    value = _ORIGINAL_GETATTRIBUTE(self, name)
+    if name not in {"decision_ledger", "execution_ledger", "runtime"}:
+        return value
+    binding = _binding_for_optional(self)
+    if binding is None:
+        return value
+    expected = {
+        "decision_ledger": binding[0],
+        "execution_ledger": binding[1],
+        "runtime": binding[3],
+    }[name]
+    if value is not expected:
+        labels = {
+            "decision_ledger": "Decision Ledger",
+            "execution_ledger": "PAPER execution",
+            "runtime": "PAPER campaign runtime",
+        }
+        raise PaperCampaignAdmissionError(
+            f"{labels[name]} authority changed after admission construction"
+        )
+    return value
+
+
+def _assert_raw_authority_fields(
+    self: PaperCampaignAdmissionCoordinator,
+    *,
+    decision_ledger: JsonlDecisionLedger,
+    execution_ledger: PaperExecutionLedger,
+    runtime: PaperCampaignRuntime,
+) -> None:
+    if _ORIGINAL_GETATTRIBUTE(self, "decision_ledger") is not decision_ledger:
+        raise PaperCampaignAdmissionError(
+            "Decision Ledger authority changed after admission construction"
+        )
+    if _ORIGINAL_GETATTRIBUTE(self, "execution_ledger") is not execution_ledger:
+        raise PaperCampaignAdmissionError(
+            "PAPER execution authority changed after admission construction"
+        )
+    if _ORIGINAL_GETATTRIBUTE(self, "runtime") is not runtime:
+        raise PaperCampaignAdmissionError(
+            "PAPER campaign runtime authority changed after admission construction"
+        )
 
 
 def _assert_runtime_binding(
@@ -112,7 +182,7 @@ def _assert_runtime_binding(
     environment: object,
     agent_loop: object,
 ) -> None:
-    if self.runtime is not runtime:
+    if _ORIGINAL_GETATTRIBUTE(self, "runtime") is not runtime:
         raise PaperCampaignAdmissionError(
             "PAPER campaign runtime authority changed after admission construction"
         )
@@ -196,7 +266,7 @@ def _guarded_init(
 def _guarded_resolved_execution_decision_id(self, *args, **kwargs):
     (
         decision_ledger,
-        _execution_ledger,
+        execution_ledger,
         expected_decision_path,
         runtime,
         settlement_bridge,
@@ -205,6 +275,12 @@ def _guarded_resolved_execution_decision_id(self, *args, **kwargs):
         lock,
     ) = _binding_for(self)
     with lock:
+        _assert_raw_authority_fields(
+            self,
+            decision_ledger=decision_ledger,
+            execution_ledger=execution_ledger,
+            runtime=runtime,
+        )
         _assert_runtime_binding(
             self,
             runtime,
@@ -212,28 +288,38 @@ def _guarded_resolved_execution_decision_id(self, *args, **kwargs):
             environment,
             agent_loop,
         )
-        if self.decision_ledger is not decision_ledger:
-            raise PaperCampaignAdmissionError(
-                "Decision Ledger authority changed after admission construction"
-            )
         _assert_decision_ledger_path(decision_ledger, expected_decision_path)
         _reject_instance_shadow(
             decision_ledger,
             "verified_records",
             "Decision Ledger",
         )
-        self.decision_ledger = _ExactDecisionLedgerReadView(decision_ledger)
-        try:
-            return _ORIGINAL_RESOLVED_EXECUTION_DECISION_ID(self, *args, **kwargs)
-        finally:
-            self.decision_ledger = decision_ledger
+        reader = _PinnedCoordinatorReadView(
+            self,
+            decision_ledger=decision_ledger,
+            execution_ledger=execution_ledger,
+        )
+        result = _ORIGINAL_RESOLVED_EXECUTION_DECISION_ID(reader, *args, **kwargs)
+        _assert_raw_authority_fields(
+            self,
+            decision_ledger=decision_ledger,
+            execution_ledger=execution_ledger,
+            runtime=runtime,
+        )
+        _assert_decision_ledger_path(decision_ledger, expected_decision_path)
+        _reject_instance_shadow(
+            decision_ledger,
+            "verified_records",
+            "Decision Ledger",
+        )
+        return result
 
 
 def _guarded_execution_attempt(self, *args, **kwargs):
     (
-        _decision_ledger,
+        decision_ledger,
         execution_ledger,
-        _expected_decision_path,
+        expected_decision_path,
         runtime,
         settlement_bridge,
         environment,
@@ -241,6 +327,12 @@ def _guarded_execution_attempt(self, *args, **kwargs):
         lock,
     ) = _binding_for(self)
     with lock:
+        _assert_raw_authority_fields(
+            self,
+            decision_ledger=decision_ledger,
+            execution_ledger=execution_ledger,
+            runtime=runtime,
+        )
         _assert_runtime_binding(
             self,
             runtime,
@@ -248,24 +340,36 @@ def _guarded_execution_attempt(self, *args, **kwargs):
             environment,
             agent_loop,
         )
-        if self.execution_ledger is not execution_ledger:
-            raise PaperCampaignAdmissionError(
-                "PAPER execution authority changed after admission construction"
-            )
+        _assert_decision_ledger_path(decision_ledger, expected_decision_path)
         _reject_instance_shadow(
             execution_ledger,
             "events",
             "PAPER execution",
         )
-        self.execution_ledger = _ExactExecutionLedgerReadView(execution_ledger)
-        try:
-            return _ORIGINAL_EXECUTION_ATTEMPT(self, *args, **kwargs)
-        finally:
-            self.execution_ledger = execution_ledger
+        reader = _PinnedCoordinatorReadView(
+            self,
+            decision_ledger=decision_ledger,
+            execution_ledger=execution_ledger,
+        )
+        result = _ORIGINAL_EXECUTION_ATTEMPT(reader, *args, **kwargs)
+        _assert_raw_authority_fields(
+            self,
+            decision_ledger=decision_ledger,
+            execution_ledger=execution_ledger,
+            runtime=runtime,
+        )
+        _assert_decision_ledger_path(decision_ledger, expected_decision_path)
+        _reject_instance_shadow(
+            execution_ledger,
+            "events",
+            "PAPER execution",
+        )
+        return result
 
 
 if not getattr(PaperCampaignAdmissionCoordinator, _GUARD_MARKER, False):
     PaperCampaignAdmissionCoordinator.__init__ = _guarded_init
+    PaperCampaignAdmissionCoordinator.__getattribute__ = _guarded_getattribute
     PaperCampaignAdmissionCoordinator._resolved_execution_decision_id = (
         _guarded_resolved_execution_decision_id
     )

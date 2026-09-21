@@ -206,7 +206,7 @@ def test_write_once_rejects_symlinked_parent_lineage(tmp_path: Path) -> None:
 
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX descriptor-relative target binding")
-def test_write_once_rejects_existing_target_symlink(tmp_path: Path) -> None:
+def test_write_once_and_loader_reject_existing_target_symlink(tmp_path: Path) -> None:
     original = manifest()
     authoritative = tmp_path / "authoritative.json"
     write_campaign_precommit_manifest_once(authoritative, original)
@@ -218,6 +218,12 @@ def test_write_once_rejects_existing_target_symlink(tmp_path: Path) -> None:
         match="cannot verify existing campaign precommit manifest",
     ):
         write_campaign_precommit_manifest_once(redirected, original)
+
+    with pytest.raises(
+        CampaignPrecommitManifestError,
+        match="cannot verify existing campaign precommit manifest",
+    ):
+        load_campaign_precommit_manifest(redirected)
 
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX descriptor-relative parent binding")

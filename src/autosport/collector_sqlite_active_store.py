@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import json
 import sqlite3
 from pathlib import Path
 from typing import Any
@@ -34,6 +36,14 @@ _INDEXED_PROJECTION_FIELDS = (
 _DELTA_SELECT_COLUMNS = ", ".join(
     ("commit_seq", *_INDEXED_PROJECTION_FIELDS, "payload_sha256", "payload_json")
 )
+
+_CYCLE_TERMINAL_STATUSES = frozenset(
+    {"SUCCESS", "PROVIDER_UNAVAILABLE", "LOCAL_FAILURE", "STOP_REQUESTED"}
+)
+_CYCLE_START_IMMUTABLE_UPDATE_TRIGGER = "collector_cycle_starts_immutable_update_v1"
+_CYCLE_START_IMMUTABLE_DELETE_TRIGGER = "collector_cycle_starts_immutable_delete_v1"
+_CYCLE_TERMINAL_IMMUTABLE_UPDATE_TRIGGER = "collector_cycle_terminals_immutable_update_v1"
+_CYCLE_TERMINAL_IMMUTABLE_DELETE_TRIGGER = "collector_cycle_terminals_immutable_delete_v1"
 
 
 class CollectorDeltaStore(_SQLiteCollectorDeltaStore):
@@ -103,6 +113,43 @@ class CollectorDeltaStore(_SQLiteCollectorDeltaStore):
         connection = self._connect()
         try:
             connection.execute("BEGIN IMMEDIATE")
+            connection.execute(
+                "CREATE TABLE IF NOT EXISTS collector_cycle_starts_v1 ("
+                "source_id TEXT NOT NULL,"
+                "cycle_seq INTEGER NOT NULL CHECK(cycle_seq > 0),"
+                "run_id TEXT NOT NULL,"
+                "stream_epoch TEXT NOT NULL,"
+                "attempted_at TEXT NOT NULL,"
+                "PRIMARY KEY(source_id, cycle_seq))"
+            )
+            connection.execute(
+                "CREATE TABLE IF NOT EXISTS collector_cycle_terminals_v1 ("
+                "source_id TEXT NOT NULL,"
+                "cycle_seq INTEGER NOT NULL CHECK(cycle_seq > 0),"
+                "payload_sha256 TEXT NOT NULL,"
+                "payload_json TEXT NOT NULL,"
+                "PRIMARY KEY(source_id, cycle_seq),"
+                "FOREIGN KEY(source_id, cycle_seq) "
+                "REFERENCES collector_cycle_starts_v1(source_id, cycle_seq))"
+            )
+            for trigger_name, timing in (
+                (_CYCLE_START_IMMUTABLE_UPDATE_TRIGGER, "UPDATE"),
+                (_CYCLE_START_IMMUTABLE_DELETE_TRIGGER, "DELETE"),
+            ):
+                connection.execute(
+                    f"CREATE TRIGGER IF NOT EXISTS {trigger_name} "
+                    f"BEFORE {timing} ON collector_cycle_starts_v1 BEGIN "
+                    "SELECT RAISE(ABORT, 'collector cycle starts are immutable'); END"
+                )
+            for trigger_name, timing in (
+                (_CYCLE_TERMINAL_IMMUTABLE_UPDATE_TRIGGER, "UPDATE"),
+                (_CYCLE_TERMINAL_IMMUTABLE_DELETE_TRIGGER, "DELETE"),
+            ):
+                connection.execute(
+                    f"CREATE TRIGGER IF NOT EXISTS {trigger_name} "
+                    f"BEFORE {timing} ON collector_cycle_terminals_v1 BEGIN "
+                    "SELECT RAISE(ABORT, 'collector cycle terminals are immutable'); END"
+                )
             connection.execute(
                 "CREATE TABLE IF NOT EXISTS collector_delta_tombstones_v1 ("
                 "delta_id TEXT PRIMARY KEY NOT NULL,"
@@ -176,6 +223,290 @@ class CollectorDeltaStore(_SQLiteCollectorDeltaStore):
                         f"collector delta indexed projection conflicts with payload: {field}"
                     )
         return delta
+
+    @staticmethod
+    def _cycle_terminal_payload_sha256(payload_json: str) -> str:
+        return hashlib.sha256(payload_json.encode("utf-8")).hexdigest()
+
+    @staticmethod
+    def _cycle_terminal_payload_json(payload: dict[str, object]) -> str:
+        return json.dumps(
+            payload,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        )
+
+    def _begin_collector_cycle(
+        self,
+        *,
+        source_id: str,
+        run_id: str,
+        stream_epoch: str,
+        attempted_at: str,
+    ) -> int:
+        """Append one immutable acquisition-attempt START to the canonical store."""
+
+        source_id = _text(source_id, "source_id")
+        run_id = _text(run_id, "run_id")
+        stream_epoch = _text(stream_epoch, "stream_epoch")
+        _instant(attempted_at, "attempted_at")
+        connection = self._connect()
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                "SELECT MAX(cycle_seq) FROM collector_cycle_starts_v1 "
+                "WHERE source_id=?",
+                (source_id,),
+            ).fetchone()
+            cycle_seq = 1 if row is None or row[0] is None else int(row[0]) + 1
+            connection.execute(
+                "INSERT INTO collector_cycle_starts_v1("
+                "source_id, cycle_seq, run_id, stream_epoch, attempted_at"
+                ") VALUES(?,?,?,?,?)",
+                (source_id, cycle_seq, run_id, stream_epoch, attempted_at),
+            )
+            connection.commit()
+            return cycle_seq
+        except sqlite3.DatabaseError as exc:
+            if connection.in_transaction:
+                connection.rollback()
+            raise ValueError("cannot append collector cycle START evidence") from exc
+        except Exception:
+            if connection.in_transaction:
+                connection.rollback()
+            raise
+        finally:
+            connection.close()
+
+    def _finish_collector_cycle(
+        self,
+        *,
+        source_id: str,
+        cycle_seq: int,
+        status: str,
+        completed_at: str,
+        catalog_changes: tuple[str, ...],
+        observed_delta_ids: tuple[str, ...],
+        committed_delta_ids: tuple[str, ...],
+        duplicate_delta_ids: tuple[str, ...],
+        error_code: str | None = None,
+    ) -> None:
+        """Append one immutable terminal receipt for an already-started cycle."""
+
+        source_id = _text(source_id, "source_id")
+        if isinstance(cycle_seq, bool) or not isinstance(cycle_seq, int) or cycle_seq <= 0:
+            raise ValueError("cycle_seq must be a positive integer")
+        if status not in _CYCLE_TERMINAL_STATUSES:
+            raise ValueError("unsupported collector cycle terminal status")
+        _instant(completed_at, "completed_at")
+        for name, values in (
+            ("catalog_changes", catalog_changes),
+            ("observed_delta_ids", observed_delta_ids),
+            ("committed_delta_ids", committed_delta_ids),
+            ("duplicate_delta_ids", duplicate_delta_ids),
+        ):
+            if not isinstance(values, tuple):
+                raise TypeError(f"{name} must be a tuple")
+            for value in values:
+                _text(value, f"{name} item")
+        if len(observed_delta_ids) != (
+            len(committed_delta_ids) + len(duplicate_delta_ids)
+        ) or sorted(observed_delta_ids) != sorted(
+            committed_delta_ids + duplicate_delta_ids
+        ):
+            raise ValueError(
+                "observed deltas must equal the committed/duplicate classification"
+            )
+        if error_code is not None:
+            error_code = _text(error_code, "error_code")
+        if status == "SUCCESS" and error_code is not None:
+            raise ValueError("successful collector cycle cannot carry error_code")
+        if status != "SUCCESS" and error_code is None:
+            raise ValueError("non-success collector cycle requires error_code")
+        if status == "PROVIDER_UNAVAILABLE" and observed_delta_ids:
+            raise ValueError(
+                "provider-unavailable cycle cannot claim observed delta evidence"
+            )
+
+        connection = self._connect()
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            start = connection.execute(
+                "SELECT run_id, stream_epoch, attempted_at "
+                "FROM collector_cycle_starts_v1 "
+                "WHERE source_id=? AND cycle_seq=?",
+                (source_id, cycle_seq),
+            ).fetchone()
+            if start is None:
+                raise ValueError("collector cycle START evidence is missing")
+            if _instant(completed_at, "completed_at") < _instant(
+                start["attempted_at"], "attempted_at"
+            ):
+                raise ValueError("collector cycle terminal predates its START")
+            existing = connection.execute(
+                "SELECT 1 FROM collector_cycle_terminals_v1 "
+                "WHERE source_id=? AND cycle_seq=?",
+                (source_id, cycle_seq),
+            ).fetchone()
+            if existing is not None:
+                raise ValueError("collector cycle already has terminal evidence")
+
+            observed_deltas: list[dict[str, str]] = []
+            for delta_id in observed_delta_ids:
+                row = connection.execute(
+                    "SELECT source_id, payload_sha256 FROM collector_deltas "
+                    "WHERE delta_id=?",
+                    (delta_id,),
+                ).fetchone()
+                if row is None:
+                    row = connection.execute(
+                        "SELECT source_id, payload_sha256 "
+                        "FROM collector_delta_tombstones_v1 WHERE delta_id=?",
+                        (delta_id,),
+                    ).fetchone()
+                if row is None or row["source_id"] != source_id:
+                    raise ValueError(
+                        "collector cycle references delta without canonical source evidence"
+                    )
+                digest = row["payload_sha256"]
+                if (
+                    not isinstance(digest, str)
+                    or len(digest) != 64
+                    or digest != digest.lower()
+                    or any(character not in "0123456789abcdef" for character in digest)
+                ):
+                    raise ValueError("collector delta evidence digest is malformed")
+                observed_deltas.append(
+                    {"delta_id": delta_id, "payload_sha256": digest}
+                )
+
+            payload: dict[str, object] = {
+                "schema": "autosport.collector_cycle_terminal",
+                "schema_version": 1,
+                "source_id": source_id,
+                "cycle_seq": cycle_seq,
+                "run_id": start["run_id"],
+                "stream_epoch": start["stream_epoch"],
+                "attempted_at": start["attempted_at"],
+                "completed_at": completed_at,
+                "status": status,
+                "catalog_changes": list(catalog_changes),
+                "observed_deltas": observed_deltas,
+                "committed_delta_ids": list(committed_delta_ids),
+                "duplicate_delta_ids": list(duplicate_delta_ids),
+                "error_code": error_code,
+            }
+            payload_json = self._cycle_terminal_payload_json(payload)
+            payload_sha256 = self._cycle_terminal_payload_sha256(payload_json)
+            connection.execute(
+                "INSERT INTO collector_cycle_terminals_v1("
+                "source_id, cycle_seq, payload_sha256, payload_json"
+                ") VALUES(?,?,?,?)",
+                (source_id, cycle_seq, payload_sha256, payload_json),
+            )
+            connection.commit()
+        except sqlite3.DatabaseError as exc:
+            if connection.in_transaction:
+                connection.rollback()
+            raise ValueError("cannot append collector cycle terminal evidence") from exc
+        except Exception:
+            if connection.in_transaction:
+                connection.rollback()
+            raise
+        finally:
+            connection.close()
+
+    def collector_cycle_evidence(
+        self,
+        *,
+        source_id: str,
+        start_cycle_seq: int,
+        end_cycle_seq: int,
+    ) -> tuple[dict[str, object], ...]:
+        """Read and authenticate one explicit source-local cycle sequence window."""
+
+        source_id = _text(source_id, "source_id")
+        for name, value in (
+            ("start_cycle_seq", start_cycle_seq),
+            ("end_cycle_seq", end_cycle_seq),
+        ):
+            if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+                raise ValueError(f"{name} must be a positive integer")
+        if end_cycle_seq < start_cycle_seq:
+            raise ValueError("end_cycle_seq cannot precede start_cycle_seq")
+
+        connection = self._connect()
+        try:
+            rows = connection.execute(
+                "SELECT s.cycle_seq, s.run_id, s.stream_epoch, s.attempted_at, "
+                "t.payload_sha256, t.payload_json "
+                "FROM collector_cycle_starts_v1 AS s "
+                "LEFT JOIN collector_cycle_terminals_v1 AS t "
+                "ON t.source_id=s.source_id AND t.cycle_seq=s.cycle_seq "
+                "WHERE s.source_id=? AND s.cycle_seq>=? AND s.cycle_seq<=? "
+                "ORDER BY s.cycle_seq",
+                (source_id, start_cycle_seq, end_cycle_seq),
+            ).fetchall()
+            evidence: list[dict[str, object]] = []
+            for row in rows:
+                terminal: dict[str, object] | None = None
+                payload_json = row["payload_json"]
+                payload_sha256 = row["payload_sha256"]
+                if (payload_json is None) != (payload_sha256 is None):
+                    raise ValueError(
+                        "collector cycle terminal evidence is structurally incomplete"
+                    )
+                if payload_json is not None:
+                    if (
+                        self._cycle_terminal_payload_sha256(payload_json)
+                        != payload_sha256
+                    ):
+                        raise ValueError(
+                            "collector cycle terminal evidence digest mismatch"
+                        )
+                    try:
+                        parsed = json.loads(payload_json)
+                    except (TypeError, ValueError, json.JSONDecodeError) as exc:
+                        raise ValueError(
+                            "collector cycle terminal evidence JSON is malformed"
+                        ) from exc
+                    if not isinstance(parsed, dict):
+                        raise ValueError(
+                            "collector cycle terminal evidence must be an object"
+                        )
+                    expected_start = {
+                        "source_id": source_id,
+                        "cycle_seq": int(row["cycle_seq"]),
+                        "run_id": row["run_id"],
+                        "stream_epoch": row["stream_epoch"],
+                        "attempted_at": row["attempted_at"],
+                    }
+                    if any(parsed.get(key) != value for key, value in expected_start.items()):
+                        raise ValueError(
+                            "collector cycle terminal conflicts with immutable START"
+                        )
+                    if parsed.get("status") not in _CYCLE_TERMINAL_STATUSES:
+                        raise ValueError(
+                            "collector cycle terminal status is unsupported"
+                        )
+                    terminal = parsed
+                evidence.append(
+                    {
+                        "source_id": source_id,
+                        "cycle_seq": int(row["cycle_seq"]),
+                        "run_id": row["run_id"],
+                        "stream_epoch": row["stream_epoch"],
+                        "attempted_at": row["attempted_at"],
+                        "terminal": terminal,
+                    }
+                )
+            return tuple(evidence)
+        except sqlite3.DatabaseError as exc:
+            raise ValueError("cannot read collector cycle evidence") from exc
+        finally:
+            connection.close()
 
     def runtime_stream_epoch(self, source_id: str) -> tuple[str, int] | None:
         """Return the latest product-owned active epoch and monotonic generation."""

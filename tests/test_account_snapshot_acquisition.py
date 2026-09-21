@@ -207,6 +207,12 @@ def test_caller_mutated_snapshot_or_receipt_cannot_reuse_durable_authority(
     ):
         acquirer.verify(acquired.snapshot, forged_receipt)
 
+    with pytest.raises(
+        AccountSnapshotAcquisitionError,
+        match="integration_kind must be official_api",
+    ):
+        replace(acquired.receipt, integration_kind="browser_automation")
+
 
 def test_bet_readback_is_rejected_before_provider_transport(
     tmp_path,

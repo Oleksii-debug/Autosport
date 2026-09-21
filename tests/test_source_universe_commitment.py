@@ -20,6 +20,7 @@ from autosport.source_universe_commitment import (
     SourceUniverseCommitment,
     SourceUniverseCommitmentError,
     build_source_universe_commitment,
+    verify_source_universe_commitment,
 )
 
 
@@ -103,6 +104,28 @@ def _delta(delta_id="d1"):
         gap_state=GapState.NONE,
         sync_state=SyncState.READY,
     )
+
+
+def _finish_zero_result_cycle(store, *, sequence, run_id="run-1"):
+    attempted_second = 4 + sequence * 2
+    completed_second = attempted_second + 1
+    cycle_seq = store._begin_collector_cycle(
+        source_id="source-x",
+        run_id=run_id,
+        stream_epoch="epoch-1",
+        attempted_at=f"2026-01-01T00:00:{attempted_second:02d}+00:00",
+    )
+    store._finish_collector_cycle(
+        source_id="source-x",
+        cycle_seq=cycle_seq,
+        status="SUCCESS",
+        completed_at=f"2026-01-01T00:00:{completed_second:02d}+00:00",
+        catalog_changes=(),
+        observed_delta_ids=(),
+        committed_delta_ids=(),
+        duplicate_delta_ids=(),
+    )
+    return cycle_seq
 
 
 class SourceUniverseCommitmentTests(unittest.TestCase):
@@ -315,6 +338,181 @@ class SourceUniverseCommitmentTests(unittest.TestCase):
                     source_id="source-x",
                     start_cycle_seq=1,
                     end_cycle_seq=2,
+                )
+
+    def test_builder_rejects_store_subclass_before_forged_evidence_dispatch(self):
+        class ForgedCollectorDeltaStore(CollectorDeltaStore):
+            def collector_cycle_evidence(self, **_kwargs):
+                return (
+                    {
+                        "source_id": "source-x",
+                        "cycle_seq": 1,
+                        "terminal": {
+                            "status": "SUCCESS",
+                            "observed_deltas": [],
+                        },
+                    },
+                )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            store = ForgedCollectorDeltaStore(Path(tmp) / "collector.db")
+            with self.assertRaisesRegex(TypeError, "exact canonical CollectorDeltaStore"):
+                build_source_universe_commitment(
+                    store,
+                    source_id="source-x",
+                    start_cycle_seq=1,
+                    end_cycle_seq=1,
+                )
+
+    def test_builder_ignores_instance_rebound_cycle_evidence_reader(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = CollectorDeltaStore(Path(tmp) / "collector.db")
+            store._begin_collector_cycle(
+                source_id="source-x",
+                run_id="run-1",
+                stream_epoch="epoch-1",
+                attempted_at="2026-01-01T00:00:05+00:00",
+            )
+            store.collector_cycle_evidence = lambda **_kwargs: (
+                {
+                    "source_id": "source-x",
+                    "cycle_seq": 1,
+                    "terminal": {
+                        "status": "SUCCESS",
+                        "observed_deltas": [],
+                    },
+                },
+            )
+
+            commitment = build_source_universe_commitment(
+                store,
+                source_id="source-x",
+                start_cycle_seq=1,
+                end_cycle_seq=1,
+            )
+
+            self.assertEqual(commitment.pending_count, 1)
+            self.assertFalse(commitment.observation_ledger_complete)
+            self.assertFalse(commitment.provider_observation_complete)
+
+    def test_verifier_accepts_canonical_candidate_and_returns_rebuilt_projection(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = CollectorDeltaStore(Path(tmp) / "collector.db")
+            _finish_zero_result_cycle(store, sequence=1)
+            candidate = build_source_universe_commitment(
+                store,
+                source_id="source-x",
+                start_cycle_seq=1,
+                end_cycle_seq=1,
+            )
+
+            verified = verify_source_universe_commitment(
+                store,
+                candidate,
+                expected_source_id="source-x",
+                expected_start_cycle_seq=1,
+                expected_end_cycle_seq=1,
+            )
+
+            self.assertIsNot(verified, candidate)
+            self.assertEqual(verified.to_dict(), candidate.to_dict())
+
+    def test_verifier_rejects_caller_minted_positive_projection(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = CollectorDeltaStore(Path(tmp) / "collector.db")
+            store._begin_collector_cycle(
+                source_id="source-x",
+                run_id="run-1",
+                stream_epoch="epoch-1",
+                attempted_at="2026-01-01T00:00:05+00:00",
+            )
+            canonical = build_source_universe_commitment(
+                store,
+                source_id="source-x",
+                start_cycle_seq=1,
+                end_cycle_seq=1,
+            )
+            forged_payload = canonical.to_dict()
+            forged_payload["observation_ledger_complete"] = True
+            forged_payload["provider_observation_complete"] = True
+            forged_payload["commitment_sha256"] = "1" * 64
+            forged = SourceUniverseCommitment._issue(forged_payload)
+
+            with self.assertRaisesRegex(
+                SourceUniverseCommitmentError,
+                "does not match canonical expected scope",
+            ):
+                verify_source_universe_commitment(
+                    store,
+                    forged,
+                    expected_source_id="source-x",
+                    expected_start_cycle_seq=1,
+                    expected_end_cycle_seq=1,
+                )
+
+    def test_verifier_rejects_stale_candidate_after_durable_cycle_finishes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = CollectorDeltaStore(Path(tmp) / "collector.db")
+            cycle_seq = store._begin_collector_cycle(
+                source_id="source-x",
+                run_id="run-1",
+                stream_epoch="epoch-1",
+                attempted_at="2026-01-01T00:00:05+00:00",
+            )
+            stale = build_source_universe_commitment(
+                store,
+                source_id="source-x",
+                start_cycle_seq=1,
+                end_cycle_seq=1,
+            )
+            self.assertEqual(stale.pending_count, 1)
+
+            store._finish_collector_cycle(
+                source_id="source-x",
+                cycle_seq=cycle_seq,
+                status="SUCCESS",
+                completed_at="2026-01-01T00:00:06+00:00",
+                catalog_changes=(),
+                observed_delta_ids=(),
+                committed_delta_ids=(),
+                duplicate_delta_ids=(),
+            )
+
+            with self.assertRaisesRegex(
+                SourceUniverseCommitmentError,
+                "does not match canonical expected scope",
+            ):
+                verify_source_universe_commitment(
+                    store,
+                    stale,
+                    expected_source_id="source-x",
+                    expected_start_cycle_seq=1,
+                    expected_end_cycle_seq=1,
+                )
+
+    def test_verifier_rejects_valid_candidate_for_different_expected_window(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = CollectorDeltaStore(Path(tmp) / "collector.db")
+            _finish_zero_result_cycle(store, sequence=1)
+            _finish_zero_result_cycle(store, sequence=2)
+            favorable_smaller_window = build_source_universe_commitment(
+                store,
+                source_id="source-x",
+                start_cycle_seq=1,
+                end_cycle_seq=1,
+            )
+            self.assertTrue(favorable_smaller_window.provider_observation_complete)
+
+            with self.assertRaisesRegex(
+                SourceUniverseCommitmentError,
+                "does not match canonical expected scope",
+            ):
+                verify_source_universe_commitment(
+                    store,
+                    favorable_smaller_window,
+                    expected_source_id="source-x",
+                    expected_start_cycle_seq=1,
+                    expected_end_cycle_seq=2,
                 )
 
     def test_commitment_truth_flags_are_not_constructor_inputs(self):

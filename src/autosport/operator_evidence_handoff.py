@@ -13,7 +13,7 @@ from .nvda_acceptance import validate_evidence as _validate_nvda_evidence
 class WorkspaceEvidenceHandoff:
     """Operator-facing projection of one canonical workspace-evidence verification.
 
-    This is deliberately not a second verifier.  The canonical manifest verifier owns
+    This is deliberately not a second verifier. The canonical manifest verifier owns
     workspace identity and integrity semantics; this projection only gives packaged
     product surfaces a small API that cannot accidentally promote release truth.
     """
@@ -34,7 +34,7 @@ class NvdaEvidenceHandoff:
     """Machine validation result for human-supplied physical NVDA evidence.
 
     PASS means that the supplied record satisfies the canonical validator for the
-    exact release candidate.  It never means that this adapter itself performed a
+    exact release candidate. It never means that this adapter itself performed a
     physical Windows/NVDA test and therefore cannot promote human/NVDA truth.
     """
 
@@ -43,7 +43,7 @@ class NvdaEvidenceHandoff:
     source_sha: str
     autosport_exe_sha256: str
     failed_checks: tuple[str, ...]
-    requires_owner_release_decision: bool
+    requires_owner_release_decision: Literal[True]
     real_money_execution: Literal[False] = False
     human_tested: Literal[False] = False
     nvda_verified: Literal[False] = False
@@ -64,9 +64,9 @@ def verify_workspace_manifest(
 ) -> WorkspaceEvidenceHandoff:
     """Verify workspace evidence through the single canonical verifier.
 
-    OSError/ValueError/WorkspaceEconomicLockError from the canonical verifier are
-    intentionally allowed to propagate.  Operator surfaces must treat those errors as
-    fail-closed rather than converting them into a successful handoff.
+    Canonical verifier failures are intentionally allowed to propagate. Operator
+    surfaces must treat those errors as fail-closed rather than converting them into
+    a successful handoff.
     """
 
     report = _verify_evidence_manifest(manifest, workspace)
@@ -124,7 +124,12 @@ def verify_nvda_handoff(
         "human_tested",
         "nvda_verified",
         "v1_ready",
+        "machine_verified_physical_execution",
     )
+    if report.get("requires_owner_release_decision") is not True:
+        raise ValueError(
+            "canonical NVDA evidence result must require an owner release decision"
+        )
     status = report["status"]
     if status not in {"PASS", "FAIL"}:
         raise ValueError("canonical NVDA evidence result has an invalid status")
@@ -139,5 +144,5 @@ def verify_nvda_handoff(
         source_sha=report["source_sha"],
         autosport_exe_sha256=report["autosport_exe_sha256"],
         failed_checks=tuple(failed_checks),
-        requires_owner_release_decision=report["requires_owner_release_decision"],
+        requires_owner_release_decision=True,
     )

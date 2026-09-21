@@ -7,13 +7,17 @@ import secrets
 import threading
 import time
 import uuid
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Callable, Iterable
+from typing import Callable, Iterable, Iterator
 
 from .domain import MarketEvent, utc_now_iso
 from .json_integrity import jsonl_bytes_are_blank, strict_json_loads
+
+
+_REPLAY_STOP_CONTEXT = threading.local()
 
 
 def _parse_jsonl_event(line: str, line_number: int) -> MarketEvent:
@@ -31,6 +35,42 @@ def _parse_jsonl_event(line: str, line_number: int) -> MarketEvent:
 
 class FutureLeakageError(RuntimeError):
     pass
+
+
+class ReplayStopRequested(RuntimeError):
+    """Cooperative operator STOP before a replay may complete and unlock results."""
+
+
+@contextmanager
+def replay_stop_scope(stop_event: threading.Event | None) -> Iterator[None]:
+    """Bind one cooperative STOP token to only the current replay worker thread.
+
+    The token is deliberately thread-local: concurrent independent replays cannot
+    stop each other, and callers outside the worker keep the historical replay API.
+    Nested scopes restore the prior binding exactly.
+    """
+
+    had_previous = hasattr(_REPLAY_STOP_CONTEXT, "event")
+    previous = getattr(_REPLAY_STOP_CONTEXT, "event", None)
+    _REPLAY_STOP_CONTEXT.event = stop_event
+    try:
+        yield
+    finally:
+        if had_previous:
+            _REPLAY_STOP_CONTEXT.event = previous
+        else:
+            delattr(_REPLAY_STOP_CONTEXT, "event")
+
+
+def _active_replay_stop_event() -> threading.Event | None:
+    event = getattr(_REPLAY_STOP_CONTEXT, "event", None)
+    return event if isinstance(event, threading.Event) else None
+
+
+def _raise_if_replay_stop_requested() -> None:
+    event = _active_replay_stop_event()
+    if event is not None and event.is_set():
+        raise ReplayStopRequested("paper replay stopped by operator")
 
 
 class ReplayLeakageFirewall:
@@ -133,6 +173,9 @@ class ReplayEngine:
         speed: float = 0.0,
         run_id: str | None = None,
     ) -> ReplayRun:
+        # STOP is checked before claiming the firewall so an already-requested
+        # cancellation cannot retire a fresh firewall merely by entering run().
+        _raise_if_replay_stop_requested()
         # Claim before any strategy-visible callback. The raw completion capability
         # remains local to this run; the firewall stores only its digest. A failed
         # run deliberately leaves the firewall retired IN_USE and therefore sealed.
@@ -141,13 +184,23 @@ class ReplayEngine:
         started = utc_now_iso()
         count = 0
         for event in self.events:
+            _raise_if_replay_stop_requested()
             if speed > 0:
                 current = _iso_seconds(event.observed_ts)
                 if previous is not None:
-                    time.sleep(max(0.0, current - previous) / speed)
+                    delay = max(0.0, current - previous) / speed
+                    if delay > 0:
+                        stop_event = _active_replay_stop_event()
+                        if stop_event is None:
+                            time.sleep(delay)
+                        elif stop_event.wait(delay):
+                            raise ReplayStopRequested("paper replay stopped by operator")
                 previous = current
+            _raise_if_replay_stop_requested()
             on_event(event)
             count += 1
+        # A STOP racing the final callback wins over result unlock/PRECOMMIT.
+        _raise_if_replay_stop_requested()
         self.firewall._complete_replay(completion_capability)
         return ReplayRun(
             run_id=run_id or str(uuid.uuid4()),

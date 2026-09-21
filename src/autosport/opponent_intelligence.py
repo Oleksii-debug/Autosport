@@ -1085,6 +1085,48 @@ class OpponentIntelligenceStore:
             self._invalidations = candidate
         return self.invalidations()
 
+    def retire_performance_outcome(
+        self,
+        performance_id: str,
+        *,
+        evidence_sha256: str,
+        detected_at: str,
+    ) -> tuple[DownstreamInvalidation, ...]:
+        """Durably retire one active performance after a void/cancel correction."""
+        target_id = _sha256("performance_id", performance_id)
+        evidence = _sha256("evidence_sha256", evidence_sha256)
+        detected = _time_text("detected_at", detected_at)
+        predecessor = self._performances.get(target_id)
+        if predecessor is None:
+            raise OpponentIntelligenceError(
+                "outcome retirement references unknown performance"
+            )
+        if _instant("detected_at", detected) <= _instant(
+            "performance recorded_at", predecessor.observation.recorded_at
+        ):
+            raise OpponentIntelligenceError(
+                "outcome retirement must be detected after performance recording"
+            )
+        if any(
+            item.observation.supersedes_performance_id == target_id
+            for item in self._performances.values()
+        ):
+            raise OpponentIntelligenceError(
+                "outcome retirement cannot fork an existing correction successor"
+            )
+        candidate = dict(self._invalidations)
+        self._invalidate_targets_for_performance(
+            target_id,
+            reason=InvalidationReason.OUTCOME_CORRECTION,
+            evidence_id=evidence,
+            detected_at=detected,
+            target=candidate,
+        )
+        if candidate != self._invalidations:
+            self._persist_state(invalidations=candidate)
+            self._invalidations = candidate
+        return self.invalidations(target_id)
+
     def invalidations(
         self, target_id: str | None = None
     ) -> tuple[DownstreamInvalidation, ...]:
@@ -1142,10 +1184,18 @@ class OpponentIntelligenceStore:
             for item in eligible.values()
             if item.observation.supersedes_performance_id is not None
         }
+        retired_outcome_ids = {
+            item.target_id
+            for item in self._invalidations.values()
+            if item.target_kind is InvalidationTarget.OPPONENT_EDGE
+            and item.reason is InvalidationReason.OUTCOME_CORRECTION
+            and item.recompute_status is RecomputeStatus.REQUIRED
+            and _instant("invalidation detected_at", item.detected_at) <= moment
+        }
         active = [
             item
             for key, item in eligible.items()
-            if key not in superseded
+            if key not in superseded and key not in retired_outcome_ids
         ]
         active.sort(
             key=lambda item: (

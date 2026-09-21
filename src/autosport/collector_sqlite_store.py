@@ -184,6 +184,23 @@ class CollectorDeltaStore:
                 "PRIMARY KEY(source_id, stream_epoch))"
             )
             connection.execute(
+                "CREATE TABLE IF NOT EXISTS collector_delta_tombstones_v1 ("
+                "delta_id TEXT PRIMARY KEY NOT NULL,"
+                "source_id TEXT NOT NULL,"
+                "stream_epoch TEXT NOT NULL,"
+                "payload_sha256 TEXT NOT NULL,"
+                "compacted_at TEXT NOT NULL,"
+                "plan_id TEXT NOT NULL)"
+            )
+            connection.execute(
+                "CREATE TABLE IF NOT EXISTS collector_epoch_activations_v1 ("
+                "source_id TEXT NOT NULL,"
+                "generation INTEGER NOT NULL CHECK(generation > 0),"
+                "stream_epoch TEXT NOT NULL,"
+                "activated_at TEXT NOT NULL,"
+                "PRIMARY KEY(source_id, generation))"
+            )
+            connection.execute(
                 "INSERT OR REPLACE INTO collector_meta(key, value) VALUES('schema_version', ?)",
                 (str(_DB_SCHEMA_VERSION),),
             )

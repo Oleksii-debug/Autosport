@@ -132,5 +132,5 @@ def initialize_product_workspace(
             ) from exc
 
     raise ProductWorkspaceInitializationError(
-        "concurrent product workspace initialization did not converge"
+        "durable product workspace identity evidence conflicts"
     ) from last_conflict

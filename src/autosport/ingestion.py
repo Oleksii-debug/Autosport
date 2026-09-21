@@ -304,11 +304,10 @@ class IngestionEngine:
             )
         started = perf_counter()
 
-        # Bind provider identity exactly once before acquisition. If acquisition or
-        # provider-owned validation fails, failure-health evidence is sampled after the
-        # failed I/O rather than carrying a stale pre-I/O timestamp.
+        # Bind provider identity exactly once before acquisition. Only provider
+        # acquisition/validation failures change current provider health; continuity
+        # witness resolution is a separate evidence domain and runs after this block.
         provider_source_id: str | None = None
-        continuity_witness: ProviderContinuityWitness | None = None
         try:
             provider_source_id = provider.source_id
             batch = provider.read_batch(max_items=max_items)
@@ -318,7 +317,6 @@ class IngestionEngine:
                 raise ValueError(
                     f"provider returned {len(batch.quotes)} quotes above requested batch bound {max_items}"
                 )
-            continuity_witness = self._continuity_witness(provider, batch)
         except Exception as exc:
             failure_now = self.clock()
             if self.health_store is not None and provider_source_id is not None:
@@ -343,6 +341,10 @@ class IngestionEngine:
                         "source continuity failure persistence also failed"
                     ) from continuity_error
             raise
+
+        # Continuity provenance is validated before normalization/persistence but does
+        # not rewrite current provider-health truth when the resolver itself is invalid.
+        continuity_witness = self._continuity_witness(provider, batch)
 
         # One post-acquisition evidence instant governs both quote-age truth and this
         # poll's health transition. Equal instants remain distinct via durable

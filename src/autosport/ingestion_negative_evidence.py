@@ -1,9 +1,10 @@
 from __future__ import annotations
 
+import argparse
 import json
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Sequence
 
 _CONTINUOUS_STATUS_SCHEMA_VERSION = 1
 _EVIDENCE_SCHEMA_VERSION = 1
@@ -247,3 +248,36 @@ def project_ingestion_negative_evidence(
         has_negative_evidence=bool(reasons),
         reason_codes=tuple(reasons),
     )
+
+
+def _nonnegative_int_arg(value: str) -> int:
+    try:
+        parsed = int(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("must be a non-negative integer") from exc
+    if parsed < 0:
+        raise argparse.ArgumentTypeError("must be a non-negative integer")
+    return parsed
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(
+        description=(
+            "Project continuous-observation status into denominator-preserving "
+            "ingestion evidence."
+        )
+    )
+    parser.add_argument("status_path", type=Path)
+    parser.add_argument("--expected-cycles", type=_nonnegative_int_arg, default=None)
+    args = parser.parse_args(argv)
+
+    evidence = project_ingestion_negative_evidence(
+        args.status_path,
+        expected_cycles=args.expected_cycles,
+    )
+    print(json.dumps(evidence.to_dict(), sort_keys=True))
+    return 2 if evidence.has_negative_evidence else 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

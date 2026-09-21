@@ -243,7 +243,7 @@ class BetfairStatementRowSemanticEvidence:
 
 def classify_betfair_statement_item(
     row: BetfairAccountStatementItemObservation,
-    item_class_data: Mapping[str, object],
+    item_class_data: dict[str, object],
 ) -> BetfairStatementRowSemanticEvidence:
     """Classify one captured statement row without widening monetary authority."""
 
@@ -276,7 +276,7 @@ def classify_betfair_statement_item(
         nested_raw = item_class_data["unknownStatementItem"]
         if type(nested_raw) is not str or not nested_raw:
             raise BetfairStatementSemanticError(
-                "unknownStatementItem must be non-empty JSON text"
+                "unknownStatementItem must be non-empty text"
             )
         try:
             nested = _decode_unknown_statement_item(nested_raw)

@@ -5,6 +5,7 @@ from typing import Any
 
 from .gui import AUTOMATION_IDS
 from .integrity import atomic_write_json
+from .windows_entry import _STARTUP_FOCUS_CONTROL
 from .windows_gui import WINDOWS_BANKROLL_AUTOMATION_ID, WindowsAutosportApp
 from .windows_layout import WINDOWS_SHELL_AUTOMATION_IDS
 from .windows_manual_calculation import WORKBENCH_AUTOMATION_IDS, show_manual_calculation_workbench
@@ -76,8 +77,16 @@ def summarize_keyboard_contract(
     focus_results: dict[str, bool],
     tab_reachable_controls: list[str],
     reverse_tab_reachable_controls: list[str] | None = None,
+    *,
+    startup_focus_control: str | None = None,
 ) -> dict[str, Any]:
     failures: list[str] = []
+    startup_focus_passed = startup_focus_control == _STARTUP_FOCUS_CONTROL
+    if not startup_focus_passed:
+        failures.append(
+            "startup focus expected "
+            f"{_STARTUP_FOCUS_CONTROL}, observed {startup_focus_control or '<none>'}"
+        )
     for sequence in (*_ACTION_BINDINGS, *_FOCUS_BINDINGS):
         if not bindings.get(sequence, False):
             failures.append(f"{sequence}: keyboard binding missing")
@@ -129,6 +138,11 @@ def summarize_keyboard_contract(
     expected_ids = {name: automation_id_for(name) for name in _FOCUSABLE_CONTROLS}
     return {
         "status": "PASS" if not failures else "FAIL",
+        "startup_focus": {
+            "expected_control": _STARTUP_FOCUS_CONTROL,
+            "observed_control": startup_focus_control,
+            "passed": startup_focus_passed,
+        },
         "action_shortcuts_bound": {
             sequence: bool(bindings.get(sequence, False)) for sequence in _ACTION_BINDINGS
         },
@@ -146,10 +160,11 @@ def summarize_keyboard_contract(
         "expected_automation_ids": expected_ids,
         "failures": failures,
         "evidence_scope": (
-            "in-process packaged Windows GUI keyboard contract: action shortcuts and shell cycling are bound, "
-            "F2/F6/F7/F8/F9/F10 focus shortcuts are executed, and critical shell controls plus the manual "
-            "calculation workbench are reachable through forward Tab and reverse Shift+Tab traversal; "
-            "not physical keyboard or NVDA speech proof"
+            "in-process packaged Windows GUI keyboard contract: actual first focus is sampled before any "
+            "audit-induced focus change, action shortcuts and shell cycling are bound, F2/F6/F7/F8/F9/F10 "
+            "focus shortcuts are executed, and critical shell controls plus the manual calculation workbench "
+            "are reachable through forward Tab and reverse Shift+Tab traversal; not physical keyboard or NVDA "
+            "speech proof"
         ),
         "human_tested": False,
         "nvda_verified": False,
@@ -191,6 +206,14 @@ def _critical_widgets(
             if widget is not None:
                 controls[f"manual_calculation_{key}"] = widget
     return controls
+
+
+def _focused_control_name(app: WindowsAutosportApp) -> str | None:
+    focused = app.focus_get()
+    for control_name, widget in _critical_widgets(app).items():
+        if focused is widget:
+            return control_name
+    return None
 
 
 def _tab_reachable_controls(
@@ -262,6 +285,7 @@ def run_keyboard_audit(output_path: str | Path) -> int:
         app = WindowsAutosportApp()
         app.update_idletasks()
         app.update()
+        startup_focus_control = _focused_control_name(app)
         dialog = show_manual_calculation_workbench(app)
         app.update_idletasks()
         app.update()
@@ -270,6 +294,7 @@ def run_keyboard_audit(output_path: str | Path) -> int:
             _execute_focus_shortcuts(app, dialog),
             _tab_reachable_controls(app, workbench_dialog=dialog),
             _tab_reachable_controls(app, reverse=True, workbench_dialog=dialog),
+            startup_focus_control=startup_focus_control,
         )
     except Exception as exc:
         report = {

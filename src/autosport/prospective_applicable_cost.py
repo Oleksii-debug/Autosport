@@ -21,7 +21,7 @@ from typing import Any
 
 from .campaign_cost_evidence import CostClass, REQUIRED_COST_CLASSES
 from .model_compute_router import ModelComputeRouterStore
-from .portfolio_plan import OpportunityIntent
+from .portfolio_plan import OpportunityIntent, PortfolioPlan
 from .prospective_model_compute_money import (
     ProspectiveModelComputeMoneyEvidence,
     ProspectiveModelComputeMoneyStatus,
@@ -164,6 +164,7 @@ class ProspectiveApplicableCostComponent:
 class ProspectiveApplicableCostResolution:
     intent_sha256: str
     opportunity_id: str
+    portfolio_plan_sha256: str
     decision_at: datetime
     components: tuple[ProspectiveApplicableCostComponent, ...]
     completeness: ProspectiveApplicableCostCompleteness = (
@@ -175,6 +176,7 @@ class ProspectiveApplicableCostResolution:
     def __post_init__(self) -> None:
         _sha256(self.intent_sha256, "intent_sha256")
         _text(self.opportunity_id, "opportunity_id")
+        _sha256(self.portfolio_plan_sha256, "portfolio_plan_sha256")
         normalized_cutoff = _instant(self.decision_at, "decision_at")
         if normalized_cutoff != self.decision_at:
             raise ProspectiveApplicableCostError("decision_at must be canonical UTC")
@@ -212,6 +214,7 @@ class ProspectiveApplicableCostResolution:
             "schema_version": _SCHEMA_VERSION,
             "intent_sha256": self.intent_sha256,
             "opportunity_id": self.opportunity_id,
+            "portfolio_plan_sha256": self.portfolio_plan_sha256,
             "decision_at": _time_text(self.decision_at),
             "components": [item.to_dict() for item in self.components],
             "completeness": self.completeness.value,
@@ -249,6 +252,7 @@ def _unresolved(
 def resolve_prospective_applicable_costs(
     *,
     intent: OpportunityIntent,
+    plan: PortfolioPlan,
     router_store: ModelComputeRouterStore,
     model_request_id: str,
     decision_at: datetime,
@@ -266,6 +270,10 @@ def resolve_prospective_applicable_costs(
         raise ProspectiveApplicableCostError(
             "intent must be the exact canonical OpportunityIntent type"
         )
+    if type(plan) is not PortfolioPlan:
+        raise ProspectiveApplicableCostError(
+            "plan must be the exact canonical PortfolioPlan type"
+        )
     if type(router_store) is not ModelComputeRouterStore:
         raise ProspectiveApplicableCostError(
             "router_store must be the exact canonical ModelComputeRouterStore type"
@@ -280,6 +288,36 @@ def resolve_prospective_applicable_costs(
         raise ProspectiveApplicableCostError(
             "caller decision_at does not match canonical OpportunityIntent proposal_ts"
         )
+    plan_cutoff = _instant(plan.decision_ts, "portfolio plan decision_ts")
+    if plan_cutoff != cutoff:
+        raise ProspectiveApplicableCostError(
+            "portfolio plan decision_ts does not match OpportunityIntent proposal_ts"
+        )
+
+    intent_sha256 = _sha256(intent.intent_sha256, "intent.intent_sha256")
+    intent_id = _text(getattr(intent, "intent_id", None), "intent.intent_id")
+    if type(plan.intent_sha256s) is not tuple or type(plan.intent_ids) is not tuple:
+        raise ProspectiveApplicableCostError(
+            "canonical PortfolioPlan intent identity vectors must be tuples"
+        )
+    matches = [
+        index
+        for index, digest in enumerate(plan.intent_sha256s)
+        if digest == intent_sha256
+    ]
+    if len(matches) != 1:
+        raise ProspectiveApplicableCostError(
+            "canonical PortfolioPlan must bind the exact intent_sha256 exactly once"
+        )
+    index = matches[0]
+    if index >= len(plan.intent_ids) or plan.intent_ids[index] != intent_id:
+        raise ProspectiveApplicableCostError(
+            "canonical PortfolioPlan intent_id/intent_sha256 binding mismatch"
+        )
+    portfolio_plan_sha256 = _sha256(
+        plan.plan_sha256,
+        "portfolio plan plan_sha256",
+    )
 
     model_evidence = resolve_prospective_model_compute_money(
         intent=intent,
@@ -299,9 +337,7 @@ def resolve_prospective_applicable_costs(
             "aggregate schema v1 cannot consume positive model-compute money"
         )
     model_evidence_id = _sha256(model_evidence.evidence_id, "model evidence_id")
-    if _sha256(model_evidence.intent_sha256, "model intent_sha256") != _sha256(
-        intent.intent_sha256, "intent.intent_sha256"
-    ):
+    if _sha256(model_evidence.intent_sha256, "model intent_sha256") != intent_sha256:
         raise ProspectiveApplicableCostError("model-compute evidence intent mismatch")
     opportunity_id = _text(
         getattr(intent.opportunity, "opportunity_id", None),
@@ -348,8 +384,9 @@ def resolve_prospective_applicable_costs(
         for cost_class in sorted(REQUIRED_COST_CLASSES, key=lambda value: value.value)
     )
     return ProspectiveApplicableCostResolution(
-        intent_sha256=_sha256(intent.intent_sha256, "intent.intent_sha256"),
+        intent_sha256=intent_sha256,
         opportunity_id=opportunity_id,
+        portfolio_plan_sha256=portfolio_plan_sha256,
         decision_at=cutoff,
         components=ordered,
     )

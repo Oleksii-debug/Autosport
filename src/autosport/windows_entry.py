@@ -148,7 +148,7 @@ def main(argv: list[str] | None = None) -> int:
     if args and args[0] == "--restart-recovery-recover-child":
         from autosport.process_recovery_audit import run_process_kill_recovery_child
 
-        return run_process_kill_recovery_audit(args[1], args[2])
+        return run_process_kill_recovery_child(args[1], args[2])
     if args and args[0] == "--research-demo-audit-output":
         from autosport.research_demo_audit import run_research_demo_audit
 

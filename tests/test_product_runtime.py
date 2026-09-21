@@ -121,7 +121,7 @@ def _delta(event: MarketEvent) -> CollectorDelta:
     )
 
 
-def _deployment_authority(*, policy_id: str = "c".repeat(64)) -> DeploymentAuthority:
+def _deployment_authority(*, policy_id: str = "c" * 64) -> DeploymentAuthority:
     scope = DeploymentScope(
         canonical_strategy_id="strategy-a",
         sport_domain="football",

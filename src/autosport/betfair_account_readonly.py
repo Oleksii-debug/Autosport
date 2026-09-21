@@ -866,7 +866,7 @@ class BetfairReadOnlyClient:
             code = error.get("code") if isinstance(error, Mapping) else None
             message = error.get("message") if isinstance(error, Mapping) else None
             provider_error_code = (
-                _provider_error_code(error.get("data"))
+                _provider_error_code(error.get("data"), method=method)
                 if isinstance(error, Mapping)
                 else None
             )
@@ -905,16 +905,26 @@ class BetfairReadOnlyClient:
         return value.isoformat()
 
 
-def _provider_error_code(data: object) -> str | None:
-    """Extract only canonical Betfair API-NG semantic error codes."""
+def _provider_error_code(data: object, *, method: str) -> str | None:
+    """Extract only the canonical semantic error for the exact Betfair service."""
 
     if not isinstance(data, Mapping):
         return None
+    if method in {_GET_ACCOUNT_FUNDS, _GET_ACCOUNT_DETAILS}:
+        expected_exception = "AccountAPINGException"
+    elif method in {
+        _LIST_CURRENT_ORDERS,
+        _LIST_CLEARED_ORDERS,
+        _LIST_MARKET_CATALOGUE,
+    }:
+        expected_exception = "APINGException"
+    else:
+        return None
     exception_keys = ("APINGException", "AccountAPINGException")
     present = [key for key in exception_keys if key in data]
-    if len(present) != 1:
+    if present != [expected_exception]:
         return None
-    exception_key = present[0]
+    exception_key = expected_exception
     if "exceptionname" in data and data["exceptionname"] != exception_key:
         return None
     exception = data[exception_key]

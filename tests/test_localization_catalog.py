@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from decimal import Decimal
 from types import SimpleNamespace
 
@@ -121,6 +122,8 @@ _RUNTIME_RECOVERY_KEYS = {
     "ui.status.close.recovery_busy",
 }
 
+_UKRAINIAN_PRESENTATION_RE = re.compile(r"[А-Яа-яІіЇїЄєҐґ]")
+
 
 def test_catalog_is_versioned_ukrainian_default_and_fails_closed() -> None:
     assert DEFAULT_LOCALE == "uk-UA"
@@ -152,6 +155,19 @@ def test_catalog_is_versioned_ukrainian_default_and_fails_closed() -> None:
         text("ui.result.summary", run_id="r")
     with pytest.raises(KeyError, match="missing localization keys"):
         require_keys({"ui.missing"})
+
+
+@pytest.mark.parametrize("key", sorted(_CRITICAL_UI_KEYS | _RUNTIME_RECOVERY_KEYS))
+def test_critical_catalog_templates_reject_empty_key_echo_or_english_only_fallback(
+    key: str,
+) -> None:
+    value = catalog(DEFAULT_LOCALE)[key]
+
+    assert value.strip(), f"critical localization value is empty: {key}"
+    assert value != key, f"critical localization value echoes its key: {key}"
+    assert _UKRAINIAN_PRESENTATION_RE.search(value), (
+        f"critical localization value has no Ukrainian-script presentation: {key}={value!r}"
+    )
 
 
 def test_critical_catalog_strings_are_exact_ukrainian_presentation() -> None:

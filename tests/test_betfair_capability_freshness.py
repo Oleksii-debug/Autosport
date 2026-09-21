@@ -117,36 +117,87 @@ def _observation(*, delayed: bool) -> BetfairMarketBookDelayObservation:
     return read_market_book_delay(client, "1.234")
 
 
-def _canonical_network_observation(
+def _canonical_network_observation_and_client(
     monkeypatch,
     *,
     delayed: bool = False,
     account_ref: str = "configured-account-B",
-) -> BetfairMarketBookDelayObservation:
-    payload = json.dumps(
-        {
-            "jsonrpc": "2.0",
-            "result": [
-                {
-                    "marketId": "1.234",
-                    "isMarketDataDelayed": delayed,
-                }
-            ],
-            "id": 1,
-        },
-        separators=(",", ":"),
-    ).encode("utf-8")
+    app_delay_data: bool = False,
+    app_active: bool = True,
+) -> tuple[BetfairMarketBookDelayObservation, BetfairReadOnlyClient]:
+    def fake_urlopen(request, timeout):
+        body = json.loads(request.data.decode("utf-8"))
+        request_id = body["id"]
+        method = body["method"]
+        if method == "AccountAPING/v1.0/getDeveloperAppKeys":
+            payload = {
+                "jsonrpc": "2.0",
+                "result": [
+                    {
+                        "appName": "autosport-test",
+                        "appId": 101,
+                        "appVersions": [
+                            {
+                                "owner": "synthetic-owner",
+                                "versionId": 202,
+                                "version": "synthetic-1",
+                                "applicationKey": "app-secret-A",
+                                "delayData": app_delay_data,
+                                "subscriptionRequired": False,
+                                "ownerManaged": False,
+                                "active": app_active,
+                            }
+                        ],
+                    }
+                ],
+                "id": request_id,
+            }
+        elif method == "SportsAPING/v1.0/listMarketBook":
+            payload = {
+                "jsonrpc": "2.0",
+                "result": [
+                    {
+                        "marketId": "1.234",
+                        "isMarketDataDelayed": delayed,
+                    }
+                ],
+                "id": request_id,
+            }
+        else:
+            raise AssertionError(f"unexpected Betfair method: {method}")
+        return FakeNetworkResponse(
+            json.dumps(payload, separators=(",", ":")).encode("utf-8")
+        )
+
     monkeypatch.setattr(
         betfair_account_readonly,
         "urlopen",
-        lambda request, timeout: FakeNetworkResponse(payload),
+        fake_urlopen,
     )
     client = BetfairReadOnlyClient(
         BetfairSessionCredentials("app-secret-A", "session-secret-A"),
         venue_id="betfair-global",
         account_id=account_ref,
     )
-    return read_market_book_delay(client, "1.234")
+    return read_market_book_delay(client, "1.234"), client
+
+
+def _canonical_network_observation(
+    monkeypatch,
+    *,
+    delayed: bool = False,
+    account_ref: str = "configured-account-B",
+    app_delay_data: bool = False,
+    app_active: bool = True,
+) -> BetfairMarketBookDelayObservation:
+    observation, _client = _canonical_network_observation_and_client(
+        monkeypatch,
+        delayed=delayed,
+        account_ref=account_ref,
+        app_delay_data=app_delay_data,
+        app_active=app_active,
+    )
+    return observation
 
 
 def _delayed_evidence(
@@ -512,3 +563,115 @@ def test_delayed_evidence_identity_is_deterministic_and_secret_free():
     assert "application_key" not in fields
     assert "session_token" not in fields
     assert "credentials" not in fields
+
+
+def test_authenticated_provider_metadata_derives_live_key_and_secret_free_context(monkeypatch):
+    profile = _profile(account_ref="configured-account-B")
+    observation = _canonical_network_observation(monkeypatch)
+
+    evidence = BetfairCapabilityFreshnessEvidence.from_market_book_observation(
+        profile,
+        observation,
+    )
+
+    assert observation.application_key_class == "live"
+    assert observation.authenticated_context_sha256 is not None
+    assert evidence.application_key_class is BetfairApplicationKeyClass.LIVE
+    assert (
+        evidence.authenticated_context_sha256
+        == observation.authenticated_context_sha256
+    )
+    serialized = json.dumps(evidence.to_canonical_dict(), sort_keys=True)
+    assert "app-secret-A" not in serialized
+    assert "session-secret-A" not in serialized
+    _require_live(evidence, profile, as_of=evidence.observed_at)
+
+
+def test_caller_cannot_relabel_authenticated_live_key_as_unknown(monkeypatch):
+    profile = _profile(account_ref="configured-account-B")
+    observation = _canonical_network_observation(monkeypatch)
+
+    with pytest.raises(
+        BetfairCapabilityFreshnessError,
+        match="conflicts with authenticated provider metadata",
+    ):
+        BetfairCapabilityFreshnessEvidence.from_market_book_observation(
+            profile,
+            observation,
+            application_key_class=BetfairApplicationKeyClass.UNKNOWN,
+        )
+
+
+def test_caller_cannot_relabel_authenticated_live_key_as_delayed(monkeypatch):
+    profile = _profile(account_ref="configured-account-B")
+    observation = _canonical_network_observation(monkeypatch)
+
+    with pytest.raises(
+        BetfairCapabilityFreshnessError,
+        match="conflicts with authenticated provider metadata",
+    ):
+        BetfairCapabilityFreshnessEvidence.from_market_book_observation(
+            profile,
+            observation,
+            application_key_class=BetfairApplicationKeyClass.DELAYED,
+        )
+
+
+def test_session_rotation_invalidates_pre_rotation_positive_freshness(monkeypatch):
+    profile = _profile(account_ref="configured-account-B")
+    observation, client = _canonical_network_observation_and_client(monkeypatch)
+    evidence = BetfairCapabilityFreshnessEvidence.from_market_book_observation(
+        profile,
+        observation,
+    )
+
+    _require_live(evidence, profile, as_of=evidence.observed_at)
+    client._credentials = BetfairSessionCredentials(
+        "app-secret-B",
+        "session-secret-B",
+    )
+
+    with pytest.raises(
+        BetfairMarketBookFreshnessError,
+        match="authenticated Betfair context changed",
+    ):
+        _require_live(evidence, profile, as_of=evidence.observed_at)
+
+
+def test_provider_delayed_app_key_cannot_mint_positive_non_delayed_evidence(monkeypatch):
+    profile = _profile(account_ref="configured-account-B")
+    observation = _canonical_network_observation(
+        monkeypatch,
+        delayed=False,
+        app_delay_data=True,
+    )
+
+    assert observation.application_key_class == "delayed"
+    with pytest.raises(
+        BetfairMarketBookFreshnessError,
+        match="requires active provider LIVE application key",
+    ):
+        BetfairCapabilityFreshnessEvidence.from_market_book_observation(
+            profile,
+            observation,
+        )
+
+
+def test_inactive_provider_live_key_cannot_mint_positive_freshness(monkeypatch):
+    profile = _profile(account_ref="configured-account-B")
+    observation = _canonical_network_observation(
+        monkeypatch,
+        delayed=False,
+        app_delay_data=False,
+        app_active=False,
+    )
+
+    assert observation.application_key_class == "unknown"
+    with pytest.raises(
+        BetfairMarketBookFreshnessError,
+        match="requires active provider LIVE application key",
+    ):
+        BetfairCapabilityFreshnessEvidence.from_market_book_observation(
+            profile,
+            observation,
+        )

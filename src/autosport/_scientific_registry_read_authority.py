@@ -75,18 +75,13 @@ def _raw_class_function(name: str) -> FunctionType:
     return candidate
 
 
-def require_scientific_registry_read_authority() -> tuple[
-    FunctionType,
-    FunctionType,
-    FunctionType,
-    FunctionType,
-]:
-    """Revalidate the complete trial-family ScientificRegistry read boundary.
+def _require_durable_read_dependencies() -> FunctionType:
+    """Verify only the executable dependencies used by the durable ``_read`` hook.
 
-    The returned functions are captured only after their currently installed code
-    is re-derived from canonical source.  Callers use these verified local
-    capabilities instead of looking the same methods up again through mutable
-    instance/class dispatch.
+    The hook is installed process-wide, so coupling it to public ``get`` or
+    ``causal_precedes`` dispatch would make unrelated ScientificRegistry consumers
+    inherit trial-family authority policy.  Trial-family callers still use the
+    stronger ``require_scientific_registry_read_authority`` boundary below.
     """
 
     if vars(_registry.ScientificRegistry).get("SCHEMA_VERSION") != 1:
@@ -94,11 +89,6 @@ def require_scientific_registry_read_authority() -> tuple[
             "ScientificRegistry schema authority changed"
         )
 
-    read_fn = _source_owned_function(
-        _raw_class_function("_read"),
-        module=__import__(__name__, fromlist=["_read_authority_verified"]),
-        qualname="_read_authority_verified",
-    )
     validate_fn = _source_owned_function(
         _raw_class_function("_validate_entry"),
         module=_registry,
@@ -109,17 +99,6 @@ def require_scientific_registry_read_authority() -> tuple[
         module=_registry,
         qualname="ScientificRegistry.__init__",
     )
-    get_fn = _source_owned_function(
-        _raw_class_function("get"),
-        module=_registry,
-        qualname="ScientificRegistry.get",
-    )
-    causal_fn = _source_owned_function(
-        _raw_class_function("causal_precedes"),
-        module=_registry,
-        qualname="ScientificRegistry.causal_precedes",
-    )
-
     read_text_fn = _source_owned_function(
         _integrity.read_verified_scientific_registry_text,
         module=_integrity,
@@ -141,12 +120,6 @@ def require_scientific_registry_read_authority() -> tuple[
         qualname="_reject_nonfinite",
     )
 
-    # Ensure the live public read path itself resolves through the verified durable
-    # authority reader, not through a same-shaped but rebound module global.
-    if read_fn.__globals__.get("_integrity") is not _integrity:
-        raise ScientificRegistryReadAuthorityError(
-            "ScientificRegistry durable reader module binding changed"
-        )
     if _integrity.read_verified_scientific_registry_text is not read_text_fn:
         raise ScientificRegistryReadAuthorityError(
             "ScientificRegistry durable reader binding changed"
@@ -159,11 +132,52 @@ def require_scientific_registry_read_authority() -> tuple[
             "ScientificRegistry read-baseline binding changed"
         )
 
+    return validate_fn
+
+
+def require_scientific_registry_read_authority() -> tuple[
+    FunctionType,
+    FunctionType,
+    FunctionType,
+    FunctionType,
+]:
+    """Revalidate the complete trial-family ScientificRegistry read boundary.
+
+    The returned functions are captured only after their currently installed code
+    is re-derived from canonical source.  Callers use these verified local
+    capabilities instead of looking the same methods up again through mutable
+    instance/class dispatch.
+    """
+
+    validate_fn = _require_durable_read_dependencies()
+    read_fn = _source_owned_function(
+        _raw_class_function("_read"),
+        module=__import__(__name__, fromlist=["_read_authority_verified"]),
+        qualname="_read_authority_verified",
+    )
+    get_fn = _source_owned_function(
+        _raw_class_function("get"),
+        module=_registry,
+        qualname="ScientificRegistry.get",
+    )
+    causal_fn = _source_owned_function(
+        _raw_class_function("causal_precedes"),
+        module=_registry,
+        qualname="ScientificRegistry.causal_precedes",
+    )
+
+    # Ensure the live trial-family read path itself resolves through the verified
+    # durable authority module rather than a same-shaped rebound global.
+    if read_fn.__globals__.get("_integrity") is not _integrity:
+        raise ScientificRegistryReadAuthorityError(
+            "ScientificRegistry durable reader module binding changed"
+        )
+
     return read_fn, validate_fn, get_fn, causal_fn
 
 
 def _read_authority_verified(self: _registry.ScientificRegistry) -> dict[str, Any]:
-    _, validate_entry, _, _ = require_scientific_registry_read_authority()
+    validate_entry = _require_durable_read_dependencies()
     raw = _integrity.read_verified_scientific_registry_text(self.path)
     try:
         state = json.loads(

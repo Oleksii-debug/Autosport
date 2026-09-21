@@ -150,6 +150,7 @@ class BetfairCapabilityFreshnessEvidence:
     observed_at: str
     source_ref: str
     source_payload_sha256: str
+    authenticated_context_sha256: str | None = None
 
     def __post_init__(self) -> None:
         _sha256_hex(self.profile_id, "profile_id")
@@ -181,6 +182,11 @@ class BetfairCapabilityFreshnessEvidence:
         _timestamp(self.observed_at, "observed_at")
         _text(self.source_ref, "source_ref")
         _sha256_hex(self.source_payload_sha256, "source_payload_sha256")
+        if self.authenticated_context_sha256 is not None:
+            _sha256_hex(
+                self.authenticated_context_sha256,
+                "authenticated_context_sha256",
+            )
 
         if (
             self.application_key_class is BetfairApplicationKeyClass.DELAYED
@@ -200,7 +206,7 @@ class BetfairCapabilityFreshnessEvidence:
         profile: BookmakerCapabilityProfile,
         observation: BetfairMarketBookDelayObservation,
         *,
-        application_key_class: BetfairApplicationKeyClass,
+        application_key_class: BetfairApplicationKeyClass | None = None,
     ) -> "BetfairCapabilityFreshnessEvidence":
         profile = _exact_profile(profile)
         if type(observation) is not BetfairMarketBookDelayObservation:
@@ -208,10 +214,33 @@ class BetfairCapabilityFreshnessEvidence:
                 "observation must be an exact BetfairMarketBookDelayObservation"
             )
         observation.assert_authoritative()
-        if type(application_key_class) is not BetfairApplicationKeyClass:
-            raise BetfairCapabilityFreshnessError(
-                "application_key_class must be a BetfairApplicationKeyClass value"
+
+        observed_key_class = {
+            "unknown": BetfairApplicationKeyClass.UNKNOWN,
+            "delayed": BetfairApplicationKeyClass.DELAYED,
+            "live": BetfairApplicationKeyClass.LIVE,
+        }[observation.application_key_class]
+        if application_key_class is not None:
+            if type(application_key_class) is not BetfairApplicationKeyClass:
+                raise BetfairCapabilityFreshnessError(
+                    "application_key_class must be a BetfairApplicationKeyClass value"
+                )
+            if (
+                observed_key_class is not BetfairApplicationKeyClass.UNKNOWN
+                and application_key_class is not observed_key_class
+            ):
+                raise BetfairCapabilityFreshnessError(
+                    "caller application_key_class conflicts with authenticated provider metadata"
+                )
+        resolved_key_class = (
+            observed_key_class
+            if observed_key_class is not BetfairApplicationKeyClass.UNKNOWN
+            else (
+                application_key_class
+                if application_key_class is not None
+                else BetfairApplicationKeyClass.UNKNOWN
             )
+        )
 
         observed = _timestamp(observation.observed_at, "observation.observed_at")
         profile_observed = _timestamp(profile.observed_at, "profile.observed_at")
@@ -250,12 +279,13 @@ class BetfairCapabilityFreshnessEvidence:
             profile_version=profile.profile_version,
             market_id=observation.market_id,
             environment=BetfairProviderEnvironment.GLOBAL_PRODUCTION_EXCHANGE,
-            application_key_class=application_key_class,
+            application_key_class=resolved_key_class,
             market_data_delay_state=delay_state,
             stream_freshness_mode=BetfairStreamFreshnessMode.UNKNOWN,
             observed_at=observation.observed_at,
             source_ref=f"betfair://market-book/{observation.market_id}",
             source_payload_sha256=observation.source_payload_sha256,
+            authenticated_context_sha256=observation.authenticated_context_sha256,
         )
 
     @property
@@ -297,6 +327,7 @@ class BetfairCapabilityFreshnessEvidence:
             "adapter_id": self.adapter_id,
             "adapter_version": self.adapter_version,
             "application_key_class": self.application_key_class.value,
+            "authenticated_context_sha256": self.authenticated_context_sha256,
             "environment": self.environment.value,
             "market_data_delay_state": self.market_data_delay_state.value,
             "market_id": self.market_id,
@@ -394,6 +425,15 @@ class BetfairCapabilityFreshnessEvidence:
                 "freshness evidence is for a different market"
             )
         self._assert_current(as_of=as_of, max_age_seconds=max_age_seconds)
+        if self.market_data_delay_state is BetfairMarketDataDelayState.FRESH:
+            if self.application_key_class is not BetfairApplicationKeyClass.LIVE:
+                raise UnknownBetfairMarketDataFreshness(
+                    "positive Betfair market data lacks authenticated LIVE application-key class"
+                )
+            if self.authenticated_context_sha256 is None:
+                raise UnknownBetfairMarketDataFreshness(
+                    "positive Betfair market data lacks authenticated context identity"
+                )
         if self.market_data_delay_state is BetfairMarketDataDelayState.UNKNOWN:
             raise UnknownBetfairMarketDataFreshness(
                 "Betfair market-data delay state is unknown"
@@ -427,7 +467,7 @@ class BetfairCapabilityFreshnessEvidence:
 
 
 def _install_freshness_authority() -> None:
-    issued: dict[int, tuple[object, str]] = {}
+    issued: dict[int, tuple[object, str, BetfairMarketBookDelayObservation]] = {}
     raw_issuer = BetfairCapabilityFreshnessEvidence.from_market_book_observation.__func__
 
     def from_market_book_observation(
@@ -435,7 +475,7 @@ def _install_freshness_authority() -> None:
         profile: BookmakerCapabilityProfile,
         observation: BetfairMarketBookDelayObservation,
         *,
-        application_key_class: BetfairApplicationKeyClass,
+        application_key_class: BetfairApplicationKeyClass | None = None,
     ) -> BetfairCapabilityFreshnessEvidence:
         evidence = raw_issuer(
             cls,
@@ -451,6 +491,7 @@ def _install_freshness_authority() -> None:
         issued[key] = (
             ref(evidence, forget),
             evidence._authority_fingerprint(),
+            observation,
         )
         return evidence
 
@@ -463,6 +504,14 @@ def _install_freshness_authority() -> None:
         if record[1] != self._authority_fingerprint():
             raise BetfairCapabilityFreshnessError(
                 "positive freshness evidence changed after product issuance"
+            )
+        observation = record[2]
+        observation.assert_authoritative()
+        if self.market_data_delay_state is BetfairMarketDataDelayState.FRESH:
+            observation.assert_positive_authoritative()
+        if self.authenticated_context_sha256 != observation.authenticated_context_sha256:
+            raise BetfairCapabilityFreshnessError(
+                "freshness evidence authenticated context does not match provider observation"
             )
 
     BetfairCapabilityFreshnessEvidence.from_market_book_observation = classmethod(

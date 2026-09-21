@@ -635,9 +635,9 @@ class CausalLearningEnvironment:
             raise LearningEnvironmentError("resolution evidence does not bind the action identity")
         if reward.outcome_id != outcome.outcome_id:
             raise LearningEnvironmentError("reward does not bind the exact outcome identity")
-        if outcome.truth is EvidenceTruth.SIMULATED and reward.truth is not EvidenceTruth.SIMULATED:
+        if outcome.truth is not reward.truth:
             raise LearningEnvironmentError(
-                "reward truth label conflicts: observed reward cannot derive from simulated outcome"
+                "outcome/reward truth labels must match exactly"
             )
         if (
             outcome.truth is EvidenceTruth.SIMULATED

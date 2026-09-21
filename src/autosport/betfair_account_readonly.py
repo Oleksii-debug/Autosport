@@ -40,6 +40,17 @@ _READ_METHOD_ENDPOINT = MappingProxyType({
 class BetfairReadOnlyError(RuntimeError):
     """Raised when provider read evidence cannot be accepted safely."""
 
+    def __init__(
+        self,
+        message: str,
+        *,
+        json_rpc_code: int | None = None,
+        provider_error_code: str | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.json_rpc_code = json_rpc_code
+        self.provider_error_code = provider_error_code
+
 
 @dataclass(frozen=True, slots=True, repr=False)
 class BetfairSessionCredentials:
@@ -854,6 +865,11 @@ class BetfairReadOnlyClient:
             error = envelope["error"]
             code = error.get("code") if isinstance(error, Mapping) else None
             message = error.get("message") if isinstance(error, Mapping) else None
+            provider_error_code = (
+                _provider_error_code(error.get("data"))
+                if isinstance(error, Mapping)
+                else None
+            )
             detail = "Betfair JSON-RPC returned an error"
             if code is not None:
                 if not isinstance(code, int) or isinstance(code, bool):
@@ -861,7 +877,11 @@ class BetfairReadOnlyClient:
                 detail += f" code={code}"
             if isinstance(message, str) and message.strip():
                 detail += f" message={self._redact_provider_message(message)[:160]}"
-            raise BetfairReadOnlyError(detail)
+            raise BetfairReadOnlyError(
+                detail,
+                json_rpc_code=code,
+                provider_error_code=provider_error_code,
+            )
         if "result" not in envelope:
             raise BetfairReadOnlyError("Betfair response is missing result")
         return _RpcResult(envelope["result"], evidence)
@@ -883,6 +903,31 @@ class BetfairReadOnlyClient:
         if not isinstance(value, datetime) or value.tzinfo is None or value.utcoffset() is None:
             raise BetfairReadOnlyError("clock must return timezone-aware datetime")
         return value.isoformat()
+
+
+def _provider_error_code(data: object) -> str | None:
+    """Extract only canonical Betfair API-NG semantic error codes."""
+
+    if not isinstance(data, Mapping):
+        return None
+    exception_keys = ("APINGException", "AccountAPINGException")
+    present = [key for key in exception_keys if key in data]
+    if len(present) != 1:
+        return None
+    exception = data[present[0]]
+    if not isinstance(exception, Mapping):
+        return None
+    code = exception.get("errorCode")
+    if (
+        not isinstance(code, str)
+        or not code
+        or code != code.strip()
+        or not code.isascii()
+        or code != code.upper()
+        or any(character not in "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_" for character in code)
+    ):
+        return None
+    return code
 
 
 def _decode_json(payload: bytes) -> object:

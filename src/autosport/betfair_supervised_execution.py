@@ -64,6 +64,7 @@ class PlaceOrdersOutcome(str, Enum):
     ACCEPTED = "ACCEPTED"
     PARTIAL = "PARTIAL"
     REJECTED = "REJECTED"
+    PLACED_UNMATCHED = "PLACED_UNMATCHED"
     UNKNOWN = "UNKNOWN"
 
 
@@ -377,6 +378,7 @@ class BetfairInstructionReport:
     status: str
     error_code: str | None
     bet_id: str | None
+    order_status: str | None
     placed_date: str | None
     average_price_matched: Decimal
     size_matched: Decimal
@@ -390,6 +392,12 @@ class BetfairInstructionReport:
             _text(self.error_code, "instruction error_code")
         if self.bet_id is not None:
             _text(self.bet_id, "bet_id")
+        if self.order_status is not None:
+            _text(self.order_status, "order_status")
+            if self.order_status not in {"EXECUTABLE", "EXECUTION_COMPLETE"}:
+                raise BetfairSupervisedExecutionError(
+                    "unsupported Betfair order_status"
+                )
         if self.placed_date is not None:
             _time(self.placed_date, "placed_date")
         object.__setattr__(
@@ -494,6 +502,7 @@ class BetfairPlaceExecutionReport:
                     "status": self.instruction.status,
                     "error_code": self.instruction.error_code,
                     "bet_id": self.instruction.bet_id,
+                    "order_status": self.instruction.order_status,
                     "placed_date": self.instruction.placed_date,
                     "average_price_matched": str(
                         self.instruction.average_price_matched
@@ -881,6 +890,10 @@ def _parse_place_orders_response(
                 item.get("betId"),
                 "betId",
             ),
+            order_status=_optional_provider_text(
+                item.get("orderStatus"),
+                "orderStatus",
+            ),
             placed_date=_optional_provider_text(
                 item.get("placedDate"),
                 "placedDate",
@@ -910,9 +923,12 @@ def _parse_place_orders_response(
         raise BetfairPlaceOrdersAmbiguous(
             "placeOrders execution/instruction statuses conflict"
         )
-    if instruction.status == "FAILURE" and instruction.bet_id is None:
+    if (
+        instruction.status == "FAILURE"
+        and instruction.order_status == "EXECUTABLE"
+    ):
         raise BetfairPlaceOrdersAmbiguous(
-            "failed placeOrders instruction lacks provider betId identity"
+            "failed placeOrders instruction contradicts live EXECUTABLE order state"
         )
     if status == "FAILURE" and result.get("errorCode") is None:
         raise BetfairPlaceOrdersAmbiguous(
@@ -921,6 +937,13 @@ def _parse_place_orders_response(
     if instruction.size_matched > action.requested_stake:
         raise BetfairPlaceOrdersAmbiguous(
             "placeOrders report matched stake exceeds requested stake"
+        )
+    if (
+        instruction.order_status == "EXECUTABLE"
+        and instruction.size_matched == action.requested_stake
+    ):
+        raise BetfairPlaceOrdersAmbiguous(
+            "placeOrders EXECUTABLE order cannot already be fully matched"
         )
     if (
         instruction.size_matched > 0
@@ -959,6 +982,8 @@ def _report_outcome(
         return PlaceOrdersOutcome.ACCEPTED
     if instruction.size_matched > 0:
         return PlaceOrdersOutcome.PARTIAL
+    if instruction.bet_id is not None:
+        return PlaceOrdersOutcome.PLACED_UNMATCHED
     return PlaceOrdersOutcome.UNKNOWN
 
 
@@ -1109,8 +1134,31 @@ def execute_betfair_supervised_action(
             receipt,
         )
 
+    if outcome is PlaceOrdersOutcome.PLACED_UNMATCHED:
+        if receipt is None:
+            raise BetfairSupervisedExecutionError(
+                "placed-unmatched provider order requires betId identity"
+            )
+        ledger.mark_unknown(
+            attempt_id,
+            reason=(
+                "betfair_placeOrders_known_unmatched_order_"
+                "requires_readback"
+            ),
+            observed_at=report.observed_at,
+        )
+        return BetfairSupervisedExecutionResult(
+            outcome,
+            attempt_id,
+            ledger.attempt_state(attempt_id),
+            evidence_id,
+            receipt,
+        )
+
     if outcome is PlaceOrdersOutcome.REJECTED:
-        receipt = receipt or provider_order_ref
+        receipt = receipt or (
+            "betfair-response-sha256:" + report.response_sha256
+        )
         acknowledgement = ExternalAcknowledgement(
             attempt_id=attempt_id,
             external_receipt_id=receipt,

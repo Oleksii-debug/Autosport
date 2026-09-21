@@ -106,6 +106,31 @@ def test_missing_persisted_binding_cannot_narrow_currency_incompleteness() -> No
         fixture.doCleanups()
 
 
+def test_class_monkeypatch_cannot_synthesize_positive_denomination(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fixture, authority = _fixture_authority_with_goal(_goal())
+    try:
+        issued = authority.denomination_binding()
+        assert issued is not None
+        _remove_persisted_binding_for_test(authority)
+        monkeypatch.setattr(
+            FinalizedCampaignAuthority,
+            "denomination_binding",
+            lambda self: issued,
+        )
+
+        version = derive_campaign_economics(
+            campaign=authority,
+            costs=(),
+            as_of=issued.available_at + timedelta(microseconds=1),
+        )
+        assert version.denomination_binding is None
+        assert "MISSING_CAMPAIGN_CURRENCY_AUTHORITY" in version.incomplete_reasons
+    finally:
+        fixture.doCleanups()
+
+
 def test_product_binding_is_reissued_from_frozen_run_not_current_goal() -> None:
     goal_a = _goal()
     before_issuance = datetime.now(timezone.utc)

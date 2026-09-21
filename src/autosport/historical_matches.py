@@ -12,7 +12,8 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlencode, urlsplit
 
-from .integrity import atomic_write_json
+from .integrity import atomic_write_json, durable_path_lock, sha256_file
+from .json_integrity import strict_json_loads
 from .parlayapi_provider import (
     ParlayApiTableTennisProvider,
     ProviderPayloadError,
@@ -188,38 +189,68 @@ def capture_historical_matches(
         "trust": trust_payload,
         "payload": payload,
     }
-    capture_sha256 = _atomic_write_capture_json(output, capture_payload)
+    lock_paths = sorted(
+        (output, evidence),
+        key=lambda path: str(path.resolve(strict=False)),
+    )
+    with durable_path_lock(lock_paths[0]):
+        with durable_path_lock(lock_paths[1]):
+            capture_sha256 = _atomic_write_capture_json(output, capture_payload)
 
-    evidence_payload = {
-        "schema_version": 1,
-        "kind": "parlayapi_historical_match_result_evidence",
-        "provider": "parlayapi",
-        "sport_key": provider.sport_key,
-        "requested_date": requested_date,
-        "priced_only": priced_only,
-        "request_url": url,
-        "request_contract_reference": REQUEST_CONTRACT_REFERENCE,
-        "captured_at": captured_at,
-        "canonical_response_sha256": canonical_response_sha256,
-        "capture_sha256": capture_sha256,
-        "historical_window_hours": window_hours,
-        "historical_window_from": window_from_raw,
-        "api_version": _header(response.headers, "x-api-version"),
-        "coverage_hint": _header(response.headers, "x-coverage-hint"),
-        **trust_payload,
-        "provider_result_schema_parsed": False,
-        "sealed_quote_outcomes_derived": False,
-        "point_in_time_odds_market_coverage_verified": False,
-        "historical_window_market_coverage_verified": False,
-        "replay_corpus_ready": False,
-        "terms_reference": TERMS_REFERENCE,
-        "licensing_or_retention_verified": False,
-        "redistribution_verified": False,
-        "real_money_execution": False,
-        "human_tested": False,
-        "nvda_verified": False,
-    }
-    atomic_write_json(evidence, evidence_payload)
+            evidence_payload = {
+                "schema_version": 1,
+                "kind": "parlayapi_historical_match_result_evidence",
+                "provider": "parlayapi",
+                "sport_key": provider.sport_key,
+                "requested_date": requested_date,
+                "priced_only": priced_only,
+                "request_url": url,
+                "request_contract_reference": REQUEST_CONTRACT_REFERENCE,
+                "captured_at": captured_at,
+                "canonical_response_sha256": canonical_response_sha256,
+                "capture_sha256": capture_sha256,
+                "historical_window_hours": window_hours,
+                "historical_window_from": window_from_raw,
+                "api_version": _header(response.headers, "x-api-version"),
+                "coverage_hint": _header(response.headers, "x-coverage-hint"),
+                **trust_payload,
+                "provider_result_schema_parsed": False,
+                "sealed_quote_outcomes_derived": False,
+                "point_in_time_odds_market_coverage_verified": False,
+                "historical_window_market_coverage_verified": False,
+                "replay_corpus_ready": False,
+                "terms_reference": TERMS_REFERENCE,
+                "licensing_or_retention_verified": False,
+                "redistribution_verified": False,
+                "real_money_execution": False,
+                "human_tested": False,
+                "nvda_verified": False,
+            }
+            atomic_write_json(evidence, evidence_payload)
+
+            expected_evidence_bytes = (
+                json.dumps(
+                    evidence_payload,
+                    ensure_ascii=False,
+                    indent=2,
+                    sort_keys=True,
+                    allow_nan=False,
+                )
+                + "\n"
+            ).encode("utf-8")
+            expected_evidence_sha256 = hashlib.sha256(expected_evidence_bytes).hexdigest()
+            try:
+                _verify_published_pair(
+                    output,
+                    evidence,
+                    expected_capture_sha256=capture_sha256,
+                    expected_evidence_sha256=expected_evidence_sha256,
+                    expected_evidence=evidence_payload,
+                )
+            except Exception:
+                _unlink_if_exact_digest(evidence, expected_evidence_sha256)
+                _unlink_if_exact_digest(output, capture_sha256)
+                raise
 
     return HistoricalMatchCapture(
         requested_date=requested_date,
@@ -237,6 +268,57 @@ def capture_historical_matches(
         output_path=str(output),
         evidence_path=str(evidence),
     )
+
+
+
+def _read_strict_evidence_object(path: Path) -> dict[str, Any]:
+    try:
+        text = path.read_bytes().decode("utf-8")
+        payload = strict_json_loads(text)
+    except (OSError, UnicodeError, TypeError, ValueError) as exc:
+        raise ProviderPayloadError(
+            "historical match evidence must be readable strict UTF-8 JSON"
+        ) from exc
+    if type(payload) is not dict:
+        raise ProviderPayloadError("historical match evidence must be a JSON object")
+    return payload
+
+
+def _verify_published_pair(
+    output: Path,
+    evidence: Path,
+    *,
+    expected_capture_sha256: str,
+    expected_evidence_sha256: str,
+    expected_evidence: dict[str, Any],
+) -> None:
+    if sha256_file(output) != expected_capture_sha256:
+        raise ProviderPayloadError(
+            "historical match capture bytes changed during pair publication"
+        )
+    if sha256_file(evidence) != expected_evidence_sha256:
+        raise ProviderPayloadError(
+            "historical match evidence bytes changed during pair publication"
+        )
+    published_evidence = _read_strict_evidence_object(evidence)
+    if published_evidence != expected_evidence:
+        raise ProviderPayloadError(
+            "historical match evidence semantics changed during pair publication"
+        )
+    if published_evidence.get("capture_sha256") != expected_capture_sha256:
+        raise ProviderPayloadError(
+            "historical match evidence does not bind final capture bytes"
+        )
+
+
+def _unlink_if_exact_digest(path: Path, expected_sha256: str) -> None:
+    try:
+        if path.is_file() and sha256_file(path) == expected_sha256:
+            path.unlink()
+    except OSError:
+        # Publication already failed closed.  Cleanup is best-effort and must not
+        # delete bytes that no longer match the generation owned by this call.
+        return
 
 
 def _atomic_write_capture_json(path: str | Path, payload: dict[str, Any]) -> str:

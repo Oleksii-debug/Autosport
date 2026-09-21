@@ -612,6 +612,22 @@ class BetfairRequestBudget:
             self._write_locked(state)
 
 
+def _contains_backpressure_token(value: object) -> bool:
+    if isinstance(value, str):
+        upper = value.upper()
+        return any(token in upper for token in _BACKPRESSURE_TOKENS)
+    if isinstance(value, Mapping):
+        return any(
+            _contains_backpressure_token(key) or _contains_backpressure_token(item)
+            for key, item in value.items()
+        )
+    if isinstance(value, Sequence) and not isinstance(
+        value, (str, bytes, bytearray)
+    ):
+        return any(_contains_backpressure_token(item) for item in value)
+    return False
+
+
 def _provider_backpressure(payload: bytes) -> bool | None:
     try:
         decoded = _parse_json_bytes(payload, context="Betfair RPC response")
@@ -624,19 +640,7 @@ def _provider_backpressure(payload: bytes) -> bool | None:
         return False
     if not isinstance(error, Mapping):
         return None
-    parts: list[str] = []
-    for key in ("message", "data"):
-        value = error.get(key)
-        if isinstance(value, str):
-            parts.append(value.upper())
-        elif isinstance(value, Mapping):
-            parts.extend(
-                str(item).upper()
-                for item in value.values()
-                if isinstance(item, (str, int))
-            )
-    joined = " ".join(parts)
-    return any(token in joined for token in _BACKPRESSURE_TOKENS)
+    return _contains_backpressure_token(error)
 
 
 class BudgetedBetfairReadTransport:
@@ -678,7 +682,7 @@ class BudgetedBetfairReadTransport:
                     timeout_seconds=timeout_seconds,
                 )
             except BetfairReadOnlyError as exc:
-                if "status 429" in str(exc).lower():
+                if any(code in str(exc).lower() for code in ("status 429", "status 503")):
                     self._budget.record_backpressure(intent.pool)
                 raise
             if not isinstance(payload, bytes):

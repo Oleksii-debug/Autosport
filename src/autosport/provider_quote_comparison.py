@@ -35,6 +35,30 @@ def _digest(value: object) -> str:
     return hashlib.sha256(_canonical_json(value).encode("utf-8")).hexdigest()
 
 
+def _text(value: object, name: str) -> str:
+    if type(value) is not str or not value or value.strip() != value or "\x00" in value:
+        raise ProviderQuoteComparisonError(
+            f"{name} must be a non-empty canonical string"
+        )
+    value.encode("utf-8")
+    return value
+
+
+def _optional_text(value: object, name: str) -> str | None:
+    if value is None:
+        return None
+    return _text(value, name)
+
+
+def _sha256(value: object, name: str) -> str:
+    text = _text(value, name)
+    if len(text) != 64 or any(character not in "0123456789abcdef" for character in text):
+        raise ProviderQuoteComparisonError(
+            f"{name} must be a canonical lowercase SHA-256 digest"
+        )
+    return text
+
+
 def _instant(value: object, name: str) -> datetime:
     if type(value) is not str or not value or value.strip() != value:
         raise ProviderQuoteComparisonError(
@@ -123,6 +147,27 @@ class ProviderQuotePoint:
     ingest_ts: str
     market_event_sha256: str
 
+    def __post_init__(self) -> None:
+        _text(self.source_id, "quote source_id")
+        _optional_text(self.provider_source_class, "quote provider_source_class")
+        if isinstance(self.sequence, bool) or not isinstance(self.sequence, int) or self.sequence < 0:
+            raise ProviderQuoteComparisonError(
+                "quote sequence must be a non-negative integer"
+            )
+        if not isinstance(self.decimal_odds, Decimal) or not self.decimal_odds.is_finite():
+            raise ProviderQuoteComparisonError(
+                "quote decimal_odds must be an exact finite Decimal"
+            )
+        if self.decimal_odds <= Decimal("1"):
+            raise ProviderQuoteComparisonError(
+                "quote decimal_odds must be greater than 1"
+            )
+        _instant(self.observed_ts, "quote observed_ts")
+        if self.source_ts is not None:
+            _instant(self.source_ts, "quote source_ts")
+        _instant(self.ingest_ts, "quote ingest_ts")
+        _sha256(self.market_event_sha256, "quote market_event_sha256")
+
     def to_payload(self) -> dict[str, object]:
         return {
             "source_id": self.source_id,
@@ -149,6 +194,52 @@ class ProviderQuoteComparison:
     as_of: str
     max_age_microseconds: int
     quotes: tuple[ProviderQuotePoint, ...]
+
+    def __post_init__(self) -> None:
+        if (
+            isinstance(self.mirror_revision, bool)
+            or not isinstance(self.mirror_revision, int)
+            or self.mirror_revision < 0
+        ):
+            raise ProviderQuoteComparisonError(
+                "mirror_revision must be a non-negative integer"
+            )
+        _sha256(self.mirror_snapshot_sha256, "mirror_snapshot_sha256")
+        for name in (
+            "sport",
+            "event_id",
+            "market_id",
+            "selection_id",
+            "competition_id",
+            "market_semantics_id",
+        ):
+            _text(getattr(self, name), name)
+        _instant(self.as_of, "as_of")
+        if (
+            isinstance(self.max_age_microseconds, bool)
+            or not isinstance(self.max_age_microseconds, int)
+            or self.max_age_microseconds < 0
+        ):
+            raise ProviderQuoteComparisonError(
+                "max_age_microseconds must be a non-negative integer"
+            )
+        if type(self.quotes) is not tuple or len(self.quotes) < 2:
+            raise ProviderQuoteComparisonError(
+                "quotes must be a tuple containing at least two providers"
+            )
+        if any(type(quote) is not ProviderQuotePoint for quote in self.quotes):
+            raise ProviderQuoteComparisonError(
+                "quotes must contain exact ProviderQuotePoint values"
+            )
+        source_ids = tuple(quote.source_id for quote in self.quotes)
+        if len(source_ids) != len(set(source_ids)):
+            raise ProviderQuoteComparisonError(
+                "comparison quotes must have unique provider source_ids"
+            )
+        if source_ids != tuple(sorted(source_ids)):
+            raise ProviderQuoteComparisonError(
+                "comparison quotes must be sorted by provider source_id"
+            )
 
     @property
     def provider_count(self) -> int:
@@ -241,10 +332,9 @@ def compare_provider_quotes(
         isinstance(minimum_sources, bool)
         or not isinstance(minimum_sources, int)
         or minimum_sources < 2
-        or minimum_sources > 256
     ):
         raise ProviderQuoteComparisonError(
-            "minimum_sources must be an integer in range 2..256"
+            "minimum_sources must be an integer greater than or equal to 2"
         )
 
     boundary, max_age_microseconds = _canonical_boundary(as_of, max_age)

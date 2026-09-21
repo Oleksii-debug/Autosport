@@ -9,12 +9,19 @@ existing ``collector_meta`` authority, and every later canonical handle resolves
 enforces the same effective ceiling before using its connection.
 """
 
+import os
 import sqlite3
+import uuid
+from contextvars import ContextVar
 from pathlib import Path
 from typing import Any
 
 
 _BUDGET_META_KEY = "collector_storage_max_bytes_v1"
+_ACTIVE_CONSTRUCTION_BUDGET: ContextVar[int | None] = ContextVar(
+    "collector_storage_active_construction_budget_v1",
+    default=None,
+)
 
 
 class CollectorStorageBudgetError(ValueError):
@@ -168,8 +175,58 @@ def install_collector_storage_budget(store_cls: type[Any]) -> None:
 
     original_init = store_cls.__init__
     original_connect = store_cls._connect
+    original_connect_path = store_cls._connect_path
+    original_initialize_sqlite = store_cls._initialize_sqlite
     original_append = store_cls.append
     original_runtime_append = getattr(store_cls, "_append_with_runtime_stream_epoch", None)
+
+    def bounded_connect_path(path: Path) -> sqlite3.Connection:
+        """Constrain every construction-time SQLite connection before any writes."""
+
+        connection = original_connect_path(path)
+        budget = _ACTIVE_CONSTRUCTION_BUDGET.get()
+        if budget is None:
+            return connection
+        try:
+            _apply_page_budget(connection, budget)
+            return connection
+        except Exception:
+            connection.close()
+            raise
+
+    def bounded_initialize_sqlite(
+        cls: type[Any],
+        path: Path,
+        *,
+        wal: bool,
+    ) -> None:
+        """Initialize under the native ceiling and bind it before authority switch."""
+
+        budget = _ACTIVE_CONSTRUCTION_BUDGET.get()
+        try:
+            # The original initializer resolves cls._connect_path dynamically, which
+            # is the bounded connection factory installed below. Therefore the page
+            # ceiling is active before journal/schema/user_version writes begin.
+            original_initialize_sqlite(path, wal=wal)
+            if budget is None:
+                return
+            connection = bounded_connect_path(path)
+            try:
+                effective = _resolve_effective_budget(connection, budget)
+                if effective != budget:
+                    raise CollectorStorageBudgetError(
+                        "initialized collector max_bytes authority conflicts"
+                    )
+                _apply_page_budget(connection, budget)
+            finally:
+                connection.close()
+        except Exception as exc:
+            if budget is not None and _sqlite_full_in_chain(exc):
+                raise CollectorStorageBudgetError(
+                    "configured max_bytes cannot initialize collector SQLite "
+                    "within its page ceiling"
+                ) from exc
+            raise
 
     def bounded_init(
         self: Any,
@@ -177,9 +234,57 @@ def install_collector_storage_budget(store_cls: type[Any]) -> None:
         *,
         max_bytes: int | None = None,
     ) -> None:
-        self._collector_requested_max_bytes_v1 = _validated_max_bytes(max_bytes)
+        requested_budget = _validated_max_bytes(max_bytes)
+        canonical_path = Path(path)
+        self._collector_requested_max_bytes_v1 = requested_budget
         self._collector_max_bytes_v1 = None
-        original_init(self, path)
+
+        token = _ACTIVE_CONSTRUCTION_BUDGET.set(requested_budget)
+        staged_path: Path | None = None
+        try:
+            # A bounded first creation is staged beside the canonical path. This keeps
+            # the canonical path absent if schema/projection initialization exhausts
+            # the native page ceiling. Existing SQLite and legacy authorities stay at
+            # their canonical path; legacy migration already constructs a temp
+            # candidate and atomically switches only after successful replay.
+            if requested_budget is not None and not canonical_path.exists():
+                canonical_path.parent.mkdir(parents=True, exist_ok=True)
+                staged_path = canonical_path.with_name(
+                    f".{canonical_path.name}.bounded-init-{os.getpid()}-{uuid.uuid4().hex}.tmp"
+                )
+                original_init(self, staged_path)
+                if canonical_path.exists():
+                    raise CollectorStorageBudgetError(
+                        "collector path appeared during bounded initialization"
+                    )
+                os.replace(staged_path, canonical_path)
+                staged_path = None
+                self.path = canonical_path
+                # Reopen through the canonical path so the live instance proves that
+                # the durable budget survived the authority move.
+                verification = self._connect()
+                verification.close()
+            else:
+                original_init(self, canonical_path)
+        except Exception as exc:
+            if requested_budget is not None and _sqlite_full_in_chain(exc):
+                raise CollectorStorageBudgetError(
+                    "configured max_bytes cannot initialize collector SQLite "
+                    "within its page ceiling"
+                ) from exc
+            raise
+        finally:
+            _ACTIVE_CONSTRUCTION_BUDGET.reset(token)
+            if staged_path is not None:
+                try:
+                    staged_path.unlink(missing_ok=True)
+                except OSError:
+                    pass
+                for suffix in ("-journal", "-wal", "-shm"):
+                    try:
+                        Path(f"{staged_path}{suffix}").unlink(missing_ok=True)
+                    except OSError:
+                        pass
 
     def bounded_connect(self: Any) -> sqlite3.Connection:
         connection = original_connect(self)
@@ -220,6 +325,8 @@ def install_collector_storage_budget(store_cls: type[Any]) -> None:
     def configured_max_bytes(self: Any) -> int | None:
         return getattr(self, "_collector_max_bytes_v1", None)
 
+    store_cls._connect_path = staticmethod(bounded_connect_path)
+    store_cls._initialize_sqlite = classmethod(bounded_initialize_sqlite)
     store_cls.__init__ = bounded_init
     store_cls._connect = bounded_connect
     store_cls.append = bounded_append

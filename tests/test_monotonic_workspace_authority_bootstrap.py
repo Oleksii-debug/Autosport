@@ -2,10 +2,20 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from autosport.monotonic_workspace_authority import (
     MonotonicWorkspaceAuthority,
     RecoveryDisposition,
 )
+
+
+@pytest.fixture(autouse=True)
+def _isolate_monotonic_root_selection_receipts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("LOCALAPPDATA", str((tmp_path / "ProfileState").resolve()))
+    monkeypatch.delenv("XDG_STATE_HOME", raising=False)
 
 
 def test_repeated_pristine_recovery_does_not_initialize_authority_namespace(

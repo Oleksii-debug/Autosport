@@ -79,11 +79,14 @@ def _parse(payload: bytes, action: ExecutionAction):
     )
 
 
-def test_terminal_order_state_without_bet_id_is_ambiguous() -> None:
+def test_terminal_order_state_without_bet_id_remains_parseable() -> None:
     action = _action()
 
-    with pytest.raises(BetfairPlaceOrdersAmbiguous, match="betId|identity"):
-        _parse(_payload(action, bet_id=None), action)
+    report = _parse(_payload(action, bet_id=None), action)
+
+    assert report.instruction.bet_id is None
+    assert report.instruction.order_status == "EXECUTION_COMPLETE"
+    assert report.instruction.size_matched == Decimal("0")
 
 
 def test_documented_terminal_failure_shape_with_bet_id_remains_parseable() -> None:

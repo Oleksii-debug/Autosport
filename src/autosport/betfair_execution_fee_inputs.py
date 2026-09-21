@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from decimal import Decimal
+from types import MethodType
 from typing import Mapping
 
 from .betfair_account_readonly import (
@@ -20,6 +21,17 @@ from .betfair_account_readonly import (
     _LIST_MARKET_CATALOGUE,
 )
 
+
+# Pin the canonical executable dependencies when this module is imported. Provider
+# callbacks are allowed to run arbitrary same-process code, so a later class-level
+# monkeypatch must not change the implementation used halfway through one evidence
+# capture operation.
+_CANONICAL_RPC = BetfairReadOnlyClient.__dict__["_rpc"]
+_CANONICAL_NEXT_REQUEST_ID = BetfairReadOnlyClient.__dict__["_next_request_id"]
+_CANONICAL_OBSERVED_AT = BetfairReadOnlyClient.__dict__["_observed_at"]
+_CANONICAL_REDACT_PROVIDER_MESSAGE = BetfairReadOnlyClient.__dict__[
+    "_redact_provider_message"
+]
 
 _CLIENT_AUTHORITY_METHODS = frozenset(
     {
@@ -91,15 +103,15 @@ def read_betfair_execution_fee_inputs(
     closed.
 
     The caller's mutable client is snapshotted into a private exact client before
-    either provider read. That removes a validate-then-use race: later replacement
-    of caller identity fields or dynamic method shadows cannot alter which account
-    identity is bound to the captured provider evidence.
+    either provider read. Canonical RPC and its dynamically-dispatched helper
+    implementations are pinned before provider callbacks, so later instance or
+    class replacement cannot change the executable authority used mid-capture.
     """
 
     pinned_client, venue_id, account_id = _snapshot_canonical_client(client)
     market = _required_text(market_id, "market_id")
 
-    account_response = BetfairReadOnlyClient._rpc(
+    account_response = _CANONICAL_RPC(
         pinned_client,
         _GET_ACCOUNT_DETAILS,
         {},
@@ -114,7 +126,7 @@ def read_betfair_execution_fee_inputs(
     )
     _provider_percent(discount_rate, "discount_rate_percent")
 
-    market_response = BetfairReadOnlyClient._rpc(
+    market_response = _CANONICAL_RPC(
         pinned_client,
         _LIST_MARKET_CATALOGUE,
         {
@@ -213,6 +225,24 @@ def _snapshot_canonical_client(
         clock=clock,
         venue_id=venue_id,
         account_id=account_id,
+    )
+
+    # Canonical _rpc internally uses ordinary attribute dispatch for these helper
+    # methods. Bind the captured implementations on the private, unreachable client
+    # before the first provider callback so a concurrent class-level replacement
+    # cannot enter the evidence path. _CANONICAL_RPC itself is also invoked through
+    # the captured function object above rather than a live class lookup.
+    pinned_client._next_request_id = MethodType(
+        _CANONICAL_NEXT_REQUEST_ID,
+        pinned_client,
+    )
+    pinned_client._observed_at = MethodType(
+        _CANONICAL_OBSERVED_AT,
+        pinned_client,
+    )
+    pinned_client._redact_provider_message = MethodType(
+        _CANONICAL_REDACT_PROVIDER_MESSAGE,
+        pinned_client,
     )
     return pinned_client, venue_id, account_id
 

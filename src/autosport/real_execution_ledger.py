@@ -1847,8 +1847,9 @@ class RealExecutionLedger:
                 "evidence_id": evidence_id,
                 "observed_at": observed_at,
                 "source": source,
-                "acknowledgement_sha256": acknowledgement_sha256,
             }
+            if acknowledgement_sha256 is not None:
+                payload["acknowledgement_sha256"] = acknowledgement_sha256
             existing = [
                 event
                 for event in attempt_events

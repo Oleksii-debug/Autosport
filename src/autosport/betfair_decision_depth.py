@@ -1,12 +1,12 @@
 from __future__ import annotations
 
-"""Strict Betfair Best Offers depth parsing with explicit authority boundaries.
+"""Strict Betfair returned Best Offers parsing with explicit authority boundaries.
 
 The authority in this module is intentionally narrow. It parses one
-caller-supplied Betfair-shaped MarketBook payload and records only the displayed
+caller-supplied Betfair-shaped MarketBook payload and records only the returned
 Best Offers ladder for an exact market, selection and side. The parser does not
 prove that the payload originated from Betfair or that the caller-supplied time
-was the network observation instant. Displayed liquidity is also racy: it can
+was the network observation instant. Returned liquidity is also racy: it can
 disappear before an order reaches the exchange. Therefore this module never
 proves provider acceptance, fill, matched size, accepted odds, execution
 latency, or settlement.
@@ -35,7 +35,10 @@ class BetfairOrderSide(StrEnum):
 
 
 class BetfairDecisionDepthStatus(StrEnum):
-    PARSED_DISPLAYED_DEPTH = "PARSED_DISPLAYED_DEPTH"
+    PARSED_RETURNED_BEST_OFFERS = "PARSED_RETURNED_BEST_OFFERS"
+    # Compatibility alias: "displayed" here means only the returned API levels,
+    # not website-equivalent/full-depth/virtualised liquidity.
+    PARSED_DISPLAYED_DEPTH = "PARSED_RETURNED_BEST_OFFERS"
 
 
 def _canonical_text(value: object, field: str) -> str:
@@ -130,12 +133,16 @@ class BetfairDecisionDepthSnapshot:
     inplay: bool | None
     bet_delay_seconds: int | None
     levels: tuple[BetfairDepthLevel, ...]
+    market_data_delayed: bool | None = None
     status: BetfairDecisionDepthStatus = field(
-        default=BetfairDecisionDepthStatus.PARSED_DISPLAYED_DEPTH, init=False
+        default=BetfairDecisionDepthStatus.PARSED_RETURNED_BEST_OFFERS, init=False
     )
     provider_id: str = field(default=_PROVIDER_ID, init=False)
     provider_snapshot_origin_proven: bool = field(default=False, init=False)
     observation_time_proven: bool = field(default=False, init=False)
+    request_projection_proven: bool = field(default=False, init=False)
+    virtual_prices_included_proven: bool = field(default=False, init=False)
+    full_ladder_proven: bool = field(default=False, init=False)
     provider_acceptance_proven: bool = field(default=False, init=False)
     fill_proven: bool = field(default=False, init=False)
     accepted_odds_proven: bool = field(default=False, init=False)
@@ -150,6 +157,8 @@ class BetfairDecisionDepthSnapshot:
             raise BetfairDecisionDepthError("market_status must be OPEN")
         if self.runner_status != "ACTIVE":
             raise BetfairDecisionDepthError("runner_status must be ACTIVE")
+        if self.market_data_delayed is not None and type(self.market_data_delayed) is not bool:
+            raise BetfairDecisionDepthError("market_data_delayed must be bool or None")
         if self.inplay is not None and type(self.inplay) is not bool:
             raise BetfairDecisionDepthError("inplay must be bool or None")
         if self.bet_delay_seconds is not None and (
@@ -172,17 +181,18 @@ class BetfairDecisionDepthSnapshot:
             raise BetfairDecisionDepthError(
                 "depth levels must be ordered best-to-worst for the requested side"
             )
-        if self.status is not BetfairDecisionDepthStatus.PARSED_DISPLAYED_DEPTH:
+        if self.status is not BetfairDecisionDepthStatus.PARSED_RETURNED_BEST_OFFERS:
             raise BetfairDecisionDepthError("unsupported decision-depth status")
         if self.provider_id != _PROVIDER_ID:
             raise BetfairDecisionDepthError("provider_id must be betfair")
 
-    def displayed_size_at_or_better(self, limit_price: Decimal) -> Decimal:
-        """Return displayed size meeting the exact requested LIMIT threshold.
+    def returned_size_at_or_better(self, limit_price: Decimal) -> Decimal:
+        """Return size in the returned ladder meeting the LIMIT threshold.
 
         For BACK, higher odds are better and prices >= ``limit_price`` qualify.
         For LAY, lower odds are better and prices <= ``limit_price`` qualify.
-        This is snapshot evidence only, not a fill forecast or reservation.
+        This covers only returned levels; it is not a full-ladder proof, fill
+        forecast, or reservation.
         """
 
         threshold = _positive_decimal(limit_price, "limit_price")
@@ -192,22 +202,34 @@ class BetfairDecisionDepthSnapshot:
             qualifying = (level for level in self.levels if level.price <= threshold)
         return sum((level.size for level in qualifying), Decimal("0"))
 
+    def displayed_size_at_or_better(self, limit_price: Decimal) -> Decimal:
+        """Compatibility alias for returned API levels only, not full market depth."""
+
+        return self.returned_size_at_or_better(limit_price)
+
+    def returned_capacity_covers(
+        self, requested_size: Decimal, limit_price: Decimal
+    ) -> bool:
+        """Whether returned snapshot levels reach ``requested_size`` at the limit."""
+
+        size = _positive_decimal(requested_size, "requested_size")
+        return self.returned_size_at_or_better(limit_price) >= size
+
     def displayed_capacity_covers(
         self, requested_size: Decimal, limit_price: Decimal
     ) -> bool:
-        """Whether displayed snapshot size reaches ``requested_size`` at the limit."""
+        """Compatibility alias; False does not prove the full ladder lacks depth."""
 
-        size = _positive_decimal(requested_size, "requested_size")
-        return self.displayed_size_at_or_better(limit_price) >= size
+        return self.returned_capacity_covers(requested_size, limit_price)
 
-    def worst_displayed_price_for_size(
+    def worst_returned_price_for_size(
         self, requested_size: Decimal, limit_price: Decimal
     ) -> Decimal | None:
-        """Return the marginal displayed price needed to reach requested snapshot size.
+        """Return marginal returned price needed to reach requested snapshot size.
 
-        ``None`` means the displayed ladder does not contain enough qualifying size.
-        The result remains racy and must never be described as an accepted/matched
-        provider price.
+        ``None`` means the returned levels do not contain enough qualifying size; it
+        does not prove the full exchange ladder lacks more depth. The result remains
+        racy and must never be described as an accepted/matched provider price.
         """
 
         size = _positive_decimal(requested_size, "requested_size")
@@ -226,6 +248,13 @@ class BetfairDecisionDepthSnapshot:
                 return level.price
         return None
 
+    def worst_displayed_price_for_size(
+        self, requested_size: Decimal, limit_price: Decimal
+    ) -> Decimal | None:
+        """Compatibility alias for marginal price within returned levels only."""
+
+        return self.worst_returned_price_for_size(requested_size, limit_price)
+
     @property
     def evidence_id(self) -> str:
         return _digest(self.to_dict(include_evidence_id=False))
@@ -241,12 +270,16 @@ class BetfairDecisionDepthSnapshot:
             "observed_at": self.observed_at.isoformat().replace("+00:00", "Z"),
             "market_status": self.market_status,
             "runner_status": self.runner_status,
+            "market_data_delayed": self.market_data_delayed,
             "inplay": self.inplay,
             "bet_delay_seconds": self.bet_delay_seconds,
             "levels": [level.to_dict() for level in self.levels],
             "status": self.status.value,
             "provider_snapshot_origin_proven": self.provider_snapshot_origin_proven,
             "observation_time_proven": self.observation_time_proven,
+            "request_projection_proven": self.request_projection_proven,
+            "virtual_prices_included_proven": self.virtual_prices_included_proven,
+            "full_ladder_proven": self.full_ladder_proven,
             "provider_acceptance_proven": self.provider_acceptance_proven,
             "fill_proven": self.fill_proven,
             "accepted_odds_proven": self.accepted_odds_proven,
@@ -267,8 +300,10 @@ def issue_betfair_decision_depth_snapshot(
     """Parse one caller-supplied MarketBook into non-authorizing depth evidence.
 
     This function intentionally does not prove that ``market_book`` came directly
-    from Betfair or that ``observed_at`` is the provider/network observation time.
-    A product-owned transport/clock boundary may later bind those facts.
+    from Betfair, that ``observed_at`` is the provider/network observation time,
+    which PriceProjection/virtualisation produced the response, or that returned
+    Best Offers cover the full exchange ladder. A product-owned transport/clock
+    boundary may later bind those facts.
     """
 
     if not isinstance(market_book, Mapping):
@@ -285,6 +320,12 @@ def issue_betfair_decision_depth_snapshot(
     market_status = _canonical_text(market_book.get("status"), "marketBook.status")
     if market_status != "OPEN":
         raise BetfairDecisionDepthError("marketBook.status must be OPEN")
+
+    market_data_delayed = market_book.get("isMarketDataDelayed")
+    if market_data_delayed is not None and type(market_data_delayed) is not bool:
+        raise BetfairDecisionDepthError(
+            "marketBook.isMarketDataDelayed must be bool when present"
+        )
 
     inplay = market_book.get("inplay")
     if inplay is not None and type(inplay) is not bool:
@@ -364,6 +405,7 @@ def issue_betfair_decision_depth_snapshot(
         observed_at=resolved_observed_at,
         market_status=market_status,
         runner_status=runner_status,
+        market_data_delayed=market_data_delayed,
         inplay=inplay,
         bet_delay_seconds=bet_delay,
         levels=tuple(levels),

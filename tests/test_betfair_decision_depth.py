@@ -20,6 +20,7 @@ def _market_book() -> dict[str, object]:
     return {
         "marketId": "1.24681012",
         "status": "OPEN",
+        "isMarketDataDelayed": False,
         "inplay": False,
         "betDelay": 0,
         "runners": [
@@ -66,13 +67,13 @@ def test_back_snapshot_uses_exact_decimal_threshold_and_best_to_worst_order() ->
         Decimal("2.02"),
         Decimal("2.00"),
     ]
-    assert snapshot.displayed_size_at_or_better(Decimal("2.02")) == Decimal("10.35")
-    assert snapshot.displayed_capacity_covers(Decimal("10.35"), Decimal("2.02"))
-    assert not snapshot.displayed_capacity_covers(Decimal("10.36"), Decimal("2.02"))
-    assert snapshot.worst_displayed_price_for_size(
+    assert snapshot.returned_size_at_or_better(Decimal("2.02")) == Decimal("10.35")
+    assert snapshot.returned_capacity_covers(Decimal("10.35"), Decimal("2.02"))
+    assert not snapshot.returned_capacity_covers(Decimal("10.36"), Decimal("2.02"))
+    assert snapshot.worst_returned_price_for_size(
         Decimal("10.35"), Decimal("2.02")
     ) == Decimal("2.02")
-    assert snapshot.worst_displayed_price_for_size(
+    assert snapshot.worst_returned_price_for_size(
         Decimal("10.36"), Decimal("2.02")
     ) is None
 
@@ -91,8 +92,8 @@ def test_lay_snapshot_uses_lower_price_as_better() -> None:
         Decimal("2.08"),
         Decimal("2.1"),
     ]
-    assert snapshot.displayed_size_at_or_better(Decimal("2.08")) == Decimal("14.25")
-    assert snapshot.worst_displayed_price_for_size(
+    assert snapshot.returned_size_at_or_better(Decimal("2.08")) == Decimal("14.25")
+    assert snapshot.worst_returned_price_for_size(
         Decimal("14.25"), Decimal("2.08")
     ) == Decimal("2.08")
 
@@ -113,9 +114,12 @@ def test_evidence_is_explicitly_non_authorizing_and_stable() -> None:
         observed_at=OBSERVED_AT,
     )
 
-    assert first.status is BetfairDecisionDepthStatus.PARSED_DISPLAYED_DEPTH
+    assert first.status is BetfairDecisionDepthStatus.PARSED_RETURNED_BEST_OFFERS
     assert first.provider_snapshot_origin_proven is False
     assert first.observation_time_proven is False
+    assert first.request_projection_proven is False
+    assert first.virtual_prices_included_proven is False
+    assert first.full_ladder_proven is False
     assert first.provider_acceptance_proven is False
     assert first.fill_proven is False
     assert first.accepted_odds_proven is False
@@ -139,8 +143,8 @@ def test_empty_present_ladder_is_valid_zero_displayed_depth() -> None:
     )
 
     assert snapshot.levels == ()
-    assert snapshot.displayed_size_at_or_better(Decimal("2")) == Decimal("0")
-    assert not snapshot.displayed_capacity_covers(Decimal("0.01"), Decimal("2"))
+    assert snapshot.returned_size_at_or_better(Decimal("2")) == Decimal("0")
+    assert not snapshot.returned_capacity_covers(Decimal("0.01"), Decimal("2"))
 
 
 @pytest.mark.parametrize(
@@ -228,6 +232,7 @@ def test_positive_authority_flags_cannot_be_minted_by_constructor() -> None:
         "observed_at": snapshot.observed_at,
         "market_status": snapshot.market_status,
         "runner_status": snapshot.runner_status,
+        "market_data_delayed": snapshot.market_data_delayed,
         "inplay": snapshot.inplay,
         "bet_delay_seconds": snapshot.bet_delay_seconds,
         "levels": snapshot.levels,
@@ -235,6 +240,9 @@ def test_positive_authority_flags_cannot_be_minted_by_constructor() -> None:
     for forbidden in (
         "provider_snapshot_origin_proven",
         "observation_time_proven",
+        "request_projection_proven",
+        "virtual_prices_included_proven",
+        "full_ladder_proven",
         "provider_acceptance_proven",
         "fill_proven",
         "accepted_odds_proven",
@@ -291,6 +299,55 @@ def test_market_metadata_types_fail_closed(mutate, match: str) -> None:
     mutate(book)
 
     with pytest.raises(BetfairDecisionDepthError, match=match):
+        issue_betfair_decision_depth_snapshot(
+            book,
+            market_id="1.24681012",
+            selection_id=42,
+            side="BACK",
+            observed_at=OBSERVED_AT,
+        )
+
+
+def test_delayed_market_data_is_preserved_not_upgraded_to_live_truth() -> None:
+    book = _market_book()
+    book["isMarketDataDelayed"] = True
+
+    snapshot = issue_betfair_decision_depth_snapshot(
+        book,
+        market_id="1.24681012",
+        selection_id=42,
+        side="BACK",
+        observed_at=OBSERVED_AT,
+    )
+
+    assert snapshot.market_data_delayed is True
+    assert snapshot.provider_snapshot_origin_proven is False
+    assert snapshot.observation_time_proven is False
+
+
+def test_missing_market_data_delay_marker_stays_unknown_not_false() -> None:
+    book = _market_book()
+    book.pop("isMarketDataDelayed")
+
+    snapshot = issue_betfair_decision_depth_snapshot(
+        book,
+        market_id="1.24681012",
+        selection_id=42,
+        side="BACK",
+        observed_at=OBSERVED_AT,
+    )
+
+    assert snapshot.market_data_delayed is None
+
+
+@pytest.mark.parametrize("value", [0, 1, "false", "true"])
+def test_market_data_delay_marker_must_be_boolean_when_present(value: object) -> None:
+    book = _market_book()
+    book["isMarketDataDelayed"] = value
+
+    with pytest.raises(
+        BetfairDecisionDepthError, match="isMarketDataDelayed must be bool when present"
+    ):
         issue_betfair_decision_depth_snapshot(
             book,
             market_id="1.24681012",

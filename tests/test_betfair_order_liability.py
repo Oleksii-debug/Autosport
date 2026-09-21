@@ -6,6 +6,7 @@ import pytest
 
 from autosport.betfair_order_liability import (
     BetfairBetTargetType,
+    BetfairMarketBettingType,
     BetfairOrderLiabilityError,
     BetfairOrderSide,
     BetfairOrderType,
@@ -29,6 +30,7 @@ def D(value: str) -> Decimal:
 )
 def test_standard_limit_reserve(side, price, size, expected):
     result = derive_betfair_order_reserve(
+        market_betting_type=BetfairMarketBettingType.ODDS,
         side=side,
         order_type=BetfairOrderType.LIMIT,
         price=D(price),
@@ -74,6 +76,7 @@ def test_standard_limit_reserve(side, price, size, expected):
 )
 def test_target_mode_exact_formula(side, target_type, price, target, raw):
     result = derive_betfair_order_reserve(
+        market_betting_type=BetfairMarketBettingType.ODDS,
         side=side,
         order_type=BetfairOrderType.LIMIT,
         price=D(price),
@@ -88,6 +91,7 @@ def test_target_mode_exact_formula(side, target_type, price, target, raw):
 
 def test_target_mode_repeating_ratio_is_exact_before_rounding():
     result = derive_betfair_order_reserve(
+        market_betting_type=BetfairMarketBettingType.ODDS,
         side=BetfairOrderSide.BACK,
         order_type=BetfairOrderType.LIMIT,
         price=D("3"),
@@ -102,6 +106,7 @@ def test_target_mode_repeating_ratio_is_exact_before_rounding():
 
 def test_target_mode_non_cent_quantum_rounds_up():
     result = derive_betfair_order_reserve(
+        market_betting_type=BetfairMarketBettingType.ODDS,
         side=BetfairOrderSide.LAY,
         order_type=BetfairOrderType.LIMIT,
         price=D("2.7"),
@@ -117,6 +122,7 @@ def test_standard_lay_reserve_is_independent_of_decimal_context():
     with localcontext() as ctx:
         ctx.prec = 4
         result = derive_betfair_order_reserve(
+            market_betting_type=BetfairMarketBettingType.ODDS,
             side=BetfairOrderSide.LAY,
             order_type=BetfairOrderType.LIMIT,
             price=D("123.4567"),
@@ -130,6 +136,7 @@ def test_target_reserve_is_independent_of_decimal_context():
     with localcontext() as ctx:
         ctx.prec = 4
         result = derive_betfair_order_reserve(
+            market_betting_type=BetfairMarketBettingType.ODDS,
             side=BetfairOrderSide.BACK,
             order_type=BetfairOrderType.LIMIT,
             price=D("3"),
@@ -152,6 +159,7 @@ def test_target_reserve_is_independent_of_decimal_context():
 def test_bsp_close_order_reserves_explicit_liability(order_type, side):
     kwargs = {"price": D("5")} if order_type is BetfairOrderType.LIMIT_ON_CLOSE else {}
     result = derive_betfair_order_reserve(
+        market_betting_type=BetfairMarketBettingType.ODDS,
         side=side,
         order_type=order_type,
         liability=D("12.34"),
@@ -164,6 +172,7 @@ def test_bsp_close_order_reserves_explicit_liability(order_type, side):
 
 def test_each_way_back_standard_limit_doubles_reserve():
     result = derive_betfair_order_reserve(
+        market_betting_type=BetfairMarketBettingType.ODDS,
         side=BetfairOrderSide.BACK,
         order_type=BetfairOrderType.LIMIT,
         price=D("5"),
@@ -179,6 +188,7 @@ def test_each_way_back_standard_limit_doubles_reserve():
     "kwargs",
     [
         dict(
+            market_betting_type=BetfairMarketBettingType.ODDS,
             side=BetfairOrderSide.LAY,
             order_type=BetfairOrderType.LIMIT,
             price=D("5"),
@@ -186,6 +196,7 @@ def test_each_way_back_standard_limit_doubles_reserve():
             each_way=True,
         ),
         dict(
+            market_betting_type=BetfairMarketBettingType.ODDS,
             side=BetfairOrderSide.BACK,
             order_type=BetfairOrderType.LIMIT,
             price=D("5"),
@@ -205,6 +216,7 @@ def test_each_way_unsupported_combinations_fail_closed(kwargs):
 def test_price_requires_exact_decimal(bad):
     with pytest.raises(BetfairOrderLiabilityError):
         derive_betfair_order_reserve(
+            market_betting_type=BetfairMarketBettingType.ODDS,
             side=BetfairOrderSide.BACK,
             order_type=BetfairOrderType.LIMIT,
             price=bad,
@@ -216,6 +228,7 @@ def test_price_requires_exact_decimal(bad):
 def test_nonpositive_or_nonfinite_size_fails_closed(bad):
     with pytest.raises(BetfairOrderLiabilityError):
         derive_betfair_order_reserve(
+            market_betting_type=BetfairMarketBettingType.ODDS,
             side=BetfairOrderSide.BACK,
             order_type=BetfairOrderType.LIMIT,
             price=D("2"),
@@ -226,6 +239,7 @@ def test_nonpositive_or_nonfinite_size_fails_closed(bad):
 def test_limit_price_must_exceed_one():
     with pytest.raises(BetfairOrderLiabilityError):
         derive_betfair_order_reserve(
+            market_betting_type=BetfairMarketBettingType.ODDS,
             side=BetfairOrderSide.LAY,
             order_type=BetfairOrderType.LIMIT,
             price=D("1"),
@@ -236,6 +250,7 @@ def test_limit_price_must_exceed_one():
 def test_target_requires_quantum():
     with pytest.raises(BetfairOrderLiabilityError):
         derive_betfair_order_reserve(
+            market_betting_type=BetfairMarketBettingType.ODDS,
             side=BetfairOrderSide.BACK,
             order_type=BetfairOrderType.LIMIT,
             price=D("2"),
@@ -247,6 +262,7 @@ def test_target_requires_quantum():
 def test_target_rejects_simultaneous_standard_size():
     with pytest.raises(BetfairOrderLiabilityError):
         derive_betfair_order_reserve(
+            market_betting_type=BetfairMarketBettingType.ODDS,
             side=BetfairOrderSide.BACK,
             order_type=BetfairOrderType.LIMIT,
             price=D("2"),
@@ -260,6 +276,7 @@ def test_target_rejects_simultaneous_standard_size():
 def test_market_on_close_rejects_price():
     with pytest.raises(BetfairOrderLiabilityError):
         derive_betfair_order_reserve(
+            market_betting_type=BetfairMarketBettingType.ODDS,
             side=BetfairOrderSide.BACK,
             order_type=BetfairOrderType.MARKET_ON_CLOSE,
             price=D("2"),
@@ -270,6 +287,7 @@ def test_market_on_close_rejects_price():
 def test_close_order_rejects_standard_size():
     with pytest.raises(BetfairOrderLiabilityError):
         derive_betfair_order_reserve(
+            market_betting_type=BetfairMarketBettingType.ODDS,
             side=BetfairOrderSide.BACK,
             order_type=BetfairOrderType.LIMIT_ON_CLOSE,
             price=D("2"),
@@ -281,6 +299,7 @@ def test_close_order_rejects_standard_size():
 def test_limit_rejects_liability_field():
     with pytest.raises(BetfairOrderLiabilityError):
         derive_betfair_order_reserve(
+            market_betting_type=BetfairMarketBettingType.ODDS,
             side=BetfairOrderSide.BACK,
             order_type=BetfairOrderType.LIMIT,
             price=D("2"),
@@ -290,6 +309,7 @@ def test_limit_rejects_liability_field():
 
 def test_reserve_witness_binds_exact_standard_inputs_against_rebinding():
     result = derive_betfair_order_reserve(
+        market_betting_type=BetfairMarketBettingType.ODDS,
         side=BetfairOrderSide.LAY,
         order_type=BetfairOrderType.LIMIT,
         price=D("3"),
@@ -315,6 +335,7 @@ def test_reserve_witness_binds_exact_standard_inputs_against_rebinding():
 
 def test_target_witness_binds_rounding_quantum_and_target_semantics():
     result = derive_betfair_order_reserve(
+        market_betting_type=BetfairMarketBettingType.ODDS,
         side=BetfairOrderSide.BACK,
         order_type=BetfairOrderType.LIMIT,
         price=D("3"),
@@ -335,6 +356,7 @@ def test_target_witness_binds_rounding_quantum_and_target_semantics():
 
 def test_each_way_witness_cannot_be_rebound_to_lay():
     result = derive_betfair_order_reserve(
+        market_betting_type=BetfairMarketBettingType.ODDS,
         side=BetfairOrderSide.BACK,
         order_type=BetfairOrderType.LIMIT,
         price=D("5"),
@@ -349,6 +371,7 @@ def test_each_way_witness_cannot_be_rebound_to_lay():
     "kwargs",
     [
         dict(
+            market_betting_type=BetfairMarketBettingType.ODDS,
             side=BetfairOrderSide.BACK,
             order_type=BetfairOrderType.LIMIT,
             price=D("2"),
@@ -356,12 +379,14 @@ def test_each_way_witness_cannot_be_rebound_to_lay():
             currency_quantum=D("0.01"),
         ),
         dict(
+            market_betting_type=BetfairMarketBettingType.ODDS,
             side=BetfairOrderSide.BACK,
             order_type=BetfairOrderType.MARKET_ON_CLOSE,
             liability=D("1"),
             currency_quantum=D("0.01"),
         ),
         dict(
+            market_betting_type=BetfairMarketBettingType.ODDS,
             side=BetfairOrderSide.BACK,
             order_type=BetfairOrderType.LIMIT_ON_CLOSE,
             price=D("2"),
@@ -377,6 +402,7 @@ def test_non_target_modes_reject_semantically_ignored_currency_quantum(kwargs):
 
 def test_close_order_witness_binds_exact_liability_input():
     result = derive_betfair_order_reserve(
+        market_betting_type=BetfairMarketBettingType.ODDS,
         side=BetfairOrderSide.BACK,
         order_type=BetfairOrderType.LIMIT_ON_CLOSE,
         price=D("2"),
@@ -388,3 +414,81 @@ def test_close_order_witness_binds_exact_liability_input():
     assert result.currency_quantum is None
     with pytest.raises(BetfairOrderLiabilityError):
         replace(result, liability=D("1"))
+
+
+@pytest.mark.parametrize(
+    "market_betting_type",
+    [
+        BetfairMarketBettingType.LINE,
+        BetfairMarketBettingType.RANGE,
+        BetfairMarketBettingType.ASIAN_HANDICAP_DOUBLE_LINE,
+        BetfairMarketBettingType.ASIAN_HANDICAP_SINGLE_LINE,
+        BetfairMarketBettingType.FIXED_ODDS,
+    ],
+)
+def test_non_odds_market_betting_semantics_fail_closed(market_betting_type):
+    with pytest.raises(BetfairOrderLiabilityError):
+        derive_betfair_order_reserve(
+            market_betting_type=market_betting_type,
+            side=BetfairOrderSide.LAY,
+            order_type=BetfairOrderType.LIMIT,
+            price=D("50"),
+            size=D("10"),
+        )
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        dict(
+            order_type=BetfairOrderType.LIMIT,
+            price=D("50"),
+            target_type=BetfairBetTargetType.PAYOUT,
+            target_size=D("10"),
+            currency_quantum=D("0.01"),
+        ),
+        dict(
+            order_type=BetfairOrderType.MARKET_ON_CLOSE,
+            liability=D("10"),
+        ),
+        dict(
+            order_type=BetfairOrderType.LIMIT_ON_CLOSE,
+            price=D("50"),
+            liability=D("10"),
+        ),
+    ],
+)
+def test_line_target_and_bsp_paths_fail_before_odds_arithmetic(kwargs):
+    with pytest.raises(BetfairOrderLiabilityError):
+        derive_betfair_order_reserve(
+            market_betting_type=BetfairMarketBettingType.LINE,
+            side=BetfairOrderSide.LAY,
+            **kwargs,
+        )
+
+
+def test_reserve_witness_binds_market_betting_type():
+    result = derive_betfair_order_reserve(
+        market_betting_type=BetfairMarketBettingType.ODDS,
+        side=BetfairOrderSide.LAY,
+        order_type=BetfairOrderType.LIMIT,
+        price=D("3"),
+        size=D("10"),
+    )
+    assert result.market_betting_type is BetfairMarketBettingType.ODDS
+    with pytest.raises(BetfairOrderLiabilityError):
+        replace(
+            result,
+            market_betting_type=BetfairMarketBettingType.LINE,
+        )
+
+
+def test_market_betting_type_requires_exact_enum():
+    with pytest.raises(BetfairOrderLiabilityError):
+        derive_betfair_order_reserve(
+            market_betting_type="ODDS",
+            side=BetfairOrderSide.BACK,
+            order_type=BetfairOrderType.LIMIT,
+            price=D("2"),
+            size=D("10"),
+        )

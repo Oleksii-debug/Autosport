@@ -7,7 +7,7 @@ import tk_uia
 
 from .gui import AutosportApp
 from .localization import text
-from .secret_redaction import redact_operator_text, safe_exception_detail
+from .secret_redaction import redact_operator_text
 from .recovery_worker import OneShotRecoveryWorker, RecoverySessionView, recover_workspace_once
 from .replay_worker import workspace_for_strategy
 from .ui_model import evaluation_lines, result_summary, ticket_lines
@@ -23,9 +23,9 @@ def _safe_exception_detail(exc: BaseException) -> str:
         exception_type = type.__getattribute__(type(exc), "__name__")
     except BaseException:
         exception_type = "BaseException"
-
-    detail = safe_exception_detail(exc, unavailable_detail="")
-    if not detail:
+    try:
+        detail = str(exc)
+    except BaseException:
         return redact_operator_text(
             text(
                 "ui.error.exception.message_unavailable",

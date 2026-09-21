@@ -90,6 +90,7 @@ def test_manifest_binds_exact_dataset_population_and_split_indices():
         "dataset_snapshot_id": "dataset-1",
         "dataset_manifest_sha256": SHA_A,
         "training_points_manifest_sha256": SHA_A,
+        "input_count": 4,
         "source_identity": "lawful-provider:fixture-v1",
         "license_identity": "license-evidence:v1",
     }
@@ -154,7 +155,8 @@ def test_split_rejects_noncausal_or_ambiguous_indices():
 
 def test_manifest_rejects_duplicate_or_noncanonical_split_order():
     with pytest.raises(
-        ReproducibilityManifestError, match="fold_id values must be unique"
+        ReproducibilityManifestError,
+        match="fold_id values must be unique",
     ):
         _manifest(splits=(_split(), _split()))
     with pytest.raises(
@@ -168,7 +170,8 @@ def test_manifest_rejects_duplicate_or_noncanonical_split_order():
             )
         )
     with pytest.raises(
-        ReproducibilityManifestError, match="ordered by evaluation_index"
+        ReproducibilityManifestError,
+        match="ordered by evaluation_index",
     ):
         _manifest(
             splits=(
@@ -189,7 +192,8 @@ def test_from_envelope_fails_closed_on_digest_or_lineage_tamper():
     extra_field = deepcopy(envelope)
     extra_field["dataset"]["raw_rows"] = []
     with pytest.raises(
-        ReproducibilityManifestError, match="dataset lineage fields mismatch"
+        ReproducibilityManifestError,
+        match="dataset lineage fields mismatch",
     ):
         FactoryReproducibilityManifest.from_envelope(extra_field)
 
@@ -197,6 +201,16 @@ def test_from_envelope_fails_closed_on_digest_or_lineage_tamper():
     forged_truth["truth"]["promotion_claim"] = True
     with pytest.raises(ReproducibilityManifestError, match="truth boundary mismatch"):
         FactoryReproducibilityManifest.from_envelope(forged_truth)
+
+
+def test_from_envelope_rejects_forged_input_count():
+    envelope = _manifest().to_envelope()
+    envelope["dataset"]["input_count"] = 5
+    with pytest.raises(
+        ReproducibilityManifestError,
+        match="input_count does not match split lineage",
+    ):
+        FactoryReproducibilityManifest.from_envelope(envelope)
 
 
 def test_from_envelope_rejects_unknown_top_level_fields_and_noncanonical_sha():

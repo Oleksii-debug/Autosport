@@ -96,13 +96,9 @@ class ModelLifecycleTests(unittest.TestCase):
         with self.assertRaisesRegex(ModelLifecycleError, "timezone-aware"):
             self._revision(updated_at="2026-09-21T07:00:00")
         with self.assertRaisesRegex(ModelLifecycleError, "sorted and unique"):
-            self._revision(
-                evidence_refs=("evidence://z", "evidence://a")
-            )
+            self._revision(evidence_refs=("evidence://z", "evidence://a"))
         with self.assertRaisesRegex(ModelLifecycleError, "sorted and unique"):
-            self._revision(
-                evidence_refs=("evidence://a", "evidence://a")
-            )
+            self._revision(evidence_refs=("evidence://a", "evidence://a"))
 
     def test_temporal_contract_prevents_future_or_overlong_drift_evidence(self) -> None:
         with self.assertRaisesRegex(ModelLifecycleError, "updated_at must not precede"):
@@ -311,9 +307,9 @@ class ModelLifecycleTests(unittest.TestCase):
                 self._revision(
                     revision=3,
                     updated_at="2026-09-22T06:10:00+00:00",
-                    drift_observed_at="2026-09-22T06:05:00+00:00",
-                    drift_valid_until="2026-09-22T06:15:00+00:00",
-                    knowledge_valid_until="2026-09-22T06:20:00+00:00",
+                    knowledge_valid_until=self.KNOWLEDGE_UNTIL,
+                    drift_observed_at="2026-09-22T05:58:00+00:00",
+                    drift_valid_until="2026-09-22T05:59:00+00:00",
                     evidence_refs=("evidence://reactivation/attempt",),
                 ),
             )

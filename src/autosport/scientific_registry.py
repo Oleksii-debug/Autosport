@@ -1022,28 +1022,36 @@ class ScientificRegistry:
             seen.add(key)
             if raw_entry["record_type"] == "Experiment":
                 fingerprint = raw_entry["payload"].get("fingerprint")
-                if raw_entry["payload"].get("repeat_of_experiment_id") is not None:
-                    prior_state = {
-                        "schema_version": self.SCHEMA_VERSION,
-                        "records": records[:index],
-                    }
-                    negative_history = [
-                        existing
-                        for existing in records[:index]
-                        if existing["record_type"] == "Experiment"
-                        and existing["payload"].get("fingerprint") == fingerprint
-                        and existing["payload"].get("outcome") != ResearchOutcome.POSITIVE.value
-                    ]
-                    if negative_history:
-                        self._validate_negative_repeat_authorization(
-                            prior_state,
-                            raw_entry,
-                            negative_history,
+                prior_state = {
+                    "schema_version": self.SCHEMA_VERSION,
+                    "records": records[:index],
+                }
+                matching_experiments = [
+                    existing
+                    for existing in records[:index]
+                    if existing["record_type"] == "Experiment"
+                    and existing["payload"].get("fingerprint") == fingerprint
+                ]
+                negative_history = [
+                    existing
+                    for existing in matching_experiments
+                    if existing["payload"].get("outcome") != ResearchOutcome.POSITIVE.value
+                ]
+                has_repeat_provenance = raw_entry["payload"].get("repeat_of_experiment_id") is not None
+                if negative_history:
+                    if not has_repeat_provenance:
+                        raise DuplicateExperimentFingerprintError(
+                            "persisted negative-result repeat lacks durable repeat provenance"
                         )
-                if fingerprint in fingerprints:
-                    # Historical explicit repeats may share a fingerprint. New repeats with
-                    # persisted provenance are re-resolved above on every restart.
-                    pass
+                    self._validate_negative_repeat_authorization(
+                        prior_state,
+                        raw_entry,
+                        negative_history,
+                    )
+                elif has_repeat_provenance:
+                    raise DuplicateExperimentFingerprintError(
+                        "repeat provenance requires prior non-positive experiment history"
+                    )
                 fingerprints.add(fingerprint)
         return state
 
@@ -1426,11 +1434,16 @@ class ScientificRegistry:
                 for existing in matching_experiments
                 if existing["payload"].get("outcome") != ResearchOutcome.POSITIVE.value
             ]
+            has_repeat_provenance = entry["payload"].get("repeat_of_experiment_id") is not None
             if negative_history:
                 self._validate_negative_repeat_authorization(
                     state,
                     entry,
                     negative_history,
+                )
+            elif has_repeat_provenance:
+                raise DuplicateExperimentFingerprintError(
+                    "repeat provenance requires prior non-positive experiment history"
                 )
         state["records"].append(entry)
         atomic_write_json(self.path, state)

@@ -46,6 +46,36 @@ def _portfolio_arithmetic_error(exc: DecimalException) -> ValueError:
     )
 
 
+def _snapshot_open_tickets_for_analysis(
+    tickets: list[PaperTicket],
+) -> list[PaperTicket]:
+    """Detach mutable ticket economics before a multi-scenario analysis run.
+
+    ``PaperTicket`` is intentionally mutable because settlement updates its status,
+    payout and timestamps in place.  A portfolio analysis can enumerate or sample
+    many scenarios, so retaining aliases to caller-owned tickets would allow a live
+    settlement/update between scenarios to change which tickets contribute after
+    the state space was already derived.  Snapshot only the economics consumed by
+    this engine; ticket legs are frozen values and Decimal/string values are
+    immutable.
+    """
+
+    snapshots: list[PaperTicket] = []
+    for ticket in tickets:
+        if ticket.status is not TicketStatus.OPEN:
+            continue
+        snapshots.append(
+            PaperTicket(
+                ticket_id=ticket.ticket_id,
+                stake=ticket.stake,
+                legs=tuple(ticket.legs),
+                placed_at=ticket.placed_at,
+                status=TicketStatus.OPEN,
+            )
+        )
+    return snapshots
+
+
 def _scenario_profit_in_context(
     tickets: list[PaperTicket],
     winning_quote_keys: set[str],
@@ -207,7 +237,7 @@ class PortfolioEngine:
             seen.update(group)
         groups.sort(key=lambda group: tuple(sorted(group)))
 
-        open_tickets = [ticket for ticket in tickets if ticket.status is TicketStatus.OPEN]
+        open_tickets = _snapshot_open_tickets_for_analysis(tickets)
         all_keys = {leg.quote_key for ticket in open_tickets for leg in ticket.legs}
         grouped = set().union(*groups) if groups else set()
         if not grouped.issubset(all_keys):

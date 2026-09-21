@@ -162,8 +162,11 @@ def summarize_description(
     shell_state_readonly: bool | None = None,
     owner_economic_state_readonly: bool | None = None,
     workbench_result_readonly: bool | None = None,
+    require_replay_stop: bool = False,
 ) -> dict[str, Any]:
     expected_ids = set(_REQUIRED_PATTERNS)
+    if not require_replay_stop:
+        expected_ids.discard(REPLAY_STOP_AUTOMATION_ID)
     controls: dict[int, dict[str, Any]] = {}
     failures: list[str] = []
 
@@ -285,6 +288,7 @@ def run_accessibility_audit(output_path: str | Path) -> int:
             shell_state_readonly=_shell_state_is_readonly(app),
             owner_economic_state_readonly=_owner_economic_state_is_readonly(app),
             workbench_result_readonly=_disabled_text_is_readonly(controls.get("result")),
+            require_replay_stop=True,
         )
     except Exception as exc:
         report = {

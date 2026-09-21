@@ -22,6 +22,7 @@ from autosport.scientific_registry import (
     ResearchOutcome,
     ResearchProtocol,
     ResearchQuestion,
+    ScientificEvidenceRef,
     ScientificRegistry,
     promotion_holdout_access_id,
     StrategyVersion,
@@ -232,6 +233,30 @@ def _experiment(*, experiment_id: str = "experiment-1", outcome=ResearchOutcome.
     )
 
 
+def _append_repeat_bundle(
+    registry: ScientificRegistry,
+    foundation: dict[str, object],
+    *,
+    bundle_id: str = "eval-repeat",
+    bundle_sha256: str = SHA_A,
+    created_at: str = T3,
+) -> tuple[EvaluationBundleRef, ScientificEvidenceRef]:
+    bundle = replace(
+        foundation["bundle"],
+        evaluation_bundle_id=bundle_id,
+        bundle_sha256=bundle_sha256,
+        created_at=created_at,
+    )
+    registry.append(bundle)
+    stored = registry.get("EvaluationBundle", bundle_id)
+    assert stored is not None
+    return bundle, ScientificEvidenceRef(
+        "EvaluationBundle",
+        bundle_id,
+        stored.record_sha256,
+    )
+
+
 def _promotion_evidence(
     *,
     experiment_id: str,
@@ -332,7 +357,7 @@ def test_restart_preserves_negative_memory_and_blocks_duplicate_fingerprint(tmp_
 def test_negative_repeat_requires_durable_postmortem_provenance(tmp_path):
     path = tmp_path / "scientific_registry.json"
     registry = ScientificRegistry.initialize_pristine(path)
-    _foundation(registry)
+    foundation = _foundation(registry)
     experiment = _experiment()
     registry.append(experiment)
 
@@ -358,12 +383,14 @@ def test_negative_repeat_requires_durable_postmortem_provenance(tmp_path):
     with pytest.raises(DuplicateExperimentFingerprintError, match="durable repeat provenance"):
         registry.append(repeat, allow_repeat_experiment=True)
 
+    _, evidence_ref = _append_repeat_bundle(registry, foundation)
     authorized = replace(
         repeat,
+        evaluation_bundle_id="eval-repeat",
         repeat_of_experiment_id="experiment-1",
         repeat_postmortem_id="postmortem-repeat",
         retest_condition="independent replication on frozen inputs",
-        repeat_evidence=("operator-approved replication:evidence-1",),
+        repeat_evidence=(evidence_ref,),
     )
     registry.append(authorized, allow_repeat_experiment=True)
 
@@ -373,8 +400,26 @@ def test_negative_repeat_requires_durable_postmortem_provenance(tmp_path):
     assert stored.payload["repeat_of_experiment_id"] == "experiment-1"
     assert stored.payload["repeat_postmortem_id"] == "postmortem-repeat"
     assert stored.payload["retest_condition"] == "independent replication on frozen inputs"
-    assert stored.payload["repeat_evidence"] == ["operator-approved replication:evidence-1"]
+    assert stored.payload["repeat_evidence"] == [evidence_ref.to_payload()]
     assert len(reopened.find_experiment_fingerprint(experiment.fingerprint)) == 2
+
+    # Restart must re-resolve the durable authorizing record, not merely trust the
+    # evidence reference persisted in the repeated Experiment payload.
+    raw = json.loads(path.read_text(encoding="utf-8"))
+    raw["records"] = [
+        entry
+        for entry in raw["records"]
+        if not (
+            entry["record_type"] == "EvaluationBundle"
+            and entry["record_id"] == "eval-repeat"
+        )
+    ]
+    path.write_text(json.dumps(raw), encoding="utf-8")
+    with pytest.raises(
+        DuplicateExperimentFingerprintError,
+        match="missing durable scientific record",
+    ):
+        ScientificRegistry(path)
 
 
 def test_negative_repeat_rejects_wrong_postmortem_condition_or_time(tmp_path):
@@ -435,7 +480,7 @@ def test_negative_repeat_rejects_wrong_postmortem_condition_or_time(tmp_path):
         repeat_of_experiment_id="experiment-1",
         repeat_postmortem_id="postmortem-valid",
         retest_condition="different condition",
-        repeat_evidence=("evidence:1",),
+        repeat_evidence=(ScientificEvidenceRef("EvaluationBundle", "missing", SHA_A),),
     )
     with pytest.raises(DuplicateExperimentFingerprintError, match="retest_condition"):
         registry.append(repeat, allow_repeat_experiment=True)
@@ -448,6 +493,146 @@ def test_negative_repeat_rejects_wrong_postmortem_condition_or_time(tmp_path):
     )
     with pytest.raises(DuplicateExperimentFingerprintError, match="predate its authorizing postmortem"):
         registry.append(future_repeat, allow_repeat_experiment=True)
+
+
+def test_negative_repeat_rejects_invented_wrong_digest_future_and_unchanged_bundle_evidence(tmp_path):
+    registry = ScientificRegistry.initialize_pristine(tmp_path / "scientific_registry.json")
+    foundation = _foundation(registry)
+    experiment = _experiment()
+    registry.append(experiment)
+    registry.append(
+        Postmortem(
+            "postmortem-evidence",
+            "experiment-1",
+            ResearchOutcome.NEGATIVE,
+            "Repeat only after a new durable evaluation exists.",
+            ("new durable evaluation",),
+            T2,
+        )
+    )
+    base = replace(
+        experiment,
+        experiment_id="experiment-2",
+        created_at=T3,
+        completed_at=T3,
+        repeat_of_experiment_id="experiment-1",
+        repeat_postmortem_id="postmortem-evidence",
+        retest_condition="new durable evaluation",
+    )
+
+    invented = replace(
+        base,
+        evaluation_bundle_id="eval-missing",
+        repeat_evidence=(
+            ScientificEvidenceRef("EvaluationBundle", "eval-missing", SHA_A),
+        ),
+    )
+    with pytest.raises(
+        DuplicateExperimentFingerprintError,
+        match="missing durable scientific record",
+    ):
+        registry.append(invented, allow_repeat_experiment=True)
+
+    _, future_ref = _append_repeat_bundle(
+        registry,
+        foundation,
+        bundle_id="eval-future",
+        bundle_sha256=SHA_A,
+        created_at="2026-01-05T00:00:00+00:00",
+    )
+    future = replace(
+        base,
+        evaluation_bundle_id="eval-future",
+        repeat_evidence=(future_ref,),
+    )
+    with pytest.raises(
+        DuplicateExperimentFingerprintError,
+        match="not available before repeat creation",
+    ):
+        registry.append(future, allow_repeat_experiment=True)
+
+    _, exact_ref = _append_repeat_bundle(
+        registry,
+        foundation,
+        bundle_id="eval-repeat",
+        bundle_sha256=SHA_A,
+        created_at=T3,
+    )
+    wrong_digest = "0" * 64
+    if wrong_digest == exact_ref.record_sha256:
+        wrong_digest = "1" * 64
+    forged = replace(
+        base,
+        evaluation_bundle_id="eval-repeat",
+        repeat_evidence=(
+            ScientificEvidenceRef("EvaluationBundle", "eval-repeat", wrong_digest),
+        ),
+    )
+    with pytest.raises(
+        DuplicateExperimentFingerprintError,
+        match="digest mismatch",
+    ):
+        registry.append(forged, allow_repeat_experiment=True)
+
+    original_bundle = registry.get("EvaluationBundle", "eval-1")
+    assert original_bundle is not None
+    unchanged = replace(
+        base,
+        evaluation_bundle_id="eval-1",
+        repeat_evidence=(
+            ScientificEvidenceRef(
+                "EvaluationBundle",
+                "eval-1",
+                original_bundle.record_sha256,
+            ),
+        ),
+    )
+    with pytest.raises(
+        DuplicateExperimentFingerprintError,
+        match="new durable EvaluationBundle",
+    ):
+        registry.append(unchanged, allow_repeat_experiment=True)
+
+
+def test_negative_repeat_rejects_same_bundle_content_under_new_identity(tmp_path):
+    registry = ScientificRegistry.initialize_pristine(tmp_path / "scientific_registry.json")
+    foundation = _foundation(registry)
+    experiment = _experiment()
+    registry.append(experiment)
+    registry.append(
+        Postmortem(
+            "postmortem-content",
+            "experiment-1",
+            ResearchOutcome.NEGATIVE,
+            "Require materially changed evaluation evidence.",
+            ("materially changed evaluation evidence",),
+            T2,
+        )
+    )
+    original = foundation["bundle"]
+    _, evidence_ref = _append_repeat_bundle(
+        registry,
+        foundation,
+        bundle_id="eval-renamed-only",
+        bundle_sha256=original.bundle_sha256,
+        created_at=T3,
+    )
+    repeat = replace(
+        experiment,
+        experiment_id="experiment-2",
+        evaluation_bundle_id="eval-renamed-only",
+        created_at=T3,
+        completed_at=T3,
+        repeat_of_experiment_id="experiment-1",
+        repeat_postmortem_id="postmortem-content",
+        retest_condition="materially changed evaluation evidence",
+        repeat_evidence=(evidence_ref,),
+    )
+    with pytest.raises(
+        DuplicateExperimentFingerprintError,
+        match="materially changed evidence",
+    ):
+        registry.append(repeat, allow_repeat_experiment=True)
 
 
 def test_conflicting_identity_rejected_but_exact_replay_is_idempotent(tmp_path):

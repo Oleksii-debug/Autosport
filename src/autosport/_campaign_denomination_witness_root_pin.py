@@ -16,7 +16,6 @@ pre-denomination registry image while machine authority survives.
 """
 
 import hashlib
-import json
 import os
 from pathlib import Path
 from typing import Mapping
@@ -203,16 +202,12 @@ def _campaign_atomic_write_json(path, payload: dict[str, object]) -> None:
         return
 
     with _integrity.durable_path_lock(destination):
-        try:
-            current = json.loads(destination.read_text(encoding="utf-8"))
-        except (OSError, UnicodeError, json.JSONDecodeError) as exc:
-            raise _impl.CampaignEconomicAuthorityError(
-                "cannot re-resolve campaign denomination root before cache publication"
-            ) from exc
-        if type(current) is not dict:
-            raise _impl.CampaignEconomicAuthorityError(
-                "campaign denomination registry state is malformed before cache publication"
-            )
+        # Reuse the already-installed source-owned ScientificRegistry read authority
+        # before trusting any durable extension bytes. This rejects duplicate keys,
+        # malformed records, rollback/replay and a concurrent unsupported replacement
+        # before root validation can create/touch an attacker-selected directory.
+        registry = _impl.ScientificRegistry(destination)
+        current = registry._read()
         durable_root = current.get(_ROOT_STATE_KEY)
         if durable_root is not None:
             _validated_root_record(durable_root, registry_path=destination)

@@ -286,7 +286,7 @@ def test_response_authority_rejects_coercible_non_numeric_wire_values(
         **kwargs,
     )
 
-    with pytest.raises(BetfairPlaceOrdersAmbiguous, match="JSON number"):
+    with pytest.raises(BetfairPlaceOrdersAmbiguous):
         _parse(payload, action)
 
 

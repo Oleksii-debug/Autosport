@@ -294,7 +294,8 @@ class RatingDifferenceBaselineModel:
     def from_payload(
         cls, payload: Mapping[str, object]
     ) -> "RatingDifferenceBaselineModel":
-        if payload.get("schema_version") != 1:
+        schema_version = payload.get("schema_version")
+        if type(schema_version) is not int or schema_version != 1:
             raise ParticipantStrengthError("unsupported baseline artifact schema")
         if payload.get("family") != cls.model_family:
             raise ParticipantStrengthError("baseline artifact family mismatch")
@@ -463,7 +464,8 @@ class HistogramCalibratedStrengthModel:
     def from_payload(
         cls, payload: Mapping[str, object]
     ) -> "HistogramCalibratedStrengthModel":
-        if payload.get("schema_version") != 1:
+        schema_version = payload.get("schema_version")
+        if type(schema_version) is not int or schema_version != 1:
             raise ParticipantStrengthError("unsupported calibrated artifact schema")
         if payload.get("family") != cls.model_family:
             raise ParticipantStrengthError("calibrated artifact family mismatch")

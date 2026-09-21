@@ -37,6 +37,7 @@ class _Transport:
         self.provider_status = "SETTLED"
         self.profit = 4
         self.settled_date = "2026-09-21T19:00:00+00:00"
+        self.cleared_event_id = "event-1"
         self.customer_order_ref: str | None = None
 
     def post(self, url: str, *, headers, body: bytes, timeout_seconds: float) -> bytes:
@@ -53,7 +54,7 @@ class _Transport:
                 rows.append({
                     "betId": "bet-777",
                     "marketId": "1.234",
-                    "eventId": "event-1",
+                    "eventId": self.cleared_event_id,
                     "selectionId": 10,
                     "side": "BACK",
                     "placedDate": "2026-09-21T18:00:00+00:00",
@@ -200,6 +201,29 @@ def test_forged_or_mismatched_capture_fails_closed(tmp_path) -> None:
     forged = replace(capture, evidence_sha256="0" * 64)
     with pytest.raises(BetfairSettlementRevisionError, match="not canonical adapter-issued"):
         _ingest(store, ledger, plan, action, forged)
+
+
+def test_matching_cleared_row_with_contradictory_event_fails_closed(tmp_path) -> None:
+    transport = _Transport()
+    ledger, plan, action, client, provider_ref = _accepted_context(tmp_path, transport)
+    store = BetfairSettlementRevisionStore(tmp_path / "settlement.jsonl")
+    transport.cleared_event_id = "event-other"
+
+    capture = _capture(client, provider_ref)
+    assert capture.market_event.event_id == action.event_id
+    matching_order = next(
+        order
+        for _status, pages in capture.cleared_pages_by_status
+        for page in pages
+        for order in page.orders
+        if order.bet_id == "bet-777"
+    )
+    assert matching_order.event_id == "event-other"
+
+    with pytest.raises(BetfairSettlementRevisionError, match="cleared row event mismatch"):
+        _ingest(store, ledger, plan, action, capture)
+
+    assert store.revisions == ()
 
 
 def test_requires_durable_attempt_receipt_owner_and_provider_ref(tmp_path) -> None:

@@ -10,7 +10,9 @@ Forecasting є strategy-class dependent, а не глобально обов’�
 
 Автоспорт не є просто чат-агентом. Швидкі числові операції, ринковий стан, залежності квитків, портфельні сценарії, settlement і ризик рахуються детермінованими програмними компонентами. AI-агенти працюють над дослідженням, прогнозами, постановкою гіпотез, вибором стратегій, критикою та навчанням, але не замінюють точну арифметику, money semantics, quote freshness або execution authority.
 
-Canonical product controls: Issue #1 — global product truth; #198 — continuous roadmap; #213 — mathematical intelligence; #355 — live market/arbitrage/dutching/outcome-independent portfolio program; #356 — generic opportunity decision contract; #353 — bookmaker/account execution program.
+Єдина ціль розробки — `TIME_TO_WHOLE_FINISHED_PRODUCT`: усі інженерні, економічні, наукові, live/execution, learning, Windows/NVDA та продуктові напрями є частинами одного Autosport і завершуються лише разом із цілим продуктом.
+
+Canonical product controls: Issue #1 — whole-product truth; #198 — continuous roadmap; #362 — swarm constitution / unbounded semantic parallelism; #367 — scientific truth; #368 — live dispatch / semantic ownership; #763 — expandable work-packet bank; #213 — mathematical intelligence; #355 — live market/arbitrage/dutching/outcome-independent portfolio program; #356 — generic opportunity decision contract; #353 — bookmaker/account execution program. Live GitHub truth у цих control surfaces переважає stale snapshots і старе stage/V1 framing.
 
 ## 2. Режими роботи
 
@@ -44,7 +46,7 @@ Truth label `OUTCOME_INDEPENDENT_POSITIVE` дозволений лише для 
 
 Агенти можуть мати спеціалізовані ролі: research, player/match analysis, forecast, live-market analysis, opportunity classification, ticket/stake-vector construction, portfolio/risk, critic, settlement review, learning/evaluation. Ролі не повинні створювати дубльовану інфраструктуру; усі працюють через спільні canonical stores/contracts. Окремий collector не повинен бути LLM-агентом у hot path: його робота детермінована й високошвидкісна.
 
-Поточний V1 `ResearchDecisionPipeline` залишається forecast-bound для predictive paper path. Issue #356 визначає майбутній bounded generic contract, де `ForecastRecord` обов’язковий для probability-edge intents, але не фабрикується для arbitrage/dutching/hedge strategy classes, якщо causal quote evidence і terminal-state economics є достатнім strategy-specific proof.
+Поточний канонічний `ResearchDecisionPipeline` є forecast-bound для predictive paper path. Issue #356 визначає bounded generic contract direction, де `ForecastRecord` обов’язковий для probability-edge intents, але не фабрикується для arbitrage/dutching/hedge strategy classes, якщо causal quote evidence і terminal-state economics є достатнім strategy-specific proof. Це capability evolution усередині одного Autosport, а не окремий V1/post-V1 продукт.
 
 Learning records фіксують рішення до outcome: доступні дані, probabilities (коли вони входять у strategy contract), features, odds, candidate positions/stake vector, обраний/відхилений action, strategy/model/config version та risk snapshot. Це забезпечує чесне post-settlement evaluation та захист від future leakage.
 
@@ -60,23 +62,25 @@ Learning records фіксують рішення до outcome: доступні 
 
 ## 9. Релізи та whole-product development
 
-Версії є milestones, а не ізольованими фазами. Команда може паралельно розвивати ingestion, replay, portfolio, agents, Windows UI, performance та packaging, якщо це не створює конфліктів. Перший release candidate повинен уже бути цілісним Windows-продуктом із агентами, а не throwaway demo.
+Autosport є **одним продуктом**. Версії, build numbers, release candidates і проміжні milestones — це ідентифікатори стану та точки перевірки, а не окремі продукти, фази «V1/post-V1» чи підстава відкладати частину whole-product scope. Команда може паралельно розвивати causal data/replay, research/science, live market intelligence, execution reality, portfolio/risk, learning, provider/multi-sport capability, Windows/NVDA, reliability/performance, packaging та operator workflow, якщо semantic ownership і залежності дозволяють це робити без реальних конфліктів.
 
-Орієнтовні milestones: v0.1 — runnable vertical slice з causal replay, paper bankroll, базовими tickets, semantic UI та deterministic tests; v0.2 — високочастотний store, розширені markets, portfolio exposure та incremental recomputation; v0.3 — multi-agent research/forecast/critic/learning, evaluation lab і масштабний replay; v0.4 — optimized combinatorial engine, long-run experiments, live-observation adapters і production-like resilience; v1.0 — стабільний packaged Windows product із перевіреною доступністю, performance, recovery та reproducible release evidence.
+Проміжний release candidate корисний лише як перевірний стан того самого продукту. Він не означає готовність і не змінює scope. Сильний candidate має збирати якомога більше вже доведених capability lanes в один відтворюваний Windows artifact, але незакриті capability/evidence gaps залишаються незакритими незалежно від номеру версії.
 
-Після exact V1: reliability/bug bash -> professional paper/live-observation qualification -> #355 live portfolio intelligence -> bookmaker read-only capability -> supervised execution -> real execution ledger/reconciliation -> bounded autonomous execution лише після окремих profitability/safety/compliance gates.
+Немає окремої черги «після V1». Reliability/bug bash, professional paper/live-observation qualification, #355 live portfolio intelligence, bookmaker read-only capability, supervised execution, execution ledger/reconciliation, learning, accessibility, packaging та майбутня bounded autonomous execution — це причинно пов’язані частини одного Autosport. Вони інтегруються у правильному порядку за доказами й залежностями, але всі скорочують шлях до `TIME_TO_WHOLE_FINISHED_PRODUCT`.
 
 ## 10. Межа реального wagering
 
 Поточна реалізація працює в paper/simulation, historical replay, live-observation/analysis, forecasting і portfolio/risk modes; real-money executor відсутній/disabled, тому `REAL_MONEY_EXECUTION=false`.
 
-Це current truth, а не постійна межа продукту. Майбутня money-moving authority належить окремій #353 програмі й активується поетапно тільки після доказів provider/legal capability, exact reconciliation, duplicate prevention, fail-closed partial execution, user limits/approval level та emergency STOP. V1 не перескакує безпосередньо до необмеженого real-money execution.
+Це current truth, а не постійна межа продукту. Майбутня money-moving authority належить окремій #353 програмі й активується поетапно тільки після доказів provider/legal capability, exact reconciliation, duplicate prevention, fail-closed partial execution, user limits/approval level та emergency STOP. Жоден version/release label сам по собі не дозволяє money-moving behavior і не обходить ці gates.
 
 ## 11. Головний критерій готовності
 
-Автоспорт вважається готовим не через кількість модулів або PR, а коли packaged Windows application дозволяє користувачу клавіатурою/NVDA завантажити або отримати market stream, запустити causal replay/live observation, бачити копійований ринковий стан, керувати віртуальним банком, запускати агентні стратегії, отримувати детерміновані portfolio calculations, проводити settlement, оцінювати результати, відновлювати стан після restart і повторювати експерименти відтворювано.
+Автоспорт вважається готовим не через кількість модулів, PR, commits, tests або назву релізу, а лише коли whole-product evidence доводить завершеність одного цілісного продукту. Packaged Windows application має дозволяти користувачу клавіатурою/NVDA завантажити або отримати market stream, запустити causal replay/live observation, бачити копійований ринковий стан, керувати віртуальним банком, запускати агентні стратегії, отримувати детерміновані portfolio calculations, проводити settlement, оцінювати результати, відновлювати стан після restart і повторювати експерименти відтворювано; окремі provider/execution/learning/reliability capability lanes отримують позитивну truth лише зі своїх канонічних доказів.
+
+Поки ці whole-product умови не доведені, статус не підвищується проміжним release label або частковим milestone.
 
 `HUMAN_TESTED=false`  
 `NVDA_VERIFIED=false`  
 `REAL_MONEY_EXECUTION=false`  
-`V1_READY=false`
+`WHOLE_PRODUCT_COMPLETE=false`

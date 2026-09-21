@@ -41,6 +41,7 @@ class _HeadlessAutosportApp(AutosportApp):
 
     def _build(self) -> None:
         self.shell_built = True
+        self.repair_button = _Button(self)
 
     def update_idletasks(self) -> None:
         return None
@@ -66,6 +67,7 @@ class _HeadlessWindowsAutosportApp(WindowsAutosportApp):
 
     def _build(self) -> None:
         self.shell_built = True
+        self.repair_button = _Button(self)
         self.tickets = SimpleNamespace(
             delete=lambda *_args: None,
             insert=lambda *_args: None,
@@ -82,11 +84,21 @@ class _HeadlessWindowsAutosportApp(WindowsAutosportApp):
 
 
 class _Button:
-    def __init__(self) -> None:
+    def __init__(self, owner=None) -> None:
+        self.owner = owner
         self.states: list[tuple[str, ...]] = []
+        self.focus_calls = 0
+        self.focus_after_accessibility: list[bool] = []
 
     def state(self, values) -> None:
         self.states.append(tuple(values))
+
+    def focus_set(self) -> None:
+        self.focus_calls += 1
+        if self.owner is not None:
+            self.focus_after_accessibility.append(
+                bool(getattr(self.owner, "accessibility_configured", False))
+            )
 
 
 class _ImmediateWorker:
@@ -188,6 +200,8 @@ def test_corrupt_economic_startup_keeps_shell_and_live_observation_reachable(tmp
     assert workspace in app._recovery_required_workspaces
     assert app.status.value == text("ui.status.startup.recovery_required")
     assert "недоступний до успішного відновлення" in app.bank.value
+    assert app.repair_button.focus_calls == 1
+    assert app.repair_button.focus_after_accessibility == [True]
 
     live_result = object()
     provider = object()
@@ -247,6 +261,8 @@ def test_windows_startup_uses_native_recovery_quarantine_and_replay_unblocks(tmp
     assert app._recovery_required_workspaces == set()
     assert app._workspace_requires_recovery(workspace)
     assert app._startup_economic_error == "ValueError: corrupt paper state"
+    assert app.repair_button.focus_calls == 1
+    assert app.repair_button.focus_after_accessibility == [True]
 
     # Windows recovery already owns this exact lifecycle. A successful terminal
     # recovery clears its native quarantine; the base startup path must not leave
@@ -304,3 +320,5 @@ def test_valid_economic_startup_preserves_existing_ready_state(tmp_path: Path) -
     assert app._recovery_required_workspaces == set()
     assert app.status.value.startswith("Готово.")
     assert "10000" in app.bank.value
+    assert app.repair_button.focus_calls == 0
+    assert app.repair_button.focus_after_accessibility == []

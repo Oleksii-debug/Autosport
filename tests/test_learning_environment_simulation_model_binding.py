@@ -95,5 +95,109 @@ class SimulationModelBindingTests(unittest.TestCase):
         self.assertEqual(transition.reward_id, matching_reward.reward_id)
 
 
+    def test_simulated_outcome_rejects_observed_reward_without_consuming_action(self) -> None:
+        environment, action = self._pending_action()
+        outcome = Outcome(
+            environment_id=environment.environment_id,
+            action_id=action.action_id,
+            revealed_at="2026-09-21T09:02:00+00:00",
+            truth=EvidenceTruth.SIMULATED,
+            evidence=(("counterfactual", "outcome"),),
+            simulation_model_id="simulator-a-v1",
+        )
+        mismatched_reward = RewardEvidence(
+            environment_id=environment.environment_id,
+            action_id=action.action_id,
+            outcome_id=outcome.outcome_id,
+            reward=Decimal("0.125"),
+            available_at="2026-09-21T09:02:01+00:00",
+            truth=EvidenceTruth.OBSERVED,
+            evidence=(("reward_rule", "observed-return-v1"),),
+        )
+
+        with self.assertRaisesRegex(
+            LearningEnvironmentError,
+            "truth labels must match exactly",
+        ):
+            environment.resolve(
+                action.action_id,
+                outcome=outcome,
+                reward=mismatched_reward,
+                resolved_at="2026-09-21T09:02:02+00:00",
+            )
+
+        matching_reward = RewardEvidence(
+            environment_id=environment.environment_id,
+            action_id=action.action_id,
+            outcome_id=outcome.outcome_id,
+            reward=Decimal("0.125"),
+            available_at="2026-09-21T09:02:01+00:00",
+            truth=EvidenceTruth.SIMULATED,
+            evidence=(("reward_rule", "counterfactual-return-v1"),),
+            simulation_model_id="simulator-a-v1",
+        )
+        transition = environment.resolve(
+            action.action_id,
+            outcome=outcome,
+            reward=matching_reward,
+            resolved_at="2026-09-21T09:02:02+00:00",
+        )
+
+        self.assertEqual(transition.action_id, action.action_id)
+        self.assertEqual(transition.outcome_id, outcome.outcome_id)
+        self.assertEqual(transition.reward_id, matching_reward.reward_id)
+
+    def test_observed_outcome_rejects_simulated_reward_without_consuming_action(self) -> None:
+        environment, action = self._pending_action()
+        outcome = Outcome(
+            environment_id=environment.environment_id,
+            action_id=action.action_id,
+            revealed_at="2026-09-21T09:02:00+00:00",
+            truth=EvidenceTruth.OBSERVED,
+            evidence=(("settled_result", "observed"),),
+        )
+        mismatched_reward = RewardEvidence(
+            environment_id=environment.environment_id,
+            action_id=action.action_id,
+            outcome_id=outcome.outcome_id,
+            reward=Decimal("0.125"),
+            available_at="2026-09-21T09:02:01+00:00",
+            truth=EvidenceTruth.SIMULATED,
+            evidence=(("reward_rule", "counterfactual-return-v1"),),
+            simulation_model_id="simulator-a-v1",
+        )
+
+        with self.assertRaisesRegex(
+            LearningEnvironmentError,
+            "truth labels must match exactly",
+        ):
+            environment.resolve(
+                action.action_id,
+                outcome=outcome,
+                reward=mismatched_reward,
+                resolved_at="2026-09-21T09:02:02+00:00",
+            )
+
+        matching_reward = RewardEvidence(
+            environment_id=environment.environment_id,
+            action_id=action.action_id,
+            outcome_id=outcome.outcome_id,
+            reward=Decimal("0.125"),
+            available_at="2026-09-21T09:02:01+00:00",
+            truth=EvidenceTruth.OBSERVED,
+            evidence=(("reward_rule", "observed-return-v1"),),
+        )
+        transition = environment.resolve(
+            action.action_id,
+            outcome=outcome,
+            reward=matching_reward,
+            resolved_at="2026-09-21T09:02:02+00:00",
+        )
+
+        self.assertEqual(transition.action_id, action.action_id)
+        self.assertEqual(transition.outcome_id, outcome.outcome_id)
+        self.assertEqual(transition.reward_id, matching_reward.reward_id)
+
+
 if __name__ == "__main__":
     unittest.main()

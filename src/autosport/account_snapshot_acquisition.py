@@ -68,6 +68,20 @@ def _canonical_sha256(value: object) -> str:
     return sha256(_canonical_json(value).encode("utf-8")).hexdigest()
 
 
+def _official_api_manifest_sha256() -> str:
+    return _canonical_sha256(
+        {
+            "schema": "autosport.betfair-account-snapshot-integration",
+            "schema_version": 1,
+            "adapter_id": ADAPTER_ID,
+            "adapter_version": ADAPTER_VERSION,
+            "integration_kind": BookmakerIntegrationKind.OFFICIAL_API.value,
+            "account_endpoint": ACCOUNT_JSON_RPC_ENDPOINT,
+            "betting_endpoint": BETTING_JSON_RPC_ENDPOINT,
+        }
+    )
+
+
 def _text(value: object, field: str) -> str:
     if type(value) is not str or not value or value != value.strip():
         raise AccountSnapshotAcquisitionError(
@@ -170,6 +184,10 @@ class AccountSnapshotAcquisitionReceipt:
             "integration_kind",
         ):
             _text(getattr(self, field), field)
+        if self.integration_kind != BookmakerIntegrationKind.OFFICIAL_API.value:
+            raise AccountSnapshotAcquisitionError(
+                "integration_kind must be official_api for Betfair acquisition receipts"
+            )
         if type(self.requested_capabilities) is not tuple or not self.requested_capabilities:
             raise AccountSnapshotAcquisitionError(
                 "requested_capabilities must be a non-empty tuple"
@@ -318,21 +336,12 @@ class BetfairAccountSnapshotAcquirer:
 def _official_api_integration(
     snapshot: BookmakerAccountSnapshot,
 ) -> BookmakerIntegrationEvidence:
-    manifest = {
-        "schema": "autosport.betfair-account-snapshot-integration",
-        "schema_version": 1,
-        "adapter_id": ADAPTER_ID,
-        "adapter_version": ADAPTER_VERSION,
-        "integration_kind": BookmakerIntegrationKind.OFFICIAL_API.value,
-        "account_endpoint": ACCOUNT_JSON_RPC_ENDPOINT,
-        "betting_endpoint": BETTING_JSON_RPC_ENDPOINT,
-    }
     evidence = bind_bookmaker_integration(
         snapshot.profile,
         integration_kind=BookmakerIntegrationKind.OFFICIAL_API,
         observed_at=snapshot.observed_at,
         source_ref=_INTEGRATION_SOURCE_REF,
-        source_payload_sha256=_canonical_sha256(manifest),
+        source_payload_sha256=_official_api_manifest_sha256(),
     )
     if evidence.integration_kind is not BookmakerIntegrationKind.OFFICIAL_API:
         raise AccountSnapshotAcquisitionError(
@@ -584,6 +593,13 @@ class _AccountSnapshotStore:
         if integration.integration_kind is not BookmakerIntegrationKind.OFFICIAL_API:
             raise AccountSnapshotAcquisitionError(
                 "durable Betfair acquisition is not bound to official API evidence"
+            )
+        if (
+            integration.source_ref != _INTEGRATION_SOURCE_REF
+            or integration.source_payload_sha256 != _official_api_manifest_sha256()
+        ):
+            raise AccountSnapshotAcquisitionError(
+                "durable Betfair integration manifest drifted from canonical authority"
             )
 
         requested_raw = record["requested_capabilities"]

@@ -176,6 +176,31 @@ def test_sample_id_alias_cannot_duplicate_identical_causal_case():
         )
 
 
+@pytest.mark.parametrize(
+    "propensities",
+    (
+        (
+            ("BET", Decimal("0.75")),
+            ("NO_BET", Decimal("0.50")),
+            ("WAIT", Decimal("0.25")),
+        ),
+        (
+            ("BET", Decimal("0.20")),
+            ("NO_BET", Decimal("0.20")),
+            ("WAIT", Decimal("0.20")),
+        ),
+    ),
+)
+def test_behavior_propensity_mass_must_be_exactly_one(propensities):
+    actions = ("BET", "NO_BET", "WAIT")
+
+    with pytest.raises(ValueError, match="sum to exactly 1"):
+        replace(
+            _case(actions),
+            behavior_propensities=propensities,
+        )
+
+
 def test_distinct_source_evidence_remains_distinct_causal_support():
     actions = ("BET", "NO_BET", "WAIT")
     predecessor = _policy("NO_BET", actions)

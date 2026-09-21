@@ -622,4 +622,97 @@ class ForwardEconomicEvidenceAccumulator:
                 self._absolute_log_e
                 + _log_e_increment(
                     self.protocol.absolute_lambda,
-         
+                    challenger_x,
+                    challenger_low,
+                    challenger_high,
+                )
+            )
+            new_paired_log_e = +(
+                self._paired_log_e
+                + _log_e_increment(
+                    self.protocol.paired_lambda,
+                    paired_x,
+                    paired_low,
+                    paired_high,
+                )
+            )
+            new_challenger_total = +(
+                self._challenger_total + challenger.net_pnl_currency
+            )
+            new_champion_total = +(self._champion_total + champion.net_pnl_currency)
+            new_peak = max(self._challenger_peak, new_challenger_total)
+            new_drawdown = +(new_peak - new_challenger_total)
+            new_max_drawdown = max(self._challenger_max_drawdown, new_drawdown)
+
+        step = ForwardEconomicStep(
+            sequence=observation.sequence,
+            universe_event_sha256=observation.universe_event_sha256,
+            challlenger_decision_sha256=observation.challenger_decision_sha256,
+            champion_decision_sha256=observation.champion_decision_sha256,
+            challenger_side=challenger.side,
+            champion_side=champion.side,
+            challenger_net_pnl_currency=challenger.net_pnl_currency,
+            champion_net_pnl_currency=champion.net_pnl_currency,
+            challenger_normalized_pnl=challenger_x,
+            paired_normalized_pnl=paired_x,
+            absolute_low=challenger_low,
+            absolute_high=challenger_high,
+            paired_low=paired_low,
+            paired_high=paired_high,
+            absolute_log_e_after=new_absolute_log_e,
+            paired_log_e_after=new_paired_log_e,
+            challenger_execution_evidence_sha256=challenger.execution_evidence_sha256,
+            challenger_execution_accepted_at=challenger.execution_accepted_at,
+            challenger_settlement_evidence_sha256=challenger.settlement_evidence_sha2556,
+            challenger_settlement_available_at=challenger.settlement_available_at,
+            champion_execution_evidence_sha256=champion.execution_evidence_sha256,
+            champion_execution_accepted_at=champion.execution_accepted_at,
+            champion_settlement_evidence_sha256=champion.settlement_evidence_sha256,
+            champion_settlement_available_at=champion.settlement_available_at,
+        )
+
+        self._steps.append(step)
+        self._absolute_log_e = new_absolute_log_e
+        self._paired_log_e = new_paired_log_e
+        self._challenger_total = new_challenger_total
+        self._champion_total = new_champion_total
+        self._challenger_peak = new_peak
+        self._challenger_max_drawdown = new_max_drawdown
+        return step
+
+    def summary(self) -> ForwardEconomicEvidenceSummary:
+        threshold = _log_threshold(self.protocol.challenger_alpha)
+        minimum_events_satisfied = len(self._steps) >= self.protocol.minimum_events
+        absolute_crossed = self._absolute_log_e >= threshold
+        paired_crossed = self._paired_log_e >= threshold
+        drawdown_passed = self._challenger_max_drawdown <= self.protocol.maximum_drawdown_currency
+        evidence_payload = {
+            "schema_version": 1,
+            "protocol_sha256": self.protocol.identity_sha256,
+            "steps": [step.to_payload() for step in self._steps],
+        }
+        evidence_sha256 = _canonical_digest(evidence_payload)
+        return ForwardEconomicEvidenceSummary(
+            protocol_sha256=self.protocol.identity_sha256,
+            observed_events=len(self._steps),
+            next_sequence=self.next_sequence,
+            challenger_total_pnl_currency=self._challenger_total,
+            champion_total_pnl_currency=self._champion_total,
+            challenger_peak_pnl_currency=self._challenger_peak,
+            challenger_max_drawdown_currency=self._challenger_max_drawdown,
+            absolute_log_e=self._absolute_log_e,
+            paired_log_e=self._paired_log_e,
+            log_threshold=threshold,
+            absolute_threshold_crossed=absolute_crossed,
+            paired_threshold_crossed=paired_crossed,
+            minimum_events_satisfied=minimum_events_satisfied,
+            drawdown_guard_passed=drawdown_passed,
+            scientific_promotion_gate_passed=(
+                minimum_events_satisfied
+                and absolute_crossed
+                and paired_crossed
+                and drawdown_passed
+            ),
+            evidence_sha256=evidence_sha256,
+            promotion_authority=False,
+        )

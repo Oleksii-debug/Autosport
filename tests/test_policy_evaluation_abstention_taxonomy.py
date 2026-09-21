@@ -60,7 +60,10 @@ def _case(actions: tuple[str, ...]) -> PolicyEvaluationCase:
         admissible_actions=ordered,
         action_rewards=tuple((action, Decimal("0")) for action in ordered),
         action_costs=tuple((action, Decimal("0")) for action in ordered),
-        behavior_propensities=tuple((action, Decimal("0.5")) for action in ordered),
+        behavior_propensities=tuple(
+            (action, Decimal("0.34") if index == 0 else Decimal("0.33"))
+            for index, action in enumerate(ordered)
+        ),
         reward_truth=EvidenceTruth.OBSERVED,
         reward_mode=PolicyRewardMode.MECHANICAL_PAPER,
         source_evidence_sha256=EVIDENCE,

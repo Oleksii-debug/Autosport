@@ -444,10 +444,13 @@ class TicketLeg:
     selection_id: str
     locked_odds: Decimal
     sport: str | None = None
+    exchange_side: str | None = None
 
     def __post_init__(self) -> None:
         if self.sport is not None:
             _canonical_sport_value(self.sport)
+        if self.exchange_side is not None:
+            _canonical_exchange_side(self.exchange_side)
 
     @property
     def quote_key(self) -> str:
@@ -456,6 +459,7 @@ class TicketLeg:
             self.market_id,
             self.selection_id,
             self.sport,
+            self.exchange_side,
         )
 
 

@@ -81,12 +81,7 @@ class BetfairMarketBookDelayObservation:
 
 
 def _canonical_network_transport(client: _base.BetfairReadOnlyClient) -> bool:
-    """Return true only for the unmodified built-in production HTTP transport.
-
-    A structurally compatible caller transport is intentionally insufficient for
-    positive freshness. Instance-level ``post`` replacement and class-level
-    replacement after this module was imported are rejected as well.
-    """
+    """Return true only for the unmodified built-in production HTTP transport."""
 
     transport = client._transport
     if type(transport) is not _base.UrllibBetfairHttpTransport:
@@ -136,10 +131,6 @@ def _read_market_book_delay(
     if not isinstance(payload, bytes):
         raise BetfairMarketBookFreshnessError("Betfair transport must return bytes")
 
-    # Positive evidence uses receipt time from the product's real wall clock,
-    # never the BetfairReadOnlyClient injected test clock. Injected transports
-    # remain deterministic by using the existing client clock for negative/parser
-    # evidence, which cannot authorize FRESH below.
     observed_at = (
         datetime.now(timezone.utc).isoformat()
         if network_origin
@@ -239,7 +230,11 @@ def _install_market_book_authority() -> None:
         return record
 
     def assert_authoritative(self: BetfairMarketBookDelayObservation) -> None:
-        _record(self)
+        record = _record(self)
+        if not self.is_market_data_delayed and not record[2]:
+            raise BetfairMarketBookFreshnessError(
+                "positive market-book observation lacks canonical production network origin"
+            )
 
     def assert_positive_authoritative(
         self: BetfairMarketBookDelayObservation,

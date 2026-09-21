@@ -122,52 +122,6 @@ class SportMemoryArtifact:
     age_seconds: int | None
     authority_generation_sha256: str
 
-    def __post_init__(self) -> None:
-        _sha256("matchup_id", self.matchup_id)
-        _sha256("subject_memory_id", self.subject_memory_id)
-        _sha256("opponent_memory_id", self.opponent_memory_id)
-        if self.subject_memory_id == self.opponent_memory_id:
-            raise SportMemoryError("matchup memory identities must be distinct")
-        subject = _text(
-            "subject_participant_entity_id",
-            self.subject_participant_entity_id,
-        )
-        opponent = _text(
-            "opponent_participant_entity_id",
-            self.opponent_participant_entity_id,
-        )
-        if subject == opponent:
-            raise SportMemoryError("matchup participants must be distinct")
-        if type(self.scope) is not SportMemoryScope:
-            raise SportMemoryError("matchup scope must be canonical SportMemoryScope")
-        view = _require_identity_view(self.identity_view, name="identity_view")
-        if view is not IdentityView.AS_KNOWN_AT_DECISION:
-            raise SportMemoryError(
-                "decision-time matchup requires AS_KNOWN_AT_DECISION view"
-            )
-        as_of = _instant("matchup as_of", self.as_of)
-        cutoff = _instant("matchup causal_cutoff", self.causal_cutoff)
-        published = _instant("matchup published_at", self.published_at)
-        if cutoff > as_of:
-            raise SportMemoryError("matchup causal cutoff cannot exceed as_of")
-        if published > as_of:
-            raise SportMemoryError("matchup publication cannot exceed as_of")
-        if published < cutoff:
-            raise SportMemoryError(
-                "matchup publication cannot precede causal cutoff"
-            )
-        for name in ("subject_support", "opponent_support"):
-            if _nonnegative_int(name, getattr(self, name)) <= 0:
-                raise SportMemoryError(f"{name} must be positive")
-        _text("subject_uncertainty", self.subject_uncertainty)
-        _text("opponent_uncertainty", self.opponent_uncertainty)
-        _nonnegative_int("subject_age_seconds", self.subject_age_seconds)
-        _nonnegative_int("opponent_age_seconds", self.opponent_age_seconds)
-        _sha256(
-            "authority_generation_sha256",
-            self.authority_generation_sha256,
-        )
-
     def payload(self, *, include_id: bool = True) -> dict[str, object]:
         result: dict[str, object] = {
             "participant_entity_id": self.participant_entity_id,
@@ -215,6 +169,52 @@ class SportMemoryMatchupEvidence:
     subject_age_seconds: int
     opponent_age_seconds: int
     authority_generation_sha256: str
+
+    def __post_init__(self) -> None:
+        _sha256("matchup_id", self.matchup_id)
+        _sha256("subject_memory_id", self.subject_memory_id)
+        _sha256("opponent_memory_id", self.opponent_memory_id)
+        if self.subject_memory_id == self.opponent_memory_id:
+            raise SportMemoryError("matchup memory identities must be distinct")
+        subject = _text(
+            "subject_participant_entity_id",
+            self.subject_participant_entity_id,
+        )
+        opponent = _text(
+            "opponent_participant_entity_id",
+            self.opponent_participant_entity_id,
+        )
+        if subject == opponent:
+            raise SportMemoryError("matchup participants must be distinct")
+        if type(self.scope) is not SportMemoryScope:
+            raise SportMemoryError("matchup scope must be canonical SportMemoryScope")
+        view = _require_identity_view(self.identity_view, name="identity_view")
+        if view is not IdentityView.AS_KNOWN_AT_DECISION:
+            raise SportMemoryError(
+                "decision-time matchup requires AS_KNOWN_AT_DECISION view"
+            )
+        as_of = _instant("matchup as_of", self.as_of)
+        cutoff = _instant("matchup causal_cutoff", self.causal_cutoff)
+        published = _instant("matchup published_at", self.published_at)
+        if cutoff > as_of:
+            raise SportMemoryError("matchup causal cutoff cannot exceed as_of")
+        if published > as_of:
+            raise SportMemoryError("matchup publication cannot exceed as_of")
+        if published < cutoff:
+            raise SportMemoryError(
+                "matchup publication cannot precede causal cutoff"
+            )
+        for name in ("subject_support", "opponent_support"):
+            if _nonnegative_int(name, getattr(self, name)) <= 0:
+                raise SportMemoryError(f"{name} must be positive")
+        _text("subject_uncertainty", self.subject_uncertainty)
+        _text("opponent_uncertainty", self.opponent_uncertainty)
+        _nonnegative_int("subject_age_seconds", self.subject_age_seconds)
+        _nonnegative_int("opponent_age_seconds", self.opponent_age_seconds)
+        _sha256(
+            "authority_generation_sha256",
+            self.authority_generation_sha256,
+        )
 
     def payload(self, *, include_id: bool = True) -> dict[str, object]:
         result: dict[str, object] = {
@@ -699,7 +699,7 @@ class SportMemoryRuntime:
                 raise SportMemoryError(
                     f"decision-time {label} memory lacks rating/uncertainty"
                 )
-            if artifact.age_seconds is None:
+            if artifact.age_seconds is None or artifact.last_observed_at is None:
                 raise SportMemoryError(
                     f"decision-time {label} memory lacks staleness evidence"
                 )
@@ -738,8 +738,30 @@ class SportMemoryRuntime:
             opponent_support=opponent.support,
             subject_uncertainty=subject.uncertainty,
             opponent_uncertainty=opponent.uncertainty,
-            subject_age_seconds=subject.age_seconds,
-            opponent_age_seconds=opponent.age_seconds,
+            subject_age_seconds=max(
+                0,
+                int(
+                    (
+                        decision_time
+                        - _instant(
+                            "subject last_observed_at",
+                            subject.last_observed_at,
+                        )
+                    ).total_seconds()
+                ),
+            ),
+            opponent_age_seconds=max(
+                0,
+                int(
+                    (
+                        decision_time
+                        - _instant(
+                            "opponent last_observed_at",
+                            opponent.last_observed_at,
+                        )
+                    ).total_seconds()
+                ),
+            ),
             authority_generation_sha256=self.authority_generation_sha256,
         )
         return replace(

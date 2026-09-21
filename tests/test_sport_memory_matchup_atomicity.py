@@ -7,6 +7,7 @@ import pytest
 
 from autosport.opponent_intelligence import IdentityView
 from autosport.sport_memory_runtime import (
+    DecisionMemoryConsumption,
     SportMemoryArtifact,
     SportMemoryError,
     SportMemoryMatchupEvidence,
@@ -92,6 +93,50 @@ def _runtime(tmp_path) -> tuple[_LowLevelRuntime, SportMemoryArtifact, SportMemo
     runtime._artifacts[opponent.memory_id] = opponent
     runtime._persist()
     return runtime, subject, opponent
+
+
+def _seed_legacy_consumption(
+    runtime: _LowLevelRuntime,
+    *,
+    decision_id: str,
+    memory_id: str,
+    decision_cutoff: str,
+    consumed_at: str,
+    expected_scope: SportMemoryScope,
+    expected_view: IdentityView = IdentityView.AS_KNOWN_AT_DECISION,
+) -> DecisionMemoryConsumption:
+    """Seed one exact pre-atomicity durable record without using public authority.
+
+    These tests reproduce bytes that an older product version could already have
+    persisted before the current bound-runtime guard existed. Constructing that
+    historical prefix through today's guarded public method would test the guard,
+    not restart compatibility.
+    """
+    artifact = runtime.get(memory_id)
+    assert artifact.scope == expected_scope
+    assert artifact.identity_view is expected_view
+    payload = {
+        "decision_id": decision_id,
+        "memory_id": artifact.memory_id,
+        "decision_cutoff": decision_cutoff,
+        "consumed_at": consumed_at,
+    }
+    record = DecisionMemoryConsumption(
+        consumption_id=_digest(payload),
+        **payload,
+    )
+    runtime._validate_consumption(record, artifact)
+    runtime._assert_no_participant_rebind(
+        decision_id=decision_id,
+        artifact=artifact,
+    )
+    key = (decision_id, artifact.memory_id)
+    assert key not in runtime._decision_consumptions
+    assert record.consumption_id not in runtime._consumptions
+    runtime._consumptions[record.consumption_id] = record
+    runtime._decision_consumptions[key] = record.consumption_id
+    runtime._persist()
+    return record
 
 
 def _matchup(
@@ -187,7 +232,8 @@ def test_legacy_single_member_crash_prefix_recovers_with_original_timestamp(tmp_
     runtime, subject, opponent = _runtime(tmp_path)
     matchup = _matchup(subject, opponent)
 
-    legacy_subject = runtime.record_consumption(
+    legacy_subject = _seed_legacy_consumption(
+        runtime,
         decision_id="decision-recover",
         memory_id=subject.memory_id,
         decision_cutoff=T2,
@@ -228,7 +274,8 @@ def test_legacy_partial_with_different_cutoff_still_fails_closed(tmp_path):
     runtime, subject, opponent = _runtime(tmp_path)
     matchup = _matchup(subject, opponent)
 
-    runtime.record_consumption(
+    _seed_legacy_consumption(
+        runtime,
         decision_id="decision-conflict",
         memory_id=subject.memory_id,
         decision_cutoff=T1,

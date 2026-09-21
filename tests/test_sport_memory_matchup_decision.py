@@ -152,6 +152,11 @@ class _LowLevelSportMemoryRuntime(_PublicSportMemoryRuntime):
 SportMemoryRuntime = _LowLevelSportMemoryRuntime
 
 
+class _ForgedVerifierRuntime(_LowLevelSportMemoryRuntime):
+    def verify_matchup_evidence(self, matchup):
+        raise AssertionError("attacker verifier must never be dispatched")
+
+
 def _scope() -> SportMemoryScope:
     return SportMemoryScope(
         sport_id="tennis",
@@ -326,6 +331,21 @@ def test_matchup_evidence_binds_two_memories_into_normal_opportunity_evidence(
             base,
             matchup,
             runtime=runtime,
+        )
+
+    attacker = _ForgedVerifierRuntime.initialize_pristine(
+        tmp_path / "attacker-sport-memory.json",
+        _MatchupAuthority(),
+        authority_generation_sha256=GENERATION,
+    )
+    with pytest.raises(
+        SportMemoryError,
+        match="canonical bound sport-memory runtime",
+    ):
+        bind_sport_memory_to_opportunity_evidence(
+            base,
+            matchup,
+            runtime=attacker,
         )
 
     records = runtime.record_matchup_consumption(

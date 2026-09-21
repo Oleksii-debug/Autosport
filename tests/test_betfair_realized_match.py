@@ -8,6 +8,7 @@ from pathlib import Path
 
 import pytest
 
+import autosport.betfair_realized_match as realized_match
 from autosport.betfair_account_readonly import (
     BetfairReadOnlyClient,
     BetfairSessionCredentials,
@@ -746,3 +747,15 @@ def test_decimal_identity_ignores_ambient_context_for_all_economic_fields(
         context.rounding = ROUND_DOWN
         low_precision.assert_authoritative()
         high_precision.assert_authoritative()
+
+
+def test_exact_decimal_serializer_does_not_collapse_distinct_values() -> None:
+    with localcontext() as context:
+        context.prec = 2
+        context.rounding = ROUND_DOWN
+        first = realized_match._decimal_text(Decimal("1.23456789"))
+        second = realized_match._decimal_text(Decimal("1.23556789"))
+
+    assert first == "1.23456789"
+    assert second == "1.23556789"
+    assert first != second

@@ -297,3 +297,31 @@ def test_identical_revalidation_is_idempotent_but_same_time_conflict_fails():
     conflicting = _evidence(profile, source_payload_sha256="b" * 64)
     with pytest.raises(CapabilityEvidenceError, match="conflicting"):
         journal.publish(conflicting)
+
+
+def test_credential_rotation_revalidation_can_link_predecessor_and_recover():
+    first = _profile()
+    old = _evidence(first)
+    journal = CapabilityEvidenceJournal()
+    journal.publish(old)
+
+    second = _profile(observed_at="2026-09-21T10:05:00+00:00")
+    fresh = _evidence(
+        second,
+        scope=_scope(credential="app-v2"),
+        observed_at=second.observed_at,
+        committed_at="2026-09-21T10:06:00+00:00",
+        review_due_at="2026-09-22T10:06:00+00:00",
+        predecessor_id=old.evidence_id,
+    )
+    journal.publish(fresh)
+    journal.publish_availability(
+        _availability(fresh, observed_at="2026-09-21T10:07:00+00:00")
+    )
+    decision = journal.resolve(
+        _requirement(scope=_scope(credential="app-v2")),
+        {first.profile_id: first, second.profile_id: second},
+        as_of="2026-09-21T10:08:00+00:00",
+    )
+    assert decision.allowed
+    assert decision.evidence_id == fresh.evidence_id

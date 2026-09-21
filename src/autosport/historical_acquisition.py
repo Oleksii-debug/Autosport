@@ -61,6 +61,43 @@ def _canonical_hash(value: Any) -> str:
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
+def _require_staged_digest(path: Path, expected_sha256: str, *, field: str) -> str:
+    actual_sha256 = sha256_file(path)
+    if actual_sha256 != expected_sha256:
+        raise ProviderPayloadError(f"{field} bytes changed after child capture")
+    return actual_sha256
+
+
+def _read_strict_json_object(path: Path, *, field: str) -> dict[str, Any]:
+    try:
+        raw = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeError) as exc:
+        raise ProviderPayloadError(f"{field} must be readable UTF-8 JSON") from exc
+
+    def reject_duplicate_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+        payload: dict[str, Any] = {}
+        for key, value in pairs:
+            if key in payload:
+                raise ProviderPayloadError(f"{field} contains duplicate JSON key {key!r}")
+            payload[key] = value
+        return payload
+
+    def reject_non_finite(value: str) -> None:
+        raise ProviderPayloadError(f"{field} contains non-finite JSON constant {value!r}")
+
+    try:
+        payload = json.loads(
+            raw,
+            object_pairs_hook=reject_duplicate_keys,
+            parse_constant=reject_non_finite,
+        )
+    except json.JSONDecodeError as exc:
+        raise ProviderPayloadError(f"{field} must be valid JSON") from exc
+    if not isinstance(payload, dict):
+        raise ProviderPayloadError(f"{field} must be a JSON object")
+    return payload
+
+
 def capture_historical_acquisition_bundle(
     provider: ParlayApiTableTennisProvider,
     *,
@@ -230,6 +267,54 @@ def capture_historical_acquisition_bundle(
             "trusted_outcome_source_admissible": result_report.trusted_outcome_source_admissible,
             "coverage_preflight": coverage_evidence,
         }
+
+        # Re-resolve every child byte set at the bundle publication boundary.
+        # Returned report digests are authority claims, not permission to trust a
+        # pathname that may have been replaced after the child function returned.
+        for index, entry in enumerate(snapshot_entries, start=1):
+            market_path = staging / str(entry["market_file"])
+            snapshot_evidence_path = staging / str(entry["evidence_file"])
+            market_sha256 = _require_staged_digest(
+                market_path,
+                str(entry["market_sha256"]),
+                field=f"snapshot[{index}].market",
+            )
+            evidence_sha256 = _require_staged_digest(
+                snapshot_evidence_path,
+                str(entry["evidence_sha256"]),
+                field=f"snapshot[{index}].evidence",
+            )
+            snapshot_evidence = _read_strict_json_object(
+                snapshot_evidence_path,
+                field=f"snapshot[{index}].evidence",
+            )
+            if snapshot_evidence.get("market_sha256") != market_sha256:
+                raise ProviderPayloadError(
+                    f"snapshot[{index}].evidence market_sha256 does not bind staged market bytes"
+                )
+            entry["market_sha256"] = market_sha256
+            entry["evidence_sha256"] = evidence_sha256
+
+        result_capture_sha256 = _require_staged_digest(
+            result_path,
+            result_report.capture_sha256,
+            field="match_results.capture",
+        )
+        result_evidence_sha256 = _require_staged_digest(
+            result_evidence_path,
+            str(result_entry["evidence_sha256"]),
+            field="match_results.evidence",
+        )
+        result_evidence = _read_strict_json_object(
+            result_evidence_path,
+            field="match_results.evidence",
+        )
+        if result_evidence.get("capture_sha256") != result_capture_sha256:
+            raise ProviderPayloadError(
+                "match_results.evidence capture_sha256 does not bind staged capture bytes"
+            )
+        result_entry["capture_sha256"] = result_capture_sha256
+        result_entry["evidence_sha256"] = result_evidence_sha256
 
         identity_payload = {
             "schema_version": 1,

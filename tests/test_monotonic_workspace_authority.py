@@ -27,6 +27,16 @@ def _sha(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
+@pytest.fixture(autouse=True)
+def _isolate_root_selection_machine_state(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Keep machine-global root receipts isolated across unit-test workspaces."""
+
+    monkeypatch.setenv("LOCALAPPDATA", str((tmp_path / "ProfileState").resolve()))
+    monkeypatch.delenv("XDG_STATE_HOME", raising=False)
+
+
 def _authority(
     tmp_path: Path,
     *,

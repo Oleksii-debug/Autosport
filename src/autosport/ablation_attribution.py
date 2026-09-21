@@ -320,6 +320,12 @@ def evaluate_ablation_attribution(
             protocol_id = left
         if control.payload.get("seed") != treatment.payload.get("seed"):
             reasons.append("RANDOM_SEED_MISMATCH")
+        control_config = _payload_sha(control.payload, "config_sha256")
+        treatment_config = _payload_sha(treatment.payload, "config_sha256")
+        if control_config is None or treatment_config is None:
+            reasons.append("EXPERIMENT_CONFIG_IDENTITY_MISSING")
+        elif control_config != treatment_config:
+            reasons.append("EXPERIMENT_CONFIG_MISMATCH")
 
     protocol = _entry(registry, "ResearchProtocol", protocol_id)
     if protocol_id and protocol is None:

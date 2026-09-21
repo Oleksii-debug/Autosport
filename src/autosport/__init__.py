@@ -53,10 +53,6 @@ from . import _predictive_authority_type_fence as _predictive_authority_type_fen
 from . import _sport_memory_authority_guard as _sport_memory_authority_guard  # noqa: F401,E402
 from . import _sport_memory_cross_store_guard as _sport_memory_cross_store_guard  # noqa: F401,E402
 
-# The canonical policy-utility store must reject polymorphic evidence before any
-# authority-bearing key lookup or durable publication can observe subclass dispatch.
-from . import _policy_utility_store_exact_type_guard as _policy_utility_store_exact_type_guard  # noqa: F401,E402
-
 # Product chrome describes one finished Autosport product. Keep internal/versioned
 # strategy and evidence identities intact while removing legacy V1 product framing.
 from . import _whole_product_title_guard as _whole_product_title_guard  # noqa: F401,E402

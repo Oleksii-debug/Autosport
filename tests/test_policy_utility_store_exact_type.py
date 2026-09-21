@@ -180,7 +180,7 @@ def test_public_module_reload_preserves_fail_before_publish_exact_type_fence() -
     assert result.returncode == 0, result.stdout + result.stderr
 
 
-def test_preimport_fake_reload_finder_marker_cannot_disable_canonical_fence() -> None:
+def test_meta_path_mutation_cannot_disable_intrinsic_exact_type_admission() -> None:
     script = textwrap.dedent(
         """
         from datetime import datetime, timezone
@@ -189,22 +189,22 @@ def test_preimport_fake_reload_finder_marker_cannot_disable_canonical_fence() ->
         import tempfile
         from pathlib import Path
 
+        import autosport.policy_utility_evidence as utility
+
+        assert "autosport._policy_utility_store_exact_type_guard" not in sys.modules
+
         class FakeMarkerFinder:
             __autosport_policy_utility_reload_finder__ = True
 
             def find_spec(self, fullname, path, target=None):
                 return None
 
-        fake = FakeMarkerFinder()
-        sys.meta_path.insert(0, fake)
-
-        import autosport.policy_utility_evidence as utility
-
-        assert any(
-            type(finder).__module__ == "autosport._policy_utility_store_exact_type_guard"
-            and type(finder).__name__ == "_PolicyUtilityReloadFinder"
+        sys.meta_path.insert(0, FakeMarkerFinder())
+        sys.meta_path[:] = [
+            finder
             for finder in sys.meta_path
-        )
+            if type(finder).__module__ != "autosport._policy_utility_store_exact_type_guard"
+        ]
         utility = importlib.reload(utility)
 
         sha_a = "a" * 64
@@ -264,7 +264,7 @@ def test_preimport_fake_reload_finder_marker_cannot_disable_canonical_fence() ->
             except utility.PolicyUtilityError as exc:
                 assert "exact PolicyUtilityEvidence" in str(exc)
             else:
-                raise AssertionError("fake marker disabled exact-type admission")
+                raise AssertionError("meta-path mutation disabled intrinsic exact-type admission")
 
             assert path.read_bytes() == before
             canonical = utility.PolicyUtilityEvidence(**values(episode_id="episode-2"))

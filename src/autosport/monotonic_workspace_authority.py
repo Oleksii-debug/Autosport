@@ -23,6 +23,7 @@ from typing import Final
 
 from .json_integrity import strict_json_loads
 from .monotonic_workspace_binding import (
+    AuthorityRootSelectionBinding,
     WorkspaceBindingConflictError,
     WorkspaceBindingIntegrityError,
     WorkspaceIdentityBinding,
@@ -185,6 +186,86 @@ def default_monotonic_authority_root() -> Path:
             "home directory must be absolute for monotonic authority"
         )
     return home / ".local" / "state" / "autosport" / "monotonic-authority-v1"
+
+
+def default_monotonic_root_selection_binding_root() -> Path:
+    """Return the non-configurable machine receipt root for authority-root selection.
+
+    This intentionally ignores AUTOSPORT_MONOTONIC_AUTHORITY_ROOT. That variable
+    selects the journal root, but must not also select the receipt that proves which
+    journal root an already-bound workspace owns.
+    """
+
+    local_app_data = os.environ.get("LOCALAPPDATA")
+    if local_app_data:
+        base = _absolute_path("LOCALAPPDATA", local_app_data)
+        return (
+            base
+            / "Autosport"
+            / "application-state"
+            / "monotonic-root-selection-v1"
+        )
+
+    xdg_state_home = os.environ.get("XDG_STATE_HOME")
+    if xdg_state_home:
+        base = _absolute_path("XDG_STATE_HOME", xdg_state_home)
+        return base / "autosport" / "monotonic-root-selection-v1"
+
+    try:
+        home = Path.home()
+    except RuntimeError as exc:
+        raise MonotonicAuthorityConfigurationError(
+            "home directory could not be resolved for monotonic root selection"
+        ) from exc
+    if not home.is_absolute():
+        raise MonotonicAuthorityConfigurationError(
+            "home directory must be absolute for monotonic root selection"
+        )
+    return (
+        home
+        / ".local"
+        / "state"
+        / "autosport"
+        / "monotonic-root-selection-v1"
+    )
+
+
+def resolve_monotonic_root_selection_binding_root(
+    workspace: str | Path,
+    authority_root: str | Path,
+) -> Path:
+    """Resolve the machine receipt root and keep it outside both protected trees."""
+
+    workspace_path = _absolute_path("workspace", workspace)
+    authority_path = _absolute_path("authority_root", authority_root)
+    binding_root = default_monotonic_root_selection_binding_root()
+    try:
+        resolved_workspace = workspace_path.resolve(strict=False)
+        resolved_authority = authority_path.resolve(strict=False)
+        resolved_binding = binding_root.resolve(strict=False)
+    except OSError as exc:
+        raise MonotonicAuthorityConfigurationError(
+            "cannot resolve monotonic root-selection trust roots"
+        ) from exc
+
+    for other, label in (
+        (resolved_workspace, "workspace"),
+        (resolved_authority, "authority root"),
+    ):
+        if (
+            resolved_binding == other
+            or resolved_binding.is_relative_to(other)
+            or other.is_relative_to(resolved_binding)
+        ):
+            raise MonotonicAuthorityConfigurationError(
+                "monotonic root-selection binding root and "
+                f"{label} must be disjoint trees"
+            )
+    if binding_root.exists() and not binding_root.is_dir():
+        raise MonotonicAuthorityConfigurationError(
+            "monotonic root-selection binding root must be a directory"
+        )
+    return binding_root
 
 
 def resolve_monotonic_authority_root(
@@ -373,6 +454,12 @@ class MonotonicWorkspaceAuthority:
         self.authority_root = resolve_monotonic_authority_root(
             self.workspace, authority_root
         )
+        self.root_selection_binding_root = (
+            resolve_monotonic_root_selection_binding_root(
+                self.workspace,
+                self.authority_root,
+            )
+        )
         try:
             self.workspace_binding = WorkspaceIdentityBinding.resolve(
                 workspace=self.workspace,
@@ -388,6 +475,17 @@ class MonotonicWorkspaceAuthority:
             self.workspace_binding.workspace_instance_id,
             max_length=256,
         )
+        try:
+            self.root_selection_binding = AuthorityRootSelectionBinding.resolve(
+                binding_root=self.root_selection_binding_root,
+                workspace=self.workspace,
+                authority_root=self.authority_root,
+                workspace_instance_id=self.workspace_instance_id,
+            )
+        except WorkspaceBindingConflictError as exc:
+            raise MonotonicAuthorityConfigurationError(str(exc)) from exc
+        except WorkspaceBindingIntegrityError as exc:
+            raise MonotonicAuthorityIntegrityError(str(exc)) from exc
         self.workspace_binding_path = self.workspace_binding.workspace_marker_path
         namespace_material = "\0".join(
             (AUTHORITY_ID, self.workspace_instance_id, self.domain, self.key)
@@ -642,16 +740,37 @@ class MonotonicWorkspaceAuthority:
 
     def _validate_workspace_binding(self) -> tuple[bool, bool]:
         try:
-            return self.workspace_binding.validate_existing(
+            root_instance_bound, root_path_bound = (
+                self.root_selection_binding.validate_existing(register_path=True)
+            )
+            workspace_bound, path_bound = self.workspace_binding.validate_existing(
                 register_moved_or_copied_path=True
             )
+            if (
+                not root_instance_bound
+                and not root_path_bound
+                and (workspace_bound or path_bound)
+            ):
+                # One-way migration for workspaces bound before root-selection
+                # receipts existed. The currently selected root becomes immutable
+                # before any new authority publication can occur.
+                self.root_selection_binding.ensure_bound()
+            return workspace_bound, path_bound
         except WorkspaceBindingConflictError as exc:
             raise MonotonicAuthorityConfigurationError(str(exc)) from exc
         except WorkspaceBindingIntegrityError as exc:
             raise MonotonicAuthorityIntegrityError(str(exc)) from exc
+        except OSError as exc:
+            raise MonotonicAuthorityIntegrityError(
+                "cannot durably validate monotonic authority root selection"
+            ) from exc
 
     def _ensure_workspace_bound(self) -> None:
         try:
+            # The root-selection receipt is published first. A crash after this
+            # point may leave workspace binding incomplete, but cannot make another
+            # configurable authority root look pristine.
+            self.root_selection_binding.ensure_bound()
             self.workspace_binding.ensure_bound()
         except WorkspaceBindingConflictError as exc:
             raise MonotonicAuthorityConfigurationError(str(exc)) from exc
@@ -659,7 +778,7 @@ class MonotonicWorkspaceAuthority:
             raise MonotonicAuthorityIntegrityError(str(exc)) from exc
         except OSError as exc:
             raise MonotonicAuthorityIntegrityError(
-                "cannot durably persist immutable workspace identity binding"
+                "cannot durably persist immutable workspace/root identity binding"
             ) from exc
 
     def _load_bound_history(self) -> _History:

@@ -1,9 +1,14 @@
-"""Fail-closed Betfair read-only degradation classification.
+"""Fail-closed Betfair read-only provider-error classification.
 
-This module classifies provider errors for read-only API operations.  It deliberately
-does not perform retries, login, transport I/O, or any money-moving reconciliation.
-Write operations are rejected so the safe-to-repeat semantics here cannot leak into
-place/cancel/update/replace execution paths.
+This module classifies provider exception codes for a bounded set of read-only API
+operations. It deliberately does not perform retries, login, transport I/O, response
+completeness validation, or any money-moving reconciliation. Write operations are
+rejected so read-safe repeat semantics cannot leak into place/cancel/update/replace
+execution paths.
+
+The classifier is policy only: construction does not prove that Betfair emitted the
+supplied error. A product-owned transport may bind this classification to separately
+verified provider-response provenance.
 """
 
 from __future__ import annotations
@@ -26,7 +31,7 @@ class ReadRecoveryAction(str, Enum):
     DO_NOT_RETRY = "DO_NOT_RETRY"
 
 
-_READ_ONLY_OPERATIONS = frozenset(
+_BETTING_READ_ONLY_OPERATIONS = frozenset(
     {
         "listMarketCatalogue",
         "listMarketBook",
@@ -34,32 +39,60 @@ _READ_ONLY_OPERATIONS = frozenset(
         "listCurrentOrders",
         "listClearedOrders",
         "listMarketProfitAndLoss",
+    }
+)
+_ACCOUNT_READ_ONLY_OPERATIONS = frozenset(
+    {
         "getAccountDetails",
         "getAccountFunds",
     }
 )
+_READ_ONLY_OPERATIONS = _BETTING_READ_ONLY_OPERATIONS | _ACCOUNT_READ_ONLY_OPERATIONS
 
-# Provider-documented Betting/Accounts APINGException categories.  The output is
-# intentionally a disposition, not a sleep duration or an executable retry command.
-_ERROR_ACTIONS: dict[str, ReadRecoveryAction] = {
+# Current provider-documented APINGException categories are kept API-family specific.
+# A code documented for one family must not inherit that disposition in another family.
+_COMMON_ERROR_ACTIONS: dict[str, ReadRecoveryAction] = {
     "INVALID_SESSION_INFORMATION": ReadRecoveryAction.REAUTHENTICATE,
     "NO_SESSION": ReadRecoveryAction.FIX_CREDENTIALS_OR_CONFIG,
     "NO_APP_KEY": ReadRecoveryAction.FIX_CREDENTIALS_OR_CONFIG,
     "INVALID_APP_KEY": ReadRecoveryAction.FIX_CREDENTIALS_OR_CONFIG,
-    "SUBSCRIPTION_EXPIRED": ReadRecoveryAction.FIX_CREDENTIALS_OR_CONFIG,
-    "INVALID_SUBSCRIPTION_TOKEN": ReadRecoveryAction.FIX_CREDENTIALS_OR_CONFIG,
     "INVALID_INPUT_DATA": ReadRecoveryAction.REPAIR_REQUEST,
-    "TOO_MUCH_DATA": ReadRecoveryAction.REPAIR_REQUEST,
     "TOO_MANY_REQUESTS": ReadRecoveryAction.RETRY_WITH_BACKOFF,
     "SERVICE_BUSY": ReadRecoveryAction.RETRY_WITH_BACKOFF,
     "TIMEOUT_ERROR": ReadRecoveryAction.RETRY_WITH_BACKOFF,
     "UNEXPECTED_ERROR": ReadRecoveryAction.RETRY_WITH_BACKOFF,
 }
+_BETTING_ERROR_ACTIONS: dict[str, ReadRecoveryAction] = {
+    **_COMMON_ERROR_ACTIONS,
+    "TOO_MUCH_DATA": ReadRecoveryAction.REPAIR_REQUEST,
+    "REQUEST_SIZE_EXCEEDS_LIMIT": ReadRecoveryAction.REPAIR_REQUEST,
+    "ACCESS_DENIED": ReadRecoveryAction.FIX_CREDENTIALS_OR_CONFIG,
+}
+_ACCOUNT_ERROR_ACTIONS: dict[str, ReadRecoveryAction] = {
+    **_COMMON_ERROR_ACTIONS,
+    "SUBSCRIPTION_EXPIRED": ReadRecoveryAction.FIX_CREDENTIALS_OR_CONFIG,
+    "INVALID_SUBSCRIPTION_TOKEN": ReadRecoveryAction.FIX_CREDENTIALS_OR_CONFIG,
+}
+
+
+def _error_actions_for(operation: str) -> dict[str, ReadRecoveryAction]:
+    if operation in _BETTING_READ_ONLY_OPERATIONS:
+        return _BETTING_ERROR_ACTIONS
+    if operation in _ACCOUNT_READ_ONLY_OPERATIONS:
+        return _ACCOUNT_ERROR_ACTIONS
+    raise BetfairReadDegradationError(
+        "operation must be a supported read-only Betfair operation"
+    )
 
 
 @dataclass(frozen=True, slots=True)
 class BetfairReadDegradation:
-    """Deterministic evidence for one failed read-only provider call."""
+    """Deterministic policy classification for a claimed failed read-only call.
+
+    This value is not provider-origin evidence. In particular, request_uuid is
+    correlation metadata only; a caller supplying a UUID does not prove that Betfair
+    emitted the error.
+    """
 
     operation: str
     error_code: str
@@ -72,24 +105,45 @@ class BetfairReadDegradation:
             )
         if not isinstance(self.error_code, str) or not self.error_code:
             raise BetfairReadDegradationError("error_code must be a non-empty string")
-        if self.error_code != self.error_code.strip() or self.error_code.upper() != self.error_code:
-            raise BetfairReadDegradationError("error_code must be canonical uppercase text")
+        if (
+            self.error_code != self.error_code.strip()
+            or self.error_code.upper() != self.error_code
+        ):
+            raise BetfairReadDegradationError(
+                "error_code must be canonical uppercase text"
+            )
         if self.request_uuid is not None:
             if not isinstance(self.request_uuid, str) or not self.request_uuid:
-                raise BetfairReadDegradationError("request_uuid must be a non-empty string when set")
+                raise BetfairReadDegradationError(
+                    "request_uuid must be a non-empty string when set"
+                )
             if self.request_uuid != self.request_uuid.strip():
-                raise BetfairReadDegradationError("request_uuid must not contain surrounding whitespace")
+                raise BetfairReadDegradationError(
+                    "request_uuid must not contain surrounding whitespace"
+                )
+
+    @property
+    def api_family(self) -> str:
+        return "BETTING" if self.operation in _BETTING_READ_ONLY_OPERATIONS else "ACCOUNTS"
+
+    @property
+    def documented_for_operation(self) -> bool:
+        return self.error_code in _error_actions_for(self.operation)
 
     @property
     def action(self) -> ReadRecoveryAction:
-        return _ERROR_ACTIONS.get(self.error_code, ReadRecoveryAction.DO_NOT_RETRY)
+        return _error_actions_for(self.operation).get(
+            self.error_code, ReadRecoveryAction.DO_NOT_RETRY
+        )
 
     @property
     def automatic_repeat_allowed(self) -> bool:
-        """Whether a controller may *consider* repeating this read after its own gate.
+        """Whether a controller may consider repeating this read after its own gate.
 
         This is deliberately false for reauthentication/config/request-repair classes.
-        RETRY_WITH_BACKOFF is safe only because this class accepts read-only operations.
+        RETRY_WITH_BACKOFF is semantically repeat-safe only because this class accepts
+        read-only operations. This property does not prove provider error origin, choose
+        delay/timing, or bypass an external retry/rate-limit controller.
         """
 
         return self.action is ReadRecoveryAction.RETRY_WITH_BACKOFF
@@ -106,15 +160,19 @@ class BetfairReadDegradation:
     def evidence_payload(self) -> dict[str, object]:
         return {
             "provider": "BETFAIR",
+            "api_family": self.api_family,
             "operation": self.operation,
             "error_code": self.error_code,
             "request_uuid": self.request_uuid,
+            "documented_for_operation": self.documented_for_operation,
             "action": self.action.value,
             "automatic_repeat_allowed": self.automatic_repeat_allowed,
             "requires_new_session": self.requires_new_session,
             "request_must_change": self.request_must_change,
             "read_only": True,
             "transport_performed": False,
+            "provider_error_origin_verified": False,
+            "response_completeness_proven": False,
             "execution_authorized": False,
         }
 

@@ -7,6 +7,8 @@ from decimal import Decimal
 import pytest
 
 from autosport import _paper_execution_decision_origin as origin_module
+from autosport import _paper_execution_decision_origin_callsite_guard as callsite_guard
+from autosport import _paper_execution_decision_origin_instance_guard as instance_guard
 from autosport.agents import AgentContext
 from autosport.decision_ledger import EconomicDecisionAuthority, JsonlDecisionLedger
 from autosport.domain import MarketEvent
@@ -52,7 +54,10 @@ def _execution_model() -> PaperExecutionModelConfig:
     )
 
 
-def test_live_product_callsite_rejects_nested_hook_and_binds_exact_origin(tmp_path) -> None:
+def test_live_product_callsite_rejects_nested_hook_and_binds_exact_origin(
+    tmp_path,
+    monkeypatch,
+) -> None:
     fixture = PersistentLiveDecisionLoopTests()
     event = fixture._event(selection="selection-a", sequence=1)
     clock = _ManualClock(fixture.START + timedelta(seconds=1))
@@ -79,6 +84,7 @@ def test_live_product_callsite_rejects_nested_hook_and_binds_exact_origin(tmp_pa
     )
     nested_rejections: list[str] = []
     captured_execution_plan = []
+    forged_origin_calls: list[str] = []
 
     def nested_post_append_hook() -> None:
         current = inspect.currentframe()
@@ -120,8 +126,25 @@ def test_live_product_callsite_rejects_nested_hook_and_binds_exact_origin(tmp_pa
     )
     loop.register_input("input-a", selection_ids="selection-a")
 
+    def forged_verified_origin(*args, **kwargs):
+        forged_origin_calls.append("called")
+        raise AssertionError("mutable verified-origin alias must not be authority")
+
+    monkeypatch.setattr(
+        instance_guard,
+        "_verified_decision_origin_without_instance_dispatch",
+        forged_verified_origin,
+    )
+    monkeypatch.setattr(
+        PaperExecutionAdoptionRuntime,
+        callsite_guard._CALLSITE_EXECUTE_CODE_SENTINEL,
+        (lambda: None).__code__,
+        raising=False,
+    )
+
     result = loop.run_cycle()
 
+    assert forged_origin_calls == []
     assert result.status is LiveCycleStatus.DECIDED
     assert result.decision_id is not None
     assert nested_rejections == [result.decision_id]
@@ -199,7 +222,10 @@ def _paper_value_agent(event: MarketEvent, goal: EconomicGoalContract) -> PaperV
     )
 
 
-def test_paper_value_fresh_and_durable_recovery_keep_exact_origin(tmp_path) -> None:
+def test_paper_value_fresh_and_durable_recovery_keep_exact_origin(
+    tmp_path,
+    monkeypatch,
+) -> None:
     goal = _paper_value_goal()
     event = _paper_value_event()
     ledger_path = tmp_path / "decisions.jsonl"
@@ -213,6 +239,17 @@ def test_paper_value_fresh_and_durable_recovery_keep_exact_origin(tmp_path) -> N
         decision_ledger=ledger,
     )
     agent = _paper_value_agent(event, goal)
+    forged_origin_calls: list[str] = []
+
+    def forged_verified_origin(*args, **kwargs):
+        forged_origin_calls.append("called")
+        raise AssertionError("mutable verified-origin alias must not be authority")
+
+    monkeypatch.setattr(
+        instance_guard,
+        "_verified_decision_origin_without_instance_dispatch",
+        forged_verified_origin,
+    )
 
     agent.on_market_event(event, context)
 
@@ -245,6 +282,7 @@ def test_paper_value_fresh_and_durable_recovery_keep_exact_origin(tmp_path) -> N
 
     restarted_agent.on_market_event(event, restarted_context)
 
+    assert forged_origin_calls == []
     assert event.quote_key in restarted_agent._acted
     assert restarted_runtime.ledger.reservation_decision_origin(run_id) == exact_origin
     assert restarted_runtime.ledger.events(run_id) == fresh_events

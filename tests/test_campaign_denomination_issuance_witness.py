@@ -75,6 +75,10 @@ def test_supported_witness_root_redirect_after_cache_loss_reuses_pinned_ancestry
     try:
         issued = authority.denomination_binding()
         assert issued is not None
+        registry_state = authority._registry()._read()
+        root_record = registry_state.get("campaign_denomination_witness_root")
+        assert type(root_record) is dict
+        assert root_record.get("root") == str(root_a.resolve())
         assert list(root_a.glob("*.campaign-denomination-issuance.monotonic-witness.jsonl"))
 
         # Model the supported crash-prefix state already exercised above: the

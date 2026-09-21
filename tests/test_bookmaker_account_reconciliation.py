@@ -27,6 +27,14 @@ _T2 = "2026-09-21T08:01:00+00:00"
 _T3 = "2026-09-21T08:02:00+00:00"
 _HASH = "a" * 64
 
+@pytest.fixture(autouse=True)
+def _isolated_monotonic_authority_root(tmp_path, monkeypatch) -> None:
+    authority_root = (tmp_path.parent / f".{tmp_path.name}-monotonic-authority").resolve(
+        strict=False
+    )
+    monkeypatch.setenv("AUTOSPORT_MONOTONIC_AUTHORITY_ROOT", str(authority_root))
+
+
 
 def _profile(
     *capabilities: BookmakerCapability,
@@ -563,3 +571,161 @@ def test_high_precision_balance_delta_is_exact_across_decimal_contexts(
     assert reopened_state is not None
     assert reopened_state.unexplained_balance_delta is not None
     assert reopened_state.unexplained_balance_delta.amount == Decimal("1E-22")
+
+
+def test_valid_old_file_rollback_cannot_resurrect_settled_position(tmp_path) -> None:
+    path = tmp_path / "account.json"
+    store = BookmakerAccountReconciliationStore(path)
+    assert store.append_snapshot(
+        _snapshot(
+            _T1,
+            capabilities=(BookmakerCapability.OPEN_POSITIONS_READ,),
+            open_positions=(_position(BookmakerPositionState.OPEN, _T1),),
+        )
+    )
+    old_valid_bytes = path.read_bytes()
+
+    assert store.append_snapshot(
+        _snapshot(
+            _T2,
+            capabilities=(BookmakerCapability.SETTLED_POSITIONS_READ,),
+            settled_positions=(
+                _position(
+                    BookmakerPositionState.SETTLED,
+                    _T2,
+                    observation_id="pos-1-settled",
+                ),
+            ),
+        )
+    )
+    state = store.latest_state()
+    assert state is not None
+    assert state.position_state("pos-1") is ReconciledPositionState.SETTLED
+
+    path.write_bytes(old_valid_bytes)
+
+    with pytest.raises(AccountReconciliationIntegrityError, match="monotonic"):
+        BookmakerAccountReconciliationStore(path).latest_state()
+
+
+def test_valid_old_balance_checkpoint_cannot_erase_newer_balance(tmp_path) -> None:
+    path = tmp_path / "account.json"
+    store = BookmakerAccountReconciliationStore(path)
+    assert store.append_snapshot(
+        _snapshot(
+            _T1,
+            capabilities=(BookmakerCapability.BALANCE_READ,),
+            balance=_balance(_T1, "100", observation_id="balance-1"),
+        )
+    )
+    old_valid_bytes = path.read_bytes()
+    assert store.append_snapshot(
+        _snapshot(
+            _T2,
+            capabilities=(BookmakerCapability.BALANCE_READ,),
+            balance=_balance(_T2, "80", observation_id="balance-2"),
+        )
+    )
+
+    path.write_bytes(old_valid_bytes)
+
+    with pytest.raises(AccountReconciliationIntegrityError, match="monotonic"):
+        BookmakerAccountReconciliationStore(path).latest_state()
+
+
+def test_delete_after_history_cannot_pristine_rebootstrap(tmp_path) -> None:
+    path = tmp_path / "account.json"
+    store = BookmakerAccountReconciliationStore(path)
+    first = _snapshot(_T1)
+    assert store.append_snapshot(first)
+    path.unlink()
+
+    restarted = BookmakerAccountReconciliationStore(path)
+    with pytest.raises(AccountReconciliationIntegrityError, match="monotonic"):
+        restarted.history()
+    with pytest.raises(AccountReconciliationIntegrityError, match="monotonic"):
+        restarted.append_snapshot(_snapshot(_T2))
+
+
+def test_exact_current_checkpoint_reopens_idempotently(tmp_path) -> None:
+    path = tmp_path / "account.json"
+    first = _snapshot(
+        _T1,
+        capabilities=(BookmakerCapability.OPEN_POSITIONS_READ,),
+        open_positions=(_position(BookmakerPositionState.OPEN, _T1),),
+    )
+    store = BookmakerAccountReconciliationStore(path)
+    assert store.append_snapshot(first)
+
+    restarted = BookmakerAccountReconciliationStore(path)
+    assert restarted.history() == (first,)
+    assert restarted.append_snapshot(first) is False
+
+
+def test_schema_version_bool_is_not_integer_schema_version(tmp_path) -> None:
+    path = tmp_path / "account.json"
+    store = BookmakerAccountReconciliationStore(path)
+    assert store.append_snapshot(_snapshot(_T1))
+
+    document = json.loads(path.read_text(encoding="utf-8"))
+    document["schema_version"] = True
+    path.write_text(json.dumps(document), encoding="utf-8")
+
+    with pytest.raises(AccountReconciliationIntegrityError, match="schema_version"):
+        BookmakerAccountReconciliationStore(path).history()
+
+
+def test_crash_after_prepare_before_local_publish_aborts_safely(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    path = tmp_path / "account.json"
+    store = BookmakerAccountReconciliationStore(path)
+    first = _snapshot(_T1)
+
+    class SimulatedCrash(RuntimeError):
+        pass
+
+    def crash_before_publish(_encoded: bytes) -> None:
+        raise SimulatedCrash("crash before local publish")
+
+    monkeypatch.setattr(store, "_publish_history_bytes", crash_before_publish)
+    with pytest.raises(SimulatedCrash, match="before local publish"):
+        store.append_snapshot(first)
+
+    assert not path.exists()
+    restarted = BookmakerAccountReconciliationStore(path)
+    assert restarted.history() == ()
+    assert restarted.append_snapshot(first) is True
+    assert restarted.history() == (first,)
+
+
+def test_crash_after_local_publish_before_commit_recovers_exact_prepare(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    path = tmp_path / "account.json"
+    store = BookmakerAccountReconciliationStore(path)
+    first = _snapshot(_T1)
+    original_recover = store._recover_authority
+
+    class SimulatedCrash(RuntimeError):
+        pass
+
+    def crash_before_commit(
+        observed_state_sha256: str | None,
+        *,
+        history: list[BookmakerAccountSnapshot] | None = None,
+    ) -> None:
+        if observed_state_sha256 is not None:
+            raise SimulatedCrash("crash after local publish")
+        original_recover(observed_state_sha256, history=history)
+
+    monkeypatch.setattr(store, "_recover_authority", crash_before_commit)
+    with pytest.raises(SimulatedCrash, match="after local publish"):
+        store.append_snapshot(first)
+
+    assert path.exists()
+    restarted = BookmakerAccountReconciliationStore(path)
+    assert restarted.history() == (first,)
+    assert restarted.append_snapshot(first) is False

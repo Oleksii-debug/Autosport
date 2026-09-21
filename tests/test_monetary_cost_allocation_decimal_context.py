@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from decimal import Decimal, ROUND_DOWN, ROUND_UP, localcontext
+from decimal import Decimal, ROUND_DOWN, ROUND_HALF_EVEN, ROUND_UP, localcontext
 
 import pytest
 
@@ -47,7 +47,7 @@ def _allocation(
 def test_rounded_to_one_invalid_allocations_fail_closed(share: Decimal) -> None:
     with localcontext() as context:
         context.prec = 28
-        context.rounding = ROUND_DOWN
+        context.rounding = ROUND_HALF_EVEN
         with pytest.raises(MonetaryAuthorityError, match="conserve exactly one"):
             _allocation(
                 (

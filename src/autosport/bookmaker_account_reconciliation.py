@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
-from decimal import Decimal
+from decimal import Context, Decimal, DecimalException, localcontext
 from enum import Enum
 from hashlib import sha256
 import json
@@ -113,6 +113,31 @@ def _currency(snapshot: BookmakerAccountSnapshot) -> str | None:
             "one snapshot cannot mix currencies"
         )
     return next(iter(values), None)
+
+
+def _balance_delta(current: Decimal, previous: Decimal) -> Decimal:
+    current_tuple, previous_tuple = current.as_tuple(), previous.as_tuple()
+    precision = max(
+        34,
+        len(current_tuple.digits)
+        + len(previous_tuple.digits)
+        + abs(current_tuple.exponent - previous_tuple.exponent)
+        + 4,
+    )
+    try:
+        with localcontext(
+            Context(prec=precision, Emin=-999999999, Emax=999999999)
+        ):
+            result = current - previous
+    except DecimalException as exc:
+        raise BookmakerAccountReconciliationError(
+            "balance delta is not representable"
+        ) from exc
+    if not result.is_finite():
+        raise BookmakerAccountReconciliationError(
+            "balance delta must be finite"
+        )
+    return result
 
 
 def _profile_semantics(snapshot: BookmakerAccountSnapshot) -> tuple[object, ...]:
@@ -301,14 +326,10 @@ def reconcile_bookmaker_account_snapshots(
     )
     delta = None
     if previous.balance is not None and current.balance is not None:
-        delta = (
-            current.balance.available_balance
-            - previous.balance.available_balance
+        delta = _balance_delta(
+            current.balance.available_balance,
+            previous.balance.available_balance,
         )
-        if not delta.is_finite():
-            raise BookmakerAccountReconciliationError(
-                "balance delta must be finite"
-            )
 
     rows: tuple[AccountPositionReconciliation, ...] = ()
     unresolved: tuple[str, ...] = ()

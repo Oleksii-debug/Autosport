@@ -145,12 +145,15 @@ def test_developer_app_identity_uses_sealed_client_clock(
 ) -> None:
     client = _canonical_client()
     fixed = datetime(2026, 9, 21, 12, 34, 56, tzinfo=timezone.utc)
-    clock = lambda: fixed
+
+    def fixed_clock() -> datetime:
+        return fixed
+
     origin = devapp._CANONICAL_CLIENT_ORIGINS[client]
-    client._clock = clock
+    client._clock = fixed_clock
     devapp._CANONICAL_CLIENT_ORIGINS[client] = devapp._CanonicalClientOrigin(
         origin.transport,
-        clock,
+        fixed_clock,
         origin.credentials,
     )
     monkeypatch.setattr(

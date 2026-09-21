@@ -24,6 +24,76 @@ class ScenarioSearchTests(unittest.TestCase):
         self.assertEqual(report.observed_best, Decimal("10"))
         self.assertEqual(report.expected_case, Decimal("4.0"))
 
+    def test_sampled_expected_case_is_invariant_to_group_order(self):
+        book = PaperBook("100")
+        a_win = TicketLeg("e-a", "winner", "win", Decimal("10"))
+        a_loss = TicketLeg("e-a", "winner", "lose", Decimal("2"))
+        b_win = TicketLeg("e-b", "winner", "win", Decimal("2"))
+        b_loss = TicketLeg("e-b", "winner", "lose", Decimal("2"))
+        ticket_a = book.open_ticket([a_win], "1")
+        ticket_b = book.open_ticket([b_win], "1")
+        groups = [
+            ScenarioGroup(
+                "group-a",
+                (
+                    ScenarioOutcome(a_win.quote_key, Decimal("0.6")),
+                    ScenarioOutcome(a_loss.quote_key, Decimal("0.4")),
+                ),
+            ),
+            ScenarioGroup(
+                "group-b",
+                (
+                    ScenarioOutcome(b_win.quote_key, Decimal("0.9")),
+                    ScenarioOutcome(b_loss.quote_key, Decimal("0.1")),
+                ),
+            ),
+        ]
+        engine = ScenarioSearchEngine(
+            exact_state_limit=1,
+            branch_node_limit=100,
+            sample_count=1,
+            seed=17,
+        )
+
+        forward = engine.analyse([ticket_a, ticket_b], groups)
+        reversed_groups = engine.analyse(
+            [ticket_a, ticket_b],
+            list(reversed(groups)),
+        )
+
+        self.assertEqual(forward.mode, "branch-and-bound-exact-extrema")
+        self.assertIsNotNone(forward.expected_case)
+        self.assertEqual(forward, reversed_groups)
+
+    def test_sampled_expected_case_is_invariant_to_outcome_order(self):
+        book = PaperBook("100")
+        win = TicketLeg("e-a", "winner", "win", Decimal("10"))
+        lose = TicketLeg("e-a", "winner", "lose", Decimal("2"))
+        ticket = book.open_ticket([win], "1")
+        outcomes = (
+            ScenarioOutcome(win.quote_key, Decimal("0.6")),
+            ScenarioOutcome(lose.quote_key, Decimal("0.4")),
+        )
+        engine = ScenarioSearchEngine(
+            exact_state_limit=1,
+            branch_node_limit=100,
+            sample_count=1,
+            seed=1,
+        )
+
+        forward = engine.analyse(
+            [ticket],
+            [ScenarioGroup("group-a", outcomes)],
+        )
+        reversed_outcomes = engine.analyse(
+            [ticket],
+            [ScenarioGroup("group-a", tuple(reversed(outcomes)))],
+        )
+
+        self.assertEqual(forward.mode, "branch-and-bound-exact-extrema")
+        self.assertIsNotNone(forward.expected_case)
+        self.assertEqual(forward, reversed_outcomes)
+
     def test_large_space_is_truth_labeled_and_has_conservative_bounds(self):
         book = PaperBook("10000")
         tickets = []

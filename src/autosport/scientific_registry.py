@@ -282,7 +282,7 @@ class ResearchProtocol:
 
 @dataclass(frozen=True, slots=True)
 class ForwardCaptureSlot:
-    """One predeclared forward-observation slot with bounded execution lateness."""
+    """One declared forward-observation slot with bounded execution lateness."""
 
     slot_id: str
     scheduled_at_utc: str
@@ -322,7 +322,7 @@ class ForwardCaptureSlot:
 
 @dataclass(frozen=True, slots=True)
 class ForwardCapturePlan:
-    """Immutable pre-outcome capture schedule for one forward-evidence run."""
+    """Immutable declared capture schedule for one forward-evidence lineage."""
 
     capture_plan_id: str
     run_id: str

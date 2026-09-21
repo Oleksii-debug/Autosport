@@ -292,25 +292,52 @@ class HistoricalAcquisitionBundleTests(unittest.TestCase):
                 "capture_historical_matches",
                 side_effect=forge_returned_report,
             ):
-                capture_historical_acquisition_bundle(
-                    self._provider(transport),
-                    requested_at=("2026-09-12T10:03:00Z",),
-                    results_date="2026-09-10",
-                    output_dir=root,
-                )
+                with self.assertRaisesRegex(
+                    ProviderPayloadError,
+                    "returned child report does not match staged evidence",
+                ):
+                    capture_historical_acquisition_bundle(
+                        self._provider(transport),
+                        requested_at=("2026-09-12T10:03:00Z",),
+                        results_date="2026-09-10",
+                        output_dir=root,
+                    )
+            self.assertFalse(root.exists())
 
-            bundle = json.loads((root / "bundle.json").read_text(encoding="utf-8"))
-            result = bundle["match_results"]
-            self.assertEqual(result["requested_date"], "2026-09-10")
-            self.assertTrue(
-                result["request_url"].endswith(
-                    "/v1/historical/sports/table_tennis/matches?date=2026-09-10&pricedOnly=false"
-                )
+    def test_mutated_match_evidence_ordinary_semantics_fail_closed(self) -> None:
+        transport = _Transport()
+        real_capture = historical_acquisition.capture_historical_matches
+
+        def mutate_evidence_after_child(*args, **kwargs):
+            report = real_capture(*args, **kwargs)
+            evidence_path = Path(kwargs["evidence_path"])
+            evidence = json.loads(evidence_path.read_text(encoding="utf-8"))
+            evidence["canonical_response_sha256"] = "0" * 64
+            evidence["captured_at"] = "2026-09-13T03:01:00+00:00"
+            evidence_path.write_text(
+                json.dumps(evidence, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+                encoding="utf-8",
             )
-            self.assertFalse(result["provider_response_origin_verified"])
-            self.assertFalse(result["trusted_outcome_source_admissible"])
-            self.assertFalse(bundle["match_result_provider_response_origin_verified"])
-            self.assertFalse(bundle["trusted_outcome_source_admissible"])
+            return report
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "acquisition"
+            with patch.object(
+                historical_acquisition,
+                "capture_historical_matches",
+                side_effect=mutate_evidence_after_child,
+            ):
+                with self.assertRaisesRegex(
+                    ProviderPayloadError,
+                    "capture/evidence semantic mismatch|returned child report does not match staged evidence",
+                ):
+                    capture_historical_acquisition_bundle(
+                        self._provider(transport),
+                        requested_at=("2026-09-12T10:03:00Z",),
+                        results_date="2026-09-10",
+                        output_dir=root,
+                    )
+            self.assertFalse(root.exists())
 
     def test_mutated_match_evidence_cannot_promote_bundle_trust(self) -> None:
         transport = _Transport()
@@ -402,25 +429,53 @@ class HistoricalAcquisitionBundleTests(unittest.TestCase):
                 "capture_historical_snapshot",
                 side_effect=forge_returned_report,
             ):
-                report = capture_historical_acquisition_bundle(
-                    self._provider(transport),
-                    requested_at=("2026-09-12T10:03:00Z",),
-                    results_date="2026-09-10",
-                    output_dir=root,
-                )
+                with self.assertRaisesRegex(
+                    ProviderPayloadError,
+                    "returned child report does not match staged evidence",
+                ):
+                    capture_historical_acquisition_bundle(
+                        self._provider(transport),
+                        requested_at=("2026-09-12T10:03:00Z",),
+                        results_date="2026-09-10",
+                        output_dir=root,
+                    )
+            self.assertFalse(root.exists())
 
-            bundle = json.loads((root / "bundle.json").read_text(encoding="utf-8"))
-            snapshot = bundle["snapshots"][0]
-            self.assertEqual(snapshot["requested_at"], "2026-09-12T10:03:00Z")
-            self.assertEqual(snapshot["snapshot_at"], "2026-09-12T10:00:00Z")
-            self.assertEqual(snapshot["quote_count"], 2)
-            self.assertTrue(snapshot["point_in_time_snapshot_contains_odds"])
-            self.assertEqual(report.snapshots_with_odds, 1)
-            market_path = root / snapshot["market_file"]
-            self.assertEqual(
-                snapshot["market_sha256"],
-                hashlib.sha256(market_path.read_bytes()).hexdigest(),
+    def test_mutated_snapshot_evidence_quote_count_fails_closed(self) -> None:
+        transport = _Transport()
+        real_capture = historical_acquisition.capture_historical_snapshot
+
+        def mutate_evidence_after_child(*args, **kwargs):
+            report = real_capture(*args, **kwargs)
+            evidence_path = Path(kwargs["evidence_path"])
+            evidence = json.loads(evidence_path.read_text(encoding="utf-8"))
+            evidence["quote_count"] = 1
+            evidence["has_data"] = True
+            evidence["point_in_time_snapshot_contains_odds"] = True
+            evidence_path.write_text(
+                json.dumps(evidence, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+                encoding="utf-8",
             )
+            return report
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "acquisition"
+            with patch.object(
+                historical_acquisition,
+                "capture_historical_snapshot",
+                side_effect=mutate_evidence_after_child,
+            ):
+                with self.assertRaisesRegex(
+                    ProviderPayloadError,
+                    "returned child report does not match staged evidence|row count does not match staged child evidence",
+                ):
+                    capture_historical_acquisition_bundle(
+                        self._provider(transport),
+                        requested_at=("2026-09-12T10:03:00Z",),
+                        results_date="2026-09-10",
+                        output_dir=root,
+                    )
+            self.assertFalse(root.exists())
 
     def test_mutated_snapshot_evidence_cannot_promote_coverage_truth(self) -> None:
         transport = _Transport()

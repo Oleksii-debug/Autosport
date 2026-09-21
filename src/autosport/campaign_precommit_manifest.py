@@ -98,6 +98,31 @@ def _canonical_bytes(value: object) -> bytes:
     ).encode("utf-8")
 
 
+def _fsync_parent_directory(path: Path) -> None:
+    """Durably publish a newly-created manifest directory entry on POSIX."""
+
+    if os.name == "nt":
+        return
+    if not hasattr(os, "O_DIRECTORY"):
+        raise CampaignPrecommitManifestError(
+            "platform lacks a directory durability primitive for campaign precommit"
+        )
+    try:
+        directory_fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY)
+    except OSError as exc:
+        raise CampaignPrecommitManifestError(
+            "cannot open campaign precommit directory for durability sync"
+        ) from exc
+    try:
+        os.fsync(directory_fd)
+    except OSError as exc:
+        raise CampaignPrecommitManifestError(
+            "cannot fsync campaign precommit directory"
+        ) from exc
+    finally:
+        os.close(directory_fd)
+
+
 def _digest(value: object) -> str:
     return hashlib.sha256(_canonical_bytes(value)).hexdigest()
 
@@ -325,6 +350,7 @@ def write_campaign_precommit_manifest_once(
                 pass
             raise
 
+    _fsync_parent_directory(target.parent)
     verified = load_campaign_precommit_manifest(target)
     if verified.manifest_sha256 != manifest.manifest_sha256:
         raise CampaignPrecommitManifestError(

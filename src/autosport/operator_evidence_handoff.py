@@ -3,51 +3,185 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
+from weakref import WeakKeyDictionary
 
 from .evidence_export import verify_evidence_manifest as _verify_evidence_manifest
 from .nvda_acceptance import create_template as _create_nvda_template
 from .nvda_acceptance import validate_evidence as _validate_nvda_evidence
 
 
-@dataclass(frozen=True, slots=True)
+class OperatorEvidenceHandoffAuthorityError(ValueError):
+    """Raised when a handoff result was not issued by the canonical adapter."""
+
+
+@dataclass(frozen=True, slots=True, repr=False, weakref_slot=True, eq=False)
 class WorkspaceEvidenceHandoff:
-    """Operator-facing projection of one canonical workspace-evidence verification.
+    """Product-issued projection of canonical workspace-evidence verification.
 
-    This is deliberately not a second verifier. The canonical manifest verifier owns
-    workspace identity and integrity semantics; this projection only gives packaged
-    product surfaces a small API that cannot accidentally promote release truth.
+    Public evidence properties fail closed unless this exact object was minted by
+    verify_workspace_manifest(). Direct construction and dataclasses.replace() do
+    not create canonical verification evidence.
     """
 
-    status: Literal["PASS"]
-    manifest_sha256: str
-    file_count: int
-    run_summary_count: int
-    fixed_evidence_set_complete: bool
-    real_money_execution: Literal[False] = False
-    human_tested: Literal[False] = False
-    nvda_verified: Literal[False] = False
-    whole_product_complete: Literal[False] = False
+    _status: Literal["PASS"]
+    _manifest_sha256: str
+    _file_count: int
+    _run_summary_count: int
+    _fixed_evidence_set_complete: bool
+
+    def assert_product_issued(self) -> None:
+        expected = _ISSUED_WORKSPACE_HANDOFFS.get(self)
+        if expected is None or expected != _workspace_handoff_state(self):
+            raise OperatorEvidenceHandoffAuthorityError(
+                "workspace evidence handoff was not issued by the canonical verifier adapter"
+            )
+
+    @property
+    def status(self) -> Literal["PASS"]:
+        self.assert_product_issued()
+        return self._status
+
+    @property
+    def manifest_sha256(self) -> str:
+        self.assert_product_issued()
+        return self._manifest_sha256
+
+    @property
+    def file_count(self) -> int:
+        self.assert_product_issued()
+        return self._file_count
+
+    @property
+    def run_summary_count(self) -> int:
+        self.assert_product_issued()
+        return self._run_summary_count
+
+    @property
+    def fixed_evidence_set_complete(self) -> bool:
+        self.assert_product_issued()
+        return self._fixed_evidence_set_complete
+
+    @property
+    def real_money_execution(self) -> Literal[False]:
+        self.assert_product_issued()
+        return False
+
+    @property
+    def human_tested(self) -> Literal[False]:
+        self.assert_product_issued()
+        return False
+
+    @property
+    def nvda_verified(self) -> Literal[False]:
+        self.assert_product_issued()
+        return False
+
+    @property
+    def whole_product_complete(self) -> Literal[False]:
+        self.assert_product_issued()
+        return False
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True, slots=True, repr=False, weakref_slot=True, eq=False)
 class NvdaEvidenceHandoff:
-    """Machine validation result for human-supplied physical NVDA evidence.
+    """Product-issued machine validation of human-supplied physical NVDA evidence.
 
-    PASS means that the supplied record satisfies the canonical validator for the
-    exact release candidate. It never means that this adapter itself performed a
-    physical Windows/NVDA test and therefore cannot promote human/NVDA truth.
+    PASS means that the canonical validator accepted the supplied record for the
+    exact release candidate. It never promotes human/NVDA/release truth.
     """
 
-    status: Literal["PASS", "FAIL"]
-    package_sha256: str
-    source_sha: str
-    autosport_exe_sha256: str
-    failed_checks: tuple[str, ...]
-    requires_owner_release_decision: Literal[True]
-    real_money_execution: Literal[False] = False
-    human_tested: Literal[False] = False
-    nvda_verified: Literal[False] = False
-    whole_product_complete: Literal[False] = False
+    _status: Literal["PASS", "FAIL"]
+    _package_sha256: str
+    _source_sha: str
+    _autosport_exe_sha256: str
+    _failed_checks: tuple[str, ...]
+
+    def assert_product_issued(self) -> None:
+        expected = _ISSUED_NVDA_HANDOFFS.get(self)
+        if expected is None or expected != _nvda_handoff_state(self):
+            raise OperatorEvidenceHandoffAuthorityError(
+                "NVDA evidence handoff was not issued by the canonical verifier adapter"
+            )
+
+    @property
+    def status(self) -> Literal["PASS", "FAIL"]:
+        self.assert_product_issued()
+        return self._status
+
+    @property
+    def package_sha256(self) -> str:
+        self.assert_product_issued()
+        return self._package_sha256
+
+    @property
+    def source_sha(self) -> str:
+        self.assert_product_issued()
+        return self._source_sha
+
+    @property
+    def autosport_exe_sha256(self) -> str:
+        self.assert_product_issued()
+        return self._autosport_exe_sha256
+
+    @property
+    def failed_checks(self) -> tuple[str, ...]:
+        self.assert_product_issued()
+        return self._failed_checks
+
+    @property
+    def requires_owner_release_decision(self) -> Literal[True]:
+        self.assert_product_issued()
+        return True
+
+    @property
+    def real_money_execution(self) -> Literal[False]:
+        self.assert_product_issued()
+        return False
+
+    @property
+    def human_tested(self) -> Literal[False]:
+        self.assert_product_issued()
+        return False
+
+    @property
+    def nvda_verified(self) -> Literal[False]:
+        self.assert_product_issued()
+        return False
+
+    @property
+    def whole_product_complete(self) -> Literal[False]:
+        self.assert_product_issued()
+        return False
+
+
+def _workspace_handoff_state(
+    value: WorkspaceEvidenceHandoff,
+) -> tuple[object, ...]:
+    return (
+        value._status,
+        value._manifest_sha256,
+        value._file_count,
+        value._run_summary_count,
+        value._fixed_evidence_set_complete,
+    )
+
+
+def _nvda_handoff_state(value: NvdaEvidenceHandoff) -> tuple[object, ...]:
+    return (
+        value._status,
+        value._package_sha256,
+        value._source_sha,
+        value._autosport_exe_sha256,
+        value._failed_checks,
+    )
+
+
+_ISSUED_WORKSPACE_HANDOFFS: WeakKeyDictionary[
+    WorkspaceEvidenceHandoff, tuple[object, ...]
+] = WeakKeyDictionary()
+_ISSUED_NVDA_HANDOFFS: WeakKeyDictionary[
+    NvdaEvidenceHandoff, tuple[object, ...]
+] = WeakKeyDictionary()
 
 
 def _require_machine_false(payload: dict[str, Any], *fields: str) -> None:
@@ -71,13 +205,15 @@ def verify_workspace_manifest(
 
     report = _verify_evidence_manifest(manifest, workspace)
     _require_machine_false(report, "real_money_execution")
-    return WorkspaceEvidenceHandoff(
-        status="PASS",
-        manifest_sha256=report["manifest_sha256"],
-        file_count=report["file_count"],
-        run_summary_count=report["run_summary_count"],
-        fixed_evidence_set_complete=report["fixed_evidence_set_complete"],
+    result = WorkspaceEvidenceHandoff(
+        _status="PASS",
+        _manifest_sha256=report["manifest_sha256"],
+        _file_count=report["file_count"],
+        _run_summary_count=report["run_summary_count"],
+        _fixed_evidence_set_complete=report["fixed_evidence_set_complete"],
     )
+    _ISSUED_WORKSPACE_HANDOFFS[result] = _workspace_handoff_state(result)
+    return result
 
 
 def create_nvda_handoff_template(
@@ -138,11 +274,16 @@ def verify_nvda_handoff(
         isinstance(item, str) for item in failed_checks
     ):
         raise ValueError("canonical NVDA evidence result has invalid failed_checks")
-    return NvdaEvidenceHandoff(
-        status=status,
-        package_sha256=report["package_sha256"],
-        source_sha=report["source_sha"],
-        autosport_exe_sha256=report["autosport_exe_sha256"],
-        failed_checks=tuple(failed_checks),
-        requires_owner_release_decision=True,
+    if (status == "PASS") != (len(failed_checks) == 0):
+        raise ValueError(
+            "canonical NVDA evidence result has contradictory status/failed_checks"
+        )
+    result = NvdaEvidenceHandoff(
+        _status=status,
+        _package_sha256=report["package_sha256"],
+        _source_sha=report["source_sha"],
+        _autosport_exe_sha256=report["autosport_exe_sha256"],
+        _failed_checks=tuple(failed_checks),
     )
+    _ISSUED_NVDA_HANDOFFS[result] = _nvda_handoff_state(result)
+    return result

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from datetime import datetime, timezone
 from hashlib import sha256
 import json
@@ -677,27 +677,28 @@ class SportMemoryRuntime:
             (subject.published_at, opponent.published_at),
             key=lambda value: _instant("published_at", value),
         )
-        payload: dict[str, object] = {
-            "subject_memory_id": subject.memory_id,
-            "opponent_memory_id": opponent.memory_id,
-            "subject_participant_entity_id": subject.participant_entity_id,
-            "opponent_participant_entity_id": opponent.participant_entity_id,
-            "scope": scope.payload(),
-            "identity_view": requested_view.value,
-            "as_of": _time_text_from_instant(decision_time),
-            "causal_cutoff": causal_cutoff,
-            "published_at": published_at,
-            "subject_support": subject.support,
-            "opponent_support": opponent.support,
-            "subject_uncertainty": subject.uncertainty,
-            "opponent_uncertainty": opponent.uncertainty,
-            "subject_age_seconds": subject.age_seconds,
-            "opponent_age_seconds": opponent.age_seconds,
-            "authority_generation_sha256": self.authority_generation_sha256,
-        }
-        return SportMemoryMatchupEvidence(
-            matchup_id=_digest(payload),
-            **payload,
+        candidate = SportMemoryMatchupEvidence(
+            matchup_id="0" * 64,
+            subject_memory_id=subject.memory_id,
+            opponent_memory_id=opponent.memory_id,
+            subject_participant_entity_id=subject.participant_entity_id,
+            opponent_participant_entity_id=opponent.participant_entity_id,
+            scope=scope,
+            identity_view=requested_view,
+            as_of=_time_text_from_instant(decision_time),
+            causal_cutoff=causal_cutoff,
+            published_at=published_at,
+            subject_support=subject.support,
+            opponent_support=opponent.support,
+            subject_uncertainty=subject.uncertainty,
+            opponent_uncertainty=opponent.uncertainty,
+            subject_age_seconds=subject.age_seconds,
+            opponent_age_seconds=opponent.age_seconds,
+            authority_generation_sha256=self.authority_generation_sha256,
+        )
+        return replace(
+            candidate,
+            matchup_id=_digest(candidate.payload(include_id=False)),
         )
 
     def verify_matchup_evidence(

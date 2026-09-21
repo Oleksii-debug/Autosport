@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
 import hashlib
@@ -29,7 +29,7 @@ class Surface(str, Enum):
 
 
 class TechnicalSupport(str, Enum):
-    PROVEN = "PROVEN"
+    OBSERVED_SUPPORTED = "OBSERVED_SUPPORTED"
     ROUTE_ELSEWHERE = "ROUTE_ELSEWHERE"
     ENTITLEMENT_BLOCKED = "ENTITLEMENT_BLOCKED"
     TRANSIENT_UNKNOWN = "TRANSIENT_UNKNOWN"
@@ -185,7 +185,7 @@ class ParlaySurfaceObservation:
             "observed_at": self.observed_at.isoformat().replace("+00:00", "Z"),
             "available_at": self.available_at.isoformat().replace("+00:00", "Z"),
             "status_code": self.status_code,
-            "origin_verified": self.origin_verified,
+            "provider_origin_verified": self.provider_origin_verified,
             "response_sha256": self.response_sha256,
             "row_count": self.row_count,
             "pagination_complete": self.pagination_complete,
@@ -294,14 +294,14 @@ def evaluate_surface_capability(
             return result(TechnicalSupport.UNKNOWN, DataUsability.UNKNOWN, "MISSING_MARKET_SERVICE_WITNESS")
 
     if not observation.pagination_complete:
-        return result(TechnicalSupport.PROVEN, DataUsability.INCOMPLETE, "RESPONSE_PAGINATION_INCOMPLETE")
+        return result(TechnicalSupport.OBSERVED_SUPPORTED, DataUsability.INCOMPLETE, "RESPONSE_PAGINATION_INCOMPLETE")
 
     if observation.row_count == 0:
-        return result(TechnicalSupport.PROVEN, DataUsability.EMPTY, "SUPPORTED_BUT_NO_CURRENT_ROWS")
+        return result(TechnicalSupport.OBSERVED_SUPPORTED, DataUsability.EMPTY, "SUPPORTED_BUT_NO_CURRENT_ROWS")
 
     if observation.oldest_row_age_seconds is None:
-        return result(TechnicalSupport.PROVEN, DataUsability.UNKNOWN, "ROW_FRESHNESS_UNPROVEN")
+        return result(TechnicalSupport.OBSERVED_SUPPORTED, DataUsability.UNKNOWN, "ROW_FRESHNESS_UNPROVEN")
     if observation.oldest_row_age_seconds > max_age:
-        return result(TechnicalSupport.PROVEN, DataUsability.STALE, "OLDEST_ROW_EXCEEDS_FRESHNESS_LIMIT")
+        return result(TechnicalSupport.OBSERVED_SUPPORTED, DataUsability.STALE, "OLDEST_ROW_EXCEEDS_FRESHNESS_LIMIT")
 
-    return result(TechnicalSupport.PROVEN, DataUsability.USABLE, "EXACT_SURFACE_EVIDENCE_USABLE")
+    return result(TechnicalSupport.OBSERVED_SUPPORTED, DataUsability.USABLE, "EXACT_SURFACE_EVIDENCE_USABLE")

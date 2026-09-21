@@ -1023,17 +1023,19 @@ class ScientificRegistry:
                         "schema_version": self.SCHEMA_VERSION,
                         "records": records[:index],
                     }
-                    matching_experiments = [
+                    negative_history = [
                         existing
                         for existing in records[:index]
                         if existing["record_type"] == "Experiment"
                         and existing["payload"].get("fingerprint") == fingerprint
+                        and existing["payload"].get("outcome") != ResearchOutcome.POSITIVE.value
                     ]
-                    self._validate_negative_repeat_authorization(
-                        prior_state,
-                        raw_entry,
-                        matching_experiments,
-                    )
+                    if negative_history:
+                        self._validate_negative_repeat_authorization(
+                            prior_state,
+                            raw_entry,
+                            negative_history,
+                        )
                 if fingerprint in fingerprints:
                     # Historical explicit repeats may share a fingerprint. New repeats with
                     # persisted provenance are re-resolved above on every restart.

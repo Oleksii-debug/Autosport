@@ -462,6 +462,8 @@ def _match_order(action: ExecutionAction, capture: BetfairExecutionReadbackEnvel
                     raise BetfairSettlementRevisionError("cleared row status partition mismatch")
                 if order.market_id != action.market_id or str(order.selection_id) != action.selection_id or order.side != action.side:
                     continue
+                if order.event_id is not None and order.event_id != action.event_id:
+                    raise BetfairSettlementRevisionError("cleared row event mismatch")
                 if order.customer_order_ref is not None and order.customer_order_ref != expected_ref:
                     raise BetfairSettlementRevisionError("cleared row customer_order_ref mismatch")
                 matches.append(order)

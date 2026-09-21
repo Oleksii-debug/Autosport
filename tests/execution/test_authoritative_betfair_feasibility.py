@@ -2,6 +2,7 @@ from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 import json
+import pickle
 from pathlib import Path
 import tempfile
 
@@ -248,11 +249,20 @@ def test_authenticated_market_book_receipt_can_issue_racy_positive_depth(
         )
 
     assert result.state is FeasibilityState.SNAPSHOT_DEPTH_SUFFICIENT_BUT_RACY
+    assert result.sufficient is True
     assert result.displayed_acceptable_depth == Decimal("15")
     assert result.reasons == ()
     assert len(result.evidence_digest) == 64
     assert len(result.liquidity_overlap_key) == 64
     assert transport.calls
+
+    # Authority is process-local issuance over the exact result object/content.
+    # Structurally identical copies or durable reconstruction remain descriptive.
+    assert replace(result).sufficient is False
+    assert pickle.loads(pickle.dumps(result)).sufficient is False
+
+    object.__setattr__(result, "snapshot_id", result.snapshot_id + "-tampered")
+    assert result.sufficient is False
 
 
 def test_forged_structurally_equal_receipt_cannot_issue_positive_truth(

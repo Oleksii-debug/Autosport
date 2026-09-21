@@ -59,6 +59,21 @@ def _instant(value: object, field: str) -> datetime:
     return parsed.astimezone(timezone.utc)
 
 
+def _require_exact_registry_authority(registry: object) -> ScientificRegistry:
+    """Return only the canonical durable registry implementation.
+
+    Registry subclasses are deliberately rejected.  External-validity provenance
+    is scientific evidence, so accepting an overrideable ``get`` method here would
+    create a second, spoofable read authority beside the durable registry itself.
+    """
+
+    if type(registry) is not ScientificRegistry:
+        raise ExternalValidityRegistryError(
+            "registry must be the exact ScientificRegistry authority"
+        )
+    return registry
+
+
 def _resolve_registered_origin(
     registry: ScientificRegistry,
     *,
@@ -66,8 +81,9 @@ def _resolve_registered_origin(
     evaluation: PolicyEvaluation,
     protocol: FrozenBaselineProtocol,
 ) -> _RegisteredEvaluationOrigin:
+    canonical_registry = _require_exact_registry_authority(registry)
     bundle_id = _text(evaluation_bundle_id, "evaluation_bundle_id")
-    bundle = registry.get("EvaluationBundle", bundle_id)
+    bundle = ScientificRegistry.get(canonical_registry, "EvaluationBundle", bundle_id)
     if bundle is None:
         raise ExternalValidityRegistryError(
             f"{evaluation.policy_id}: registered EvaluationBundle is missing: {bundle_id}"
@@ -89,7 +105,9 @@ def _resolve_registered_origin(
         payload.get("protocol_sha256"), "EvaluationBundle.protocol_sha256"
     )
 
-    dataset = registry.get("DatasetSnapshot", dataset_snapshot_id)
+    dataset = ScientificRegistry.get(
+        canonical_registry, "DatasetSnapshot", dataset_snapshot_id
+    )
     if dataset is None:
         raise ExternalValidityRegistryError(
             f"{evaluation.policy_id}: EvaluationBundle references missing DatasetSnapshot: "
@@ -139,8 +157,7 @@ def build_registered_external_validity_report(
     and that all compared bundles share one registered dataset/protocol origin.
     """
 
-    if not isinstance(registry, ScientificRegistry):
-        raise ExternalValidityRegistryError("registry must be ScientificRegistry")
+    canonical_registry = _require_exact_registry_authority(registry)
     if not isinstance(protocol, FrozenBaselineProtocol):
         raise ExternalValidityRegistryError("protocol must be FrozenBaselineProtocol")
     if not isinstance(candidate, PolicyEvaluation):
@@ -182,7 +199,7 @@ def build_registered_external_validity_report(
         by_id[result.policy_id] = result
 
     candidate_origin = _resolve_registered_origin(
-        registry,
+        canonical_registry,
         evaluation_bundle_id=candidate_evaluation_bundle_id,
         evaluation=candidate,
         protocol=protocol,
@@ -195,7 +212,7 @@ def build_registered_external_validity_report(
                 f"supported baseline result is missing: {baseline_id}"
             )
         origin = _resolve_registered_origin(
-            registry,
+            canonical_registry,
             evaluation_bundle_id=baseline_evaluation_bundle_ids[baseline_id],
             evaluation=result,
             protocol=protocol,

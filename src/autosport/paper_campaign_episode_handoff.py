@@ -208,6 +208,49 @@ class PaperCampaignEpisodeHandoff:
             else:
                 self._write_state({})
 
+    @classmethod
+    def open_existing(
+        cls,
+        campaign: PaperCampaignRuntime,
+        *,
+        state_path: str | Path | None = None,
+    ) -> "PaperCampaignEpisodeHandoff":
+        """Open the canonical durable handoff for restart without creating state.
+
+        Writer construction intentionally remains able to initialize a virgin handoff.
+        Restart readback is different authority: it must bind to the campaign's
+        canonical handoff path and fail closed when those durable bytes are absent.
+        """
+
+        if not isinstance(campaign, PaperCampaignRuntime):
+            raise TypeError("campaign must be PaperCampaignRuntime")
+        canonical_path = campaign.state_path.with_name(
+            f"{campaign.state_path.name}.episode-handoff.json"
+        )
+        selected_path = Path(state_path) if state_path is not None else canonical_path
+        try:
+            selected_resolved = selected_path.resolve(strict=False)
+            canonical_resolved = canonical_path.resolve(strict=False)
+        except OSError as exc:
+            raise PaperCampaignEpisodeHandoffError(
+                "restart handoff state path cannot be resolved"
+            ) from exc
+        if selected_resolved != canonical_resolved:
+            raise PaperCampaignEpisodeHandoffError(
+                "restart handoff state path must match canonical campaign handoff path"
+            )
+
+        instance = cls.__new__(cls)
+        instance.campaign = campaign
+        instance.state_path = selected_path
+        with WorkspaceEconomicLock(selected_path.parent):
+            if not selected_path.exists():
+                raise PaperCampaignEpisodeHandoffError(
+                    "existing handoff state is missing for restart readback"
+                )
+            instance._read_state()
+        return instance
+
     def _write_state(self, handoffs: dict[str, object]) -> None:
         bare = {
             "schema": HANDOFF_SCHEMA,

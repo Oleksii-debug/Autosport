@@ -887,6 +887,20 @@ def test_registry_detects_tampering_on_restart(tmp_path):
         ScientificRegistry(path)
 
 
+@pytest.mark.parametrize("bad_schema_version", [True, 1.0])
+def test_registry_rejects_noncanonical_schema_version_types(
+    tmp_path, bad_schema_version
+):
+    path = tmp_path / "scientific_registry.json"
+    ScientificRegistry.initialize_pristine(path)
+    raw = json.loads(path.read_text(encoding="utf-8"))
+    raw["schema_version"] = bad_schema_version
+    path.write_text(json.dumps(raw), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="schema_version mismatch"):
+        ScientificRegistry(path)
+
+
 def test_protocol_record_reuses_existing_scientific_binding_hash(tmp_path):
     registry = ScientificRegistry.initialize_pristine(tmp_path / "scientific_registry.json")
     protocol = ResearchProtocol(_binding(), SHA_C, SHA_D, SHA_A, T0)

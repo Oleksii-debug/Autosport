@@ -192,6 +192,25 @@ def test_caller_modified_exact_type_cannot_pass_product_verifier() -> None:
         verify_provider_billing_row_attribution(source, modified, "billing-ref-1")
 
 
+def test_rebound_evidence_equality_cannot_bypass_field_verification(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = _source()
+    genuine = resolve_provider_billing_row_attribution(source, "billing-ref-1")
+    modified = _caller_modified_evidence(genuine)
+    monkeypatch.setattr(
+        ProviderBillingRowAttributionEvidence,
+        "__eq__",
+        lambda _self, _other: True,
+    )
+
+    with pytest.raises(
+        ProviderBillingRowAuthorityError,
+        match="does not match canonical source re-resolution",
+    ):
+        verify_provider_billing_row_attribution(source, modified, "billing-ref-1")
+
+
 def test_authority_witness_constructor_is_not_caller_mintable() -> None:
     source = _source()
     evidence = resolve_provider_billing_row_attribution(source, "billing-ref-1")

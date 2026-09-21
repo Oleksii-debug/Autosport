@@ -94,6 +94,10 @@ def _build_seal() -> tuple[
 
 
 _SEALED_REQUIRE, _SEALED_RESOLVE, _INSTALL_SEALS = _build_seal()
+# Compatibility names are assertions/tests only.  The live seal and reload loaders
+# retain closure-owned references and never trust these mutable module aliases.
+_sealed_require_exact_lineage_authority = _SEALED_REQUIRE
+_sealed_resolve_canonical_snapshot = _SEALED_RESOLVE
 
 
 class _RepairReloadLoader(importlib.abc.Loader):
@@ -150,9 +154,9 @@ class _BackupRepairReloadFinder(importlib.abc.MetaPathFinder):
 
 
 _CANONICAL_REPAIR_RELOAD_FINDER = _RepairReloadFinder(_INSTALL_SEALS)
-# Do not export/store the backup under the canonical finder name.  Its live object is
-# retained by sys.meta_path itself, so rewriting the public canonical reference does
-# not rewrite the fallback's closure-owned reinstall capability.
+# The backup is intentionally a different finder class without the public marker.
+# Its live object is retained by sys.meta_path, so rewriting/removing the canonical
+# finder reference alone cannot rewrite the fallback's closure-owned installer.
 _BACKUP_REPAIR_RELOAD_FINDER = _BackupRepairReloadFinder(_INSTALL_SEALS)
 
 

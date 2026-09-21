@@ -1,0 +1,128 @@
+from __future__ import annotations
+
+from dataclasses import replace
+
+import pytest
+
+from autosport.champion_eligibility import (
+    ChampionEligibilityDecision,
+    ChampionEligibilityError,
+    ChampionEligibilityStatus,
+    persist_eligibility_decision,
+    validate_activation_eligibility,
+)
+from tests.test_champion_eligibility import (
+    CONFIG,
+    ENV,
+    _eligible_scoped_decision,
+    _scoped_decision,
+    _scoped_history,
+)
+
+
+def _forged_eligible_over_degraded_evidence(tmp_path):
+    registry, findings, windows = _scoped_history(
+        tmp_path,
+        values_sequence=(("3", "4"), ("3", "4")),
+    )
+    canonical = _scoped_decision(registry, findings, windows)
+    assert canonical.status is ChampionEligibilityStatus.SHADOW_DEACTIVATED
+    assert canonical.degraded_streak == 2
+
+    forged = ChampionEligibilityDecision(
+        status=ChampionEligibilityStatus.ELIGIBLE,
+        canonical_strategy_id=canonical.canonical_strategy_id,
+        strategy_version_id=canonical.strategy_version_id,
+        model_version_id=canonical.model_version_id,
+        environment_sha256=canonical.environment_sha256,
+        protocol_id=canonical.protocol_id,
+        config_sha256=canonical.config_sha256,
+        sport=canonical.sport,
+        league=canonical.league,
+        regime=canonical.regime,
+        finding_ids=canonical.finding_ids,
+        finding_record_sha256s=canonical.finding_record_sha256s,
+        window_start=canonical.window_start,
+        window_end=canonical.window_end,
+        evaluated_at=canonical.evaluated_at,
+        valid_until=canonical.valid_until,
+        minimum_samples=canonical.minimum_samples,
+        minimum_effective_sample_size=canonical.minimum_effective_sample_size,
+        effective_sample_size=canonical.effective_sample_size,
+        degraded_streak=canonical.degraded_streak,
+        recovery_streak=canonical.recovery_streak,
+        admissible_actions=canonical.admissible_actions,
+        research_trigger_id=None,
+        reason="forged eligible status over canonically degraded evidence",
+    )
+    assert forged.status is ChampionEligibilityStatus.ELIGIBLE
+    return registry, canonical, forged
+
+
+def _validate(registry, decision) -> None:
+    validate_activation_eligibility(
+        registry,
+        decision,
+        as_of="2026-02-14T12:00:00Z",
+        canonical_strategy_id="strategy-context",
+        expected_strategy_version_id="strategy-1",
+        expected_model_version_id="model-1",
+        expected_environment_sha256=ENV,
+        expected_protocol_id="protocol-1",
+        expected_config_sha256=CONFIG,
+        admissible_actions=frozenset({"WAIT"}),
+    )
+
+
+def test_persistence_rejects_directly_minted_eligible_status(tmp_path) -> None:
+    registry, canonical, forged = _forged_eligible_over_degraded_evidence(tmp_path)
+
+    with pytest.raises(
+        ChampionEligibilityError,
+        match="does not match canonical derivation",
+    ):
+        persist_eligibility_decision(registry, forged)
+
+    assert registry.get(forged.record_type, forged.record_id) is None
+    assert canonical.status is ChampionEligibilityStatus.SHADOW_DEACTIVATED
+
+
+def test_activation_rederives_legacy_registered_decision_before_positive_use(
+    tmp_path,
+) -> None:
+    registry, _canonical, forged = _forged_eligible_over_degraded_evidence(tmp_path)
+
+    # Simulate a legacy/caller path that bypassed persist_eligibility_decision and
+    # wrote a structurally valid ChampionEligibilityDecision directly to the registry.
+    registry.append(forged)
+
+    with pytest.raises(
+        ChampionEligibilityError,
+        match="does not match canonical derivation",
+    ):
+        _validate(registry, forged)
+
+
+def test_canonical_eligible_decision_still_persists_and_activates(tmp_path) -> None:
+    registry, decision = _eligible_scoped_decision(tmp_path)
+
+    decision_id = persist_eligibility_decision(registry, decision)
+
+    assert decision_id == decision.decision_id
+    _validate(registry, decision)
+
+
+def test_decision_subclass_cannot_cross_authority_boundary(tmp_path) -> None:
+    registry, decision = _eligible_scoped_decision(tmp_path)
+
+    class DerivedDecision(ChampionEligibilityDecision):
+        pass
+
+    derived = DerivedDecision(**{
+        field: getattr(decision, field)
+        for field in decision.__dataclass_fields__
+        if field != "decision_id"
+    })
+
+    with pytest.raises(TypeError, match="exact ChampionEligibilityDecision"):
+        persist_eligibility_decision(registry, derived)

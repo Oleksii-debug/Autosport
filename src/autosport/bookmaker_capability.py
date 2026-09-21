@@ -60,6 +60,15 @@ class BookmakerPositionState(str, Enum):
     SETTLED = "settled"
 
 
+_ACCOUNT_SNAPSHOT_EVIDENCE_CAPABILITIES = frozenset(
+    {
+        BookmakerCapability.BALANCE_READ,
+        BookmakerCapability.OPEN_POSITIONS_READ,
+        BookmakerCapability.SETTLED_POSITIONS_READ,
+    }
+)
+
+
 def _text(value: str, field: str) -> str:
     if not isinstance(value, str):
         raise BookmakerCapabilityError(f"{field} must be a string")
@@ -375,6 +384,18 @@ class BookmakerAccountSnapshot:
                 raise BookmakerCapabilityError(
                     "observed_capabilities must contain only BookmakerCapability values"
                 )
+        unsupported_snapshot_claims = (
+            self.observed_capabilities - _ACCOUNT_SNAPSHOT_EVIDENCE_CAPABILITIES
+        )
+        if unsupported_snapshot_claims:
+            names = ", ".join(
+                sorted(capability.value for capability in unsupported_snapshot_claims)
+            )
+            raise BookmakerCapabilityError(
+                "observed_capabilities cannot claim capabilities without typed "
+                f"account-snapshot evidence: {names}"
+            )
+        for capability in self.observed_capabilities:
             self.profile.require(capability)
 
         self._validate_balance(snapshot_at)

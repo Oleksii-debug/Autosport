@@ -26,7 +26,7 @@ _PROVIDER_ID = "betfair"
 
 
 class BetfairDecisionDepthError(ValueError):
-    """Raised when a MarketBook cannot issue strict displayed-depth evidence."""
+    """Raised when a MarketBook cannot issue strict returned-depth evidence."""
 
 
 class BetfairOrderSide(StrEnum):
@@ -105,7 +105,7 @@ def _digest(payload: object) -> str:
 
 @dataclass(frozen=True, slots=True)
 class BetfairDepthLevel:
-    """One exact displayed Best Offers price/size level."""
+    """One exact returned exchange price/size level."""
 
     price: Decimal
     size: Decimal
@@ -123,7 +123,7 @@ class BetfairDepthLevel:
 
 @dataclass(frozen=True, slots=True)
 class BetfairDecisionDepthSnapshot:
-    """Immutable displayed-depth evidence for one exact decision-side ladder."""
+    """Immutable returned-depth evidence for one exact decision-side ladder."""
 
     market_id: str
     selection_id: int
@@ -303,8 +303,8 @@ def issue_betfair_decision_depth_snapshot(
     This function intentionally does not prove that ``market_book`` came directly
     from Betfair, that ``observed_at`` is the provider/network observation time,
     which PriceProjection/virtualisation produced the response, or whether returned
-    exchange levels are a best-offers slice or the full available ladder. A product-owned transport/clock
-    boundary may later bind those facts.
+    exchange levels are a best-offers slice or the full available ladder. A
+    product-owned transport/clock boundary may later bind those facts.
     """
 
     if not isinstance(market_book, Mapping):

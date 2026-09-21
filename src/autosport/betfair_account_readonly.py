@@ -27,6 +27,7 @@ _GET_ACCOUNT_DETAILS = "AccountAPING/v1.0/getAccountDetails"
 _LIST_CURRENT_ORDERS = "SportsAPING/v1.0/listCurrentOrders"
 _LIST_CLEARED_ORDERS = "SportsAPING/v1.0/listClearedOrders"
 _LIST_MARKET_CATALOGUE = "SportsAPING/v1.0/listMarketCatalogue"
+_LIST_MARKET_BOOK = "SportsAPING/v1.0/listMarketBook"
 _EXECUTION_CLEARED_STATUSES = ("SETTLED", "VOIDED", "LAPSED", "CANCELLED")
 _READ_METHOD_ENDPOINT = MappingProxyType({
     _GET_ACCOUNT_FUNDS: ACCOUNT_JSON_RPC_ENDPOINT,
@@ -34,6 +35,7 @@ _READ_METHOD_ENDPOINT = MappingProxyType({
     _LIST_CURRENT_ORDERS: BETTING_JSON_RPC_ENDPOINT,
     _LIST_CLEARED_ORDERS: BETTING_JSON_RPC_ENDPOINT,
     _LIST_MARKET_CATALOGUE: BETTING_JSON_RPC_ENDPOINT,
+    _LIST_MARKET_BOOK: BETTING_JSON_RPC_ENDPOINT,
 })
 
 
@@ -86,6 +88,147 @@ class BetfairEvidence:
     def __post_init__(self) -> None:
         _iso_timestamp(self.observed_at, "observed_at")
         _sha256_hex(self.source_payload_sha256, "source_payload_sha256")
+
+
+@dataclass(frozen=True, slots=True)
+class BetfairMarketBookPriceSize:
+    price: Decimal
+    size: Decimal
+
+    def __post_init__(self) -> None:
+        _positive_decimal(self.price, "market_book price")
+        _nonnegative_decimal(self.size, "market_book size")
+
+
+@dataclass(frozen=True, slots=True, weakref_slot=True)
+class BetfairMarketBookDepthObservation:
+    """Authenticated decision-time displayed-depth receipt from listMarketBook.
+
+    This is provider-response evidence only. It is not a reservation, fill,
+    acceptance, or guarantee that displayed liquidity will remain available.
+    """
+
+    venue_id: str
+    account_id: str
+    market_id: str
+    selection_id: int
+    status: str
+    is_market_data_delayed: bool
+    market_version: int
+    inplay: bool
+    bet_delay_seconds: int
+    projection_kind: str
+    virtualise: bool
+    available_to_back: tuple[BetfairMarketBookPriceSize, ...]
+    request_scope_sha256: str
+    evidence: BetfairEvidence
+
+    def __post_init__(self) -> None:
+        _required_text(self.venue_id, "venue_id")
+        _required_text(self.account_id, "account_id")
+        _required_text(self.market_id, "market_id")
+        _positive_int(self.selection_id, "selection_id")
+        _required_text(self.status, "status")
+        if type(self.is_market_data_delayed) is not bool:
+            raise BetfairReadOnlyError("is_market_data_delayed must be bool")
+        _nonnegative_int(self.market_version, "market_version")
+        if type(self.inplay) is not bool:
+            raise BetfairReadOnlyError("inplay must be bool")
+        _nonnegative_int(self.bet_delay_seconds, "bet_delay_seconds")
+        if self.projection_kind != "EX_ALL_OFFERS":
+            raise BetfairReadOnlyError(
+                "market-book depth receipt currently requires EX_ALL_OFFERS"
+            )
+        if type(self.virtualise) is not bool:
+            raise BetfairReadOnlyError("virtualise must be bool")
+        if self.virtualise:
+            raise BetfairReadOnlyError(
+                "market-book depth receipt forbids virtualised liquidity"
+            )
+        if type(self.available_to_back) is not tuple:
+            raise BetfairReadOnlyError("available_to_back must be a tuple")
+        if any(
+            not isinstance(item, BetfairMarketBookPriceSize)
+            for item in self.available_to_back
+        ):
+            raise BetfairReadOnlyError(
+                "available_to_back must contain BetfairMarketBookPriceSize"
+            )
+        prices = tuple(item.price for item in self.available_to_back)
+        if len(set(prices)) != len(prices):
+            raise BetfairReadOnlyError(
+                "available_to_back contains duplicate provider price levels"
+            )
+        _sha256_hex(self.request_scope_sha256, "request_scope_sha256")
+        if not isinstance(self.evidence, BetfairEvidence):
+            raise BetfairReadOnlyError("market-book receipt requires BetfairEvidence")
+
+
+_MARKET_BOOK_DEPTH_ISSUED: dict[int, tuple[object, str]] = {}
+
+
+def _market_book_depth_fingerprint(
+    observation: BetfairMarketBookDepthObservation,
+) -> str:
+    return _canonical_sha256(
+        {
+            "schema": "autosport.betfair.market-book-depth-receipt.v1",
+            "venue_id": observation.venue_id,
+            "account_id": observation.account_id,
+            "market_id": observation.market_id,
+            "selection_id": observation.selection_id,
+            "status": observation.status,
+            "is_market_data_delayed": observation.is_market_data_delayed,
+            "market_version": observation.market_version,
+            "inplay": observation.inplay,
+            "bet_delay_seconds": observation.bet_delay_seconds,
+            "projection_kind": observation.projection_kind,
+            "virtualise": observation.virtualise,
+            "available_to_back": [
+                {"price": str(item.price), "size": str(item.size)}
+                for item in observation.available_to_back
+            ],
+            "request_scope_sha256": observation.request_scope_sha256,
+            "observed_at": observation.evidence.observed_at,
+            "source_payload_sha256": observation.evidence.source_payload_sha256,
+        }
+    )
+
+
+def _issue_market_book_depth(
+    observation: BetfairMarketBookDepthObservation,
+) -> BetfairMarketBookDepthObservation:
+    fingerprint = _market_book_depth_fingerprint(observation)
+    observation_id = id(observation)
+
+    def forget(current: object, *, observation_id: int = observation_id) -> None:
+        existing = _MARKET_BOOK_DEPTH_ISSUED.get(observation_id)
+        if existing is not None and existing[0] is current:
+            _MARKET_BOOK_DEPTH_ISSUED.pop(observation_id, None)
+
+    reference = ref(observation, forget)
+    _MARKET_BOOK_DEPTH_ISSUED[observation_id] = (reference, fingerprint)
+    return observation
+
+
+def assert_market_book_depth_authoritative(
+    observation: BetfairMarketBookDepthObservation,
+) -> None:
+    """Reject structurally valid receipts not issued by authenticated provider IO."""
+
+    if not isinstance(observation, BetfairMarketBookDepthObservation):
+        raise BetfairReadOnlyError(
+            "market-book depth authority requires BetfairMarketBookDepthObservation"
+        )
+    current = _MARKET_BOOK_DEPTH_ISSUED.get(id(observation))
+    if (
+        current is None
+        or current[0]() is not observation
+        or current[1] != _market_book_depth_fingerprint(observation)
+    ):
+        raise BetfairReadOnlyError(
+            "market-book depth observation was not issued by canonical Betfair read IO"
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -552,6 +695,85 @@ class BetfairReadOnlyClient:
         )
         _unique_bet_ids(orders, "clearedOrders")
         return BetfairClearedOrderPage(orders, _provider_bool(report, "moreAvailable"), from_record, record_count, response.evidence)
+
+    def read_market_book_depth(
+        self,
+        market_id: str,
+        selection_id: int,
+    ) -> BetfairMarketBookDepthObservation:
+        """Read exact non-virtualised EX_ALL_OFFERS BACK-executable depth.
+
+        Betfair names availableToBack from the customer action perspective:
+        this is displayed liquidity available to a customer placing BACK.
+        """
+        market = _required_text(market_id, "market_id")
+        selection = _positive_int(selection_id, "selection_id")
+        params: dict[str, object] = {
+            "marketIds": [market],
+            "priceProjection": {
+                "priceData": ["EX_ALL_OFFERS"],
+                "virtualise": False,
+            },
+        }
+        response = self._rpc(_LIST_MARKET_BOOK, params)
+        rows = _sequence(response.result, "listMarketBook result")
+        if len(rows) != 1:
+            raise BetfairReadOnlyError(
+                "listMarketBook must return exactly one requested market"
+            )
+        book = _mapping(rows[0], "marketBook[0]")
+        returned_market = _provider_text(book, "marketId", "market_id")
+        if returned_market != market:
+            raise BetfairReadOnlyError("listMarketBook returned a different market")
+
+        runners = _sequence(book.get("runners"), "marketBook[0].runners")
+        matches = [
+            _mapping(item, "marketBook runner")
+            for item in runners
+            if isinstance(item, Mapping) and item.get("selectionId") == selection
+        ]
+        if len(matches) != 1:
+            raise BetfairReadOnlyError(
+                "listMarketBook lacks one exact requested selection"
+            )
+        runner = matches[0]
+        ex = _mapping(runner.get("ex"), "marketBook runner.ex")
+        raw_back = _sequence(
+            ex.get("availableToBack"),
+            "marketBook runner.ex.availableToBack",
+        )
+        available_to_back = tuple(
+            BetfairMarketBookPriceSize(
+                _number(
+                    _mapping(item, "availableToBack priceSize"),
+                    "price",
+                    "price",
+                ),
+                _number(
+                    _mapping(item, "availableToBack priceSize"),
+                    "size",
+                    "size",
+                ),
+            )
+            for item in raw_back
+        )
+        observation = BetfairMarketBookDepthObservation(
+            venue_id=self._venue_id,
+            account_id=self._account_id,
+            market_id=returned_market,
+            selection_id=selection,
+            status=_provider_text(book, "status", "status"),
+            is_market_data_delayed=_provider_bool(book, "isMarketDataDelayed"),
+            market_version=_provider_int(book, "version", "version"),
+            inplay=_provider_bool(book, "inplay"),
+            bet_delay_seconds=_provider_int(book, "betDelay", "betDelay"),
+            projection_kind="EX_ALL_OFFERS",
+            virtualise=False,
+            available_to_back=available_to_back,
+            request_scope_sha256=_canonical_sha256(params),
+            evidence=response.evidence,
+        )
+        return _issue_market_book_depth(observation)
 
     def read_market_event(self, market_id: str) -> BetfairMarketEventObservation:
         market = _required_text(market_id, "market_id")

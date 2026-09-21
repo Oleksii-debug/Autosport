@@ -178,6 +178,28 @@ def test_operator_view_prioritizes_blockers_and_is_order_deterministic():
     assert first.real_money_execution is False
 
 
+def test_operator_view_preserves_exact_microsecond_recency_order():
+    older = entry(
+        entry_id="risk-older",
+        severity=RiskSeverity.LOW,
+        blocks_product_readiness=False,
+        updated_at="9998-12-31T23:59:59.000001Z",
+        detected_at="9998-12-31T23:59:58Z",
+    )
+    newer = entry(
+        entry_id="risk-newer",
+        severity=RiskSeverity.LOW,
+        blocks_product_readiness=False,
+        updated_at="9998-12-31T23:59:59.000002Z",
+        detected_at="9998-12-31T23:59:58Z",
+    )
+
+    view = build_operator_risk_register_view(
+        [older, newer], as_of="9998-12-31T23:59:59.000003Z"
+    )
+    assert [row.entry_id for row in view.rows] == ["risk-newer", "risk-older"]
+
+
 def test_operator_view_rejects_duplicate_current_ids_and_future_entry():
     current = entry()
     with pytest.raises(ModelRiskRegisterError, match="duplicate current"):

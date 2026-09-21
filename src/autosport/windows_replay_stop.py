@@ -51,7 +51,7 @@ def install_windows_replay_stop() -> None:
     same keyboard-focusable/UIA-addressable control.
     """
 
-    from .gui import AutosportApp, _safe_exception_text
+    from .gui import AutosportApp
     from .windows_gui import WindowsAutosportApp, _safe_exception_detail
 
     if getattr(AutosportApp, "_windows_replay_stop_installed", False):

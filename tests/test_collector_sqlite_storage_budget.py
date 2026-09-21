@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sqlite3
+import threading
 from pathlib import Path
 
 import pytest
@@ -237,6 +238,61 @@ def test_conflicting_second_handle_cannot_widen_or_narrow_durable_budget(
     inherited = CollectorDeltaStore(path)
     assert same.configured_max_bytes == exact_current_budget
     assert inherited.configured_max_bytes == exact_current_budget
+
+
+def test_first_budget_activation_rebinds_already_open_writer_transaction(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "collector.sqlite"
+    initial = CollectorDeltaStore(path)
+    first = _delta(1)
+    assert initial.append(first) is True
+    page_size, page_count = _page_geometry(path)
+    exact_current_budget = page_size * page_count
+    before_size = path.stat().st_size
+
+    writer = CollectorDeltaStore(path)
+    opened = threading.Event()
+    resume = threading.Event()
+    original_connect = writer._connect
+
+    def paused_connect() -> sqlite3.Connection:
+        connection = original_connect()
+        opened.set()
+        if not resume.wait(timeout=10):
+            connection.close()
+            raise AssertionError("timed out waiting to resume stale writer")
+        return connection
+
+    writer._connect = paused_connect  # type: ignore[method-assign]
+    outcome: dict[str, BaseException | bool] = {}
+
+    def append_from_stale_connection() -> None:
+        try:
+            outcome["result"] = writer.append(_delta(2, padding=page_size * 16))
+        except BaseException as exc:  # capture thread outcome for deterministic assertion
+            outcome["error"] = exc
+
+    thread = threading.Thread(target=append_from_stale_connection)
+    thread.start()
+    assert opened.wait(timeout=10)
+
+    # Publish the first durable budget after writer A has already opened an
+    # unbounded connection but before it acquires BEGIN IMMEDIATE.
+    bounded = CollectorDeltaStore(path, max_bytes=exact_current_budget)
+    assert bounded.configured_max_bytes == exact_current_budget
+    resume.set()
+    thread.join(timeout=10)
+    assert not thread.is_alive()
+
+    error = outcome.get("error")
+    assert isinstance(error, CollectorStorageBackpressureError)
+    assert "RETENTION_REQUIRED" in str(error)
+    assert writer.get("delta-2") is None
+    assert bounded.get("delta-1") == first
+    assert path.stat().st_size == before_size
+    _, after_pages = _page_geometry(path)
+    assert after_pages <= page_count
 
 
 def test_unconfigured_store_preserves_existing_growth_behavior(tmp_path: Path) -> None:

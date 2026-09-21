@@ -19,6 +19,7 @@ from .bookmaker_routing_plan import (
 )
 from .real_execution_ledger import (
     AcknowledgementStatus,
+    AttemptState,
     EventType,
     ExecutionLedgerError,
     RealExecutionLedger,
@@ -340,6 +341,44 @@ def _block_positive_reroute(
     )
 
 
+def _durable_attempt_states(
+    events: tuple[dict[str, object], ...],
+    *,
+    parent_plan_id: str,
+) -> dict[str, AttemptState]:
+    """Project attempt states from the same frozen, already-verified snapshot."""
+
+    states: dict[str, AttemptState] = {}
+    for event in events:
+        if event.get("plan_id") != parent_plan_id:
+            continue
+        attempt_id = event.get("attempt_id")
+        if type(attempt_id) is not str:
+            continue
+        kind = event.get("event_type")
+        if kind == EventType.ATTEMPT_RESERVED.value:
+            states[attempt_id] = AttemptState.RESERVED
+        elif kind == EventType.ATTEMPT_SUBMITTED.value:
+            states[attempt_id] = AttemptState.SUBMITTED
+        elif kind == EventType.ATTEMPT_UNKNOWN.value:
+            states[attempt_id] = AttemptState.UNKNOWN
+        elif kind == EventType.RECONCILED_NOT_FOUND.value:
+            states[attempt_id] = AttemptState.RECONCILED_NOT_FOUND
+        elif kind == EventType.EXTERNAL_ACKNOWLEDGEMENT.value:
+            payload = event.get("payload")
+            if not isinstance(payload, dict):
+                raise RoutingContractError(
+                    "durable acknowledgement payload is invalid"
+                )
+            try:
+                states[attempt_id] = AttemptState(payload["status"])
+            except (KeyError, ValueError) as exc:
+                raise RoutingContractError(
+                    "durable acknowledgement status is invalid"
+                ) from exc
+    return states
+
+
 def _validate_durable_effect_receipts(
     observations: tuple[VenueObservation, ...],
     *,
@@ -362,7 +401,19 @@ def _validate_durable_effect_receipts(
             "parent plan is absent from durable execution ledger"
         )
 
-    unresolved_partial = False
+    attempt_states = _durable_attempt_states(
+        events,
+        parent_plan_id=parent_plan_id,
+    )
+    unresolved_partial = any(
+        state in {
+            AttemptState.RESERVED,
+            AttemptState.SUBMITTED,
+            AttemptState.UNKNOWN,
+            AttemptState.PARTIAL,
+        }
+        for state in attempt_states.values()
+    )
     for item in observations:
         if item.external_receipt_id is None:
             if item.effect is ExternalEffect.UNKNOWN:
@@ -452,7 +503,33 @@ def _validate_durable_effect_receipts(
         ):
             unresolved_partial = True
 
+    provided_receipts = {
+        (item.proposal_leg_id, item.external_receipt_id)
+        for item in observations
+        if item.external_receipt_id is not None
+    }
+    durable_terminal_receipts: set[tuple[object, object]] = set()
+    for event in events:
+        if (
+            event.get("plan_id") != parent_plan_id
+            or event.get("event_type") != EventType.EXTERNAL_ACKNOWLEDGEMENT.value
+        ):
+            continue
+        payload = event.get("payload")
+        if not isinstance(payload, dict):
+            raise RoutingContractError(
+                "durable acknowledgement payload is invalid"
+            )
+        durable_terminal_receipts.add(
+            (event.get("action_id"), payload.get("external_receipt_id"))
+        )
+    if durable_terminal_receipts.difference(provided_receipts):
+        raise RoutingContractError(
+            "reconciliation observations omit durable terminal receipt"
+        )
+
     return unresolved_partial
+
 
 def reconcile_equal_split_residual(
     requested_stake: Decimal,
@@ -503,16 +580,16 @@ def reconcile_equal_split_residual_against_ledger(
 ) -> ParallelRoutingProposal:
     """Reconcile only after terminal child receipts agree with durable execution.
 
-    The routing parent plan ID is also the durable execution plan ID, and every
-    receipt-backed observation must resolve through provider/account receipt
-    identity to an attempt whose action ID is the canonical proposal leg ID. The
-    durable attempt state must agree with the routing effect. This function is
-    read-only with respect to the ledger and never calls a provider or moves money.
+    The routing parent plan ID is also the durable execution plan ID. One
+    integrity-verified snapshot binds each supplied receipt to the exact shared
+    routing/action economics and, for accepted effects, to the durable accepted
+    stake. Omitting any durable terminal receipt fails closed. Any durable
+    RESERVED, SUBMITTED, UNKNOWN, or PARTIAL attempt keeps positive reroute
+    authority blocked until the external effect is conclusively resolved.
 
     UNKNOWN without an external receipt remains admissible only because it blocks
-    routing. No accepted-stake equality claim is made here; the public durable saga
-    currently exposes receipt ownership and attempt state, not acknowledgement
-    payload amounts.
+    routing. This function is read-only with respect to the ledger, never calls a
+    provider, and never moves money.
     """
     venues = tuple(selected_venues)
     normalized = _validated_child_receipts(

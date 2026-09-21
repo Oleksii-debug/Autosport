@@ -570,3 +570,53 @@ def test_refusal_on_different_child_does_not_close_partial_remainder() -> None:
     assert reconciled.residual_before == Decimal("80.00")
     assert reconciled.proposed_total == Decimal("0")
     assert reconciled.legs == ()
+
+
+
+def test_ledger_backed_reconciliation_rejects_omitted_durable_acceptance(
+    tmp_path,
+) -> None:
+    a, b = _venue("book-a", "acct-a"), _venue("book-b", "acct-b")
+    initial = _initial((a, b))
+    ledger = _ledger_for_initial(tmp_path, initial)
+
+    _acknowledge_leg(
+        ledger,
+        initial.legs[0],
+        attempt_id="attempt-a-omitted",
+        receipt_id="external-a-omitted",
+        status=AcknowledgementStatus.ACCEPTED,
+        accepted_stake=Decimal("50.00"),
+    )
+
+    with pytest.raises(
+        RoutingContractError,
+        match="omit durable terminal receipt",
+    ):
+        _reconcile_against_ledger((a, b), (), ledger)
+
+
+def test_ledger_backed_unobserved_submitted_attempt_blocks_positive_reroute(
+    tmp_path,
+) -> None:
+    a, b = _venue("book-a", "acct-a"), _venue("book-b", "acct-b")
+    initial = _initial((a, b))
+    ledger = _ledger_for_initial(tmp_path, initial)
+    ledger.begin_attempt(
+        plan_id=_PLAN_ID,
+        action_id=initial.legs[0].leg_id,
+        attempt_id="attempt-a-submitted-unobserved",
+        reserved_at="2026-09-17T01:42:00+00:00",
+    )
+    ledger.mark_submitted(
+        "attempt-a-submitted-unobserved",
+        submitted_at="2026-09-17T01:43:00+00:00",
+    )
+
+    reconciled = _reconcile_against_ledger((a, b), (), ledger)
+
+    assert reconciled.state is RoutingState.BLOCKED_UNKNOWN
+    assert reconciled.confirmed_total == Decimal("0")
+    assert reconciled.residual_before == Decimal("100.00")
+    assert reconciled.proposed_total == Decimal("0")
+    assert reconciled.legs == ()

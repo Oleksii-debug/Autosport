@@ -102,3 +102,7 @@ from . import _campaign_provider_scope_stable_projection as _campaign_provider_s
 # application acknowledgement. Pin those reads to the exact checkpoint class so a
 # mutable exact instance cannot shadow methods and mint deletion authority.
 from . import _collector_retention_desktop_ack_authority as _collector_retention_desktop_ack_authority  # noqa: F401,E402
+
+# Releasing a durable retention pin is itself deletion authority. Keep DECISION/REPLAY
+# terminal-owner resolution independent of writable collector_retention module mirrors.
+from . import _collector_retention_owner_authority as _collector_retention_owner_authority  # noqa: F401,E402

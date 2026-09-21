@@ -123,6 +123,7 @@ class MarketPriceTruthTests(unittest.TestCase):
             schema_version=2,
             import_identity="a" * 64,
             governance=governance,
+            manifest_file_sha256="e" * 64,
             market_sha256="b" * 64,
             results_sha256="c" * 64,
             load_market_events=lambda: events,
@@ -160,6 +161,7 @@ class MarketPriceTruthTests(unittest.TestCase):
         )
 
         payload = session._run_summary_payload(dataset, result)
+        self.assertEqual(payload["dataset_manifest_file_sha256"], "e" * 64)
         self.assertEqual(
             payload["market_price_truth"],
             {

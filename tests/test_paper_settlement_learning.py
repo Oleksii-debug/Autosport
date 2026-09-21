@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import tempfile
 import unittest
@@ -30,6 +31,37 @@ from autosport.paper_settlement_learning import (
 from autosport.risk import PaperRiskPolicy
 from autosport.settlement import SettlementEngine
 from autosport.continuous_session import SettlementResolution
+
+
+def _canonical_digest(value: object) -> str:
+    payload = json.dumps(
+        value,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _rewrite_bridge_state(root: Path, state: dict[str, object]) -> None:
+    bare = {
+        "schema": state["schema"],
+        "schema_version": state["schema_version"],
+        "bindings": state["bindings"],
+    }
+    state["state_sha256"] = _canonical_digest(bare)
+    (root / "paper_learning_bridge.json").write_text(
+        json.dumps(
+            state,
+            ensure_ascii=False,
+            sort_keys=True,
+            indent=2,
+            allow_nan=False,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
 
 
 def _fixture(
@@ -245,6 +277,37 @@ class PaperSettlementLearningBridgeTests(unittest.TestCase):
                 (root / "paper_learning_bridge.json").read_text(encoding="utf-8")
             )
             self.assertEqual(durable["bindings"][ticket.ticket_id]["status"], "OUTBOX")
+            reference = durable["bindings"][ticket.ticket_id]["outbox"][
+                "observed_reward_reference"
+            ]
+            self.assertEqual(
+                reference["schema"],
+                "autosport.paper_observed_reward_reference",
+            )
+            self.assertEqual(
+                reference["issuer"],
+                "autosport.paper_settlement_learning",
+            )
+            self.assertEqual(reference["currency"], "USD")
+            self.assertEqual(reference["reward"], "10.00")
+            self.assertEqual(reference["ticket_id"], ticket.ticket_id)
+            self.assertEqual(reference["decision_id"], decision.decision_id)
+            self.assertEqual(
+                reference["settlement_bundle_sha256"],
+                durable["bindings"][ticket.ticket_id]["outbox"][
+                    "settlement_bundle_sha256"
+                ],
+            )
+            self.assertEqual(
+                reference["reference_id"],
+                _canonical_digest(
+                    {
+                        key: value
+                        for key, value in reference.items()
+                        if key != "reference_id"
+                    }
+                ),
+            )
             self.assertEqual(runtime.snapshot().phase, AgentLoopPhase.WAIT_OUTCOME)
 
             reopened_runtime = AgentLoopRuntime(root / "agent-loop.json")
@@ -267,6 +330,99 @@ class PaperSettlementLearningBridgeTests(unittest.TestCase):
             loop_state = json.loads((root / "agent-loop.json").read_text(encoding="utf-8"))
             self.assertEqual(len(loop_state["resolutions"]), 1)
             self.assertEqual(loop_state["resolutions"][0]["reward_value"], "10.00")
+
+    def test_restart_rejects_resigned_forged_observed_reward_reference(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            leg = TicketLeg(
+                event_id="event-1",
+                market_id="winner",
+                selection_id="home",
+                locked_odds=Decimal("2.00"),
+                sport="table_tennis",
+            )
+            (
+                goal,
+                risk,
+                ticket,
+                decision,
+                environment,
+                baseline,
+                runtime,
+                observation,
+                action,
+                bridge,
+            ) = _fixture(root, legs=(leg,))
+            bridge.bind_ticket(
+                ticket_id=ticket.ticket_id,
+                decision_id=decision.decision_id,
+                environment=environment,
+                observation=observation,
+                action=action,
+                baseline_checkpoint=baseline,
+            )
+            _book, resolutions = _settle(root, outcomes={leg.quote_key: "win"})
+
+            with patch.object(
+                AgentLoopRuntime,
+                "record_resolution",
+                side_effect=RuntimeError("crash before learner acknowledgement"),
+            ):
+                with self.assertRaisesRegex(RuntimeError, "crash before learner"):
+                    bridge.reconcile_after_settlement(
+                        paper_book_path=root / "paper_book.json",
+                        resolutions=resolutions,
+                        settled_ticket_ids=(ticket.ticket_id,),
+                        at="2026-09-19T21:20:00+00:00",
+                    )
+
+            state = json.loads(
+                (root / "paper_learning_bridge.json").read_text(encoding="utf-8")
+            )
+            outbox = state["bindings"][ticket.ticket_id]["outbox"]
+            reference = outbox["observed_reward_reference"]
+            reference["reward"] = "999.00"
+            reference["reference_id"] = _canonical_digest(
+                {
+                    key: value
+                    for key, value in reference.items()
+                    if key != "reference_id"
+                }
+            )
+            outbox["outbox_id"] = _canonical_digest(
+                {
+                    key: value
+                    for key, value in outbox.items()
+                    if key != "outbox_id"
+                }
+            )
+            _rewrite_bridge_state(root, state)
+
+            reopened_runtime = AgentLoopRuntime(root / "agent-loop.json")
+            reopened_bridge = PaperSettlementLearningBridge(
+                root / "paper_learning_bridge.json",
+                paper_book_path=root / "paper_book.json",
+                decision_ledger=JsonlDecisionLedger(root / "decisions.jsonl"),
+                agent_loop=reopened_runtime,
+                economic_goal=goal,
+                risk_policy=risk,
+            )
+            with self.assertRaisesRegex(
+                PaperSettlementLearningBridgeError,
+                "reference differs from product-owned source truth",
+            ):
+                reopened_bridge.reconcile_after_settlement(
+                    paper_book_path=root / "paper_book.json",
+                    resolutions=(),
+                    settled_ticket_ids=(),
+                    at="2026-09-19T21:20:01+00:00",
+                )
+
+            self.assertIs(reopened_runtime.snapshot().phase, AgentLoopPhase.WAIT_OUTCOME)
+            loop_state = json.loads(
+                (root / "agent-loop.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(loop_state["resolutions"], [])
 
     def test_retry_after_agent_loop_resolution_before_bridge_ack_is_exactly_once(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

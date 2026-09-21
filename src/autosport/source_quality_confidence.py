@@ -103,10 +103,32 @@ class SourceQualityObservation:
 
 @dataclass(frozen=True, slots=True)
 class SourceQualityAssessment:
+    """Fail-closed result value; positive authority is not caller-constructible.
+
+    ``ACCEPT`` and authority-bearing corroboration are reserved for future
+    product-owned durable resolvers.  Until those resolvers exist, even direct
+    construction of this public value object cannot mint either truth claim.
+    """
+
     action: ConfidenceAction
     effective_confidence: Decimal
     reasons: tuple[str, ...]
     corroborated: bool
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.action, ConfidenceAction):
+            raise ValueError("action must be ConfidenceAction")
+        _validate_probability(self.effective_confidence, "effective_confidence")
+        if type(self.reasons) is not tuple:
+            raise ValueError("reasons must be an exact tuple")
+        normalized_reasons = tuple(_strict_text(reason, "reason") for reason in self.reasons)
+        object.__setattr__(self, "reasons", normalized_reasons)
+        if type(self.corroborated) is not bool:
+            raise ValueError("corroborated must be bool")
+        if self.action is ConfidenceAction.ACCEPT:
+            raise ValueError("ACCEPT requires canonical provider authority integration")
+        if self.corroborated:
+            raise ValueError("corroborated=True requires canonical corroborator authority integration")
 
 
 def assess_source_quality(
@@ -117,12 +139,12 @@ def assess_source_quality(
 ) -> SourceQualityAssessment:
     """Assess one observation without allowing caller-minted authority.
 
-    Hard evidence failures always ``ABSTAIN``.  Corroboration is identity evidence
-    only and never raises confidence.  Until an authenticated, durable,
-    product-owned provider-evidence resolver is wired into this boundary,
-    ``OFFICIAL_API`` also always ``ABSTAIN``: a source-class label is not proof of
-    official issuance.  Browser/manual evidence can be used only as bounded
-    ``DOWNWEIGHT`` evidence.
+    Hard evidence failures always ``ABSTAIN``.  Caller-supplied corroborator IDs
+    are diagnostic identities only and never mint a positive corroboration truth
+    value.  Until authenticated, durable, product-owned provider/corroborator
+    resolvers are wired into this boundary, ``OFFICIAL_API`` also always
+    ``ABSTAIN``: a source-class label is not proof of official issuance.
+    Browser/manual evidence can be used only as bounded ``DOWNWEIGHT`` evidence.
     """
 
     if not isinstance(observation, SourceQualityObservation):
@@ -145,7 +167,10 @@ def assess_source_quality(
     elif age > policy.max_age:
         reasons.append("STALE_OBSERVATION")
 
-    corroborated = bool(observation.corroborator_ids)
+    # Caller-supplied corroborator identities remain useful diagnostic metadata,
+    # but this boundary has no product-owned corroborator authority resolver yet.
+    # Therefore a positive corroboration truth value is structurally unavailable.
+    corroborated = False
     effective_confidence = observation.base_confidence
 
     if reasons:
@@ -187,10 +212,12 @@ def validate_independent_corroborators(
     observation: SourceQualityObservation,
     allowed_corroborator_ids: Iterable[str],
 ) -> tuple[str, ...]:
-    """Return independently allowed corroborators in observation order.
+    """Narrow caller-declared identities; do not mint corroboration authority.
 
-    Caller-provided counts are never accepted.  Explicit identities are validated
-    by ``SourceQualityObservation`` and this helper can only narrow that set.
+    The returned intersection is diagnostic metadata only.  ``allowed`` is an
+    input to this helper, not a product-owned trust token, and cannot make an
+    assessment report ``corroborated=True``.  A future positive corroboration
+    path must re-resolve identities from canonical durable authority.
     """
 
     if not isinstance(observation, SourceQualityObservation):

@@ -22,6 +22,7 @@ from .market_mirror import MarketMirror
 from .market_mirror_runtime import BoundedMirrorInvalidationBuffer
 from .parlayapi_provider import ParlayApiTableTennisProvider, ProviderPayloadError
 from .providers import MarketProvider, ProviderUnavailableError
+from .secret_redaction import safe_exception_text
 from .storage import SQLiteMarketStore
 
 
@@ -128,11 +129,7 @@ class _LoopState:
 
 
 def _redacted_error(exc: BaseException, secrets: Sequence[str]) -> str:
-    message = f"{type(exc).__name__}: {exc}"
-    for secret in secrets:
-        if isinstance(secret, str) and secret:
-            message = message.replace(secret, "[REDACTED]")
-    return message
+    return safe_exception_text(exc, extra_secret_values=secrets)
 
 
 def _read_previous_status(path: Path) -> dict[str, object] | None:

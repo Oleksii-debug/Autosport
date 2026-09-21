@@ -102,12 +102,17 @@ class CorrelatedExposureAdversarialTests(unittest.TestCase):
         self.assertEqual(decision.action, "STAKE_VECTOR")
         self.assertEqual(decision.stakes, (Decimal("25"),))
 
-    def test_duplicate_candidate_identity_fails_closed_without_amplifying_risk(self) -> None:
-        context = self._context("event-a", "market-a", "selection-a")
+    def test_duplicate_semantic_candidate_fails_closed_without_amplifying_risk(
+        self,
+    ) -> None:
+        first = self._context("event-a", "market-a", "selection-a")
+        duplicate = self._context("event-a", "market-a", "selection-a")
+        self.assertIsNot(first, duplicate)
+
         decision = self._policy(self._goal()).derive_goal_stake_vector(
             PaperBook("100"),
             (Decimal("0.30"), Decimal("0.20")),
-            contexts=(context, context),
+            contexts=(first, duplicate),
         )
 
         self.assertEqual(decision.action, "WAIT")
@@ -117,32 +122,43 @@ class CorrelatedExposureAdversarialTests(unittest.TestCase):
             "candidate set contains duplicate or ambiguous executable identity",
         )
 
-    def test_disjoint_candidate_permutation_preserves_identity_bound_allocation(self) -> None:
+    def test_disjoint_candidate_permutation_is_invariant_under_capital_scarcity(
+        self,
+    ) -> None:
         first = self._context(
             "event-a", "market-a", "selection-a", source_id="provider-a", sequence=1
         )
         second = self._context(
             "event-b", "market-b", "selection-b", source_id="provider-b", sequence=2
         )
-        policy = self._policy(self._goal())
+        policy = self._policy(
+            self._goal(max_capital_at_risk_fraction=Decimal("0.30"))
+        )
         book = PaperBook("100")
+        signals = (Decimal("0.25"), Decimal("0.25"))
 
         forward = policy.derive_goal_stake_vector(
             book,
-            (Decimal("0.30"), Decimal("0.20")),
+            signals,
             contexts=(first, second),
         )
         reverse = policy.derive_goal_stake_vector(
             book,
-            (Decimal("0.20"), Decimal("0.30")),
+            signals,
             contexts=(second, first),
         )
 
         self.assertEqual(forward.action, "STAKE_VECTOR")
         self.assertEqual(reverse.action, "STAKE_VECTOR")
+        forward_by_identity = self._by_identity((first, second), forward.stakes)
+        reverse_by_identity = self._by_identity((second, first), reverse.stakes)
+        self.assertEqual(forward_by_identity, reverse_by_identity)
         self.assertEqual(
-            self._by_identity((first, second), forward.stakes),
-            self._by_identity((second, first), reverse.stakes),
+            forward_by_identity,
+            {
+                first.legs[0].quote_key: Decimal("25"),
+                second.legs[0].quote_key: Decimal("5"),
+            },
         )
         self.assertEqual(book.balance, Decimal("100"))
         self.assertEqual(book.tickets, {})

@@ -293,7 +293,6 @@ def test_decision_rejects_subclassed_observation():
         observed_at=T0,
         available_at=T0,
         status_code=200,
-        origin_verified=True,
         response_sha256=DIGEST,
         row_count=1,
         pagination_complete=True,

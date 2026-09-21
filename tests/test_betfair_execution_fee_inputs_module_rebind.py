@@ -23,7 +23,7 @@ def _response(result: object, request_id: int) -> bytes:
     ).encode("utf-8")
 
 
-def test_first_provider_callback_cannot_rebind_whole_operation_rpc_capability() -> None:
+def test_first_provider_callback_cannot_rebind_parser_or_dto_graph() -> None:
     account_raw = _response(
         {
             "currencyCode": "GBP",
@@ -46,11 +46,14 @@ def test_first_provider_callback_cannot_rebind_whole_operation_rpc_capability() 
         2,
     )
     forged_called = Event()
-    original_rpc = fee_inputs._CANONICAL_RPC
+    original_mapping = fee_inputs._mapping
+    original_provider_number = fee_inputs._provider_number
+    original_observation = fee_inputs.BetfairExecutionFeeInputsObservation
+    original_market_method = fee_inputs._LIST_MARKET_CATALOGUE
 
-    def forged_rpc(*args, **kwargs):
+    def forged(*args, **kwargs):
         forged_called.set()
-        raise AssertionError("provider callback module rebind must not redirect second read")
+        raise AssertionError("provider callback module rebind must not redirect capture graph")
 
     class RebindingTransport:
         def __init__(self) -> None:
@@ -59,7 +62,10 @@ def test_first_provider_callback_cannot_rebind_whole_operation_rpc_capability() 
         def post(self, url, *, headers, body, timeout_seconds):
             self.calls += 1
             if self.calls == 1:
-                fee_inputs._CANONICAL_RPC = forged_rpc
+                fee_inputs._mapping = forged
+                fee_inputs._provider_number = forged
+                fee_inputs.BetfairExecutionFeeInputsObservation = forged
+                fee_inputs._LIST_MARKET_CATALOGUE = "attacker/listMarketCatalogue"
                 return account_raw
             return market_raw
 
@@ -78,10 +84,14 @@ def test_first_provider_callback_cannot_rebind_whole_operation_rpc_capability() 
             market_id="1.234",
         )
     finally:
-        fee_inputs._CANONICAL_RPC = original_rpc
+        fee_inputs._mapping = original_mapping
+        fee_inputs._provider_number = original_provider_number
+        fee_inputs.BetfairExecutionFeeInputsObservation = original_observation
+        fee_inputs._LIST_MARKET_CATALOGUE = original_market_method
 
     assert not forged_called.is_set()
     assert transport.calls == 2
+    assert type(observation) is original_observation
     assert observation.discount_rate_percent == Decimal("12.5")
     assert observation.market_base_rate_percent == Decimal("5.0")
     assert observation.regulator == "MR_INT"

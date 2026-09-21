@@ -67,7 +67,7 @@ def _validate_policy_for_use(policy: object) -> PromotionPolicy:
     """Revalidate authority-bearing policy fields at the consuming boundary."""
 
     if type(policy) is not PromotionPolicy:
-        raise PromotionEvidenceError("policy must be exact PromotionPolicy")
+        raise PromotionEvidenceError("policy must be PromotionPolicy")
     try:
         return PromotionPolicy(
             min_pairs=policy.min_pairs,

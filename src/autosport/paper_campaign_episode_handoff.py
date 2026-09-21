@@ -417,12 +417,40 @@ class PaperCampaignEpisodeHandoff:
                 "cannot verify independent committed handoff authority"
             ) from exc
 
+    def _verify_prepared_not_independently_committed(
+        self,
+        record: dict[str, object],
+    ) -> None:
+        """Reject local PREPARED state when stronger consumption truth is COMMIT."""
+
+        parent_checkpoint_id = _sha(
+            record["parent_checkpoint_id"], "parent_checkpoint_id"
+        )
+        try:
+            consumption_history = self._consumption_authority(
+                parent_checkpoint_id
+            ).read_history()
+        except MonotonicWorkspaceAuthorityError as exc:
+            raise PaperCampaignEpisodeHandoffError(
+                "cannot verify independent prepared handoff authority"
+            ) from exc
+
+        if any(
+            entry.phase is AuthorityPhase.COMMIT
+            for entry in consumption_history
+        ):
+            raise PaperCampaignEpisodeHandoffError(
+                "local PREPARED handoff conflicts with independent committed "
+                "consumption authority"
+            )
+
     def committed_children(
         self,
     ) -> tuple[PaperCampaignEpisodeHandoffRecord, ...]:
         """Return validated immutable restart locators for committed child episodes.
 
-        PREPARED crash-prefix records are intentionally invisible.  This is a
+        PREPARED crash-prefix records are intentionally invisible only while the
+        independent consumption authority has never crossed COMMIT. This is a
         projection only: it neither creates a child nor advances either monotonic
         handoff authority.
         """
@@ -433,7 +461,8 @@ class PaperCampaignEpisodeHandoff:
             for parent_checkpoint_id in sorted(state["handoffs"]):
                 raw = state["handoffs"][parent_checkpoint_id]
                 assert isinstance(raw, dict)
-                if raw["status"] != _COMMITTED:
+                if raw["status"] == _PREPARED:
+                    self._verify_prepared_not_independently_committed(raw)
                     continue
                 self._verify_committed_authorities(raw)
                 projected.append(self._committed_projection(raw))

@@ -203,3 +203,110 @@ def test_float_money_is_rejected_to_avoid_binary_money_semantics() -> None:
             protected_reserve=D("0"),
             accounts=[],
         )
+
+
+def test_small_money_matrix_preserves_decomposition_and_state_invariants() -> None:
+    values = (0, 1, 5)
+    for central in values:
+        for reserve in values:
+            if reserve > central:
+                continue
+            for a_available in values:
+                for a_target in values:
+                    for b_available in values:
+                        for b_target in values:
+                            result = review_provider_liquidity(
+                                currency="EUR",
+                                central_cash=D(central),
+                                protected_reserve=D(reserve),
+                                accounts=[
+                                    ProviderLiquidityAccount(
+                                        "a", "EUR", D(a_available), D(a_target)
+                                    ),
+                                    ProviderLiquidityAccount(
+                                        "b", "EUR", D(b_available), D(b_target)
+                                    ),
+                                ],
+                            )
+
+                            assert result.central_deployable_cash == D(
+                                central - reserve
+                            )
+                            assert result.total_provider_need == sum(
+                                (item.need for item in result.accounts), D("0")
+                            )
+                            assert result.modeled_provider_surplus == sum(
+                                (
+                                    item.modeled_surplus
+                                    for item in result.accounts
+                                ),
+                                D("0"),
+                            )
+                            for item in result.accounts:
+                                assert item.need == D("0") or (
+                                    item.modeled_surplus == D("0")
+                                )
+                                assert item.need - item.modeled_surplus == (
+                                    item.target_working_cash
+                                    - item.available_cash
+                                )
+
+                            expected_need_after_central = max(
+                                result.total_provider_need
+                                - result.central_deployable_cash,
+                                D("0"),
+                            )
+                            expected_shortfall = max(
+                                expected_need_after_central
+                                - result.modeled_provider_surplus,
+                                D("0"),
+                            )
+                            assert (
+                                result.need_after_central_cash
+                                == expected_need_after_central
+                            )
+                            assert (
+                                result.modeled_shortfall_after_surplus
+                                == expected_shortfall
+                            )
+                            assert (
+                                result.requires_transfer_feasibility_check
+                                is (
+                                    expected_need_after_central > D("0")
+                                    and result.modeled_provider_surplus > D("0")
+                                )
+                            )
+                            assert result.authorizes_transfer is False
+                            assert result.authorizes_execution is False
+
+
+@pytest.mark.parametrize(
+    ("first_available", "first_target", "second_available", "second_target"),
+    [
+        ("0", "5", "8", "2"),
+        ("100.01", "100", "0", "0.01"),
+        ("7", "7", "9", "20"),
+    ],
+)
+def test_provider_input_order_cannot_change_review(
+    first_available: str,
+    first_target: str,
+    second_available: str,
+    second_target: str,
+) -> None:
+    first = account("provider-a", first_available, first_target)
+    second = account("provider-b", second_available, second_target)
+    forward = review_provider_liquidity(
+        currency="EUR",
+        central_cash=D("10"),
+        protected_reserve=D("2"),
+        accounts=[first, second],
+    )
+    reverse = review_provider_liquidity(
+        currency="EUR",
+        central_cash=D("10"),
+        protected_reserve=D("2"),
+        accounts=[second, first],
+    )
+
+    assert forward == reverse

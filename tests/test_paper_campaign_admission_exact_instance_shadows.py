@@ -1,7 +1,7 @@
 from __future__ import annotations
 
+import importlib
 import os
-from threading import Barrier, Thread
 from unittest.mock import patch
 
 import pytest
@@ -306,119 +306,166 @@ def test_runtime_method_shadow_after_construction_is_never_invoked(tmp_path):
     assert (fixture.workspace / "decisions.jsonl").read_bytes() == decisions_before
 
 
-def test_decision_ledger_class_method_swap_after_precheck_never_executes_attacker(
+def _four_state_bytes(fixture: AdmissionFixture):
+    return (
+        (fixture.workspace / "paper-campaign-admission.json").read_bytes(),
+        (fixture.workspace / "decisions.jsonl").read_bytes(),
+        (fixture.workspace / "agent-loop.json").read_bytes(),
+        (fixture.workspace / "paper_book.json").read_bytes(),
+    )
+
+
+def test_decision_class_and_pinned_mirror_cosubstitution_never_executes_attacker(
     tmp_path, monkeypatch
 ):
     fixture = AdmissionFixture(tmp_path)
-    decision_ledger = JsonlDecisionLedger(fixture.workspace / "decisions.jsonl")
-    coordinator = fixture.coordinator(decision_ledger=decision_ledger)
-    state_path = fixture.workspace / "paper-campaign-admission.json"
-    decision_path = fixture.workspace / "decisions.jsonl"
-    agent_path = fixture.workspace / "agent-loop.json"
-    book_path = fixture.workspace / "paper_book.json"
-    state_before = state_path.read_bytes()
-    decisions_before = decision_path.read_bytes()
-    agent_before = agent_path.read_bytes()
-    book_before = book_path.read_bytes()
-    precheck = Barrier(2, timeout=5)
-    release = Barrier(2, timeout=5)
-    original_reject = admission_guard._reject_instance_shadow
+    coordinator = fixture.coordinator()
+    before = _four_state_bytes(fixture)
     attacker_called = False
-    errors: list[BaseException] = []
-
-    def gated_reject(value: object, method_name: str, label: str) -> None:
-        original_reject(value, method_name, label)
-        if value is decision_ledger and method_name == "verified_records":
-            precheck.wait()
-            release.wait()
 
     def attacker_verified_records(_self):
         nonlocal attacker_called
         attacker_called = True
-        return []
+        raise AssertionError("forged DecisionLedger callback must never execute")
 
-    monkeypatch.setattr(admission_guard, "_reject_instance_shadow", gated_reject)
-
-    def run_admission() -> None:
-        try:
-            fixture.admit(coordinator)
-        except BaseException as exc:  # capture the deterministic fail-closed result
-            errors.append(exc)
-
-    worker = Thread(target=run_admission)
-    worker.start()
-    precheck.wait()
+    monkeypatch.setattr(
+        admission_guard,
+        "_PINNED_DECISION_VERIFIED_RECORDS",
+        attacker_verified_records,
+    )
     monkeypatch.setattr(JsonlDecisionLedger, "verified_records", attacker_verified_records)
-    release.wait()
-    worker.join(timeout=5)
 
-    assert not worker.is_alive()
-    assert len(errors) == 1
-    assert isinstance(errors[0], PaperCampaignAdmissionError)
-    assert "class method changed" in str(errors[0])
+    with pytest.raises(PaperCampaignAdmissionError, match="class method changed"):
+        fixture.admit(coordinator)
+
     assert attacker_called is False
-    assert state_path.read_bytes() == state_before
-    assert decision_path.read_bytes() == decisions_before
-    assert agent_path.read_bytes() == agent_before
-    assert book_path.read_bytes() == book_before
+    assert _four_state_bytes(fixture) == before
 
 
-def test_execution_ledger_class_method_swap_after_precheck_never_executes_attacker(
+def test_execution_class_and_pinned_mirror_cosubstitution_never_executes_attacker(
     tmp_path, monkeypatch
 ):
     fixture = AdmissionFixture(tmp_path)
-    with patch.dict(
-        os.environ,
-        {"AUTOSPORT_PAPER_EXECUTION_WITNESS_DIR": str(fixture.authority)},
-    ):
-        execution_ledger = PaperExecutionLedger(fixture.execution_ledger_path)
-    coordinator = fixture.coordinator(execution_ledger=execution_ledger)
-    state_path = fixture.workspace / "paper-campaign-admission.json"
-    decision_path = fixture.workspace / "decisions.jsonl"
-    agent_path = fixture.workspace / "agent-loop.json"
-    book_path = fixture.workspace / "paper_book.json"
-    state_before = state_path.read_bytes()
-    decisions_before = decision_path.read_bytes()
-    agent_before = agent_path.read_bytes()
-    book_before = book_path.read_bytes()
-    precheck = Barrier(2, timeout=5)
-    release = Barrier(2, timeout=5)
-    original_reject = admission_guard._reject_instance_shadow
+    coordinator = fixture.coordinator()
+    before = _four_state_bytes(fixture)
     attacker_called = False
-    errors: list[BaseException] = []
-
-    def gated_reject(value: object, method_name: str, label: str) -> None:
-        original_reject(value, method_name, label)
-        if value is execution_ledger and method_name == "events":
-            precheck.wait()
-            release.wait()
 
     def attacker_events(_self, _run_id: str):
         nonlocal attacker_called
         attacker_called = True
-        return []
+        raise AssertionError("forged execution-ledger callback must never execute")
 
-    monkeypatch.setattr(admission_guard, "_reject_instance_shadow", gated_reject)
-
-    def run_admission() -> None:
-        try:
-            fixture.admit(coordinator)
-        except BaseException as exc:  # capture the deterministic fail-closed result
-            errors.append(exc)
-
-    worker = Thread(target=run_admission)
-    worker.start()
-    precheck.wait()
+    monkeypatch.setattr(admission_guard, "_PINNED_EXECUTION_EVENTS", attacker_events)
     monkeypatch.setattr(PaperExecutionLedger, "events", attacker_events)
-    release.wait()
-    worker.join(timeout=5)
 
-    assert not worker.is_alive()
-    assert len(errors) == 1
-    assert isinstance(errors[0], PaperCampaignAdmissionError)
-    assert "class method changed" in str(errors[0])
+    with pytest.raises(PaperCampaignAdmissionError, match="class method changed"):
+        fixture.admit(coordinator)
+
     assert attacker_called is False
-    assert state_path.read_bytes() == state_before
-    assert decision_path.read_bytes() == decisions_before
-    assert agent_path.read_bytes() == agent_before
-    assert book_path.read_bytes() == book_before
+    assert _four_state_bytes(fixture) == before
+
+
+def test_original_resolved_decision_mirror_substitution_is_not_authority(
+    tmp_path, monkeypatch
+):
+    fixture = AdmissionFixture(tmp_path)
+    coordinator = fixture.coordinator()
+    before = _four_state_bytes(fixture)
+    attacker_called = False
+
+    def attacker_resolver(*_args, **_kwargs):
+        nonlocal attacker_called
+        attacker_called = True
+        raise AssertionError("mutable resolver mirror must never execute")
+
+    monkeypatch.setattr(
+        admission_guard,
+        "_ORIGINAL_RESOLVED_EXECUTION_DECISION_ID",
+        attacker_resolver,
+    )
+
+    with pytest.raises(PaperCampaignAdmissionError):
+        coordinator._resolved_execution_decision_id(
+            run_id="missing-run",
+            reservation={"trigger_id": "missing-decision"},
+            origin={
+                "decision_id": "missing-decision",
+                "decision_record_ordinal": 999999,
+                "decision_record_sha256": "0" * 64,
+            },
+        )
+
+    assert attacker_called is False
+    assert _four_state_bytes(fixture) == before
+
+
+def test_original_execution_attempt_mirror_substitution_is_not_authority(
+    tmp_path, monkeypatch
+):
+    fixture = AdmissionFixture(tmp_path)
+    coordinator = fixture.coordinator()
+    before = _four_state_bytes(fixture)
+    attacker_called = False
+
+    def attacker_attempt(*_args, **_kwargs):
+        nonlocal attacker_called
+        attacker_called = True
+        raise AssertionError("mutable execution-attempt mirror must never execute")
+
+    monkeypatch.setattr(
+        admission_guard,
+        "_ORIGINAL_EXECUTION_ATTEMPT",
+        attacker_attempt,
+    )
+
+    with pytest.raises(PaperCampaignAdmissionError):
+        coordinator._execution_attempt(
+            run_id="missing-run",
+            attempt_id="missing-attempt",
+        )
+
+    assert attacker_called is False
+    assert _four_state_bytes(fixture) == before
+
+
+def test_reload_repairs_mutable_mirrors_from_installed_closure_seal(tmp_path, monkeypatch):
+    fixture = AdmissionFixture(tmp_path)
+    coordinator = fixture.coordinator()
+    before = _four_state_bytes(fixture)
+
+    def attacker_verified_records(_self):
+        raise AssertionError("reloaded mirror must not retain attacker delegate")
+
+    def attacker_events(_self, _run_id: str):
+        raise AssertionError("reloaded mirror must not retain attacker delegate")
+
+    monkeypatch.setattr(
+        admission_guard,
+        "_PINNED_DECISION_VERIFIED_RECORDS",
+        attacker_verified_records,
+    )
+    monkeypatch.setattr(admission_guard, "_PINNED_EXECUTION_EVENTS", attacker_events)
+    monkeypatch.setattr(
+        admission_guard,
+        "_ORIGINAL_RESOLVED_EXECUTION_DECISION_ID",
+        attacker_verified_records,
+    )
+    monkeypatch.setattr(
+        admission_guard,
+        "_ORIGINAL_EXECUTION_ATTEMPT",
+        attacker_events,
+    )
+
+    reloaded = importlib.reload(admission_guard)
+
+    assert reloaded._PINNED_DECISION_VERIFIED_RECORDS is not attacker_verified_records
+    assert reloaded._PINNED_EXECUTION_EVENTS is not attacker_events
+    assert reloaded._ORIGINAL_RESOLVED_EXECUTION_DECISION_ID is not attacker_verified_records
+    assert reloaded._ORIGINAL_EXECUTION_ATTEMPT is not attacker_events
+
+    with pytest.raises(PaperCampaignAdmissionError):
+        coordinator._execution_attempt(
+            run_id="missing-run",
+            attempt_id="missing-attempt",
+        )
+    assert _four_state_bytes(fixture) == before

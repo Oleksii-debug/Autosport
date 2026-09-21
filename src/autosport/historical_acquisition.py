@@ -313,6 +313,182 @@ def _require_match_result_evidence_semantics(
     }
 
 
+def _require_snapshot_report_binding(
+    report: Any,
+    semantics: dict[str, Any],
+    *,
+    field: str,
+) -> None:
+    observed = (
+        report.requested_at,
+        report.snapshot_at,
+        report.captured_at,
+        report.response_sha256,
+        report.market_sha256,
+        report.quote_count,
+        report.has_data,
+    )
+    expected = (
+        semantics["requested_at"],
+        semantics["snapshot_at"],
+        semantics["captured_at"],
+        semantics["provider_response_sha256"],
+        semantics["market_sha256"],
+        semantics["quote_count"],
+        semantics["point_in_time_snapshot_contains_odds"],
+    )
+    if observed != expected:
+        raise ProviderPayloadError(
+            f"{field} returned child report does not match staged evidence"
+        )
+
+
+def _require_snapshot_market_semantics(
+    path: Path,
+    *,
+    expected_quote_count: int,
+    expected_captured_at: str,
+    field: str,
+) -> None:
+    try:
+        raw = path.read_bytes().decode("utf-8")
+    except (OSError, UnicodeError) as exc:
+        raise ProviderPayloadError(f"{field} must be readable UTF-8 JSONL") from exc
+
+    lines = raw.splitlines()
+    if len(lines) != expected_quote_count:
+        raise ProviderPayloadError(
+            f"{field} row count does not match staged child evidence"
+        )
+    for line_number, line in enumerate(lines, start=1):
+        if not line:
+            raise ProviderPayloadError(f"{field} contains an empty JSONL row")
+        try:
+            row = json.loads(line)
+        except json.JSONDecodeError as exc:
+            raise ProviderPayloadError(
+                f"{field} row {line_number} must be valid JSON"
+            ) from exc
+        if type(row) is not dict:
+            raise ProviderPayloadError(
+                f"{field} row {line_number} must be a JSON object"
+            )
+        if row.get("ingest_ts") != expected_captured_at:
+            raise ProviderPayloadError(
+                f"{field} row {line_number} ingest_ts does not match child evidence"
+            )
+
+
+def _require_match_result_capture_semantics(
+    payload: dict[str, Any],
+    *,
+    expected_sport_key: str,
+    expected_date: str,
+    expected_priced_only: bool,
+    expected_request_url: str,
+) -> dict[str, Any]:
+    if type(payload.get("schema_version")) is not int or payload["schema_version"] != 1:
+        raise ProviderPayloadError("match_results.capture schema_version mismatch")
+    if payload.get("kind") != "parlayapi_historical_match_result_capture":
+        raise ProviderPayloadError("match_results.capture kind mismatch")
+    if payload.get("provider") != "parlayapi":
+        raise ProviderPayloadError("match_results.capture provider identity mismatch")
+    if payload.get("sport_key") != expected_sport_key:
+        raise ProviderPayloadError("match_results.capture sport identity mismatch")
+
+    request = payload.get("request")
+    if type(request) is not dict:
+        raise ProviderPayloadError("match_results.capture request must be an object")
+    if request.get("url") != expected_request_url:
+        raise ProviderPayloadError("match_results.capture request_url mismatch")
+    if request.get("date") != expected_date:
+        raise ProviderPayloadError("match_results.capture requested_date mismatch")
+    if type(request.get("priced_only")) is not bool or request["priced_only"] is not expected_priced_only:
+        raise ProviderPayloadError("match_results.capture priced_only mismatch")
+
+    captured_at = payload.get("captured_at")
+    if type(captured_at) is not str:
+        raise ProviderPayloadError("match_results.capture captured_at must be text")
+    try:
+        _canonical_timestamp(captured_at, field="match_results.capture.captured_at")
+    except ValueError as exc:
+        raise ProviderPayloadError(
+            "match_results.capture captured_at must be a timezone-aware ISO timestamp"
+        ) from exc
+
+    canonical_response_sha256 = payload.get("canonical_response_sha256")
+    if (
+        type(canonical_response_sha256) is not str
+        or len(canonical_response_sha256) != 64
+        or any(character not in "0123456789abcdef" for character in canonical_response_sha256)
+    ):
+        raise ProviderPayloadError(
+            "match_results.capture canonical_response_sha256 must be lowercase SHA-256 hex"
+        )
+
+    trust = payload.get("trust")
+    if type(trust) is not dict:
+        raise ProviderPayloadError("match_results.capture trust must be an object")
+    trust_fields = (
+        "product_owned_request_path_verified",
+        "product_owned_acquisition_clock_verified",
+        "provider_response_origin_verified",
+        "trusted_outcome_source_admissible",
+    )
+    for field_name in trust_fields:
+        if trust.get(field_name) is not False:
+            raise ProviderPayloadError(
+                f"match_results.capture trust.{field_name} must remain false on this authority"
+            )
+
+    return {
+        "requested_date": expected_date,
+        "priced_only": expected_priced_only,
+        "request_url": expected_request_url,
+        "captured_at": captured_at,
+        "canonical_response_sha256": canonical_response_sha256,
+        **{field_name: False for field_name in trust_fields},
+    }
+
+
+def _require_match_result_report_binding(
+    report: Any,
+    semantics: dict[str, Any],
+) -> None:
+    observed = (
+        report.requested_date,
+        report.priced_only,
+        report.request_url,
+        report.captured_at,
+        report.capture_sha256,
+        report.canonical_response_sha256,
+        report.historical_window_hours,
+        report.historical_window_from,
+        report.product_owned_request_path_verified,
+        report.product_owned_acquisition_clock_verified,
+        report.provider_response_origin_verified,
+        report.trusted_outcome_source_admissible,
+    )
+    expected = (
+        semantics["requested_date"],
+        semantics["priced_only"],
+        semantics["request_url"],
+        semantics["captured_at"],
+        semantics["capture_sha256"],
+        semantics["canonical_response_sha256"],
+        semantics["historical_window_hours"],
+        semantics["historical_window_from"],
+        semantics["product_owned_request_path_verified"],
+        semantics["product_owned_acquisition_clock_verified"],
+        semantics["provider_response_origin_verified"],
+        semantics["trusted_outcome_source_admissible"],
+    )
+    if observed != expected:
+        raise ProviderPayloadError(
+            "match_results returned child report does not match staged evidence"
+        )
+
+
 def capture_historical_acquisition_bundle(
     provider: ParlayApiTableTennisProvider,
     *,
@@ -419,6 +595,7 @@ def capture_historical_acquisition_bundle(
         snapshot_dir = staging / "snapshots"
         snapshot_dir.mkdir(parents=True, exist_ok=False)
         snapshot_entries: list[dict[str, Any]] = []
+        snapshot_reports: list[Any] = []
         snapshots_with_odds = 0
 
         for index, instant in enumerate(canonical_requests, start=1):
@@ -426,12 +603,13 @@ def capture_historical_acquisition_bundle(
             evidence_relative = Path("snapshots") / f"{index:04d}-evidence.json"
             market_path = staging / market_relative
             evidence_path = staging / evidence_relative
-            capture_historical_snapshot(
+            snapshot_report = capture_historical_snapshot(
                 provider,
                 requested_at=instant,
                 output_path=market_path,
                 evidence_path=evidence_path,
             )
+            snapshot_reports.append(snapshot_report)
             snapshot_entries.append(
                 {
                     "market_file": market_relative.as_posix(),
@@ -443,7 +621,7 @@ def capture_historical_acquisition_bundle(
         result_evidence_relative = Path("match-results.evidence.json")
         result_path = staging / result_relative
         result_evidence_path = staging / result_evidence_relative
-        capture_historical_matches(
+        result_report = capture_historical_matches(
             provider,
             requested_date=canonical_results_date,
             output_path=result_path,
@@ -454,8 +632,8 @@ def capture_historical_acquisition_bundle(
         # Re-resolve every child byte set at the bundle publication boundary.
         # Returned report digests are authority claims, not permission to trust a
         # pathname that may have been replaced after the child function returned.
-        for index, (instant, entry) in enumerate(
-            zip(canonical_requests, snapshot_entries, strict=True),
+        for index, (instant, entry, snapshot_report) in enumerate(
+            zip(canonical_requests, snapshot_entries, snapshot_reports, strict=True),
             start=1,
         ):
             market_path = staging / str(entry["market_file"])
@@ -472,6 +650,17 @@ def capture_historical_acquisition_bundle(
             market_sha256 = _require_staged_digest(
                 market_path,
                 str(snapshot_semantics["market_sha256"]),
+                field=f"snapshot[{index}].market",
+            )
+            _require_snapshot_report_binding(
+                snapshot_report,
+                snapshot_semantics,
+                field=f"snapshot[{index}]",
+            )
+            _require_snapshot_market_semantics(
+                market_path,
+                expected_quote_count=int(snapshot_semantics["quote_count"]),
+                expected_captured_at=str(snapshot_semantics["captured_at"]),
                 field=f"snapshot[{index}].market",
             )
             entry.clear()
@@ -498,15 +687,37 @@ def capture_historical_acquisition_bundle(
             expected_priced_only=results_priced_only,
             expected_request_url=results_request_url,
         )
-        result_capture_sha256 = _require_staged_digest(
+        result_capture, result_capture_sha256 = _read_strict_json_object_with_sha256(
             result_path,
-            str(result_semantics["capture_sha256"]),
             field="match_results.capture",
         )
-        if result_evidence.get("capture_sha256") != result_capture_sha256:
+        if result_capture_sha256 != str(result_semantics["capture_sha256"]):
             raise ProviderPayloadError(
                 "match_results.evidence capture_sha256 does not bind staged capture bytes"
             )
+        result_capture_semantics = _require_match_result_capture_semantics(
+            result_capture,
+            expected_sport_key=str(request_scope["sport_key"]),
+            expected_date=canonical_results_date,
+            expected_priced_only=results_priced_only,
+            expected_request_url=results_request_url,
+        )
+        for field_name in (
+            "requested_date",
+            "priced_only",
+            "request_url",
+            "captured_at",
+            "canonical_response_sha256",
+            "product_owned_request_path_verified",
+            "product_owned_acquisition_clock_verified",
+            "provider_response_origin_verified",
+            "trusted_outcome_source_admissible",
+        ):
+            if result_capture_semantics[field_name] != result_semantics[field_name]:
+                raise ProviderPayloadError(
+                    f"match_results capture/evidence semantic mismatch for {field_name}"
+                )
+        _require_match_result_report_binding(result_report, result_semantics)
         result_entry = {
             **result_semantics,
             "capture_file": result_relative.as_posix(),

@@ -280,7 +280,7 @@ def _utc(value: datetime, field: str) -> datetime:
 
 
 def _nonnegative_decimal(value: Decimal, field: str) -> Decimal:
-    if not isinstance(value, Decimal) or not value.is_finite() or value < 0:
+    if type(value) is not Decimal or not value.is_finite() or value < 0:
         raise BetfairAccountFundsPrecheckError(
             f"{field} must be a finite non-negative Decimal"
         )

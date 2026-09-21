@@ -219,7 +219,7 @@ def test_reconcile_failure_with_broken_str_keeps_recovery_actionable(tmp_path: P
     assert app._recovery_required_workspaces == {workspace}
     assert expected in logs
     assert "економічний стан лишається недоступним" in app.status.value
-    showerror.assert_called_once_with("Автоспорт", expected)
+    showerror.assert_called_once_with("Автоспорт", expected, parent=app)
 
 
 def test_post_recovery_reopen_failure_with_broken_str_keeps_recovery_actionable(
@@ -249,7 +249,7 @@ def test_post_recovery_reopen_failure_with_broken_str_keeps_recovery_actionable(
     assert app._recovery_required_workspaces == {workspace}
     assert expected in logs
     assert "стан економічного сеансу лишається недоступним" in app.status.value
-    showerror.assert_called_once_with("Автоспорт", expected)
+    showerror.assert_called_once_with("Автоспорт", expected, parent=app)
 
 
 def test_post_replay_reopen_failure_with_hostile_exception_keeps_feedback_actionable(
@@ -297,4 +297,4 @@ def test_post_replay_reopen_failure_with_hostile_exception_keeps_feedback_action
     ]
     assert logs == [expected]
     assert "економічну робочу область заблоковано" in app.status.value
-    showerror.assert_called_once_with("Автоспорт", expected)
+    showerror.assert_called_once_with("Автоспорт", expected, parent=app)

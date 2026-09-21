@@ -201,8 +201,12 @@ def derive_walk_forward_splits(
 
     indexed_points = list(enumerate(points))
     for _, point in indexed_points:
-        _instant("point observed_at", point.observed_at)
-        _instant("point target_reveal_at", point.target_reveal_at)
+        observed = _instant("point observed_at", point.observed_at)
+        revealed = _instant("point target_reveal_at", point.target_reveal_at)
+        if revealed < observed:
+            raise ReproducibilityManifestError(
+                "point target_reveal_at must not precede observed_at"
+            )
     ordered = sorted(
         indexed_points,
         key=lambda item: _instant("point observed_at", item[1].observed_at),
@@ -266,6 +270,17 @@ def derive_walk_forward_splits(
                 training_cutoff=fold.training_cutoff,
                 evaluation_at=fold.evaluation_at,
             )
+        )
+    evaluation_indices = tuple(
+        split.evaluation_index for split in split_evidence
+    )
+    if evaluation_indices != tuple(sorted(set(evaluation_indices))):
+        raise ReproducibilityManifestError(
+            "fold evidence must be unique and ordered by evaluation_index"
+        )
+    if evaluation_indices[-1] != len(ordered) - 1:
+        raise ReproducibilityManifestError(
+            "fold evidence must cover the final governed input"
         )
     return tuple(split_evidence)
 
@@ -360,6 +375,7 @@ class FactoryReproducibilityManifest:
                 "dataset_snapshot_id": self.dataset_snapshot_id,
                 "dataset_manifest_sha256": self.dataset_manifest_sha256,
                 "training_points_manifest_sha256": self.training_points_manifest_sha256,
+                "input_count": self.splits[-1].evaluation_index + 1,
                 "source_identity": self.dataset_source_identity,
                 "license_identity": self.dataset_license_identity,
             },
@@ -432,6 +448,7 @@ class FactoryReproducibilityManifest:
             "dataset_snapshot_id",
             "dataset_manifest_sha256",
             "training_points_manifest_sha256",
+            "input_count",
             "source_identity",
             "license_identity",
         }:
@@ -493,6 +510,15 @@ class FactoryReproducibilityManifest:
             environment_sha256=software["environment_sha256"],
             seed=model["seed"],
         )
+        input_count = dataset["input_count"]
+        if (
+            isinstance(input_count, bool)
+            or not isinstance(input_count, int)
+            or input_count != manifest.splits[-1].evaluation_index + 1
+        ):
+            raise ReproducibilityManifestError(
+                "dataset input_count does not match split lineage"
+            )
         if _sha256(
             "manifest_sha256", envelope["manifest_sha256"]
         ) != manifest.manifest_sha256:

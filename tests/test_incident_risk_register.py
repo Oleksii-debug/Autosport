@@ -101,6 +101,16 @@ class IncidentRiskRegisterTests(unittest.TestCase):
         with self.assertRaisesRegex(IncidentRiskRegisterError, "severity must be a JSON string"):
             IncidentRiskEntry.from_dict(wrong_enum_type)
 
+        for noncanonical_severity in ("HIGH", "High"):
+            with self.subTest(noncanonical_severity=noncanonical_severity):
+                wrong_severity_case = dict(payload)
+                wrong_severity_case["severity"] = noncanonical_severity
+                with self.assertRaisesRegex(
+                    IncidentRiskRegisterError,
+                    "invalid enum/value data",
+                ):
+                    IncidentRiskEntry.from_dict(wrong_severity_case)
+
     def test_canonical_text_timestamp_and_tuple_rules_fail_closed(self) -> None:
         with self.assertRaisesRegex(IncidentRiskRegisterError, "canonical trimmed text"):
             self._entry(title=" leading")

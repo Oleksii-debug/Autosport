@@ -16,6 +16,7 @@ from typing import Callable, Protocol, Sequence
 from .causal_collector import (
     CollectorDelta,
     CollectorDeltaStore,
+    CollectorStorageBackpressureError,
     RemoteCollectorAdapter,
     StreamCheckpoint,
 )
@@ -560,10 +561,16 @@ class HeadlessCollectorService:
             )
         activated_at = self.clock()
         _CollectorServiceState._instant(activated_at, "activated_at")
-        return self.delta_store._append_with_runtime_stream_epoch(
-            delta,
-            activated_at=activated_at,
-        )
+        try:
+            return self.delta_store._append_with_runtime_stream_epoch(
+                delta,
+                activated_at=activated_at,
+            )
+        except CollectorStorageBackpressureError as exc:
+            raise CollectorRetentionRequiredError(
+                "RETENTION_REQUIRED: collector native SQLite allocation ceiling was reached; "
+                "run explicit pin-aware compaction, then retry"
+            ) from exc
 
     @property
     def source_id(self) -> str:
@@ -828,7 +835,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         factory = _load_source_factory(args.source_factory)
         source = factory()
         service = HeadlessCollectorService(
-            delta_store=CollectorDeltaStore(root / "collector_deltas.json"),
+            delta_store=CollectorDeltaStore(
+                root / "collector_deltas.json",
+                max_bytes=args.max_store_bytes,
+            ),
             lifecycle=ContinuousEventLifecycle(root / "collector_catalog.json"),
             source=source,
             state_path=root / "collector_service_state.json",
@@ -852,6 +862,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         except CollectorServiceStoppedError:
             print(json.dumps(service.status(), ensure_ascii=False, sort_keys=True))
             return 3
+        except CollectorRetentionRequiredError:
+            print(json.dumps(service.status(), ensure_ascii=False, sort_keys=True))
+            return 4
         print(json.dumps(service.status(), ensure_ascii=False, sort_keys=True))
         return signal_stop.exit_code or 0
     finally:

@@ -202,8 +202,10 @@ def initialize_research_control_runtime(
     root.mkdir(parents=True, exist_ok=True)
     paths = ResearchControlPaths.for_workspace(root)
     presence = _state_presence(paths)
-    if any(presence):
-        if all(presence):
+    registry_exists, supervisor_exists, curriculum_exists, scheduler_exists = presence
+    child_presence = (supervisor_exists, curriculum_exists, scheduler_exists)
+    if any(child_presence):
+        if registry_exists and all(child_presence):
             raise ResearchControlRuntimeError(
                 "research control state already exists; use open_research_control_runtime"
             )
@@ -211,7 +213,11 @@ def initialize_research_control_runtime(
             "research control workspace is incomplete; refusing partial-state rebootstrap"
         )
 
-    registry = ScientificRegistry.initialize_pristine(paths.scientific_registry)
+    registry = (
+        ScientificRegistry(paths.scientific_registry)
+        if registry_exists
+        else ScientificRegistry.initialize_pristine(paths.scientific_registry)
+    )
     supervisor = ResearchSupervisor.initialize_pristine(paths.supervisor, registry)
     adapter = ResearchTriggerAdapter(supervisor)
     NightResearchCurriculum.initialize_pristine(

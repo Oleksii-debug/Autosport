@@ -512,8 +512,6 @@ class TrialFamilyAccountingStore:
             events = list(state['events'])
             if _instant(event_at, 'event_at') < _instant(family.frozen_at, 'family.frozen_at'):
                 raise ValueError('trial-family event predates frozen family')
-            if events and _instant(event_at, 'event_at') < _instant(events[-1]['event_at'], 'previous event_at'):
-                raise ValueError('event_at must not precede durable event history')
             prior_assessments = self._sequential(state).assessments()
             if prior_assessments:
                 latest_sequential_at = max(
@@ -522,6 +520,8 @@ class TrialFamilyAccountingStore:
                 )
                 if _instant(event_at, 'event_at') < latest_sequential_at:
                     raise ValueError('event_at must not precede durable sequential history')
+            if events and _instant(event_at, 'event_at') < _instant(events[-1]['event_at'], 'previous event_at'):
+                raise ValueError('event_at must not precede durable event history')
             previous_sha = events[-1]['event_sha256'] if events else None
             envelope = {'sequence': len(events) + 1, 'kind': kind, 'event_at': event_at, 'payload': payload, 'prev_event_sha256': previous_sha}
             event = {**envelope, 'event_sha256': _digest(envelope)}

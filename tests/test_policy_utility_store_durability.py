@@ -106,32 +106,34 @@ def test_canonical_store_cross_process_writers_preserve_both_commits(tmp_path) -
 
 
 def test_directory_sync_boundary_failure_returns_no_receipt_and_retry_converges(
+    monkeypatch,
     tmp_path,
 ) -> None:
     path = tmp_path / "utility.jsonl"
     evidence = _evidence(episode_id="episode-dir-sync")
-    seen_stages: list[str] = []
 
-    def fail_before_directory_sync(stage: str) -> None:
-        seen_stages.append(stage)
-        if stage == "after_replace_before_directory_fsync":
-            raise RuntimeError("injected directory-sync boundary failure")
+    def fail_directory_sync(_path: Path) -> None:
+        raise OSError("injected directory-sync boundary failure")
 
-    store = PolicyUtilityStore(path, fault_hook=fail_before_directory_sync)
-    with pytest.raises(RuntimeError, match="directory-sync boundary failure"):
+    monkeypatch.setattr(policy_utility_module, "_fsync_directory", fail_directory_sync)
+    store = PolicyUtilityStore(path)
+    with pytest.raises(PolicyUtilityError, match="unable to durably publish"):
         store.append(evidence)
 
-    assert "before_replace" in seen_stages
-    assert "after_replace_before_directory_fsync" in seen_stages
-    assert "after_directory_fsync" not in seen_stages
-
-    # Publication may already be visible after replace, but the failed caller
-    # never received True. A clean restart converges idempotently on exactly one
-    # complete record rather than creating a second commit or a partial line.
+    # POSIX replace may already be visible when the directory fsync fails, but
+    # the failed caller receives no True receipt. A clean restart converges
+    # idempotently on exactly one complete record rather than duplicating it.
+    monkeypatch.undo()
     reopened = PolicyUtilityStore(path)
     assert reopened.list() == (evidence,)
     assert reopened.append(evidence) is False
     assert reopened.list() == (evidence,)
+
+
+def test_store_does_not_expose_reentrant_fault_callback(tmp_path) -> None:
+    path = tmp_path / "utility.jsonl"
+    with pytest.raises(TypeError):
+        PolicyUtilityStore(path, fault_hook=lambda _stage: None)  # type: ignore[call-arg]
 
 
 def test_windows_write_through_replace_uses_atomic_write_through_flags(monkeypatch, tmp_path) -> None:
@@ -196,7 +198,7 @@ def test_store_wraps_durable_replace_failure_and_returns_no_receipt(monkeypatch,
     path = tmp_path / "utility.jsonl"
     evidence = _evidence(episode_id="episode-write-through-failure")
 
-    def fail_durable_replace(source, destination, *, after_posix_replace=None):
+    def fail_durable_replace(source, destination):
         raise OSError("injected platform durable replace failure")
 
     monkeypatch.setattr(policy_utility_module, "_durable_replace", fail_durable_replace)

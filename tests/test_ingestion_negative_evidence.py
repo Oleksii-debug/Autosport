@@ -1,9 +1,11 @@
 import json
 import tempfile
 import unittest
+from contextlib import redirect_stdout
+from io import StringIO
 from pathlib import Path
 
-from autosport.ingestion_negative_evidence import project_ingestion_negative_evidence
+from autosport.ingestion_negative_evidence import main, project_ingestion_negative_evidence
 
 
 def _status(**overrides):
@@ -119,6 +121,31 @@ class IngestionNegativeEvidenceTests(unittest.TestCase):
         self.assertEqual(evidence.failed_cycles, 1)
         self.assertEqual(evidence.unobserved_expected_cycles, 0)
         self.assertEqual(evidence.successful_fraction, 0.75)
+
+    def test_cli_emits_machine_readable_negative_evidence_and_nonzero_exit(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "continuous_observation_status.json"
+            stdout = StringIO()
+            with redirect_stdout(stdout):
+                exit_code = main([str(path), "--expected-cycles", "3"])
+
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual(exit_code, 2)
+        self.assertEqual(payload["evidence_state"], "missing")
+        self.assertEqual(payload["denominator_cycles"], 3)
+        self.assertTrue(payload["has_negative_evidence"])
+
+    def test_cli_returns_zero_only_for_observed_nonnegative_projection(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = self._write(Path(tmp), _status())
+            stdout = StringIO()
+            with redirect_stdout(stdout):
+                exit_code = main([str(path), "--expected-cycles", "2"])
+
+        payload = json.loads(stdout.getvalue())
+        self.assertEqual(exit_code, 0)
+        self.assertFalse(payload["has_negative_evidence"])
+        self.assertEqual(payload["successful_fraction"], 1.0)
 
     def test_invalid_expected_cycles_is_caller_error(self):
         with self.assertRaises(ValueError):

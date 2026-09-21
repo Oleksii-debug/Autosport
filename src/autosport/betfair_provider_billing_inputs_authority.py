@@ -7,8 +7,22 @@ read wrapper and validator: the wrapper owns construction of the existing strict
 Betfair read-only client with the canonical HTTP transport and a closure-captured
 UTC clock, then records the exact returned observation in a closure-private
 issuance relation. Callers can provide credentials and bounded read scope, but
-cannot inject a transport, clock, venue/account label, pre-built client, or rebound
-provider executable into positive provider-billing issuance.
+cannot inject a client, transport, clock, venue/account label, or pre-built
+observation through the supported API.
+
+The provenance threat boundary is the repository's canonical trusted-process
+boundary, matching :mod:`_provider_receipt_trust_root`: it protects against
+caller-created objects, structural witnesses, consumer API misuse, issued-object
+tamper, and caller injection through supported APIs. The executable identity
+checks below are fail-fast defense in depth for known drift/rebinding seams.
+
+It deliberately does *not* claim an OS sandbox against arbitrary code injection or
+arbitrary monkeypatching of Python/stdlib runtime internals inside the already
+trusted Autosport process. Such code can replace transitive network functions
+below any finite in-process fence. A stronger origin guarantee requires
+provider-signed evidence or a separately isolated service/process issuer; the
+current Betfair provider contract supplies neither. This module must not imply that
+stronger guarantee.
 
 This is an in-process observation capability, not a second provider client, billing
 store, economic classifier, allocation authority, or durable cost record.
@@ -28,6 +42,19 @@ from .betfair_account_readonly import (
 )
 
 
+PROVIDER_BILLING_ORIGIN_TRUST_SCOPE = "trusted-autosport-process-v1"
+PROVIDER_BILLING_ORIGIN_PROTECTS = (
+    "caller-created-observation",
+    "caller-injected-client-transport-clock",
+    "consumer-api-misuse",
+    "issued-object-tamper",
+)
+PROVIDER_BILLING_ORIGIN_EXCLUDES = (
+    "arbitrary-same-process-code-injection",
+    "arbitrary-stdlib-runtime-monkeypatch",
+)
+
+
 class BetfairProviderBillingInputsAuthorityError(BetfairReadOnlyError):
     """Raised when a provider-billing observation lacks canonical read issuance."""
 
@@ -40,9 +67,10 @@ def _build_observation_authority():
     credentials_cls = BetfairSessionCredentials
     transport_cls = UrllibBetfairHttpTransport
 
-    # Capture the production executable identities before any provider read. The
-    # public lower-level client intentionally remains injectable for ordinary
-    # deterministic adapters/tests; this positive issuance boundary does not.
+    # Capture known production executable identities before any provider read as
+    # defense in depth. The public lower-level client intentionally remains
+    # injectable for deterministic adapters/tests; the supported positive API does
+    # not accept that injection. These checks are not an arbitrary-code sandbox.
     client_init = client_cls.__dict__["__init__"]
     client_new = client_cls.__dict__.get("__new__")
     transport_init = transport_cls.__dict__["__init__"]
@@ -118,7 +146,7 @@ def _build_observation_authority():
     issued: dict[int, tuple[object, tuple[object, ...]]] = {}
 
     def assert_executable_authority() -> None:
-        """Reject same-process rebinding of every executable root used for I/O."""
+        """Fail fast on known executable drift inside the trusted-process boundary."""
 
         if (
             _readonly.__dict__.get("BetfairReadOnlyClient") is not readonly_client_export

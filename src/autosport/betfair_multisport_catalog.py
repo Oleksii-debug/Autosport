@@ -29,7 +29,11 @@ class BetfairCatalogRequest:
             raise BetfairCatalogError("method is outside the read-only discovery allowlist")
         if not isinstance(self.params, Mapping):
             raise BetfairCatalogError("params must be a mapping")
-        object.__setattr__(self, "params", MappingProxyType(dict(self.params)))
+        object.__setattr__(self, "params", _deep_freeze_mapping(self.params, "params"))
+
+    def rpc_params(self) -> dict[str, object]:
+        """Return a detached JSON-compatible copy for the authenticated RPC boundary."""
+        return _deep_thaw_mapping(self.params)
 
 
 @dataclass(frozen=True, slots=True)
@@ -273,6 +277,37 @@ def parse_market_catalogue_result(
         )
     _reject_duplicate((item.market_id for item in items), "marketId", provider_result=True)
     return BetfairMarketCatalogueBatch(tuple(items), limit, len(items) == limit)
+
+
+def _deep_freeze_mapping(value: Mapping[str, object], field: str) -> Mapping[str, object]:
+    frozen: dict[str, object] = {}
+    for key, item in value.items():
+        if not isinstance(key, str) or not key:
+            raise BetfairCatalogError(f"{field} keys must be non-empty strings")
+        frozen[key] = _deep_freeze_value(item, f"{field}.{key}")
+    return MappingProxyType(frozen)
+
+
+def _deep_freeze_value(value: object, field: str) -> object:
+    if isinstance(value, Mapping):
+        return _deep_freeze_mapping(value, field)
+    if isinstance(value, (list, tuple)):
+        return tuple(_deep_freeze_value(item, field) for item in value)
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    raise BetfairCatalogError(f"{field} contains a non-JSON-compatible value")
+
+
+def _deep_thaw_mapping(value: Mapping[str, object]) -> dict[str, object]:
+    return {key: _deep_thaw_value(item) for key, item in value.items()}
+
+
+def _deep_thaw_value(value: object) -> object:
+    if isinstance(value, Mapping):
+        return _deep_thaw_mapping(value)
+    if isinstance(value, tuple):
+        return [_deep_thaw_value(item) for item in value]
+    return value
 
 
 def _rows(value: object, field: str) -> list[object]:

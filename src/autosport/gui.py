@@ -349,6 +349,7 @@ class AutosportApp(tk.Tk):
         selected = filedialog.askopenfilename(
             title=text("ui.dialog.research_plan.choose_title"),
             filetypes=((text("ui.filetype.json"), "*.json"), (text("ui.filetype.all"), "*.*")),
+            parent=self,
         )
         if not selected:
             return
@@ -502,7 +503,10 @@ class AutosportApp(tk.Tk):
         if blocker is not None:
             self.status.set(blocker)
             return
-        selected = filedialog.askdirectory(title=text("ui.dialog.dataset.choose_title"))
+        selected = filedialog.askdirectory(
+            title=text("ui.dialog.dataset.choose_title"),
+            parent=self,
+        )
         if not selected:
             return
 
@@ -714,6 +718,7 @@ class AutosportApp(tk.Tk):
             initialfile="autosport-evidence.json",
             defaultextension=".json",
             filetypes=((text("ui.filetype.json"), "*.json"), (text("ui.filetype.all"), "*.*")),
+            parent=self,
         )
         if not output:
             return

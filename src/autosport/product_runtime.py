@@ -424,7 +424,14 @@ class AutonomousProductRuntime:
             raise
 
     def pause(self) -> ContinuousSessionStatus:
-        self._coherent_status()
+        current = self._coherent_status()
+        state = self._state_value(current)
+        if state == SessionState.STOPPED.value:
+            raise ProductCompositionError(
+                "cannot pause a stopped product runtime; start it before pausing"
+            )
+        if state == SessionState.PAUSED.value:
+            return current
         self.coordinator.pause()
         return self._coherent_status()
 

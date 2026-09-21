@@ -1155,13 +1155,14 @@ def execute_betfair_supervised_action(
             receipt,
         )
 
+    acknowledgement_receipt = receipt
     if outcome is PlaceOrdersOutcome.REJECTED:
-        receipt = receipt or (
-            "betfair-response-sha256:" + report.response_sha256
+        acknowledgement_receipt = acknowledgement_receipt or (
+            "betfair-rejection-evidence:" + evidence_id
         )
         acknowledgement = ExternalAcknowledgement(
             attempt_id=attempt_id,
-            external_receipt_id=receipt,
+            external_receipt_id=acknowledgement_receipt,
             status=AcknowledgementStatus.REJECTED,
             acknowledged_at=report.observed_at,
         )

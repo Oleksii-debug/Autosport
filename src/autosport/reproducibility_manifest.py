@@ -278,9 +278,13 @@ def derive_walk_forward_splits(
         raise ReproducibilityManifestError(
             "fold evidence must be unique and ordered by evaluation_index"
         )
-    if evaluation_indices[-1] != len(ordered) - 1:
+    expected_evaluation_indices = tuple(
+        range(evaluation_indices[0], len(ordered))
+    )
+    if evaluation_indices != expected_evaluation_indices:
         raise ReproducibilityManifestError(
-            "fold evidence must cover the final governed input"
+            "fold evidence must provide contiguous complete coverage from "
+            "the first fold through the final governed input"
         )
     return tuple(split_evidence)
 

@@ -491,8 +491,7 @@ def test_historical_decision_cannot_rebind_participant_after_later_snapshot(
 
 
 def test_matchup_selection_and_binding_fail_closed_on_future_evidence(tmp_path):
-    runtime = _runtime(tmp_path)
-    _materialize_pair(runtime, cutoff=T1, published_at=T1_PUBLISHED)
+    runtime = _bound_runtime_pair(tmp_path)
 
     with pytest.raises(
         SportMemoryError,

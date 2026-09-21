@@ -47,9 +47,9 @@ def test_line_level_pricing_has_hard_90_day_cap_without_consent_authority() -> N
     before = evidence.evaluate(as_of=T0 + LINE_LEVEL_MAX_RETENTION - timedelta(seconds=1))
     expired = evidence.evaluate(as_of=T0 + LINE_LEVEL_MAX_RETENTION)
 
-    assert before.state is ParlayApiRetentionState.RAW_USABLE
-    assert before.raw_use_allowed is True
-    assert before.training_corpus_allowed is True
+    assert before.state is ParlayApiRetentionState.ACQUISITION_AUTHORITY_UNRESOLVED
+    assert before.raw_use_allowed is False
+    assert before.training_corpus_allowed is False
     assert before.raw_redistribution_allowed is False
     assert expired.state is ParlayApiRetentionState.DELETE_REQUIRED
     assert expired.delete_raw_output is True
@@ -64,7 +64,7 @@ def test_cache_control_shorter_than_90_days_wins() -> None:
     assert evidence.effective_retention_deadline() == T0 + timedelta(days=1)
     assert evidence.evaluate(
         as_of=T0 + timedelta(days=1) - timedelta(seconds=1)
-    ).state is ParlayApiRetentionState.RAW_USABLE
+    ).state is ParlayApiRetentionState.ACQUISITION_AUTHORITY_UNRESOLVED
     assert evidence.evaluate(
         as_of=T0 + timedelta(days=1)
     ).state is ParlayApiRetentionState.DELETE_REQUIRED
@@ -96,7 +96,8 @@ def test_enterprise_or_historical_access_tier_never_mints_redistribution_or_exte
     )
     decision = evidence.evaluate(as_of=T0 + timedelta(days=30))
 
-    assert decision.state is ParlayApiRetentionState.RAW_USABLE
+    assert decision.state is ParlayApiRetentionState.ACQUISITION_AUTHORITY_UNRESOLVED
+    assert decision.raw_use_allowed is False
     assert decision.raw_redistribution_allowed is False
     assert evidence.effective_retention_deadline() == T0 + timedelta(days=90)
 
@@ -111,7 +112,9 @@ def test_result_or_other_raw_output_needs_explicit_finite_internal_horizon() -> 
         ParlayApiOutputClass.MATCH_RESULT_OR_OTHER_OUTPUT,
         internal_retention_until=T0 + timedelta(days=30),
     )
-    assert bounded.evaluate(as_of=T0 + timedelta(days=29)).training_corpus_allowed is True
+    bounded_decision = bounded.evaluate(as_of=T0 + timedelta(days=29))
+    assert bounded_decision.state is ParlayApiRetentionState.ACQUISITION_AUTHORITY_UNRESOLVED
+    assert bounded_decision.training_corpus_allowed is False
     assert bounded.evaluate(
         as_of=T0 + timedelta(days=30)
     ).state is ParlayApiRetentionState.DELETE_REQUIRED
@@ -125,7 +128,36 @@ def test_capture_availability_is_causal_and_cannot_be_backdated() -> None:
 
     assert before.state is ParlayApiRetentionState.NOT_YET_AVAILABLE
     assert before.training_corpus_allowed is False
-    assert after.state is ParlayApiRetentionState.RAW_USABLE
+    assert after.state is ParlayApiRetentionState.ACQUISITION_AUTHORITY_UNRESOLVED
+    assert after.raw_use_allowed is False
+
+
+def test_caller_rewrap_cannot_reset_old_raw_output_retention_authority() -> None:
+    old_capture = capture()
+    assert old_capture.evaluate(
+        as_of=T0 + LINE_LEVEL_MAX_RETENTION
+    ).state is ParlayApiRetentionState.DELETE_REQUIRED
+
+    # The exact same provider payload digest can be wrapped by an ordinary caller
+    # with a fresh arbitrary acquisition digest and refreshed timestamps. Deadline
+    # calculation may describe that supplied evidence, but it must not mint use
+    # authority until canonical acquisition identity/time are re-resolved.
+    refreshed_at = T0 + timedelta(days=120)
+    rewrapped = new_capture_retention_evidence(
+        output_class=ParlayApiOutputClass.LINE_LEVEL_PRICING,
+        source_payload_sha256=SHA_A,
+        acquisition_identity_sha256="c" * 64,
+        captured_at=refreshed_at,
+        available_at=refreshed_at,
+    )
+
+    assert rewrapped.effective_retention_deadline() == refreshed_at + LINE_LEVEL_MAX_RETENTION
+    decision = rewrapped.evaluate(as_of=refreshed_at)
+    assert decision.state is ParlayApiRetentionState.ACQUISITION_AUTHORITY_UNRESOLVED
+    assert decision.raw_use_allowed is False
+    assert decision.training_corpus_allowed is False
+    with pytest.raises(ParlayApiRetentionError, match="ACQUISITION_AUTHORITY_UNRESOLVED"):
+        rewrapped.require_raw_use(as_of=refreshed_at)
 
 
 def test_policy_change_preserves_capture_identity_but_blocks_use_for_review() -> None:

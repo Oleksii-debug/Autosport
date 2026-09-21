@@ -180,6 +180,19 @@ class ProviderQuoteComparisonTests(unittest.TestCase):
         )
         self.assertEqual(result, ())
 
+    def test_missing_provider_source_time_is_not_promoted_from_receipt_time(self) -> None:
+        result = self.compare(
+            self.event(
+                source="provider-a",
+                odds="2.00",
+                source_ts=None,
+                observed_ts="2026-09-21T12:59:50+00:00",
+                ingest_ts="2026-09-21T12:59:51+00:00",
+            ),
+            self.event(source="provider-b", odds="2.10"),
+        )
+        self.assertEqual(result, ())
+
     def test_future_local_observation_or_ingest_cannot_enter_comparison(self) -> None:
         valid = self.event(source="provider-a", odds="2.00")
         future_observed = self.event(
@@ -282,6 +295,8 @@ class ProviderQuoteComparisonTests(unittest.TestCase):
             replace(point, decimal_odds=Decimal("NaN"))
         with self.assertRaises(ProviderQuoteComparisonError):
             replace(point, observed_ts="not-a-time")
+        with self.assertRaises(ProviderQuoteComparisonError):
+            replace(point, source_ts=None)
         with self.assertRaises(ProviderQuoteComparisonError):
             replace(point, market_event_sha256="caller-minted")
 

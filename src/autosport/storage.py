@@ -126,6 +126,42 @@ def _source_payload(event: MarketEvent) -> str:
     return _source_payload_from_raw(event.to_dict())
 
 
+def _build_market_mirror_restore_snapshot(
+    events: Iterable[MarketEvent],
+) -> tuple[int, tuple[MarketEvent, ...], str | None]:
+    """Derive the exact live-mirror restart state from one decoded history snapshot.
+
+    This mirrors MarketMirror.apply ordering semantics without importing the mirror
+    and creating a storage-to-mirror import cycle. Local observation/ingestion clocks
+    are ignored only for same-sequence duplicate identity, exactly as in the live mirror.
+    """
+    latest: dict[tuple[str, str], MarketEvent] = {}
+    revision = 0
+    for event in sorted(events, key=_event_order_key):
+        key = (event.source_id, event.quote_key)
+        previous = latest.get(key)
+        if previous is None:
+            latest[key] = event
+            revision += 1
+            continue
+
+        if event.sequence < previous.sequence:
+            continue
+        if event.sequence == previous.sequence:
+            if _source_payload(event) != _source_payload(previous):
+                return (
+                    revision,
+                    (),
+                    "conflicting MarketEvent payload reused an existing source-local sequence",
+                )
+            continue
+
+        latest[key] = event
+        revision += 1
+
+    return revision, tuple(latest[key] for key in sorted(latest)), None
+
+
 def _typed_equal(left: object, right: object) -> bool:
     return type(left) is type(right) and left == right
 
@@ -530,6 +566,8 @@ class SQLiteMarketStore:
     def __init__(self, path: str | Path = "autosport.db") -> None:
         self.path = Path(path)
         self._connection_lock = RLock()
+        self._mirror_restore_snapshot: tuple[int, tuple[MarketEvent, ...]] | None = None
+        self._mirror_restore_error: str | None = None
         self.connection = sqlite3.connect(self.path, check_same_thread=False)
         try:
             self.connection.execute("PRAGMA journal_mode=WAL")
@@ -626,6 +664,7 @@ class SQLiteMarketStore:
         """Repair provider-aware current projection from one write-locked history snapshot."""
         latest: dict[tuple[str, str], tuple[tuple[int, str], MarketEvent]] = {}
         history_by_dedupe: dict[str, MarketEvent] = {}
+        history_events: list[MarketEvent] = []
         self.connection.execute("BEGIN IMMEDIATE")
         try:
             rows = self.connection.execute(
@@ -633,12 +672,17 @@ class SQLiteMarketStore:
             ).fetchall()
             for row in rows:
                 event = _event_from_history_row(row)
+                history_events.append(event)
                 history_by_dedupe[event.dedupe_key] = event
                 order_key = _projection_order_key(event)
                 projection_key = (event.source_id, event.quote_key)
                 previous = latest.get(projection_key)
                 if previous is None or order_key > previous[0]:
                     latest[projection_key] = (order_key, event)
+
+            restore_revision, restore_events, restore_error = (
+                _build_market_mirror_restore_snapshot(history_events)
+            )
 
             projection_rows = self.connection.execute(
                 f"SELECT {_CURRENT_COLUMNS_SQL} FROM current_quotes"
@@ -681,6 +725,8 @@ class SQLiteMarketStore:
             raise
         else:
             self.connection.commit()
+            self._mirror_restore_snapshot = (restore_revision, restore_events)
+            self._mirror_restore_error = restore_error
 
     def _insert_one(self, event: MarketEvent) -> bool:
         payload = _validate_incoming_event(event)
@@ -740,6 +786,8 @@ class SQLiteMarketStore:
                     payload,
                 ),
             )
+        self._mirror_restore_snapshot = None
+        self._mirror_restore_error = None
         return True
 
     def append(self, event: MarketEvent) -> bool:
@@ -773,6 +821,37 @@ class SQLiteMarketStore:
                 ).fetchall()
             events = [_event_from_history_row(row) for row in rows]
         return sorted(events, key=_event_order_key)
+
+    def market_mirror_restore_snapshot(self) -> tuple[int, tuple[MarketEvent, ...]]:
+        """Return validated latest mirror state plus exact replay-derived revision.
+
+        Startup rebuild computes this from the authoritative history rows it already
+        decodes. A successful append invalidates the cache because an out-of-order
+        observation can change replay revision semantics; the next restore then
+        recomputes once from history and caches the new compact state.
+        """
+        with self._connection_lock:
+            if self._mirror_restore_snapshot is None and self._mirror_restore_error is None:
+                rows = self.connection.execute(
+                    f"SELECT {_HISTORY_COLUMNS_SQL} FROM market_events"
+                ).fetchall()
+                history_events = [_event_from_history_row(row) for row in rows]
+                revision, events, error = _build_market_mirror_restore_snapshot(
+                    history_events
+                )
+                self._mirror_restore_snapshot = (revision, events)
+                self._mirror_restore_error = error
+
+            if self._mirror_restore_error is not None:
+                raise ValueError(self._mirror_restore_error)
+            if self._mirror_restore_snapshot is None:
+                raise RuntimeError("market mirror restore snapshot is unavailable")
+
+            revision, events = self._mirror_restore_snapshot
+            owned_events = tuple(
+                MarketEvent.from_dict(event.to_dict()) for event in events
+            )
+            return revision, owned_events
 
     def current_by_source(self) -> dict[tuple[str, str], MarketEvent]:
         with self._connection_lock:

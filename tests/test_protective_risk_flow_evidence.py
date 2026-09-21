@@ -283,6 +283,12 @@ class ProtectiveRiskFlowEvidenceTests(unittest.TestCase):
                 raw_equity=Decimal("NaN"),
             )
 
+    def test_unrepresentable_finite_decimal_fails_closed_with_typed_reason(self) -> None:
+        with self.assertRaises(ProtectiveRiskEvidenceError) as caught:
+            _build((_valuation(1, "huge", "1e1000000", T0),))
+
+        self.assertEqual(caught.exception.code, "ARITHMETIC_UNREPRESENTABLE")
+
     def test_decimal_result_is_independent_of_caller_context(self) -> None:
         events = (
             _valuation(1, "v1", "1000", T0),

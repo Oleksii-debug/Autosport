@@ -420,6 +420,31 @@ def _verify_runtime_snapshot_bindings(
 class BoundSportMemoryRuntime(SportMemoryRuntime):
     """Product-owned runtime that refreshes canonical source authority per write."""
 
+    def __setattr__(self, name: str, value: object) -> None:
+        # Positive authority is dispatched through this exact concrete runtime.
+        # Never allow an instance attribute to shadow a class/inherited member:
+        # doing so could replace verification/write methods while preserving the
+        # exact BoundSportMemoryRuntime type checked by product binders.
+        for authority_class in type(self).__mro__:
+            if name in authority_class.__dict__:
+                raise SportMemoryCheckpointError(
+                    f"bound sport-memory runtime forbids instance authority shadow: {name}"
+                )
+        object.__setattr__(self, name, value)
+
+    def __getattribute__(self, name: str):
+        # Also fail closed on direct __dict__ injection, which bypasses
+        # __setattr__. Special-method dispatch resolves this guard on the class,
+        # so an instance shadow cannot bypass the check itself.
+        instance_state = object.__getattribute__(self, "__dict__")
+        if name in instance_state:
+            for authority_class in type(self).__mro__:
+                if name in authority_class.__dict__:
+                    raise SportMemoryCheckpointError(
+                        f"bound sport-memory runtime detected instance authority shadow: {name}"
+                    )
+        return object.__getattribute__(self, name)
+
     def __init__(
         self,
         path: Path,

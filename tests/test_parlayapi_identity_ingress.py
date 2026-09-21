@@ -139,6 +139,35 @@ class ParlayApiIdentityIngressTests(unittest.TestCase):
         with self.assertRaisesRegex(ProviderPayloadError, "declare both"):
             self._read(event)
 
+    def test_timezone_naive_declared_start_cannot_be_canonical_identity(self):
+        event = copy.deepcopy(_BASE_EVENT)
+        event.update(
+            commence_time="2026-09-12T20:30:00",
+            home_team="Player A",
+            away_team="Player B",
+        )
+        with self.assertRaisesRegex(ProviderPayloadError, "timezone offset"):
+            self._read(event)
+
+    def test_equivalent_declared_start_offsets_share_one_canonical_instant(self):
+        first = copy.deepcopy(_BASE_EVENT)
+        first.update(
+            commence_time="2026-09-12T20:30:00Z",
+            home_team="Player A",
+            away_team="Player B",
+        )
+        second = copy.deepcopy(first)
+        second["commence_time"] = "2026-09-12T22:30:00+02:00"
+        second["bookmakers"][0]["key"] = "book-b"
+
+        quotes = self._read_events([first, second])
+
+        self.assertEqual(len(quotes), 2)
+        self.assertEqual(
+            {quote.provider_market_id for quote in quotes},
+            {"book-a:h2h", "book-b:h2h"},
+        )
+
     def test_repeated_event_id_cannot_change_declared_participants(self):
         first = copy.deepcopy(_BASE_EVENT)
         first.update(

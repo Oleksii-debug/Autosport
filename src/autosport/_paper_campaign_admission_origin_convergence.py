@@ -8,8 +8,7 @@ or second origin store is accepted.
 
 from __future__ import annotations
 
-import hashlib
-import json
+from datetime import datetime, timezone
 from typing import Mapping
 
 from . import paper_campaign_admission as _admission
@@ -64,16 +63,6 @@ _CANONICAL_RESERVATION_FIELDS = frozenset(
 _LEGACY_ORIGIN_EVENT = "DECISION_ORIGIN_BOUND"
 
 
-def _digest(value: object) -> str:
-    encoded = json.dumps(
-        value,
-        ensure_ascii=False,
-        sort_keys=True,
-        separators=(",", ":"),
-        allow_nan=False,
-    ).encode("utf-8")
-    return hashlib.sha256(encoded).hexdigest()
-
 
 class _ResolvedExecutionDecisionId(str):
     """String-compatible exact authority returned to legacy ticket code."""
@@ -99,7 +88,6 @@ def _install() -> None:
     accepted_equivalent = _admission._ACCEPTED_EQUIVALENT
     observation_type = Observation
     environment_type = CausalLearningEnvironment
-    environment_checkpoint = CausalLearningEnvironment.checkpoint
     paper_leg_from_dict = PaperLegAttempt.from_dict
     decision_integrity_error = DecisionLedgerIntegrityError
     execution_integrity_errors = (PaperExecutionIntegrityError, PaperExecutionStateError)
@@ -117,7 +105,6 @@ def _install() -> None:
     execution_run_key = _admission._EXECUTION_RUN_ID
     execution_attempt_key = _admission._EXECUTION_ATTEMPT_ID
     execution_ticket_key = _admission._EXECUTION_TICKET_ID
-    digest = _digest
 
     def reservation_payload(event: object) -> Mapping[str, object]:
         if not isinstance(event, Mapping):
@@ -187,152 +174,86 @@ def _install() -> None:
         ):
             raise error("PAPER execution decision_origin record_sha256 is invalid")
         raw_learning = origin.get("learning_observation")
-        if type(raw_learning) is not dict or set(raw_learning) != learning_fields:
-            raise error("PAPER pre-execution learning Observation schema is invalid")
-        if (
-            raw_learning.get("schema") != learning_schema
-            or raw_learning.get("schema_version") != learning_schema_version
-        ):
-            raise error("unsupported PAPER pre-execution learning Observation schema")
-        return payload
-
-    def execution_attempt(self, *, run_id: str, attempt_id: str):
-        run_id = text(run_id, "execution_run_id")
-        attempt_id = text(attempt_id, "execution_attempt_id")
-        try:
-            events = self.execution_ledger.events(run_id)
-        except execution_integrity_errors as exc:
-            raise error("PAPER execution ledger cannot re-resolve admission authority") from exc
-        if not events:
-            raise error("admission execution run is missing from canonical ledger")
-        if any(event.get("event_type") == legacy_origin_event for event in events):
-            raise error("legacy standalone PAPER decision-origin event is not canonical")
-        reservations = [event for event in events if event.get("event_type") == "RUN_RESERVED"]
-        completions = [event for event in events if event.get("event_type") == "RUN_COMPLETED"]
-        if len(reservations) != 1 or len(completions) != 1:
-            raise error("admission requires one completed canonical PAPER execution run")
-        reservation = reservation_payload(reservations[0])
-        origin = reservation["decision_origin"]
-        assert isinstance(origin, Mapping)
-        attempts: list[PaperLegAttempt] = []
-        try:
-            for event in events:
-                if event.get("event_type") == "ATTEMPT_RECORDED":
-                    attempts.append(paper_leg_from_dict(event.get("payload")))
-        except (PaperExecutionIntegrityError, ValueError, TypeError) as exc:
-            raise error("admission execution attempt evidence is invalid") from exc
-        matches = [attempt for attempt in attempts if attempt.attempt_id == attempt_id]
-        if len(matches) != 1:
-            raise error("admission execution attempt is missing or duplicated")
-        attempt = matches[0]
-        if attempt.run_id != run_id:
-            raise error("admission execution attempt belongs to another run")
-        action_ids = reservation["action_ids"]
-        assert isinstance(action_ids, list)
-        if attempt.sequence >= len(action_ids) or action_ids[attempt.sequence] != attempt.action_id:
-            raise error("admission execution attempt is not bound to reserved action order")
-        if attempt.outcome not in accepted_equivalent:
-            raise error("REJECTED/UNKNOWN PAPER execution cannot enter campaign admission")
-        if attempt.execution_odds is None or attempt.execution_stake is None:
-            raise error("accepted PAPER execution lacks exact execution odds/stake")
-        return attempt, reservation, origin
-
-    def resolved_execution_decision_id(
-        self,
-        *,
-        run_id: str,
-        reservation: Mapping[str, object],
-        origin: Mapping[str, object],
-    ):
-        trigger_id = text(reservation.get("trigger_id"), "execution trigger_id")
-        if origin is not reservation.get("decision_origin") and dict(origin) != reservation.get("decision_origin"):
-            raise error("PAPER execution decision_origin is not reservation authority")
-        if origin.get("decision_id") != trigger_id:
-            raise error("PAPER pre-execution decision-origin identity conflicts with reservation")
-        record_sha256 = origin.get("record_sha256")
-        if type(record_sha256) is not str:
-            raise error("PAPER pre-execution decision-origin digest is unavailable")
-        try:
-            records = self.decision_ledger.verified_records()
-        except decision_integrity_error as exc:
-            raise error("Decision Ledger cannot prove PAPER execution origin") from exc
-        matches = [candidate for candidate in records if candidate.decision_id == trigger_id]
-        if len(matches) != 1:
-            raise error("PAPER execution must originate from one pre-existing durable decision")
-        record = matches[0]
-        if digest_record(record) != record_sha256:
-            raise error("PAPER pre-execution decision-origin commitment no longer matches Decision Ledger")
-        payload = record.payload
-        if not isinstance(payload, Mapping):
-            raise error("PAPER execution decision payload is invalid")
-        live = matches_live(payload, decision_id=trigger_id, run_id=run_id, reservation=reservation)
-        legacy = matches_legacy(payload, decision_id=trigger_id, run_id=run_id, reservation=reservation)
-        if live == legacy:
-            raise error("PAPER execution decision lacks one canonical execution authority")
-
-        raw_learning = origin.get("learning_observation")
         if not isinstance(raw_learning, Mapping) or set(raw_learning) != learning_fields:
             raise error("PAPER pre-execution learning Observation is unavailable")
-        raw_evidence = raw_learning.get("evidence")
-        if type(raw_evidence) is not list:
-            raise error("PAPER pre-execution learning Observation evidence is invalid")
-        normalized_evidence: list[tuple[str, str]] = []
-        for item in raw_evidence:
-            if (
-                type(item) is not list
-                or len(item) != 2
-                or type(item[0]) is not str
-                or type(item[1]) is not str
-            ):
-                raise error("PAPER pre-execution learning Observation evidence is invalid")
-            normalized_evidence.append((item[0], item[1]))
-        try:
-            observation = observation_type(
-                environment_id=raw_learning.get("environment_id"),
-                observed_at=raw_learning.get("observed_at"),
-                available_at=raw_learning.get("available_at"),
-                evidence=tuple(normalized_evidence),
+
+        source_learning = payload.get("learning_observation")
+        if not isinstance(source_learning, Mapping) or set(source_learning) != learning_fields:
+            raise error(
+                "DecisionRecord lacks the product-issued pre-execution learning Observation"
             )
-        except (LearningEnvironmentError, TypeError, ValueError) as exc:
-            raise error("PAPER pre-execution learning Observation is invalid") from exc
-        if raw_learning.get("observation_id") != observation.observation_id:
-            raise error("PAPER pre-execution learning Observation identity changed")
+
+        def rebuild_observation(
+            raw: Mapping[str, object],
+            source_name: str,
+        ) -> Observation:
+            evidence = raw.get("evidence")
+            if not isinstance(evidence, (list, tuple)):
+                raise error(f"{source_name} learning Observation evidence is invalid")
+            normalized: list[tuple[str, str]] = []
+            for item in evidence:
+                if (
+                    not isinstance(item, (list, tuple))
+                    or len(item) != 2
+                    or type(item[0]) is not str
+                    or type(item[1]) is not str
+                ):
+                    raise error(
+                        f"{source_name} learning Observation evidence is invalid"
+                    )
+                normalized.append((item[0], item[1]))
+            try:
+                rebuilt = observation_type(
+                    environment_id=raw.get("environment_id"),
+                    observed_at=raw.get("observed_at"),
+                    available_at=raw.get("available_at"),
+                    evidence=tuple(normalized),
+                )
+            except (LearningEnvironmentError, TypeError, ValueError) as exc:
+                raise error(f"{source_name} learning Observation is invalid") from exc
+            if raw.get("observation_id") != rebuilt.observation_id:
+                raise error(f"{source_name} learning Observation identity changed")
+            return rebuilt
+
+        observation = rebuild_observation(raw_learning, "PAPER origin")
+        source_observation = rebuild_observation(source_learning, "DecisionRecord")
+        if observation != source_observation:
+            raise error(
+                "PAPER learning Observation conflicts with DecisionRecord commitment"
+            )
 
         environment = self.runtime.environment
         if type(environment) is not environment_type:
             raise error("PAPER campaign learning environment must be canonical")
         if observation.environment_id != environment.environment_id:
-            raise error("PAPER pre-execution learning Observation belongs to another environment")
-        try:
-            checkpoint = environment_checkpoint(environment)
-        except LearningEnvironmentError as exc:
-            raise error("PAPER campaign learning environment is not at the bound checkpoint") from exc
-
-        action_ids = reservation.get("action_ids")
-        reservation_evidence = reservation.get("observation_evidence_ids")
-        assert isinstance(action_ids, list)
-        assert isinstance(reservation_evidence, dict)
-        expected_evidence = {
-            "decision_id": trigger_id,
-            "decision_record_sha256": record_sha256,
-            "environment_checkpoint_id": checkpoint.checkpoint_id,
-            "execution_action_ids_sha256": digest(action_ids),
-            "execution_model_fingerprint": reservation["model_fingerprint"],
-            "execution_observation_evidence_ids_sha256": digest(reservation_evidence),
-            "execution_plan_fingerprint": reservation["plan_fingerprint"],
-            "execution_plan_id": reservation["plan_id"],
-        }
-        if dict(observation.evidence) != expected_evidence:
             raise error(
-                "PAPER pre-execution learning Observation evidence conflicts with durable origin"
+                "PAPER pre-execution learning Observation belongs to another environment"
             )
+
+        try:
+            available_time = datetime.fromisoformat(
+                observation.available_at.replace("Z", "+00:00")
+            )
+            decision_time = datetime.fromisoformat(
+                record.observed_ts.replace("Z", "+00:00")
+            )
+        except ValueError as exc:
+            raise error(
+                "PAPER pre-execution learning Observation time is invalid"
+            ) from exc
         if (
-            observation.observed_at != record.observed_ts
-            or observation.available_at != record.observed_ts
-            or observation.available_at != reservation["started_at"]
+            available_time.tzinfo is None
+            or available_time.utcoffset() is None
+            or decision_time.tzinfo is None
+            or decision_time.utcoffset() is None
+        ):
+            raise error("PAPER pre-execution learning Observation time is invalid")
+        if (
+            available_time.astimezone(timezone.utc)
+            > decision_time.astimezone(timezone.utc)
         ):
             raise error(
-                "PAPER pre-execution learning Observation time conflicts with durable decision"
+                "PAPER pre-execution learning Observation was unavailable at decision time"
             )
 
         return resolved_type(

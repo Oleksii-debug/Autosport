@@ -3,7 +3,7 @@ from __future__ import annotations
 from autosport.decision_ledger import JsonlDecisionLedger
 from autosport.learning_environment import Observation
 from autosport.paper_campaign_admission import PaperCampaignAdmissionError
-from paper_campaign_admission_test_support import AdmissionFixture, T2, T3
+from paper_campaign_admission_test_support import AdmissionFixture, T0, T1, T2, T3
 
 import pytest
 
@@ -12,33 +12,47 @@ def test_campaign_observation_is_exact_preexecution_origin_evidence(tmp_path):
     fixture = AdmissionFixture(tmp_path)
     coordinator = fixture.coordinator()
     records = JsonlDecisionLedger(fixture.workspace / "decisions.jsonl").verified_records()
-    source = next(record for record in records if record.decision_id == fixture.execution_decision_id)
+    source = next(
+        record
+        for record in records
+        if record.decision_id == fixture.execution_decision_id
+    )
 
     assert fixture.observation.environment_id == coordinator.runtime.environment.environment_id
-    assert fixture.observation.observed_at == source.observed_ts == T2
-    assert fixture.observation.available_at == source.observed_ts
+    assert fixture.observation.observed_at == T0
+    assert fixture.observation.available_at == T1
+    assert source.observed_ts == T2
+    assert T1 < T2
     evidence = dict(fixture.observation.evidence)
     assert set(evidence) == {
-        "decision_id",
-        "decision_record_sha256",
+        "decision_context_sha256",
         "environment_checkpoint_id",
-        "execution_action_ids_sha256",
-        "execution_model_fingerprint",
-        "execution_observation_evidence_ids_sha256",
-        "execution_plan_fingerprint",
-        "execution_plan_id",
+        "intent_evidence_sha256",
+        "intent_provenance_sha256",
+        "intent_vector_sha256",
+        "market_state_sha256",
     }
-    assert evidence["decision_id"] == source.decision_id
+    assert not any(key.startswith("execution_") for key in evidence)
+
+    source_payload = source.to_dict()["payload"]["learning_observation"]
+    assert source_payload["observation_id"] == fixture.observation.observation_id
 
     events = coordinator.execution_ledger.events(fixture.execution_run_id)
-    reservation = next(event for event in events if event["event_type"] == "RUN_RESERVED")
-    assert not any(event["event_type"] == "DECISION_ORIGIN_BOUND" for event in events)
+    reservation = next(
+        event for event in events if event["event_type"] == "RUN_RESERVED"
+    )
+    assert not any(
+        event["event_type"] == "DECISION_ORIGIN_BOUND" for event in events
+    )
     origin = reservation["payload"]["decision_origin"]
     assert origin["schema_version"] == 2
-    assert origin["record_sha256"] == evidence["decision_record_sha256"]
+    assert origin["learning_observation"] == source_payload
     durable = origin["learning_observation"]
     assert durable["observation_id"] == fixture.observation.observation_id
-    assert tuple(tuple(item) for item in durable["evidence"]) == fixture.observation.evidence
+    assert (
+        tuple(tuple(item) for item in durable["evidence"])
+        == fixture.observation.evidence
+    )
 
 
 def test_same_decision_context_with_different_learning_evidence_rejects(tmp_path):
@@ -46,7 +60,7 @@ def test_same_decision_context_with_different_learning_evidence_rejects(tmp_path
     coordinator = fixture.coordinator()
     before = JsonlDecisionLedger(fixture.workspace / "decisions.jsonl").verified_records()
     changed = dict(fixture.observation.evidence)
-    changed["execution_plan_id"] = changed["execution_plan_id"] + "-substituted"
+    changed["intent_evidence_sha256"] = "f" * 64
     forged = Observation(
         environment_id=fixture.observation.environment_id,
         observed_at=fixture.observation.observed_at,
@@ -93,7 +107,7 @@ def test_reservation_execution_evidence_substitution_rejects(tmp_path):
 
     with pytest.raises(
         PaperCampaignAdmissionError,
-        match="learning Observation evidence conflicts",
+        match="reservation argument conflicts",
     ):
         coordinator._resolved_execution_decision_id(
             run_id=fixture.execution_run_id,

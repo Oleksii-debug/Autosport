@@ -201,6 +201,36 @@ class AdmissionFixture:
             paper_book_path=self.workspace / "paper_book.json",
             learning_environment=self.environment,
         )
+        if seed_execution_decision:
+            issuer = getattr(
+                execution_runtime,
+                "_autosport_issue_predecision_learning_observation",
+            )
+            self.learning_observation_payload = issuer(
+                observed_at=T0,
+                available_at=T1,
+                evidence=(
+                    ("decision_context_sha256", "a" * 64),
+                    ("intent_evidence_sha256", "b" * 64),
+                    ("intent_provenance_sha256", "c" * 64),
+                    ("intent_vector_sha256", "d" * 64),
+                    ("market_state_sha256", "e" * 64),
+                ),
+            )
+            if self.learning_observation_payload is None:
+                raise AssertionError("fixture learning Observation was not issued")
+            raw_evidence = self.learning_observation_payload["evidence"]
+            self.observation = Observation(
+                environment_id=self.learning_observation_payload["environment_id"],
+                observed_at=self.learning_observation_payload["observed_at"],
+                available_at=self.learning_observation_payload["available_at"],
+                evidence=tuple((item[0], item[1]) for item in raw_evidence),
+            )
+            if (
+                self.observation.observation_id
+                != self.learning_observation_payload["observation_id"]
+            ):
+                raise AssertionError("fixture learning Observation identity changed")
         action = ExecutionAction(
             action_id="admission-execution-action",
             bookmaker_id="paper-venue",
@@ -297,10 +327,14 @@ class AdmissionFixture:
                 )
             finally:
                 execution_runtime.ledger = original_ledger
-            self.observation = _durable_learning_observation(
+            durable_observation = _durable_learning_observation(
                 execution_ledger,
                 self.execution_run_id,
             )
+            if durable_observation != self.observation:
+                raise AssertionError(
+                    "RUN_RESERVED did not copy the pre-published learning Observation"
+                )
         else:
             # Deliberately originless: used to prove a later matching decision cannot
             # retroactively bless already-started PAPER execution.
@@ -334,6 +368,11 @@ class AdmissionFixture:
                     "schema": "autosport.persistent_live_decision",
                     "schema_version": 2,
                     "material_action_id": self.execution_decision_id,
+                    **(
+                        {"learning_observation": self.learning_observation_payload}
+                        if hasattr(self, "learning_observation_payload")
+                        else {}
+                    ),
                     "paper_execution": {
                         "schema": "autosport.paper_execution_adoption",
                         "schema_version": 1,

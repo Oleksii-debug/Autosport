@@ -1,22 +1,21 @@
-"""Pre-execution learning Observation authority for PAPER campaign admission.
+"""Decision-time learning Observation authority for PAPER campaign admission.
 
-Campaign learning must not invent an Observation after execution.  The existing #727
-product-origin reservation is the first durable boundary that is both downstream of
-an already-published DecisionLedger record and upstream of every PAPER attempt.  This
-module binds one exact learning Observation at that boundary when the canonical
-PaperExecutionAdoptionRuntime was constructed with the exact learning environment.
+The canonical economic decision producer issues one exact learning Observation from
+decision-visible source evidence before publishing its DecisionRecord. The
+Observation bytes live inside that existing durable record. The merged #727
+decision-origin path later copies those already-issued bytes into RUN_RESERVED; it
+never reconstructs them from execution-plan or reservation fields.
 
-The Observation is carried inside #727 ``decision_origin`` bytes.  Existing v1
-origins remain readable for execution recovery, but they are intentionally
-insufficient for campaign admission.  No second origin store or standalone event is
-introduced.
+Existing v1 origins remain readable for generic PAPER recovery, but campaign
+admission requires the v2 carrier and exact equality with the DecisionRecord
+commitment. No second observation store or decision-origin protocol is introduced.
 """
 
 from __future__ import annotations
 
-import hashlib
 import inspect
 import json
+from datetime import datetime, timezone
 from functools import wraps
 from threading import RLock
 from typing import Mapping
@@ -24,11 +23,13 @@ from weakref import WeakKeyDictionary
 
 from . import _paper_execution_decision_origin as _origin
 from . import _paper_execution_decision_origin_instance_guard as _instance_guard
+from .decision_ledger import JsonlDecisionLedger
 from .learning_environment import (
     CausalLearningEnvironment,
     LearningEnvironmentError,
     Observation,
 )
+from .live_decision_loop import PersistentLiveDecisionLoop
 from .paper_campaign_admission import (
     PaperCampaignAdmissionCoordinator,
     PaperCampaignAdmissionError,
@@ -56,46 +57,8 @@ _OBSERVATION_FIELDS = frozenset(
     }
 )
 _RUNTIME_INIT_SENTINEL = "_autosport_campaign_observation_pristine_init"
-_INSTALL_SENTINEL = "_autosport_campaign_preexecution_observation_v2"
-_SHA256_HEX = frozenset("0123456789abcdef")
-
-
-def _digest(value: object) -> str:
-    encoded = json.dumps(
-        value,
-        ensure_ascii=False,
-        sort_keys=True,
-        separators=(",", ":"),
-        allow_nan=False,
-    ).encode("utf-8")
-    return hashlib.sha256(encoded).hexdigest()
-
-
-def _canonical_origin_text(value: object, name: str) -> str:
-    if type(value) is not str or not value or value.strip() != value or "\x00" in value:
-        raise _origin.PaperExecutionDecisionOriginError(
-            f"{name} must be canonical non-empty text"
-        )
-    try:
-        value.encode("utf-8", errors="strict")
-    except UnicodeEncodeError as exc:
-        raise _origin.PaperExecutionDecisionOriginError(
-            f"{name} must be UTF-8 encodable"
-        ) from exc
-    return value
-
-
-def _canonical_sha(value: object, name: str) -> str:
-    text = _canonical_origin_text(value, name)
-    if (
-        len(text) != 64
-        or text.lower() != text
-        or any(character not in _SHA256_HEX for character in text)
-    ):
-        raise _origin.PaperExecutionDecisionOriginError(
-            f"{name} must be lowercase SHA-256"
-        )
-    return text
+_ISSUER_METHOD = "_autosport_issue_predecision_learning_observation"
+_INSTALL_SENTINEL = "_autosport_campaign_preexecution_observation_v3"
 
 
 def _observation_payload(observation: Observation) -> dict[str, object]:
@@ -157,13 +120,24 @@ def _observation_from_payload(raw: object) -> Observation:
     return observation
 
 
+def _utc(value: str, name: str) -> datetime:
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except (AttributeError, ValueError) as exc:
+        raise _origin.PaperExecutionDecisionOriginError(
+            f"{name} must be timezone-aware ISO-8601"
+        ) from exc
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        raise _origin.PaperExecutionDecisionOriginError(
+            f"{name} must be timezone-aware ISO-8601"
+        )
+    return parsed.astimezone(timezone.utc)
+
+
 def _install() -> None:
     if getattr(PaperExecutionAdoptionRuntime, _INSTALL_SENTINEL, False):
         return
 
-    # Keep the environment binding outside caller-mutable runtime attributes.  A
-    # runtime may opt into campaign learning exactly once at construction; generic
-    # PAPER execution remains valid but produces a v1 origin that admission rejects.
     bindings: WeakKeyDictionary[
         PaperExecutionAdoptionRuntime,
         tuple[CausalLearningEnvironment, str],
@@ -182,7 +156,6 @@ def _install() -> None:
     )
     stable_checkpoint = CausalLearningEnvironment.checkpoint
     stable_origin_to_dict = _origin.DecisionRecordOrigin.to_dict
-    canonical_append_code = _instance_guard._CanonicalReservationView._append_event.__code__
     product_runtime_context = _instance_guard._PRODUCT_ORIGIN_RUNTIME
 
     @wraps(stable_runtime_init)
@@ -203,13 +176,74 @@ def _install() -> None:
             stable_checkpoint(learning_environment)
         except LearningEnvironmentError as exc:
             raise _origin.PaperExecutionDecisionOriginError(
-                "campaign learning environment must be at a durable checkpoint before execution"
+                "campaign learning environment must be at a durable checkpoint before decision"
             ) from exc
         with bindings_lock:
             bindings[self] = (
                 learning_environment,
                 learning_environment.environment_id,
             )
+
+    def issue_predecision_learning_observation(
+        self: PaperExecutionAdoptionRuntime,
+        *,
+        observed_at: str,
+        available_at: str,
+        evidence: tuple[tuple[str, str], ...],
+    ) -> dict[str, object] | None:
+        if type(self) is not PaperExecutionAdoptionRuntime:
+            raise _origin.PaperExecutionDecisionOriginError(
+                "learning observation issuer requires exact product execution runtime"
+            )
+        with bindings_lock:
+            binding = bindings.get(self)
+        if binding is None:
+            return None
+        environment, bound_environment_id = binding
+        if environment.environment_id != bound_environment_id:
+            raise _origin.PaperExecutionDecisionOriginError(
+                "campaign learning environment identity changed before decision"
+            )
+        if (
+            type(evidence) is not tuple
+            or any(
+                type(item) is not tuple
+                or len(item) != 2
+                or type(item[0]) is not str
+                or type(item[1]) is not str
+                or not item[0]
+                or not item[1]
+                for item in evidence
+            )
+        ):
+            raise _origin.PaperExecutionDecisionOriginError(
+                "decision-time learning evidence must be canonical string pairs"
+            )
+        keys = [item[0] for item in evidence]
+        if len(keys) != len(set(keys)) or "environment_checkpoint_id" in keys:
+            raise _origin.PaperExecutionDecisionOriginError(
+                "decision-time learning evidence keys must be unique"
+            )
+        try:
+            checkpoint = stable_checkpoint(environment)
+            observation = Observation(
+                environment_id=bound_environment_id,
+                observed_at=observed_at,
+                available_at=available_at,
+                evidence=tuple(
+                    sorted(
+                        (
+                            *evidence,
+                            ("environment_checkpoint_id", checkpoint.checkpoint_id),
+                        )
+                    )
+                ),
+            )
+        except (LearningEnvironmentError, TypeError, ValueError) as exc:
+            raise _origin.PaperExecutionDecisionOriginError(
+                "decision-time learning observation is not causally valid"
+            ) from exc
+        return _observation_payload(observation)
 
     def origin_to_dict(self: _origin.DecisionRecordOrigin) -> dict[str, object]:
         base = stable_origin_to_dict(self)
@@ -224,116 +258,93 @@ def _install() -> None:
             binding = bindings.get(runtime)
         if binding is None:
             return base
-        environment, bound_environment_id = binding
-        if environment.environment_id != bound_environment_id:
-            raise _origin.PaperExecutionDecisionOriginError(
-                "campaign learning environment identity changed before execution"
-            )
+        _, bound_environment_id = binding
 
         current = inspect.currentframe()
-        append_frame = None
-        reserve_frame = None
+        frame = current.f_back if current is not None else None
+        producer = None
         try:
-            append_frame = current.f_back if current is not None else None
-            reserve_frame = append_frame.f_back if append_frame is not None else None
+            while frame is not None:
+                if frame.f_code is PersistentLiveDecisionLoop._persist_plan.__code__:
+                    producer = frame
+                    break
+                frame = frame.f_back
+            if producer is None:
+                return base
+            owner = producer.f_locals.get("self")
             if (
-                append_frame is None
-                or append_frame.f_code is not canonical_append_code
-                or append_frame.f_locals.get("self")._origin is not self
+                type(owner) is not PersistentLiveDecisionLoop
+                or getattr(owner, "paper_execution", None) is not runtime
+                or producer.f_locals.get("decision_id") != self.decision_id
             ):
                 raise _origin.PaperExecutionDecisionOriginError(
-                    "learning observation must be issued by canonical #727 reservation"
+                    "learning observation producer identity changed before reservation"
                 )
-            payload = append_frame.f_locals.get("payload")
+            ledger = getattr(owner, "decision_ledger", None)
+            if type(ledger) is not JsonlDecisionLedger:
+                raise _origin.PaperExecutionDecisionOriginError(
+                    "learning observation producer lacks exact DecisionLedger authority"
+                )
+            snapshot = ledger.verified_snapshot()
+            matches: list[dict[str, object]] = []
+            for line in snapshot.payload.decode("utf-8").splitlines():
+                envelope = json.loads(line)
+                record = envelope.get("record")
+                if type(record) is not dict or record.get("decision_id") != self.decision_id:
+                    continue
+                if envelope.get("sha256") != self.record_sha256:
+                    raise _origin.PaperExecutionDecisionOriginError(
+                        "learning observation DecisionRecord digest changed"
+                    )
+                matches.append(record)
+            if len(matches) != 1:
+                raise _origin.PaperExecutionDecisionOriginError(
+                    "learning observation requires one exact durable DecisionRecord"
+                )
+            record = matches[0]
+            payload = record.get("payload")
             if type(payload) is not dict:
                 raise _origin.PaperExecutionDecisionOriginError(
-                    "canonical reservation payload is unavailable for learning observation"
+                    "learning observation DecisionRecord payload is invalid"
                 )
-            if reserve_frame is None:
+            raw = payload.get("learning_observation")
+            if type(raw) is not dict:
                 raise _origin.PaperExecutionDecisionOriginError(
-                    "canonical reservation frame is unavailable for learning observation"
+                    "campaign decision lacks pre-published learning observation"
                 )
-            plan = reserve_frame.f_locals.get("plan")
-            observed_at = getattr(plan, "created_at", None)
-            available_at = payload.get("started_at")
-            if type(observed_at) is not str or type(available_at) is not str:
+            observation = _observation_from_payload(raw)
+            if observation.environment_id != bound_environment_id:
                 raise _origin.PaperExecutionDecisionOriginError(
-                    "pre-execution learning observation timestamps are unavailable"
+                    "learning observation belongs to another campaign environment"
                 )
-            if payload.get("trigger_id") != self.decision_id:
+            observed_ts = record.get("observed_ts")
+            if type(observed_ts) is not str:
                 raise _origin.PaperExecutionDecisionOriginError(
-                    "learning observation decision identity conflicts with reservation"
+                    "learning observation DecisionRecord time is invalid"
                 )
-            try:
-                checkpoint = stable_checkpoint(environment)
-            except LearningEnvironmentError as exc:
+            if _utc(observation.available_at, "learning observation available_at") > _utc(
+                observed_ts,
+                "DecisionRecord observed_ts",
+            ):
                 raise _origin.PaperExecutionDecisionOriginError(
-                    "campaign learning environment is not checkpointable before execution"
-                ) from exc
-
-            action_ids = payload.get("action_ids")
-            observation_evidence_ids = payload.get("observation_evidence_ids")
-            if type(action_ids) is not list or type(observation_evidence_ids) is not dict:
+                    "learning observation was not available before the economic decision"
+                )
+            canonical_raw = _observation_payload(observation)
+            if raw != canonical_raw:
                 raise _origin.PaperExecutionDecisionOriginError(
-                    "reservation evidence is unavailable for learning observation"
+                    "learning observation durable bytes are not canonical"
                 )
-            evidence = tuple(
-                sorted(
-                    (
-                        ("decision_id", self.decision_id),
-                        ("decision_record_sha256", self.record_sha256),
-                        ("environment_checkpoint_id", checkpoint.checkpoint_id),
-                        ("execution_action_ids_sha256", _digest(action_ids)),
-                        (
-                            "execution_model_fingerprint",
-                            _canonical_origin_text(
-                                payload.get("model_fingerprint"),
-                                "execution model_fingerprint",
-                            ),
-                        ),
-                        (
-                            "execution_observation_evidence_ids_sha256",
-                            _digest(observation_evidence_ids),
-                        ),
-                        (
-                            "execution_plan_fingerprint",
-                            _canonical_origin_text(
-                                payload.get("plan_fingerprint"),
-                                "execution plan_fingerprint",
-                            ),
-                        ),
-                        (
-                            "execution_plan_id",
-                            _canonical_origin_text(
-                                payload.get("plan_id"),
-                                "execution plan_id",
-                            ),
-                        ),
-                    )
-                )
-            )
-            try:
-                observation = Observation(
-                    environment_id=bound_environment_id,
-                    observed_at=observed_at,
-                    available_at=available_at,
-                    evidence=evidence,
-                )
-            except LearningEnvironmentError as exc:
-                raise _origin.PaperExecutionDecisionOriginError(
-                    "pre-execution learning observation is not causal"
-                ) from exc
             return {
                 "schema": _ORIGIN_SCHEMA,
                 "schema_version": _ORIGIN_SCHEMA_V2,
                 "decision_id": self.decision_id,
                 "record_sha256": self.record_sha256,
-                "learning_observation": _observation_payload(observation),
+                "learning_observation": canonical_raw,
             }
         finally:
             del current
-            del append_frame
-            del reserve_frame
+            del frame
+            del producer
 
     @classmethod
     def origin_from_dict(cls, raw: object):
@@ -358,27 +369,19 @@ def _install() -> None:
                 "unsupported decision origin schema"
             )
         return cls(
-            decision_id=_canonical_origin_text(
-                raw.get("decision_id"),
-                "decision origin decision_id",
-            ),
-            record_sha256=_canonical_sha(
-                raw.get("record_sha256"),
-                "decision origin record_sha256",
-            ),
+            decision_id=raw.get("decision_id"),  # type: ignore[arg-type]
+            record_sha256=raw.get("record_sha256"),  # type: ignore[arg-type]
         )
 
-    # Extend only the serialization boundary used by #727.  Equality and durable
-    # retry identity remain the original (decision_id, record_sha256) pair, so a v1
-    # in-flight execution can still converge but can never be retroactively promoted
-    # into campaign learning.
     PaperExecutionAdoptionRuntime.__init__ = runtime_init_with_learning_environment
+    setattr(
+        PaperExecutionAdoptionRuntime,
+        _ISSUER_METHOD,
+        issue_predecision_learning_observation,
+    )
     _origin.DecisionRecordOrigin.to_dict = origin_to_dict
     _origin.DecisionRecordOrigin.from_dict = origin_from_dict
 
-    # The convergence resolver has already rebuilt the exact durable v2 Observation.
-    # Attach only explicit producer-contract metadata here; never synthesize or
-    # replace learning bytes after execution.
     coordinator = PaperCampaignAdmissionCoordinator
     error = PaperCampaignAdmissionError
     original_resolver = coordinator._resolved_execution_decision_id
@@ -399,8 +402,12 @@ def _install() -> None:
         observation = getattr(authority, "observation", None)
         if not isinstance(observation, Observation):
             raise error("PAPER pre-execution learning Observation is unavailable")
+        authority.observation_adapter_schema = (
+            "autosport.paper_campaign_preexecution_observation"
+        )
+        authority.observation_adapter_schema_version = 1
         authority.observation_producer_contract = (
-            "autosport.paper_execution_decision_origin.v2"
+            "autosport.persistent_live_decision.v2"
         )
         return authority
 

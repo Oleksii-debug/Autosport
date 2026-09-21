@@ -37,9 +37,12 @@ def test_versioned_adapter_reuses_exact_preexecution_origin_without_learning_fea
         "autosport.persistent_live_decision.v2"
     )
     assert dict(authority.observation.evidence).keys() == {
-        "context_hash",
-        "decision_id",
-        "decision_record_sha256",
+        "decision_context_sha256",
+        "environment_checkpoint_id",
+        "intent_evidence_sha256",
+        "intent_provenance_sha256",
+        "intent_vector_sha256",
+        "market_state_sha256",
     }
 
 
@@ -65,7 +68,7 @@ def test_same_time_substituted_learning_evidence_fails_before_decision_mutation(
         environment_id=fixture.observation.environment_id,
         observed_at=fixture.observation.observed_at,
         available_at=fixture.observation.available_at,
-        evidence=(("context_hash", "b" * 64),),
+        evidence=(("decision_context_sha256", "f" * 64),),
     )
 
     with pytest.raises(PaperCampaignAdmissionError, match="caller observation conflicts"):
@@ -87,9 +90,12 @@ def test_execution_observation_evidence_cannot_become_learning_observation_ident
     learning_evidence = dict(authority.observation.evidence)
     execution_evidence_ids = reservation["observation_evidence_ids"]
     assert set(learning_evidence) == {
-        "context_hash",
-        "decision_id",
-        "decision_record_sha256",
+        "decision_context_sha256",
+        "environment_checkpoint_id",
+        "intent_evidence_sha256",
+        "intent_provenance_sha256",
+        "intent_vector_sha256",
+        "market_state_sha256",
     }
     assert "execution_outcome" not in learning_evidence
     assert "accepted_odds" not in learning_evidence

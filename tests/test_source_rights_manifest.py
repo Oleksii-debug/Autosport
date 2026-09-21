@@ -4,6 +4,7 @@ import hashlib
 import json
 import tempfile
 import unittest
+from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import patch
@@ -251,6 +252,25 @@ class SourceRightsManifestTests(unittest.TestCase):
                 manifest.manifest_sha256,
                 hashlib.sha256(manifest.manifest_bytes).hexdigest(),
             )
+
+    def test_copied_manifest_fields_cannot_diverge_from_hash_bound_bytes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            manifest = load_source_rights_manifest(self._write(Path(tmp)))
+            forged = replace(
+                manifest,
+                source_identity="licensed-provider-account:other",
+            )
+
+            with self.assertRaisesRegex(
+                SourceRightsManifestError,
+                "snapshot fields are inconsistent",
+            ):
+                authorize_source_use(
+                    forged,
+                    source_identity="licensed-provider-account:other",
+                    required_scope="historical.read",
+                    at=datetime(2026, 9, 21, tzinfo=timezone.utc),
+                )
 
     def test_authorization_check_requires_timezone_aware_time(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

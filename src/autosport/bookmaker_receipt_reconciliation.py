@@ -581,16 +581,21 @@ def reconcile_equal_split_residual_against_ledger(
 ) -> ParallelRoutingProposal:
     """Reconcile only after terminal child receipts agree with durable execution.
 
-    The routing parent plan ID is also the durable execution plan ID. One
-    integrity-verified snapshot binds each supplied receipt to the exact shared
-    routing/action economics and, for accepted effects, to the durable accepted
-    stake. Omitting any durable terminal receipt fails closed. Any durable
-    RESERVED, SUBMITTED, UNKNOWN, or PARTIAL attempt keeps positive reroute
-    authority blocked until the external effect is conclusively resolved.
+    The routing parent plan ID is also the durable execution plan ID. An optimistic
+    integrity-verified preflight may reject invalid evidence early, but no positive
+    routing result is authorized from that read. The durable facts are re-resolved
+    under the ledger's existing writer-serialization boundary and that boundary is
+    held through routing-result construction, so a concurrent execution mutation
+    cannot race a stale snapshot into positive residual authority.
 
-    UNKNOWN without an external receipt remains admissible only because it blocks
-    routing. This function is read-only with respect to the ledger, never calls a
-    provider, and never moves money.
+    Omitting any durable terminal receipt fails closed. Any durable RESERVED,
+    SUBMITTED, UNKNOWN, or PARTIAL attempt keeps positive reroute authority blocked
+    until the external effect is conclusively resolved. UNKNOWN without an external
+    receipt remains admissible only because it blocks routing.
+
+    This function does not append ledger events, call a provider, or move money.
+    It reuses the ledger writer boundary as a short read-authority lease so reads
+    and writes share one serialization domain.
     """
     venues = tuple(selected_venues)
     normalized = _validated_child_receipts(
@@ -599,19 +604,48 @@ def reconcile_equal_split_residual_against_ledger(
         routing_request_id=routing_request_id,
         parent_plan_id=parent_plan_id,
     )
-    durable_unresolved_partial = _validate_durable_effect_receipts(
+
+    # Optimistic fail-fast validation only. A writer may legitimately advance the
+    # ledger after this snapshot; therefore this result is never returned as
+    # positive authority without the serialized re-resolution below.
+    _validate_durable_effect_receipts(
         normalized,
         ledger=ledger,
         parent_plan_id=parent_plan_id,
     )
-    proposal = plan_equal_split_residual(
-        requested_stake,
-        venues,
-        normalized,
-        routing_request_id=routing_request_id,
-        parent_plan_id=parent_plan_id,
-        stake_quantum=stake_quantum,
-    )
-    if durable_unresolved_partial or _has_unresolved_partial_acceptance(normalized):
-        return _block_positive_reroute(proposal)
-    return proposal
+
+    def resolve_under_ledger_serialization() -> ParallelRoutingProposal:
+        durable_unresolved_partial = _validate_durable_effect_receipts(
+            normalized,
+            ledger=ledger,
+            parent_plan_id=parent_plan_id,
+        )
+        proposal = plan_equal_split_residual(
+            requested_stake,
+            venues,
+            normalized,
+            routing_request_id=routing_request_id,
+            parent_plan_id=parent_plan_id,
+            stake_quantum=stake_quantum,
+        )
+        if (
+            durable_unresolved_partial
+            or _has_unresolved_partial_acceptance(normalized)
+        ):
+            return _block_positive_reroute(proposal)
+        return proposal
+
+    try:
+        # Use the product-owned implementation, not a caller-rebound instance
+        # method. _mutate holds the existing per-instance RLock plus exact
+        # cross-instance writer-lock path until the callback returns. The callback
+        # is read-only, so this is a serialization lease rather than a ledger
+        # mutation or a second lock authority.
+        return RealExecutionLedger._mutate(
+            ledger,
+            resolve_under_ledger_serialization,
+        )
+    except (ExecutionLedgerError, OSError) as exc:
+        raise RoutingContractError(
+            "durable execution ledger could not be serialized for reconciliation"
+        ) from exc

@@ -131,3 +131,14 @@ def test_run_scheduled_delegates_to_existing_scheduler_loop(tmp_path):
     assert ticks == 2
     assert sleeps == [2.0]
     assert len(runtime.supervisor.list_runs()) == 1
+
+
+@pytest.mark.parametrize("bad_budget", [0, -1, True, 1.5, "8"])
+def test_invalid_budget_fails_before_any_research_state_is_created(tmp_path, bad_budget):
+    with pytest.raises(ResearchControlRuntimeError, match="max_budget_units"):
+        initialize_research_control_runtime(tmp_path, max_budget_units=bad_budget)
+
+    assert not (tmp_path / "scientific_registry.json").exists()
+    assert not (tmp_path / "research_supervisor.json").exists()
+    assert not (tmp_path / "research_curriculum.json").exists()
+    assert not (tmp_path / "research_scheduler.json").exists()

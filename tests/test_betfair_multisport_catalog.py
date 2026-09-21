@@ -110,13 +110,14 @@ def _catalogue_row(index: int, *, event_type_id: str = "1") -> dict[str, object]
     }
 
 
-def test_catalogue_batch_below_limit_proves_only_exact_filter_exhaustion():
+def test_catalogue_batch_below_limit_proves_only_not_limit_saturated():
     batch = parse_market_catalogue_result(
         [_catalogue_row(1), _catalogue_row(2)],
         requested_event_type_ids=("1",),
         requested_max_results=3,
     )
-    assert batch.completeness_proven is True
+    assert batch.response_not_limit_saturated is True
+    assert batch.completeness_proven is False
     assert batch.continuation_required is False
     assert [item.event_type_id for item in batch.markets] == ["1", "1"]
     assert [item.market_type_code for item in batch.markets] == ["MATCH_ODDS", "MATCH_ODDS"]

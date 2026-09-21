@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sqlite3
 import tempfile
 import unittest
 from datetime import datetime, timedelta
@@ -234,6 +235,92 @@ class ProspectiveCollectorScheduleTests(unittest.TestCase):
                     start_slot_ordinal=0,
                     end_slot_ordinal=1,
                 )
+
+    def test_caller_cannot_rebind_due_time_or_skip_slot(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = CollectorDeltaStore(Path(tmp) / "collector.db")
+            store._ensure_collector_schedule(
+                source_id="source-x",
+                run_id="run-1",
+                anchor_at="2026-01-01T00:00:00+00:00",
+                interval_seconds=10,
+            )
+            slot = store._next_collector_schedule_slot(
+                source_id="source-x",
+                run_id="run-1",
+            )
+
+            with self.assertRaisesRegex(ValueError, "due_at is not canonical"):
+                store._begin_scheduled_collector_cycle(
+                    source_id="source-x",
+                    run_id="run-1",
+                    stream_epoch="epoch-1",
+                    slot_ordinal=0,
+                    due_at="2026-01-01T00:00:01+00:00",
+                    attempted_at="2026-01-01T00:00:01+00:00",
+                )
+            with self.assertRaisesRegex(
+                ValueError,
+                "duplicate, skipped, or out of order",
+            ):
+                store._begin_scheduled_collector_cycle(
+                    source_id="source-x",
+                    run_id="run-1",
+                    stream_epoch="epoch-1",
+                    slot_ordinal=1,
+                    due_at="2026-01-01T00:00:10+00:00",
+                    attempted_at="2026-01-01T00:00:10+00:00",
+                )
+
+            self.assertEqual(
+                store._next_collector_schedule_slot(
+                    source_id="source-x",
+                    run_id="run-1",
+                ),
+                slot,
+            )
+
+    def test_schedule_rows_are_sql_immutable(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "collector.db"
+            store = CollectorDeltaStore(path)
+            store._ensure_collector_schedule(
+                source_id="source-x",
+                run_id="run-1",
+                anchor_at="2026-01-01T00:00:00+00:00",
+                interval_seconds=10,
+            )
+            slot = store._next_collector_schedule_slot(
+                source_id="source-x",
+                run_id="run-1",
+            )
+            store._begin_scheduled_collector_cycle(
+                source_id="source-x",
+                run_id="run-1",
+                stream_epoch="epoch-1",
+                slot_ordinal=slot["slot_ordinal"],
+                due_at=slot["due_at"],
+                attempted_at="2026-01-01T00:00:00+00:00",
+            )
+
+            connection = sqlite3.connect(path)
+            try:
+                with self.assertRaises(sqlite3.DatabaseError):
+                    connection.execute(
+                        "UPDATE collector_schedules_v1 "
+                        "SET interval_seconds='1.0' "
+                        "WHERE source_id='source-x' AND run_id='run-1'"
+                    )
+                connection.rollback()
+                with self.assertRaises(sqlite3.DatabaseError):
+                    connection.execute(
+                        "DELETE FROM collector_schedule_slots_v1 "
+                        "WHERE source_id='source-x' AND run_id='run-1' "
+                        "AND slot_ordinal=0"
+                    )
+            finally:
+                connection.rollback()
+                connection.close()
 
     def test_one_due_slot_cannot_mint_two_cycle_starts(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

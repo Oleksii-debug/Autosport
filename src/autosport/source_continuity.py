@@ -32,6 +32,15 @@ def _text(value: object, name: str, *, nullable: bool = False) -> str | None:
     return value
 
 
+def _cursor(value: object) -> str | None:
+    """Preserve the existing ProviderBatch cursor domain as opaque telemetry."""
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise TypeError("cursor must be str or null")
+    return value
+
+
 def _instant(value: object, name: str, *, nullable: bool = False) -> str | None:
     raw = _text(value, name, nullable=nullable)
     if raw is None:
@@ -77,7 +86,7 @@ class SourceContinuityState:
         if self.status not in _ALLOWED_CONTINUITY_STATUSES:
             raise ValueError("invalid source continuity status")
         _text(self.trusted_token, "trusted_token", nullable=True)
-        _text(self.last_observed_cursor, "last_observed_cursor", nullable=True)
+        _cursor(self.last_observed_cursor)
         _instant(self.last_success_at, "last_success_at", nullable=True)
         _instant(self.last_failure_at, "last_failure_at", nullable=True)
         _text(self.reason, "reason")
@@ -192,7 +201,7 @@ class SourceContinuityStore:
     ) -> SourceContinuityState:
         source_id = _text(source_id, "source_id")
         now = _instant(now, "now")
-        cursor = _text(cursor, "cursor", nullable=True)
+        cursor = _cursor(cursor)
         if witness is not None and not isinstance(witness, ProviderContinuityWitness):
             raise TypeError("witness must be ProviderContinuityWitness or null")
         assert isinstance(source_id, str)

@@ -1,11 +1,24 @@
 from __future__ import annotations
 
+from datetime import datetime
 from decimal import Decimal
+import json
 
 import pytest
 
 import autosport.betfair_timeout_reconciliation as timeout_resolution
 import autosport.real_execution_ledger as ledger_module
+import autosport.supervised_provider_evidence as provider_evidence
+from autosport.betfair_account_readonly import (
+    BetfairReadOnlyClient,
+    BetfairSessionCredentials,
+)
+from autosport.bookmaker_capability import (
+    BookmakerCapability,
+    BookmakerCapabilityFact,
+    BookmakerCapabilityProfile,
+    BookmakerCapabilityState,
+)
 from autosport.real_execution_ledger import (
     AcknowledgementStatus,
     ExecutionAction,
@@ -13,6 +26,7 @@ from autosport.real_execution_ledger import (
     RealExecutionLedger,
 )
 from autosport.supervised_provider_evidence import (
+    ProviderEvidenceError,
     VerifiedProviderAbsenceEvidence,
     VerifiedProviderEffectEvidence,
 )
@@ -36,6 +50,25 @@ def _action() -> ExecutionAction:
         quote_id="quote-1",
         quote_observed_at="2026-09-21T17:59:00+00:00",
         expires_at="2026-09-21T18:10:00+00:00",
+    )
+
+
+def _profile() -> BookmakerCapabilityProfile:
+    return BookmakerCapabilityProfile(
+        venue_id="betfair",
+        account_id="acct-1",
+        adapter_id="betfair-exchange-jsonrpc-readonly",
+        adapter_version="1",
+        profile_version=1,
+        facts=(
+            BookmakerCapabilityFact(
+                BookmakerCapability.BET_READBACK,
+                BookmakerCapabilityState.SUPPORTED,
+            ),
+        ),
+        observed_at="2026-09-21T17:59:00+00:00",
+        source_ref="betfair://profile/timeout-test",
+        source_payload_sha256="a" * 64,
     )
 
 
@@ -161,6 +194,55 @@ def _resolve(
     return result
 
 
+class _ReadbackTransport:
+    def __init__(self, responses: list[bytes]) -> None:
+        self.responses = list(responses)
+
+    def post(self, url: str, *, headers, body: bytes, timeout_seconds: float) -> bytes:
+        del url, headers, body, timeout_seconds
+        if not self.responses:
+            raise AssertionError("unexpected Betfair readback call")
+        return self.responses.pop(0)
+
+
+def _rpc_result(result: object, request_id: int) -> bytes:
+    return json.dumps(
+        {"jsonrpc": "2.0", "result": result, "id": request_id},
+        separators=(",", ":"),
+    ).encode("utf-8")
+
+
+def _empty_provider_capture(
+    action: ExecutionAction,
+    provider_ref: str,
+    *,
+    observed_at: str = "2026-09-21T18:00:16+00:00",
+):
+    responses = [
+        _rpc_result(
+            [{"marketId": action.market_id, "event": {"id": action.event_id}}],
+            1,
+        ),
+        _rpc_result({"currentOrders": [], "moreAvailable": False}, 2),
+    ]
+    for request_id in range(3, 7):
+        responses.append(
+            _rpc_result({"clearedOrders": [], "moreAvailable": False}, request_id)
+        )
+    client = BetfairReadOnlyClient(
+        BetfairSessionCredentials("app-secret", "session-secret"),
+        transport=_ReadbackTransport(responses),
+        clock=lambda: datetime.fromisoformat(observed_at),
+        venue_id="betfair",
+        account_id="acct-1",
+    )
+    return client.read_execution_readback(
+        action_id=action.action_id,
+        market_id=action.market_id,
+        provider_order_ref=provider_ref,
+    )
+
+
 def test_complete_empty_before_visibility_horizon_stays_indeterminate(
     tmp_path, monkeypatch
 ) -> None:
@@ -214,6 +296,38 @@ def test_capture_started_before_deadline_cannot_become_absence_when_last_rpc_fin
     assert result.evidence is None
     with pytest.raises(timeout_resolution.BetfairTimeoutResolutionError):
         timeout_resolution.assert_betfair_timeout_absence_authoritative(evidence)
+
+
+def test_direct_generic_bound_absence_is_not_timeout_authoritative(
+    tmp_path, monkeypatch
+) -> None:
+    ledger, action, provider_ref, _ = _ledger_with_timeout(tmp_path, monkeypatch)
+    assert provider_ref is not None
+    profile = _profile()
+    capture = _empty_provider_capture(action, provider_ref)
+
+    direct = provider_evidence.verify_betfair_provider_state(
+        action,
+        profile,
+        expected_profile_sha256=profile.profile_id,
+        readback=capture,
+        expected_provider_order_ref=provider_ref,
+    )
+    assert isinstance(direct, VerifiedProviderAbsenceEvidence)
+    with pytest.raises(ProviderEvidenceError, match="timeout-horizon authority"):
+        provider_evidence.assert_verified_provider_evidence_authoritative(direct)
+
+    resolved = timeout_resolution.resolve_betfair_timeout_provider_state(
+        ledger,
+        action,
+        profile,
+        attempt_id="attempt-1",
+        expected_profile_sha256=profile.profile_id,
+        readback=capture,
+    )
+    assert resolved.kind is timeout_resolution.BetfairTimeoutResolutionKind.ABSENT_AFTER_VISIBILITY_HORIZON
+    assert isinstance(resolved.evidence, VerifiedProviderAbsenceEvidence)
+    provider_evidence.assert_verified_provider_evidence_authoritative(resolved.evidence)
 
 
 def test_bound_absence_not_issued_by_timeout_resolver_is_rejected() -> None:

@@ -335,7 +335,7 @@ class RealExecutionLedgerTests(unittest.TestCase):
             restarted = RealExecutionLedger(path)
             with self.assertRaisesRegex(
                 ExecutionLedgerIntegrityError,
-                "acknowledgement from invalid state",
+                "provider evidence requires submitted/UNKNOWN attempt",
             ):
                 restarted.verify_integrity()
 

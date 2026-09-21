@@ -364,8 +364,12 @@ class TrialFamilyAccountingStore:
             raise ValueError('ScientificRegistry path escaped trial workspace') from exc
         if registry_path.parent != self.workspace_root:
             raise ValueError('ScientificRegistry must share the trial workspace lock')
-        require_scientific_registry_read_authority()
-        ScientificRegistry(registry_path)
+        # Pure trial-ledger reads must remain inspectable even when the external
+        # ScientificRegistry executable/read authority is unavailable. Operations
+        # that actually consume registry truth call _registry(), which performs
+        # the full authority preflight before constructing ScientificRegistry.
+        if not registry_path.is_file():
+            raise ValueError('ScientificRegistry bound to trial family is missing')
         sequential_rel = _text(state['sequential_store'], 'sequential_store')
         sequential_path = (self.workspace_root / sequential_rel).resolve(strict=False)
         try:

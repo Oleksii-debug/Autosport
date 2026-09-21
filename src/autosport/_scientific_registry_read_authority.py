@@ -78,8 +78,6 @@ def _raw_class_function(name: str) -> FunctionType:
 def require_scientific_registry_read_authority() -> tuple[
     FunctionType,
     FunctionType,
-    FunctionType,
-    FunctionType,
 ]:
     """Revalidate the complete trial-family ScientificRegistry read boundary.
 
@@ -109,17 +107,6 @@ def require_scientific_registry_read_authority() -> tuple[
         module=_registry,
         qualname="ScientificRegistry.__init__",
     )
-    get_fn = _source_owned_function(
-        _raw_class_function("get"),
-        module=_registry,
-        qualname="ScientificRegistry.get",
-    )
-    causal_fn = _source_owned_function(
-        _raw_class_function("causal_precedes"),
-        module=_registry,
-        qualname="ScientificRegistry.causal_precedes",
-    )
-
     read_text_fn = _source_owned_function(
         _integrity.read_verified_scientific_registry_text,
         module=_integrity,
@@ -159,11 +146,11 @@ def require_scientific_registry_read_authority() -> tuple[
             "ScientificRegistry read-baseline binding changed"
         )
 
-    return read_fn, validate_fn, get_fn, causal_fn
+    return read_fn, validate_fn
 
 
 def _read_authority_verified(self: _registry.ScientificRegistry) -> dict[str, Any]:
-    _, validate_entry, _, _ = require_scientific_registry_read_authority()
+    _, validate_entry = require_scientific_registry_read_authority()
     raw = _integrity.read_verified_scientific_registry_text(self.path)
     try:
         state = json.loads(

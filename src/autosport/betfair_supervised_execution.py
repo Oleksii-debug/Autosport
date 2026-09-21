@@ -807,6 +807,11 @@ def _parse_place_orders_response(
         raise BetfairPlaceOrdersAmbiguous(
             "placeOrders instruction status is unsupported/nonterminal"
         )
+    if "sizeMatched" not in item:
+        raise BetfairPlaceOrdersAmbiguous(
+            "placeOrders instruction report omits sizeMatched; "
+            "external effect is ambiguous"
+        )
     try:
         instruction = BetfairInstructionReport(
             status=instruction_status,
@@ -827,7 +832,7 @@ def _parse_place_orders_response(
                 "averagePriceMatched",
             ),
             size_matched=_nonnegative_decimal(
-                item.get("sizeMatched", 0),
+                item["sizeMatched"],
                 "sizeMatched",
             ),
         )

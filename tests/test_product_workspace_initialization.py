@@ -7,6 +7,13 @@ from pathlib import Path
 
 import pytest
 
+from autosport.product_workspace_initialization import (
+    PRODUCT_WORKSPACE_BINDING_SCHEMA_VERSION,
+    ProductWorkspaceInitializationError,
+    initialize_product_workspace,
+)
+
+
 @pytest.fixture(autouse=True)
 def _isolate_machine_identity_state(
     tmp_path: Path,
@@ -17,13 +24,6 @@ def _isolate_machine_identity_state(
     monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "os-application-state"))
     monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "xdg-state"))
     monkeypatch.delenv("AUTOSPORT_MONOTONIC_AUTHORITY_ROOT", raising=False)
-
-
-from autosport.product_workspace_initialization import (
-    PRODUCT_WORKSPACE_BINDING_SCHEMA_VERSION,
-    ProductWorkspaceInitializationError,
-    initialize_product_workspace,
-)
 
 
 def _worker(workspace: str, authority_root: str, start, results) -> None:

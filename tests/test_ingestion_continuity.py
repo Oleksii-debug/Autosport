@@ -98,12 +98,12 @@ class IngestionContinuityTests(unittest.TestCase):
             self.assertIsNone(continuity.trusted_token)
             market.close()
 
-    def test_explicit_chain_survives_restart(self):
+    def test_resolver_chain_stays_unverified_across_restart(self):
         def resolver(_provider, batch: ProviderBatch):
             mapping = {
                 "token-1": ProviderContinuityWitness(None, "token-1"),
                 "token-2": ProviderContinuityWitness("token-1", "token-2"),
-                "token-3": ProviderContinuityWitness("token-2", "token-3"),
+                "token-3": ProviderContinuityWitness("token-1", "token-3"),
             }
             return mapping[batch.cursor]
 
@@ -119,7 +119,7 @@ class IngestionContinuityTests(unittest.TestCase):
             first = engine.poll_once(provider, max_items=10)
             second = engine.poll_once(provider, max_items=10)
             self.assertEqual(first.continuity_status, "unknown")
-            self.assertEqual(second.continuity_status, "verified")
+            self.assertEqual(second.continuity_status, "unknown")
             market.close()
 
             restarted, market2, _health2 = self._runtime(
@@ -134,12 +134,12 @@ class IngestionContinuityTests(unittest.TestCase):
                 ),
                 max_items=10,
             )
-            self.assertEqual(third.continuity_status, "verified")
+            self.assertEqual(third.continuity_status, "unknown")
             self.assertEqual(
                 SourceContinuityStore(
                     Path(tmp) / "source_continuity.json"
                 ).get("source").trusted_token,
-                "token-3",
+                "token-1",
             )
             market2.close()
 
@@ -163,7 +163,7 @@ class IngestionContinuityTests(unittest.TestCase):
             engine.poll_once(provider, max_items=10)
             self.assertEqual(
                 engine.poll_once(provider, max_items=10).continuity_status,
-                "verified",
+                "unknown",
             )
 
             with self.assertRaises(ProviderUnavailableError):
@@ -173,7 +173,7 @@ class IngestionContinuityTests(unittest.TestCase):
                 Path(tmp) / "source_continuity.json"
             ).get("source")
             self.assertEqual(failed_continuity.status, "unknown")
-            self.assertEqual(failed_continuity.trusted_token, "token-2")
+            self.assertEqual(failed_continuity.trusted_token, "token-1")
 
             recovered = engine.poll_once(
                 StaticProvider(
@@ -215,7 +215,7 @@ class IngestionContinuityTests(unittest.TestCase):
                 Path(tmp) / "source_continuity.json"
             ).get("source")
             self.assertEqual(continuity.status, "unknown")
-            self.assertEqual(continuity.trusted_token, "token-2")
+            self.assertEqual(continuity.trusted_token, "token-1")
             self.assertEqual(continuity.reason, "witness_previous_token_mismatch")
             market.close()
 

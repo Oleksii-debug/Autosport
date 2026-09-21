@@ -108,3 +108,79 @@ def test_origin_fails_closed_when_verifier_rebind_races_filesystem_read(
     origin = origin_module.verified_decision_origin(ledger, DECISION_ID)
     assert origin.record_sha256 == digest
     assert instance_guard._STABLE_VERIFY_BYTES_DESCRIPTOR is original_descriptor
+
+
+@pytest.mark.parametrize(
+    ("method_name", "descriptor_kind"),
+    [
+        ("_json_object_without_duplicate_keys", "static"),
+        ("_reject_non_finite_json", "static"),
+        ("_validate_record", "class"),
+        ("_canonical_record", "static"),
+        ("_validate_json_value", "class"),
+        ("_require_utf8_text", "static"),
+    ],
+)
+def test_origin_fails_closed_before_transitive_helper_rebind_executes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    method_name: str,
+    descriptor_kind: str,
+) -> None:
+    ledger, _ = _ledger(tmp_path)
+    attacker_calls: list[tuple[object, ...]] = []
+
+    def forged(*args: object, **kwargs: object) -> object:
+        attacker_calls.append((*args, kwargs))
+        if method_name == "_canonical_record":
+            return "{}"
+        if method_name == "_validate_record":
+            return args[-1] if args else {}
+        if method_name == "_json_object_without_duplicate_keys":
+            return {}
+        return None
+
+    descriptor = classmethod(forged) if descriptor_kind == "class" else staticmethod(forged)
+    monkeypatch.setattr(JsonlDecisionLedger, method_name, descriptor)
+
+    with pytest.raises(
+        origin_module.PaperExecutionDecisionOriginError,
+        match="executable authority seal changed",
+    ):
+        origin_module.verified_decision_origin(ledger, DECISION_ID)
+
+    assert attacker_calls == []
+
+
+def test_origin_fails_closed_when_transitive_helper_rebind_races_filesystem_read(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ledger, digest = _ledger(tmp_path)
+    attacker_calls: list[tuple[object, ...]] = []
+    original_descriptor = JsonlDecisionLedger.__dict__["_validate_record"]
+    original_read_bytes = Path.read_bytes
+
+    def forged(cls: type[JsonlDecisionLedger], *args: object, **kwargs: object) -> object:
+        attacker_calls.append((cls, *args, kwargs))
+        return args[0] if args else {}
+
+    def racing_read_bytes(path: Path) -> bytes:
+        payload = original_read_bytes(path)
+        setattr(JsonlDecisionLedger, "_validate_record", classmethod(forged))
+        return payload
+
+    monkeypatch.setattr(Path, "read_bytes", racing_read_bytes)
+    try:
+        with pytest.raises(
+            origin_module.PaperExecutionDecisionOriginError,
+            match="executable authority seal changed",
+        ):
+            origin_module.verified_decision_origin(ledger, DECISION_ID)
+    finally:
+        setattr(JsonlDecisionLedger, "_validate_record", original_descriptor)
+
+    assert attacker_calls == []
+    monkeypatch.setattr(Path, "read_bytes", original_read_bytes)
+    origin = origin_module.verified_decision_origin(ledger, DECISION_ID)
+    assert origin.record_sha256 == digest

@@ -4,9 +4,10 @@
 This benchmark is measurement-only. It sets no latency pass/fail threshold and does
 not mutate provider, decision, execution, economic, or release authority.
 
-The timed boundary excludes fixture construction and mirror priming. Timed work is
-limited to the named in-memory MarketMirror operation, including the canonical value
-snapshot cloning performed by that operation.
+The timed boundary excludes fixture construction and mirror priming. Batched apply/get
+samples include the small caller-side Python iteration and result capture required to
+issue each API call; projection samples time one API call including canonical snapshot
+cloning. This is an end-to-end in-process API benchmark, not an isolated CPU primitive.
 """
 
 from __future__ import annotations
@@ -342,10 +343,12 @@ def run_benchmark(
         "schema_version": _SCHEMA_VERSION,
         "source_sha": source,
         "measurement_boundary": (
-            "In-memory canonical MarketMirror operations only. Event construction, "
-            "fixture generation, and mirror priming are excluded from timing. Timed "
-            "reads include MarketMirror canonical snapshot cloning. No network, disk, "
-            "provider polling, decision engine, execution, or sleep is included."
+            "In-memory MarketMirror API boundary. Event construction, fixture "
+            "generation, and mirror priming are excluded. Batched apply/get timings "
+            "include caller-side Python iteration and result capture needed to issue "
+            "the calls; projection timings cover one API call including canonical "
+            "snapshot cloning. No network, disk, provider polling, decision engine, "
+            "execution, or sleep is included."
         ),
         "threshold_policy": "measurement_only_no_pass_fail_threshold",
         "environment": {

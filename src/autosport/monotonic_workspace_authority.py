@@ -718,6 +718,11 @@ class MonotonicWorkspaceAuthority:
         )
         history = self._load_history()
 
+        if history.records and not workspace_bound:
+            raise MonotonicAuthorityIntegrityError(
+                "authority history exists but workspace identity binding is missing"
+            )
+
         if not root_bound:
             if history.records or (workspace_bound and path_bound):
                 # Safe upgrade from the integrated pre-root-selection format:
@@ -731,11 +736,6 @@ class MonotonicWorkspaceAuthority:
                     "bound workspace has no authority-root selection proof or "
                     "history under the selected machine root"
                 )
-
-        if history.records and not workspace_bound:
-            raise MonotonicAuthorityIntegrityError(
-                "authority history exists but workspace identity binding is missing"
-            )
 
         if root_bound:
             # Only after the selected root is proven may a moved/copied local

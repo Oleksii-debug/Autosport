@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import math
 import unittest
-from decimal import Decimal
+from decimal import Decimal, localcontext
 
 from autosport.forecasting import (
     ForecastOutcomeFact,
@@ -126,18 +126,49 @@ class ForecastLogLossEndpointPolicyTests(unittest.TestCase):
             math.isclose(report.log_loss, expected, rel_tol=1e-15, abs_tol=0.0)
         )
 
-    def test_interior_decimal_rounded_to_binary64_endpoint_fails_closed(self) -> None:
-        with self.assertRaisesRegex(
-            ValueError,
-            "interior probability cannot be represented as an interior binary64",
-        ):
-            self._evaluate_one("0.999999999999999999999999999999", 0)
+    def test_near_one_probability_uses_declared_decimal_complement(self) -> None:
+        probability = Decimal("0.9999999999999999")
+        report = self._evaluate_one(str(probability), 0)
 
+        expected = float(-Decimal("1e-16").ln())
+        binary64_quantized = -math.log1p(-float(probability))
+        self.assertAlmostEqual(report.log_loss, expected)
+        self.assertGreater(abs(report.log_loss - binary64_quantized), 0.01)
+
+    def test_extreme_interior_decimals_are_scored_before_float_conversion(self) -> None:
+        near_one = self._evaluate_one(
+            "0.999999999999999999999999999999",
+            0,
+        )
+        tiny = self._evaluate_one("1e-1000", 1)
+
+        self.assertAlmostEqual(
+            near_one.log_loss,
+            float(-Decimal("1e-30").ln()),
+        )
+        self.assertAlmostEqual(
+            tiny.log_loss,
+            float(-Decimal("1e-1000").ln()),
+        )
+
+    def test_log_loss_is_independent_of_ambient_decimal_precision(self) -> None:
+        probability = "0.999999999999999999999999999999"
+        with localcontext() as context:
+            context.prec = 6
+            low_precision = self._evaluate_one(probability, 0).log_loss
+        with localcontext() as context:
+            context.prec = 50
+            high_precision = self._evaluate_one(probability, 0).log_loss
+
+        self.assertEqual(low_precision, high_precision)
+        self.assertAlmostEqual(low_precision, float(-Decimal("1e-30").ln()))
+
+    def test_positive_loss_that_underflows_summary_float_fails_closed(self) -> None:
         with self.assertRaisesRegex(
             ValueError,
-            "interior probability cannot be represented as an interior binary64",
+            "positive log loss is not representable as a nonzero binary64",
         ):
-            self._evaluate_one("1e-1000", 1)
+            self._evaluate_one("1e-1000", 0)
 
 
 if __name__ == "__main__":

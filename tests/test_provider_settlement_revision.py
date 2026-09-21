@@ -34,6 +34,11 @@ def _settled(
     position_id: str = "bet-1",
     currency: str = "EUR",
     state: BookmakerPositionState = BookmakerPositionState.SETTLED,
+    provider_amount: str = "10",
+    provider_amount_semantics: str = "backer_stake",
+    provider_side: str | None = "BACK",
+    decimal_odds: str | None = "2.00",
+    external_receipt_id: str | None = None,
 ) -> BookmakerPositionObservation:
     return BookmakerPositionObservation(
         venue_id=venue_id,
@@ -45,12 +50,16 @@ def _settled(
         currency=currency,
         observed_at=observed_at,
         source_payload_sha256=source_hash,
-        provider_amount=Decimal("10"),
-        provider_amount_semantics="backer_stake",
-        provider_side="BACK",
-        decimal_odds=Decimal("2.00"),
+        provider_amount=Decimal(provider_amount),
+        provider_amount_semantics=provider_amount_semantics,
+        provider_side=provider_side,
+        decimal_odds=Decimal(decimal_odds) if decimal_odds is not None else None,
         gross_return=Decimal(gross_return),
-        external_receipt_id=f"receipt-{observation_id}",
+        external_receipt_id=(
+            external_receipt_id
+            if external_receipt_id is not None
+            else f"receipt-{observation_id}"
+        ),
     )
 
 
@@ -297,6 +306,74 @@ def test_correction_cannot_rebind_core_identity(field: str, kwargs: dict[str, st
         match="cannot rewrite provider/account/adapter/position/currency identity",
     ):
         ProviderSettlementRevisionChain((first, corrected))
+
+
+@pytest.mark.parametrize(
+    ("field", "kwargs"),
+    [
+        ("provider amount", {"provider_amount": "11"}),
+        (
+            "provider amount semantics",
+            {"provider_amount_semantics": "lay_liability"},
+        ),
+        ("provider side", {"provider_side": "LAY"}),
+        ("decimal odds", {"decimal_odds": "2.10"}),
+    ],
+)
+def test_correction_cannot_rewrite_executed_position_terms(
+    field: str,
+    kwargs: dict[str, str],
+) -> None:
+    first = _revision(
+        _settled(observation_id="settlement-1", observed_at=_T1, gross_return="20"),
+        available_at=_T1,
+    )
+    corrected = _revision(
+        _settled(
+            observation_id="settlement-2",
+            observed_at=_T2,
+            gross_return="10",
+            source_hash=_HASH_B,
+            **kwargs,
+        ),
+        available_at=_T2,
+        supersedes=first.revision_id,
+    )
+
+    with pytest.raises(
+        ProviderSettlementRevisionError,
+        match="executed position terms",
+    ):
+        ProviderSettlementRevisionChain((first, corrected))
+
+
+def test_correction_may_use_new_observation_receipt_when_execution_terms_match() -> None:
+    first = _revision(
+        _settled(
+            observation_id="settlement-1",
+            observed_at=_T1,
+            gross_return="20",
+            external_receipt_id="settlement-receipt-1",
+        ),
+        available_at=_T1,
+    )
+    corrected = _revision(
+        _settled(
+            observation_id="settlement-2",
+            observed_at=_T2,
+            gross_return="10",
+            source_hash=_HASH_B,
+            external_receipt_id="settlement-receipt-2",
+        ),
+        available_at=_T2,
+        supersedes=first.revision_id,
+    )
+
+    chain = ProviderSettlementRevisionChain((first, corrected))
+
+    assert chain.current_restated == corrected
+    assert first.settlement.external_receipt_id == "settlement-receipt-1"
+    assert corrected.settlement.external_receipt_id == "settlement-receipt-2"
 
 
 def test_correction_observation_time_cannot_move_backward() -> None:

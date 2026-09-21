@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import math
 from datetime import datetime
+from unittest.mock import patch
 
 import pytest
 
@@ -70,3 +71,16 @@ def test_small_latency_benchmark_reports_complete_positive_ordered_summary() -> 
     assert result.accepted == 7
     assert math.isfinite(result.p50_ms) and result.p50_ms > 0
     assert result.p50_ms <= result.p95_ms <= result.p99_ms <= result.max_ms
+
+
+def test_latency_benchmark_fails_if_persisted_events_never_reach_market_mirror() -> None:
+    with patch(
+        "benchmarks.benchmark_market_mirror_latency.BoundedMirrorInvalidationBuffer.accept_persisted",
+        autospec=True,
+        return_value=None,
+    ):
+        with pytest.raises(
+            RuntimeError,
+            match="market mirror benchmark workload did not fully apply",
+        ):
+            run_latency_benchmark(count=3, quote_keys=2, warmup=1)

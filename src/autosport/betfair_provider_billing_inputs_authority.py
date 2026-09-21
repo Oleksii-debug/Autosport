@@ -91,8 +91,8 @@ def _build_observation_authority():
         )
     product_handler_ids = tuple(id(handler) for handler in product_handlers)
     product_https_dispatch = tuple(
-        (order, id(handler))
-        for order, handler in product_opener.handle_open.get("https", ())
+        (getattr(handler, "handler_order", None), id(handler))
+        for handler in product_opener.handle_open.get("https", ())
     )
     if not any(
         handler_id == id(product_https_handler)
@@ -160,8 +160,8 @@ def _build_observation_authority():
             tuple(id(handler) for handler in product_opener.handlers)
             != product_handler_ids
             or tuple(
-                (order, id(handler))
-                for order, handler in product_opener.handle_open.get("https", ())
+                (getattr(handler, "handler_order", None), id(handler))
+                for handler in product_opener.handle_open.get("https", ())
             )
             != product_https_dispatch
             or type(product_https_handler) is not stdlib_https_handler_cls

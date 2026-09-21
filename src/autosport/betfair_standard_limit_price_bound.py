@@ -8,9 +8,12 @@ provider-enforced BACK LIMIT floor emitted by the canonical Betfair supervised
 write adapter. It does not predict whether an order will fill, how much will
 fill, when it will fill, or whether best execution improves its realized price.
 
-The authority is useful for conservative opportunity economics: on the supported
-plain BACK LIMIT path, the requested odds are the worst admissible matched odds.
-All nonstandard/smart-order paths remain outside this schema.
+The canonical instruction projection is useful evidence, but it is not sufficient
+to prove zero adverse price deterioration while account-level MatchMe
+applicability is unresolved. Until a product-owned decision-time authority proves
+MatchMe inapplicable for the exact execution account/action, positive price-bound
+evidence is deliberately unreachable. All nonstandard/smart-order paths remain
+outside this schema as before.
 """
 
 from dataclasses import dataclass
@@ -45,6 +48,10 @@ _WRITE_ADAPTER_VERSION = WRITE_ADAPTER_VERSION
 _CANONICAL_PLACE_ACTION = BetfairSupervisedPlaceOrdersClient.place_action
 _CAPTURE_PROVIDER_ORDER_REF = "0" * 32
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+_MATCHME_APPLICABILITY_BLOCKER = (
+    "positive zero-adverse-price authority requires product-owned decision-time "
+    "MatchMe non-applicability for the exact execution account/action"
+)
 
 
 class BetfairStandardLimitPriceBoundError(ValueError):
@@ -457,54 +464,30 @@ def _issue_evidence(
     action: ExecutionAction,
     instruction_sha256: str,
 ) -> BetfairStandardLimitPriceBoundEvidence:
-    item = object.__new__(BetfairStandardLimitPriceBoundEvidence)
-    values = {
-        "execution_plan_id": bound.execution_plan.plan_id,
-        "execution_plan_sha256": bound.execution_plan.fingerprint,
-        "portfolio_plan_sha256": bound.portfolio_plan_sha256,
-        "intent_id": bound.intent_id,
-        "intent_sha256": bound.intent_sha256,
-        "action_id": action.action_id,
-        "bookmaker_id": action.bookmaker_id,
-        "account_id": action.account_id,
-        "event_id": action.event_id,
-        "market_id": action.market_id,
-        "selection_id": action.selection_id,
-        "side": action.side,
-        "requested_stake": action.requested_stake,
-        "price_floor_odds": action.requested_odds,
-        "quote_id": action.quote_id,
-        "quote_observed_at": action.quote_observed_at,
-        "quote_expires_at": action.expires_at,
-        "decision_at": bound.execution_plan.created_at,
-        "instruction_sha256": instruction_sha256,
-        "provider_contract_id": _PROVIDER_CONTRACT_ID,
-        "provider_contract_ref": _PROVIDER_CONTRACT_REF,
-        "write_adapter_id": _WRITE_ADAPTER_ID,
-        "write_adapter_version": _WRITE_ADAPTER_VERSION,
-        "status": BetfairStandardLimitPriceBoundStatus.PROVIDER_BOUND_ZERO_ADVERSE_PRICE_DETERIORATION,
-        "zero_adverse_price_deterioration": True,
-        "execution_feasibility_proven": False,
-        "realized_price_exact": False,
-    }
-    for field, value in values.items():
-        object.__setattr__(item, field, value)
-    item._validate()
-    return item
+    """Fail closed until product-owned MatchMe applicability exists.
 
+    Request shape and documentation omission cannot establish that an authenticated
+    account/action is outside persistent MatchMe semantics. Keep this canonical
+    issuance seam closed rather than minting a false zero-slippage fact.
+    """
+
+    del bound, action, instruction_sha256
+    raise BetfairStandardLimitPriceBoundError(_MATCHME_APPLICABILITY_BLOCKER)
 
 def resolve_betfair_standard_limit_price_bound(
     *,
     bound: BoundSupervisedExecutionPlan,
     action_id: str,
 ) -> BetfairStandardLimitPriceBoundEvidence:
-    """Re-resolve one exact current standard BACK LIMIT price floor.
+    """Validate one exact current standard BACK LIMIT instruction fail-closed.
 
     The caller supplies only the bound plan and an action identity. No caller
     instruction, price bound, zero/slippage flag, provider setting, accepted
-    price, or fill assumption is accepted. The action and its quote are
-    re-resolved from the immutable bound plan, and the result remains explicitly
-    silent about execution feasibility and favorable best-price improvement.
+    price, or fill assumption is accepted. The action, quote and exact canonical
+    provider instruction are re-resolved, but request shape alone cannot prove
+    account-level MatchMe inapplicability. Until product-owned decision-time
+    applicability exists for this exact account/action, positive price-bound
+    issuance is rejected rather than asserting zero adverse slippage.
     """
 
     if type(bound) is not BoundSupervisedExecutionPlan:

@@ -214,6 +214,22 @@ def test_caller_mutated_snapshot_or_receipt_cannot_reuse_durable_authority(
         replace(acquired.receipt, integration_kind="browser_automation")
 
 
+def test_betfair_provider_identity_cannot_be_relabelled(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    calls = _install_transport(monkeypatch, [])
+
+    with pytest.raises(TypeError, match="venue_id"):
+        BetfairAccountSnapshotAcquirer(
+            tmp_path / "account.sqlite3",
+            _credentials(),
+            venue_id="other-provider",
+        )
+
+    assert calls == []
+
+
 def test_bet_readback_is_rejected_before_provider_transport(
     tmp_path,
     monkeypatch,

@@ -14,6 +14,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Callable, Iterable
 
+from .integrity import durable_path_lock
 from .research_curriculum import CurriculumPurpose, NightResearchCurriculum, ReplayCandidate
 from .research_scheduler import ResearchScheduler, TickResult
 from .research_supervisor import ResearchSupervisor
@@ -201,35 +202,37 @@ def initialize_research_control_runtime(
     root = Path(workspace)
     root.mkdir(parents=True, exist_ok=True)
     paths = ResearchControlPaths.for_workspace(root)
-    presence = _state_presence(paths)
-    registry_exists, supervisor_exists, curriculum_exists, scheduler_exists = presence
-    child_presence = (supervisor_exists, curriculum_exists, scheduler_exists)
-    if any(child_presence):
-        if registry_exists and all(child_presence):
+    initialization_lock = root / "research_control_runtime.init"
+    with durable_path_lock(initialization_lock):
+        presence = _state_presence(paths)
+        registry_exists, supervisor_exists, curriculum_exists, scheduler_exists = presence
+        child_presence = (supervisor_exists, curriculum_exists, scheduler_exists)
+        if any(child_presence):
+            if registry_exists and all(child_presence):
+                raise ResearchControlRuntimeError(
+                    "research control state already exists; use open_research_control_runtime"
+                )
             raise ResearchControlRuntimeError(
-                "research control state already exists; use open_research_control_runtime"
+                "research control workspace is incomplete; refusing partial-state rebootstrap"
             )
-        raise ResearchControlRuntimeError(
-            "research control workspace is incomplete; refusing partial-state rebootstrap"
-        )
 
-    registry = (
-        ScientificRegistry(paths.scientific_registry)
-        if registry_exists
-        else ScientificRegistry.initialize_pristine(paths.scientific_registry)
-    )
-    supervisor = ResearchSupervisor.initialize_pristine(paths.supervisor, registry)
-    adapter = ResearchTriggerAdapter(supervisor)
-    NightResearchCurriculum.initialize_pristine(
-        paths.curriculum,
-        adapter,
-        max_budget_units=max_budget_units,
-    )
-    ResearchScheduler.initialize_pristine(
-        paths.scheduler,
-        adapter,
-        source_registry=registry,
-    )
+        registry = (
+            ScientificRegistry(paths.scientific_registry)
+            if registry_exists
+            else ScientificRegistry.initialize_pristine(paths.scientific_registry)
+        )
+        supervisor = ResearchSupervisor.initialize_pristine(paths.supervisor, registry)
+        adapter = ResearchTriggerAdapter(supervisor)
+        NightResearchCurriculum.initialize_pristine(
+            paths.curriculum,
+            adapter,
+            max_budget_units=max_budget_units,
+        )
+        ResearchScheduler.initialize_pristine(
+            paths.scheduler,
+            adapter,
+            source_registry=registry,
+        )
     return open_research_control_runtime(
         root,
         max_budget_units=max_budget_units,

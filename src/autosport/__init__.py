@@ -10,6 +10,20 @@ from . import _paper_execution_append_recovery as _paper_execution_append_recove
 from . import _paper_value_execution_authority as _paper_value_execution_authority  # noqa: F401,E402
 from . import _paper_value_risk_admission_recovery as _paper_value_risk_admission_recovery  # noqa: F401,E402
 
+# Product PAPER execution must preserve which exact, already-durable DecisionLedger
+# record existed before #623 RUN_RESERVED/attempt publication. This guard wraps the
+# fully-composed execution runtime after the existing recovery/authority layers.
+from . import _paper_execution_decision_origin as _paper_execution_decision_origin  # noqa: F401,E402
+# Exact classes are insufficient if an instance shadows authority-bearing methods.
+# Fence those dispatch points before product call-site authorization is installed.
+from . import _paper_execution_decision_origin_instance_guard as _paper_execution_decision_origin_instance_guard  # noqa: F401,E402
+# Canonical producer ancestry is not an ambient capability: only the exact direct
+# product execute call may bind origin, while nested hooks fail before reservation.
+from . import _paper_execution_decision_origin_callsite_guard as _paper_execution_decision_origin_callsite_guard  # noqa: F401,E402
+# An origin-bound incomplete run may resume only after the product re-resolves the
+# same durable DecisionLedger origin; generic/originless retry remains fail-closed.
+from . import _paper_execution_decision_origin_resume_guard as _paper_execution_decision_origin_resume_guard  # noqa: F401,E402
+
 # Bind explicit realized-VOC admissions to the exact canonical ResearchProtocol
 # and protocol-derived cohort before the scoring facade is imported by consumers.
 from . import _voc_admission_identity_guard as _voc_admission_identity_guard  # noqa: F401,E402

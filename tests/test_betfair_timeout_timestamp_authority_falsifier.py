@@ -46,9 +46,7 @@ def test_caller_cannot_backdate_timeout_origin_to_mint_definitive_absence(
     except timeout_resolution.BetfairTimeoutResolutionError:
         return
 
-    assert (
-        result.kind
-        is timeout_resolution.BetfairTimeoutResolutionKind.INDETERMINATE_BEFORE_VISIBILITY_HORIZON
-    )
+    kinds = timeout_resolution.BetfairTimeoutResolutionKind
+    assert result.kind is kinds.INDETERMINATE_BEFORE_VISIBILITY_HORIZON
     assert result.definitive is False
     assert result.evidence is None

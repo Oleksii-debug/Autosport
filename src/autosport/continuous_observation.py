@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import argparse
-import json
 import math
 import os
 import signal
@@ -17,6 +16,7 @@ from typing import Callable, Sequence
 from .ingestion import CommittedIngestionHealthError
 from .ingestion_health import IngestionPolicy, SourceHealthStore
 from .integrity import atomic_write_json
+from .json_integrity import strict_json_loads
 from .live_observation import poll_open_market_store_once
 from .market_mirror import MarketMirror
 from .market_mirror_runtime import BoundedMirrorInvalidationBuffer
@@ -139,8 +139,8 @@ def _read_previous_status(path: Path) -> dict[str, object] | None:
     if not path.exists():
         return None
     try:
-        raw = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raw = strict_json_loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, ValueError) as exc:
         raise ValueError("continuous observation status is unreadable or invalid JSON") from exc
     if not isinstance(raw, dict) or raw.get("schema_version") != _STATUS_SCHEMA_VERSION:
         raise ValueError("continuous observation status has unsupported schema")

@@ -126,13 +126,16 @@ class BetfairCapabilityFreshnessEvidence:
     """Immutable exact-market Betfair freshness evidence.
 
     A non-delayed MarketBook response is positive REST freshness only when this
-    object was issued from a canonical adapter observation. It does not prove
-    Stream freshness, financial authority, or whole-product readiness.
+    object was issued from a canonical adapter observation. Any bound bookmaker
+    profile and configured account reference are configuration/provenance scope,
+    not provider-authenticated account identity or positive freshness authority.
+    It does not prove Stream freshness, financial authority, or whole-product
+    readiness.
     """
 
     profile_id: str
     venue_id: str
-    account_id: str
+    configured_account_ref: str
     adapter_id: str
     adapter_version: str
     profile_version: int
@@ -148,7 +151,7 @@ class BetfairCapabilityFreshnessEvidence:
     def __post_init__(self) -> None:
         _sha256_hex(self.profile_id, "profile_id")
         _text(self.venue_id, "venue_id")
-        _text(self.account_id, "account_id")
+        _text(self.configured_account_ref, "configured_account_ref")
         _text(self.adapter_id, "adapter_id")
         _text(self.adapter_version, "adapter_version")
         if type(self.profile_version) is not int or self.profile_version < 1:
@@ -221,7 +224,7 @@ class BetfairCapabilityFreshnessEvidence:
         )
         actual_adapter = (
             observation.venue_id,
-            observation.account_id,
+            observation.configured_account_ref,
             observation.adapter_id,
             observation.adapter_version,
         )
@@ -238,7 +241,7 @@ class BetfairCapabilityFreshnessEvidence:
         return cls(
             profile_id=profile.profile_id,
             venue_id=profile.venue_id,
-            account_id=profile.account_id,
+            configured_account_ref=observation.configured_account_ref,
             adapter_id=profile.adapter_id,
             adapter_version=profile.adapter_version,
             profile_version=profile.profile_version,
@@ -273,9 +276,15 @@ class BetfairCapabilityFreshnessEvidence:
     def grants_product_write_authority(self) -> bool:
         return False
 
+    @property
+    def proves_provider_account_identity(self) -> bool:
+        """MarketBook freshness does not authenticate a configured account label."""
+
+        return False
+
     def to_canonical_dict(self) -> dict[str, object]:
         return {
-            "account_id": self.account_id,
+            "configured_account_ref": self.configured_account_ref,
             "adapter_id": self.adapter_id,
             "adapter_version": self.adapter_version,
             "application_key_class": self.application_key_class.value,
@@ -304,14 +313,14 @@ class BetfairCapabilityFreshnessEvidence:
         actual = (
             self.profile_id,
             self.venue_id,
-            self.account_id,
+            self.configured_account_ref,
             self.adapter_id,
             self.adapter_version,
             self.profile_version,
         )
         if actual != expected:
             raise BetfairCapabilityFreshnessError(
-                "freshness evidence does not match capability profile identity"
+                "freshness evidence does not match configured capability profile scope"
             )
 
     def _authority_fingerprint(self) -> str:
@@ -371,7 +380,6 @@ class BetfairCapabilityFreshnessEvidence:
                 "freshness evidence is for a different market"
             )
         self._assert_current(as_of=as_of, max_age_seconds=max_age_seconds)
-        profile.require(BookmakerCapability.LIVE_QUOTES_READ)
         if self.market_data_delay_state is BetfairMarketDataDelayState.UNKNOWN:
             raise UnknownBetfairMarketDataFreshness(
                 "Betfair market-data delay state is unknown"

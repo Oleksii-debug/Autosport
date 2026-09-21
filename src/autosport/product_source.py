@@ -1001,13 +1001,23 @@ def _required_env(name: str) -> str:
     return value
 
 
-def create_parlay_product_source() -> ParlayApiProductSource:
-    """Construct the supported read-only Parlay source from secret-safe environment."""
+def create_parlay_product_source_for_workspace(
+    workspace: str | Path,
+) -> ParlayApiProductSource:
+    """Construct the built-in read-only Parlay source for one canonical workspace."""
 
     provider = ParlayApiTableTennisProvider(api_key=_required_env("AUTOSPORT_PARLAY_API_KEY"))
     return ParlayApiProductSource(
         provider,
-        workspace=_required_env("AUTOSPORT_PRODUCT_WORKSPACE"),
+        workspace=workspace,
         lawful_terms_ref=_required_env("AUTOSPORT_PARLAY_LAWFUL_TERMS_REF"),
         retention_ref=_required_env("AUTOSPORT_PARLAY_RETENTION_REF"),
+    )
+
+
+def create_parlay_product_source() -> ParlayApiProductSource:
+    """Construct the external-factory-compatible Parlay source from environment."""
+
+    return create_parlay_product_source_for_workspace(
+        _required_env("AUTOSPORT_PRODUCT_WORKSPACE")
     )

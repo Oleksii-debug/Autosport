@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
 
@@ -33,20 +34,53 @@ def _show_workspace_configuration_error(detail: str) -> None:
 
 
 def _probe_workspace_writable(workspace: Path) -> None:
-    """Fail before GUI construction when durable workspace storage is not writable."""
+    """Fail before GUI construction when canonical durable publication is unavailable."""
 
     import tempfile
 
+    payload = b"autosport workspace atomic publish probe\n"
+    source: Path | None = None
+    destination: Path | None = None
+
     workspace.mkdir(parents=True, exist_ok=True)
-    with tempfile.NamedTemporaryFile(
-        mode="wb",
-        dir=workspace,
-        prefix=".autosport-write-probe-",
-        suffix=".tmp",
-        delete=True,
-    ) as probe:
-        probe.write(b"autosport workspace write probe\n")
-        probe.flush()
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="wb",
+            dir=workspace,
+            prefix=".autosport-write-probe-source-",
+            suffix=".tmp",
+            delete=False,
+        ) as probe:
+            source = Path(probe.name)
+            probe.write(payload)
+            probe.flush()
+            os.fsync(probe.fileno())
+
+        # Replace an already-existing disposable sibling so the preflight proves
+        # the same stricter publish primitive used by canonical durable writers,
+        # without touching any real Autosport state.
+        with tempfile.NamedTemporaryFile(
+            mode="wb",
+            dir=workspace,
+            prefix=".autosport-write-probe-destination-",
+            suffix=".tmp",
+            delete=False,
+        ) as published_probe:
+            destination = Path(published_probe.name)
+
+        os.replace(source, destination)
+        source = None
+
+        if destination.read_bytes() != payload:
+            raise OSError("workspace atomic replace did not publish expected probe bytes")
+    finally:
+        for candidate in (source, destination):
+            if candidate is None:
+                continue
+            try:
+                candidate.unlink()
+            except FileNotFoundError:
+                pass
 
 
 def _workspace_access_error_message(workspace: Path, exc: OSError) -> str:

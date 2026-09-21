@@ -251,13 +251,16 @@ def classify_betfair_statement_item(
         raise TypeError(
             "row must be exact BetfairAccountStatementItemObservation"
         )
-    if type(item_class_data) is not dict or any(
-        type(key) is not str for key in item_class_data
-    ):
+    if type(item_class_data) is not dict:
         raise BetfairStatementSemanticError(
             "item_class_data must be an exact JSON object"
         )
-    if _canonical_sha256(item_class_data) != row.item_class_data_sha256:
+    item_class_data_snapshot = item_class_data.copy()
+    if any(type(key) is not str for key in item_class_data_snapshot):
+        raise BetfairStatementSemanticError(
+            "item_class_data keys must be exact strings"
+        )
+    if _canonical_sha256(item_class_data_snapshot) != row.item_class_data_sha256:
         raise BetfairStatementSemanticError(
             "item_class_data does not match captured row digest"
         )
@@ -269,11 +272,11 @@ def classify_betfair_statement_item(
     commission_reversal = False
 
     if row.item_class == "UNKNOWN":
-        if set(item_class_data) != {"unknownStatementItem"}:
+        if set(item_class_data_snapshot) != {"unknownStatementItem"}:
             raise BetfairStatementSemanticError(
                 "UNKNOWN itemClassData must contain only unknownStatementItem"
             )
-        nested_raw = item_class_data["unknownStatementItem"]
+        nested_raw = item_class_data_snapshot["unknownStatementItem"]
         if type(nested_raw) is not str or not nested_raw:
             raise BetfairStatementSemanticError(
                 "unknownStatementItem must be non-empty text"

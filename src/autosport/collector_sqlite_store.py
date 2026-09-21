@@ -280,6 +280,7 @@ class CollectorDeltaStore:
             raise ValueError("invalid causal collector store") from exc
         if (
             not isinstance(raw, dict)
+            or type(raw.get("schema_version")) is not int
             or raw.get("schema_version") != 1
             or not isinstance(raw.get("deltas"), list)
             or not isinstance(raw.get("streams"), dict)

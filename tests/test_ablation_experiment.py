@@ -88,6 +88,9 @@ class AblationExperimentTests(unittest.TestCase):
         self.assertEqual(contrast.identified_factor_set, (AblationFactor.MODEL,))
         self.assertEqual(contrast.delta, Decimal("2.50"))
         payload = report.to_dict()
+        self.assertTrue(
+            payload["truth"]["external_metric_evidence_must_be_resolved"]
+        )
         self.assertFalse(payload["truth"]["factor_contributions_additive"])
         self.assertFalse(payload["truth"]["active_strategy_mutation"])
         self.assertFalse(payload["truth"]["real_money_execution"])
@@ -275,6 +278,30 @@ class AblationExperimentTests(unittest.TestCase):
                 ),
                 evaluated_at="2026-09-21T10:00:00Z",
             )
+
+    def test_hashes_and_times_are_canonicalized_before_binding(self) -> None:
+        factors = FactorIdentitySet(
+            data_sha256=_sha("A"),
+            model_sha256=_sha("B"),
+            threshold_selection_sha256=_sha("C"),
+            sizing_sha256=_sha("D"),
+            execution_sha256=_sha("E"),
+        )
+        self.assertEqual(factors.data_sha256, _sha("a"))
+
+        observation = AblationCellObservation(
+            cell_id="canonical",
+            cell_spec_sha256=_sha("A"),
+            run_evidence_sha256=_sha("B"),
+            metric_value=Decimal("1"),
+            evidence_available_at="2026-09-21T11:00:00+02:00",
+        )
+        self.assertEqual(observation.cell_spec_sha256, _sha("a"))
+        self.assertEqual(observation.run_evidence_sha256, _sha("b"))
+        self.assertEqual(
+            observation.evidence_available_at,
+            "2026-09-21T09:00:00Z",
+        )
 
     def test_delta_is_independent_of_low_ambient_decimal_precision(self) -> None:
         protocol = self._one_factor_protocol()

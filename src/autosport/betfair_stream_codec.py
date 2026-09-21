@@ -133,6 +133,19 @@ class BetfairApplyStatus(str, Enum):
     DUPLICATE = "duplicate"
 
 
+class BetfairProviderStreamHealth(str, Enum):
+    UP_TO_DATE = "up_to_date"
+    UNRELIABLE = "unreliable_503"
+
+
+def _provider_stream_health(value: object) -> BetfairProviderStreamHealth:
+    if value is None:
+        return BetfairProviderStreamHealth.UP_TO_DATE
+    if type(value) is int and value == 503:
+        return BetfairProviderStreamHealth.UNRELIABLE
+    raise ValueError(f"unsupported Betfair stream status {value!r}")
+
+
 @dataclass(frozen=True, slots=True)
 class BetfairQuoteIdentity:
     source_id: str
@@ -200,6 +213,7 @@ class BetfairMarketChangeFrame:
     clk: str | None
     publish_time_ms: int
     conflated: bool
+    provider_health: BetfairProviderStreamHealth
     market_changes: tuple[BetfairMarketChange, ...]
     frame_sha256: str
 
@@ -223,6 +237,7 @@ class BetfairStreamApplyResult:
     cursor: BetfairStreamCursor | None
     frame_kind: BetfairFrameKind
     conflated: bool
+    provider_health: BetfairProviderStreamHealth
     publish_time_ms: int
     changed: tuple[BetfairQuoteState, ...]
     removed: tuple[BetfairQuoteIdentity, ...]
@@ -345,6 +360,7 @@ def decode_market_change_message(raw: dict[str, Any]) -> BetfairMarketChangeFram
     conflated = raw.get("con", False)
     if type(conflated) is not bool:
         raise ValueError("con must be bool")
+    provider_health = _provider_stream_health(raw.get("status"))
     mc_raw = raw.get("mc", [])
     if type(mc_raw) is not list:
         raise ValueError("mc must be a list")
@@ -362,7 +378,7 @@ def decode_market_change_message(raw: dict[str, Any]) -> BetfairMarketChangeFram
     elif clk is None:
         raise ValueError(f"{kind.value} requires clk")
     return BetfairMarketChangeFrame(
-        kind, initial, clk, pt, conflated, changes, _frame_hash(raw)
+        kind, initial, clk, pt, conflated, provider_health, changes, _frame_hash(raw)
     )
 
 
@@ -377,6 +393,8 @@ class BetfairMarketStreamState:
         self._clk: str | None = None
         self._pt: int | None = None
         self._hash: str | None = None
+        self._provider_health: BetfairProviderStreamHealth | None = None
+        self._last_unreliable_publish_time_ms: int | None = None
         self._initialized = False
         self._quotes: dict[BetfairQuoteIdentity, BetfairQuoteState] = {}
         self._levels: dict[tuple[str, int, Decimal, BetfairQuoteSide, int], Decimal] = {}
@@ -384,6 +402,14 @@ class BetfairMarketStreamState:
     @property
     def initialized(self) -> bool:
         return self._initialized
+
+    @property
+    def provider_health(self) -> BetfairProviderStreamHealth | None:
+        return self._provider_health
+
+    @property
+    def last_unreliable_publish_time_ms(self) -> int | None:
+        return self._last_unreliable_publish_time_ms
 
     def reconnect_cursor(self) -> BetfairStreamCursor | None:
         if self._initial is None or self._clk is None:
@@ -472,6 +498,7 @@ class BetfairMarketStreamState:
                     self.reconnect_cursor(),
                     frame.kind,
                     frame.conflated,
+                    frame.provider_health,
                     frame.publish_time_ms,
                     (),
                     (),
@@ -482,6 +509,9 @@ class BetfairMarketStreamState:
         if frame.kind is BetfairFrameKind.HEARTBEAT:
             if frame.initial_clk is not None:
                 self._initial = frame.initial_clk
+            self._provider_health = frame.provider_health
+            if frame.provider_health is BetfairProviderStreamHealth.UNRELIABLE:
+                self._last_unreliable_publish_time_ms = frame.publish_time_ms
             self._clk, self._pt, self._hash = (
                 frame.clk, frame.publish_time_ms, frame.frame_sha256
             )
@@ -490,6 +520,7 @@ class BetfairMarketStreamState:
                 self.reconnect_cursor(),
                 frame.kind,
                 frame.conflated,
+                frame.provider_health,
                 frame.publish_time_ms,
                 (),
                 (),
@@ -534,12 +565,16 @@ class BetfairMarketStreamState:
 
         if frame.initial_clk is not None:
             self._initial = frame.initial_clk
+        self._provider_health = frame.provider_health
+        if frame.provider_health is BetfairProviderStreamHealth.UNRELIABLE:
+            self._last_unreliable_publish_time_ms = frame.publish_time_ms
         self._clk, self._pt, self._hash = frame.clk, frame.publish_time_ms, frame.frame_sha256
         return BetfairStreamApplyResult(
             BetfairApplyStatus.APPLIED,
             self.reconnect_cursor(),
             frame.kind,
             frame.conflated,
+            frame.provider_health,
             frame.publish_time_ms,
             tuple(changed),
             tuple(dict.fromkeys(removed)),

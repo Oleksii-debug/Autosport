@@ -15,7 +15,7 @@ from .gui_evidence_export import (
 )
 from .live_observation import OneShotObservationWorker, observe_workspace_once
 from .localization import text
-from .secret_redaction import redact_operator_text, safe_exception_detail
+from .secret_redaction import redact_operator_text
 from .parlayapi_provider import ParlayApiTableTennisProvider
 from .paths import default_workspace
 from .recovery import reconcile_late_crashes
@@ -95,13 +95,14 @@ def _safe_exception_text(exc: BaseException) -> str:
         name = type.__getattribute__(type(exc), "__name__")
     except BaseException:
         name = "BaseException"
-
-    detail = safe_exception_detail(exc, unavailable_detail="")
-    if not detail:
+    try:
+        detail = str(exc)
+    except BaseException:
         return redact_operator_text(
             text("ui.error.exception.message_unavailable", exception_type=name)
         )
-    return redact_operator_text(f"{name}: {detail}")
+    rendered = f"{name}: {detail}" if detail else name
+    return redact_operator_text(rendered)
 
 
 class AutosportApp(tk.Tk):

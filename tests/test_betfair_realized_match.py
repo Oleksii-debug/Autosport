@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import replace
 from datetime import datetime, timezone
-from decimal import Decimal
+from decimal import Decimal, ROUND_DOWN, ROUND_UP, localcontext
 import json
 from pathlib import Path
 
@@ -94,8 +94,13 @@ def _prepared(
     root: Path,
     *,
     submitted: bool = True,
+    requested_odds: str = "3.0",
+    requested_stake: str = "10",
 ) -> tuple[ExecutionPlan, RealExecutionLedger, str]:
-    action = _action()
+    action = _action(
+        requested_odds=requested_odds,
+        requested_stake=requested_stake,
+    )
     plan = ExecutionPlan(
         plan_id="plan-1",
         bookmaker_profile_version="profile-1",
@@ -683,3 +688,61 @@ def test_current_order_matched_plus_remaining_cannot_exceed_request(
         match="matched plus remaining",
     ):
         _resolve(plan, ledger, capture)
+
+
+def test_decimal_identity_ignores_ambient_context_for_all_economic_fields(
+    tmp_path: Path,
+) -> None:
+    plan, ledger, provider_ref = _prepared(
+        tmp_path,
+        requested_odds="3.12345678",
+        requested_stake="10.12345678",
+    )
+    current = [
+        _current_order(
+            provider_ref,
+            price=3.12345678,
+            requested_size=10.12345678,
+            average_price_matched=3.23456789,
+            size_matched=4.12345678,
+            size_remaining=6.0,
+        )
+    ]
+
+    with localcontext() as context:
+        context.prec = 4
+        context.rounding = ROUND_DOWN
+        low_precision = _resolve(
+            plan,
+            ledger,
+            _capture(
+                provider_ref,
+                current_orders=current,
+            ),
+        )
+        low_precision.assert_authoritative()
+
+    with localcontext() as context:
+        context.prec = 40
+        context.rounding = ROUND_UP
+        high_precision = _resolve(
+            plan,
+            ledger,
+            _capture(
+                provider_ref,
+                current_orders=current,
+            ),
+        )
+        high_precision.assert_authoritative()
+
+    assert low_precision.evidence_id == high_precision.evidence_id
+    assert low_precision.requested_odds == Decimal("3.12345678")
+    assert low_precision.requested_stake == Decimal("10.12345678")
+    assert low_precision.provider_matched_odds == Decimal("3.23456789")
+    assert low_precision.provider_matched_stake == Decimal("4.12345678")
+
+    with localcontext() as context:
+        context.prec = 2
+        context.rounding = ROUND_DOWN
+        low_precision.assert_authoritative()
+        high_precision.assert_authoritative()

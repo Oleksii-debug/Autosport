@@ -234,6 +234,15 @@ class SessionEvidence:
             raise CampaignError("session counts must be integers")
         if self.wins + self.losses + self.voids > self.bets:
             raise CampaignError("wins + losses + voids cannot exceed bets")
+        for name in (
+            "starting_bankroll",
+            "ending_bankroll",
+            "net_profit",
+            "turnover",
+        ):
+            value = getattr(self, name)
+            if value is not None and type(value) is not Decimal:
+                raise CampaignError(f"{name} must be an exact Decimal")
         starting_bankroll_text = _canonical_decimal(
             self.starting_bankroll,
             "starting_bankroll",

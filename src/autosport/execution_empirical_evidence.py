@@ -187,19 +187,116 @@ class EmpiricalExecutionEvidence:
             value = getattr(self, name)
             if type(value) is not int or value < 0:
                 raise EmpiricalExecutionEvidenceError(f"{name} must be non-negative int")
-        for name in ("requested_odds", "requested_stake"):
-            if _decimal(getattr(self, name), name) <= 0:
-                raise EmpiricalExecutionEvidenceError(f"{name} must be > 0")
-        for name in (
-            "accepted_odds",
-            "accepted_stake",
-            "accepted_minus_requested_odds",
-            "adverse_odds_delta",
-            "unaccepted_stake",
-        ):
-            value = getattr(self, name)
-            if value is not None:
-                _decimal(value, name)
+        requested_odds = _decimal(self.requested_odds, "requested_odds")
+        requested_stake = _decimal(self.requested_stake, "requested_stake")
+        if requested_odds <= 0 or requested_stake <= 0:
+            raise EmpiricalExecutionEvidenceError("requested odds/stake must be > 0")
+
+        try:
+            status = AcknowledgementStatus(self.acknowledgement_status)
+        except ValueError as exc:
+            raise EmpiricalExecutionEvidenceError(
+                "acknowledgement_status must be canonical"
+            ) from exc
+
+        nullable_metrics = (
+            self.accepted_odds,
+            self.accepted_stake,
+            self.accepted_minus_requested_odds,
+            self.adverse_odds_delta,
+            self.unaccepted_stake,
+        )
+        if status is AcknowledgementStatus.REJECTED:
+            if any(value is not None for value in nullable_metrics):
+                raise EmpiricalExecutionEvidenceError(
+                    "rejected evidence cannot claim accepted/slippage metrics"
+                )
+        else:
+            if any(value is None for value in nullable_metrics):
+                raise EmpiricalExecutionEvidenceError(
+                    "accepted/partial evidence requires complete accepted/slippage metrics"
+                )
+            accepted_odds = _decimal(self.accepted_odds, "accepted_odds")
+            accepted_stake = _decimal(self.accepted_stake, "accepted_stake")
+            accepted_minus = _decimal(
+                self.accepted_minus_requested_odds,
+                "accepted_minus_requested_odds",
+            )
+            adverse_delta = _decimal(self.adverse_odds_delta, "adverse_odds_delta")
+            unaccepted_stake = _decimal(self.unaccepted_stake, "unaccepted_stake")
+            if accepted_odds <= 0 or accepted_stake <= 0:
+                raise EmpiricalExecutionEvidenceError(
+                    "accepted odds/stake must be > 0"
+                )
+            if accepted_stake > requested_stake:
+                raise EmpiricalExecutionEvidenceError(
+                    "accepted stake cannot exceed requested stake"
+                )
+            if accepted_minus != accepted_odds - requested_odds:
+                raise EmpiricalExecutionEvidenceError(
+                    "accepted-minus-requested odds metric is inconsistent"
+                )
+            if self.side == "BACK":
+                expected_adverse = max(
+                    requested_odds - accepted_odds, Decimal("0")
+                )
+            elif self.side == "LAY":
+                expected_adverse = max(
+                    accepted_odds - requested_odds, Decimal("0")
+                )
+            else:
+                raise EmpiricalExecutionEvidenceError(
+                    "accepted-price evidence supports canonical BACK/LAY only"
+                )
+            if adverse_delta != expected_adverse or adverse_delta < 0:
+                raise EmpiricalExecutionEvidenceError(
+                    "adverse odds delta is inconsistent"
+                )
+            expected_unaccepted = requested_stake - accepted_stake
+            if unaccepted_stake != expected_unaccepted or unaccepted_stake < 0:
+                raise EmpiricalExecutionEvidenceError(
+                    "unaccepted stake metric is inconsistent"
+                )
+
+        quote_time = _timestamp(self.quote_observed_at, "quote_observed_at")
+        decision_time = _timestamp(self.decision_at, "decision_at")
+        reserve_time = _timestamp(self.reserved_at, "reserved_at")
+        submit_time = _timestamp(self.submitted_at, "submitted_at")
+        provider_time = _timestamp(
+            self.provider_evidence_observed_at,
+            "provider_evidence_observed_at",
+        )
+        acknowledgement_time = _timestamp(self.acknowledged_at, "acknowledged_at")
+        expected_timings = {
+            "quote_age_at_decision_us": _duration_us(
+                decision_time, quote_time, "quote_age_at_decision"
+            ),
+            "decision_to_reserve_us": _duration_us(
+                reserve_time, decision_time, "decision_to_reserve"
+            ),
+            "decision_to_submit_us": _duration_us(
+                submit_time, decision_time, "decision_to_submit"
+            ),
+            "submit_to_provider_evidence_us": _duration_us(
+                provider_time, submit_time, "submit_to_provider_evidence"
+            ),
+            "submit_to_acknowledgement_us": _duration_us(
+                acknowledgement_time, submit_time, "submit_to_acknowledgement"
+            ),
+            "decision_to_acknowledgement_us": _duration_us(
+                acknowledgement_time, decision_time, "decision_to_acknowledgement"
+            ),
+        }
+        if provider_time > acknowledgement_time:
+            raise EmpiricalExecutionEvidenceError(
+                "provider evidence cannot postdate acknowledgement"
+            )
+        for name, expected in expected_timings.items():
+            if getattr(self, name) != expected:
+                raise EmpiricalExecutionEvidenceError(
+                    f"{name} does not match bound timestamps"
+                )
+
         object.__setattr__(
             self,
             "evidence_sha256",

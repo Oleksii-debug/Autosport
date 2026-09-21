@@ -347,6 +347,40 @@ class HistoricalAcquisitionBundleTests(unittest.TestCase):
                     )
             self.assertFalse(root.exists())
 
+    def test_mutated_child_evidence_cannot_claim_parsed_result_authority(self) -> None:
+        transport = _Transport()
+        real_capture = historical_acquisition.capture_historical_matches
+
+        def mutate_evidence_after_child(*args, **kwargs):
+            report = real_capture(*args, **kwargs)
+            evidence_path = Path(kwargs["evidence_path"])
+            evidence = json.loads(evidence_path.read_text(encoding="utf-8"))
+            evidence["provider_result_schema_parsed"] = True
+            evidence_path.write_text(
+                json.dumps(evidence, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+                encoding="utf-8",
+            )
+            return report
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "acquisition"
+            with patch.object(
+                historical_acquisition,
+                "capture_historical_matches",
+                side_effect=mutate_evidence_after_child,
+            ):
+                with self.assertRaisesRegex(
+                    ProviderPayloadError,
+                    "provider_result_schema_parsed must remain false",
+                ):
+                    capture_historical_acquisition_bundle(
+                        self._provider(transport),
+                        requested_at=("2026-09-12T10:03:00Z",),
+                        results_date="2026-09-10",
+                        output_dir=root,
+                    )
+            self.assertFalse(root.exists())
+
     def test_replaced_snapshot_market_fails_before_bundle_publication(self) -> None:
         transport = _Transport()
         real_capture = historical_acquisition.capture_historical_snapshot

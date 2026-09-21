@@ -7,8 +7,8 @@ from typing import Mapping
 PRODUCT_RUNTIME_UK_UA: Mapping[str, str] = MappingProxyType(
     {
         "ui.product_runtime.frame.title": "Тривала PAPER-робота",
-        "ui.product_runtime.button.start": "Запустити тривалу PAPER-роботу",
-        "ui.product_runtime.button.stop": "Зупинити тривалу PAPER-роботу",
+        "ui.product_runtime.button.start": "PAPER: старт",
+        "ui.product_runtime.button.stop": "PAPER: стоп",
         "ui.product_runtime.status.idle": "Тривала PAPER-робота не запущена.",
         "ui.product_runtime.status.starting": "Запускається канонічна тривала PAPER-робота…",
         "ui.product_runtime.status.running": (

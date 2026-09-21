@@ -9,6 +9,10 @@ same-process class monkeypatch cannot synthesize positive denomination authority
 from missing durable state or bypass the monotonic issuance witness.
 """
 
+# Freeze the independent denomination-witness location before snapshotting the
+# authority read graph. This keeps supported environment changes from redirecting an
+# already-issued campaign onto a fresh witness ancestry after restart/cache loss.
+from . import _campaign_denomination_witness_root_pin as _witness_root_pin  # noqa: F401,E402
 from . import campaign_cost_evidence as _cost_evidence
 from .campaign_economic_authority import FinalizedCampaignAuthority as _Authority
 

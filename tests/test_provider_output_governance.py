@@ -90,9 +90,15 @@ def test_terms_reference_must_be_public_https_and_secret_free():
         authority(terms_reference="https://provider.example/terms?token=secret")
 
 
-def test_owner_approval_reference_rejects_query_or_fragment_credentials():
+def test_owner_approval_reference_rejects_query_fragment_and_unsafe_reference_forms():
     with pytest.raises(ValueError, match="query or fragment"):
         authority(owner_approval_reference="urn:approval:1#secret")
+    with pytest.raises(ValueError, match="absolute reference"):
+        authority(owner_approval_reference="bare-secret-token")
+    with pytest.raises(ValueError, match="HTTPS or URN"):
+        authority(owner_approval_reference="file:///C:/private/approval.txt")
+    with pytest.raises(ValueError, match="credentials"):
+        authority(owner_approval_reference="https://user:pass@example.com/approval")
 
 
 def test_authority_requires_half_open_nonempty_validity_interval():

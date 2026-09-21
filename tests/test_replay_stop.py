@@ -5,9 +5,16 @@ import threading
 import unittest
 from dataclasses import dataclass
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from autosport.gui import AUTOMATION_IDS
+from autosport.keyboard_audit import (
+    _ACTION_BINDINGS,
+    _FOCUS_BINDINGS,
+    _FOCUSABLE_CONTROLS,
+    summarize_keyboard_contract,
+)
 from autosport.localization import text
 from autosport.replay import (
     FutureLeakageError,
@@ -17,7 +24,7 @@ from autosport.replay import (
     ReplayStopToken,
 )
 from autosport.replay_worker import OneShotReplayWorker, run_workspace_dataset_once
-from autosport.windows_replay_stop import REPLAY_STOP_AUTOMATION_ID
+from autosport.windows_replay_stop import REPLAY_STOP_AUTOMATION_ID, _stop_control_enabled
 
 
 @dataclass(frozen=True)
@@ -131,6 +138,64 @@ class ReplayStopTests(unittest.TestCase):
             )
             self.assertGreater(result.replay.event_count, 0)
             self.assertTrue(Path(result.result_path).is_file())
+
+    def test_idle_stop_is_focusable_but_pending_stop_is_not_reentrant(self):
+        self.assertTrue(_stop_control_enabled(None))
+        self.assertTrue(
+            _stop_control_enabled(SimpleNamespace(busy=False, stop_available=False))
+        )
+        self.assertTrue(
+            _stop_control_enabled(SimpleNamespace(busy=True, stop_available=True))
+        )
+        self.assertFalse(
+            _stop_control_enabled(SimpleNamespace(busy=True, stop_available=False))
+        )
+
+    def test_packaged_keyboard_contract_requires_ctrl_s_and_stop_tab_reachability(self):
+        bindings = {
+            sequence: True for sequence in (*_ACTION_BINDINGS, *_FOCUS_BINDINGS)
+        }
+        focus = {sequence: True for sequence in _FOCUS_BINDINGS}
+        reachable = list(_FOCUSABLE_CONTROLS)
+        report = summarize_keyboard_contract(
+            bindings,
+            focus,
+            reachable,
+            list(reversed(reachable)),
+            require_replay_stop=True,
+        )
+        self.assertEqual(report["status"], "PASS")
+        self.assertEqual(
+            report["expected_automation_ids"]["stop_replay"],
+            REPLAY_STOP_AUTOMATION_ID,
+        )
+
+        bindings["<Control-s>"] = False
+        missing_binding = summarize_keyboard_contract(
+            bindings,
+            focus,
+            reachable,
+            list(reversed(reachable)),
+            require_replay_stop=True,
+        )
+        self.assertEqual(missing_binding["status"], "FAIL")
+        self.assertTrue(
+            any("<Control-s>" in failure for failure in missing_binding["failures"])
+        )
+
+        bindings["<Control-s>"] = True
+        reachable.remove("stop_replay")
+        missing_tab = summarize_keyboard_contract(
+            bindings,
+            focus,
+            reachable,
+            list(reversed(reachable)),
+            require_replay_stop=True,
+        )
+        self.assertEqual(missing_tab["status"], "FAIL")
+        self.assertTrue(
+            any("stop_replay" in failure for failure in missing_tab["failures"])
+        )
 
     def test_windows_stop_surface_uses_catalog_and_unique_uia_id(self):
         self.assertEqual(text("ui.windows.replay_stop.button"), "Зупинити повтор")

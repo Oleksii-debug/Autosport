@@ -76,6 +76,13 @@ def test_workspace_direct_construction_and_replace_cannot_mint_pass(
     issued.assert_product_issued()
     assert issued.status == "PASS"
 
+    cloned = replace(issued)
+    with pytest.raises(
+        handoff.OperatorEvidenceHandoffAuthorityError,
+        match="not issued",
+    ):
+        _ = cloned.status
+
     replaced = replace(issued, _manifest_sha256="5" * 64)
     with pytest.raises(
         handoff.OperatorEvidenceHandoffAuthorityError,
@@ -266,6 +273,13 @@ def test_nvda_direct_construction_and_replace_cannot_mint_pass(
     issued.assert_product_issued()
     assert issued.status == "PASS"
     assert issued.failed_checks == ()
+
+    cloned = replace(issued)
+    with pytest.raises(
+        handoff.OperatorEvidenceHandoffAuthorityError,
+        match="not issued",
+    ):
+        _ = cloned.status
 
     replaced = replace(issued, _package_sha256="6" * 64)
     with pytest.raises(

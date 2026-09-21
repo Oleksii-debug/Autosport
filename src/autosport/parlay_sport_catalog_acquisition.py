@@ -1,0 +1,306 @@
+from __future__ import annotations
+
+import hashlib
+import json
+import math
+import urllib.request
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
+from typing import Callable, Mapping
+from urllib.error import HTTPError, URLError
+
+
+CANONICAL_PARLAY_SPORTS_URL = "https://parlay-api.com/v1/sports"
+DEFAULT_TIMEOUT_SECONDS = 10.0
+DEFAULT_MAX_RESPONSE_BYTES = 1_048_576
+_USER_AGENT = "Autosport/0.1 read-only-sport-catalog"
+
+
+class ParlaySportCatalogAcquisitionError(RuntimeError):
+    """Base error for the read-only sport-catalog acquisition boundary."""
+
+
+class ParlaySportCatalogTransportError(ParlaySportCatalogAcquisitionError):
+    """Network/HTTP error before a trustworthy catalog response exists."""
+
+
+class ParlaySportCatalogEvidenceError(ParlaySportCatalogAcquisitionError, ValueError):
+    """Response evidence is structurally inconsistent or unsafe to trust."""
+
+
+@dataclass(frozen=True, slots=True)
+class RawCatalogHttpResponse:
+    status_code: int
+    headers: tuple[tuple[str, str], ...]
+    body: bytes
+    final_url: str
+
+
+@dataclass(frozen=True, slots=True)
+class ParlaySportCatalogAcquisition:
+    acquired_at: str
+    status_code: int
+    final_url: str
+    etag: str | None
+    raw_body: bytes | None
+    raw_body_sha256: str | None
+    prior_acquisition_id: str | None
+    acquisition_id: str
+    provider_origin_verified: bool = field(default=False, init=False)
+
+    @property
+    def is_not_modified(self) -> bool:
+        return self.status_code == 304
+
+
+Transport = Callable[[str, Mapping[str, str], float, int], RawCatalogHttpResponse]
+Clock = Callable[[], str]
+
+
+def _utc_now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _finite_positive_float(value: object, *, field_name: str) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError(f"{field_name} must be a finite positive number")
+    numeric = float(value)
+    if not math.isfinite(numeric) or numeric <= 0:
+        raise ValueError(f"{field_name} must be a finite positive number")
+    return numeric
+
+
+def _positive_int(value: object, *, field_name: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        raise ValueError(f"{field_name} must be a positive non-boolean integer")
+    return value
+
+
+def _validate_timestamp(value: object) -> str:
+    if not isinstance(value, str) or not value or value != value.strip():
+        raise ParlaySportCatalogEvidenceError("acquired_at must be a non-empty trimmed string")
+    normalized = value[:-1] + "+00:00" if value.endswith("Z") else value
+    try:
+        parsed = datetime.fromisoformat(normalized)
+    except ValueError as exc:
+        raise ParlaySportCatalogEvidenceError("acquired_at must be ISO-8601") from exc
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        raise ParlaySportCatalogEvidenceError("acquired_at must be timezone-aware")
+    return value
+
+
+def _single_header(headers: tuple[tuple[str, str], ...], name: str) -> str | None:
+    matches = [value for key, value in headers if key.lower() == name.lower()]
+    if len(matches) > 1:
+        raise ParlaySportCatalogEvidenceError(f"response contains duplicate {name} headers")
+    if not matches:
+        return None
+    value = matches[0]
+    if not isinstance(value, str):
+        raise ParlaySportCatalogEvidenceError(f"{name} header must be text")
+    if not value or value != value.strip():
+        raise ParlaySportCatalogEvidenceError(f"{name} header must be non-empty trimmed text")
+    return value
+
+
+def _validate_raw_response(response: object, *, max_response_bytes: int) -> RawCatalogHttpResponse:
+    if not isinstance(response, RawCatalogHttpResponse):
+        raise ParlaySportCatalogEvidenceError("transport must return RawCatalogHttpResponse")
+    if isinstance(response.status_code, bool) or not isinstance(response.status_code, int):
+        raise ParlaySportCatalogEvidenceError("response status_code must be an integer")
+    if response.status_code not in (200, 304):
+        raise ParlaySportCatalogTransportError(
+            f"unexpected Parlay sport-catalog HTTP status {response.status_code}"
+        )
+    if response.final_url != CANONICAL_PARLAY_SPORTS_URL:
+        raise ParlaySportCatalogEvidenceError(
+            "Parlay sport-catalog response final URL does not match the canonical origin/path"
+        )
+    if not isinstance(response.body, bytes):
+        raise ParlaySportCatalogEvidenceError("response body must be exact bytes")
+    if len(response.body) > max_response_bytes:
+        raise ParlaySportCatalogEvidenceError("Parlay sport-catalog response exceeds bounded size")
+    if not isinstance(response.headers, tuple) or any(
+        not isinstance(item, tuple)
+        or len(item) != 2
+        or not isinstance(item[0], str)
+        or not isinstance(item[1], str)
+        for item in response.headers
+    ):
+        raise ParlaySportCatalogEvidenceError("response headers must preserve text header pairs")
+    return response
+
+
+def _bounded_read(stream: object, max_response_bytes: int) -> bytes:
+    raw = stream.read(max_response_bytes + 1)
+    if not isinstance(raw, bytes):
+        raise ParlaySportCatalogEvidenceError("provider response body is not bytes")
+    if len(raw) > max_response_bytes:
+        raise ParlaySportCatalogEvidenceError("Parlay sport-catalog response exceeds bounded size")
+    return raw
+
+
+def _default_transport(
+    url: str,
+    headers: Mapping[str, str],
+    timeout_seconds: float,
+    max_response_bytes: int,
+) -> RawCatalogHttpResponse:
+    if url != CANONICAL_PARLAY_SPORTS_URL:
+        raise ParlaySportCatalogEvidenceError("catalog transport received a non-canonical URL")
+    request = urllib.request.Request(url, headers=dict(headers), method="GET")
+    try:
+        with urllib.request.urlopen(request, timeout=timeout_seconds) as response:  # nosec B310 - fixed HTTPS URL
+            return RawCatalogHttpResponse(
+                status_code=int(response.status),
+                headers=tuple((str(key), str(value)) for key, value in response.headers.items()),
+                body=_bounded_read(response, max_response_bytes),
+                final_url=str(response.geturl()),
+            )
+    except HTTPError as exc:
+        if exc.code == 304:
+            return RawCatalogHttpResponse(
+                status_code=304,
+                headers=tuple(
+                    (str(key), str(value))
+                    for key, value in (exc.headers.items() if exc.headers is not None else ())
+                ),
+                body=_bounded_read(exc, max_response_bytes),
+                final_url=str(exc.geturl()),
+            )
+        raise ParlaySportCatalogTransportError(
+            f"Parlay sport-catalog HTTP {exc.code}"
+        ) from exc
+    except URLError as exc:
+        raise ParlaySportCatalogTransportError(
+            f"Parlay sport-catalog transport error: {exc.reason}"
+        ) from exc
+
+
+def _acquisition_id(
+    *,
+    acquired_at: str,
+    status_code: int,
+    final_url: str,
+    etag: str | None,
+    raw_body_sha256: str | None,
+    prior_acquisition_id: str | None,
+    provider_origin_verified: bool,
+) -> str:
+    payload = {
+        "schema_version": 1,
+        "acquired_at": acquired_at,
+        "status_code": status_code,
+        "final_url": final_url,
+        "etag": etag,
+        "raw_body_sha256": raw_body_sha256,
+        "prior_acquisition_id": prior_acquisition_id,
+        "provider_origin_verified": provider_origin_verified,
+    }
+    canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    return "parlay-sports-acquisition:" + hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def acquire_parlay_sport_catalog(
+    *,
+    prior: ParlaySportCatalogAcquisition | None = None,
+    timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS,
+    max_response_bytes: int = DEFAULT_MAX_RESPONSE_BYTES,
+    transport: Transport | None = None,
+    clock: Clock = _utc_now_iso,
+) -> ParlaySportCatalogAcquisition:
+    """Acquire exact `/v1/sports` bytes without granting odds/write/product authority.
+
+    Positive provider-origin evidence is issued only when the product-owned default
+    transport is used. An injected transport remains useful for deterministic tests
+    and simulations but can never set ``provider_origin_verified``.
+    """
+
+    timeout_seconds = _finite_positive_float(timeout_seconds, field_name="timeout_seconds")
+    max_response_bytes = _positive_int(max_response_bytes, field_name="max_response_bytes")
+    if prior is not None and not isinstance(prior, ParlaySportCatalogAcquisition):
+        raise TypeError("prior must be a ParlaySportCatalogAcquisition")
+
+    headers: dict[str, str] = {
+        "Accept": "application/json",
+        "User-Agent": _USER_AGENT,
+    }
+    conditional_etag: str | None = None
+    if prior is not None:
+        if prior.status_code != 200 or prior.raw_body is None or prior.raw_body_sha256 is None:
+            raise ParlaySportCatalogEvidenceError(
+                "conditional acquisition requires an exact prior HTTP 200 body acquisition"
+            )
+        if hashlib.sha256(prior.raw_body).hexdigest() != prior.raw_body_sha256:
+            raise ParlaySportCatalogEvidenceError("prior acquisition raw-body digest mismatch")
+        if prior.etag is not None:
+            conditional_etag = prior.etag
+            headers["If-None-Match"] = prior.etag
+
+    using_product_transport = transport is None
+    active_transport = _default_transport if transport is None else transport
+    response = _validate_raw_response(
+        active_transport(
+            CANONICAL_PARLAY_SPORTS_URL,
+            headers,
+            timeout_seconds,
+            max_response_bytes,
+        ),
+        max_response_bytes=max_response_bytes,
+    )
+    acquired_at = _validate_timestamp(clock())
+    etag = _single_header(response.headers, "ETag")
+
+    if response.status_code == 304:
+        if prior is None or conditional_etag is None:
+            raise ParlaySportCatalogEvidenceError(
+                "HTTP 304 requires an exact prior acquisition and If-None-Match witness"
+            )
+        if response.body:
+            raise ParlaySportCatalogEvidenceError("HTTP 304 must not carry a catalog body")
+        provider_origin_verified = using_product_transport and prior.provider_origin_verified
+        acquisition_id = _acquisition_id(
+            acquired_at=acquired_at,
+            status_code=304,
+            final_url=response.final_url,
+            etag=etag,
+            raw_body_sha256=None,
+            prior_acquisition_id=prior.acquisition_id,
+            provider_origin_verified=provider_origin_verified,
+        )
+        result = ParlaySportCatalogAcquisition(
+            acquired_at=acquired_at,
+            status_code=304,
+            final_url=response.final_url,
+            etag=etag,
+            raw_body=None,
+            raw_body_sha256=None,
+            prior_acquisition_id=prior.acquisition_id,
+            acquisition_id=acquisition_id,
+        )
+    else:
+        digest = hashlib.sha256(response.body).hexdigest()
+        provider_origin_verified = using_product_transport
+        acquisition_id = _acquisition_id(
+            acquired_at=acquired_at,
+            status_code=200,
+            final_url=response.final_url,
+            etag=etag,
+            raw_body_sha256=digest,
+            prior_acquisition_id=None,
+            provider_origin_verified=provider_origin_verified,
+        )
+        result = ParlaySportCatalogAcquisition(
+            acquired_at=acquired_at,
+            status_code=200,
+            final_url=response.final_url,
+            etag=etag,
+            raw_body=response.body,
+            raw_body_sha256=digest,
+            prior_acquisition_id=None,
+            acquisition_id=acquisition_id,
+        )
+
+    if provider_origin_verified:
+        object.__setattr__(result, "provider_origin_verified", True)
+    return result

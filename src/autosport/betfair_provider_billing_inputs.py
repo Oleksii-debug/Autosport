@@ -7,9 +7,11 @@ amount/date coincidence, or a caller label into cost truth.
 
 The Betfair account reads consumed here do not expose a provider-owned literal
 account identifier. The caller-configured ``BetfairReadOnlyClient.account_id`` is
-therefore not emitted. Raw application keys are compared only transiently and no
-key or key fingerprint is retained; durable entitlement identity is a digest of a
-canonical non-secret provider projection.
+therefore not emitted. The provider-returned owner on the uniquely matched
+application-key version is retained as an authenticated account-origin observation.
+Raw application keys are compared only transiently and no key or key fingerprint is
+retained; durable entitlement identity is a digest of a canonical non-secret
+provider projection.
 """
 from __future__ import annotations
 
@@ -233,6 +235,7 @@ def _build_capability():
         owner_managed: bool
         active: bool
         vendor_id: str | None
+        provider_owner: str
         observed_at: str
         source_projection_sha256: str
 
@@ -252,6 +255,7 @@ def _build_capability():
                     raise error_cls(f"{field} must be bool")
             if self.vendor_id is not None:
                 required_text(self.vendor_id, "vendor_id")
+            required_text(self.provider_owner, "provider_owner")
             instant(self.observed_at, "observed_at")
             sha256_hex(
                 self.source_projection_sha256,
@@ -351,7 +355,7 @@ def _build_capability():
         return canonical_sha256(
             {
                 "schema": "autosport.betfair_provider_billing_inputs",
-                "schema_version": 4,
+                "schema_version": 5,
                 "venue_id": entitlement.venue_id,
                 "observed_at": observed_at,
                 "entitlement": {
@@ -364,6 +368,7 @@ def _build_capability():
                     "owner_managed": entitlement.owner_managed,
                     "active": entitlement.active,
                     "vendor_id": entitlement.vendor_id,
+                    "provider_owner": entitlement.provider_owner,
                     "observed_at": entitlement.observed_at,
                     "source_projection_sha256": (
                         entitlement.source_projection_sha256
@@ -613,6 +618,7 @@ def _build_capability():
         vendor_id = version.get("vendorId")
         if vendor_id is not None:
             vendor_id = required_text(vendor_id, "vendor_id")
+        provider_owner = provider_text(version, "owner", "provider_owner")
         app_id = provider_positive_int(app, "appId", "app_id")
         app_name = provider_text(app, "appName", "app_name")
         version_id = provider_positive_int(version, "versionId", "version_id")
@@ -635,6 +641,7 @@ def _build_capability():
             "owner_managed": owner_managed,
             "active": active,
             "vendor_id": vendor_id,
+            "provider_owner": provider_owner,
         }
         return DeveloperAppEntitlementObservation(
             venue_id=pinned.venue_id,
@@ -647,6 +654,7 @@ def _build_capability():
             owner_managed=owner_managed,
             active=active,
             vendor_id=vendor_id,
+            provider_owner=provider_owner,
             observed_at=rpc.evidence.observed_at,
             source_projection_sha256=canonical_sha256(projection),
         )

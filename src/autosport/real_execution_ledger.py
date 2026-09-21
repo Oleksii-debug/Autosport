@@ -111,7 +111,11 @@ def _decimal(value: Decimal | str | int, name: str) -> Decimal:
 
 
 def _decimal_text(value: Decimal) -> str:
-    text = format(value.normalize(), "f")
+    # Decimal.normalize() applies the ambient Decimal Context and can round
+    # exact money/odds before durable persistence. Formatting the original
+    # coefficient/exponent is context-independent; trim only representational
+    # fractional trailing zeros so numerically equivalent scales canonicalize.
+    text = format(value, "f")
     return text.rstrip("0").rstrip(".") if "." in text else text
 
 

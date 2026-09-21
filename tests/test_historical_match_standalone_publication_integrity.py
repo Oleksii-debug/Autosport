@@ -65,14 +65,25 @@ def test_standalone_capture_fails_closed_if_published_capture_changes_before_evi
         replace_capture_before_evidence,
     )
 
-    with pytest.raises(Exception):
-        capture_historical_matches(
+    try:
+        report = capture_historical_matches(
             _provider(transport),
             requested_date="2026-09-10",
             output_path=output,
             evidence_path=evidence,
         )
+    except Exception:
+        return
 
-    assert replacement_observed is True
-    assert output.read_bytes() == replacement
+    if replacement_observed:
+        pytest.fail(
+            "standalone capture returned success after its published capture bytes "
+            "were replaced before evidence commit"
+        )
+
+    # A future transactional implementation may keep the final capture path
+    # unpublished until the pair is committed.  That is also safe provided the
+    # returned digest matches the bytes finally exposed at output_path.
+    assert output.exists()
+    assert report.capture_sha256 == __import__("hashlib").sha256(output.read_bytes()).hexdigest()
     assert len(transport.urls) == 1

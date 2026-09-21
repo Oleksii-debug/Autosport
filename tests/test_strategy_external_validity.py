@@ -10,6 +10,7 @@ from autosport.evaluation_universe import (
     EvaluationRow,
     EvaluationUniverse,
     EvaluationUniverseLedger,
+    FunnelEvent,
     FunnelStage,
     SlotState,
 )
@@ -244,6 +245,27 @@ def test_subset_cannot_replace_frozen_denominator():
     candidate, baselines = _results(protocol)
     with pytest.raises(StrategyExternalValidityError, match="exact frozen EvaluationUniverse"):
         evaluate_strategy_external_validity(ledger, protocol, candidate, baselines)
+
+
+def test_attempted_execution_without_outcome_is_materially_unresolved():
+    ledger = _ledger(_row("candidate"))
+    row = ledger.universe.rows[0]
+    ledger = ledger.append(
+        FunnelEvent(
+            row_id=row.row_id,
+            stage=FunnelStage.ATTEMPTED,
+            event_at="2026-09-20T00:06:00Z",
+            execution_model_id=row.execution_model_id,
+            execution_attempt_id="paper-attempt-1",
+        )
+    )
+    protocol = _protocol(ledger)
+    candidate, baselines = _results(protocol)
+
+    report = evaluate_strategy_external_validity(ledger, protocol, candidate, baselines)
+
+    assert report.evidence_grade is StrategyEvidenceGrade.INSUFFICIENT
+    assert "material_funnel_state_unresolved" in report.external_evidence_gaps
 
 
 def test_arbitrage_without_terminal_space_authority_is_insufficient():

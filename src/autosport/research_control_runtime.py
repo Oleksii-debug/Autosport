@@ -178,6 +178,12 @@ def _state_presence(paths: ResearchControlPaths) -> tuple[bool, ...]:
     return tuple(path.exists() for path in paths.all())
 
 
+def _max_budget_units(value: object) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        raise ResearchControlRuntimeError("max_budget_units must be a positive integer")
+    return value
+
+
 def initialize_research_control_runtime(
     workspace: str | Path,
     *,
@@ -191,6 +197,7 @@ def initialize_research_control_runtime(
     partial workspace instead of silently rebasing research truth.
     """
 
+    max_budget_units = _max_budget_units(max_budget_units)
     root = Path(workspace)
     root.mkdir(parents=True, exist_ok=True)
     paths = ResearchControlPaths.for_workspace(root)
@@ -230,6 +237,7 @@ def open_research_control_runtime(
 ) -> ResearchControlRuntime:
     """Open exactly one existing canonical research control-plane composition."""
 
+    max_budget_units = _max_budget_units(max_budget_units)
     root = Path(workspace)
     paths = ResearchControlPaths.for_workspace(root)
     presence = _state_presence(paths)

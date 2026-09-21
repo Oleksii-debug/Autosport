@@ -318,3 +318,22 @@ def derive_settlement_execution_basis(
         basis_id=_basis_id(identity_payload),
         **fields,
     )
+
+
+def verify_settlement_execution_basis(
+    ledger: RealExecutionLedger,
+    basis: SettlementExecutionBasis,
+) -> SettlementExecutionBasis:
+    """Fail closed unless a supplied basis exactly re-resolves from durable truth."""
+
+    if type(basis) is not SettlementExecutionBasis:
+        raise TypeError("basis must be exact SettlementExecutionBasis")
+    expected = derive_settlement_execution_basis(
+        ledger,
+        attempt_id=basis.attempt_id,
+    )
+    if basis != expected:
+        raise SettlementExecutionBasisError(
+            "settlement execution basis does not match canonical durable execution"
+        )
+    return expected

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
 from dataclasses import replace
 from pathlib import Path
 
@@ -256,6 +257,136 @@ def test_write_once_fails_if_parent_identity_changes_during_publication(
 
     assert not path.exists()
     assert (moved_parent / "precommit.json").exists()
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows handle-bound parent identity")
+def test_windows_write_once_fails_if_parent_identity_changes_during_publication(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = tmp_path / "evidence" / "precommit.json"
+    path.parent.mkdir()
+    moved_parent = tmp_path / "evidence-moved"
+    original_open = precommit_module._open_bound_windows_parent_directory
+
+    def bind_then_swap(
+        parent: Path,
+    ) -> tuple[int, Path, tuple[int, int, int]]:
+        handle, absolute, identity = original_open(parent)
+        Path(parent).rename(moved_parent)
+        Path(parent).mkdir()
+        return handle, absolute, identity
+
+    monkeypatch.setattr(
+        precommit_module,
+        "_open_bound_windows_parent_directory",
+        bind_then_swap,
+    )
+
+    with pytest.raises(
+        CampaignPrecommitManifestError,
+        match="parent identity changed during publication",
+    ):
+        write_campaign_precommit_manifest_once(path, manifest())
+
+    assert not path.exists()
+    assert (moved_parent / "precommit.json").exists()
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows handle-bound restart identity")
+def test_windows_loader_rejects_moved_parent_even_with_identical_decoy(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = tmp_path / "evidence" / "precommit.json"
+    path.parent.mkdir()
+    write_campaign_precommit_manifest_once(path, manifest())
+    expected = path.read_bytes()
+    moved_parent = tmp_path / "evidence-moved"
+    original_open = precommit_module._open_bound_windows_parent_directory
+
+    def bind_then_swap(
+        parent: Path,
+    ) -> tuple[int, Path, tuple[int, int, int]]:
+        handle, absolute, identity = original_open(parent)
+        Path(parent).rename(moved_parent)
+        Path(parent).mkdir()
+        path.write_bytes(expected)
+        return handle, absolute, identity
+
+    monkeypatch.setattr(
+        precommit_module,
+        "_open_bound_windows_parent_directory",
+        bind_then_swap,
+    )
+
+    with pytest.raises(
+        CampaignPrecommitManifestError,
+        match="parent identity changed during publication",
+    ):
+        load_campaign_precommit_manifest(path)
+
+    assert path.read_bytes() == expected
+    assert (moved_parent / "precommit.json").read_bytes() == expected
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows junction/reparse contract")
+def test_windows_write_once_rejects_junction_parent_lineage(tmp_path: Path) -> None:
+    real_root = tmp_path / "real-root"
+    real_parent = real_root / "evidence"
+    real_parent.mkdir(parents=True)
+    redirected_root = tmp_path / "redirected-root"
+
+    result = subprocess.run(
+        [
+            "cmd",
+            "/c",
+            "mklink",
+            "/J",
+            str(redirected_root),
+            str(real_root),
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        pytest.skip(f"cannot create Windows test junction: {result.stderr}")
+
+    try:
+        path = redirected_root / "evidence" / "precommit.json"
+        with pytest.raises(
+            CampaignPrecommitManifestError,
+            match="reparse",
+        ):
+            write_campaign_precommit_manifest_once(path, manifest())
+        assert not (real_parent / "precommit.json").exists()
+    finally:
+        if redirected_root.exists():
+            os.rmdir(redirected_root)
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows target-reparse contract")
+def test_windows_write_once_and_loader_reject_target_symlink(tmp_path: Path) -> None:
+    original = manifest()
+    authoritative = tmp_path / "authoritative.json"
+    write_campaign_precommit_manifest_once(authoritative, original)
+    redirected = tmp_path / "redirected.json"
+    try:
+        redirected.symlink_to(authoritative)
+    except OSError as exc:
+        pytest.skip(f"cannot create Windows test symlink: {exc}")
+
+    with pytest.raises(
+        CampaignPrecommitManifestError,
+        match="cannot verify existing campaign precommit manifest",
+    ):
+        write_campaign_precommit_manifest_once(redirected, original)
+    with pytest.raises(
+        CampaignPrecommitManifestError,
+        match="cannot verify existing campaign precommit manifest",
+    ):
+        load_campaign_precommit_manifest(redirected)
 
 
 def test_write_once_refuses_conflicting_successor(tmp_path: Path) -> None:

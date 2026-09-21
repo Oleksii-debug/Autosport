@@ -124,6 +124,8 @@ def test_runtime_repair_reload_reinstalls_class_dispatch_seal(
         reloaded._require_exact_lineage_authority
         is seal._sealed_require_exact_lineage_authority
     )
+    assert reloaded._resolve_canonical_snapshot.__closure__ is None
+    assert reloaded._require_exact_lineage_authority.__closure__ is None
 
     dispatched = False
 
@@ -290,6 +292,59 @@ def test_rebinding_seal_module_aliases_cannot_redirect_live_guard(
         )
 
     assert dispatched is False
+
+
+def test_dispatch_authority_has_no_mutable_closure_trust_root() -> None:
+    assert repair._require_exact_lineage_authority.__closure__ is None
+    assert repair._resolve_canonical_snapshot.__closure__ is None
+    assert seal._sealed_require_exact_lineage_authority.__closure__ is None
+    assert seal._sealed_resolve_canonical_snapshot.__closure__ is None
+
+
+def test_removing_both_seal_reload_hooks_cannot_restore_unsealed_dispatch(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    ledger, snapshot, _ = _canonical_holdout(tmp_path, monkeypatch)
+    original_meta_path = list(sys.meta_path)
+    try:
+        sys.meta_path[:] = [
+            finder
+            for finder in sys.meta_path
+            if type(finder).__module__ != seal.__name__
+        ]
+        reloaded = importlib.reload(repair)
+        assert reloaded._require_exact_lineage_authority.__closure__ is None
+        assert reloaded._resolve_canonical_snapshot.__closure__ is None
+
+        dispatched = False
+
+        def forged_record(self, snapshot_id: str):
+            nonlocal dispatched
+            dispatched = True
+            return SimpleNamespace(
+                snapshot_id=snapshot_id,
+                manifest_sha256=snapshot.manifest_sha256,
+                source_identity=snapshot.source_identity,
+                license_identity=snapshot.license_identity,
+                causal_cutoff=snapshot.causal_cutoff,
+                available_at=snapshot.available_at_utc,
+            )
+
+        monkeypatch.setattr(DatasetSnapshotLineageAuthority, "record", forged_record)
+        with pytest.raises(
+            evidence.PointInTimeEvidenceError,
+            match="trusted DatasetSnapshotLineageAuthority class implementation changed: record",
+        ):
+            ledger.freshness_id(
+                dataset_snapshot=snapshot,
+                confirmation_trial_family_id="family-v1",
+            )
+        assert dispatched is False
+    finally:
+        sys.meta_path[:] = original_meta_path
+        seal._install_reload_finders()
+        seal._install_seals()
 
 
 def test_backup_reload_capability_is_not_a_public_module_global() -> None:

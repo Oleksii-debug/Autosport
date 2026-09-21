@@ -141,6 +141,7 @@ class ForecastLogLossEndpointPolicyTests(unittest.TestCase):
             0,
         )
         tiny = self._evaluate_one("1e-1000", 1)
+        compact_extreme = self._evaluate_one("1e-1000000", 1)
 
         self.assertAlmostEqual(
             near_one.log_loss,
@@ -149,6 +150,10 @@ class ForecastLogLossEndpointPolicyTests(unittest.TestCase):
         self.assertAlmostEqual(
             tiny.log_loss,
             float(-Decimal("1e-1000").ln()),
+        )
+        self.assertAlmostEqual(
+            compact_extreme.log_loss,
+            float(-Decimal("1e-1000000").ln()),
         )
 
     def test_log_loss_is_independent_of_ambient_decimal_precision(self) -> None:
@@ -164,11 +169,13 @@ class ForecastLogLossEndpointPolicyTests(unittest.TestCase):
         self.assertAlmostEqual(low_precision, float(-Decimal("1e-30").ln()))
 
     def test_positive_loss_that_underflows_summary_float_fails_closed(self) -> None:
-        with self.assertRaisesRegex(
-            ValueError,
-            "positive log loss is not representable as a nonzero binary64",
-        ):
-            self._evaluate_one("1e-1000", 0)
+        for probability in ("1e-1000", "1e-1000000"):
+            with self.subTest(probability=probability):
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "positive log loss is not representable as a nonzero binary64",
+                ):
+                    self._evaluate_one(probability, 0)
 
 
 if __name__ == "__main__":

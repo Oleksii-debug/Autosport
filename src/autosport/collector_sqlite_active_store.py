@@ -51,6 +51,7 @@ _SCHEDULE_IMMUTABLE_UPDATE_TRIGGER = "collector_schedules_immutable_update_v1"
 _SCHEDULE_IMMUTABLE_DELETE_TRIGGER = "collector_schedules_immutable_delete_v1"
 _SCHEDULE_SLOT_IMMUTABLE_UPDATE_TRIGGER = "collector_schedule_slots_immutable_update_v1"
 _SCHEDULE_SLOT_IMMUTABLE_DELETE_TRIGGER = "collector_schedule_slots_immutable_delete_v1"
+_MAX_SCHEDULE_EVIDENCE_SLOTS = 1_000_000
 
 
 class CollectorDeltaStore(_SQLiteCollectorDeltaStore):
@@ -594,7 +595,7 @@ class CollectorDeltaStore(_SQLiteCollectorDeltaStore):
         start_slot_ordinal: int,
         end_slot_ordinal: int,
     ) -> dict[str, object]:
-        """Read one exact schedule window and bind it to canonical cycle STARTs."""
+        """Commit one expected schedule window, including explicit missing STARTs."""
 
         source_id = _text(source_id, "source_id")
         run_id = _text(run_id, "run_id")
@@ -610,6 +611,11 @@ class CollectorDeltaStore(_SQLiteCollectorDeltaStore):
                 raise ValueError(f"{name} must be a non-negative integer")
         if end_slot_ordinal < start_slot_ordinal:
             raise ValueError("end_slot_ordinal cannot precede start_slot_ordinal")
+        expected_count = end_slot_ordinal - start_slot_ordinal + 1
+        if expected_count > _MAX_SCHEDULE_EVIDENCE_SLOTS:
+            raise ValueError(
+                "collector schedule evidence window exceeds bounded slot limit"
+            )
 
         connection = self._connect()
         try:
@@ -631,7 +637,7 @@ class CollectorDeltaStore(_SQLiteCollectorDeltaStore):
 
             rows = connection.execute(
                 "SELECT b.slot_ordinal, b.due_at, b.cycle_seq, "
-                "s.stream_epoch, s.attempted_at "
+                "s.run_id AS start_run_id, s.stream_epoch, s.attempted_at "
                 "FROM collector_schedule_slots_v1 AS b "
                 "JOIN collector_cycle_starts_v1 AS s "
                 "ON s.source_id=b.source_id AND s.cycle_seq=b.cycle_seq "
@@ -645,28 +651,54 @@ class CollectorDeltaStore(_SQLiteCollectorDeltaStore):
                     end_slot_ordinal,
                 ),
             ).fetchall()
-            expected_count = end_slot_ordinal - start_slot_ordinal + 1
-            if len(rows) != expected_count:
-                raise ValueError(
-                    "collector schedule window is incomplete or non-contiguous"
-                )
+            by_ordinal: dict[int, sqlite3.Row] = {}
+            for row in rows:
+                ordinal = int(row["slot_ordinal"])
+                if ordinal in by_ordinal:
+                    raise ValueError("collector schedule slot identity is duplicated")
+                if row["start_run_id"] != run_id:
+                    raise ValueError(
+                        "collector schedule slot is bound to another run START"
+                    )
+                by_ordinal[ordinal] = row
 
             slots: list[dict[str, object]] = []
-            for offset, row in enumerate(rows):
-                ordinal = start_slot_ordinal + offset
-                if int(row["slot_ordinal"]) != ordinal:
-                    raise ValueError(
-                        "collector schedule window is incomplete or non-contiguous"
-                    )
+            bound_start_count = 0
+            missing_start_count = 0
+            late_start_count = 0
+            early_start_count = 0
+            for ordinal in range(start_slot_ordinal, end_slot_ordinal + 1):
                 canonical_due = self._collector_schedule_due_at(
                     anchor_at=schedule["anchor_at"],
                     interval_seconds=schedule["interval_seconds"],
                     slot_ordinal=ordinal,
                 )
+                row = by_ordinal.get(ordinal)
+                if row is None:
+                    missing_start_count += 1
+                    slots.append(
+                        {
+                            "slot_ordinal": ordinal,
+                            "due_at": canonical_due,
+                            "cycle_seq": None,
+                            "stream_epoch": None,
+                            "attempted_at": None,
+                            "started_before_due": None,
+                            "started_late": None,
+                        }
+                    )
+                    continue
                 if row["due_at"] != canonical_due:
-                    raise ValueError("collector schedule slot due_at conflicts with schedule")
+                    raise ValueError(
+                        "collector schedule slot due_at conflicts with schedule"
+                    )
                 attempted = _instant(row["attempted_at"], "attempted_at")
                 due = _instant(canonical_due, "due_at")
+                started_before_due = attempted < due
+                started_late = attempted > due
+                bound_start_count += 1
+                early_start_count += int(started_before_due)
+                late_start_count += int(started_late)
                 slots.append(
                     {
                         "slot_ordinal": ordinal,
@@ -674,8 +706,8 @@ class CollectorDeltaStore(_SQLiteCollectorDeltaStore):
                         "cycle_seq": int(row["cycle_seq"]),
                         "stream_epoch": row["stream_epoch"],
                         "attempted_at": attempted.isoformat(),
-                        "started_before_due": attempted < due,
-                        "started_late": attempted > due,
+                        "started_before_due": started_before_due,
+                        "started_late": started_late,
                     }
                 )
 
@@ -689,6 +721,11 @@ class CollectorDeltaStore(_SQLiteCollectorDeltaStore):
                 "interval_seconds": schedule["interval_seconds"],
                 "start_slot_ordinal": start_slot_ordinal,
                 "end_slot_ordinal": end_slot_ordinal,
+                "expected_slot_count": expected_count,
+                "bound_start_count": bound_start_count,
+                "missing_start_count": missing_start_count,
+                "early_start_count": early_start_count,
+                "late_start_count": late_start_count,
                 "slots": slots,
             }
             commitment_json = self._cycle_terminal_payload_json(commitment_payload)

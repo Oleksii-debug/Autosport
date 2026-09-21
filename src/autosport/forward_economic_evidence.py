@@ -198,4 +198,131 @@ class ForwardEconomicProtocol:
         frozen_at: datetime,
     ) -> None:
         if type(alpha_registry) is not FamilywiseAlphaRegistry:
-    
+            raise ForwardEconomicEvidenceError("alpha_registry must be an exact FamilywiseAlphaRegistry")
+        protocol_id = _text(protocol_id, "protocol_id")
+        challenger_id = _text(challenger_id, "challenger_id")
+        champion_id = _text(champion_id, "champion_id")
+        universe_id = _text(universe_id, "universe_id")
+        universe_sha256 = _sha256(universe_sha256, "universe_sha256")
+        authority_binding_sha256 = _sha256(
+            authority_binding_sha256, "authority_binding_sha256"
+        )
+        if challenger_id == champion_id:
+            raise ForwardEconomicEvidenceError("challenger and champion must be distinct")
+        alpha = alpha_registry.allocation_for(challenger_id)
+        if isinstance(minimum_events, bool) or not isinstance(minimum_events, int) or minimum_events <= 0:
+            raise ForwardEconomicEvidenceError("minimum_events must be a positive integer")
+        risk_unit = _positive_decimal(risk_unit_currency, "risk_unit_currency")
+        maximum_odds = _positive_decimal(maximum_accepted_odds, "maximum_accepted_odds")
+        if maximum_odds <= 1:
+            raise ForwardEconomicEvidenceError("maximum_accepted_odds must exceed one")
+        drawdown = _decimal(maximum_drawdown_currency, "maximum_drawdown_currency")
+        if drawdown < 0:
+            raise ForwardEconomicEvidenceError("maximum_drawdown_currency must be non-negative")
+        abs_lambda = _positive_decimal(absolute_lambda, "absolute_lambda")
+        pair_lambda = _positive_decimal(paired_lambda, "paired_lambda")
+        if isinstance(start_sequence, bool) or not isinstance(start_sequence, int) or start_sequence < 0:
+            raise ForwardEconomicEvidenceError("start_sequence must be a non-negative integer")
+        frozen = _instant(frozen_at, "frozen_at")
+        if alpha_registry.sealed_at > frozen:
+            raise ForwardEconomicEvidenceError("alpha registry must be sealed before protocol freeze")
+        for name, value in (
+            ("protocol_id", protocol_id),
+            ("challenger_id", challenger_id),
+            ("champion_id", champion_id),
+            ("universe_id", universe_id),
+            ("universe_sha256", universe_sha256),
+            ("authority_binding_sha256", authority_binding_sha256),
+            ("alpha_registry_sha256", alpha_registry.identity_sha256),
+            ("challenger_alpha", alpha),
+            ("minimum_events", minimum_events),
+            ("risk_unit_currency", risk_unit),
+            ("maximum_accepted_odds", maximum_odds),
+            ("maximum_drawdown_currency", drawdown),
+            ("absolute_lambda", abs_lambda),
+            ("paired_lambda", pair_lambda),
+            ("start_sequence", start_sequence),
+            ("frozen_at", frozen),
+        ):
+            object.__setattr__(self, name, value)
+
+    def to_payload(self) -> dict[str, object]:
+        return {
+            "schema_version": 2,
+            "protocol_id": self.protocol_id,
+            "challenger_id": self.challenger_id,
+            "champion_id": self.champion_id,
+            "universe_id": self.universe_id,
+            "universe_sha256": self.universe_sha256,
+            "authority_binding_sha256": self.authority_binding_sha256,
+            "alpha_registry_sha256": self.alpha_registry_sha256,
+            "challenger_alpha": _decimal_text(self.challenger_alpha),
+            "minimum_events": self.minimum_events,
+            "risk_unit_currency": _decimal_text(self.risk_unit_currency),
+            "maximum_accepted_odds": _decimal_text(self.maximum_accepted_odds),
+            "maximum_drawdown_currency": _decimal_text(self.maximum_drawdown_currency),
+            "absolute_lambda": _decimal_text(self.absolute_lambda),
+            "paired_lambda": _decimal_text(self.paired_lambda),
+            "start_sequence": self.start_sequence,
+            "frozen_at": _instant_text(self.frozen_at),
+            "decimal_precision": _DECIMAL_PRECISION,
+            "normalization": "authoritative_net_money_pnl_divided_by_fixed_risk_unit",
+            "absolute_null": "mean_normalized_challenger_money_pnl<=0",
+            "paired_null": "mean_normalized_challenger_minus_champion_money_pnl<=0",
+        }
+
+    @property
+    def identity_sha256(self) -> str:
+        return _canonical_digest(self.to_payload())
+
+
+@dataclass(frozen=True, slots=True)
+class ForwardDecisionObservation:
+    sequence: int
+    universe_sha256: str
+    universe_event_sha256: str
+    challenger_decision_sha256: str
+    champion_decision_sha256: str
+
+    def __post_init__(self) -> None:
+        if isinstance(self.sequence, bool) or not isinstance(self.sequence, int) or self.sequence < 0:
+            raise ForwardEconomicEvidenceError("sequence must be a non-negative integer")
+        _sha256(self.universe_sha256, "universe_sha256")
+        _sha256(self.universe_event_sha256, "universe_event_sha256")
+        _sha256(self.challenger_decision_sha256, "challenger_decision_sha256")
+        _sha256(self.champion_decision_sha256, "champion_decision_sha256")
+
+
+@dataclass(frozen=True, slots=True)
+class ResolvedPolicyOutcome:
+    policy_id: str
+    sequence: int
+    universe_event_sha256: str
+    decision_sha256: str
+    decision_committed_at: datetime
+    side: BetSide
+    accepted_odds: Decimal | None
+    accepted_stake: Decimal | None
+    net_pnl_currency: Decimal
+    execution_evidence_sha256: str | None
+    execution_accepted_at: datetime | None
+    settlement_evidence_sha256: str | None
+    settlement_available_at: datetime | None
+
+    def __post_init__(self) -> None:
+        _text(self.policy_id, "policy_id")
+        if isinstance(self.sequence, bool) or not isinstance(self.sequence, int) or self.sequence < 0:
+            raise ForwardEconomicEvidenceError("sequence must be a non-negative integer")
+        _sha256(self.universe_event_sha256, "universe_event_sha256")
+        _sha256(self.decision_sha256, "decision_sha256")
+        committed = _instant(self.decision_committed_at, "decision_committed_at")
+        if type(self.side) is not BetSide:
+            raise ForwardEconomicEvidenceError("side must be an exact BetSide")
+        pnl = _decimal(self.net_pnl_currency, "net_pnl_currency")
+        if self.side is BetSide.NONE:
+            if self.accepted_odds is not None or self.accepted_stake is not None:
+                raise ForwardEconomicEvidenceError("NONE cannot carry accepted odds or stake")
+            if self.execution_evidence_sha256 is not None or self.settlement_evidence_sha256 is not None:
+                raise ForwardEconomicEvidenceError("NONE cannot carry execution or settlement evidence")
+            if self.execution_accepted_at is not None or self.settlement_available_at is not None:
+                raise ForwardEconomic

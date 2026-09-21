@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from datetime import datetime
@@ -18,6 +17,7 @@ class StartupExecutionBlockReason(str, Enum):
     ACCOUNT_STATE_REBUILD_UNAVAILABLE = "ACCOUNT_STATE_REBUILD_UNAVAILABLE"
     ACCOUNT_STATE_REBUILD_FAILED = "ACCOUNT_STATE_REBUILD_FAILED"
     ACCOUNT_STATE_INVALID = "ACCOUNT_STATE_INVALID"
+    ACCOUNT_STATE_AUTHORITY_UNAVAILABLE = "ACCOUNT_STATE_AUTHORITY_UNAVAILABLE"
 
 
 def _nonempty_text(value: str, name: str) -> str:
@@ -59,6 +59,13 @@ class ExecutionAccount:
 
 @dataclass(frozen=True, slots=True)
 class AccountExposureSnapshot:
+    """Structural account-state projection for diagnostics only.
+
+    This value is intentionally caller-constructible and therefore cannot grant
+    positive startup execution authority. A future positive path must re-resolve
+    product-issued provider/account-read evidence with explicit freshness.
+    """
+
     bookmaker_id: str
     account_id: str
     currency: str
@@ -106,12 +113,13 @@ class StartupExecutionGate:
 
     The gate deliberately has no provider write capability. It first asks the
     durable execution ledger to recover crash-interrupted attempts to UNKNOWN,
-    then requires a caller-supplied provider reconciliation to make every
-    external effect definitive. Only after that does it accept a complete,
-    validated bankroll/exposure rebuild for every configured execution account.
+    then requires provider reconciliation to make every external effect
+    definitive. AccountExposureSnapshot remains useful diagnostic state but is
+    not product-issued provider authority, so it cannot enable execution.
 
-    Any inability to prove those facts disables new execution while leaving
-    analysis/read-only operation available.
+    Positive startup admission remains disabled until Autosport has a
+    product-owned account-read resolver with explicit freshness plus an atomic
+    ledger-generation handoff to the execution writer.
     """
 
     _UNRESOLVED_STATES = frozenset(
@@ -196,8 +204,10 @@ class StartupExecutionGate:
                 promoted=promoted,
             )
 
-        # Do not let a concurrent/newly persisted uncertain effect slip through
-        # the account rebuild window. The ledger remains the final authority.
+        # Re-read canonical ledger events after the point-in-time snapshot. This
+        # catches an append that lands immediately after verified_snapshot()
+        # returns its bytes (the #1019 race). A still-later append cannot become
+        # unsafe startup authority because positive admission is disabled below.
         try:
             unresolved = self._unresolved_attempt_ids()
         except Exception:
@@ -213,22 +223,26 @@ class StartupExecutionGate:
                 snapshots=snapshots,
             )
 
-        return StartupExecutionStatus(
-            execution_enabled=True,
-            analysis_read_only_enabled=True,
-            reason=None,
-            promoted_attempt_ids=promoted,
-            unresolved_attempt_ids=(),
-            account_snapshots=snapshots,
+        # AccountExposureSnapshot is a structural projection, not product-issued
+        # provider evidence. Do not convert caller-controlled values or timestamps
+        # into execution authority. A later positive implementation must consume
+        # a non-caller-mintable provider/account resolver, enforce freshness, and
+        # atomically bind the admitted ledger generation to the execution writer.
+        return self._blocked(
+            StartupExecutionBlockReason.ACCOUNT_STATE_AUTHORITY_UNAVAILABLE,
+            promoted=promoted,
+            snapshots=snapshots,
         )
 
     def _unresolved_attempt_ids(self) -> tuple[str, ...]:
-        snapshot = self._ledger.verified_snapshot()
+        # First force the public integrity snapshot boundary. Then derive both
+        # attempt identity and state from one fresh canonical event read instead
+        # of mixing stale snapshot IDs with later per-attempt live reads.
+        self._ledger.verified_snapshot()
+        events = self._ledger._events()
         attempt_ids: list[str] = []
         seen: set[str] = set()
-        for raw_line in snapshot.payload.splitlines():
-            envelope = json.loads(raw_line)
-            event = envelope["event"]
+        for event in events:
             if event["event_type"] != EventType.ATTEMPT_RESERVED.value:
                 continue
             attempt_id = event["attempt_id"]
@@ -238,7 +252,10 @@ class StartupExecutionGate:
         return tuple(
             attempt_id
             for attempt_id in attempt_ids
-            if self._ledger.attempt_state(attempt_id) in self._UNRESOLVED_STATES
+            if RealExecutionLedger._state(
+                RealExecutionLedger._attempt_events(events, attempt_id)
+            )
+            in self._UNRESOLVED_STATES
         )
 
     def _valid_account_snapshots(

@@ -34,6 +34,9 @@ PRODUCT_RUNTIME_UK_UA: Mapping[str, str] = MappingProxyType(
             "Тривала PAPER-робота не запущена: AUTOSPORT_PRODUCT_SOURCE_FACTORY містить "
             "зайві пробіли або іншу неоднозначну конфігурацію."
         ),
+        "ui.product_runtime.status.recovery_required": (
+            "Тривала PAPER-робота заблокована: спочатку відновіть quarantined workspace."
+        ),
         "ui.product_runtime.status.operation_busy": (
             "Спочатку завершіть поточну replay/live/recovery/export операцію."
         ),

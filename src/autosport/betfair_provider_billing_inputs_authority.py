@@ -7,8 +7,8 @@ read wrapper and validator: the wrapper owns construction of the existing strict
 Betfair read-only client with the canonical HTTP transport and a closure-captured
 UTC clock, then records the exact returned observation in a closure-private
 issuance relation. Callers can provide credentials and bounded read scope, but
-cannot inject a transport, clock, venue/account label, or pre-built client into
-positive provider-billing issuance.
+cannot inject a transport, clock, venue/account label, pre-built client, or rebound
+provider executable into positive provider-billing issuance.
 
 This is an in-process observation capability, not a second provider client, billing
 store, economic classifier, allocation authority, or durable cost record.
@@ -17,6 +17,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
+from . import betfair_account_readonly as _readonly
 from . import betfair_provider_billing_inputs as _inputs
 from .betfair_account_readonly import (
     BetfairReadOnlyClient,
@@ -37,16 +38,54 @@ def _build_observation_authority():
     client_cls = BetfairReadOnlyClient
     credentials_cls = BetfairSessionCredentials
     transport_cls = UrllibBetfairHttpTransport
+
+    # Capture the production executable identities before any provider read. The
+    # public lower-level client intentionally remains injectable for ordinary
+    # deterministic adapters/tests; this positive issuance boundary does not.
+    client_init = client_cls.__dict__["__init__"]
+    client_new = client_cls.__dict__.get("__new__")
+    transport_init = transport_cls.__dict__["__init__"]
+    transport_new = transport_cls.__dict__.get("__new__")
     transport_post = transport_cls.__dict__["post"]
+    readonly_client_export = _readonly.__dict__["BetfairReadOnlyClient"]
+    readonly_transport_export = _readonly.__dict__["UrllibBetfairHttpTransport"]
+    request_ctor = _readonly.__dict__["Request"]
+    network_open = _readonly.__dict__["urlopen"]
+
     now_utc = datetime.now
     utc = timezone.utc
     base_error_cls = BetfairReadOnlyError
     error_cls = BetfairProviderBillingInputsAuthorityError
     get_attr = object.__getattribute__
+    object_new = object.__new__
 
     # Strongly retaining the issued object prevents id reuse while its issuance is
     # authoritative. The stored projection detects object.__setattr__ tampering.
     issued: dict[int, tuple[object, tuple[object, ...]]] = {}
+
+    def assert_executable_authority() -> None:
+        """Reject same-process rebinding of every executable root used for I/O."""
+
+        if (
+            _readonly.__dict__.get("BetfairReadOnlyClient") is not readonly_client_export
+            or readonly_client_export is not client_cls
+            or client_cls.__dict__.get("__init__") is not client_init
+            or client_cls.__dict__.get("__new__") is not client_new
+        ):
+            raise error_cls("provider billing client executable drifted")
+        if (
+            _readonly.__dict__.get("UrllibBetfairHttpTransport")
+            is not readonly_transport_export
+            or readonly_transport_export is not transport_cls
+            or transport_cls.__dict__.get("__init__") is not transport_init
+            or transport_cls.__dict__.get("__new__") is not transport_new
+            or transport_cls.__dict__.get("post") is not transport_post
+        ):
+            raise error_cls("provider billing transport executable drifted")
+        if _readonly.__dict__.get("Request") is not request_ctor:
+            raise error_cls("provider billing HTTP request executable drifted")
+        if _readonly.__dict__.get("urlopen") is not network_open:
+            raise error_cls("provider billing network opener drifted")
 
     def projection(source: object) -> tuple[object, ...]:
         entitlement = get_attr(source, "entitlement")
@@ -96,20 +135,23 @@ def _build_observation_authority():
 
         if type(credentials) is not credentials_cls:
             raise TypeError("credentials must be exact BetfairSessionCredentials")
+        assert_executable_authority()
 
         def product_clock():
             return now_utc(utc)
 
-        transport = transport_cls()
-        # Keep the production transport exact and unshadowed. This protects the
-        # positive wrapper from a caller-supplied structural transport even if a
-        # pre-built client is available elsewhere in the application.
+        # Bypass mutable class-call dispatch and invoke the captured canonical
+        # constructors directly. The class dictionaries are also fenced above, so
+        # a caller cannot replace the public constructors and have that replacement
+        # execute on this authority path.
+        transport = object_new(transport_cls)
+        transport_init(transport)
         if type(transport) is not transport_cls or "post" in vars(transport):
             raise error_cls("provider billing production transport is not canonical")
-        if transport_cls.__dict__.get("post") is not transport_post:
-            raise error_cls("provider billing production transport method drifted")
 
-        client = client_cls(
+        client = object_new(client_cls)
+        client_init(
+            client,
             credentials,
             transport=transport,
             timeout_seconds=timeout_seconds,
@@ -117,6 +159,19 @@ def _build_observation_authority():
             venue_id="betfair",
             account_id="provider-billing-product",
         )
+        if type(client) is not client_cls:
+            raise error_cls("provider billing production client is not canonical")
+        state = vars(client)
+        if (
+            state.get("_credentials") is not credentials
+            or state.get("_transport") is not transport
+            or state.get("_clock") is not product_clock
+            or state.get("_venue_id") != "betfair"
+            or state.get("_account_id") != "provider-billing-product"
+            or state.get("_timeout_seconds") != float(timeout_seconds)
+        ):
+            raise error_cls("provider billing production client state drifted")
+
         source = read_impl(
             client,
             from_record=from_record,
@@ -124,6 +179,9 @@ def _build_observation_authority():
             statement_from=statement_from,
             statement_to=statement_to,
         )
+        # A persistent executable rebind that occurs during provider I/O cannot be
+        # legitimized merely because the returned JSON is syntactically valid.
+        assert_executable_authority()
         return register(source)
 
     def validate(source: object):

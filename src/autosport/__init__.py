@@ -73,6 +73,10 @@ from . import _point_in_time_feature_provenance_guard as _point_in_time_feature_
 # stale holdout process views re-resolve the same durable workspace binding/root.
 from . import _point_in_time_authority_runtime_repair as _point_in_time_authority_runtime_repair  # noqa: F401,E402
 
+# Freeze the concrete lineage/registry class implementations as part of the
+# capability: exact instances must not dispatch through caller-replaced class methods.
+from . import _point_in_time_class_dispatch_seal as _point_in_time_class_dispatch_seal  # noqa: F401,E402
+
 # Structural cursor/range witnesses are useful legacy intake evidence but are not
 # production provider-completeness authority. Install the fail-closed public gate;
 # the supported denominator path consumes the exact live CompleteGameBoardSnapshot.

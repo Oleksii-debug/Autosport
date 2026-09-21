@@ -382,12 +382,46 @@ class HoldoutConsumption:
             raise EvidenceLedgerCorruptError("invalid holdout record") from exc
 
 
+def _physical_holdout_key(
+    dataset_snapshot: DatasetSnapshot,
+) -> tuple[str, str, str]:
+    """Canonical identity of the immutable physical confirmation dataset."""
+    if type(dataset_snapshot) is not DatasetSnapshot:
+        raise PointInTimeEvidenceError("dataset_snapshot must be an exact DatasetSnapshot")
+    return (
+        _sha256(dataset_snapshot.manifest_sha256, "dataset_snapshot.manifest_sha256"),
+        _text(dataset_snapshot.source_identity, "dataset_snapshot.source_identity"),
+        _text(dataset_snapshot.license_identity, "dataset_snapshot.license_identity"),
+    )
+
+
+def _find_physical_holdout_consumption(
+    records: Mapping[str, HoldoutConsumption],
+    *,
+    dataset_snapshot: DatasetSnapshot,
+) -> HoldoutConsumption | None:
+    """Find prior consumption even when caller-controlled aliases changed."""
+    wanted = _physical_holdout_key(dataset_snapshot)
+    for record in records.values():
+        existing = (
+            _sha256(record.dataset_manifest_sha256, "dataset_manifest_sha256"),
+            _text(record.source_identity, "source_identity"),
+            _text(record.license_identity, "license_identity"),
+        )
+        if existing == wanted:
+            return record
+    return None
+
+
 class HoldoutConsumptionLedger:
     """Append-only durable proof that a canonical confirmation holdout was consumed.
 
-    Freshness deliberately excludes both ``dataset_snapshot_id`` and
-    ``research_protocol_id``. Renaming/reloading the same immutable bytes or wrapping
-    them in a new protocol therefore cannot manufacture a fresh confirmation set.
+    Persisted freshness identifiers deliberately exclude both
+    ``dataset_snapshot_id`` and ``research_protocol_id``. For schema compatibility
+    they retain ``confirmation_trial_family_id``, but that caller-visible family label
+    is not freshness authority: eligibility also checks the exact immutable physical
+    dataset identity (manifest + source + license). Renaming a snapshot, protocol, or
+    family therefore cannot manufacture a fresh confirmation set.
 
     Every workspace-local ledger version is fenced by the shared, workspace-external
     ``MonotonicWorkspaceAuthority``. A valid older JSON file or a deleted ledger is
@@ -604,14 +638,14 @@ class HoldoutConsumptionLedger:
         confirmation_trial_family_id: str,
     ) -> None:
         _text(research_protocol_id, "research_protocol_id")
-        freshness_id = self.freshness_id(
-            dataset_snapshot=dataset_snapshot,
-            confirmation_trial_family_id=confirmation_trial_family_id,
-        )
+        _text(confirmation_trial_family_id, "confirmation_trial_family_id")
         with self._lock:
             with _HoldoutLedgerLock(self._path.parent):
                 self._load()
-                existing = self._records.get(freshness_id)
+                existing = _find_physical_holdout_consumption(
+                    self._records,
+                    dataset_snapshot=dataset_snapshot,
+                )
         if existing is not None:
             raise HoldoutAlreadyConsumedError(
                 f"holdout {existing.holdout_access_id} was already consumed by "

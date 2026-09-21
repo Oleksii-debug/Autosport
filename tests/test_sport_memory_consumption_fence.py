@@ -189,13 +189,13 @@ def test_reopened_public_base_runtime_cannot_persist_stale_consumption(tmp_path)
     assert runtime_path.read_bytes() == durable_before
 
 
-def test_second_open_runtime_cannot_erase_first_consumption(tmp_path):
+def test_second_open_runtime_reloads_and_preserves_first_consumption(tmp_path):
     identity, opponent, checkpoint_path, runtime_path, first, artifact = _bound_runtime(
         tmp_path
     )
 
     # Open a second product runtime at the exact same durable generation. Both
-    # objects now legitimately hold the same runtime root R.
+    # objects legitimately begin from the same runtime root R.
     second = open_bound_sport_memory_runtime(
         runtime_path,
         checkpoint_path,
@@ -211,18 +211,25 @@ def test_second_open_runtime_cannot_erase_first_consumption(tmp_path):
         expected_scope=_scope(),
     )
 
-    # The second object still carries R in memory. Its whole-file R+B image must
-    # be rejected rather than erasing the already committed R+A image.
-    with pytest.raises(SportMemoryError, match="durable root changed"):
-        second.record_consumption(
-            decision_id="decision-stale-second",
-            memory_id=artifact.memory_id,
-            decision_cutoff=T4,
-            consumed_at=T5,
-            expected_scope=_scope(),
-        )
+    # The transaction repair replaces predecessor late-CAS rejection: a stale
+    # bound runtime reloads the latest locked checkpoint, applies its
+    # non-conflicting write, and preserves the already acknowledged first write.
+    second_record = second.record_consumption(
+        decision_id="decision-stale-second",
+        memory_id=artifact.memory_id,
+        decision_cutoff=T4,
+        consumed_at=T5,
+        expected_scope=_scope(),
+    )
 
-    assert second.consumptions_for_artifact(artifact.memory_id) == ()
+    second_records = {
+        record.decision_id: record
+        for record in second.consumptions_for_artifact(artifact.memory_id)
+    }
+    assert second_records == {
+        "decision-first": first_record,
+        "decision-stale-second": second_record,
+    }
 
     reopened_identity = ParticipantIdentityRegistry(identity.path)
     reopened_opponent = OpponentIntelligenceStore(opponent.path, reopened_identity)
@@ -232,4 +239,8 @@ def test_second_open_runtime_cannot_erase_first_consumption(tmp_path):
         reopened_identity,
         reopened_opponent,
     )
-    assert reopened.consumptions_for_artifact(artifact.memory_id) == (first_record,)
+    reopened_records = {
+        record.decision_id: record
+        for record in reopened.consumptions_for_artifact(artifact.memory_id)
+    }
+    assert reopened_records == second_records

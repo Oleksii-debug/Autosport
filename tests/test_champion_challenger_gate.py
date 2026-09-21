@@ -144,6 +144,11 @@ def test_invalid_policy_rejected(kwargs):
         policy(**kwargs)
 
 
+def test_non_iterable_evidence_fails_closed():
+    with pytest.raises(PromotionEvidenceError, match="pairs must be iterable"):
+        evaluate_promotion(None, policy())  # type: ignore[arg-type]
+
+
 def test_generator_input_is_consumed_once():
     evidence = (PairedLoss(str(i), 1.0, 0.0) for i in range(6))
     decision = evaluate_promotion(

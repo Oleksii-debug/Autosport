@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from decimal import Context, Decimal, InvalidOperation, ROUND_HALF_EVEN, localcontext
+from decimal import Context, Decimal, DecimalException, InvalidOperation, ROUND_HALF_EVEN, localcontext
 from enum import StrEnum
 import hashlib
 import json
@@ -482,66 +482,71 @@ def build_protective_risk_flow_evidence(
     ruin_event_id: str | None = None
     percentage_status = PercentageEvidenceStatus.ACTIVE
 
-    with localcontext(_DECIMAL_CONTEXT):
-        for event in canonical_events:
-            if event.kind is RiskEvidenceEventKind.CAPITAL_FLOW:
-                net_flow = _classify_external_flow(event, capital_scope_id)
-                if ruin_event_id is not None and net_flow > 0:
-                    raise _error(
-                        "RECAPITALIZATION_AFTER_RUIN",
-                        "external inflow after nonpositive equity requires a new campaign",
+    try:
+            for event in canonical_events:
+                if event.kind is RiskEvidenceEventKind.CAPITAL_FLOW:
+                    net_flow = _classify_external_flow(event, capital_scope_id)
+                    if ruin_event_id is not None and net_flow > 0:
+                        raise _error(
+                            "RECAPITALIZATION_AFTER_RUIN",
+                            "external inflow after nonpositive equity requires a new campaign",
+                        )
+                    cumulative_external_flow += net_flow
+                    continue
+    
+                assert event.raw_equity is not None
+                adjusted = event.raw_equity - cumulative_external_flow
+                if high_water is None or adjusted > high_water:
+                    high_water = adjusted
+                drawdown_absolute = max(Decimal("0"), high_water - adjusted)
+                maximum_drawdown_absolute = max(
+                    maximum_drawdown_absolute,
+                    drawdown_absolute,
+                )
+                minimum_equity = (
+                    adjusted if minimum_equity is None else min(minimum_equity, adjusted)
+                )
+    
+                fraction: Decimal | None
+                if (
+                    percentage_status is PercentageEvidenceStatus.ACTIVE
+                    and high_water > 0
+                    and adjusted > 0
+                ):
+                    fraction = drawdown_absolute / high_water
+                    maximum_drawdown_fraction_seen = max(
+                        maximum_drawdown_fraction_seen,
+                        fraction,
                     )
-                cumulative_external_flow += net_flow
-                continue
-
-            assert event.raw_equity is not None
-            adjusted = event.raw_equity - cumulative_external_flow
-            if high_water is None or adjusted > high_water:
-                high_water = adjusted
-            drawdown_absolute = max(Decimal("0"), high_water - adjusted)
-            maximum_drawdown_absolute = max(
-                maximum_drawdown_absolute,
-                drawdown_absolute,
-            )
-            minimum_equity = (
-                adjusted if minimum_equity is None else min(minimum_equity, adjusted)
-            )
-
-            fraction: Decimal | None
-            if (
-                percentage_status is PercentageEvidenceStatus.ACTIVE
-                and high_water > 0
-                and adjusted > 0
-            ):
-                fraction = drawdown_absolute / high_water
-                maximum_drawdown_fraction_seen = max(
-                    maximum_drawdown_fraction_seen,
-                    fraction,
+                else:
+                    fraction = None
+    
+                if adjusted <= 0 and ruin_event_id is None:
+                    ruin_event_id = event.event_id
+                    percentage_status = (
+                        PercentageEvidenceStatus.TERMINATED_NONPOSITIVE_EQUITY
+                    )
+                    fraction = None
+    
+                points.append(
+                    FlowAdjustedEquityPoint(
+                        sequence=event.sequence,
+                        event_id=event.event_id,
+                        occurred_at=event.occurred_at,
+                        raw_equity=event.raw_equity,
+                        cumulative_external_flow=cumulative_external_flow,
+                        flow_adjusted_equity=adjusted,
+                        high_water_mark=high_water,
+                        drawdown_absolute=drawdown_absolute,
+                        drawdown_fraction=fraction,
+                    )
                 )
-            else:
-                fraction = None
-
-            if adjusted <= 0 and ruin_event_id is None:
-                ruin_event_id = event.event_id
-                percentage_status = (
-                    PercentageEvidenceStatus.TERMINATED_NONPOSITIVE_EQUITY
-                )
-                fraction = None
-
-            points.append(
-                FlowAdjustedEquityPoint(
-                    sequence=event.sequence,
-                    event_id=event.event_id,
-                    occurred_at=event.occurred_at,
-                    raw_equity=event.raw_equity,
-                    cumulative_external_flow=cumulative_external_flow,
-                    flow_adjusted_equity=adjusted,
-                    high_water_mark=high_water,
-                    drawdown_absolute=drawdown_absolute,
-                    drawdown_fraction=fraction,
-                )
-            )
-
+    
+    except DecimalException as exc:
+        raise _error(
+            "ARITHMETIC_UNREPRESENTABLE",
+            "protective-risk arithmetic exceeds the canonical Decimal domain",
+        ) from exc
     if not points:
         raise _error("FLOW_ORDER_AMBIGUOUS", "at least one valuation is required")
     assert minimum_equity is not None

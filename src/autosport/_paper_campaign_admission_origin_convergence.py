@@ -174,6 +174,113 @@ def _install() -> None:
         ):
             raise error("PAPER execution decision_origin record_sha256 is invalid")
         raw_learning = origin.get("learning_observation")
+        if type(raw_learning) is not dict or set(raw_learning) != learning_fields:
+            raise error("PAPER pre-execution learning Observation schema is invalid")
+        if (
+            raw_learning.get("schema") != learning_schema
+            or raw_learning.get("schema_version") != learning_schema_version
+        ):
+            raise error("unsupported PAPER pre-execution learning Observation schema")
+        return payload
+
+    def execution_attempt(self, *, run_id: str, attempt_id: str):
+        run_id = text(run_id, "execution_run_id")
+        attempt_id = text(attempt_id, "execution_attempt_id")
+        try:
+            events = self.execution_ledger.events(run_id)
+        except execution_integrity_errors as exc:
+            raise error("PAPER execution ledger cannot re-resolve admission authority") from exc
+        if not events:
+            raise error("admission execution run is missing from canonical ledger")
+        if any(event.get("event_type") == legacy_origin_event for event in events):
+            raise error("legacy standalone PAPER decision-origin event is not canonical")
+        reservations = [event for event in events if event.get("event_type") == "RUN_RESERVED"]
+        completions = [event for event in events if event.get("event_type") == "RUN_COMPLETED"]
+        if len(reservations) != 1 or len(completions) != 1:
+            raise error("admission requires one completed canonical PAPER execution run")
+        reservation = reservation_payload(reservations[0])
+        origin = reservation["decision_origin"]
+        assert isinstance(origin, Mapping)
+        attempts: list[PaperLegAttempt] = []
+        try:
+            for event in events:
+                if event.get("event_type") == "ATTEMPT_RECORDED":
+                    attempts.append(paper_leg_from_dict(event.get("payload")))
+        except (PaperExecutionIntegrityError, ValueError, TypeError) as exc:
+            raise error("admission execution attempt evidence is invalid") from exc
+        matches = [attempt for attempt in attempts if attempt.attempt_id == attempt_id]
+        if len(matches) != 1:
+            raise error("admission execution attempt is missing or duplicated")
+        attempt = matches[0]
+        if attempt.run_id != run_id:
+            raise error("admission execution attempt belongs to another run")
+        action_ids = reservation["action_ids"]
+        assert isinstance(action_ids, list)
+        if attempt.sequence >= len(action_ids) or action_ids[attempt.sequence] != attempt.action_id:
+            raise error("admission execution attempt is not bound to reserved action order")
+        if attempt.outcome not in accepted_equivalent:
+            raise error("REJECTED/UNKNOWN PAPER execution cannot enter campaign admission")
+        if attempt.execution_odds is None or attempt.execution_stake is None:
+            raise error("accepted PAPER execution lacks exact execution odds/stake")
+        return attempt, reservation, origin
+
+    def resolved_execution_decision_id(
+        self,
+        *,
+        run_id: str,
+        reservation: Mapping[str, object],
+        origin: Mapping[str, object],
+    ):
+        try:
+            durable_events = self.execution_ledger.events(run_id)
+        except execution_integrity_errors as exc:
+            raise error(
+                "PAPER execution ledger cannot re-resolve reservation authority"
+            ) from exc
+        durable_reservations = [
+            event
+            for event in durable_events
+            if event.get("event_type") == "RUN_RESERVED"
+        ]
+        if len(durable_reservations) != 1:
+            raise error("PAPER execution requires one canonical durable reservation")
+        canonical_reservation = reservation_payload(durable_reservations[0])
+        if dict(reservation) != dict(canonical_reservation):
+            raise error("PAPER reservation argument conflicts with canonical ledger")
+        reservation = canonical_reservation
+        canonical_origin = reservation["decision_origin"]
+        assert isinstance(canonical_origin, Mapping)
+        if dict(origin) != dict(canonical_origin):
+            raise error("PAPER execution decision_origin is not reservation authority")
+        origin = canonical_origin
+
+        trigger_id = text(reservation.get("trigger_id"), "execution trigger_id")
+        if origin is not reservation.get("decision_origin") and dict(origin) != reservation.get("decision_origin"):
+            raise error("PAPER execution decision_origin is not reservation authority")
+        if origin.get("decision_id") != trigger_id:
+            raise error("PAPER pre-execution decision-origin identity conflicts with reservation")
+        record_sha256 = origin.get("record_sha256")
+        if type(record_sha256) is not str:
+            raise error("PAPER pre-execution decision-origin digest is unavailable")
+        try:
+            records = self.decision_ledger.verified_records()
+        except decision_integrity_error as exc:
+            raise error("Decision Ledger cannot prove PAPER execution origin") from exc
+        matches = [candidate for candidate in records if candidate.decision_id == trigger_id]
+        if len(matches) != 1:
+            raise error("PAPER execution must originate from one pre-existing durable decision")
+        record = matches[0]
+        if digest_record(record) != record_sha256:
+            raise error("PAPER pre-execution decision-origin commitment no longer matches Decision Ledger")
+        payload = record.payload
+        if not isinstance(payload, Mapping):
+            raise error("PAPER execution decision payload is invalid")
+        live = matches_live(payload, decision_id=trigger_id, run_id=run_id, reservation=reservation)
+        legacy = matches_legacy(payload, decision_id=trigger_id, run_id=run_id, reservation=reservation)
+        if live == legacy:
+            raise error("PAPER execution decision lacks one canonical execution authority")
+
+        raw_learning = origin.get("learning_observation")
         if not isinstance(raw_learning, Mapping) or set(raw_learning) != learning_fields:
             raise error("PAPER pre-execution learning Observation is unavailable")
 

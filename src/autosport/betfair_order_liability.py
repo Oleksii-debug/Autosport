@@ -40,6 +40,15 @@ class BetfairBetTargetType(str, Enum):
     BACKERS_PROFIT = "BACKERS_PROFIT"
 
 
+class BetfairMarketBettingType(str, Enum):
+    ODDS = "ODDS"
+    LINE = "LINE"
+    RANGE = "RANGE"
+    ASIAN_HANDICAP_DOUBLE_LINE = "ASIAN_HANDICAP_DOUBLE_LINE"
+    ASIAN_HANDICAP_SINGLE_LINE = "ASIAN_HANDICAP_SINGLE_LINE"
+    FIXED_ODDS = "FIXED_ODDS"
+
+
 def _decimal(value: object, name: str) -> Decimal:
     if type(value) is not Decimal:
         raise BetfairOrderLiabilityError(f"{name} must be Decimal")
@@ -109,6 +118,7 @@ class _ReserveCalculation:
 def _derive_components(
     *,
     side: BetfairOrderSide,
+    market_betting_type: BetfairMarketBettingType,
     order_type: BetfairOrderType,
     price: Decimal | None,
     size: Decimal | None,
@@ -119,6 +129,15 @@ def _derive_components(
     each_way: bool,
 ) -> _ReserveCalculation:
     _enum(side, BetfairOrderSide, "side")
+    _enum(
+        market_betting_type,
+        BetfairMarketBettingType,
+        "market_betting_type",
+    )
+    if market_betting_type is not BetfairMarketBettingType.ODDS:
+        raise BetfairOrderLiabilityError(
+            "only ODDS market betting semantics are supported"
+        )
     _enum(order_type, BetfairOrderType, "order_type")
     if type(each_way) is not bool:
         raise BetfairOrderLiabilityError("each_way must be bool")
@@ -225,6 +244,7 @@ class BetfairOrderReserve:
     """Self-validating exact provider-economic reserve calculation."""
 
     side: BetfairOrderSide
+    market_betting_type: BetfairMarketBettingType
     order_type: BetfairOrderType
     price: Decimal | None
     size: Decimal | None
@@ -245,6 +265,7 @@ class BetfairOrderReserve:
             )
         expected = _derive_components(
             side=self.side,
+            market_betting_type=self.market_betting_type,
             order_type=self.order_type,
             price=self.price,
             size=self.size,
@@ -282,6 +303,7 @@ class BetfairOrderReserve:
 def derive_betfair_order_reserve(
     *,
     side: BetfairOrderSide,
+    market_betting_type: BetfairMarketBettingType,
     order_type: BetfairOrderType,
     price: Decimal | None = None,
     size: Decimal | None = None,
@@ -307,6 +329,7 @@ def derive_betfair_order_reserve(
     """
     calculation = _derive_components(
         side=side,
+        market_betting_type=market_betting_type,
         order_type=order_type,
         price=price,
         size=size,
@@ -318,6 +341,7 @@ def derive_betfair_order_reserve(
     )
     return BetfairOrderReserve(
         side=side,
+        market_betting_type=market_betting_type,
         order_type=order_type,
         price=price,
         size=size,

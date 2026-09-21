@@ -221,6 +221,16 @@ class PredicateEvidence:
         ]
         if len(set(identities)) != len(identities):
             raise LiveDecisionDispositionError("predicate evidence contains duplicates")
+        values = tuple(
+            sorted(
+                values,
+                key=lambda item: (
+                    item.authority_kind,
+                    item.evidence_id,
+                    item.evidence_sha256,
+                ),
+            )
+        )
         object.__setattr__(self, "evidence", values)
 
     def to_dict(self) -> dict[str, object]:
@@ -298,6 +308,7 @@ class LiveDecisionDisposition:
         predicate_ids = [item.predicate_id for item in values]
         if len(set(predicate_ids)) != len(predicate_ids):
             raise LiveDecisionDispositionError("predicate_id values must be unique")
+        values = tuple(sorted(values, key=lambda item: item.predicate_id))
         object.__setattr__(self, "predicates", values)
 
         unknown = sum(item.truth is PredicateTruth.UNKNOWN for item in values)

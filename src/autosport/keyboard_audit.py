@@ -181,7 +181,7 @@ def _critical_widgets(
         "live_quotes": app.live_quotes,
         "tickets": app.tickets,
         "evaluation": app.evaluation,
-        "log": app.log,
+        "log": app.log_accessible,
         "bankroll": app.bank_summary,
         "manual_calculation_open": app.manual_calculation_button,
     }

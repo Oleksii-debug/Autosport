@@ -222,6 +222,125 @@ class FocusedMirrorDependencyIndex:
                 keys.update(self._matched_keys.get(input_id, set()))
         return tuple(sorted(keys))
 
+    def _batch_dependencies(
+        self,
+        input_ids: tuple[str, ...],
+    ) -> tuple[FocusedMirrorDependency, ...]:
+        if type(input_ids) is not tuple:
+            raise TypeError("input_ids must be a tuple")
+        normalized = tuple(self._input_id(input_id) for input_id in input_ids)
+        if len(normalized) != len(set(normalized)):
+            raise ValueError("input_ids must be unique")
+
+        dependencies: list[FocusedMirrorDependency] = []
+        with self._lock:
+            for input_id in normalized:
+                try:
+                    dependencies.append(self._dependencies[input_id])
+                except KeyError as exc:
+                    raise KeyError(
+                        f"unknown focused mirror input {input_id!r}"
+                    ) from exc
+        return tuple(dependencies)
+
+    def decision_views(
+        self,
+        input_ids: tuple[str, ...],
+        *,
+        as_of: datetime,
+        max_age: timedelta,
+    ) -> dict[str, MirrorSnapshot]:
+        """Read many focused inputs from one coherent canonical mirror revision.
+
+        A portfolio decision can depend on several focused inputs. Reading those
+        inputs independently permits a market update to land between reads, producing
+        a composite state that never existed at one mirror revision. Capture the
+        decision-eligible mirror once, then project every requested dependency from
+        that immutable snapshot.
+        """
+        dependencies = self._batch_dependencies(input_ids)
+        if not dependencies:
+            return {}
+
+        captured = self._mirror.active_view(
+            as_of=as_of,
+            max_age=max_age,
+        )
+        return {
+            dependency.input_id: MirrorSnapshot(
+                revision=captured.revision,
+                events=tuple(
+                    event
+                    for event in captured.events
+                    if dependency.matches(event)
+                ),
+            )
+            for dependency in dependencies
+        }
+
+    def incremental_decision_views(
+        self,
+        input_ids: tuple[str, ...],
+        *,
+        as_of: datetime,
+        max_age: timedelta,
+    ) -> dict[str, MirrorSnapshot]:
+        """Read many routed inputs from one coherent canonical mirror revision.
+
+        The union of already-routed quote identities is captured in one
+        active_view_for_keys call. Each requested input is then projected from those
+        immutable bytes, so simultaneous live updates cannot tear one portfolio
+        recomputation across multiple mirror revisions.
+        """
+        if type(input_ids) is not tuple:
+            raise TypeError("input_ids must be a tuple")
+        normalized = tuple(self._input_id(input_id) for input_id in input_ids)
+        if len(normalized) != len(set(normalized)):
+            raise ValueError("input_ids must be unique")
+
+        dependencies: list[FocusedMirrorDependency] = []
+        keys_by_input: dict[str, frozenset[MirrorQuoteKey]] = {}
+        with self._lock:
+            for input_id in normalized:
+                try:
+                    dependency = self._dependencies[input_id]
+                except KeyError as exc:
+                    raise KeyError(
+                        f"unknown focused mirror input {input_id!r}"
+                    ) from exc
+                dependencies.append(dependency)
+                keys_by_input[input_id] = frozenset(
+                    self._matched_keys.get(input_id, set())
+                )
+
+        if not dependencies:
+            return {}
+
+        union_keys: set[MirrorQuoteKey] = set()
+        for keys in keys_by_input.values():
+            union_keys.update(keys)
+
+        captured = self._mirror.active_view_for_keys(
+            union_keys,
+            as_of=as_of,
+            max_age=max_age,
+        )
+        return {
+            dependency.input_id: MirrorSnapshot(
+                revision=captured.revision,
+                events=tuple(
+                    event
+                    for event in captured.events
+                    if (
+                        (event.source_id, event.quote_key)
+                        in keys_by_input[dependency.input_id]
+                        and dependency.matches(event)
+                    )
+                ),
+            )
+            for dependency in dependencies
+        }
+
     def decision_view(
         self,
         input_id: str,
@@ -230,12 +349,11 @@ class FocusedMirrorDependencyIndex:
         max_age: timedelta,
     ) -> MirrorSnapshot:
         """Read one canonical focused view without depending on invalidation drains."""
-        dependency = self._dependency(input_id)
-        return self._mirror.active_view(
+        return self.decision_views(
+            (input_id,),
             as_of=as_of,
             max_age=max_age,
-            **self._selectors(dependency),
-        )
+        )[input_id]
 
     def incremental_decision_view(
         self,
@@ -251,12 +369,11 @@ class FocusedMirrorDependencyIndex:
         path. General consumers must use decision_view so correctness does not depend
         on participating in this index invalidation protocol.
         """
-        keys = self.matching_keys(input_id)
-        return self._mirror.active_view_for_keys(
-            keys,
+        return self.incremental_decision_views(
+            (input_id,),
             as_of=as_of,
             max_age=max_age,
-        )
+        )[input_id]
 
     def replay_view(
         self,

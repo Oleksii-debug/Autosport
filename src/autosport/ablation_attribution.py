@@ -220,7 +220,7 @@ def derive_scientific_core_authorities(
     if model_id is None:
         if strategy.payload.get("model_version_id") is not None:
             return None
-        model_sha = _digest({"experiment_id": experiment.record_id, "model_version_id": None})
+        model_sha = _digest({"schema_version": 1, "model_version_id": None})
     else:
         model_id = _payload_text(experiment.payload, "model_version_id")
         if model_id is None or strategy.payload.get("model_version_id") != model_id:

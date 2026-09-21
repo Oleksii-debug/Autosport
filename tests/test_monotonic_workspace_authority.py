@@ -19,6 +19,7 @@ from autosport.monotonic_workspace_authority import (
     MonotonicWorkspaceAuthority,
     RecoveryDisposition,
     default_monotonic_authority_root,
+    default_monotonic_root_selection_binding_root,
 )
 
 
@@ -668,6 +669,119 @@ def test_explicit_authority_override_must_be_absolute(
     monkeypatch.setenv("AUTOSPORT_MONOTONIC_AUTHORITY_ROOT", "relative/state")
     with pytest.raises(MonotonicAuthorityConfigurationError, match="absolute"):
         default_monotonic_authority_root()
+
+
+def test_root_selection_receipt_ignores_configurable_authority_override(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    profile_state = (tmp_path / "ProfileState").resolve()
+    override = (tmp_path / "redirected-authority").resolve()
+    monkeypatch.setenv("LOCALAPPDATA", str(profile_state))
+    monkeypatch.setenv("AUTOSPORT_MONOTONIC_AUTHORITY_ROOT", str(override))
+
+    assert default_monotonic_root_selection_binding_root() == (
+        profile_state
+        / "Autosport"
+        / "application-state"
+        / "monotonic-root-selection-v1"
+    )
+    assert default_monotonic_root_selection_binding_root() != override
+
+
+def test_supported_authority_root_switch_cannot_reopen_old_snapshot(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    profile_state = (tmp_path / "ProfileState").resolve()
+    root_a = (tmp_path / "machine-a").resolve()
+    root_b = (tmp_path / "machine-b").resolve()
+    workspace = (tmp_path / "workspace").resolve()
+    workspace.mkdir()
+    monkeypatch.setenv("LOCALAPPDATA", str(profile_state))
+    monkeypatch.setenv("AUTOSPORT_MONOTONIC_AUTHORITY_ROOT", str(root_a))
+
+    authority = MonotonicWorkspaceAuthority(
+        workspace=workspace,
+        workspace_instance_id="workspace-instance-root-switch",
+        domain="test-domain",
+        key="test-key",
+    )
+    g1 = _sha("g1-root-a")
+    g2 = _sha("g2-root-a")
+    _commit(authority, tx_id="tx-a1", previous=None, state=g1, binding=_sha("b1"))
+    _commit(authority, tx_id="tx-a2", previous=g1, state=g2, binding=_sha("b2"))
+
+    monkeypatch.setenv("AUTOSPORT_MONOTONIC_AUTHORITY_ROOT", str(root_b))
+    redirected = MonotonicWorkspaceAuthority(
+        workspace=workspace,
+        workspace_instance_id=None,
+        domain="test-domain",
+        key="test-key",
+    )
+
+    with pytest.raises(
+        MonotonicAuthorityConfigurationError,
+        match="different monotonic authority root",
+    ):
+        redirected.recover(observed_state_sha256=g1)
+
+    assert not list(root_b.rglob("*.json"))
+
+
+def test_root_switch_cannot_remint_after_workspace_binding_deletion(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    profile_state = (tmp_path / "ProfileState").resolve()
+    root_a = (tmp_path / "machine-a").resolve()
+    root_b = (tmp_path / "machine-b").resolve()
+    workspace = (tmp_path / "workspace").resolve()
+    workspace.mkdir()
+    monkeypatch.setenv("LOCALAPPDATA", str(profile_state))
+    monkeypatch.setenv("AUTOSPORT_MONOTONIC_AUTHORITY_ROOT", str(root_a))
+
+    authority = MonotonicWorkspaceAuthority(
+        workspace=workspace,
+        workspace_instance_id="workspace-instance-root-delete",
+        domain="test-domain",
+        key="test-key",
+    )
+    g1 = _sha("g1-before-binding-delete")
+    _commit(authority, tx_id="tx-a1", previous=None, state=g1, binding=_sha("b1"))
+    shutil.rmtree(workspace / ".autosport")
+
+    monkeypatch.setenv("AUTOSPORT_MONOTONIC_AUTHORITY_ROOT", str(root_b))
+    redirected = MonotonicWorkspaceAuthority(
+        workspace=workspace,
+        workspace_instance_id=None,
+        domain="test-domain",
+        key="test-key",
+    )
+
+    with pytest.raises(
+        MonotonicAuthorityConfigurationError,
+        match="bound to another monotonic authority identity|different monotonic authority root",
+    ):
+        redirected.recover(observed_state_sha256=None)
+
+    assert not list(root_b.rglob("*.json"))
+
+
+def test_root_selection_receipt_must_be_disjoint_from_configurable_authority_root(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    profile_state = (tmp_path / "ProfileState").resolve()
+    workspace = (tmp_path / "workspace").resolve()
+    workspace.mkdir()
+    machine_parent = profile_state / "Autosport" / "application-state"
+    monkeypatch.setenv("LOCALAPPDATA", str(profile_state))
+    monkeypatch.setenv("AUTOSPORT_MONOTONIC_AUTHORITY_ROOT", str(machine_parent))
+
+    with pytest.raises(MonotonicAuthorityConfigurationError, match="disjoint"):
+        MonotonicWorkspaceAuthority(
+            workspace=workspace,
+            workspace_instance_id="workspace-instance-overlap",
+            domain="test-domain",
+            key="test-key",
+        )
 
 
 def test_local_primitive_documents_exact_threat_boundary() -> None:

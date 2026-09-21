@@ -167,6 +167,19 @@ class ModelRuntimeContractTests(unittest.TestCase):
                 max_attempts=1,
             )
 
+    def test_stretched_deadline_cannot_legalize_late_success(self) -> None:
+        stretched = ModelInvocationDeadline(
+            started_monotonic=5.0,
+            expires_monotonic=50.0,
+        )
+        result = self._result(
+            state=ModelInvocationState.SUCCESS,
+            completed_monotonic=8.0,
+            response_digest=self.response_digest,
+        )
+        with self.assertRaisesRegex(ModelRuntimeContractError, "end-to-end budget"):
+            result.verify_against(config=self.local, deadline=stretched)
+
     def test_raw_enum_values_and_fractional_retry_budget_fail_closed(self) -> None:
         with self.assertRaisesRegex(ModelRuntimeContractError, "mode must be"):
             ModelRuntimeConfig(

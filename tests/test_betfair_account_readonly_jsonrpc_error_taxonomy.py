@@ -160,3 +160,46 @@ def test_error_envelope_wins_over_result_even_when_result_looks_valid() -> None:
 
     with pytest.raises(BetfairReadOnlyError, match="both error and result"):
         client.read_account_funds()
+
+
+def test_known_provider_token_in_top_level_message_does_not_mint_typed_semantics() -> None:
+    client = _client(
+        _error_payload(
+            data={"unrelated": {"note": "not provider authority"}},
+            message="TOO_MANY_REQUESTS",
+        )
+    )
+
+    with pytest.raises(BetfairReadOnlyError) as raised:
+        client.read_current_orders_page()
+
+    assert raised.value.json_rpc_code == -32099
+    assert raised.value.provider_error_code is None
+
+
+def test_duplicate_supported_exception_containers_are_ambiguous_even_with_same_code() -> None:
+    client = _client(
+        _error_payload(
+            data={
+                "APINGException": {"errorCode": "TOO_MANY_REQUESTS"},
+                "AccountAPINGException": {"errorCode": "TOO_MANY_REQUESTS"},
+            }
+        )
+    )
+
+    with pytest.raises(BetfairReadOnlyError) as raised:
+        client.read_current_orders_page()
+
+    assert raised.value.json_rpc_code == -32099
+    assert raised.value.provider_error_code is None
+
+
+@pytest.mark.parametrize("bad_data", [[], "APINGException", 17, True])
+def test_non_object_error_data_cannot_mint_provider_semantics(bad_data: object) -> None:
+    client = _client(_error_payload(data=bad_data))
+
+    with pytest.raises(BetfairReadOnlyError) as raised:
+        client.read_account_funds()
+
+    assert raised.value.json_rpc_code == -32099
+    assert raised.value.provider_error_code is None

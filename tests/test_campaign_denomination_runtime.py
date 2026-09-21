@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 
 import pytest
@@ -22,6 +22,8 @@ from autosport.campaign_evidence import CampaignOutcome, CampaignReadiness
 from autosport.economic_goal import EconomicGoalContract
 from autosport.economic_goal_provenance import provenance_for
 from autosport.economic_goal_store import EconomicGoalStore
+from autosport.integrity import atomic_write_json
+from autosport.workspace_lock import WorkspaceEconomicLock
 from test_campaign_cost_evidence import T1, T2, _cost, _fixture_authority
 from test_campaign_evidence import PaperCampaignTests
 
@@ -56,8 +58,6 @@ def _runtime_provenance(goal: EconomicGoalContract) -> dict[str, object]:
 
 def _fixture_authority_with_goal(
     goal: EconomicGoalContract,
-    *,
-    issue: bool = True,
 ) -> tuple[PaperCampaignTests, FinalizedCampaignAuthority]:
     fixture = PaperCampaignTests(
         methodName="test_session_evidence_hash_binds_window_and_metrics"
@@ -71,15 +71,33 @@ def _fixture_authority_with_goal(
         readiness=CampaignReadiness.ELIGIBLE,
         finalized_at="2026-09-11T00:00:00Z",
     )
-    authority = FinalizedCampaignAuthority(campaign, clock=lambda: T1)
-    if issue:
-        authority.issue_denomination_binding()
-    return fixture, authority
+    return fixture, FinalizedCampaignAuthority(campaign)
+
+
+def _denomination_as_of(authority: FinalizedCampaignAuthority):
+    binding = authority.denomination_binding()
+    assert binding is not None
+    return binding.available_at + timedelta(microseconds=1)
+
+
+def _remove_persisted_binding_for_test(
+    authority: FinalizedCampaignAuthority,
+) -> None:
+    registry = authority._registry()
+    with WorkspaceEconomicLock(registry.path.parent):
+        state = registry._read()
+        bindings = state.get("campaign_denomination_bindings")
+        assert type(bindings) is dict
+        bindings.pop(authority._binding_key())
+        if not bindings:
+            state.pop("campaign_denomination_bindings")
+        atomic_write_json(registry.path, state)
 
 
 def test_missing_persisted_binding_cannot_narrow_currency_incompleteness() -> None:
-    fixture, authority = _fixture_authority_with_goal(_goal(), issue=False)
+    fixture, authority = _fixture_authority_with_goal(_goal())
     try:
+        _remove_persisted_binding_for_test(authority)
         assert authority.denomination_binding() is None
         version = derive_campaign_economics(campaign=authority, costs=(), as_of=T2)
         assert version.denomination_binding is None
@@ -90,11 +108,12 @@ def test_missing_persisted_binding_cannot_narrow_currency_incompleteness() -> No
 
 def test_product_binding_is_reissued_from_frozen_run_not_current_goal() -> None:
     goal_a = _goal()
+    before_issuance = datetime.now(timezone.utc)
     fixture, authority = _fixture_authority_with_goal(goal_a)
     try:
         binding = authority.denomination_binding()
         assert binding is not None
-        assert binding.available_at == T1
+        assert before_issuance <= binding.available_at <= datetime.now(timezone.utc)
         assert binding.economic_goal_id == goal_a.goal_id
         assert binding.economic_goal_revision == goal_a.revision
         assert binding.economic_goal_sha256 == provenance_for(goal_a).contract_sha256
@@ -122,9 +141,11 @@ def test_persisted_binding_re_resolves_after_authority_restart() -> None:
     try:
         binding = authority.denomination_binding()
         assert binding is not None
-        restarted = FinalizedCampaignAuthority(authority._campaign, clock=lambda: T2)
+        restarted = FinalizedCampaignAuthority(authority._campaign)
         assert restarted.denomination_binding() == binding
         assert restarted.issue_denomination_binding() == binding
+        with pytest.raises(TypeError):
+            FinalizedCampaignAuthority(authority._campaign, clock=lambda: T1)
     finally:
         fixture.doCleanups()
 
@@ -137,7 +158,7 @@ def test_denominated_economics_persists_binding_and_restart_rederives_it(
         version = derive_campaign_economics(
             campaign=authority,
             costs=(),
-            as_of=T2,
+            as_of=_denomination_as_of(authority),
         )
         assert version.denomination_binding == authority.denomination_binding()
         assert "MISSING_CAMPAIGN_CURRENCY_AUTHORITY" not in version.incomplete_reasons
@@ -171,13 +192,22 @@ def test_denominated_economics_persists_binding_and_restart_rederives_it(
 
 
 def test_non_iso_shape_valid_currency_cannot_become_positive_authority() -> None:
-    fixture, authority = _fixture_authority_with_goal(_goal(currency="ZZZ"), issue=False)
+    fixture = PaperCampaignTests(
+        methodName="test_session_evidence_hash_binds_window_and_metrics"
+    )
+    fixture.setUp()
     try:
+        fixture._economic_goal_provenance = _runtime_provenance(
+            _goal(currency="ZZZ")
+        )
+        campaign = fixture.campaign()
+        fixture.add_session(campaign, fixture.session())
         with pytest.raises(CampaignDenominationError, match="ISO 4217"):
-            authority.issue_denomination_binding()
-        assert authority.denomination_binding() is None
-        version = derive_campaign_economics(campaign=authority, costs=(), as_of=T2)
-        assert "MISSING_CAMPAIGN_CURRENCY_AUTHORITY" in version.incomplete_reasons
+            campaign.finalize(
+                outcome=CampaignOutcome.POSITIVE,
+                readiness=CampaignReadiness.ELIGIBLE,
+                finalized_at="2026-09-11T00:00:00Z",
+            )
     finally:
         fixture.doCleanups()
 
@@ -189,13 +219,13 @@ def test_cross_currency_cost_rejects_before_campaign_money_arithmetic() -> None:
             derive_campaign_economics(
                 campaign=authority,
                 costs=(_cost(authority, currency="USD"),),
-                as_of=T2,
+                as_of=_denomination_as_of(authority),
             )
 
         same_currency = derive_campaign_economics(
             campaign=authority,
             costs=(_cost(authority, currency="EUR"),),
-            as_of=T2,
+            as_of=_denomination_as_of(authority),
         )
         assert "MISSING_CAMPAIGN_CURRENCY_AUTHORITY" not in same_currency.incomplete_reasons
         assert "UNRESOLVED_COST_AUTHORITY:PROVIDER_DATA" in same_currency.incomplete_reasons

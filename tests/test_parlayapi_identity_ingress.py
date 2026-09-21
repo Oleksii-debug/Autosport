@@ -115,6 +115,30 @@ class ParlayApiIdentityIngressTests(unittest.TestCase):
         with self.assertRaisesRegex(ProviderPayloadError, "stable provider key identity"):
             self._read(event)
 
+    def test_same_bookmaker_title_with_distinct_provider_keys_does_not_alias(self):
+        event = copy.deepcopy(_BASE_EVENT)
+        second_bookmaker = copy.deepcopy(event["bookmakers"][0])
+        second_bookmaker["key"] = "book-b"
+        event["bookmakers"].append(second_bookmaker)
+        quotes = self._read(event)
+        self.assertEqual(len(quotes), 2)
+        self.assertEqual(
+            {quote.provider_market_id for quote in quotes},
+            {"book-a:h2h", "book-b:h2h"},
+        )
+
+    def test_provider_sport_scope_mismatch_fails_closed(self):
+        event = copy.deepcopy(_BASE_EVENT)
+        event["sport_key"] = "soccer"
+        with self.assertRaisesRegex(ProviderPayloadError, "sport_key conflicts"):
+            self._read(event)
+
+    def test_partial_participant_binding_fails_closed(self):
+        event = copy.deepcopy(_BASE_EVENT)
+        event["home_team"] = "Player A"
+        with self.assertRaisesRegex(ProviderPayloadError, "declare both"):
+            self._read(event)
+
     def test_repeated_event_id_cannot_change_declared_participants(self):
         first = copy.deepcopy(_BASE_EVENT)
         first.update(

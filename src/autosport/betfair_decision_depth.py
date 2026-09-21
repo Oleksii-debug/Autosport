@@ -1,10 +1,10 @@
 from __future__ import annotations
 
-"""Strict Betfair returned Best Offers parsing with explicit authority boundaries.
+"""Strict Betfair returned exchange-ladder parsing with explicit authority boundaries.
 
 The authority in this module is intentionally narrow. It parses one
 caller-supplied Betfair-shaped MarketBook payload and records only the returned
-Best Offers ladder for an exact market, selection and side. The parser does not
+exchange ladder for an exact market, selection and side. The parser does not
 prove that the payload originated from Betfair or that the caller-supplied time
 was the network observation instant. Returned liquidity is also racy: it can
 disappear before an order reaches the exchange. Therefore this module never
@@ -35,10 +35,11 @@ class BetfairOrderSide(StrEnum):
 
 
 class BetfairDecisionDepthStatus(StrEnum):
-    PARSED_RETURNED_BEST_OFFERS = "PARSED_RETURNED_BEST_OFFERS"
+    PARSED_RETURNED_EXCHANGE_LADDER = "PARSED_RETURNED_EXCHANGE_LADDER"
+    PARSED_RETURNED_BEST_OFFERS = "PARSED_RETURNED_EXCHANGE_LADDER"
     # Compatibility alias: "displayed" here means only the returned API levels,
     # not website-equivalent/full-depth/virtualised liquidity.
-    PARSED_DISPLAYED_DEPTH = "PARSED_RETURNED_BEST_OFFERS"
+    PARSED_DISPLAYED_DEPTH = "PARSED_RETURNED_EXCHANGE_LADDER"
 
 
 def _canonical_text(value: object, field: str) -> str:
@@ -135,7 +136,7 @@ class BetfairDecisionDepthSnapshot:
     levels: tuple[BetfairDepthLevel, ...]
     market_data_delayed: bool | None = None
     status: BetfairDecisionDepthStatus = field(
-        default=BetfairDecisionDepthStatus.PARSED_RETURNED_BEST_OFFERS, init=False
+        default=BetfairDecisionDepthStatus.PARSED_RETURNED_EXCHANGE_LADDER, init=False
     )
     provider_id: str = field(default=_PROVIDER_ID, init=False)
     provider_snapshot_origin_proven: bool = field(default=False, init=False)
@@ -181,7 +182,7 @@ class BetfairDecisionDepthSnapshot:
             raise BetfairDecisionDepthError(
                 "depth levels must be ordered best-to-worst for the requested side"
             )
-        if self.status is not BetfairDecisionDepthStatus.PARSED_RETURNED_BEST_OFFERS:
+        if self.status is not BetfairDecisionDepthStatus.PARSED_RETURNED_EXCHANGE_LADDER:
             raise BetfairDecisionDepthError("unsupported decision-depth status")
         if self.provider_id != _PROVIDER_ID:
             raise BetfairDecisionDepthError("provider_id must be betfair")
@@ -301,8 +302,8 @@ def issue_betfair_decision_depth_snapshot(
 
     This function intentionally does not prove that ``market_book`` came directly
     from Betfair, that ``observed_at`` is the provider/network observation time,
-    which PriceProjection/virtualisation produced the response, or that returned
-    Best Offers cover the full exchange ladder. A product-owned transport/clock
+    which PriceProjection/virtualisation produced the response, or whether returned
+    exchange levels are a best-offers slice or the full available ladder. A product-owned transport/clock
     boundary may later bind those facts.
     """
 

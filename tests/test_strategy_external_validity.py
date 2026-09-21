@@ -227,6 +227,7 @@ def test_complete_denominator_is_preserved_and_truth_is_fail_closed():
     payload = report.to_payload()
 
     assert report.evaluated_row_count == 4
+    assert report.model_version_ids == ("model-1",)
     assert dict(report.stage_counts)[FunnelStage.OBSERVED_SLOT.value] == 3
     assert dict(report.attrition_counts)[AttritionReason.NO_EVENT.value] == 1
     assert dict(report.attrition_counts)[AttritionReason.SOURCE_OUTAGE.value] == 1

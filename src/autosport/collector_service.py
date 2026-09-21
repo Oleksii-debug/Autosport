@@ -640,7 +640,11 @@ class HeadlessCollectorService:
                 "run explicit pin-aware compaction or enlarge the budget, then retry"
             )
 
-    def run_cycle(self) -> CollectorCycleResult:
+    def run_cycle(
+        self,
+        *,
+        _schedule_slot: dict[str, object] | None = None,
+    ) -> CollectorCycleResult:
         attempt_at = self.clock()
         _CollectorServiceState._instant(attempt_at, "attempt_at")
         self._state.record_attempt(at=attempt_at)
@@ -650,12 +654,31 @@ class HeadlessCollectorService:
         # pending cycle rather than silently shrinking a future evidence denominator.
         cycle_source = self._require_source_identity()
         cycle_stream_epoch = cycle_source.stream_epoch
-        cycle_seq = self.delta_store._begin_collector_cycle(
-            source_id=self.source_id,
-            run_id=self._state.run_id,
-            stream_epoch=cycle_stream_epoch,
-            attempted_at=attempt_at,
-        )
+        if _schedule_slot is None:
+            cycle_seq = self.delta_store._begin_collector_cycle(
+                source_id=self.source_id,
+                run_id=self._state.run_id,
+                stream_epoch=cycle_stream_epoch,
+                attempted_at=attempt_at,
+            )
+        else:
+            if not isinstance(_schedule_slot, dict):
+                raise CollectorServiceError(
+                    "scheduled collector cycle requires canonical slot evidence"
+                )
+            try:
+                cycle_seq = self.delta_store._begin_scheduled_collector_cycle(
+                    source_id=self.source_id,
+                    run_id=self._state.run_id,
+                    stream_epoch=cycle_stream_epoch,
+                    slot_ordinal=_schedule_slot.get("slot_ordinal"),
+                    due_at=_schedule_slot.get("due_at"),
+                    attempted_at=attempt_at,
+                )
+            except (TypeError, ValueError) as exc:
+                raise CollectorServiceError(
+                    "cannot bind scheduled collector cycle to canonical due slot"
+                ) from exc
         catalog_changes: tuple[str, ...] = ()
         observed: list[str] = []
         committed: list[str] = []
@@ -810,13 +833,28 @@ class HeadlessCollectorService:
         self._state.stop(at=self.clock(), reason=reason)
 
     def run(self, *, max_cycles: int | None = None) -> CollectorRunResult:
-        """Run until STOP without retaining an unbounded in-memory cycle history."""
+        """Run against one frozen prospective cadence without shifting missed slots."""
         if max_cycles is not None and (
             isinstance(max_cycles, bool)
             or not isinstance(max_cycles, int)
             or max_cycles <= 0
         ):
             raise ValueError("max_cycles must be a positive integer or None")
+
+        schedule_anchor = self.clock()
+        _CollectorServiceState._instant(schedule_anchor, "schedule_anchor")
+        try:
+            self.delta_store._ensure_collector_schedule(
+                source_id=self.source_id,
+                run_id=self._state.run_id,
+                anchor_at=schedule_anchor,
+                interval_seconds=self.config.poll_interval_seconds,
+            )
+        except (TypeError, ValueError) as exc:
+            raise CollectorServiceError(
+                "cannot establish prospective collector schedule authority"
+            ) from exc
+
         cycles_executed = 0
         last_cycle: CollectorCycleResult | None = None
         while max_cycles is None or cycles_executed < max_cycles:
@@ -825,7 +863,29 @@ class HeadlessCollectorService:
                 self.stop(reason)
                 break
             try:
-                last_cycle = self.run_cycle()
+                schedule_slot = self.delta_store._next_collector_schedule_slot(
+                    source_id=self.source_id,
+                    run_id=self._state.run_id,
+                )
+            except (TypeError, ValueError) as exc:
+                raise CollectorServiceError(
+                    "cannot resolve next canonical collector due slot"
+                ) from exc
+
+            due_at = _CollectorServiceState._instant(
+                schedule_slot.get("due_at"),
+                "due_at",
+            )
+            now = _CollectorServiceState._instant(self.clock(), "clock")
+            if now < due_at:
+                self.sleep((due_at - now).total_seconds())
+                reason = self._requested_stop_reason()
+                if reason is not None:
+                    self.stop(reason)
+                    break
+
+            try:
+                last_cycle = self.run_cycle(_schedule_slot=schedule_slot)
             except _StopRequested:
                 break
             cycles_executed += 1
@@ -836,7 +896,6 @@ class HeadlessCollectorService:
             if reason is not None:
                 self.stop(reason)
                 break
-            self.sleep(self.config.poll_interval_seconds)
         return CollectorRunResult(
             cycles_executed=cycles_executed,
             last_cycle=last_cycle,

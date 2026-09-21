@@ -112,6 +112,23 @@ class ReferencePriceEvidenceTests(unittest.TestCase):
         )
         self.assertFalse(revised.executable_quote_verified)
 
+    def test_observational_truth_flags_cannot_be_caller_promoted(self) -> None:
+        evidence = self.build(
+            (
+                self.event("provider-a", "2.00", execution_quote_verified=True),
+                self.event("provider-b", "2.10", execution_quote_verified=True),
+            )
+        )
+
+        for field_name in (
+            "executable_quote_verified",
+            "fair_probability_verified",
+            "fill_fidelity_verified",
+        ):
+            with self.subTest(field_name=field_name):
+                with self.assertRaises(ValueError):
+                    replace(evidence, **{field_name: True})
+
     def test_duplicate_source_cannot_gain_consensus_weight(self) -> None:
         with self.assertRaisesRegex(
             ReferencePriceEvidenceError, "distinct source_id"

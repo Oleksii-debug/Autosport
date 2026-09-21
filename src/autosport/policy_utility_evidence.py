@@ -75,8 +75,9 @@ class PolicyUtilityEvidence:
 
     Schema v1 is intentionally contract-only. It preserves incomplete or
     unsupported economic utility evidence but can never self-authorize a policy
-    update. The semantic key is owner-scoped so an unresolved caller assertion
-    cannot reserve the canonical causal key for a different owner context.
+    update. The semantic key remains the stable schema-v1 causal update key;
+    owner/model/economic context remains evidence-bound and therefore conflicts
+    as semantic drift for the same causal update instead of minting a second key.
     """
 
     environment_id: str
@@ -225,14 +226,6 @@ class PolicyUtilityEvidence:
                 "reward_id": self.reward_id,
                 "transition_id": self.transition_id,
                 "policy_id": self.policy_id,
-                "model_id": self.model_id,
-                "strategy_id": self.strategy_id,
-                "config_sha256": self.config_sha256,
-                "protocol_sha256": self.protocol_sha256,
-                "economic_goal_fingerprint": self.economic_goal_fingerprint,
-                "risk_fingerprint": self.risk_fingerprint,
-                "bankroll_id": self.bankroll_id,
-                "portfolio_identity": self.portfolio_identity,
             }
         )
 

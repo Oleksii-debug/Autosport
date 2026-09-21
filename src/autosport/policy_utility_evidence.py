@@ -431,8 +431,11 @@ class PolicyUtilityStore:
             self._reload()
 
     def append(self, evidence: PolicyUtilityEvidence) -> bool:
-        if not isinstance(evidence, PolicyUtilityEvidence):
-            raise PolicyUtilityError("append requires PolicyUtilityEvidence")
+        # This exact-type admission is intrinsic to the canonical mutation
+        # boundary so importlib.reload/sys.meta_path manipulation cannot remove
+        # the invariant before semantic-key dispatch or durable publication.
+        if type(evidence) is not PolicyUtilityEvidence:
+            raise PolicyUtilityError("append requires exact PolicyUtilityEvidence")
         with self._lock:
             with durable_path_lock(self.path):
                 self._reload()

@@ -89,8 +89,24 @@ def _print_committed_ingestion_health_failure(exc: RuntimeError) -> None:
     )
 
 
+
+class _AutosportArgumentParser(argparse.ArgumentParser):
+    def parse_args(
+        self,
+        args: list[str] | None = None,
+        namespace: argparse.Namespace | None = None,
+    ) -> argparse.Namespace:
+        parsed = super().parse_args(args, namespace)
+        if (
+            getattr(parsed, "command", None) == "repair-workspace"
+            and getattr(parsed, "workspace", None) is None
+        ):
+            parsed.workspace = default_workspace()
+        return parsed
+
+
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="autosport", description="Autosport paper/replay laboratory")
+    parser = _AutosportArgumentParser(prog="autosport", description="Autosport paper/replay laboratory")
     sub = parser.add_subparsers(dest="command", required=True)
     sub.add_parser("demo", help="run built-in paper demonstration")
     replay = sub.add_parser("replay", help="run a raw JSONL market replay")
@@ -149,7 +165,7 @@ def build_parser() -> argparse.ArgumentParser:
     snapshot.add_argument("--regions", default="us", help="comma-separated provider regions")
     snapshot.add_argument("--markets", default="h2h,spreads,totals", help="comma-separated historical game-line markets")
     repair = sub.add_parser("repair-workspace", help="reconcile only late-crashed runs with durable hash-matched completion evidence")
-    repair.add_argument("--workspace", type=Path, default=default_workspace())
+    repair.add_argument("--workspace", type=Path, default=None)
     endurance = sub.add_parser("endurance", help="run deterministic bounded ingestion/replay/restart/settlement stress checks")
     endurance.add_argument("--workspace", type=Path, default=Path(".autosport-endurance"))
     endurance.add_argument("--events", type=int, default=20_000)

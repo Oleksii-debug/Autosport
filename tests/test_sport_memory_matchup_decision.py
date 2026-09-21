@@ -305,8 +305,9 @@ def test_matchup_evidence_binds_two_memories_into_normal_opportunity_evidence(
     assert matchup.opponent_support == 2
     assert matchup.subject_uncertainty == "0.5"
     assert matchup.opponent_uncertainty == "0.5"
-    assert matchup.subject_age_seconds == 3600
-    assert matchup.opponent_age_seconds == 3600
+    # Snapshot age at T1 is 3600s; decision-time age at T2 is 3900s.
+    assert matchup.subject_age_seconds == 3900
+    assert matchup.opponent_age_seconds == 3900
     assert matchup.causal_cutoff == T1
     assert matchup.published_at == T1_PUBLISHED
     assert _digest(matchup.payload(include_id=False)) == matchup.matchup_id

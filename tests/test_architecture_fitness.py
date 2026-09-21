@@ -136,3 +136,17 @@ def test_check_mode_fails_only_on_reported_architecture_findings(tmp_path, capsy
     output = capsys.readouterr().out
     assert "cycles=1" in output
     assert "runtime_modules_executed=false" in output
+
+
+def test_repository_package_measurement_is_deterministic_when_tree_is_available():
+    package_root = Path(__file__).parents[1] / "src" / "autosport"
+    if not package_root.is_dir():
+        pytest.skip("full repository tree is not present in this local harness")
+
+    first = analyze_package(package_root, max_source_lines=100_000)
+    second = analyze_package(package_root, max_source_lines=100_000)
+
+    assert first.to_payload() == second.to_payload()
+    assert len(first.modules) > 0
+    assert all(metric.path.startswith("autosport/") for metric in first.modules)
+    assert first.to_payload()["truth"]["runtime_modules_executed"] is False

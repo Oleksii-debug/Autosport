@@ -4,7 +4,7 @@ import hashlib
 import json
 from dataclasses import dataclass, field, replace
 from datetime import datetime
-from decimal import Decimal, InvalidOperation, ROUND_DOWN
+from decimal import Context, Decimal, DecimalException, InvalidOperation, ROUND_HALF_EVEN, localcontext
 from enum import Enum
 
 from .decision_ledger import (
@@ -523,9 +523,18 @@ class PortfolioDependencyEvidence:
             for index, left in enumerate(self.candidate_sha256s)
             for right in self.candidate_sha256s[index + 1:]
         }
+        if type(self.pairwise_dependency_upper_bounds) is not tuple:
+            raise ValueError(
+                "dependency evidence pair bounds must be a canonical tuple"
+            )
         seen: set[tuple[str, str]] = set()
         previous: tuple[str, str, Decimal] | None = None
-        for left, right, bound in self.pairwise_dependency_upper_bounds:
+        for item in self.pairwise_dependency_upper_bounds:
+            if type(item) is not tuple or len(item) != 3:
+                raise ValueError(
+                    "dependency evidence pair bound must be a canonical tuple"
+                )
+            left, right, bound = item
             left = _canonical_sha256("dependency evidence pair candidate", left)
             right = _canonical_sha256("dependency evidence pair candidate", right)
             if left == right:
@@ -635,13 +644,19 @@ class PortfolioDependencyEvidence:
         return as_of <= decision <= valid_until
 
 
+_ROBUST_STRESS_DECIMAL_CONTEXT = Context(
+    prec=28,
+    rounding=ROUND_HALF_EVEN,
+)
+
+
 @dataclass(frozen=True, slots=True)
 class RobustPortfolioProposal:
-    """Conservative correlated-exposure stress result.
+    """Canonical correlated-exposure stress result.
 
-    The object is independently fail-closed: direct construction and serialized
-    readback cannot claim a stake vector that is less conservative than the
-    bound dependency/uncertainty/fee/partial-fill stress factors.
+    Arithmetic is isolated from the caller's ambient Decimal context.  The
+    proposal remains bound to exact dependency evidence by PortfolioPlan, which
+    recomputes the derivation on durable readback.
     """
 
     base_stakes: tuple[Decimal, ...]
@@ -685,25 +700,23 @@ class RobustPortfolioProposal:
                 raise ValueError(
                     f"robust proposal {name} must be an exact Decimal between 0 and 1"
                 )
-        expected_scale = (
-            (Decimal("1") - self.dependency_haircut_fraction)
-            * (Decimal("1") - self.uncertainty_fraction)
-            * (Decimal("1") - self.fee_fraction)
-            * (Decimal("1") - self.partial_fill_stress_fraction)
-        )
         if (
             not isinstance(self.robust_scale, Decimal)
             or not self.robust_scale.is_finite()
-            or self.robust_scale != expected_scale
         ):
-            raise ValueError("robust proposal scale must exactly match stress factors")
-        for base_stake, proposed_stake in zip(
-            self.base_stakes, self.proposed_stakes, strict=True
-        ):
-            if proposed_stake > base_stake * expected_scale:
-                raise ValueError(
-                    "robust proposal must not increase stake above stressed base exposure"
+            raise ValueError("robust proposal scale must be a finite exact Decimal")
+        try:
+            with localcontext(_ROBUST_STRESS_DECIMAL_CONTEXT):
+                expected_scale = (
+                    (Decimal("1") - self.dependency_haircut_fraction)
+                    * (Decimal("1") - self.uncertainty_fraction)
+                    * (Decimal("1") - self.fee_fraction)
+                    * (Decimal("1") - self.partial_fill_stress_fraction)
                 )
+        except DecimalException as exc:
+            raise ValueError("robust proposal scale is not representable") from exc
+        if self.robust_scale != expected_scale:
+            raise ValueError("robust proposal scale must exactly match stress factors")
 
     @classmethod
     def derive(
@@ -726,20 +739,21 @@ class RobustPortfolioProposal:
             (bound for _, _, bound in evidence.pairwise_dependency_upper_bounds),
             default=Decimal("0"),
         )
-        scale = (
-            (Decimal("1") - dependency_haircut)
-            * (Decimal("1") - evidence.uncertainty_fraction)
-            * (Decimal("1") - evidence.fee_fraction)
-            * (Decimal("1") - evidence.partial_fill_stress_fraction)
-        )
         try:
-            proposed = tuple(
-                (stake * scale).quantize(quantum, rounding=ROUND_DOWN)
-                for stake in base_stakes
-            )
-        except InvalidOperation as exc:
+            with localcontext(_ROBUST_STRESS_DECIMAL_CONTEXT):
+                scale = (
+                    (Decimal("1") - dependency_haircut)
+                    * (Decimal("1") - evidence.uncertainty_fraction)
+                    * (Decimal("1") - evidence.fee_fraction)
+                    * (Decimal("1") - evidence.partial_fill_stress_fraction)
+                )
+                proposed = tuple(
+                    (stake * scale).quantize(quantum)
+                    for stake in base_stakes
+                )
+        except DecimalException as exc:
             raise ValueError(
-                "robust proposal quantization is not representable"
+                "robust proposal arithmetic is not representable"
             ) from exc
         return cls(
             base_stakes,

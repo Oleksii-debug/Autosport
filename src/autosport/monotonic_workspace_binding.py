@@ -23,6 +23,10 @@ from .json_integrity import strict_json_loads
 
 WORKSPACE_BINDING_SCHEMA: Final = "autosport.monotonic_authority.workspace_binding"
 PATH_BINDING_SCHEMA: Final = "autosport.monotonic_authority.workspace_path_binding"
+ROOT_INSTANCE_BINDING_SCHEMA: Final = (
+    "autosport.monotonic_authority.root_instance_binding"
+)
+ROOT_PATH_BINDING_SCHEMA: Final = "autosport.monotonic_authority.root_path_binding"
 BINDING_SCHEMA_VERSION: Final = 1
 BINDING_AUTHORITY_ID: Final = "autosport.machine.monotonic.v1"
 
@@ -43,6 +47,30 @@ _PATH_BINDING_KEYS: Final = frozenset(
         "workspace_locator",
         "workspace_locator_sha256",
         "workspace_instance_id",
+        "binding_sha256",
+    }
+)
+_ROOT_INSTANCE_BINDING_KEYS: Final = frozenset(
+    {
+        "schema",
+        "schema_version",
+        "authority_id",
+        "workspace_instance_id",
+        "authority_root_locator",
+        "authority_root_locator_sha256",
+        "binding_sha256",
+    }
+)
+_ROOT_PATH_BINDING_KEYS: Final = frozenset(
+    {
+        "schema",
+        "schema_version",
+        "authority_id",
+        "workspace_locator",
+        "workspace_locator_sha256",
+        "workspace_instance_id",
+        "authority_root_locator",
+        "authority_root_locator_sha256",
         "binding_sha256",
     }
 )
@@ -96,6 +124,20 @@ def _canonical_instance_id(value: object) -> str:
             "workspace_instance_id contains invalid Unicode"
         ) from exc
     return value
+
+
+def _authority_root_locator(authority_root: Path) -> str:
+    if not authority_root.is_absolute():
+        raise WorkspaceBindingIntegrityError(
+            "authority root for root-selection binding must be absolute"
+        )
+    try:
+        resolved = authority_root.resolve(strict=False)
+    except OSError as exc:
+        raise WorkspaceBindingIntegrityError(
+            "cannot resolve authority root for root-selection binding"
+        ) from exc
+    return os.path.normcase(os.path.normpath(str(resolved)))
 
 
 def _workspace_locator(workspace: Path) -> str:
@@ -237,6 +279,259 @@ def _verify_binding_hash(raw: dict[str, object]) -> None:
     unhashed.pop("binding_sha256")
     if _payload_hash(unhashed) != digest:
         raise WorkspaceBindingIntegrityError("workspace binding hash mismatch")
+
+
+@dataclass(frozen=True, slots=True)
+class AuthorityRootSelectionBinding:
+    """Machine-local receipt pinning one workspace identity/path to one authority root.
+
+    These receipts live outside the configurable monotonic authority root. They do
+    not add domain truth; they only prevent supported root redirection from turning
+    an already-bound workspace into a fresh authority namespace while the machine
+    selection receipts survive.
+    """
+
+    binding_root: Path
+    workspace_instance_id: str
+    workspace_locator: str
+    workspace_locator_sha256: str
+    authority_root_locator: str
+    authority_root_locator_sha256: str
+    instance_binding_path: Path
+    path_binding_path: Path
+
+    @classmethod
+    def resolve(
+        cls,
+        *,
+        binding_root: Path,
+        workspace: Path,
+        authority_root: Path,
+        workspace_instance_id: str,
+    ) -> "AuthorityRootSelectionBinding":
+        if not binding_root.is_absolute():
+            raise WorkspaceBindingIntegrityError(
+                "root-selection binding root must be absolute"
+            )
+        instance_id = _canonical_instance_id(workspace_instance_id)
+        workspace_locator = _workspace_locator(workspace)
+        workspace_locator_sha256 = hashlib.sha256(
+            workspace_locator.encode("utf-8")
+        ).hexdigest()
+        root_locator = _authority_root_locator(authority_root)
+        root_locator_sha256 = hashlib.sha256(
+            root_locator.encode("utf-8")
+        ).hexdigest()
+        instance_key = hashlib.sha256(instance_id.encode("utf-8")).hexdigest()
+        return cls(
+            binding_root=binding_root,
+            workspace_instance_id=instance_id,
+            workspace_locator=workspace_locator,
+            workspace_locator_sha256=workspace_locator_sha256,
+            authority_root_locator=root_locator,
+            authority_root_locator_sha256=root_locator_sha256,
+            instance_binding_path=(
+                binding_root
+                / "instance-root-bindings"
+                / instance_key[:2]
+                / f"{instance_key}.json"
+            ),
+            path_binding_path=(
+                binding_root
+                / "path-root-bindings"
+                / workspace_locator_sha256[:2]
+                / f"{workspace_locator_sha256}.json"
+            ),
+        )
+
+    @staticmethod
+    def _validate_root_fields(
+        raw: dict[str, object],
+    ) -> tuple[str, str]:
+        locator = raw["authority_root_locator"]
+        locator_sha = raw["authority_root_locator_sha256"]
+        if (
+            not isinstance(locator, str)
+            or not locator
+            or locator != locator.strip()
+            or not isinstance(locator_sha, str)
+            or len(locator_sha) != _SHA256_LENGTH
+            or any(ch not in "0123456789abcdef" for ch in locator_sha)
+            or hashlib.sha256(locator.encode("utf-8")).hexdigest() != locator_sha
+        ):
+            raise WorkspaceBindingIntegrityError(
+                "invalid monotonic authority root-selection locator"
+            )
+        return locator, locator_sha
+
+    @classmethod
+    def _read_instance_root(
+        cls,
+        path: Path,
+        *,
+        expected_instance_id: str,
+    ) -> tuple[str, str] | None:
+        if not path.exists():
+            return None
+        raw = _read_strict_object(path, _ROOT_INSTANCE_BINDING_KEYS)
+        if (
+            raw["schema"] != ROOT_INSTANCE_BINDING_SCHEMA
+            or raw["schema_version"] != BINDING_SCHEMA_VERSION
+            or isinstance(raw["schema_version"], bool)
+            or raw["authority_id"] != BINDING_AUTHORITY_ID
+            or raw["workspace_instance_id"] != expected_instance_id
+        ):
+            raise WorkspaceBindingIntegrityError(
+                "workspace instance root-selection binding identity/schema mismatch"
+            )
+        _verify_binding_hash(raw)
+        return cls._validate_root_fields(raw)
+
+    @classmethod
+    def _read_path_root(
+        cls,
+        path: Path,
+        *,
+        expected_locator: str,
+        expected_locator_sha: str,
+        expected_instance_id: str,
+    ) -> tuple[str, str] | None:
+        if not path.exists():
+            return None
+        raw = _read_strict_object(path, _ROOT_PATH_BINDING_KEYS)
+        if (
+            raw["schema"] != ROOT_PATH_BINDING_SCHEMA
+            or raw["schema_version"] != BINDING_SCHEMA_VERSION
+            or isinstance(raw["schema_version"], bool)
+            or raw["authority_id"] != BINDING_AUTHORITY_ID
+            or raw["workspace_locator"] != expected_locator
+            or raw["workspace_locator_sha256"] != expected_locator_sha
+        ):
+            raise WorkspaceBindingIntegrityError(
+                "workspace path root-selection binding identity/schema mismatch"
+            )
+        _verify_binding_hash(raw)
+        if raw["workspace_instance_id"] != expected_instance_id:
+            raise WorkspaceBindingConflictError(
+                "workspace path is bound to another monotonic authority identity"
+            )
+        return cls._validate_root_fields(raw)
+
+    def _require_current_root(self, stored: tuple[str, str] | None) -> bool:
+        if stored is None:
+            return False
+        if stored != (
+            self.authority_root_locator,
+            self.authority_root_locator_sha256,
+        ):
+            raise WorkspaceBindingConflictError(
+                "workspace is already bound to a different monotonic authority root"
+            )
+        return True
+
+    def validate_existing(
+        self,
+        *,
+        register_path: bool = True,
+    ) -> tuple[bool, bool]:
+        instance_bound = self._require_current_root(
+            self._read_instance_root(
+                self.instance_binding_path,
+                expected_instance_id=self.workspace_instance_id,
+            )
+        )
+        path_bound = self._require_current_root(
+            self._read_path_root(
+                self.path_binding_path,
+                expected_locator=self.workspace_locator,
+                expected_locator_sha=self.workspace_locator_sha256,
+                expected_instance_id=self.workspace_instance_id,
+            )
+        )
+        if register_path and instance_bound and not path_bound:
+            self._ensure_path_binding()
+            path_bound = True
+        return instance_bound, path_bound
+
+    def ensure_bound(self) -> None:
+        self._ensure_instance_binding()
+        self._ensure_path_binding()
+
+    def _instance_payload(self) -> dict[str, object]:
+        unhashed: dict[str, object] = {
+            "schema": ROOT_INSTANCE_BINDING_SCHEMA,
+            "schema_version": BINDING_SCHEMA_VERSION,
+            "authority_id": BINDING_AUTHORITY_ID,
+            "workspace_instance_id": self.workspace_instance_id,
+            "authority_root_locator": self.authority_root_locator,
+            "authority_root_locator_sha256": self.authority_root_locator_sha256,
+        }
+        return {**unhashed, "binding_sha256": _payload_hash(unhashed)}
+
+    def _path_payload(self) -> dict[str, object]:
+        unhashed: dict[str, object] = {
+            "schema": ROOT_PATH_BINDING_SCHEMA,
+            "schema_version": BINDING_SCHEMA_VERSION,
+            "authority_id": BINDING_AUTHORITY_ID,
+            "workspace_locator": self.workspace_locator,
+            "workspace_locator_sha256": self.workspace_locator_sha256,
+            "workspace_instance_id": self.workspace_instance_id,
+            "authority_root_locator": self.authority_root_locator,
+            "authority_root_locator_sha256": self.authority_root_locator_sha256,
+        }
+        return {**unhashed, "binding_sha256": _payload_hash(unhashed)}
+
+    def _ensure_instance_binding(self) -> None:
+        existing = self._read_instance_root(
+            self.instance_binding_path,
+            expected_instance_id=self.workspace_instance_id,
+        )
+        if self._require_current_root(existing):
+            return
+        self.binding_root.mkdir(parents=True, exist_ok=True)
+        try:
+            _durable_exclusive_json_create(
+                self.instance_binding_path,
+                self._instance_payload(),
+                lineage_boundary=self.binding_root,
+            )
+        except FileExistsError:
+            existing = self._read_instance_root(
+                self.instance_binding_path,
+                expected_instance_id=self.workspace_instance_id,
+            )
+            if not self._require_current_root(existing):
+                raise WorkspaceBindingConflictError(
+                    "workspace instance root selection was concurrently rebound"
+                )
+
+    def _ensure_path_binding(self) -> None:
+        existing = self._read_path_root(
+            self.path_binding_path,
+            expected_locator=self.workspace_locator,
+            expected_locator_sha=self.workspace_locator_sha256,
+            expected_instance_id=self.workspace_instance_id,
+        )
+        if self._require_current_root(existing):
+            return
+        self.binding_root.mkdir(parents=True, exist_ok=True)
+        try:
+            _durable_exclusive_json_create(
+                self.path_binding_path,
+                self._path_payload(),
+                lineage_boundary=self.binding_root,
+            )
+        except FileExistsError:
+            existing = self._read_path_root(
+                self.path_binding_path,
+                expected_locator=self.workspace_locator,
+                expected_locator_sha=self.workspace_locator_sha256,
+                expected_instance_id=self.workspace_instance_id,
+            )
+            if not self._require_current_root(existing):
+                raise WorkspaceBindingConflictError(
+                    "workspace path root selection was concurrently rebound"
+                )
 
 
 @dataclass(frozen=True, slots=True)

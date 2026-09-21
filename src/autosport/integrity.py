@@ -26,6 +26,15 @@ _PATH_LOCKS_GUARD = threading.Lock()
 _PATH_LOCKS: dict[str, threading.RLock] = {}
 _PATH_LOCK_LOCAL = threading.local()
 
+
+class AtomicWritePublicationUncertainError(RuntimeError):
+    """Replacement completed, but exact published bytes could not be verified.
+
+    Callers must reconcile the canonical destination before retrying because the
+    new image may already be visible even though this call cannot report success.
+    """
+
+
 _SCIENTIFIC_REGISTRY_AUTHORITY_DOMAIN = "autosport.scientific-registry.v1"
 _SCIENTIFIC_REGISTRY_ENTRY_KEYS = frozenset(
     {
@@ -321,10 +330,17 @@ def atomic_write_json(path: str | Path, payload: dict[str, Any]) -> None:
             with _ATOMIC_JSON_PUBLISH_LOCK:
                 if not protect_scientific_registry:
                     os.replace(temporary, destination)
-                    published = sha256_file(destination)
+                    try:
+                        published = sha256_file(destination)
+                    except OSError as exc:
+                        raise AtomicWritePublicationUncertainError(
+                            "atomic JSON replacement completed but published bytes "
+                            "could not be verified"
+                        ) from exc
                     if published != intended:
-                        raise RuntimeError(
-                            "published atomic JSON bytes do not match intended digest"
+                        raise AtomicWritePublicationUncertainError(
+                            "atomic JSON replacement completed but published bytes "
+                            "do not match intended digest"
                         )
                     return
 

@@ -191,8 +191,13 @@ class AtomicWriteJsonTests(unittest.TestCase):
                 "sha256_file",
                 side_effect=fail_destination_readback,
             ):
-                with self.assertRaisesRegex(OSError, "readback unavailable"):
+                with self.assertRaisesRegex(
+                    integrity.AtomicWritePublicationUncertainError,
+                    "replacement completed but published bytes could not be verified",
+                ) as caught:
                     integrity.atomic_write_json(destination, {"generation": 2})
+
+            self.assertIsInstance(caught.exception.__cause__, OSError)
 
             self.assertEqual(
                 json.loads(destination.read_text(encoding="utf-8")),
@@ -221,8 +226,8 @@ class AtomicWriteJsonTests(unittest.TestCase):
                 side_effect=mismatch_destination_readback,
             ):
                 with self.assertRaisesRegex(
-                    RuntimeError,
-                    "published atomic JSON bytes do not match intended digest",
+                    integrity.AtomicWritePublicationUncertainError,
+                    "replacement completed but published bytes do not match intended digest",
                 ):
                     integrity.atomic_write_json(destination, {"generation": 2})
 

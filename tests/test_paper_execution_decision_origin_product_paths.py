@@ -222,6 +222,39 @@ def _paper_value_agent(event: MarketEvent, goal: EconomicGoalContract) -> PaperV
     )
 
 
+def test_paper_value_rejects_shadowed_material_action_identity(tmp_path) -> None:
+    goal = _paper_value_goal()
+    event = _paper_value_event()
+    ledger = JsonlDecisionLedger(tmp_path / "decisions.jsonl")
+    context = AgentContext(
+        PaperBook("100"),
+        latest_quotes={event.quote_key: event},
+        replay_run_id="run-origin-paper-value-shadow",
+        decision_ledger=ledger,
+    )
+    agent = _paper_value_agent(event, goal)
+    attacker_called = False
+
+    def forged_material_action_id(*args, **kwargs):
+        nonlocal attacker_called
+        attacker_called = True
+        return "attacker-selected-decision"
+
+    agent._material_action_id = forged_material_action_id
+
+    with pytest.raises(
+        origin_module.PaperExecutionDecisionOriginError,
+        match="shadows authority method _material_action_id",
+    ):
+        agent.on_market_event(event, context)
+
+    assert attacker_called is False
+    assert ledger.verified_records() == ()
+    runtime = context.paper_execution
+    assert isinstance(runtime, PaperExecutionAdoptionRuntime)
+    assert runtime.ledger.events() == ()
+
+
 def test_paper_value_fresh_and_durable_recovery_keep_exact_origin(
     tmp_path,
     monkeypatch,

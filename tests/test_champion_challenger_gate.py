@@ -1,7 +1,10 @@
+from copy import copy
+
 import pytest
 
 from autosport.champion_challenger_gate import (
     PairedLoss,
+    PromotionDecision,
     PromotionEvidenceError,
     PromotionPolicy,
     evaluate_promotion,
@@ -227,6 +230,43 @@ def test_large_sign_test_lower_half_tail_is_near_one_without_underflow_failure()
     assert 0.999 < decision.one_sided_sign_test_p_value <= 1.0
     assert decision.promote is False
     assert "sign_test_not_significant" in decision.reasons
+
+
+def test_promotion_decision_cannot_be_constructed_directly():
+    with pytest.raises(PromotionEvidenceError, match="evaluator-issued"):
+        PromotionDecision(  # type: ignore[call-arg]
+            _promote=True,
+            pair_count=1,
+            effective_pair_count=1,
+            challenger_wins=1,
+            champion_wins=0,
+            ties=0,
+            mean_improvement=1.0,
+            win_rate=1.0,
+            one_sided_sign_test_p_value=0.01,
+            reasons=(),
+        )
+
+
+def test_copied_decision_cannot_carry_promotion_authority():
+    original = evaluate_promotion(
+        [PairedLoss("x", 1.0, 0.0)],
+        policy(alpha=0.9),
+    )
+    copied = copy(original)
+    with pytest.raises(PromotionEvidenceError, match="not intact evaluator-issued"):
+        _ = copied.promote
+
+
+def test_post_issuance_mutation_revokes_promotion_authority():
+    decision = evaluate_promotion(
+        [PairedLoss("x", 1.0, 0.0)],
+        policy(alpha=0.9),
+    )
+    assert decision.promote is True
+    object.__setattr__(decision, "reasons", ("forged",))
+    with pytest.raises(PromotionEvidenceError, match="not intact evaluator-issued"):
+        _ = decision.promote
 
 
 def test_policy_is_required_and_none_fails_closed():

@@ -1,11 +1,11 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 
 
 BETFAIR_MARKETBOOK_PROJECTION_CONCURRENCY_POLICY_VERSION = (
-    "betfair.list-market-book.projection-concurrency.v1"
+    "betfair.list-market-book.projection-concurrency.v2-no-auto-expiry"
 )
 _MAX_PROJECTION_REQUESTS_IN_FLIGHT = 3
 _EPOCH = datetime(1970, 1, 1, tzinfo=timezone.utc)
@@ -33,53 +33,26 @@ def _utc_microseconds(value: object, *, name: str) -> int:
     )
 
 
-def _timedelta_microseconds(value: object) -> int:
-    if not isinstance(value, timedelta):
-        raise TypeError("max_inflight_hold must be timedelta")
-    microseconds = (
-        value.days * 86_400 * 1_000_000
-        + value.seconds * 1_000_000
-        + value.microseconds
-    )
-    if microseconds <= 0:
-        raise ValueError("max_inflight_hold must be positive")
-    return microseconds
-
-
-def _datetime_from_utc_microseconds(value: int) -> datetime:
-    return _EPOCH + timedelta(microseconds=value)
-
-
 @dataclass(frozen=True, slots=True)
 class MarketBookProjectionLease:
     request_id: str
     acquired_at_utc_us: int
-    hold_until_utc_us: int
 
     def __post_init__(self) -> None:
         _validate_request_id(self.request_id)
         if type(self.acquired_at_utc_us) is not int:
             raise TypeError("acquired_at_utc_us must be a non-boolean int")
-        if type(self.hold_until_utc_us) is not int:
-            raise TypeError("hold_until_utc_us must be a non-boolean int")
-        if self.hold_until_utc_us <= self.acquired_at_utc_us:
-            raise ValueError("hold_until_utc_us must be after acquired_at_utc_us")
 
 
 @dataclass(frozen=True, slots=True)
 class MarketBookProjectionConcurrencyState:
     policy_version: str
-    max_inflight_hold_us: int
     last_observed_at_utc_us: int | None
     active: tuple[MarketBookProjectionLease, ...]
 
     def __post_init__(self) -> None:
         if self.policy_version != BETFAIR_MARKETBOOK_PROJECTION_CONCURRENCY_POLICY_VERSION:
             raise ValueError("unsupported Betfair MarketBook projection concurrency policy")
-        if type(self.max_inflight_hold_us) is not int:
-            raise TypeError("max_inflight_hold_us must be a non-boolean int")
-        if self.max_inflight_hold_us <= 0:
-            raise ValueError("max_inflight_hold_us must be positive")
         if self.last_observed_at_utc_us is not None and type(
             self.last_observed_at_utc_us
         ) is not int:
@@ -93,11 +66,6 @@ class MarketBookProjectionConcurrencyState:
             if type(lease) is not MarketBookProjectionLease:
                 raise TypeError("active must contain MarketBookProjectionLease values")
             ids.append(lease.request_id)
-            if (
-                lease.hold_until_utc_us - lease.acquired_at_utc_us
-                != self.max_inflight_hold_us
-            ):
-                raise ValueError("lease hold does not match concurrency state policy")
             if (
                 self.last_observed_at_utc_us is not None
                 and lease.acquired_at_utc_us > self.last_observed_at_utc_us
@@ -116,41 +84,29 @@ class MarketBookProjectionConcurrencyDecision:
     projection_bearing: bool
     allowed: bool
     active_projection_requests: int
-    next_eligible_at_utc_us: int | None = None
-
-    @property
-    def observed_at(self) -> datetime:
-        return _datetime_from_utc_microseconds(self.observed_at_utc_us)
-
-    @property
-    def next_eligible_at(self) -> datetime | None:
-        if self.next_eligible_at_utc_us is None:
-            return None
-        return _datetime_from_utc_microseconds(self.next_eligible_at_utc_us)
 
 
 class BetfairMarketBookProjectionConcurrencyGate:
-    """Pure state-transition kernel for Betfair projection request concurrency.
+    """Pure fail-safe state kernel for Betfair projection request concurrency.
 
     Betfair documents a three-request concurrency limit for listMarketBook calls
-    carrying OrderProjection and/or MatchProjection. This class models only that
-    admission state. Price-only reads bypass this bucket.
+    carrying OrderProjection and/or MatchProjection. This class models only local
+    product admission state. Price-only reads bypass this bucket.
 
-    It performs no network I/O, sleeping, scheduling or retry. max_inflight_hold
-    is a conservative product-owned bound used to preserve still-possibly-in-flight
-    reservations across restart if an explicit completion was not observed. A real
-    runtime must serialize access to one canonical shared state and must not treat a
-    caller-constructed decision as provider evidence or as permission to execute.
+    Active projection leases NEVER expire merely because caller time advanced. A
+    caller-chosen timeout cannot prove that the provider stopped counting a request
+    as in-flight. Slots therefore release only through complete for the exact active
+    request. On restart unresolved leases remain blocking; a separate product
+    recovery authority must establish when they are safe to resolve. This kernel does
+    no network I/O, scheduling, sleeping, retry or recovery, and its public decisions
+    are not provider evidence or financial/execution permission.
     """
 
     def __init__(
         self,
         *,
-        max_inflight_hold: timedelta,
         state: MarketBookProjectionConcurrencyState | None = None,
     ) -> None:
-        max_hold_us = _timedelta_microseconds(max_inflight_hold)
-        self._max_hold_us = max_hold_us
         self._active: dict[str, MarketBookProjectionLease] = {}
         self._last_observed_at_utc_us: int | None = None
         if state is not None:
@@ -158,39 +114,26 @@ class BetfairMarketBookProjectionConcurrencyGate:
                 raise TypeError(
                     "state must be MarketBookProjectionConcurrencyState or None"
                 )
-            if state.max_inflight_hold_us != max_hold_us:
-                raise ValueError(
-                    "state max_inflight_hold does not match configured policy"
-                )
             self._last_observed_at_utc_us = state.last_observed_at_utc_us
-            self._active = {
-                lease.request_id: lease
-                for lease in state.active
-            }
+            self._active = {lease.request_id: lease for lease in state.active}
 
     @property
     def policy_version(self) -> str:
         return BETFAIR_MARKETBOOK_PROJECTION_CONCURRENCY_POLICY_VERSION
 
-    def _advance(self, observed_at: datetime, *, name: str) -> int:
-        observed_us = _utc_microseconds(observed_at, name=name)
+    def _advance(self, observed_at: datetime) -> int:
+        observed_us = _utc_microseconds(observed_at, name="observed_at")
         if (
             self._last_observed_at_utc_us is not None
             and observed_us < self._last_observed_at_utc_us
         ):
-            raise ValueError(f"{name} must not move backwards")
-        self._active = {
-            request_id: lease
-            for request_id, lease in self._active.items()
-            if lease.hold_until_utc_us > observed_us
-        }
+            raise ValueError("observed_at must not move backwards")
         self._last_observed_at_utc_us = observed_us
         return observed_us
 
     def snapshot(self) -> MarketBookProjectionConcurrencyState:
         return MarketBookProjectionConcurrencyState(
             policy_version=BETFAIR_MARKETBOOK_PROJECTION_CONCURRENCY_POLICY_VERSION,
-            max_inflight_hold_us=self._max_hold_us,
             last_observed_at_utc_us=self._last_observed_at_utc_us,
             active=tuple(
                 self._active[request_id]
@@ -211,7 +154,7 @@ class BetfairMarketBookProjectionConcurrencyGate:
             raise TypeError("has_order_projection must be bool")
         if type(has_match_projection) is not bool:
             raise TypeError("has_match_projection must be bool")
-        observed_us = self._advance(observed_at, name="observed_at")
+        observed_us = self._advance(observed_at)
         if request_id in self._active:
             raise ValueError("request_id is already active")
 
@@ -232,16 +175,11 @@ class BetfairMarketBookProjectionConcurrencyGate:
                 projection_bearing=True,
                 allowed=False,
                 active_projection_requests=len(self._active),
-                next_eligible_at_utc_us=min(
-                    lease.hold_until_utc_us
-                    for lease in self._active.values()
-                ),
             )
 
         self._active[request_id] = MarketBookProjectionLease(
             request_id=request_id,
             acquired_at_utc_us=observed_us,
-            hold_until_utc_us=observed_us + self._max_hold_us,
         )
         return MarketBookProjectionConcurrencyDecision(
             request_id=request_id,
@@ -253,7 +191,7 @@ class BetfairMarketBookProjectionConcurrencyGate:
 
     def complete(self, request_id: str, *, observed_at: datetime) -> None:
         request_id = _validate_request_id(request_id)
-        self._advance(observed_at, name="observed_at")
+        self._advance(observed_at)
         if request_id not in self._active:
             raise ValueError(
                 "request_id is not an active projection-bearing request"

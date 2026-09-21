@@ -297,7 +297,8 @@ class RealExecutionLedgerTests(unittest.TestCase):
                 reserved_at=RESERVED_AT,
             )
             ledger.mark_submitted("try-1", submitted_at=SUBMITTED_AT)
-            _acknowledge_submitted_with_provider_evidence(ledger,
+            _acknowledge_submitted_with_provider_evidence(
+                ledger,
                 ExternalAcknowledgement(
                     attempt_id="try-1",
                     external_receipt_id="r1",
@@ -982,7 +983,8 @@ class RealExecutionLedgerTests(unittest.TestCase):
             with self.assertRaisesRegex(
                 ExecutionStateError, "exceeds requested action stake"
             ):
-                _acknowledge_submitted_with_provider_evidence(ledger,
+                _acknowledge_submitted_with_provider_evidence(
+                    ledger,
                     ExternalAcknowledgement(
                         attempt_id="try-1",
                         external_receipt_id="oversized",
@@ -1089,7 +1091,8 @@ class RealExecutionLedgerTests(unittest.TestCase):
                 reserved_at=RESERVED_AT,
             )
             ledger.mark_submitted("try-1", submitted_at=SUBMITTED_AT)
-            _acknowledge_submitted_with_provider_evidence(ledger,
+            _acknowledge_submitted_with_provider_evidence(
+                ledger,
                 ExternalAcknowledgement(
                     attempt_id="try-1",
                     external_receipt_id="r1",
@@ -1141,7 +1144,7 @@ class RealExecutionLedgerTests(unittest.TestCase):
             restarted = RealExecutionLedger(path)
             with self.assertRaisesRegex(
                 ExecutionLedgerIntegrityError,
-                "acknowledgement stake exceeds requested action stake",
+                "provider-bound acknowledgement evidence",
             ):
                 restarted.verify_integrity()
 
@@ -1157,7 +1160,8 @@ class RealExecutionLedgerTests(unittest.TestCase):
                 reserved_at=RESERVED_AT,
             )
             ledger.mark_submitted("try-1", submitted_at=SUBMITTED_AT)
-            _acknowledge_submitted_with_provider_evidence(ledger,
+            _acknowledge_submitted_with_provider_evidence(
+                ledger,
                 ExternalAcknowledgement(
                     attempt_id="try-1",
                     external_receipt_id="r1",
@@ -1236,7 +1240,8 @@ class RealExecutionLedgerTests(unittest.TestCase):
                     attempt_id,
                     submitted_at=SUBMITTED_AT,
                 )
-                _acknowledge_submitted_with_provider_evidence(ledger,
+                _acknowledge_submitted_with_provider_evidence(
+                    ledger,
                     ExternalAcknowledgement(
                         attempt_id=attempt_id,
                         external_receipt_id="same-native-id",
@@ -1267,7 +1272,8 @@ class RealExecutionLedgerTests(unittest.TestCase):
             )
             ledger.mark_submitted("t1", submitted_at=SUBMITTED_AT)
             ledger.mark_submitted("t2", submitted_at=SUBMITTED_AT)
-            _acknowledge_submitted_with_provider_evidence(ledger,
+            _acknowledge_submitted_with_provider_evidence(
+                ledger,
                 ExternalAcknowledgement(
                     attempt_id="t1",
                     external_receipt_id="r",
@@ -1278,7 +1284,8 @@ class RealExecutionLedgerTests(unittest.TestCase):
                 )
             )
             with self.assertRaises(ExecutionIdentityConflict):
-                _acknowledge_submitted_with_provider_evidence(ledger,
+                _acknowledge_submitted_with_provider_evidence(
+                    ledger,
                     ExternalAcknowledgement(
                         attempt_id="t2",
                         external_receipt_id="r",
@@ -1301,7 +1308,8 @@ class RealExecutionLedgerTests(unittest.TestCase):
                 reserved_at=RESERVED_AT,
             )
             ledger.mark_submitted("t1", submitted_at=SUBMITTED_AT)
-            _acknowledge_submitted_with_provider_evidence(ledger,
+            _acknowledge_submitted_with_provider_evidence(
+                ledger,
                 ExternalAcknowledgement(
                     attempt_id="t1",
                     external_receipt_id="r1",

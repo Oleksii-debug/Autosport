@@ -62,8 +62,24 @@ def response(result: object, request_id: int) -> bytes:
     ).encode("utf-8")
 
 
-def account_responses(balance: float = 100.10) -> tuple[bytes, bytes]:
+def account_responses(balance: float = 100.10) -> tuple[bytes, bytes, bytes]:
     return (
+        response(
+            [
+                {
+                    "appId": 12345,
+                    "appVersions": [
+                        {
+                            "versionId": 67890,
+                            "ownerManaged": False,
+                            "applicationKey": "provider-returned-app-key",
+                            "version": "1.0",
+                        }
+                    ],
+                }
+            ],
+            1,
+        ),
         response(
             {
                 "currencyCode": "GBP",
@@ -71,7 +87,7 @@ def account_responses(balance: float = 100.10) -> tuple[bytes, bytes]:
                 "region": "GBR",
                 "timezone": "Europe/London",
             },
-            1,
+            2,
         ),
         response(
             {
@@ -80,7 +96,7 @@ def account_responses(balance: float = 100.10) -> tuple[bytes, bytes]:
                 "retainedCommission": 0.05,
                 "exposureLimit": -5000.00,
             },
-            2,
+            3,
         ),
     )
 
@@ -127,10 +143,12 @@ def test_live_product_acquisition_is_authoritative_but_durable_receipt_is_not(
     assert acquired.receipt.execution_authorized is False
     assert acquired.receipt.real_money_execution is False
     assert acquired.receipt.integration_kind is BookmakerIntegrationKind.OFFICIAL_API
+    assert len(acquired.receipt.authenticated_account_identity_sha256) == 64
+    assert acquired.receipt.account_identity_observed_at
     assert acquired.receipt.provider_native_observed_at is None
     assert acquired.snapshot.balance is not None
     assert acquired.snapshot.balance.available_balance == Decimal("100.1")
-    assert len(harness.calls) == 2
+    assert len(harness.calls) == 3
     assert store.count() == 1
     assert_bookmaker_account_acquisition_authoritative(acquired)
 
@@ -161,7 +179,7 @@ def test_same_live_acquisition_id_returns_ephemeral_issued_object_without_more_i
 
     assert retry is first
     assert retry.source_authority_proven is True
-    assert len(harness.calls) == calls_after_first == 2
+    assert len(harness.calls) == calls_after_first == 3
     assert store.count() == 1
 
 
@@ -183,7 +201,7 @@ def test_lost_ephemeral_origin_requires_new_acquisition_id_to_reacquire(
         match="cannot reissue provider-origin authority",
     ):
         acquire_balance(store, acquisition_id="attempt-1")
-    assert len(harness.calls) == 2
+    assert len(harness.calls) == 3
 
     durable = store.resolve(receipt_id)
     assert durable.source_authority_proven is False
@@ -207,7 +225,7 @@ def test_new_acquisition_id_keeps_identical_provider_bytes_as_new_observation(
     assert first.receipt.observation_key != second.receipt.observation_key
     assert first.receipt.acquisition_id == "attempt-1"
     assert second.receipt.acquisition_id == "attempt-2"
-    assert len(harness.calls) == 4
+    assert len(harness.calls) == 6
     assert store.count() == 2
 
 
@@ -324,6 +342,7 @@ def test_credentials_never_persist_in_receipt_or_snapshot_store(
 
     assert b"app-secret" not in durable_bytes
     assert b"session-secret" not in durable_bytes
+    assert b"provider-returned-app-key" not in durable_bytes
     assert "app-secret" not in repr(acquired)
     assert "session-secret" not in repr(acquired)
 
@@ -407,7 +426,7 @@ def test_acquisition_id_reuse_with_different_scope_or_capabilities_fails_before_
             account_id="account-a",
         )
 
-    assert len(harness.calls) == calls_after_first == 2
+    assert len(harness.calls) == calls_after_first == 3
     assert store.count() == 1
 
 

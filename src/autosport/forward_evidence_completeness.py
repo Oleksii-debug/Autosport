@@ -113,26 +113,24 @@ def _iso(value: datetime) -> str:
 
 
 @dataclass(frozen=True, slots=True)
-class ResearchProtocolEnvelope:
+class ForwardEvidenceProtocolEnvelope:
+    """Forward-cohort commitment layered on canonical ScientificProtocolBinding.
+
+    ``scientific_protocol_sha256`` must be the existing
+    ``ScientificProtocolBinding.binding_sha256`` (or the durable registry record
+    that binds it). This envelope only adds forward-campaign completeness
+    identities that the canonical scientific protocol does not own.
+    """
+
     campaign_id: str
-    protocol_version: str
+    scientific_protocol_sha256: str
     candidate_universe_rule_id: str
     candidate_universe_rule_sha256: str
-    inclusion_exclusion_policy_sha256: str
-    strategy_or_policy_identity: str
+    forward_evaluation_policy_sha256: str
     runtime_identity_sha256: str
-    primary_metric_id: str
-    protective_metric_set_sha256: str
-    minimum_effect_rule: str
     baseline_set_sha256: str
+    protective_metric_set_sha256: str
     cost_policy_sha256: str
-    dependence_unit: str
-    inference_method_id: str
-    multiplicity_policy_id: str
-    sequential_look_policy_id: str
-    stopping_rule_id: str
-    promotion_rule_id: str
-    rollback_rule_id: str
     precommit_anchor_lower: datetime
     precommit_anchor_upper: datetime
     serializer_version: str = "v1"
@@ -142,28 +140,18 @@ class ResearchProtocolEnvelope:
     def __post_init__(self) -> None:
         for name in (
             "campaign_id",
-            "protocol_version",
             "candidate_universe_rule_id",
-            "strategy_or_policy_identity",
-            "primary_metric_id",
-            "minimum_effect_rule",
-            "dependence_unit",
-            "inference_method_id",
-            "multiplicity_policy_id",
-            "sequential_look_policy_id",
-            "stopping_rule_id",
-            "promotion_rule_id",
-            "rollback_rule_id",
             "serializer_version",
             "hash_algorithm",
         ):
             _text(getattr(self, name), name)
         for name in (
+            "scientific_protocol_sha256",
             "candidate_universe_rule_sha256",
-            "inclusion_exclusion_policy_sha256",
+            "forward_evaluation_policy_sha256",
             "runtime_identity_sha256",
-            "protective_metric_set_sha256",
             "baseline_set_sha256",
+            "protective_metric_set_sha256",
             "cost_policy_sha256",
         ):
             _sha256(getattr(self, name), name)
@@ -183,24 +171,14 @@ class ResearchProtocolEnvelope:
     def canonical_payload(self) -> dict[str, Any]:
         return {
             "campaign_id": self.campaign_id,
-            "protocol_version": self.protocol_version,
+            "scientific_protocol_sha256": self.scientific_protocol_sha256.lower(),
             "candidate_universe_rule_id": self.candidate_universe_rule_id,
             "candidate_universe_rule_sha256": self.candidate_universe_rule_sha256.lower(),
-            "inclusion_exclusion_policy_sha256": self.inclusion_exclusion_policy_sha256.lower(),
-            "strategy_or_policy_identity": self.strategy_or_policy_identity,
+            "forward_evaluation_policy_sha256": self.forward_evaluation_policy_sha256.lower(),
             "runtime_identity_sha256": self.runtime_identity_sha256.lower(),
-            "primary_metric_id": self.primary_metric_id,
-            "protective_metric_set_sha256": self.protective_metric_set_sha256.lower(),
-            "minimum_effect_rule": self.minimum_effect_rule,
             "baseline_set_sha256": self.baseline_set_sha256.lower(),
+            "protective_metric_set_sha256": self.protective_metric_set_sha256.lower(),
             "cost_policy_sha256": self.cost_policy_sha256.lower(),
-            "dependence_unit": self.dependence_unit,
-            "inference_method_id": self.inference_method_id,
-            "multiplicity_policy_id": self.multiplicity_policy_id,
-            "sequential_look_policy_id": self.sequential_look_policy_id,
-            "stopping_rule_id": self.stopping_rule_id,
-            "promotion_rule_id": self.promotion_rule_id,
-            "rollback_rule_id": self.rollback_rule_id,
             "precommit_anchor_lower": _iso(self.precommit_anchor_lower),
             "precommit_anchor_upper": _iso(self.precommit_anchor_upper),
             "serializer_version": self.serializer_version,
@@ -553,7 +531,7 @@ class CostEvidence:
 
 @dataclass(frozen=True, slots=True)
 class CampaignEvidence:
-    protocol: ResearchProtocolEnvelope
+    protocol: ForwardEvidenceProtocolEnvelope
     opportunities: tuple[ForwardOpportunityEnvelope, ...]
     cohort_roots: tuple[CohortRootEnvelope, ...]
     closes: tuple[CampaignCloseEnvelope, ...]
@@ -565,9 +543,9 @@ class CampaignEvidence:
     stopping_rule_satisfied: bool = True
 
     def __post_init__(self) -> None:
-        if not isinstance(self.protocol, ResearchProtocolEnvelope):
+        if not isinstance(self.protocol, ForwardEvidenceProtocolEnvelope):
             raise ForwardEvidenceCompletenessError(
-                "protocol must be a ResearchProtocolEnvelope"
+                "protocol must be a ForwardEvidenceProtocolEnvelope"
             )
         object.__setattr__(
             self,
@@ -925,7 +903,7 @@ __all__ = [
     "DecisionState",
     "ForwardEvidenceCompletenessError",
     "ForwardOpportunityEnvelope",
-    "ResearchProtocolEnvelope",
+    "ForwardEvidenceProtocolEnvelope",
     "RevealBoundaryReceipt",
     "UniverseResult",
     "VerificationCode",

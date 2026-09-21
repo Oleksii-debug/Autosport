@@ -15,6 +15,7 @@ from .parlayapi_provider import (
 
 
 _SPORT_KEY_PATTERN = re.compile(r"^[a-z0-9]+(?:_[a-z0-9]+)*$")
+_RESERVED_DATASET_SCOPE_SPORT_KEYS = frozenset({"unknown", "mixed"})
 
 
 def _canonical_sport_key(value: object) -> str:
@@ -26,6 +27,8 @@ def _canonical_sport_key(value: object) -> str:
         raise ValueError(
             "sport_key must use lowercase ASCII letters/digits joined by single underscores"
         )
+    if value in _RESERVED_DATASET_SCOPE_SPORT_KEYS:
+        raise ValueError("sport_key must not use a reserved dataset scope identity")
     return value
 
 
@@ -64,8 +67,11 @@ class ParlayApiSportProvider(ParlayApiTableTennisProvider):
                 "other sport adapters require authenticated read-only access"
             )
 
-        self.sport_key = canonical
-        self.source_id = f"parlayapi:{canonical}"
+        # These two values form one configured provider identity. Keep them on
+        # private backing fields and expose read-only properties so callers cannot
+        # retarget later requests or relabel later batches by rebinding public attrs.
+        self._sport_key = canonical
+        self._source_id = f"parlayapi:{canonical}"
 
         kwargs: dict[str, Any] = {
             "public_preview": public_preview,
@@ -83,6 +89,14 @@ class ParlayApiSportProvider(ParlayApiTableTennisProvider):
         if sleeper is not None:
             kwargs["sleeper"] = sleeper
         super().__init__(api_key, **kwargs)
+
+    @property
+    def sport_key(self) -> str:
+        return self._sport_key
+
+    @property
+    def source_id(self) -> str:
+        return self._source_id
 
     def _url(self) -> str:
         query = urlencode(

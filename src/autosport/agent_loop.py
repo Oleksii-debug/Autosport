@@ -572,9 +572,8 @@ class AgentLoopRuntime:
 
     @staticmethod
     def _monotonic_key(path: Path) -> str:
-        absolute = os.path.abspath(os.fspath(path))
-        locator = os.path.normcase(os.path.normpath(absolute))
-        return "agent-loop-" + hashlib.sha256(locator.encode("utf-8")).hexdigest()
+        name = os.path.normcase(Path(path).name)
+        return "agent-loop-" + hashlib.sha256(name.encode("utf-8")).hexdigest()
 
     @classmethod
     def _monotonic_authority(cls, path: Path) -> MonotonicWorkspaceAuthority:

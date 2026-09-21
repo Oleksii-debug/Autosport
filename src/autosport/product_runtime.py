@@ -55,6 +55,34 @@ class _ProductRuntimeLease(WorkspaceEconomicLock):
 
     FILE_NAME = ".product-runtime.lock"
 
+    def __init__(self, workspace: str | Path) -> None:
+        super().__init__(workspace)
+        self._authority_active = False
+        self._acquired_once = False
+
+    @property
+    def authority_active(self) -> bool:
+        """Whether this one-shot lease still grants positive runtime authority."""
+        return self._authority_active
+
+    def acquire(self) -> None:
+        # A product runtime lease is a one-shot lifetime capability. Reacquiring the
+        # same mutable lock object after release could resurrect an old runtime object
+        # after ownership has moved elsewhere.
+        if self._acquired_once:
+            raise WorkspaceEconomicLockError(
+                "product runtime workspace authority cannot be reacquired"
+            )
+        super().acquire()
+        self._acquired_once = True
+        self._authority_active = True
+
+    def release(self) -> None:
+        # Revoke product authority before attempting OS teardown. Even if unlock/close
+        # later reports an error, callers must never treat ownership as positively held.
+        self._authority_active = False
+        super().release()
+
 
 class ProductCollectorSource(CollectorServiceSource, Protocol):
     """One acquisition source plus canonical delta-to-event resolution.
@@ -298,9 +326,9 @@ class AutonomousProductRuntime:
     _closed: bool = False
 
     def _require_runtime_authority(self) -> None:
-        if self._closed:
+        if self._closed or not self._runtime_lease.authority_active:
             raise ProductCompositionError(
-                "product runtime is closed and no longer owns workspace authority"
+                "product runtime is closed or no longer owns workspace authority"
             )
 
     @staticmethod
@@ -521,16 +549,17 @@ def build_autonomous_product_runtime(
 
         lifecycle = ContinuousEventLifecycle(root / "catalog.json")
         market_store = SQLiteMarketStore(root / "market.db")
+        # Until the fully assembled runtime takes ownership, construction unwind owns
+        # every opened resource. Register exactly once so failures at any later
+        # composition step cannot leak SQLite handles or leave Windows files locked.
+        lease_stack.callback(market_store.close)
         mirror = MarketMirror()
         invalidations = BoundedMirrorInvalidationBuffer(mirror)
 
         # Rebuild volatile mirror truth from the canonical durable current projection.
-        try:
-            for event in market_store.current_by_source().values():
-                invalidations.accept_persisted(event)
-        except Exception:
-            market_store.close()
-            raise
+        # ExitStack closes the store exactly once if this or any downstream step fails.
+        for event in market_store.current_by_source().values():
+            invalidations.accept_persisted(event)
 
         # Future mirror updates are downstream of the canonical market bus so they are
         # delivered only after SQLite persistence. If a subscriber fails after persistence,

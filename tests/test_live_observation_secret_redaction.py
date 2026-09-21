@@ -39,6 +39,17 @@ class LiveObservationSecretRedactionTests(unittest.TestCase):
         )
         self.assertNotIn("super-secret-key", error)
 
+    def test_redacts_quoted_secret_with_spaces_as_one_value(self):
+        error = self._run_failure(
+            RuntimeError('provider rejected PASSWORD="secret phrase with spaces" market=tt-123')
+        )
+
+        self.assertEqual(
+            error,
+            "RuntimeError: provider rejected PASSWORD=[REDACTED] market=tt-123",
+        )
+        self.assertNotIn("secret phrase", error)
+
     def test_redacts_authorization_header_and_url_userinfo(self):
         error = self._run_failure(
             RuntimeError(
@@ -52,6 +63,19 @@ class LiveObservationSecretRedactionTests(unittest.TestCase):
         self.assertNotIn("bearer-secret", error)
         self.assertNotIn("password123", error)
 
+    def test_redacts_provider_session_assignment_and_authentication_header(self):
+        error = self._run_failure(
+            RuntimeError(
+                "BETFAIR_SESSION_TOKEN=session-secret "
+                "X-Authentication: header-secret market=1.234"
+            )
+        )
+
+        self.assertIn("BETFAIR_SESSION_TOKEN=[REDACTED]", error)
+        self.assertIn("X-Authentication: [REDACTED]", error)
+        self.assertNotIn("session-secret", error)
+        self.assertNotIn("header-secret", error)
+
     def test_redacts_query_parameter_secret_but_preserves_neighboring_fields(self):
         error = self._run_failure(
             RuntimeError("GET /markets?api_key=query-secret&market=1.234")
@@ -59,6 +83,12 @@ class LiveObservationSecretRedactionTests(unittest.TestCase):
 
         self.assertIn("api_key=[REDACTED]&market=1.234", error)
         self.assertNotIn("query-secret", error)
+
+    def test_plain_token_word_without_assignment_is_preserved(self):
+        self.assertEqual(
+            self._run_failure(RuntimeError("provider token cache is unavailable")),
+            "RuntimeError: provider token cache is unavailable",
+        )
 
     def test_ordinary_failure_text_is_preserved(self):
         self.assertEqual(

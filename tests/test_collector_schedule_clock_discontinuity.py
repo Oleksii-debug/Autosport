@@ -28,19 +28,19 @@ class CollectorScheduleClockDiscontinuityTests(unittest.TestCase):
                     source_id="source-x",
                     run_id="run-1",
                     stream_epoch="epoch-1",
-                    slot_ordinal=1,
-                    due_at="2026-01-01T00:00:10+00:00",
-                    attempted_at="2026-01-01T00:00:09+00:00",
+                    slot_ordinal=0,
+                    due_at="2026-01-01T00:00:00+00:00",
+                    attempted_at="2025-12-31T23:59:59+00:00",
                 )
 
             evidence = store.collector_schedule_evidence(
                 source_id="source-x",
                 run_id="run-1",
                 start_slot_ordinal=0,
-                end_slot_ordinal=1,
+                end_slot_ordinal=0,
             )
             self.assertEqual(evidence["bound_start_count"], 0)
-            self.assertEqual(evidence["missing_start_count"], 2)
+            self.assertEqual(evidence["missing_start_count"], 1)
 
     def test_later_slot_start_time_cannot_regress_after_late_start(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

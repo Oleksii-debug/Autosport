@@ -128,4 +128,112 @@ def build_list_event_types_request(
     return BetfairCatalogRequest(LIST_EVENT_TYPES, {"filter": dict(market_filter or {})})
 
 
-def _scoped_r
+def _scoped_request(method: str, event_type_ids: Sequence[str]) -> BetfairCatalogRequest:
+    ids = _unique_ids(event_type_ids, "event_type_ids")
+    return BetfairCatalogRequest(method, {"filter": {"eventTypeIds": list(ids)}})
+
+
+def build_list_events_request(*, event_type_ids: Sequence[str]) -> BetfairCatalogRequest:
+    return _scoped_request(LIST_EVENTS, event_type_ids)
+
+
+def build_list_market_types_request(*, event_type_ids: Sequence[str]) -> BetfairCatalogRequest:
+    return _scoped_request(LIST_MARKET_TYPES, event_type_ids)
+
+
+def build_list_market_catalogue_request(
+    *,
+    event_type_ids: Sequence[str],
+    market_type_codes: Sequence[str] = (),
+    max_results: int = 1000,
+    market_start_from: str | None = None,
+    market_start_to: str | None = None,
+) -> BetfairCatalogRequest:
+    ids = _unique_ids(event_type_ids, "event_type_ids")
+    codes = _unique_codes(market_type_codes, "market_type_codes")
+    market_filter: dict[str, object] = {"eventTypeIds": list(ids)}
+    if codes:
+        market_filter["marketTypeCodes"] = list(codes)
+    if market_start_from is not None or market_start_to is not None:
+        time_range: dict[str, str] = {}
+        if market_start_from is not None:
+            time_range["from"] = _text(market_start_from, "market_start_from")
+        if market_start_to is not None:
+            time_range["to"] = _text(market_start_to, "market_start_to")
+        market_filter["marketStartTime"] = time_range
+    return BetfairCatalogRequest(
+        LIST_MARKET_CATALOGUE,
+        {
+            "filter": market_filter,
+            "marketProjection": [
+                "EVENT",
+                "EVENT_TYPE",
+                "MARKET_DESCRIPTION",
+                "MARKET_START_TIME",
+            ],
+            "sort": "FIRST_TO_START",
+            "maxResults": _max_results(max_results),
+        },
+    )
+
+
+def parse_event_types_result(result: object) -> tuple[BetfairEventType, ...]:
+    items = []
+    for index, raw in enumerate(_rows(result, "listEventTypes result")):
+        row = _mapping(raw, f"listEventTypes[{index}]")
+        event_type = _mapping(row.get("eventType"), f"listEventTypes[{index}].eventType")
+        items.append(
+            BetfairEventType(
+                _provider_text(event_type, "id", "event_type_id"),
+                _provider_text(event_type, "name", "event_type_name"),
+                _provider_count(row, "marketCount", "market_count"),
+            )
+        )
+    _reject_duplicate((item.event_type_id for item in items), "eventType id", provider_result=True)
+    return tuple(items)
+
+
+def parse_events_result(result: object) -> tuple[BetfairEvent, ...]:
+    items = []
+    for index, raw in enumerate(_rows(result, "listEvents result")):
+        row = _mapping(raw, f"listEvents[{index}]")
+        event = _mapping(row.get("event"), f"listEvents[{index}].event")
+        items.append(
+            BetfairEvent(
+                _provider_text(event, "id", "event_id"),
+                _provider_text(event, "name", "event_name"),
+                _provider_count(row, "marketCount", "market_count"),
+                _optional_provider_text(event, "countryCode", "country_code"),
+                _optional_provider_text(event, "timezone", "timezone_name"),
+                _optional_provider_text(event, "openDate", "open_date"),
+            )
+        )
+    _reject_duplicate((item.event_id for item in items), "event id", provider_result=True)
+    return tuple(items)
+
+
+def parse_market_types_result(result: object) -> tuple[BetfairMarketType, ...]:
+    items = []
+    for index, raw in enumerate(_rows(result, "listMarketTypes result")):
+        row = _mapping(raw, f"listMarketTypes[{index}]")
+        items.append(
+            BetfairMarketType(
+                _provider_text(row, "marketType", "market_type_code"),
+                _provider_count(row, "marketCount", "market_count"),
+            )
+        )
+    _reject_duplicate((item.market_type_code for item in items), "marketType code", provider_result=True)
+    return tuple(items)
+
+
+def parse_market_catalogue_result(
+    result: object,
+    *,
+    requested_event_type_ids: Sequence[str],
+    requested_max_results: int,
+) -> BetfairMarketCatalogueBatch:
+    allowed = frozenset(_unique_ids(requested_event_type_ids, "requested_event_type_ids"))
+    limit = _max_results(requested_max_results)
+    rows = _rows(result, "listMarketCatalogue result")
+    if len(rows) > limit:
+        raise BetfairCatalogError("listMarketCatalogue returned more rows than req

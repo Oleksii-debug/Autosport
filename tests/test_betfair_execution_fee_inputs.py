@@ -316,9 +316,6 @@ def test_post_snapshot_identity_and_method_mutation_cannot_rebind_provider_evide
     worker.start()
     assert transport.entered.wait(timeout=5), "provider read did not reach deterministic gate"
 
-    # These mutations happen after snapshot/preflight while the first provider read
-    # is blocked. A validate-then-use implementation can bind authentic payloads to
-    # these forged identities or dynamically invoke the new method shadow.
     client._venue_id = "forged-venue"
     client._account_id = "forged-account"
     client._observed_at = lambda: "2099-01-01T00:00:00+00:00"
@@ -372,3 +369,63 @@ def test_provider_callback_mutating_original_rpc_shadow_cannot_take_over_second_
 
     assert observation.account_id == "account-123"
     assert calls == 2
+
+
+def test_post_snapshot_class_dispatch_replacement_cannot_take_over_private_reads():
+    account_raw = response(account_details(), 1)
+    market_raw = response(market_description(), 2)
+    transport = FirstCallGateTransport([account_raw, market_raw])
+    client = BetfairReadOnlyClient(
+        BetfairSessionCredentials("app-secret", "session-secret"),
+        transport=transport,
+        clock=lambda: FIXED_NOW,
+        venue_id="betfair-exchange",
+        account_id="account-123",
+    )
+    result: list[object] = []
+    failures: list[BaseException] = []
+    replacement_called = Event()
+
+    original_rpc = BetfairReadOnlyClient._rpc
+    original_next_request_id = BetfairReadOnlyClient._next_request_id
+    original_observed_at = BetfairReadOnlyClient._observed_at
+    original_redact = BetfairReadOnlyClient._redact_provider_message
+
+    def forged(*args, **kwargs):
+        replacement_called.set()
+        raise AssertionError("post-snapshot class replacement must never be invoked")
+
+    def read() -> None:
+        try:
+            result.append(read_betfair_execution_fee_inputs(client, market_id="1.234"))
+        except BaseException as exc:  # pragma: no cover - surfaced below
+            failures.append(exc)
+
+    worker = Thread(target=read)
+    worker.start()
+    assert transport.entered.wait(timeout=5), "provider read did not reach deterministic gate"
+
+    try:
+        BetfairReadOnlyClient._rpc = forged
+        BetfairReadOnlyClient._next_request_id = forged
+        BetfairReadOnlyClient._observed_at = forged
+        BetfairReadOnlyClient._redact_provider_message = forged
+        transport.release.set()
+        worker.join(timeout=5)
+    finally:
+        BetfairReadOnlyClient._rpc = original_rpc
+        BetfairReadOnlyClient._next_request_id = original_next_request_id
+        BetfairReadOnlyClient._observed_at = original_observed_at
+        BetfairReadOnlyClient._redact_provider_message = original_redact
+        transport.release.set()
+
+    assert not worker.is_alive(), "fee-input read did not finish after gate release"
+    assert failures == []
+    assert not replacement_called.is_set()
+    assert len(result) == 1
+    observation = result[0]
+    assert observation.venue_id == "betfair-exchange"
+    assert observation.account_id == "account-123"
+    assert observation.account_evidence.observed_at == FIXED_NOW.isoformat()
+    assert observation.market_evidence.observed_at == FIXED_NOW.isoformat()
+    assert [json.loads(call["body"])["id"] for call in transport.calls] == [1, 2]

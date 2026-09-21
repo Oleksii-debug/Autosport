@@ -154,3 +154,43 @@ def test_adapter_rejects_partial_fold_coverage_of_governed_population():
             points,
             (Fold("fold-2", T1, T2, 2),),
         )
+
+def test_adapter_honors_explicit_minimum_train_size():
+    points = (
+        Point(T0, T0),
+        Point(T1, T1),
+        Point(T2, T2),
+        Point(T3, T3),
+        Point(T4, T4),
+    )
+    folds = (
+        Fold("fold-3", T2, T3, 3),
+        Fold("fold-4", T3, T4, 4),
+    )
+
+    splits = derive_walk_forward_splits(
+        points,
+        folds,
+        minimum_train_size=3,
+    )
+
+    assert tuple(split.evaluation_index for split in splits) == (3, 4)
+
+
+@pytest.mark.parametrize("bad_minimum_train_size", [0, True, 1.0])
+def test_adapter_rejects_noncanonical_minimum_train_size(bad_minimum_train_size):
+    points = (
+        Point(T0, T0),
+        Point(T1, T1),
+        Point(T2, T2),
+    )
+    with pytest.raises(
+        ReproducibilityManifestError,
+        match="minimum_train_size must be a positive integer",
+    ):
+        derive_walk_forward_splits(
+            points,
+            (Fold("fold-2", T1, T2, 2),),
+            minimum_train_size=bad_minimum_train_size,
+        )
+

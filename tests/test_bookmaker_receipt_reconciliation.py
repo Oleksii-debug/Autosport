@@ -386,7 +386,9 @@ def test_ledger_backed_partial_acceptance_requires_owned_receipt(tmp_path) -> No
     reconciled = _reconcile_against_ledger((a, b), (receipt,), ledger)
     assert reconciled.confirmed_total == Decimal("40.00")
     assert reconciled.residual_before == Decimal("60.00")
-    assert reconciled.state is RoutingState.ROUTE
+    assert reconciled.state is RoutingState.BLOCKED_UNKNOWN
+    assert reconciled.proposed_total == Decimal("0")
+    assert reconciled.legs == ()
 
 
 def test_ledger_backed_reconciliation_rejects_forged_receipt(tmp_path) -> None:
@@ -522,5 +524,49 @@ def test_ledger_backed_unknown_without_receipt_remains_fail_closed(tmp_path) -> 
 
     reconciled = _reconcile_against_ledger((a, b), (unknown,), ledger)
     assert reconciled.state is RoutingState.BLOCKED_UNKNOWN
+    assert reconciled.proposed_total == Decimal("0")
+    assert reconciled.legs == ()
+
+
+
+def test_partial_acceptance_without_child_closure_blocks_generic_reroute() -> None:
+    a, b = _venue("book-a", "acct-a"), _venue("book-b", "acct-b")
+    initial = _initial((a, b))
+    accepted = bind_leg_receipt(
+        initial.legs[0],
+        effect=ExternalEffect.ACCEPTED,
+        external_receipt_id="external-a-partial-open",
+        confirmed_accepted=Decimal("20.00"),
+    )
+
+    reconciled = _reconcile((a, b), (accepted,))
+
+    assert reconciled.state is RoutingState.BLOCKED_UNKNOWN
+    assert reconciled.confirmed_total == Decimal("20.00")
+    assert reconciled.residual_before == Decimal("80.00")
+    assert reconciled.proposed_total == Decimal("0")
+    assert reconciled.legs == ()
+
+
+def test_refusal_on_different_child_does_not_close_partial_remainder() -> None:
+    a, b = _venue("book-a", "acct-a"), _venue("book-b", "acct-b")
+    initial = _initial((a, b))
+    accepted_a = bind_leg_receipt(
+        initial.legs[0],
+        effect=ExternalEffect.ACCEPTED,
+        external_receipt_id="external-a-partial-open",
+        confirmed_accepted=Decimal("20.00"),
+    )
+    refused_b = bind_leg_receipt(
+        initial.legs[1],
+        effect=ExternalEffect.MARKET_REFUSED,
+        observation_id="refusal-b-only",
+    )
+
+    reconciled = _reconcile((a, b), (accepted_a, refused_b))
+
+    assert reconciled.state is RoutingState.BLOCKED_UNKNOWN
+    assert reconciled.confirmed_total == Decimal("20.00")
+    assert reconciled.residual_before == Decimal("80.00")
     assert reconciled.proposed_total == Decimal("0")
     assert reconciled.legs == ()

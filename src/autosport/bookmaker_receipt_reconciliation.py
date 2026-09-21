@@ -1,11 +1,13 @@
 from __future__ import annotations
 
-from decimal import Decimal
+import json
+from decimal import Decimal, InvalidOperation
 from typing import Iterable
 
 from .bookmaker_routing import (
     ExternalEffect,
     RoutingContractError,
+    RoutingState,
     VenueObservation,
     VenueQuote,
     _dedupe_external_receipts,
@@ -16,8 +18,9 @@ from .bookmaker_routing_plan import (
     plan_equal_split_residual,
 )
 from .real_execution_ledger import (
-    AttemptState,
-    ExternalReceiptIdentity,
+    AcknowledgementStatus,
+    EventType,
+    ExecutionLedgerError,
     RealExecutionLedger,
 )
 
@@ -152,55 +155,313 @@ def _validated_child_receipts(
     return normalized
 
 
+def _verified_ledger_events(
+    ledger: RealExecutionLedger,
+) -> tuple[dict[str, object], ...]:
+    """Freeze one integrity-verified ledger snapshot for the whole reconciliation."""
+
+    if not isinstance(ledger, RealExecutionLedger):
+        raise RoutingContractError("ledger must be a RealExecutionLedger")
+    try:
+        snapshot = ledger.verified_snapshot()
+    except (ExecutionLedgerError, OSError) as exc:
+        raise RoutingContractError(
+            "durable execution ledger could not be verified"
+        ) from exc
+
+    if not snapshot.payload:
+        return ()
+    try:
+        decoded = snapshot.payload.decode("utf-8")
+        events: list[dict[str, object]] = []
+        for line in decoded.splitlines():
+            envelope = json.loads(line)
+            event = envelope["event"]
+            if not isinstance(event, dict):
+                raise TypeError("event must be an object")
+            events.append(event)
+        return tuple(events)
+    except (UnicodeDecodeError, json.JSONDecodeError, KeyError, TypeError) as exc:
+        # verified_snapshot() has already validated these exact bytes with the
+        # ledger's strict parser. Any disagreement here is therefore a local
+        # decoding/contract failure and must not mint routing authority.
+        raise RoutingContractError(
+            "verified execution snapshot could not be decoded"
+        ) from exc
+
+
+def _durable_plan_action(
+    events: tuple[dict[str, object], ...],
+    *,
+    parent_plan_id: str,
+    action_id: str,
+) -> dict[str, object]:
+    plans = [
+        event
+        for event in events
+        if event.get("plan_id") == parent_plan_id
+        and event.get("event_type") == EventType.PLAN_RESERVED.value
+    ]
+    if len(plans) != 1:
+        raise RoutingContractError(
+            "parent plan is absent or ambiguous in durable execution ledger"
+        )
+    try:
+        plan = plans[0]["payload"]["plan"]  # type: ignore[index]
+        if not isinstance(plan, dict) or plan.get("plan_id") != parent_plan_id:
+            raise TypeError("stored plan payload is invalid")
+        actions = plan["actions"]
+        if not isinstance(actions, list):
+            raise TypeError("stored plan actions are invalid")
+    except (KeyError, TypeError) as exc:
+        raise RoutingContractError(
+            "durable execution plan payload is invalid"
+        ) from exc
+
+    matches = [
+        action
+        for action in actions
+        if isinstance(action, dict) and action.get("action_id") == action_id
+    ]
+    if len(matches) != 1:
+        raise RoutingContractError(
+            "durable receipt attempt does not own canonical proposal child"
+        )
+    return matches[0]
+
+
+def _durable_decimal(value: object, name: str) -> Decimal:
+    if type(value) is not str:
+        raise RoutingContractError(f"durable {name} is not canonical Decimal text")
+    try:
+        parsed = Decimal(value)
+    except (InvalidOperation, ValueError) as exc:
+        raise RoutingContractError(f"durable {name} is not a valid Decimal") from exc
+    if not parsed.is_finite() or parsed <= 0:
+        raise RoutingContractError(f"durable {name} must be finite and positive")
+    return parsed
+
+
+def _require_durable_action_matches_child(
+    action: dict[str, object],
+    item: VenueObservation,
+) -> Decimal:
+    exact_text = {
+        "bookmaker_id": item.venue_id,
+        "account_id": item.account_id,
+        "event_id": item.quote.event_id,
+        "market_id": item.quote.market_id,
+        "selection_id": item.quote.selection_id,
+        "quote_observed_at": item.quote.observed_ts,
+    }
+    for field, expected in exact_text.items():
+        if action.get(field) != expected:
+            raise RoutingContractError(
+                f"durable execution action {field} mismatches canonical routing child"
+            )
+
+    # This routing contract has no LAY-liability representation. The canonical
+    # supervised bridge currently emits BACK only; anything else must fail closed.
+    if action.get("side") != "BACK":
+        raise RoutingContractError(
+            "durable execution action side is outside routing child authority"
+        )
+
+    durable_odds = _durable_decimal(
+        action.get("requested_odds"), "requested_odds"
+    )
+    if durable_odds != item.quote.decimal_odds:
+        raise RoutingContractError(
+            "durable execution action odds mismatch canonical routing child"
+        )
+    durable_requested = _durable_decimal(
+        action.get("requested_stake"), "requested_stake"
+    )
+    if item.proposed_stake is None or durable_requested != item.proposed_stake:
+        raise RoutingContractError(
+            "durable execution action stake mismatch canonical routing child"
+        )
+    return durable_requested
+
+
+def _matching_receipt_events(
+    events: tuple[dict[str, object], ...],
+    *,
+    parent_plan_id: str,
+    action_id: str,
+    external_receipt_id: str,
+    event_type: EventType,
+) -> tuple[dict[str, object], ...]:
+    matches: list[dict[str, object]] = []
+    for event in events:
+        if (
+            event.get("plan_id") != parent_plan_id
+            or event.get("action_id") != action_id
+            or event.get("event_type") != event_type.value
+        ):
+            continue
+        payload = event.get("payload")
+        if (
+            isinstance(payload, dict)
+            and payload.get("external_receipt_id") == external_receipt_id
+        ):
+            matches.append(event)
+    return tuple(matches)
+
+
+def _has_unresolved_partial_acceptance(
+    observations: tuple[VenueObservation, ...],
+) -> bool:
+    """Return whether a child has confirmed stake but no child-bound closure."""
+
+    closed_children = {
+        item.proposal_leg_id
+        for item in observations
+        if item.effect is ExternalEffect.MARKET_REFUSED
+    }
+    return any(
+        item.effect is ExternalEffect.ACCEPTED
+        and item.proposal_leg_id not in closed_children
+        and item.proposed_stake is not None
+        and item.confirmed_accepted < item.proposed_stake
+        for item in observations
+    )
+
+
+def _block_positive_reroute(
+    proposal: ParallelRoutingProposal,
+) -> ParallelRoutingProposal:
+    if (
+        proposal.state is RoutingState.BLOCKED_UNKNOWN
+        and proposal.proposed_total == Decimal("0")
+        and not proposal.legs
+    ):
+        return proposal
+    return ParallelRoutingProposal(
+        state=RoutingState.BLOCKED_UNKNOWN,
+        parent_plan_id=proposal.parent_plan_id,
+        routing_request_id=proposal.routing_request_id,
+        residual_before=proposal.residual_before,
+        confirmed_total=proposal.confirmed_total,
+        proposed_total=Decimal("0"),
+        stake_quantum=proposal.stake_quantum,
+        legs=(),
+    )
+
+
 def _validate_durable_effect_receipts(
     observations: tuple[VenueObservation, ...],
     *,
     ledger: RealExecutionLedger,
     parent_plan_id: str,
-) -> None:
-    """Fail closed unless claimed receipt effects match durable execution facts."""
+) -> bool:
+    """Bind routing claims to one fenced durable snapshot.
 
-    if not isinstance(ledger, RealExecutionLedger):
-        raise RoutingContractError("ledger must be a RealExecutionLedger")
-    try:
-        saga = ledger.saga(parent_plan_id)
-    except KeyError as exc:
+    Returns True when durable evidence still represents a potentially-live partial
+    remainder and therefore cannot authorize a positive residual reroute.
+    """
+
+    events = _verified_ledger_events(ledger)
+    if not any(
+        event.get("plan_id") == parent_plan_id
+        and event.get("event_type") == EventType.PLAN_RESERVED.value
+        for event in events
+    ):
         raise RoutingContractError(
             "parent plan is absent from durable execution ledger"
-        ) from exc
+        )
 
+    unresolved_partial = False
     for item in observations:
-        # UNKNOWN without a receipt is safe to preserve: it blocks routing rather
-        # than claiming a terminal external effect. If a receipt is supplied, it
-        # must still agree with the durable attempt below.
         if item.external_receipt_id is None:
             if item.effect is ExternalEffect.UNKNOWN:
                 continue
             raise RoutingContractError(
                 "ledger-backed terminal reconciliation requires external_receipt_id"
             )
+        if item.proposal_leg_id is None:
+            raise RoutingContractError(
+                "ledger-backed reconciliation requires canonical proposal child"
+            )
 
-        identity = ExternalReceiptIdentity(
-            bookmaker_id=item.venue_id,
-            account_id=item.account_id,
-            external_receipt_id=item.external_receipt_id,
+        action = _durable_plan_action(
+            events,
+            parent_plan_id=parent_plan_id,
+            action_id=item.proposal_leg_id,
         )
-        attempt_id = saga.receipts.get(identity)
-        if attempt_id is None:
-            raise RoutingContractError(
-                "routing receipt is absent from durable execution ledger"
-            )
-        if saga.attempt_action_ids.get(attempt_id) != item.proposal_leg_id:
-            raise RoutingContractError(
-                "durable receipt attempt does not own canonical proposal child"
-            )
+        durable_requested = _require_durable_action_matches_child(action, item)
 
-        state = saga.attempts.get(attempt_id)
-        if state not in _LEDGER_STATES_BY_EFFECT[item.effect]:
+        acknowledgements = _matching_receipt_events(
+            events,
+            parent_plan_id=parent_plan_id,
+            action_id=item.proposal_leg_id,
+            external_receipt_id=item.external_receipt_id,
+            event_type=EventType.EXTERNAL_ACKNOWLEDGEMENT,
+        )
+        found_reconciliations = _matching_receipt_events(
+            events,
+            parent_plan_id=parent_plan_id,
+            action_id=item.proposal_leg_id,
+            external_receipt_id=item.external_receipt_id,
+            event_type=EventType.RECONCILED_FOUND,
+        )
+
+        if item.effect is ExternalEffect.UNKNOWN:
+            if acknowledgements or not found_reconciliations:
+                raise RoutingContractError(
+                    "routing receipt effect disagrees with durable execution state"
+                )
+            continue
+
+        if len(acknowledgements) != 1:
+            raise RoutingContractError(
+                "routing receipt is absent or ambiguous in durable execution ledger"
+            )
+        payload = acknowledgements[0].get("payload")
+        if not isinstance(payload, dict):
+            raise RoutingContractError(
+                "durable acknowledgement payload is invalid"
+            )
+        try:
+            status = AcknowledgementStatus(payload["status"])
+        except (KeyError, ValueError) as exc:
+            raise RoutingContractError(
+                "durable acknowledgement status is invalid"
+            ) from exc
+
+        if item.effect is ExternalEffect.MARKET_REFUSED:
+            if status is not AcknowledgementStatus.REJECTED:
+                raise RoutingContractError(
+                    "routing receipt effect disagrees with durable execution state"
+                )
+            continue
+
+        if item.effect is not ExternalEffect.ACCEPTED or status not in {
+            AcknowledgementStatus.ACCEPTED,
+            AcknowledgementStatus.PARTIAL,
+        }:
             raise RoutingContractError(
                 "routing receipt effect disagrees with durable execution state"
             )
 
+        durable_accepted = _durable_decimal(
+            payload.get("accepted_stake"), "accepted_stake"
+        )
+        if item.confirmed_accepted != durable_accepted:
+            raise RoutingContractError(
+                "routing accepted amount disagrees with durable acknowledgement"
+            )
+
+        # PARTIAL is not terminality proof: the unmatched provider order remainder
+        # may still execute. Even a provider-labelled ACCEPTED record is not enough
+        # for residual authority if its durable amount is below the bound request.
+        if (
+            status is AcknowledgementStatus.PARTIAL
+            or durable_accepted < durable_requested
+        ):
+            unresolved_partial = True
+
+    return unresolved_partial
 
 def reconcile_equal_split_residual(
     requested_stake: Decimal,
@@ -226,7 +487,7 @@ def reconcile_equal_split_residual(
         routing_request_id=routing_request_id,
         parent_plan_id=parent_plan_id,
     )
-    return plan_equal_split_residual(
+    proposal = plan_equal_split_residual(
         requested_stake,
         venues,
         normalized,
@@ -234,6 +495,9 @@ def reconcile_equal_split_residual(
         parent_plan_id=parent_plan_id,
         stake_quantum=stake_quantum,
     )
+    if _has_unresolved_partial_acceptance(normalized):
+        return _block_positive_reroute(proposal)
+    return proposal
 
 
 def reconcile_equal_split_residual_against_ledger(
@@ -266,12 +530,12 @@ def reconcile_equal_split_residual_against_ledger(
         routing_request_id=routing_request_id,
         parent_plan_id=parent_plan_id,
     )
-    _validate_durable_effect_receipts(
+    durable_unresolved_partial = _validate_durable_effect_receipts(
         normalized,
         ledger=ledger,
         parent_plan_id=parent_plan_id,
     )
-    return plan_equal_split_residual(
+    proposal = plan_equal_split_residual(
         requested_stake,
         venues,
         normalized,
@@ -279,3 +543,6 @@ def reconcile_equal_split_residual_against_ledger(
         parent_plan_id=parent_plan_id,
         stake_quantum=stake_quantum,
     )
+    if durable_unresolved_partial or _has_unresolved_partial_acceptance(normalized):
+        return _block_positive_reroute(proposal)
+    return proposal

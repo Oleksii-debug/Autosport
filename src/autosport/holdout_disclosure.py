@@ -73,12 +73,13 @@ class HoldoutDisclosureGate:
     disclosure delegates directly to the existing durable
     ``HoldoutConsumptionLedger``.
 
-    Pure non-outcome metadata and output that remains inaccessible inside a sealed
-    precommitted evaluator do not consume confirmation capacity. Public disclosure
-    channels are conservatively treated as adaptive-accessible even if a caller
-    supplies ``False``; that flag can exempt only the sealed evaluator boundary.
-    No result from this gate proves that a holdout is untouched or authorizes
-    promotion.
+    Output that remains inaccessible inside a sealed precommitted evaluator does
+    not consume confirmation capacity. Public disclosure channels are conservatively
+    treated as adaptive-accessible even if a caller supplies ``False``. Likewise,
+    caller-selected ``NON_OUTCOME_METADATA`` is descriptive only and cannot mint a
+    public freshness exemption. A narrower metadata exemption requires a separate
+    product-owned classifier. No result from this gate proves that a holdout is
+    untouched or authorizes promotion.
     """
 
     _CONSUMER_IDENTITY = "holdout-disclosure-gate-v1"
@@ -117,7 +118,7 @@ class HoldoutDisclosureGate:
     ) -> bool:
         if type(kind) is not DisclosureKind:
             raise HoldoutDisclosureError("kind must be an exact DisclosureKind")
-        return kind.outcome_derived and cls.effective_accessibility(
+        return cls.effective_accessibility(
             channel=channel,
             accessible_to_adaptive_actor=accessible_to_adaptive_actor,
         )

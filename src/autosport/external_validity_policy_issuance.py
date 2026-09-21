@@ -19,6 +19,7 @@ import json
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation, localcontext
+from pathlib import Path
 from typing import Any, Mapping, Sequence
 
 from .external_validity_baseline import (
@@ -28,6 +29,12 @@ from .external_validity_baseline import (
     FrozenBaselineProtocol,
     PolicyEvaluation,
 )
+from .monotonic_workspace_authority import resolve_monotonic_authority_root
+from .monotonic_workspace_binding import (
+    WorkspaceBindingConflictError,
+    WorkspaceBindingIntegrityError,
+    WorkspaceIdentityBinding,
+)
 from .scientific_registry import EvaluationBundleRef, ScientificRegistry
 from .strategy_model_factory import FactoryArtifactStore
 
@@ -36,10 +43,63 @@ class ProductPolicyEvaluationIssuanceError(ExternalValidityError):
     """Raised when product-issued external-validity provenance is not exact."""
 
 
+@dataclass(frozen=True, slots=True)
+class ProductPolicyEvaluationWorkspace:
+    """Already-bound product workspace used as the evaluator issuance trust root.
+
+    The issuer never accepts caller-selected registry/store instances.  The expected
+    workspace instance identity must come from product/runtime configuration outside
+    an issued result and must already be present in both the workspace marker and
+    independent machine path binding.
+    """
+
+    workspace: Path
+    workspace_instance_id: str
+
+    @classmethod
+    def open(
+        cls,
+        workspace: str | Path,
+        *,
+        expected_workspace_instance_id: str,
+    ) -> "ProductPolicyEvaluationWorkspace":
+        try:
+            root = Path(workspace).expanduser().resolve(strict=False)
+        except (OSError, RuntimeError, TypeError, ValueError) as exc:
+            raise ProductPolicyEvaluationIssuanceError(
+                "product evaluator workspace cannot be resolved"
+            ) from exc
+        expected = _text(
+            expected_workspace_instance_id,
+            "expected_workspace_instance_id",
+        )
+        try:
+            authority_root = resolve_monotonic_authority_root(root)
+            binding = WorkspaceIdentityBinding.resolve(
+                workspace=root,
+                authority_root=authority_root,
+                requested_workspace_instance_id=expected,
+            )
+            workspace_bound, path_bound = binding.validate_existing(
+                register_moved_or_copied_path=False
+            )
+        except (WorkspaceBindingConflictError, WorkspaceBindingIntegrityError) as exc:
+            raise ProductPolicyEvaluationIssuanceError(
+                "product evaluator workspace identity is not authoritative"
+            ) from exc
+        if not workspace_bound or not path_bound:
+            raise ProductPolicyEvaluationIssuanceError(
+                "product evaluator workspace must be durably bound before issuance"
+            )
+        return cls(root, binding.workspace_instance_id)
+
+
 _ISSUER_SOURCE_SHA256 = "aa95112ec260878167b36071f2682f196cb27f8731c677e14d1d7659aac28c90"
 _RESULT_ARTIFACT_KIND = "external-validity-policy-result"
 _BUNDLE_ID_PREFIX = "external-validity-policy-result:"
 _BOOTSTRAP_REPLICATES = 1024
+_CANONICAL_REGISTRY_FILENAME = "scientific_registry.json"
+_CANONICAL_ARTIFACT_DIRECTORY = "factory-artifacts"
 
 # Capture the concrete authority surface at import.  Positive reads/writes never
 # dispatch through caller-installed instance or class shadows.
@@ -165,6 +225,57 @@ def _require_store(store: object) -> FactoryArtifactStore:
     return store
 
 
+def _open_canonical_authorities(
+    authority: ProductPolicyEvaluationWorkspace,
+) -> tuple[ScientificRegistry, FactoryArtifactStore]:
+    if type(authority) is not ProductPolicyEvaluationWorkspace:
+        raise ProductPolicyEvaluationIssuanceError(
+            "authority must be an exact ProductPolicyEvaluationWorkspace"
+        )
+    try:
+        root = authority.workspace.expanduser().resolve(strict=False)
+        authority_root = resolve_monotonic_authority_root(root)
+        binding = WorkspaceIdentityBinding.resolve(
+            workspace=root,
+            authority_root=authority_root,
+            requested_workspace_instance_id=authority.workspace_instance_id,
+        )
+        workspace_bound, path_bound = binding.validate_existing(
+            register_moved_or_copied_path=False
+        )
+    except (OSError, RuntimeError, WorkspaceBindingConflictError, WorkspaceBindingIntegrityError) as exc:
+        raise ProductPolicyEvaluationIssuanceError(
+            "product evaluator workspace identity cannot be re-verified"
+        ) from exc
+    if root != authority.workspace or binding.workspace_instance_id != authority.workspace_instance_id:
+        raise ProductPolicyEvaluationIssuanceError(
+            "product evaluator workspace authority was rebound"
+        )
+    if not workspace_bound or not path_bound:
+        raise ProductPolicyEvaluationIssuanceError(
+            "product evaluator workspace binding is incomplete"
+        )
+
+    registry_path = root / _CANONICAL_REGISTRY_FILENAME
+    artifact_root = root / _CANONICAL_ARTIFACT_DIRECTORY
+    if not registry_path.is_file():
+        raise ProductPolicyEvaluationIssuanceError(
+            "canonical product ScientificRegistry is missing"
+        )
+    if not artifact_root.is_dir():
+        raise ProductPolicyEvaluationIssuanceError(
+            "canonical product FactoryArtifactStore is missing"
+        )
+    try:
+        registry = ScientificRegistry(registry_path)
+        store = FactoryArtifactStore(artifact_root)
+    except (OSError, ValueError) as exc:
+        raise ProductPolicyEvaluationIssuanceError(
+            "canonical product evaluator authorities cannot be reopened"
+        ) from exc
+    return _require_registry(registry), _require_store(store)
+
+
 def _registry_get(registry: ScientificRegistry, record_type: str, record_id: str):
     return _REGISTRY_GET(_require_registry(registry), record_type, record_id)
 
@@ -226,6 +337,7 @@ class IssuedPolicyEvaluationRef:
     """Stable reference to one deterministic product-issued external result."""
 
     issuance_id: str
+    workspace_instance_id: str
     evaluation_bundle_id: str
     evaluation_bundle_sha256: str
     result_artifact_sha256: str
@@ -236,6 +348,7 @@ class IssuedPolicyEvaluationRef:
 
     def __post_init__(self) -> None:
         _sha256(self.issuance_id, "issuance_id")
+        _text(self.workspace_instance_id, "workspace_instance_id")
         _text(self.evaluation_bundle_id, "evaluation_bundle_id")
         _sha256(self.evaluation_bundle_sha256, "evaluation_bundle_sha256")
         _sha256(self.result_artifact_sha256, "result_artifact_sha256")
@@ -254,9 +367,10 @@ class IssuedPolicyEvaluationRef:
 
     def to_payload(self) -> dict[str, object]:
         return {
-            "schema_version": 1,
-            "kind": "autosport-issued-policy-evaluation-ref-v1",
+            "schema_version": 2,
+            "kind": "autosport-issued-policy-evaluation-ref-v2",
             "issuance_id": self.issuance_id,
+            "workspace_instance_id": self.workspace_instance_id,
             "evaluation_bundle_id": self.evaluation_bundle_id,
             "evaluation_bundle_sha256": self.evaluation_bundle_sha256,
             "result_artifact_sha256": self.result_artifact_sha256,
@@ -274,6 +388,7 @@ class IssuedPolicyEvaluationRef:
             "schema_version",
             "kind",
             "issuance_id",
+            "workspace_instance_id",
             "evaluation_bundle_id",
             "evaluation_bundle_sha256",
             "result_artifact_sha256",
@@ -286,8 +401,8 @@ class IssuedPolicyEvaluationRef:
             raise ProductPolicyEvaluationIssuanceError(
                 "issued PolicyEvaluation reference fields mismatch"
             )
-        if payload.get("schema_version") != 1 or payload.get("kind") != (
-            "autosport-issued-policy-evaluation-ref-v1"
+        if payload.get("schema_version") != 2 or payload.get("kind") != (
+            "autosport-issued-policy-evaluation-ref-v2"
         ):
             raise ProductPolicyEvaluationIssuanceError(
                 "issued PolicyEvaluation reference schema mismatch"
@@ -301,6 +416,7 @@ class IssuedPolicyEvaluationRef:
             ) from exc
         return cls(
             issuance_id=payload.get("issuance_id"),
+            workspace_instance_id=payload.get("workspace_instance_id"),
             evaluation_bundle_id=payload.get("evaluation_bundle_id"),
             evaluation_bundle_sha256=payload.get("evaluation_bundle_sha256"),
             result_artifact_sha256=payload.get("result_artifact_sha256"),
@@ -374,11 +490,16 @@ def _target(protocol: FrozenBaselineProtocol, baseline_kind: BaselineKind | None
     )
 
 
-def _issuance_id(protocol: FrozenBaselineProtocol, target: _Target) -> str:
+def _issuance_id(
+    authority: ProductPolicyEvaluationWorkspace,
+    protocol: FrozenBaselineProtocol,
+    target: _Target,
+) -> str:
     return _digest(
         {
-            "schema_version": 1,
-            "kind": "autosport-external-validity-product-issuance-identity-v1",
+            "schema_version": 2,
+            "kind": "autosport-external-validity-product-issuance-identity-v2",
+            "workspace_instance_id": authority.workspace_instance_id,
             "protocol_sha256": protocol.identity_sha256,
             "evidence_scope_sha256": protocol.evidence_scope.identity_sha256,
             "cohort_sha256": protocol.evidence_scope.cohort_sha256,
@@ -924,8 +1045,7 @@ def _derive_policy_evaluation(
 
 
 def issue_product_policy_evaluation(
-    registry: ScientificRegistry,
-    artifact_store: FactoryArtifactStore,
+    authority: ProductPolicyEvaluationWorkspace,
     protocol: FrozenBaselineProtocol,
     *,
     source_evaluation_bundle_id: str,
@@ -939,10 +1059,9 @@ def issue_product_policy_evaluation(
     same slot to changed source truth collides with the immutable result artifact.
     """
 
-    canonical_registry = _require_registry(registry)
-    canonical_store = _require_store(artifact_store)
+    canonical_registry, canonical_store = _open_canonical_authorities(authority)
     target = _target(protocol, baseline_kind)
-    issuance_id = _issuance_id(protocol, target)
+    issuance_id = _issuance_id(authority, protocol, target)
     source = _require_source_factory_evaluation(
         canonical_registry,
         canonical_store,
@@ -953,9 +1072,10 @@ def issue_product_policy_evaluation(
     evaluation, projection = _derive_policy_evaluation(protocol, target, source)
 
     result_payload = {
-        "schema_version": 1,
-        "kind": "autosport-product-issued-external-validity-policy-evaluation-v1",
+        "schema_version": 2,
+        "kind": "autosport-product-issued-external-validity-policy-evaluation-v2",
         "issuance_id": issuance_id,
+        "workspace_instance_id": authority.workspace_instance_id,
         "protocol_sha256": protocol.identity_sha256,
         "evidence_scope_sha256": protocol.evidence_scope.identity_sha256,
         "policy_id": target.policy_id,
@@ -1030,6 +1150,7 @@ def issue_product_policy_evaluation(
 
     ref = IssuedPolicyEvaluationRef(
         issuance_id=issuance_id,
+        workspace_instance_id=authority.workspace_instance_id,
         evaluation_bundle_id=evaluation_bundle_id,
         evaluation_bundle_sha256=evaluation.evaluation_bundle_sha256,
         result_artifact_sha256=result_artifact_sha256,
@@ -1039,8 +1160,7 @@ def issue_product_policy_evaluation(
         baseline_kind=target.baseline_kind,
     )
     resolve_product_policy_evaluation(
-        canonical_registry,
-        canonical_store,
+        authority,
         protocol,
         ref,
     )
@@ -1048,21 +1168,23 @@ def issue_product_policy_evaluation(
 
 
 def resolve_product_policy_evaluation(
-    registry: ScientificRegistry,
-    artifact_store: FactoryArtifactStore,
+    authority: ProductPolicyEvaluationWorkspace,
     protocol: FrozenBaselineProtocol,
     reference: IssuedPolicyEvaluationRef,
 ) -> PolicyEvaluation:
     """Re-resolve and recompute exact product-issued result truth after restart."""
 
-    canonical_registry = _require_registry(registry)
-    canonical_store = _require_store(artifact_store)
+    canonical_registry, canonical_store = _open_canonical_authorities(authority)
     if type(reference) is not IssuedPolicyEvaluationRef:
         raise ProductPolicyEvaluationIssuanceError(
             "reference must be an exact IssuedPolicyEvaluationRef"
         )
+    if reference.workspace_instance_id != authority.workspace_instance_id:
+        raise ProductPolicyEvaluationIssuanceError(
+            "issued reference belongs to another product workspace"
+        )
     target = _target(protocol, reference.baseline_kind)
-    expected_issuance_id = _issuance_id(protocol, target)
+    expected_issuance_id = _issuance_id(authority, protocol, target)
     if reference.issuance_id != expected_issuance_id:
         raise ProductPolicyEvaluationIssuanceError(
             "issued reference does not match frozen protocol slot"
@@ -1138,10 +1260,11 @@ def resolve_product_policy_evaluation(
 
     if (
         type(result_payload) is not dict
-        or result_payload.get("schema_version") != 1
+        or result_payload.get("schema_version") != 2
         or result_payload.get("kind")
-        != "autosport-product-issued-external-validity-policy-evaluation-v1"
+        != "autosport-product-issued-external-validity-policy-evaluation-v2"
         or result_payload.get("issuance_id") != expected_issuance_id
+        or result_payload.get("workspace_instance_id") != authority.workspace_instance_id
         or result_payload.get("protocol_sha256") != protocol.identity_sha256
         or result_payload.get("evidence_scope_sha256")
         != protocol.evidence_scope.identity_sha256
@@ -1222,8 +1345,7 @@ def resolve_product_policy_evaluation(
 
 
 def verify_product_policy_evaluation(
-    registry: ScientificRegistry,
-    artifact_store: FactoryArtifactStore,
+    authority: ProductPolicyEvaluationWorkspace,
     protocol: FrozenBaselineProtocol,
     reference: IssuedPolicyEvaluationRef,
     claimed: PolicyEvaluation,
@@ -1235,8 +1357,7 @@ def verify_product_policy_evaluation(
             "claimed evaluation must be an exact PolicyEvaluation value"
         )
     issued = resolve_product_policy_evaluation(
-        registry,
-        artifact_store,
+        authority,
         protocol,
         reference,
     )
@@ -1250,6 +1371,7 @@ def verify_product_policy_evaluation(
 __all__ = [
     "IssuedPolicyEvaluationRef",
     "ProductPolicyEvaluationIssuanceError",
+    "ProductPolicyEvaluationWorkspace",
     "canonical_product_policy_evaluation_bundle_sha256",
     "issue_product_policy_evaluation",
     "resolve_product_policy_evaluation",

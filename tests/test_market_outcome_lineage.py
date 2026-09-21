@@ -42,22 +42,18 @@ class MarketOutcomeRevisionLineageTests(unittest.TestCase):
     def test_exact_replay_is_same_revision(self):
         authority = self._authority()
 
-        decision = validate_market_outcome_authority_revision(authority, authority)
+        relation = validate_market_outcome_authority_revision(authority, authority)
 
-        self.assertIs(decision.relation, OutcomeRevisionRelation.SAME_REVISION)
-        self.assertEqual(
-            decision.previous_authority_sha256,
-            decision.current_authority_sha256,
-        )
+        self.assertIs(relation, OutcomeRevisionRelation.SAME_REVISION)
 
     def test_same_provider_revision_may_be_reobserved_later(self):
         previous = self._authority(observed_at="2026-09-18T15:00:01Z")
         current = self._authority(observed_at="2026-09-18T15:03:00Z")
         self.assertNotEqual(previous.authority_sha256, current.authority_sha256)
 
-        decision = validate_market_outcome_authority_revision(previous, current)
+        relation = validate_market_outcome_authority_revision(previous, current)
 
-        self.assertIs(decision.relation, OutcomeRevisionRelation.SAME_REVISION)
+        self.assertIs(relation, OutcomeRevisionRelation.SAME_REVISION)
         self.assertEqual(previous.source_revision, current.source_revision)
         self.assertEqual(
             previous.roster_provenance_sha256,
@@ -72,9 +68,9 @@ class MarketOutcomeRevisionLineageTests(unittest.TestCase):
             selection_ids=("away", "draw", "home"),
         )
 
-        decision = validate_market_outcome_authority_revision(previous, current)
+        relation = validate_market_outcome_authority_revision(previous, current)
 
-        self.assertIs(decision.relation, OutcomeRevisionRelation.STRICT_SUCCESSOR)
+        self.assertIs(relation, OutcomeRevisionRelation.STRICT_SUCCESSOR)
         self.assertNotEqual(previous.source_revision, current.source_revision)
         self.assertNotEqual(previous.selection_ids, current.selection_ids)
 
@@ -147,6 +143,12 @@ class MarketOutcomeRevisionLineageTests(unittest.TestCase):
         )
         with self.assertRaisesRegex(ValueError, "verification protocol changed"):
             validate_market_outcome_authority_revision(previous, changed_protocol)
+
+    def test_return_type_is_relation_only_not_mintable_evidence_dto(self):
+        authority = self._authority()
+        relation = validate_market_outcome_authority_revision(authority, authority)
+
+        self.assertIs(type(relation), OutcomeRevisionRelation)
 
 
 if __name__ == "__main__":

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import datetime, timezone
 from decimal import Decimal
 import json
@@ -231,3 +232,19 @@ def test_resolver_keeps_original_source_type_authority_after_global_rebinding(
     evidence = resolve_provider_billing_row_attribution(source, "billing-ref-1")
     assert evidence.provider_owner == "provider-owner-A"
     assert evidence.attribution_state == "UNPROVEN"
+
+
+def test_public_evidence_rejects_non_timestamp_observation_fields() -> None:
+    evidence = resolve_provider_billing_row_attribution(_source(), "billing-ref-1")
+
+    with pytest.raises(
+        ProviderBillingAttributionError,
+        match="source_observed_at must be timezone-aware ISO-8601",
+    ):
+        replace(evidence, source_observed_at="not-a-time")
+
+    with pytest.raises(
+        ProviderBillingAttributionError,
+        match="row_item_date must be timezone-aware ISO-8601",
+    ):
+        replace(evidence, row_item_date="2026-09-20T09:00:00")

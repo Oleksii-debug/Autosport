@@ -45,10 +45,12 @@ class MarketBookTransport:
             ("2.00", "6"),
         ),
         lay_sizes: tuple[tuple[str, str], ...] = (("1.99", "999"),),
+        selection_status: str = "ACTIVE",
     ) -> None:
         self.delayed = delayed
         self.back_sizes = back_sizes
         self.lay_sizes = lay_sizes
+        self.selection_status = selection_status
         self.calls: list[dict[str, object]] = []
 
     def post(
@@ -86,7 +88,9 @@ class MarketBookTransport:
             + ',"result":[{"marketId":"1.234","isMarketDataDelayed":'
             + delayed
             + ',"status":"OPEN","version":17,"inplay":false,"betDelay":0,'
-            + '"runners":[{"selectionId":42,"ex":{"availableToBack":['
+            + '"runners":[{"selectionId":42,"status":"'
+            + self.selection_status
+            + '","ex":{"availableToBack":['
             + back
             + '],"availableToLay":['
             + lay
@@ -243,6 +247,26 @@ def test_response_level_delayed_data_fails_closed() -> None:
 
     assert result.state is FeasibilityState.UNKNOWN_UNPROVEN
     assert "DELAYED_SOURCE" in result.reasons
+
+
+def test_non_active_runner_fails_closed() -> None:
+    receipt = _client(
+        MarketBookTransport(selection_status="REMOVED")
+    ).read_market_book_depth("1.234", 42)
+    bound = _bound()
+
+    with tempfile.TemporaryDirectory() as tmp:
+        result = assess_authoritative_betfair_execution_feasibility(
+            _reserved_ledger(tmp, bound),
+            bound,
+            receipt,
+            action_id=ACTION_ID,
+            decision_at=NOW,
+            max_snapshot_age=timedelta(seconds=1),
+        )
+
+    assert result.state is FeasibilityState.UNKNOWN_UNPROVEN
+    assert "SELECTION_NOT_ACTIVE" in result.reasons
 
 
 def test_back_uses_available_to_back_not_available_to_lay() -> None:

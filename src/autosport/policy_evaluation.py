@@ -21,6 +21,7 @@ from .transparent_bandit_policy import BanditPolicyState
 
 _HEX = frozenset("0123456789abcdef")
 _CANONICAL_PAPER_ABSTENTION_ACTIONS = frozenset({"NO_BET", "WAIT"})
+_CANONICAL_PAPER_MATERIAL_ACTIONS = frozenset({"BET"})
 
 
 def _text(value: object, name: str) -> str:
@@ -28,6 +29,13 @@ def _text(value: object, name: str) -> str:
         raise ValueError(f"{name} must be canonical non-empty text")
     value.encode("utf-8", errors="strict")
     return value
+
+
+def _validated_abstain_action(value: object) -> str:
+    action = _text(value, "abstain_action")
+    if action in _CANONICAL_PAPER_MATERIAL_ACTIONS:
+        raise ValueError("abstain_action must not name a canonical material PAPER action")
+    return action
 
 
 def _sha256(value: object, name: str) -> str:
@@ -173,7 +181,7 @@ class PolicyEvaluationConfig:
         _sha256(self.feature_source_sha256, "feature_source_sha256")
         _sha256(self.reward_definition_sha256, "reward_definition_sha256")
         _sha256(self.cost_definition_sha256, "cost_definition_sha256")
-        _text(self.abstain_action, "abstain_action")
+        _validated_abstain_action(self.abstain_action)
         if self.counterfactual_authority is not None:
             if not isinstance(
                 self.counterfactual_authority, QualifiedCounterfactualAuthority
@@ -531,7 +539,7 @@ def _policy_metrics(
         downside_loss = max(Decimal(0), -worst_reward)
         max_drawdown = _max_drawdown(rewards)
         abstention_actions = _CANONICAL_PAPER_ABSTENTION_ACTIONS | frozenset(
-            {_text(abstain_action, "abstain_action")}
+            {_validated_abstain_action(abstain_action)}
         )
         abstentions = Decimal(
             sum(action in abstention_actions for action in actions)
@@ -575,7 +583,7 @@ def evaluate_policy_pair(
     challenger_actions = tuple(item.action_type for item in challenger.estimates)
     if predecessor_actions != challenger_actions:
         raise ValueError("paired policy evaluation requires identical action universe")
-    _text(abstain_action, "abstain_action")
+    abstain_action = _validated_abstain_action(abstain_action)
 
     ordered = _ordered_cases(cases)
     if counterfactual_authority is not None and not isinstance(

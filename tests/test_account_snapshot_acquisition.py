@@ -7,6 +7,7 @@ import sqlite3
 
 import pytest
 
+import autosport.account_snapshot_acquisition as acquisition_module
 import autosport.betfair_account_readonly as betfair_readonly
 from autosport.account_snapshot_acquisition import (
     AccountSnapshotAcquisitionError,
@@ -80,6 +81,15 @@ def _credentials() -> BetfairSessionCredentials:
 
 def _balance_capabilities() -> frozenset[BookmakerCapability]:
     return frozenset({BookmakerCapability.BALANCE_READ})
+
+
+def test_raw_acquisition_minting_seams_are_not_exposed() -> None:
+    assert not hasattr(BetfairAccountSnapshotAcquirer, "_read_provider_snapshot")
+    assert not hasattr(acquisition_module._AccountSnapshotStore, "record")
+    assert not hasattr(
+        acquisition_module,
+        "_install_account_snapshot_acquisition_authority",
+    )
 
 
 def test_product_owned_read_persists_restart_verifiable_receipt_without_secrets(

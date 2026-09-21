@@ -8,6 +8,7 @@ from pathlib import Path
 
 import pytest
 
+import autosport.forensic_session_journal as forensic_session_journal
 from autosport.forensic_session_journal import (
     REDACTED,
     ForensicSessionJournal,
@@ -298,6 +299,91 @@ def test_torn_tail_fails_closed_before_new_startup(tmp_path: Path) -> None:
         new_journal(tmp_path)
     assert journal.path.read_bytes() == before
 
+
+
+def test_durable_checkpoint_detects_complete_valid_tail_truncation(
+    tmp_path: Path,
+) -> None:
+    journal = new_journal(tmp_path)
+    journal.append_material("provider.connected", {"provider": "paper"})
+    journal.close({"reason": "clean"})
+
+    original = journal.path.read_text(encoding="utf-8").splitlines()
+    assert len(original) == 3
+    journal.path.write_text("\n".join(original[:-1]) + "\n", encoding="utf-8")
+
+    with pytest.raises(
+        JournalIntegrityError,
+        match="tail was truncated behind its durable checkpoint",
+    ):
+        verify_journal(journal.path)
+
+
+def test_nonempty_journal_without_durable_checkpoint_fails_closed(
+    tmp_path: Path,
+) -> None:
+    journal = new_journal(tmp_path)
+    journal.append_material("provider.connected", {"provider": "paper"})
+    journal.close()
+    journal.checkpoint_path.unlink()
+
+    with pytest.raises(
+        JournalIntegrityError,
+        match="missing its durable checkpoint",
+    ):
+        verify_journal(journal.path)
+
+
+def test_reopen_recovers_fsynced_tail_after_checkpoint_publication_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    journal = new_journal(tmp_path)
+    real_write_checkpoint = forensic_session_journal._write_checkpoint
+    failed = False
+
+    def fail_second_checkpoint(path: Path, record_count: int, digest: str) -> None:
+        nonlocal failed
+        if record_count == 2 and not failed:
+            failed = True
+            raise OSError("simulated checkpoint publication failure")
+        real_write_checkpoint(path, record_count, digest)
+
+    monkeypatch.setattr(
+        forensic_session_journal,
+        "_write_checkpoint",
+        fail_second_checkpoint,
+    )
+    with pytest.raises(JournalUncertainError, match="durability is uncertain"):
+        journal.append_material("provider.durable_before_checkpoint", {"attempt": 1})
+    assert failed
+
+    with pytest.raises(
+        JournalIntegrityError,
+        match="durable records beyond its checkpoint",
+    ):
+        verify_journal(journal.path)
+
+    monkeypatch.setattr(
+        forensic_session_journal,
+        "_write_checkpoint",
+        real_write_checkpoint,
+    )
+    reopened = ForensicSessionJournal(
+        journal.path,
+        clock=FakeClock(),
+        session_id=str(uuid.UUID(int=2)),
+    )
+    reopened.close({"reason": "recovered"})
+
+    records = verify_journal(journal.path)
+    assert any(
+        record.event_type == "provider.durable_before_checkpoint"
+        for record in records
+    )
+    checkpoint = json.loads(reopened.checkpoint_path.read_text(encoding="utf-8"))
+    assert checkpoint["record_count"] == len(records)
+    assert checkpoint["last_record_sha256"] == records[-1].sha256
 
 def test_malformed_utf8_fails_closed(tmp_path: Path) -> None:
     path = tmp_path / "forensic-session.jsonl"

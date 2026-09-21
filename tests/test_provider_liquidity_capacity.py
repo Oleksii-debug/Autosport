@@ -28,9 +28,9 @@ def _projection(
         depth = None
     return ProjectionIdentity(
         projection=projection,
-        depth=depth,
         virtualise=virtualise,
         rollup_settings=rollup_settings,
+        depth=depth,
     )
 
 
@@ -233,12 +233,33 @@ def test_duplicate_prices_are_rejected_to_prevent_double_counting() -> None:
 
 def test_projection_rejects_ambiguous_depth_and_duplicate_rollup_keys() -> None:
     with pytest.raises(ValueError, match="requires a positive integer depth"):
-        ProjectionIdentity(OfferProjection.EX_BEST_OFFERS, depth=None)
+        ProjectionIdentity(
+            OfferProjection.EX_BEST_OFFERS,
+            virtualise=False,
+            rollup_settings=(),
+            depth=None,
+        )
     with pytest.raises(ValueError, match="must not declare a bounded depth"):
-        ProjectionIdentity(OfferProjection.EX_ALL_OFFERS, depth=3)
+        ProjectionIdentity(
+            OfferProjection.EX_ALL_OFFERS,
+            virtualise=False,
+            rollup_settings=(),
+            depth=3,
+        )
     with pytest.raises(ValueError, match="duplicate rollup setting key"):
         ProjectionIdentity(
             OfferProjection.EX_BEST_OFFERS,
-            depth=3,
+            virtualise=False,
             rollup_settings=(("model", "STAKE"), ("model", "PAYOUT")),
+            depth=3,
+        )
+
+
+def test_projection_rejects_unknown_virtualise_semantics() -> None:
+    with pytest.raises(TypeError, match="virtualise must be bool"):
+        ProjectionIdentity(
+            OfferProjection.EX_BEST_OFFERS,
+            virtualise=None,  # type: ignore[arg-type]
+            rollup_settings=(),
+            depth=3,
         )

@@ -46,11 +46,17 @@ class IngestionContinuityTests(unittest.TestCase):
             source_ts="2026-09-21T08:00:00+00:00",
         )
 
-    def _runtime(self, tmp: str, *, resolver=None):
+    def _runtime(
+        self,
+        tmp: str,
+        *,
+        resolver=None,
+        clock_start: str = "2026-09-21T08:00:00+00:00",
+    ):
         market = SQLiteMarketStore(Path(tmp) / "market.db")
         health = SourceHealthStore(Path(tmp) / "source_health.json")
         bus = MarketEventBus(market)
-        start = datetime.fromisoformat("2026-09-21T08:00:00+00:00")
+        start = datetime.fromisoformat(clock_start)
         tick = 0
 
         def clock() -> str:
@@ -116,7 +122,11 @@ class IngestionContinuityTests(unittest.TestCase):
             self.assertEqual(second.continuity_status, "verified")
             market.close()
 
-            restarted, market2, _health2 = self._runtime(tmp, resolver=resolver)
+            restarted, market2, _health2 = self._runtime(
+                tmp,
+                resolver=resolver,
+                clock_start="2026-09-21T08:02:00+00:00",
+            )
             third = restarted.poll_once(
                 StaticProvider(
                     "source",

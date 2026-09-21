@@ -132,8 +132,10 @@ from . import _collector_retention_desktop_ack_authority as _collector_retention
 from . import _point_in_time_class_dispatch_seal as _point_in_time_class_dispatch_seal  # noqa: F401,E402
 
 # #708 consumes the already-durable #727 RUN_RESERVED decision origin. Reconcile
-# the provisional admission facade first, then closure-seal its authority reads.
+# the provisional admission facade first, derive one explicit versioned decision-time
+# learning Observation contract, then closure-seal every authority-bearing read.
 from . import _paper_campaign_admission_origin_convergence as _paper_campaign_admission_origin_convergence  # noqa: F401,E402
+from . import _paper_campaign_admission_preexecution_observation as _paper_campaign_admission_preexecution_observation  # noqa: F401,E402
 from . import _paper_campaign_admission_consumer_guard as _paper_campaign_admission_consumer_guard  # noqa: F401,E402
 # Extend that same executable seal through canonical PaperBook ticket resolution;
 # no new ticket/source authority is introduced here.

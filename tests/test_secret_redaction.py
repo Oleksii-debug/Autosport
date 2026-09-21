@@ -62,11 +62,23 @@ class SecretRedactionTests(unittest.TestCase):
         source = (
             "Authorization: Bearer alpha123 "
             "api_key=bravo456 "
-            "https://user:charlie789@example.test/?token=delta123"
+            "postgresql://user:charlie789@example.test/db?token=delta123"
         )
         once = redact_operator_text(source)
-        twice = redact_operator_text(once)
+        with mock.patch.dict(
+            os.environ,
+            {"AUTOSPORT_PARLAYAPI_KEY": "REDA"},
+            clear=False,
+        ):
+            twice = redact_operator_text(once)
         self.assertEqual(twice, once)
+
+    def test_quoted_authorization_value_is_fully_redacted(self) -> None:
+        source = 'Authorization: "Bearer quoted-secret-123" region=eu'
+        redacted = redact_operator_text(source)
+        self.assertNotIn("quoted-secret-123", redacted)
+        self.assertIn('Authorization: "' + REDACTED + '"', redacted)
+        self.assertIn("region=eu", redacted)
 
     def test_nested_sensitive_keys_are_redacted_without_hiding_normal_config(self) -> None:
         source = {

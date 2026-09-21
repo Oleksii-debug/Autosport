@@ -216,6 +216,8 @@ class BetfairClearedBetSettlementEvidence:
             raise BetfairClearedSettlementEvidenceError(
                 "terminal_rows must be a non-empty tuple"
             )
+        for row in self.terminal_rows:
+            _row_payload(row)
         if tuple(
             sorted(
                 self.terminal_rows,
@@ -227,7 +229,6 @@ class BetfairClearedBetSettlementEvidence:
             )
         seen_statuses: set[str] = set()
         for row in self.terminal_rows:
-            _row_payload(row)
             if row.bet_status in seen_statuses:
                 raise BetfairClearedSettlementEvidenceError(
                     "terminal evidence contains duplicate status rows"

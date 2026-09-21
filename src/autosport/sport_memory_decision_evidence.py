@@ -10,6 +10,7 @@ from .portfolio_plan import OpportunityEvidence
 from .sport_memory_runtime import (
     SportMemoryError,
     SportMemoryMatchupEvidence,
+    SportMemoryRuntime,
 )
 
 
@@ -39,6 +40,8 @@ def _digest(payload: object) -> str:
 def bind_sport_memory_to_opportunity_evidence(
     base: OpportunityEvidence,
     matchup: SportMemoryMatchupEvidence,
+    *,
+    runtime: SportMemoryRuntime,
 ) -> OpportunityEvidence:
     """Return normal OpportunityEvidence cryptographically bound to sport memory.
 
@@ -48,10 +51,9 @@ def bind_sport_memory_to_opportunity_evidence(
     """
     if not isinstance(base, OpportunityEvidence):
         raise TypeError("base must be OpportunityEvidence")
-    if type(matchup) is not SportMemoryMatchupEvidence:
-        raise TypeError("matchup must be SportMemoryMatchupEvidence")
-    if _digest(matchup.payload(include_id=False)) != matchup.matchup_id:
-        raise SportMemoryError("sport-memory matchup digest mismatch")
+    if not isinstance(runtime, SportMemoryRuntime):
+        raise TypeError("runtime must be SportMemoryRuntime")
+    matchup = runtime.verify_matchup_evidence(matchup)
 
     observed = _instant("base observed_at", base.observed_at)
     matchup_as_of = _instant("matchup as_of", matchup.as_of)

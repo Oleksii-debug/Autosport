@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Callable, Mapping, Sequence, TypeAlias
 
 from .integrity import atomic_write_json, durable_path_lock, ensure_durable_file
+from .json_integrity import strict_json_loads
 
 
 _SCHEMA_VERSION = 1
@@ -50,8 +51,9 @@ _SECRET_KEY_MARKERS = (
     "private_key",
 )
 _SECRET_ASSIGNMENT_RE = re.compile(
-    r"(?i)\b(password|passwd|secret|token|api[_-]?key|authorization|cookie)"
-    r"\s*([:=])\s*([^\s,;]+)"
+    r"(?i)\b(?:client[_-]?secret|access[_-]?token|refresh[_-]?token|"
+    r"private[_-]?key|credential|password|passwd|secret|token|"
+    r"api[_-]?key|authorization|cookie)\s*([:=])\s*([^\s,;]+)"
 )
 _BEARER_RE = re.compile(r"(?i)\bbearer\s+[A-Za-z0-9._~+/=-]+")
 _URI_CREDENTIAL_RE = re.compile(
@@ -68,7 +70,7 @@ class ForensicJournalError(RuntimeError):
 
 
 class ForensicJournalIntegrityError(ForensicJournalError):
-    """Raised when durable journal/checkpoint evidence is malformed or inconsistent."""
+    """Durable journal/checkpoint evidence is malformed or inconsistent."""
 
 
 class ForensicEventKind(str, Enum):
@@ -109,19 +111,6 @@ def _utc_now() -> datetime:
     return datetime.now(timezone.utc)
 
 
-def _reject_duplicate_json_keys(pairs: list[tuple[str, object]]) -> dict[str, object]:
-    result: dict[str, object] = {}
-    for key, value in pairs:
-        if key in result:
-            raise ForensicJournalIntegrityError(f"duplicate JSON object key: {key}")
-        result[key] = value
-    return result
-
-
-def _reject_nonfinite_json_constant(value: str) -> None:
-    raise ForensicJournalIntegrityError(f"non-finite JSON constant: {value}")
-
-
 def _is_sha256(value: object) -> bool:
     return (
         isinstance(value, str)
@@ -132,16 +121,15 @@ def _is_sha256(value: object) -> bool:
 
 def _canonical_json_bytes(payload: Mapping[str, object]) -> bytes:
     try:
-        text = json.dumps(
+        return json.dumps(
             payload,
             ensure_ascii=False,
             sort_keys=True,
             separators=(",", ":"),
             allow_nan=False,
-        )
+        ).encode("utf-8")
     except (TypeError, ValueError) as exc:
         raise ValueError("forensic journal payload must be canonical JSON") from exc
-    return text.encode("utf-8")
 
 
 def _record_digest(payload_without_digest: Mapping[str, object]) -> str:
@@ -158,7 +146,7 @@ def _canonical_timestamp(value: datetime) -> str:
     )
 
 
-def _require_nonempty_text(label: str, value: object, *, max_length: int = 256) -> str:
+def _require_text(label: str, value: object, *, max_length: int = 256) -> str:
     if not isinstance(value, str) or not value.strip():
         raise ValueError(f"{label} must be a non-empty string")
     if len(value) > max_length:
@@ -177,7 +165,8 @@ def _redact_text(value: str) -> str:
     value = _URI_CREDENTIAL_RE.sub(r"\1[REDACTED]:[REDACTED]@", value)
     value = _BEARER_RE.sub("Bearer [REDACTED]", value)
     return _SECRET_ASSIGNMENT_RE.sub(
-        lambda match: f"{match.group(1)}{match.group(2)}{_REDACTED}",
+        lambda match: f"{match.group(0)[:match.start(1)-match.start(0)]}"
+        f"{match.group(1)}{_REDACTED}",
         value,
     )
 
@@ -194,22 +183,15 @@ def _sanitize_json_value(value: object, *, secret_context: bool = False) -> Json
     if isinstance(value, str):
         return _redact_text(value)
     if isinstance(value, Mapping):
-        sanitized: dict[str, JsonValue] = {}
-        for raw_key, raw_value in value.items():
-            if not isinstance(raw_key, str) or not raw_key:
+        result: dict[str, JsonValue] = {}
+        for key, item in value.items():
+            if not isinstance(key, str) or not key:
                 raise ValueError("forensic journal detail keys must be non-empty strings")
-            if raw_key in sanitized:
-                raise ValueError(f"duplicate forensic journal detail key: {raw_key}")
-            sanitized[raw_key] = _sanitize_json_value(
-                raw_value,
-                secret_context=_is_secret_key(raw_key),
-            )
-        return sanitized
+            result[key] = _sanitize_json_value(item, secret_context=_is_secret_key(key))
+        return result
     if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
         return [_sanitize_json_value(item) for item in value]
-    raise TypeError(
-        "forensic journal details must contain only JSON-compatible values"
-    )
+    raise TypeError("forensic journal details must contain only JSON-compatible values")
 
 
 def _sanitize_details(details: Mapping[str, object] | None) -> dict[str, JsonValue]:
@@ -233,12 +215,7 @@ def _parse_timestamp(value: object) -> str:
         raise ForensicJournalIntegrityError(
             "forensic journal occurred_at is invalid"
         ) from exc
-    if parsed.utcoffset() != timezone.utc.utcoffset(parsed):
-        raise ForensicJournalIntegrityError(
-            "forensic journal occurred_at must be UTC"
-        )
-    canonical = _canonical_timestamp(parsed)
-    if canonical != value:
+    if _canonical_timestamp(parsed) != value:
         raise ForensicJournalIntegrityError(
             "forensic journal occurred_at is not canonical"
         )
@@ -256,28 +233,18 @@ def _assert_safe_regular_or_absent(path: Path, *, label: str) -> None:
         )
 
 
-def _decode_json_object(raw: str, *, label: str) -> dict[str, object]:
+def _decode_object(raw: str, *, label: str) -> dict[str, object]:
     try:
-        payload = json.loads(
-            raw,
-            object_pairs_hook=_reject_duplicate_json_keys,
-            parse_constant=_reject_nonfinite_json_constant,
-        )
-    except ForensicJournalIntegrityError:
-        raise
-    except (json.JSONDecodeError, TypeError, ValueError) as exc:
-        raise ForensicJournalIntegrityError(f"{label} is not valid JSON") from exc
+        payload = strict_json_loads(raw)
+    except (TypeError, ValueError) as exc:
+        raise ForensicJournalIntegrityError(f"{label} is not valid strict JSON") from exc
     if type(payload) is not dict:
         raise ForensicJournalIntegrityError(f"{label} must be a JSON object")
     return payload
 
 
 class ForensicSessionJournal:
-    """Append-only, secret-safe, hash-chained process/session activity evidence.
-
-    This journal is an observability/evidence boundary only. It does not replace
-    economic, decision, provider, settlement, run-registry, or execution truth.
-    """
+    """Append-only forensic activity evidence, separate from economic authorities."""
 
     def __init__(
         self,
@@ -288,10 +255,7 @@ class ForensicSessionJournal:
         self.path = Path(path)
         self.checkpoint_path = self.path.with_name(f"{self.path.name}.head.json")
         self._clock = clock
-        if self.path == self.checkpoint_path:
-            raise ValueError("journal and checkpoint paths must differ")
         self.path.parent.mkdir(parents=True, exist_ok=True)
-
         with durable_path_lock(self.path):
             _assert_safe_regular_or_absent(self.path, label="forensic journal")
             _assert_safe_regular_or_absent(
@@ -299,7 +263,7 @@ class ForensicSessionJournal:
             )
             ensure_durable_file(self.path)
             if not self.checkpoint_path.exists():
-                if self.path.stat().st_size != 0:
+                if self.path.stat().st_size:
                     raise ForensicJournalIntegrityError(
                         "non-empty forensic journal is missing its checkpoint"
                     )
@@ -310,11 +274,11 @@ class ForensicSessionJournal:
             self._load_state(recover_checkpoint=True)
 
     @staticmethod
-    def _checkpoint_payload(record_count: int, last_record_sha256: str) -> dict[str, object]:
+    def _checkpoint_payload(count: int, digest: str) -> dict[str, object]:
         return {
             "schema_version": _SCHEMA_VERSION,
-            "record_count": record_count,
-            "last_record_sha256": last_record_sha256,
+            "record_count": count,
+            "last_record_sha256": digest,
         }
 
     def _read_checkpoint(self) -> tuple[int, str]:
@@ -327,71 +291,56 @@ class ForensicSessionJournal:
             raise ForensicJournalIntegrityError(
                 "forensic journal checkpoint is unreadable"
             ) from exc
-        payload = _decode_json_object(raw, label="forensic journal checkpoint")
-        if set(payload) != _CHECKPOINT_KEYS:
+        payload = _decode_object(raw, label="forensic journal checkpoint")
+        if set(payload) != _CHECKPOINT_KEYS or payload.get("schema_version") != _SCHEMA_VERSION:
             raise ForensicJournalIntegrityError(
                 "forensic journal checkpoint schema is invalid"
             )
-        if payload.get("schema_version") != _SCHEMA_VERSION:
+        count = payload.get("record_count")
+        digest = payload.get("last_record_sha256")
+        if type(count) is not int or count < 0 or not _is_sha256(digest):
             raise ForensicJournalIntegrityError(
-                "unsupported forensic journal checkpoint schema"
+                "forensic journal checkpoint values are invalid"
             )
-        record_count = payload.get("record_count")
-        if type(record_count) is not int or record_count < 0:
+        if (count == 0) != (digest == _GENESIS_SHA256):
             raise ForensicJournalIntegrityError(
-                "forensic journal checkpoint record_count is invalid"
+                "forensic journal checkpoint genesis state is inconsistent"
             )
-        last_sha = payload.get("last_record_sha256")
-        if not _is_sha256(last_sha):
-            raise ForensicJournalIntegrityError(
-                "forensic journal checkpoint hash is invalid"
-            )
-        if record_count == 0 and last_sha != _GENESIS_SHA256:
-            raise ForensicJournalIntegrityError(
-                "empty forensic journal checkpoint must use genesis hash"
-            )
-        if record_count > 0 and last_sha == _GENESIS_SHA256:
-            raise ForensicJournalIntegrityError(
-                "non-empty forensic journal checkpoint cannot use genesis hash"
-            )
-        return record_count, last_sha
+        return count, digest
 
     def _read_records(self) -> list[ForensicJournalRecord]:
         _assert_safe_regular_or_absent(self.path, label="forensic journal")
         try:
-            raw_bytes = self.path.read_bytes()
+            raw = self.path.read_bytes()
         except OSError as exc:
             raise ForensicJournalIntegrityError("forensic journal is unreadable") from exc
-        if not raw_bytes:
+        if not raw:
             return []
-        if not raw_bytes.endswith(b"\n"):
+        if not raw.endswith(b"\n"):
             raise ForensicJournalIntegrityError(
                 "forensic journal has a truncated trailing record"
             )
         try:
-            raw_text = raw_bytes.decode("utf-8")
+            text = raw.decode("utf-8")
         except UnicodeDecodeError as exc:
             raise ForensicJournalIntegrityError(
                 "forensic journal must be UTF-8"
             ) from exc
 
         records: list[ForensicJournalRecord] = []
-        expected_previous = _GENESIS_SHA256
-        for expected_sequence, line in enumerate(raw_text.splitlines(), start=1):
+        previous = _GENESIS_SHA256
+        for sequence, line in enumerate(text.splitlines(), start=1):
             if not line:
                 raise ForensicJournalIntegrityError(
                     "forensic journal contains an empty record"
                 )
-            payload = _decode_json_object(
-                line, label=f"forensic journal record {expected_sequence}"
-            )
             record = self._validate_record(
-                payload,
-                expected_sequence=expected_sequence,
-                expected_previous=expected_previous,
+                _decode_object(line, label=f"forensic journal record {sequence}"),
+                expected_sequence=sequence,
+                expected_previous=previous,
             )
             records.append(record)
-            expected_previous = record.record_sha256
+            previous = record.record_sha256
         return records
 
     def _validate_record(
@@ -401,32 +350,30 @@ class ForensicSessionJournal:
         expected_sequence: int,
         expected_previous: str,
     ) -> ForensicJournalRecord:
-        if set(payload) != _RECORD_KEYS:
-            raise ForensicJournalIntegrityError("forensic journal record schema is invalid")
-        if payload.get("schema_version") != _SCHEMA_VERSION:
+        if (
+            set(payload) != _RECORD_KEYS
+            or payload.get("schema_version") != _SCHEMA_VERSION
+            or payload.get("sequence") != expected_sequence
+        ):
             raise ForensicJournalIntegrityError(
-                "unsupported forensic journal record schema"
-            )
-        if payload.get("sequence") != expected_sequence:
-            raise ForensicJournalIntegrityError(
-                "forensic journal sequence is not contiguous"
+                "forensic journal record schema/sequence is invalid"
             )
 
         occurred_at = _parse_timestamp(payload.get("occurred_at"))
-        source = payload.get("source")
-        event_name = payload.get("event_name")
         try:
-            source = _require_nonempty_text("source", source)
-            event_name = _require_nonempty_text("event_name", event_name)
+            source = _require_text("source", payload.get("source"))
+            event_name = _require_text("event_name", payload.get("event_name"))
         except ValueError as exc:
             raise ForensicJournalIntegrityError(str(exc)) from exc
+        if _redact_text(source) != source or _redact_text(event_name) != event_name:
+            raise ForensicJournalIntegrityError(
+                "forensic journal identity field contains secret material"
+            )
 
         try:
             kind = ForensicEventKind(payload.get("kind"))
         except (TypeError, ValueError) as exc:
-            raise ForensicJournalIntegrityError(
-                "forensic journal kind is invalid"
-            ) from exc
+            raise ForensicJournalIntegrityError("forensic journal kind is invalid") from exc
 
         raw_state = payload.get("heartbeat_state")
         if kind is ForensicEventKind.HEARTBEAT:
@@ -460,30 +407,24 @@ class ForensicSessionJournal:
                 "forensic journal details must be an object"
             )
         try:
-            sanitized_details = _sanitize_details(details)
+            if _sanitize_details(details) != details:
+                raise ForensicJournalIntegrityError(
+                    "forensic journal details contain unredacted secret material"
+                )
         except (TypeError, ValueError) as exc:
             raise ForensicJournalIntegrityError(
                 "forensic journal details are invalid"
             ) from exc
-        if sanitized_details != details:
-            raise ForensicJournalIntegrityError(
-                "forensic journal details contain unredacted secret material"
-            )
 
         previous = payload.get("previous_sha256")
-        if previous != expected_previous:
+        digest = payload.get("record_sha256")
+        if previous != expected_previous or not _is_sha256(digest):
             raise ForensicJournalIntegrityError(
                 "forensic journal hash chain is discontinuous"
             )
-        record_sha = payload.get("record_sha256")
-        if not _is_sha256(record_sha):
-            raise ForensicJournalIntegrityError(
-                "forensic journal record hash is invalid"
-            )
-        digest_payload = dict(payload)
-        del digest_payload["record_sha256"]
-        calculated = _record_digest(digest_payload)
-        if calculated != record_sha:
+        material = dict(payload)
+        del material["record_sha256"]
+        if _record_digest(material) != digest:
             raise ForensicJournalIntegrityError(
                 "forensic journal record digest mismatch"
             )
@@ -498,33 +439,32 @@ class ForensicSessionJournal:
             message=message,
             details=details,
             previous_sha256=previous,
-            record_sha256=record_sha,
+            record_sha256=digest,
         )
 
     def _load_state(
         self, *, recover_checkpoint: bool
     ) -> tuple[list[ForensicJournalRecord], ForensicJournalIntegrity]:
         records = self._read_records()
-        checkpoint_count, checkpoint_sha = self._read_checkpoint()
-        record_count = len(records)
-        last_sha = records[-1].record_sha256 if records else _GENESIS_SHA256
-
-        if checkpoint_count > record_count:
+        checkpoint_count, checkpoint_digest = self._read_checkpoint()
+        count = len(records)
+        digest = records[-1].record_sha256 if records else _GENESIS_SHA256
+        if checkpoint_count > count:
             raise ForensicJournalIntegrityError(
                 "forensic journal tail was truncated behind its durable checkpoint"
             )
-        if checkpoint_count == record_count:
-            if checkpoint_sha != last_sha:
+        if checkpoint_count == count:
+            if checkpoint_digest != digest:
                 raise ForensicJournalIntegrityError(
                     "forensic journal checkpoint does not match journal head"
                 )
         else:
-            expected_checkpoint_sha = (
+            prefix_digest = (
                 _GENESIS_SHA256
                 if checkpoint_count == 0
                 else records[checkpoint_count - 1].record_sha256
             )
-            if checkpoint_sha != expected_checkpoint_sha:
+            if checkpoint_digest != prefix_digest:
                 raise ForensicJournalIntegrityError(
                     "forensic journal checkpoint is not a valid journal prefix"
                 )
@@ -534,23 +474,17 @@ class ForensicSessionJournal:
                 )
             atomic_write_json(
                 self.checkpoint_path,
-                self._checkpoint_payload(record_count, last_sha),
+                self._checkpoint_payload(count, digest),
             )
-
-        return records, ForensicJournalIntegrity(
-            record_count=record_count,
-            last_record_sha256=last_sha,
-        )
+        return records, ForensicJournalIntegrity(count, digest)
 
     def verify(self) -> ForensicJournalIntegrity:
         with durable_path_lock(self.path):
-            _, integrity = self._load_state(recover_checkpoint=True)
-            return integrity
+            return self._load_state(recover_checkpoint=True)[1]
 
     def read_records(self) -> tuple[ForensicJournalRecord, ...]:
         with durable_path_lock(self.path):
-            records, _ = self._load_state(recover_checkpoint=True)
-            return tuple(records)
+            return tuple(self._load_state(recover_checkpoint=True)[0])
 
     def _append(
         self,
@@ -562,15 +496,15 @@ class ForensicSessionJournal:
         message: str | None,
         details: Mapping[str, object] | None,
     ) -> ForensicJournalRecord:
-        source = _require_nonempty_text("source", source)
-        event_name = _require_nonempty_text("event_name", event_name)
+        source = _require_text("source", source)
+        event_name = _require_text("event_name", event_name)
+        if _redact_text(source) != source or _redact_text(event_name) != event_name:
+            raise ValueError("source/event_name must not contain secret material")
         if message is not None:
             if not isinstance(message, str):
                 raise TypeError("message must be a string or None")
-            if len(message) > 4096:
-                raise ValueError("message is too long")
-            if "\x00" in message:
-                raise ValueError("message must not contain NUL")
+            if len(message) > 4096 or "\x00" in message:
+                raise ValueError("message is too long or contains NUL")
             message = _redact_text(message)
         sanitized_details = _sanitize_details(details)
         occurred_at = _canonical_timestamp(self._clock())
@@ -584,9 +518,7 @@ class ForensicSessionJournal:
         with durable_path_lock(self.path):
             records, _ = self._load_state(recover_checkpoint=True)
             sequence = len(records) + 1
-            previous_sha256 = (
-                records[-1].record_sha256 if records else _GENESIS_SHA256
-            )
+            previous = records[-1].record_sha256 if records else _GENESIS_SHA256
             payload: dict[str, object] = {
                 "schema_version": _SCHEMA_VERSION,
                 "sequence": sequence,
@@ -599,146 +531,114 @@ class ForensicSessionJournal:
                 "event_name": event_name,
                 "message": message,
                 "details": sanitized_details,
-                "previous_sha256": previous_sha256,
+                "previous_sha256": previous,
             }
-            record_sha256 = _record_digest(payload)
-            payload["record_sha256"] = record_sha256
-            line = _canonical_json_bytes(payload) + b"\n"
-
+            digest = _record_digest(payload)
+            payload["record_sha256"] = digest
             _assert_safe_regular_or_absent(self.path, label="forensic journal")
             try:
                 with self.path.open("ab") as handle:
-                    handle.write(line)
+                    handle.write(_canonical_json_bytes(payload) + b"\n")
                     handle.flush()
                     os.fsync(handle.fileno())
             except OSError as exc:
                 raise ForensicJournalError(
                     "failed to durably append forensic journal record"
                 ) from exc
-
             atomic_write_json(
                 self.checkpoint_path,
-                self._checkpoint_payload(sequence, record_sha256),
+                self._checkpoint_payload(sequence, digest),
             )
             return self._validate_record(
                 payload,
                 expected_sequence=sequence,
-                expected_previous=previous_sha256,
+                expected_previous=previous,
             )
 
     def record_startup(
-        self,
-        source: str,
-        *,
-        message: str | None = None,
-        details: Mapping[str, object] | None = None,
+        self, source: str, *, message: str | None = None,
+        details: Mapping[str, object] | None = None
     ) -> ForensicJournalRecord:
         return self._append(
-            kind=ForensicEventKind.STARTUP,
-            source=source,
-            event_name="startup",
-            heartbeat_state=None,
-            message=message,
-            details=details,
+            kind=ForensicEventKind.STARTUP, source=source, event_name="startup",
+            heartbeat_state=None, message=message, details=details
         )
 
     def record_shutdown(
-        self,
-        source: str,
-        *,
-        message: str | None = None,
-        details: Mapping[str, object] | None = None,
+        self, source: str, *, message: str | None = None,
+        details: Mapping[str, object] | None = None
     ) -> ForensicJournalRecord:
         return self._append(
-            kind=ForensicEventKind.SHUTDOWN,
-            source=source,
-            event_name="shutdown",
-            heartbeat_state=None,
-            message=message,
-            details=details,
+            kind=ForensicEventKind.SHUTDOWN, source=source, event_name="shutdown",
+            heartbeat_state=None, message=message, details=details
         )
 
     def record_crash(
-        self,
-        source: str,
-        *,
-        message: str | None = None,
-        details: Mapping[str, object] | None = None,
+        self, source: str, *, message: str | None = None,
+        details: Mapping[str, object] | None = None
     ) -> ForensicJournalRecord:
         return self._append(
-            kind=ForensicEventKind.CRASH,
-            source=source,
-            event_name="crash",
-            heartbeat_state=None,
-            message=message,
-            details=details,
+            kind=ForensicEventKind.CRASH, source=source, event_name="crash",
+            heartbeat_state=None, message=message, details=details
         )
 
     def record_material_event(
-        self,
-        source: str,
-        event_name: str,
-        *,
-        message: str | None = None,
-        details: Mapping[str, object] | None = None,
+        self, source: str, event_name: str, *, message: str | None = None,
+        details: Mapping[str, object] | None = None
     ) -> ForensicJournalRecord:
         return self._append(
-            kind=ForensicEventKind.MATERIAL_EVENT,
-            source=source,
-            event_name=event_name,
-            heartbeat_state=None,
-            message=message,
-            details=details,
+            kind=ForensicEventKind.MATERIAL_EVENT, source=source, event_name=event_name,
+            heartbeat_state=None, message=message, details=details
         )
 
     def record_heartbeat(
-        self,
-        source: str,
-        state: HeartbeatState,
-        *,
-        message: str | None = None,
-        details: Mapping[str, object] | None = None,
+        self, source: str, state: HeartbeatState, *, message: str | None = None,
+        details: Mapping[str, object] | None = None
     ) -> ForensicJournalRecord:
         if not isinstance(state, HeartbeatState):
             raise TypeError("state must be HeartbeatState")
         return self._append(
-            kind=ForensicEventKind.HEARTBEAT,
-            source=source,
-            event_name="heartbeat",
-            heartbeat_state=state,
-            message=message,
-            details=details,
+            kind=ForensicEventKind.HEARTBEAT, source=source, event_name="heartbeat",
+            heartbeat_state=state, message=message, details=details
         )
 
     def export(self, destination: str | Path) -> Path:
         destination = Path(destination)
-        if destination in {self.path, self.checkpoint_path}:
+        destination_key = destination.resolve(strict=False)
+        protected = {
+            self.path.resolve(strict=False),
+            self.checkpoint_path.resolve(strict=False),
+        }
+        if destination_key in protected:
             raise ValueError("export destination must differ from journal/checkpoint")
         with durable_path_lock(self.path):
             records, integrity = self._load_state(recover_checkpoint=True)
-            payload = {
-                "schema_version": _SCHEMA_VERSION,
-                "record_count": integrity.record_count,
-                "last_record_sha256": integrity.last_record_sha256,
-                "records": [
-                    {
-                        "sequence": record.sequence,
-                        "occurred_at": record.occurred_at,
-                        "kind": record.kind.value,
-                        "source": record.source,
-                        "heartbeat_state": (
-                            record.heartbeat_state.value
-                            if record.heartbeat_state is not None
-                            else None
-                        ),
-                        "event_name": record.event_name,
-                        "message": record.message,
-                        "details": record.details,
-                        "previous_sha256": record.previous_sha256,
-                        "record_sha256": record.record_sha256,
-                    }
-                    for record in records
-                ],
-            }
-            atomic_write_json(destination, payload)
+            atomic_write_json(
+                destination,
+                {
+                    "schema_version": _SCHEMA_VERSION,
+                    "record_count": integrity.record_count,
+                    "last_record_sha256": integrity.last_record_sha256,
+                    "records": [
+                        {
+                            "schema_version": _SCHEMA_VERSION,
+                            "sequence": record.sequence,
+                            "occurred_at": record.occurred_at,
+                            "kind": record.kind.value,
+                            "source": record.source,
+                            "heartbeat_state": (
+                                record.heartbeat_state.value
+                                if record.heartbeat_state is not None
+                                else None
+                            ),
+                            "event_name": record.event_name,
+                            "message": record.message,
+                            "details": record.details,
+                            "previous_sha256": record.previous_sha256,
+                            "record_sha256": record.record_sha256,
+                        }
+                        for record in records
+                    ],
+                },
+            )
         return destination

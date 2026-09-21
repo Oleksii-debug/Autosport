@@ -20,162 +20,215 @@ _AGENT_EVENT_SENTINEL = (
 _CALLSITE_EXECUTE_CODE_SENTINEL = (
     "_autosport_decision_origin_pristine_product_callsite_code"
 )
+_SEAL_MARKER = "autosport.paper_execution_decision_origin.resume_guard.seal.v1"
 
-if not hasattr(PaperExecutionLedger, _LOAD_SENTINEL):
-    setattr(PaperExecutionLedger, _LOAD_SENTINEL, _origin._ORIGINAL_LEDGER_LOAD)
-if not hasattr(PaperExecutionLedger, _EVENTS_SENTINEL):
-    setattr(PaperExecutionLedger, _EVENTS_SENTINEL, _origin._ORIGINAL_LEDGER_EVENTS)
-if not hasattr(PaperValueAgent, _AGENT_EVENT_SENTINEL):
-    setattr(PaperValueAgent, _AGENT_EVENT_SENTINEL, PaperValueAgent.on_market_event)
-if not hasattr(PaperExecutionAdoptionRuntime, _CALLSITE_EXECUTE_CODE_SENTINEL):
-    # This module is imported after the callsite guard. Freeze the first installed
-    # wrapper code once so later module reloads cannot redefine product authority.
-    if PaperExecutionAdoptionRuntime.execute is not _callsite_guard._execute_with_exact_product_callsite:
-        raise RuntimeError("decision-origin callsite guard was not installed canonically")
-    setattr(
-        PaperExecutionAdoptionRuntime,
-        _CALLSITE_EXECUTE_CODE_SENTINEL,
-        _callsite_guard._execute_with_exact_product_callsite.__code__,
+
+def _sealed_tuple_from_callable(candidate: object):
+    closure = getattr(candidate, "__closure__", None)
+    if not closure:
+        return None
+    for cell in closure:
+        try:
+            value = cell.cell_contents
+        except ValueError:
+            continue
+        if type(value) is tuple and len(value) == 4 and value[0] == _SEAL_MARKER:
+            return value
+    return None
+
+
+def _initial_seal():
+    return (
+        _SEAL_MARKER,
+        _origin._ORIGINAL_LEDGER_LOAD,
+        _origin._ORIGINAL_LEDGER_EVENTS,
+        PaperValueAgent.on_market_event,
     )
 
-_STABLE_LOAD_RUN = getattr(PaperExecutionLedger, _LOAD_SENTINEL)
-_STABLE_EVENTS = getattr(PaperExecutionLedger, _EVENTS_SENTINEL)
-_STABLE_PAPER_VALUE_ON_MARKET_EVENT = getattr(PaperValueAgent, _AGENT_EVENT_SENTINEL)
 
+def _build_guard(seal):
+    def stable_raw_events(
+        self: PaperExecutionLedger,
+        run_id: str | None = None,
+    ) -> tuple[dict[str, Any], ...]:
+        return seal[2](self, run_id)
 
-def _stable_raw_events(
-    self: PaperExecutionLedger,
-    run_id: str | None = None,
-) -> tuple[dict[str, Any], ...]:
-    return _STABLE_EVENTS(self, run_id)
+    def events_with_stable_origin_mask(
+        self: PaperExecutionLedger,
+        run_id: str | None = None,
+    ) -> tuple[dict[str, Any], ...]:
+        events = seal[2](self, run_id)
+        if not _origin._MASK_ORIGIN_FOR_LEGACY_LOAD.get():
+            return events
 
+        masked: list[dict[str, Any]] = []
+        for event in events:
+            if event.get("event_type") != "RUN_RESERVED":
+                masked.append(event)
+                continue
+            payload = event.get("payload")
+            if type(payload) is not dict or "decision_origin" not in payload:
+                masked.append(event)
+                continue
+            copy = dict(event)
+            copy_payload = dict(payload)
+            copy_payload.pop("decision_origin", None)
+            copy["payload"] = copy_payload
+            masked.append(copy)
+        return tuple(masked)
 
-def _events_with_stable_origin_mask(
-    self: PaperExecutionLedger,
-    run_id: str | None = None,
-) -> tuple[dict[str, Any], ...]:
-    events = _stable_raw_events(self, run_id)
-    if not _origin._MASK_ORIGIN_FOR_LEGACY_LOAD.get():
-        return events
-
-    masked: list[dict[str, Any]] = []
-    for event in events:
-        if event.get("event_type") != "RUN_RESERVED":
-            masked.append(event)
-            continue
-        payload = event.get("payload")
-        if type(payload) is not dict or "decision_origin" not in payload:
-            masked.append(event)
-            continue
-        copy = dict(event)
-        copy_payload = dict(payload)
-        copy_payload.pop("decision_origin", None)
-        copy["payload"] = copy_payload
-        masked.append(copy)
-    return tuple(masked)
-
-
-def _load_run_requiring_bound_origin(
-    self: PaperExecutionLedger,
-    *,
-    run_id: str,
-    trigger_id: str,
-    plan,
-    config,
-    started_at: str,
-    observation_evidence_ids,
-):
-    stored = _origin._reservation_origin_from_events(_stable_raw_events(self, run_id))
-    expected = _origin._DECISION_ORIGIN.get()
-    if stored is not None and (
-        stored.decision_id != trigger_id or stored.decision_id != plan.decision_id
+    def load_run_requiring_bound_origin(
+        self: PaperExecutionLedger,
+        *,
+        run_id: str,
+        trigger_id: str,
+        plan,
+        config,
+        started_at: str,
+        observation_evidence_ids,
     ):
-        raise _origin.PaperExecutionDecisionOriginError(
-            "durable decision origin conflicts with execution reservation identity"
-        )
-    if stored is not None and expected is None:
-        raise PaperExecutionStateError(
-            "origin-bound execution reservation requires verified decision origin on resume"
-        )
-    if expected is not None:
-        if stored is None:
-            raise PaperExecutionStateError(
-                "existing execution reservation lacks pre-execution decision origin"
+        stored = _origin._reservation_origin_from_events(seal[2](self, run_id))
+        expected = _origin._DECISION_ORIGIN.get()
+        if stored is not None and (
+            stored.decision_id != trigger_id or stored.decision_id != plan.decision_id
+        ):
+            raise _origin.PaperExecutionDecisionOriginError(
+                "durable decision origin conflicts with execution reservation identity"
             )
-        if stored != expected:
+        if stored is not None and expected is None:
             raise PaperExecutionStateError(
-                "execution decision origin changed across retry/restart"
+                "origin-bound execution reservation requires verified decision origin on resume"
             )
+        if expected is not None:
+            if stored is None:
+                raise PaperExecutionStateError(
+                    "existing execution reservation lacks pre-execution decision origin"
+                )
+            if stored != expected:
+                raise PaperExecutionStateError(
+                    "execution decision origin changed across retry/restart"
+                )
 
-    token = _origin._MASK_ORIGIN_FOR_LEGACY_LOAD.set(True)
-    try:
-        return _STABLE_LOAD_RUN(
-            self,
-            run_id=run_id,
-            trigger_id=trigger_id,
-            plan=plan,
-            config=config,
-            started_at=started_at,
-            observation_evidence_ids=observation_evidence_ids,
-        )
-    finally:
-        _origin._MASK_ORIGIN_FOR_LEGACY_LOAD.reset(token)
+        token = _origin._MASK_ORIGIN_FOR_LEGACY_LOAD.set(True)
+        try:
+            return seal[1](
+                self,
+                run_id=run_id,
+                trigger_id=trigger_id,
+                plan=plan,
+                config=config,
+                started_at=started_at,
+                observation_evidence_ids=observation_evidence_ids,
+            )
+        finally:
+            _origin._MASK_ORIGIN_FOR_LEGACY_LOAD.reset(token)
 
-
-def _reservation_decision_origin_stable(
-    self: PaperExecutionLedger,
-    run_id: str,
-):
-    if type(self) is not PaperExecutionLedger:
-        raise _origin.PaperExecutionDecisionOriginError(
-            "reservation origin requires exact PaperExecutionLedger authority"
-        )
-    return _origin._reservation_origin_from_events(_stable_raw_events(self, run_id))
-
-
-def _paper_value_on_market_event_with_durable_origin(
-    self: PaperValueAgent,
-    event,
-    context,
-) -> None:
-    if (
-        _origin._DECISION_ORIGIN.get() is not None
-        or _instance_guard._PRODUCT_ORIGIN_RUNTIME.get() is not None
+    def reservation_decision_origin_stable(
+        self: PaperExecutionLedger,
+        run_id: str,
     ):
-        raise _origin.PaperExecutionDecisionOriginError(
-            "caller-supplied decision-origin context cannot enter paper-value execution"
-        )
+        if type(self) is not PaperExecutionLedger:
+            raise _origin.PaperExecutionDecisionOriginError(
+                "reservation origin requires exact PaperExecutionLedger authority"
+            )
+        return _origin._reservation_origin_from_events(seal[2](self, run_id))
 
-    runtime = getattr(context, "paper_execution", None)
-    if runtime is None or event.quote_key in self._acted:
-        return _STABLE_PAPER_VALUE_ON_MARKET_EVENT(self, event, context)
-
-    ledger = getattr(context, "decision_ledger", None)
-    if type(ledger) is not JsonlDecisionLedger:
-        return _STABLE_PAPER_VALUE_ON_MARKET_EVENT(self, event, context)
-
-    decision_id = self._material_action_id(context, event)
-    record = _paper_value_authority._durable_record_for_call(
-        self,
+    def paper_value_on_market_event_with_durable_origin(
+        self: PaperValueAgent,
         event,
         context,
-        decision_id,
-    )
-    if record is None:
-        return _STABLE_PAPER_VALUE_ON_MARKET_EVENT(self, event, context)
+    ) -> None:
+        if (
+            _origin._DECISION_ORIGIN.get() is not None
+            or _instance_guard._PRODUCT_ORIGIN_RUNTIME.get() is not None
+        ):
+            raise _origin.PaperExecutionDecisionOriginError(
+                "caller-supplied decision-origin context cannot enter paper-value execution"
+            )
 
-    verified_origin = _instance_guard._verified_decision_origin_without_instance_dispatch(
-        ledger,
-        decision_id,
+        runtime = getattr(context, "paper_execution", None)
+        if runtime is None or event.quote_key in self._acted:
+            return seal[3](self, event, context)
+
+        ledger = getattr(context, "decision_ledger", None)
+        if type(ledger) is not JsonlDecisionLedger:
+            return seal[3](self, event, context)
+
+        decision_id = self._material_action_id(context, event)
+        record = _paper_value_authority._durable_record_for_call(
+            self,
+            event,
+            context,
+            decision_id,
+        )
+        if record is None:
+            return seal[3](self, event, context)
+
+        verified_origin = _instance_guard._verified_decision_origin_without_instance_dispatch(
+            ledger,
+            decision_id,
+        )
+        token = _origin._DECISION_ORIGIN.set(verified_origin)
+        try:
+            return seal[3](self, event, context)
+        finally:
+            _origin._DECISION_ORIGIN.reset(token)
+
+    return (
+        stable_raw_events,
+        events_with_stable_origin_mask,
+        load_run_requiring_bound_origin,
+        reservation_decision_origin_stable,
+        paper_value_on_market_event_with_durable_origin,
     )
-    token = _origin._DECISION_ORIGIN.set(verified_origin)
-    try:
-        return _STABLE_PAPER_VALUE_ON_MARKET_EVENT(self, event, context)
-    finally:
-        _origin._DECISION_ORIGIN.reset(token)
 
 
 def _install() -> None:
+    already_installed = bool(
+        getattr(PaperExecutionLedger, "_autosport_decision_origin_resume_guard", False)
+    )
+    seal = _sealed_tuple_from_callable(PaperExecutionLedger.events)
+    if already_installed and seal is None:
+        raise RuntimeError("decision-origin resume guard executable seal is unavailable")
+    if seal is None:
+        seal = _initial_seal()
+
+    if not hasattr(PaperExecutionAdoptionRuntime, _CALLSITE_EXECUTE_CODE_SENTINEL):
+        if PaperExecutionAdoptionRuntime.execute is not _callsite_guard._execute_with_exact_product_callsite:
+            raise RuntimeError("decision-origin callsite guard was not installed canonically")
+        setattr(
+            PaperExecutionAdoptionRuntime,
+            _CALLSITE_EXECUTE_CODE_SENTINEL,
+            _callsite_guard._execute_with_exact_product_callsite.__code__,
+        )
+
+    # Compatibility/debug mirrors only. Authority wrappers use the closure-held
+    # seal and reload restores these mirrors after deliberate tampering.
+    setattr(PaperExecutionLedger, _LOAD_SENTINEL, seal[1])
+    setattr(PaperExecutionLedger, _EVENTS_SENTINEL, seal[2])
+    setattr(PaperValueAgent, _AGENT_EVENT_SENTINEL, seal[3])
+
+    global _STABLE_LOAD_RUN
+    global _STABLE_EVENTS
+    global _STABLE_PAPER_VALUE_ON_MARKET_EVENT
+    global _stable_raw_events
+    global _events_with_stable_origin_mask
+    global _load_run_requiring_bound_origin
+    global _reservation_decision_origin_stable
+    global _paper_value_on_market_event_with_durable_origin
+    _STABLE_LOAD_RUN = seal[1]
+    _STABLE_EVENTS = seal[2]
+    _STABLE_PAPER_VALUE_ON_MARKET_EVENT = seal[3]
+    (
+        _stable_raw_events,
+        _events_with_stable_origin_mask,
+        _load_run_requiring_bound_origin,
+        _reservation_decision_origin_stable,
+        _paper_value_on_market_event_with_durable_origin,
+    ) = _build_guard(seal)
+
+    if already_installed:
+        return
     PaperExecutionLedger.events = _events_with_stable_origin_mask
     PaperExecutionLedger.load_run = _load_run_requiring_bound_origin
     PaperExecutionLedger.reservation_decision_origin = _reservation_decision_origin_stable

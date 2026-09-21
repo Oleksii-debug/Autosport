@@ -5,6 +5,7 @@ import inspect
 import pytest
 
 from autosport.external_validity_policy_issuance import (
+    IssuedPolicyEvaluationRef,
     ProductPolicyEvaluationIssuanceError,
     ProductPolicyEvaluationWorkspace,
     issue_product_policy_evaluation,
@@ -76,6 +77,7 @@ def test_workspace_authority_reopens_exact_bound_product_workspace(
     assert first == second
     assert first.workspace == workspace
     assert first.workspace_instance_id == workspace_id
+    assert len(first.workspace_locator_sha256) == 64
 
 
 def test_copied_or_fresh_workspace_cannot_reuse_canonical_instance_identity(
@@ -99,6 +101,49 @@ def test_copied_or_fresh_workspace_cannot_reuse_canonical_instance_identity(
         ProductPolicyEvaluationWorkspace.open(
             attacker,
             expected_workspace_instance_id=workspace_id,
+        )
+
+    # Even if another component deliberately registers a copied/moved path with
+    # the same durable instance id, locator identity keeps the two roots distinct.
+    authority_root = (tmp_path / "machine-authority").resolve()
+    attacker_binding = WorkspaceIdentityBinding.resolve(
+        workspace=attacker,
+        authority_root=authority_root,
+        requested_workspace_instance_id=workspace_id,
+    )
+    attacker_binding.ensure_bound()
+    canonical_authority = ProductPolicyEvaluationWorkspace.open(
+        canonical,
+        expected_workspace_instance_id=workspace_id,
+    )
+    attacker_authority = ProductPolicyEvaluationWorkspace.open(
+        attacker,
+        expected_workspace_instance_id=workspace_id,
+    )
+    assert (
+        canonical_authority.workspace_locator_sha256
+        != attacker_authority.workspace_locator_sha256
+    )
+
+    copied_reference = IssuedPolicyEvaluationRef(
+        issuance_id="a" * 64,
+        workspace_instance_id=workspace_id,
+        workspace_locator_sha256=canonical_authority.workspace_locator_sha256,
+        evaluation_bundle_id="external-validity-policy-result:" + "a" * 64,
+        evaluation_bundle_sha256="b" * 64,
+        result_artifact_sha256="c" * 64,
+        source_evaluation_bundle_id="source-evaluation",
+        source_evaluation_bundle_sha256="d" * 64,
+        policy_id="policy",
+    )
+    with pytest.raises(
+        ProductPolicyEvaluationIssuanceError,
+        match="belongs to another product workspace",
+    ):
+        resolve_product_policy_evaluation(
+            attacker_authority,
+            None,  # rejected on workspace identity before protocol parsing
+            copied_reference,
         )
 
 

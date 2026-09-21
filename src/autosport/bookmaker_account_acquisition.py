@@ -26,6 +26,7 @@ from .betfair_account_readonly import (
     ADAPTER_VERSION,
     BETTING_JSON_RPC_ENDPOINT,
     BetfairReadOnlyClient,
+    BetfairSessionCredentials,
 )
 from .bookmaker_capability import (
     BookmakerAccountSnapshot,
@@ -108,7 +109,9 @@ class BookmakerAccountAcquisitionReceipt:
 
     @property
     def source_authority_proven(self) -> bool:
-        return True
+        # A durable receipt is integrity/audit evidence, not remote-provider
+        # provenance. Positive origin is an ephemeral exact-object capability.
+        return False
 
     @property
     def allocation_authority_proven(self) -> bool:
@@ -157,7 +160,7 @@ class BookmakerAccountAcquisitionReceipt:
             )
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True, slots=True, weakref_slot=True)
 class AcquiredBookmakerAccountSnapshot:
     """Exact typed snapshot re-resolved from durable acquisition authority."""
 
@@ -177,7 +180,7 @@ class AcquiredBookmakerAccountSnapshot:
 
     @property
     def source_authority_proven(self) -> bool:
-        return True
+        return _is_bookmaker_account_acquisition_authoritative(self)
 
     @property
     def allocation_authority_proven(self) -> bool:
@@ -186,6 +189,26 @@ class AcquiredBookmakerAccountSnapshot:
     @property
     def atomicity_proven(self) -> bool:
         return False
+
+
+def assert_bookmaker_account_acquisition_authoritative(
+    acquired: AcquiredBookmakerAccountSnapshot,
+) -> None:
+    """Reject values that lack live provider-origin acquisition authority."""
+
+    raise BookmakerAccountAcquisitionError(
+        "bookmaker account acquisition has no live provider-origin authority"
+    )
+
+
+def _is_bookmaker_account_acquisition_authoritative(
+    acquired: AcquiredBookmakerAccountSnapshot,
+) -> bool:
+    try:
+        assert_bookmaker_account_acquisition_authoritative(acquired)
+    except BookmakerAccountAcquisitionError:
+        return False
+    return True
 
 
 class BookmakerAccountAcquisitionStore:
@@ -204,7 +227,7 @@ class BookmakerAccountAcquisitionStore:
     def path(self) -> Path:
         return self._path
 
-    def acquire_betfair(
+    def _acquire_betfair_unissued(
         self,
         client: BetfairReadOnlyClient,
         requested_capabilities: frozenset[BookmakerCapability],
@@ -1189,3 +1212,137 @@ def _sha256_hex(value: object, field: str) -> str:
             f"{field} must be a lowercase SHA-256 hex digest"
         )
     return text
+
+
+def _install_provider_origin_guard() -> None:
+    """Issue positive source authority only from the fixed production entrypoint.
+
+    This mirrors Autosport's existing complete-board trust-root model: local
+    durable bytes prove integrity and identity but cannot recreate remote origin
+    after process restart. Arbitrary in-process code injection/monkeypatching is
+    outside this application authority boundary.
+    """
+
+    from weakref import ref
+
+    issued: dict[
+        str,
+        tuple[object, str],
+    ] = {}
+    raw_acquire = BookmakerAccountAcquisitionStore._acquire_betfair_unissued
+
+    def fingerprint(acquired: AcquiredBookmakerAccountSnapshot) -> str:
+        return _digest(
+            {
+                "receipt_id": acquired.receipt.receipt_id,
+                "snapshot_payload_sha256": acquired.receipt.snapshot_payload_sha256,
+                "snapshot_semantic_sha256": acquired.receipt.snapshot_semantic_sha256,
+            }
+        )
+
+    def forget(receipt_id: str, reference: object) -> None:
+        current = issued.get(receipt_id)
+        if current is not None and current[0] is reference:
+            issued.pop(receipt_id, None)
+
+    def issue(
+        acquired: AcquiredBookmakerAccountSnapshot,
+    ) -> AcquiredBookmakerAccountSnapshot:
+        receipt_id = acquired.receipt.receipt_id
+        reference = ref(
+            acquired,
+            lambda current, receipt_id=receipt_id: forget(receipt_id, current),
+        )
+        issued[receipt_id] = (reference, fingerprint(acquired))
+        return acquired
+
+    def current_issued(
+        receipt_id: str,
+    ) -> AcquiredBookmakerAccountSnapshot | None:
+        current = issued.get(receipt_id)
+        if current is None:
+            return None
+        value = current[0]()
+        if value is None:
+            issued.pop(receipt_id, None)
+            return None
+        if (
+            type(value) is not AcquiredBookmakerAccountSnapshot
+            or current[1] != fingerprint(value)
+        ):
+            issued.pop(receipt_id, None)
+            return None
+        return value
+
+    def assert_authoritative(
+        acquired: AcquiredBookmakerAccountSnapshot,
+    ) -> None:
+        if type(acquired) is not AcquiredBookmakerAccountSnapshot:
+            raise BookmakerAccountAcquisitionError(
+                "provider-origin authority requires exact acquired snapshot evidence"
+            )
+        current = current_issued(acquired.receipt.receipt_id)
+        if current is not acquired:
+            raise BookmakerAccountAcquisitionError(
+                "account snapshot was not issued by live canonical provider acquisition"
+            )
+
+    def acquire_betfair(
+        self: BookmakerAccountAcquisitionStore,
+        credentials: BetfairSessionCredentials,
+        requested_capabilities: frozenset[BookmakerCapability],
+        *,
+        acquisition_id: str,
+        venue_id: str = "betfair",
+        account_id: str = "default-account",
+        timeout_seconds: float = 10.0,
+    ) -> AcquiredBookmakerAccountSnapshot:
+        if type(credentials) is not BetfairSessionCredentials:
+            raise BookmakerAccountAcquisitionError(
+                "credentials must be exact BetfairSessionCredentials"
+            )
+        capabilities = _validate_requested_capabilities(requested_capabilities)
+        acquisition = _exact_text(acquisition_id, "acquisition_id")
+
+        # Construct the canonical production client here. Consumers cannot inject
+        # an alternate transport into the authority-bearing acquisition entrypoint.
+        client = BetfairReadOnlyClient(
+            credentials,
+            timeout_seconds=timeout_seconds,
+            venue_id=venue_id,
+            account_id=account_id,
+        )
+        _assert_canonical_betfair_client(client)
+
+        existing = self._load_by_acquisition_id(acquisition)
+        if existing is not None:
+            _validate_retry_request(
+                existing,
+                client,
+                capabilities,
+                acquisition,
+            )
+            live = current_issued(existing.receipt.receipt_id)
+            if live is not None:
+                return live
+            raise BookmakerAccountAcquisitionError(
+                "durable acquisition cannot reissue provider-origin authority; "
+                "use a new acquisition_id to reacquire provider evidence"
+            )
+
+        acquired = raw_acquire(
+            self,
+            client,
+            capabilities,
+            acquisition_id=acquisition,
+        )
+        return issue(acquired)
+
+    globals()["assert_bookmaker_account_acquisition_authoritative"] = (
+        assert_authoritative
+    )
+    BookmakerAccountAcquisitionStore.acquire_betfair = acquire_betfair
+
+
+_install_provider_origin_guard()
+del _install_provider_origin_guard

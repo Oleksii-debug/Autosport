@@ -11,6 +11,10 @@ _SENSITIVE_NORMALIZED_KEYS = frozenset(
     {
         "apikey",
         "xapikey",
+        "applicationkey",
+        "authentication",
+        "xapplication",
+        "xauthentication",
         "token",
         "accesstoken",
         "refreshtoken",
@@ -31,6 +35,8 @@ _SENSITIVE_NORMALIZED_KEYS = frozenset(
 )
 _SENSITIVE_SUFFIXES = (
     "apikey",
+    "applicationkey",
+    "authentication",
     "accesstoken",
     "refreshtoken",
     "idtoken",
@@ -62,7 +68,7 @@ _BEARER_RE = re.compile(
     r"(?i)\b(?P<scheme>bearer)\s+(?P<value>[A-Za-z0-9._~+/=-]{4,})"
 )
 _KEY_VALUE_RE = re.compile(
-    r"(?i)(?P<prefix>(?P<key>[A-Za-z0-9_.-]+)\s*[:=]\s*)"
+    r"(?i)(?P<prefix>(?P<quote>[\"']?)(?P<key>[A-Za-z0-9_.-]+)(?P=quote)\s*[:=]\s*)"
     r"(?P<value>\[REDACTED\]|\"[^\"\r\n]*\"|'[^'\r\n]*'|[^\s,;&}\]]+)"
 )
 

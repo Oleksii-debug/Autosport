@@ -58,6 +58,49 @@ def test_interactive_gui_fails_before_gui_import_when_workspace_is_unwritable(
     assert captured == {"workspace": workspace, "error": error}
 
 
+@pytest.mark.parametrize(
+    ("operation", "detail"),
+    (
+        ("fsync", "fsync unavailable"),
+        ("replace", "atomic replace denied"),
+    ),
+)
+def test_canonical_publish_capability_failure_blocks_gui_and_cleans_probes(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    operation: str,
+    detail: str,
+) -> None:
+    workspace = tmp_path / "durable publish workspace"
+    monkeypatch.setenv("AUTOSPORT_WORKSPACE", str(workspace))
+    failure = OSError(detail)
+
+    def fail_operation(*_args: object) -> None:
+        raise failure
+
+    captured: dict[str, object] = {}
+
+    def capture_error(candidate: Path, observed: OSError) -> None:
+        captured["workspace"] = candidate
+        captured["error"] = observed
+
+    def forbidden_gui_main() -> int:
+        raise AssertionError("GUI must not open when durable publish capability fails")
+
+    monkeypatch.setattr(windows_entry.os, operation, fail_operation)
+    monkeypatch.setattr(windows_entry, "_show_workspace_access_error", capture_error)
+    monkeypatch.setitem(
+        sys.modules,
+        "autosport.windows_gui",
+        SimpleNamespace(main=forbidden_gui_main),
+    )
+
+    assert windows_entry._run_interactive_gui() == 2
+    assert captured == {"workspace": workspace, "error": failure}
+    assert workspace.is_dir()
+    assert list(workspace.iterdir()) == []
+
+
 def test_workspace_access_error_is_actionable_and_single_line(tmp_path: Path) -> None:
     workspace = tmp_path / "робоча папка"
     error = PermissionError("access denied\nsecondary detail")

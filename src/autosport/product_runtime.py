@@ -382,10 +382,10 @@ class AutonomousProductRuntime:
         try:
             self.collector.resume()
             self.coordinator.resume()
+            return self._coherent_status()
         except BaseException as primary_error:
             self._compensate_failed_start(primary_error)
             raise
-        return self._coherent_status()
 
     def pause(self) -> ContinuousSessionStatus:
         self._coherent_status()

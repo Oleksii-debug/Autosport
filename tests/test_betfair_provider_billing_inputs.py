@@ -92,9 +92,9 @@ class _Transport:
                     {
                         "refId": "billing-ref-1",
                         "itemDate": "2026-09-20T09:00:00Z",
-                        "amount": "-499.00",
-                        "balance": "1501.00",
-                        "itemClass": "ACCOUNT_DEBIT",
+                        "amount": -499,
+                        "balance": 1501,
+                        "itemClass": "UNKNOWN",
                         "itemClassData": {"source": "provider"},
                     }
                 ],
@@ -109,7 +109,9 @@ class _Transport:
 
 
 def _client(
-    *, application_key: str = "live-key-123"
+    *,
+    application_key: str = "live-key-123",
+    account_id: str = "account-A",
 ) -> tuple[BetfairReadOnlyClient, _Transport]:
     transport = _Transport(application_key)
     client = BetfairReadOnlyClient(
@@ -117,12 +119,12 @@ def _client(
         transport=transport,
         clock=_Clock(),
         venue_id="betfair",
-        account_id="account-A",
+        account_id=account_id,
     )
     return client, transport
 
 
-def test_captures_exact_entitlement_and_statement_without_minting_cost() -> None:
+def test_captures_exact_entitlement_statement_and_request_scope_without_cost() -> None:
     client, transport = _client()
 
     observation = read_betfair_provider_billing_inputs(
@@ -132,7 +134,7 @@ def test_captures_exact_entitlement_and_statement_without_minting_cost() -> None
     )
 
     assert type(observation) is BetfairProviderBillingInputsObservation
-    assert observation.entitlement.account_id == "account-A"
+    assert observation.entitlement.venue_id == "betfair"
     assert observation.entitlement.active is True
     assert observation.entitlement.delay_data is False
     assert observation.entitlement.vendor_id == "vendor-3"
@@ -140,8 +142,13 @@ def test_captures_exact_entitlement_and_statement_without_minting_cost() -> None
         b"live-key-123"
     ).hexdigest()
     assert observation.statement.currency_code == "GBP"
-    assert observation.statement.items[0].amount == Decimal("-499.00")
-    assert observation.statement.items[0].item_class == "ACCOUNT_DEBIT"
+    assert observation.statement.statement_from == "2026-09-01T00:00:00Z"
+    assert observation.statement.statement_to == "2026-09-21T00:00:00Z"
+    assert len(observation.statement.request_scope_sha256) == 64
+    assert observation.statement.items[0].amount == Decimal("-499")
+    assert observation.statement.items[0].item_class == "UNKNOWN"
+    assert not hasattr(observation.entitlement, "account_id")
+    assert not hasattr(observation.statement, "account_id")
     assert not hasattr(observation, "cost_class")
     assert not hasattr(observation, "allocated_amount")
 
@@ -161,6 +168,135 @@ def test_captures_exact_entitlement_and_statement_without_minting_cost() -> None
             "to": "2026-09-21T00:00:00Z",
         },
     }
+
+
+def test_caller_account_label_cannot_become_authenticated_billing_identity() -> None:
+    first_client, _ = _client(account_id="account-A")
+    second_client, _ = _client(account_id="account-B")
+
+    first = read_betfair_provider_billing_inputs(first_client)
+    second = read_betfair_provider_billing_inputs(second_client)
+
+    assert not hasattr(first.entitlement, "account_id")
+    assert not hasattr(first.statement, "account_id")
+    assert not hasattr(second.entitlement, "account_id")
+    assert not hasattr(second.statement, "account_id")
+    assert first.evidence_sha256 == second.evidence_sha256
+
+
+def test_same_provider_response_under_different_statement_window_has_new_identity() -> None:
+    first_client, _ = _client()
+    second_client, _ = _client()
+
+    first = read_betfair_provider_billing_inputs(
+        first_client,
+        statement_from="2026-09-01T00:00:00Z",
+        statement_to="2026-09-10T00:00:00Z",
+    )
+    second = read_betfair_provider_billing_inputs(
+        second_client,
+        statement_from="2026-09-11T00:00:00Z",
+        statement_to="2026-09-21T00:00:00Z",
+    )
+
+    assert first.statement.items == second.statement.items
+    assert first.statement.evidence == second.statement.evidence
+    assert (
+        first.statement.request_scope_sha256
+        != second.statement.request_scope_sha256
+    )
+    assert first.evidence_sha256 != second.evidence_sha256
+
+
+def test_same_rows_with_different_page_coordinates_have_new_identity() -> None:
+    first_client, _ = _client()
+    second_client, _ = _client()
+
+    first = read_betfair_provider_billing_inputs(
+        first_client,
+        from_record=0,
+        record_count=10,
+    )
+    second = read_betfair_provider_billing_inputs(
+        second_client,
+        from_record=100,
+        record_count=10,
+    )
+
+    assert first.statement.items == second.statement.items
+    assert first.statement.evidence == second.statement.evidence
+    assert first.evidence_sha256 != second.evidence_sha256
+
+
+def test_more_available_is_bound_to_top_level_evidence_identity() -> None:
+    complete_client, complete_transport = _client()
+    partial_client, partial_transport = _client()
+    partial_post = partial_transport.post
+
+    def post(
+        url: str,
+        *,
+        headers: dict[str, str],
+        body: bytes,
+        timeout_seconds: float,
+    ) -> bytes:
+        payload = partial_post(
+            url,
+            headers=headers,
+            body=body,
+            timeout_seconds=timeout_seconds,
+        )
+        request = json.loads(body)
+        if request["method"] != "AccountAPING/v1.0/getAccountStatement":
+            return payload
+        envelope = json.loads(payload)
+        envelope["result"]["moreAvailable"] = True
+        return json.dumps(envelope, separators=(",", ":")).encode("utf-8")
+
+    partial_transport.post = post  # type: ignore[method-assign]
+    complete = read_betfair_provider_billing_inputs(complete_client)
+    partial = read_betfair_provider_billing_inputs(partial_client)
+
+    assert complete.statement.more_available is False
+    assert partial.statement.more_available is True
+    assert complete_transport.calls[2]["request"] == partial_transport.calls[2]["request"]
+    assert complete.evidence_sha256 != partial.evidence_sha256
+
+
+def test_rejects_statement_response_larger_than_requested_page() -> None:
+    client, transport = _client()
+    original_post = transport.post
+
+    def post(
+        url: str,
+        *,
+        headers: dict[str, str],
+        body: bytes,
+        timeout_seconds: float,
+    ) -> bytes:
+        payload = original_post(
+            url,
+            headers=headers,
+            body=body,
+            timeout_seconds=timeout_seconds,
+        )
+        request = json.loads(body)
+        if request["method"] != "AccountAPING/v1.0/getAccountStatement":
+            return payload
+        envelope = json.loads(payload)
+        row = envelope["result"]["accountStatement"][0]
+        envelope["result"]["accountStatement"] = [
+            row,
+            {**row, "refId": "billing-ref-2"},
+        ]
+        return json.dumps(envelope, separators=(",", ":")).encode("utf-8")
+
+    transport.post = post  # type: ignore[method-assign]
+    with pytest.raises(
+        BetfairReadOnlyError,
+        match="exceeds requested record_count",
+    ):
+        read_betfair_provider_billing_inputs(client, record_count=1)
 
 
 def test_missing_statement_rows_are_preserved_as_absence_not_zero() -> None:
@@ -209,7 +345,7 @@ def test_missing_statement_rows_are_preserved_as_absence_not_zero() -> None:
     assert not hasattr(observation.statement, "known_zero")
 
 
-def test_rejects_wrong_or_ambiguous_authenticated_application_key() -> None:
+def test_rejects_wrong_authenticated_application_key() -> None:
     client, transport = _client(application_key="missing-key")
     transport.application_key = "different-key"
 
@@ -239,7 +375,7 @@ def test_rejects_provider_rpc_error_without_exposing_provider_message() -> None:
                     "id": request["id"],
                     "error": {
                         "code": -32099,
-                        "message": "secret provider detail",
+                        "message": "secret provider detail session-secret",
                     },
                 }
             ).encode("utf-8")
@@ -254,6 +390,7 @@ def test_rejects_provider_rpc_error_without_exposing_provider_message() -> None:
     with pytest.raises(BetfairReadOnlyError) as exc_info:
         read_betfair_provider_billing_inputs(client)
     assert "secret provider detail" not in str(exc_info.value)
+    assert "session-secret" not in str(exc_info.value)
 
 
 def test_rejects_polymorphic_client_and_instance_shadowed_authority() -> None:
@@ -274,6 +411,93 @@ def test_rejects_polymorphic_client_and_instance_shadowed_authority() -> None:
 
     client._rpc = lambda *_args, **_kwargs: None  # type: ignore[method-assign]
     with pytest.raises(BetfairReadOnlyError, match="instance-shadowed"):
+        read_betfair_provider_billing_inputs(client)
+
+
+def test_rejects_bool_response_id_that_compares_equal_to_integer() -> None:
+    client, transport = _client()
+    original_post = transport.post
+
+    def post(
+        url: str,
+        *,
+        headers: dict[str, str],
+        body: bytes,
+        timeout_seconds: float,
+    ) -> bytes:
+        request = json.loads(body)
+        if request["method"] == "AccountAPING/v1.0/getAccountDetails":
+            return b'{"jsonrpc":"2.0","id":true,"result":{"currencyCode":"GBP"}}'
+        return original_post(
+            url,
+            headers=headers,
+            body=body,
+            timeout_seconds=timeout_seconds,
+        )
+
+    transport.post = post  # type: ignore[method-assign]
+    with pytest.raises(BetfairReadOnlyError, match="id does not match"):
+        read_betfair_provider_billing_inputs(client)
+
+
+def test_rejects_duplicate_provider_json_object_key() -> None:
+    client, transport = _client()
+    original_post = transport.post
+
+    def post(
+        url: str,
+        *,
+        headers: dict[str, str],
+        body: bytes,
+        timeout_seconds: float,
+    ) -> bytes:
+        request = json.loads(body)
+        if request["method"] == "AccountAPING/v1.0/getAccountDetails":
+            return (
+                b'{"jsonrpc":"2.0","id":1,'
+                b'"result":{"currencyCode":"GBP"},"result":{}}'
+            )
+        return original_post(
+            url,
+            headers=headers,
+            body=body,
+            timeout_seconds=timeout_seconds,
+        )
+
+    transport.post = post  # type: ignore[method-assign]
+    with pytest.raises(BetfairReadOnlyError, match="duplicate object key"):
+        read_betfair_provider_billing_inputs(client)
+
+
+def test_rejects_string_money_instead_of_provider_json_number() -> None:
+    client, transport = _client()
+    original_post = transport.post
+
+    def post(
+        url: str,
+        *,
+        headers: dict[str, str],
+        body: bytes,
+        timeout_seconds: float,
+    ) -> bytes:
+        payload = original_post(
+            url,
+            headers=headers,
+            body=body,
+            timeout_seconds=timeout_seconds,
+        )
+        request = json.loads(body)
+        if request["method"] != "AccountAPING/v1.0/getAccountStatement":
+            return payload
+        envelope = json.loads(payload)
+        envelope["result"]["accountStatement"][0]["amount"] = "-499.00"
+        return json.dumps(envelope, separators=(",", ":")).encode("utf-8")
+
+    transport.post = post  # type: ignore[method-assign]
+    with pytest.raises(
+        BetfairReadOnlyError,
+        match="amount must be a JSON number decoded without binary float",
+    ):
         read_betfair_provider_billing_inputs(client)
 
 

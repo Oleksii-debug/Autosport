@@ -554,6 +554,50 @@ class PersistentLiveDecisionLoopTests(unittest.TestCase):
             )
             resumed.close()
 
+    def test_committed_restart_binds_progress_health_horizon_to_ledger(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            decision_time = self.START + timedelta(seconds=1)
+            first = self._provider_loop(
+                workspace,
+                provider=InMemoryProvider(
+                    "provider-a",
+                    [self._provider_quote()],
+                ),
+                factory=_EmptyIntentFactory(),
+                clock=_ManualClock(decision_time),
+            )
+            self._register_provider_input(first)
+            self.assertEqual(first.run_cycle().status, LiveCycleStatus.DECIDED)
+            first.close()
+
+            verified = self._provider_loop(
+                workspace,
+                provider=InMemoryProvider("provider-a", []),
+                factory=_EmptyIntentFactory(),
+                clock=_ManualClock(decision_time),
+            )
+            verified.close()
+
+            progress_path = workspace / PersistentLiveDecisionLoop.PROGRESS_FILE_NAME
+            tampered = json.loads(progress_path.read_text(encoding="utf-8"))
+            tampered["provider_health_boundaries"][0]["transition_order"] += 1
+            progress_path.write_text(
+                json.dumps(tampered, sort_keys=True, separators=(",", ":")),
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(
+                DecisionLedgerIntegrityError,
+                "provider health evidence conflicts",
+            ):
+                self._provider_loop(
+                    workspace,
+                    provider=InMemoryProvider("provider-a", []),
+                    factory=_EmptyIntentFactory(),
+                    clock=_ManualClock(decision_time),
+                )
+
     def test_constructor_requires_durable_registered_intent_provenance(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             workspace = Path(directory)

@@ -48,6 +48,7 @@ class BetfairAccountFundsPrecheck:
     adapter_version: str
     required_liability: Decimal
     available_to_bet_balance: Decimal
+    currency_code: str
     account_observed_at: datetime
     funds_observed_at: datetime
     evaluated_at: datetime
@@ -73,6 +74,7 @@ class BetfairAccountFundsPrecheck:
         _nonnegative_decimal(
             self.available_to_bet_balance, "available_to_bet_balance"
         )
+        _currency_code(self.currency_code, "currency_code")
         for label, value in (
             ("account_observed_at", self.account_observed_at),
             ("funds_observed_at", self.funds_observed_at),
@@ -113,6 +115,7 @@ class BetfairAccountFundsPrecheck:
             "available_to_bet_balance": _decimal_text(
                 self.available_to_bet_balance
             ),
+            "currency_code": self.currency_code,
             "account_observed_at": _datetime_text(self.account_observed_at),
             "funds_observed_at": _datetime_text(self.funds_observed_at),
             "evaluated_at": _datetime_text(self.evaluated_at),
@@ -154,6 +157,7 @@ def evaluate_betfair_account_funds(
     credentials: BetfairSessionCredentials,
     required_liability: Decimal,
     *,
+    required_currency_code: str,
     timeout_seconds: float = 10.0,
 ) -> BetfairAccountFundsPrecheck:
     """Acquire current provider evidence and issue one process-local precheck result."""
@@ -161,6 +165,9 @@ def evaluate_betfair_account_funds(
     if type(credentials) is not BetfairSessionCredentials:
         raise TypeError("credentials must be BetfairSessionCredentials")
     _nonnegative_decimal(required_liability, "required_liability")
+    required_currency_code = _currency_code(
+        required_currency_code, "required_currency_code"
+    )
 
     client = BetfairReadOnlyClient(
         credentials,
@@ -183,6 +190,13 @@ def evaluate_betfair_account_funds(
         raise BetfairAccountFundsPrecheckError(
             "account-funds acquisition returned non-canonical evidence"
         )
+    account_currency_code = _currency_code(
+        details.currency_code, "account currency_code"
+    )
+    if required_currency_code != account_currency_code:
+        raise BetfairAccountFundsPrecheckError(
+            "required liability currency does not match Betfair account currency"
+        )
 
     evaluated_at = _utc_now()
     account_observed_at = _parse_provider_time(
@@ -200,6 +214,7 @@ def evaluate_betfair_account_funds(
         adapter_version=ADAPTER_VERSION,
         required_liability=required_liability,
         available_to_bet_balance=funds.available_to_bet_balance,
+        currency_code=account_currency_code,
         account_observed_at=account_observed_at,
         funds_observed_at=funds_observed_at,
         evaluated_at=evaluated_at,
@@ -268,6 +283,20 @@ def _nonnegative_decimal(value: Decimal, field: str) -> Decimal:
     if not isinstance(value, Decimal) or not value.is_finite() or value < 0:
         raise BetfairAccountFundsPrecheckError(
             f"{field} must be a finite non-negative Decimal"
+        )
+    return value
+
+
+def _currency_code(value: str, field: str) -> str:
+    if (
+        not isinstance(value, str)
+        or len(value) != 3
+        or not value.isascii()
+        or not value.isalpha()
+        or value != value.upper()
+    ):
+        raise BetfairAccountFundsPrecheckError(
+            f"{field} must be a three-letter uppercase currency code"
         )
     return value
 

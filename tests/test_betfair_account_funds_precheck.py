@@ -57,11 +57,13 @@ def install_client(monkeypatch, *, balance=Decimal("100"), details_at=NOW, funds
 def test_happy_path_issues_process_local_authority(monkeypatch):
     install_client(monkeypatch, balance=Decimal("100"))
     result = subject.evaluate_betfair_account_funds(
-        BetfairSessionCredentials("app", "token"), Decimal("25")
+        BetfairSessionCredentials("app", "token"), Decimal("25"),
+        required_currency_code="EUR",
     )
     assert result.passed is True
     assert result.execution_authorized is False
     assert result.account_id == f"betfair-account-evidence:{DETAILS_SHA}"
+    assert result.currency_code == "EUR"
     assert result.account_funds_sha256 == FUNDS_SHA
     assert subject.is_authoritative_funds_precheck(result) is True
     assert subject.require_authoritative_funds_precheck(result) is result
@@ -70,11 +72,13 @@ def test_happy_path_issues_process_local_authority(monkeypatch):
 def test_equal_balance_passes_and_one_cent_over_fails(monkeypatch):
     install_client(monkeypatch, balance=Decimal("25.00"))
     equal = subject.evaluate_betfair_account_funds(
-        BetfairSessionCredentials("app", "token"), Decimal("25.00")
+        BetfairSessionCredentials("app", "token"), Decimal("25.00"),
+        required_currency_code="EUR",
     )
     assert equal.passed is True
     over = subject.evaluate_betfair_account_funds(
-        BetfairSessionCredentials("app", "token"), Decimal("25.01")
+        BetfairSessionCredentials("app", "token"), Decimal("25.01"),
+        required_currency_code="EUR",
     )
     assert over.passed is False
     assert subject.is_authoritative_funds_precheck(over) is True
@@ -89,7 +93,8 @@ def test_invalid_required_liability_fails_before_provider_read(monkeypatch, bad)
     monkeypatch.setattr(subject, "BetfairReadOnlyClient", ForbiddenClient)
     with pytest.raises(subject.BetfairAccountFundsPrecheckError):
         subject.evaluate_betfair_account_funds(
-            BetfairSessionCredentials("app", "token"), bad
+            BetfairSessionCredentials("app", "token"), bad,
+            required_currency_code="EUR",
         )
 
 
@@ -97,7 +102,8 @@ def test_negative_provider_available_balance_fails_closed(monkeypatch):
     install_client(monkeypatch, balance=Decimal("-0.01"))
     with pytest.raises(subject.BetfairAccountFundsPrecheckError):
         subject.evaluate_betfair_account_funds(
-            BetfairSessionCredentials("app", "token"), Decimal("0")
+            BetfairSessionCredentials("app", "token"), Decimal("0"),
+            required_currency_code="EUR",
         )
 
 
@@ -108,12 +114,14 @@ def test_stale_and_future_funds_evidence_fail_closed(monkeypatch):
     )
     with pytest.raises(subject.BetfairAccountFundsPrecheckError, match="stale"):
         subject.evaluate_betfair_account_funds(
-            BetfairSessionCredentials("app", "token"), Decimal("1")
+            BetfairSessionCredentials("app", "token"), Decimal("1"),
+            required_currency_code="EUR",
         )
     install_client(monkeypatch, funds_at=NOW + timedelta(seconds=2))
     with pytest.raises(subject.BetfairAccountFundsPrecheckError, match="future-dated"):
         subject.evaluate_betfair_account_funds(
-            BetfairSessionCredentials("app", "token"), Decimal("1")
+            BetfairSessionCredentials("app", "token"), Decimal("1"),
+            required_currency_code="EUR",
         )
 
 
@@ -128,14 +136,16 @@ def test_provider_failure_maps_to_precheck_error(monkeypatch):
     monkeypatch.setattr(subject, "BetfairReadOnlyClient", FailingClient)
     with pytest.raises(subject.BetfairAccountFundsPrecheckError, match="acquisition failed"):
         subject.evaluate_betfair_account_funds(
-            BetfairSessionCredentials("app", "token"), Decimal("1")
+            BetfairSessionCredentials("app", "token"), Decimal("1"),
+            required_currency_code="EUR",
         )
 
 
 def test_caller_constructed_replace_and_pickle_objects_lack_authority(monkeypatch):
     install_client(monkeypatch)
     issued = subject.evaluate_betfair_account_funds(
-        BetfairSessionCredentials("app", "token"), Decimal("25")
+        BetfairSessionCredentials("app", "token"), Decimal("25"),
+        required_currency_code="EUR",
     )
     forged = subject.BetfairAccountFundsPrecheck(
         venue_id=issued.venue_id,
@@ -144,6 +154,7 @@ def test_caller_constructed_replace_and_pickle_objects_lack_authority(monkeypatc
         adapter_version=issued.adapter_version,
         required_liability=issued.required_liability,
         available_to_bet_balance=issued.available_to_bet_balance,
+        currency_code=issued.currency_code,
         account_observed_at=issued.account_observed_at,
         funds_observed_at=issued.funds_observed_at,
         evaluated_at=issued.evaluated_at,
@@ -162,10 +173,12 @@ def test_caller_constructed_replace_and_pickle_objects_lack_authority(monkeypatc
 def test_digest_changes_with_economic_inputs(monkeypatch):
     install_client(monkeypatch)
     a = subject.evaluate_betfair_account_funds(
-        BetfairSessionCredentials("app", "token"), Decimal("10")
+        BetfairSessionCredentials("app", "token"), Decimal("10"),
+        required_currency_code="EUR",
     )
     b = subject.evaluate_betfair_account_funds(
-        BetfairSessionCredentials("app", "token"), Decimal("11")
+        BetfairSessionCredentials("app", "token"), Decimal("11"),
+        required_currency_code="EUR",
     )
     assert a.precheck_id != b.precheck_id
 
@@ -185,7 +198,8 @@ def test_issued_authority_expires_at_use_time(monkeypatch):
     now = [NOW]
     monkeypatch.setattr(subject, "_utc_now", lambda: now[0])
     result = subject.evaluate_betfair_account_funds(
-        BetfairSessionCredentials("app", "token"), Decimal("25")
+        BetfairSessionCredentials("app", "token"), Decimal("25"),
+        required_currency_code="EUR",
     )
     assert result.passed is True
     assert subject.require_authoritative_funds_precheck(result) is result
@@ -200,7 +214,8 @@ def test_issued_authority_expires_at_use_time(monkeypatch):
 def test_inplace_liability_mutation_cannot_upgrade_authority(monkeypatch):
     install_client(monkeypatch, balance=Decimal("100"))
     result = subject.evaluate_betfair_account_funds(
-        BetfairSessionCredentials("app", "token"), Decimal("125")
+        BetfairSessionCredentials("app", "token"), Decimal("125"),
+        required_currency_code="EUR",
     )
     assert result.passed is False
     assert subject.is_authoritative_funds_precheck(result) is True
@@ -230,7 +245,8 @@ def test_inplace_economic_or_evidence_mutation_revokes_authority(
 ):
     install_client(monkeypatch)
     result = subject.evaluate_betfair_account_funds(
-        BetfairSessionCredentials("app", "token"), Decimal("25")
+        BetfairSessionCredentials("app", "token"), Decimal("25"),
+        required_currency_code="EUR",
     )
     assert subject.is_authoritative_funds_precheck(result) is True
 
@@ -239,3 +255,47 @@ def test_inplace_economic_or_evidence_mutation_revokes_authority(
     assert subject.is_authoritative_funds_precheck(result) is False
     with pytest.raises(subject.BetfairAccountFundsPrecheckError, match="authority"):
         subject.require_authoritative_funds_precheck(result)
+
+
+def test_currency_mismatch_fails_closed_before_issuing_authority(monkeypatch):
+    install_client(monkeypatch, balance=Decimal("100"))
+
+    with pytest.raises(
+        subject.BetfairAccountFundsPrecheckError,
+        match="currency",
+    ):
+        subject.evaluate_betfair_account_funds(
+            BetfairSessionCredentials("app", "token"),
+            Decimal("25"),
+            required_currency_code="USD",
+        )
+
+
+@pytest.mark.parametrize("bad_currency", ["", "eur", "EURO", "€UR", " EU"])
+def test_invalid_required_currency_fails_before_provider_read(monkeypatch, bad_currency):
+    class ForbiddenClient:
+        def __init__(self, *args, **kwargs):
+            raise AssertionError("provider must not be read")
+
+    monkeypatch.setattr(subject, "BetfairReadOnlyClient", ForbiddenClient)
+    with pytest.raises(subject.BetfairAccountFundsPrecheckError, match="currency"):
+        subject.evaluate_betfair_account_funds(
+            BetfairSessionCredentials("app", "token"),
+            Decimal("1"),
+            required_currency_code=bad_currency,
+        )
+
+
+def test_currency_is_bound_into_precheck_identity(monkeypatch):
+    install_client(monkeypatch, balance=Decimal("100"))
+    result = subject.evaluate_betfair_account_funds(
+        BetfairSessionCredentials("app", "token"),
+        Decimal("25"),
+        required_currency_code="EUR",
+    )
+    original_id = result.precheck_id
+
+    object.__setattr__(result, "currency_code", "USD")
+
+    assert result.precheck_id != original_id
+    assert subject.is_authoritative_funds_precheck(result) is False

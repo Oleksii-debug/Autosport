@@ -179,12 +179,16 @@ class ProviderCapabilityEvidenceRef:
     evidence_ref: str
     evidence_sha256: str
     observed_at: str
+    profile_id: str
+    integration_evidence_id: str
 
     def __post_init__(self) -> None:
         _text(self.kind, "kind")
         _text(self.evidence_ref, "evidence_ref")
         _sha256(self.evidence_sha256, "evidence_sha256")
         _timestamp(self.observed_at, "observed_at")
+        _sha256(self.profile_id, "profile_id")
+        _sha256(self.integration_evidence_id, "integration_evidence_id")
 
     @property
     def evidence_id(self) -> str:
@@ -195,8 +199,10 @@ class ProviderCapabilityEvidenceRef:
         return {
             "evidence_ref": self.evidence_ref,
             "evidence_sha256": self.evidence_sha256,
+            "integration_evidence_id": self.integration_evidence_id,
             "kind": self.kind,
             "observed_at": self.observed_at,
+            "profile_id": self.profile_id,
         }
 
 
@@ -342,10 +348,14 @@ class ProviderCapabilityManifest:
         if type(self.schema_version) is not int or self.schema_version != 1:
             raise ProviderCapabilityManifestError("schema_version must be exactly 1")
 
-        self._validate_facts(observed_at)
+        self._validate_facts(integration_at, observed_at)
         self._validate_dependencies()
 
-    def _validate_facts(self, observed_at: datetime) -> None:
+    def _validate_facts(
+        self,
+        integration_at: datetime,
+        observed_at: datetime,
+    ) -> None:
         if type(self.facts) is not tuple:
             raise ProviderCapabilityManifestError("facts must be an exact tuple")
         if any(type(fact) is not ProviderCapabilityManifestFact for fact in self.facts):
@@ -386,13 +396,30 @@ class ProviderCapabilityManifest:
                         f"{fact.capability.value} conclusive state requires explicit evidence"
                     )
 
-            if fact.evidence is not None and _timestamp(
-                fact.evidence.observed_at,
-                "fact.evidence.observed_at",
-            ) > observed_at:
-                raise ProviderCapabilityManifestError(
-                    f"{fact.capability.value} evidence cannot postdate manifest"
+            if fact.evidence is not None:
+                evidence_at = _timestamp(
+                    fact.evidence.observed_at,
+                    "fact.evidence.observed_at",
                 )
+                if evidence_at < integration_at:
+                    raise ProviderCapabilityManifestError(
+                        f"{fact.capability.value} evidence cannot predate integration evidence"
+                    )
+                if evidence_at > observed_at:
+                    raise ProviderCapabilityManifestError(
+                        f"{fact.capability.value} evidence cannot postdate manifest"
+                    )
+                if fact.evidence.profile_id != self.profile.profile_id:
+                    raise ProviderCapabilityManifestError(
+                        f"{fact.capability.value} evidence does not bind exact profile"
+                    )
+                if (
+                    fact.evidence.integration_evidence_id
+                    != self.integration.evidence_id
+                ):
+                    raise ProviderCapabilityManifestError(
+                        f"{fact.capability.value} evidence does not bind exact integration"
+                    )
 
     def _validate_dependencies(self) -> None:
         quote_read = (

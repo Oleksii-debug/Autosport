@@ -10,6 +10,7 @@ remain explicit in every result.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime
 from decimal import Decimal
 from hashlib import sha256
 import json
@@ -53,6 +54,7 @@ def _build_capability():
     hash_ctor = sha256
     decimal_cls = Decimal
     sha_pattern = re.compile(r"^[0-9a-f]{64}$")
+    parse_datetime = datetime.fromisoformat
     missing_authorities = _MISSING_AUTHORITIES
 
     def required_text(value: object, field: str) -> str:
@@ -72,6 +74,20 @@ def _build_capability():
         if sha_pattern.fullmatch(text) is None:
             raise error_cls(
                 f"{field} must be lowercase SHA-256"
+            )
+        return text
+
+    def iso_timestamp(value: object, field: str) -> str:
+        text = required_text(value, field)
+        try:
+            parsed = parse_datetime(text.replace("Z", "+00:00"))
+        except ValueError as exc:
+            raise error_cls(
+                f"{field} must be timezone-aware ISO-8601"
+            ) from exc
+        if parsed.tzinfo is None or parsed.utcoffset() is None:
+            raise error_cls(
+                f"{field} must be timezone-aware ISO-8601"
             )
         return text
 
@@ -141,7 +157,7 @@ def _build_capability():
                 raise error_cls(
                     "currency_code must be canonical three-letter uppercase ASCII"
                 )
-            required_text(self.source_observed_at, "source_observed_at")
+            iso_timestamp(self.source_observed_at, "source_observed_at")
             sha256_hex(self.source_evidence_sha256, "source_evidence_sha256")
             sha256_hex(
                 self.statement_request_scope_sha256,
@@ -156,7 +172,7 @@ def _build_capability():
                     "statement_more_available must be bool"
                 )
             required_text(self.row_ref_id, "row_ref_id")
-            required_text(self.row_item_date, "row_item_date")
+            iso_timestamp(self.row_item_date, "row_item_date")
             required_text(self.row_item_class, "row_item_class")
             sha256_hex(
                 self.row_item_class_data_sha256,

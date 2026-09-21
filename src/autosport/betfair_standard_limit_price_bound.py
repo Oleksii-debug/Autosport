@@ -30,7 +30,7 @@ from .betfair_supervised_execution import (
     WRITE_ADAPTER_VERSION,
 )
 from .real_execution_ledger import ExecutionAction, ExecutionPlan
-from .supervised_execution import BoundSupervisedExecutionPlan
+from .supervised_execution import BoundSupervisedExecutionPlan, SupervisedExecutionError
 
 
 _SCHEMA_VERSION = 1
@@ -520,12 +520,18 @@ def resolve_betfair_standard_limit_price_bound(
             "bound execution authority method shadow is not allowed"
         )
 
-    BoundSupervisedExecutionPlan.verify_binding(bound)
+    try:
+        BoundSupervisedExecutionPlan.verify_binding(bound)
+    except SupervisedExecutionError as exc:
+        raise BetfairStandardLimitPriceBoundError(str(exc)) from exc
     if type(bound.execution_plan) is not ExecutionPlan:
         raise BetfairStandardLimitPriceBoundError(
             "bound execution_plan must be the exact canonical ExecutionPlan type"
         )
-    action = BoundSupervisedExecutionPlan.action_for(bound, action_id)
+    try:
+        action = BoundSupervisedExecutionPlan.action_for(bound, action_id)
+    except SupervisedExecutionError as exc:
+        raise BetfairStandardLimitPriceBoundError(str(exc)) from exc
     if type(action) is not ExecutionAction:
         raise BetfairStandardLimitPriceBoundError(
             "bound plan returned a non-canonical ExecutionAction"

@@ -2,10 +2,14 @@ from __future__ import annotations
 
 import os
 import unittest
+from contextlib import redirect_stdout
+from io import StringIO
 from unittest import mock
 
 from autosport.dataset_worker import _safe_worker_error
+from autosport import historical_acquisition
 from autosport.diagnostic import _render_exception
+from autosport.live_observation import OneShotObservationWorker
 from autosport.replay_worker import _terminal_error
 from autosport.secret_redaction import (
     REDACTED,
@@ -108,6 +112,71 @@ class SecretRedactionTests(unittest.TestCase):
                 self.assertNotIn(secret, rendered)
                 self.assertIn("RuntimeError:", rendered)
                 self.assertIn("market=winner", rendered)
+
+    def test_live_worker_terminal_error_uses_redaction_boundary(self) -> None:
+        secret = "live-secret-654"
+        worker = OneShotObservationWorker()
+
+        with mock.patch.dict(
+            os.environ,
+            {"AUTOSPORT_PARLAYAPI_KEY": secret},
+            clear=False,
+        ):
+            self.assertTrue(
+                worker.start(
+                    lambda: (_ for _ in ()).throw(
+                        RuntimeError("Authorization: Bearer " + secret)
+                    )
+                )
+            )
+            thread = worker._thread
+            self.assertIsNotNone(thread)
+            thread.join(timeout=2.0)
+            self.assertFalse(thread.is_alive())
+            message = worker.poll()
+
+        self.assertIsNotNone(message)
+        self.assertIsNone(message.result)
+        self.assertNotIn(secret, message.error)
+        self.assertIn("RuntimeError:", message.error)
+        self.assertIn("Authorization: " + REDACTED, message.error)
+
+    def test_historical_cli_redacts_failure_detail_without_changing_exit_contract(self) -> None:
+        secret = "historical-secret-321"
+        output = StringIO()
+        argv = [
+            "--at",
+            "2026-09-12T10:03:00Z",
+            "--results-date",
+            "2026-09-10",
+        ]
+
+        with (
+            mock.patch.dict(
+                os.environ,
+                {"AUTOSPORT_PARLAYAPI_KEY": secret},
+                clear=False,
+            ),
+            mock.patch.object(
+                historical_acquisition,
+                "ParlayApiTableTennisProvider",
+                return_value=object(),
+            ),
+            mock.patch.object(
+                historical_acquisition,
+                "capture_historical_acquisition_bundle",
+                side_effect=ValueError("password=" + secret + " region=us"),
+            ),
+            redirect_stdout(output),
+        ):
+            result = historical_acquisition.main(argv)
+
+        rendered = output.getvalue()
+        self.assertEqual(result, 3)
+        self.assertNotIn(secret, rendered)
+        self.assertIn("historical_acquisition=FAIL_CLOSED", rendered)
+        self.assertIn("password=" + REDACTED, rendered)
+        self.assertIn("region=us", rendered)
 
     def test_hostile_exception_string_still_terminalizes_without_secret(self) -> None:
         class HostileRenderedString(str):

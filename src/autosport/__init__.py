@@ -126,3 +126,7 @@ from . import _point_in_time_class_dispatch_seal as _point_in_time_class_dispatc
 # journals. Seal the registry prefix observed at look registration so a later write
 # can never retroactively authorize an already-durable promotion record.
 from . import _trial_family_cross_ledger_witness as _trial_family_cross_ledger_witness  # noqa: F401,E402
+
+# Replay must recognize the cross-ledger witness kind, but callers must not mint that
+# authority through the legacy generic trial-event append seam.
+from . import _trial_family_witness_mint_guard as _trial_family_witness_mint_guard  # noqa: F401,E402

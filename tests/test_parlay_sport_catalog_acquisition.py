@@ -357,6 +357,83 @@ class ParlaySportCatalogAcquisitionTests(unittest.TestCase):
 
         self.assertFalse(captured["opener"].second_hop_attempted)
 
+    def test_default_transport_with_injected_clock_cannot_mint_positive_origin(self):
+        product_transport = RecordingTransport([response(body=b"[]")])
+        with mock.patch.object(
+            acquisition_module,
+            "_default_transport",
+            side_effect=product_transport,
+        ):
+            result = acquire_parlay_sport_catalog(
+                timeout_seconds=3.5,
+                max_response_bytes=1024,
+                clock=lambda: "2020-01-01T00:00:00+00:00",
+            )
+
+        self.assertEqual(result.status_code, 200)
+        self.assertFalse(result.provider_origin_verified)
+
+    def test_default_transport_and_product_clock_can_mint_positive_200_origin(self):
+        product_transport = RecordingTransport([response(body=b"[]")])
+        with mock.patch.object(
+            acquisition_module,
+            "_default_transport",
+            side_effect=product_transport,
+        ):
+            result = acquire_parlay_sport_catalog(
+                timeout_seconds=3.5,
+                max_response_bytes=1024,
+            )
+
+        self.assertEqual(result.status_code, 200)
+        self.assertTrue(result.provider_origin_verified)
+
+    def test_genuine_304_cannot_transfer_positive_origin_from_caller_prior(self):
+        prior = acquire_parlay_sport_catalog(
+            transport=RecordingTransport(
+                [response(body=b'[{"key":"forged"}]', etag='"v1"')]
+            ),
+            timeout_seconds=3.5,
+            max_response_bytes=1024,
+            clock=lambda: "2020-01-01T00:00:00+00:00",
+        )
+        object.__setattr__(prior, "provider_origin_verified", True)
+        object.__setattr__(
+            prior,
+            "acquisition_id",
+            acquisition_module._acquisition_id(
+                acquired_at=prior.acquired_at,
+                status_code=200,
+                final_url=prior.final_url,
+                etag=prior.etag,
+                raw_body_sha256=prior.raw_body_sha256,
+                prior_acquisition_id=None,
+                provider_origin_verified=True,
+            ),
+        )
+
+        product_transport = RecordingTransport(
+            [response(status=304, body=b"", etag='"v1"')]
+        )
+        with mock.patch.object(
+            acquisition_module,
+            "_default_transport",
+            side_effect=product_transport,
+        ):
+            result = acquire_parlay_sport_catalog(
+                prior=prior,
+                timeout_seconds=3.5,
+                max_response_bytes=1024,
+            )
+
+        self.assertTrue(result.is_not_modified)
+        self.assertFalse(result.provider_origin_verified)
+        self.assertEqual(result.prior_acquisition_id, prior.acquisition_id)
+        self.assertEqual(
+            product_transport.calls[0]["headers"]["If-None-Match"],
+            '"v1"',
+        )
+
     def test_prior_must_be_exact_200_body_acquisition(self):
         fake_304 = ParlaySportCatalogAcquisition(
             acquired_at=NOW,

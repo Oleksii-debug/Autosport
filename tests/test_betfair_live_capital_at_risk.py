@@ -261,14 +261,39 @@ def test_partial_ack_matched_stake_does_not_understate_live_capital_at_risk(tmp_
     )
 
     truth.assert_authoritative()
-    assert truth.status is BetfairLiveCapitalAtRiskStatus.EXACT_CURRENT_ORDER
+    assert truth.status is BetfairLiveCapitalAtRiskStatus.EXACT_CURRENT_STAKE_ONLY
     assert truth.matched_stake == Decimal("4")
     assert truth.unmatched_stake == Decimal("6")
-    assert truth.exact_capital_at_risk == Decimal("10")
-    assert truth.exact_capital_at_risk > Decimal("4")
+    assert truth.exact_live_stake == Decimal("10")
+    assert truth.exact_live_stake > Decimal("4")
+    assert truth.exact_capital_at_risk is None
+    assert truth.capital_at_risk_authority is False
     assert truth.execution_authority is False
     assert truth.settlement_authority is False
     assert truth.risk_release_authority is False
+
+
+def test_exact_current_stake_does_not_mint_capital_risk_without_market_type(tmp_path):
+    bound = _bound()
+    ledger, provider_ref = _ledger(tmp_path, bound)
+    readback = _readback(
+        provider_ref,
+        current_rows=[_current_row(provider_ref)],
+    )
+
+    truth = resolve_betfair_live_capital_at_risk(
+        bound,
+        ledger,
+        attempt_id="attempt-1",
+        readback=readback,
+    )
+
+    truth.assert_authoritative()
+    assert truth.status is BetfairLiveCapitalAtRiskStatus.EXACT_CURRENT_STAKE_ONLY
+    assert truth.exact_live_stake == Decimal("10")
+    assert truth.exact_capital_at_risk is None
+    assert truth.capital_at_risk_authority is False
+    assert "market betting-type" in truth.reason
 
 
 def test_caller_copied_readback_cannot_mint_live_risk_authority(tmp_path):
@@ -408,8 +433,10 @@ def test_exact_sum_ignores_hostile_ambient_decimal_precision(tmp_path):
     finally:
         getcontext().prec = old_precision
 
-    assert truth.status is BetfairLiveCapitalAtRiskStatus.EXACT_CURRENT_ORDER
-    assert truth.exact_capital_at_risk == Decimal("10.000")
+    assert truth.status is BetfairLiveCapitalAtRiskStatus.EXACT_CURRENT_STAKE_ONLY
+    assert truth.exact_live_stake == Decimal("10.000")
+    assert truth.exact_capital_at_risk is None
+    assert truth.capital_at_risk_authority is False
 
 
 def test_resolver_output_itself_cannot_be_caller_minted(tmp_path):

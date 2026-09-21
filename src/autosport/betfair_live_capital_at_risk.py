@@ -1,17 +1,22 @@
 from __future__ import annotations
 
-"""Fail-closed Betfair live capital-at-risk projection.
+"""Fail-closed Betfair live-risk binding for durable supervised attempts.
 
-A positive result is point-in-time reserve truth for one durable standard-BACK
-supervised attempt.  It is derived only from the attempt's durable provider order
-reference plus a canonical ``BetfairExecutionReadbackEnvelope``.
+The current Betfair write seam persists ``accepted_stake=sizeMatched``.  That
+matched-only value is not the full live provider stake while ``sizeRemaining``
+may still be executable.  This module binds a durable supervised attempt and
+provider order reference to one canonical ``BetfairExecutionReadbackEnvelope``
+and can prove the exact *current provider stake* as the context-independent sum
+``sizeMatched + sizeRemaining``.
 
-The Betfair write seam persists ``accepted_stake=sizeMatched``.  That matched-only
-value is not total live exposure while an unmatched remainder may still be live.
-For the supported current-order shape this authority therefore uses the exact,
-context-independent sum ``sizeMatched + sizeRemaining``.  Missing, cleared,
-ambiguous, contradictory, unsupported, or non-authoritative evidence stays
-UNKNOWN and cannot release risk.
+It deliberately does **not** turn that stake into exact capital-at-risk.  The
+current readback/bound-plan evidence does not carry authoritative Betfair market
+betting type / liability semantics.  In particular, an EACH_WAY BACK reserve can
+differ from an ordinary standard-BACK stake reserve.  Until a canonical
+liability authority (for example the separate order-liability lineage) is bound,
+``exact_capital_at_risk`` remains None and ``capital_at_risk_authority`` remains
+False.  Missing, cleared, ambiguous, contradictory, unsupported, or
+non-authoritative evidence stays UNKNOWN and can never release risk.
 """
 
 from dataclasses import dataclass
@@ -37,7 +42,7 @@ class BetfairLiveCapitalAtRiskError(RuntimeError):
 
 
 class BetfairLiveCapitalAtRiskStatus(StrEnum):
-    EXACT_CURRENT_ORDER = "EXACT_CURRENT_ORDER"
+    EXACT_CURRENT_STAKE_ONLY = "EXACT_CURRENT_STAKE_ONLY"
     UNKNOWN = "UNKNOWN"
 
 
@@ -56,7 +61,9 @@ class BetfairLiveCapitalAtRiskTruth:
     ledger_event_count: int | None
     matched_stake: Decimal | None
     unmatched_stake: Decimal | None
+    exact_live_stake: Decimal | None
     exact_capital_at_risk: Decimal | None
+    capital_at_risk_authority: bool
     execution_authority: bool
     settlement_authority: bool
     risk_release_authority: bool
@@ -76,19 +83,25 @@ class BetfairLiveCapitalAtRiskTruth:
         if type(self.attempt_id) is not str or not self.attempt_id.strip():
             raise BetfairLiveCapitalAtRiskError("attempt_id must be non-empty")
         if (
-            self.execution_authority is not False
+            self.capital_at_risk_authority is not False
+            or self.execution_authority is not False
             or self.settlement_authority is not False
             or self.risk_release_authority is not False
         ):
             raise BetfairLiveCapitalAtRiskError(
-                "live-risk truth cannot authorize execution, settlement, or risk release"
+                "current-stake binding cannot authorize capital risk, execution, "
+                "settlement, or risk release"
+            )
+        if self.exact_capital_at_risk is not None:
+            raise BetfairLiveCapitalAtRiskError(
+                "capital-at-risk is unavailable without canonical liability semantics"
             )
         if self.ledger_event_count is not None and (
             type(self.ledger_event_count) is not int or self.ledger_event_count < 0
         ):
             raise BetfairLiveCapitalAtRiskError("invalid ledger_event_count")
 
-        if self.status is BetfairLiveCapitalAtRiskStatus.EXACT_CURRENT_ORDER:
+        if self.status is BetfairLiveCapitalAtRiskStatus.EXACT_CURRENT_STAKE_ONLY:
             required_text = (
                 self.action_id,
                 self.provider_order_ref,
@@ -99,28 +112,28 @@ class BetfairLiveCapitalAtRiskTruth:
             )
             if any(type(value) is not str or not value for value in required_text):
                 raise BetfairLiveCapitalAtRiskError(
-                    "exact live-risk truth lacks required identity/evidence"
+                    "exact current-stake truth lacks required identity/evidence"
                 )
             if self.ledger_event_count is None:
                 raise BetfairLiveCapitalAtRiskError(
-                    "exact live-risk truth lacks ledger generation"
+                    "exact current-stake truth lacks ledger generation"
                 )
             values = (
                 self.matched_stake,
                 self.unmatched_stake,
-                self.exact_capital_at_risk,
+                self.exact_live_stake,
             )
             if any(
                 type(value) is not Decimal or not value.is_finite() or value < 0
                 for value in values
             ):
                 raise BetfairLiveCapitalAtRiskError(
-                    "exact live-risk amounts must be finite non-negative Decimal"
+                    "current-stake amounts must be finite non-negative Decimal"
                 )
-            assert self.exact_capital_at_risk is not None
-            if self.exact_capital_at_risk <= 0:
+            assert self.exact_live_stake is not None
+            if self.exact_live_stake <= 0:
                 raise BetfairLiveCapitalAtRiskError(
-                    "zero exposure is not positive live-risk authority"
+                    "zero live stake is not positive current-stake authority"
                 )
         elif any(
             value is not None
@@ -130,7 +143,7 @@ class BetfairLiveCapitalAtRiskTruth:
                 self.readback_evidence_sha256,
                 self.matched_stake,
                 self.unmatched_stake,
-                self.exact_capital_at_risk,
+                self.exact_live_stake,
             )
         ):
             raise BetfairLiveCapitalAtRiskError(
@@ -202,7 +215,9 @@ def _unknown_fields(
         "ledger_event_count": ledger_event_count,
         "matched_stake": None,
         "unmatched_stake": None,
+        "exact_live_stake": None,
         "exact_capital_at_risk": None,
+        "capital_at_risk_authority": False,
         "execution_authority": False,
         "settlement_authority": False,
         "risk_release_authority": False,
@@ -286,7 +301,7 @@ def _resolve_fields(
         )
     if action.bookmaker_id != "betfair" or action.side != "BACK":
         return unknown(
-            "live-risk resolver supports only canonical Betfair standard BACK actions"
+            "live-risk resolver supports only canonical Betfair BACK actions"
         )
     if provider_order_ref is None:
         return unknown("attempt lacks a durable Betfair provider order reference")
@@ -393,22 +408,23 @@ def _resolve_fields(
         )
 
     try:
-        capital_at_risk = _exact_nonnegative_sum(
+        exact_live_stake = _exact_nonnegative_sum(
             row.size_matched,
             row.size_remaining,
         )
     except BetfairLiveCapitalAtRiskError:
         return unknown("provider current-order stake arithmetic is invalid")
-    if capital_at_risk <= 0 or capital_at_risk > action.requested_stake:
+    if exact_live_stake <= 0 or exact_live_stake > action.requested_stake:
         return unknown(
-            "provider current-order reserve is zero or exceeds requested stake"
+            "provider current-order live stake is zero or exceeds requested stake"
         )
 
     return {
-        "status": BetfairLiveCapitalAtRiskStatus.EXACT_CURRENT_ORDER,
+        "status": BetfairLiveCapitalAtRiskStatus.EXACT_CURRENT_STAKE_ONLY,
         "reason": (
-            "authoritative currentOrders capture proves exact standard-BACK "
-            "matched plus unmatched reserve"
+            "authoritative currentOrders proves exact matched plus unmatched stake; "
+            "capital-at-risk remains unknown without canonical market betting-type "
+            "and liability authority"
         ),
         "plan_id": plan_id,
         "attempt_id": attempt_id,
@@ -421,7 +437,9 @@ def _resolve_fields(
         "ledger_event_count": event_count,
         "matched_stake": row.size_matched,
         "unmatched_stake": row.size_remaining,
-        "exact_capital_at_risk": capital_at_risk,
+        "exact_live_stake": exact_live_stake,
+        "exact_capital_at_risk": None,
+        "capital_at_risk_authority": False,
         "execution_authority": False,
         "settlement_authority": False,
         "risk_release_authority": False,

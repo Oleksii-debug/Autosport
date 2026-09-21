@@ -143,7 +143,7 @@ def test_caller_cannot_mint_provider_origin_verification():
             observed_at=T0,
             available_at=T0,
             status_code=200,
-            origin_verified=True,
+            provider_origin_verified=True,
             response_sha256=DIGEST,
             row_count=1,
             pagination_complete=True,

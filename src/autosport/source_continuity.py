@@ -17,6 +17,7 @@ _ALLOWED_REASONS = frozenset(
         "witness_current_token_mismatch",
         "witness_previous_token_mismatch",
         "provider_backfill_incomplete",
+        "provider_native_evidence_required",
         "provider_chain_and_backfill_verified",
         "provider_failure_since_last_continuity_proof",
     }
@@ -28,6 +29,7 @@ _SUCCESS_REASONS = frozenset(
         "witness_current_token_mismatch",
         "witness_previous_token_mismatch",
         "provider_backfill_incomplete",
+        "provider_native_evidence_required",
         "provider_chain_and_backfill_verified",
     }
 )
@@ -36,6 +38,7 @@ _TRUSTED_TOKEN_REQUIRED_REASONS = frozenset(
         "provider_anchor_established_without_prior_continuity",
         "witness_previous_token_mismatch",
         "provider_backfill_incomplete",
+        "provider_native_evidence_required",
         "provider_chain_and_backfill_verified",
     }
 )
@@ -90,7 +93,12 @@ def _parse_validated_instant(value: str) -> datetime:
 
 @dataclass(frozen=True, slots=True)
 class ProviderContinuityWitness:
-    """Provider-owned proof that one cursor transition covers the intervening interval."""
+    """Untrusted adapter assertion about one cursor transition.
+
+    The generic MarketProvider/ProviderBatch contract carries no independently
+    provider-native replay/backfill evidence. Constructing this public DTO can
+    therefore never by itself mint verified continuity.
+    """
 
     previous_token: str | None
     current_token: str
@@ -170,10 +178,12 @@ class SourceContinuityState:
 class SourceContinuityStore:
     """Durable fail-closed provider continuity authority.
 
-    Current snapshot health and historical continuity are deliberately independent:
-    a successful snapshot without an explicit provider-owned continuity witness is
-    stored as ``unknown`` rather than being promoted to continuous-history proof.
-    Tokens are opaque identities; this contract never invents numeric contiguity.
+    Current snapshot health and historical continuity are deliberately independent.
+    Generic resolver output is only an assertion: even a matching token chain with
+    ``backfill_complete=True`` remains ``unknown`` because this layer has no
+    independently provider-native replay/backfill evidence to re-resolve. Tokens are
+    opaque identities; this contract never invents numeric contiguity or provider
+    provenance.
     """
 
     def __init__(self, path: str | Path) -> None:
@@ -324,9 +334,11 @@ class SourceContinuityStore:
                 elif not witness.backfill_complete:
                     reason = "provider_backfill_incomplete"
                 else:
-                    trusted_token = witness.current_token
-                    status = "verified"
-                    reason = "provider_chain_and_backfill_verified"
+                    # A public resolver DTO is not provider-native provenance. Keep
+                    # the last established anchor fixed and fail closed until a
+                    # separate provider-native replay/backfill authority can
+                    # re-resolve the exact covered transition.
+                    reason = "provider_native_evidence_required"
 
             state = SourceContinuityState(
                 source_id=source_id,

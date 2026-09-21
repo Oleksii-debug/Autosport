@@ -14,6 +14,7 @@ _ACTION_BINDINGS = {
     "<Control-o>": "choose_dataset",
     "<Control-r>": "run_replay",
     "<Control-Shift-R>": "repair_workspace",
+    "<Control-e>": "export_evidence",
     "<Control-l>": "live_refresh",
     "<Control-Alt-Left>": "shell_previous",
     "<Control-Alt-Right>": "shell_next",

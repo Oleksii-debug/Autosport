@@ -320,6 +320,26 @@ class ProspectiveCollectorScheduleTests(unittest.TestCase):
                 run_id="run-1",
             )
 
+            with self.assertRaisesRegex(
+                ValueError,
+                "stream_epoch does not match current source",
+            ):
+                store._begin_scheduled_collector_cycle(
+                    source_id="source-x",
+                    run_id="run-1",
+                    stream_epoch="epoch-2",
+                    slot_ordinal=slot["slot_ordinal"],
+                    due_at=slot["due_at"],
+                    attempted_at="2026-01-01T00:00:00+00:00",
+                )
+            self.assertEqual(
+                store._next_collector_schedule_slot(
+                    source_id="source-x",
+                    run_id="run-1",
+                ),
+                slot,
+            )
+
             with self.assertRaisesRegex(ValueError, "due_at is not canonical"):
                 store._begin_scheduled_collector_cycle(
                     source_id="source-x",

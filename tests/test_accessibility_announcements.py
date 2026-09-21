@@ -30,6 +30,13 @@ ASSERTIVE_KINDS = {
 }
 
 
+def _valid_activity_id(priority: AnnouncementPriority) -> str:
+    return (
+        f"autosport:announcement:v1:{priority.value.lower()}:sha256:"
+        + ("0" * 64)
+    )
+
+
 def _decision_for_invariant_test(**values):
     """Bypass the public constructor only to exercise internal invariants."""
 
@@ -39,9 +46,17 @@ def _decision_for_invariant_test(**values):
         priority=AnnouncementPriority.POLITE,
         text="Оновлений стан",
         reason="EMIT",
+        activity_id=_valid_activity_id(AnnouncementPriority.POLITE),
         move_focus=False,
     )
     defaults.update(values)
+    if "activity_id" not in values:
+        if defaults["emit"] is False:
+            defaults["activity_id"] = None
+        elif isinstance(defaults["priority"], AnnouncementPriority) and (
+            defaults["priority"] is not AnnouncementPriority.SILENT
+        ):
+            defaults["activity_id"] = _valid_activity_id(defaults["priority"])
     for name, value in defaults.items():
         object.__setattr__(decision, name, value)
     decision.__post_init__()
@@ -89,6 +104,7 @@ def test_high_frequency_churn_is_always_silent(kind):
         assert decision.priority is AnnouncementPriority.SILENT
         assert decision.text is None
         assert decision.reason == "HIGH_FREQUENCY_CHURN"
+        assert decision.activity_id is None
         assert decision.move_focus is False
     assert gate.history_size == 0
 
@@ -105,13 +121,17 @@ def test_polite_transition_emits_once_per_state_token(kind):
     assert first.priority is AnnouncementPriority.POLITE
     assert first.text == "Оновлений стан"
     assert first.reason == "EMIT"
+    assert first.activity_id is not None
+    assert first.activity_id.isascii()
     assert first.move_focus is False
     assert duplicate.emit is False
     assert duplicate.priority is AnnouncementPriority.SILENT
     assert duplicate.text is None
     assert duplicate.reason == "DUPLICATE_STATE_TRANSITION"
+    assert duplicate.activity_id is None
     assert next_transition.emit is True
     assert next_transition.priority is AnnouncementPriority.POLITE
+    assert next_transition.activity_id != first.activity_id
 
 
 @pytest.mark.parametrize("kind", sorted(ASSERTIVE_KINDS, key=lambda item: item.value))
@@ -126,17 +146,22 @@ def test_assertive_event_emits_once_per_critical_episode(kind):
 
     assert first.emit is True
     assert first.priority is AnnouncementPriority.ASSERTIVE
+    assert first.activity_id is not None
+    assert first.activity_id.isascii()
     assert same_episode_new_projection.emit is False
     assert same_episode_new_projection.priority is AnnouncementPriority.SILENT
     assert same_episode_new_projection.reason == "DUPLICATE_CRITICAL_EPISODE"
+    assert same_episode_new_projection.activity_id is None
     assert new_episode.emit is True
     assert new_episode.priority is AnnouncementPriority.ASSERTIVE
+    assert new_episode.activity_id != first.activity_id
 
 
 def test_caller_cannot_supply_or_escalate_priority():
     parameters = inspect.signature(AnnouncementEvent).parameters
     assert "priority" not in parameters
     assert "urgency" not in parameters
+    assert "activity_id" not in parameters
 
     gate = AnnouncementGate()
     churn = gate.decide(_event(AnnouncementKind.PRICE_TICK, token="attacker-minted-token"))
@@ -350,3 +375,109 @@ def test_cross_kind_polite_events_share_state_transition_dedupe_identity():
     assert same_transition_different_kind.emit is False
     assert same_transition_different_kind.priority is AnnouncementPriority.SILENT
     assert same_transition_different_kind.reason == "DUPLICATE_STATE_TRANSITION"
+
+
+def test_polite_activity_identity_is_stable_nonlocalized_and_text_independent():
+    first = AnnouncementGate().decide(
+        _event(
+            AnnouncementKind.OPERATION_STARTED,
+            token="перехід-42",
+            text="Операцію розпочато",
+        )
+    )
+    reprojection = AnnouncementGate().decide(
+        _event(
+            AnnouncementKind.STOP_REQUESTED,
+            token="перехід-42",
+            text="Інший локалізований текст",
+        )
+    )
+    unrelated = AnnouncementGate().decide(
+        _event(
+            AnnouncementKind.OPERATION_STARTED,
+            token="перехід-43",
+            text="Операцію розпочато",
+        )
+    )
+
+    assert first.emit is True
+    assert reprojection.emit is True
+    assert unrelated.emit is True
+    assert first.activity_id == reprojection.activity_id
+    assert unrelated.activity_id != first.activity_id
+    assert first.activity_id is not None
+    assert first.activity_id.isascii()
+    assert "перехід" not in first.activity_id
+    assert "Операцію" not in first.activity_id
+
+
+def test_assertive_activity_identity_follows_episode_across_projection_kind_and_text():
+    first = AnnouncementGate().decide(
+        _event(
+            AnnouncementKind.CRITICAL_ERROR,
+            token="projection-a",
+            episode="критичний-епізод-7",
+            text="Критична помилка",
+        )
+    )
+    reprojection = AnnouncementGate().decide(
+        _event(
+            AnnouncementKind.AUTHORITY_BLOCKED,
+            token="projection-b",
+            episode="критичний-епізод-7",
+            text="Дію заблоковано",
+        )
+    )
+    unrelated = AnnouncementGate().decide(
+        _event(
+            AnnouncementKind.CRITICAL_ERROR,
+            token="projection-a",
+            episode="критичний-епізод-8",
+            text="Критична помилка",
+        )
+    )
+
+    assert first.emit is True
+    assert reprojection.emit is True
+    assert unrelated.emit is True
+    assert first.activity_id == reprojection.activity_id
+    assert unrelated.activity_id != first.activity_id
+    assert first.activity_id is not None
+    assert first.activity_id.isascii()
+    assert "епізод" not in first.activity_id
+    assert "Критична" not in first.activity_id
+
+
+def test_activity_identity_namespace_must_match_policy_priority():
+    with pytest.raises(ValueError, match="invalid product-issued format"):
+        _decision_for_invariant_test(
+            priority=AnnouncementPriority.ASSERTIVE,
+            activity_id=_valid_activity_id(AnnouncementPriority.POLITE),
+        )
+
+
+@pytest.mark.parametrize(
+    "activity_id",
+    [
+        None,
+        "",
+        " autosport:announcement:v1:polite:sha256:" + ("0" * 64),
+        "autosport:announcement:v1:polite:sha256:" + ("g" * 64),
+        "autosport:announcement:v1:polite:sha256:" + ("0" * 63),
+        "локалізований-id",
+    ],
+)
+def test_emitted_activity_identity_must_be_valid_product_format(activity_id):
+    with pytest.raises(ValueError, match="activity_id"):
+        _decision_for_invariant_test(activity_id=activity_id)
+
+
+def test_suppressed_decision_cannot_carry_activity_identity():
+    with pytest.raises(ValueError, match="must not carry activity_id"):
+        _decision_for_invariant_test(
+            emit=False,
+            priority=AnnouncementPriority.SILENT,
+            text=None,
+            reason="DUPLICATE_STATE_TRANSITION",
+            activity_id=_valid_activity_id(AnnouncementPriority.POLITE),
+        )

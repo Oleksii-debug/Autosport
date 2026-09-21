@@ -257,6 +257,7 @@ class CapabilityRequirement:
     scope: CapabilityScope
     validation_policy_version: str
     source_contract_ref: str
+    max_observation_age_seconds: int
     require_available: bool = True
 
     def __post_init__(self) -> None:
@@ -270,6 +271,14 @@ class CapabilityRequirement:
             raise CapabilityEvidenceError("scope must be exact CapabilityScope")
         _text(self.validation_policy_version, "validation_policy_version")
         _text(self.source_contract_ref, "source_contract_ref")
+        if (
+            not isinstance(self.max_observation_age_seconds, int)
+            or isinstance(self.max_observation_age_seconds, bool)
+            or self.max_observation_age_seconds <= 0
+        ):
+            raise CapabilityEvidenceError(
+                "max_observation_age_seconds must be a positive integer"
+            )
         if not isinstance(self.require_available, bool):
             raise CapabilityEvidenceError("require_available must be bool")
 
@@ -554,10 +563,15 @@ def _evaluate(
             return deny(CapabilityLifecycleState.UNKNOWN, "profile account mismatch")
     if profile.state_of(evidence.capability) is not evidence.support_state:
         return deny(CapabilityLifecycleState.UNKNOWN, "profile support mismatch")
-    if _time(profile.observed_at, "profile.observed_at") != _time(
-        evidence.observed_at, "evidence.observed_at"
-    ):
+    profile_observed_at = _time(profile.observed_at, "profile.observed_at")
+    if profile_observed_at != _time(evidence.observed_at, "evidence.observed_at"):
         return deny(CapabilityLifecycleState.UNKNOWN, "observation identity mismatch")
+    observation_age = (as_of - profile_observed_at).total_seconds()
+    if observation_age >= requirement.max_observation_age_seconds:
+        return deny(
+            CapabilityLifecycleState.REVALIDATION_REQUIRED,
+            "canonical observation age exceeds policy",
+        )
     if evidence.scope.credential_identity != requirement.scope.credential_identity:
         return deny(
             CapabilityLifecycleState.REVALIDATION_REQUIRED,

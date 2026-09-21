@@ -24,12 +24,16 @@ class ProductOperatorController:
     """Synchronous operator control for one canonical ``AutonomousProductRuntime``.
 
     The controller deliberately owns no scheduler, thread, sleep loop, market state,
-    PAPER book, settlement path, or learning authority.  A UI or CLI may schedule
-    calls however it chooses, while every product mutation still flows through the
-    single canonical runtime supplied at construction.
+    PAPER book, settlement path, or learning authority. A UI or CLI may schedule calls
+    however it chooses, while every product mutation still flows through the single
+    canonical runtime supplied at construction.
+
+    Operator presentation is intentionally a projection of canonical durable session
+    state. In particular, STOPPED is never reinterpreted as a process-local READY
+    sentinel: the product runtime has no durable READY state that could justify that
+    distinction after restart.
     """
 
-    _READY = "READY"
     _RUNNING = "RUNNING"
     _PAUSED = "PAUSED"
     _STOPPED = "STOPPED"
@@ -40,8 +44,9 @@ class ProductOperatorController:
             raise TypeError("runtime must be exact AutonomousProductRuntime")
         self._runtime = runtime
         self._lock = RLock()
-        initial_status = self._runtime.status()
-        self._ever_started = self._state_value(initial_status) != self._STOPPED
+        # Validate canonical state at attachment time without creating a second local
+        # lifecycle authority. Durable RUNNING/PAUSED/STOPPED remains the only truth.
+        self._state_value(self._runtime.status())
         self._closed = False
         self._controller_tick_count = 0
 
@@ -74,11 +79,9 @@ class ProductOperatorController:
             self._ensure_open()
             status, state = self._canonical_status()
             if state == self._RUNNING:
-                self._ever_started = True
                 return status
             status = self._runtime.start()
             self._state_value(status)
-            self._ever_started = True
             return status
 
     def tick(self) -> ContinuousTickResult:
@@ -89,7 +92,6 @@ class ProductOperatorController:
             _, state = self._canonical_status()
             if state != self._RUNNING:
                 raise ProductOperatorError("product runtime must be started before tick")
-            self._ever_started = True
             result = self._runtime.tick()
             self._controller_tick_count += 1
             return result
@@ -105,7 +107,6 @@ class ProductOperatorController:
                 return status
             status = self._runtime.stop(normalized_reason)
             self._state_value(status)
-            self._ever_started = True
             return status
 
     def status(self) -> ProductOperatorSnapshot:
@@ -113,18 +114,7 @@ class ProductOperatorController:
 
         with self._lock:
             canonical_status, canonical_state = self._canonical_status()
-            if canonical_state in {self._RUNNING, self._PAUSED}:
-                self._ever_started = True
-            if self._closed:
-                state = self._CLOSED
-            elif canonical_state == self._RUNNING:
-                state = self._RUNNING
-            elif canonical_state == self._PAUSED:
-                state = self._PAUSED
-            elif self._ever_started:
-                state = self._STOPPED
-            else:
-                state = self._READY
+            state = self._CLOSED if self._closed else canonical_state
             return ProductOperatorSnapshot(
                 state=state,
                 controller_tick_count=self._controller_tick_count,

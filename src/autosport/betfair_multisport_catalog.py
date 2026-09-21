@@ -119,9 +119,14 @@ class BetfairMarketCatalogueBatch:
             raise BetfairCatalogError("continuation flag does not match batch cardinality")
 
     @property
-    def completeness_proven(self) -> bool:
-        """True only when this exact filter slice returned fewer rows than its limit."""
+    def response_not_limit_saturated(self) -> bool:
+        """Whether the response returned fewer rows than the requested maxResults."""
         return not self.continuation_required
+
+    @property
+    def completeness_proven(self) -> bool:
+        """Never upgrade one catalogue response to proof of the full market universe."""
+        return False
 
 
 def build_list_event_types_request(

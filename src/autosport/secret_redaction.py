@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import re
 from collections.abc import Iterable, Mapping
+from urllib.parse import unquote_plus
 from typing import Any
 
 REDACTED = "[REDACTED]"
@@ -148,7 +149,8 @@ def redact_operator_text(
     )
 
     def redact_query(match: re.Match[str]) -> str:
-        if not is_sensitive_key(match.group("key")):
+        decoded_key = unquote_plus(match.group("key"))
+        if not is_sensitive_key(decoded_key):
             return match.group(0)
         return match.group("prefix") + REDACTED
 

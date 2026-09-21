@@ -7,6 +7,8 @@ import unittest
 from autosport.domain import MarketEvent, MarketType
 from autosport.reference_price_evidence import (
     ReferencePriceEvidenceError,
+    ReferencePriceProtocol,
+    ReferenceTargetInclusionPolicy,
     build_reference_price_evidence,
 )
 
@@ -50,13 +52,62 @@ class ReferencePriceEvidenceTests(unittest.TestCase):
             market_semantics_id="winner.match.v1",
         )
 
+    def protocol(
+        self,
+        source_ids,
+        *,
+        target_source_id: str = "target-provider",
+        target_inclusion_policy: ReferenceTargetInclusionPolicy = (
+            ReferenceTargetInclusionPolicy.EXCLUDE
+        ),
+        price_semantics: str = "best_available_to_back",
+        max_age_seconds: int = 30,
+        max_skew_seconds: int = 5,
+        minimum_sources: int = 2,
+    ) -> ReferencePriceProtocol:
+        return ReferencePriceProtocol(
+            eligible_source_ids=tuple(source_ids),
+            target_source_id=target_source_id,
+            target_inclusion_policy=target_inclusion_policy,
+            price_semantics=price_semantics,
+            max_age_seconds=max_age_seconds,
+            max_skew_seconds=max_skew_seconds,
+            minimum_sources=minimum_sources,
+        )
+
     def build(self, events, **kwargs):
+        materialized = tuple(events)
+        protocol = kwargs.pop("protocol", None)
+        decision_ts = kwargs.pop("decision_ts", self.DECISION)
+        if protocol is None:
+            eligible_source_ids = kwargs.pop(
+                "eligible_source_ids",
+                tuple(sorted({event.source_id for event in materialized})),
+            )
+            protocol = self.protocol(
+                eligible_source_ids,
+                target_source_id=kwargs.pop(
+                    "target_source_id",
+                    "target-provider",
+                ),
+                target_inclusion_policy=kwargs.pop(
+                    "target_inclusion_policy",
+                    ReferenceTargetInclusionPolicy.EXCLUDE,
+                ),
+                price_semantics=kwargs.pop(
+                    "protocol_price_semantics",
+                    "best_available_to_back",
+                ),
+                max_age_seconds=kwargs.pop("max_age_seconds", 30),
+                max_skew_seconds=kwargs.pop("max_skew_seconds", 5),
+                minimum_sources=kwargs.pop("minimum_sources", 2),
+            )
+        if kwargs:
+            raise AssertionError(f"unexpected test helper kwargs: {kwargs!r}")
         return build_reference_price_evidence(
-            events,
-            decision_ts=kwargs.pop("decision_ts", self.DECISION),
-            max_age_seconds=kwargs.pop("max_age_seconds", 30),
-            max_skew_seconds=kwargs.pop("max_skew_seconds", 5),
-            **kwargs,
+            materialized,
+            decision_ts=decision_ts,
+            protocol=protocol,
         )
 
     def test_builds_order_independent_exact_median_without_stronger_truth_claims(self) -> None:
@@ -137,7 +188,8 @@ class ReferencePriceEvidenceTests(unittest.TestCase):
                 (
                     self.event("provider-a", "2.00", sequence=1),
                     self.event("provider-a", "2.10", sequence=2),
-                )
+                ),
+                eligible_source_ids=("provider-a", "provider-b"),
             )
 
     def test_market_selection_identity_mismatch_fails_closed(self) -> None:
@@ -277,6 +329,190 @@ class ReferencePriceEvidenceTests(unittest.TestCase):
             ReferencePriceEvidenceError, "minimum_sources must be at least 2"
         ):
             self.build((self.event("provider-a", "2.00"),), minimum_sources=1)
+
+
+    def test_frozen_provider_universe_rejects_provider_shopping(self) -> None:
+        protocol = self.protocol(
+            ("provider-a", "provider-b", "provider-c"),
+            minimum_sources=2,
+        )
+
+        with self.assertRaisesRegex(
+            ReferencePriceEvidenceError,
+            "exactly cover frozen eligible source universe",
+        ):
+            self.build(
+                (
+                    self.event("provider-a", "2.00"),
+                    self.event("provider-b", "2.10"),
+                ),
+                protocol=protocol,
+            )
+
+        complete = self.build(
+            (
+                self.event("provider-a", "2.00"),
+                self.event("provider-b", "2.10"),
+                self.event("provider-c", "1.95"),
+            ),
+            protocol=protocol,
+        )
+        self.assertEqual(
+            complete.source_ids,
+            ("provider-a", "provider-b", "provider-c"),
+        )
+        self.assertEqual(complete.protocol_id, protocol.protocol_id)
+
+    def test_frozen_provider_universe_rejects_unexpected_source(self) -> None:
+        protocol = self.protocol(("provider-a", "provider-b"))
+
+        with self.assertRaisesRegex(
+            ReferencePriceEvidenceError,
+            "exactly cover frozen eligible source universe",
+        ):
+            self.build(
+                (
+                    self.event("provider-a", "2.00"),
+                    self.event("provider-b", "2.10"),
+                    self.event("provider-c", "9.00"),
+                ),
+                protocol=protocol,
+            )
+
+    def test_target_inclusion_policy_is_structural_and_explicit(self) -> None:
+        with self.assertRaisesRegex(
+            ReferencePriceEvidenceError,
+            "excluded target_source_id",
+        ):
+            self.protocol(
+                ("provider-a", "provider-b"),
+                target_source_id="provider-a",
+                target_inclusion_policy=ReferenceTargetInclusionPolicy.EXCLUDE,
+            )
+
+        included = self.protocol(
+            ("provider-a", "provider-b"),
+            target_source_id="provider-a",
+            target_inclusion_policy=ReferenceTargetInclusionPolicy.INCLUDE,
+        )
+        evidence = self.build(
+            (
+                self.event("provider-a", "2.00"),
+                self.event("provider-b", "2.10"),
+            ),
+            protocol=included,
+        )
+        self.assertIs(
+            evidence.protocol.target_inclusion_policy,
+            ReferenceTargetInclusionPolicy.INCLUDE,
+        )
+        self.assertIn("provider-a", evidence.source_ids)
+
+    def test_excluded_target_cannot_enter_evidence_as_unexpected_source(self) -> None:
+        protocol = self.protocol(
+            ("provider-b", "provider-c"),
+            target_source_id="provider-a",
+            target_inclusion_policy=ReferenceTargetInclusionPolicy.EXCLUDE,
+        )
+
+        with self.assertRaisesRegex(
+            ReferencePriceEvidenceError,
+            "exactly cover frozen eligible source universe",
+        ):
+            self.build(
+                (
+                    self.event("provider-a", "2.50"),
+                    self.event("provider-b", "2.00"),
+                    self.event("provider-c", "2.10"),
+                ),
+                protocol=protocol,
+            )
+
+    def test_protocol_identity_changes_when_policy_changes(self) -> None:
+        baseline = self.protocol(
+            ("provider-a", "provider-b", "provider-c"),
+            max_age_seconds=30,
+            minimum_sources=2,
+        )
+        wider_freshness = self.protocol(
+            ("provider-a", "provider-b", "provider-c"),
+            max_age_seconds=31,
+            minimum_sources=2,
+        )
+        stronger_coverage = self.protocol(
+            ("provider-a", "provider-b", "provider-c"),
+            max_age_seconds=30,
+            minimum_sources=3,
+        )
+
+        self.assertNotEqual(baseline.protocol_id, wider_freshness.protocol_id)
+        self.assertNotEqual(baseline.protocol_id, stronger_coverage.protocol_id)
+        with self.assertRaisesRegex(
+            ReferencePriceEvidenceError,
+            "unsupported reference aggregation_method",
+        ):
+            ReferencePriceProtocol(
+                eligible_source_ids=("provider-a", "provider-b"),
+                target_source_id="target-provider",
+                target_inclusion_policy=ReferenceTargetInclusionPolicy.EXCLUDE,
+                price_semantics="best_available_to_back",
+                max_age_seconds=30,
+                max_skew_seconds=5,
+                minimum_sources=2,
+                aggregation_method="best_price_after_inspection",
+            )
+
+    def test_evidence_identity_binds_frozen_protocol(self) -> None:
+        events = (
+            self.event("provider-a", "2.00"),
+            self.event("provider-b", "2.10"),
+        )
+        baseline = self.build(
+            events,
+            protocol=self.protocol(
+                ("provider-a", "provider-b"),
+                max_age_seconds=30,
+            ),
+        )
+        different_policy = self.build(
+            events,
+            protocol=self.protocol(
+                ("provider-a", "provider-b"),
+                max_age_seconds=31,
+            ),
+        )
+
+        self.assertNotEqual(baseline.protocol_id, different_policy.protocol_id)
+        self.assertNotEqual(baseline.evidence_id, different_policy.evidence_id)
+
+    def test_legacy_per_call_policy_knobs_cannot_mint_evidence(self) -> None:
+        events = (
+            self.event("provider-a", "2.00"),
+            self.event("provider-b", "2.10"),
+        )
+        with self.assertRaisesRegex(
+            ReferencePriceEvidenceError,
+            "frozen ReferencePriceProtocol is required",
+        ):
+            build_reference_price_evidence(
+                events,
+                decision_ts=self.DECISION,
+                max_age_seconds=30,
+                max_skew_seconds=5,
+                minimum_sources=2,
+            )
+
+        protocol = self.protocol(("provider-a", "provider-b"))
+        with self.assertRaisesRegex(
+            ReferencePriceEvidenceError,
+            "per-call reference policy overrides are forbidden",
+        ):
+            build_reference_price_evidence(
+                events,
+                decision_ts=self.DECISION,
+                protocol=protocol,
+                max_age_seconds=60,
+            )
 
 
 if __name__ == "__main__":

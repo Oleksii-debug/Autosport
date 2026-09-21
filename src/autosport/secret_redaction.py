@@ -58,7 +58,7 @@ _BEARER_RE = re.compile(
 )
 _KEY_VALUE_RE = re.compile(
     r"(?i)(?P<prefix>(?P<key>[A-Za-z0-9_.-]+)\s*[:=]\s*)"
-    r"(?P<value>\"[^\"\r\n]*\"|'[^'\r\n]*'|[^\s,;&}\]]+)"
+    r"(?P<value>\[REDACTED\]|\"[^\"\r\n]*\"|'[^'\r\n]*'|[^\s,;&}\]]+)"
 )
 
 

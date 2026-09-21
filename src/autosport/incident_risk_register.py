@@ -1,8 +1,8 @@
 """Typed incident/model-risk register contract and operator projection.
 
-The register contract is deliberately presentation-oriented.  It does not grant or
+The register contract is deliberately presentation-oriented. It does not grant or
 revoke execution authority, does not persist credentials, and does not promote any
-release/human-verification truth.  Durable storage and Windows widget wiring remain
+release/human-verification truth. Durable storage and Windows widget wiring remain
 separate product boundaries.
 """
 
@@ -40,6 +40,7 @@ _ENTRY_KEYS: Final = frozenset(
         "requires_operator_action",
     }
 )
+_ENUM_JSON_FIELDS: Final = ("kind", "severity", "status", "evidence_state")
 
 
 class IncidentRiskRegisterError(ValueError):
@@ -106,7 +107,9 @@ def _canonical_text(
 
 def _positive_int(name: str, value: object) -> int:
     if type(value) is not int or value <= 0:
-        raise IncidentRiskRegisterError(f"{name} must be a positive non-boolean integer")
+        raise IncidentRiskRegisterError(
+            f"{name} must be a positive non-boolean integer"
+        )
     return value
 
 
@@ -142,6 +145,21 @@ def _enum_value(enum_type, name: str, value: object):
     if not isinstance(value, enum_type):
         raise IncidentRiskRegisterError(f"{name} must be {enum_type.__name__}")
     return value
+
+
+def _timestamp_sort_key(value: datetime) -> int:
+    """Return exact integer microseconds for deterministic UTC ordering."""
+
+    return (
+        (
+            value.toordinal() * 86_400
+            + value.hour * 3_600
+            + value.minute * 60
+            + value.second
+        )
+        * 1_000_000
+        + value.microsecond
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -201,13 +219,17 @@ class IncidentRiskEntry:
                 "model-risk entries require at least one exact model_version_id"
             )
         if (
-            self.evidence_state in {RiskEvidenceState.PARTIAL, RiskEvidenceState.VERIFIED}
+            self.evidence_state
+            in {RiskEvidenceState.PARTIAL, RiskEvidenceState.VERIFIED}
             and not self.evidence_refs
         ):
             raise IncidentRiskRegisterError(
                 "partial/verified evidence state requires at least one evidence_ref"
             )
-        if self.status in {RiskStatus.MITIGATING, RiskStatus.CLOSED} and not self.mitigation:
+        if (
+            self.status in {RiskStatus.MITIGATING, RiskStatus.CLOSED}
+            and not self.mitigation
+        ):
             raise IncidentRiskRegisterError(
                 "mitigating/closed entries require a non-empty mitigation"
             )
@@ -220,7 +242,10 @@ class IncidentRiskEntry:
                 raise IncidentRiskRegisterError(
                     "closed entries cannot require operator action"
                 )
-        elif self.severity is RiskSeverity.CRITICAL and not self.requires_operator_action:
+        elif (
+            self.severity is RiskSeverity.CRITICAL
+            and not self.requires_operator_action
+        ):
             raise IncidentRiskRegisterError(
                 "open critical entries must require operator action"
             )
@@ -253,8 +278,16 @@ class IncidentRiskEntry:
             raise IncidentRiskRegisterError(
                 "incident/model-risk entry must contain exactly canonical fields"
             )
-        if raw["schema"] != _SCHEMA or raw["schema_version"] != _SCHEMA_VERSION:
+        if (
+            type(raw["schema"]) is not str
+            or raw["schema"] != _SCHEMA
+            or type(raw["schema_version"]) is not int
+            or raw["schema_version"] != _SCHEMA_VERSION
+        ):
             raise IncidentRiskRegisterError("unsupported incident/model-risk schema")
+        for name in _ENUM_JSON_FIELDS:
+            if type(raw[name]) is not str:
+                raise IncidentRiskRegisterError(f"{name} must be a JSON string")
 
         def tuple_field(name: str) -> tuple[str, ...]:
             value = raw[name]
@@ -263,7 +296,7 @@ class IncidentRiskEntry:
             return tuple(value)
 
         try:
-            severity = RiskSeverity[str(raw["severity"]).upper()]
+            severity = RiskSeverity[raw["severity"].upper()]
             return cls(
                 entry_id=raw["entry_id"],
                 revision=raw["revision"],
@@ -317,8 +350,12 @@ def validate_successor(
         raise IncidentRiskRegisterError("successor must preserve opened_at")
     if candidate.revision != previous.revision + 1:
         raise IncidentRiskRegisterError("successor revision must be contiguous")
-    _, previous_updated = _canonical_timestamp("previous.updated_at", previous.updated_at)
-    _, candidate_updated = _canonical_timestamp("candidate.updated_at", candidate.updated_at)
+    _, previous_updated = _canonical_timestamp(
+        "previous.updated_at", previous.updated_at
+    )
+    _, candidate_updated = _canonical_timestamp(
+        "candidate.updated_at", candidate.updated_at
+    )
     if candidate_updated <= previous_updated:
         raise IncidentRiskRegisterError(
             "successor updated_at must move strictly forward"
@@ -375,12 +412,12 @@ def operator_sort(entries: Iterable[IncidentRiskEntry]) -> tuple[IncidentRiskEnt
     if any(not isinstance(entry, IncidentRiskEntry) for entry in materialized):
         raise TypeError("operator_sort accepts only IncidentRiskEntry values")
 
-    def key(entry: IncidentRiskEntry) -> tuple[int, int, float, str]:
+    def key(entry: IncidentRiskEntry) -> tuple[int, int, int, str]:
         _, updated = _canonical_timestamp("updated_at", entry.updated_at)
         return (
             0 if entry.requires_operator_action else 1,
             -int(entry.severity),
-            -updated.timestamp(),
+            -_timestamp_sort_key(updated),
             entry.entry_id,
         )
 

@@ -285,24 +285,38 @@ class CollectorDeltaStore(_SQLiteCollectorDeltaStore):
             if changed:
                 self._write({"schema_version": self.schema_version})
 
-            current = connection.execute(
-                "SELECT generation, stream_epoch FROM collector_epoch_activations_v1 "
-                "WHERE source_id=? ORDER BY generation DESC LIMIT 1",
-                (delta.source_id,),
-            ).fetchone()
-            if current is None or current["stream_epoch"] != delta.stream_epoch:
-                generation = 1 if current is None else int(current["generation"]) + 1
-                connection.execute(
-                    "INSERT INTO collector_epoch_activations_v1("
-                    "source_id, generation, stream_epoch, activated_at"
-                    ") VALUES(?,?,?,?)",
-                    (
-                        delta.source_id,
-                        generation,
-                        delta.stream_epoch,
-                        activated_at,
-                    ),
+            activation_evidence = changed
+            if not activation_evidence:
+                latest = connection.execute(
+                    "SELECT delta_id, stream_epoch FROM collector_deltas "
+                    "WHERE source_id=? ORDER BY commit_seq DESC LIMIT 1",
+                    (delta.source_id,),
+                ).fetchone()
+                activation_evidence = (
+                    latest is not None
+                    and latest["delta_id"] == delta.delta_id
+                    and latest["stream_epoch"] == delta.stream_epoch
                 )
+
+            if activation_evidence:
+                current = connection.execute(
+                    "SELECT generation, stream_epoch FROM collector_epoch_activations_v1 "
+                    "WHERE source_id=? ORDER BY generation DESC LIMIT 1",
+                    (delta.source_id,),
+                ).fetchone()
+                if current is None or current["stream_epoch"] != delta.stream_epoch:
+                    generation = 1 if current is None else int(current["generation"]) + 1
+                    connection.execute(
+                        "INSERT INTO collector_epoch_activations_v1("
+                        "source_id, generation, stream_epoch, activated_at"
+                        ") VALUES(?,?,?,?)",
+                        (
+                            delta.source_id,
+                            generation,
+                            delta.stream_epoch,
+                            activated_at,
+                        ),
+                    )
             connection.commit()
             return changed
         except sqlite3.IntegrityError as exc:

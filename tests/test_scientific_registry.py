@@ -1,3 +1,4 @@
+import hashlib
 import json
 from dataclasses import replace
 
@@ -22,6 +23,7 @@ from autosport.scientific_registry import (
     ResearchOutcome,
     ResearchProtocol,
     ResearchQuestion,
+    RetestCondition,
     ScientificEvidenceRef,
     ScientificRegistry,
     promotion_holdout_access_id,
@@ -59,7 +61,6 @@ def _hypothesis() -> Hypothesis:
 
 
 def _payload_sha(record) -> str:
-    import hashlib
     canonical = json.dumps(
         record.to_payload(), ensure_ascii=False, sort_keys=True, separators=(",", ":")
     )
@@ -375,7 +376,7 @@ def test_negative_repeat_requires_durable_postmortem_provenance(tmp_path):
         "experiment-1",
         ResearchOutcome.NEGATIVE,
         "No primary-metric improvement.",
-        ("independent replication on frozen inputs",),
+        (RetestCondition.NEW_EVALUATION_BUNDLE.value,),
         T3,
     )
     registry.append(postmortem)
@@ -389,7 +390,7 @@ def test_negative_repeat_requires_durable_postmortem_provenance(tmp_path):
         evaluation_bundle_id="eval-repeat",
         repeat_of_experiment_id="experiment-1",
         repeat_postmortem_id="postmortem-repeat",
-        retest_condition="independent replication on frozen inputs",
+        retest_condition=RetestCondition.NEW_EVALUATION_BUNDLE.value,
         repeat_evidence=(evidence_ref,),
     )
     registry.append(authorized, allow_repeat_experiment=True)
@@ -418,8 +419,6 @@ def test_negative_repeat_requires_durable_postmortem_provenance(tmp_path):
         key: tampered_bundle[key]
         for key in ("record_type", "record_id", "available_at", "payload")
     }
-    import hashlib
-
     tampered_bundle["record_sha256"] = hashlib.sha256(
         json.dumps(
             envelope,
@@ -499,7 +498,7 @@ def test_negative_repeat_rejects_wrong_postmortem_condition_or_time(tmp_path):
             "experiment-1",
             ResearchOutcome.NEGATIVE,
             "Replication is permitted only under the frozen condition.",
-            ("replicate on frozen inputs",),
+            (RetestCondition.NEW_EVALUATION_BUNDLE.value,),
             T3,
         )
     )
@@ -518,7 +517,7 @@ def test_negative_repeat_rejects_wrong_postmortem_condition_or_time(tmp_path):
 
     future_repeat = replace(
         repeat,
-        retest_condition="replicate on frozen inputs",
+        retest_condition=RetestCondition.NEW_EVALUATION_BUNDLE.value,
         created_at=T2,
         completed_at=T3,
     )
@@ -537,7 +536,7 @@ def test_negative_repeat_rejects_invented_wrong_digest_future_and_unchanged_bund
             "experiment-1",
             ResearchOutcome.NEGATIVE,
             "Repeat only after a new durable evaluation exists.",
-            ("new durable evaluation",),
+            (RetestCondition.NEW_EVALUATION_BUNDLE.value,),
             T2,
         )
     )
@@ -548,7 +547,7 @@ def test_negative_repeat_rejects_invented_wrong_digest_future_and_unchanged_bund
         completed_at=T3,
         repeat_of_experiment_id="experiment-1",
         repeat_postmortem_id="postmortem-evidence",
-        retest_condition="new durable evaluation",
+        retest_condition=RetestCondition.NEW_EVALUATION_BUNDLE.value,
     )
 
     invented = replace(
@@ -635,8 +634,11 @@ def test_negative_repeat_rejects_same_bundle_content_under_new_identity(tmp_path
             "postmortem-content",
             "experiment-1",
             ResearchOutcome.NEGATIVE,
-            "Require materially changed evaluation evidence.",
-            ("materially changed evaluation evidence",),
+            "Require a machine-verifiable new evaluation before repeat.",
+            (
+                RetestCondition.NEW_EVALUATION_BUNDLE.value,
+                "independent human replication",
+            ),
             T2,
         )
     )
@@ -656,7 +658,7 @@ def test_negative_repeat_rejects_same_bundle_content_under_new_identity(tmp_path
         completed_at=T3,
         repeat_of_experiment_id="experiment-1",
         repeat_postmortem_id="postmortem-content",
-        retest_condition="materially changed evaluation evidence",
+        retest_condition=RetestCondition.NEW_EVALUATION_BUNDLE.value,
         repeat_evidence=(evidence_ref,),
     )
     with pytest.raises(
@@ -664,6 +666,25 @@ def test_negative_repeat_rejects_same_bundle_content_under_new_identity(tmp_path
         match="materially changed evidence",
     ):
         registry.append(repeat, allow_repeat_experiment=True)
+
+    _, material_ref = _append_repeat_bundle(
+        registry,
+        foundation,
+        bundle_id="eval-material",
+        bundle_sha256=SHA_A,
+        created_at=T3,
+    )
+    non_mechanical = replace(
+        repeat,
+        evaluation_bundle_id="eval-material",
+        retest_condition="independent human replication",
+        repeat_evidence=(material_ref,),
+    )
+    with pytest.raises(
+        DuplicateExperimentFingerprintError,
+        match="mechanically supported",
+    ):
+        registry.append(non_mechanical, allow_repeat_experiment=True)
 
 
 def test_conflicting_identity_rejected_but_exact_replay_is_idempotent(tmp_path):

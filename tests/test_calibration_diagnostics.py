@@ -216,6 +216,37 @@ class CalibrationDiagnosticsTests(unittest.TestCase):
             ((0.0, 0.5, 1), (0.5, 1.0, 1)),
         )
 
+    def test_log_loss_endpoint_bound_matches_canonical_clipping(self):
+        cases = (
+            ("f-one-wrong", "1", 0),
+            ("f-zero-wrong", "0", 1),
+        )
+        for forecast_id, probability, outcome in cases:
+            with self.subTest(probability=probability, outcome=outcome):
+                record = (self._record(forecast_id, probability),)
+                facts = (
+                    ForecastOutcomeFact(
+                        forecast_id,
+                        outcome,
+                        "2026-02-10T14:00:00+00:00",
+                    ),
+                )
+                canonical = evaluate_forecast_window(
+                    record,
+                    facts,
+                    self._window(),
+                    bins=1,
+                )
+                report = evaluate_calibration_diagnostics(
+                    record,
+                    facts,
+                    self._window(),
+                    bins=1,
+                )
+
+                self.assertEqual(report.log_loss.point, canonical.log_loss)
+                self.assertLessEqual(report.log_loss.point, report.log_loss.upper)
+
     def test_wilson_extreme_observed_rates_preserve_exact_zero_one_bounds(self):
         zero_record = (self._record("f-zero-only", "0.20"),)
         zero_outcome = (

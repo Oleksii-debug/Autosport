@@ -57,6 +57,7 @@ class StrategyExternalValidityReport:
     evaluation_contract_family: EvaluationContractFamily
     strategy_version_id: str
     config_sha256: str
+    model_version_ids: tuple[str, ...]
     universe_id: str
     universe_sha256: str
     membership_sha256: str
@@ -82,6 +83,7 @@ class StrategyExternalValidityReport:
             "evaluation_contract_family": self.evaluation_contract_family.value,
             "strategy_version_id": self.strategy_version_id,
             "config_sha256": self.config_sha256,
+            "model_version_ids": list(self.model_version_ids),
             "universe_id": self.universe_id,
             "universe_sha256": self.universe_sha256,
             "membership_sha256": self.membership_sha256,
@@ -177,6 +179,9 @@ def evaluate_strategy_external_validity(
         evaluation_contract_family=protocol.evaluation_contract_family,
         strategy_version_id=strategy_ids[0],
         config_sha256=config_ids[0],
+        model_version_ids=tuple(sorted({
+            row.model_version_id for row in rows if row.model_version_id is not None
+        })),
         universe_id=ledger.universe.universe_id,
         universe_sha256=ledger.universe.universe_sha256,
         membership_sha256=ledger.universe.membership_sha256,

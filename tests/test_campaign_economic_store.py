@@ -316,6 +316,51 @@ def test_tampered_immutable_version_fails_integrity_validation(tmp_path: Path) -
         fixture.doCleanups()
 
 
+@pytest.mark.parametrize("schema_version", [True, 1.0])
+def test_economic_head_rejects_non_integer_schema_version_aliases(
+    tmp_path: Path,
+    schema_version,
+) -> None:
+    fixture, authority = _fixture_authority()
+    try:
+        workspace, authority_root = _paths(tmp_path)
+        version = derive_campaign_economics(
+            campaign=authority,
+            costs=(_cost(authority),),
+            as_of=T2,
+        )
+        store = CampaignEconomicEvidenceStore(
+            workspace,
+            campaign=authority,
+            authority_root=authority_root,
+        )
+        store.append(version)
+        head = (
+            workspace
+            / "campaign_economics"
+            / version.campaign_sha256
+            / "head.json"
+        )
+        raw = json.loads(head.read_text(encoding="utf-8"))
+        raw["schema_version"] = schema_version
+        head.write_text(
+            json.dumps(raw, sort_keys=True, separators=(",", ":")) + "\n",
+            encoding="utf-8",
+        )
+
+        with pytest.raises(
+            CampaignEconomicStoreError,
+            match="economic head version is unsupported",
+        ):
+            CampaignEconomicEvidenceStore(
+                workspace,
+                campaign=authority,
+                authority_root=authority_root,
+            ).latest()
+    finally:
+        fixture.doCleanups()
+
+
 def test_full_local_workspace_rollback_is_rejected_by_external_authority(tmp_path: Path) -> None:
     fixture, authority = _fixture_authority()
     try:

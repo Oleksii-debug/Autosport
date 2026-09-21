@@ -174,6 +174,32 @@ class GovernanceCurrentnessTests(unittest.TestCase):
         self.assertEqual(result.evidence_id, latest.evidence_id)
         self.assertFalse(result.execution_authorized)
 
+    def test_same_document_cannot_flip_to_permitted_after_conflicting_interpretation(self):
+        self.registry.register_governance(
+            self._evidence(
+                permission=GovernancePermissionState.PROHIBITED,
+                observed_at="2026-09-21T11:50:00+00:00",
+                digest="a" * 64,
+            )
+        )
+        latest = self._evidence(
+            permission=GovernancePermissionState.PERMITTED,
+            observed_at="2026-09-21T12:00:00+00:00",
+            digest="a" * 64,
+            source_ref="https://provider.example/terms-v1-recheck",
+        )
+        self.registry.register_governance(latest)
+
+        result = self._resolve()
+
+        self.assertEqual(result.state, GovernanceEvidenceState.UNKNOWN)
+        self.assertEqual(
+            result.reason,
+            GovernanceCurrentnessReason.TERMS_PERMISSION_CONFLICT,
+        )
+        self.assertEqual(result.evidence_id, latest.evidence_id)
+        self.assertFalse(result.execution_authorized)
+
     def test_same_timestamp_conflicting_latest_records_are_ambiguous(self):
         self.registry.register_governance(
             self._evidence(

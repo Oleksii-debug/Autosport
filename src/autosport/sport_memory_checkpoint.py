@@ -108,10 +108,7 @@ def _opponent_source_root(path: Path) -> str:
     """
 
     try:
-        raw: Any = json.loads(
-            path.read_text(encoding="utf-8"),
-            object_pairs_hook=_json_object_without_duplicate_keys,
-        )
+        raw: Any = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
         raise SportMemoryCheckpointError(
             "cannot read opponent canonical store"
@@ -337,7 +334,10 @@ def _checkpoint_from_raw(raw: object) -> SportMemoryAuthorityCheckpoint:
 
 def _read_checkpoint(path: Path) -> SportMemoryAuthorityCheckpoint:
     try:
-        raw: Any = json.loads(path.read_text(encoding="utf-8"))
+        raw: Any = json.loads(
+            path.read_text(encoding="utf-8"),
+            object_pairs_hook=_json_object_without_duplicate_keys,
+        )
     except (OSError, json.JSONDecodeError) as exc:
         raise SportMemoryCheckpointError(
             "cannot load sport-memory authority checkpoint"

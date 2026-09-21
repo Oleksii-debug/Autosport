@@ -112,17 +112,9 @@ def _scopes(value: object) -> tuple[str, ...]:
     return tuple(sorted(normalized))
 
 
-def load_source_rights_manifest(path: str | Path) -> SourceRightsManifest:
-    """Load and validate one exact source-rights manifest byte snapshot."""
-
-    manifest_path = Path(path)
-    try:
-        payload = manifest_path.read_bytes()
-    except OSError as exc:
-        raise SourceRightsManifestError(
-            f"source-rights manifest is not readable: {manifest_path}"
-        ) from exc
-
+def _validated_projection(
+    payload: bytes,
+) -> tuple[str, tuple[str, ...], datetime, datetime, str, str, datetime]:
     try:
         raw = json.loads(
             payload.decode("utf-8"),
@@ -194,6 +186,38 @@ def load_source_rights_manifest(path: str | Path) -> SourceRightsManifest:
             "expires_at must be later than effective_at"
         )
 
+    return (
+        source_identity,
+        authorized_scopes,
+        effective_at,
+        expires_at,
+        approved_by,
+        approval_reference,
+        approved_at,
+    )
+
+
+def load_source_rights_manifest(path: str | Path) -> SourceRightsManifest:
+    """Load and validate one exact source-rights manifest byte snapshot."""
+
+    manifest_path = Path(path)
+    try:
+        payload = manifest_path.read_bytes()
+    except OSError as exc:
+        raise SourceRightsManifestError(
+            f"source-rights manifest is not readable: {manifest_path}"
+        ) from exc
+
+    (
+        source_identity,
+        authorized_scopes,
+        effective_at,
+        expires_at,
+        approved_by,
+        approval_reference,
+        approved_at,
+    ) = _validated_projection(payload)
+
     return SourceRightsManifest(
         manifest_path=str(manifest_path),
         manifest_sha256=hashlib.sha256(payload).hexdigest(),
@@ -244,6 +268,22 @@ def authorize_source_use(
         raise SourceRightsManifestError(
             "source-rights manifest snapshot digest is inconsistent"
         )
+
+    projection = _validated_projection(manifest.manifest_bytes)
+    object_projection = (
+        manifest.source_identity,
+        manifest.authorized_scopes,
+        manifest.effective_at,
+        manifest.expires_at,
+        manifest.approved_by,
+        manifest.approval_reference,
+        manifest.approved_at,
+    )
+    if projection != object_projection:
+        raise SourceRightsManifestError(
+            "source-rights manifest snapshot fields are inconsistent"
+        )
+
     if requested_source != manifest.source_identity:
         raise SourceRightsManifestError(
             "source_identity is not authorized by this manifest"

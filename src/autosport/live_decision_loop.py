@@ -1939,8 +1939,9 @@ class PersistentLiveDecisionLoop:
                     raise DecisionLedgerIntegrityError(
                         "durable live decision execution-adoption evidence changed"
                     )
+                detached_existing_payload = existing.to_dict()["payload"]
                 if (
-                    existing.payload.get("learning_observation")
+                    detached_existing_payload.get("learning_observation")
                     != learning_observation_payload
                 ):
                     raise DecisionLedgerIntegrityError(

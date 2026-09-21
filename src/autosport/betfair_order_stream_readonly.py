@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 """Read-only Betfair Order Stream (OCM) codec and deterministic state cache.
 
 This module owns only provider-side private order-stream reconstruction. It does not
@@ -12,8 +10,11 @@ Order fields in OCM are absolute provider values. Replayed frames are therefore
 idempotent and matched/cancelled/lapsed/voided sizes are replaced, never added.
 ``customerOrderRef`` (lightweight field ``rfo``) may bind one provider ``betId`` only;
 a conflicting re-bind fails closed even after an image removes the order from the
-current cache.
+current cache. Frame application is transactional: a rejected frame cannot leave a
+partially mutated cache or identity map behind.
 """
+
+from __future__ import annotations
 
 import hashlib
 import json
@@ -331,10 +332,10 @@ def decode_order_change_message(raw: dict[str, Any]) -> BetfairOrderChangeFrame:
         "RESUB_DELTA": BetfairFrameKind.RESUB_DELTA,
         "HEARTBEAT": BetfairFrameKind.HEARTBEAT,
     }
-    ct = raw.get("ct")
-    if ct not in kinds:
-        raise ValueError(f"unsupported Betfair order change type {ct!r}")
-    kind = kinds[ct]
+    change_type = raw.get("ct")
+    if change_type not in kinds:
+        raise ValueError(f"unsupported Betfair order change type {change_type!r}")
+    kind = kinds[change_type]
     initial_clk = _optional_text(raw.get("initialClk"), "initialClk")
     clk = _text(raw.get("clk"), "clk")
     publish_time_ms = _integer(raw.get("pt"), "pt")
@@ -353,6 +354,8 @@ def decode_order_change_message(raw: dict[str, Any]) -> BetfairOrderChangeFrame:
     if kind in {BetfairFrameKind.SUB_IMAGE, BetfairFrameKind.RESUB_DELTA}:
         if initial_clk is None:
             raise ValueError(f"{kind.value} requires initialClk")
+    if kind is BetfairFrameKind.SUB_IMAGE and any(not item.image for item in changes):
+        raise ValueError("SUB_IMAGE order changes must declare img=true")
     return BetfairOrderChangeFrame(
         kind=kind,
         initial_clk=initial_clk,
@@ -501,10 +504,10 @@ class BetfairOrderStreamState:
             ),
             side=self._merge_immutable(previous.side, delta.side, "side"),
             status=previous.status if delta.status is None else delta.status,
-            persistence_type=self._merge_immutable(
-                previous.persistence_type,
-                delta.persistence_type,
-                "persistenceType",
+            persistence_type=(
+                previous.persistence_type
+                if delta.persistence_type is None
+                else delta.persistence_type
             ),
             order_type=self._merge_immutable(
                 previous.order_type,
@@ -553,49 +556,7 @@ class BetfairOrderStreamState:
             del self._orders[identity]
         return identities
 
-    def apply(self, frame: BetfairOrderChangeFrame) -> BetfairOrderStreamApplyResult:
-        if not isinstance(frame, BetfairOrderChangeFrame):
-            raise TypeError("frame must be BetfairOrderChangeFrame")
-        if (
-            self._publish_time_ms is not None
-            and frame.publish_time_ms < self._publish_time_ms
-        ):
-            raise ValueError("Betfair order-stream publish time moved backwards")
-        if frame.clk == self._clk:
-            if frame.frame_sha256 == self._frame_sha256:
-                return BetfairOrderStreamApplyResult(
-                    BetfairApplyStatus.DUPLICATE,
-                    self.reconnect_cursor(),
-                    frame.kind,
-                    frame.publish_time_ms,
-                    (),
-                    (),
-                    (),
-                )
-            raise ValueError("same Betfair order-stream clk has different content")
-
-        if frame.kind is BetfairFrameKind.HEARTBEAT:
-            if (
-                frame.initial_clk is not None
-                and self._initial_clk is not None
-                and frame.initial_clk != self._initial_clk
-            ):
-                raise ValueError("Betfair order-stream initialClk changed on heartbeat")
-            if frame.initial_clk is not None:
-                self._initial_clk = frame.initial_clk
-            self._clk = frame.clk
-            self._publish_time_ms = frame.publish_time_ms
-            self._frame_sha256 = frame.frame_sha256
-            return BetfairOrderStreamApplyResult(
-                BetfairApplyStatus.HEARTBEAT,
-                self.reconnect_cursor(),
-                frame.kind,
-                frame.publish_time_ms,
-                (),
-                (),
-                (),
-            )
-
+    def _apply_change(self, frame: BetfairOrderChangeFrame) -> BetfairOrderStreamApplyResult:
         removed: list[BetfairOrderIdentity] = []
         image_markets: list[str] = []
         if frame.kind is BetfairFrameKind.SUB_IMAGE:
@@ -647,6 +608,76 @@ class BetfairOrderStreamState:
             tuple(dict.fromkeys(removed)),
             tuple(image_markets),
         )
+
+    def apply(self, frame: BetfairOrderChangeFrame) -> BetfairOrderStreamApplyResult:
+        if not isinstance(frame, BetfairOrderChangeFrame):
+            raise TypeError("frame must be BetfairOrderChangeFrame")
+        if (
+            self._publish_time_ms is not None
+            and frame.publish_time_ms < self._publish_time_ms
+        ):
+            raise ValueError("Betfair order-stream publish time moved backwards")
+        if frame.clk == self._clk:
+            if frame.frame_sha256 == self._frame_sha256:
+                return BetfairOrderStreamApplyResult(
+                    BetfairApplyStatus.DUPLICATE,
+                    self.reconnect_cursor(),
+                    frame.kind,
+                    frame.publish_time_ms,
+                    (),
+                    (),
+                    (),
+                )
+            raise ValueError("same Betfair order-stream clk has different content")
+
+        if frame.kind is BetfairFrameKind.HEARTBEAT:
+            if (
+                frame.initial_clk is not None
+                and self._initial_clk is not None
+                and frame.initial_clk != self._initial_clk
+            ):
+                raise ValueError("Betfair order-stream initialClk changed on heartbeat")
+            if frame.initial_clk is not None:
+                self._initial_clk = frame.initial_clk
+            self._clk = frame.clk
+            self._publish_time_ms = frame.publish_time_ms
+            self._frame_sha256 = frame.frame_sha256
+            return BetfairOrderStreamApplyResult(
+                BetfairApplyStatus.HEARTBEAT,
+                self.reconnect_cursor(),
+                frame.kind,
+                frame.publish_time_ms,
+                (),
+                (),
+                (),
+            )
+
+        before = (
+            self._initial_clk,
+            self._clk,
+            self._publish_time_ms,
+            self._frame_sha256,
+            self._initialized,
+            self._orders.copy(),
+            self._bet_locations.copy(),
+            self._ref_to_bet.copy(),
+            self._bet_to_ref.copy(),
+        )
+        try:
+            return self._apply_change(frame)
+        except Exception:
+            (
+                self._initial_clk,
+                self._clk,
+                self._publish_time_ms,
+                self._frame_sha256,
+                self._initialized,
+                self._orders,
+                self._bet_locations,
+                self._ref_to_bet,
+                self._bet_to_ref,
+            ) = before
+            raise
 
 
 __all__ = [

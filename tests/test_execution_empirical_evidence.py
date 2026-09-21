@@ -13,6 +13,7 @@ from autosport.execution_empirical_evidence import (
 from autosport.real_execution_ledger import (
     AcknowledgementStatus,
     ExecutionAction,
+    ExecutionLedgerIntegrityError,
     ExecutionPlan,
     ExternalAcknowledgement,
     RealExecutionLedger,
@@ -312,3 +313,61 @@ def test_direct_construction_rejects_rejected_metric_claim(tmp_path):
         match="rejected evidence cannot claim accepted/slippage metrics",
     ):
         replace(evidence, accepted_odds=Decimal("2.10"))
+
+
+def test_restart_rebuild_is_byte_identical_evidence(tmp_path):
+    ledger = _ledger(tmp_path)
+    _bind_provider(ledger)
+    _ack(ledger)
+    first = build_empirical_execution_evidence(
+        ledger,
+        attempt_id="attempt-1",
+    )
+
+    restarted = RealExecutionLedger(ledger.path)
+    second = build_empirical_execution_evidence(
+        restarted,
+        attempt_id="attempt-1",
+    )
+
+    assert second.to_dict() == first.to_dict()
+    assert second.evidence_sha256 == first.evidence_sha256
+
+
+def test_tampered_ledger_fails_before_empirical_projection(tmp_path):
+    ledger = _ledger(tmp_path)
+    _bind_provider(ledger)
+    _ack(ledger)
+    raw = ledger.path.read_text(encoding="utf-8")
+    assert "receipt-1" in raw
+    ledger.path.write_text(
+        raw.replace("receipt-1", "receipt-x", 1),
+        encoding="utf-8",
+        newline="\n",
+    )
+
+    with pytest.raises(ExecutionLedgerIntegrityError):
+        build_empirical_execution_evidence(
+            ledger,
+            attempt_id="attempt-1",
+        )
+
+
+def test_provider_evidence_after_acknowledgement_fails_closed(tmp_path):
+    ledger = _ledger(tmp_path)
+    ledger.bind_provider_evidence(
+        attempt_id="attempt-1",
+        evidence_id=EVIDENCE_ID,
+        observed_at="2026-09-21T10:00:01.900000+00:00",
+        source="provider-response",
+    )
+    _ack(ledger)
+
+    with pytest.raises(
+        EmpiricalExecutionEvidenceUnavailable,
+        match="provider evidence cannot postdate",
+    ):
+        build_empirical_execution_evidence(
+            ledger,
+            attempt_id="attempt-1",
+        )

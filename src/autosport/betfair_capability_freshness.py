@@ -129,8 +129,11 @@ class BetfairCapabilityFreshnessEvidence:
     object was issued from a canonical adapter observation. Any bound bookmaker
     profile and configured account reference are configuration/provenance scope,
     not provider-authenticated account identity or positive freshness authority.
-    It does not prove Stream freshness, financial authority, or whole-product
-    readiness.
+    The public FRESH delay-state name means only "provider did not flag this
+    REST response as delayed"; positive consumption additionally checks bounded
+    age from the local receipt timestamp. Neither fact proves provider-native
+    quote generation/publish age. It does not prove Stream freshness, financial
+    authority, or whole-product readiness.
     """
 
     profile_id: str
@@ -282,6 +285,12 @@ class BetfairCapabilityFreshnessEvidence:
 
         return False
 
+    @property
+    def proves_provider_quote_publish_age(self) -> bool:
+        """REST delay status plus local receipt time is not quote publish-time proof."""
+
+        return False
+
     def to_canonical_dict(self) -> dict[str, object]:
         return {
             "configured_account_ref": self.configured_account_ref,
@@ -372,6 +381,11 @@ class BetfairCapabilityFreshnessEvidence:
         as_of: str,
         max_age_seconds: int,
     ) -> None:
+        """Require a canonical non-delayed REST response with recent local receipt.
+
+        This gate does not prove provider-native quote generation/publish age.
+        """
+
         self._assert_product_issued()
         self.assert_matches_profile(profile)
         market = _text(market_id, "market_id")

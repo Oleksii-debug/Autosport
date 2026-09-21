@@ -28,6 +28,15 @@ class ParlaySportCatalogEvidenceError(ParlaySportCatalogAcquisitionError, ValueE
     """Response evidence is structurally inconsistent or unsafe to trust."""
 
 
+class _RejectRedirects(urllib.request.HTTPRedirectHandler):
+    """Fail before urllib can issue a second request for any redirect response."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        raise ParlaySportCatalogTransportError(
+            f"Parlay sport-catalog redirect blocked before second hop: HTTP {code}"
+        )
+
+
 @dataclass(frozen=True, slots=True)
 class RawCatalogHttpResponse:
     status_code: int
@@ -76,7 +85,7 @@ def _positive_int(value: object, *, field_name: str) -> int:
     return value
 
 
-def _validate_timestamp(value: object) -> str:
+def _timestamp_instant(value: object) -> datetime:
     if not isinstance(value, str) or not value or value != value.strip():
         raise ParlaySportCatalogEvidenceError("acquired_at must be a non-empty trimmed string")
     normalized = value[:-1] + "+00:00" if value.endswith("Z") else value
@@ -86,6 +95,11 @@ def _validate_timestamp(value: object) -> str:
         raise ParlaySportCatalogEvidenceError("acquired_at must be ISO-8601") from exc
     if parsed.tzinfo is None or parsed.utcoffset() is None:
         raise ParlaySportCatalogEvidenceError("acquired_at must be timezone-aware")
+    return parsed
+
+
+def _validate_timestamp(value: object) -> str:
+    _timestamp_instant(value)
     return value
 
 
@@ -149,8 +163,9 @@ def _default_transport(
     if url != CANONICAL_PARLAY_SPORTS_URL:
         raise ParlaySportCatalogEvidenceError("catalog transport received a non-canonical URL")
     request = urllib.request.Request(url, headers=dict(headers), method="GET")
+    opener = urllib.request.build_opener(_RejectRedirects())
     try:
-        with urllib.request.urlopen(request, timeout=timeout_seconds) as response:  # nosec B310 - fixed HTTPS URL
+        with opener.open(request, timeout=timeout_seconds) as response:  # nosec B310 - fixed HTTPS URL
             return RawCatalogHttpResponse(
                 status_code=int(response.status),
                 headers=tuple((str(key), str(value)) for key, value in response.headers.items()),
@@ -251,6 +266,15 @@ def acquire_parlay_sport_catalog(
 
     timeout_seconds = _finite_positive_float(timeout_seconds, field_name="timeout_seconds")
     max_response_bytes = _positive_int(max_response_bytes, field_name="max_response_bytes")
+    if timeout_seconds > DEFAULT_TIMEOUT_SECONDS:
+        raise ValueError(
+            f"timeout_seconds must not exceed product maximum {DEFAULT_TIMEOUT_SECONDS}"
+        )
+    if max_response_bytes > DEFAULT_MAX_RESPONSE_BYTES:
+        raise ValueError(
+            "max_response_bytes must not exceed product maximum "
+            f"{DEFAULT_MAX_RESPONSE_BYTES}"
+        )
     if prior is not None and not isinstance(prior, ParlaySportCatalogAcquisition):
         raise TypeError("prior must be a ParlaySportCatalogAcquisition")
 
@@ -276,6 +300,12 @@ def acquire_parlay_sport_catalog(
         max_response_bytes=max_response_bytes,
     )
     acquired_at = _validate_timestamp(clock())
+    if prior is not None and _timestamp_instant(acquired_at) < _timestamp_instant(
+        prior.acquired_at
+    ):
+        raise ParlaySportCatalogEvidenceError(
+            "acquired_at cannot precede the exact prior acquisition"
+        )
     etag = _single_header(response.headers, "ETag")
 
     if response.status_code == 304:

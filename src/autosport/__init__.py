@@ -78,6 +78,15 @@ from . import _dataset_snapshot_lineage_publication as _dataset_snapshot_lineage
 from . import _dataset_snapshot_lineage_publication_provenance as _dataset_snapshot_lineage_publication_provenance  # noqa: F401,E402
 from . import _dataset_snapshot_lineage_publication_trust_root as _dataset_snapshot_lineage_publication_trust_root  # noqa: F401,E402
 
+# Point-in-time feature evidence is positive only when the exact dataset lineage
+# manifest already commits the exact typed DatasetSnapshot/FeatureSet/artifact
+# provenance relation. The guard reuses the existing lineage/registry authorities.
+from . import _point_in_time_feature_provenance_guard as _point_in_time_feature_provenance_guard  # noqa: F401,E402
+
+# Exact-fence the lineage capability before any authority-bearing dispatch and let
+# stale holdout process views re-resolve the same durable workspace binding/root.
+from . import _point_in_time_authority_runtime_repair as _point_in_time_authority_runtime_repair  # noqa: F401,E402
+
 # Structural cursor/range witnesses are useful legacy intake evidence but are not
 # production provider-completeness authority. Install the fail-closed public gate;
 # the supported denominator path consumes the exact live CompleteGameBoardSnapshot.
@@ -111,3 +120,13 @@ from . import _betfair_market_commission_origin_binding as _betfair_market_commi
 # scope; it must not mint a replacement projection merely because T1 evidence
 # instance ids or timestamps changed after restart.
 from . import _campaign_provider_scope_stable_projection as _campaign_provider_scope_stable_projection  # noqa: F401,E402
+
+# Collector retention may physically delete historical rows only from durable desktop
+# application acknowledgement. Pin those reads to the exact checkpoint class so a
+# mutable exact instance cannot shadow methods and mint deletion authority.
+from . import _collector_retention_desktop_ack_authority as _collector_retention_desktop_ack_authority  # noqa: F401,E402
+
+# Snapshot the final product-loaded lineage/registry concrete class surfaces. Exact
+# authority instances must not dispatch through caller-replaced class implementations,
+# and explicit runtime-repair reloads must restore this seal before positive use.
+from . import _point_in_time_class_dispatch_seal as _point_in_time_class_dispatch_seal  # noqa: F401,E402

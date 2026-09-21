@@ -234,6 +234,34 @@ class HeadlessCollectorServiceTests(unittest.TestCase):
                 ("epoch-1", 3),
             )
 
+    def test_existing_durable_history_blocks_source_only_activation_bootstrap(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = CollectorDeltaStore(Path(tmp) / "collector.json")
+            epoch_2_delta = replace(
+                make_delta(
+                    delta_id="e2-preexisting",
+                    position=0,
+                    gap_state=GapState.CURSOR_RESET,
+                ),
+                stream_epoch="epoch-2",
+            )
+            self.assertTrue(store.append(epoch_2_delta))
+            self.assertIsNone(store.runtime_stream_epoch("source-x"))
+
+            page = catalog_page(1, "event-1")
+            source = FakeCollectorSource([page], [()])
+            source.stream_epoch = "epoch-1"
+            service = self.make_service(tmp, source)
+
+            self.assertIsNone(
+                service.delta_store.runtime_stream_epoch("source-x")
+            )
+            empty = service.run_cycle()
+            self.assertEqual(empty.committed_delta_ids, ())
+            self.assertIsNone(
+                service.delta_store.runtime_stream_epoch("source-x")
+            )
+
     def test_restart_does_not_activate_changed_epoch_without_durable_delta(self):
         with tempfile.TemporaryDirectory() as tmp:
             page = catalog_page(1, "event-1")

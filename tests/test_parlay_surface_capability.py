@@ -79,6 +79,29 @@ def test_empty_rows_do_not_destroy_technical_support():
     assert result.technical_support is TechnicalSupport.PROVEN
     assert result.data_usability is DataUsability.EMPTY
 
+def test_props_200_without_market_service_witness_is_unknown():
+    result = decide(obs(
+        surface=Surface.PROPS,
+        requested_market="player_points",
+        served_markets=(),
+        row_count=8,
+    ))
+    assert result.technical_support is TechnicalSupport.UNKNOWN
+    assert result.reason == "MISSING_MARKET_SERVICE_WITNESS"
+
+
+def test_props_explicit_market_service_witness_can_be_usable():
+    result = decide(obs(
+        surface=Surface.PROPS,
+        requested_market="player_points",
+        served_markets=("player_points",),
+        row_count=8,
+    ))
+    assert result.technical_support is TechnicalSupport.PROVEN
+    assert result.data_usability is DataUsability.USABLE
+
+
+
 
 def test_incomplete_pagination_cannot_be_usable():
     result = decide(obs(surface=Surface.PROPS, requested_market=None, served_markets=(), pagination_complete=False))

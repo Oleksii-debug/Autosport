@@ -1,3 +1,4 @@
+import json
 import pytest
 
 from autosport.betfair_multisport_catalog import (
@@ -165,3 +166,13 @@ def test_catalogue_row_outside_requested_market_type_scope_fails_closed():
             requested_market_type_codes=("WIN",),
             requested_max_results=10,
         )
+
+
+def test_rpc_params_is_detached_and_json_serializable():
+    request = build_list_market_catalogue_request(
+        event_type_ids=("1",), market_type_codes=("MATCH_ODDS",)
+    )
+    params = request.rpc_params()
+    json.dumps(params)
+    params["filter"]["eventTypeIds"].append("7")
+    assert tuple(request.params["filter"]["eventTypeIds"]) == ("1",)

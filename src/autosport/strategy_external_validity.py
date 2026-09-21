@@ -144,6 +144,10 @@ def evaluate_strategy_external_validity(
     config_ids = tuple(sorted({row.config_sha256 for row in rows}))
     if len(strategy_ids) != 1:
         raise StrategyExternalValidityError("frozen denominator mixes strategy_version_id values")
+    if protocol.candidate_id != strategy_ids[0]:
+        raise StrategyExternalValidityError(
+            "baseline candidate_id does not match frozen strategy_version_id"
+        )
     if len(config_ids) != 1:
         raise StrategyExternalValidityError("frozen denominator mixes config_sha256 values")
 

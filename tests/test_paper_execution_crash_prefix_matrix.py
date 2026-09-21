@@ -198,6 +198,7 @@ class PaperExecutionCrashPrefixMatrixTests(unittest.TestCase):
                 trigger_id=TRIGGER_ID,
                 started_at=STARTED_AT,
                 materialize_exposure=True,
+                suspended_action_ids=suspended_action_ids,
             )
             if prefix_result is not None:
                 self.assertEqual(prefix_result.run, recovered.run)
@@ -215,6 +216,7 @@ class PaperExecutionCrashPrefixMatrixTests(unittest.TestCase):
                 trigger_id=TRIGGER_ID,
                 started_at=STARTED_AT,
                 materialize_exposure=True,
+                suspended_action_ids=suspended_action_ids,
             )
             self.assertEqual(recovered.run, second.run)
             self.assertEqual(stable_ticket_ids, second.ticket_ids)

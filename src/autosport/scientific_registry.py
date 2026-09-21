@@ -1007,7 +1007,11 @@ class ScientificRegistry:
             state = json.loads(raw, object_pairs_hook=_reject_duplicate_keys, parse_constant=_reject_nonfinite)
         except json.JSONDecodeError as exc:
             raise ValueError("scientific registry must be valid UTF-8 JSON") from exc
-        if type(state) is not dict or state.get("schema_version") != self.SCHEMA_VERSION:
+        if (
+            type(state) is not dict
+            or type(state.get("schema_version")) is not int
+            or state["schema_version"] != self.SCHEMA_VERSION
+        ):
             raise ValueError("scientific registry schema_version mismatch")
         records = state.get("records")
         if type(records) is not list:

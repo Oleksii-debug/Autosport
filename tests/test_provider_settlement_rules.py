@@ -255,6 +255,53 @@ def test_build_helper_orders_versions_but_keeps_gap_semantics() -> None:
         timeline.select("2026-04-15T00:00:00+00:00")
 
 
+def test_semantically_equal_timestamp_aliases_share_canonical_identities() -> None:
+    alias_z = _book(
+        start="2026-01-01T00:00:00Z",
+        end="2026-06-01T00:00:00Z",
+    )
+    alias_offset = _book(
+        start="2026-01-01T01:00:00+01:00",
+        end="2026-06-01T02:00:00+02:00",
+    )
+    alias_fraction = _book(
+        start="2026-01-01T00:00:00.000000+00:00",
+        end="2026-06-01T00:00:00.000000+00:00",
+    )
+
+    assert alias_z.rulebook_id == alias_offset.rulebook_id == alias_fraction.rulebook_id
+
+    timeline = ProviderSettlementRuleTimeline(alias_z.provider_id, (alias_z,))
+    selection_z = timeline.select_rule(
+        evaluated_at="2026-03-01T00:00:00Z",
+        market_family="synthetic.match_result",
+        scenario_code="synthetic.interrupted",
+    )
+    selection_offset = timeline.select_rule(
+        evaluated_at="2026-03-01T01:00:00+01:00",
+        market_family="synthetic.match_result",
+        scenario_code="synthetic.interrupted",
+    )
+    selection_fraction = timeline.select_rule(
+        evaluated_at="2026-03-01T00:00:00.000000+00:00",
+        market_family="synthetic.match_result",
+        scenario_code="synthetic.interrupted",
+    )
+
+    assert (
+        selection_z.selection_id
+        == selection_offset.selection_id
+        == selection_fraction.selection_id
+    )
+
+    different_instant = timeline.select_rule(
+        evaluated_at="2026-03-01T00:00:00.000001+00:00",
+        market_family="synthetic.match_result",
+        scenario_code="synthetic.interrupted",
+    )
+    assert different_instant.selection_id != selection_z.selection_id
+
+
 def test_structural_selection_detects_rule_identity_tampering() -> None:
     book = _book()
     timeline = ProviderSettlementRuleTimeline(book.provider_id, (book,))

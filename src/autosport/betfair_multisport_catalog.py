@@ -351,4 +351,5 @@ def _provider_count(row: Mapping[str, object], key: str, field: str) -> int:
 
 def _max_results(value: object) -> int:
     if not isinstance(value, int) or isinstance(value, bool) or not 1 <= value <= 1000:
-        raise BetfairCatalogError("
+        raise BetfairCatalogError("max_results must be an integer in 1..1000")
+    return value

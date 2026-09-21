@@ -321,7 +321,7 @@ class BookmakerAccountAcquisitionStore:
             # receive/observation times but no typed provider-native account
             # snapshot timestamp.  Never substitute the local clock here.
             "provider_native_observed_at": None,
-            "source_authority_proven": True,
+            "source_authority_proven": False,
             "allocation_authority_proven": False,
             "atomicity_proven": False,
             "execution_authorized": False,
@@ -750,8 +750,6 @@ def _snapshot_from_payload(payload: object) -> BookmakerAccountSnapshot:
         {
             "venue_id",
             "account_id",
-            "authenticated_account_identity_sha256",
-            "account_identity_observed_at",
             "adapter_id",
             "adapter_version",
             "profile_version",
@@ -972,6 +970,8 @@ def _decode_record(
             "observation_key",
             "venue_id",
             "account_id",
+            "authenticated_account_identity_sha256",
+            "account_identity_observed_at",
             "adapter_id",
             "adapter_version",
             "profile_id",
@@ -999,7 +999,7 @@ def _decode_record(
             "unsupported acquisition record schema version"
         )
     for field, expected in (
-        ("source_authority_proven", True),
+        ("source_authority_proven", False),
         ("allocation_authority_proven", False),
         ("atomicity_proven", False),
         ("execution_authorized", False),

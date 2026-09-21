@@ -113,14 +113,20 @@ def attempt_utility_bound_update(
     transition: Transition,
     utility: PolicyUtilityEvidence,
 ) -> tuple[BanditPolicyState, UtilityBoundUpdateEvidence]:
-    """Return an unchanged policy until owner-utility authority is resolved."""
+    """Return an unchanged policy until owner-utility authority is resolved.
 
-    if not isinstance(policy, BanditPolicyState):
-        raise TypeError("policy must be BanditPolicyState")
-    if not isinstance(action, Action) or not isinstance(reward, RewardEvidence):
-        raise TypeError("action/reward evidence types are invalid")
-    if not isinstance(transition, Transition) or not isinstance(utility, PolicyUtilityEvidence):
-        raise TypeError("transition/utility evidence types are invalid")
+    Authority-bearing inputs must be the exact canonical concrete types. Accepting
+    subclasses here would let a caller replace trusted properties/method dispatch
+    while still passing ``isinstance`` checks, bypassing the exact-capability fence
+    already enforced by the terminalizer composition boundary.
+    """
+
+    if type(policy) is not BanditPolicyState:
+        raise TypeError("policy must be exact BanditPolicyState")
+    if type(action) is not Action or type(reward) is not RewardEvidence:
+        raise TypeError("action/reward evidence must use exact canonical types")
+    if type(transition) is not Transition or type(utility) is not PolicyUtilityEvidence:
+        raise TypeError("transition/utility evidence must use exact canonical types")
 
     _validate_canonical_causal_witnesses(
         policy=policy,

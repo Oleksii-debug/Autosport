@@ -9,8 +9,11 @@ import json
 import os
 from pathlib import Path
 import re
+import tempfile
 import threading
 from typing import Any, Mapping
+
+from .integrity import durable_path_lock
 
 
 SCHEMA_VERSION = 1
@@ -70,11 +73,11 @@ class AuthorityRef:
 class PolicyUtilityEvidence:
     """Fail-closed contract for owner-bound policy utility.
 
-    Schema v1 is intentionally contract-only. It can preserve incomplete or
-    unsupported economic utility evidence, but it cannot authorize an economic
-    policy update. A later product-owned resolver must re-resolve canonical
-    currency/cost/denominator/counterfactual authorities before a positive
-    learning disposition can exist.
+    Schema v1 is intentionally contract-only. It preserves incomplete or
+    unsupported economic utility evidence but can never self-authorize a policy
+    update. The semantic key remains the stable schema-v1 causal update key;
+    owner/model/economic context remains evidence-bound and therefore conflicts
+    as semantic drift for the same causal update instead of minting a second key.
     """
 
     environment_id: str
@@ -162,7 +165,6 @@ class PolicyUtilityEvidence:
             _finite_decimal(self.utility_value, "utility_value")
             if self.currency is None:
                 raise PolicyUtilityError("utility_value requires canonical currency")
-
         if self.completeness is UtilityCompleteness.UNSUPPORTED and self.utility_value is not None:
             raise PolicyUtilityError("UNSUPPORTED utility cannot carry a utility_value")
 
@@ -263,9 +265,7 @@ class PolicyUtilityEvidence:
             "decision_kind": self.decision_kind.value,
             "available_at": _datetime_text(self.available_at),
             "currency": self.currency,
-            "utility_value": (
-                None if self.utility_value is None else _decimal_text(self.utility_value)
-            ),
+            "utility_value": None if self.utility_value is None else _decimal_text(self.utility_value),
             "authority_refs": [item.to_dict() for item in self.authority_refs],
             "denominator_ref": (
                 None if self.denominator_ref is None else self.denominator_ref.to_dict()
@@ -279,9 +279,7 @@ class PolicyUtilityEvidence:
                 if self.effective_sample_size is None
                 else _decimal_text(self.effective_sample_size)
             ),
-            "uncertainty": (
-                None if self.uncertainty is None else _decimal_text(self.uncertainty)
-            ),
+            "uncertainty": None if self.uncertainty is None else _decimal_text(self.uncertainty),
             "source_resolved": False,
             "policy_update_eligible": False,
         }
@@ -295,41 +293,16 @@ class PolicyUtilityEvidence:
     @classmethod
     def from_dict(cls, raw: Mapping[str, Any]) -> "PolicyUtilityEvidence":
         expected = {
-            "schema_version",
-            "environment_id",
-            "episode_id",
-            "action_id",
-            "outcome_id",
-            "reward_id",
-            "transition_id",
-            "policy_id",
-            "model_id",
-            "strategy_id",
-            "config_sha256",
-            "protocol_sha256",
-            "economic_goal_fingerprint",
-            "risk_fingerprint",
-            "bankroll_id",
-            "portfolio_identity",
-            "utility_definition_family",
-            "utility_definition_version",
-            "utility_definition_sha256",
-            "completeness",
-            "truth_class",
-            "decision_kind",
-            "available_at",
-            "currency",
-            "utility_value",
-            "authority_refs",
-            "denominator_ref",
-            "counterfactual_ref",
-            "support_count",
-            "effective_sample_size",
-            "uncertainty",
-            "source_resolved",
-            "policy_update_eligible",
-            "semantic_key",
-            "evidence_id",
+            "schema_version", "environment_id", "episode_id", "action_id", "outcome_id",
+            "reward_id", "transition_id", "policy_id", "model_id", "strategy_id",
+            "config_sha256", "protocol_sha256", "economic_goal_fingerprint",
+            "risk_fingerprint", "bankroll_id", "portfolio_identity",
+            "utility_definition_family", "utility_definition_version",
+            "utility_definition_sha256", "completeness", "truth_class",
+            "decision_kind", "available_at", "currency", "utility_value",
+            "authority_refs", "denominator_ref", "counterfactual_ref",
+            "support_count", "effective_sample_size", "uncertainty",
+            "source_resolved", "policy_update_eligible", "semantic_key", "evidence_id",
         }
         _exact_keys(raw, expected, "PolicyUtilityEvidence")
         if type(raw["schema_version"]) is not int or raw["schema_version"] != SCHEMA_VERSION:
@@ -348,6 +321,7 @@ class PolicyUtilityEvidence:
             decision_kind = DecisionKind(_string(raw["decision_kind"], "decision_kind"))
         except ValueError as exc:
             raise PolicyUtilityError("unsupported policy utility enum value") from exc
+
         evidence = cls(
             environment_id=_string(raw["environment_id"], "environment_id"),
             episode_id=_string(raw["episode_id"], "episode_id"),
@@ -402,7 +376,9 @@ class PolicyUtilityEvidence:
                 None if ess_raw is None else _parse_decimal(ess_raw, "effective_sample_size")
             ),
             uncertainty=(
-                None if uncertainty_raw is None else _parse_decimal(uncertainty_raw, "uncertainty")
+                None
+                if uncertainty_raw is None
+                else _parse_decimal(uncertainty_raw, "uncertainty")
             ),
         )
         if _string(raw["semantic_key"], "semantic_key") != evidence.semantic_key:
@@ -413,11 +389,14 @@ class PolicyUtilityEvidence:
 
 
 class PolicyUtilityStore:
-    """Append-only durable store for schema-v1 utility evidence.
+    """Canonical exactly-once durable store for schema-v1 utility evidence.
 
-    Cross-process writer fencing remains a composition-root responsibility.
-    Every append reloads durable state before mutation and fails closed on
-    semantic drift for the same causal policy-update key.
+    Every writer uses the same cross-process path fence and compare/publish
+    protocol. Publication writes a complete successor image, fsyncs the file,
+    then performs platform-aware metadata-durable replacement. Windows uses
+    ``MoveFileExW`` with ``MOVEFILE_WRITE_THROUGH``; POSIX uses ``os.replace``
+    followed by a containing-directory fsync. No receipt is returned until that
+    durability boundary succeeds.
     """
 
     _locks_guard = threading.Lock()
@@ -435,37 +414,32 @@ class PolicyUtilityStore:
             self._reload()
 
     def append(self, evidence: PolicyUtilityEvidence) -> bool:
-        if not isinstance(evidence, PolicyUtilityEvidence):
-            raise PolicyUtilityError("append requires PolicyUtilityEvidence")
+        if type(evidence) is not PolicyUtilityEvidence:
+            raise PolicyUtilityError("append requires exact PolicyUtilityEvidence")
         with self._lock:
-            self._reload()
-            existing = self._by_semantic_key.get(evidence.semantic_key)
-            if existing is not None:
-                if existing.evidence_id == evidence.evidence_id:
-                    return False
-                raise PolicyUtilityError(
-                    "policy utility semantic drift for existing causal update key"
-                )
-            by_id = self._by_id.get(evidence.evidence_id)
-            if by_id is not None:
-                if by_id.semantic_key == evidence.semantic_key:
-                    return False
-                raise PolicyUtilityError("policy utility evidence_id collision")
+            with durable_path_lock(self.path):
+                self._reload()
+                existing = self._by_semantic_key.get(evidence.semantic_key)
+                if existing is not None:
+                    if existing.evidence_id == evidence.evidence_id:
+                        return False
+                    raise PolicyUtilityError(
+                        "policy utility semantic drift for existing causal update key"
+                    )
+                by_id = self._by_id.get(evidence.evidence_id)
+                if by_id is not None:
+                    if by_id.semantic_key == evidence.semantic_key:
+                        return False
+                    raise PolicyUtilityError("policy utility evidence_id collision")
 
-            encoded = json.dumps(
-                evidence.to_dict(),
-                sort_keys=True,
-                separators=(",", ":"),
-                ensure_ascii=True,
-                allow_nan=False,
-            )
-            with self.path.open("a", encoding="utf-8", newline="\n") as handle:
-                handle.write(encoded + "\n")
-                handle.flush()
-                os.fsync(handle.fileno())
-            self._by_id[evidence.evidence_id] = evidence
-            self._by_semantic_key[evidence.semantic_key] = evidence
-            return True
+                self._publish_successor(evidence)
+                self._reload()
+                persisted = self._by_id.get(evidence.evidence_id)
+                if persisted != evidence:
+                    raise PolicyUtilityError(
+                        "published policy utility evidence failed exact reload verification"
+                    )
+                return True
 
     def get(self, evidence_id: str) -> PolicyUtilityEvidence:
         _sha256(evidence_id, "evidence_id")
@@ -480,6 +454,55 @@ class PolicyUtilityStore:
         with self._lock:
             self._reload()
             return tuple(self._by_id.values())
+
+    def _publish_successor(self, evidence: PolicyUtilityEvidence) -> None:
+        try:
+            previous = self.path.read_bytes() if self.path.exists() else b""
+        except OSError as exc:
+            raise PolicyUtilityError("unable to read policy utility store") from exc
+        if previous and not previous.endswith(b"\n"):
+            raise PolicyUtilityError(
+                "policy utility store lacks canonical trailing record boundary"
+            )
+
+        encoded = (
+            json.dumps(
+                evidence.to_dict(),
+                sort_keys=True,
+                separators=(",", ":"),
+                ensure_ascii=True,
+                allow_nan=False,
+            )
+            + "\n"
+        ).encode("utf-8")
+
+        temporary: Path | None = None
+        try:
+            with tempfile.NamedTemporaryFile(
+                "wb",
+                dir=self.path.parent,
+                prefix=f".{self.path.name}.",
+                suffix=".tmp",
+                delete=False,
+            ) as handle:
+                temporary = Path(handle.name)
+                handle.write(previous)
+                handle.write(encoded)
+                handle.flush()
+                os.fsync(handle.fileno())
+
+            _durable_replace(temporary, self.path)
+            temporary = None
+        except PolicyUtilityError:
+            raise
+        except OSError as exc:
+            raise PolicyUtilityError("unable to durably publish policy utility evidence") from exc
+        finally:
+            if temporary is not None:
+                try:
+                    temporary.unlink()
+                except FileNotFoundError:
+                    pass
 
     def _reload(self) -> None:
         by_id: dict[str, PolicyUtilityEvidence] = {}
@@ -519,6 +542,54 @@ class PolicyUtilityStore:
                 by_semantic[evidence.semantic_key] = evidence
         self._by_id = by_id
         self._by_semantic_key = by_semantic
+
+
+def _durable_replace(source: Path, destination: Path) -> None:
+    """Publish one complete image with platform-appropriate metadata durability."""
+
+    if os.name == "nt":
+        _replace_windows_write_through(source, destination)
+        return
+
+    os.replace(source, destination)
+    _fsync_directory(destination.parent)
+
+
+def _replace_windows_write_through(source: Path, destination: Path) -> None:
+    """Atomically replace ``destination`` and synchronously flush Windows metadata."""
+
+    import ctypes
+
+    movefile_replace_existing = 0x1
+    movefile_write_through = 0x8
+    move_file_ex = ctypes.windll.kernel32.MoveFileExW
+    move_file_ex.argtypes = [ctypes.c_wchar_p, ctypes.c_wchar_p, ctypes.c_uint]
+    move_file_ex.restype = ctypes.c_int
+    if not move_file_ex(
+        str(source),
+        str(destination),
+        movefile_replace_existing | movefile_write_through,
+    ):
+        raise ctypes.WinError()
+
+
+def _fsync_directory(path: Path) -> None:
+    """Persist a POSIX rename by synchronizing its containing directory."""
+
+    if not hasattr(os, "O_DIRECTORY"):
+        raise PolicyUtilityError(
+            "platform lacks a directory durability primitive for policy utility store"
+        )
+    try:
+        directory_fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY)
+    except OSError as exc:
+        raise PolicyUtilityError("unable to open policy utility store directory") from exc
+    try:
+        os.fsync(directory_fd)
+    except OSError as exc:
+        raise PolicyUtilityError("unable to fsync policy utility store directory") from exc
+    finally:
+        os.close(directory_fd)
 
 
 def _digest(raw: Mapping[str, Any]) -> str:
@@ -627,4 +698,6 @@ def _exact_keys(raw: Mapping[str, Any], expected: set[str], label: str) -> None:
     if set(raw) != expected:
         missing = sorted(expected - set(raw))
         extra = sorted(set(raw) - expected)
-        raise PolicyUtilityError(f"{label} keys mismatch; missing={missing}; extra={extra}")
+        raise PolicyUtilityError(
+            f"{label} keys mismatch; missing={missing}; extra={extra}"
+        )

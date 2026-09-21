@@ -10,6 +10,20 @@ from . import _paper_execution_append_recovery as _paper_execution_append_recove
 from . import _paper_value_execution_authority as _paper_value_execution_authority  # noqa: F401,E402
 from . import _paper_value_risk_admission_recovery as _paper_value_risk_admission_recovery  # noqa: F401,E402
 
+# Product PAPER execution must preserve which exact, already-durable DecisionLedger
+# record existed before #623 RUN_RESERVED/attempt publication. This guard wraps the
+# fully-composed execution runtime after the existing recovery/authority layers.
+from . import _paper_execution_decision_origin as _paper_execution_decision_origin  # noqa: F401,E402
+# Exact classes are insufficient if an instance shadows authority-bearing methods.
+# Fence those dispatch points before product call-site authorization is installed.
+from . import _paper_execution_decision_origin_instance_guard as _paper_execution_decision_origin_instance_guard  # noqa: F401,E402
+# Canonical producer ancestry is not an ambient capability: only the exact direct
+# product execute call may bind origin, while nested hooks fail before reservation.
+from . import _paper_execution_decision_origin_callsite_guard as _paper_execution_decision_origin_callsite_guard  # noqa: F401,E402
+# An origin-bound incomplete run may resume only after the product re-resolves the
+# same durable DecisionLedger origin; generic/originless retry remains fail-closed.
+from . import _paper_execution_decision_origin_resume_guard as _paper_execution_decision_origin_resume_guard  # noqa: F401,E402
+
 # Bind explicit realized-VOC admissions to the exact canonical ResearchProtocol
 # and protocol-derived cohort before the scoring facade is imported by consumers.
 from . import _voc_admission_identity_guard as _voc_admission_identity_guard  # noqa: F401,E402
@@ -42,7 +56,7 @@ from . import _provider_transport_origin as _provider_transport_origin  # noqa: 
 from . import _provider_observation_payload_strictness as _provider_observation_payload_strictness  # noqa: F401,E402
 
 # Install the fail-closed predictive runtime authority bridge before callers import
-# decision modules.  The import is intentionally private; public APIs remain in the
+# decision modules. The import is intentionally private; public APIs remain in the
 # owning opportunity/predictive modules.
 from . import predictive_authority as _predictive_authority  # noqa: E402,F401
 from . import _predictive_authority_type_fence as _predictive_authority_type_fence  # noqa: E402,F401
@@ -63,6 +77,15 @@ from . import _whole_product_title_guard as _whole_product_title_guard  # noqa: 
 from . import _dataset_snapshot_lineage_publication as _dataset_snapshot_lineage_publication  # noqa: F401,E402
 from . import _dataset_snapshot_lineage_publication_provenance as _dataset_snapshot_lineage_publication_provenance  # noqa: F401,E402
 from . import _dataset_snapshot_lineage_publication_trust_root as _dataset_snapshot_lineage_publication_trust_root  # noqa: F401,E402
+
+# Point-in-time feature evidence is positive only when the exact dataset lineage
+# manifest already commits the exact typed DatasetSnapshot/FeatureSet/artifact
+# provenance relation. The guard reuses the existing lineage/registry authorities.
+from . import _point_in_time_feature_provenance_guard as _point_in_time_feature_provenance_guard  # noqa: F401,E402
+
+# Exact-fence the lineage capability before any authority-bearing dispatch and let
+# stale holdout process views re-resolve the same durable workspace binding/root.
+from . import _point_in_time_authority_runtime_repair as _point_in_time_authority_runtime_repair  # noqa: F401,E402
 
 # Structural cursor/range witnesses are useful legacy intake evidence but are not
 # production provider-completeness authority. Install the fail-closed public gate;
@@ -98,6 +121,17 @@ from . import _betfair_market_commission_origin_binding as _betfair_market_commi
 # instance ids or timestamps changed after restart.
 from . import _campaign_provider_scope_stable_projection as _campaign_provider_scope_stable_projection  # noqa: F401,E402
 
-# PAPER campaign admission consumes exact durable ledgers. Reject per-instance
-# method shadows before any authority-bearing decision/execution history read.
+# Collector retention may physically delete historical rows only from durable desktop
+# application acknowledgement. Pin those reads to the exact checkpoint class so a
+# mutable exact instance cannot shadow methods and mint deletion authority.
+from . import _collector_retention_desktop_ack_authority as _collector_retention_desktop_ack_authority  # noqa: F401,E402
+
+# Snapshot the final product-loaded lineage/registry concrete class surfaces. Exact
+# authority instances must not dispatch through caller-replaced class implementations,
+# and explicit runtime-repair reloads must restore this seal before positive use.
+from . import _point_in_time_class_dispatch_seal as _point_in_time_class_dispatch_seal  # noqa: F401,E402
+
+# #708 consumes the already-durable #727 RUN_RESERVED decision origin. Reconcile
+# the provisional admission facade first, then closure-seal its authority reads.
+from . import _paper_campaign_admission_origin_convergence as _paper_campaign_admission_origin_convergence  # noqa: F401,E402
 from . import _paper_campaign_admission_consumer_guard as _paper_campaign_admission_consumer_guard  # noqa: F401,E402

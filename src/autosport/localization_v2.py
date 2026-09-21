@@ -11,7 +11,7 @@ _UK_UA = MappingProxyType(
     {
         "ui.boolean.true": "так",
         "ui.boolean.false": "ні",
-        "ui.app.title": "Автоспорт — V1 лабораторія паперового моделювання для Windows",
+        "ui.app.title": "Автоспорт — аналітична програма для Windows",
         "ui.dialog.title": "Автоспорт",
         "ui.label.strategy": "Стратегія:",
         "ui.label.speed": "Швидкість:",

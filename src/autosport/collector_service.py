@@ -16,6 +16,7 @@ from typing import Callable, Protocol, Sequence
 from .causal_collector import (
     CollectorDelta,
     CollectorDeltaStore,
+    CollectorStorageBackpressureError,
     RemoteCollectorAdapter,
     StreamCheckpoint,
 )
@@ -32,6 +33,7 @@ from .providers import ProviderUnavailableError
 
 _MAX_DELTA_PAGE_ITEMS = 5000
 _MAX_PROVIDER_RETRY_ATTEMPTS = 10
+_DEFAULT_MAX_STORE_BYTES = 1_073_741_824
 
 
 class CollectorServiceError(RuntimeError):
@@ -40,6 +42,12 @@ class CollectorServiceError(RuntimeError):
 
 class CollectorStorageLimitError(CollectorServiceError):
     """Raised when the configured durable collector storage budget is exhausted."""
+
+
+class CollectorRetentionRequiredError(CollectorStorageLimitError):
+    """Recoverable backpressure requiring safe retention before more intake."""
+
+    code = "RETENTION_REQUIRED"
 
 
 class CollectorServiceStoppedError(CollectorServiceError):
@@ -106,7 +114,7 @@ class CollectorServiceConfig:
     initial_backoff_seconds: float = 1.0
     max_backoff_seconds: float = 30.0
     jitter_fraction: float = 0.20
-    max_store_bytes: int = 1_073_741_824
+    max_store_bytes: int = _DEFAULT_MAX_STORE_BYTES
 
     def __post_init__(self) -> None:
         if (
@@ -480,13 +488,15 @@ class HeadlessCollectorService:
         self.delta_store = delta_store
         self.lifecycle = lifecycle
         self.source = source
+        self._source_identity = source
+        self._source_id = source_id
         self.config = config or CollectorServiceConfig()
         self.clock = clock or (lambda: datetime.now(timezone.utc).isoformat())
         self.sleep = sleep or time.sleep
         self.random_value = random_value or random.random
         self.stop_requested = stop_requested or (lambda: False)
         self.stop_reason = stop_reason or (lambda: "stop_requested")
-        self._adapter = RemoteCollectorAdapter(self.delta_store.append)
+        self._adapter = RemoteCollectorAdapter(self._append_admitted_delta)
         started_at = self.clock()
         _CollectorServiceState._instant(started_at, "started_at")
         self._state = _CollectorServiceState(
@@ -495,10 +505,77 @@ class HeadlessCollectorService:
             source_id=source_id,
             started_at=started_at,
         )
+        try:
+            self.delta_store._bootstrap_or_recover_runtime_stream_epoch(
+                source_id=self._source_id,
+                stream_epoch=stream_epoch,
+                activated_at=started_at,
+            )
+        except (TypeError, ValueError) as exc:
+            raise CollectorServiceError(
+                "cannot establish collector active-epoch authority"
+            ) from exc
+
+    def _require_source_identity(
+        self,
+        *,
+        expected_stream_epoch: str | None = None,
+    ) -> CollectorServiceSource:
+        """Return the configured source only while its product identity is intact."""
+
+        source = self._source_identity
+        if self.source is not source:
+            raise CollectorServiceError(
+                "collector source instance cannot be replaced during this service run"
+            )
+        source_id = getattr(source, "source_id", None)
+        stream_epoch = getattr(source, "stream_epoch", None)
+        if source_id != self._source_id:
+            raise CollectorServiceError(
+                "source.source_id changed after collector service construction"
+            )
+        if not isinstance(stream_epoch, str) or not stream_epoch.strip():
+            raise CollectorServiceError(
+                "source.stream_epoch must remain a non-empty string"
+            )
+        if (
+            expected_stream_epoch is not None
+            and stream_epoch != expected_stream_epoch
+        ):
+            raise CollectorServiceError(
+                "source.stream_epoch changed during active collector cycle"
+            )
+        return source
+
+    def _append_admitted_delta(self, delta: CollectorDelta) -> bool:
+        """Commit a validated provider delta and its epoch authority atomically."""
+
+        if not isinstance(delta, CollectorDelta):
+            raise TypeError("delta must be CollectorDelta")
+        delta.validate()
+        self._require_source_identity(
+            expected_stream_epoch=delta.stream_epoch
+        )
+        if delta.source_id != self._source_id:
+            raise CollectorServiceError(
+                "collector source returned a delta for another source_id"
+            )
+        activated_at = self.clock()
+        _CollectorServiceState._instant(activated_at, "activated_at")
+        try:
+            return self.delta_store._append_with_runtime_stream_epoch(
+                delta,
+                activated_at=activated_at,
+            )
+        except CollectorStorageBackpressureError as exc:
+            raise CollectorRetentionRequiredError(
+                "RETENTION_REQUIRED: collector native SQLite allocation ceiling was reached; "
+                "run explicit pin-aware compaction, then retry"
+            ) from exc
 
     @property
     def source_id(self) -> str:
-        return self.source.source_id
+        return self._source_id
 
     def status(self) -> dict[str, object]:
         """Durable operator-readable state; provider messages/secrets are excluded."""
@@ -558,8 +635,9 @@ class HeadlessCollectorService:
         except FileNotFoundError:
             size = 0
         if size >= self.config.max_store_bytes:
-            raise CollectorStorageLimitError(
-                "collector durable store reached configured byte budget"
+            raise CollectorRetentionRequiredError(
+                "RETENTION_REQUIRED: collector durable store reached configured byte budget; "
+                "run explicit pin-aware compaction or enlarge the budget, then retry"
             )
 
     def run_cycle(self) -> CollectorCycleResult:
@@ -567,13 +645,18 @@ class HeadlessCollectorService:
         _CollectorServiceState._instant(attempt_at, "attempt_at")
         self._state.record_attempt(at=attempt_at)
         try:
+            cycle_source = self._require_source_identity()
+            cycle_stream_epoch = cycle_source.stream_epoch
             self._check_storage_budget()
             catalog_changes = self._bounded_provider_call(
                 lambda: self.lifecycle.refresh_once(
-                    self.source.fetch_catalog_page,
+                    cycle_source.fetch_catalog_page,
                     source_id=self.source_id,
                     discovered_at=self.clock(),
                 )
+            )
+            self._require_source_identity(
+                expected_stream_epoch=cycle_stream_epoch
             )
             if not isinstance(catalog_changes, tuple):
                 raise TypeError("lifecycle refresh must return a tuple")
@@ -583,14 +666,17 @@ class HeadlessCollectorService:
                 if item.source_id == self.source_id
             )
             checkpoint = self.delta_store.stream_checkpoint(
-                self.source_id, self.source.stream_epoch
+                self.source_id, cycle_stream_epoch
             )
             raw_deltas = self._bounded_provider_call(
-                lambda: self.source.fetch_deltas(
+                lambda: cycle_source.fetch_deltas(
                     checkpoint,
                     records,
                     self.config.max_items,
                 )
+            )
+            self._require_source_identity(
+                expected_stream_epoch=cycle_stream_epoch
             )
             if not isinstance(raw_deltas, tuple):
                 raise TypeError("source.fetch_deltas must return a tuple")
@@ -612,7 +698,7 @@ class HeadlessCollectorService:
                     raise CollectorServiceError(
                         "collector source returned a delta for another source_id"
                     )
-                if delta.stream_epoch != self.source.stream_epoch:
+                if delta.stream_epoch != cycle_stream_epoch:
                     raise CollectorServiceError(
                         "collector source returned a delta for another stream_epoch"
                     )
@@ -626,6 +712,9 @@ class HeadlessCollectorService:
                     duplicates.append(delta.delta_id)
                 self._check_storage_budget()
 
+            self._require_source_identity(
+                expected_stream_epoch=cycle_stream_epoch
+            )
             completed_at = self.clock()
             _CollectorServiceState._instant(completed_at, "completed_at")
             self._state.record_success(
@@ -704,6 +793,35 @@ def _load_source_factory(spec: str) -> Callable[[], CollectorServiceSource]:
     return factory
 
 
+def _open_collector_store_with_effective_budget(
+    path: Path,
+    requested_max_bytes: int | None,
+) -> tuple[CollectorDeltaStore, int]:
+    """Open the canonical store and resolve one durable operator byte budget.
+
+    CLI omission is assertion-free: an existing durable budget is adopted. A fresh
+    or previously unbound workspace establishes the product default. Explicit
+    values remain assertions and the canonical store rejects any durable conflict.
+    """
+
+    requested = requested_max_bytes
+    if requested is None and not path.exists():
+        requested = _DEFAULT_MAX_STORE_BYTES
+
+    store = CollectorDeltaStore(path, max_bytes=requested)
+    effective = store.configured_max_bytes
+    if effective is None:
+        # Existing unbound stores adopt the product default through the same
+        # canonical durable authority. Never duplicate or bypass its conflict fence.
+        store = CollectorDeltaStore(path, max_bytes=_DEFAULT_MAX_STORE_BYTES)
+        effective = store.configured_max_bytes
+    if effective is None:
+        raise CollectorServiceError(
+            "collector durable store did not resolve a max_store_bytes authority"
+        )
+    return store, effective
+
+
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="python -m autosport.collector_service",
@@ -727,7 +845,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--initial-backoff-seconds", type=float, default=1.0)
     parser.add_argument("--max-backoff-seconds", type=float, default=30.0)
     parser.add_argument("--jitter-fraction", type=float, default=0.20)
-    parser.add_argument("--max-store-bytes", type=int, default=1_073_741_824)
+    parser.add_argument("--max-store-bytes", type=int)
     return parser
 
 
@@ -746,8 +864,14 @@ def main(argv: Sequence[str] | None = None) -> int:
     try:
         factory = _load_source_factory(args.source_factory)
         source = factory()
+        delta_store, effective_max_store_bytes = (
+            _open_collector_store_with_effective_budget(
+                root / "collector_deltas.json",
+                args.max_store_bytes,
+            )
+        )
         service = HeadlessCollectorService(
-            delta_store=CollectorDeltaStore(root / "collector_deltas.json"),
+            delta_store=delta_store,
             lifecycle=ContinuousEventLifecycle(root / "collector_catalog.json"),
             source=source,
             state_path=root / "collector_service_state.json",
@@ -759,7 +883,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 initial_backoff_seconds=args.initial_backoff_seconds,
                 max_backoff_seconds=args.max_backoff_seconds,
                 jitter_fraction=args.jitter_fraction,
-                max_store_bytes=args.max_store_bytes,
+                max_store_bytes=effective_max_store_bytes,
             ),
             stop_requested=signal_stop,
             stop_reason=signal_stop.reason,
@@ -771,6 +895,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         except CollectorServiceStoppedError:
             print(json.dumps(service.status(), ensure_ascii=False, sort_keys=True))
             return 3
+        except CollectorRetentionRequiredError:
+            print(json.dumps(service.status(), ensure_ascii=False, sort_keys=True))
+            return 4
         print(json.dumps(service.status(), ensure_ascii=False, sort_keys=True))
         return signal_stop.exit_code or 0
     finally:

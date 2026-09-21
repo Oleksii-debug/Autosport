@@ -109,10 +109,14 @@ def read_betfair_execution_fee_inputs(
     therefore cannot change the executable authority used mid-capture.
     """
 
+    # Resolve the authority-bearing RPC once for the whole operation before any
+    # provider callback can run. A callback may rebind the module mirror, but it
+    # cannot redirect the second read of this already-started capture.
+    rpc = _CANONICAL_RPC
     pinned_client, venue_id, account_id = _snapshot_canonical_client(client)
     market = _required_text(market_id, "market_id")
 
-    account_response = _CANONICAL_RPC(
+    account_response = rpc(
         pinned_client,
         _GET_ACCOUNT_DETAILS,
         {},
@@ -127,7 +131,7 @@ def read_betfair_execution_fee_inputs(
     )
     _provider_percent(discount_rate, "discount_rate_percent")
 
-    market_response = _CANONICAL_RPC(
+    market_response = rpc(
         pinned_client,
         _LIST_MARKET_CATALOGUE,
         {
@@ -182,10 +186,6 @@ def _snapshot_canonical_client(
     if type(client) is not BetfairReadOnlyClient:
         raise TypeError("client must be exact BetfairReadOnlyClient")
 
-    # One dictionary copy captures the caller-owned instance image before any
-    # provider callback can run. All later RPC work happens on a private client
-    # constructed only from this image, so mutations of the original cannot race
-    # with authority-bearing dynamic dispatch or final identity binding.
     state = vars(client).copy()
     shadowed = sorted(
         name for name in _CLIENT_AUTHORITY_METHODS if name in state
@@ -222,13 +222,6 @@ def _snapshot_canonical_client(
         credentials.application_key,
         credentials.session_token,
     )
-
-    # Capture the already-resolved bound POST capability once. A bound Python
-    # method retains its function object even if the caller later shadows the
-    # instance attribute or replaces the transport class method. Store it on a
-    # private built-in namespace so canonical _rpc sees a stable instance-level
-    # `post` value on both provider reads rather than re-resolving the mutable
-    # caller-owned transport object.
     pinned_transport = SimpleNamespace(post=transport_post)
     pinned_client = BetfairReadOnlyClient(
         pinned_credentials,
@@ -238,12 +231,6 @@ def _snapshot_canonical_client(
         venue_id=venue_id,
         account_id=account_id,
     )
-
-    # Canonical _rpc internally uses ordinary attribute dispatch for these helper
-    # methods. Bind the captured implementations on the private, unreachable client
-    # before the first provider callback so a concurrent class-level replacement
-    # cannot enter the evidence path. _CANONICAL_RPC itself is also invoked through
-    # the captured function object above rather than a live class lookup.
     pinned_client._next_request_id = MethodType(
         _CANONICAL_NEXT_REQUEST_ID,
         pinned_client,

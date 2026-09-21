@@ -15,7 +15,8 @@ WINDOWS_REPLAY_STOP_UK_UA = MappingProxyType(
             "Запит STOP прийнято. PAPER replay буде скасовано на найближчій безпечній межі події."
         ),
         "ui.windows.replay_stop.status.stopped": (
-            "PAPER replay зупинено до розблокування результатів; канонічний економічний стан не змінено."
+            "PAPER replay зупинено до розблокування результатів; PaperBook і Decision Ledger "
+            "залишилися BASE, а незавершений run позначено aborted_uncommitted."
         ),
         "ui.windows.replay_stop.status.unavailable": (
             "STOP уже недоступний: немає активного replay, який ще може прийняти безпечну зупинку."

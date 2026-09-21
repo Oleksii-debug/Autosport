@@ -206,12 +206,16 @@ class _ValidatedQuoteOutcomes(dict[str, str]):
 
     def __init__(
         self,
-        values: dict[str, str],
+        values: Any = (),
         *,
-        validated_sha256: str,
+        validated_sha256: str | None = None,
     ) -> None:
         super().__init__(values)
-        self._validated_sha256 = validated_sha256
+        self._validated_sha256 = (
+            _settlement_quote_outcomes_sha256(self)
+            if validated_sha256 is None
+            else _sha256(validated_sha256, "validated_sha256")
+        )
 
     @property
     def validated_sha256(self) -> str:

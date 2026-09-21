@@ -203,6 +203,9 @@ def run_endurance(
     was_tracing = tracemalloc.is_tracing()
     if not was_tracing:
         tracemalloc.start()
+    # Attribute the reported peak to this endurance run, not to unrelated
+    # allocations that happened earlier in a caller-owned tracing session.
+    tracemalloc.reset_peak()
 
     store: SQLiteMarketStore | None = None
     mirror_store: SQLiteMarketStore | None = None

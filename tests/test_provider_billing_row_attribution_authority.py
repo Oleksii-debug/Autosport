@@ -20,6 +20,7 @@ from autosport.provider_billing_row_attribution_authority import (
     ProviderBillingRowAuthorityError,
     VerifiedProviderBillingRowAuthority,
     resolve_verified_provider_billing_row_attribution,
+    validate_verified_provider_billing_row_authority,
     verify_provider_billing_row_attribution,
 )
 
@@ -176,6 +177,7 @@ def test_verifier_issues_witness_only_for_exact_source_reresolution() -> None:
     assert authority.source_evidence_sha256 == source.evidence_sha256
     assert authority.row_ref_id == "billing-ref-1"
     assert authority.evidence_sha256 == evidence.evidence_sha256
+    assert validate_verified_provider_billing_row_authority(authority) is authority
 
 
 def test_caller_modified_exact_type_cannot_pass_product_verifier() -> None:
@@ -226,6 +228,40 @@ def test_authority_witness_constructor_is_not_caller_mintable() -> None:
         )
 
 
+def test_object_new_forged_exact_witness_is_not_registered_authority() -> None:
+    source = _source()
+    evidence, genuine = resolve_verified_provider_billing_row_attribution(
+        source, "billing-ref-1"
+    )
+    forged = object.__new__(VerifiedProviderBillingRowAuthority)
+    object.__setattr__(
+        forged, "source_evidence_sha256", genuine.source_evidence_sha256
+    )
+    object.__setattr__(forged, "row_ref_id", genuine.row_ref_id)
+    object.__setattr__(forged, "evidence_sha256", evidence.evidence_sha256)
+
+    assert type(forged) is VerifiedProviderBillingRowAuthority
+    with pytest.raises(
+        ProviderBillingRowAuthorityError,
+        match="must be product-issued and registered",
+    ):
+        validate_verified_provider_billing_row_authority(forged)
+
+
+def test_registered_witness_field_tamper_is_rejected() -> None:
+    source = _source()
+    _evidence, authority = resolve_verified_provider_billing_row_attribution(
+        source, "billing-ref-1"
+    )
+    object.__setattr__(authority, "row_ref_id", "caller-rebound-ref")
+
+    with pytest.raises(
+        ProviderBillingRowAuthorityError,
+        match="no longer matches issued identity",
+    ):
+        validate_verified_provider_billing_row_authority(authority)
+
+
 def test_resolve_verified_returns_causally_bound_pair() -> None:
     source = _source()
 
@@ -237,6 +273,7 @@ def test_resolve_verified_returns_causally_bound_pair() -> None:
     assert authority.row_ref_id == evidence.row_ref_id
     assert authority.evidence_sha256 == evidence.evidence_sha256
     assert evidence.attribution_state == "UNPROVEN"
+    assert validate_verified_provider_billing_row_authority(authority) is authority
 
 
 def test_verified_witness_cannot_expose_cost_or_allocation_authority() -> None:

@@ -290,7 +290,7 @@ def evaluate_surface_capability(
                     route,
                 )
             return result(TechnicalSupport.UNKNOWN, DataUsability.UNAVAILABLE, "MARKET_UNSERVABLE_HERE")
-        if observation.surface in {Surface.ODDS, Surface.HISTORICAL_ODDS} and market not in observation.served_markets:
+        if market not in observation.served_markets:
             return result(TechnicalSupport.UNKNOWN, DataUsability.UNKNOWN, "MISSING_MARKET_SERVICE_WITNESS")
 
     if not observation.pagination_complete:

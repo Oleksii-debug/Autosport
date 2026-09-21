@@ -57,13 +57,15 @@ class ProjectionIdentity:
     """Identity of provider settings that determine returned price-size evidence."""
 
     projection: OfferProjection
+    virtualise: bool
+    rollup_settings: tuple[tuple[str, str], ...]
     depth: int | None = None
-    rollup_settings: tuple[tuple[str, str], ...] = ()
-    virtualise: bool = False
 
     def __post_init__(self) -> None:
         if not isinstance(self.projection, OfferProjection):
             raise TypeError("projection must be OfferProjection")
+        if not isinstance(self.virtualise, bool):
+            raise TypeError("virtualise must be bool")
         if self.projection is OfferProjection.EX_BEST_OFFERS:
             if not isinstance(self.depth, int) or isinstance(self.depth, bool) or self.depth <= 0:
                 raise ValueError("EX_BEST_OFFERS requires a positive integer depth")

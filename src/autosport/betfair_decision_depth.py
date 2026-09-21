@@ -107,8 +107,8 @@ class BetfairDepthLevel:
     size: Decimal
 
     def __post_init__(self) -> None:
-        _positive_decimal(self.price, "level.price")
-        _positive_decimal(self.size, "level.size")
+        object.__setattr__(self, "price", _positive_decimal(self.price, "level.price"))
+        object.__setattr__(self, "size", _positive_decimal(self.size, "level.size"))
 
     def to_dict(self) -> dict[str, str]:
         return {
@@ -306,7 +306,9 @@ def issue_betfair_decision_depth_snapshot(
             raise BetfairDecisionDepthError(
                 f"marketBook.runners[{index}] must be a mapping"
             )
-        runner_selection_id = runner.get("selectionId")
+        runner_selection_id = _selection_id(
+            runner.get("selectionId"), f"marketBook.runners[{index}].selectionId"
+        )
         if runner_selection_id == expected_selection_id:
             matches.append(runner)
     if len(matches) != 1:

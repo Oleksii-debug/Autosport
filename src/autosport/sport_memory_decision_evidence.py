@@ -60,9 +60,9 @@ def bind_sport_memory_to_opportunity_evidence(
     matchup_published = _instant("matchup published_at", matchup.published_at)
     matchup_cutoff = _instant("matchup causal_cutoff", matchup.causal_cutoff)
     base_cutoff = _instant("base causal_cutoff", base.causal_cutoff)
-    if matchup_as_of > observed:
+    if matchup_as_of != observed:
         raise SportMemoryError(
-            "sport-memory matchup was selected after opportunity evidence"
+            "sport-memory matchup as_of must exactly match opportunity evidence observed_at"
         )
     if matchup_published > observed:
         raise SportMemoryError(

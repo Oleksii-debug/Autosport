@@ -9,7 +9,13 @@ import json
 import re
 from typing import Any, Mapping, Sequence
 
+from .campaign_denomination import (
+    CampaignDenominationBinding,
+    CampaignDenominationError,
+    rehydrate_campaign_denomination_binding,
+)
 from .campaign_economic_authority import (
+    CampaignEconomicAuthorityError,
     CanonicalCampaignProjection,
     CanonicalMembershipRef,
     CanonicalSessionRef,
@@ -20,6 +26,22 @@ from .campaign_economic_authority import (
 SCHEMA_VERSION = 3
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _CURRENCY_RE = re.compile(r"^[A-Z]{3}$")
+
+
+def _capture_product_denomination_reader():
+    # Pin the product implementation once.  Exact-type checks alone do not stop
+    # same-process class monkeypatching from replacing a bound method after
+    # import and synthesizing positive denomination authority.
+    reader = FinalizedCampaignAuthority.denomination_binding
+
+    def resolve(campaign: FinalizedCampaignAuthority):
+        return reader(campaign)
+
+    return resolve
+
+
+_PRODUCT_DENOMINATION_READER = _capture_product_denomination_reader()
+del _capture_product_denomination_reader
 
 
 class CostEvidenceError(ValueError):
@@ -261,6 +283,7 @@ class CampaignEconomicEvidenceVersion:
     net_after_known_costs: Decimal | None
     completeness: EconomicCompleteness
     incomplete_reasons: tuple[str, ...]
+    denomination_binding: CampaignDenominationBinding | None = None
 
     def __post_init__(self) -> None:
         _utc(self.as_of, "as_of")
@@ -271,6 +294,13 @@ class CampaignEconomicEvidenceVersion:
         if self.net_after_known_costs is not None:
             _finite_decimal(self.net_after_known_costs, "net_after_known_costs")
         _sorted_unique(self.incomplete_reasons, "incomplete_reasons")
+        if (
+            self.denomination_binding is not None
+            and type(self.denomination_binding) is not CampaignDenominationBinding
+        ):
+            raise CostEvidenceError(
+                "denomination_binding must be exact CampaignDenominationBinding or None"
+            )
         if (self.previous_version_id is None) != (self.previous_version_sha256 is None):
             raise CostEvidenceError("predecessor id and digest must be present together")
         if self.previous_version_id is not None:
@@ -294,7 +324,10 @@ class CampaignEconomicEvidenceVersion:
         return self.version_id
 
     def payload(self) -> dict[str, Any]:
-        return {
+        # Preserve byte-identical schema-v3 identity for legacy/non-denominated
+        # versions. Positive denomination is an additive extension only when it is
+        # product-issued and re-resolvable from canonical completed-run authority.
+        raw: dict[str, Any] = {
             "schema_version": SCHEMA_VERSION,
             "campaign_authority": _projection_dict(self.campaign_authority),
             "costs": [value.to_dict() for value in self.costs],
@@ -306,6 +339,11 @@ class CampaignEconomicEvidenceVersion:
             "completeness": self.completeness.value,
             "incomplete_reasons": list(self.incomplete_reasons),
         }
+        if self.denomination_binding is not None:
+            raw["denomination_binding"] = dict(
+                self.denomination_binding.canonical_payload
+            )
+        return raw
 
     def to_dict(self) -> dict[str, Any]:
         raw = self.payload()
@@ -321,7 +359,14 @@ class CampaignEconomicEvidenceVersion:
             "net_after_known_costs", "completeness", "incomplete_reasons",
             "version_id", "record_sha256",
         }
-        _exact_keys(raw, expected, "CampaignEconomicEvidenceVersion")
+        actual = set(raw)
+        optional = {"denomination_binding"}
+        if actual not in (expected, expected | optional):
+            raise CostEvidenceError(
+                "CampaignEconomicEvidenceVersion keys mismatch: "
+                f"missing={sorted(expected - actual)}, "
+                f"extra={sorted(actual - expected - optional)}"
+            )
         if raw["schema_version"] != SCHEMA_VERSION:
             raise CostEvidenceError("unsupported economic evidence schema_version")
         net_raw = raw["net_after_known_costs"]
@@ -341,6 +386,13 @@ class CampaignEconomicEvidenceVersion:
                 _string(value, "incomplete reason")
                 for value in _list(raw["incomplete_reasons"], "incomplete_reasons")
             ),
+            denomination_binding=(
+                None
+                if "denomination_binding" not in raw
+                else rehydrate_campaign_denomination_binding(
+                    _mapping(raw["denomination_binding"], "denomination_binding")
+                )
+            ),
         )
         if _string(raw["version_id"], "version_id") != item.version_id:
             raise CostEvidenceError("economic version id mismatch")
@@ -358,17 +410,27 @@ def derive_campaign_economics(
 ) -> CampaignEconomicEvidenceVersion:
     """Derive fail-closed campaign economics from canonical campaign truth.
 
-    The current product has no canonical campaign-wide money currency/billing
-    authority on main. Therefore this function deliberately records candidate
-    cost evidence without allowing any caller-authored source reference,
-    NOT_APPLICABLE declaration, public provider price, configured estimate, or
-    dimensionless compute metric to close professional net-economics truth.
+    Campaign denomination is positive only when the finalized product authority
+    can re-issue it from transaction-bound completed-run evidence. That closes the
+    denomination identity only; caller-authored cost sources, NOT_APPLICABLE
+    declarations, configured/public prices and dimensionless compute evidence still
+    cannot close professional net-economics truth.
     """
 
     if type(campaign) is not FinalizedCampaignAuthority:
         raise CostEvidenceError("campaign must be FinalizedCampaignAuthority")
     _utc(as_of, "as_of")
     projection = campaign.projection()
+    try:
+        denomination = _PRODUCT_DENOMINATION_READER(campaign)
+    except (CampaignEconomicAuthorityError, CampaignDenominationError) as exc:
+        raise CostEvidenceError(
+            "campaign denomination authority failed canonical re-resolution"
+        ) from exc
+    if denomination is not None and denomination.available_at > as_of:
+        raise CostEvidenceError(
+            "future-available campaign denomination authority cannot be backdated"
+        )
     cost_items = tuple(sorted(costs, key=lambda value: value.cost_evidence_id))
     _sorted_unique(cost_items, "costs", key=lambda value: value.cost_evidence_id)
 
@@ -377,6 +439,15 @@ def derive_campaign_economics(
     for cost in cost_items:
         if cost.campaign_sha256 != projection.campaign_sha256:
             raise CostEvidenceError("cost evidence belongs to a different campaign")
+        if (
+            denomination is not None
+            and cost.unit is CostUnit.MONEY
+            and cost.currency != denomination.currency
+        ):
+            raise CostEvidenceError(
+                "money cost currency does not match canonical campaign denomination; "
+                "explicit FX authority required"
+            )
         if cost.available_at > as_of:
             raise CostEvidenceError("future-available cost evidence cannot be backdated")
         if not set(cost.memberships).issubset(allowed_memberships):
@@ -392,6 +463,13 @@ def derive_campaign_economics(
     else:
         if previous.campaign_authority != projection:
             raise CostEvidenceError("successor cannot rewrite finalized campaign authority")
+        if (
+            previous.denomination_binding is not None
+            and previous.denomination_binding != denomination
+        ):
+            raise CostEvidenceError(
+                "successor cannot rewrite product-issued campaign denomination"
+            )
         if as_of < previous.as_of:
             raise CostEvidenceError("successor cannot move as_of backwards")
         _validate_successor(previous.costs, cost_items)
@@ -405,7 +483,9 @@ def derive_campaign_economics(
         cost for cost in cost_items if cost.cost_evidence_id not in superseded
     )
 
-    reasons: set[str] = {"MISSING_CAMPAIGN_CURRENCY_AUTHORITY"}
+    reasons: set[str] = set()
+    if denomination is None:
+        reasons.add("MISSING_CAMPAIGN_CURRENCY_AUTHORITY")
     by_class: dict[CostClass, list[CostEvidence]] = {
         value: [] for value in REQUIRED_COST_CLASSES
     }
@@ -435,6 +515,7 @@ def derive_campaign_economics(
         net_after_known_costs=None,
         completeness=EconomicCompleteness.INCOMPLETE_NET_ECONOMICS,
         incomplete_reasons=tuple(sorted(reasons)),
+        denomination_binding=denomination,
     )
 
 

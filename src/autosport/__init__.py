@@ -107,3 +107,8 @@ from . import _collector_retention_desktop_ack_authority as _collector_retention
 # every read must consume the exact authority-current image before causal witnesses
 # can be minted from it.
 from . import _scientific_registry_read_authority as _scientific_registry_read_authority  # noqa: F401,E402
+
+# Sequential multiplicity evidence and PromotionEvidence live in separate durable
+# journals. Seal the registry prefix observed at look registration so a later write
+# can never retroactively authorize an already-durable promotion record.
+from . import _trial_family_cross_ledger_witness as _trial_family_cross_ledger_witness  # noqa: F401,E402

@@ -311,15 +311,23 @@ def atomic_write_json(path: str | Path, payload: dict[str, Any]) -> None:
             os.fsync(handle.fileno())
 
         protect_scientific_registry = _looks_like_scientific_registry_state(payload)
-        intended = sha256_file(temporary) if protect_scientific_registry else None
+        # A successful generic publication must prove that the bytes visible at the
+        # canonical destination are exactly the bytes that were fsync'd in the
+        # sibling temporary file. This is a post-replace integrity check, not a
+        # claim of power-loss durability on every filesystem.
+        intended = sha256_file(temporary)
 
         with durable_path_lock(destination):
             with _ATOMIC_JSON_PUBLISH_LOCK:
                 if not protect_scientific_registry:
                     os.replace(temporary, destination)
+                    published = sha256_file(destination)
+                    if published != intended:
+                        raise RuntimeError(
+                            "published atomic JSON bytes do not match intended digest"
+                        )
                     return
 
-                assert intended is not None
                 observed = sha256_file(destination) if destination.exists() else None
                 authority = _scientific_registry_authority(destination)
                 _recover_or_bootstrap_scientific_registry_authority(

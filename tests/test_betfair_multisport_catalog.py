@@ -155,3 +155,13 @@ def test_identity_lists_reject_duplicates_and_empty_scope():
         build_list_events_request(event_type_ids=("1", "1"))
     with pytest.raises(BetfairCatalogError, match="must not be empty"):
         build_list_market_types_request(event_type_ids=())
+
+
+def test_catalogue_row_outside_requested_market_type_scope_fails_closed():
+    with pytest.raises(BetfairCatalogError, match="marketType scope"):
+        parse_market_catalogue_result(
+            [_catalogue_row(1)],
+            requested_event_type_ids=("1",),
+            requested_market_type_codes=("WIN",),
+            requested_max_results=10,
+        )

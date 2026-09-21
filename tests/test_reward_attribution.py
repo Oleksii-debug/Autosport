@@ -225,6 +225,22 @@ def test_same_causal_reward_has_stable_semantic_key_but_attribution_drift_change
     assert changed.policy_update_eligible is False
 
 
+def test_schema_version_requires_exact_integer_not_bool() -> None:
+    raw = _unknown().to_dict()
+    raw["schema_version"] = True
+    with pytest.raises(
+        RewardAttributionError,
+        match="unsupported reward attribution schema",
+    ):
+        RewardAttributionEvidence.from_dict(raw)
+
+    with pytest.raises(
+        RewardAttributionError,
+        match="unsupported reward attribution schema",
+    ):
+        replace(_unknown(), schema_version=True)
+
+
 def test_digest_and_identity_tampering_fail_closed() -> None:
     raw = _unknown().to_dict()
     raw["semantic_key"] = SHA_A

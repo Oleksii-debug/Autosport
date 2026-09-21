@@ -6,6 +6,7 @@ from dataclasses import replace
 import pytest
 
 from autosport._strategy_model_factory_impl import _holdout_consumed_by_other_evidence
+from autosport.reproducibility_manifest import FactoryReproducibilityManifest
 from autosport.scientific_registry import (
     DatasetSnapshot,
     DuplicateExperimentFingerprintError,
@@ -905,6 +906,98 @@ def test_protective_metric_degradation_is_durably_rejected(tmp_path):
     decision = registry.get("PromotionDecision", "promotion-v2")
     assert decision.payload["action"] == "REJECT"
     assert "protective metric degraded" in decision.payload["reason"]
+
+
+def test_factory_emits_hash_bound_reproducibility_manifest_and_restart_verifies(
+    tmp_path,
+):
+    registry, registry_path, rule, store, evaluator_config, dataset_manifest_sha256 = (
+        _factory_foundation(tmp_path)
+    )
+    result = _run_candidate(
+        ExperimentRunner(registry, store),
+        _candidate_points(),
+        rule,
+    )
+
+    bundle = registry.get("EvaluationBundle", "eval-v2")
+    assert bundle is not None
+    evaluation_payload = store.read(
+        "evaluation",
+        "eval-v2",
+        expected_sha256=bundle.payload["bundle_sha256"],
+    )
+    manifest_sha256 = evaluation_payload["reproducibility_manifest_sha256"]
+    assert manifest_sha256 in bundle.payload["artifact_hashes"]
+
+    manifest_envelope = store.read(
+        "reproducibility-manifest",
+        "eval-v2",
+        expected_sha256=manifest_sha256,
+    )
+    manifest = FactoryReproducibilityManifest.from_envelope(manifest_envelope)
+    model_payload = store.read(
+        "model",
+        "model-v2",
+        expected_sha256=registry.get("ModelVersion", "model-v2").payload[
+            "artifact_sha256"
+        ],
+    )
+
+    assert manifest.experiment_id == "experiment-v2"
+    assert manifest.evaluation_bundle_id == "eval-v2"
+    assert manifest.dataset_snapshot_id == "dataset-factory"
+    assert manifest.dataset_manifest_sha256 == dataset_manifest_sha256
+    assert manifest.training_points_manifest_sha256 == dataset_manifest_sha256
+    assert manifest.evaluator_config_sha256 == evaluator_config.config_sha256
+    assert manifest.model_version_id == "model-v2"
+    assert manifest.model_artifact_sha256 == registry.get(
+        "ModelVersion", "model-v2"
+    ).payload["artifact_sha256"]
+    assert manifest.learner_state_sha256 == model_payload["identity_sha256"]
+    assert tuple(split.evaluation_index for split in manifest.splits) == (2, 3)
+    assert tuple(len(split.training_indices) for split in manifest.splits) == (2, 3)
+
+    restarted = ExperimentRunner.verify_restart(
+        registry_path,
+        tmp_path / "factory-artifacts",
+        "experiment-v2",
+        as_of=T7,
+    )
+    assert restarted.evaluation_bundle_sha256 == result.evaluation_bundle_sha256
+
+
+def test_restart_detects_tampered_reproducibility_manifest(tmp_path):
+    registry, registry_path, rule, store, _, _ = _factory_foundation(tmp_path)
+    _run_candidate(ExperimentRunner(registry, store), _candidate_points(), rule)
+
+    target = store.path_for_testing("reproducibility-manifest", "eval-v2")
+    payload = json.loads(target.read_text(encoding="utf-8"))
+    payload["research"]["evaluator_config_sha256"] = SHA_A
+    target.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="artifact hash mismatch"):
+        ExperimentRunner.verify_restart(
+            registry_path,
+            tmp_path / "factory-artifacts",
+            "experiment-v2",
+            as_of=T7,
+        )
+
+
+def test_restart_detects_missing_reproducibility_manifest(tmp_path):
+    registry, registry_path, rule, store, _, _ = _factory_foundation(tmp_path)
+    _run_candidate(ExperimentRunner(registry, store), _candidate_points(), rule)
+
+    store.path_for_testing("reproducibility-manifest", "eval-v2").unlink()
+
+    with pytest.raises(ValueError, match="factory artifact is missing"):
+        ExperimentRunner.verify_restart(
+            registry_path,
+            tmp_path / "factory-artifacts",
+            "experiment-v2",
+            as_of=T7,
+        )
 
 
 def test_restart_detects_tampered_evaluation_artifact(tmp_path):

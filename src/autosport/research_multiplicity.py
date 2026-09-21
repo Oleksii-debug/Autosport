@@ -7,7 +7,7 @@ from datetime import datetime
 from decimal import Decimal, InvalidOperation
 from enum import StrEnum
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Callable, Mapping
 
 from .integrity import atomic_write_json
 from .scientific_registry import ResearchOutcome
@@ -1096,8 +1096,17 @@ class SequentialMultiplicityEvidenceStore:
         wanted = _sha256(member_authority_id, "member_authority_id")
         return tuple(loaded["by_member"].get(wanted, ()))
 
-    def append(self, evidence: SequentialLookEvidence) -> SequentialAssessment:
+    def append(
+        self,
+        evidence: SequentialLookEvidence,
+        *,
+        locked_precondition: Callable[[], None] | None = None,
+    ) -> SequentialAssessment:
+        if locked_precondition is not None and not callable(locked_precondition):
+            raise TypeError("locked_precondition must be callable")
         with WorkspaceEconomicLock(self.workspace_root):
+            if locked_precondition is not None:
+                locked_precondition()
             loaded = self._read_state()
             plan: ExperimentFamilyPlan = loaded["plan"]
             if evidence.family_plan_sha256 != plan.plan_sha256:

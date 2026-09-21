@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import stat
 import tempfile
 import threading
 import uuid
@@ -27,6 +28,20 @@ _MONOTONIC_BINDING_SCHEMA = "autosport.execution_stop_authority.monotonic_bindin
 _MONOTONIC_BINDING_VERSION = 1
 _MONOTONIC_STATE_SCHEMA = "autosport.execution_stop_authority.monotonic_state"
 _MONOTONIC_STATE_VERSION = 1
+_MONOTONIC_RECEIPT_SCHEMA = "autosport.execution_stop_authority.monotonic_binding_receipt"
+_MONOTONIC_RECEIPT_VERSION = 1
+_MONOTONIC_RECEIPT_KEYS = frozenset(
+    {
+        "schema",
+        "schema_version",
+        "workspace_instance_id",
+        "domain",
+        "key",
+        "namespace_sha256",
+        "semantic_binding_sha256",
+        "receipt_sha256",
+    }
+)
 
 
 class ExecutionStopAuthorityError(RuntimeError):
@@ -255,6 +270,137 @@ class ExecutionStopAuthority:
             }
         )
 
+    @staticmethod
+    def _monotonic_receipt_path(
+        authority: MonotonicWorkspaceAuthority,
+    ) -> Path:
+        return (
+            authority.authority_root
+            / "consumer-bindings"
+            / authority.namespace_sha256[:2]
+            / f"{authority.namespace_sha256}.execution-stop.json"
+        )
+
+    def _monotonic_receipt_payload(
+        self,
+        authority: MonotonicWorkspaceAuthority,
+        *,
+        semantic_binding_sha256: str,
+    ) -> dict[str, object]:
+        body: dict[str, object] = {
+            "schema": _MONOTONIC_RECEIPT_SCHEMA,
+            "schema_version": _MONOTONIC_RECEIPT_VERSION,
+            "workspace_instance_id": authority.workspace_instance_id,
+            "domain": authority.domain,
+            "key": authority.key,
+            "namespace_sha256": authority.namespace_sha256,
+            "semantic_binding_sha256": semantic_binding_sha256,
+        }
+        return {**body, "receipt_sha256": _digest(body)}
+
+    def _read_monotonic_receipt_unlocked(
+        self,
+        authority: MonotonicWorkspaceAuthority,
+        *,
+        semantic_binding_sha256: str,
+    ) -> bool:
+        path = self._monotonic_receipt_path(authority)
+        if not path.exists():
+            return False
+        try:
+            metadata = path.lstat()
+        except OSError as exc:
+            raise ExecutionStopIntegrityError(
+                "cannot inspect STOP monotonic binding receipt"
+            ) from exc
+        if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1:
+            raise ExecutionStopIntegrityError(
+                "STOP monotonic binding receipt must be a single-link regular file"
+            )
+        try:
+            raw = _parse_json_object(
+                path.read_text(encoding="utf-8"),
+                what="STOP monotonic binding receipt",
+            )
+        except (OSError, UnicodeError) as exc:
+            raise ExecutionStopIntegrityError(
+                "cannot read STOP monotonic binding receipt"
+            ) from exc
+        if set(raw) != _MONOTONIC_RECEIPT_KEYS:
+            raise ExecutionStopIntegrityError(
+                "STOP monotonic binding receipt schema is invalid"
+            )
+        expected = self._monotonic_receipt_payload(
+            authority,
+            semantic_binding_sha256=semantic_binding_sha256,
+        )
+        if raw != expected:
+            raise ExecutionStopIntegrityError(
+                "STOP monotonic binding receipt identity or digest mismatch"
+            )
+        return True
+
+    def _ensure_monotonic_receipt_unlocked(
+        self,
+        authority: MonotonicWorkspaceAuthority,
+        *,
+        semantic_binding_sha256: str,
+    ) -> None:
+        if self._read_monotonic_receipt_unlocked(
+            authority,
+            semantic_binding_sha256=semantic_binding_sha256,
+        ):
+            return
+        path = self._monotonic_receipt_path(authority)
+        payload = self._monotonic_receipt_payload(
+            authority,
+            semantic_binding_sha256=semantic_binding_sha256,
+        )
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            flags = (
+                os.O_WRONLY
+                | os.O_CREAT
+                | os.O_EXCL
+                | getattr(os, "O_BINARY", 0)
+            )
+            if os.name != "nt":
+                flags |= getattr(os, "O_NOFOLLOW", 0)
+            descriptor = os.open(path, flags, 0o600)
+            try:
+                with os.fdopen(
+                    descriptor,
+                    "w",
+                    encoding="utf-8",
+                    newline="\n",
+                ) as handle:
+                    descriptor = -1
+                    handle.write(_canonical(payload))
+                    handle.write("\n")
+                    handle.flush()
+                    os.fsync(handle.fileno())
+            finally:
+                if descriptor >= 0:
+                    os.close(descriptor)
+            _sync_directory(path.parent)
+            if path.parent.parent != authority.authority_root:
+                _sync_directory(path.parent.parent)
+            _sync_directory(authority.authority_root)
+        except FileExistsError:
+            if not self._read_monotonic_receipt_unlocked(
+                authority,
+                semantic_binding_sha256=semantic_binding_sha256,
+            ):
+                raise ExecutionStopIntegrityError(
+                    "STOP monotonic binding receipt creation raced without evidence"
+                )
+        except ExecutionStopAuthorityError:
+            raise
+        except OSError as exc:
+            raise ExecutionStopIntegrityError(
+                "cannot durably persist STOP monotonic binding receipt"
+            ) from exc
+
     def _monotonic_state_digest(self, record: dict[str, Any]) -> str:
         return _digest(
             {
@@ -305,7 +451,15 @@ class ExecutionStopAuthority:
         try:
             authority = self._monotonic_authority()
             history = authority.read_history()
+            receipt_exists = self._read_monotonic_receipt_unlocked(
+                authority,
+                semantic_binding_sha256=binding,
+            )
             if not history:
+                if receipt_exists:
+                    raise ExecutionStopIntegrityError(
+                        "STOP monotonic authority history is missing after prior binding"
+                    )
                 if observed is None:
                     return
                 if not adopt_if_missing:
@@ -325,6 +479,10 @@ class ExecutionStopAuthority:
                     intended_state_sha256=observed,
                     semantic_binding_sha256=binding,
                 )
+                self._ensure_monotonic_receipt_unlocked(
+                    authority,
+                    semantic_binding_sha256=binding,
+                )
                 authority.commit(
                     tx_id=tx_id,
                     observed_state_sha256=observed,
@@ -332,6 +490,11 @@ class ExecutionStopAuthority:
                 )
                 return
 
+            if not receipt_exists:
+                self._ensure_monotonic_receipt_unlocked(
+                    authority,
+                    semantic_binding_sha256=binding,
+                )
             latest = history[-1]
             if (
                 latest.phase is AuthorityPhase.PREPARE
@@ -377,6 +540,10 @@ class ExecutionStopAuthority:
                 tx_id=tx_id,
                 observed_state_sha256=observed,
                 intended_state_sha256=intended,
+                semantic_binding_sha256=binding,
+            )
+            self._ensure_monotonic_receipt_unlocked(
+                authority,
                 semantic_binding_sha256=binding,
             )
             return authority, tx_id, binding, intended

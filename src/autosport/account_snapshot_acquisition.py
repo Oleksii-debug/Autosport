@@ -259,10 +259,10 @@ class BetfairAccountSnapshotAcquirer:
             account_id=account_id,
         )
 
-    def acquire(
+    def _read_provider_snapshot(
         self,
         requested_capabilities: frozenset[BookmakerCapability],
-    ) -> AuthoritativeAccountSnapshot:
+    ) -> tuple[BookmakerAccountSnapshot, BookmakerIntegrationEvidence]:
         if type(requested_capabilities) is not frozenset:
             raise AccountSnapshotAcquisitionError(
                 "requested_capabilities must be an exact frozenset"
@@ -301,7 +301,7 @@ class BetfairAccountSnapshotAcquirer:
             )
 
         integration = _official_api_integration(snapshot)
-        return self._store.record(snapshot, integration, requested_capabilities)
+        return snapshot, integration
 
     def resolve(self, acquisition_id: str) -> AuthoritativeAccountSnapshot:
         return self._store.resolve(acquisition_id)
@@ -1032,3 +1032,34 @@ def _snapshot_from_payload(payload: dict[str, object]) -> BookmakerAccountSnapsh
         )
     except (TypeError, ValueError) as exc:
         raise AccountSnapshotAcquisitionError("snapshot is invalid") from exc
+
+
+
+# Bind positive acquisition authority to the exact product-owned provider read.  The raw
+# provider-read function and raw durable-record function are captured only by this closure,
+# then removed from their classes.  This mirrors the canonical execution-readback issuance
+# pattern: callers can resolve/verify durable evidence, but cannot pass an arbitrary
+# caller-constructed BookmakerAccountSnapshot to a minting function.
+def _install_account_snapshot_acquisition_authority() -> None:
+    raw_read = BetfairAccountSnapshotAcquirer._read_provider_snapshot
+    raw_record = _AccountSnapshotStore.record
+
+    def acquire(
+        self: BetfairAccountSnapshotAcquirer,
+        requested_capabilities: frozenset[BookmakerCapability],
+    ) -> AuthoritativeAccountSnapshot:
+        snapshot, integration = raw_read(self, requested_capabilities)
+        return raw_record(
+            self._store,
+            snapshot,
+            integration,
+            requested_capabilities,
+        )
+
+    BetfairAccountSnapshotAcquirer.acquire = acquire
+    delattr(BetfairAccountSnapshotAcquirer, "_read_provider_snapshot")
+    delattr(_AccountSnapshotStore, "record")
+
+
+_install_account_snapshot_acquisition_authority()
+del _install_account_snapshot_acquisition_authority

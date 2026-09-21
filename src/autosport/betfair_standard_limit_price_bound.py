@@ -30,7 +30,10 @@ from .betfair_supervised_execution import (
     WRITE_ADAPTER_VERSION,
 )
 from .real_execution_ledger import ExecutionAction, ExecutionPlan
-from .supervised_execution import BoundSupervisedExecutionPlan
+from .supervised_execution import (
+    BoundSupervisedExecutionPlan,
+    SupervisedExecutionError,
+)
 
 
 _SCHEMA_VERSION = 1
@@ -435,6 +438,7 @@ def _canonical_instruction_projection(action: ExecutionAction) -> dict[str, Any]
         raise BetfairStandardLimitPriceBoundError(
             "Betfair selection_id must be canonical positive integer text"
         )
+    action_payload = ExecutionAction.to_dict(action)
     if (
         type(instruction.get("selectionId")) is not int
         or instruction.get("selectionId") != selection_id
@@ -442,8 +446,8 @@ def _canonical_instruction_projection(action: ExecutionAction) -> dict[str, Any]
         or instruction.get("orderType") != "LIMIT"
         or instruction.get("side") != "BACK"
         or limit_order.get("persistenceType") != "LAPSE"
-        or limit_order.get("price") != str(action.requested_odds)
-        or limit_order.get("size") != str(action.requested_stake)
+        or limit_order.get("price") != action_payload["requested_odds"]
+        or limit_order.get("size") != action_payload["requested_stake"]
     ):
         raise BetfairStandardLimitPriceBoundError(
             "provider instruction projection does not preserve the bound standard LIMIT"
@@ -525,7 +529,12 @@ def resolve_betfair_standard_limit_price_bound(
         raise BetfairStandardLimitPriceBoundError(
             "bound execution_plan must be the exact canonical ExecutionPlan type"
         )
-    action = BoundSupervisedExecutionPlan.action_for(bound, action_id)
+    try:
+        action = BoundSupervisedExecutionPlan.action_for(bound, action_id)
+    except SupervisedExecutionError as exc:
+        raise BetfairStandardLimitPriceBoundError(
+            "action is not in bound execution plan"
+        ) from exc
     if type(action) is not ExecutionAction:
         raise BetfairStandardLimitPriceBoundError(
             "bound plan returned a non-canonical ExecutionAction"

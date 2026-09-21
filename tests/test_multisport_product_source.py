@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import tempfile
 import unittest
 from decimal import Decimal
@@ -82,6 +83,17 @@ class MultiSportProductSourceTests(unittest.TestCase):
                 "parlayapi-table-tennis-product-v1",
             )
             self.assertEqual(source.sport_key, "table_tennis")
+            namespace = hashlib.sha256(
+                b"parlayapi:table_tennis\0parlayapi-table-tennis-product-v1"
+            ).hexdigest()
+            self.assertEqual(
+                source.state_dir,
+                Path(directory)
+                / "workspace"
+                / ".autosport"
+                / "product-sources"
+                / namespace,
+            )
 
     def test_distinct_sports_get_distinct_durable_stream_and_state_identity(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -134,6 +146,39 @@ class MultiSportProductSourceTests(unittest.TestCase):
             event = source.resolve_event(delta)
             self.assertEqual(delta.stream_epoch, page.stream_epoch)
             self.assertEqual(event.sport, "basketball_nba")
+
+    def test_basketball_product_source_reopens_exact_durable_state(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            workspace = root / "workspace"
+            authority_root = root / "authority"
+            source = ParlayApiProductSource(
+                _Provider(
+                    "basketball_nba",
+                    [_batch(source_sport="basketball_nba")],
+                ),
+                workspace=workspace,
+                authority_root=authority_root,
+                lawful_terms_ref="terms:parlayapi:v1",
+                retention_ref="retention:parlayapi:v1",
+                clock=lambda: "2026-09-21T12:00:01+00:00",
+            )
+            page = source.fetch_catalog_page(None)
+            delta = source.fetch_deltas(None, (), 1)[0]
+            event = source.resolve_event(delta)
+
+            reopened = ParlayApiProductSource(
+                _Provider("basketball_nba"),
+                workspace=workspace,
+                authority_root=authority_root,
+                lawful_terms_ref="terms:parlayapi:v1",
+                retention_ref="retention:parlayapi:v1",
+                clock=lambda: "2026-09-21T12:00:02+00:00",
+            )
+
+            self.assertEqual(reopened.stream_epoch, page.stream_epoch)
+            self.assertEqual(reopened.state_path, source.state_path)
+            self.assertEqual(reopened.resolve_event(delta), event)
 
     def test_product_source_rejects_quote_sport_that_conflicts_with_source_scope(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

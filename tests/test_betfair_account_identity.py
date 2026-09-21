@@ -133,6 +133,7 @@ def test_direct_default_client_never_gains_k07_provenance(
     with pytest.raises(BetfairAccountIdentityError, match="product-owned"):
         resolve_betfair_authenticated_account_identity(client)
 
+
 def test_distinct_authenticated_contexts_do_not_alias_identical_account_details(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

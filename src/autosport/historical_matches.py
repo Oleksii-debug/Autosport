@@ -272,7 +272,7 @@ def capture_historical_matches(
 
 
 def _publication_lock_path(destination: Path) -> Path:
-    canonical = str(destination.resolve(strict=False)).encode("utf-8")
+    canonical = os.path.normcase(str(destination.resolve(strict=False))).encode("utf-8")
     identity = hashlib.sha256(canonical).hexdigest()
     return Path(tempfile.gettempdir()) / "autosport-historical-match-locks" / identity
 

@@ -3,10 +3,11 @@
 Exact concrete ledger/runtime types prevent subclass-based authority forgery, but
 non-data-descriptor methods can still be replaced per instance through ``__dict__``.
 The coordinator itself can also be pointed at different exact authorities after
-construction. Admission therefore pins the original authority objects outside the
-coordinator instance, rejects replacement/shadowing immediately before every read,
-and performs ledger reads through exact-class views so a racing mutation cannot
-redirect durable execution or decision history.
+construction. Admission therefore pins the original authority objects and exact
+ledger read callables outside mutable class/instance namespaces, rejects authority
+replacement/shadowing immediately around every read, and performs ledger reads
+through those pinned callables so a racing class mutation cannot redirect durable
+execution or decision history.
 """
 
 from __future__ import annotations
@@ -24,13 +25,17 @@ from .paper_campaign_runtime import PaperCampaignRuntime
 from .paper_execution_reality import PaperExecutionLedger
 from .paper_settlement_learning import PaperSettlementLearningBridge
 
-_GUARD_MARKER = "__autosport_exact_admission_authority_guard_v5__"
+_GUARD_MARKER = "__autosport_exact_admission_authority_guard_v6__"
 _ORIGINAL_INIT = PaperCampaignAdmissionCoordinator.__init__
 _ORIGINAL_GETATTRIBUTE = PaperCampaignAdmissionCoordinator.__getattribute__
 _ORIGINAL_RESOLVED_EXECUTION_DECISION_ID = (
     PaperCampaignAdmissionCoordinator._resolved_execution_decision_id
 )
 _ORIGINAL_EXECUTION_ATTEMPT = PaperCampaignAdmissionCoordinator._execution_attempt
+# Pin executable authority at guard installation time.  Reads below call these
+# function objects directly instead of re-resolving through mutable class namespaces.
+_PINNED_DECISION_VERIFIED_RECORDS = JsonlDecisionLedger.verified_records
+_PINNED_EXECUTION_EVENTS = PaperExecutionLedger.events
 _AUTHORITY_BINDINGS = WeakKeyDictionary()
 _AUTHORITY_BINDINGS_LOCK = RLock()
 _RUNTIME_METHODS = (
@@ -49,6 +54,20 @@ def _reject_instance_shadow(value: object, method_name: str, label: str) -> None
     if _has_instance_shadow(value, method_name):
         raise PaperCampaignAdmissionError(
             f"{label} authority method is shadowed on the exact instance"
+        )
+
+
+def _assert_decision_ledger_class_method() -> None:
+    if JsonlDecisionLedger.verified_records is not _PINNED_DECISION_VERIFIED_RECORDS:
+        raise PaperCampaignAdmissionError(
+            "Decision Ledger authority class method changed after guard installation"
+        )
+
+
+def _assert_execution_ledger_class_method() -> None:
+    if PaperExecutionLedger.events is not _PINNED_EXECUTION_EVENTS:
+        raise PaperCampaignAdmissionError(
+            "PAPER execution authority class method changed after guard installation"
         )
 
 
@@ -83,7 +102,7 @@ class _ExactDecisionLedgerReadView:
         self._ledger = ledger
 
     def verified_records(self):
-        return JsonlDecisionLedger.verified_records(self._ledger)
+        return _PINNED_DECISION_VERIFIED_RECORDS(self._ledger)
 
 
 class _ExactExecutionLedgerReadView:
@@ -93,7 +112,7 @@ class _ExactExecutionLedgerReadView:
         self._ledger = ledger
 
     def events(self, run_id: str):
-        return PaperExecutionLedger.events(self._ledger, run_id)
+        return _PINNED_EXECUTION_EVENTS(self._ledger, run_id)
 
 
 class _PinnedCoordinatorReadView:
@@ -226,6 +245,8 @@ def _guarded_init(
         raise TypeError(
             "runtime settlement_bridge must be exact PaperSettlementLearningBridge"
         )
+    _assert_decision_ledger_class_method()
+    _assert_execution_ledger_class_method()
     _reject_runtime_shadows(runtime)
     _reject_bridge_shadows(runtime.settlement_bridge)
     expected_decision_path = _canonical_decision_path(state_path)
@@ -289,6 +310,7 @@ def _guarded_resolved_execution_decision_id(self, *args, **kwargs):
             agent_loop,
         )
         _assert_decision_ledger_path(decision_ledger, expected_decision_path)
+        _assert_decision_ledger_class_method()
         _reject_instance_shadow(
             decision_ledger,
             "verified_records",
@@ -307,6 +329,7 @@ def _guarded_resolved_execution_decision_id(self, *args, **kwargs):
             runtime=runtime,
         )
         _assert_decision_ledger_path(decision_ledger, expected_decision_path)
+        _assert_decision_ledger_class_method()
         _reject_instance_shadow(
             decision_ledger,
             "verified_records",
@@ -341,6 +364,7 @@ def _guarded_execution_attempt(self, *args, **kwargs):
             agent_loop,
         )
         _assert_decision_ledger_path(decision_ledger, expected_decision_path)
+        _assert_execution_ledger_class_method()
         _reject_instance_shadow(
             execution_ledger,
             "events",
@@ -359,6 +383,7 @@ def _guarded_execution_attempt(self, *args, **kwargs):
             runtime=runtime,
         )
         _assert_decision_ledger_path(decision_ledger, expected_decision_path)
+        _assert_execution_ledger_class_method()
         _reject_instance_shadow(
             execution_ledger,
             "events",

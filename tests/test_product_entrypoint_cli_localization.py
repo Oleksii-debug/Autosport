@@ -3,6 +3,7 @@ from __future__ import annotations
 import unittest
 from pathlib import Path
 
+from autosport.localization import CATALOG_VERSION, catalog as canonical_catalog, text
 from autosport.localization_product_cli import catalog, product_cli_text
 from autosport.product_entrypoint import _parser
 
@@ -48,6 +49,19 @@ class ProductEntrypointCliLocalizationTests(unittest.TestCase):
         self.assertEqual(args.bankroll, "125.50")
         self.assertEqual(args.max_cycles, 7)
         self.assertEqual(args.poll_seconds, 2.5)
+
+    def test_product_cli_resources_are_in_the_canonical_catalog(self) -> None:
+        self.assertEqual(CATALOG_VERSION, 8)
+        resources = catalog()
+        self.assertIs(resources, canonical_catalog())
+        self.assertEqual(
+            product_cli_text("product.cli.help"),
+            text("product.cli.help"),
+        )
+        self.assertEqual(
+            resources["product.cli.usage_prefix"],
+            "використання: ",
+        )
 
     def test_product_cli_catalog_is_immutable_and_has_no_fallback(self) -> None:
         resources = catalog()

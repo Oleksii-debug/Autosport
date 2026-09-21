@@ -279,19 +279,17 @@ def _module_attribute_dependencies(
                     "referenced module attribute cannot be resolved"
                 ) from exc
 
-        # Seal executable/module dependencies reached through module-qualified
-        # source expressions. Ordinary data attributes remain represented by the
-        # resolver source itself and by any directly referenced canonical globals.
-        if type(value) not in (
-            FunctionType,
-            BuiltinFunctionType,
-            BuiltinMethodType,
-            ModuleType,
-            type,
-        ):
-            continue
+        # Every statically resolved qualified value can influence resolver
+        # behavior. Canonical immutable constants are sealed directly; mutable or
+        # opaque values fail closed through _dependency_payload rather than
+        # disappearing behind the root module identity.
         key = f"module:{root_name}.{'.'.join(attributes)}"
-        dependencies[key] = _dependency_payload(value, visiting=visiting)
+        try:
+            dependencies[key] = _dependency_payload(value, visiting=visiting)
+        except ResolverSemanticIdentityError as exc:
+            raise ResolverSemanticIdentityError(
+                "referenced module qualified data cannot be represented safely"
+            ) from exc
     return dependencies
 
 
@@ -368,13 +366,6 @@ def _global_type_attribute_dependencies(
         ) from exc
 
     dependencies: dict[str, object] = {}
-    executable_types = (
-        FunctionType,
-        BuiltinFunctionType,
-        BuiltinMethodType,
-        ModuleType,
-        type,
-    )
     for node in ast.walk(tree):
         if not isinstance(node, ast.Attribute):
             continue
@@ -399,7 +390,7 @@ def _global_type_attribute_dependencies(
                 attribute,
             )
             path.append(step)
-        if not complete or type(value) not in executable_types:
+        if not complete:
             continue
 
         if type(value) is FunctionType:
@@ -412,7 +403,12 @@ def _global_type_attribute_dependencies(
                 ),
             ]
         else:
-            dependency_payload = _dependency_payload(value, visiting=visiting)
+            try:
+                dependency_payload = _dependency_payload(value, visiting=visiting)
+            except ResolverSemanticIdentityError as exc:
+                raise ResolverSemanticIdentityError(
+                    "referenced global type qualified data cannot be represented safely"
+                ) from exc
 
         key = f"global-type:{root_name}.{'.'.join(attributes)}"
         dependencies[key] = [
@@ -450,6 +446,38 @@ def _default_constructor_dependency(owner: type) -> object:
 
     return [
         "default-object-constructor",
+        f"{owner.__module__}.{owner.__qualname__}",
+    ]
+
+
+def _default_instance_lookup_dependency(owner: type) -> object:
+    """Require ordinary instance lookup semantics without invoking callbacks."""
+
+    resolved_getattribute_owner: type | None = None
+    raw_getattribute: object = None
+    for candidate in owner.__mro__:
+        namespace = vars(candidate)
+        if "__getattribute__" in namespace:
+            resolved_getattribute_owner = candidate
+            raw_getattribute = namespace["__getattribute__"]
+            break
+
+    if (
+        resolved_getattribute_owner is not object
+        or raw_getattribute is not object.__getattribute__
+    ):
+        raise ResolverSemanticIdentityError(
+            "referenced global type instance lookup cannot be represented safely"
+        )
+
+    for candidate in owner.__mro__:
+        if "__getattr__" in vars(candidate):
+            raise ResolverSemanticIdentityError(
+                "referenced global type fallback lookup cannot be represented safely"
+            )
+
+    return [
+        "default-object-attribute-lookup",
         f"{owner.__module__}.{owner.__qualname__}",
     ]
 
@@ -493,6 +521,7 @@ def _global_type_instance_dependencies(
                 "referenced global type constructor arguments cannot be represented safely"
             )
 
+        lookup_payload = _default_instance_lookup_dependency(root)
         constructor_payload = _default_constructor_dependency(root)
         value, step, dispatch_owner = _resolve_global_type_attribute(
             root,
@@ -518,6 +547,7 @@ def _global_type_instance_dependencies(
             "global-type-instance-dispatch",
             f"{root.__module__}.{root.__qualname__}",
             constructor_payload,
+            lookup_payload,
             step,
             dependency_payload,
         ]

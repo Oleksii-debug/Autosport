@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 
+import autosport.campaign_precommit_manifest as precommit_module
 from autosport.campaign_precommit_manifest import (
     CampaignPrecommitManifest,
     CampaignPrecommitManifestError,
@@ -271,3 +272,50 @@ def test_loader_rejects_semantically_equivalent_noncanonical_bytes(
         match="bytes are not canonical",
     ):
         load_campaign_precommit_manifest(path)
+
+
+def test_write_once_synchronizes_parent_directory_before_success(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = tmp_path / "nested" / "precommit.json"
+    calls: list[Path] = []
+
+    monkeypatch.setattr(
+        precommit_module,
+        "_fsync_parent_directory",
+        lambda parent: calls.append(parent),
+    )
+
+    digest = write_campaign_precommit_manifest_once(path, manifest())
+
+    assert digest == manifest().manifest_sha256
+    assert calls == [path.parent]
+
+
+def test_parent_directory_sync_failure_fails_closed_and_retry_recovers(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = tmp_path / "precommit.json"
+    original_sync = precommit_module._fsync_parent_directory
+    attempts = 0
+
+    def fail_sync(parent: Path) -> None:
+        nonlocal attempts
+        attempts += 1
+        raise CampaignPrecommitManifestError("synthetic directory durability failure")
+
+    monkeypatch.setattr(precommit_module, "_fsync_parent_directory", fail_sync)
+    with pytest.raises(
+        CampaignPrecommitManifestError,
+        match="synthetic directory durability failure",
+    ):
+        write_campaign_precommit_manifest_once(path, manifest())
+
+    assert attempts == 1
+    assert path.exists()
+
+    monkeypatch.setattr(precommit_module, "_fsync_parent_directory", original_sync)
+    digest = write_campaign_precommit_manifest_once(path, manifest())
+
+    assert digest == manifest().manifest_sha256
+    assert load_campaign_precommit_manifest(path) == manifest()

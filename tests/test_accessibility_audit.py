@@ -368,8 +368,14 @@ class AccessibilityAuditTests(unittest.TestCase):
                 _autosport_workbench_controls={},
                 destroy=lambda: None,
             )
+            owner_dialog = SimpleNamespace(destroy=lambda: None)
             with (
                 patch.object(accessibility_audit, "WindowsAutosportApp", return_value=_AuditApp()),
+                patch.object(
+                    accessibility_audit,
+                    "_open_owner_economic_dialog_for_audit",
+                    return_value=owner_dialog,
+                ),
                 patch.object(
                     accessibility_audit,
                     "show_manual_calculation_workbench",

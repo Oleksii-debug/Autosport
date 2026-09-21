@@ -146,10 +146,25 @@ class CollectorDeltaStore(_SQLiteCollectorDeltaStore):
                 "run_id TEXT NOT NULL,"
                 "schedule_id TEXT NOT NULL UNIQUE,"
                 "policy TEXT NOT NULL,"
+                "stream_epoch TEXT NOT NULL,"
                 "anchor_at TEXT NOT NULL,"
                 "interval_seconds TEXT NOT NULL,"
                 "PRIMARY KEY(source_id, run_id))"
             )
+            schedule_columns = {
+                row["name"]
+                for row in connection.execute(
+                    "PRAGMA table_info(collector_schedules_v1)"
+                ).fetchall()
+            }
+            if "stream_epoch" not in schedule_columns:
+                # The earlier prospective-schedule prototype did not freeze the
+                # acquisition epoch. Preserve that historical uncertainty as NULL:
+                # callers must not launder a current source epoch into old evidence.
+                connection.execute(
+                    "ALTER TABLE collector_schedules_v1 "
+                    "ADD COLUMN stream_epoch TEXT"
+                )
             connection.execute(
                 "CREATE TABLE IF NOT EXISTS collector_schedule_slots_v1 ("
                 "source_id TEXT NOT NULL,"
@@ -306,15 +321,17 @@ class CollectorDeltaStore(_SQLiteCollectorDeltaStore):
         *,
         source_id: str,
         run_id: str,
+        stream_epoch: str,
         anchor_at: str,
         interval_seconds: str,
     ) -> str:
         payload = cls._cycle_terminal_payload_json(
             {
-                "schema_version": 1,
+                "schema_version": 2,
                 "policy": _SCHEDULE_POLICY,
                 "source_id": source_id,
                 "run_id": run_id,
+                "stream_epoch": stream_epoch,
                 "anchor_at": anchor_at,
                 "interval_seconds": interval_seconds,
             }
@@ -345,6 +362,7 @@ class CollectorDeltaStore(_SQLiteCollectorDeltaStore):
         *,
         source_id: str,
         run_id: str,
+        stream_epoch: str,
         anchor_at: str,
         interval_seconds: float,
     ) -> dict[str, object]:
@@ -352,11 +370,13 @@ class CollectorDeltaStore(_SQLiteCollectorDeltaStore):
 
         source_id = _text(source_id, "source_id")
         run_id = _text(run_id, "run_id")
+        stream_epoch = _text(stream_epoch, "stream_epoch")
         canonical_anchor = _instant(anchor_at, "anchor_at").isoformat()
         interval_text = self._schedule_interval_text(interval_seconds)
         candidate_id = self._collector_schedule_id(
             source_id=source_id,
             run_id=run_id,
+            stream_epoch=stream_epoch,
             anchor_at=canonical_anchor,
             interval_seconds=interval_text,
         )
@@ -365,28 +385,36 @@ class CollectorDeltaStore(_SQLiteCollectorDeltaStore):
         try:
             connection.execute("BEGIN IMMEDIATE")
             row = connection.execute(
-                "SELECT schedule_id, policy, anchor_at, interval_seconds "
+                "SELECT schedule_id, policy, stream_epoch, anchor_at, interval_seconds "
                 "FROM collector_schedules_v1 WHERE source_id=? AND run_id=?",
                 (source_id, run_id),
             ).fetchone()
             if row is None:
                 connection.execute(
                     "INSERT INTO collector_schedules_v1("
-                    "source_id, run_id, schedule_id, policy, anchor_at, interval_seconds"
-                    ") VALUES(?,?,?,?,?,?)",
+                    "source_id, run_id, schedule_id, policy, stream_epoch, "
+                    "anchor_at, interval_seconds"
+                    ") VALUES(?,?,?,?,?,?,?)",
                     (
                         source_id,
                         run_id,
                         candidate_id,
                         _SCHEDULE_POLICY,
+                        stream_epoch,
                         canonical_anchor,
                         interval_text,
                     ),
                 )
                 schedule_id = candidate_id
+                stored_epoch = stream_epoch
                 stored_anchor = canonical_anchor
                 stored_interval = interval_text
             else:
+                if row["stream_epoch"] is None:
+                    raise ValueError(
+                        "legacy collector schedule lacks frozen stream_epoch authority"
+                    )
+                stored_epoch = _text(row["stream_epoch"], "stream_epoch")
                 stored_anchor = _instant(row["anchor_at"], "anchor_at").isoformat()
                 stored_interval = self._schedule_interval_text(
                     float(row["interval_seconds"])
@@ -394,16 +422,22 @@ class CollectorDeltaStore(_SQLiteCollectorDeltaStore):
                 expected_id = self._collector_schedule_id(
                     source_id=source_id,
                     run_id=run_id,
+                    stream_epoch=stored_epoch,
                     anchor_at=stored_anchor,
                     interval_seconds=stored_interval,
                 )
                 if (
                     row["policy"] != _SCHEDULE_POLICY
                     or row["schedule_id"] != expected_id
+                    or row["stream_epoch"] != stored_epoch
                     or row["anchor_at"] != stored_anchor
                     or row["interval_seconds"] != stored_interval
                 ):
                     raise ValueError("collector schedule identity is corrupt")
+                if stored_epoch != stream_epoch:
+                    raise ValueError(
+                        "collector schedule stream_epoch cannot change within a durable run"
+                    )
                 if stored_interval != interval_text:
                     raise ValueError(
                         "collector schedule interval cannot change within a durable run"
@@ -411,11 +445,12 @@ class CollectorDeltaStore(_SQLiteCollectorDeltaStore):
                 schedule_id = row["schedule_id"]
             connection.commit()
             return {
-                "schema_version": 1,
+                "schema_version": 2,
                 "schedule_id": schedule_id,
                 "policy": _SCHEDULE_POLICY,
                 "source_id": source_id,
                 "run_id": run_id,
+                "stream_epoch": stored_epoch,
                 "anchor_at": stored_anchor,
                 "interval_seconds": stored_interval,
             }
@@ -443,7 +478,7 @@ class CollectorDeltaStore(_SQLiteCollectorDeltaStore):
         connection = self._connect()
         try:
             schedule = connection.execute(
-                "SELECT schedule_id, policy, anchor_at, interval_seconds "
+                "SELECT schedule_id, policy, stream_epoch, anchor_at, interval_seconds "
                 "FROM collector_schedules_v1 WHERE source_id=? AND run_id=?",
                 (source_id, run_id),
             ).fetchone()
@@ -451,9 +486,15 @@ class CollectorDeltaStore(_SQLiteCollectorDeltaStore):
                 raise ValueError("collector schedule authority is missing")
             if schedule["policy"] != _SCHEDULE_POLICY:
                 raise ValueError("collector schedule policy is unsupported")
+            if schedule["stream_epoch"] is None:
+                raise ValueError(
+                    "legacy collector schedule lacks frozen stream_epoch authority"
+                )
+            stream_epoch = _text(schedule["stream_epoch"], "stream_epoch")
             expected_id = self._collector_schedule_id(
                 source_id=source_id,
                 run_id=run_id,
+                stream_epoch=stream_epoch,
                 anchor_at=schedule["anchor_at"],
                 interval_seconds=schedule["interval_seconds"],
             )
@@ -474,6 +515,7 @@ class CollectorDeltaStore(_SQLiteCollectorDeltaStore):
             )
             return {
                 "schedule_id": schedule["schedule_id"],
+                "stream_epoch": stream_epoch,
                 "slot_ordinal": slot_ordinal,
                 "due_at": due_at,
             }
@@ -508,15 +550,25 @@ class CollectorDeltaStore(_SQLiteCollectorDeltaStore):
         try:
             connection.execute("BEGIN IMMEDIATE")
             schedule = connection.execute(
-                "SELECT schedule_id, policy, anchor_at, interval_seconds "
+                "SELECT schedule_id, policy, stream_epoch, anchor_at, interval_seconds "
                 "FROM collector_schedules_v1 WHERE source_id=? AND run_id=?",
                 (source_id, run_id),
             ).fetchone()
             if schedule is None or schedule["policy"] != _SCHEDULE_POLICY:
                 raise ValueError("collector schedule authority is missing or invalid")
+            if schedule["stream_epoch"] is None:
+                raise ValueError(
+                    "legacy collector schedule lacks frozen stream_epoch authority"
+                )
+            frozen_epoch = _text(schedule["stream_epoch"], "stream_epoch")
+            if stream_epoch != frozen_epoch:
+                raise ValueError(
+                    "collector schedule stream_epoch does not match current source"
+                )
             expected_id = self._collector_schedule_id(
                 source_id=source_id,
                 run_id=run_id,
+                stream_epoch=frozen_epoch,
                 anchor_at=schedule["anchor_at"],
                 interval_seconds=schedule["interval_seconds"],
             )
@@ -556,7 +608,7 @@ class CollectorDeltaStore(_SQLiteCollectorDeltaStore):
                     source_id,
                     cycle_seq,
                     run_id,
-                    stream_epoch,
+                    frozen_epoch,
                     canonical_attempt,
                 ),
             )
@@ -620,15 +672,21 @@ class CollectorDeltaStore(_SQLiteCollectorDeltaStore):
         connection = self._connect()
         try:
             schedule = connection.execute(
-                "SELECT schedule_id, policy, anchor_at, interval_seconds "
+                "SELECT schedule_id, policy, stream_epoch, anchor_at, interval_seconds "
                 "FROM collector_schedules_v1 WHERE source_id=? AND run_id=?",
                 (source_id, run_id),
             ).fetchone()
             if schedule is None or schedule["policy"] != _SCHEDULE_POLICY:
                 raise ValueError("collector schedule authority is missing or invalid")
+            if schedule["stream_epoch"] is None:
+                raise ValueError(
+                    "legacy collector schedule lacks frozen stream_epoch authority"
+                )
+            frozen_epoch = _text(schedule["stream_epoch"], "stream_epoch")
             expected_id = self._collector_schedule_id(
                 source_id=source_id,
                 run_id=run_id,
+                stream_epoch=frozen_epoch,
                 anchor_at=schedule["anchor_at"],
                 interval_seconds=schedule["interval_seconds"],
             )
@@ -659,6 +717,10 @@ class CollectorDeltaStore(_SQLiteCollectorDeltaStore):
                 if row["start_run_id"] != run_id:
                     raise ValueError(
                         "collector schedule slot is bound to another run START"
+                    )
+                if row["stream_epoch"] != frozen_epoch:
+                    raise ValueError(
+                        "collector schedule slot is bound to another stream_epoch"
                     )
                 by_ordinal[ordinal] = row
 
@@ -712,11 +774,12 @@ class CollectorDeltaStore(_SQLiteCollectorDeltaStore):
                 )
 
             commitment_payload = {
-                "schema_version": 1,
+                "schema_version": 2,
                 "schedule_id": schedule["schedule_id"],
                 "policy": schedule["policy"],
                 "source_id": source_id,
                 "run_id": run_id,
+                "stream_epoch": frozen_epoch,
                 "anchor_at": schedule["anchor_at"],
                 "interval_seconds": schedule["interval_seconds"],
                 "start_slot_ordinal": start_slot_ordinal,

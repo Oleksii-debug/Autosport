@@ -103,22 +103,24 @@ class SourceQualityObservation:
 
 @dataclass(frozen=True, slots=True)
 class SourceQualityAssessment:
-    """Fail-closed result value; positive authority is not caller-constructible.
+    """Fail-closed result value without implicit numeric weighting authority.
 
-    ``ACCEPT`` and authority-bearing corroboration are reserved for future
-    product-owned durable resolvers.  Until those resolvers exist, even direct
-    construction of this public value object cannot mint either truth claim.
+    ``input_confidence`` preserves the caller/evidence confidence exactly; it is
+    deliberately not named or presented as an already-weighted confidence.  The
+    policy result is ``action``.  ``ACCEPT`` and authority-bearing corroboration
+    remain structurally unavailable until canonical product-owned resolvers are
+    integrated.
     """
 
     action: ConfidenceAction
-    effective_confidence: Decimal
+    input_confidence: Decimal
     reasons: tuple[str, ...]
     corroborated: bool
 
     def __post_init__(self) -> None:
         if not isinstance(self.action, ConfidenceAction):
             raise ValueError("action must be ConfidenceAction")
-        _validate_probability(self.effective_confidence, "effective_confidence")
+        _validate_probability(self.input_confidence, "input_confidence")
         if type(self.reasons) is not tuple:
             raise ValueError("reasons must be an exact tuple")
         normalized_reasons = tuple(_strict_text(reason, "reason") for reason in self.reasons)
@@ -145,6 +147,8 @@ def assess_source_quality(
     resolvers are wired into this boundary, ``OFFICIAL_API`` also always
     ``ABSTAIN``: a source-class label is not proof of official issuance.
     Browser/manual evidence can be used only as bounded ``DOWNWEIGHT`` evidence.
+    The returned numeric field is explicitly the input confidence, not a derived
+    or already-weighted trust score; downstream consumers must respect ``action``.
     """
 
     if not isinstance(observation, SourceQualityObservation):
@@ -171,12 +175,12 @@ def assess_source_quality(
     # but this boundary has no product-owned corroborator authority resolver yet.
     # Therefore a positive corroboration truth value is structurally unavailable.
     corroborated = False
-    effective_confidence = observation.base_confidence
+    input_confidence = observation.base_confidence
 
     if reasons:
         return SourceQualityAssessment(
             action=ConfidenceAction.ABSTAIN,
-            effective_confidence=effective_confidence,
+            input_confidence=input_confidence,
             reasons=tuple(reasons),
             corroborated=corroborated,
         )
@@ -187,22 +191,22 @@ def assess_source_quality(
     if observation.source_class is SourceClass.OFFICIAL_API:
         return SourceQualityAssessment(
             action=ConfidenceAction.ABSTAIN,
-            effective_confidence=effective_confidence,
+            input_confidence=input_confidence,
             reasons=("OFFICIAL_API_AUTHORITY_UNRESOLVED",),
             corroborated=corroborated,
         )
 
-    if effective_confidence < policy.downweight_confidence:
+    if input_confidence < policy.downweight_confidence:
         return SourceQualityAssessment(
             action=ConfidenceAction.ABSTAIN,
-            effective_confidence=effective_confidence,
+            input_confidence=input_confidence,
             reasons=("CONFIDENCE_BELOW_DOWNWEIGHT_FLOOR",),
             corroborated=corroborated,
         )
 
     return SourceQualityAssessment(
         action=ConfidenceAction.DOWNWEIGHT,
-        effective_confidence=effective_confidence,
+        input_confidence=input_confidence,
         reasons=(f"{observation.source_class.value}_CANNOT_MINT_ACCEPT",),
         corroborated=corroborated,
     )

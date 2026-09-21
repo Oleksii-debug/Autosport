@@ -207,7 +207,7 @@ def test_non_object_error_data_cannot_mint_provider_semantics(bad_data: object) 
 
 @pytest.mark.parametrize(
     "declared_exception",
-    ["AccountAPINGException", "OtherException", 17, True],
+    ["AccountAPINGException", "OtherException", 17, True, None],
 )
 def test_conflicting_or_malformed_exceptionname_fails_closed(
     declared_exception: object,

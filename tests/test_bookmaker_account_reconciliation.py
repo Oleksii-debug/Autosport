@@ -286,7 +286,7 @@ def test_identity_time_currency_and_profile_rollbacks_fail_closed():
 
     with pytest.raises(
         BookmakerAccountReconciliationError,
-        match="precedes",
+        match="strictly later",
     ):
         reconcile_bookmaker_account_snapshots(
             snapshot(
@@ -470,3 +470,14 @@ def test_balance_delta_does_not_depend_on_callers_decimal_context():
     assert constrained.available_balance_delta == Decimal("9.12344")
     assert constrained.available_balance_delta == expected.available_balance_delta
     assert constrained.evidence_id == expected.evidence_id
+
+
+
+def test_equal_snapshot_time_is_not_a_causal_reconciliation_order():
+    previous = snapshot(at="2026-09-21T10:02:00+00:00")
+    current = snapshot(at="2026-09-21T10:02:00+00:00")
+    with pytest.raises(
+        BookmakerAccountReconciliationError,
+        match="strictly later",
+    ):
+        reconcile_bookmaker_account_snapshots(previous, current)

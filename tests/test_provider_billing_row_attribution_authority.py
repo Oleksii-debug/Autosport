@@ -11,7 +11,9 @@ from autosport.betfair_account_readonly import (
     BetfairReadOnlyClient,
     BetfairSessionCredentials,
 )
-from autosport.betfair_provider_billing_inputs import read_betfair_provider_billing_inputs
+from autosport.betfair_provider_billing_inputs_authority import (
+    read_verified_betfair_provider_billing_inputs,
+)
 from autosport.provider_billing_row_attribution import (
     ProviderBillingRowAttributionEvidence,
     resolve_provider_billing_row_attribution,
@@ -97,7 +99,7 @@ def _source():
         venue_id="betfair",
         account_id="caller-label-is-not-authority",
     )
-    return read_betfair_provider_billing_inputs(
+    return read_verified_betfair_provider_billing_inputs(
         client,
         record_count=10,
         statement_from="2026-09-01T00:00:00Z",
@@ -178,6 +180,30 @@ def test_verifier_issues_witness_only_for_exact_source_reresolution() -> None:
     assert authority.row_ref_id == "billing-ref-1"
     assert authority.evidence_sha256 == evidence.evidence_sha256
     assert validate_verified_provider_billing_row_authority(authority) is authority
+
+
+def test_caller_constructed_checksum_valid_source_cannot_mint_row_authority() -> None:
+    issued = _source()
+    source_cls = type(issued)
+    caller_constructed = source_cls(
+        entitlement=issued.entitlement,
+        statement=issued.statement,
+        observed_at=issued.observed_at,
+        evidence_sha256=issued.evidence_sha256,
+    )
+    evidence = resolve_provider_billing_row_attribution(
+        caller_constructed, "billing-ref-1"
+    )
+
+    assert type(caller_constructed) is source_cls
+    assert caller_constructed.evidence_sha256 == issued.evidence_sha256
+    with pytest.raises(
+        ProviderBillingRowAuthorityError,
+        match="source must be issued by canonical provider read",
+    ):
+        verify_provider_billing_row_attribution(
+            caller_constructed, evidence, "billing-ref-1"
+        )
 
 
 def test_caller_modified_exact_type_cannot_pass_product_verifier() -> None:

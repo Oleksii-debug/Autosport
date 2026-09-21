@@ -8,6 +8,8 @@ from math import isfinite
 from pathlib import Path
 from typing import BinaryIO
 
+from .secret_redaction import safe_exception_text
+
 
 _ALLOWED_HEALTH_STATUSES = frozenset({"unknown", "healthy", "degraded", "failed"})
 _COUNTER_FIELDS = (
@@ -492,7 +494,7 @@ class SourceHealthStore:
             state.total_failures += 1
             state.consecutive_failures += 1
             state.last_error_at = now
-            state.last_error = f"{type(error).__name__}: {error}"
+            state.last_error = safe_exception_text(error)
             state.quality_flags = ()
             state.status = "failed"
             self._put(state, recorded_at=now)

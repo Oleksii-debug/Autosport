@@ -3,7 +3,10 @@
 This module composes existing authorities instead of minting a replacement source of
 truth.  A ForwardCapturePlan must already be immutable in ScientificRegistry and
 durably witnessed in the Decision Ledger prefix captured by BoundPreEvaluationSession.
-Only then may the exact provider-member session be bound to a later EvaluationBundle.
+The product-owned binding additionally requires the canonical runtime-issued provider
+snapshot.  This proves exact cross-layer lineage, but it deliberately does not claim
+that the plan was physically written before provider capture: that stronger claim
+requires an immutable external timestamp/anchor.
 """
 
 from __future__ import annotations
@@ -446,13 +449,15 @@ def bind_structural_forward_evidence(
 
 @dataclass(frozen=True, slots=True)
 class ProductOwnedForwardEvidenceBinding:
-    """Production forward binding anchored in issued provider/product capabilities."""
+    """Product-owned forward lineage with an explicit physical-precommit truth boundary."""
 
     structural: ForwardEvidenceCrossLayerBinding
     product_semantic_authority_sha256: str
     product_origin_sha256: str
     provider_evidence_sha256: str
     provider_captured_at: str
+    physical_precommit_proven: bool = False
+    immutable_external_time_anchor_required: bool = True
 
     def __post_init__(self) -> None:
         if not isinstance(self.structural, ForwardEvidenceCrossLayerBinding):
@@ -464,19 +469,31 @@ class ProductOwnedForwardEvidenceBinding:
         ):
             object.__setattr__(self, name, _sha(name, getattr(self, name)))
         _instant(self.provider_captured_at, "provider_captured_at")
+        if self.physical_precommit_proven is not False:
+            raise ValueError(
+                "local lineage cannot assert physical precommit without an external anchor"
+            )
+        if self.immutable_external_time_anchor_required is not True:
+            raise ValueError(
+                "product-owned forward lineage must retain the external-anchor requirement"
+            )
         if self.provider_evidence_sha256 != self.structural.provider_evidence_sha256:
             raise ValueError("product-owned provider evidence does not match structural lineage")
 
     def to_payload(self) -> dict[str, object]:
         return {
             "schema_version": SCHEMA_VERSION,
-            "authority_family": f"{AUTHORITY_FAMILY}.product-origin",
+            "authority_family": f"{AUTHORITY_FAMILY}.product-origin-lineage",
             "structural": self.structural.to_payload(),
             "structural_authority_sha256": self.structural.authority_sha256,
             "product_semantic_authority_sha256": self.product_semantic_authority_sha256,
             "product_origin_sha256": self.product_origin_sha256,
             "provider_evidence_sha256": self.provider_evidence_sha256,
             "provider_captured_at": self.provider_captured_at,
+            "physical_precommit_proven": self.physical_precommit_proven,
+            "immutable_external_time_anchor_required": (
+                self.immutable_external_time_anchor_required
+            ),
         }
 
     @property
@@ -494,12 +511,14 @@ def bind_forward_evidence(
     provider_snapshot: CompleteGameBoardSnapshot,
     evaluation_bundle_id: str,
 ) -> ProductOwnedForwardEvidenceBinding:
-    """Production entrypoint for one exact precommitted forward observation.
+    """Bind exact product/provider forward lineage without claiming physical precommit.
 
-    Positive authority requires both independently issued capabilities: the canonical
-    provider snapshot and the product-owned semantic session re-resolved from durable
-    economic/product roots.  Caller-constructed legacy facts are not used as
-    production timing authority.
+    The two independently issued capabilities prove canonical provider origin and
+    durable product/economic origin.  The declared capture interval is checked against
+    the provider snapshot's bound capture timestamp.  Because local journals and
+    caller timestamps cannot prove which physical write happened first, the result
+    permanently carries physical_precommit_proven=False until a separate immutable
+    external timestamp/anchor authority is composed.
     """
 
     if not isinstance(product_session, ProductOwnedPreEvaluationSemanticSession):

@@ -132,7 +132,7 @@ class DatasetConsumptionHashIntegrityTests(unittest.TestCase):
             _write_dataset(root)
             manifest_path = root / "manifest.json"
             dataset = load_dataset(root)
-            self.assertEqual(dataset.manifest_sha256, _sha256(manifest_path))
+            self.assertEqual(dataset.manifest_file_sha256, _sha256(manifest_path))
 
             manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
             manifest["name"] = "rewritten dataset identity"

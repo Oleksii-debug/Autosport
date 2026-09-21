@@ -5,8 +5,10 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 from urllib.parse import parse_qs, urlparse
 
+from autosport import historical_acquisition
 from autosport.historical_acquisition import capture_historical_acquisition_bundle
 from autosport.parlayapi_provider import HttpJsonResponse, ParlayApiTableTennisProvider, ProviderPayloadError
 
@@ -239,6 +241,62 @@ class HistoricalAcquisitionBundleTests(unittest.TestCase):
         self.assertNotEqual(reports[0][0], reports[1][0])
         self.assertNotEqual(reports[0][1], reports[1][1])
         self.assertNotEqual(reports[0][2], reports[1][2])
+
+    def test_replaced_match_capture_fails_before_bundle_publication(self) -> None:
+        transport = _Transport()
+        real_capture = historical_acquisition.capture_historical_matches
+
+        def replace_result_capture(*args, **kwargs):
+            report = real_capture(*args, **kwargs)
+            Path(kwargs["output_path"]).write_text('{"tampered":true}\n', encoding="utf-8")
+            return report
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "acquisition"
+            with patch.object(
+                historical_acquisition,
+                "capture_historical_matches",
+                side_effect=replace_result_capture,
+            ):
+                with self.assertRaisesRegex(
+                    ProviderPayloadError,
+                    "match_results.capture bytes changed after child capture",
+                ):
+                    capture_historical_acquisition_bundle(
+                        self._provider(transport),
+                        requested_at=("2026-09-12T10:03:00Z",),
+                        results_date="2026-09-10",
+                        output_dir=root,
+                    )
+            self.assertFalse(root.exists())
+
+    def test_replaced_snapshot_market_fails_before_bundle_publication(self) -> None:
+        transport = _Transport()
+        real_capture = historical_acquisition.capture_historical_snapshot
+
+        def replace_snapshot_market(*args, **kwargs):
+            report = real_capture(*args, **kwargs)
+            Path(kwargs["output_path"]).write_text('{"tampered":true}\n', encoding="utf-8")
+            return report
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "acquisition"
+            with patch.object(
+                historical_acquisition,
+                "capture_historical_snapshot",
+                side_effect=replace_snapshot_market,
+            ):
+                with self.assertRaisesRegex(
+                    ProviderPayloadError,
+                    r"snapshot\[1\]\.market bytes changed after child capture",
+                ):
+                    capture_historical_acquisition_bundle(
+                        self._provider(transport),
+                        requested_at=("2026-09-12T10:03:00Z",),
+                        results_date="2026-09-10",
+                        output_dir=root,
+                    )
+            self.assertFalse(root.exists())
 
     def test_equivalent_duplicate_snapshot_instants_fail_before_network(self) -> None:
         transport = _Transport()

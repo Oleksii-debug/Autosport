@@ -239,6 +239,14 @@ def _open_canonical_authorities(
         raise ProductPolicyEvaluationIssuanceError(
             "authority must be an exact ProductPolicyEvaluationWorkspace"
         )
+    if ScientificRegistry is not _REGISTRY_TYPE:
+        raise ProductPolicyEvaluationIssuanceError(
+            "ScientificRegistry constructor authority was rebound"
+        )
+    if FactoryArtifactStore is not _STORE_TYPE:
+        raise ProductPolicyEvaluationIssuanceError(
+            "FactoryArtifactStore constructor authority was rebound"
+        )
     try:
         root = authority.workspace.expanduser().resolve(strict=False)
         authority_root = resolve_monotonic_authority_root(root)

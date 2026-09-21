@@ -9,10 +9,17 @@ from autosport.localization import DEFAULT_LOCALE, catalog
 
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
-_CRITICAL_PRESENTATION_MODULES = (
+_REQUIRED_CRITICAL_PRESENTATION_MODULES = (
     Path("src/autosport/gui.py"),
+    Path("src/autosport/windows_gui.py"),
     Path("src/autosport/windows_layout.py"),
     Path("src/autosport/windows_manual_calculation.py"),
+)
+_OPTIONAL_CRITICAL_PRESENTATION_MODULES = (
+    # This packaged UIA surface is introduced by a separate accessibility lineage.
+    # Once present on the tested tree it must automatically fall under this gate;
+    # the static gate must not require a follow-up edit just to notice the file.
+    Path("src/autosport/windows_accessible_gui.py"),
 )
 _DIRECT_PRESENTATION_LITERAL_ALLOWLIST_V1 = frozenset()
 _CYRILLIC_RE = re.compile(r"[А-ЩЬЮЯЄІЇҐа-щьюяєіїґ]")
@@ -48,6 +55,21 @@ _CRITICAL_HUMAN_KEYS = frozenset(
         "ui.windows.manual_calculation.status.error",
     }
 )
+
+
+def _critical_presentation_modules() -> tuple[Path, ...]:
+    required_missing = [
+        path
+        for path in _REQUIRED_CRITICAL_PRESENTATION_MODULES
+        if not (_REPO_ROOT / path).is_file()
+    ]
+    assert not required_missing, f"missing required critical presentation modules: {required_missing}"
+    optional_present = tuple(
+        path
+        for path in _OPTIONAL_CRITICAL_PRESENTATION_MODULES
+        if (_REPO_ROOT / path).is_file()
+    )
+    return _REQUIRED_CRITICAL_PRESENTATION_MODULES + optional_present
 
 
 def _source(relative_path: Path) -> str:
@@ -87,14 +109,78 @@ def _call_name(node: ast.Call) -> str | None:
     return None
 
 
-def _constant_string(node: ast.AST | None) -> str | None:
+def _static_string(
+    node: ast.AST | None,
+    constants: dict[str, str],
+) -> str | None:
+    """Resolve only statically-known strings used directly at presentation sinks.
+
+    The gate deliberately does not evaluate arbitrary Python. It covers the
+    bounded escape forms that can otherwise hide hard-coded presentation copy
+    from an inline-literal check: literal f-strings, constant concatenation and
+    module-level string constants (including constants composed from other
+    already-resolved constants).
+    """
+
     if isinstance(node, ast.Constant) and isinstance(node.value, str):
         return node.value
+    if isinstance(node, ast.JoinedStr):
+        pieces: list[str] = []
+        for value in node.values:
+            if not isinstance(value, ast.Constant) or not isinstance(value.value, str):
+                return None
+            pieces.append(value.value)
+        return "".join(pieces)
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
+        left = _static_string(node.left, constants)
+        right = _static_string(node.right, constants)
+        if left is not None and right is not None:
+            return left + right
+        return None
+    if isinstance(node, ast.Name):
+        return constants.get(node.id)
     return None
 
 
-def _presentation_literal_violations(relative_path: Path) -> list[str]:
+def _module_string_constants(tree: ast.AST) -> dict[str, str]:
+    if not isinstance(tree, ast.Module):
+        return {}
+
+    candidates: dict[str, ast.AST] = {}
+    for statement in tree.body:
+        if isinstance(statement, ast.Assign):
+            for target in statement.targets:
+                if isinstance(target, ast.Name):
+                    candidates[target.id] = statement.value
+        elif (
+            isinstance(statement, ast.AnnAssign)
+            and isinstance(statement.target, ast.Name)
+            and statement.value is not None
+        ):
+            candidates[statement.target.id] = statement.value
+
+    resolved: dict[str, str] = {}
+    pending = dict(candidates)
+    while pending:
+        progressed = False
+        for name, expression in tuple(pending.items()):
+            value = _static_string(expression, resolved)
+            if value is None:
+                continue
+            resolved[name] = value
+            del pending[name]
+            progressed = True
+        if not progressed:
+            break
+    return resolved
+
+
+def _presentation_literal_violations_in_tree(
+    tree: ast.AST,
+    source_name: str,
+) -> list[str]:
     violations: list[str] = []
+    constants = _module_string_constants(tree)
     widget_calls = {
         "tk.Button",
         "tk.Checkbutton",
@@ -108,7 +194,7 @@ def _presentation_literal_violations(relative_path: Path) -> list[str]:
         "ttk.LabelFrame",
         "ttk.Radiobutton",
     }
-    for node in ast.walk(_tree(relative_path)):
+    for node in ast.walk(tree):
         if not isinstance(node, ast.Call):
             continue
         name = _call_name(node)
@@ -130,16 +216,20 @@ def _presentation_literal_violations(relative_path: Path) -> list[str]:
                     candidates.append((f"{name} text", keyword.value))
 
         for sink, candidate in candidates:
-            literal = _constant_string(candidate)
-            if (
-                literal
-                and literal not in _DIRECT_PRESENTATION_LITERAL_ALLOWLIST_V1
-            ):
+            literal = _static_string(candidate, constants)
+            if literal and literal not in _DIRECT_PRESENTATION_LITERAL_ALLOWLIST_V1:
                 violations.append(
-                    f"{relative_path}:{getattr(node, 'lineno', '?')}: "
+                    f"{source_name}:{getattr(node, 'lineno', '?')}: "
                     f"{sink} bypasses localization catalog: {literal!r}"
                 )
     return violations
+
+
+def _presentation_literal_violations(relative_path: Path) -> list[str]:
+    return _presentation_literal_violations_in_tree(
+        _tree(relative_path),
+        str(relative_path),
+    )
 
 
 def test_default_locale_and_critical_human_copy_are_ukrainian() -> None:
@@ -164,7 +254,7 @@ def test_default_locale_and_critical_human_copy_are_ukrainian() -> None:
 def test_every_literal_catalog_reference_on_critical_windows_surfaces_exists() -> None:
     messages = catalog(DEFAULT_LOCALE)
     referenced: set[str] = set()
-    for relative_path in _CRITICAL_PRESENTATION_MODULES:
+    for relative_path in _critical_presentation_modules():
         referenced.update(_literal_text_keys(relative_path))
 
     assert referenced, "critical presentation modules exposed no literal localization references"
@@ -187,9 +277,51 @@ def test_every_literal_catalog_reference_on_critical_windows_surfaces_exists() -
 
 def test_critical_presentation_sinks_do_not_bypass_localization_catalog() -> None:
     violations: list[str] = []
-    for relative_path in _CRITICAL_PRESENTATION_MODULES:
+    modules = _critical_presentation_modules()
+    assert Path("src/autosport/windows_gui.py") in modules
+    for relative_path in modules:
         violations.extend(_presentation_literal_violations(relative_path))
     assert not violations, "\n".join(violations)
+
+
+def test_static_gate_rejects_indirect_and_expression_literal_escape_forms() -> None:
+    fixture = ast.parse(
+        '''
+import tk_uia
+from tkinter import messagebox
+
+STATUS_NAME = "Hard" + " coded status"
+STATUS_DESCRIPTION = "Hard-coded description"
+
+tk_uia.set_acc_name(widget, STATUS_NAME)
+tk_uia.set_acc_description(widget, STATUS_DESCRIPTION)
+messagebox.showerror(f"English title", "English " + "message")
+'''
+    )
+    violations = _presentation_literal_violations_in_tree(fixture, "fixture.py")
+
+    assert len(violations) == 4
+    assert any("Hard coded status" in violation for violation in violations)
+    assert any("Hard-coded description" in violation for violation in violations)
+    assert any("English title" in violation for violation in violations)
+    assert any("English message" in violation for violation in violations)
+
+
+def test_static_gate_allows_canonical_catalog_resolution_at_uia_sinks() -> None:
+    fixture = ast.parse(
+        '''
+import tk_uia
+from autosport.localization import text
+
+tk_uia.set_acc_name(widget, text("ui.accessibility.operational_status.name"))
+tk_uia.set_acc_description(
+    widget,
+    text("ui.accessibility.operational_status.description"),
+)
+'''
+    )
+
+    assert not _presentation_literal_violations_in_tree(fixture, "fixture.py")
 
 
 def test_ukrainian_catalog_round_trips_through_cyrillic_path(tmp_path: Path) -> None:

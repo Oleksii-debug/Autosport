@@ -137,6 +137,28 @@ class PaperRiskReportingTests(unittest.TestCase):
         self.assertEqual(report.current_drawdown_amount, Decimal("20"))
         self.assertEqual(report.drawdown_loss_room, Decimal("2.00"))
 
+    def test_over_limit_drawdown_stays_negative_and_reporting_is_read_only(self) -> None:
+        book = PaperBook("100")
+        ticket = book.open_ticket(
+            (self._leg(7),),
+            Decimal("30"),
+            placed_at="2026-09-21T08:00:00+00:00",
+        )
+        book.settle(
+            ticket.ticket_id,
+            set(),
+            settled_at="2026-09-21T08:05:00+00:00",
+        )
+        before_sha256 = PaperRiskPolicy.risk_of_ruin_portfolio_sha256(book)
+
+        report = build_paper_risk_report(book, self._goal())
+
+        after_sha256 = PaperRiskPolicy.risk_of_ruin_portfolio_sha256(book)
+        self.assertEqual(report.current_drawdown_amount, Decimal("30"))
+        self.assertEqual(report.drawdown_loss_room, Decimal("-10.00"))
+        self.assertEqual(report.paper_state_sha256, before_sha256)
+        self.assertEqual(after_sha256, before_sha256)
+
     def test_restart_preserves_exact_report_identity_and_values(self) -> None:
         book = PaperBook("100")
         ticket = book.open_ticket(

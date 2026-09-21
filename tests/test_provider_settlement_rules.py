@@ -43,6 +43,20 @@ def test_exact_rule_version_is_applicable_only_inside_effective_interval() -> No
     assert rule.settlement_authorized is False
 
 
+def test_advance_noticed_rule_is_valid_but_not_effective_early() -> None:
+    rule = _rule(
+        effective_from="2026-10-01T00:00:00+00:00",
+        effective_until="2026-11-01T00:00:00+00:00",
+        observed_at="2026-09-20T00:00:00+00:00",
+    )
+    assert rule.applicability(
+        venue_id="venue-a",
+        rule_set_id="football-standard",
+        rule_version="2026.09",
+        event_time="2026-09-30T23:59:59+00:00",
+    ) is SettlementRuleApplicability.NOT_EFFECTIVE
+
+
 def test_missing_foreign_or_changed_version_never_becomes_applicable() -> None:
     rule = _rule()
 
@@ -133,13 +147,13 @@ def test_catalog_rejects_future_observation_and_noncanonical_members() -> None:
     [
         ({"effective_from": "2026-09-01T00:00:00"}, "timezone offset"),
         ({"effective_until": "2026-09-01T00:00:00+00:00"}, "after effective_from"),
-        ({"observed_at": "2026-08-31T23:59:59+00:00"}, "cannot predate"),
+        ({"observed_at": "2026-09-20T00:00:00"}, "timezone offset"),
         ({"source_payload_sha256": "A" * 64}, "lowercase 64-character"),
         ({"schema_version": True}, "schema_version"),
         ({"schema_version": 1.0}, "schema_version"),
     ],
 )
-def test_rule_rejects_noncanonical_or_causally_invalid_evidence(
+def test_rule_rejects_noncanonical_evidence(
     overrides: dict[str, object], match: str
 ) -> None:
     with pytest.raises(ProviderSettlementRuleError, match=match):

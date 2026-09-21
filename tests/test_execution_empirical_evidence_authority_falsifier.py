@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+from copy import copy
 from dataclasses import fields, replace
 from decimal import Decimal
+import pickle
 
 import pytest
 
@@ -98,3 +100,32 @@ def test_public_constructor_cannot_mint_rebound_projection_without_ledger(tmp_pa
 
     with pytest.raises(EmpiricalExecutionEvidenceError):
         EmpiricalExecutionEvidence(**kwargs)
+
+
+def test_copy_cannot_inherit_projection_issuance(tmp_path):
+    evidence = _reserved_evidence(tmp_path)
+    duplicated = copy(evidence)
+
+    assert duplicated is not evidence
+    with pytest.raises(
+        EmpiricalExecutionEvidenceError,
+        match="not issued by canonical ledger projection",
+    ):
+        duplicated.assert_projection_issued()
+    with pytest.raises(
+        EmpiricalExecutionEvidenceError,
+        match="not issued by canonical ledger projection",
+    ):
+        duplicated.to_dict()
+
+
+def test_pickle_round_trip_cannot_inherit_projection_issuance(tmp_path):
+    evidence = _reserved_evidence(tmp_path)
+    reconstructed = pickle.loads(pickle.dumps(evidence))
+
+    assert reconstructed is not evidence
+    with pytest.raises(
+        EmpiricalExecutionEvidenceError,
+        match="not issued by canonical ledger projection",
+    ):
+        _ = reconstructed.evidence_sha256

@@ -128,7 +128,7 @@ _CHILD_CODE = textwrap.dedent(
 )
 
 
-def _fresh_runtime(root: Path):
+def _fresh_runtime(root: Path, *, ticket_id: str | None = None):
     goal = _legacy.EconomicGoalContract(
         goal_id="campaign-goal",
         revision=1,
@@ -151,20 +151,35 @@ def _fresh_runtime(root: Path):
         admissible_actions=frozenset({"PAPER_PROPOSAL"}),
     )
     baseline = pristine.checkpoint()
+    agent_loop = _legacy.AgentLoopRuntime(root / "agent-loop.json")
+    bridge = _legacy.PaperSettlementLearningBridge(
+        root / "paper-learning-bridge.json",
+        paper_book_path=root / "paper_book.json",
+        decision_ledger=_legacy.JsonlDecisionLedger(root / "decisions.jsonl"),
+        agent_loop=agent_loop,
+        economic_goal=goal,
+        risk_policy=risk,
+    )
+
+    snapshot = agent_loop.snapshot()
+    checkpoint = baseline
+    if snapshot.environment_checkpoint_id != baseline.checkpoint_id:
+        if ticket_id is None:
+            raise AssertionError(
+                "fresh recovery requires ticket_id for a post-transition checkpoint"
+            )
+        checkpoint = bridge.next_checkpoint(ticket_id)
+        if checkpoint.checkpoint_id != snapshot.environment_checkpoint_id:
+            raise AssertionError(
+                "bridge next checkpoint differs from durable AgentLoop checkpoint"
+            )
+
     resumed = _legacy.CausalLearningEnvironment.resume(
         identity,
         episode_key="campaign-episode",
         policy_id="campaign-policy",
         admissible_actions=frozenset({"PAPER_PROPOSAL"}),
-        checkpoint=baseline,
-    )
-    bridge = _legacy.PaperSettlementLearningBridge(
-        root / "paper-learning-bridge.json",
-        paper_book_path=root / "paper_book.json",
-        decision_ledger=_legacy.JsonlDecisionLedger(root / "decisions.jsonl"),
-        agent_loop=_legacy.AgentLoopRuntime(root / "agent-loop.json"),
-        economic_goal=goal,
-        risk_policy=risk,
+        checkpoint=checkpoint,
     )
     return _legacy.PaperCampaignRuntime(
         environment=resumed,
@@ -218,12 +233,12 @@ class PaperCampaignProcessKillRecoveryTests(unittest.TestCase):
         ticket_id: str,
         transition_id: str,
     ) -> None:
-        recovered = _fresh_runtime(root)
+        recovered = _fresh_runtime(root, ticket_id=ticket_id)
         first = recovered.finalize_ticket(ticket_id=ticket_id, at=_legacy.T4)
 
         # Simulate another operator/process retry from durable state. The same
         # ticket must resolve to the same receipt without duplicate evidence.
-        recovered_again = _fresh_runtime(root)
+        recovered_again = _fresh_runtime(root, ticket_id=ticket_id)
         second = recovered_again.finalize_ticket(ticket_id=ticket_id, at=_legacy.T4)
 
         self.assertEqual(first, second)
@@ -355,7 +370,7 @@ class PaperCampaignProcessKillRecoveryTests(unittest.TestCase):
             # A fresh process can recover solely from the durable intent plus the
             # already-settled PaperBook. No repeated external settlement payload
             # is required and no second settlement authority is invented.
-            recovered = _fresh_runtime(root)
+            recovered = _fresh_runtime(root, ticket_id=ticket_id)
             transitions = recovered.settlement_bridge.reconcile_after_settlement(
                 paper_book_path=root / "paper_book.json",
                 resolutions=(),

@@ -259,9 +259,12 @@ def acquire_parlay_sport_catalog(
 ) -> ParlaySportCatalogAcquisition:
     """Acquire exact `/v1/sports` bytes without granting odds/write/product authority.
 
-    Positive provider-origin evidence is issued only when the product-owned default
-    transport is used. An injected transport remains useful for deterministic tests
-    and simulations but can never set ``provider_origin_verified``.
+    Positive provider-origin evidence is issued only when both the product-owned
+    default transport and product-owned clock are used. Injected transport/clock
+    seams remain useful for deterministic tests and simulations but can never set
+    ``provider_origin_verified``. A 304 conditional response also remains
+    origin-unverified until prior HTTP-200 bytes can be re-resolved from a
+    product-owned durable acquisition authority rather than a caller-supplied object.
     """
 
     timeout_seconds = _finite_positive_float(timeout_seconds, field_name="timeout_seconds")
@@ -289,6 +292,7 @@ def acquire_parlay_sport_catalog(
             headers["If-None-Match"] = conditional_etag
 
     using_product_transport = transport is None
+    using_product_clock = clock is _utc_now_iso
     active_transport = _default_transport if transport is None else transport
     response = _validate_raw_response(
         active_transport(
@@ -315,7 +319,11 @@ def acquire_parlay_sport_catalog(
             )
         if response.body:
             raise ParlaySportCatalogEvidenceError("HTTP 304 must not carry a catalog body")
-        provider_origin_verified = using_product_transport and prior.provider_origin_verified
+        # A caller-supplied prior object is only structurally self-consistent evidence.
+        # Until a product-owned durable authority can re-resolve its exact HTTP-200
+        # bytes by identity, a genuine provider 304 must not transfer positive origin
+        # authority from that object.
+        provider_origin_verified = False
         acquisition_id = _acquisition_id(
             acquired_at=acquired_at,
             status_code=304,
@@ -337,7 +345,7 @@ def acquire_parlay_sport_catalog(
         )
     else:
         digest = hashlib.sha256(response.body).hexdigest()
-        provider_origin_verified = using_product_transport
+        provider_origin_verified = using_product_transport and using_product_clock
         acquisition_id = _acquisition_id(
             acquired_at=acquired_at,
             status_code=200,

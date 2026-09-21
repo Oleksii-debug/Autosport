@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 from pathlib import Path
 
 import pytest
@@ -85,5 +86,5 @@ def test_standalone_capture_fails_closed_if_published_capture_changes_before_evi
     # unpublished until the pair is committed.  That is also safe provided the
     # returned digest matches the bytes finally exposed at output_path.
     assert output.exists()
-    assert report.capture_sha256 == __import__("hashlib").sha256(output.read_bytes()).hexdigest()
+    assert report.capture_sha256 == hashlib.sha256(output.read_bytes()).hexdigest()
     assert len(transport.urls) == 1

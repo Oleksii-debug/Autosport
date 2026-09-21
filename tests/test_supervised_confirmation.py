@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 import json
+import shutil
 
 import pytest
 
@@ -271,3 +272,112 @@ def test_invalid_ttl_and_nonfinite_review_payload_fail_before_append(tmp_path):
         _prepare(authority, review_payload={"price": float("nan")})
 
     assert authority.path.read_bytes() == b""
+
+
+def test_active_review_and_receipt_form_one_shot_decision_lifecycle(tmp_path):
+    clock = FakeClock()
+    path = tmp_path / "operator-confirmations.jsonl"
+    authority = SupervisedConfirmationAuthority(path, clock=clock)
+    first = _prepare(authority, review_id="review-a")
+
+    with pytest.raises(
+        SupervisedConfirmationConflictError,
+        match="active unconfirmed review",
+    ):
+        _prepare(
+            authority,
+            review_id="review-b",
+            risk_evidence_sha256="c" * 64,
+            review_payload={"decision": "refreshed operator surface"},
+        )
+
+    reopened = SupervisedConfirmationAuthority(path, clock=clock)
+    with pytest.raises(
+        SupervisedConfirmationConflictError,
+        match="active unconfirmed review",
+    ):
+        _prepare(reopened, review_id="review-b")
+
+    clock.advance(seconds=121)
+    second = _prepare(reopened, review_id="review-b")
+    with pytest.raises(SupervisedConfirmationConflictError, match="expired"):
+        reopened.confirm_review(
+            review_id=first.review_id,
+            expected_review_sha256=first.review_sha256,
+        )
+    receipt = reopened.confirm_review(
+        review_id=second.review_id,
+        expected_review_sha256=second.review_sha256,
+    )
+
+    with pytest.raises(
+        SupervisedConfirmationConflictError,
+        match="already has a durable confirmation receipt",
+    ):
+        _prepare(reopened, review_id="review-c")
+
+    restarted = SupervisedConfirmationAuthority(path, clock=clock)
+    verified = restarted.verify_receipt(
+        receipt_id=receipt.receipt_id,
+        expected_review_sha256=second.review_sha256,
+    )
+    assert verified.receipt_id == receipt.receipt_id
+    with pytest.raises(
+        SupervisedConfirmationConflictError,
+        match="already has a durable confirmation receipt",
+    ):
+        _prepare(restarted, review_id="review-c")
+
+
+def test_nonempty_confirmation_state_fails_closed_after_monotonic_authority_loss(
+    tmp_path,
+    monkeypatch,
+):
+    machine_root = tmp_path / "machine-authority"
+    monkeypatch.setenv(
+        "AUTOSPORT_MONOTONIC_AUTHORITY_ROOT",
+        str(machine_root.resolve()),
+    )
+    clock = FakeClock()
+    path = tmp_path / "workspace" / "operator-confirmations.jsonl"
+    authority = SupervisedConfirmationAuthority(path, clock=clock)
+    _prepare(authority)
+    assert path.read_bytes()
+    assert machine_root.is_dir()
+
+    shutil.rmtree(machine_root)
+
+    with pytest.raises(
+        SupervisedConfirmationIntegrityError,
+        match="independent monotonic authority",
+    ):
+        SupervisedConfirmationAuthority(path, clock=clock)
+
+
+def test_copied_nonempty_confirmation_state_cannot_be_adopted_in_fresh_namespace(
+    tmp_path,
+    monkeypatch,
+):
+    machine_root = tmp_path / "machine-authority"
+    monkeypatch.setenv(
+        "AUTOSPORT_MONOTONIC_AUTHORITY_ROOT",
+        str(machine_root.resolve()),
+    )
+    clock = FakeClock()
+    source = tmp_path / "workspace-a" / "operator-confirmations.jsonl"
+    authority = SupervisedConfirmationAuthority(source, clock=clock)
+    _prepare(authority)
+
+    copied = tmp_path / "workspace-b" / source.name
+    copied.parent.mkdir(parents=True)
+    shutil.copy2(source, copied)
+    shutil.copy2(
+        source.with_name(f"{source.name}.head.json"),
+        copied.with_name(f"{copied.name}.head.json"),
+    )
+
+    with pytest.raises(
+        SupervisedConfirmationIntegrityError,
+        match="independent monotonic authority",
+    ):
+        SupervisedConfirmationAuthority(copied, clock=clock)

@@ -11,7 +11,7 @@ from autosport.research_control_runtime import (
 )
 from autosport.research_curriculum import ResearchCurriculumError
 from autosport.research_scheduler import ResearchSchedule, TickAction, WakeSource
-from autosport.scientific_registry import ResearchQuestion
+from autosport.scientific_registry import ResearchQuestion, ScientificRegistry
 
 
 SOURCE_SHA = "1" * 64
@@ -83,6 +83,29 @@ def test_scheduled_wake_flows_through_adapter_and_supervisor_once_across_restart
     assert same_instant.action is TickAction.IDLE
     assert len(reopened.supervisor.list_runs()) == 1
 
+
+
+def test_initialize_reuses_existing_canonical_scientific_registry(tmp_path):
+    registry = ScientificRegistry.initialize_pristine(tmp_path / "scientific_registry.json")
+    registry.append(
+        ResearchQuestion(
+            question_id="preexisting-question",
+            statement="Pre-existing governed research question.",
+            source_sha256=SOURCE_SHA,
+            created_at="2026-09-21T11:00:00Z",
+        )
+    )
+
+    runtime = initialize_research_control_runtime(tmp_path, max_budget_units=8)
+
+    entry = runtime.scientific_registry.get("ResearchQuestion", "preexisting-question")
+    assert entry is not None
+    assert entry.record_sha256 == registry.get(
+        "ResearchQuestion", "preexisting-question"
+    ).record_sha256
+    assert runtime.paths.supervisor.exists()
+    assert runtime.paths.curriculum.exists()
+    assert runtime.paths.scheduler.exists()
 
 def test_partial_state_is_never_silently_rebootstrapped(tmp_path):
     runtime = initialize_research_control_runtime(tmp_path, max_budget_units=8)

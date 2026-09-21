@@ -24,6 +24,31 @@ class SourceContinuityProvenanceTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "invalid source continuity store"):
                 SourceContinuityStore(path)
 
+    def test_cross_field_forged_anchor_is_rejected(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "source_continuity.json"
+            path.write_text(
+                json.dumps(
+                    {
+                        "schema_version": 1,
+                        "sources": {
+                            "source": {
+                                "source_id": "source",
+                                "status": "unknown",
+                                "trusted_token": "forged-token",
+                                "last_observed_cursor": None,
+                                "last_success_at": None,
+                                "last_failure_at": None,
+                                "reason": "no_continuity_evidence",
+                            }
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(ValueError, "invalid source continuity store"):
+                SourceContinuityStore(path)
+
     def test_witness_subclass_cannot_gain_provider_authority(self):
         with tempfile.TemporaryDirectory() as tmp:
             store = SourceContinuityStore(Path(tmp) / "source_continuity.json")

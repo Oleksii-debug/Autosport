@@ -115,7 +115,7 @@ class ModelAdapterDescriptor:
     config_sha256: str
 
     def __post_init__(self) -> None:
-        if self.mode not in (ModelBackendMode.LOCAL_OLLAMA, ModelBackendMode.EXTERNAL_API):
+        if not isinstance(self.mode, ModelBackendMode) or self.mode not in (ModelBackendMode.LOCAL_OLLAMA, ModelBackendMode.EXTERNAL_API):
             raise ModelInvocationError("adapter mode must be LOCAL_OLLAMA or EXTERNAL_API")
         _text("backend_id", self.backend_id)
         _text("model_id", self.model_id)
@@ -211,6 +211,17 @@ class ModelInvocationResult:
 class ModelInvocationCompletion:
     result: ModelInvocationResult
     response_text: str | None
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.result, ModelInvocationResult):
+            raise ModelInvocationError("result must be ModelInvocationResult")
+        if self.result.status is ModelInvocationStatus.SUCCESS:
+            if type(self.response_text) is not str or not self.response_text:
+                raise ModelInvocationError("SUCCESS requires response_text")
+            if _hash_text(self.response_text) != self.result.output_sha256:
+                raise ModelInvocationError("response_text does not match output_sha256")
+        elif self.response_text is not None:
+            raise ModelInvocationError("non-SUCCESS completion cannot expose response_text")
 
 
 def invoke_optional_model(

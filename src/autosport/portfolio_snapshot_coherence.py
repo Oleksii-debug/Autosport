@@ -154,61 +154,28 @@ class PortfolioComponentEvidence:
 
 
 @dataclass(frozen=True, slots=True)
-class PortfolioSnapshotCoherence:
-    """Deterministic read-only result for one evidence cut."""
-
-    status: SnapshotCoherenceStatus
+class _DerivedCoherence:
     decision_as_of: str
     required_components: tuple[str, ...]
     max_age_seconds: int
     max_cut_skew_seconds: int
     components: tuple[PortfolioComponentEvidence, ...]
+    status: SnapshotCoherenceStatus
     reasons: tuple[str, ...]
     policy_sha256: str
     component_set_sha256: str
     coherence_id: str
 
-    @property
-    def coherent(self) -> bool:
-        """Whether this cut is temporally coherent; this grants no action authority."""
 
-        return self.status is SnapshotCoherenceStatus.COHERENT
-
-    def to_dict(self) -> dict[str, object]:
-        return {
-            "schema": _SCHEMA,
-            "schema_version": _SCHEMA_VERSION,
-            "status": self.status.value,
-            "decision_as_of": self.decision_as_of,
-            "required_components": list(self.required_components),
-            "max_age_seconds": self.max_age_seconds,
-            "max_cut_skew_seconds": self.max_cut_skew_seconds,
-            "components": [item.to_dict() for item in self.components],
-            "reasons": list(self.reasons),
-            "policy_sha256": self.policy_sha256,
-            "component_set_sha256": self.component_set_sha256,
-            "coherence_id": self.coherence_id,
-            "portfolio_calculation_authority": False,
-            "risk_authority": False,
-            "execution_authority": False,
-            "real_money_execution": False,
-        }
-
-
-def evaluate_portfolio_snapshot_coherence(
+def _derive_snapshot_coherence(
     *,
-    decision_as_of: str,
+    decision_as_of: object,
     required_components: Iterable[str],
     components: Iterable[PortfolioComponentEvidence],
-    max_age_seconds: int,
-    max_cut_skew_seconds: int,
-) -> PortfolioSnapshotCoherence:
-    """Evaluate one exact causal cut without deriving portfolio economics.
-
-    Status precedence is intentionally deterministic and fail-closed:
-    incomplete -> unexpected -> ambiguous -> future -> stale -> mixed-cut -> coherent.
-    Input order never changes identity or disposition.
-    """
+    max_age_seconds: object,
+    max_cut_skew_seconds: object,
+) -> _DerivedCoherence:
+    """Derive the only valid immutable representation of one coherence result."""
 
     as_of = _instant(decision_as_of, "decision_as_of")
     max_age = _nonnegative_int(max_age_seconds, "max_age_seconds")
@@ -264,7 +231,7 @@ def evaluate_portfolio_snapshot_coherence(
 
     status: SnapshotCoherenceStatus
     reasons: tuple[str, ...]
-    selected: tuple[PortfolioComponentEvidence, ...] = tuple(
+    selected = tuple(
         grouped[key][0]
         for key in required
         if len(grouped.get(key, ())) == 1
@@ -327,15 +294,132 @@ def evaluate_portfolio_snapshot_coherence(
         "reasons": list(reasons),
     }
     coherence_id = _digest(identity_payload)
-    return PortfolioSnapshotCoherence(
-        status=status,
+    return _DerivedCoherence(
         decision_as_of=decision_id,
         required_components=required,
         max_age_seconds=max_age,
         max_cut_skew_seconds=max_skew,
         components=ordered,
+        status=status,
         reasons=reasons,
         policy_sha256=policy_sha256,
         component_set_sha256=component_set_sha256,
         coherence_id=coherence_id,
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class PortfolioSnapshotCoherence:
+    """Deterministic read-only result for one evidence cut.
+
+    Direct construction is allowed only when every stored field is exactly equal
+    to the canonical derivation from the stored decision cut, policy and evidence.
+    This prevents callers/deserializers from minting a positive ``COHERENT`` result.
+    """
+
+    status: SnapshotCoherenceStatus
+    decision_as_of: str
+    required_components: tuple[str, ...]
+    max_age_seconds: int
+    max_cut_skew_seconds: int
+    components: tuple[PortfolioComponentEvidence, ...]
+    reasons: tuple[str, ...]
+    policy_sha256: str
+    component_set_sha256: str
+    coherence_id: str
+
+    def __post_init__(self) -> None:
+        derived = _derive_snapshot_coherence(
+            decision_as_of=self.decision_as_of,
+            required_components=self.required_components,
+            components=self.components,
+            max_age_seconds=self.max_age_seconds,
+            max_cut_skew_seconds=self.max_cut_skew_seconds,
+        )
+        exact_fields = (
+            ("status", self.status, derived.status),
+            ("decision_as_of", self.decision_as_of, derived.decision_as_of),
+            ("required_components", self.required_components, derived.required_components),
+            ("max_age_seconds", self.max_age_seconds, derived.max_age_seconds),
+            (
+                "max_cut_skew_seconds",
+                self.max_cut_skew_seconds,
+                derived.max_cut_skew_seconds,
+            ),
+            ("components", self.components, derived.components),
+            ("reasons", self.reasons, derived.reasons),
+            ("policy_sha256", self.policy_sha256, derived.policy_sha256),
+            (
+                "component_set_sha256",
+                self.component_set_sha256,
+                derived.component_set_sha256,
+            ),
+            ("coherence_id", self.coherence_id, derived.coherence_id),
+        )
+        for name, actual, expected in exact_fields:
+            if type(actual) is not type(expected) or actual != expected:
+                raise PortfolioSnapshotCoherenceError(
+                    f"{name} must match deterministic coherence derivation"
+                )
+
+    @property
+    def coherent(self) -> bool:
+        """Whether this cut is temporally coherent; this grants no action authority."""
+
+        return self.status is SnapshotCoherenceStatus.COHERENT
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "schema": _SCHEMA,
+            "schema_version": _SCHEMA_VERSION,
+            "status": self.status.value,
+            "decision_as_of": self.decision_as_of,
+            "required_components": list(self.required_components),
+            "max_age_seconds": self.max_age_seconds,
+            "max_cut_skew_seconds": self.max_cut_skew_seconds,
+            "components": [item.to_dict() for item in self.components],
+            "reasons": list(self.reasons),
+            "policy_sha256": self.policy_sha256,
+            "component_set_sha256": self.component_set_sha256,
+            "coherence_id": self.coherence_id,
+            "portfolio_calculation_authority": False,
+            "risk_authority": False,
+            "execution_authority": False,
+            "real_money_execution": False,
+        }
+
+
+def evaluate_portfolio_snapshot_coherence(
+    *,
+    decision_as_of: str,
+    required_components: Iterable[str],
+    components: Iterable[PortfolioComponentEvidence],
+    max_age_seconds: int,
+    max_cut_skew_seconds: int,
+) -> PortfolioSnapshotCoherence:
+    """Evaluate one exact causal cut without deriving portfolio economics.
+
+    Status precedence is intentionally deterministic and fail-closed:
+    incomplete -> unexpected -> ambiguous -> future -> stale -> mixed-cut -> coherent.
+    Input order never changes identity or disposition.
+    """
+
+    derived = _derive_snapshot_coherence(
+        decision_as_of=decision_as_of,
+        required_components=required_components,
+        components=components,
+        max_age_seconds=max_age_seconds,
+        max_cut_skew_seconds=max_cut_skew_seconds,
+    )
+    return PortfolioSnapshotCoherence(
+        status=derived.status,
+        decision_as_of=derived.decision_as_of,
+        required_components=derived.required_components,
+        max_age_seconds=derived.max_age_seconds,
+        max_cut_skew_seconds=derived.max_cut_skew_seconds,
+        components=derived.components,
+        reasons=derived.reasons,
+        policy_sha256=derived.policy_sha256,
+        component_set_sha256=derived.component_set_sha256,
+        coherence_id=derived.coherence_id,
     )

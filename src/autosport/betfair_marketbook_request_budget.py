@@ -63,11 +63,17 @@ class MarketBookRequestBudget:
     market_ids: tuple[str, ...]
     price_data: tuple[str, ...] = ()
     best_prices_depth: int | None = None
+    operation: str = "listMarketBook"
 
     def __post_init__(self) -> None:
         market_ids = _canonical_tokens(self.market_ids, "market_ids")
         if not market_ids:
             raise MarketBookBudgetError("market_ids must contain at least one market")
+        operation = self.operation
+        if operation not in {"listMarketBook", "listRunnerBook"}:
+            raise MarketBookBudgetError("operation must be listMarketBook or listRunnerBook")
+        if operation == "listRunnerBook" and len(market_ids) != 1:
+            raise MarketBookBudgetError("listRunnerBook requires exactly one market_id")
         price_data = _canonical_tokens(self.price_data, "price_data")
         unknown = tuple(value for value in price_data if value not in _PRICE_WEIGHTS)
         if unknown:
@@ -144,7 +150,7 @@ class MarketBookRequestBudget:
         points = self.total_points
         return {
             "provider": "BETFAIR",
-            "operations": ["listMarketBook", "listRunnerBook"],
+            "operation": self.operation,
             "market_ids": list(self.market_ids),
             "requested_price_data": list(self.price_data),
             "effective_price_data": list(self.effective_price_data),

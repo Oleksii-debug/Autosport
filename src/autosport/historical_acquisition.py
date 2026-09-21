@@ -116,6 +116,10 @@ def _require_match_result_evidence_semantics(
     expected_priced_only: bool,
     expected_request_url: str,
 ) -> dict[str, Any]:
+    if type(payload.get("schema_version")) is not int or payload["schema_version"] != 1:
+        raise ProviderPayloadError("match_results.evidence schema_version mismatch")
+    if payload.get("kind") != "parlayapi_historical_match_result_evidence":
+        raise ProviderPayloadError("match_results.evidence kind mismatch")
     if payload.get("provider") != "parlayapi":
         raise ProviderPayloadError("match_results.evidence provider identity mismatch")
     if payload.get("sport_key") != expected_sport_key:
@@ -130,7 +134,12 @@ def _require_match_result_evidence_semantics(
     captured_at = payload.get("captured_at")
     if type(captured_at) is not str:
         raise ProviderPayloadError("match_results.evidence captured_at must be text")
-    _canonical_timestamp(captured_at, field="match_results.evidence.captured_at")
+    try:
+        _canonical_timestamp(captured_at, field="match_results.evidence.captured_at")
+    except ValueError as exc:
+        raise ProviderPayloadError(
+            "match_results.evidence captured_at must be a timezone-aware ISO timestamp"
+        ) from exc
 
     canonical_response_sha256 = payload.get("canonical_response_sha256")
     capture_sha256 = payload.get("capture_sha256")
@@ -373,7 +382,7 @@ def capture_historical_acquisition_bundle(
         )
         result_semantics = _require_match_result_evidence_semantics(
             result_evidence,
-            expected_sport_key=provider.sport_key,
+            expected_sport_key=str(request_scope["sport_key"]),
             expected_date=canonical_results_date,
             expected_priced_only=results_priced_only,
             expected_request_url=results_request_url,

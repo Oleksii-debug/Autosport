@@ -339,11 +339,30 @@ def load_campaign_precommit_manifest(
     path: str | os.PathLike[str],
 ) -> CampaignPrecommitManifest:
     target = Path(path)
+    if os.name == "nt":
+        try:
+            raw_bytes = target.read_bytes()
+        except OSError as exc:
+            raise CampaignPrecommitManifestError(
+                "cannot read campaign precommit manifest"
+            ) from exc
+    else:
+        name = target.name
+        if name in {"", ".", ".."} or Path(name).name != name:
+            raise CampaignPrecommitManifestError(
+                "campaign precommit target must name one file"
+            )
+        parent_fd, absolute_parent = _open_bound_posix_parent_directory(target.parent)
+        try:
+            raw_bytes = _read_bound_posix_file_bytes(parent_fd, name)
+            _assert_bound_posix_parent_identity(absolute_parent, parent_fd)
+        finally:
+            os.close(parent_fd)
+
     try:
-        raw_bytes = target.read_bytes()
         text = raw_bytes.decode("utf-8", errors="strict")
         raw = strict_json_loads(text)
-    except (OSError, UnicodeError, ValueError) as exc:
+    except (UnicodeError, ValueError) as exc:
         raise CampaignPrecommitManifestError(
             "cannot read campaign precommit manifest"
         ) from exc

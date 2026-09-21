@@ -270,3 +270,15 @@ def test_wrong_service_exception_container_cannot_mint_provider_semantics(
 
     assert raised.value.json_rpc_code == -32099
     assert raised.value.provider_error_code is None
+
+
+def test_typed_error_metadata_preserves_runtimeerror_args_contract() -> None:
+    no_args = BetfairReadOnlyError()
+    multiple_args = BetfairReadOnlyError("left", "right")
+
+    assert no_args.args == ()
+    assert no_args.json_rpc_code is None
+    assert no_args.provider_error_code is None
+    assert multiple_args.args == ("left", "right")
+    assert multiple_args.json_rpc_code is None
+    assert multiple_args.provider_error_code is None

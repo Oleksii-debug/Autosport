@@ -7,9 +7,14 @@ from unittest.mock import patch
 
 import pytest
 
-from autosport.causal_collector import CollectorDelta, CollectorDeltaStore
+from autosport.causal_collector import (
+    CollectorDelta,
+    CollectorDeltaStore,
+    CollectorStorageBudgetError,
+)
 from autosport.collector_service import (
     CollectorRetentionRequiredError,
+    CollectorServiceConfig,
     HeadlessCollectorService,
     main,
 )
@@ -134,3 +139,154 @@ def test_cli_max_store_bytes_is_native_durable_authority(
     assert reopened.configured_max_bytes == max_bytes
     page_size, page_count = _page_geometry(reopened.path)
     assert page_count <= max_bytes // page_size
+
+def test_cli_omitted_budget_reuses_durable_custom_budget_on_restart(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    source = _Source()
+    max_bytes = 2 * 1024 * 1024
+    common = [
+        "--workspace",
+        str(tmp_path),
+        "--source-factory",
+        "ignored:factory",
+        "--run-id",
+        "run-custom-restart",
+        "--max-cycles",
+        "1",
+        "--poll-seconds",
+        "1",
+    ]
+
+    with patch(
+        "autosport.collector_service._load_source_factory",
+        return_value=lambda: source,
+    ):
+        assert main([*common, "--max-store-bytes", str(max_bytes)]) == 0
+        capsys.readouterr()
+        assert main([*common, "--resume-stopped-run"]) == 0
+
+    status = json.loads(capsys.readouterr().out)
+    assert status["stop_reason"] == "max_cycles_reached"
+    reopened = CollectorDeltaStore(tmp_path / "collector_deltas.json")
+    assert reopened.configured_max_bytes == max_bytes
+
+
+def test_cli_explicit_conflicting_restart_budget_remains_rejected(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "collector_deltas.json"
+    CollectorDeltaStore(path, max_bytes=2 * 1024 * 1024)
+    source = _Source()
+
+    with (
+        patch(
+            "autosport.collector_service._load_source_factory",
+            return_value=lambda: source,
+        ),
+        pytest.raises(
+            CollectorStorageBudgetError,
+            match="conflicts with durable collector max_bytes",
+        ),
+    ):
+        main(
+            [
+                "--workspace",
+                str(tmp_path),
+                "--source-factory",
+                "ignored:factory",
+                "--run-id",
+                "run-conflicting-budget",
+                "--max-cycles",
+                "1",
+                "--max-store-bytes",
+                str(3 * 1024 * 1024),
+            ]
+        )
+
+
+def test_cli_fresh_omitted_budget_establishes_product_default(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    source = _Source()
+
+    with patch(
+        "autosport.collector_service._load_source_factory",
+        return_value=lambda: source,
+    ):
+        assert (
+            main(
+                [
+                    "--workspace",
+                    str(tmp_path),
+                    "--source-factory",
+                    "ignored:factory",
+                    "--run-id",
+                    "run-default-budget",
+                    "--max-cycles",
+                    "1",
+                    "--poll-seconds",
+                    "1",
+                ]
+            )
+            == 0
+        )
+
+    capsys.readouterr()
+    reopened = CollectorDeltaStore(tmp_path / "collector_deltas.json")
+    assert reopened.configured_max_bytes == CollectorServiceConfig().max_store_bytes
+
+
+def test_cli_service_config_uses_same_adopted_durable_budget(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    max_bytes = 2 * 1024 * 1024
+    CollectorDeltaStore(
+        tmp_path / "collector_deltas.json",
+        max_bytes=max_bytes,
+    )
+    source = _Source()
+    observed: dict[str, int | None] = {}
+
+    def capture_run(
+        service: HeadlessCollectorService,
+        *,
+        max_cycles: int | None = None,
+    ) -> None:
+        observed["config"] = service.config.max_store_bytes
+        observed["store"] = service.delta_store.configured_max_bytes
+        observed["max_cycles"] = max_cycles
+
+    with (
+        patch(
+            "autosport.collector_service._load_source_factory",
+            return_value=lambda: source,
+        ),
+        patch.object(HeadlessCollectorService, "run", capture_run),
+    ):
+        assert (
+            main(
+                [
+                    "--workspace",
+                    str(tmp_path),
+                    "--source-factory",
+                    "ignored:factory",
+                    "--run-id",
+                    "run-config-budget",
+                    "--max-cycles",
+                    "1",
+                ]
+            )
+            == 0
+        )
+
+    capsys.readouterr()
+    assert observed == {
+        "config": max_bytes,
+        "store": max_bytes,
+        "max_cycles": 1,
+    }
+

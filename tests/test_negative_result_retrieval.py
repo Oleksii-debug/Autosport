@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import hashlib
+import json
+
 import pytest
 
 from test_scientific_registry_index import SHA_A, SHA_B, SHA_C, T2, T3, _seed_registry
@@ -164,3 +167,41 @@ def test_limit_is_strictly_bounded_integer(tmp_path, limit):
 
     with pytest.raises(ValueError, match="limit"):
         search_negative_results(registry, "candidate", as_of=T3, limit=limit)
+
+
+def test_self_consistent_unknown_experiment_outcome_fails_closed(tmp_path):
+    path = tmp_path / "scientific_registry.json"
+    _seed_registry(path)
+
+    state = json.loads(path.read_text(encoding="utf-8"))
+    experiment = next(
+        entry
+        for entry in state["records"]
+        if entry["record_type"] == "Experiment"
+        and entry["record_id"] == "experiment-2"
+    )
+    experiment["payload"]["outcome"] = "UNKNOWN_RESULT"
+    envelope = {
+        "record_type": experiment["record_type"],
+        "record_id": experiment["record_id"],
+        "available_at": experiment["available_at"],
+        "payload": experiment["payload"],
+    }
+    canonical = json.dumps(
+        envelope,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    )
+    experiment["record_sha256"] = hashlib.sha256(
+        canonical.encode("utf-8")
+    ).hexdigest()
+    path.write_text(
+        json.dumps(state, ensure_ascii=False, sort_keys=True, separators=(",", ":")),
+        encoding="utf-8",
+    )
+
+    registry = ScientificRegistry(path)
+    with pytest.raises(RuntimeError, match="unsupported outcome"):
+        search_negative_results(registry, "candidate", as_of=T3)

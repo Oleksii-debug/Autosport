@@ -47,6 +47,12 @@ def _initial_seal():
 
 
 def _build_guard(seal):
+    # Capture the already-sealed origin resolver and product execution context in
+    # this installed wrapper closure. Later module-global replacement is not an
+    # authority source for fresh or durable PaperValue execution.
+    verified_origin = _instance_guard._verified_decision_origin_without_instance_dispatch
+    product_origin_runtime = _instance_guard._PRODUCT_ORIGIN_RUNTIME
+
     def stable_raw_events(
         self: PaperExecutionLedger,
         run_id: str | None = None,
@@ -140,7 +146,7 @@ def _build_guard(seal):
     ) -> None:
         if (
             _origin._DECISION_ORIGIN.get() is not None
-            or _instance_guard._PRODUCT_ORIGIN_RUNTIME.get() is not None
+            or product_origin_runtime.get() is not None
         ):
             raise _origin.PaperExecutionDecisionOriginError(
                 "caller-supplied decision-origin context cannot enter paper-value execution"
@@ -164,11 +170,11 @@ def _build_guard(seal):
         if record is None:
             return seal[3](self, event, context)
 
-        verified_origin = _instance_guard._verified_decision_origin_without_instance_dispatch(
+        verified = verified_origin(
             ledger,
             decision_id,
         )
-        token = _origin._DECISION_ORIGIN.set(verified_origin)
+        token = _origin._DECISION_ORIGIN.set(verified)
         try:
             return seal[3](self, event, context)
         finally:

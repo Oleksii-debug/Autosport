@@ -11,6 +11,7 @@ from autosport.live_decision_disposition import (
     MarketDecisionIdentity,
     PredicateEvidence,
     PredicateTruth,
+    ProductPolicyAuthorityBinding,
 )
 
 
@@ -31,6 +32,23 @@ def _predicate(
         truth=PredicateTruth.PROVEN,
         reason_code="proven",
         evidence=tuple(refs),
+    )
+
+
+def _product_binding() -> ProductPolicyAuthorityBinding:
+    return ProductPolicyAuthorityBinding(
+        economic_decision_id="decision-1",
+        economic_decision_sha256="0" * 64,
+        record_context_sha256="1" * 64,
+        decision_context_sha256="2" * 64,
+        market_state_sha256="3" * 64,
+        intent_provenance_sha256="4" * 64,
+        economic_goal_contract_sha256="5" * 64,
+        risk_policy_sha256="6" * 64,
+        plan_sha256="7" * 64,
+        plan_action="paper_plan",
+        policy_evaluated_at="2026-09-21T08:40:00.000000Z",
+        has_positive_execution_stake=True,
     )
 
 
@@ -55,6 +73,7 @@ def _disposition(
         disposition=Disposition.ACTIONABLE,
         reason_code="eligible",
         predicates=predicates,
+        product_policy_authority=_product_binding(),
     )
 
 

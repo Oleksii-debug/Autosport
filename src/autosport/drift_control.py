@@ -1055,12 +1055,38 @@ class DriftMonitor:
         baseline_count = reference.get("sample_count")
         if isinstance(baseline_count, bool) or not isinstance(baseline_count, int):
             raise DriftLineageError("drift reference has invalid sample_count")
+        baseline_effective = reference.get("effective_sample_size")
+        if baseline_effective is not None and (
+            isinstance(baseline_effective, bool)
+            or not isinstance(baseline_effective, int)
+            or baseline_effective <= 0
+            or baseline_effective > baseline_count
+        ):
+            raise DriftLineageError(
+                "drift reference has invalid effective_sample_size"
+            )
+        baseline_evidence_count = (
+            baseline_count if baseline_effective is None else baseline_effective
+        )
+        current_evidence_count = (
+            current.sample_count
+            if current.effective_sample_size is None
+            else current.effective_sample_size
+        )
 
         insufficiency_reason: str | None = None
-        if baseline_count < min_samples:
-            insufficiency_reason = "REFERENCE_SAMPLE_COUNT"
-        elif current.sample_count < min_samples:
-            insufficiency_reason = "CURRENT_SAMPLE_COUNT"
+        if baseline_evidence_count < min_samples:
+            insufficiency_reason = (
+                "REFERENCE_SAMPLE_COUNT"
+                if baseline_effective is None
+                else "REFERENCE_EFFECTIVE_SAMPLE_SIZE"
+            )
+        elif current_evidence_count < min_samples:
+            insufficiency_reason = (
+                "CURRENT_SAMPLE_COUNT"
+                if current.effective_sample_size is None
+                else "CURRENT_EFFECTIVE_SAMPLE_SIZE"
+            )
         elif current.source_identity != reference.get("source_identity"):
             insufficiency_reason = "SOURCE_IDENTITY_MISMATCH"
         elif _canonical_scope(
@@ -1273,20 +1299,46 @@ class DriftMonitor:
 
         min_samples = reference.get("min_samples")
         baseline_count = reference.get("sample_count")
+        baseline_effective = reference.get("effective_sample_size")
         if (
             isinstance(min_samples, bool)
             or not isinstance(min_samples, int)
             or min_samples <= 0
             or isinstance(baseline_count, bool)
             or not isinstance(baseline_count, int)
+            or (
+                baseline_effective is not None
+                and (
+                    isinstance(baseline_effective, bool)
+                    or not isinstance(baseline_effective, int)
+                    or baseline_effective <= 0
+                    or baseline_effective > baseline_count
+                )
+            )
         ):
             raise DriftLineageError("drift reference sample policy is invalid")
+        baseline_evidence_count = (
+            baseline_count if baseline_effective is None else baseline_effective
+        )
+        current_evidence_count = (
+            current.sample_count
+            if current.effective_sample_size is None
+            else current.effective_sample_size
+        )
 
         insufficiency_reason: str | None = None
-        if baseline_count < min_samples:
-            insufficiency_reason = "REFERENCE_SAMPLE_COUNT"
-        elif current.sample_count < min_samples:
-            insufficiency_reason = "CURRENT_SAMPLE_COUNT"
+        if baseline_evidence_count < min_samples:
+            insufficiency_reason = (
+                "REFERENCE_SAMPLE_COUNT"
+                if baseline_effective is None
+                else "REFERENCE_EFFECTIVE_SAMPLE_SIZE"
+            )
+        elif current_evidence_count < min_samples:
+            insufficiency_reason = (
+                "CURRENT_SAMPLE_COUNT"
+                if current.effective_sample_size is None
+                else "CURRENT_EFFECTIVE_SAMPLE_SIZE"
+            )
         elif current.source_identity != reference.get("source_identity"):
             insufficiency_reason = "SOURCE_IDENTITY_MISMATCH"
         elif _canonical_scope(

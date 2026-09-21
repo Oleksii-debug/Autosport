@@ -29,6 +29,7 @@ from .ingestion_health import SourceHealthStore
 from .integrity import atomic_write_json
 from .json_integrity import strict_json_loads
 from .market_bus import MarketEventBus
+from .policy_deployment import DeploymentAuthority
 from .market_mirror_runtime import (
     BoundedMirrorInvalidationBuffer,
     FocusedMirrorDependencyIndex,
@@ -60,19 +61,43 @@ class ProductCompositionManifest:
     source_id: str
     initial_bankroll: str
     settlement_authority_identity: str | None = None
+    deployment_authority_sha256: str | None = None
+    activation_binding_id: str | None = None
+    policy_id: str | None = None
+    deployment_environment_id: str | None = None
+    campaign_episode_key: str | None = None
 
 
 class _ManifestStore:
     _SCHEMA = "autosport.autonomous_product_composition"
-    _VERSION = 2
+    _VERSION = 3
     _V1_FIELDS = {"schema", "schema_version", "source_id", "initial_bankroll"}
-    _FIELDS = {
+    _V2_FIELDS = {
         "schema",
         "schema_version",
         "source_id",
         "initial_bankroll",
         "settlement_authority_identity",
     }
+    _FIELDS = {
+        "schema",
+        "schema_version",
+        "source_id",
+        "initial_bankroll",
+        "settlement_authority_identity",
+        "deployment_authority_sha256",
+        "activation_binding_id",
+        "policy_id",
+        "deployment_environment_id",
+        "campaign_episode_key",
+    }
+    _CAMPAIGN_FIELDS = (
+        "deployment_authority_sha256",
+        "activation_binding_id",
+        "policy_id",
+        "deployment_environment_id",
+        "campaign_episode_key",
+    )
 
     def __init__(self, path: Path) -> None:
         self.path = path
@@ -82,6 +107,48 @@ class _ManifestStore:
         if type(value) is not str or not value or value.strip() != value:
             raise ProductCompositionError(f"{field} must be a non-empty trimmed string")
         return value
+
+    @classmethod
+    def _sha256(cls, value: object, field: str) -> str:
+        digest = cls._text(value, field)
+        if (
+            len(digest) != 64
+            or digest != digest.lower()
+            or any(character not in "0123456789abcdef" for character in digest)
+        ):
+            raise ProductCompositionError(f"{field} must be lowercase SHA-256 hex")
+        return digest
+
+    @classmethod
+    def _campaign_identity(
+        cls,
+        *,
+        deployment_authority_sha256: object,
+        activation_binding_id: object,
+        policy_id: object,
+        deployment_environment_id: object,
+        campaign_episode_key: object,
+    ) -> tuple[str | None, str | None, str | None, str | None, str | None]:
+        values = (
+            deployment_authority_sha256,
+            activation_binding_id,
+            policy_id,
+            deployment_environment_id,
+            campaign_episode_key,
+        )
+        if all(value is None for value in values):
+            return (None, None, None, None, None)
+        if any(value is None for value in values):
+            raise ProductCompositionError(
+                "campaign composition identity fields must be provided together"
+            )
+        return (
+            cls._sha256(deployment_authority_sha256, "deployment_authority_sha256"),
+            cls._sha256(activation_binding_id, "activation_binding_id"),
+            cls._sha256(policy_id, "policy_id"),
+            cls._sha256(deployment_environment_id, "deployment_environment_id"),
+            cls._text(campaign_episode_key, "campaign_episode_key"),
+        )
 
     def _read_raw(self) -> dict[str, object]:
         try:
@@ -97,6 +164,20 @@ class _ManifestStore:
             return {
                 **raw,
                 "settlement_authority_identity": None,
+                **{field: None for field in self._CAMPAIGN_FIELDS},
+            }
+        if version == 2 and set(raw) == self._V2_FIELDS:
+            self._text(raw.get("source_id"), "source_id")
+            self._text(raw.get("initial_bankroll"), "initial_bankroll")
+            authority_identity = raw.get("settlement_authority_identity")
+            if authority_identity is not None:
+                self._sha256(
+                    authority_identity,
+                    "settlement_authority_identity",
+                )
+            return {
+                **raw,
+                **{field: None for field in self._CAMPAIGN_FIELDS},
             }
         if version != self._VERSION or set(raw) != self._FIELDS:
             raise ProductCompositionError("product composition manifest schema mismatch")
@@ -104,18 +185,17 @@ class _ManifestStore:
         self._text(raw.get("initial_bankroll"), "initial_bankroll")
         authority_identity = raw.get("settlement_authority_identity")
         if authority_identity is not None:
-            identity = self._text(
+            self._sha256(
                 authority_identity,
                 "settlement_authority_identity",
             )
-            if (
-                len(identity) != 64
-                or identity != identity.lower()
-                or any(character not in "0123456789abcdef" for character in identity)
-            ):
-                raise ProductCompositionError(
-                    "settlement_authority_identity must be lowercase SHA-256 hex"
-                )
+        self._campaign_identity(
+            deployment_authority_sha256=raw.get("deployment_authority_sha256"),
+            activation_binding_id=raw.get("activation_binding_id"),
+            policy_id=raw.get("policy_id"),
+            deployment_environment_id=raw.get("deployment_environment_id"),
+            campaign_episode_key=raw.get("campaign_episode_key"),
+        )
         return raw
 
     def load_or_create(
@@ -124,14 +204,37 @@ class _ManifestStore:
         source_id: str,
         initial_bankroll: str,
         settlement_authority_identity: str | None,
+        deployment_authority: DeploymentAuthority | None,
+        campaign_episode_key: str | None,
     ) -> ProductCompositionManifest:
         source_id = self._text(source_id, "source_id")
         initial_bankroll = self._text(initial_bankroll, "initial_bankroll")
         if settlement_authority_identity is not None:
-            settlement_authority_identity = self._text(
+            settlement_authority_identity = self._sha256(
                 settlement_authority_identity,
                 "settlement_authority_identity",
             )
+        if deployment_authority is None:
+            configured_campaign = self._campaign_identity(
+                deployment_authority_sha256=None,
+                activation_binding_id=None,
+                policy_id=None,
+                deployment_environment_id=None,
+                campaign_episode_key=campaign_episode_key,
+            )
+        else:
+            if not isinstance(deployment_authority, DeploymentAuthority):
+                raise TypeError("deployment_authority must be DeploymentAuthority")
+            configured_campaign = self._campaign_identity(
+                deployment_authority_sha256=deployment_authority.authority_sha256,
+                activation_binding_id=deployment_authority.binding.binding_id,
+                policy_id=deployment_authority.binding.policy_id,
+                deployment_environment_id=(
+                    deployment_authority.deployment_identity.environment_id
+                ),
+                campaign_episode_key=campaign_episode_key,
+            )
+        campaign_payload = dict(zip(self._CAMPAIGN_FIELDS, configured_campaign, strict=True))
         self.path.parent.mkdir(parents=True, exist_ok=True)
         if not self.path.exists():
             atomic_write_json(
@@ -142,6 +245,7 @@ class _ManifestStore:
                     "source_id": source_id,
                     "initial_bankroll": initial_bankroll,
                     "settlement_authority_identity": settlement_authority_identity,
+                    **campaign_payload,
                 },
             )
         raw = self._read_raw()
@@ -157,10 +261,20 @@ class _ManifestStore:
             raise ProductCompositionError(
                 "settlement authority identity conflicts with durable product composition"
             )
+        for field, configured in campaign_payload.items():
+            if raw[field] != configured:
+                raise ProductCompositionError(
+                    f"{field} conflicts with durable product composition"
+                )
         return ProductCompositionManifest(
             source_id=source_id,
             initial_bankroll=initial_bankroll,
             settlement_authority_identity=settlement_authority_identity,
+            deployment_authority_sha256=campaign_payload["deployment_authority_sha256"],
+            activation_binding_id=campaign_payload["activation_binding_id"],
+            policy_id=campaign_payload["policy_id"],
+            deployment_environment_id=campaign_payload["deployment_environment_id"],
+            campaign_episode_key=campaign_payload["campaign_episode_key"],
         )
 
 
@@ -318,6 +432,8 @@ def build_autonomous_product_runtime(
     initial_bankroll: str = "10000",
     outcome_authority: SettlementOutcomeAuthority | None = None,
     settlement_learning_handoff: SettlementLearningHandoff | None = None,
+    deployment_authority: DeploymentAuthority | None = None,
+    campaign_episode_key: str | None = None,
 ) -> AutonomousProductRuntime:
     """Construct or restore one canonical headless PAPER product runtime.
 
@@ -353,6 +469,8 @@ def build_autonomous_product_runtime(
         source_id=source_id,
         initial_bankroll=normalized_bankroll,
         settlement_authority_identity=settlement_authority_identity,
+        deployment_authority=deployment_authority,
+        campaign_episode_key=campaign_episode_key,
     )
 
     lifecycle = ContinuousEventLifecycle(root / "catalog.json")

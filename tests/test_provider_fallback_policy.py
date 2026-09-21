@@ -565,3 +565,96 @@ def test_corrupt_registry_fails_closed_instead_of_accepting_caller_profile(tmp_p
             ),
             decided_at=T3,
         )
+
+def test_account_scoped_read_cannot_fallback_to_another_account(tmp_path):
+    primary = _profile(
+        venue="venue-a",
+        account="acct-a",
+        adapter="api-a",
+        capability=BookmakerCapability.BALANCE_READ,
+    )
+    fallback = _profile(
+        venue="venue-b",
+        account="acct-b",
+        adapter="api-b",
+        capability=BookmakerCapability.BALANCE_READ,
+        source_sha=SHA_D,
+    )
+    decision = _resolve(
+        _registry(tmp_path, primary, fallback),
+        primary,
+        primary_state=ProviderOperationalState.UNAVAILABLE,
+        fallback=fallback,
+        capability=BookmakerCapability.BALANCE_READ,
+    )
+
+    assert decision.disposition is ProviderFallbackDisposition.ABSTAIN
+    assert decision.reason == "ACCOUNT_SCOPED_FALLBACK_IDENTITY_MISMATCH"
+
+
+def test_account_scoped_read_can_use_alternate_adapter_for_same_account(tmp_path):
+    primary = _profile(
+        venue="venue-a",
+        account="acct-a",
+        adapter="api-primary",
+        capability=BookmakerCapability.BALANCE_READ,
+    )
+    fallback = _profile(
+        venue="venue-a",
+        account="acct-a",
+        adapter="api-secondary",
+        capability=BookmakerCapability.BALANCE_READ,
+        source_sha=SHA_D,
+    )
+    decision = _resolve(
+        _registry(tmp_path, primary, fallback),
+        primary,
+        primary_state=ProviderOperationalState.UNAVAILABLE,
+        fallback=fallback,
+        capability=BookmakerCapability.BALANCE_READ,
+    )
+
+    assert decision.disposition is ProviderFallbackDisposition.USE_FALLBACK_READ
+    assert decision.selected_profile_id == fallback.profile_id
+    assert decision.downstream_semantic_compatibility_required is False
+
+
+def test_cross_provider_quote_fallback_requires_semantic_compatibility_gate(tmp_path):
+    primary = _profile(venue="venue-a", account="acct-a", adapter="api-a")
+    fallback = _profile(
+        venue="venue-b", account="acct-b", adapter="api-b", source_sha=SHA_D
+    )
+    decision = _resolve(
+        _registry(tmp_path, primary, fallback),
+        primary,
+        primary_state=ProviderOperationalState.UNAVAILABLE,
+        fallback=fallback,
+    )
+
+    assert decision.disposition is ProviderFallbackDisposition.USE_FALLBACK_READ
+    assert decision.downstream_semantic_compatibility_required is True
+    assert decision.downstream_source_quality_required is True
+
+
+def test_partial_fallback_is_rejected_even_when_primary_is_healthy(tmp_path):
+    primary = _profile(venue="primary", account="acct-p", adapter="api-p")
+    fallback = _profile(
+        venue="fallback", account="acct-f", adapter="api-f", source_sha=SHA_D
+    )
+    registry = _registry(tmp_path, primary, fallback)
+
+    with pytest.raises(ProviderFallbackPolicyError, match="supplied together"):
+        resolve_readonly_provider_route(
+            registry=registry,
+            required_capability=BookmakerCapability.LIVE_QUOTES_READ,
+            primary_route=_route(primary),
+            primary_integration=_integration(primary),
+            primary_operational=_operational(
+                primary, state=ProviderOperationalState.HEALTHY
+            ),
+            fallback_route=_route(fallback),
+            fallback_integration=None,
+            fallback_operational=None,
+            decided_at=T3,
+        )
+

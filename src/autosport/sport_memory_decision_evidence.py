@@ -53,6 +53,12 @@ def bind_sport_memory_to_opportunity_evidence(
         raise TypeError("base must be OpportunityEvidence")
     if not isinstance(runtime, SportMemoryRuntime):
         raise TypeError("runtime must be SportMemoryRuntime")
+    from .sport_memory_checkpoint import BoundSportMemoryRuntime
+
+    if type(runtime) is not BoundSportMemoryRuntime:
+        raise SportMemoryError(
+            "opportunity evidence binding requires canonical bound sport-memory runtime"
+        )
     matchup = runtime.verify_matchup_evidence(matchup)
 
     observed = _instant("base observed_at", base.observed_at)

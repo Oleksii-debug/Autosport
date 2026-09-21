@@ -141,6 +141,12 @@ def _resolve_effective_budget(
         # lock and never widen or narrow that already-published budget implicitly.
         durable_budget = _read_durable_budget(connection)
         if durable_budget is None:
+            # The database may have grown while this connection waited behind a
+            # writer that acquired BEGIN IMMEDIATE before budget publication. Rebind
+            # and validate the current page geometry while holding the same writer
+            # lock that protects the durable authority. If the store is already over
+            # budget, fail before publishing a contradictory metadata row.
+            _apply_page_budget(connection, requested_budget)
             connection.execute(
                 "INSERT INTO collector_meta(key, value) VALUES(?, ?)",
                 (_BUDGET_META_KEY, str(requested_budget)),

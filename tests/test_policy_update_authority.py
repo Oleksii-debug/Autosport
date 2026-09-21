@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import fields as dataclass_fields
 from dataclasses import replace
 from datetime import datetime, timezone
 from decimal import Decimal
@@ -123,6 +124,17 @@ def _utility(policy, action, reward, transition, **overrides):
     return PolicyUtilityEvidence(**values)
 
 
+def _subclass_copy(value):
+    forged_type = type(f"Forged{type(value).__name__}", (type(value),), {})
+    return forged_type(
+        **{
+            field.name: getattr(value, field.name)
+            for field in dataclass_fields(value)
+            if field.init
+        }
+    )
+
+
 def test_utility_gate_blocks_raw_reward_update_and_is_deterministic() -> None:
     policy, action, reward, transition = _resolved_step()
     utility = _utility(policy, action, reward, transition)
@@ -198,3 +210,20 @@ def test_utility_gate_reuses_generic_learner_causal_admission_boundary() -> None
                 transition=bad_transition,
                 utility=utility,
             )
+
+
+@pytest.mark.parametrize("forged_component", ("policy", "action", "reward", "transition", "utility"))
+def test_utility_gate_rejects_polymorphic_authority_inputs(forged_component: str) -> None:
+    policy, action, reward, transition = _resolved_step()
+    utility = _utility(policy, action, reward, transition)
+    arguments = {
+        "policy": policy,
+        "action": action,
+        "reward": reward,
+        "transition": transition,
+        "utility": utility,
+    }
+    arguments[forged_component] = _subclass_copy(arguments[forged_component])
+
+    with pytest.raises(TypeError, match="exact|canonical"):
+        attempt_utility_bound_update(**arguments)

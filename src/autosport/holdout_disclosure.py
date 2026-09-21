@@ -74,8 +74,11 @@ class HoldoutDisclosureGate:
     ``HoldoutConsumptionLedger``.
 
     Pure non-outcome metadata and output that remains inaccessible inside a sealed
-    precommitted evaluator do not consume confirmation capacity. No result from
-    this gate proves that a holdout is untouched or authorizes promotion.
+    precommitted evaluator do not consume confirmation capacity. Public disclosure
+    channels are conservatively treated as adaptive-accessible even if a caller
+    supplies ``False``; that flag can exempt only the sealed evaluator boundary.
+    No result from this gate proves that a holdout is untouched or authorizes
+    promotion.
     """
 
     _CONSUMER_IDENTITY = "holdout-disclosure-gate-v1"
@@ -89,18 +92,35 @@ class HoldoutDisclosureGate:
         self._ledger = ledger
 
     @staticmethod
-    def requires_consumption(
+    def effective_accessibility(
         *,
+        channel: DisclosureChannel,
+        accessible_to_adaptive_actor: bool,
+    ) -> bool:
+        if type(channel) is not DisclosureChannel:
+            raise HoldoutDisclosureError("channel must be an exact DisclosureChannel")
+        if type(accessible_to_adaptive_actor) is not bool:
+            raise HoldoutDisclosureError(
+                "accessible_to_adaptive_actor must be an exact bool"
+            )
+        if channel is DisclosureChannel.SEALED_EVALUATOR:
+            return accessible_to_adaptive_actor
+        return True
+
+    @classmethod
+    def requires_consumption(
+        cls,
+        *,
+        channel: DisclosureChannel,
         kind: DisclosureKind,
         accessible_to_adaptive_actor: bool,
     ) -> bool:
         if type(kind) is not DisclosureKind:
             raise HoldoutDisclosureError("kind must be an exact DisclosureKind")
-        if type(accessible_to_adaptive_actor) is not bool:
-            raise HoldoutDisclosureError(
-                "accessible_to_adaptive_actor must be an exact bool"
-            )
-        return kind.outcome_derived and accessible_to_adaptive_actor
+        return kind.outcome_derived and cls.effective_accessibility(
+            channel=channel,
+            accessible_to_adaptive_actor=accessible_to_adaptive_actor,
+        )
 
     def record(
         self,
@@ -117,17 +137,19 @@ class HoldoutDisclosureGate:
             raise HoldoutDisclosureError(
                 "dataset_snapshot must be an exact DatasetSnapshot"
             )
-        if type(channel) is not DisclosureChannel:
-            raise HoldoutDisclosureError("channel must be an exact DisclosureChannel")
-
+        effective_accessibility = self.effective_accessibility(
+            channel=channel,
+            accessible_to_adaptive_actor=accessible_to_adaptive_actor,
+        )
         if not self.requires_consumption(
+            channel=channel,
             kind=kind,
             accessible_to_adaptive_actor=accessible_to_adaptive_actor,
         ):
             return HoldoutDisclosureDecision(
                 channel=channel,
                 kind=kind,
-                accessible_to_adaptive_actor=accessible_to_adaptive_actor,
+                accessible_to_adaptive_actor=effective_accessibility,
                 consumption=None,
             )
 
@@ -142,6 +164,6 @@ class HoldoutDisclosureGate:
         return HoldoutDisclosureDecision(
             channel=channel,
             kind=kind,
-            accessible_to_adaptive_actor=accessible_to_adaptive_actor,
+            accessible_to_adaptive_actor=effective_accessibility,
             consumption=consumption,
         )

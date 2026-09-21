@@ -45,9 +45,21 @@ def test_benchmark_case_reports_separate_restart_append_and_verify_measurements(
     assert result["record_count_after_append"] == 33
     assert result["seeded_file_bytes"] > 0
     assert result["file_bytes_after_append"] > result["seeded_file_bytes"]
+
     assert result["open_ns"] >= 0
+    assert result["open_journal_read_calls"] == 1
+    assert result["open_journal_read_bytes"] == result["seeded_file_bytes"]
+
     assert result["append_ns"] >= 0
+    assert result["append_journal_read_calls"] == 1
+    assert result["append_journal_read_bytes"] == result["seeded_file_bytes"]
+
     assert result["verify_ns"] >= 0
+    assert result["verify_journal_read_calls"] == 1
+    assert result["verify_journal_read_bytes"] == result["file_bytes_after_append"]
+
+    assert result["theoretical_append_historical_record_validations"] == 32
+    assert result["theoretical_append_lifecycle_record_visits"] == 65
 
 
 def test_run_benchmark_preserves_requested_sizes_and_does_not_define_thresholds():
@@ -57,6 +69,13 @@ def test_run_benchmark_preserves_requested_sizes_and_does_not_define_thresholds(
     assert all("open_ns" in result for result in results)
     assert all("append_ns" in result for result in results)
     assert all("verify_ns" in result for result in results)
+
+    report = benchmark_forensic_journal.benchmark_document((2,))
+    assert report["kind"] == "autosport.forensic_journal_scaling_profile"
+    assert report["measurement_only"] is True
+    assert report["performance_threshold_defined"] is False
+    assert report["integrity_semantics_modified"] is False
+    assert report["clock"] == "perf_counter_ns"
 
 
 @pytest.mark.parametrize("record_count", [0, -1, True, 1.5])

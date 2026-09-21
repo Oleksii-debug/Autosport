@@ -149,6 +149,7 @@ class SourceContinuityStore:
         if (
             not isinstance(raw, dict)
             or set(raw) != {"schema_version", "sources"}
+            or type(raw.get("schema_version")) is not int
             or raw.get("schema_version") != _SCHEMA_VERSION
             or not isinstance(raw.get("sources"), dict)
         ):
@@ -222,7 +223,7 @@ class SourceContinuityStore:
         source_id = _text(source_id, "source_id")
         now = _instant(now, "now")
         cursor = _cursor(cursor)
-        if witness is not None and not isinstance(witness, ProviderContinuityWitness):
+        if witness is not None and type(witness) is not ProviderContinuityWitness:
             raise TypeError("witness must be ProviderContinuityWitness or null")
         assert isinstance(source_id, str)
         assert isinstance(now, str)

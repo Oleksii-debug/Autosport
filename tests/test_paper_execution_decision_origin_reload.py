@@ -8,6 +8,7 @@ from autosport import _paper_execution_decision_origin as origin_module
 from autosport import _paper_execution_decision_origin_callsite_guard as callsite_guard
 from autosport import _paper_execution_decision_origin_instance_guard as instance_guard
 from autosport import _paper_execution_decision_origin_resume_guard as resume_guard
+from autosport.decision_ledger import JsonlDecisionLedger
 from autosport.paper import PaperBook
 from autosport.paper_execution_adoption import (
     PaperExecutionAdoptionRuntime,
@@ -71,8 +72,6 @@ def _plan(decision_id: str = "decision-origin-reload") -> ExecutionPlan:
 def test_repeated_origin_module_reload_preserves_originless_reserve_load_and_execute(
     tmp_path,
 ) -> None:
-    # The origin module is intentionally reloaded in-place: this was the dangerous
-    # sequence because its module globals are shared by already-installed wrappers.
     importlib.reload(origin_module)
     importlib.reload(origin_module)
 
@@ -134,8 +133,77 @@ def test_repeated_origin_module_reload_preserves_originless_reserve_load_and_exe
         assert result.run.trigger_id == plan.decision_id
         assert ledger.reservation_decision_origin(result.run.run_id) is None
     finally:
-        # Restore the public helper binding and refresh guard globals so this
-        # regression is order-independent for the rest of the full test suite.
         importlib.reload(instance_guard)
         importlib.reload(callsite_guard)
         importlib.reload(resume_guard)
+
+
+def test_guard_reload_repairs_tampered_delegate_mirrors_from_closure_seal(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    installed_reserve = PaperExecutionLedger.reserve_run
+    installed_events = PaperExecutionLedger.events
+    attacker_calls: list[str] = []
+
+    def forged(*args, **kwargs):
+        attacker_calls.append("forged")
+        raise AssertionError("tampered delegate mirror must not become authority")
+
+    monkeypatch.setattr(instance_guard, "_STABLE_VERIFIED_SNAPSHOT", forged)
+    monkeypatch.setattr(instance_guard, "_STABLE_RESERVE_RUN", forged)
+    monkeypatch.setattr(instance_guard, "_STABLE_APPEND_EVENT", forged)
+    monkeypatch.setattr(resume_guard, "_STABLE_EVENTS", forged)
+    monkeypatch.setattr(resume_guard, "_STABLE_LOAD_RUN", forged)
+    monkeypatch.setattr(
+        JsonlDecisionLedger,
+        instance_guard._VERIFIED_SNAPSHOT_SENTINEL,
+        forged,
+    )
+    monkeypatch.setattr(
+        PaperExecutionLedger,
+        instance_guard._RESERVE_SENTINEL,
+        forged,
+    )
+    monkeypatch.setattr(
+        PaperExecutionLedger,
+        instance_guard._APPEND_SENTINEL,
+        forged,
+    )
+    monkeypatch.setattr(
+        PaperExecutionLedger,
+        resume_guard._EVENTS_SENTINEL,
+        forged,
+    )
+    monkeypatch.setattr(
+        PaperExecutionLedger,
+        resume_guard._LOAD_SENTINEL,
+        forged,
+    )
+
+    importlib.reload(instance_guard)
+    importlib.reload(resume_guard)
+
+    assert PaperExecutionLedger.reserve_run is installed_reserve
+    assert PaperExecutionLedger.events is installed_events
+    assert instance_guard._STABLE_RESERVE_RUN is not forged
+    assert instance_guard._STABLE_APPEND_EVENT is not forged
+    assert instance_guard._STABLE_VERIFIED_SNAPSHOT is not forged
+    assert resume_guard._STABLE_EVENTS is not forged
+    assert resume_guard._STABLE_LOAD_RUN is not forged
+
+    ledger = PaperExecutionLedger(tmp_path / "sealed-reload.jsonl")
+    plan = _plan("decision-sealed-reload")
+    ledger.reserve_run(
+        run_id="sealed-reload-run",
+        trigger_id=plan.decision_id,
+        plan=plan,
+        config=_config(),
+        started_at=STARTED_AT,
+        observation_evidence_ids={},
+    )
+    assert ledger.reservation_decision_origin("sealed-reload-run") is None
+    assert [event["event_type"] for event in ledger.events("sealed-reload-run")] == [
+        "RUN_RESERVED"
+    ]
+    assert attacker_calls == []

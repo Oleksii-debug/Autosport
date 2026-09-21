@@ -5,7 +5,7 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 
-from forward_evidence_completeness import (
+from autosport.forward_evidence_completeness import (
     AuthoritativeSourceReceipt,
     CampaignCloseEnvelope,
     CampaignEvidence,

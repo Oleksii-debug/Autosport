@@ -16,6 +16,7 @@ pre-denomination registry image while machine authority survives.
 """
 
 import hashlib
+import json
 import os
 from pathlib import Path
 from typing import Mapping
@@ -41,6 +42,7 @@ _REGISTRY_DENOMINATION_EXTENSION_KEYS = frozenset(
 )
 
 _ORIGINAL_SCIENTIFIC_REGISTRY_DETECTOR = None
+_ORIGINAL_CAMPAIGN_ATOMIC_WRITE_JSON = None
 _ORIGINAL_ISSUANCE_WITNESS_PATH = None
 _ORIGINAL_APPEND_ISSUANCE_WITNESS = None
 
@@ -110,7 +112,7 @@ def _install_registry_extension_detector() -> None:
     _integrity._campaign_denomination_registry_extensions_installed = True
 
 
-def _validated_root(value: object, *, registry) -> Path:
+def _validated_root(value: object, *, registry_path: Path) -> Path:
     if type(value) is not str or not value or value != value.strip():
         raise _impl.CampaignEconomicAuthorityError(
             "campaign denomination witness root is invalid"
@@ -122,7 +124,7 @@ def _validated_root(value: object, *, registry) -> Path:
         )
     root = Path(canonical)
     try:
-        workspace = registry.path.expanduser().resolve(strict=False).parent
+        workspace = registry_path.expanduser().resolve(strict=False).parent
         root_resolved = root.resolve(strict=False)
     except OSError as exc:
         raise _impl.CampaignEconomicAuthorityError(
@@ -141,11 +143,7 @@ def _validated_root(value: object, *, registry) -> Path:
     return root
 
 
-def _root_record(registry) -> Mapping[str, object] | None:
-    state = registry._read()
-    raw = state.get(_ROOT_STATE_KEY)
-    if raw is None:
-        return None
+def _validated_root_record(raw: object, *, registry_path: Path) -> Mapping[str, object]:
     if type(raw) is not dict or set(raw) != _ROOT_KEYS:
         raise _impl.CampaignEconomicAuthorityError(
             "campaign denomination witness root record is malformed"
@@ -157,12 +155,11 @@ def _root_record(registry) -> Mapping[str, object] | None:
         raise _impl.CampaignEconomicAuthorityError(
             "campaign denomination witness root schema is unsupported"
         )
-    if raw["registry_identity"] != _impl._registry_identity(registry.path):
+    if raw["registry_identity"] != _impl._registry_identity(registry_path):
         raise _impl.CampaignEconomicAuthorityError(
             "campaign denomination witness root belongs to another registry"
         )
-    root_value = raw["root"]
-    root = _validated_root(root_value, registry=registry)
+    root = _validated_root(raw["root"], registry_path=registry_path)
     if raw["root_sha256"] != _root_sha256(str(root)):
         raise _impl.CampaignEconomicAuthorityError(
             "campaign denomination witness root digest mismatch"
@@ -170,11 +167,67 @@ def _root_record(registry) -> Mapping[str, object] | None:
     return raw
 
 
+def _root_record(registry) -> Mapping[str, object] | None:
+    state = registry._read()
+    raw = state.get(_ROOT_STATE_KEY)
+    if raw is None:
+        return None
+    return _validated_root_record(raw, registry_path=registry.path)
+
+
 def _pinned_root(registry) -> Path | None:
     record = _root_record(registry)
     if record is None:
         return None
-    return _validated_root(record["root"], registry=registry)
+    return _validated_root(record["root"], registry_path=registry.path)
+
+
+def _campaign_atomic_write_json(path, payload: dict[str, object]) -> None:
+    """Keep the durable root pin when legacy issuance publishes its stale cache image.
+
+    ``issue_denomination_binding`` reads the registry before the first witness append.
+    The append now pins the witness root durably, so the method's later cache write
+    would otherwise publish its earlier pre-pin state and delete that root record.
+    Merge only the already-durable, strictly validated root record into that exact
+    denomination-cache publication under the existing durable path lock.
+    """
+
+    assert _ORIGINAL_CAMPAIGN_ATOMIC_WRITE_JSON is not None
+    destination = Path(path)
+    if (
+        type(payload) is not dict
+        or _impl._DENOMINATION_STATE_KEY not in payload
+        or _ROOT_STATE_KEY in payload
+    ):
+        _ORIGINAL_CAMPAIGN_ATOMIC_WRITE_JSON(destination, payload)
+        return
+
+    with _integrity.durable_path_lock(destination):
+        try:
+            current = json.loads(destination.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+            raise _impl.CampaignEconomicAuthorityError(
+                "cannot re-resolve campaign denomination root before cache publication"
+            ) from exc
+        if type(current) is not dict:
+            raise _impl.CampaignEconomicAuthorityError(
+                "campaign denomination registry state is malformed before cache publication"
+            )
+        durable_root = current.get(_ROOT_STATE_KEY)
+        if durable_root is not None:
+            _validated_root_record(durable_root, registry_path=destination)
+            payload = dict(payload)
+            payload[_ROOT_STATE_KEY] = durable_root
+        _ORIGINAL_CAMPAIGN_ATOMIC_WRITE_JSON(destination, payload)
+
+
+def _install_campaign_atomic_writer() -> None:
+    if getattr(_impl, "_campaign_denomination_root_preserving_writer_installed", False):
+        return
+    global _ORIGINAL_CAMPAIGN_ATOMIC_WRITE_JSON
+    _ORIGINAL_CAMPAIGN_ATOMIC_WRITE_JSON = _impl.atomic_write_json
+    _impl.atomic_write_json = _campaign_atomic_write_json
+    _impl._campaign_denomination_root_preserving_writer_installed = True
 
 
 def _ensure_pinned_root(registry) -> Path:
@@ -192,7 +245,7 @@ def _ensure_pinned_root(registry) -> Path:
             "cannot select campaign denomination witness root"
         ) from exc
     selected_text = _root_text(selected)
-    _validated_root(selected_text, registry=registry)
+    _validated_root(selected_text, registry_path=registry.path)
 
     state = registry._read()
     existing = state.get(_ROOT_STATE_KEY)
@@ -252,6 +305,7 @@ def _append_issuance_witness(
 
 def _install() -> None:
     _install_registry_extension_detector()
+    _install_campaign_atomic_writer()
     if getattr(_impl, "_campaign_denomination_witness_root_pin_installed", False):
         return
     global _ORIGINAL_ISSUANCE_WITNESS_PATH, _ORIGINAL_APPEND_ISSUANCE_WITNESS

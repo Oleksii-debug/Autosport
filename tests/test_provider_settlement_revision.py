@@ -176,6 +176,25 @@ def test_conflicting_reuse_of_provider_observation_id_fails_closed() -> None:
         ProviderSettlementRevisionChain((first, conflicting))
 
 
+def test_same_provider_observation_cannot_inflate_revision_count() -> None:
+    first = _revision(
+        _settled(observation_id="settlement-1", observed_at=_T1, gross_return="20"),
+        available_at=_T1,
+    )
+    repeated_as_new_revision = _revision(
+        first.settlement,
+        available_at=_T2,
+        supersedes=first.revision_id,
+        source_ref="cleared/replayed-settlement-1",
+    )
+
+    with pytest.raises(
+        ProviderSettlementRevisionError,
+        match="cannot create a distinct settlement revision",
+    ):
+        ProviderSettlementRevisionChain((first, repeated_as_new_revision))
+
+
 def test_missing_or_forked_predecessor_fails_closed() -> None:
     first = _revision(
         _settled(observation_id="settlement-1", observed_at=_T1, gross_return="20"),

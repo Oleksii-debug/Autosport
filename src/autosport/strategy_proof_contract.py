@@ -1,9 +1,11 @@
-"""Strategy-family proof taxonomy for the generic Autosport opportunity contract.
+"""Class-specific proof taxonomy for the canonical Autosport Opportunity contract.
 
-This module is deliberately authority-light.  It answers only whether the
-evidence *classes* required by one strategy family are present.  It does not
-validate the underlying evidence, size stakes, mutate portfolio state, relax
-EconomicGoal/RiskPolicy authority, or authorize execution.
+This module is deliberately authority-light. It reuses ``StrategyClass`` and
+``OpportunityDecision`` from :mod:`autosport.opportunity`; it does not mint a
+second strategy/decision vocabulary. It answers only whether the evidence
+*classes* required by one canonical strategy class are present. It does not
+validate the evidence itself, prove economics, size stakes, mutate portfolio
+state, relax EconomicGoal/RiskPolicy authority, or authorize execution.
 """
 
 from __future__ import annotations
@@ -12,21 +14,11 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Final
 
+from .opportunity import OpportunityDecision, StrategyClass
+
 
 class StrategyProofContractError(ValueError):
     """Raised when strategy-proof inputs are non-canonical."""
-
-
-class StrategyFamily(str, Enum):
-    """Strategy families admitted by the generic opportunity language."""
-
-    PREDICTIVE_EDGE = "predictive_edge"
-    LIVE_PRICE_MOVEMENT = "live_price_movement"
-    ARBITRAGE = "arbitrage"
-    DUTCHING = "dutching"
-    HEDGE_REBALANCE = "hedge_rebalance"
-    HYBRID = "hybrid"
-    WAIT = "wait"
 
 
 class ProofRequirement(str, Enum):
@@ -117,23 +109,44 @@ _HEDGE: Final[frozenset[ProofRequirement]] = frozenset(
     }
 )
 
-_FAMILY_REQUIREMENTS: Final[dict[StrategyFamily, frozenset[ProofRequirement]]] = {
-    StrategyFamily.PREDICTIVE_EDGE: _SHARED | _PREDICTIVE,
-    StrategyFamily.LIVE_PRICE_MOVEMENT: _SHARED | _LIVE,
-    StrategyFamily.ARBITRAGE: _SHARED | _OUTCOME_STRUCTURE,
-    StrategyFamily.DUTCHING: _SHARED | _OUTCOME_STRUCTURE,
-    StrategyFamily.HEDGE_REBALANCE: _SHARED | _HEDGE,
-    StrategyFamily.HYBRID: _SHARED
-    | _PREDICTIVE
+_CLASS_REQUIREMENTS: Final[dict[StrategyClass, frozenset[ProofRequirement]]] = {
+    StrategyClass.PREDICTIVE_EDGE: _SHARED,
+    StrategyClass.LIVE_PRICE_MOVEMENT: _SHARED | _LIVE,
+    StrategyClass.ARBITRAGE: _SHARED | _OUTCOME_STRUCTURE,
+    StrategyClass.DUTCHING: _SHARED | _OUTCOME_STRUCTURE,
+    StrategyClass.HEDGE_REBALANCE: _SHARED | _HEDGE,
+    StrategyClass.HYBRID: _SHARED
     | frozenset({ProofRequirement.HYBRID_COMPONENT_EVIDENCE}),
-    StrategyFamily.WAIT: _SHARED,
 }
 
 
-def _family(value: object) -> StrategyFamily:
-    if not isinstance(value, StrategyFamily):
-        raise StrategyProofContractError("family must be a StrategyFamily")
+def _strategy_class(value: object) -> StrategyClass:
+    if not isinstance(value, StrategyClass):
+        raise StrategyProofContractError("strategy_class must be a StrategyClass")
     return value
+
+
+def _probability_claim(value: object) -> bool:
+    if type(value) is not bool:
+        raise StrategyProofContractError("claims_probability_edge must be a bool")
+    return value
+
+
+def _validate_probability_claim(
+    strategy_class: StrategyClass,
+    claims_probability_edge: bool,
+) -> None:
+    if strategy_class is StrategyClass.PREDICTIVE_EDGE and not claims_probability_edge:
+        raise StrategyProofContractError(
+            "PREDICTIVE_EDGE must claim probability edge"
+        )
+    if (
+        strategy_class not in {StrategyClass.PREDICTIVE_EDGE, StrategyClass.HYBRID}
+        and claims_probability_edge
+    ):
+        raise StrategyProofContractError(
+            "only PREDICTIVE_EDGE or HYBRID may claim probability edge"
+        )
 
 
 def _proofs(value: object) -> frozenset[ProofRequirement]:
@@ -151,34 +164,46 @@ def _ordered(proofs: frozenset[ProofRequirement]) -> tuple[ProofRequirement, ...
     return tuple(sorted(proofs, key=lambda proof: proof.value))
 
 
+def _required_for(
+    strategy_class: StrategyClass,
+    claims_probability_edge: bool,
+) -> frozenset[ProofRequirement]:
+    canonical_class = _strategy_class(strategy_class)
+    canonical_claim = _probability_claim(claims_probability_edge)
+    _validate_probability_claim(canonical_class, canonical_claim)
+
+    required = _CLASS_REQUIREMENTS[canonical_class]
+    if canonical_claim:
+        required = required | _PREDICTIVE
+    return required
+
+
 @dataclass(frozen=True, slots=True)
 class StrategyProofContract:
-    """Immutable proof-class contract for one strategy family."""
+    """Immutable proof-class contract keyed by canonical Opportunity identity."""
 
-    family: StrategyFamily
+    strategy_class: StrategyClass
+    claims_probability_edge: bool
     required_proofs: tuple[ProofRequirement, ...]
 
     def __post_init__(self) -> None:
-        _family(self.family)
+        canonical_class = _strategy_class(self.strategy_class)
+        canonical_claim = _probability_claim(self.claims_probability_edge)
+        expected = _ordered(_required_for(canonical_class, canonical_claim))
+
         if not isinstance(self.required_proofs, tuple):
             raise StrategyProofContractError("required_proofs must be a tuple")
         if any(not isinstance(item, ProofRequirement) for item in self.required_proofs):
             raise StrategyProofContractError(
                 "required_proofs must contain only ProofRequirement values"
             )
-        if tuple(sorted(self.required_proofs, key=lambda item: item.value)) != (
-            self.required_proofs
-        ):
+        if self.required_proofs != _ordered(frozenset(self.required_proofs)):
             raise StrategyProofContractError(
-                "required_proofs must use canonical lexical order"
+                "required_proofs must be unique and use canonical lexical order"
             )
-        if len(set(self.required_proofs)) != len(self.required_proofs):
-            raise StrategyProofContractError("required_proofs must be unique")
-
-        expected = _ordered(_FAMILY_REQUIREMENTS[self.family])
         if self.required_proofs != expected:
             raise StrategyProofContractError(
-                "required_proofs do not match the canonical strategy-family contract"
+                "required_proofs do not match the canonical strategy-class contract"
             )
 
     @property
@@ -192,33 +217,26 @@ class StrategyProofContract:
             in self.required_proofs
         )
 
-    @property
-    def positive_action_family(self) -> bool:
-        return self.family is not StrategyFamily.WAIT
-
 
 @dataclass(frozen=True, slots=True)
 class StrategyProofEvaluation:
-    """Deterministic proof-presence evaluation.
+    """Deterministic proof-presence evaluation, never execution authority."""
 
-    ``proof_contract_satisfied`` means only that the enumerated proof classes are
-    present.  It is never execution authorization: each evidence object still has
-    to pass its canonical validator and the existing portfolio/risk/execution
-    authorities remain independently binding.
-    """
-
-    family: StrategyFamily
+    strategy_class: StrategyClass
+    claims_probability_edge: bool
     required_proofs: tuple[ProofRequirement, ...]
     present_proofs: tuple[ProofRequirement, ...]
     missing_proofs: tuple[ProofRequirement, ...]
     proof_contract_satisfied: bool
     positive_action_candidate: bool
-    fallback_family: StrategyFamily
+    proof_gate_decision: OpportunityDecision
     execution_authorized: bool = False
 
     def __post_init__(self) -> None:
-        _family(self.family)
-        _family(self.fallback_family)
+        canonical_class = _strategy_class(self.strategy_class)
+        canonical_claim = _probability_claim(self.claims_probability_edge)
+        expected_required = _ordered(_required_for(canonical_class, canonical_claim))
+
         for name, value in (
             ("required_proofs", self.required_proofs),
             ("present_proofs", self.present_proofs),
@@ -230,17 +248,14 @@ class StrategyProofEvaluation:
                 raise StrategyProofContractError(
                     f"{name} must contain only ProofRequirement values"
                 )
-            if tuple(sorted(value, key=lambda item: item.value)) != value:
+            if value != _ordered(frozenset(value)):
                 raise StrategyProofContractError(
-                    f"{name} must use canonical lexical order"
+                    f"{name} must be unique and use canonical lexical order"
                 )
-            if len(set(value)) != len(value):
-                raise StrategyProofContractError(f"{name} must be unique")
 
-        expected_required = _ordered(_FAMILY_REQUIREMENTS[self.family])
         if self.required_proofs != expected_required:
             raise StrategyProofContractError(
-                "required_proofs do not match the canonical strategy-family contract"
+                "required_proofs do not match the canonical strategy-class contract"
             )
 
         required_set = frozenset(self.required_proofs)
@@ -256,24 +271,26 @@ class StrategyProofEvaluation:
             raise StrategyProofContractError(
                 "proof_contract_satisfied does not match missing_proofs"
             )
-
-        expected_positive = (
-            self.family is not StrategyFamily.WAIT and expected_satisfied
-        )
-        if self.positive_action_candidate is not expected_positive:
+        if self.positive_action_candidate is not expected_satisfied:
             raise StrategyProofContractError(
-                "positive_action_candidate does not match family/proof state"
+                "positive_action_candidate does not match proof state"
             )
 
-        expected_fallback = (
-            self.family if expected_positive else StrategyFamily.WAIT
-        )
-        if self.fallback_family is not expected_fallback:
+        if not isinstance(self.proof_gate_decision, OpportunityDecision):
             raise StrategyProofContractError(
-                "fallback_family must fail closed to WAIT"
+                "proof_gate_decision must be an OpportunityDecision"
+            )
+        expected_decision = (
+            OpportunityDecision.ACTIONABLE
+            if expected_satisfied
+            else OpportunityDecision.WAIT
+        )
+        if self.proof_gate_decision is not expected_decision:
+            raise StrategyProofContractError(
+                "proof_gate_decision must fail closed to WAIT"
             )
 
-        if not isinstance(self.execution_authorized, bool):
+        if type(self.execution_authorized) is not bool:
             raise StrategyProofContractError("execution_authorized must be a bool")
         if self.execution_authorized:
             raise StrategyProofContractError(
@@ -281,41 +298,52 @@ class StrategyProofEvaluation:
             )
 
 
-def proof_contract_for(family: StrategyFamily) -> StrategyProofContract:
-    """Return the canonical immutable proof contract for ``family``."""
+def proof_contract_for(
+    strategy_class: StrategyClass,
+    *,
+    claims_probability_edge: bool,
+) -> StrategyProofContract:
+    """Return canonical proof obligations for one Opportunity strategy identity."""
 
-    canonical_family = _family(family)
+    canonical_class = _strategy_class(strategy_class)
+    canonical_claim = _probability_claim(claims_probability_edge)
+    required = _required_for(canonical_class, canonical_claim)
     return StrategyProofContract(
-        family=canonical_family,
-        required_proofs=_ordered(_FAMILY_REQUIREMENTS[canonical_family]),
+        strategy_class=canonical_class,
+        claims_probability_edge=canonical_claim,
+        required_proofs=_ordered(required),
     )
 
 
 def evaluate_strategy_proofs(
-    family: StrategyFamily,
+    strategy_class: StrategyClass,
     present_proofs: frozenset[ProofRequirement],
+    *,
+    claims_probability_edge: bool,
 ) -> StrategyProofEvaluation:
     """Evaluate proof-class presence without widening downstream authority."""
 
-    contract = proof_contract_for(family)
+    contract = proof_contract_for(
+        strategy_class,
+        claims_probability_edge=claims_probability_edge,
+    )
     canonical_present = _proofs(present_proofs)
     required_set = frozenset(contract.required_proofs)
     missing = required_set - canonical_present
     satisfied = not missing
-    positive_action_candidate = (
-        contract.positive_action_family and satisfied
-    )
-    fallback_family = (
-        contract.family if positive_action_candidate else StrategyFamily.WAIT
-    )
 
     return StrategyProofEvaluation(
-        family=contract.family,
+        strategy_class=contract.strategy_class,
+        claims_probability_edge=contract.claims_probability_edge,
         required_proofs=contract.required_proofs,
         present_proofs=_ordered(canonical_present),
         missing_proofs=_ordered(missing),
         proof_contract_satisfied=satisfied,
-        positive_action_candidate=positive_action_candidate,
-        fallback_family=fallback_family,
+        positive_action_candidate=satisfied,
+        proof_gate_decision=(
+            OpportunityDecision.ACTIONABLE
+            if satisfied
+            else OpportunityDecision.WAIT
+        ),
         execution_authorized=False,
     )

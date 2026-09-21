@@ -219,3 +219,23 @@ def test_mitigating_risk_requires_mitigation_text() -> None:
             operator_action="x",
             mitigation="",
         )
+
+
+def test_direct_snapshot_constructor_cannot_bypass_canonical_order() -> None:
+    direct = RiskRegisterSnapshot(
+        generated_at="2026-09-21T09:00:00Z",
+        records=(
+            record("risk-z", severity=RiskSeverity.LOW),
+            record("risk-a", severity=RiskSeverity.CRITICAL),
+        ),
+    )
+    built = RiskRegisterSnapshot.build(
+        "2026-09-21T09:00:00Z",
+        [
+            record("risk-a", severity=RiskSeverity.CRITICAL),
+            record("risk-z", severity=RiskSeverity.LOW),
+        ],
+    )
+    assert direct.to_json() == built.to_json()
+    assert direct.sha256 == built.sha256
+    assert tuple(item.risk_id for item in direct.records) == ("risk-a", "risk-z")

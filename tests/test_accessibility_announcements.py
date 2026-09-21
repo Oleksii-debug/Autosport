@@ -1,0 +1,233 @@
+import inspect
+
+import pytest
+
+from autosport.accessibility_announcements import (
+    AnnouncementDecision,
+    AnnouncementEvent,
+    AnnouncementGate,
+    AnnouncementKind,
+    AnnouncementPriority,
+    priority_for_kind,
+)
+
+
+SILENT_KINDS = {
+    AnnouncementKind.PRICE_TICK,
+    AnnouncementKind.MARKET_REFRESH,
+    AnnouncementKind.PROGRESS_TICK,
+}
+POLITE_KINDS = {
+    AnnouncementKind.OPERATION_STARTED,
+    AnnouncementKind.OPERATION_COMPLETED,
+    AnnouncementKind.STOP_REQUESTED,
+    AnnouncementKind.STOP_COMPLETED,
+}
+ASSERTIVE_KINDS = {
+    AnnouncementKind.RECOVERY_REQUIRED,
+    AnnouncementKind.CRITICAL_ERROR,
+    AnnouncementKind.AUTHORITY_BLOCKED,
+}
+
+
+def _event(
+    kind: AnnouncementKind,
+    *,
+    token: str = "state-1",
+    text: str = "Оновлений стан",
+    episode: str | None = None,
+) -> AnnouncementEvent:
+    return AnnouncementEvent(
+        kind=kind,
+        text=text,
+        state_token=token,
+        episode_id=episode,
+    )
+
+
+def test_every_kind_has_exact_product_owned_priority():
+    assert set(AnnouncementKind) == SILENT_KINDS | POLITE_KINDS | ASSERTIVE_KINDS
+    assert not (SILENT_KINDS & POLITE_KINDS)
+    assert not (SILENT_KINDS & ASSERTIVE_KINDS)
+    assert not (POLITE_KINDS & ASSERTIVE_KINDS)
+
+    for kind in SILENT_KINDS:
+        assert priority_for_kind(kind) is AnnouncementPriority.SILENT
+    for kind in POLITE_KINDS:
+        assert priority_for_kind(kind) is AnnouncementPriority.POLITE
+    for kind in ASSERTIVE_KINDS:
+        assert priority_for_kind(kind) is AnnouncementPriority.ASSERTIVE
+
+
+@pytest.mark.parametrize("kind", sorted(SILENT_KINDS, key=lambda item: item.value))
+def test_high_frequency_churn_is_always_silent(kind):
+    gate = AnnouncementGate()
+
+    first = gate.decide(_event(kind, token="tick-1"))
+    second = gate.decide(_event(kind, token="tick-2", text="Ще один tick"))
+
+    for decision in (first, second):
+        assert decision.emit is False
+        assert decision.priority is AnnouncementPriority.SILENT
+        assert decision.text is None
+        assert decision.reason == "HIGH_FREQUENCY_CHURN"
+        assert decision.move_focus is False
+    assert gate.history_size == 0
+
+
+@pytest.mark.parametrize("kind", sorted(POLITE_KINDS, key=lambda item: item.value))
+def test_polite_transition_emits_once_per_state_token(kind):
+    gate = AnnouncementGate()
+
+    first = gate.decide(_event(kind, token="transition-1"))
+    duplicate = gate.decide(_event(kind, token="transition-1", text="Changed projection text"))
+    next_transition = gate.decide(_event(kind, token="transition-2"))
+
+    assert first == AnnouncementDecision(
+        emit=True,
+        priority=AnnouncementPriority.POLITE,
+        text="Оновлений стан",
+        reason="EMIT",
+        move_focus=False,
+    )
+    assert duplicate.emit is False
+    assert duplicate.priority is AnnouncementPriority.SILENT
+    assert duplicate.text is None
+    assert duplicate.reason == "DUPLICATE_STATE_TRANSITION"
+    assert next_transition.emit is True
+    assert next_transition.priority is AnnouncementPriority.POLITE
+
+
+@pytest.mark.parametrize("kind", sorted(ASSERTIVE_KINDS, key=lambda item: item.value))
+def test_assertive_event_emits_once_per_critical_episode(kind):
+    gate = AnnouncementGate()
+
+    first = gate.decide(_event(kind, token="projection-1", episode="episode-a"))
+    same_episode_new_projection = gate.decide(
+        _event(kind, token="projection-2", episode="episode-a", text="Detailed update")
+    )
+    new_episode = gate.decide(_event(kind, token="projection-1", episode="episode-b"))
+
+    assert first.emit is True
+    assert first.priority is AnnouncementPriority.ASSERTIVE
+    assert same_episode_new_projection.emit is False
+    assert same_episode_new_projection.priority is AnnouncementPriority.SILENT
+    assert same_episode_new_projection.reason == "DUPLICATE_CRITICAL_EPISODE"
+    assert new_episode.emit is True
+    assert new_episode.priority is AnnouncementPriority.ASSERTIVE
+
+
+def test_caller_cannot_supply_or_escalate_priority():
+    parameters = inspect.signature(AnnouncementEvent).parameters
+    assert "priority" not in parameters
+    assert "urgency" not in parameters
+
+    gate = AnnouncementGate()
+    churn = gate.decide(_event(AnnouncementKind.PRICE_TICK, token="attacker-minted-token"))
+    assert churn.emit is False
+    assert churn.priority is AnnouncementPriority.SILENT
+
+
+def test_announcement_policy_never_moves_focus():
+    gate = AnnouncementGate()
+    decisions = [
+        gate.decide(_event(AnnouncementKind.PRICE_TICK)),
+        gate.decide(_event(AnnouncementKind.STOP_REQUESTED)),
+        gate.decide(_event(AnnouncementKind.RECOVERY_REQUIRED, episode="recovery-1")),
+    ]
+    assert all(decision.move_focus is False for decision in decisions)
+
+    with pytest.raises(ValueError, match="must never request focus movement"):
+        AnnouncementDecision(
+            emit=True,
+            priority=AnnouncementPriority.ASSERTIVE,
+            text="Критична помилка",
+            reason="EMIT",
+            move_focus=True,
+        )
+
+
+def test_history_is_strictly_bounded_and_eviction_is_deterministic():
+    gate = AnnouncementGate(max_history=3)
+
+    for index in range(10):
+        decision = gate.decide(
+            _event(
+                AnnouncementKind.OPERATION_COMPLETED,
+                token=f"transition-{index}",
+                text=f"Операцію {index} завершено",
+            )
+        )
+        assert decision.emit is True
+        assert gate.history_size <= 3
+
+    assert gate.history_size == 3
+
+    replay = gate.decide(
+        _event(
+            AnnouncementKind.OPERATION_COMPLETED,
+            token="transition-0",
+            text="Операцію 0 завершено",
+        )
+    )
+    assert replay.emit is True
+    assert gate.history_size == 3
+
+
+@pytest.mark.parametrize("value", [0, -1, True, False, 1.5, "4", None])
+def test_invalid_history_bound_fails_closed(value):
+    with pytest.raises(ValueError, match="max_history must be a positive integer"):
+        AnnouncementGate(max_history=value)
+
+
+@pytest.mark.parametrize("field,value", [("text", ""), ("text", " x "), ("state_token", ""), ("state_token", " x ")])
+def test_event_text_and_state_token_must_be_nonempty_trimmed(field, value):
+    kwargs = {"kind": AnnouncementKind.STOP_COMPLETED, "text": "Готово", "state_token": "done-1"}
+    kwargs[field] = value
+    with pytest.raises(ValueError, match=field):
+        AnnouncementEvent(**kwargs)
+
+
+def test_assertive_episode_identity_is_required_and_trimmed():
+    for episode in (None, "", " bad "):
+        with pytest.raises(ValueError, match="episode_id"):
+            _event(AnnouncementKind.CRITICAL_ERROR, episode=episode)
+
+    with pytest.raises(ValueError, match="valid only for assertive"):
+        _event(AnnouncementKind.OPERATION_STARTED, episode="unexpected")
+
+
+def test_runtime_types_fail_closed():
+    with pytest.raises(TypeError, match="kind must be AnnouncementKind"):
+        AnnouncementEvent(kind="PRICE_TICK", text="x", state_token="y")  # type: ignore[arg-type]
+    with pytest.raises(TypeError, match="event must be AnnouncementEvent"):
+        AnnouncementGate().decide(object())  # type: ignore[arg-type]
+    with pytest.raises(TypeError, match="kind must be AnnouncementKind"):
+        priority_for_kind("STOP_COMPLETED")  # type: ignore[arg-type]
+
+
+def test_suppressed_decision_cannot_accidentally_carry_announceable_payload():
+    with pytest.raises(ValueError, match="must be SILENT"):
+        AnnouncementDecision(
+            emit=False,
+            priority=AnnouncementPriority.POLITE,
+            text=None,
+            reason="DUPLICATE_STATE_TRANSITION",
+        )
+    with pytest.raises(ValueError, match="must not carry announcement text"):
+        AnnouncementDecision(
+            emit=False,
+            priority=AnnouncementPriority.SILENT,
+            text="Do not announce",
+            reason="HIGH_FREQUENCY_CHURN",
+        )
+
+
+def test_emitted_decision_cannot_be_silent():
+    with pytest.raises(ValueError, match="cannot be SILENT"):
+        AnnouncementDecision(
+            emit=True,
+            priority=AnnouncementPriority.SILENT,
+            text="Impossible",
+            reason="EMIT",
+        )

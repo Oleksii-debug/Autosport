@@ -181,6 +181,52 @@ def _require_canonical_product_reservation_path(
         del cursor
 
 
+class _CanonicalReservationView:
+    """Use the pristine reserve builder while sealing its durable append dispatch.
+
+    The canonical reserve implementation owns the RUN_RESERVED payload schema.  This
+    view supplies only its append sink, adding verified decision-origin evidence at
+    the final serialization seam and then calling the pinned pristine append method
+    on the exact ledger.  No second reservation payload/validation path exists here.
+    """
+
+    __slots__ = ("_ledger", "_origin")
+
+    def __init__(
+        self,
+        ledger: PaperExecutionLedger,
+        origin: _origin.DecisionRecordOrigin,
+    ) -> None:
+        self._ledger = ledger
+        self._origin = origin
+
+    def _append_event(
+        self,
+        *,
+        event_type: str,
+        run_id: str,
+        key: str,
+        payload,
+    ) -> None:
+        if event_type != "RUN_RESERVED":
+            raise _origin.PaperExecutionDecisionOriginError(
+                "canonical reserve path emitted unexpected event type"
+            )
+        if type(payload) is not dict or "decision_origin" in payload:
+            raise _origin.PaperExecutionDecisionOriginError(
+                "canonical reserve payload cannot predeclare decision origin"
+            )
+        bound_payload = dict(payload)
+        bound_payload["decision_origin"] = self._origin.to_dict()
+        _STABLE_APPEND_EVENT(
+            self._ledger,
+            event_type=event_type,
+            run_id=run_id,
+            key=key,
+            payload=bound_payload,
+        )
+
+
 def _reserve_run_without_shadowed_append(
     self: PaperExecutionLedger,
     *,
@@ -217,22 +263,14 @@ def _reserve_run_without_shadowed_append(
             "decision origin does not match execution trigger/plan decision identity"
         )
 
-    payload = {
-        "trigger_id": trigger_id,
-        "plan_id": plan.plan_id,
-        "plan_fingerprint": plan.fingerprint,
-        "model_fingerprint": config.fingerprint,
-        "started_at": started_at,
-        "action_ids": [action.action_id for action in plan.actions],
-        "observation_evidence_ids": dict(sorted(observation_evidence_ids.items())),
-        "decision_origin": origin.to_dict(),
-    }
-    _STABLE_APPEND_EVENT(
-        self,
-        event_type="RUN_RESERVED",
+    return _STABLE_RESERVE_RUN(
+        _CanonicalReservationView(self, origin),
         run_id=run_id,
-        key=f"{run_id}:reserve",
-        payload=payload,
+        trigger_id=trigger_id,
+        plan=plan,
+        config=config,
+        started_at=started_at,
+        observation_evidence_ids=observation_evidence_ids,
     )
 
 

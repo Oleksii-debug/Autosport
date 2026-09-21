@@ -37,6 +37,7 @@ def _public_components():
         owner_managed=True,
         active=True,
         vendor_id=None,
+        provider_owner="provider-owner",
         observed_at="2026-09-21T01:00:00Z",
         source_projection_sha256="1" * 64,
     )

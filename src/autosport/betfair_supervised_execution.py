@@ -705,6 +705,27 @@ def _optional_provider_text(
     return value
 
 
+def _provider_response_decimal(
+    value: object,
+    field: str,
+    *,
+    positive: bool,
+) -> Decimal:
+    """Accept only provider JSON numeric wire values, never coercible strings/bools."""
+
+    if isinstance(value, bool) or not isinstance(value, (int, Decimal)):
+        raise BetfairPlaceOrdersAmbiguous(
+            f"{field} must be a JSON number"
+        )
+    parsed = Decimal(value)
+    if not parsed.is_finite() or (parsed <= 0 if positive else parsed < 0):
+        constraint = "> 0" if positive else ">= 0"
+        raise BetfairPlaceOrdersAmbiguous(
+            f"{field} must be finite and {constraint}"
+        )
+    return parsed
+
+
 def _parse_place_orders_response(
     payload: bytes,
     *,
@@ -818,14 +839,16 @@ def _parse_place_orders_response(
             and echoed.get("orderType") == "LIMIT"
             and handicap_matches
             and limit.get("persistenceType") == "LAPSE"
-            and _positive_decimal(
+            and _provider_response_decimal(
                 limit.get("price"),
                 "echoed price",
+                positive=True,
             )
             == action.requested_odds
-            and _positive_decimal(
+            and _provider_response_decimal(
                 limit.get("size"),
                 "echoed size",
+                positive=True,
             )
             == action.requested_stake
         )
@@ -862,13 +885,15 @@ def _parse_place_orders_response(
                 item.get("placedDate"),
                 "placedDate",
             ),
-            average_price_matched=_nonnegative_decimal(
+            average_price_matched=_provider_response_decimal(
                 item.get("averagePriceMatched", 0),
                 "averagePriceMatched",
+                positive=False,
             ),
-            size_matched=_nonnegative_decimal(
+            size_matched=_provider_response_decimal(
                 item["sizeMatched"],
                 "sizeMatched",
+                positive=False,
             ),
         )
     except BetfairSupervisedExecutionError as exc:

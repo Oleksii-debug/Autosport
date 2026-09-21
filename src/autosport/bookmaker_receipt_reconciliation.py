@@ -25,15 +25,6 @@ from .real_execution_ledger import (
 )
 
 
-_LEDGER_STATES_BY_EFFECT = {
-    ExternalEffect.ACCEPTED: frozenset(
-        {AttemptState.ACCEPTED, AttemptState.PARTIAL}
-    ),
-    ExternalEffect.MARKET_REFUSED: frozenset({AttemptState.REJECTED}),
-    ExternalEffect.UNKNOWN: frozenset({AttemptState.UNKNOWN}),
-}
-
-
 def bind_leg_receipt(
     leg: VenueLegProposal,
     *,
@@ -415,7 +406,7 @@ def _validate_durable_effect_receipts(
 
         if len(acknowledgements) != 1:
             raise RoutingContractError(
-                "routing receipt is absent or ambiguous in durable execution ledger"
+                "routing receipt is absent from durable execution ledger or is ambiguous"
             )
         payload = acknowledgements[0].get("payload")
         if not isinstance(payload, dict):

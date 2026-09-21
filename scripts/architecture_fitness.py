@@ -184,6 +184,7 @@ def _local_dependencies(
     *,
     is_package: bool,
     known: set[str],
+    packages: set[str],
     package: str,
 ) -> set[str]:
     dependencies: set[str] = set()
@@ -205,6 +206,13 @@ def _local_dependencies(
                 target = _existing_module_prefix(base, known, package)
                 if target is not None and target != current_module:
                     dependencies.add(target)
+                if base in packages:
+                    for alias in node.names:
+                        if alias.name == "*":
+                            continue
+                        alias_target = f"{base}.{alias.name}"
+                        if alias_target in known and alias_target != current_module:
+                            dependencies.add(alias_target)
             if node.module is None:
                 for alias in node.names:
                     if alias.name == "*":
@@ -285,6 +293,9 @@ def analyze_package(
         module_paths[module] = (path, path.name == "__init__.py")
 
     known = set(module_paths)
+    packages = {
+        module for module, (_, is_package) in module_paths.items() if is_package
+    }
     graph: dict[str, set[str]] = {module: set() for module in known}
     metrics: list[ModuleMetric] = []
     for module in sorted(module_paths):
@@ -295,6 +306,7 @@ def analyze_package(
             module,
             is_package=is_package,
             known=known,
+            packages=packages,
             package=package,
         )
         metrics.append(

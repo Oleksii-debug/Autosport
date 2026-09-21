@@ -9,7 +9,11 @@ from autosport.providers import CanonicalNormalizer, ProviderQuote
 _TS = "2026-09-21T20:00:00+00:00"
 
 
-def _event(*, exchange_side: str | None = None) -> MarketEvent:
+def _event(
+    *,
+    exchange_side: str | None = None,
+    sport: str | None = None,
+) -> MarketEvent:
     return MarketEvent(
         event_id="event-1",
         market_id="market-1",
@@ -19,6 +23,7 @@ def _event(*, exchange_side: str | None = None) -> MarketEvent:
         source_id="book",
         sequence=9,
         ingest_ts=_TS,
+        sport=sport,
         exchange_side=exchange_side,
     )
 
@@ -40,6 +45,20 @@ def test_legacy_no_side_quote_and_dedupe_identity_are_unchanged() -> None:
 
     assert event.quote_key == "event-1|market-1|runner-1"
     assert event.dedupe_key == "book|event-1|market-1|runner-1|9"
+    assert "exchange_side" not in event.to_dict()
+
+
+def test_existing_sport_identity_is_exactly_unchanged_without_side() -> None:
+    event = _event(sport="soccer")
+
+    assert event.quote_key == (
+        "sport-v2-WyJxdW90ZSIsInNvY2NlciIsImV2ZW50LTEiLCJtYXJrZXQtMSIs"
+        "InJ1bm5lci0xIl0"
+    )
+    assert event.dedupe_key == (
+        "sport-v2-WyJkZWR1cGUiLCJib29rIiwic29jY2VyIiwiZXZlbnQtMSIsIm1h"
+        "cmtldC0xIiwicnVubmVyLTEiLDld"
+    )
     assert "exchange_side" not in event.to_dict()
 
 

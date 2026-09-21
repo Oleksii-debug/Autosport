@@ -251,6 +251,274 @@ class RiskOfRuinVectorEvidence:
             )
 
 
+class RiskOfRuinAuthorityError(RuntimeError):
+    """Raised when positive ruin authority cannot be resolved from durable science."""
+
+
+_ROR_AUTHORITY_MISSING_REASON = (
+    "portfolio risk-of-ruin evidence was not resolved from canonical "
+    "ScientificRegistry authority"
+)
+_VECTOR_ROR_AUTHORITY_MISSING_REASON = (
+    "portfolio vector risk-of-ruin evidence was not resolved from canonical "
+    "ScientificRegistry authority"
+)
+_MAX_RUNTIME_ROR_AUTHORITIES = 10_000
+_ROR_ARTIFACT_SCHEMA = "autosport.risk-of-ruin-bound"
+_ROR_ARTIFACT_VERSION = 1
+
+
+def _reject_ror_duplicate_keys(pairs: list[tuple[str, object]]) -> dict[str, object]:
+    payload: dict[str, object] = {}
+    for key, value in pairs:
+        if key in payload:
+            raise RiskOfRuinAuthorityError(
+                "risk-of-ruin bound artifact contains duplicate JSON keys"
+            )
+        payload[key] = value
+    return payload
+
+
+def _reject_ror_nonfinite(value: str) -> object:
+    raise RiskOfRuinAuthorityError(
+        f"risk-of-ruin bound artifact contains non-finite JSON value {value}"
+    )
+
+
+def _canonical_ror_decimal_text(
+    value: object,
+    name: str,
+    *,
+    positive: bool = False,
+    probability: bool = False,
+) -> Decimal:
+    if type(value) is not str or not value or value != value.strip():
+        raise RiskOfRuinAuthorityError(f"{name} must be canonical decimal text")
+    if "e" in value.lower() or value.startswith("+"):
+        raise RiskOfRuinAuthorityError(f"{name} must not use exponent or plus syntax")
+    try:
+        parsed = Decimal(value)
+    except (InvalidOperation, ValueError) as exc:
+        raise RiskOfRuinAuthorityError(f"{name} must be canonical decimal text") from exc
+    if not parsed.is_finite() or str(parsed) != value:
+        raise RiskOfRuinAuthorityError(f"{name} must be canonical finite decimal text")
+    if parsed.is_zero() and parsed.is_signed():
+        raise RiskOfRuinAuthorityError(f"{name} must not use negative zero")
+    if positive and parsed <= 0:
+        raise RiskOfRuinAuthorityError(f"{name} must be positive")
+    if not positive and parsed < 0:
+        raise RiskOfRuinAuthorityError(f"{name} must be non-negative")
+    if probability and parsed > Decimal("1"):
+        raise RiskOfRuinAuthorityError(f"{name} must not exceed one")
+    return parsed
+
+
+def _canonical_ror_bound_artifact(
+    raw: object,
+    *,
+    kind: str,
+) -> tuple[dict[str, object], str]:
+    if type(raw) is not bytes or not raw:
+        raise RiskOfRuinAuthorityError(
+            "risk-of-ruin bound artifact must be non-empty exact bytes"
+        )
+    try:
+        text = raw.decode("utf-8", errors="strict")
+    except UnicodeDecodeError as exc:
+        raise RiskOfRuinAuthorityError(
+            "risk-of-ruin bound artifact must be strict UTF-8"
+        ) from exc
+    try:
+        payload = json.loads(
+            text,
+            object_pairs_hook=_reject_ror_duplicate_keys,
+            parse_constant=_reject_ror_nonfinite,
+        )
+    except json.JSONDecodeError as exc:
+        raise RiskOfRuinAuthorityError(
+            "risk-of-ruin bound artifact must be valid JSON"
+        ) from exc
+    if type(payload) is not dict:
+        raise RiskOfRuinAuthorityError(
+            "risk-of-ruin bound artifact must be a JSON object"
+        )
+    common = {
+        "schema",
+        "schema_version",
+        "kind",
+        "research_protocol_id",
+        "research_protocol_sha256",
+        "evaluation_bundle_id",
+        "producer_identity",
+        "causal_cutoff",
+        "evaluated_at",
+        "bankroll_id",
+        "currency",
+        "base_portfolio_sha256",
+        "upper_bound",
+    }
+    specific = (
+        {"candidate_sha256", "evaluated_stake"}
+        if kind == "SINGLE"
+        else {"candidate_vector_sha256", "evaluated_stakes"}
+    )
+    if set(payload) != common | specific:
+        raise RiskOfRuinAuthorityError(
+            "risk-of-ruin bound artifact fields do not match canonical schema"
+        )
+    if (
+        payload.get("schema") != _ROR_ARTIFACT_SCHEMA
+        or type(payload.get("schema_version")) is not int
+        or payload.get("schema_version") != _ROR_ARTIFACT_VERSION
+        or payload.get("kind") != kind
+    ):
+        raise RiskOfRuinAuthorityError(
+            "risk-of-ruin bound artifact schema/kind is unsupported"
+        )
+
+    for field in (
+        "research_protocol_id",
+        "evaluation_bundle_id",
+        "producer_identity",
+        "bankroll_id",
+        "currency",
+    ):
+        try:
+            _canonical_context_text(field, payload.get(field))
+        except (TypeError, ValueError) as exc:
+            raise RiskOfRuinAuthorityError(
+                f"risk-of-ruin bound artifact {field} is invalid"
+            ) from exc
+    try:
+        _canonical_sha256(
+            "research_protocol_sha256", payload.get("research_protocol_sha256")
+        )
+        _canonical_sha256(
+            "base_portfolio_sha256", payload.get("base_portfolio_sha256")
+        )
+        _, cutoff = _canonical_context_timestamp(
+            "causal_cutoff", payload.get("causal_cutoff")
+        )
+        _, evaluated = _canonical_context_timestamp(
+            "evaluated_at", payload.get("evaluated_at")
+        )
+    except (TypeError, ValueError) as exc:
+        raise RiskOfRuinAuthorityError(
+            "risk-of-ruin bound artifact provenance is invalid"
+        ) from exc
+    if cutoff > evaluated:
+        raise RiskOfRuinAuthorityError(
+            "risk-of-ruin bound causal cutoff is after evaluation time"
+        )
+    currency = payload["currency"]
+    if (
+        len(currency) != 3
+        or not currency.isascii()
+        or not currency.isalpha()
+        or currency != currency.upper()
+    ):
+        raise RiskOfRuinAuthorityError(
+            "risk-of-ruin bound currency must be uppercase three-letter ASCII"
+        )
+    _canonical_ror_decimal_text(
+        payload.get("upper_bound"),
+        "upper_bound",
+        probability=True,
+    )
+    if kind == "SINGLE":
+        try:
+            _canonical_sha256("candidate_sha256", payload.get("candidate_sha256"))
+        except (TypeError, ValueError) as exc:
+            raise RiskOfRuinAuthorityError(
+                "risk-of-ruin bound candidate hash is invalid"
+            ) from exc
+        _canonical_ror_decimal_text(
+            payload.get("evaluated_stake"),
+            "evaluated_stake",
+            positive=True,
+        )
+    else:
+        try:
+            _canonical_sha256(
+                "candidate_vector_sha256", payload.get("candidate_vector_sha256")
+            )
+        except (TypeError, ValueError) as exc:
+            raise RiskOfRuinAuthorityError(
+                "risk-of-ruin bound candidate-vector hash is invalid"
+            ) from exc
+        raw_stakes = payload.get("evaluated_stakes")
+        if type(raw_stakes) is not list or not raw_stakes:
+            raise RiskOfRuinAuthorityError(
+                "risk-of-ruin vector bound requires a non-empty stake list"
+            )
+        stakes = tuple(
+            _canonical_ror_decimal_text(
+                item,
+                f"evaluated_stakes[{index}]",
+            )
+            for index, item in enumerate(raw_stakes)
+        )
+        if not any(stake > 0 for stake in stakes):
+            raise RiskOfRuinAuthorityError(
+                "risk-of-ruin vector bound requires a positive stake"
+            )
+
+    canonical = json.dumps(
+        payload,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    ).encode("utf-8")
+    if canonical != raw:
+        raise RiskOfRuinAuthorityError(
+            "risk-of-ruin bound artifact must use canonical UTF-8 JSON encoding"
+        )
+    return payload, hashlib.sha256(raw).hexdigest()
+
+
+def _risk_of_ruin_evidence_fingerprint(evidence: RiskOfRuinEvidence) -> str:
+    return _sha256_payload(
+        {
+            "kind": "SINGLE",
+            "evidence_id": evidence.evidence_id,
+            "research_protocol_sha256": evidence.research_protocol_sha256,
+            "reproducibility_bundle_sha256": evidence.reproducibility_bundle_sha256,
+            "producer_identity": evidence.producer_identity,
+            "causal_cutoff": evidence.causal_cutoff,
+            "evaluated_at": evidence.evaluated_at,
+            "bankroll_id": evidence.bankroll_id,
+            "currency": evidence.currency,
+            "base_portfolio_sha256": evidence.base_portfolio_sha256,
+            "candidate_sha256": evidence.candidate_sha256,
+            "evaluated_stake": str(evidence.evaluated_stake),
+            "upper_bound": str(evidence.upper_bound),
+        }
+    )
+
+
+def _risk_of_ruin_vector_evidence_fingerprint(
+    evidence: RiskOfRuinVectorEvidence,
+) -> str:
+    return _sha256_payload(
+        {
+            "kind": "VECTOR",
+            "evidence_id": evidence.evidence_id,
+            "research_protocol_sha256": evidence.research_protocol_sha256,
+            "reproducibility_bundle_sha256": evidence.reproducibility_bundle_sha256,
+            "producer_identity": evidence.producer_identity,
+            "causal_cutoff": evidence.causal_cutoff,
+            "evaluated_at": evidence.evaluated_at,
+            "bankroll_id": evidence.bankroll_id,
+            "currency": evidence.currency,
+            "base_portfolio_sha256": evidence.base_portfolio_sha256,
+            "candidate_vector_sha256": evidence.candidate_vector_sha256,
+            "evaluated_stakes": [str(stake) for stake in evidence.evaluated_stakes],
+            "upper_bound": str(evidence.upper_bound),
+        }
+    )
+
+
 @dataclass(frozen=True, slots=True)
 class ProposedTicketRiskContext:
     """Typed, non-persistent facts about one proposed paper ticket.
@@ -790,6 +1058,9 @@ class PaperRiskPolicy:
                 False,
                 "portfolio risk-of-ruin provenance-bound evidence is required by economic goal",
             )
+        authority_reason = _risk_of_ruin_runtime_authority_reason(evidence)
+        if authority_reason is not None:
+            return RiskDecision(False, authority_reason)
         if evidence.upper_bound > goal.max_risk_of_ruin:
             return RiskDecision(
                 False,
@@ -860,11 +1131,9 @@ class PaperRiskPolicy:
                 False,
                 "multi-candidate portfolio risk-of-ruin requires vector-bound evidence",
             )
-        if not isinstance(evidence, RiskOfRuinVectorEvidence):
-            return RiskDecision(
-                False,
-                "multi-candidate portfolio risk-of-ruin vector evidence is invalid",
-            )
+        authority_reason = _risk_of_ruin_vector_runtime_authority_reason(evidence)
+        if authority_reason is not None:
+            return RiskDecision(False, authority_reason)
         if evidence.upper_bound > goal.max_risk_of_ruin:
             return RiskDecision(
                 False,
@@ -1892,3 +2161,372 @@ class PaperRiskPolicy:
         if remaining_balance < reserve_limit:
             return RiskDecision(False, "minimum virtual cash reserve would be violated")
         return RiskDecision(True, "allowed")
+
+def _install_risk_of_ruin_runtime_authority():
+    """Install the sole product-issued runtime mint path for ruin evidence.
+
+    Persisted/caller-constructed RiskOfRuinEvidence remains audit data. Positive
+    paper allocation requires exact-object authority minted only after the bound
+    artifact is re-resolved through the canonical durable ScientificRegistry.
+    Runtime capability intentionally does not survive serialization/restart.
+    """
+
+    authorized_single: dict[int, tuple[RiskOfRuinEvidence, str, str]] = {}
+    authorized_vector: dict[int, tuple[RiskOfRuinVectorEvidence, str, str]] = {}
+
+    def single_reason(evidence: object) -> str | None:
+        if type(evidence) is not RiskOfRuinEvidence:
+            return _ROR_AUTHORITY_MISSING_REASON
+        entry = authorized_single.get(id(evidence))
+        if entry is None or entry[0] is not evidence:
+            return _ROR_AUTHORITY_MISSING_REASON
+        if entry[1] != _risk_of_ruin_evidence_fingerprint(evidence):
+            return _ROR_AUTHORITY_MISSING_REASON
+        return None
+
+    def vector_reason(evidence: object) -> str | None:
+        if type(evidence) is not RiskOfRuinVectorEvidence:
+            return _VECTOR_ROR_AUTHORITY_MISSING_REASON
+        entry = authorized_vector.get(id(evidence))
+        if entry is None or entry[0] is not evidence:
+            return _VECTOR_ROR_AUTHORITY_MISSING_REASON
+        if entry[1] != _risk_of_ruin_vector_evidence_fingerprint(evidence):
+            return _VECTOR_ROR_AUTHORITY_MISSING_REASON
+        return None
+
+    def durable_lineage(
+        registry: object,
+        payload: dict[str, object],
+        artifact_sha256: str,
+        *,
+        decision_limit: datetime,
+    ) -> tuple[str, str, str]:
+        try:
+            from ._scientific_registry_read_authority import (
+                require_scientific_registry_read_authority,
+            )
+            from .scientific_registry import RegistryEntry, ScientificRegistry
+        except ImportError as exc:
+            raise RiskOfRuinAuthorityError(
+                "canonical ScientificRegistry authority is unavailable"
+            ) from exc
+
+        if type(registry) is not ScientificRegistry:
+            raise RiskOfRuinAuthorityError(
+                "risk-of-ruin authority requires exact ScientificRegistry"
+            )
+        try:
+            _, _, get_record, _ = require_scientific_registry_read_authority()
+            protocol = get_record(
+                registry,
+                "ResearchProtocol",
+                payload["research_protocol_id"],
+            )
+            bundle = get_record(
+                registry,
+                "EvaluationBundle",
+                payload["evaluation_bundle_id"],
+            )
+        except (AttributeError, RuntimeError, TypeError, ValueError) as exc:
+            raise RiskOfRuinAuthorityError(
+                "canonical ScientificRegistry read authority could not be resolved"
+            ) from exc
+        if type(protocol) is not RegistryEntry or type(bundle) is not RegistryEntry:
+            raise RiskOfRuinAuthorityError(
+                "risk-of-ruin authority requires durable protocol and evaluation bundle"
+            )
+        if type(protocol.payload) is not dict or type(bundle.payload) is not dict:
+            raise RiskOfRuinAuthorityError(
+                "risk-of-ruin scientific lineage payload is non-canonical"
+            )
+
+        protocol_sha256 = protocol.payload.get("protocol_sha256")
+        bundle_protocol_sha256 = bundle.payload.get("protocol_sha256")
+        bundle_sha256 = bundle.payload.get("bundle_sha256")
+        artifact_hashes = bundle.payload.get("artifact_hashes")
+        if (
+            protocol_sha256 != payload["research_protocol_sha256"]
+            or bundle_protocol_sha256 != protocol_sha256
+        ):
+            raise RiskOfRuinAuthorityError(
+                "risk-of-ruin bound protocol does not match durable scientific lineage"
+            )
+        try:
+            _canonical_sha256("durable protocol_sha256", protocol_sha256)
+            _canonical_sha256("durable bundle_sha256", bundle_sha256)
+        except (TypeError, ValueError) as exc:
+            raise RiskOfRuinAuthorityError(
+                "risk-of-ruin durable scientific digests are invalid"
+            ) from exc
+        if (
+            type(artifact_hashes) is not list
+            or artifact_sha256 not in artifact_hashes
+        ):
+            raise RiskOfRuinAuthorityError(
+                "risk-of-ruin bound artifact is not durably listed in EvaluationBundle"
+            )
+
+        try:
+            _, protocol_available = _canonical_context_timestamp(
+                "ResearchProtocol.available_at", protocol.available_at
+            )
+            _, bundle_available = _canonical_context_timestamp(
+                "EvaluationBundle.available_at", bundle.available_at
+            )
+            _, causal_cutoff = _canonical_context_timestamp(
+                "risk-of-ruin causal_cutoff", payload["causal_cutoff"]
+            )
+            _, evaluated_at = _canonical_context_timestamp(
+                "risk-of-ruin evaluated_at", payload["evaluated_at"]
+            )
+        except (TypeError, ValueError) as exc:
+            raise RiskOfRuinAuthorityError(
+                "risk-of-ruin durable scientific time provenance is invalid"
+            ) from exc
+        if protocol_available > causal_cutoff:
+            raise RiskOfRuinAuthorityError(
+                "risk-of-ruin protocol was not durable before causal cutoff"
+            )
+        if evaluated_at > bundle_available:
+            raise RiskOfRuinAuthorityError(
+                "risk-of-ruin EvaluationBundle predates its bound artifact"
+            )
+        if bundle_available > decision_limit:
+            raise RiskOfRuinAuthorityError(
+                "risk-of-ruin EvaluationBundle was unavailable at decision time"
+            )
+        if evaluated_at > decision_limit:
+            raise RiskOfRuinAuthorityError(
+                "risk-of-ruin bound uses future evaluation information"
+            )
+
+        authority_digest = _sha256_payload(
+            {
+                "schema": "autosport.resolved-risk-of-ruin-authority",
+                "schema_version": 1,
+                "artifact_sha256": artifact_sha256,
+                "protocol_record_sha256": protocol.record_sha256,
+                "bundle_record_sha256": bundle.record_sha256,
+                "decision_limit": decision_limit.isoformat(),
+            }
+        )
+        return protocol_sha256, bundle_sha256, authority_digest
+
+    def resolve_single(
+        registry: object,
+        *,
+        book: PaperBook,
+        context: ProposedTicketRiskContext,
+        evaluated_stake: Decimal,
+        risk_bound_artifact: bytes,
+    ) -> RiskOfRuinEvidence:
+        if type(book) is not PaperBook or type(context) is not ProposedTicketRiskContext:
+            raise RiskOfRuinAuthorityError(
+                "single risk-of-ruin resolution requires canonical paper state/context"
+            )
+        if (
+            type(evaluated_stake) is not Decimal
+            or not evaluated_stake.is_finite()
+            or evaluated_stake <= 0
+        ):
+            raise RiskOfRuinAuthorityError(
+                "single risk-of-ruin evaluated stake must be positive exact Decimal"
+            )
+        if context.proposal_ts is None:
+            raise RiskOfRuinAuthorityError(
+                "single risk-of-ruin resolution requires proposal time"
+            )
+        try:
+            _, decision_limit = _canonical_context_timestamp(
+                "proposal_ts", context.proposal_ts
+            )
+        except (TypeError, ValueError) as exc:
+            raise RiskOfRuinAuthorityError(
+                "single risk-of-ruin proposal time is invalid"
+            ) from exc
+
+        payload, artifact_sha256 = _canonical_ror_bound_artifact(
+            risk_bound_artifact,
+            kind="SINGLE",
+        )
+        portfolio_sha256 = PaperRiskPolicy.risk_of_ruin_portfolio_sha256(book)
+        candidate_sha256 = PaperRiskPolicy.risk_of_ruin_candidate_sha256(context)
+        if portfolio_sha256 is None or candidate_sha256 is None:
+            raise RiskOfRuinAuthorityError(
+                "single risk-of-ruin canonical state cannot be hashed"
+            )
+        artifact_stake = _canonical_ror_decimal_text(
+            payload["evaluated_stake"],
+            "evaluated_stake",
+            positive=True,
+        )
+        if (
+            context.bankroll_id is None
+            or context.currency is None
+            or payload["bankroll_id"] != context.bankroll_id
+            or payload["currency"] != context.currency
+            or payload["base_portfolio_sha256"] != portfolio_sha256
+            or payload["candidate_sha256"] != candidate_sha256
+            or artifact_stake != evaluated_stake
+        ):
+            raise RiskOfRuinAuthorityError(
+                "single risk-of-ruin artifact does not match exact proposal state"
+            )
+
+        protocol_sha256, bundle_sha256, authority_digest = durable_lineage(
+            registry,
+            payload,
+            artifact_sha256,
+            decision_limit=decision_limit,
+        )
+        evidence = RiskOfRuinEvidence(
+            evidence_id=artifact_sha256,
+            research_protocol_sha256=protocol_sha256,
+            reproducibility_bundle_sha256=bundle_sha256,
+            producer_identity=payload["producer_identity"],
+            causal_cutoff=payload["causal_cutoff"],
+            evaluated_at=payload["evaluated_at"],
+            bankroll_id=payload["bankroll_id"],
+            currency=payload["currency"],
+            base_portfolio_sha256=payload["base_portfolio_sha256"],
+            candidate_sha256=payload["candidate_sha256"],
+            evaluated_stake=artifact_stake,
+            upper_bound=_canonical_ror_decimal_text(
+                payload["upper_bound"],
+                "upper_bound",
+                probability=True,
+            ),
+        )
+        if len(authorized_single) >= _MAX_RUNTIME_ROR_AUTHORITIES:
+            authorized_single.pop(next(iter(authorized_single)))
+        authorized_single[id(evidence)] = (
+            evidence,
+            _risk_of_ruin_evidence_fingerprint(evidence),
+            authority_digest,
+        )
+        return evidence
+
+    def resolve_vector(
+        registry: object,
+        *,
+        book: PaperBook,
+        contexts: tuple[ProposedTicketRiskContext, ...],
+        evaluated_stakes: tuple[Decimal, ...],
+        risk_bound_artifact: bytes,
+    ) -> RiskOfRuinVectorEvidence:
+        if type(book) is not PaperBook or type(contexts) is not tuple or not contexts:
+            raise RiskOfRuinAuthorityError(
+                "vector risk-of-ruin resolution requires canonical paper state/contexts"
+            )
+        if type(evaluated_stakes) is not tuple or len(evaluated_stakes) != len(contexts):
+            raise RiskOfRuinAuthorityError(
+                "vector risk-of-ruin stake cardinality does not match contexts"
+            )
+        for context in contexts:
+            if type(context) is not ProposedTicketRiskContext or context.proposal_ts is None:
+                raise RiskOfRuinAuthorityError(
+                    "vector risk-of-ruin contexts require canonical proposal times"
+                )
+        for stake in evaluated_stakes:
+            if (
+                type(stake) is not Decimal
+                or not stake.is_finite()
+                or stake < 0
+            ):
+                raise RiskOfRuinAuthorityError(
+                    "vector risk-of-ruin stakes must be non-negative exact Decimals"
+                )
+        if not any(stake > 0 for stake in evaluated_stakes):
+            raise RiskOfRuinAuthorityError(
+                "vector risk-of-ruin stakes require at least one positive value"
+            )
+
+        try:
+            proposal_times = [
+                _canonical_context_timestamp("proposal_ts", context.proposal_ts)[1]
+                for context in contexts
+            ]
+        except (TypeError, ValueError) as exc:
+            raise RiskOfRuinAuthorityError(
+                "vector risk-of-ruin proposal time is invalid"
+            ) from exc
+        decision_limit = min(proposal_times)
+        payload, artifact_sha256 = _canonical_ror_bound_artifact(
+            risk_bound_artifact,
+            kind="VECTOR",
+        )
+        portfolio_sha256 = PaperRiskPolicy.risk_of_ruin_portfolio_sha256(book)
+        candidate_vector_sha256 = PaperRiskPolicy.risk_of_ruin_candidate_vector_sha256(
+            contexts
+        )
+        if portfolio_sha256 is None or candidate_vector_sha256 is None:
+            raise RiskOfRuinAuthorityError(
+                "vector risk-of-ruin canonical state cannot be hashed"
+            )
+        artifact_stakes = tuple(
+            _canonical_ror_decimal_text(
+                raw_stake,
+                f"evaluated_stakes[{index}]",
+            )
+            for index, raw_stake in enumerate(payload["evaluated_stakes"])
+        )
+        bankroll_ids = {context.bankroll_id for context in contexts}
+        currencies = {context.currency for context in contexts}
+        if (
+            len(bankroll_ids) != 1
+            or None in bankroll_ids
+            or len(currencies) != 1
+            or None in currencies
+            or payload["bankroll_id"] != next(iter(bankroll_ids))
+            or payload["currency"] != next(iter(currencies))
+            or payload["base_portfolio_sha256"] != portfolio_sha256
+            or payload["candidate_vector_sha256"] != candidate_vector_sha256
+            or artifact_stakes != evaluated_stakes
+        ):
+            raise RiskOfRuinAuthorityError(
+                "vector risk-of-ruin artifact does not match exact portfolio state"
+            )
+
+        protocol_sha256, bundle_sha256, authority_digest = durable_lineage(
+            registry,
+            payload,
+            artifact_sha256,
+            decision_limit=decision_limit,
+        )
+        evidence = RiskOfRuinVectorEvidence(
+            evidence_id=artifact_sha256,
+            research_protocol_sha256=protocol_sha256,
+            reproducibility_bundle_sha256=bundle_sha256,
+            producer_identity=payload["producer_identity"],
+            causal_cutoff=payload["causal_cutoff"],
+            evaluated_at=payload["evaluated_at"],
+            bankroll_id=payload["bankroll_id"],
+            currency=payload["currency"],
+            base_portfolio_sha256=payload["base_portfolio_sha256"],
+            candidate_vector_sha256=payload["candidate_vector_sha256"],
+            evaluated_stakes=artifact_stakes,
+            upper_bound=_canonical_ror_decimal_text(
+                payload["upper_bound"],
+                "upper_bound",
+                probability=True,
+            ),
+        )
+        if len(authorized_vector) >= _MAX_RUNTIME_ROR_AUTHORITIES:
+            authorized_vector.pop(next(iter(authorized_vector)))
+        authorized_vector[id(evidence)] = (
+            evidence,
+            _risk_of_ruin_vector_evidence_fingerprint(evidence),
+            authority_digest,
+        )
+        return evidence
+
+    return single_reason, vector_reason, resolve_single, resolve_vector
+
+
+(
+    _risk_of_ruin_runtime_authority_reason,
+    _risk_of_ruin_vector_runtime_authority_reason,
+    resolve_authoritative_risk_of_ruin_evidence,
+    resolve_authoritative_risk_of_ruin_vector_evidence,
+) = _install_risk_of_ruin_runtime_authority()
+

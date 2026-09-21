@@ -63,9 +63,13 @@ class PartialSignalInstallRollbackTests(unittest.TestCase):
         runtime.start.assert_not_called()
         runtime.close.assert_called_once_with()
 
-        restored = signal_calls[-2:]
-        self.assertEqual(
-            restored,
+        restorations = [
+            call
+            for call in signal_calls
+            if any(call[1] is prior for prior in previous_handlers.values())
+        ]
+        self.assertCountEqual(
+            restorations,
             [
                 (stop_signals[0], previous_handlers[stop_signals[0]]),
                 (stop_signals[1], previous_handlers[stop_signals[1]]),

@@ -2,8 +2,8 @@
 
 This module extends the existing exact :class:`BetfairReadOnlyClient` with a
 narrow read capability for developer-app entitlement and account-statement
-evidence.  It does not turn public tariffs, missing rows, or shared/fixed charges
-into per-opportunity money.  The observations are source evidence only; economic
+evidence. It does not turn public tariffs, missing rows, or shared/fixed charges
+into per-opportunity money. The observations are source evidence only; economic
 allocation remains fail-closed until a product-owned policy binds it.
 """
 from __future__ import annotations
@@ -34,7 +34,7 @@ _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 class BetfairDeveloperAppEntitlementObservation:
     """Provider-owned state for the exact application key in use.
 
-    The raw application key is intentionally not retained.  Matching is performed
+    The raw application key is intentionally not retained. Matching is performed
     against the exact authenticated credential before the SHA-256 fingerprint is
     emitted.
     """
@@ -50,7 +50,7 @@ class BetfairDeveloperAppEntitlementObservation:
     subscription_required: bool
     owner_managed: bool
     active: bool
-    vendor_id: int | None
+    vendor_id: str | None
     evidence: BetfairEvidence
 
     def __post_init__(self) -> None:
@@ -70,9 +70,11 @@ class BetfairDeveloperAppEntitlementObservation:
             if type(value) is not bool:
                 raise BetfairReadOnlyError(f"{field} must be bool")
         if self.vendor_id is not None:
-            _positive_int(self.vendor_id, "vendor_id")
+            _required_text(self.vendor_id, "vendor_id")
         if type(self.evidence) is not BetfairEvidence:
-            raise BetfairReadOnlyError("entitlement evidence must be exact BetfairEvidence")
+            raise BetfairReadOnlyError(
+                "entitlement evidence must be exact BetfairEvidence"
+            )
 
 
 @dataclass(frozen=True, slots=True)
@@ -123,11 +125,15 @@ class BetfairAccountStatementPageObservation:
             type(item) is not BetfairAccountStatementItemObservation
             for item in self.items
         ):
-            raise BetfairReadOnlyError("statement items must be exact canonical tuple")
+            raise BetfairReadOnlyError(
+                "statement items must be exact canonical tuple"
+            )
         if type(self.more_available) is not bool:
             raise BetfairReadOnlyError("more_available must be bool")
         if type(self.evidence) is not BetfairEvidence:
-            raise BetfairReadOnlyError("statement evidence must be exact BetfairEvidence")
+            raise BetfairReadOnlyError(
+                "statement evidence must be exact BetfairEvidence"
+            )
 
 
 @dataclass(frozen=True, slots=True)
@@ -141,22 +147,30 @@ class BetfairProviderBillingInputsObservation:
 
     def __post_init__(self) -> None:
         if type(self.entitlement) is not BetfairDeveloperAppEntitlementObservation:
-            raise BetfairReadOnlyError("entitlement must be exact canonical observation")
+            raise BetfairReadOnlyError(
+                "entitlement must be exact canonical observation"
+            )
         if type(self.statement) is not BetfairAccountStatementPageObservation:
-            raise BetfairReadOnlyError("statement must be exact canonical observation")
+            raise BetfairReadOnlyError(
+                "statement must be exact canonical observation"
+            )
         if (
             self.entitlement.venue_id != self.statement.venue_id
             or self.entitlement.account_id != self.statement.account_id
         ):
-            raise BetfairReadOnlyError("provider billing observations disagree on account identity")
+            raise BetfairReadOnlyError(
+                "provider billing observations disagree on account identity"
+            )
         _instant(self.observed_at, "observed_at")
         _sha256_hex(self.evidence_sha256, "evidence_sha256")
         expected = _combined_evidence_sha256(self.entitlement, self.statement)
         if self.evidence_sha256 != expected:
-            raise BetfairReadOnlyError("provider billing combined evidence digest mismatch")
+            raise BetfairReadOnlyError(
+                "provider billing combined evidence digest mismatch"
+            )
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True, slots=True, repr=False)
 class _PinnedClient:
     venue_id: str
     account_id: str
@@ -186,26 +200,34 @@ def read_betfair_provider_billing_inputs(
 
     The function uses only the exact canonical client's already-authorized
     credentials, transport, clock, account identity, and request-id authority.
-    It exposes no provider write method.  Absence of a billing row is merely
+    It exposes no provider write method. Absence of a billing row is merely
     absence of evidence and must never be interpreted as zero cost.
     """
 
     _nonnegative_int(from_record, "from_record")
     _positive_int(record_count, "record_count")
     if record_count > 100:
-        raise BetfairReadOnlyError("record_count exceeds provider statement page limit")
+        raise BetfairReadOnlyError(
+            "record_count exceeds provider statement page limit"
+        )
     if statement_from is not None:
         _instant(statement_from, "statement_from")
     if statement_to is not None:
         _instant(statement_to, "statement_to")
     if statement_from is not None and statement_to is not None:
-        if _instant(statement_from, "statement_from") > _instant(statement_to, "statement_to"):
-            raise BetfairReadOnlyError("statement_from must not be after statement_to")
+        if _instant(statement_from, "statement_from") > _instant(
+            statement_to, "statement_to"
+        ):
+            raise BetfairReadOnlyError(
+                "statement_from must not be after statement_to"
+            )
 
     pinned = _snapshot_client(client)
     details = _read_rpc(pinned, _GET_ACCOUNT_DETAILS, {})
     details_result = _mapping(details.result, "getAccountDetails result")
-    currency_code = _provider_text(details_result, "currencyCode", "currency_code")
+    currency_code = _provider_text(
+        details_result, "currencyCode", "currency_code"
+    )
     if not currency_code.isascii() or currency_code != currency_code.upper():
         raise BetfairReadOnlyError("currency_code must be uppercase ASCII")
 
@@ -224,12 +246,19 @@ def read_betfair_provider_billing_inputs(
             item_date_range["to"] = statement_to
         statement_params["itemDateRange"] = item_date_range
 
-    statement_rpc = _read_rpc(pinned, _GET_ACCOUNT_STATEMENT, statement_params)
-    statement_result = _mapping(statement_rpc.result, "getAccountStatement result")
+    statement_rpc = _read_rpc(
+        pinned, _GET_ACCOUNT_STATEMENT, statement_params
+    )
+    statement_result = _mapping(
+        statement_rpc.result, "getAccountStatement result"
+    )
     raw_items = statement_result.get("accountStatement")
     if type(raw_items) is not list:
         raise BetfairReadOnlyError("accountStatement must be a JSON array")
-    items = tuple(_parse_statement_item(item, index) for index, item in enumerate(raw_items))
+    items = tuple(
+        _parse_statement_item(item, index)
+        for index, item in enumerate(raw_items)
+    )
     more_available = statement_result.get("moreAvailable")
     if type(more_available) is not bool:
         raise BetfairReadOnlyError("statement moreAvailable must be bool")
@@ -253,7 +282,9 @@ def read_betfair_provider_billing_inputs(
         entitlement=entitlement,
         statement=statement,
         observed_at=observed_at,
-        evidence_sha256=_combined_evidence_sha256(entitlement, statement),
+        evidence_sha256=_combined_evidence_sha256(
+            entitlement, statement
+        ),
     )
 
 
@@ -261,22 +292,39 @@ def _snapshot_client(client: object) -> _PinnedClient:
     if type(client) is not BetfairReadOnlyClient:
         raise TypeError("client must be exact BetfairReadOnlyClient")
     state = vars(client).copy()
-    if any(name in state for name in ("_next_request_id", "_observed_at", "_rpc")):
-        raise BetfairReadOnlyError("BetfairReadOnlyClient read authority is instance-shadowed")
+    if any(
+        name in state
+        for name in ("_next_request_id", "_observed_at", "_rpc")
+    ):
+        raise BetfairReadOnlyError(
+            "BetfairReadOnlyClient read authority is instance-shadowed"
+        )
     credentials = state.get("_credentials")
     if type(credentials) is not BetfairSessionCredentials:
-        raise BetfairReadOnlyError("client credentials are not exact canonical credentials")
+        raise BetfairReadOnlyError(
+            "client credentials are not exact canonical credentials"
+        )
     venue_id = _required_text(state.get("_venue_id"), "venue_id")
     account_id = _required_text(state.get("_account_id"), "account_id")
     transport = state.get("_transport")
     post = getattr(transport, "post", None)
     if not callable(post):
-        raise BetfairReadOnlyError("client transport post capability is unavailable")
+        raise BetfairReadOnlyError(
+            "client transport post capability is unavailable"
+        )
     timeout = state.get("_timeout_seconds")
-    if isinstance(timeout, bool) or not isinstance(timeout, (int, float)) or timeout <= 0:
+    if (
+        isinstance(timeout, bool)
+        or not isinstance(timeout, (int, float))
+        or timeout <= 0
+    ):
         raise BetfairReadOnlyError("client timeout is invalid")
-    next_request_id = BetfairReadOnlyClient._next_request_id.__get__(client, BetfairReadOnlyClient)
-    observed_at = BetfairReadOnlyClient._observed_at.__get__(client, BetfairReadOnlyClient)
+    next_request_id = BetfairReadOnlyClient._next_request_id.__get__(
+        client, BetfairReadOnlyClient
+    )
+    observed_at = BetfairReadOnlyClient._observed_at.__get__(
+        client, BetfairReadOnlyClient
+    )
     return _PinnedClient(
         venue_id=venue_id,
         account_id=account_id,
@@ -289,14 +337,27 @@ def _snapshot_client(client: object) -> _PinnedClient:
     )
 
 
-def _read_rpc(pinned: _PinnedClient, method: str, params: Mapping[str, object]) -> _RpcRead:
-    if method not in {_GET_ACCOUNT_DETAILS, _GET_DEVELOPER_APP_KEYS, _GET_ACCOUNT_STATEMENT}:
-        raise BetfairReadOnlyError("provider billing RPC is outside the strict read-only allowlist")
+def _read_rpc(
+    pinned: _PinnedClient, method: str, params: Mapping[str, object]
+) -> _RpcRead:
+    if method not in {
+        _GET_ACCOUNT_DETAILS,
+        _GET_DEVELOPER_APP_KEYS,
+        _GET_ACCOUNT_STATEMENT,
+    }:
+        raise BetfairReadOnlyError(
+            "provider billing RPC is outside the strict read-only allowlist"
+        )
     request_id = pinned.next_request_id()
     if isinstance(request_id, bool) or not isinstance(request_id, int):
         raise BetfairReadOnlyError("canonical request id is invalid")
     body = json.dumps(
-        {"jsonrpc": "2.0", "method": method, "params": dict(params), "id": request_id},
+        {
+            "jsonrpc": "2.0",
+            "method": method,
+            "params": dict(params),
+            "id": request_id,
+        },
         ensure_ascii=True,
         sort_keys=True,
         separators=(",", ":"),
@@ -318,12 +379,18 @@ def _read_rpc(pinned: _PinnedClient, method: str, params: Mapping[str, object]) 
     _instant(observed_at, "observed_at")
     evidence = BetfairEvidence(observed_at, sha256(payload).hexdigest())
     try:
-        decoded = json.loads(payload.decode("utf-8"), parse_float=Decimal, parse_int=int)
+        decoded = json.loads(
+            payload.decode("utf-8"), parse_float=Decimal, parse_int=int
+        )
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-        raise BetfairReadOnlyError("Betfair response is not valid UTF-8 JSON") from exc
+        raise BetfairReadOnlyError(
+            "Betfair response is not valid UTF-8 JSON"
+        ) from exc
     envelope = _mapping(decoded, "JSON-RPC response")
     if envelope.get("jsonrpc") != "2.0" or envelope.get("id") != request_id:
-        raise BetfairReadOnlyError("Betfair response envelope does not match request")
+        raise BetfairReadOnlyError(
+            "Betfair response envelope does not match request"
+        )
     if "error" in envelope:
         raise BetfairReadOnlyError("Betfair provider returned an RPC error")
     if "result" not in envelope:
@@ -337,44 +404,65 @@ def _resolve_exact_entitlement(
 ) -> BetfairDeveloperAppEntitlementObservation:
     raw_apps = rpc.result
     if type(raw_apps) is not list:
-        raise BetfairReadOnlyError("getDeveloperAppKeys result must be a JSON array")
-    matches: list[tuple[Mapping[str, object], Mapping[str, object]]] = []
+        raise BetfairReadOnlyError(
+            "getDeveloperAppKeys result must be a JSON array"
+        )
+    matches: list[
+        tuple[Mapping[str, object], Mapping[str, object]]
+    ] = []
     for app_index, raw_app in enumerate(raw_apps):
         app = _mapping(raw_app, f"developerApps[{app_index}]")
         versions = app.get("appVersions")
         if type(versions) is not list:
-            raise BetfairReadOnlyError("developer app versions must be a JSON array")
+            raise BetfairReadOnlyError(
+                "developer app versions must be a JSON array"
+            )
         for version_index, raw_version in enumerate(versions):
-            version = _mapping(raw_version, f"developerApps[{app_index}].appVersions[{version_index}]")
-            application_key = _provider_text(version, "applicationKey", "application_key")
+            version = _mapping(
+                raw_version,
+                f"developerApps[{app_index}].appVersions[{version_index}]",
+            )
+            application_key = _provider_text(
+                version, "applicationKey", "application_key"
+            )
             if application_key == pinned.application_key:
                 matches.append((app, version))
     if len(matches) != 1:
-        raise BetfairReadOnlyError("exact authenticated application key entitlement is ambiguous or missing")
+        raise BetfairReadOnlyError(
+            "exact authenticated application key entitlement is ambiguous or missing"
+        )
     app, version = matches[0]
     vendor_id = version.get("vendorId")
     if vendor_id is not None:
-        _positive_int(vendor_id, "vendor_id")
+        vendor_id = _required_text(vendor_id, "vendor_id")
     return BetfairDeveloperAppEntitlementObservation(
         venue_id=pinned.venue_id,
         account_id=pinned.account_id,
-        application_key_sha256=sha256(pinned.application_key.encode("utf-8")).hexdigest(),
+        application_key_sha256=sha256(
+            pinned.application_key.encode("utf-8")
+        ).hexdigest(),
         app_id=_provider_positive_int(app, "appId", "app_id"),
         app_name=_provider_text(app, "appName", "app_name"),
-        version_id=_provider_positive_int(version, "versionId", "version_id"),
+        version_id=_provider_positive_int(
+            version, "versionId", "version_id"
+        ),
         version=_provider_text(version, "version", "version"),
         delay_data=_provider_bool(version, "delayData", "delay_data"),
         subscription_required=_provider_bool(
             version, "subscriptionRequired", "subscription_required"
         ),
-        owner_managed=_provider_bool(version, "ownerManaged", "owner_managed"),
+        owner_managed=_provider_bool(
+            version, "ownerManaged", "owner_managed"
+        ),
         active=_provider_bool(version, "active", "active"),
         vendor_id=vendor_id,
         evidence=rpc.evidence,
     )
 
 
-def _parse_statement_item(value: object, index: int) -> BetfairAccountStatementItemObservation:
+def _parse_statement_item(
+    value: object, index: int
+) -> BetfairAccountStatementItemObservation:
     row = _mapping(value, f"accountStatement[{index}]")
     item_class_data = row.get("itemClassData")
     if item_class_data is None:
@@ -382,7 +470,9 @@ def _parse_statement_item(value: object, index: int) -> BetfairAccountStatementI
     if not isinstance(item_class_data, Mapping) or any(
         type(key) is not str for key in item_class_data
     ):
-        raise BetfairReadOnlyError("statement itemClassData must be a JSON object")
+        raise BetfairReadOnlyError(
+            "statement itemClassData must be a JSON object"
+        )
     detail_digest = sha256(
         json.dumps(
             item_class_data,
@@ -412,7 +502,9 @@ def _combined_evidence_sha256(
         "venue_id": entitlement.venue_id,
         "account_id": entitlement.account_id,
         "application_key_sha256": entitlement.application_key_sha256,
-        "entitlement_payload_sha256": entitlement.evidence.source_payload_sha256,
+        "entitlement_payload_sha256": (
+            entitlement.evidence.source_payload_sha256
+        ),
         "statement_payload_sha256": statement.evidence.source_payload_sha256,
         "currency_code": statement.currency_code,
         "statement_rows": [
@@ -428,50 +520,77 @@ def _combined_evidence_sha256(
         ],
     }
     return sha256(
-        json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        json.dumps(
+            payload, sort_keys=True, separators=(",", ":")
+        ).encode("utf-8")
     ).hexdigest()
 
 
 def _mapping(value: object, field: str) -> Mapping[str, object]:
-    if not isinstance(value, Mapping) or any(type(key) is not str for key in value):
+    if not isinstance(value, Mapping) or any(
+        type(key) is not str for key in value
+    ):
         raise BetfairReadOnlyError(f"{field} must be a JSON object")
     return value
 
 
-def _provider_text(value: Mapping[str, object], key: str, field: str) -> str:
+def _provider_text(
+    value: Mapping[str, object], key: str, field: str
+) -> str:
     if key not in value:
-        raise BetfairReadOnlyError(f"{field} is missing from provider response")
+        raise BetfairReadOnlyError(
+            f"{field} is missing from provider response"
+        )
     return _required_text(value[key], field)
 
 
-def _provider_positive_int(value: Mapping[str, object], key: str, field: str) -> int:
+def _provider_positive_int(
+    value: Mapping[str, object], key: str, field: str
+) -> int:
     if key not in value:
-        raise BetfairReadOnlyError(f"{field} is missing from provider response")
+        raise BetfairReadOnlyError(
+            f"{field} is missing from provider response"
+        )
     return _positive_int(value[key], field)
 
 
-def _provider_bool(value: Mapping[str, object], key: str, field: str) -> bool:
+def _provider_bool(
+    value: Mapping[str, object], key: str, field: str
+) -> bool:
     if key not in value or type(value[key]) is not bool:
         raise BetfairReadOnlyError(f"{field} must be provider bool")
     return value[key]
 
 
-def _provider_decimal(value: Mapping[str, object], key: str, field: str) -> Decimal:
+def _provider_decimal(
+    value: Mapping[str, object], key: str, field: str
+) -> Decimal:
     if key not in value:
-        raise BetfairReadOnlyError(f"{field} is missing from provider response")
+        raise BetfairReadOnlyError(
+            f"{field} is missing from provider response"
+        )
     raw = value[key]
     if isinstance(raw, bool):
         raise BetfairReadOnlyError(f"{field} must be provider number")
     try:
         result = raw if type(raw) is Decimal else Decimal(str(raw))
     except (InvalidOperation, ValueError, TypeError) as exc:
-        raise BetfairReadOnlyError(f"{field} must be provider number") from exc
+        raise BetfairReadOnlyError(
+            f"{field} must be provider number"
+        ) from exc
     return _decimal(result, field)
 
 
 def _required_text(value: object, field: str) -> str:
-    if type(value) is not str or not value or value != value.strip() or "\x00" in value:
-        raise BetfairReadOnlyError(f"{field} must be a non-empty canonical string")
+    if (
+        type(value) is not str
+        or not value
+        or value != value.strip()
+        or "\x00" in value
+    ):
+        raise BetfairReadOnlyError(
+            f"{field} must be a non-empty canonical string"
+        )
     return value
 
 
@@ -484,13 +603,17 @@ def _sha256_hex(value: object, field: str) -> str:
 
 def _positive_int(value: object, field: str) -> int:
     if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
-        raise BetfairReadOnlyError(f"{field} must be a positive integer")
+        raise BetfairReadOnlyError(
+            f"{field} must be a positive integer"
+        )
     return value
 
 
 def _nonnegative_int(value: object, field: str) -> int:
     if isinstance(value, bool) or not isinstance(value, int) or value < 0:
-        raise BetfairReadOnlyError(f"{field} must be a non-negative integer")
+        raise BetfairReadOnlyError(
+            f"{field} must be a non-negative integer"
+        )
     return value
 
 
@@ -502,11 +625,15 @@ def _decimal(value: object, field: str) -> Decimal:
 
 def _instant(value: object, field: str) -> datetime:
     if type(value) is not str:
-        raise BetfairReadOnlyError(f"{field} must be an ISO-8601 string")
+        raise BetfairReadOnlyError(
+            f"{field} must be an ISO-8601 string"
+        )
     try:
         parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
     except ValueError as exc:
-        raise BetfairReadOnlyError(f"{field} must be valid ISO-8601") from exc
+        raise BetfairReadOnlyError(
+            f"{field} must be valid ISO-8601"
+        ) from exc
     if parsed.tzinfo is None or parsed.utcoffset() is None:
         raise BetfairReadOnlyError(f"{field} must be timezone-aware")
     return parsed.astimezone(timezone.utc)

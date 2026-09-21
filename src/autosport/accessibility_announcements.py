@@ -119,7 +119,7 @@ class AnnouncementDecision:
             if self.priority is AnnouncementPriority.SILENT:
                 raise ValueError("emitted decision cannot be SILENT")
             _require_trimmed("text", self.text)
-            _validate_activity_id(self.activity_id)
+            _validate_activity_id(self.activity_id, self.priority)
         else:
             if self.priority is not AnnouncementPriority.SILENT:
                 raise ValueError("suppressed decision must be SILENT")
@@ -240,7 +240,10 @@ def _activity_id_for_key(key: tuple[str, str]) -> str:
     return f"{_ACTIVITY_ID_PREFIX}{identity_kind.lower()}:sha256:{digest}"
 
 
-def _validate_activity_id(value: object) -> str:
+def _validate_activity_id(
+    value: object,
+    priority: AnnouncementPriority,
+) -> str:
     _require_trimmed("activity_id", value)
     assert isinstance(value, str)
     if not value.isascii() or not value.startswith(_ACTIVITY_ID_PREFIX):
@@ -250,7 +253,11 @@ def _validate_activity_id(value: object) -> str:
         identity_kind, algorithm, digest = suffix.split(":", 2)
     except ValueError as exc:
         raise ValueError("activity_id has invalid product-issued format") from exc
-    if identity_kind not in {"polite", "assertive"} or algorithm != "sha256":
+    if (
+        identity_kind not in {"polite", "assertive"}
+        or identity_kind != priority.value.lower()
+        or algorithm != "sha256"
+    ):
         raise ValueError("activity_id has invalid product-issued format")
     if len(digest) != 64 or any(character not in "0123456789abcdef" for character in digest):
         raise ValueError("activity_id has invalid product-issued digest")

@@ -603,6 +603,7 @@ class AgentLoopRuntime:
         observed_state_sha256: str | None,
         intended_state_sha256: str,
         semantic_binding_sha256: str,
+        authority_tip_sha256: str | None = None,
     ) -> str:
         return _digest(
             {
@@ -610,6 +611,7 @@ class AgentLoopRuntime:
                 "observed_state_sha256": observed_state_sha256,
                 "intended_state_sha256": intended_state_sha256,
                 "semantic_binding_sha256": semantic_binding_sha256,
+                "authority_tip_sha256": authority_tip_sha256,
             }
         )
 
@@ -684,14 +686,24 @@ class AgentLoopRuntime:
         candidate = dict(state_without_digest)
         candidate["state_sha256"] = intended_state_sha256
         binding_sha256 = self._monotonic_binding(self.path, candidate)
-        tx_id = self._monotonic_tx_id(
-            operation="PUBLISH",
-            observed_state_sha256=observed_state_sha256,
-            intended_state_sha256=intended_state_sha256,
-            semantic_binding_sha256=binding_sha256,
-        )
         try:
             authority = self._monotonic_authority(self.path)
+            history = authority.read_history()
+            if not history:
+                raise AgentLoopError(
+                    "AgentLoop monotonic baseline is missing before state publication"
+                )
+            if history[-1].phase is AuthorityPhase.PREPARE:
+                raise AgentLoopError(
+                    "AgentLoop monotonic authority still has an unresolved PREPARE"
+                )
+            tx_id = self._monotonic_tx_id(
+                operation="PUBLISH",
+                observed_state_sha256=observed_state_sha256,
+                intended_state_sha256=intended_state_sha256,
+                semantic_binding_sha256=binding_sha256,
+                authority_tip_sha256=history[-1].record_sha256,
+            )
             authority.prepare(
                 tx_id=tx_id,
                 observed_state_sha256=observed_state_sha256,

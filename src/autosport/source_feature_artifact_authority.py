@@ -33,6 +33,7 @@ from typing import Any, Final, Mapping
 from . import _point_in_time_authority_runtime_repair as runtime_repair
 from . import _point_in_time_feature_provenance_guard as provenance_guard
 from . import point_in_time_evidence as evidence
+from .causal_collector import CollectorDelta, CollectorDeltaStore
 from .dataset_snapshot_lineage import DatasetSnapshotLineageAuthority
 from .integrity import atomic_write_json
 from .monotonic_workspace_authority import (
@@ -103,6 +104,125 @@ def _canonical_json(payload: Mapping[str, Any]) -> str:
 
 def _digest(payload: Mapping[str, Any]) -> str:
     return hashlib.sha256(_canonical_json(payload).encode("utf-8")).hexdigest()
+
+
+COLLECTOR_SOURCE_FEATURE_PRODUCER_ID: Final = (
+    "autosport.collector-source-feature-producer-v1"
+)
+_COLLECTOR_SOURCE_FEATURE_DEFINITION: Final[dict[str, Any]] = {
+    "kind": "autosport.collector-source-feature-v1",
+    "schema_version": 1,
+    "input_authority": "CollectorDeltaStore",
+    "input_identity": "exact durable CollectorDelta by delta_id",
+    "projection": "canonical collector delta plus exact dataset/FeatureSet identity",
+}
+COLLECTOR_SOURCE_FEATURE_DEFINITION_SHA256: Final = _digest(
+    _COLLECTOR_SOURCE_FEATURE_DEFINITION
+)
+COLLECTOR_SOURCE_FEATURE_PRODUCER_SHA256: Final = hashlib.sha256(
+    (
+        COLLECTOR_SOURCE_FEATURE_PRODUCER_ID
+        + ":"
+        + COLLECTOR_SOURCE_FEATURE_DEFINITION_SHA256
+    ).encode("utf-8")
+).hexdigest()
+_CANONICAL_COLLECTOR_FILENAME: Final = "collector_deltas.json"
+
+
+def _require_canonical_collector_store(
+    lineage_authority: DatasetSnapshotLineageAuthority,
+    collector_store: CollectorDeltaStore,
+) -> CollectorDeltaStore:
+    from . import causal_collector as collector_module
+
+    canonical_type = collector_module.CollectorDeltaStore
+    if type(collector_store) is not canonical_type:
+        raise evidence.PointInTimeEvidenceError(
+            "source feature materialization requires the exact canonical CollectorDeltaStore"
+        )
+    expected_path = lineage_authority.path.with_name(
+        _CANONICAL_COLLECTOR_FILENAME
+    ).resolve(strict=False)
+    try:
+        observed_path = collector_store.path.resolve(strict=False)
+    except (AttributeError, OSError) as exc:
+        raise evidence.PointInTimeEvidenceError(
+            "canonical collector source path is unavailable"
+        ) from exc
+    if observed_path != expected_path:
+        raise evidence.PointInTimeEvidenceError(
+            "source feature materialization must use the canonical collector store "
+            "from the exact lineage workspace"
+        )
+    return collector_store
+
+
+def collector_source_feature_payload(
+    *,
+    source_delta: CollectorDelta,
+    dataset_snapshot: DatasetSnapshot,
+    feature_set: FeatureSet,
+) -> bytes:
+    """Build the supported source-owned feature artifact from durable input.
+
+    This deterministic encoder is read-only, not an issuance capability. The
+    writer re-resolves source_delta from the canonical CollectorDeltaStore before
+    calling it; callers cannot provide arbitrary feature bytes to the writer.
+    """
+
+    if type(source_delta) is not CollectorDelta:
+        raise evidence.PointInTimeEvidenceError(
+            "source_delta must be an exact CollectorDelta"
+        )
+    if type(dataset_snapshot) is not DatasetSnapshot:
+        raise evidence.PointInTimeEvidenceError(
+            "dataset_snapshot must be an exact DatasetSnapshot"
+        )
+    if type(feature_set) is not FeatureSet:
+        raise evidence.PointInTimeEvidenceError(
+            "feature_set must be an exact FeatureSet"
+        )
+    source_delta.validate()
+    if source_delta.source_id != dataset_snapshot.source_identity:
+        raise evidence.PointInTimeEvidenceError(
+            "collector source identity does not match DatasetSnapshot"
+        )
+    if _instant(source_delta.collector_committed_at, "collector_committed_at") > _instant(
+        dataset_snapshot.causal_cutoff, "dataset_snapshot.causal_cutoff"
+    ):
+        raise evidence.PointInTimeEvidenceError(
+            "collector source commit is after DatasetSnapshot causal cutoff"
+        )
+    if _instant(source_delta.desktop_available_at, "desktop_available_at") > _instant(
+        dataset_snapshot.available_at_utc, "dataset_snapshot.available_at_utc"
+    ):
+        raise evidence.PointInTimeEvidenceError(
+            "collector source was not product-available by DatasetSnapshot availability"
+        )
+    if (
+        feature_set.definition_sha256.lower()
+        != COLLECTOR_SOURCE_FEATURE_DEFINITION_SHA256
+        or feature_set.source_sha256.lower()
+        != COLLECTOR_SOURCE_FEATURE_PRODUCER_SHA256
+    ):
+        raise evidence.PointInTimeEvidenceError(
+            "FeatureSet is not bound to the canonical collector source-feature producer"
+        )
+
+    payload = {
+        "kind": "autosport.collector-source-feature-artifact-v1",
+        "schema_version": 1,
+        "producer_id": COLLECTOR_SOURCE_FEATURE_PRODUCER_ID,
+        "producer_contract_sha256": COLLECTOR_SOURCE_FEATURE_PRODUCER_SHA256,
+        "dataset_snapshot_id": dataset_snapshot.dataset_snapshot_id,
+        "dataset_source_identity": dataset_snapshot.source_identity,
+        "feature_set_id": feature_set.feature_set_id,
+        "feature_version": feature_set.version,
+        "feature_definition_sha256": feature_set.definition_sha256.lower(),
+        "feature_source_sha256": feature_set.source_sha256.lower(),
+        "source_delta": source_delta.to_dict(),
+    }
+    return (_canonical_json(payload) + "\n").encode("utf-8")
 
 
 def _reject_duplicate_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
@@ -582,7 +702,13 @@ class SourceFeatureArtifactAuthority:
                 feature_payload_sha256=feature_provenance.feature_payload_sha256,
                 feature_provenance_sha256=feature_provenance.provenance_sha256,
                 lineage_proof_sha256=lineage_proof_sha256,
-                first_published_at_utc=_utc_now(),
+                first_published_at_utc=(
+                    __import__("datetime").datetime.now(
+                        __import__("datetime").timezone.utc
+                    )
+                    .isoformat(timespec="microseconds")
+                    .replace("+00:00", "Z")
+                ),
             )
             updated = dict(records)
             updated[key] = record
@@ -697,16 +823,24 @@ class SourceFeatureArtifactAuthority:
 
 
 class SourceFeatureArtifactMaterializer:
-    """Source-facing seam that may create one first-publication fact.
+    """Canonical source-side producer over durable collector truth.
 
-    It intentionally stores no duplicate feature bytes.  It only re-resolves the
-    canonical registry and lineage, derives provenance from the immutable bytes, and
-    then exercises the low-level publication capability.
+    The writer never accepts caller-authored feature bytes or publication time.
+    It re-resolves one exact immutable CollectorDelta, deterministically builds
+    the supported artifact, and only then exercises first-publication authority.
     """
 
-    def __init__(self, lineage_authority: DatasetSnapshotLineageAuthority) -> None:
+    def __init__(
+        self,
+        lineage_authority: DatasetSnapshotLineageAuthority,
+        *,
+        collector_store: CollectorDeltaStore,
+    ) -> None:
         runtime_repair._require_exact_lineage_authority(lineage_authority)
         self.lineage_authority = lineage_authority
+        self.collector_store = _require_canonical_collector_store(
+            lineage_authority, collector_store
+        )
         self._authority = SourceFeatureArtifactAuthority.for_lineage(
             lineage_authority
         )
@@ -720,8 +854,14 @@ class SourceFeatureArtifactMaterializer:
         *,
         dataset_snapshot: DatasetSnapshot,
         feature_set: FeatureSet,
-        feature_payload: bytes,
+        source_delta_id: str | None = None,
+        feature_payload: bytes | None = None,
     ) -> SourceFeatureArtifactPublication:
+        if feature_payload is not None:
+            raise evidence.PointInTimeEvidenceError(
+                "caller-supplied feature_payload is forbidden; "
+                "source feature bytes are produced from canonical CollectorDeltaStore truth"
+            )
         if type(dataset_snapshot) is not DatasetSnapshot:
             raise evidence.PointInTimeEvidenceError(
                 "dataset_snapshot must be an exact DatasetSnapshot"
@@ -730,10 +870,24 @@ class SourceFeatureArtifactMaterializer:
             raise evidence.PointInTimeEvidenceError(
                 "feature_set must be an exact FeatureSet"
             )
-        if type(feature_payload) is not bytes or not feature_payload:
+        if source_delta_id is None:
             raise evidence.PointInTimeEvidenceError(
-                "feature_payload must be non-empty immutable bytes"
+                "source_delta_id is required for source-owned feature materialization"
             )
+        source_delta_id = _text(source_delta_id, "source_delta_id")
+        source_delta = type(self.collector_store).get(
+            self.collector_store, source_delta_id
+        )
+        if source_delta is None:
+            raise evidence.PointInTimeEvidenceError(
+                "source_delta_id is not present in the canonical collector store"
+            )
+
+        generated_payload = collector_source_feature_payload(
+            source_delta=source_delta,
+            dataset_snapshot=dataset_snapshot,
+            feature_set=feature_set,
+        )
         dataset_entry = _registry_entry(
             self.lineage_authority,
             record_type="DatasetSnapshot",
@@ -749,7 +903,7 @@ class SourceFeatureArtifactMaterializer:
         feature_provenance = provenance_guard.FeatureArtifactProvenance.issue(
             dataset_snapshot=dataset_snapshot,
             feature_set=feature_set,
-            feature_payload=feature_payload,
+            feature_payload=generated_payload,
         )
         lineage_record = self.lineage_authority.record(
             dataset_snapshot.dataset_snapshot_id
@@ -762,6 +916,18 @@ class SourceFeatureArtifactMaterializer:
             raise evidence.PointInTimeEvidenceError(
                 "source materialization provenance is not a member of canonical dataset lineage"
             )
+
+        from datetime import datetime as _AuthorityDateTime
+        from datetime import timezone as _AuthorityTimezone
+
+        authority_now = _AuthorityDateTime.now(_AuthorityTimezone.utc)
+        if authority_now < _instant(
+            source_delta.desktop_available_at, "source_delta.desktop_available_at"
+        ):
+            raise evidence.PointInTimeEvidenceError(
+                "authority clock predates durable collector source availability"
+            )
+
         return self._authority._publish_from_materializer(
             materializer=self,
             dataset_snapshot=dataset_snapshot,
@@ -771,7 +937,6 @@ class SourceFeatureArtifactMaterializer:
             feature_provenance=feature_provenance,
             lineage_proof_sha256=lineage_record.proof_sha256,
         )
-
 
 def _same_lineage_authority(
     left: DatasetSnapshotLineageAuthority,
@@ -867,11 +1032,13 @@ def _bind_with_source_authority(
 
 evidence.SourceFeatureArtifactPublication = SourceFeatureArtifactPublication
 evidence.SourceFeatureArtifactAuthority = SourceFeatureArtifactAuthority
-evidence.SourceFeatureArtifactMaterializer = SourceFeatureArtifactMaterializer
 evidence.PointInTimeFeatureAuthority.bind = staticmethod(_bind_with_source_authority)
 
 __all__ = [
+    "COLLECTOR_SOURCE_FEATURE_DEFINITION_SHA256",
+    "COLLECTOR_SOURCE_FEATURE_PRODUCER_ID",
+    "COLLECTOR_SOURCE_FEATURE_PRODUCER_SHA256",
     "SourceFeatureArtifactPublication",
     "SourceFeatureArtifactAuthority",
-    "SourceFeatureArtifactMaterializer",
+    "collector_source_feature_payload",
 ]

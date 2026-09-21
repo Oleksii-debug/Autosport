@@ -42,10 +42,12 @@ class _EmptySource:
         cycle_durations: list[float],
         *,
         start_position: int = 1,
+        stream_epoch: str = "epoch-1",
     ) -> None:
         self.clock = clock
         self.cycle_durations = list(cycle_durations)
         self.position = start_position - 1
+        self.stream_epoch = stream_epoch
 
     def fetch_catalog_page(self, checkpoint):
         self.position += 1
@@ -171,6 +173,8 @@ class ProspectiveCollectorScheduleTests(unittest.TestCase):
                 evidence["anchor_at"],
                 "2026-01-01T00:00:00+00:00",
             )
+            self.assertEqual(evidence["schema_version"], 2)
+            self.assertEqual(evidence["stream_epoch"], "epoch-1")
             self.assertEqual(
                 evidence["slots"][1]["due_at"],
                 "2026-01-01T00:00:10+00:00",
@@ -181,6 +185,56 @@ class ProspectiveCollectorScheduleTests(unittest.TestCase):
             )
             self.assertTrue(evidence["slots"][1]["started_late"])
             self.assertEqual(restart_clock.sleeps, [])
+
+    def test_restart_rejects_stream_epoch_rebind_after_zero_result(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            first_clock = _Clock("2026-01-01T00:00:00+00:00")
+            first = _service(
+                tmp,
+                clock=first_clock,
+                source=_EmptySource(
+                    first_clock,
+                    [0],
+                    start_position=1,
+                    stream_epoch="epoch-1",
+                ),
+            )
+            first.run(max_cycles=1)
+
+            restart_clock = _Clock("2026-01-01T00:00:35+00:00")
+            reopened = _service(
+                tmp,
+                clock=restart_clock,
+                source=_EmptySource(
+                    restart_clock,
+                    [0],
+                    start_position=2,
+                    stream_epoch="epoch-2",
+                ),
+            )
+            reopened.resume()
+
+            with self.assertRaisesRegex(
+                CollectorServiceError,
+                "prospective collector schedule authority",
+            ):
+                reopened.run(max_cycles=1)
+
+            evidence = reopened.delta_store.collector_schedule_evidence(
+                source_id="source-x",
+                run_id="run-1",
+                start_slot_ordinal=0,
+                end_slot_ordinal=0,
+            )
+            self.assertEqual(evidence["stream_epoch"], "epoch-1")
+            self.assertEqual(evidence["bound_start_count"], 1)
+            self.assertEqual(evidence["slots"][0]["stream_epoch"], "epoch-1")
+            cycles = reopened.delta_store.collector_cycle_evidence(
+                source_id="source-x",
+                start_cycle_seq=1,
+                end_cycle_seq=1,
+            )
+            self.assertEqual(len(cycles), 1)
 
     def test_schedule_interval_cannot_be_rebound_after_restart(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -257,6 +311,7 @@ class ProspectiveCollectorScheduleTests(unittest.TestCase):
             store._ensure_collector_schedule(
                 source_id="source-x",
                 run_id="run-1",
+                stream_epoch="epoch-1",
                 anchor_at="2026-01-01T00:00:00+00:00",
                 interval_seconds=10,
             )
@@ -302,6 +357,7 @@ class ProspectiveCollectorScheduleTests(unittest.TestCase):
             store._ensure_collector_schedule(
                 source_id="source-x",
                 run_id="run-1",
+                stream_epoch="epoch-1",
                 anchor_at="2026-01-01T00:00:00+00:00",
                 interval_seconds=10,
             )
@@ -343,6 +399,7 @@ class ProspectiveCollectorScheduleTests(unittest.TestCase):
             store._ensure_collector_schedule(
                 source_id="source-x",
                 run_id="run-1",
+                stream_epoch="epoch-1",
                 anchor_at="2026-01-01T00:00:00+00:00",
                 interval_seconds=10,
             )

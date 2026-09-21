@@ -20,6 +20,7 @@ from autosport.bookmaker_account_acquisition import (
     assert_bookmaker_account_acquisition_authoritative,
 )
 from autosport.bookmaker_capability import BookmakerCapability
+from autosport.campaign_provider_scope_authority import CampaignProviderScopeError
 from autosport.bookmaker_integration_boundary import BookmakerIntegrationKind
 
 
@@ -355,7 +356,7 @@ def test_provider_read_failure_cannot_mint_positive_acquisition_receipt(
     harness.install(monkeypatch)
     store = BookmakerAccountAcquisitionStore(tmp_path / "account.sqlite3")
 
-    with pytest.raises(Exception, match="valid UTF-8 JSON"):
+    with pytest.raises(CampaignProviderScopeError, match="not valid JSON"):
         acquire_balance(store, acquisition_id="failed-attempt")
 
     assert len(harness.calls) == 1

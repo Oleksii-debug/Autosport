@@ -349,3 +349,22 @@ def test_resub_delta_preserves_opaque_cursor_without_sequence_math() -> None:
     ]
     assert len(ltp) == 1
     assert ltp[0].price == Decimal("2.3")
+
+
+def test_virtual_display_ladders_fail_closed_instead_of_silent_aliasing() -> None:
+    raw = _image()
+    runner = raw["mc"][0]["rc"][0]
+    runner.pop("batb")
+    runner["bdatb"] = [[0, 2.0, 10]]
+
+    with pytest.raises(ValueError, match="virtual display ladder"):
+        decode_market_change_message(raw)
+
+
+@pytest.mark.parametrize("segment_type", ["SEG_START", "SEG", "SEG_END"])
+def test_segmented_messages_require_reassembly_before_state_application(segment_type: str) -> None:
+    raw = _image()
+    raw["segmentType"] = segment_type
+
+    with pytest.raises(ValueError, match="require reassembly"):
+        decode_market_change_message(raw)

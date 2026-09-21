@@ -149,6 +149,11 @@ def test_documented_place_bet_cannot_satisfy_authenticated_requirement():
     assert "strength" in decision.reason
 
 
+def test_unproven_requirement_cannot_authorize_any_capability():
+    with pytest.raises(CapabilityEvidenceError, match="UNPROVEN"):
+        _requirement(minimum_strength=CapabilityEvidenceStrength.UNPROVEN)
+
+
 def test_account_scope_cannot_generalize():
     profile, _, journal = _journal()
     decision = _resolve(

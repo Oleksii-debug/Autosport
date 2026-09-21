@@ -10,6 +10,38 @@ from .price_truth import market_price_truth_from_run_summary
 from .session import ObservationResult, SessionResult
 
 
+_TICKET_STATUS_TEXT_KEYS = {
+    "open": "ui.ticket.status.open",
+    "won": "ui.ticket.status.won",
+    "lost": "ui.ticket.status.lost",
+    "void": "ui.ticket.status.void",
+}
+_SOURCE_HEALTH_TEXT_KEYS = {
+    "unknown": "ui.source_health.status.unknown",
+    "healthy": "ui.source_health.status.healthy",
+    "degraded": "ui.source_health.status.degraded",
+    "failed": "ui.source_health.status.failed",
+}
+_INGESTION_QUALITY_FLAG_TEXT_KEYS = {
+    "INVALID_SOURCE_TIMESTAMP": "ui.observation.quality_flag.invalid_source_timestamp",
+    "STALE_SOURCE": "ui.observation.quality_flag.stale_source",
+    "FUTURE_CLOCK_SKEW": "ui.observation.quality_flag.future_clock_skew",
+    "INVALID_QUOTE": "ui.observation.quality_flag.invalid_quote",
+    "SOURCE_TIME_REGRESSION": "ui.observation.quality_flag.source_time_regression",
+}
+
+
+def _localized_product_token(token: str, keys: dict[str, str]) -> str:
+    """Translate only product-owned closed-set presentation tokens.
+
+    Unknown tokens are returned byte-for-byte as text so provider-owned evidence is
+    never guessed, normalized, or hidden by the presentation layer.
+    """
+
+    key = keys.get(token)
+    return token if key is None else text(key)
+
+
 def result_summary(result: SessionResult) -> str:
     return text(
         "ui.result.summary",
@@ -143,7 +175,10 @@ def ticket_lines(session) -> list[str]:
         lines.append(
             text(
                 "ui.ticket.row",
-                status=ticket.status.value.upper(),
+                status=_localized_product_token(
+                    ticket.status.value,
+                    _TICKET_STATUS_TEXT_KEYS,
+                ),
                 stake=ticket.stake,
                 odds=ticket.combined_odds,
                 payout=ticket.payout,
@@ -155,14 +190,20 @@ def ticket_lines(session) -> list[str]:
 
 def observation_summary(result: ObservationResult) -> str:
     flags = (
-        ", ".join(result.stats.quality_flags)
+        ", ".join(
+            _localized_product_token(flag, _INGESTION_QUALITY_FLAG_TEXT_KEYS)
+            for flag in result.stats.quality_flags
+        )
         if result.stats.quality_flags
         else text("ui.observation.no_flags")
     )
     return text(
         "ui.observation.summary",
         source_id=result.stats.source_id,
-        health=result.health.status,
+        health=_localized_product_token(
+            result.health.status,
+            _SOURCE_HEALTH_TEXT_KEYS,
+        ),
         received=result.stats.received,
         accepted=result.stats.accepted,
         rejected=result.stats.rejected,

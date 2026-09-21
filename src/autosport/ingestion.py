@@ -312,10 +312,21 @@ class IngestionEngine:
         # Persistence and subscriber delivery are local pipeline stages. A failure here
         # must still propagate, but it must not be attributed to provider health after
         # acquisition/validation/normalization already succeeded.
-        ordered_flags = tuple(sorted(flags))
         try:
             accepted = self.bus.publish_many(normalized)
         except MarketEventDeliveryError as delivery_error:
+            # Storage can legitimately suppress exact duplicate event identities.
+            # Keep those non-accepted provider inputs observable instead of allowing
+            # received > accepted + rejected to look healthy.
+            duplicate_count = len(normalized) - delivery_error.accepted_count
+            if duplicate_count < 0:
+                raise RuntimeError("market bus accepted more events than were normalized")
+            effective_flags = set(flags)
+            if duplicate_count:
+                effective_flags.add("DUPLICATE_EVENT")
+            ordered_flags = tuple(sorted(effective_flags))
+            effective_rejected = rejected + duplicate_count
+
             # MarketEventDeliveryError can only be raised after transactional
             # persistence succeeds. Preserve the exact storage-derived outcome in
             # provider progress before re-raising the consumer delivery failure.
@@ -324,7 +335,7 @@ class IngestionEngine:
                 now=now,
                 received=len(batch.quotes),
                 accepted=delivery_error.accepted_count,
-                rejected=rejected,
+                rejected=effective_rejected,
                 elapsed_seconds=perf_counter() - started,
                 cursor=batch.cursor,
                 latest_source_ts=latest_source_ts,
@@ -340,6 +351,14 @@ class IngestionEngine:
                         delivery_error=delivery_error,
                     ) from health_error
             raise
+
+        duplicate_count = len(normalized) - accepted
+        if duplicate_count < 0:
+            raise RuntimeError("market bus accepted more events than were normalized")
+        if duplicate_count:
+            flags.add("DUPLICATE_EVENT")
+        rejected += duplicate_count
+        ordered_flags = tuple(sorted(flags))
 
         outcome = CommittedIngestionOutcome(
             source_id=batch.source_id,

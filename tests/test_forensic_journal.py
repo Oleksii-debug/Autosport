@@ -106,6 +106,46 @@ def test_forensic_journal_redacts_secrets_before_persistence_and_export(tmp_path
     assert payload["records"][0]["details"]["api_token"] == "[REDACTED]"
 
 
+@pytest.mark.parametrize(
+    ("message", "secret_fragments"),
+    [
+        ('password="alpha beta gamma"', ("alpha", "beta", "gamma")),
+        ("client_secret='first second'", ("first", "second")),
+        ('before token="one two three" after', ("one", "two", "three")),
+        (
+            'authorization="unterminated secret tail',
+            ("unterminated", "secret", "tail"),
+        ),
+    ],
+)
+def test_forensic_journal_redacts_quoted_secret_assignments_without_partial_leak(
+    tmp_path, message, secret_fragments
+):
+    path = tmp_path / "forensic.jsonl"
+    journal = ForensicSessionJournal(path, clock=FakeClock())
+
+    record = journal.record_material_event(
+        "provider-health",
+        "quoted-secret-redaction",
+        message=message,
+        details={"note": message},
+    )
+
+    persisted = path.read_text(encoding="utf-8")
+    exported = journal.export(tmp_path / "owner-export.json").read_text(
+        encoding="utf-8"
+    )
+    in_memory = (record.message or "") + " " + str(record.details["note"])
+
+    for fragment in secret_fragments:
+        assert fragment not in persisted
+        assert fragment not in exported
+        assert fragment not in in_memory
+    assert "[REDACTED]" in persisted
+    assert "[REDACTED]" in exported
+    assert "[REDACTED]" in in_memory
+
+
 def test_forensic_journal_rejects_record_tamper(tmp_path):
     path = tmp_path / "forensic.jsonl"
     journal = ForensicSessionJournal(path, clock=FakeClock())

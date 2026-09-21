@@ -111,6 +111,7 @@ def snapshot(
     bal=None,
     opened=(),
     settled=(),
+    child_at=None,
 ):
     prof = prof or profile()
     if (
@@ -122,6 +123,11 @@ def snapshot(
             "100",
             account=prof.account_id,
         )
+    if child_at is not None:
+        if bal is not None:
+            bal = replace(bal, observed_at=child_at)
+        opened = tuple(replace(item, observed_at=child_at) for item in opened)
+        settled = tuple(replace(item, observed_at=child_at) for item in settled)
     return BookmakerAccountSnapshot(
         profile=prof,
         observed_capabilities=caps,
@@ -151,6 +157,7 @@ def test_clean_reconciliation_tracks_lifecycle_and_non_pnl_balance_delta():
     )
     current = snapshot(
         at="2026-09-21T10:03:00+00:00",
+        child_at="2026-09-21T10:02:30+00:00",
         bal=balance("balance-2", "112.50"),
         opened=(
             position(
@@ -242,6 +249,7 @@ def test_missing_settled_read_is_incomplete_not_false_missing_effect():
     })
     current = snapshot(
         at="2026-09-21T10:03:00+00:00",
+        child_at="2026-09-21T10:02:30+00:00",
         caps=caps,
     )
 
@@ -275,6 +283,7 @@ def test_identity_time_currency_and_profile_rollbacks_fail_closed():
             previous,
             snapshot(
                 at="2026-09-21T10:03:00+00:00",
+        child_at="2026-09-21T10:02:30+00:00",
                 prof=other,
                 bal=balance(
                     "balance-2",
@@ -308,6 +317,7 @@ def test_identity_time_currency_and_profile_rollbacks_fail_closed():
             ),
             snapshot(
                 at="2026-09-21T10:03:00+00:00",
+        child_at="2026-09-21T10:02:30+00:00",
                 prof=profile(version=1),
             ),
         )
@@ -327,6 +337,7 @@ def test_identity_time_currency_and_profile_rollbacks_fail_closed():
             ),
             snapshot(
                 at="2026-09-21T10:03:00+00:00",
+        child_at="2026-09-21T10:02:30+00:00",
                 bal=balance(
                     "balance-2",
                     "100",
@@ -343,6 +354,7 @@ def test_same_profile_version_can_be_reobserved_but_not_semantically_changed():
     )
     reobserved = snapshot(
         at="2026-09-21T10:03:00+00:00",
+        child_at="2026-09-21T10:02:30+00:00",
         prof=profile(digest="2" * 64),
     )
     assert (
@@ -355,6 +367,7 @@ def test_same_profile_version_can_be_reobserved_but_not_semantically_changed():
 
     changed = snapshot(
         at="2026-09-21T10:03:00+00:00",
+        child_at="2026-09-21T10:02:30+00:00",
         prof=profile(
             digest="3" * 64,
             adapter_version="2",
@@ -383,6 +396,7 @@ def test_settled_position_cannot_reappear_open():
     )
     current = snapshot(
         at="2026-09-21T10:03:00+00:00",
+        child_at="2026-09-21T10:02:30+00:00",
         opened=(
             position(
                 "bet-1",
@@ -424,6 +438,7 @@ def test_digest_and_transition_order_ignore_input_tuple_order():
     )
     current = snapshot(
         at="2026-09-21T10:03:00+00:00",
+        child_at="2026-09-21T10:02:30+00:00",
         settled=(
             position(
                 "bet-2",
@@ -462,6 +477,7 @@ def test_balance_delta_does_not_depend_on_callers_decimal_context():
     )
     current = snapshot(
         at="2026-09-21T10:03:00+00:00",
+        child_at="2026-09-21T10:02:30+00:00",
         bal=balance("balance-2", "123456789.12345"),
     )
     expected = reconcile_bookmaker_account_snapshots(previous, current)
@@ -479,5 +495,51 @@ def test_equal_snapshot_time_is_not_a_causal_reconciliation_order():
     with pytest.raises(
         BookmakerAccountReconciliationError,
         match="strictly later",
+    ):
+        reconcile_bookmaker_account_snapshots(previous, current)
+
+
+
+def test_stale_current_balance_evidence_cannot_drive_reconciliation():
+    previous = snapshot(at="2026-09-21T10:02:00+00:00")
+    current = snapshot(
+        at="2026-09-21T10:03:00+00:00",
+        bal=balance("balance-2", "101.00"),
+    )
+    with pytest.raises(
+        BookmakerAccountReconciliationError,
+        match="current balance evidence must be strictly later",
+    ):
+        reconcile_bookmaker_account_snapshots(previous, current)
+
+
+def test_stale_current_settled_evidence_cannot_prove_open_to_settled():
+    previous = snapshot(
+        at="2026-09-21T10:02:00+00:00",
+        opened=(
+            position(
+                "bet-1",
+                BookmakerPositionState.OPEN,
+                "open-1",
+            ),
+        ),
+    )
+    current = snapshot(
+        at="2026-09-21T10:03:00+00:00",
+        bal=replace(
+            balance("balance-2", "100"),
+            observed_at="2026-09-21T10:02:30+00:00",
+        ),
+        settled=(
+            position(
+                "bet-1",
+                BookmakerPositionState.SETTLED,
+                "settled-stale",
+            ),
+        ),
+    )
+    with pytest.raises(
+        BookmakerAccountReconciliationError,
+        match="current settled position evidence must be strictly later",
     ):
         reconcile_bookmaker_account_snapshots(previous, current)

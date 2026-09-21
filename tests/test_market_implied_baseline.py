@@ -4,8 +4,9 @@ import copy
 import hashlib
 import tempfile
 import unittest
+from fractions import Fraction
 from datetime import datetime, timedelta, timezone
-from decimal import Decimal
+from decimal import Decimal, localcontext
 from pathlib import Path
 
 from autosport.domain import MarketEvent, MarketType
@@ -164,6 +165,25 @@ class MarketImpliedBaselineTests(unittest.TestCase):
         self.assertFalse(truth["execution_authority"])
         self.assertFalse(truth["promotion_authority"])
         self.assertFalse(truth["real_money_execution"])
+
+    def test_nontrivial_devig_is_exact_and_independent_of_decimal_context(self) -> None:
+        self.persist((("away", "2.10"), ("draw", "3.40"), ("home", "4.20")))
+        with localcontext() as context:
+            context.prec = 6
+            low_precision = self.evidence()
+        with localcontext() as context:
+            context.prec = 50
+            high_precision = self.evidence()
+
+        self.assertEqual(
+            tuple((p.numerator, p.denominator) for p in low_precision.probabilities),
+            tuple((p.numerator, p.denominator) for p in high_precision.probabilities),
+        )
+        self.assertEqual(low_precision.evidence_sha256, high_precision.evidence_sha256)
+        self.assertEqual(
+            sum((p.fraction for p in low_precision.probabilities), start=Fraction(0, 1)),
+            Fraction(1, 1),
+        )
 
     def test_missing_three_way_selection_cannot_be_silently_renormalized(self) -> None:
         self.persist((("away", "2.10"), ("home", "2.20")))

@@ -65,7 +65,7 @@ def _digest(value: object) -> str:
     return hashlib.sha256(_canonical(value).encode("utf-8")).hexdigest()
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True, slots=True, init=False)
 class PaperExecutionQualitySample:
     """Derived PAPER-only execution-quality sample.
 
@@ -110,7 +110,31 @@ class PaperExecutionQualitySample:
     )
     schema_version: int = SCHEMA_VERSION
 
-    def __post_init__(self) -> None:
+    def __new__(cls, *args, **kwargs):
+        del args, kwargs
+        raise TypeError(
+            "PaperExecutionQualitySample is issued only by the canonical quality projector"
+        )
+
+    @classmethod
+    def _construct(cls, **values: object) -> "PaperExecutionQualitySample":
+        values = {
+            "evidence_class": ExecutionQualityEvidenceClass.PAPER_EXECUTION_MODEL,
+            "schema_version": SCHEMA_VERSION,
+            **values,
+        }
+        expected = set(cls.__dataclass_fields__)
+        if set(values) != expected:
+            raise ExecutionQualityEvidenceError(
+                "execution-quality sample construction fields are incomplete"
+            )
+        obj = object.__new__(cls)
+        for name in cls.__dataclass_fields__:
+            object.__setattr__(obj, name, values[name])
+        obj._validate()
+        return obj
+
+    def _validate(self) -> None:
         if self.evidence_class is not ExecutionQualityEvidenceClass.PAPER_EXECUTION_MODEL:
             raise ExecutionQualityEvidenceError(
                 "PaperExecutionQualitySample cannot claim non-PAPER evidence"
@@ -452,7 +476,7 @@ def _project_paper_attempt(
         completion_numerator = None
 
     universe = ledger.universe
-    return PaperExecutionQualitySample(
+    return PaperExecutionQualitySample._construct(
         universe_sha256=universe.universe_sha256,
         membership_sha256=universe.membership_sha256,
         research_protocol_id=universe.research_protocol_id,
@@ -543,7 +567,7 @@ def build_paper_execution_quality_report(
 
     samples.sort(key=lambda sample: sample.row_id)
     cohort = ledger.cohort()
-    return PaperExecutionQualityReport(
+    return PaperExecutionQualityReport._construct(
         universe_sha256=ledger.universe.universe_sha256,
         membership_sha256=ledger.universe.membership_sha256,
         research_protocol_id=ledger.universe.research_protocol_id,

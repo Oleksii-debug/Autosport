@@ -880,12 +880,15 @@ class HeadlessCollectorService:
                 "due_at",
             )
             now = _CollectorServiceState._instant(self.clock(), "clock")
-            if now < due_at:
+            while now < due_at:
                 self.sleep((due_at - now).total_seconds())
                 reason = self._requested_stop_reason()
                 if reason is not None:
                     self.stop(reason)
                     break
+                now = _CollectorServiceState._instant(self.clock(), "clock")
+            if reason is not None:
+                break
 
             try:
                 last_cycle = self.run_cycle(_schedule_slot=schedule_slot)

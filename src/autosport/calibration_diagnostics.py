@@ -4,6 +4,7 @@ import hashlib
 import json
 import math
 from dataclasses import dataclass
+from enum import Enum
 from statistics import NormalDist
 from typing import Iterable
 
@@ -12,6 +13,7 @@ from .forecasting import (
     ForecastRecord,
     TemporalEvaluationWindow,
     evaluate_forecast_window,
+    parse_iso_timestamp,
 )
 
 _EPSILON = 1e-15
@@ -19,6 +21,14 @@ _BRIER_INTERVAL_METHOD = "hoeffding-bounded-brier-v1"
 _LOG_LOSS_INTERVAL_METHOD = "hoeffding-clipped-log-loss-v1"
 _CALIBRATION_INTERVAL_METHOD = "bonferroni-wilson-binomial-v1"
 _ECE_INTERVAL_METHOD = "simultaneous-bin-envelope-v1"
+_DEPENDENCE_SCREEN_METHOD = "exact-quote-key-uniqueness-v1"
+
+
+class CalibrationDependenceAssumption(str, Enum):
+    """Predeclared sampling assumption for nominal uncertainty intervals."""
+
+    SINGLE_OBSERVATION = "single-observation-v1"
+    INDEPENDENT_BERNOULLI = "independent-bernoulli-v1"
 
 
 def _canonical_float(value: float) -> str:
@@ -136,6 +146,9 @@ class CalibrationDiagnostics:
     confidence_level: float
     cohort_sha256: str
     config_sha256: str
+    dependence_assumption: CalibrationDependenceAssumption
+    raw_sample_count: int
+    effective_sample_count: int
     brier_score: MetricUncertainty
     log_loss: MetricUncertainty
     expected_calibration_error: MetricUncertainty
@@ -154,6 +167,24 @@ class CalibrationDiagnostics:
             raise ValueError("bins must be a positive integer")
         if type(self.confidence_level) is not float or not 0.0 < self.confidence_level < 1.0:
             raise ValueError("confidence_level must be a float strictly between 0 and 1")
+        if type(self.dependence_assumption) is not CalibrationDependenceAssumption:
+            raise ValueError("dependence_assumption must be a typed calibration assumption")
+        if type(self.raw_sample_count) is not int or self.raw_sample_count != self.count:
+            raise ValueError("raw_sample_count must equal the evaluated cohort count")
+        if (
+            type(self.effective_sample_count) is not int
+            or self.effective_sample_count <= 0
+            or self.effective_sample_count > self.raw_sample_count
+        ):
+            raise ValueError(
+                "effective_sample_count must be positive and cannot exceed raw count"
+            )
+        if (
+            self.dependence_assumption
+            is CalibrationDependenceAssumption.SINGLE_OBSERVATION
+            and (self.raw_sample_count != 1 or self.effective_sample_count != 1)
+        ):
+            raise ValueError("single-observation assumption requires exactly one row")
         for field_name, digest in (
             ("cohort_sha256", self.cohort_sha256),
             ("config_sha256", self.config_sha256),
@@ -188,6 +219,10 @@ class CalibrationDiagnostics:
             "confidence_level": _canonical_float(self.confidence_level),
             "cohort_sha256": self.cohort_sha256,
             "config_sha256": self.config_sha256,
+            "dependence_assumption": self.dependence_assumption.value,
+            "dependence_screen_method": _DEPENDENCE_SCREEN_METHOD,
+            "raw_sample_count": self.raw_sample_count,
+            "effective_sample_count": self.effective_sample_count,
             "brier_score": self.brier_score.to_payload(),
             "log_loss": self.log_loss.to_payload(),
             "expected_calibration_error": self.expected_calibration_error.to_payload(),
@@ -264,6 +299,7 @@ def evaluate_calibration_diagnostics(
     *,
     bins: int = 10,
     confidence_level: float = 0.95,
+    dependence_assumption: CalibrationDependenceAssumption | None = None,
 ) -> CalibrationDiagnostics:
     """Build bounded calibration uncertainty evidence for one complete temporal cohort.
 
@@ -314,15 +350,74 @@ def evaluate_calibration_diagnostics(
             raise ValueError(f"duplicate outcome fact for forecast: {fact.forecast_id}")
         outcome_by_id[fact.forecast_id] = fact
 
-    missing = sorted(forecast_id for forecast_id in selected_by_id if forecast_id not in outcome_by_id)
+    missing = sorted(
+        forecast_id
+        for forecast_id in selected_by_id
+        if forecast_id not in outcome_by_id
+    )
     if missing:
         raise ValueError(
             "complete calibration cohort required; missing outcome facts for: "
             + ", ".join(missing)
         )
 
-    selected_outcomes = tuple(outcome_by_id[record.forecast_id] for record in selected)
-    summary = evaluate_forecast_window(selected, selected_outcomes, window, bins=bins)
+    evaluation_end = parse_iso_timestamp(window.evaluation_end_ts)
+    late_outcomes = sorted(
+        record.forecast_id
+        for record in selected
+        if parse_iso_timestamp(
+            outcome_by_id[record.forecast_id].revealed_at
+        ) > evaluation_end
+    )
+    if late_outcomes:
+        raise ValueError(
+            "calibration outcome facts revealed after evaluation cutoff: "
+            + ", ".join(late_outcomes)
+        )
+
+    if dependence_assumption is not None and (
+        type(dependence_assumption) is not CalibrationDependenceAssumption
+    ):
+        raise ValueError(
+            "dependence_assumption must be a typed CalibrationDependenceAssumption"
+        )
+    if len(selected) == 1:
+        resolved_dependence = (
+            CalibrationDependenceAssumption.SINGLE_OBSERVATION
+            if dependence_assumption is None
+            else dependence_assumption
+        )
+    else:
+        if (
+            dependence_assumption
+            is not CalibrationDependenceAssumption.INDEPENDENT_BERNOULLI
+        ):
+            raise ValueError(
+                "multi-row calibration uncertainty requires an explicit "
+                "INDEPENDENT_BERNOULLI dependence assumption"
+            )
+        resolved_dependence = dependence_assumption
+
+    if (
+        resolved_dependence
+        is CalibrationDependenceAssumption.INDEPENDENT_BERNOULLI
+    ):
+        quote_keys = tuple(record.quote_key for record in selected)
+        if len(set(quote_keys)) != len(quote_keys):
+            raise ValueError(
+                "INDEPENDENT_BERNOULLI diagnostics reject repeated quote_key "
+                "dependence; use a separately justified cluster/ESS method"
+            )
+
+    selected_outcomes = tuple(
+        outcome_by_id[record.forecast_id] for record in selected
+    )
+    summary = evaluate_forecast_window(
+        selected,
+        selected_outcomes,
+        window,
+        bins=bins,
+    )
 
     paired = tuple(
         sorted(
@@ -354,6 +449,8 @@ def evaluate_calibration_diagnostics(
         },
         "bins": bins,
         "confidence_level": _canonical_float(confidence_level),
+        "dependence_assumption": resolved_dependence.value,
+        "dependence_screen_method": _DEPENDENCE_SCREEN_METHOD,
         "brier_interval_method": _BRIER_INTERVAL_METHOD,
         "log_loss_interval_method": _LOG_LOSS_INTERVAL_METHOD,
         "calibration_interval_method": _CALIBRATION_INTERVAL_METHOD,
@@ -456,6 +553,9 @@ def evaluate_calibration_diagnostics(
         confidence_level=confidence_level,
         cohort_sha256=cohort_sha256,
         config_sha256=config_sha256,
+        dependence_assumption=resolved_dependence,
+        raw_sample_count=summary.count,
+        effective_sample_count=summary.count,
         brier_score=brier,
         log_loss=log_loss,
         expected_calibration_error=ece,

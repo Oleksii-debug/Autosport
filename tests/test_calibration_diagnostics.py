@@ -1,7 +1,10 @@
 import unittest
 from decimal import Decimal
 
-from autosport.calibration_diagnostics import evaluate_calibration_diagnostics
+from autosport.calibration_diagnostics import (
+    CalibrationDependenceAssumption,
+    evaluate_calibration_diagnostics,
+)
 from autosport.forecasting import (
     ForecastOutcomeFact,
     ForecastRecord,
@@ -45,6 +48,17 @@ class CalibrationDiagnosticsTests(unittest.TestCase):
             "holdout",
         )
 
+    def _evaluate(self, records, outcomes, window=None, **kwargs):
+        return evaluate_calibration_diagnostics(
+            records,
+            outcomes,
+            window or self._window(),
+            dependence_assumption=(
+                CalibrationDependenceAssumption.INDEPENDENT_BERNOULLI
+            ),
+            **kwargs,
+        )
+
     def _cohort(self):
         records = (
             self._record("f-1", "0.90"),
@@ -79,7 +93,7 @@ class CalibrationDiagnosticsTests(unittest.TestCase):
         records, outcomes = self._cohort()
         window = self._window()
         base = evaluate_forecast_window(records, outcomes, window, bins=5)
-        report = evaluate_calibration_diagnostics(
+        report = self._evaluate(
             records,
             outcomes,
             window,
@@ -113,12 +127,18 @@ class CalibrationDiagnosticsTests(unittest.TestCase):
         )
         self.assertFalse(report.promotion_authorized)
         self.assertFalse(report.real_money_execution)
+        self.assertEqual(
+            report.dependence_assumption,
+            CalibrationDependenceAssumption.INDEPENDENT_BERNOULLI,
+        )
+        self.assertEqual(report.raw_sample_count, report.count)
+        self.assertEqual(report.effective_sample_count, report.count)
         self.assertEqual(len(report.report_sha256), 64)
 
     def test_complete_cohort_is_required(self):
         records, outcomes = self._cohort()
         with self.assertRaisesRegex(ValueError, "complete calibration cohort required"):
-            evaluate_calibration_diagnostics(
+            self._evaluate(
                 records,
                 outcomes[:-1],
                 self._window(),
@@ -127,13 +147,13 @@ class CalibrationDiagnosticsTests(unittest.TestCase):
 
     def test_input_order_does_not_change_evidence_identity(self):
         records, outcomes = self._cohort()
-        forward = evaluate_calibration_diagnostics(
+        forward = self._evaluate(
             records,
             outcomes,
             self._window(),
             bins=5,
         )
-        reverse = evaluate_calibration_diagnostics(
+        reverse = self._evaluate(
             tuple(reversed(records)),
             tuple(reversed(outcomes)),
             self._window(),
@@ -145,7 +165,7 @@ class CalibrationDiagnosticsTests(unittest.TestCase):
 
     def test_outcome_change_changes_cohort_and_report_identity(self):
         records, outcomes = self._cohort()
-        original = evaluate_calibration_diagnostics(
+        original = self._evaluate(
             records,
             outcomes,
             self._window(),
@@ -154,7 +174,7 @@ class CalibrationDiagnosticsTests(unittest.TestCase):
         changed_outcomes = outcomes[:-1] + (
             ForecastOutcomeFact("f-4", 1, "2026-02-13T14:00:00+00:00"),
         )
-        changed = evaluate_calibration_diagnostics(
+        changed = self._evaluate(
             records,
             changed_outcomes,
             self._window(),
@@ -167,21 +187,21 @@ class CalibrationDiagnosticsTests(unittest.TestCase):
         records, outcomes = self._cohort()
         duplicate = outcomes + (outcomes[0],)
         with self.assertRaisesRegex(ValueError, "duplicate outcome"):
-            evaluate_calibration_diagnostics(
+            self._evaluate(
                 records,
                 duplicate,
                 self._window(),
                 bins=5,
             )
         with self.assertRaisesRegex(ValueError, "bins must be a positive integer"):
-            evaluate_calibration_diagnostics(
+            self._evaluate(
                 records,
                 outcomes,
                 self._window(),
                 bins=True,
             )
         with self.assertRaisesRegex(ValueError, "confidence_level"):
-            evaluate_calibration_diagnostics(
+            self._evaluate(
                 records,
                 outcomes,
                 self._window(),
@@ -202,7 +222,7 @@ class CalibrationDiagnosticsTests(unittest.TestCase):
             ForecastOutcomeFact("f-zero", 0, "2026-02-10T14:00:00+00:00"),
             ForecastOutcomeFact("f-one", 1, "2026-02-11T14:00:00+00:00"),
         )
-        report = evaluate_calibration_diagnostics(
+        report = self._evaluate(
             records,
             outcomes,
             self._window(),
@@ -237,7 +257,7 @@ class CalibrationDiagnosticsTests(unittest.TestCase):
                     self._window(),
                     bins=1,
                 )
-                report = evaluate_calibration_diagnostics(
+                report = self._evaluate(
                     record,
                     facts,
                     self._window(),
@@ -252,7 +272,7 @@ class CalibrationDiagnosticsTests(unittest.TestCase):
         zero_outcome = (
             ForecastOutcomeFact("f-zero-only", 0, "2026-02-10T14:00:00+00:00"),
         )
-        zero_report = evaluate_calibration_diagnostics(
+        zero_report = self._evaluate(
             zero_record,
             zero_outcome,
             self._window(),
@@ -266,7 +286,7 @@ class CalibrationDiagnosticsTests(unittest.TestCase):
         one_outcome = (
             ForecastOutcomeFact("f-one-only", 1, "2026-02-10T14:00:00+00:00"),
         )
-        one_report = evaluate_calibration_diagnostics(
+        one_report = self._evaluate(
             one_record,
             one_outcome,
             self._window(),
@@ -275,6 +295,59 @@ class CalibrationDiagnosticsTests(unittest.TestCase):
         )
         self.assertEqual(one_report.calibration[0].observed_rate, 1.0)
         self.assertEqual(one_report.calibration[0].observed_rate_upper, 1.0)
+
+    def test_post_cutoff_outcome_cannot_backfill_frozen_window(self):
+        record = self._record("late-label", "0.80")
+        late_outcome = ForecastOutcomeFact(
+            "late-label",
+            1,
+            "2026-03-01T00:00:00+00:00",
+        )
+        with self.assertRaisesRegex(ValueError, "evaluation cutoff"):
+            self._evaluate(
+                (record,),
+                (late_outcome,),
+                self._window(),
+                bins=2,
+            )
+
+    def test_multi_row_uncertainty_requires_explicit_dependence_assumption(self):
+        records, outcomes = self._cohort()
+        with self.assertRaisesRegex(ValueError, "INDEPENDENT_BERNOULLI"):
+            evaluate_calibration_diagnostics(
+                records,
+                outcomes,
+                self._window(),
+                bins=5,
+            )
+
+    def test_iid_diagnostic_rejects_repeated_exact_quote_key(self):
+        records, outcomes = self._cohort()
+        repeated = (
+            records[0],
+            ForecastRecord(
+                quote_key=records[0].quote_key,
+                probability=records[1].probability,
+                model_id=records[1].model_id,
+                model_version=records[1].model_version,
+                strategy_version=records[1].strategy_version,
+                model_training_cutoff_ts=records[1].model_training_cutoff_ts,
+                input_cutoff_ts=records[1].input_cutoff_ts,
+                generated_at=records[1].generated_at,
+                uncertainty=records[1].uncertainty,
+                evidence_hashes=records[1].evidence_hashes,
+                market_snapshot_hash=records[1].market_snapshot_hash,
+                provenance=records[1].provenance,
+                forecast_id=records[1].forecast_id,
+            ),
+        )
+        with self.assertRaisesRegex(ValueError, "repeated quote_key"):
+            self._evaluate(
+                repeated,
+                outcomes[:2],
+                self._window(),
+                bins=2,
+            )
 
     def test_causal_and_training_boundary_checks_are_preserved(self):
         records, outcomes = self._cohort()
@@ -286,7 +359,7 @@ class CalibrationDiagnosticsTests(unittest.TestCase):
             ),
         ) + records[1:]
         with self.assertRaisesRegex(ValueError, "holdout/walk-forward leakage"):
-            evaluate_calibration_diagnostics(
+            self._evaluate(
                 leaked,
                 outcomes,
                 self._window(),
@@ -297,7 +370,7 @@ class CalibrationDiagnosticsTests(unittest.TestCase):
             ForecastOutcomeFact("f-1", 1, "2026-02-10T11:00:00+00:00"),
         ) + outcomes[1:]
         with self.assertRaisesRegex(ValueError, "outcome reveal must be after forecast generation"):
-            evaluate_calibration_diagnostics(
+            self._evaluate(
                 records,
                 early_reveal,
                 self._window(),

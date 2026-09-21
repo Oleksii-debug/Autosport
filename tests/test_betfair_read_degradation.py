@@ -27,7 +27,7 @@ def test_common_documented_errors_have_same_read_disposition(error_code, action)
     for operation in ("listMarketBook", "getAccountFunds"):
         result = BetfairReadDegradation(operation, error_code)
         assert result.action is action
-        assert result.documented_for_operation is True
+        assert result.documented_for_api_family is True
         assert result.automatic_repeat_allowed is (
             action is ReadRecoveryAction.RETRY_WITH_BACKOFF
         )
@@ -46,11 +46,11 @@ def test_betting_specific_errors_are_documented_only_for_betting(error_code, act
     account = BetfairReadDegradation("getAccountFunds", error_code)
 
     assert betting.api_family == "BETTING"
-    assert betting.documented_for_operation is True
+    assert betting.documented_for_api_family is True
     assert betting.action is action
 
     assert account.api_family == "ACCOUNTS"
-    assert account.documented_for_operation is False
+    assert account.documented_for_api_family is False
     assert account.action is ReadRecoveryAction.DO_NOT_RETRY
     assert account.automatic_repeat_allowed is False
 
@@ -64,11 +64,11 @@ def test_accounts_specific_errors_are_not_rebound_to_betting(error_code):
     betting = BetfairReadDegradation("listMarketBook", error_code)
 
     assert account.api_family == "ACCOUNTS"
-    assert account.documented_for_operation is True
+    assert account.documented_for_api_family is True
     assert account.action is ReadRecoveryAction.FIX_CREDENTIALS_OR_CONFIG
 
     assert betting.api_family == "BETTING"
-    assert betting.documented_for_operation is False
+    assert betting.documented_for_api_family is False
     assert betting.action is ReadRecoveryAction.DO_NOT_RETRY
     assert betting.automatic_repeat_allowed is False
 
@@ -95,7 +95,7 @@ def test_request_shape_failures_require_repair_not_retry():
 
 def test_unknown_error_fails_closed_without_automatic_retry():
     result = BetfairReadDegradation("getAccountFunds", "FUTURE_PROVIDER_ERROR")
-    assert result.documented_for_operation is False
+    assert result.documented_for_api_family is False
     assert result.action is ReadRecoveryAction.DO_NOT_RETRY
     assert result.automatic_repeat_allowed is False
 
@@ -135,7 +135,7 @@ def test_supported_reads_can_classify_common_temporary_provider_failures(operati
     result = BetfairReadDegradation(operation, "SERVICE_BUSY")
     assert result.action is ReadRecoveryAction.RETRY_WITH_BACKOFF
     assert result.automatic_repeat_allowed is True
-    assert result.documented_for_operation is True
+    assert result.documented_for_api_family is True
     assert result.evidence_payload["read_only"] is True
 
 
@@ -201,7 +201,7 @@ def test_all_common_temporary_errors_are_repeatable_only_for_supported_reads():
     )
     for operation, error in itertools.product(operations, temporary):
         result = BetfairReadDegradation(operation, error)
-        assert result.documented_for_operation is True
+        assert result.documented_for_api_family is True
         assert result.automatic_repeat_allowed is True
         assert result.action is ReadRecoveryAction.RETRY_WITH_BACKOFF
 
@@ -215,7 +215,7 @@ def test_accounts_credentials_and_config_errors_never_mint_reauth_or_repeat_auth
         "INVALID_SUBSCRIPTION_TOKEN",
     ):
         result = BetfairReadDegradation("getAccountDetails", code)
-        assert result.documented_for_operation is True
+        assert result.documented_for_api_family is True
         assert result.action is ReadRecoveryAction.FIX_CREDENTIALS_OR_CONFIG
         assert result.requires_new_session is False
         assert result.automatic_repeat_allowed is False

@@ -13,12 +13,23 @@ from typing import Callable, Mapping, Sequence, TypeAlias
 
 from .integrity import atomic_write_json, durable_path_lock, ensure_durable_file
 from .json_integrity import strict_json_loads
+from .monotonic_workspace_authority import (
+    AuthorityPhase,
+    MonotonicWorkspaceAuthority,
+    MonotonicWorkspaceAuthorityError,
+)
 
 
 _SCHEMA_VERSION = 1
 _GENESIS_SHA256 = "0" * 64
 _HEX = frozenset("0123456789abcdef")
 _MAX_REVIEW_TTL_SECONDS = 3600
+_CHECKPOINT_SCHEMA_VERSION = 2
+_MONOTONIC_DOMAIN = "supervised-confirmation-authority"
+_MONOTONIC_BINDING_SCHEMA = "autosport.supervised_confirmation.monotonic_binding"
+_MONOTONIC_BINDING_VERSION = 1
+_MONOTONIC_STATE_SCHEMA = "autosport.supervised_confirmation.monotonic_state"
+_MONOTONIC_STATE_VERSION = 1
 _RECORD_KEYS = frozenset(
     {
         "schema_version",
@@ -30,8 +41,11 @@ _RECORD_KEYS = frozenset(
         "record_sha256",
     }
 )
-_CHECKPOINT_KEYS = frozenset(
+_LEGACY_CHECKPOINT_KEYS = frozenset(
     {"schema_version", "record_count", "last_record_sha256"}
+)
+_CHECKPOINT_KEYS = frozenset(
+    {"schema_version", "record_count", "last_record_sha256", "clock_high_water"}
 )
 _REVIEW_KEYS = frozenset(
     {
@@ -128,6 +142,8 @@ class _State:
     reviews: dict[str, SupervisedExecutionReview]
     receipts: dict[str, OperatorConfirmationReceipt]
     receipt_by_review: dict[str, str]
+    decision_sha256_by_id: dict[str, str]
+    receipt_by_decision: dict[str, str]
 
 
 def _utc_now() -> datetime:
@@ -290,17 +306,287 @@ class SupervisedConfirmationAuthority:
                     )
                 atomic_write_json(
                     self.checkpoint_path,
-                    self._checkpoint_payload(0, _GENESIS_SHA256),
+                    self._checkpoint_payload(0, _GENESIS_SHA256, None),
                 )
-            self._load(recover_checkpoint=True)
+            records, _, digest, clock_high_water = self._load(
+                recover_checkpoint=True
+            )
+            self._ensure_monotonic_current_locked(
+                records,
+                digest,
+                clock_high_water,
+                adopt_if_missing=True,
+            )
 
     @staticmethod
-    def _checkpoint_payload(count: int, digest: str) -> dict[str, object]:
+    def _checkpoint_payload(
+        count: int,
+        digest: str,
+        clock_high_water: str | None,
+    ) -> dict[str, object]:
         return {
-            "schema_version": _SCHEMA_VERSION,
+            "schema_version": _CHECKPOINT_SCHEMA_VERSION,
             "record_count": count,
             "last_record_sha256": digest,
+            "clock_high_water": clock_high_water,
         }
+
+    @staticmethod
+    def _monotonic_key(path: Path) -> str:
+        name = os.path.normcase(path.name)
+        return "supervised-confirmation-" + hashlib.sha256(
+            name.encode("utf-8")
+        ).hexdigest()
+
+    def _absolute_path(self) -> Path:
+        return Path(os.path.abspath(os.fspath(self.path)))
+
+    def _monotonic_authority(self) -> MonotonicWorkspaceAuthority:
+        absolute = self._absolute_path()
+        return MonotonicWorkspaceAuthority(
+            workspace=absolute.parent,
+            domain=_MONOTONIC_DOMAIN,
+            key=self._monotonic_key(absolute),
+        )
+
+    def _monotonic_binding(self) -> str:
+        return _domain_sha256(
+            _MONOTONIC_BINDING_SCHEMA,
+            {
+                "schema_version": _MONOTONIC_BINDING_VERSION,
+                "state_key": self._monotonic_key(self._absolute_path()),
+                "journal_schema_version": _SCHEMA_VERSION,
+                "checkpoint_schema_version": _CHECKPOINT_SCHEMA_VERSION,
+            },
+        )
+
+    def _monotonic_state_digest(
+        self,
+        records: Sequence[_Record],
+        digest: str,
+        clock_high_water: str | None,
+    ) -> str | None:
+        if not records and clock_high_water is None:
+            return None
+        return _domain_sha256(
+            _MONOTONIC_STATE_SCHEMA,
+            {
+                "schema_version": _MONOTONIC_STATE_VERSION,
+                "state_key": self._monotonic_key(self._absolute_path()),
+                "record_count": len(records),
+                "last_record_sha256": digest,
+                "clock_high_water": clock_high_water,
+            },
+        )
+
+    @staticmethod
+    def _monotonic_tx_id(
+        *,
+        operation: str,
+        observed_state_sha256: str | None,
+        intended_state_sha256: str,
+        semantic_binding_sha256: str,
+        authority_tip_sha256: str | None,
+    ) -> str:
+        return _domain_sha256(
+            "autosport.supervised-confirmation-monotonic-tx.v1",
+            {
+                "operation": operation,
+                "observed_state_sha256": observed_state_sha256,
+                "intended_state_sha256": intended_state_sha256,
+                "semantic_binding_sha256": semantic_binding_sha256,
+                "authority_tip_sha256": authority_tip_sha256,
+            },
+        )
+
+    @staticmethod
+    def _raise_monotonic_error(exc: MonotonicWorkspaceAuthorityError) -> None:
+        raise SupervisedConfirmationIntegrityError(
+            f"confirmation monotonic authority rejected local state: {exc}"
+        ) from exc
+
+    def _ensure_monotonic_current_locked(
+        self,
+        records: Sequence[_Record],
+        digest: str,
+        clock_high_water: str | None,
+        *,
+        adopt_if_missing: bool,
+    ) -> None:
+        observed = self._monotonic_state_digest(
+            records, digest, clock_high_water
+        )
+        binding = self._monotonic_binding()
+        try:
+            authority = self._monotonic_authority()
+            history = authority.read_history()
+            if not history:
+                if observed is None:
+                    return
+                if not adopt_if_missing:
+                    raise SupervisedConfirmationIntegrityError(
+                        "confirmation state exists without independent monotonic authority"
+                    )
+                tx_id = self._monotonic_tx_id(
+                    operation="ADOPT_VALIDATED_BASELINE",
+                    observed_state_sha256=None,
+                    intended_state_sha256=observed,
+                    semantic_binding_sha256=binding,
+                    authority_tip_sha256=None,
+                )
+                authority.prepare(
+                    tx_id=tx_id,
+                    observed_state_sha256=None,
+                    intended_state_sha256=observed,
+                    semantic_binding_sha256=binding,
+                )
+                authority.commit(
+                    tx_id=tx_id,
+                    observed_state_sha256=observed,
+                    semantic_binding_sha256=binding,
+                )
+                return
+
+            latest = history[-1]
+            if (
+                latest.phase is AuthorityPhase.PREPARE
+                and observed == latest.intended_state_sha256
+            ):
+                authority.recover(
+                    observed_state_sha256=observed,
+                    tx_id=latest.tx_id,
+                    semantic_binding_sha256=binding,
+                )
+            else:
+                authority.recover(observed_state_sha256=observed)
+        except MonotonicWorkspaceAuthorityError as exc:
+            self._raise_monotonic_error(exc)
+
+    def _prepare_monotonic_transition_locked(
+        self,
+        *,
+        records: Sequence[_Record],
+        digest: str,
+        clock_high_water: str | None,
+        intended_record_count: int,
+        intended_digest: str,
+        intended_clock_high_water: str | None,
+        operation: str,
+    ) -> tuple[MonotonicWorkspaceAuthority, str, str, str]:
+        self._ensure_monotonic_current_locked(
+            records,
+            digest,
+            clock_high_water,
+            adopt_if_missing=True,
+        )
+        observed = self._monotonic_state_digest(
+            records, digest, clock_high_water
+        )
+        intended = _domain_sha256(
+            _MONOTONIC_STATE_SCHEMA,
+            {
+                "schema_version": _MONOTONIC_STATE_VERSION,
+                "state_key": self._monotonic_key(self._absolute_path()),
+                "record_count": intended_record_count,
+                "last_record_sha256": intended_digest,
+                "clock_high_water": intended_clock_high_water,
+            },
+        )
+        binding = self._monotonic_binding()
+        try:
+            authority = self._monotonic_authority()
+            history = authority.read_history()
+            tip = None if not history else history[-1].record_sha256
+            tx_id = self._monotonic_tx_id(
+                operation=operation,
+                observed_state_sha256=observed,
+                intended_state_sha256=intended,
+                semantic_binding_sha256=binding,
+                authority_tip_sha256=tip,
+            )
+            authority.prepare(
+                tx_id=tx_id,
+                observed_state_sha256=observed,
+                intended_state_sha256=intended,
+                semantic_binding_sha256=binding,
+            )
+            return authority, tx_id, binding, intended
+        except MonotonicWorkspaceAuthorityError as exc:
+            self._raise_monotonic_error(exc)
+            raise AssertionError("unreachable")
+
+    def _commit_monotonic_transition_locked(
+        self,
+        *,
+        authority: MonotonicWorkspaceAuthority,
+        tx_id: str,
+        binding: str,
+        intended_state_sha256: str,
+    ) -> None:
+        records, _, digest, clock_high_water = self._load(
+            recover_checkpoint=False
+        )
+        observed = self._monotonic_state_digest(
+            records, digest, clock_high_water
+        )
+        if observed != intended_state_sha256:
+            raise SupervisedConfirmationIntegrityError(
+                "confirmation local state differs from monotonic PREPARE"
+            )
+        assert observed is not None
+        try:
+            authority.commit(
+                tx_id=tx_id,
+                observed_state_sha256=observed,
+                semantic_binding_sha256=binding,
+            )
+        except MonotonicWorkspaceAuthorityError as exc:
+            self._raise_monotonic_error(exc)
+
+    def _observe_clock_locked(
+        self,
+        records: Sequence[_Record],
+        digest: str,
+        clock_high_water: str | None,
+        now: datetime,
+    ) -> str:
+        now_text = _timestamp(now)
+        if clock_high_water is not None:
+            prior = _parse_timestamp("clock_high_water", clock_high_water)
+            if now < prior:
+                raise SupervisedConfirmationConflictError(
+                    "product clock moved backwards behind durable confirmation history"
+                )
+            if now_text == clock_high_water:
+                return clock_high_water
+
+        authority, tx_id, binding, intended = (
+            self._prepare_monotonic_transition_locked(
+                records=records,
+                digest=digest,
+                clock_high_water=clock_high_water,
+                intended_record_count=len(records),
+                intended_digest=digest,
+                intended_clock_high_water=now_text,
+                operation="ADVANCE_CLOCK_HIGH_WATER",
+            )
+        )
+        try:
+            atomic_write_json(
+                self.checkpoint_path,
+                self._checkpoint_payload(len(records), digest, now_text),
+            )
+        except OSError as exc:
+            raise SupervisedConfirmationError(
+                "failed to durably advance confirmation clock high-water"
+            ) from exc
+        self._commit_monotonic_transition_locked(
+            authority=authority,
+            tx_id=tx_id,
+            binding=binding,
+            intended_state_sha256=intended,
+        )
+        return now_text
 
     def prepare_review(
         self,
@@ -338,12 +624,28 @@ class SupervisedConfirmationAuthority:
         )
 
         with durable_path_lock(self.path):
-            records, state, _ = self._load(recover_checkpoint=True)
+            records, state, digest, clock_high_water = self._load(
+                recover_checkpoint=True
+            )
+            self._ensure_monotonic_current_locked(
+                records, digest, clock_high_water, adopt_if_missing=True
+            )
             if review_id in state.reviews:
                 raise SupervisedConfirmationConflictError(
                     "review_id already exists in durable confirmation authority"
                 )
+            bound_decision_sha = state.decision_sha256_by_id.get(decision_id)
+            if bound_decision_sha is not None and bound_decision_sha != decision_sha256:
+                raise SupervisedConfirmationConflictError(
+                    "decision_id is already bound to different durable decision evidence"
+                )
             now = self._now()
+            if clock_high_water is not None and now < _parse_timestamp(
+                "clock_high_water", clock_high_water
+            ):
+                raise SupervisedConfirmationConflictError(
+                    "product clock moved backwards behind durable confirmation history"
+                )
             reviewed_at = _timestamp(now)
             expires_at = _timestamp(now + timedelta(seconds=ttl_seconds))
             payload: dict[str, object] = {
@@ -366,6 +668,8 @@ class SupervisedConfirmationAuthority:
                 event_type=ConfirmationEventType.REVIEW_PREPARED,
                 recorded_at=reviewed_at,
                 payload=payload,
+                digest=digest,
+                clock_high_water=clock_high_water,
             )
             return self._review_from_payload(record.payload)
 
@@ -380,7 +684,12 @@ class SupervisedConfirmationAuthority:
             "expected_review_sha256", expected_review_sha256
         )
         with durable_path_lock(self.path):
-            records, state, _ = self._load(recover_checkpoint=True)
+            records, state, digest, clock_high_water = self._load(
+                recover_checkpoint=True
+            )
+            self._ensure_monotonic_current_locked(
+                records, digest, clock_high_water, adopt_if_missing=True
+            )
             review = state.reviews.get(review_id)
             if review is None:
                 raise SupervisedConfirmationConflictError("review_id is not durable")
@@ -392,10 +701,21 @@ class SupervisedConfirmationAuthority:
                 raise SupervisedConfirmationConflictError(
                     "review already has a durable confirmation receipt"
                 )
+            if review.decision_id in state.receipt_by_decision:
+                raise SupervisedConfirmationConflictError(
+                    "decision already has a durable confirmation receipt"
+                )
             now = self._now()
-            if now > _parse_timestamp("expires_at", review.expires_at):
+            clock_high_water = self._observe_clock_locked(
+                records, digest, clock_high_water, now
+            )
+            if now >= _parse_timestamp("expires_at", review.expires_at):
                 raise SupervisedConfirmationConflictError(
                     "review expired before confirmation"
+                )
+            if now < _parse_timestamp("reviewed_at", review.reviewed_at):
+                raise SupervisedConfirmationConflictError(
+                    "confirmation cannot predate durable review"
                 )
             confirmed_at = _timestamp(now)
             receipt_id = _domain_sha256(
@@ -420,6 +740,8 @@ class SupervisedConfirmationAuthority:
                 event_type=ConfirmationEventType.REVIEW_CONFIRMED,
                 recorded_at=confirmed_at,
                 payload=payload,
+                digest=digest,
+                clock_high_water=clock_high_water,
             )
             return self._receipt_from_confirmation(record.payload, review)
 
@@ -437,7 +759,12 @@ class SupervisedConfirmationAuthority:
         if type(require_unconsumed) is not bool:
             raise TypeError("require_unconsumed must be bool")
         with durable_path_lock(self.path):
-            _, state, _ = self._load(recover_checkpoint=True)
+            records, state, digest, clock_high_water = self._load(
+                recover_checkpoint=True
+            )
+            self._ensure_monotonic_current_locked(
+                records, digest, clock_high_water, adopt_if_missing=True
+            )
             receipt = state.receipts.get(receipt_id)
             if receipt is None:
                 raise SupervisedConfirmationConflictError(
@@ -451,6 +778,14 @@ class SupervisedConfirmationAuthority:
                 raise SupervisedConfirmationConflictError(
                     "confirmation receipt has already been consumed"
                 )
+            now = self._now()
+            self._observe_clock_locked(records, digest, clock_high_water, now)
+            if require_unconsumed:
+                review = state.reviews[receipt.review_id]
+                if now >= _parse_timestamp("expires_at", review.expires_at):
+                    raise SupervisedConfirmationConflictError(
+                        "confirmation receipt expired with its bound review"
+                    )
             return receipt
 
     def consume_receipt(
@@ -466,7 +801,12 @@ class SupervisedConfirmationAuthority:
         )
         consumer_key = _text("consumer_key", consumer_key, max_length=512)
         with durable_path_lock(self.path):
-            records, state, _ = self._load(recover_checkpoint=True)
+            records, state, digest, clock_high_water = self._load(
+                recover_checkpoint=True
+            )
+            self._ensure_monotonic_current_locked(
+                records, digest, clock_high_water, adopt_if_missing=True
+            )
             receipt = state.receipts.get(receipt_id)
             if receipt is None:
                 raise SupervisedConfirmationConflictError(
@@ -480,7 +820,16 @@ class SupervisedConfirmationAuthority:
                 raise SupervisedConfirmationConflictError(
                     "confirmation receipt has already been consumed"
                 )
-            consumed_at = _timestamp(self._now())
+            now = self._now()
+            clock_high_water = self._observe_clock_locked(
+                records, digest, clock_high_water, now
+            )
+            review = state.reviews[receipt.review_id]
+            if now >= _parse_timestamp("expires_at", review.expires_at):
+                raise SupervisedConfirmationConflictError(
+                    "confirmation receipt expired with its bound review"
+                )
+            consumed_at = _timestamp(now)
             self._append_locked(
                 records,
                 event_type=ConfirmationEventType.RECEIPT_CONSUMED,
@@ -491,6 +840,8 @@ class SupervisedConfirmationAuthority:
                     "consumer_key": consumer_key,
                     "consumed_at": consumed_at,
                 },
+                digest=digest,
+                clock_high_water=clock_high_water,
             )
             return OperatorConfirmationReceipt(
                 receipt_id=receipt.receipt_id,
@@ -511,7 +862,7 @@ class SupervisedConfirmationAuthority:
             raise ValueError("clock must return a timezone-aware datetime")
         return value.astimezone(timezone.utc)
 
-    def _read_checkpoint(self) -> tuple[int, str]:
+    def _read_checkpoint(self) -> tuple[int, str, str | None, bool]:
         _assert_safe_regular_or_absent(
             self.checkpoint_path, label="confirmation checkpoint"
         )
@@ -522,7 +873,15 @@ class SupervisedConfirmationAuthority:
                 "confirmation checkpoint is unreadable"
             ) from exc
         payload = _decode_object(raw, label="confirmation checkpoint")
-        if set(payload) != _CHECKPOINT_KEYS or payload.get("schema_version") != _SCHEMA_VERSION:
+        legacy = (
+            set(payload) == _LEGACY_CHECKPOINT_KEYS
+            and payload.get("schema_version") == _SCHEMA_VERSION
+        )
+        current = (
+            set(payload) == _CHECKPOINT_KEYS
+            and payload.get("schema_version") == _CHECKPOINT_SCHEMA_VERSION
+        )
+        if not legacy and not current:
             raise SupervisedConfirmationIntegrityError(
                 "confirmation checkpoint schema is invalid"
             )
@@ -536,8 +895,18 @@ class SupervisedConfirmationAuthority:
             raise SupervisedConfirmationIntegrityError(
                 "confirmation checkpoint genesis state is inconsistent"
             )
+        high_water: str | None = None
+        if current:
+            raw_high_water = payload.get("clock_high_water")
+            if raw_high_water is not None:
+                try:
+                    high_water = _timestamp(
+                        _parse_timestamp("clock_high_water", raw_high_water)
+                    )
+                except ValueError as exc:
+                    raise SupervisedConfirmationIntegrityError(str(exc)) from exc
         assert isinstance(digest, str)
-        return count, digest
+        return count, digest, high_water, legacy
 
     def _read_records(self) -> list[_Record]:
         _assert_safe_regular_or_absent(self.path, label="confirmation journal")
@@ -613,8 +982,22 @@ class SupervisedConfirmationAuthority:
         return records
 
     def _state_from_records(self, records: Sequence[_Record]) -> _State:
-        state = _State(reviews={}, receipts={}, receipt_by_review={})
+        state = _State(
+            reviews={},
+            receipts={},
+            receipt_by_review={},
+            decision_sha256_by_id={},
+            receipt_by_decision={},
+        )
+        previous_recorded_at: datetime | None = None
         for record in records:
+            recorded_at = _parse_timestamp("recorded_at", record.recorded_at)
+            if previous_recorded_at is not None and recorded_at < previous_recorded_at:
+                raise SupervisedConfirmationIntegrityError(
+                    "confirmation record clock regressed"
+                )
+            previous_recorded_at = recorded_at
+
             if record.event_type is ConfirmationEventType.REVIEW_PREPARED:
                 review = self._review_from_payload(record.payload)
                 if record.recorded_at != review.reviewed_at:
@@ -625,6 +1008,12 @@ class SupervisedConfirmationAuthority:
                     raise SupervisedConfirmationIntegrityError(
                         "confirmation journal reuses review_id"
                     )
+                bound_decision_sha = state.decision_sha256_by_id.get(review.decision_id)
+                if bound_decision_sha is not None and bound_decision_sha != review.decision_sha256:
+                    raise SupervisedConfirmationIntegrityError(
+                        "decision_id was rebound to different durable decision evidence"
+                    )
+                state.decision_sha256_by_id[review.decision_id] = review.decision_sha256
                 state.reviews[review.review_id] = review
                 continue
 
@@ -644,14 +1033,22 @@ class SupervisedConfirmationAuthority:
                     raise SupervisedConfirmationIntegrityError(
                         "review/receipt was confirmed more than once"
                     )
-                if _parse_timestamp("confirmed_at", receipt.confirmed_at) > _parse_timestamp(
-                    "expires_at", review.expires_at
-                ):
+                if review.decision_id in state.receipt_by_decision:
                     raise SupervisedConfirmationIntegrityError(
-                        "persisted confirmation occurs after review expiry"
+                        "decision was confirmed more than once"
+                    )
+                confirmed_at = _parse_timestamp("confirmed_at", receipt.confirmed_at)
+                if confirmed_at < _parse_timestamp("reviewed_at", review.reviewed_at):
+                    raise SupervisedConfirmationIntegrityError(
+                        "persisted confirmation predates review"
+                    )
+                if confirmed_at >= _parse_timestamp("expires_at", review.expires_at):
+                    raise SupervisedConfirmationIntegrityError(
+                        "persisted confirmation occurs at or after review expiry"
                     )
                 state.receipts[receipt.receipt_id] = receipt
                 state.receipt_by_review[review_id] = receipt.receipt_id
+                state.receipt_by_decision[review.decision_id] = receipt.receipt_id
                 continue
 
             if record.event_type is ConfirmationEventType.RECEIPT_CONSUMED:
@@ -669,9 +1066,7 @@ class SupervisedConfirmationAuthority:
                     raise SupervisedConfirmationIntegrityError(
                         "confirmation receipt was consumed more than once"
                     )
-                review_sha256 = self._payload_sha256(
-                    record.payload, "review_sha256"
-                )
+                review_sha256 = self._payload_sha256(record.payload, "review_sha256")
                 if review_sha256 != receipt.review_sha256:
                     raise SupervisedConfirmationIntegrityError(
                         "consumption review digest mismatches receipt"
@@ -682,11 +1077,15 @@ class SupervisedConfirmationAuthority:
                     raise SupervisedConfirmationIntegrityError(
                         "consumption record timestamp mismatches payload"
                     )
-                if _parse_timestamp("consumed_at", consumed_at) < _parse_timestamp(
-                    "confirmed_at", receipt.confirmed_at
-                ):
+                consumed_instant = _parse_timestamp("consumed_at", consumed_at)
+                if consumed_instant < _parse_timestamp("confirmed_at", receipt.confirmed_at):
                     raise SupervisedConfirmationIntegrityError(
                         "receipt consumption predates confirmation"
+                    )
+                review = state.reviews[receipt.review_id]
+                if consumed_instant >= _parse_timestamp("expires_at", review.expires_at):
+                    raise SupervisedConfirmationIntegrityError(
+                        "persisted receipt consumption occurs at or after review expiry"
                     )
                 state.receipts[receipt_id] = OperatorConfirmationReceipt(
                     receipt_id=receipt.receipt_id,
@@ -707,12 +1106,13 @@ class SupervisedConfirmationAuthority:
 
     def _load(
         self, *, recover_checkpoint: bool
-    ) -> tuple[list[_Record], _State, str]:
+    ) -> tuple[list[_Record], _State, str, str | None]:
         records = self._read_records()
         state = self._state_from_records(records)
-        checkpoint_count, checkpoint_digest = self._read_checkpoint()
+        checkpoint_count, checkpoint_digest, checkpoint_high_water, legacy = self._read_checkpoint()
         count = len(records)
         digest = records[-1].record_sha256 if records else _GENESIS_SHA256
+        record_high_water = records[-1].recorded_at if records else None
         if checkpoint_count > count:
             raise SupervisedConfirmationIntegrityError(
                 "confirmation journal was truncated behind durable checkpoint"
@@ -722,12 +1122,16 @@ class SupervisedConfirmationAuthority:
                 raise SupervisedConfirmationIntegrityError(
                     "confirmation checkpoint does not match journal head"
                 )
+            if not legacy and record_high_water is not None and (
+                checkpoint_high_water is None
+                or _parse_timestamp("clock_high_water", checkpoint_high_water)
+                < _parse_timestamp("recorded_at", record_high_water)
+            ):
+                raise SupervisedConfirmationIntegrityError(
+                    "confirmation checkpoint clock high-water is behind journal"
+                )
         else:
-            prefix_digest = (
-                _GENESIS_SHA256
-                if checkpoint_count == 0
-                else records[checkpoint_count - 1].record_sha256
-            )
+            prefix_digest = _GENESIS_SHA256 if checkpoint_count == 0 else records[checkpoint_count - 1].record_sha256
             if checkpoint_digest != prefix_digest:
                 raise SupervisedConfirmationIntegrityError(
                     "confirmation checkpoint is not a valid journal prefix"
@@ -736,11 +1140,25 @@ class SupervisedConfirmationAuthority:
                 raise SupervisedConfirmationIntegrityError(
                     "confirmation journal has durable records beyond checkpoint"
                 )
+
+        high_water = checkpoint_high_water
+        if record_high_water is not None and (
+            high_water is None
+            or _parse_timestamp("clock_high_water", high_water)
+            < _parse_timestamp("recorded_at", record_high_water)
+        ):
+            high_water = record_high_water
+
+        if legacy or checkpoint_count < count:
+            if not recover_checkpoint:
+                raise SupervisedConfirmationIntegrityError(
+                    "confirmation checkpoint requires deterministic recovery"
+                )
             atomic_write_json(
                 self.checkpoint_path,
-                self._checkpoint_payload(count, digest),
+                self._checkpoint_payload(count, digest, high_water),
             )
-        return records, state, digest
+        return records, state, digest, high_water
 
     def _append_locked(
         self,
@@ -749,9 +1167,22 @@ class SupervisedConfirmationAuthority:
         event_type: ConfirmationEventType,
         recorded_at: str,
         payload: Mapping[str, object],
+        digest: str,
+        clock_high_water: str | None,
     ) -> _Record:
+        recorded_instant = _parse_timestamp("recorded_at", recorded_at)
+        if clock_high_water is not None and recorded_instant < _parse_timestamp(
+            "clock_high_water", clock_high_water
+        ):
+            raise SupervisedConfirmationConflictError(
+                "product clock moved backwards behind durable confirmation history"
+            )
         sequence = len(records) + 1
         previous = records[-1].record_sha256 if records else _GENESIS_SHA256
+        if previous != digest:
+            raise SupervisedConfirmationIntegrityError(
+                "confirmation append base digest changed"
+            )
         event: dict[str, object] = {
             "schema_version": _SCHEMA_VERSION,
             "sequence": sequence,
@@ -760,17 +1191,27 @@ class SupervisedConfirmationAuthority:
             "payload": dict(payload),
             "previous_sha256": previous,
         }
-        digest = _sha256(event)
-        event["record_sha256"] = digest
+        event_digest = _sha256(event)
+        event["record_sha256"] = event_digest
         candidate = _Record(
             sequence=sequence,
             recorded_at=recorded_at,
             event_type=event_type,
             payload=dict(payload),
             previous_sha256=previous,
-            record_sha256=digest,
+            record_sha256=event_digest,
         )
         self._state_from_records([*records, candidate])
+        next_high_water = recorded_at
+        authority, tx_id, binding, intended = self._prepare_monotonic_transition_locked(
+            records=records,
+            digest=digest,
+            clock_high_water=clock_high_water,
+            intended_record_count=sequence,
+            intended_digest=event_digest,
+            intended_clock_high_water=next_high_water,
+            operation=f"APPEND_{event_type.value}",
+        )
         _assert_safe_regular_or_absent(self.path, label="confirmation journal")
         try:
             with self.path.open("ab") as handle:
@@ -783,7 +1224,13 @@ class SupervisedConfirmationAuthority:
             ) from exc
         atomic_write_json(
             self.checkpoint_path,
-            self._checkpoint_payload(sequence, digest),
+            self._checkpoint_payload(sequence, event_digest, next_high_water),
+        )
+        self._commit_monotonic_transition_locked(
+            authority=authority,
+            tx_id=tx_id,
+            binding=binding,
+            intended_state_sha256=intended,
         )
         return candidate
 

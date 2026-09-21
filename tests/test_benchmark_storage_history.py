@@ -64,6 +64,7 @@ def test_storage_benchmark_small_run_proves_all_read_cardinalities() -> None:
     assert result.python_version
     assert result.sqlite_version
     assert result.operating_system
+    assert result.read_after_reopen is True
     assert result.write.rows == 24
     assert result.full_history_read.rows == 24
     assert result.event_history_read.rows == 8
@@ -96,5 +97,6 @@ def test_storage_benchmark_result_is_machine_readable_without_threshold_claims()
     assert decoded["python_version"]
     assert decoded["sqlite_version"]
     assert decoded["operating_system"]
+    assert decoded["read_after_reopen"] is True
     assert "threshold" not in serialized.lower()
     assert payload["full_history_read"]["rows"] == 12

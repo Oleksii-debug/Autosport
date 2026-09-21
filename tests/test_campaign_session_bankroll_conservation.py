@@ -88,6 +88,23 @@ class CampaignSessionBankrollConservationTests(unittest.TestCase):
         with self.assertRaisesRegex(CampaignError, "net_profit is required"):
             self._session(net_profit=None)
 
+    def test_campaign_money_ingress_requires_exact_decimal(self) -> None:
+        invalid_values = (
+            ("starting_bankroll", 1000.0),
+            ("ending_bankroll", 1060.0),
+            ("net_profit", 60.0),
+            ("turnover", 600.0),
+            ("starting_bankroll", 1000),
+            ("starting_bankroll", "1000"),
+        )
+        for field, value in invalid_values:
+            with self.subTest(field=field, value=value):
+                with self.assertRaisesRegex(
+                    CampaignError,
+                    rf"{field} must be an exact Decimal",
+                ):
+                    self._session(**{field: value})
+
     def test_rehashed_inconsistent_durable_payload_fails_closed(self) -> None:
         raw = self._session().to_payload()
         raw["ending_bankroll"] = "1059"

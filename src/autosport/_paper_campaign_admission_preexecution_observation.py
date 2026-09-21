@@ -154,6 +154,8 @@ def _install() -> None:
     stable_checkpoint = CausalLearningEnvironment.checkpoint
     stable_origin_to_dict = _origin.DecisionRecordOrigin.to_dict
     product_runtime_context = _instance_guard._PRODUCT_ORIGIN_RUNTIME
+    json_loads = json.loads
+    json_dumps = json.dumps
 
     @wraps(stable_runtime_init)
     def runtime_init_with_learning_environment(
@@ -269,7 +271,7 @@ def _install() -> None:
                 "decision origin lacks complete pre-published learning evidence"
             )
         try:
-            raw = json.loads(raw_json)
+            raw = json_loads(raw_json)
         except (json.JSONDecodeError, TypeError, ValueError) as exc:
             raise _origin.PaperExecutionDecisionOriginError(
                 "pre-published learning observation is not canonical JSON"
@@ -291,7 +293,7 @@ def _install() -> None:
                 "learning observation was not available before the economic decision"
             )
         canonical_raw = _observation_payload(observation)
-        canonical_json = json.dumps(
+        canonical_json = json_dumps(
             canonical_raw,
             ensure_ascii=False,
             sort_keys=True,

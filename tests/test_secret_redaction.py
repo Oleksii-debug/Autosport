@@ -48,7 +48,7 @@ class SecretRedactionTests(unittest.TestCase):
             self.assertNotIn(secret, redacted)
         self.assertIn("api_key=" + REDACTED, redacted)
         self.assertIn("password:'" + REDACTED + "'", redacted)
-        self.assertIn("Bearer " + REDACTED, redacted)
+        self.assertIn("Authorization: " + REDACTED, redacted)
         self.assertIn("https://" + REDACTED + "@example.test/path", redacted)
         self.assertIn("market=match", redacted)
 

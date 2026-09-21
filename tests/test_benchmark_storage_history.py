@@ -54,9 +54,16 @@ def test_storage_benchmark_small_run_proves_all_read_cardinalities() -> None:
         selections_per_event=2,
     )
 
+    assert result.schema_version == 1
     assert result.requested_events == 24
     assert result.persisted_events == 24
+    assert result.event_count == 3
+    assert result.selections_per_event == 2
+    assert result.target_event_id == "event-0"
     assert result.database_bytes > 0
+    assert result.python_version
+    assert result.sqlite_version
+    assert result.operating_system
     assert result.write.rows == 24
     assert result.full_history_read.rows == 24
     assert result.event_history_read.rows == 8
@@ -81,6 +88,13 @@ def test_storage_benchmark_result_is_machine_readable_without_threshold_claims()
     payload = result.to_dict()
 
     serialized = json.dumps(payload, sort_keys=True)
-    assert json.loads(serialized)["requested_events"] == 12
+    decoded = json.loads(serialized)
+    assert decoded["schema_version"] == 1
+    assert decoded["requested_events"] == 12
+    assert decoded["event_count"] == 3
+    assert decoded["selections_per_event"] == 2
+    assert decoded["python_version"]
+    assert decoded["sqlite_version"]
+    assert decoded["operating_system"]
     assert "threshold" not in serialized.lower()
     assert payload["full_history_read"]["rows"] == 12

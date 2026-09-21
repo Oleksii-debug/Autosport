@@ -30,6 +30,7 @@ def test_events_and_market_types_are_scoped_by_event_type_id_not_name():
 def test_catalogue_request_uses_locale_independent_selectors_and_provider_limit():
     request = build_list_market_catalogue_request(
         event_type_ids=("1", "7"),
+        event_ids=("100", "200"),
         market_type_codes=("MATCH_ODDS", "WIN"),
         max_results=1000,
         market_start_from="2026-09-21T00:00:00Z",
@@ -38,6 +39,7 @@ def test_catalogue_request_uses_locale_independent_selectors_and_provider_limit(
     assert request.method == "SportsAPING/v1.0/listMarketCatalogue"
     assert request.params["filter"] == {
         "eventTypeIds": ("1", "7"),
+        "eventIds": ("100", "200"),
         "marketTypeCodes": ("MATCH_ODDS", "WIN"),
         "marketStartTime": {
             "from": "2026-09-21T00:00:00Z",
@@ -177,3 +179,13 @@ def test_rpc_params_is_detached_and_json_serializable():
     json.dumps(params)
     params["filter"]["eventTypeIds"].append("7")
     assert tuple(request.params["filter"]["eventTypeIds"]) == ("1",)
+
+
+def test_catalogue_row_outside_requested_event_scope_fails_closed():
+    with pytest.raises(BetfairCatalogError, match="requested event scope"):
+        parse_market_catalogue_result(
+            [_catalogue_row(1)],
+            requested_event_type_ids=("1",),
+            requested_event_ids=("event-2",),
+            requested_max_results=10,
+        )

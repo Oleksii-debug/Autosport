@@ -805,8 +805,12 @@ class MonotonicWorkspaceAuthority:
             root_activated = True
 
         if root_bound:
-            # Only after the selected root is proven may a moved/copied local
-            # workspace marker register its new path inside that same root.
+            # A moved/copied workspace may have proven the root through another
+            # stable path receipt for the same immutable workspace identity.
+            # Persist this path's root selector before registering its per-root
+            # workspace-path alias, so later deletion at the new path cannot
+            # reopen a fresh machine-root universe.
+            self._ensure_authority_root_bound()
             self._validate_workspace_binding(register_moved_or_copied_path=True)
         return history
 

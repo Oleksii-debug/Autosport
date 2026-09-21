@@ -9,7 +9,9 @@ from autosport.model_drift_evidence import (
     DriftObservation,
     DriftWindow,
     ModelDriftEvidenceError,
+    TwoSampleKSEvidence,
     build_two_sample_ks_evidence,
+    verify_two_sample_ks_evidence,
 )
 
 
@@ -69,6 +71,7 @@ def test_exact_ks_statistic_is_rational_and_deterministic_without_lifecycle_verd
     )
     payload = evidence.to_payload()
 
+    assert type(evidence) is TwoSampleKSEvidence
     assert evidence.ks_numerator == 1
     assert evidence.ks_denominator == 3
     assert evidence.max_difference_at == "1"
@@ -311,3 +314,163 @@ def test_one_observation_identity_change_changes_window_and_evidence_identity():
 
     assert current.identity_sha256 != changed.identity_sha256
     assert first.evidence_sha256 != second.evidence_sha256
+
+
+def test_window_binds_availability_time_as_the_causal_window_basis():
+    reference = _window("reference", ("1", "2"), day=1)
+    payload = reference.to_payload()
+
+    assert payload["window_basis"] == "available_at"
+
+
+def test_reused_source_evidence_identity_fails_closed_even_under_new_sample_alias():
+    shared_evidence = _hash("same-underlying-evidence")
+    reference = DriftWindow(
+        window_id="reference",
+        model_id="model:alpha",
+        model_artifact_sha256=_hash("model:alpha:v1"),
+        metric_key="score",
+        window_start="2026-01-01T00:00:00Z",
+        window_end="2026-01-01T01:00:00Z",
+        observations=(
+            DriftObservation(
+                sample_id="reference-row",
+                observed_at="2026-01-01T00:10:00Z",
+                available_at="2026-01-01T00:10:30Z",
+                value="1",
+                evidence_sha256=shared_evidence,
+            ),
+        ),
+    )
+    current = DriftWindow(
+        window_id="current",
+        model_id="model:alpha",
+        model_artifact_sha256=_hash("model:alpha:v1"),
+        metric_key="score",
+        window_start="2026-01-02T00:00:00Z",
+        window_end="2026-01-02T01:00:00Z",
+        observations=(
+            DriftObservation(
+                sample_id="renamed-current-row",
+                observed_at="2026-01-02T00:10:00Z",
+                available_at="2026-01-02T00:10:30Z",
+                value="2",
+                evidence_sha256=shared_evidence,
+            ),
+        ),
+    )
+
+    with pytest.raises(ModelDriftEvidenceError, match="must not reuse evidence_sha256"):
+        build_two_sample_ks_evidence(
+            reference,
+            current,
+            evaluated_at="2026-01-02T01:00:00Z",
+        )
+
+
+def test_duplicate_source_evidence_within_one_window_fails_closed():
+    evidence = _hash("duplicated-source")
+    first = DriftObservation(
+        sample_id="a",
+        observed_at="2026-01-01T00:01:00Z",
+        available_at="2026-01-01T00:01:30Z",
+        value="1",
+        evidence_sha256=evidence,
+    )
+    second = DriftObservation(
+        sample_id="b",
+        observed_at="2026-01-01T00:02:00Z",
+        available_at="2026-01-01T00:02:30Z",
+        value="2",
+        evidence_sha256=evidence,
+    )
+
+    with pytest.raises(ModelDriftEvidenceError, match="evidence_sha256 values must be unique"):
+        DriftWindow(
+            window_id="reference",
+            model_id="model:alpha",
+            model_artifact_sha256=_hash("model:alpha:v1"),
+            metric_key="score",
+            window_start="2026-01-01T00:00:00Z",
+            window_end="2026-01-01T01:00:00Z",
+            observations=(first, second),
+        )
+
+
+def test_float_measurement_input_is_rejected_instead_of_silently_exactified():
+    with pytest.raises(ModelDriftEvidenceError, match="exact decimal"):
+        DriftObservation(
+            sample_id="float-input",
+            observed_at="2026-01-01T00:10:00Z",
+            available_at="2026-01-01T00:10:30Z",
+            value=0.1,  # type: ignore[arg-type]
+            evidence_sha256=_hash("float-input"),
+        )
+
+
+def test_window_subclass_cannot_override_canonical_measurement_authority():
+    class ForgedWindow(DriftWindow):
+        @property
+        def identity_sha256(self) -> str:
+            return _hash("forged")
+
+    reference = _window("reference", ("1",), day=1)
+    current_base = _window("current", ("2",), day=2)
+    current = ForgedWindow(
+        window_id=current_base.window_id,
+        model_id=current_base.model_id,
+        model_artifact_sha256=current_base.model_artifact_sha256,
+        metric_key=current_base.metric_key,
+        window_start=current_base.window_start,
+        window_end=current_base.window_end,
+        observations=current_base.observations,
+    )
+
+    with pytest.raises(ModelDriftEvidenceError, match="exact DriftWindow"):
+        build_two_sample_ks_evidence(
+            reference,
+            current,
+            evaluated_at="2026-01-02T01:00:00Z",
+        )
+
+
+def test_unequal_sample_sizes_and_ties_have_exact_expected_statistic():
+    reference = _window("reference", ("0", "1"), day=1)
+    current = _window("current", ("1", "1", "2"), day=2)
+
+    evidence = build_two_sample_ks_evidence(
+        reference,
+        current,
+        evaluated_at="2026-01-02T01:00:00Z",
+    )
+
+    assert (evidence.ks_numerator, evidence.ks_denominator) == (1, 2)
+    assert evidence.max_difference_at == "0"
+    assert evidence.to_payload()["window_basis"] == "available_at"
+
+
+def test_window_ids_must_be_distinct_even_when_time_ranges_are_disjoint():
+    reference = _window("same-logical-window", ("1",), day=1)
+    current = _window("same-logical-window", ("2",), day=2)
+
+    with pytest.raises(ModelDriftEvidenceError, match="distinct window_id"):
+        build_two_sample_ks_evidence(
+            reference,
+            current,
+            evaluated_at="2026-01-02T01:00:00Z",
+        )
+
+
+def test_verifier_rederives_against_exact_windows():
+    reference = _window("reference", ("1", "2"), day=1)
+    current = _window("current", ("2", "3"), day=2)
+    other_current = _window("other-current", ("2", "4"), day=2)
+    evidence = build_two_sample_ks_evidence(
+        reference,
+        current,
+        evaluated_at="2026-01-02T01:00:00Z",
+    )
+
+    verify_two_sample_ks_evidence(evidence, reference, current)
+    with pytest.raises(ModelDriftEvidenceError, match="does not match exact"):
+        verify_two_sample_ks_evidence(evidence, reference, other_current)

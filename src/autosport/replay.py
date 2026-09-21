@@ -99,15 +99,37 @@ class ReplayRun:
     completed_at: str
 
 
+def _snapshot_replay_event(event: MarketEvent) -> MarketEvent:
+    """Own one canonical value snapshot without retaining caller metadata aliases."""
+
+    if not isinstance(event, MarketEvent):
+        raise TypeError("replay events must be MarketEvent values")
+    try:
+        # Dispatch through the canonical base-class serializer so subclasses cannot
+        # replace replay identity through an overridden to_dict implementation.
+        return MarketEvent.from_dict(MarketEvent.to_dict(event))
+    except (AttributeError, KeyError, TypeError, ValueError) as exc:
+        raise ValueError("replay event must be canonical") from exc
+
+
 class ReplayEngine:
     def __init__(self, events: Iterable[MarketEvent], firewall: ReplayLeakageFirewall | None = None) -> None:
-        raw_events = list(events)
-        self.events = sorted(raw_events, key=_replay_order_key)
+        # Snapshot each yielded value immediately. MarketEvent is frozen but nested
+        # metadata is mutable, so retaining caller objects would allow strategy-visible
+        # replay bytes to drift after dataset_hash was frozen.
+        raw_events = [_snapshot_replay_event(event) for event in events]
+        self._events = tuple(sorted(raw_events, key=_replay_order_key))
         self.firewall = firewall or ReplayLeakageFirewall()
         # Dataset identity preserves the pre-causal-delivery ordering contract.
         # Delivery order may evolve to match live availability semantics without
         # silently changing durable experiment/dataset identity for the same input.
         self.dataset_hash = _dataset_hash(raw_events)
+
+    @property
+    def events(self) -> tuple[MarketEvent, ...]:
+        """Return detached audit snapshots without exposing hash-bound engine state."""
+
+        return tuple(_snapshot_replay_event(event) for event in self._events)
 
     @classmethod
     def from_jsonl(cls, path: str | Path, firewall: ReplayLeakageFirewall | None = None) -> "ReplayEngine":
@@ -143,7 +165,7 @@ class ReplayEngine:
         started = utc_now_iso()
         count = 0
         replay_mirror = MarketMirror()
-        for event in self.events:
+        for event in self._events:
             if speed > 0:
                 current = _event_available_datetime(event).timestamp()
                 if previous is not None:
@@ -158,7 +180,10 @@ class ReplayEngine:
             update = replay_mirror.apply(event)
             count += 1
             if update.status == MirrorUpdate.APPLIED:
-                on_event(event)
+                # A strategy callback receives a value snapshot, never the engine's
+                # hash-bound internal event. Callback mutation therefore cannot
+                # rewrite later audit inspection or the durable replay identity.
+                on_event(_snapshot_replay_event(event))
         self.firewall._complete_replay(completion_capability)
         return ReplayRun(
             run_id=run_id or str(uuid.uuid4()),

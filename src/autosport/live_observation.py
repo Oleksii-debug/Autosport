@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import queue
+import re
 import sqlite3
 import threading
 from dataclasses import dataclass
@@ -22,6 +23,42 @@ Clock = Callable[[], str]
 
 _MAX_SNAPSHOT_BATCHES = 256
 _MAX_BATCH_ATTEMPTS = 2
+_SECRET_ASSIGNMENT = re.compile(
+    r"(?i)\b((?:[A-Z0-9]+_)*(?:API_KEY|APP_KEY|ACCESS_TOKEN|AUTH_TOKEN|CLIENT_SECRET|PASSWORD|PASSWD)|"
+    r"api[-_]?key|app[-_]?key|access[-_]?token|auth[-_]?token|client[-_]?secret|password|passwd)"
+    r"(\s*[:=]\s*)(?:[\"']?)([^&\s,;\"']+)(?:[\"']?)"
+)
+_AUTHORIZATION_HEADER = re.compile(
+    r"(?i)\b(Authorization\s*:\s*(?:Bearer|Basic)\s+)[^\s,;]+"
+)
+_URL_USERINFO = re.compile(r"(?i)\b(https?://)[^/@\s]+@")
+
+
+def _redact_sensitive_text(value: str) -> str:
+    """Remove credential-shaped values before a worker error reaches presentation surfaces."""
+
+    value = _AUTHORIZATION_HEADER.sub(r"\1[REDACTED]", value)
+    value = _URL_USERINFO.sub(r"\1[REDACTED]@", value)
+    return _SECRET_ASSIGNMENT.sub(
+        lambda match: f"{match.group(1)}{match.group(2)}[REDACTED]",
+        value,
+    )
+
+
+def _terminal_error_text(exc: BaseException) -> str:
+    """Build a deterministic terminal error without leaking credentials or hanging on __str__."""
+
+    try:
+        name = type.__getattribute__(type(exc), "__name__")
+    except BaseException:
+        name = "BaseException"
+    try:
+        detail = str(exc)
+    except BaseException:
+        return name
+    if not detail:
+        return name
+    return f"{name}: {_redact_sensitive_text(detail)}"
 
 
 @dataclass(frozen=True, slots=True)
@@ -74,7 +111,7 @@ class OneShotObservationWorker:
             # failure: publish one terminal error and let poll() restore idle state.
             self._thread = None
             self._messages.put(
-                ObservationWorkerMessage(error=f"{type(exc).__name__}: {exc}")
+                ObservationWorkerMessage(error=_terminal_error_text(exc))
             )
             return True
         return True
@@ -87,7 +124,7 @@ class OneShotObservationWorker:
             # not terminate the GUI process. Publish a terminal failure so poll()
             # clears the single-flight state instead of leaving live observation
             # permanently busy after the worker thread has already died.
-            message = ObservationWorkerMessage(error=f"{type(exc).__name__}: {exc}")
+            message = ObservationWorkerMessage(error=_terminal_error_text(exc))
         self._messages.put(message)
 
     def poll(self) -> ObservationWorkerMessage | None:

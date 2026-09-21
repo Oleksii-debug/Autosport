@@ -57,7 +57,11 @@ def test_payload_roundtrip_binds_exact_goal_and_policy_provenance() -> None:
         == provenance_for(goal).contract_sha256
     )
     assert payload["policy_provenance_sha256"] == policy.provenance_sha256
-    assert paper_risk_policy_from_payload(payload, economic_goal=goal) == policy
+    assert paper_risk_policy_from_payload(
+        payload,
+        economic_goal=goal,
+        expected_policy_provenance_sha256=policy.provenance_sha256,
+    ) == policy
 
 
 def test_store_roundtrip_survives_fresh_restart_instance(tmp_path) -> None:
@@ -69,7 +73,10 @@ def test_store_roundtrip_survives_fresh_restart_instance(tmp_path) -> None:
 
     restarted_store = PaperRiskPolicyStore(tmp_path)
 
-    assert restarted_store.load(economic_goal=goal) == policy
+    assert restarted_store.load(
+        economic_goal=goal,
+        expected_policy_provenance_sha256=policy.provenance_sha256,
+    ) == policy
     assert restarted_store.path.read_bytes() == first_bytes
 
 
@@ -92,13 +99,18 @@ def test_owner_initialization_is_creation_only_and_preserves_existing_bytes(
         )
 
     assert store.path.read_bytes() == before
-    assert PaperRiskPolicyStore(tmp_path).load(economic_goal=goal) == _policy(goal)
+    expected = _policy(goal)
+    assert PaperRiskPolicyStore(tmp_path).load(
+        economic_goal=goal,
+        expected_policy_provenance_sha256=expected.provenance_sha256,
+    ) == expected
 
 
 def test_reconstruction_rejects_different_economic_goal_revision(tmp_path) -> None:
     goal = _goal()
     store = PaperRiskPolicyStore(tmp_path)
-    store.initialize_owner(_policy(goal))
+    policy = _policy(goal)
+    store.initialize_owner(policy)
 
     different_goal = replace(goal, revision=2)
 
@@ -106,18 +118,26 @@ def test_reconstruction_rejects_different_economic_goal_revision(tmp_path) -> No
         PaperRiskPolicyStoreError,
         match="economic goal contract does not match",
     ):
-        store.load(economic_goal=different_goal)
+        store.load(
+            economic_goal=different_goal,
+            expected_policy_provenance_sha256=policy.provenance_sha256,
+        )
 
 
 def test_fraction_tamper_with_stale_policy_provenance_fails_closed() -> None:
     goal = _goal()
-    payload = paper_risk_policy_to_payload(_policy(goal))
+    policy = _policy(goal)
+    payload = paper_risk_policy_to_payload(policy)
     body = payload["policy"]
     assert isinstance(body, dict)
     body["max_ticket_fraction"] = "0.016"
 
     with pytest.raises(PaperRiskPolicyStoreError, match="provenance mismatch"):
-        paper_risk_policy_from_payload(payload, economic_goal=goal)
+        paper_risk_policy_from_payload(
+            payload,
+            economic_goal=goal,
+            expected_policy_provenance_sha256=policy.provenance_sha256,
+        )
 
 
 @pytest.mark.parametrize(
@@ -134,7 +154,8 @@ def test_fraction_tamper_with_stale_policy_provenance_fails_closed() -> None:
 )
 def test_payload_rejects_malformed_or_ambiguous_authority(mutation: str) -> None:
     goal = _goal()
-    payload = paper_risk_policy_to_payload(_policy(goal))
+    policy = _policy(goal)
+    payload = paper_risk_policy_to_payload(policy)
     body = payload["policy"]
     assert isinstance(body, dict)
 
@@ -156,8 +177,55 @@ def test_payload_rejects_malformed_or_ambiguous_authority(mutation: str) -> None
         raise AssertionError(mutation)
 
     with pytest.raises(PaperRiskPolicyStoreError):
-        paper_risk_policy_from_payload(payload, economic_goal=goal)
+        paper_risk_policy_from_payload(
+            payload,
+            economic_goal=goal,
+            expected_policy_provenance_sha256=policy.provenance_sha256,
+        )
 
+
+
+def test_coherent_fraction_and_self_digest_rewrite_cannot_rebind_external_authority() -> None:
+    goal = _goal()
+    owner_policy = _policy(goal)
+    payload = paper_risk_policy_to_payload(owner_policy)
+    body = payload["policy"]
+    assert isinstance(body, dict)
+
+    rebound_policy = PaperRiskPolicy(
+        max_ticket_fraction=Decimal("0.016"),
+        max_committed_fraction=owner_policy.max_committed_fraction,
+        minimum_cash_reserve_fraction=owner_policy.minimum_cash_reserve_fraction,
+        economic_goal=goal,
+    )
+    body["max_ticket_fraction"] = "0.016"
+    payload["policy_provenance_sha256"] = rebound_policy.provenance_sha256
+
+    with pytest.raises(
+        PaperRiskPolicyStoreError,
+        match="does not match external authority",
+    ):
+        paper_risk_policy_from_payload(
+            payload,
+            economic_goal=goal,
+            expected_policy_provenance_sha256=owner_policy.provenance_sha256,
+        )
+
+
+def test_external_policy_authority_must_be_canonical_sha256() -> None:
+    goal = _goal()
+    policy = _policy(goal)
+    payload = paper_risk_policy_to_payload(policy)
+
+    with pytest.raises(
+        PaperRiskPolicyStoreError,
+        match="expected_policy_provenance_sha256",
+    ):
+        paper_risk_policy_from_payload(
+            payload,
+            economic_goal=goal,
+            expected_policy_provenance_sha256="A" * 64,
+        )
 
 def test_strict_json_rejects_duplicate_schema_key() -> None:
     duplicate = (
@@ -166,28 +234,46 @@ def test_strict_json_rejects_duplicate_schema_key() -> None:
         '"policy":{},"policy_provenance_sha256":"' + ("0" * 64) + '"}'
     )
 
+    goal = _goal()
+    policy = _policy(goal)
     with pytest.raises(PaperRiskPolicyStoreError, match="invalid paper risk policy JSON"):
-        paper_risk_policy_from_json(duplicate, economic_goal=_goal())
+        paper_risk_policy_from_json(
+            duplicate,
+            economic_goal=goal,
+            expected_policy_provenance_sha256=policy.provenance_sha256,
+        )
 
 
 def test_corrupt_durable_file_fails_closed_on_restart(tmp_path) -> None:
     goal = _goal()
     store = PaperRiskPolicyStore(tmp_path)
-    store.initialize_owner(_policy(goal))
+    policy = _policy(goal)
+    store.initialize_owner(policy)
     store.path.write_text('{"schema":', encoding="utf-8")
 
     with pytest.raises(PaperRiskPolicyStoreError, match="invalid paper risk policy JSON"):
-        store.load(economic_goal=goal)
+        store.load(
+            economic_goal=goal,
+            expected_policy_provenance_sha256=policy.provenance_sha256,
+        )
 
 
 def test_unbound_policy_roundtrip_requires_exact_unbound_state() -> None:
     policy = _policy(None)
     payload = paper_risk_policy_to_payload(policy)
 
-    assert paper_risk_policy_from_payload(payload, economic_goal=None) == policy
+    assert paper_risk_policy_from_payload(
+        payload,
+        economic_goal=None,
+        expected_policy_provenance_sha256=policy.provenance_sha256,
+    ) == policy
 
     with pytest.raises(
         PaperRiskPolicyStoreError,
         match="economic goal contract does not match",
     ):
-        paper_risk_policy_from_payload(payload, economic_goal=_goal())
+        paper_risk_policy_from_payload(
+            payload,
+            economic_goal=_goal(),
+            expected_policy_provenance_sha256=policy.provenance_sha256,
+        )

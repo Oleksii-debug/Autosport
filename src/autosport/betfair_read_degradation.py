@@ -33,6 +33,9 @@ class ReadRecoveryAction(str, Enum):
 
 _BETTING_READ_ONLY_OPERATIONS = frozenset(
     {
+        "listEventTypes",
+        "listEvents",
+        "listMarketTypes",
         "listMarketCatalogue",
         "listMarketBook",
         "listRunnerBook",

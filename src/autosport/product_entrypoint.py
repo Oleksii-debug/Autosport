@@ -53,6 +53,21 @@ class _SignalStopRequest:
         return 128 + self.signal_number
 
 
+def _product_stop_signals() -> tuple[int, ...]:
+    """Return console stop signals supported by the running platform.
+
+    Windows delivers Ctrl+Break as SIGBREAK rather than SIGINT.  Register it when
+    available so that the supported product boundary records a durable stop instead
+    of letting the process terminate outside the runtime shutdown path.
+    """
+
+    signals = [int(signal.SIGINT), int(signal.SIGTERM)]
+    sigbreak = getattr(signal, "SIGBREAK", None)
+    if sigbreak is not None and int(sigbreak) not in signals:
+        signals.append(int(sigbreak))
+    return tuple(signals)
+
+
 def _normalized_workspace(value: object, *, label: str) -> Path:
     try:
         return Path(value).expanduser().resolve(strict=False)
@@ -170,11 +185,11 @@ def run_product(
         initial_bankroll=initial_bankroll,
     )
     stop_request = _SignalStopRequest()
-    previous_handlers: dict[signal.Signals, object] = {}
+    previous_handlers: dict[int, object] = {}
     if install_signal_handlers:
         previous_handlers = {
             signum: signal.getsignal(signum)
-            for signum in (signal.SIGINT, signal.SIGTERM)
+            for signum in _product_stop_signals()
         }
         for signum in previous_handlers:
             signal.signal(signum, stop_request.handle)

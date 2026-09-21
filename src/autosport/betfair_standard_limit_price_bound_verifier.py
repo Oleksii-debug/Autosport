@@ -1,14 +1,13 @@
 from __future__ import annotations
 
-"""Fresh re-resolution verifier for Betfair standard-LIMIT price-bound records.
+"""Fresh product-owned re-resolution verifier for Betfair standard-LIMIT bounds.
 
-``BetfairStandardLimitPriceBoundEvidence`` is a Python value record, not an
-unforgeable capability: Python callers can bypass a raising ``__init__`` with
-``object.__new__``/``object.__setattr__``.  Positive product authority therefore
-must not depend on object origin.  This module makes acceptance derive again from
-the canonical bound plan, action identity, and production ``place_action`` request
-shape, then exact-compares the supplied record and returns the freshly resolved
-canonical record for downstream use.
+``BetfairStandardLimitPriceBoundEvidence`` and ``BoundSupervisedExecutionPlan``
+are ordinary Python values, not unforgeable capabilities. Positive product
+authority therefore starts from the existing durable ``RealExecutionLedger``:
+the exact plan id/fingerprint and supervised-approval binding must already be
+product-issued there before the canonical fail-before-I/O request resolver is
+allowed to supply a record for downstream acceptance.
 """
 
 from decimal import Decimal
@@ -18,6 +17,7 @@ from .betfair_standard_limit_price_bound import (
     BetfairStandardLimitPriceBoundEvidence,
     resolve_betfair_standard_limit_price_bound,
 )
+from .real_execution_ledger import RealExecutionLedger
 from .supervised_execution import BoundSupervisedExecutionPlan
 
 
@@ -73,22 +73,64 @@ def _exact_snapshot(
     return tuple(snapshot)
 
 
+def _require_product_owned_bound(
+    *,
+    ledger: RealExecutionLedger,
+    bound: BoundSupervisedExecutionPlan,
+) -> None:
+    """Bind caller DTO self-consistency to the existing durable product authority."""
+
+    if type(ledger) is not RealExecutionLedger:
+        raise BetfairStandardLimitPriceBoundError(
+            "ledger must be the exact canonical RealExecutionLedger type"
+        )
+    if type(bound) is not BoundSupervisedExecutionPlan:
+        raise BetfairStandardLimitPriceBoundError(
+            "bound must be the exact canonical BoundSupervisedExecutionPlan type"
+        )
+
+    # Call class implementations directly so instance-level method shadowing
+    # cannot replace either the deterministic binding proof or ledger reads.
+    BoundSupervisedExecutionPlan.verify_binding(bound)
+    try:
+        saga = RealExecutionLedger.saga(ledger, bound.execution_plan.plan_id)
+    except KeyError as exc:
+        raise BetfairStandardLimitPriceBoundError(
+            "bound execution plan is not durably reserved by product authority"
+        ) from exc
+    if saga.plan_fingerprint != bound.execution_plan.fingerprint:
+        raise BetfairStandardLimitPriceBoundError(
+            "durable execution-plan fingerprint mismatches caller bound"
+        )
+    if not RealExecutionLedger.supervised_approval_is_active(
+        ledger,
+        plan_id=bound.execution_plan.plan_id,
+        approval_id=bound.execution_plan.approval_id,
+        approval_fingerprint=bound.approval_fingerprint,
+    ):
+        raise BetfairStandardLimitPriceBoundError(
+            "durable supervised approval is missing or revoked"
+        )
+
+
 def verify_betfair_standard_limit_price_bound(
     *,
     evidence: BetfairStandardLimitPriceBoundEvidence,
+    ledger: RealExecutionLedger,
     bound: BoundSupervisedExecutionPlan,
     action_id: str,
 ) -> BetfairStandardLimitPriceBoundEvidence:
-    """Accept a candidate record only by fresh canonical re-resolution.
+    """Accept a candidate record only by product-owned durable re-resolution.
 
-    The supplied record is never the trust root.  A fresh canonical resolver run
-    re-validates the exact bound/action and captures the current production
-    ``place_action`` request using the existing fail-before-I/O transport.  Every
-    authority-bearing field is then exact-compared (including Decimal textual
-    representation), and the fresh canonical record is returned.  Downstream
-    code must use that returned record rather than retaining the caller object.
+    The candidate record and caller-supplied bound are never the trust root.
+    First the exact execution plan must exist in the canonical durable ledger
+    with the same immutable fingerprint and active supervised-approval binding.
+    Only then does the existing resolver capture the current production
+    ``place_action`` request through its fail-before-I/O transport. Every
+    authority-bearing field is exact-compared, and the fresh record is returned.
     """
 
+    _require_product_owned_bound(ledger=ledger, bound=bound)
     expected = resolve_betfair_standard_limit_price_bound(
         bound=bound,
         action_id=action_id,

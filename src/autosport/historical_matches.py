@@ -10,10 +10,8 @@ from dataclasses import dataclass
 from datetime import date, datetime
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlencode
+from urllib.parse import urlencode, urlsplit
 
-from . import parlayapi_provider as _parlayapi_provider
-from .domain import utc_now_iso
 from .integrity import atomic_write_json
 from .parlayapi_provider import (
     ParlayApiTableTennisProvider,
@@ -23,7 +21,6 @@ from .parlayapi_provider import (
 
 TERMS_REFERENCE = "https://parlay-api.com/terms"
 REQUEST_CONTRACT_REFERENCE = "https://api.parlay-api.com/docs"
-_PARLAY_API_ORIGIN = "https://parlay-api.com"
 _CAPTURE_PUBLISH_LOCK = threading.Lock()
 
 
@@ -31,6 +28,7 @@ _CAPTURE_PUBLISH_LOCK = threading.Lock()
 class HistoricalMatchCapture:
     requested_date: str
     priced_only: bool
+    request_url: str
     captured_at: str
     canonical_response_sha256: str
     capture_sha256: str
@@ -42,6 +40,38 @@ class HistoricalMatchCapture:
     trusted_outcome_source_admissible: bool
     output_path: str
     evidence_path: str
+
+
+def historical_match_request_url(
+    provider: ParlayApiTableTennisProvider,
+    *,
+    requested_date: str,
+    priced_only: bool,
+) -> str:
+    """Return the exact secret-free logical /matches request used by this product path."""
+
+    _parse_date(requested_date, field="requested_date")
+    if not isinstance(priced_only, bool):
+        raise ValueError("priced_only must be boolean")
+    base_url = provider.base_url
+    if not isinstance(base_url, str) or not base_url:
+        raise ValueError("provider base_url must be a non-empty URL")
+    parsed_base = urlsplit(base_url)
+    if (
+        parsed_base.username is not None
+        or parsed_base.password is not None
+        or parsed_base.query
+        or parsed_base.fragment
+    ):
+        raise ValueError("provider base_url must not contain credentials, query, or fragment")
+    query_values = {
+        "date": requested_date,
+        "pricedOnly": "true" if priced_only else "false",
+    }
+    return (
+        f"{base_url}/v1/historical/sports/{provider.sport_key}/matches?"
+        + urlencode(query_values)
+    )
 
 
 def capture_historical_matches(
@@ -60,12 +90,13 @@ def capture_historical_matches(
     response identity and runtime entitlement metadata, not quote outcomes,
     historical market coverage, retention rights, or replay-corpus readiness.
 
-    Trust is deliberately split into narrow facts.  An exact product-owned
-    request path can be recognized from the canonical provider class, origin and
-    built-in transport.  The current provider response envelope does *not* carry
-    the transport's final URL or exact wire bytes, so this layer cannot prove the
-    final response origin and therefore cannot admit the capture as a trusted
-    outcome source.
+    The exact secret-free logical request URL is content-bound for provenance,
+    but it is not proof that the mutable provider object actually dispatched that
+    URL through a product-owned transport or clock.  The current provider response
+    envelope also omits the transport's final URL and exact wire bytes.  Therefore
+    request-path, acquisition-clock, response-origin and trusted-outcome authority
+    all remain fail-closed until a separate immutable provider-issued invocation
+    witness can be mechanically resolved.
     """
 
     if provider.public_preview or not provider.api_key:
@@ -79,16 +110,17 @@ def capture_historical_matches(
     if _paths_alias(output, evidence):
         raise ValueError("output_path and evidence_path must refer to different files")
 
-    query_values = {
-        "date": requested_date,
-        "pricedOnly": "true" if priced_only else "false",
-    }
-    url = (
-        f"{provider.base_url}/v1/historical/sports/{provider.sport_key}/matches?"
-        + urlencode(query_values)
+    url = historical_match_request_url(
+        provider,
+        requested_date=requested_date,
+        priced_only=priced_only,
     )
-    product_owned_request_path_verified = _product_owned_request_path_verified(provider)
-    product_owned_acquisition_clock_verified = _product_owned_acquisition_clock_verified(provider)
+    # Mutable provider fields/methods are not an invocation witness.  In
+    # particular, _request/transport/clock can be shadowed or changed around
+    # retries.  Keep positive transport/clock authority false until the provider
+    # layer emits an immutable, mechanically re-resolvable invocation witness.
+    product_owned_request_path_verified = False
+    product_owned_acquisition_clock_verified = False
     response = provider._request(url)
     captured_at = provider.clock()
     _parse_timestamp(captured_at, field="captured_at")
@@ -143,6 +175,7 @@ def capture_historical_matches(
         "provider": "parlayapi",
         "sport_key": provider.sport_key,
         "request": {
+            "url": url,
             "date": requested_date,
             "priced_only": priced_only,
         },
@@ -161,6 +194,7 @@ def capture_historical_matches(
         "sport_key": provider.sport_key,
         "requested_date": requested_date,
         "priced_only": priced_only,
+        "request_url": url,
         "request_contract_reference": REQUEST_CONTRACT_REFERENCE,
         "captured_at": captured_at,
         "canonical_response_sha256": canonical_response_sha256,
@@ -187,6 +221,7 @@ def capture_historical_matches(
     return HistoricalMatchCapture(
         requested_date=requested_date,
         priced_only=priced_only,
+        request_url=url,
         captured_at=captured_at,
         canonical_response_sha256=canonical_response_sha256,
         capture_sha256=capture_sha256,
@@ -199,25 +234,6 @@ def capture_historical_matches(
         output_path=str(output),
         evidence_path=str(evidence),
     )
-
-
-def _product_owned_request_path_verified(provider: ParlayApiTableTennisProvider) -> bool:
-    """Recognize only the exact product-owned initial Parlay request path.
-
-    This is intentionally narrower than "provider response origin verified".
-    The latter needs final-URL/raw-response evidence from the transport envelope.
-    """
-
-    return (
-        type(provider) is ParlayApiTableTennisProvider
-        and provider.base_url == _PARLAY_API_ORIGIN
-        and provider.sport_key == "table_tennis"
-        and provider.transport is _parlayapi_provider._default_transport
-    )
-
-
-def _product_owned_acquisition_clock_verified(provider: ParlayApiTableTennisProvider) -> bool:
-    return type(provider) is ParlayApiTableTennisProvider and provider.clock is utc_now_iso
 
 
 def _atomic_write_capture_json(path: str | Path, payload: dict[str, Any]) -> str:

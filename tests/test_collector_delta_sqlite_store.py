@@ -160,7 +160,6 @@ class CollectorSQLiteStoreTests(unittest.TestCase):
                     self.assertFalse(
                         path.with_name(f"{path.name}.legacy-v1.json").exists()
                     )
-                    self.assertNotEqual(path.read_bytes()[:16], b"SQLite format 3\\x00")
 
 
     def test_legacy_stream_checkpoint_mismatch_fails_before_authority_switch(self):

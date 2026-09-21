@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 from hashlib import sha256
 import json
@@ -266,6 +266,21 @@ def test_historical_decision_cannot_rebind_participant_after_later_snapshot(
     )
     assert later.subject_memory_id != earlier.subject_memory_id
     assert later.opponent_memory_id != earlier.opponent_memory_id
+
+    substituted = replace(
+        later,
+        subject_memory_id=earlier.subject_memory_id,
+        matchup_id="0" * 64,
+    )
+    substituted = replace(
+        substituted,
+        matchup_id=_digest(substituted.payload(include_id=False)),
+    )
+    with pytest.raises(
+        SportMemoryError,
+        match="not canonical latest-as-of",
+    ):
+        runtime.verify_matchup_evidence(substituted)
 
     with pytest.raises(
         SportMemoryError,

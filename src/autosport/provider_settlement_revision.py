@@ -220,7 +220,7 @@ class ProviderSettlementRevisionChain:
             if self._identity(current) != identity:
                 raise ProviderSettlementRevisionError(
                     "settlement correction cannot rewrite provider/account/adapter/"
-                    "position/currency or executed position terms"
+                    "position/currency identity or executed position terms"
                 )
             if current.supersedes_revision_id != previous.revision_id:
                 raise ProviderSettlementRevisionError(

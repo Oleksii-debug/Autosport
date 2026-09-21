@@ -8,6 +8,8 @@ from math import isfinite
 from pathlib import Path
 from typing import BinaryIO
 
+from .integrity import atomic_write_json
+
 
 _ALLOWED_HEALTH_STATUSES = frozenset({"unknown", "healthy", "degraded", "failed"})
 _COUNTER_FIELDS = (
@@ -658,10 +660,8 @@ class SourceHealthStore:
         return raw
 
     def _write(self, raw: dict) -> None:
-        temporary = self.path.with_suffix(self.path.suffix + ".tmp")
-        with temporary.open("w", encoding="utf-8", newline="\n") as handle:
-            json.dump(raw, handle, ensure_ascii=False, indent=2, sort_keys=True)
-            handle.write("\n")
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(temporary, self.path)
+        # Keep SourceHealthStore's outer read/modify/write lock as the semantic
+        # transaction fence, but use the shared publication primitive for the
+        # actual whole-file replacement. This avoids a second fixed-temp writer
+        # implementation and inherits the repository-wide atomic JSON contract.
+        atomic_write_json(self.path, raw)

@@ -2,7 +2,9 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
+import autosport.ingestion_health as ingestion_health
 from autosport.ingestion_health import SourceHealthStore
 
 
@@ -303,6 +305,52 @@ class SourceHealthStateIntegrityTests(unittest.TestCase):
                     quality_flags=("GAP", "GAP"),
                 )
             self.assertEqual(path.read_bytes(), baseline)
+
+
+    def test_runtime_mutation_uses_shared_atomic_json_publication(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "source-health.json"
+            store = SourceHealthStore(path)
+
+            with patch.object(
+                ingestion_health,
+                "atomic_write_json",
+                wraps=ingestion_health.atomic_write_json,
+            ) as publish:
+                state = store.record_failure(
+                    "source",
+                    now="2026-09-14T00:02:00+00:00",
+                    error=RuntimeError("provider unavailable"),
+                )
+
+            self.assertEqual(publish.call_count, 1)
+            self.assertEqual(Path(publish.call_args.args[0]), path)
+            self.assertEqual(state.status, "failed")
+            reopened = SourceHealthStore(path).get("source")
+            self.assertEqual(reopened.poll_count, 1)
+            self.assertEqual(reopened.total_failures, 1)
+            self.assertEqual(reopened.status, "failed")
+
+    def test_shared_publication_failure_preserves_prior_source_health_bytes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "source-health.json"
+            store = SourceHealthStore(path)
+            prior_bytes = path.read_bytes()
+
+            with patch.object(
+                ingestion_health,
+                "atomic_write_json",
+                side_effect=OSError(28, "No space left on device"),
+            ):
+                with self.assertRaisesRegex(OSError, "No space left on device"):
+                    store.record_failure(
+                        "source",
+                        now="2026-09-14T00:02:00+00:00",
+                        error=RuntimeError("provider unavailable"),
+                    )
+
+            self.assertEqual(path.read_bytes(), prior_bytes)
+            self.assertEqual(SourceHealthStore(path).get("source").status, "unknown")
 
 
 if __name__ == "__main__":

@@ -28,8 +28,15 @@ from .monotonic_workspace_authority import (
     MonotonicWorkspaceAuthorityError,
 )
 from .json_integrity import strict_json_loads
+from .parlay_sport_provider import ParlayApiSportProvider, _canonical_sport_key
 from .parlayapi_provider import ParlayApiTableTennisProvider
-from .providers import CanonicalNormalizer, MarketProvider, ProviderBatch, ProviderQuote
+from .providers import (
+    CanonicalNormalizer,
+    MarketProvider,
+    ProviderBatch,
+    ProviderQuote,
+    _validate_sport,
+)
 from .workspace_lock import WorkspaceEconomicLock, WorkspaceEconomicLockError
 
 
@@ -59,7 +66,8 @@ class ParlayApiProductSource:
 
     _SCHEMA = "autosport.parlay_product_source"
     _VERSION = 3
-    _STREAM_EPOCH = "parlayapi-table-tennis-product-v1"
+    _STREAM_EPOCH = "parlayapi-table-tennis-product-v1"  # durable legacy identity
+    _SOURCE_PREFIX = "parlayapi:"
     _READ_BATCH_ITEMS = 1000
     _MAX_SNAPSHOT_ITEMS = 50_000
     _STATE_FIELDS = {
@@ -108,7 +116,8 @@ class ParlayApiProductSource:
             raise ProductSourceStateError("product source workspace must be absolute")
         self.provider = provider
         self.source_id = source_id
-        self.stream_epoch = self._STREAM_EPOCH
+        self.sport_key = self._sport_from_source_id(source_id)
+        self.stream_epoch = self._stream_epoch_for_sport(self.sport_key)
         self.workspace = workspace_path
         self.lawful_terms_ref = self._text(lawful_terms_ref, "lawful_terms_ref")
         self.retention_ref = self._text(retention_ref, "retention_ref")
@@ -147,6 +156,29 @@ class ParlayApiProductSource:
         ).hexdigest()
         self._initialize_state()
         self._read_state()
+
+    @classmethod
+    def _sport_from_source_id(cls, source_id: str) -> str:
+        if not source_id.startswith(cls._SOURCE_PREFIX):
+            raise ValueError("provider.source_id must use parlayapi:<sport_key> identity")
+        raw = source_id[len(cls._SOURCE_PREFIX) :]
+        try:
+            sport_key = _canonical_sport_key(raw)
+            _validate_sport(sport_key)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                "provider.source_id must contain one canonical Parlay sport identity"
+            ) from exc
+        if source_id != f"{cls._SOURCE_PREFIX}{sport_key}":
+            raise ValueError("provider.source_id sport identity is not canonical")
+        return sport_key
+
+    @classmethod
+    def _stream_epoch_for_sport(cls, sport_key: str) -> str:
+        # Existing table-tennis workspaces must reopen with their exact durable epoch.
+        if sport_key == "table_tennis":
+            return cls._STREAM_EPOCH
+        return f"parlayapi-{sport_key}-product-v1"
 
     @staticmethod
     def _text(value: object, field: str) -> str:
@@ -632,6 +664,10 @@ class ParlayApiProductSource:
             event = self.normalizer.normalize(self.source_id, quote)
             if event.sport is None:
                 raise ProductSourcePayloadError("provider quote requires canonical sport identity")
+            if event.sport != self.sport_key:
+                raise ProductSourcePayloadError(
+                    "provider quote sport conflicts with product source identity"
+                )
             scheduled = self._scheduled_start(event)
             phase = (
                 EventPhase.PRE_MATCH
@@ -1002,9 +1038,34 @@ def _required_env(name: str) -> str:
 
 
 def create_parlay_product_source() -> ParlayApiProductSource:
-    """Construct the supported read-only Parlay source from secret-safe environment."""
+    """Construct the legacy table-tennis product source from secret-safe environment."""
 
     provider = ParlayApiTableTennisProvider(api_key=_required_env("AUTOSPORT_PARLAY_API_KEY"))
+    return ParlayApiProductSource(
+        provider,
+        workspace=_required_env("AUTOSPORT_PRODUCT_WORKSPACE"),
+        lawful_terms_ref=_required_env("AUTOSPORT_PARLAY_LAWFUL_TERMS_REF"),
+        retention_ref=_required_env("AUTOSPORT_PARLAY_RETENTION_REF"),
+    )
+
+
+def create_parlay_sport_product_source(sport_key: str) -> ParlayApiProductSource:
+    """Construct one authenticated sport-scoped read-only Parlay product source.
+
+    This only composes the configured read adapter with the durable product-source
+    boundary. It does not prove catalog activity, endpoint capability, entitlement,
+    or any provider-write/execution authority.
+    """
+
+    canonical = _canonical_sport_key(sport_key)
+    try:
+        _validate_sport(canonical)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("sport_key is not a canonical product sport identity") from exc
+    provider = ParlayApiSportProvider(
+        canonical,
+        api_key=_required_env("AUTOSPORT_PARLAY_API_KEY"),
+    )
     return ParlayApiProductSource(
         provider,
         workspace=_required_env("AUTOSPORT_PRODUCT_WORKSPACE"),

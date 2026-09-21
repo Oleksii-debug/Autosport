@@ -130,16 +130,8 @@ def _durable_timeout_authority(
         raise BetfairTimeoutResolutionError(
             "timeout resolution requires a durable UNKNOWN attempt"
         )
-    provider_order_ref = ledger.provider_order_reference(
-        attempt_id=attempt_id,
-        provider_id=action.bookmaker_id,
-    )
-    if provider_order_ref is None:
-        raise BetfairTimeoutResolutionError(
-            "timeout attempt lacks durable provider order reference"
-        )
-
     snapshot = ledger.verified_snapshot()
+    plan_events: list[dict[str, object]] = []
     unknown_events: list[dict[str, object]] = []
     reserved_events: list[dict[str, object]] = []
     submitted_events: list[dict[str, object]] = []
@@ -147,9 +139,11 @@ def _durable_timeout_authority(
         for raw_line in snapshot.payload.splitlines():
             envelope = json.loads(raw_line.decode("utf-8"))
             event = envelope["event"]
+            event_type = event.get("event_type")
+            if event_type == "PLAN_RESERVED":
+                plan_events.append(event)
             if event.get("attempt_id") != attempt_id:
                 continue
-            event_type = event.get("event_type")
             if event_type == "ATTEMPT_RESERVED":
                 reserved_events.append(event)
             elif event_type == "ATTEMPT_SUBMITTED":
@@ -164,6 +158,55 @@ def _durable_timeout_authority(
     if len(reserved_events) != 1 or reserved_events[0].get("action_id") != action.action_id:
         raise BetfairTimeoutResolutionError(
             "timeout attempt does not bind the exact execution action"
+        )
+    reserved = reserved_events[0]
+    plan_id = reserved.get("plan_id")
+    matching_plans = [event for event in plan_events if event.get("plan_id") == plan_id]
+    if len(matching_plans) != 1:
+        raise BetfairTimeoutResolutionError(
+            "timeout attempt does not resolve one durable execution plan"
+        )
+    plan_payload = matching_plans[0].get("payload")
+    if not isinstance(plan_payload, dict):
+        raise BetfairTimeoutResolutionError(
+            "durable execution plan payload is malformed"
+        )
+    durable_plan = plan_payload.get("plan")
+    if not isinstance(durable_plan, dict):
+        raise BetfairTimeoutResolutionError(
+            "durable execution plan body is malformed"
+        )
+    durable_actions = durable_plan.get("actions")
+    if not isinstance(durable_actions, list):
+        raise BetfairTimeoutResolutionError(
+            "durable execution plan actions are malformed"
+        )
+    action_matches = [
+        item
+        for item in durable_actions
+        if isinstance(item, dict) and item.get("action_id") == action.action_id
+    ]
+    if len(action_matches) != 1:
+        raise BetfairTimeoutResolutionError(
+            "timeout attempt does not resolve one durable execution action"
+        )
+    durable_action = action_matches[0]
+    if durable_action != action.to_dict():
+        raise BetfairTimeoutResolutionError(
+            "caller execution action differs from durable execution plan action"
+        )
+    durable_bookmaker_id = durable_action.get("bookmaker_id")
+    if not isinstance(durable_bookmaker_id, str):
+        raise BetfairTimeoutResolutionError(
+            "durable execution action bookmaker identity is malformed"
+        )
+    provider_order_ref = ledger.provider_order_reference(
+        attempt_id=attempt_id,
+        provider_id=durable_bookmaker_id,
+    )
+    if provider_order_ref is None:
+        raise BetfairTimeoutResolutionError(
+            "timeout attempt lacks durable provider order reference"
         )
     if len(submitted_events) != 1:
         raise BetfairTimeoutResolutionError(

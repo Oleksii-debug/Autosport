@@ -409,7 +409,7 @@ def test_negative_repeat_requires_durable_postmortem_provenance(tmp_path):
         registry.append(repeat, allow_repeat_experiment=True)
 
     _, evidence_ref = _append_repeat_bundle(registry, foundation)
-    authorized = replace(
+    caller_authored = replace(
         repeat,
         evaluation_bundle_id="eval-repeat",
         repeat_of_experiment_id="experiment-1",
@@ -417,98 +417,19 @@ def test_negative_repeat_requires_durable_postmortem_provenance(tmp_path):
         retest_condition=RetestCondition.NEW_EVALUATION_BUNDLE.value,
         repeat_evidence=(evidence_ref,),
     )
-    registry.append(authorized, allow_repeat_experiment=True)
+    with pytest.raises(
+        DuplicateExperimentFingerprintError,
+        match="product-issued EvaluationBundle authority",
+    ):
+        registry.append(caller_authored, allow_repeat_experiment=True)
 
+    # The rejected attempt cannot become durable history, and restart must preserve
+    # the original negative-result memory rather than silently accepting the repeat.
     reopened = ScientificRegistry(path)
-    stored = reopened.get("Experiment", "experiment-2")
-    assert stored is not None
-    assert stored.payload["repeat_of_experiment_id"] == "experiment-1"
-    assert stored.payload["repeat_postmortem_id"] == "postmortem-repeat"
-    assert stored.payload["retest_condition"] == "independent replication on frozen inputs"
-    assert stored.payload["repeat_evidence"] == [evidence_ref.to_payload()]
-    assert len(reopened.find_experiment_fingerprint(experiment.fingerprint)) == 2
-
-    # Restart must re-resolve the durable authorizing record, not merely trust the
-    # evidence reference persisted in the repeated Experiment payload.
-    original_raw = json.loads(path.read_text(encoding="utf-8"))
-
-    stripped = json.loads(json.dumps(original_raw))
-    stripped_repeat = next(
-        entry
-        for entry in stripped["records"]
-        if entry["record_type"] == "Experiment"
-        and entry["record_id"] == "experiment-2"
-    )
-    for key in (
-        "repeat_of_experiment_id",
-        "repeat_postmortem_id",
-        "retest_condition",
-        "repeat_evidence",
-    ):
-        stripped_repeat["payload"].pop(key)
-    stripped_envelope = {
-        key: stripped_repeat[key]
-        for key in ("record_type", "record_id", "available_at", "payload")
-    }
-    stripped_repeat["record_sha256"] = hashlib.sha256(
-        json.dumps(
-            stripped_envelope,
-            ensure_ascii=False,
-            sort_keys=True,
-            separators=(",", ":"),
-            allow_nan=False,
-        ).encode("utf-8")
-    ).hexdigest()
-    path.write_text(json.dumps(stripped), encoding="utf-8")
-    with pytest.raises(
-        DuplicateExperimentFingerprintError,
-        match="lacks durable repeat provenance",
-    ):
-        ScientificRegistry(path)
-
-    tampered = json.loads(json.dumps(original_raw))
-    tampered_bundle = next(
-        entry
-        for entry in tampered["records"]
-        if entry["record_type"] == "EvaluationBundle"
-        and entry["record_id"] == "eval-repeat"
-    )
-    tampered_bundle["payload"]["bundle_sha256"] = SHA_B
-    envelope = {
-        key: tampered_bundle[key]
-        for key in ("record_type", "record_id", "available_at", "payload")
-    }
-    tampered_bundle["record_sha256"] = hashlib.sha256(
-        json.dumps(
-            envelope,
-            ensure_ascii=False,
-            sort_keys=True,
-            separators=(",", ":"),
-            allow_nan=False,
-        ).encode("utf-8")
-    ).hexdigest()
-    path.write_text(json.dumps(tampered), encoding="utf-8")
-    with pytest.raises(
-        DuplicateExperimentFingerprintError,
-        match="durable record digest mismatch",
-    ):
-        ScientificRegistry(path)
-
-    missing = json.loads(json.dumps(original_raw))
-    missing["records"] = [
-        entry
-        for entry in missing["records"]
-        if not (
-            entry["record_type"] == "EvaluationBundle"
-            and entry["record_id"] == "eval-repeat"
-        )
-    ]
-    path.write_text(json.dumps(missing), encoding="utf-8")
-    with pytest.raises(
-        DuplicateExperimentFingerprintError,
-        match="missing durable scientific record",
-    ):
-        ScientificRegistry(path)
+    assert reopened.get("Experiment", "experiment-2") is None
+    matches = reopened.find_experiment_fingerprint(experiment.fingerprint)
+    assert [entry.record_id for entry in matches] == ["experiment-1"]
+    assert reopened.get("Postmortem", "postmortem-repeat") is not None
 
 
 def test_negative_repeat_rejects_wrong_postmortem_condition_or_time(tmp_path):

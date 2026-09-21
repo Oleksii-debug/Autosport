@@ -1387,6 +1387,15 @@ class ScientificRegistry:
                 "repeat EvaluationBundle protocol lineage mismatch"
             )
 
+        # A registry row is a durable reference, not proof that the product evaluator
+        # actually produced the referenced evaluation artifact. Until the canonical
+        # factory/artifact authority is mechanically verified at this boundary, a
+        # caller-created EvaluationBundleRef must never reopen negative-result work.
+        raise DuplicateExperimentFingerprintError(
+            "negative-result repeat requires product-issued EvaluationBundle authority; "
+            "generic ScientificRegistry EvaluationBundle evidence is insufficient"
+        )
+
     def _append_entry_locked(
         self,
         state: dict[str, Any],

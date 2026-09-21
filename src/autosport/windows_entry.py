@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
 
@@ -33,20 +34,54 @@ def _show_workspace_configuration_error(detail: str) -> None:
 
 
 def _probe_workspace_writable(workspace: Path) -> None:
-    """Fail before GUI construction when durable workspace storage is not writable."""
+    """Fail before GUI construction unless canonical-style durable publish works."""
 
     import tempfile
 
     workspace.mkdir(parents=True, exist_ok=True)
-    with tempfile.NamedTemporaryFile(
-        mode="wb",
-        dir=workspace,
-        prefix=".autosport-write-probe-",
-        suffix=".tmp",
-        delete=True,
-    ) as probe:
-        probe.write(b"autosport workspace write probe\n")
-        probe.flush()
+    source_path: Path | None = None
+    destination_path: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="wb",
+            dir=workspace,
+            prefix=".autosport-write-probe-source-",
+            suffix=".tmp",
+            delete=False,
+        ) as probe:
+            source_path = Path(probe.name)
+            probe.write(b"autosport workspace write probe\n")
+            probe.flush()
+            os.fsync(probe.fileno())
+
+        # Replace an existing sibling rather than only renaming to a missing path.
+        # Canonical durable stores use atomic replacement, and Windows ACL/provider
+        # behavior can differ materially from simple create/write/delete access.
+        with tempfile.NamedTemporaryFile(
+            mode="wb",
+            dir=workspace,
+            prefix=".autosport-write-probe-destination-",
+            suffix=".tmp",
+            delete=False,
+        ) as destination:
+            destination_path = Path(destination.name)
+
+        os.replace(source_path, destination_path)
+    except OSError:
+        # Preserve the actual fsync/replace/create failure; cleanup is best-effort
+        # only on the error path so a secondary unlink error cannot mask it.
+        for path in (source_path, destination_path):
+            if path is not None:
+                try:
+                    path.unlink(missing_ok=True)
+                except OSError:
+                    pass
+        raise
+    else:
+        # A successful capability probe must leave the user's workspace untouched.
+        for path in (source_path, destination_path):
+            if path is not None:
+                path.unlink(missing_ok=True)
 
 
 def _workspace_access_error_message(workspace: Path, exc: OSError) -> str:

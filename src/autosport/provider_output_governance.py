@@ -71,15 +71,18 @@ def _reference(value: object, name: str, *, public_https: bool) -> str:
     if "?" in text or "#" in text:
         raise ValueError(f"{name} must not contain query or fragment data")
     parsed = urlsplit(text)
-    if parsed.scheme:
-        if parsed.username is not None or parsed.password is not None:
-            raise ValueError(f"{name} must not contain credentials")
-        if public_https and parsed.scheme.lower() != "https":
-            raise ValueError(f"{name} must use HTTPS")
-        if public_https and not parsed.hostname:
-            raise ValueError(f"{name} must identify an HTTPS host")
-    elif public_https:
-        raise ValueError(f"{name} must be an absolute HTTPS reference")
+    if not parsed.scheme:
+        raise ValueError(f"{name} must be an absolute reference")
+    if parsed.username is not None or parsed.password is not None:
+        raise ValueError(f"{name} must not contain credentials")
+    scheme = parsed.scheme.lower()
+    if public_https:
+        if scheme != "https" or not parsed.hostname:
+            raise ValueError(f"{name} must be an absolute HTTPS reference")
+    elif scheme not in {"https", "urn"}:
+        raise ValueError(f"{name} must use HTTPS or URN")
+    elif scheme == "https" and not parsed.hostname:
+        raise ValueError(f"{name} HTTPS reference must identify a host")
     return text
 
 

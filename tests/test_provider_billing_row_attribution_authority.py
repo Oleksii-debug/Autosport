@@ -4,6 +4,7 @@ from dataclasses import fields
 from datetime import datetime, timezone
 from hashlib import sha256
 import json
+import urllib.request as _urllib_request
 from unittest.mock import patch
 
 import pytest
@@ -12,6 +13,7 @@ import autosport.betfair_account_readonly as _readonly
 from autosport.betfair_account_readonly import (
     BetfairReadOnlyClient,
     BetfairSessionCredentials,
+    UrllibBetfairHttpTransport,
 )
 from autosport.betfair_provider_billing_inputs_authority import (
     BetfairProviderBillingInputsAuthorityError,
@@ -114,17 +116,25 @@ def _provider_payload(body: bytes) -> bytes:
     ).encode("utf-8")
 
 
-def _fake_urlopen(request, *, timeout: float):
-    assert timeout > 0
-    assert request.data is not None
-    return _UrlopenResponse(_provider_payload(request.data))
+def _fake_opener_open(
+    _self: object,
+    request: object,
+    data: bytes | None = None,
+    timeout: float | object = _urllib_request._GLOBAL_DEFAULT_TIMEOUT,
+):
+    assert data is None
+    assert timeout is not _urllib_request._GLOBAL_DEFAULT_TIMEOUT
+    request_data = getattr(request, "data", None)
+    assert request_data is not None
+    return _UrlopenResponse(_provider_payload(request_data))
 
 
 def _source():
     credentials = BetfairSessionCredentials("k", "t")
-    # Exercise the exact production transport/client construction path. Only the
-    # external urllib call is replaced inside this deterministic test process.
-    with patch.object(_readonly, "urlopen", _fake_urlopen):
+    # Exercise the exact production transport/client path without replacing the
+    # product module's captured network-opener identity. The deterministic seam is
+    # below urllib.request.urlopen and cannot itself become a provider authority.
+    with patch.object(_urllib_request.OpenerDirector, "open", _fake_opener_open):
         return read_verified_betfair_provider_billing_inputs(
             credentials,
             record_count=10,
@@ -321,6 +331,88 @@ def test_caller_injected_client_transport_cannot_enter_verified_provider_issuanc
         match="credentials must be exact BetfairSessionCredentials",
     ):
         read_verified_betfair_provider_billing_inputs(caller_client)
+
+
+def test_rebound_module_network_opener_cannot_mint_provider_issuance(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    called = False
+
+    def fake_urlopen(*_args: object, **_kwargs: object):
+        nonlocal called
+        called = True
+        raise AssertionError("rebound network opener must not execute")
+
+    monkeypatch.setattr(_readonly, "urlopen", fake_urlopen)
+    with pytest.raises(
+        BetfairProviderBillingInputsAuthorityError,
+        match="network opener drifted",
+    ):
+        read_verified_betfair_provider_billing_inputs(
+            BetfairSessionCredentials("k", "t")
+        )
+    assert called is False
+
+
+def test_rebound_client_constructor_cannot_mint_provider_issuance(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    called = False
+
+    def fake_init(_self: object, *_args: object, **_kwargs: object) -> None:
+        nonlocal called
+        called = True
+
+    monkeypatch.setattr(BetfairReadOnlyClient, "__init__", fake_init)
+    with pytest.raises(
+        BetfairProviderBillingInputsAuthorityError,
+        match="client executable drifted",
+    ):
+        read_verified_betfair_provider_billing_inputs(
+            BetfairSessionCredentials("k", "t")
+        )
+    assert called is False
+
+
+def test_rebound_transport_constructor_cannot_mint_provider_issuance(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    called = False
+
+    def fake_init(_self: object, *_args: object, **_kwargs: object) -> None:
+        nonlocal called
+        called = True
+
+    monkeypatch.setattr(UrllibBetfairHttpTransport, "__init__", fake_init)
+    with pytest.raises(
+        BetfairProviderBillingInputsAuthorityError,
+        match="transport executable drifted",
+    ):
+        read_verified_betfair_provider_billing_inputs(
+            BetfairSessionCredentials("k", "t")
+        )
+    assert called is False
+
+
+def test_rebound_transport_post_cannot_mint_provider_issuance(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    called = False
+
+    def fake_post(_self: object, *_args: object, **_kwargs: object) -> bytes:
+        nonlocal called
+        called = True
+        return b"{}"
+
+    monkeypatch.setattr(UrllibBetfairHttpTransport, "post", fake_post)
+    with pytest.raises(
+        BetfairProviderBillingInputsAuthorityError,
+        match="transport executable drifted",
+    ):
+        read_verified_betfair_provider_billing_inputs(
+            BetfairSessionCredentials("k", "t")
+        )
+    assert called is False
 
 
 def test_verifier_issues_witness_only_for_exact_source_reresolution() -> None:

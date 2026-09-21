@@ -130,6 +130,18 @@ def test_identity_is_order_independent_but_sensitive_to_budget_semantics():
     assert deeper.evidence_id != shallower.evidence_id
 
 
+def test_operation_is_exact_and_list_runner_book_is_single_market_only():
+    market_book = MarketBookRequestBudget(("1.1",), ("EX_BEST_OFFERS",), operation="listMarketBook")
+    runner_book = MarketBookRequestBudget(("1.1",), ("EX_BEST_OFFERS",), operation="listRunnerBook")
+    assert market_book.evidence_payload["operation"] == "listMarketBook"
+    assert runner_book.evidence_payload["operation"] == "listRunnerBook"
+    assert market_book.evidence_id != runner_book.evidence_id
+    with pytest.raises(MarketBookBudgetError, match="exactly one market_id"):
+        MarketBookRequestBudget(("1.1", "1.2"), operation="listRunnerBook")
+    with pytest.raises(MarketBookBudgetError, match="operation must"):
+        MarketBookRequestBudget(("1.1",), operation="listMarketCatalogue")
+
+
 def test_budget_evidence_never_grants_execution_authority():
     request = budget(1, ("EX_BEST_OFFERS",))
     assert request.allowed is True

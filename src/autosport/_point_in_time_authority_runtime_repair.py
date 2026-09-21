@@ -14,17 +14,14 @@ import hashlib
 import importlib.abc
 import importlib.machinery
 import json
-import marshal
 import os
 from pathlib import Path
 import sys
-from types import CodeType, FunctionType
 import weakref
 
 from . import _dataset_snapshot_lineage_publication_trust_root as lineage_trust_root
 from . import dataset_snapshot_lineage as lineage_module
 from . import point_in_time_evidence as evidence
-from . import scientific_registry as registry_module
 from .dataset_snapshot_lineage import DatasetSnapshotLineageAuthority
 from .monotonic_workspace_authority import (
     MonotonicWorkspaceAuthority,
@@ -113,108 +110,36 @@ def _reject_instance_method_shadows(
         )
 
 
-def _walk_code_objects(code: CodeType):
-    """Yield one compiled source tree without executing the source."""
-
-    yield code
-    for constant in code.co_consts:
-        if type(constant) is CodeType:
-            yield from _walk_code_objects(constant)
-
-
-def _canonical_code_sha256(
-    module: object,
-    *,
-    expected_qualname: str,
-    live_function: FunctionType,
-) -> str:
-    """Compile canonical source and return the exact callable bytecode identity."""
-
-    spec = getattr(module, "__spec__", None)
-    origin = getattr(spec, "origin", None)
-    if type(origin) is not str or not origin:
-        raise ValueError("canonical module source origin is unavailable")
-    origin_path = Path(origin).resolve(strict=True)
-    live_path = Path(live_function.__code__.co_filename).resolve(strict=True)
-    if live_path != origin_path:
-        raise ValueError("live callable does not originate from canonical module source")
-    source = origin_path.read_text(encoding="utf-8")
-    compiled = compile(
-        source,
-        live_function.__code__.co_filename,
-        "exec",
-        dont_inherit=True,
-        optimize=sys.flags.optimize,
-    )
-    matches = tuple(
-        candidate
-        for candidate in _walk_code_objects(compiled)
-        if candidate.co_qualname == expected_qualname
-    )
-    if len(matches) != 1:
-        raise ValueError("canonical callable source identity is ambiguous")
-    return hashlib.sha256(marshal.dumps(matches[0])).hexdigest()
-
-
-def _require_source_backed_class_method(
-    concrete_type: type,
-    module: object,
-    *,
-    method_name: str,
-    expected_qualname: str,
-    authority_name: str,
-) -> None:
-    """Reject in-process class dispatch that differs from canonical source bytes."""
-
-    if getattr(module, concrete_type.__name__, None) is not concrete_type:
-        raise evidence.PointInTimeEvidenceError(
-            f"trusted {authority_name} class identity changed"
-        )
-    descriptor = concrete_type.__dict__.get(method_name)
-    if type(descriptor) in (staticmethod, classmethod):
-        function = descriptor.__func__
-    else:
-        function = descriptor
-    if type(function) is not FunctionType:
-        raise evidence.PointInTimeEvidenceError(
-            f"trusted {authority_name} class implementation changed: {method_name}"
-        )
-    if (
-        function.__module__ != getattr(module, "__name__", None)
-        or function.__qualname__ != expected_qualname
-    ):
-        raise evidence.PointInTimeEvidenceError(
-            f"trusted {authority_name} class implementation changed: {method_name}"
-        )
-    try:
-        expected = _canonical_code_sha256(
-            module,
-            expected_qualname=expected_qualname,
-            live_function=function,
-        )
-        actual = hashlib.sha256(marshal.dumps(function.__code__)).hexdigest()
-    except (OSError, TypeError, ValueError) as exc:
-        raise evidence.PointInTimeEvidenceError(
-            f"trusted {authority_name} source identity unavailable: {method_name}"
-        ) from exc
-    if actual != expected:
-        raise evidence.PointInTimeEvidenceError(
-            f"trusted {authority_name} class implementation changed: {method_name}"
-        )
-
-
 def _require_exact_lineage_authority(
     lineage_authority,
     *,
     holdout: bool = False,
 ) -> DatasetSnapshotLineageAuthority:
-    """Require exact capabilities plus canonical source-backed dispatch identity."""
+    """Require exact capabilities plus canonical source-backed dispatch identity.
 
-    if type(lineage_authority) is not DatasetSnapshotLineageAuthority:
+    The verifier is created inside each call from this function's code constants and
+    re-resolves the two authority classes from their sibling source modules.  No
+    pristine callable, expected namespace, source digest, or verification callback is
+    retained in a caller-mutable module global or closure cell.
+    """
+
+    import hashlib as _hashlib
+    import marshal as _marshal
+    import sys as _sys
+    from pathlib import Path as _Path
+    from types import CodeType as _CodeType, FunctionType as _FunctionType
+
+    from . import dataset_snapshot_lineage as _lineage_module
+    from . import scientific_registry as _registry_module
+
+    canonical_lineage_type = _lineage_module.DatasetSnapshotLineageAuthority
+    canonical_registry_type = _registry_module.ScientificRegistry
+
+    if type(lineage_authority) is not canonical_lineage_type:
         raise evidence.PointInTimeEvidenceError(
             _HOLDOUT_LINEAGE_REQUIRED if holdout else _FEATURE_LINEAGE_REQUIRED
         )
-    if type(lineage_authority.registry) is not ScientificRegistry:
+    if type(lineage_authority.registry) is not canonical_registry_type:
         raise evidence.PointInTimeEvidenceError(
             "lineage_authority.registry must be an exact ScientificRegistry"
         )
@@ -227,28 +152,109 @@ def _require_exact_lineage_authority(
             "lineage_authority.monotonic_authority must be an exact "
             "MonotonicWorkspaceAuthority"
         )
-    _require_source_backed_class_method(
-        DatasetSnapshotLineageAuthority,
-        lineage_module,
+
+    package_dir = _Path(_sys._getframe().f_code.co_filename).resolve(strict=True).parent
+
+    def require_source_backed_method(
+        concrete_type: type,
+        module: object,
+        *,
+        module_filename: str,
+        method_name: str,
+        expected_qualname: str,
+        authority_name: str,
+    ) -> None:
+        expected_path = (package_dir / module_filename).resolve(strict=True)
+        spec = getattr(module, "__spec__", None)
+        origin = getattr(spec, "origin", None)
+        try:
+            if type(origin) is not str or _Path(origin).resolve(strict=True) != expected_path:
+                raise ValueError("canonical module source origin changed")
+        except OSError as exc:
+            raise evidence.PointInTimeEvidenceError(
+                f"trusted {authority_name} source identity unavailable: {method_name}"
+            ) from exc
+        if getattr(module, concrete_type.__name__, None) is not concrete_type:
+            raise evidence.PointInTimeEvidenceError(
+                f"trusted {authority_name} class identity changed"
+            )
+        descriptor = concrete_type.__dict__.get(method_name)
+        if type(descriptor) in (staticmethod, classmethod):
+            function = descriptor.__func__
+        else:
+            function = descriptor
+        if type(function) is not _FunctionType:
+            raise evidence.PointInTimeEvidenceError(
+                f"trusted {authority_name} class implementation changed: {method_name}"
+            )
+        if (
+            function.__module__ != getattr(module, "__name__", None)
+            or function.__qualname__ != expected_qualname
+        ):
+            raise evidence.PointInTimeEvidenceError(
+                f"trusted {authority_name} class implementation changed: {method_name}"
+            )
+        try:
+            live_path = _Path(function.__code__.co_filename).resolve(strict=True)
+            if live_path != expected_path:
+                raise ValueError("live callable source path changed")
+            source = expected_path.read_text(encoding="utf-8")
+            compiled = compile(
+                source,
+                function.__code__.co_filename,
+                "exec",
+                dont_inherit=True,
+                optimize=_sys.flags.optimize,
+            )
+
+            def walk(code: _CodeType):
+                yield code
+                for constant in code.co_consts:
+                    if type(constant) is _CodeType:
+                        yield from walk(constant)
+
+            matches = tuple(
+                candidate
+                for candidate in walk(compiled)
+                if candidate.co_qualname == expected_qualname
+            )
+            if len(matches) != 1:
+                raise ValueError("canonical callable source identity is ambiguous")
+            expected = _hashlib.sha256(_marshal.dumps(matches[0])).digest()
+            actual = _hashlib.sha256(_marshal.dumps(function.__code__)).digest()
+        except (OSError, TypeError, ValueError) as exc:
+            raise evidence.PointInTimeEvidenceError(
+                f"trusted {authority_name} source identity unavailable: {method_name}"
+            ) from exc
+        if actual != expected:
+            raise evidence.PointInTimeEvidenceError(
+                f"trusted {authority_name} class implementation changed: {method_name}"
+            )
+
+    require_source_backed_method(
+        canonical_lineage_type,
+        _lineage_module,
+        module_filename="dataset_snapshot_lineage.py",
         method_name="record",
         expected_qualname="DatasetSnapshotLineageAuthority.record",
         authority_name="DatasetSnapshotLineageAuthority",
     )
-    _require_source_backed_class_method(
-        ScientificRegistry,
-        registry_module,
+    require_source_backed_method(
+        canonical_registry_type,
+        _registry_module,
+        module_filename="scientific_registry.py",
         method_name="get",
         expected_qualname="ScientificRegistry.get",
         authority_name="ScientificRegistry",
     )
     _reject_instance_method_shadows(
         lineage_authority,
-        DatasetSnapshotLineageAuthority,
+        canonical_lineage_type,
         authority_name="lineage_authority",
     )
     _reject_instance_method_shadows(
         lineage_authority.registry,
-        ScientificRegistry,
+        canonical_registry_type,
         authority_name="lineage_authority.registry",
     )
     return lineage_authority
@@ -537,11 +543,11 @@ def _resolve_canonical_snapshot(
             "dataset_snapshot must be an exact DatasetSnapshot"
         )
     lineage = _bound_lineage_authority(ledger)
-    # Revalidate again immediately before the authority-bearing class dispatch so a
-    # class replacement cannot race an earlier construction-time check.
     _require_exact_lineage_authority(lineage, holdout=True)
+    from .dataset_snapshot_lineage import DatasetSnapshotLineageAuthority as canonical_lineage_type
+
     try:
-        record = DatasetSnapshotLineageAuthority.record(
+        record = canonical_lineage_type.record(
             lineage,
             dataset_snapshot.dataset_snapshot_id,
         )
@@ -781,7 +787,7 @@ class _PointInTimeReloadLoader(importlib.abc.Loader):
 
 
 class _PointInTimeReloadFinder(importlib.abc.MetaPathFinder):
-    """Intercept explicit reload of either already-loaded authority submodule."""
+    """Intercept explicit reload of either already-loaded authority-bearing point-in-time submodule."""
 
     _autosport_point_in_time_reload_finder_v1 = True
 

@@ -21,6 +21,7 @@ from .continuous_session import (
     ContinuousSessionCoordinator,
     ContinuousSessionStatus,
     ContinuousTickResult,
+    SessionState,
     SettlementLearningHandoff,
     SettlementOutcomeAuthority,
 )
@@ -295,27 +296,137 @@ class AutonomousProductRuntime:
     dependencies: FocusedMirrorDependencyIndex
     _runtime_lease: _ProductRuntimeLease
 
+    @staticmethod
+    def _state_value(status: ContinuousSessionStatus) -> str:
+        state = getattr(status, "state", None)
+        value = state.value if hasattr(state, "value") else state
+        if value not in {
+            SessionState.RUNNING.value,
+            SessionState.PAUSED.value,
+            SessionState.STOPPED.value,
+        }:
+            raise ProductCompositionError(
+                "canonical product session returned an invalid lifecycle state"
+            )
+        return value
+
+    def _coherent_status(self) -> ContinuousSessionStatus:
+        """Project lifecycle truth only when collector and session durable state agree."""
+
+        coordinator_status = self.coordinator.status()
+        state = self._state_value(coordinator_status)
+        try:
+            collector_status = self.collector.status()
+        except Exception as exc:
+            raise ProductCompositionError(
+                "cannot verify canonical collector lifecycle state"
+            ) from exc
+        if (
+            type(collector_status) is not dict
+            or "stopped_at" not in collector_status
+            or "stop_reason" not in collector_status
+        ):
+            raise ProductCompositionError(
+                "canonical collector lifecycle state is incomplete"
+            )
+        stopped_at = collector_status["stopped_at"]
+        stop_reason = collector_status["stop_reason"]
+        if (stopped_at is None) != (stop_reason is None):
+            raise ProductCompositionError(
+                "canonical collector STOP state is incomplete"
+            )
+        collector_stopped = stopped_at is not None
+        session_stopped = state == SessionState.STOPPED.value
+        if collector_stopped != session_stopped:
+            raise ProductCompositionError(
+                "canonical product runtime lifecycle authorities disagree"
+            )
+        return coordinator_status
+
+    @staticmethod
+    def _note_secondary_failure(
+        primary_error: BaseException,
+        *,
+        action: str,
+        secondary_error: BaseException,
+    ) -> None:
+        try:
+            primary_error.add_note(
+                f"{action} also failed: "
+                f"{type(secondary_error).__name__}: {secondary_error}"
+            )
+        except BaseException:
+            pass
+
+    def _compensate_failed_start(self, primary_error: BaseException) -> None:
+        # start() spans two durable authorities. Either call can fail after its
+        # durable mutation committed, so both STOP compensations are attempted
+        # independently and the original start failure remains primary truth.
+        for action, stop in (
+            ("collector STOP compensation", self.collector.stop),
+            ("session STOP compensation", self.coordinator.stop),
+        ):
+            try:
+                stop("runtime_start_failed")
+            except BaseException as secondary_error:
+                self._note_secondary_failure(
+                    primary_error,
+                    action=action,
+                    secondary_error=secondary_error,
+                )
+
     def start(self) -> ContinuousSessionStatus:
-        self.collector.resume()
-        self.coordinator.resume()
-        return self.status()
+        # A prior interrupted lifecycle transition must be repaired with explicit
+        # STOP before any new resume is allowed.
+        self._coherent_status()
+        try:
+            self.collector.resume()
+            self.coordinator.resume()
+        except BaseException as primary_error:
+            self._compensate_failed_start(primary_error)
+            raise
+        return self._coherent_status()
 
     def pause(self) -> ContinuousSessionStatus:
+        self._coherent_status()
         self.coordinator.pause()
-        return self.status()
+        return self._coherent_status()
 
     def resume(self) -> ContinuousSessionStatus:
         return self.start()
 
     def stop(self, reason: str = "operator_stop") -> ContinuousSessionStatus:
-        self.collector.stop(reason)
-        self.coordinator.stop(reason)
-        return self.status()
+        # STOP is also the explicit recovery action for a previously split
+        # lifecycle graph, so do not preflight coherence here. Attempt both
+        # durable STOP authorities even if either side reports an error.
+        collector_error: BaseException | None = None
+        coordinator_error: BaseException | None = None
+        try:
+            self.collector.stop(reason)
+        except BaseException as exc:
+            collector_error = exc
+        try:
+            self.coordinator.stop(reason)
+        except BaseException as exc:
+            coordinator_error = exc
+
+        if collector_error is not None:
+            if coordinator_error is not None:
+                self._note_secondary_failure(
+                    collector_error,
+                    action="session STOP",
+                    secondary_error=coordinator_error,
+                )
+            raise collector_error
+        if coordinator_error is not None:
+            raise coordinator_error
+        return self._coherent_status()
 
     def status(self) -> ContinuousSessionStatus:
-        return self.coordinator.status()
+        return self._coherent_status()
 
     def tick(self) -> ContinuousTickResult:
+        self._coherent_status()
         return self.coordinator.tick()
 
     def close(self) -> None:

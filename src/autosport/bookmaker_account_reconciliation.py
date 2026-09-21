@@ -288,9 +288,9 @@ def reconcile_bookmaker_account_snapshots(
         raise BookmakerAccountReconciliationError(
             "snapshot venue/account/adapter identity mismatch"
         )
-    if _timestamp(current.observed_at) < _timestamp(previous.observed_at):
+    if _timestamp(current.observed_at) <= _timestamp(previous.observed_at):
         raise BookmakerAccountReconciliationError(
-            "current snapshot precedes previous snapshot"
+            "current snapshot must be strictly later than previous snapshot"
         )
     if c.profile_version < p.profile_version:
         raise BookmakerAccountReconciliationError(

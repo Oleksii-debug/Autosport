@@ -252,6 +252,58 @@ def test_effective_sample_size_is_explicit_hash_bound_evidence(tmp_path):
         ScientificRegistry(registry.path)
 
 
+def test_reference_effective_sample_size_controls_minimum_evidence(tmp_path):
+    baseline = _baseline_window(effective_sample_size=1)
+    current = _current_window(effective_sample_size=2)
+    registry = _registry(
+        tmp_path,
+        baseline_window=baseline,
+        current_window=current,
+    )
+    monitor = DriftMonitor(registry)
+    reference = _reference(monitor, baseline=baseline, min_samples=2)
+
+    finding = monitor.evaluate(
+        reference.reference_id,
+        current,
+        evaluated_at=EVALUATED_AT,
+    )
+
+    assert baseline.sample_count == 2
+    assert baseline.effective_sample_size == 1
+    assert finding.state is DriftState.INSUFFICIENT_EVIDENCE
+    assert finding.insufficiency_reason == "REFERENCE_EFFECTIVE_SAMPLE_SIZE"
+    assert finding.absolute_delta_fraction is None
+    reopened = DriftMonitor(ScientificRegistry(registry.path))
+    reopened.require_canonical_finding(finding.finding_id, as_of=EVALUATED_AT)
+
+
+def test_current_effective_sample_size_controls_minimum_evidence(tmp_path):
+    baseline = _baseline_window(effective_sample_size=2)
+    current = _current_window(effective_sample_size=1)
+    registry = _registry(
+        tmp_path,
+        baseline_window=baseline,
+        current_window=current,
+    )
+    monitor = DriftMonitor(registry)
+    reference = _reference(monitor, baseline=baseline, min_samples=2)
+
+    finding = monitor.evaluate(
+        reference.reference_id,
+        current,
+        evaluated_at=EVALUATED_AT,
+    )
+
+    assert current.sample_count == 2
+    assert current.effective_sample_size == 1
+    assert finding.state is DriftState.INSUFFICIENT_EVIDENCE
+    assert finding.insufficiency_reason == "CURRENT_EFFECTIVE_SAMPLE_SIZE"
+    assert finding.absolute_delta_fraction is None
+    reopened = DriftMonitor(ScientificRegistry(registry.path))
+    reopened.require_canonical_finding(finding.finding_id, as_of=EVALUATED_AT)
+
+
 def test_scoped_drift_evidence_is_hash_bound_and_scope_mismatch_fails_closed(tmp_path):
     baseline = _baseline_window(
         sport="table_tennis",

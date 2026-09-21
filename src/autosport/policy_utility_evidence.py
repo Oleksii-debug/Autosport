@@ -11,7 +11,7 @@ from pathlib import Path
 import re
 import tempfile
 import threading
-from typing import Any, Callable, Mapping
+from typing import Any, Mapping
 
 from .integrity import durable_path_lock
 
@@ -409,18 +409,12 @@ class PolicyUtilityStore:
     _locks_guard = threading.Lock()
     _locks: dict[str, threading.RLock] = {}
 
-    def __init__(
-        self,
-        path: str | Path,
-        *,
-        fault_hook: Callable[[str], None] | None = None,
-    ) -> None:
+    def __init__(self, path: str | Path) -> None:
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
         key = str(self.path.resolve())
         with self._locks_guard:
             self._lock = self._locks.setdefault(key, threading.RLock())
-        self._fault_hook = fault_hook
         self._by_id: dict[str, PolicyUtilityEvidence] = {}
         self._by_semantic_key: dict[str, PolicyUtilityEvidence] = {}
         with self._lock:
@@ -504,18 +498,8 @@ class PolicyUtilityStore:
                 handle.flush()
                 os.fsync(handle.fileno())
 
-            self._fault("before_replace")
-
-            def after_posix_replace() -> None:
-                self._fault("after_replace_before_directory_fsync")
-
-            _durable_replace(
-                temporary,
-                self.path,
-                after_posix_replace=after_posix_replace,
-            )
+            _durable_replace(temporary, self.path)
             temporary = None
-            self._fault("after_directory_fsync")
         except PolicyUtilityError:
             raise
         except OSError as exc:
@@ -526,10 +510,6 @@ class PolicyUtilityStore:
                     temporary.unlink()
                 except FileNotFoundError:
                     pass
-
-    def _fault(self, stage: str) -> None:
-        if self._fault_hook is not None:
-            self._fault_hook(stage)
 
     def _reload(self) -> None:
         by_id: dict[str, PolicyUtilityEvidence] = {}
@@ -571,12 +551,7 @@ class PolicyUtilityStore:
         self._by_semantic_key = by_semantic
 
 
-def _durable_replace(
-    source: Path,
-    destination: Path,
-    *,
-    after_posix_replace: Callable[[], None] | None = None,
-) -> None:
+def _durable_replace(source: Path, destination: Path) -> None:
     """Publish one complete image with platform-appropriate metadata durability."""
 
     if os.name == "nt":
@@ -584,8 +559,6 @@ def _durable_replace(
         return
 
     os.replace(source, destination)
-    if after_posix_replace is not None:
-        after_posix_replace()
     _fsync_directory(destination.parent)
 
 

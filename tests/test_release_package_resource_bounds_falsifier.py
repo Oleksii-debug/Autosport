@@ -14,7 +14,7 @@ class ReleasePackageResourceBoundsFalsifierTests(unittest.TestCase):
 
     SOURCE_SHA = "a" * 40
     MEMBER = "Autosport-V1/payload.bin"
-    _CENTRAL_SIGNATURE = b"PK\\x01\\x02"
+    _CENTRAL_SIGNATURE = b"PK\x01\x02"
 
     @staticmethod
     def _write_candidate(path: Path) -> None:

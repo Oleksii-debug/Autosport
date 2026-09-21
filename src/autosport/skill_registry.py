@@ -301,7 +301,7 @@ class SkillRegistry:
         try: s=json.loads(self.path.read_text(encoding="utf-8"),object_pairs_hook=_pairs)
         except json.JSONDecodeError as exc: raise SkillRegistryError("SkillRegistry state must be valid JSON") from exc
         if type(s) is not dict or set(s)!={"schema","schema_version","definitions","runs","state_sha256"}: raise SkillRegistryError("SkillRegistry state keys invalid")
-        if s["schema"]!=SCHEMA or s["schema_version"]!=SCHEMA_VERSION: raise SkillRegistryError("SkillRegistry schema mismatch")
+        if s["schema"] != SCHEMA or type(s["schema_version"]) is not int or s["schema_version"] != SCHEMA_VERSION: raise SkillRegistryError("SkillRegistry schema mismatch")
         if s["state_sha256"]!=_digest(self._without_digest(s)): raise SkillRegistryError("SkillRegistry state digest mismatch")
         keys=set(); ids=set()
         for e in s["definitions"]:

@@ -168,38 +168,50 @@ def summarize_description(
         automation_id = widget.automation_id
         if automation_id not in expected_ids:
             continue
+        normalized_automation_id = int(automation_id)
+        if normalized_automation_id in controls:
+            failures.append(
+                f"automation_id={normalized_automation_id}: duplicate critical control identity "
+                f"first_path={controls[normalized_automation_id]['path']} "
+                f"duplicate_path={widget.path}"
+            )
+            continue
         gap_names = sorted(_enum_name(gap) for gap in widget.gaps if _enum_name(gap))
         pattern_names = sorted(_enum_name(pattern) for pattern in widget.patterns if _enum_name(pattern))
         role_name = _enum_name(widget.role)
-        controls[int(automation_id)] = {
+        controls[normalized_automation_id] = {
             "path": widget.path,
             "tk_class": widget.tk_class,
             "role": role_name,
             "name": widget.name,
-            "automation_id": automation_id,
+            "automation_id": normalized_automation_id,
             "patterns": pattern_names,
             "answers_rows": bool(widget.answers_rows),
             "gaps": gap_names,
         }
         if not widget.name:
-            failures.append(f"automation_id={automation_id}: missing accessible name")
-        expected_role = _EXPECTED_ROLES[int(automation_id)]
+            failures.append(f"automation_id={normalized_automation_id}: missing accessible name")
+        expected_role = _EXPECTED_ROLES[normalized_automation_id]
         if role_name != expected_role:
             actual_role = role_name if role_name is not None else "NONE"
             failures.append(
-                f"automation_id={automation_id}: unexpected accessible role={actual_role} expected={expected_role}"
+                f"automation_id={normalized_automation_id}: unexpected accessible role={actual_role} expected={expected_role}"
             )
         blockers = sorted(set(gap_names) & _BLOCKING_GAPS)
         if blockers:
-            failures.append(f"automation_id={automation_id}: blocking gaps={','.join(blockers)}")
-        required = _REQUIRED_PATTERNS[int(automation_id)]
+            failures.append(
+                f"automation_id={normalized_automation_id}: blocking gaps={','.join(blockers)}"
+            )
+        required = _REQUIRED_PATTERNS[normalized_automation_id]
         missing_patterns = sorted(required - set(pattern_names))
         if missing_patterns:
             failures.append(
-                f"automation_id={automation_id}: missing UIA patterns={','.join(missing_patterns)}"
+                f"automation_id={normalized_automation_id}: missing UIA patterns={','.join(missing_patterns)}"
             )
-        if int(automation_id) in _ROW_CONTROLS and not widget.answers_rows:
-            failures.append(f"automation_id={automation_id}: list rows are not exposed through UIA")
+        if normalized_automation_id in _ROW_CONTROLS and not widget.answers_rows:
+            failures.append(
+                f"automation_id={normalized_automation_id}: list rows are not exposed through UIA"
+            )
 
     missing_ids = sorted(expected_ids - set(controls))
     for automation_id in missing_ids:

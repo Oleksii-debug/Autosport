@@ -59,6 +59,34 @@ def _sha256(value: object, name: str) -> str:
     return text
 
 
+def _exact_decimal_difference(left: Decimal, right: Decimal) -> Decimal:
+    """Subtract finite Decimals without consulting the ambient Decimal context.
+
+    ``Decimal`` arithmetic normally uses the process-local context precision, which is
+    inappropriate for a value that participates in a deterministic evidence hash. Aligning
+    the finite base-10 coefficients with integers preserves every input digit and constructs
+    the exact Decimal result directly.
+    """
+
+    left_tuple = left.as_tuple()
+    right_tuple = right.as_tuple()
+    common_exponent = min(left_tuple.exponent, right_tuple.exponent)
+
+    def signed_coefficient(value: Decimal) -> int:
+        parts = value.as_tuple()
+        coefficient = 0
+        for digit in parts.digits:
+            coefficient = coefficient * 10 + digit
+        coefficient *= 10 ** (parts.exponent - common_exponent)
+        return -coefficient if parts.sign else coefficient
+
+    difference = signed_coefficient(left) - signed_coefficient(right)
+    sign = 1 if difference < 0 else 0
+    absolute = abs(difference)
+    digits = tuple(int(character) for character in str(absolute)) if absolute else (0,)
+    return Decimal((sign, digits, common_exponent))
+
+
 def _instant(value: object, name: str) -> datetime:
     if type(value) is not str or not value or value.strip() != value:
         raise ProviderQuoteComparisonError(
@@ -255,7 +283,10 @@ class ProviderQuoteComparison:
 
     @property
     def displayed_spread(self) -> Decimal:
-        return self.best_decimal_odds - self.worst_decimal_odds
+        return _exact_decimal_difference(
+            self.best_decimal_odds,
+            self.worst_decimal_odds,
+        )
 
     @property
     def best_source_ids(self) -> tuple[str, ...]:

@@ -67,14 +67,9 @@ def _timestamp(value: object, name: str) -> tuple[str, datetime]:
 
 def _currency(value: object, name: str) -> str:
     raw = _text(value, name)
-    if (
-        len(raw) != 3
-        or not raw.isascii()
-        or not raw.isalpha()
-        or raw != raw.upper()
-    ):
+    if raw != raw.upper() or not raw.isascii() or not raw.isalnum():
         raise ProviderFundsFeasibilityError(
-            f"{name} must be a three-letter uppercase ASCII code"
+            f"{name} must be an uppercase ASCII alphanumeric provider currency code"
         )
     return raw
 

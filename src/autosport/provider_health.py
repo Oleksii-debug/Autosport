@@ -85,6 +85,46 @@ def _validate_exact_profile(profile: BookmakerCapabilityProfile) -> None:
             )
 
 
+def _validate_profile_progression(
+    previous: BookmakerCapabilityProfile,
+    current: BookmakerCapabilityProfile,
+) -> None:
+    previous_scope = (previous.venue_id, previous.account_id, previous.adapter_id)
+    current_scope = (current.venue_id, current.account_id, current.adapter_id)
+    if current_scope != previous_scope:
+        raise ProviderHealthEvidenceError(
+            "capability drift profiles must describe one exact venue/account/adapter scope"
+        )
+    if current.profile_version <= previous.profile_version:
+        raise ProviderHealthEvidenceError(
+            "current profile_version must advance for capability drift"
+        )
+    if _timestamp(current.observed_at, "current.observed_at") < _timestamp(
+        previous.observed_at,
+        "previous.observed_at",
+    ):
+        raise ProviderHealthEvidenceError(
+            "current capability profile cannot predate previous profile"
+        )
+
+
+def _semantic_changed_capabilities(
+    previous: BookmakerCapabilityProfile,
+    current: BookmakerCapabilityProfile,
+) -> tuple[BookmakerCapability, ...]:
+    return tuple(
+        sorted(
+            (
+                capability
+                for capability in BookmakerCapability
+                if previous.state_of(capability)
+                is not current.state_of(capability)
+            ),
+            key=lambda item: item.value,
+        )
+    )
+
+
 @dataclass(frozen=True, slots=True)
 class ProviderHealthEvidence:
     """One immutable descriptive health observation for one exact profile.
@@ -104,6 +144,7 @@ class ProviderHealthEvidence:
     source_payload_sha256: str
     previous_profile_id: str | None = None
     changed_capabilities: tuple[BookmakerCapability, ...] = ()
+    previous_profile: BookmakerCapabilityProfile | None = None
 
     def __post_init__(self) -> None:
         _validate_exact_profile(self.profile)
@@ -163,9 +204,27 @@ class ProviderHealthEvidence:
                 raise ProviderHealthEvidenceError(
                     "previous_profile_id must differ from current profile_id"
                 )
-            if not self.changed_capabilities:
+            if self.previous_profile is None:
                 raise ProviderHealthEvidenceError(
-                    "capability_changed requires changed_capabilities"
+                    "capability_changed requires previous_profile"
+                )
+            _validate_exact_profile(self.previous_profile)
+            if self.previous_profile.profile_id != previous_profile_id:
+                raise ProviderHealthEvidenceError(
+                    "previous_profile_id must match previous_profile.profile_id"
+                )
+            _validate_profile_progression(self.previous_profile, self.profile)
+            actual_changes = _semantic_changed_capabilities(
+                self.previous_profile,
+                self.profile,
+            )
+            if not actual_changes:
+                raise ProviderHealthEvidenceError(
+                    "profiles contain no semantic capability-state change"
+                )
+            if self.changed_capabilities != actual_changes:
+                raise ProviderHealthEvidenceError(
+                    "changed_capabilities must equal the exact semantic profile delta"
                 )
             if since < profile_observed:
                 raise ProviderHealthEvidenceError(
@@ -179,6 +238,10 @@ class ProviderHealthEvidence:
             if self.changed_capabilities:
                 raise ProviderHealthEvidenceError(
                     "changed_capabilities are only valid for capability_changed"
+                )
+            if self.previous_profile is not None:
+                raise ProviderHealthEvidenceError(
+                    "previous_profile is only valid for capability_changed"
                 )
 
     @property
@@ -263,35 +326,9 @@ def detect_capability_change(
 
     _validate_exact_profile(previous)
     _validate_exact_profile(current)
-    previous_scope = (previous.venue_id, previous.account_id, previous.adapter_id)
-    current_scope = (current.venue_id, current.account_id, current.adapter_id)
-    if current_scope != previous_scope:
-        raise ProviderHealthEvidenceError(
-            "capability drift profiles must describe one exact venue/account/adapter scope"
-        )
-    if current.profile_version <= previous.profile_version:
-        raise ProviderHealthEvidenceError(
-            "current profile_version must advance for capability drift"
-        )
-    if _timestamp(current.observed_at, "current.observed_at") < _timestamp(
-        previous.observed_at,
-        "previous.observed_at",
-    ):
-        raise ProviderHealthEvidenceError(
-            "current capability profile cannot predate previous profile"
-        )
+    _validate_profile_progression(previous, current)
 
-    changed = tuple(
-        sorted(
-            (
-                capability
-                for capability in BookmakerCapability
-                if previous.state_of(capability)
-                is not current.state_of(capability)
-            ),
-            key=lambda item: item.value,
-        )
-    )
+    changed = _semantic_changed_capabilities(previous, current)
     if not changed:
         raise ProviderHealthEvidenceError(
             "profiles contain no semantic capability-state change"
@@ -307,4 +344,5 @@ def detect_capability_change(
         source_payload_sha256=source_payload_sha256,
         previous_profile_id=previous.profile_id,
         changed_capabilities=changed,
+        previous_profile=previous,
     )

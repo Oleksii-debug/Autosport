@@ -5,7 +5,6 @@ from datetime import datetime, timezone
 from hashlib import sha256
 import json
 import urllib.request as _urllib_request
-from unittest.mock import patch
 
 import pytest
 
@@ -14,6 +13,9 @@ from autosport.betfair_account_readonly import (
     BetfairReadOnlyClient,
     BetfairSessionCredentials,
     UrllibBetfairHttpTransport,
+)
+from autosport.betfair_provider_billing_inputs import (
+    read_betfair_provider_billing_inputs,
 )
 from autosport.betfair_provider_billing_inputs_authority import (
     BetfairProviderBillingInputsAuthorityError,
@@ -59,22 +61,6 @@ class _Transport:
         return _provider_payload(body)
 
 
-class _UrlopenResponse:
-    def __init__(self, payload: bytes) -> None:
-        self.payload = payload
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, _exc_type, _exc, _tb) -> bool:
-        return False
-
-    def read(self, limit: int = -1) -> bytes:
-        if limit < 0:
-            return self.payload
-        return self.payload[:limit]
-
-
 def _provider_payload(body: bytes) -> bytes:
     request = json.loads(body)
     method = request["method"]
@@ -116,32 +102,48 @@ def _provider_payload(body: bytes) -> bytes:
     ).encode("utf-8")
 
 
-def _fake_opener_open(
-    _self: object,
-    request: object,
-    data: bytes | None = None,
-    timeout: object = None,
-):
-    assert data is None
-    assert isinstance(timeout, (int, float)) and not isinstance(timeout, bool)
-    assert timeout > 0
-    request_data = getattr(request, "data", None)
-    assert request_data is not None
-    return _UrlopenResponse(_provider_payload(request_data))
+def _register_test_source_via_private_closure(source: object):
+    """Register a deterministic fixture without exposing a product injection seam.
+
+    Production code has no synthetic-response hook. Unit tests deliberately use
+    Python closure introspection here so deterministic fixture creation cannot be
+    reached through the supported provider-issuance API or ordinary executable
+    rebinding. The product threat boundary explicitly treats private reflection as
+    outside the supported caller surface; normal same-process rebinds are tested
+    separately below and must fail closed before they execute.
+    """
+
+    closure = read_verified_betfair_provider_billing_inputs.__closure__
+    assert closure is not None
+    cells = {
+        name: cell.cell_contents
+        for name, cell in zip(
+            read_verified_betfair_provider_billing_inputs.__code__.co_freevars,
+            closure,
+            strict=True,
+        )
+    }
+    register = cells["register"]
+    return register(source)
 
 
 def _source():
     credentials = BetfairSessionCredentials("k", "t")
-    # Exercise the exact production transport/client path without replacing the
-    # product module's captured network-opener identity. The deterministic seam is
-    # below urllib.request.urlopen and cannot itself become a provider authority.
-    with patch.object(_urllib_request.OpenerDirector, "open", _fake_opener_open):
-        return read_verified_betfair_provider_billing_inputs(
-            credentials,
-            record_count=10,
-            statement_from="2026-09-01T00:00:00Z",
-            statement_to="2026-09-21T00:00:00Z",
-        )
+    client = BetfairReadOnlyClient(
+        credentials,
+        transport=_Transport("k"),
+        clock=_Clock(),
+        venue_id="betfair",
+        account_id="provider-billing-test-fixture",
+    )
+    source = read_betfair_provider_billing_inputs(
+        client,
+        from_record=0,
+        record_count=10,
+        statement_from="2026-09-01T00:00:00Z",
+        statement_to="2026-09-21T00:00:00Z",
+    )
+    return _register_test_source_via_private_closure(source)
 
 
 def _combined_source_digest(entitlement: object, statement: object, observed_at: str) -> str:
@@ -348,6 +350,27 @@ def test_rebound_module_network_opener_cannot_mint_provider_issuance(
     with pytest.raises(
         BetfairProviderBillingInputsAuthorityError,
         match="network opener drifted",
+    ):
+        read_verified_betfair_provider_billing_inputs(
+            BetfairSessionCredentials("k", "t")
+        )
+    assert called is False
+
+
+def test_rebound_lower_opener_dispatch_cannot_mint_provider_issuance(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    called = False
+
+    def fake_open(_self: object, *_args: object, **_kwargs: object):
+        nonlocal called
+        called = True
+        raise AssertionError("rebound lower opener must not execute")
+
+    monkeypatch.setattr(_urllib_request.OpenerDirector, "open", fake_open)
+    with pytest.raises(
+        BetfairProviderBillingInputsAuthorityError,
+        match="lower network opener drifted",
     ):
         read_verified_betfair_provider_billing_inputs(
             BetfairSessionCredentials("k", "t")

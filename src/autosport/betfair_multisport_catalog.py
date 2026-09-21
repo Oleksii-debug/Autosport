@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime
 from math import isfinite
 from types import MappingProxyType
 from typing import Mapping, Sequence
@@ -168,12 +169,18 @@ def build_list_market_catalogue_request(
         market_filter["eventIds"] = list(scoped_event_ids)
     if codes:
         market_filter["marketTypeCodes"] = list(codes)
+    _time_range(
+        market_start_from,
+        market_start_to,
+        from_field="market_start_from",
+        to_field="market_start_to",
+    )
     if market_start_from is not None or market_start_to is not None:
         time_range: dict[str, str] = {}
         if market_start_from is not None:
-            time_range["from"] = _text(market_start_from, "market_start_from")
+            time_range["from"] = market_start_from
         if market_start_to is not None:
-            time_range["to"] = _text(market_start_to, "market_start_to")
+            time_range["to"] = market_start_to
         market_filter["marketStartTime"] = time_range
     return BetfairCatalogRequest(
         LIST_MARKET_CATALOGUE,
@@ -203,7 +210,9 @@ def parse_event_types_result(result: object) -> tuple[BetfairEventType, ...]:
                 _provider_count(row, "marketCount", "market_count"),
             )
         )
-    _reject_duplicate((item.event_type_id for item in items), "eventType id", provider_result=True)
+    _reject_duplicate(
+        (item.event_type_id for item in items), "eventType id", provider_result=True
+    )
     return tuple(items)
 
 
@@ -236,7 +245,9 @@ def parse_market_types_result(result: object) -> tuple[BetfairMarketType, ...]:
                 _provider_count(row, "marketCount", "market_count"),
             )
         )
-    _reject_duplicate((item.market_type_code for item in items), "marketType code", provider_result=True)
+    _reject_duplicate(
+        (item.market_type_code for item in items), "marketType code", provider_result=True
+    )
     return tuple(items)
 
 
@@ -247,6 +258,8 @@ def parse_market_catalogue_result(
     requested_max_results: int,
     requested_event_ids: Sequence[str] = (),
     requested_market_type_codes: Sequence[str] = (),
+    requested_market_start_from: str | None = None,
+    requested_market_start_to: str | None = None,
 ) -> BetfairMarketCatalogueBatch:
     allowed = frozenset(_unique_ids(requested_event_type_ids, "requested_event_type_ids"))
     allowed_events = frozenset(
@@ -254,6 +267,12 @@ def parse_market_catalogue_result(
     )
     allowed_market_types = frozenset(
         _unique_codes(requested_market_type_codes, "requested_market_type_codes")
+    )
+    start_from, start_to = _time_range(
+        requested_market_start_from,
+        requested_market_start_to,
+        from_field="requested_market_start_from",
+        to_field="requested_market_start_to",
     )
     limit = _max_results(requested_max_results)
     rows = _rows(result, "listMarketCatalogue result")
@@ -282,13 +301,25 @@ def parse_market_catalogue_result(
             raise BetfairCatalogError(
                 "catalogue row escaped the requested marketType scope"
             )
+        market_start_time = _provider_text(
+            row, "marketStartTime", "market_start_time"
+        )
+        market_start = _provider_datetime(market_start_time, "market_start_time")
+        if start_from is not None and market_start < start_from:
+            raise BetfairCatalogError(
+                "catalogue row escaped the requested market start time window"
+            )
+        if start_to is not None and market_start > start_to:
+            raise BetfairCatalogError(
+                "catalogue row escaped the requested market start time window"
+            )
         items.append(
             BetfairCatalogMarket(
                 _provider_text(row, "marketId", "market_id"),
                 event_type_id,
                 event_id,
                 _provider_text(row, "marketName", "market_name"),
-                _provider_text(row, "marketStartTime", "market_start_time"),
+                market_start_time,
                 market_type,
             )
         )
@@ -359,6 +390,32 @@ def _provider_text(row: Mapping[str, object], key: str, field: str) -> str:
 
 def _optional_provider_text(row: Mapping[str, object], key: str, field: str) -> str | None:
     return _optional_text(row.get(key), field)
+
+
+def _provider_datetime(value: object, field: str) -> datetime:
+    text = _text(value, field)
+    candidate = text[:-1] + "+00:00" if text.endswith(("Z", "z")) else text
+    try:
+        parsed = datetime.fromisoformat(candidate)
+    except ValueError as exc:
+        raise BetfairCatalogError(f"{field} must be an ISO-8601 date-time") from exc
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        raise BetfairCatalogError(f"{field} must include a timezone offset")
+    return parsed
+
+
+def _time_range(
+    start: str | None,
+    end: str | None,
+    *,
+    from_field: str,
+    to_field: str,
+) -> tuple[datetime | None, datetime | None]:
+    parsed_start = None if start is None else _provider_datetime(start, from_field)
+    parsed_end = None if end is None else _provider_datetime(end, to_field)
+    if parsed_start is not None and parsed_end is not None and parsed_start > parsed_end:
+        raise BetfairCatalogError(f"{from_field} must not be after {to_field}")
+    return parsed_start, parsed_end
 
 
 def _provider_id(value: object, field: str) -> str:

@@ -119,3 +119,56 @@ def test_legacy_pair_migrates_once_but_cannot_be_readopted_after_bind_loss(
         match="history is missing after prior binding",
     ):
         restarted.current()
+
+
+def test_existing_machine_history_without_receipt_is_backfilled_safely(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "execution-stop.jsonl"
+    authority = ExecutionStopAuthority(path)
+    expected = authority.initialize_stopped(
+        operator_id="owner",
+        reason="existing pre-receipt monotonic state",
+        command_id="stop-r1",
+    )
+
+    machine = authority._monotonic_authority()
+    receipt_path = authority._monotonic_receipt_path(machine)
+    history_before = machine.read_history()
+    assert history_before
+    receipt_path.unlink()
+
+    restarted = ExecutionStopAuthority(path)
+    assert restarted.current() == expected
+    assert receipt_path.exists()
+    assert restarted._monotonic_authority().read_history() == history_before
+
+
+def test_tampered_binding_receipt_fails_closed_without_rewriting_it(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "execution-stop.jsonl"
+    authority = ExecutionStopAuthority(path)
+    authority.initialize_stopped(
+        operator_id="owner",
+        reason="initial safe state",
+        command_id="stop-r1",
+    )
+
+    machine = authority._monotonic_authority()
+    receipt_path = authority._monotonic_receipt_path(machine)
+    original = receipt_path.read_text(encoding="utf-8")
+    tampered = original.replace(
+        '"domain":"execution-stop-authority"',
+        '"domain":"wrong-authority"',
+    )
+    assert tampered != original
+    receipt_path.write_text(tampered, encoding="utf-8")
+
+    restarted = ExecutionStopAuthority(path)
+    with pytest.raises(
+        ExecutionStopIntegrityError,
+        match="identity or digest mismatch",
+    ):
+        restarted.current()
+    assert receipt_path.read_text(encoding="utf-8") == tampered

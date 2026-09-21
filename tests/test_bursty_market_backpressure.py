@@ -21,6 +21,8 @@ def _event(
     source_id: str = "provider-a",
     event_id: str = "event-1",
     market_id: str = "market-1",
+    status: str = "open",
+    score_state: str | None = None,
 ) -> MarketEvent:
     timestamp = (_START + timedelta(seconds=sequence)).isoformat()
     return MarketEvent(
@@ -31,9 +33,10 @@ def _event(
         observed_ts=timestamp,
         source_id=source_id,
         sequence=sequence,
-        status="open",
+        status=status,
         source_ts=timestamp,
         ingest_ts=timestamp,
+        score_state=score_state,
     )
 
 
@@ -198,6 +201,48 @@ def test_full_refresh_rebuilds_focused_keys_from_latest_burst_truth() -> None:
     assert len(b_view.events) == 1
     assert b_view.events[0].selection_id == "b"
     assert unrelated_view.events == ()
+
+
+def test_status_barrier_inside_same_quote_burst_forces_full_refresh() -> None:
+    mirror = MarketMirror()
+    buffer = BoundedMirrorInvalidationBuffer(mirror, max_dirty_keys=8)
+
+    buffer.accept_persisted(_event("barrier", 1, status="open"))
+    assert buffer.pending_count == 1
+    assert buffer.full_refresh_required is False
+
+    # A suspension cannot be collapsed into the ordinary same-key dirty marker.
+    # Even if a newer OPEN arrives before downstream drain, the outstanding fence
+    # must force the live loop to rebuild cached decision state across the barrier.
+    buffer.accept_persisted(_event("barrier", 2, status="suspended"))
+    assert buffer.full_refresh_required is True
+    assert buffer.pending_count == 0
+    buffer.accept_persisted(_event("barrier", 3, status="open"))
+
+    latest = mirror.get("provider-a", "event-1", "market-1", "barrier")
+    assert latest is not None
+    assert latest.sequence == 3
+    assert latest.status == "open"
+
+    batch = buffer.drain(max_items=8)
+    assert batch.full_refresh_required is True
+    assert batch.changed_keys == ()
+    assert batch.has_more is False
+    assert buffer.full_refresh_required is False
+
+
+def test_material_score_transition_is_not_price_coalesced() -> None:
+    mirror = MarketMirror()
+    buffer = BoundedMirrorInvalidationBuffer(mirror, max_dirty_keys=8)
+
+    buffer.accept_persisted(_event("score", 1, score_state="0-0"))
+    buffer.accept_persisted(_event("score", 2, odds="2.20", score_state="1-0"))
+
+    assert buffer.full_refresh_required is True
+    assert buffer.pending_count == 0
+    batch = buffer.drain(max_items=8)
+    assert batch.full_refresh_required is True
+    assert batch.changed_keys == ()
 
 
 def test_concurrent_same_quote_burst_converges_to_highest_sequence_and_one_dirty_key() -> None:

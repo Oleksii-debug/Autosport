@@ -30,6 +30,7 @@ def _install_reserved_witness_mint_guard() -> None:
     original_assert_promotion = (
         _tfa.TrialFamilyAccountingStore.assert_promotion_evidence_eligible
     )
+    workspace_lock = WorkspaceEconomicLock
 
     def append_event_without_reserved_witness_mint(
         self: _tfa.TrialFamilyAccountingStore,
@@ -62,7 +63,9 @@ def _install_reserved_witness_mint_guard() -> None:
         # design. Serialize the whole composition, not merely each individual read,
         # so public writers using the same workspace lock cannot create a TOCTOU
         # between the attempt-count/open-attempt check and witness verification.
-        with WorkspaceEconomicLock(self.workspace_root):
+        # Resolve the lock capability from this install-time closure, not a mutable
+        # module global that a caller could rebind before an authority-bearing read.
+        with workspace_lock(self.workspace_root):
             return original_assert_promotion(
                 self,
                 evidence=evidence,

@@ -1,13 +1,18 @@
 from __future__ import annotations
 
+import hashlib
 import os
 import stat
 from dataclasses import dataclass
 from pathlib import Path
 
 from .decision_ledger import DecisionLedgerIntegrityError, JsonlDecisionLedger
-from .integrity import sha256_file
-from .run_registry import ReconciliationError, RunRegistry, has_durable_workspace_history
+from .run_registry import (
+    ReconciliationError,
+    RunRegistry,
+    _read_stable_regular_file_bytes,
+    has_durable_workspace_history,
+)
 from .run_transaction import RunTransaction, RunTransactionError
 from .workspace_lock import (
     WorkspaceEconomicLock,
@@ -414,16 +419,31 @@ def _require_recorded_base_state(
         raise ReconciliationError("registry lacks a valid base PaperBook SHA-256")
     if not isinstance(expected_ledger, str) or len(expected_ledger) != 64:
         raise ReconciliationError("registry lacks a valid base Decision Ledger SHA-256")
-    if not paper_book_path.is_file() or not decision_ledger_path.is_file():
-        raise ReconciliationError("canonical economic base files are missing")
 
-    actual_book = sha256_file(paper_book_path)
     try:
-        ledger_snapshot = JsonlDecisionLedger(decision_ledger_path).verified_snapshot()
+        book_bytes = _read_stable_regular_file_bytes(
+            paper_book_path,
+            label="canonical PaperBook",
+        )
+        ledger_bytes = _read_stable_regular_file_bytes(
+            decision_ledger_path,
+            label="canonical Decision Ledger",
+        )
+    except (FileNotFoundError, OSError, ValueError) as exc:
+        raise ReconciliationError(
+            "canonical economic base files are missing, aliased, or unreadable"
+        ) from exc
+
+    actual_book = hashlib.sha256(book_bytes).hexdigest()
+    try:
+        JsonlDecisionLedger._verify_bytes(ledger_bytes)
     except DecisionLedgerIntegrityError as exc:
         raise ReconciliationError(
             f"canonical Decision Ledger integrity validation failed: {exc}"
         ) from exc
-    if actual_book != expected_book or ledger_snapshot.sha256 != expected_ledger:
-        raise ReconciliationError("canonical economic state no longer matches the recorded transaction BASE")
-    return actual_book, ledger_snapshot.sha256
+    actual_ledger = hashlib.sha256(ledger_bytes).hexdigest()
+    if actual_book != expected_book or actual_ledger != expected_ledger:
+        raise ReconciliationError(
+            "canonical economic state no longer matches the recorded transaction BASE"
+        )
+    return actual_book, actual_ledger

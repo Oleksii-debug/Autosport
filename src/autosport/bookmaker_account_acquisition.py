@@ -20,6 +20,9 @@ from pathlib import Path
 import sqlite3
 from typing import Any
 
+from ._campaign_provider_scope_devapp_identity import (
+    _read_developer_account_identity,
+)
 from .betfair_account_readonly import (
     ACCOUNT_JSON_RPC_ENDPOINT,
     ADAPTER_ID,
@@ -95,6 +98,8 @@ class BookmakerAccountAcquisitionReceipt:
     observation_key: str
     venue_id: str
     account_id: str
+    authenticated_account_identity_sha256: str
+    account_identity_observed_at: str
     adapter_id: str
     adapter_version: str
     profile_id: str
@@ -233,6 +238,8 @@ class BookmakerAccountAcquisitionStore:
         requested_capabilities: frozenset[BookmakerCapability],
         *,
         acquisition_id: str,
+        authenticated_account_identity_sha256: str,
+        account_identity_observed_at: str,
     ) -> AcquiredBookmakerAccountSnapshot:
         """Perform or idempotently resume one canonical provider acquisition.
 
@@ -245,6 +252,14 @@ class BookmakerAccountAcquisitionStore:
         _assert_canonical_betfair_client(client)
         capabilities = _validate_requested_capabilities(requested_capabilities)
         acquisition_id = _exact_text(acquisition_id, "acquisition_id")
+        authenticated_account_identity_sha256 = _sha256_hex(
+            authenticated_account_identity_sha256,
+            "authenticated_account_identity_sha256",
+        )
+        account_identity_observed_at = _exact_text(
+            account_identity_observed_at,
+            "account_identity_observed_at",
+        )
         existing = self._load_by_acquisition_id(acquisition_id)
         if existing is not None:
             _validate_retry_request(existing, client, capabilities, acquisition_id)
@@ -283,6 +298,10 @@ class BookmakerAccountAcquisitionStore:
             "observation_key": observation_key,
             "venue_id": snapshot.profile.venue_id,
             "account_id": snapshot.profile.account_id,
+            "authenticated_account_identity_sha256": (
+                authenticated_account_identity_sha256
+            ),
+            "account_identity_observed_at": account_identity_observed_at,
             "adapter_id": snapshot.profile.adapter_id,
             "adapter_version": snapshot.profile.adapter_version,
             "profile_id": snapshot.profile.profile_id,
@@ -731,6 +750,8 @@ def _snapshot_from_payload(payload: object) -> BookmakerAccountSnapshot:
         {
             "venue_id",
             "account_id",
+            "authenticated_account_identity_sha256",
+            "account_identity_observed_at",
             "adapter_id",
             "adapter_version",
             "profile_version",
@@ -1102,6 +1123,14 @@ def _decode_record(
         observation_key=_exact_text(record["observation_key"], "observation_key"),
         venue_id=_exact_text(record["venue_id"], "venue_id"),
         account_id=_exact_text(record["account_id"], "account_id"),
+        authenticated_account_identity_sha256=_sha256_hex(
+            record["authenticated_account_identity_sha256"],
+            "authenticated_account_identity_sha256",
+        ),
+        account_identity_observed_at=_exact_text(
+            record["account_identity_observed_at"],
+            "account_identity_observed_at",
+        ),
         adapter_id=_exact_text(record["adapter_id"], "adapter_id"),
         adapter_version=_exact_text(record["adapter_version"], "adapter_version"),
         profile_id=_exact_text(record["profile_id"], "profile_id"),
@@ -1293,7 +1322,6 @@ def _install_provider_origin_guard() -> None:
         requested_capabilities: frozenset[BookmakerCapability],
         *,
         acquisition_id: str,
-        venue_id: str = "betfair",
         account_id: str = "default-account",
         timeout_seconds: float = 10.0,
     ) -> AcquiredBookmakerAccountSnapshot:
@@ -1309,7 +1337,7 @@ def _install_provider_origin_guard() -> None:
         client = BetfairReadOnlyClient(
             credentials,
             timeout_seconds=timeout_seconds,
-            venue_id=venue_id,
+            venue_id="betfair",
             account_id=account_id,
         )
         _assert_canonical_betfair_client(client)
@@ -1330,11 +1358,16 @@ def _install_provider_origin_guard() -> None:
                 "use a new acquisition_id to reacquire provider evidence"
             )
 
+        account_identity = _read_developer_account_identity(client)
         acquired = raw_acquire(
             self,
             client,
             capabilities,
             acquisition_id=acquisition,
+            authenticated_account_identity_sha256=(
+                account_identity.account_identity_sha256
+            ),
+            account_identity_observed_at=account_identity.observed_at,
         )
         return issue(acquired)
 

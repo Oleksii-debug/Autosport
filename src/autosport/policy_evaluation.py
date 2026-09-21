@@ -20,6 +20,7 @@ from .transparent_bandit_policy import BanditPolicyState
 
 
 _HEX = frozenset("0123456789abcdef")
+_CANONICAL_PAPER_ABSTENTION_ACTIONS = frozenset({"NO_BET", "WAIT"})
 
 
 def _text(value: object, name: str) -> str:
@@ -529,7 +530,7 @@ def _policy_metrics(
         worst_reward = min(rewards)
         downside_loss = max(Decimal(0), -worst_reward)
         max_drawdown = _max_drawdown(rewards)
-        abstentions = Decimal(sum(action == abstain_action for action in actions))
+        abstention_actions = _CANONICAL_PAPER_ABSTENTION_ACTIONS | frozenset(\n            {_text(abstain_action, "abstain_action")}\n        )\n        abstentions = Decimal(sum(action in abstention_actions for action in actions))
         abstention_rate = abstentions / count
         action_rate = Decimal(1) - abstention_rate
     return tuple(

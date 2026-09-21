@@ -2,11 +2,16 @@ from __future__ import annotations
 
 import hashlib
 import unittest
+from unittest import mock
 
+import autosport.parlay_sport_catalog_acquisition as acquisition_module
 from autosport.parlay_sport_catalog_acquisition import (
     CANONICAL_PARLAY_SPORTS_URL,
+    DEFAULT_MAX_RESPONSE_BYTES,
+    DEFAULT_TIMEOUT_SECONDS,
     ParlaySportCatalogAcquisition,
     ParlaySportCatalogEvidenceError,
+    ParlaySportCatalogTransportError,
     RawCatalogHttpResponse,
     acquire_parlay_sport_catalog,
 )
@@ -230,6 +235,127 @@ class ParlaySportCatalogAcquisitionTests(unittest.TestCase):
                         max_response_bytes=bad_size,
                         clock=lambda: NOW,
                     )
+
+    def test_runtime_bounds_are_tighten_only_product_limits(self):
+        for bad_timeout in (
+            DEFAULT_TIMEOUT_SECONDS + 0.0001,
+            DEFAULT_TIMEOUT_SECONDS * 2,
+        ):
+            with self.subTest(timeout=bad_timeout):
+                transport = RecordingTransport([response()])
+                with self.assertRaisesRegex(ValueError, "product maximum"):
+                    acquire_parlay_sport_catalog(
+                        transport=transport,
+                        timeout_seconds=bad_timeout,
+                        clock=lambda: NOW,
+                    )
+                self.assertEqual(transport.calls, [])
+
+        for bad_size in (
+            DEFAULT_MAX_RESPONSE_BYTES + 1,
+            DEFAULT_MAX_RESPONSE_BYTES * 2,
+        ):
+            with self.subTest(max_response_bytes=bad_size):
+                transport = RecordingTransport([response()])
+                with self.assertRaisesRegex(ValueError, "product maximum"):
+                    acquire_parlay_sport_catalog(
+                        transport=transport,
+                        max_response_bytes=bad_size,
+                        clock=lambda: NOW,
+                    )
+                self.assertEqual(transport.calls, [])
+
+        result = acquire_parlay_sport_catalog(
+            transport=RecordingTransport([response()]),
+            timeout_seconds=DEFAULT_TIMEOUT_SECONDS,
+            max_response_bytes=DEFAULT_MAX_RESPONSE_BYTES,
+            clock=lambda: NOW,
+        )
+        self.assertEqual(result.status_code, 200)
+
+    def test_304_cannot_regress_causal_acquisition_time(self):
+        prior = acquire_parlay_sport_catalog(
+            transport=RecordingTransport([response(body=b"[]", etag='"v1"')]),
+            timeout_seconds=3.5,
+            max_response_bytes=1024,
+            clock=lambda: "2026-09-21T10:30:00+00:00",
+        )
+        transport = RecordingTransport(
+            [response(status=304, body=b"", etag='"v1"')]
+        )
+
+        with self.assertRaisesRegex(
+            ParlaySportCatalogEvidenceError, "cannot precede"
+        ):
+            acquire_parlay_sport_catalog(
+                prior=prior,
+                transport=transport,
+                timeout_seconds=3.5,
+                max_response_bytes=1024,
+                clock=lambda: "2026-09-21T10:29:59+00:00",
+            )
+        self.assertEqual(len(transport.calls), 1)
+
+    def test_equivalent_timezone_instant_is_not_clock_regression(self):
+        prior = acquire_parlay_sport_catalog(
+            transport=RecordingTransport([response(body=b"[]", etag='"v1"')]),
+            timeout_seconds=3.5,
+            max_response_bytes=1024,
+            clock=lambda: "2026-09-21T10:30:00+00:00",
+        )
+        result = acquire_parlay_sport_catalog(
+            prior=prior,
+            transport=RecordingTransport(
+                [response(status=304, body=b"", etag='"v1"')]
+            ),
+            timeout_seconds=3.5,
+            max_response_bytes=1024,
+            clock=lambda: "2026-09-21T12:30:00+02:00",
+        )
+        self.assertTrue(result.is_not_modified)
+
+    def test_default_transport_blocks_redirect_before_second_hop(self):
+        captured = {}
+
+        class SimulatedRedirectOpener:
+            def __init__(self, handler):
+                self.handler = handler
+                self.second_hop_attempted = False
+
+            def open(self, request, timeout):
+                self.handler.redirect_request(
+                    request,
+                    None,
+                    302,
+                    "Found",
+                    {"Location": "https://example.invalid/x"},
+                    "https://example.invalid/x",
+                )
+                self.second_hop_attempted = True
+                raise AssertionError("redirect handler allowed a second hop")
+
+        def fake_build_opener(handler):
+            opener = SimulatedRedirectOpener(handler)
+            captured["opener"] = opener
+            return opener
+
+        with mock.patch.object(
+            acquisition_module.urllib.request,
+            "build_opener",
+            side_effect=fake_build_opener,
+        ):
+            with self.assertRaisesRegex(
+                ParlaySportCatalogTransportError,
+                "redirect blocked before second hop",
+            ):
+                acquisition_module._default_transport(
+                    CANONICAL_PARLAY_SPORTS_URL,
+                    {"Accept": "application/json"},
+                    1.0,
+                    1024,
+                )
+
+        self.assertFalse(captured["opener"].second_hop_attempted)
 
     def test_prior_must_be_exact_200_body_acquisition(self):
         fake_304 = ParlaySportCatalogAcquisition(

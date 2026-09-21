@@ -3,7 +3,10 @@
 This module persists only the existing executable paper-risk configuration.  It
 does not make risk decisions, widen EconomicGoal authority, or create a second
 risk model.  A persisted policy can be reconstructed only against the exact
-EconomicGoalContract revision whose canonical digest was stored with it.
+EconomicGoalContract revision whose canonical digest was stored with it.  Load
+also requires the exact PaperRiskPolicy provenance identity from a separately
+verified durable authority; the mutable store payload is never allowed to
+self-authorize a coherent rewrite.
 """
 
 from __future__ import annotations
@@ -123,8 +126,14 @@ def paper_risk_policy_from_payload(
     payload: object,
     *,
     economic_goal: EconomicGoalContract | None,
+    expected_policy_provenance_sha256: str,
 ) -> PaperRiskPolicy:
-    """Reconstruct exact executable risk authority and verify all durable bindings."""
+    """Reconstruct only when an external immutable policy identity agrees.
+
+    The expected provenance must come from a separately verified authority
+    outside paper_risk_policy.json.  This prevents a coherent rewrite of both
+    executable fractions and the self-derived digest stored in this payload.
+    """
 
     if type(payload) is not dict or not all(type(key) is str for key in payload):
         raise PaperRiskPolicyStoreError(
@@ -169,6 +178,14 @@ def paper_risk_policy_from_payload(
         "policy_provenance_sha256",
         root["policy_provenance_sha256"],
     )
+    expected_provenance = _sha256_text(
+        "expected_policy_provenance_sha256",
+        expected_policy_provenance_sha256,
+    )
+    if persisted_provenance != expected_provenance:
+        raise PaperRiskPolicyStoreError(
+            "durable paper risk policy provenance does not match external authority"
+        )
     try:
         reconstructed = PaperRiskPolicy(
             max_ticket_fraction=_decimal_text(
@@ -194,6 +211,10 @@ def paper_risk_policy_from_payload(
         raise PaperRiskPolicyStoreError(
             "durable paper risk policy provenance mismatch"
         )
+    if reconstructed.provenance_sha256 != expected_provenance:
+        raise PaperRiskPolicyStoreError(
+            "reconstructed paper risk policy does not match external authority"
+        )
     return reconstructed
 
 
@@ -201,6 +222,7 @@ def paper_risk_policy_from_json(
     text: str,
     *,
     economic_goal: EconomicGoalContract | None,
+    expected_policy_provenance_sha256: str,
 ) -> PaperRiskPolicy:
     """Decode one strict JSON document and verify exact policy reconstruction."""
 
@@ -210,7 +232,11 @@ def paper_risk_policy_from_json(
         payload = strict_json_loads(text)
     except (TypeError, ValueError) as exc:
         raise PaperRiskPolicyStoreError("invalid paper risk policy JSON") from exc
-    return paper_risk_policy_from_payload(payload, economic_goal=economic_goal)
+    return paper_risk_policy_from_payload(
+        payload,
+        economic_goal=economic_goal,
+        expected_policy_provenance_sha256=expected_policy_provenance_sha256,
+    )
 
 
 class PaperRiskPolicyStore:
@@ -231,6 +257,7 @@ class PaperRiskPolicyStore:
         self,
         *,
         economic_goal: EconomicGoalContract | None,
+        expected_policy_provenance_sha256: str,
     ) -> PaperRiskPolicy:
         try:
             text = self.path.read_text(encoding="utf-8")
@@ -238,7 +265,11 @@ class PaperRiskPolicyStore:
             raise PaperRiskPolicyStoreError(
                 f"cannot read persisted paper risk policy: {exc}"
             ) from exc
-        return paper_risk_policy_from_json(text, economic_goal=economic_goal)
+        return paper_risk_policy_from_json(
+            text,
+            economic_goal=economic_goal,
+            expected_policy_provenance_sha256=expected_policy_provenance_sha256,
+        )
 
     def initialize_owner(self, policy: PaperRiskPolicy) -> None:
         """Create the exact initial policy under the canonical economic writer lock."""

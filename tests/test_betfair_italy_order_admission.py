@@ -65,8 +65,11 @@ def test_mixed_back_and_lay_batch_is_rejected():
 
 @pytest.mark.parametrize("target", ["PAYOUT", "BACKERS_PROFIT"])
 def test_target_sizing_is_unavailable_in_italy(target):
-    result = evaluate_italian_limit_batch((I(target=target),))
-    assert "I0:TARGET_MODE_UNAVAILABLE_IT" in result.reason_codes
+    result = evaluate_italian_limit_batch(
+        (I(size="0.01", price="10000000", target=target),)
+    )
+    assert result.reason_codes == ("I0:TARGET_MODE_UNAVAILABLE_IT",)
+    assert result.preselected_returns_eur == ()
 
 
 def test_back_preselected_return_equal_to_10000_is_allowed():
@@ -176,9 +179,7 @@ def test_all_reasons_are_preserved_deterministically():
     assert result.reason_codes == (
         "MIXED_BACK_LAY_BATCH",
         "I0:TARGET_MODE_UNAVAILABLE_IT",
-        "I0:BACK_STAKE_BELOW_EUR_2",
-        "I0:BACK_STAKE_NOT_EUR_0_50_INCREMENT",
-        "I0:PRESELECTED_RETURN_EXCEEDS_EUR_10000",
         "I1:LAY_BACKER_STAKE_BELOW_EUR_0_50",
         "I1:PRESELECTED_RETURN_EXCEEDS_EUR_10000",
     )
+    assert result.preselected_returns_eur == (Decimal("14700.00"),)

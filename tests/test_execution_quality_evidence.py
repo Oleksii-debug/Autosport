@@ -23,6 +23,8 @@ from autosport.evaluation_universe import (
 )
 from autosport.execution_quality_evidence import (
     ExecutionQualityEvidenceClass,
+    PaperExecutionQualityReport,
+    PaperExecutionQualitySample,
     build_paper_execution_quality_report,
 )
 from autosport.paper_execution_reality import (
@@ -385,3 +387,11 @@ def test_report_rejects_ledger_subclass_before_authority_reads(tmp_path):
 
     with pytest.raises(TypeError, match="exact EvaluationUniverseLedger"):
         build_paper_execution_quality_report(forged)
+
+
+def test_positive_quality_evidence_cannot_be_caller_constructed():
+    with pytest.raises(TypeError, match="canonical quality projector"):
+        PaperExecutionQualitySample()
+
+    with pytest.raises(TypeError, match="canonical frozen ledger"):
+        PaperExecutionQualityReport()

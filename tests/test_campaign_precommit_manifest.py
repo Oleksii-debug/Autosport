@@ -32,9 +32,9 @@ def manifest(**overrides: object) -> CampaignPrecommitManifest:
         "campaign_id": "paper-forward-2026-09-22",
         "source_id": "betfair:exchange",
         "source_snapshot_sha256": A,
-        "committed_at": "2026-09-21T19:00:00Z",
-        "observation_not_before": "2026-09-22T06:00:00Z",
-        "observation_not_after": "2026-09-29T06:00:00Z",
+        "committed_at": "2099-12-31T19:00:00Z",
+        "observation_not_before": "2100-01-01T06:00:00Z",
+        "observation_not_after": "2100-01-08T06:00:00Z",
         "evaluation_universe_sha256": B,
         "strategy_version_id": "strategy-v17",
         "champion_version_id": "model-v42",
@@ -114,12 +114,12 @@ def test_precommit_must_precede_first_observation() -> None:
         CampaignPrecommitManifestError,
         match="before prospective observation",
     ):
-        manifest(committed_at="2026-09-22T06:00:00Z")
+        manifest(committed_at="2100-01-01T06:00:00Z")
 
 
 def test_observation_window_must_be_nonempty() -> None:
     with pytest.raises(CampaignPrecommitManifestError):
-        manifest(observation_not_after="2026-09-22T06:00:00Z")
+        manifest(observation_not_after="2100-01-01T06:00:00Z")
 
 
 def test_champion_and_baseline_must_be_distinct() -> None:
@@ -650,3 +650,79 @@ def test_parent_directory_sync_failure_fails_closed_and_retry_recovers(
 
     assert digest == manifest().manifest_sha256
     assert load_campaign_precommit_manifest(path) == manifest()
+
+
+def test_backdated_late_first_publication_fails_closed(tmp_path: Path) -> None:
+    target = tmp_path / "backdated.json"
+    backdated = manifest(
+        campaign_id="paper-forward-backdated",
+        committed_at="1999-12-31T23:59:59Z",
+        observation_not_before="2000-01-01T00:00:00Z",
+        observation_not_after="2100-01-01T00:00:00Z",
+    )
+
+    with pytest.raises(
+        CampaignPrecommitManifestError,
+        match="first campaign precommit publication must precede prospective observation",
+    ):
+        write_campaign_precommit_manifest_once(target, backdated)
+
+    assert not target.exists()
+
+
+def test_late_exact_retry_remains_idempotent(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    target = tmp_path / "precommit.json"
+    original = manifest()
+
+    monkeypatch.setattr(
+        precommit_module,
+        "_publication_deadline_reached",
+        lambda _deadline: False,
+    )
+    digest = write_campaign_precommit_manifest_once(target, original)
+    first_bytes = target.read_bytes()
+
+    monkeypatch.setattr(
+        precommit_module,
+        "_publication_deadline_reached",
+        lambda _deadline: True,
+    )
+    assert write_campaign_precommit_manifest_once(target, original) == digest
+    assert target.read_bytes() == first_bytes
+
+
+def test_boundary_crossed_after_temp_flush_never_publishes_canonical(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    target = tmp_path / "precommit.json"
+    original = manifest()
+    checks = iter((False, True))
+
+    monkeypatch.setattr(
+        precommit_module,
+        "_publication_deadline_reached",
+        lambda _deadline: next(checks),
+    )
+    with pytest.raises(
+        CampaignPrecommitManifestError,
+        match="first campaign precommit publication must precede prospective observation",
+    ):
+        write_campaign_precommit_manifest_once(target, original)
+
+    assert not target.exists()
+    assert not tuple(tmp_path.glob(f".{target.name}.*.tmp"))
+
+    monkeypatch.setattr(
+        precommit_module,
+        "_publication_deadline_reached",
+        lambda _deadline: False,
+    )
+    assert (
+        write_campaign_precommit_manifest_once(target, original)
+        == original.manifest_sha256
+    )
+    assert load_campaign_precommit_manifest(target) == original

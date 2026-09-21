@@ -190,14 +190,17 @@ def search_negative_results(
     hits: list[NegativeResultHit] = []
     for experiment in experiments:
         outcome_value = experiment.payload.get("outcome")
-        if outcome_value not in _NON_POSITIVE_OUTCOMES:
+        if type(outcome_value) is not str:
+            raise NegativeResultRetrievalError(
+                f"Experiment:{experiment.record_id} has invalid outcome"
+            )
+        if outcome_value == ResearchOutcome.POSITIVE.value:
             continue
-        try:
-            outcome = ResearchOutcome(outcome_value)
-        except ValueError as exc:
+        if outcome_value not in _NON_POSITIVE_OUTCOMES:
             raise NegativeResultRetrievalError(
                 f"Experiment:{experiment.record_id} has unsupported outcome"
-            ) from exc
+            )
+        outcome = ResearchOutcome(outcome_value)
 
         context = f"Experiment:{experiment.record_id}"
         protocol = _require_entry(

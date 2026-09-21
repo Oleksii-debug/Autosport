@@ -233,37 +233,53 @@ def _tab_reachable_controls(
 
 
 def _export_evidence_binding_dispatches(app: WindowsAutosportApp) -> bool:
-    """Prove Ctrl+E dynamically dispatches to export_evidence without exporting."""
+    """Prove Ctrl+E targets export_evidence without executing known actions."""
 
     try:
         instance_attributes = vars(app)
     except TypeError:
         return False
-    had_instance_value = "export_evidence" in instance_attributes
-    previous_instance_value = instance_attributes.get("export_evidence")
-    dispatched = False
+
+    dispatched_actions: list[str] = []
+    shadowed: list[tuple[str, bool, object | None]] = []
     restore_ok = True
 
-    def probe() -> None:
-        nonlocal dispatched
-        dispatched = True
-
     try:
-        setattr(app, "export_evidence", probe)
+        for action in dict.fromkeys(_ACTION_BINDINGS.values()):
+            try:
+                target = getattr(app, action)
+            except Exception:
+                continue
+            if not callable(target):
+                continue
+
+            had_instance_value = action in instance_attributes
+            previous_instance_value = instance_attributes.get(action)
+
+            def probe(*_args: object, _action: str = action, **_kwargs: object) -> None:
+                dispatched_actions.append(_action)
+
+            setattr(app, action, probe)
+            shadowed.append((action, had_instance_value, previous_instance_value))
+
+        if "export_evidence" not in {action for action, _had, _previous in shadowed}:
+            return False
+
         app.event_generate("<Control-e>")
         app.update()
     except Exception:
-        dispatched = False
+        return False
     finally:
-        try:
-            if had_instance_value:
-                setattr(app, "export_evidence", previous_instance_value)
-            else:
-                delattr(app, "export_evidence")
-        except Exception:
-            restore_ok = False
+        for action, had_instance_value, previous_instance_value in reversed(shadowed):
+            try:
+                if had_instance_value:
+                    setattr(app, action, previous_instance_value)
+                else:
+                    delattr(app, action)
+            except Exception:
+                restore_ok = False
 
-    return dispatched and restore_ok
+    return restore_ok and dispatched_actions == ["export_evidence"]
 
 
 def _binding_presence(app: WindowsAutosportApp) -> dict[str, bool]:

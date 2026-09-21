@@ -7,11 +7,11 @@ import pytest
 
 from autosport.betfair_standard_limit_slippage import (
     BetfairStandardLimitSlippageError,
+    ProspectiveAdversePriceSlippageKnowledge,
     ProspectiveSlippageUnknownReason,
     build_betfair_standard_back_limit_instruction,
     prove_betfair_standard_back_limit_zero_slippage,
 )
-from autosport.prospective_applicable_cost import ApplicableCostKnowledge
 from autosport.real_execution_ledger import ExecutionAction, ExecutionPlan
 from autosport.supervised_execution import (
     BoundSupervisedExecutionPlan,
@@ -132,7 +132,7 @@ def test_plain_back_limit_yields_sealed_known_zero_price_slippage() -> None:
         instruction=instruction,
     )
 
-    assert assessment.knowledge is ApplicableCostKnowledge.KNOWN_ZERO
+    assert assessment.knowledge is ProspectiveAdversePriceSlippageKnowledge.KNOWN_ZERO
     assert assessment.amount == Decimal("0")
     assert assessment.complete is True
     assert assessment.unknown_reason is None
@@ -143,7 +143,10 @@ def test_plain_back_limit_yields_sealed_known_zero_price_slippage() -> None:
     assert assessment.evidence.quote_id == "quote-735"
     assert assessment.evidence.decision_quote == "2.10"
     assert assessment.evidence.decision_at == CREATED_AT
-    assert assessment.evidence.knowledge is ApplicableCostKnowledge.KNOWN_ZERO
+    assert (
+        assessment.evidence.knowledge
+        is ProspectiveAdversePriceSlippageKnowledge.KNOWN_ZERO
+    )
     assert assessment.evidence.evidence_sha256 == assessment.evidence.to_dict()[
         "evidence_sha256"
     ]
@@ -155,8 +158,10 @@ def test_fok_or_any_extra_instruction_semantic_fails_closed() -> None:
         bound.execution_plan.actions[0],
         provider_order_ref=PROVIDER_REF,
     )
+    limit_order = instruction["limitOrder"]
+    assert type(limit_order) is dict
     instruction["limitOrder"] = {
-        **instruction["limitOrder"],
+        **limit_order,
         "timeInForce": "FILL_OR_KILL",
     }
 
@@ -167,7 +172,10 @@ def test_fok_or_any_extra_instruction_semantic_fails_closed() -> None:
         instruction=instruction,
     )
 
-    assert assessment.knowledge is ApplicableCostKnowledge.UNKNOWN_UNPROVEN
+    assert (
+        assessment.knowledge
+        is ProspectiveAdversePriceSlippageKnowledge.UNKNOWN_UNPROVEN
+    )
     assert assessment.amount is None
     assert assessment.complete is False
     assert (
@@ -191,7 +199,10 @@ def test_provider_identity_mismatch_fails_closed() -> None:
         provider_adapter_version="future-version",
     )
 
-    assert assessment.knowledge is ApplicableCostKnowledge.UNKNOWN_UNPROVEN
+    assert (
+        assessment.knowledge
+        is ProspectiveAdversePriceSlippageKnowledge.UNKNOWN_UNPROVEN
+    )
     assert (
         assessment.unknown_reason
         is ProspectiveSlippageUnknownReason.PROVIDER_IDENTITY_MISMATCH
@@ -212,7 +223,10 @@ def test_quote_not_active_at_decision_fails_closed() -> None:
         instruction=instruction,
     )
 
-    assert assessment.knowledge is ApplicableCostKnowledge.UNKNOWN_UNPROVEN
+    assert (
+        assessment.knowledge
+        is ProspectiveAdversePriceSlippageKnowledge.UNKNOWN_UNPROVEN
+    )
     assert (
         assessment.unknown_reason
         is ProspectiveSlippageUnknownReason.QUOTE_NOT_ACTIVE_AT_DECISION

@@ -6,6 +6,7 @@ from typing import Iterable
 from .bookmaker_routing import (
     ExternalEffect,
     RoutingContractError,
+    RoutingState,
     VenueObservation,
     VenueQuote,
     _dedupe_external_receipts,
@@ -137,6 +138,33 @@ def _validated_child_receipts(
     return normalized
 
 
+def _has_unresolved_partial_acceptance(
+    observations: tuple[VenueObservation, ...],
+) -> bool:
+    """Return whether a child has confirmed stake but no terminal remainder proof.
+
+    ``ACCEPTED`` proves only the exact ``confirmed_accepted`` amount. When that
+    amount is below the child's bound proposal, the unconfirmed remainder may still
+    be live externally. A child-bound MARKET_REFUSED observation is the explicit
+    terminal evidence on this contract that closes that remainder. Until then,
+    reconciliation must preserve the confirmed stake but mint no new proposal
+    authority.
+    """
+
+    closed_children = {
+        item.proposal_leg_id
+        for item in observations
+        if item.effect is ExternalEffect.MARKET_REFUSED
+    }
+    return any(
+        item.effect is ExternalEffect.ACCEPTED
+        and item.proposal_leg_id not in closed_children
+        and item.proposed_stake is not None
+        and item.confirmed_accepted < item.proposed_stake
+        for item in observations
+    )
+
+
 def reconcile_equal_split_residual(
     requested_stake: Decimal,
     selected_venues: Iterable[VenueQuote],
@@ -153,6 +181,11 @@ def reconcile_equal_split_residual(
     external receipt ID. UNKNOWN/refusal may have no provider receipt yet and still
     block or constrain reroute through the child binding. Exact receipt replay is
     idempotent; conflicting receipt reuse fails closed in the routing contract.
+
+    A partial ACCEPTED amount is not itself proof that the unaccepted remainder of
+    that child is terminal. Unless child-bound refusal evidence closes the remainder,
+    the reconciled state is BLOCKED_UNKNOWN: confirmed stake remains truthful while
+    no fresh proposal authority is created against possibly-live external exposure.
     """
     venues = tuple(selected_venues)
     normalized = _validated_child_receipts(
@@ -161,11 +194,27 @@ def reconcile_equal_split_residual(
         routing_request_id=routing_request_id,
         parent_plan_id=parent_plan_id,
     )
-    return plan_equal_split_residual(
+    proposal = plan_equal_split_residual(
         requested_stake,
         venues,
         normalized,
         routing_request_id=routing_request_id,
         parent_plan_id=parent_plan_id,
         stake_quantum=stake_quantum,
+    )
+    if (
+        proposal.state is RoutingState.BLOCKED_UNKNOWN
+        or not _has_unresolved_partial_acceptance(normalized)
+    ):
+        return proposal
+
+    return ParallelRoutingProposal(
+        state=RoutingState.BLOCKED_UNKNOWN,
+        parent_plan_id=proposal.parent_plan_id,
+        routing_request_id=proposal.routing_request_id,
+        residual_before=proposal.residual_before,
+        confirmed_total=proposal.confirmed_total,
+        proposed_total=Decimal("0"),
+        stake_quantum=proposal.stake_quantum,
+        legs=(),
     )

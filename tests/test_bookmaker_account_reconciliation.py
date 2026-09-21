@@ -368,3 +368,73 @@ def test_snapshot_fingerprint_is_deterministic_for_equivalent_tuple_order() -> N
     )
 
     assert snapshot_fingerprint(first) == snapshot_fingerprint(second)
+
+
+def test_balance_observation_identity_cannot_be_reused_with_conflicting_content(
+    tmp_path,
+) -> None:
+    store = BookmakerAccountReconciliationStore(tmp_path / "account.json")
+    assert store.append_snapshot(
+        _snapshot(
+            _T1,
+            capabilities=(BookmakerCapability.BALANCE_READ,),
+            balance=_balance(
+                _T1,
+                "100",
+                observation_id="balance-shared",
+            ),
+        )
+    )
+
+    with pytest.raises(
+        AccountReconciliationIntegrityError,
+        match="balance observation_id was reused",
+    ):
+        store.append_snapshot(
+            _snapshot(
+                _T2,
+                capabilities=(BookmakerCapability.BALANCE_READ,),
+                balance=_balance(
+                    _T2,
+                    "90",
+                    observation_id="balance-shared",
+                ),
+            )
+        )
+
+
+def test_position_observation_identity_cannot_be_reused_with_conflicting_content(
+    tmp_path,
+) -> None:
+    store = BookmakerAccountReconciliationStore(tmp_path / "account.json")
+    assert store.append_snapshot(
+        _snapshot(
+            _T1,
+            capabilities=(BookmakerCapability.OPEN_POSITIONS_READ,),
+            open_positions=(
+                _position(
+                    BookmakerPositionState.OPEN,
+                    _T1,
+                    observation_id="position-shared",
+                ),
+            ),
+        )
+    )
+
+    with pytest.raises(
+        AccountReconciliationIntegrityError,
+        match="position observation_id was reused",
+    ):
+        store.append_snapshot(
+            _snapshot(
+                _T2,
+                capabilities=(BookmakerCapability.SETTLED_POSITIONS_READ,),
+                settled_positions=(
+                    _position(
+                        BookmakerPositionState.SETTLED,
+                        _T2,
+                        observation_id="position-shared",
+                    ),
+                ),
+            )
+        )

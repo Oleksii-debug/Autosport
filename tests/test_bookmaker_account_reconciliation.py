@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
-from decimal import Decimal
+from decimal import Context, Decimal, localcontext
 
 import pytest
 
@@ -452,3 +452,21 @@ def test_digest_and_transition_order_ignore_input_tuple_order():
         row.external_position_id
         for row in ra.position_transitions
     ] == ["bet-1", "bet-2"]
+
+
+
+def test_balance_delta_does_not_depend_on_callers_decimal_context():
+    previous = snapshot(
+        at="2026-09-21T10:02:00+00:00",
+        bal=balance("balance-1", "123456780.00001"),
+    )
+    current = snapshot(
+        at="2026-09-21T10:03:00+00:00",
+        bal=balance("balance-2", "123456789.12345"),
+    )
+    expected = reconcile_bookmaker_account_snapshots(previous, current)
+    with localcontext(Context(prec=2)):
+        constrained = reconcile_bookmaker_account_snapshots(previous, current)
+    assert constrained.available_balance_delta == Decimal("9.12344")
+    assert constrained.available_balance_delta == expected.available_balance_delta
+    assert constrained.evidence_id == expected.evidence_id

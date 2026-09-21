@@ -356,15 +356,21 @@ class BoundedMirrorInvalidationBuffer:
             raise TypeError("event must be a MarketEvent")
 
         with self._lock:
-            previous = self._mirror.event_for_quote_key(event.source_id, event.quote_key)
+            key = (event.source_id, event.quote_key)
+            # Only snapshot the previous event when this update would otherwise be
+            # coalesced into an already-pending dirty key. A first dirty update will
+            # be recomputed normally, and avoiding an unconditional deep snapshot
+            # keeps the high-frequency path proportional to the work being bounded.
+            previous = (
+                self._mirror.event_for_quote_key(event.source_id, event.quote_key)
+                if not self._full_refresh_required and key in self._dirty
+                else None
+            )
             result = self._mirror.apply(event)
             if result.status is not MirrorUpdate.APPLIED:
                 return result
 
-            if (
-                previous is not None
-                and self._requires_full_refresh(previous, event)
-            ):
+            if previous is not None and self._requires_full_refresh(previous, event):
                 # The durable event is already authoritative and the mirror now
                 # contains its newest state. Do not collapse a material transition
                 # into an ordinary same-key dirty marker: invalidate every cached

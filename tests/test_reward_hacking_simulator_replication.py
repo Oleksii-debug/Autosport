@@ -41,7 +41,7 @@ def _environment_and_policy() -> tuple[CausalLearningEnvironment, BanditPolicySt
         config_id="learning-config-v1",
         data_id="dataset-sim-replication",
         protocol_id="rq-reward-hacking-simulator-replication",
-        cutoff_ts=_iso(BASE),
+        cutoff_ts=_iso(BASE + timedelta(hours=3)),
         seed=41,
     )
     environment = CausalLearningEnvironment(

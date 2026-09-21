@@ -13,7 +13,9 @@ _EXE_SHA = "3" * 64
 _MANIFEST_SHA = "4" * 64
 
 
-def test_workspace_manifest_delegates_to_canonical_verifier(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_workspace_manifest_delegates_to_canonical_verifier(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     calls: list[tuple[object, object]] = []
 
     def fake_verify(manifest: object, workspace: object) -> dict[str, object]:
@@ -42,7 +44,9 @@ def test_workspace_manifest_delegates_to_canonical_verifier(monkeypatch: pytest.
     assert result.whole_product_complete is False
 
 
-def test_workspace_manifest_propagates_fail_closed_error(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_workspace_manifest_propagates_fail_closed_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     def fail(*_args: object, **_kwargs: object) -> dict[str, object]:
         raise ValueError("manifest mismatch")
 
@@ -52,7 +56,9 @@ def test_workspace_manifest_propagates_fail_closed_error(monkeypatch: pytest.Mon
         handoff.verify_workspace_manifest("manifest.json", "workspace")
 
 
-def test_workspace_manifest_refuses_truth_promotion(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_workspace_manifest_refuses_truth_promotion(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     monkeypatch.setattr(
         handoff,
         "_verify_evidence_manifest",
@@ -69,7 +75,9 @@ def test_workspace_manifest_refuses_truth_promotion(monkeypatch: pytest.MonkeyPa
         handoff.verify_workspace_manifest("manifest.json", "workspace")
 
 
-def test_nvda_template_delegates_and_preserves_machine_truth(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_nvda_template_delegates_and_preserves_machine_truth(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     calls: list[tuple[object, str, str]] = []
     template = {
         "candidate": {"source_sha": _SOURCE_SHA, "package_sha256": _PACKAGE_SHA},
@@ -101,7 +109,9 @@ def test_nvda_template_delegates_and_preserves_machine_truth(monkeypatch: pytest
     assert calls == [(Path("release.zip"), _SOURCE_SHA, _PACKAGE_SHA)]
 
 
-def test_nvda_template_refuses_truth_promotion(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_nvda_template_refuses_truth_promotion(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     monkeypatch.setattr(
         handoff,
         "_create_nvda_template",
@@ -121,7 +131,25 @@ def test_nvda_template_refuses_truth_promotion(monkeypatch: pytest.MonkeyPatch) 
         )
 
 
-def test_nvda_verification_delegates_and_projects_result(monkeypatch: pytest.MonkeyPatch) -> None:
+def _valid_nvda_report() -> dict[str, object]:
+    return {
+        "status": "FAIL",
+        "package_sha256": _PACKAGE_SHA,
+        "source_sha": _SOURCE_SHA,
+        "autosport_exe_sha256": _EXE_SHA,
+        "failed_checks": ["primary_tab_flow"],
+        "requires_owner_release_decision": True,
+        "machine_verified_physical_execution": False,
+        "real_money_execution": False,
+        "human_tested": False,
+        "nvda_verified": False,
+        "v1_ready": False,
+    }
+
+
+def test_nvda_verification_delegates_and_projects_result(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     calls: list[tuple[object, object, str, str]] = []
 
     def fake_validate(
@@ -134,18 +162,7 @@ def test_nvda_verification_delegates_and_projects_result(monkeypatch: pytest.Mon
         calls.append(
             (release_zip, evidence_path, expected_source_sha, expected_package_sha256)
         )
-        return {
-            "status": "FAIL",
-            "package_sha256": _PACKAGE_SHA,
-            "source_sha": _SOURCE_SHA,
-            "autosport_exe_sha256": _EXE_SHA,
-            "failed_checks": ["primary_tab_flow"],
-            "requires_owner_release_decision": True,
-            "real_money_execution": False,
-            "human_tested": False,
-            "nvda_verified": False,
-            "v1_ready": False,
-        }
+        return _valid_nvda_report()
 
     monkeypatch.setattr(handoff, "_validate_nvda_evidence", fake_validate)
 
@@ -171,7 +188,41 @@ def test_nvda_verification_delegates_and_projects_result(monkeypatch: pytest.Mon
     assert result.whole_product_complete is False
 
 
-def test_nvda_verification_propagates_canonical_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_nvda_verification_refuses_machine_physical_promotion(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    report = _valid_nvda_report()
+    report["machine_verified_physical_execution"] = True
+    monkeypatch.setattr(handoff, "_validate_nvda_evidence", lambda *_args, **_kwargs: report)
+
+    with pytest.raises(ValueError, match="machine_verified_physical_execution"):
+        handoff.verify_nvda_handoff(
+            "release.zip",
+            "nvda.json",
+            expected_source_sha=_SOURCE_SHA,
+            expected_package_sha256=_PACKAGE_SHA,
+        )
+
+
+def test_nvda_verification_requires_owner_decision(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    report = _valid_nvda_report()
+    report["requires_owner_release_decision"] = False
+    monkeypatch.setattr(handoff, "_validate_nvda_evidence", lambda *_args, **_kwargs: report)
+
+    with pytest.raises(ValueError, match="owner release decision"):
+        handoff.verify_nvda_handoff(
+            "release.zip",
+            "nvda.json",
+            expected_source_sha=_SOURCE_SHA,
+            expected_package_sha256=_PACKAGE_SHA,
+        )
+
+
+def test_nvda_verification_propagates_canonical_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     def fail(*_args: object, **_kwargs: object) -> dict[str, object]:
         raise ValueError("candidate identity mismatch")
 

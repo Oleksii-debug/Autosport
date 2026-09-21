@@ -2,11 +2,13 @@ from __future__ import annotations
 
 from dataclasses import replace
 from datetime import timedelta
+import hashlib
 import json
 import os
 
 import pytest
 
+import autosport.campaign_economic_authority as campaign_authority_module
 from autosport.campaign_economic_authority import (
     CampaignEconomicAuthorityError,
     FinalizedCampaignAuthority,
@@ -142,5 +144,57 @@ def test_denomination_registry_extensions_reject_rollback_to_preissuance_image(
             match="observed workspace state does not match latest committed authority state",
         ):
             registry._read()
+    finally:
+        fixture.doCleanups()
+
+
+def test_root_preserving_cache_write_verifies_registry_before_root_side_effect(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    trusted_root = tmp_path / "trusted-denomination-root"
+    attacker_root = tmp_path / "must-not-be-created-from-tampered-registry"
+    monkeypatch.setenv("AUTOSPORT_PAPER_EXECUTION_WITNESS_DIR", str(trusted_root))
+
+    fixture, authority = _fixture_authority_with_goal(_goal())
+    try:
+        assert authority.denomination_binding() is not None
+        registry = authority._registry()
+        current = registry._read()
+        stale_payload = dict(current)
+        original_root = stale_payload.pop("campaign_denomination_witness_root")
+        assert type(original_root) is dict
+        assert "campaign_denomination_bindings" in stale_payload
+
+        attacker_root_text = os.path.normcase(os.path.abspath(attacker_root.resolve()))
+        forged_root = dict(original_root)
+        forged_root["root"] = attacker_root_text
+        forged_root["root_sha256"] = hashlib.sha256(
+            attacker_root_text.encode("utf-8")
+        ).hexdigest()
+
+        base_text = json.dumps(
+            stale_payload,
+            ensure_ascii=False,
+            indent=2,
+            sort_keys=True,
+            allow_nan=False,
+        )
+        assert base_text.endswith("}")
+        tampered = (
+            base_text[:-1]
+            + ",\n  \"campaign_denomination_witness_root\": "
+            + json.dumps(original_root, ensure_ascii=False, sort_keys=True, allow_nan=False)
+            + ",\n  \"campaign_denomination_witness_root\": "
+            + json.dumps(forged_root, ensure_ascii=False, sort_keys=True, allow_nan=False)
+            + "\n}\n"
+        ).encode("utf-8")
+        with registry.path.open("wb") as handle:
+            handle.write(tampered)
+            handle.flush()
+            os.fsync(handle.fileno())
+
+        with pytest.raises(ValueError, match="duplicate JSON object key"):
+            campaign_authority_module.atomic_write_json(registry.path, stale_payload)
+        assert not attacker_root.exists()
     finally:
         fixture.doCleanups()

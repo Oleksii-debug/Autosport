@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import replace
 from datetime import datetime, timezone
-from decimal import Decimal
+from decimal import Decimal, localcontext
 import json
 
 import pytest
@@ -15,6 +15,7 @@ from autosport.betfair_live_capital_at_risk import (
     BetfairLiveCapitalAtRiskError,
     BetfairLiveCapitalAtRiskReason,
     BetfairLiveCapitalAtRiskTruth,
+    _exact_add,
     resolve_betfair_live_capital_at_risk,
 )
 from autosport.real_execution_ledger import (
@@ -240,6 +241,8 @@ def test_partial_ack_uses_matched_plus_remaining_not_matched_only(tmp_path):
     assert evidence.capital_at_risk == Decimal("5")
     assert evidence.capital_at_risk != Decimal("2")
     assert evidence.execution_authority is False
+    assert evidence.readback_observed_at == "2026-09-22T00:00:00+00:00"
+    assert len(evidence.readback_request_scope_sha256) == 64
     evidence.assert_authoritative()
 
 
@@ -334,6 +337,26 @@ def test_foreign_customer_order_ref_fails_closed(tmp_path):
         _capture(ref, current=[_current(ref, ref="f" * 32)]),
     )
     assert evidence.reason is BetfairLiveCapitalAtRiskReason.IDENTITY_MISMATCH
+
+
+def test_durable_receipt_identity_must_match_provider_bet_id(tmp_path):
+    ledger, bound, ref = _context(tmp_path, "PARTIAL")
+    evidence = _resolve(
+        ledger,
+        bound,
+        _capture(ref, current=[_current(ref, bet_id="bet-other")]),
+    )
+    assert evidence.truth is BetfairLiveCapitalAtRiskTruth.UNKNOWN
+    assert evidence.reason is BetfairLiveCapitalAtRiskReason.IDENTITY_MISMATCH
+
+
+def test_exact_live_stake_addition_ignores_ambient_decimal_context():
+    with localcontext() as context:
+        context.prec = 3
+        assert _exact_add(
+            Decimal("0.12345"),
+            Decimal("0.12345"),
+        ) == Decimal("0.24690")
 
 
 @pytest.mark.parametrize(

@@ -16,6 +16,7 @@ from autosport.paper_execution_reality import (
     PaperAttemptOutcome,
     PaperExecutionLedger,
     PaperExecutionModelConfig,
+    RecoveryDecision,
 )
 from autosport.real_execution_ledger import ExecutionAction, ExecutionPlan
 
@@ -229,6 +230,8 @@ class PaperExecutionCrashPrefixMatrixTests(unittest.TestCase):
 
         run = baseline["run"]
         self.assertEqual(run.attempts[0].outcome, PaperAttemptOutcome.ACCEPTED)
+        self.assertEqual(run.recovery_decision, RecoveryDecision.NONE)
+        self.assertEqual(str(run.worst_case_exposure), "10.00")
         self.assertEqual(baseline["book_semantics"][1], "90.00")
 
     def test_unknown_attempt_remains_negative_evidence_without_ghost_exposure(self) -> None:
@@ -249,6 +252,11 @@ class PaperExecutionCrashPrefixMatrixTests(unittest.TestCase):
 
         run = baseline["run"]
         self.assertEqual(run.attempts[0].outcome, PaperAttemptOutcome.UNKNOWN)
+        self.assertEqual(
+            run.recovery_decision,
+            RecoveryDecision.HEDGE_REVIEW_REQUIRED,
+        )
+        self.assertEqual(str(run.worst_case_exposure), "10.00")
         self.assertEqual(baseline["book_semantics"][1], "100.00")
         self.assertEqual(baseline["book_semantics"][2], ())
 

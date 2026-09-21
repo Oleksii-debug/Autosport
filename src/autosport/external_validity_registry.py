@@ -1,6 +1,6 @@
 """Durable scientific-registry provenance for external-validity comparisons.
 
-The frozen baseline harness deliberately owns comparison semantics only.  This
+The frozen baseline harness deliberately owns comparison semantics only. This
 adapter closes the provenance boundary by requiring every supported evaluation
 to resolve to the existing immutable ScientificRegistry before a descriptive
 external-validity report can be produced.
@@ -8,6 +8,8 @@ external-validity report can be produced.
 
 from __future__ import annotations
 
+import hashlib
+import json
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Mapping, Sequence
@@ -68,6 +70,48 @@ def _instant(value: object, field: str) -> datetime:
     return parsed.astimezone(timezone.utc)
 
 
+def canonical_policy_evaluation_bundle_sha256(evaluation: PolicyEvaluation) -> str:
+    """Commit an evaluation bundle SHA to the exact canonical result payload.
+
+    The caller-carried ``evaluation_bundle_sha256`` is intentionally excluded from
+    the commitment to avoid a recursive identity. Every scientific value that the
+    descriptive comparison consumes is included, including baseline identity when
+    present. Therefore an opaque matching SHA cannot bless changed result values.
+    """
+
+    if type(evaluation) is not PolicyEvaluation:
+        raise ExternalValidityRegistryError(
+            "evaluation must be an exact PolicyEvaluation value"
+        )
+    payload: dict[str, object] = {
+        "schema_version": 1,
+        "kind": "autosport_external_validity_policy_evaluation_bundle",
+        "policy_id": evaluation.policy_id,
+        "policy_artifact_sha256": evaluation.policy_artifact_sha256,
+        "protocol_sha256": evaluation.protocol_sha256,
+        "evidence_scope_sha256": evaluation.evidence_scope_sha256,
+        "cohort_sha256": evaluation.cohort_sha256,
+        "primary_metric": evaluation.primary_metric,
+        "evaluated_at": evaluation.evaluated_at,
+        "metric_value": evaluation.metric_value,
+        "uncertainty_low": evaluation.uncertainty_low,
+        "uncertainty_high": evaluation.uncertainty_high,
+        "observed_count": evaluation.observed_count,
+        "scored_count": evaluation.scored_count,
+        "abstention_count": evaluation.abstention_count,
+        "total_cost": evaluation.total_cost,
+        "baseline_definition_sha256": evaluation.baseline_definition_sha256,
+    }
+    encoded = json.dumps(
+        payload,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
 def _require_exact_registry_authority(registry: object) -> ScientificRegistry:
     """Return only an unshadowed canonical durable registry implementation.
 
@@ -119,6 +163,15 @@ def _resolve_registered_origin(
     protocol: FrozenBaselineProtocol,
 ) -> _RegisteredEvaluationOrigin:
     canonical_registry = _require_exact_registry_authority(registry)
+    if type(evaluation) is not PolicyEvaluation:
+        raise ExternalValidityRegistryError(
+            "evaluation must be an exact PolicyEvaluation value"
+        )
+    if type(protocol) is not FrozenBaselineProtocol:
+        raise ExternalValidityRegistryError(
+            "protocol must be an exact FrozenBaselineProtocol value"
+        )
+
     bundle_id = _text(evaluation_bundle_id, "evaluation_bundle_id")
     bundle = _registry_get(canonical_registry, "EvaluationBundle", bundle_id)
     if bundle is None:
@@ -130,9 +183,14 @@ def _resolve_registered_origin(
     registered_bundle_sha256 = _sha256(
         payload.get("bundle_sha256"), "EvaluationBundle.bundle_sha256"
     )
-    if registered_bundle_sha256 != evaluation.evaluation_bundle_sha256:
+    canonical_bundle_sha256 = canonical_policy_evaluation_bundle_sha256(evaluation)
+    if evaluation.evaluation_bundle_sha256 != canonical_bundle_sha256:
         raise ExternalValidityRegistryError(
-            f"{evaluation.policy_id}: evaluation bundle SHA does not match registry"
+            f"{evaluation.policy_id}: evaluation bundle SHA does not commit to canonical evaluation payload"
+        )
+    if registered_bundle_sha256 != canonical_bundle_sha256:
+        raise ExternalValidityRegistryError(
+            f"{evaluation.policy_id}: registered bundle SHA does not match canonical evaluation commitment"
         )
 
     dataset_snapshot_id = _text(
@@ -141,6 +199,10 @@ def _resolve_registered_origin(
     registry_protocol_sha256 = _sha256(
         payload.get("protocol_sha256"), "EvaluationBundle.protocol_sha256"
     )
+    if registry_protocol_sha256 != protocol.identity_sha256:
+        raise ExternalValidityRegistryError(
+            f"{evaluation.policy_id}: registered EvaluationBundle protocol SHA does not match frozen protocol"
+        )
 
     dataset = _registry_get(
         canonical_registry, "DatasetSnapshot", dataset_snapshot_id
@@ -195,10 +257,14 @@ def build_registered_external_validity_report(
     """
 
     canonical_registry = _require_exact_registry_authority(registry)
-    if not isinstance(protocol, FrozenBaselineProtocol):
-        raise ExternalValidityRegistryError("protocol must be FrozenBaselineProtocol")
-    if not isinstance(candidate, PolicyEvaluation):
-        raise ExternalValidityRegistryError("candidate must be PolicyEvaluation")
+    if type(protocol) is not FrozenBaselineProtocol:
+        raise ExternalValidityRegistryError(
+            "protocol must be an exact FrozenBaselineProtocol value"
+        )
+    if type(candidate) is not PolicyEvaluation:
+        raise ExternalValidityRegistryError(
+            "candidate must be an exact PolicyEvaluation value"
+        )
     if not isinstance(baseline_evaluation_bundle_ids, Mapping):
         raise ExternalValidityRegistryError(
             "baseline_evaluation_bundle_ids must be a mapping"
@@ -225,9 +291,9 @@ def build_registered_external_validity_report(
 
     by_id: dict[str, PolicyEvaluation] = {}
     for result in baseline_results:
-        if not isinstance(result, PolicyEvaluation):
+        if type(result) is not PolicyEvaluation:
             raise ExternalValidityRegistryError(
-                "baseline_results must contain PolicyEvaluation values"
+                "baseline_results must contain exact PolicyEvaluation values"
             )
         if result.policy_id in by_id:
             raise ExternalValidityRegistryError(

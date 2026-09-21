@@ -6,7 +6,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from autosport import windows_entry
+from autosport import integrity, windows_entry
 
 
 def test_workspace_probe_supports_spaces_and_ukrainian_unicode(tmp_path: Path) -> None:
@@ -58,7 +58,7 @@ def test_interactive_gui_fails_before_gui_import_when_workspace_is_unwritable(
     assert captured == {"workspace": workspace, "error": error}
 
 
-@pytest.mark.parametrize("failing_primitive", ("fsync", "replace"))
+@pytest.mark.parametrize("failing_primitive", ("fsync", "replace", "path_lock"))
 def test_interactive_gui_fails_before_gui_import_when_atomic_publish_primitive_fails(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -72,11 +72,18 @@ def test_interactive_gui_fails_before_gui_import_when_atomic_publish_primitive_f
             raise OSError("fsync unavailable")
 
         monkeypatch.setattr(windows_entry.os, "fsync", fail_fsync)
-    else:
+    elif failing_primitive == "replace":
         def fail_replace(_source: object, _destination: object) -> None:
             raise PermissionError("atomic replace denied")
 
         monkeypatch.setattr(windows_entry.os, "replace", fail_replace)
+    else:
+        def fail_path_lock(_handle: object) -> None:
+            raise OSError("durable path lock unavailable")
+
+        # Exercise the real durable_path_lock context manager and fail at its
+        # OS-lock acquisition boundary after the disposable sidecar is opened.
+        monkeypatch.setattr(integrity, "_lock_handle", fail_path_lock)
 
     captured: dict[str, object] = {}
 

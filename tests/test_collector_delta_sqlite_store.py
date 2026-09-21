@@ -136,6 +136,33 @@ class CollectorSQLiteStoreTests(unittest.TestCase):
             )
             self.assertFalse(CollectorDeltaStore(path).append(delta))
 
+    def test_legacy_json_rejects_non_integer_schema_version_aliases(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            for label, schema_version in (("bool", True), ("float", 1.0)):
+                with self.subTest(schema_version=schema_version):
+                    path = root / f"collector-{label}.json"
+                    raw = {
+                        "schema_version": schema_version,
+                        "deltas": [],
+                        "streams": {},
+                    }
+                    source = json.dumps(raw, sort_keys=True) + "\n"
+                    path.write_text(source, encoding="utf-8")
+
+                    with self.assertRaisesRegex(
+                        ValueError,
+                        "unsupported causal collector store schema",
+                    ):
+                        CollectorDeltaStore(path)
+
+                    self.assertEqual(path.read_text(encoding="utf-8"), source)
+                    self.assertFalse(
+                        path.with_name(f"{path.name}.legacy-v1.json").exists()
+                    )
+                    self.assertNotEqual(path.read_bytes()[:16], b"SQLite format 3\\x00")
+
+
     def test_legacy_stream_checkpoint_mismatch_fails_before_authority_switch(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "collector.json"

@@ -9,6 +9,9 @@ from typing import Any, Sequence
 _CONTINUOUS_STATUS_SCHEMA_VERSION = 1
 _EVIDENCE_SCHEMA_VERSION = 1
 _CONTINUOUS_STATUS_KIND = "autosport_continuous_local_observation"
+_CONTINUOUS_LIFECYCLE_STATES = frozenset(
+    {"starting", "running", "attempting", "provider_unavailable", "failed", "stopped"}
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -178,6 +181,13 @@ def project_ingestion_negative_evidence(
             evidence_state="invalid",
             expected_cycles=expected_cycles,
             reason="status_invalid_lifecycle_state",
+        )
+    if lifecycle_state not in _CONTINUOUS_LIFECYCLE_STATES:
+        return _negative_shell(
+            path,
+            evidence_state="invalid",
+            expected_cycles=expected_cycles,
+            reason="status_unknown_lifecycle_state",
         )
     if not _valid_nonnegative_int(attempted) or not _valid_nonnegative_int(successful):
         return _negative_shell(

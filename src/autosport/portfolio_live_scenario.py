@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from decimal import Decimal
@@ -58,6 +59,10 @@ def _money(value: object, name: str) -> Decimal:
 
 def _time(value: object, name: str) -> datetime:
     raw = _text(value, name)
+    if re.search(r"[.,]\\d{7,}", raw):
+        raise LivePortfolioScenarioError(
+            f"{name} must not exceed microsecond precision"
+        )
     try:
         parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
     except ValueError as exc:

@@ -17,8 +17,6 @@ from pathlib import Path
 import sys
 import tempfile
 
-import pytest
-
 
 def _load_canonical_betfair_test_module():
     path = Path(__file__).with_name("test_betfair_supervised_execution.py")

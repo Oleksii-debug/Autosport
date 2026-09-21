@@ -197,6 +197,180 @@ class CollectorDeltaStore(_SQLiteCollectorDeltaStore):
             connection.close()
 
     @classmethod
+    def _activate_runtime_stream_epoch_connection(
+        cls,
+        connection: sqlite3.Connection,
+        *,
+        source_id: str,
+        stream_epoch: str,
+        activated_at: str,
+        allow_transition: bool = True,
+    ) -> int:
+        """Record one activation inside the caller's existing SQLite transaction."""
+
+        source_id = _text(source_id, "source_id")
+        stream_epoch = _text(stream_epoch, "stream_epoch")
+        _instant(activated_at, "activated_at")
+        current = connection.execute(
+            "SELECT generation, stream_epoch FROM collector_epoch_activations_v1 "
+            "WHERE source_id=? ORDER BY generation DESC LIMIT 1",
+            (source_id,),
+        ).fetchone()
+        if current is not None and current["stream_epoch"] == stream_epoch:
+            return int(current["generation"])
+        if current is not None and not allow_transition:
+            return int(current["generation"])
+        generation = 1 if current is None else int(current["generation"]) + 1
+        connection.execute(
+            "INSERT INTO collector_epoch_activations_v1("
+            "source_id, generation, stream_epoch, activated_at"
+            ") VALUES(?,?,?,?)",
+            (source_id, generation, stream_epoch, activated_at),
+        )
+        return generation
+
+    def _record_runtime_stream_epoch(
+        self,
+        *,
+        source_id: str,
+        stream_epoch: str,
+        activated_at: str,
+        allow_transition: bool = True,
+    ) -> int:
+        """Record service-owned epoch authority in one durable transaction."""
+
+        connection = self._connect()
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            generation = self._activate_runtime_stream_epoch_connection(
+                connection,
+                source_id=source_id,
+                stream_epoch=stream_epoch,
+                activated_at=activated_at,
+                allow_transition=allow_transition,
+            )
+            connection.commit()
+            return generation
+        except sqlite3.DatabaseError as exc:
+            if connection.in_transaction:
+                connection.rollback()
+            raise ValueError("invalid causal collector active-epoch authority") from exc
+        except Exception:
+            if connection.in_transaction:
+                connection.rollback()
+            raise
+        finally:
+            connection.close()
+
+    def _recover_runtime_stream_epoch(
+        self,
+        *,
+        source_id: str,
+        stream_epoch: str,
+        activated_at: str,
+    ) -> int | None:
+        """Heal only a crash prefix proven by the newest immutable durable delta.
+
+        Mutable source metadata cannot move authority by itself. Recovery is allowed
+        only when the newest retained commit for this source decodes to the exact
+        source/epoch requested by the configured collector service.
+        """
+
+        source_id = _text(source_id, "source_id")
+        stream_epoch = _text(stream_epoch, "stream_epoch")
+        _instant(activated_at, "activated_at")
+        connection = self._connect()
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            latest = connection.execute(
+                f"SELECT {_DELTA_SELECT_COLUMNS} FROM collector_deltas "
+                "WHERE source_id=? ORDER BY commit_seq DESC LIMIT 1",
+                (source_id,),
+            ).fetchone()
+            current = connection.execute(
+                "SELECT generation, stream_epoch FROM collector_epoch_activations_v1 "
+                "WHERE source_id=? ORDER BY generation DESC LIMIT 1",
+                (source_id,),
+            ).fetchone()
+            if latest is None:
+                connection.commit()
+                return None if current is None else int(current["generation"])
+            durable = self._row_delta(latest)
+            if (
+                durable.source_id != source_id
+                or durable.stream_epoch != stream_epoch
+            ):
+                connection.commit()
+                return None if current is None else int(current["generation"])
+            generation = self._activate_runtime_stream_epoch_connection(
+                connection,
+                source_id=source_id,
+                stream_epoch=stream_epoch,
+                activated_at=activated_at,
+            )
+            connection.commit()
+            return generation
+        except sqlite3.DatabaseError as exc:
+            if connection.in_transaction:
+                connection.rollback()
+            raise ValueError("invalid causal collector active-epoch recovery") from exc
+        except Exception:
+            if connection.in_transaction:
+                connection.rollback()
+            raise
+        finally:
+            connection.close()
+
+    def _append_with_runtime_stream_epoch(
+        self,
+        delta: CollectorDelta,
+        *,
+        activated_at: str,
+    ) -> bool:
+        """Atomically admit one canonical delta and its active-epoch authority.
+
+        A process crash can therefore expose neither a durable new-epoch delta
+        without activation nor an activation without the exact admitted evidence.
+        Exact duplicate replay may heal an older crash prefix because the immutable
+        duplicate itself is already durable evidence for that source/epoch.
+        """
+
+        if not isinstance(delta, CollectorDelta):
+            raise TypeError("delta must be CollectorDelta")
+        delta.validate()
+        _instant(activated_at, "activated_at")
+        connection = self._connect()
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            changed = self._append_connection(connection, delta)
+            if changed:
+                self._write({"schema_version": self.schema_version})
+            self._activate_runtime_stream_epoch_connection(
+                connection,
+                source_id=delta.source_id,
+                stream_epoch=delta.stream_epoch,
+                activated_at=activated_at,
+            )
+            connection.commit()
+            return changed
+        except sqlite3.IntegrityError as exc:
+            if connection.in_transaction:
+                connection.rollback()
+            raise DeltaConflictError(
+                "collector delta violates durable identity constraints"
+            ) from exc
+        except sqlite3.DatabaseError as exc:
+            if connection.in_transaction:
+                connection.rollback()
+            raise ValueError("invalid causal collector store") from exc
+        except Exception:
+            if connection.in_transaction:
+                connection.rollback()
+            raise
+        finally:
+            connection.close()
+
+    @classmethod
     def _delta_by_id(
         cls,
         connection: sqlite3.Connection,

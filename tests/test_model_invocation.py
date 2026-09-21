@@ -135,6 +135,18 @@ def test_invalid_endpoint_retry_bounds_and_monotonic_regression_fail_closed():
         run(req(),pol(),{ModelBackendMode.LOCAL_OLLAMA:a},mono=("10","9"))
 
 
+def test_monotonic_regression_between_dispatch_and_response_fails_closed():
+    a=Fake(desc(),[ModelAdapterResponse("ok","qwen3:8b")])
+    with pytest.raises(ModelInvocationError,match="monotonic clock regressed"):
+        run(
+            req(),
+            pol(),
+            {ModelBackendMode.LOCAL_OLLAMA:a},
+            mono=("10","11","10.5"),
+        )
+    assert a.calls==[Decimal("1")]
+
+
 def test_descriptor_requires_real_enum_not_string_alias():
     with pytest.raises(ModelInvocationError, match="adapter mode"):
         ModelAdapterDescriptor("LOCAL_OLLAMA", "x", "LOCAL_LOOPBACK_HTTP", "qwen3:8b", SHA)

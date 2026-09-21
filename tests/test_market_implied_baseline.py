@@ -156,9 +156,8 @@ class MarketImpliedBaselineTests(unittest.TestCase):
         )
         self.assertEqual((evidence.overround_numerator, evidence.overround_denominator), (1, 1))
         self.assertEqual(evidence.to_dict()["method_id"], METHOD_ID)
-        self.assertTrue(
-            all(q.market_snapshot_hash == evidence.quote_snapshot_sha256 for q in evidence.quotes)
-        )
+        self.assertTrue(all(q.market_snapshot_hash is None for q in evidence.quotes))
+        self.assertEqual(len(evidence.quote_snapshot_sha256), 64)
         truth = evidence.to_dict()["truth"]
         self.assertTrue(truth["forecast_comparator_only"])
         self.assertFalse(truth["source_stream_continuity_proven"])

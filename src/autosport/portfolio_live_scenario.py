@@ -59,7 +59,7 @@ def _money(value: object, name: str) -> Decimal:
 
 def _time(value: object, name: str) -> datetime:
     raw = _text(value, name)
-    if re.search(r"[.,]\\d{7,}", raw):
+    if re.search(r"[.,]\d{7,}", raw):
         raise LivePortfolioScenarioError(
             f"{name} must not exceed microsecond precision"
         )

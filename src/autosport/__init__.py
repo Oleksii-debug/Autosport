@@ -126,7 +126,21 @@ from . import _campaign_provider_scope_stable_projection as _campaign_provider_s
 # mutable exact instance cannot shadow methods and mint deletion authority.
 from . import _collector_retention_desktop_ack_authority as _collector_retention_desktop_ack_authority  # noqa: F401,E402
 
+# ScientificRegistry successors are protected by an independent machine authority;
+# every read must consume the exact authority-current image before causal witnesses
+# can be minted from it.
+from . import _scientific_registry_read_authority as _scientific_registry_read_authority  # noqa: F401,E402
+
 # Snapshot the final product-loaded lineage/registry concrete class surfaces. Exact
 # authority instances must not dispatch through caller-replaced class implementations,
 # and explicit runtime-repair reloads must restore this seal before positive use.
 from . import _point_in_time_class_dispatch_seal as _point_in_time_class_dispatch_seal  # noqa: F401,E402
+
+# Sequential multiplicity evidence and PromotionEvidence live in separate durable
+# journals. Seal the registry prefix observed at look registration so a later write
+# can never retroactively authorize an already-durable promotion record.
+from . import _trial_family_cross_ledger_witness as _trial_family_cross_ledger_witness  # noqa: F401,E402
+
+# Replay must recognize the cross-ledger witness kind, but callers must not mint that
+# authority through the legacy generic trial-event append seam.
+from . import _trial_family_witness_mint_guard as _trial_family_witness_mint_guard  # noqa: F401,E402

@@ -49,6 +49,10 @@ _URL_USERINFO_RE = re.compile(
 _QUERY_PARAM_RE = re.compile(
     r"(?P<prefix>[?&](?P<key>[^=&#\s]+)=)(?P<value>[^&#\s]*)"
 )
+_AUTHORIZATION_VALUE_RE = re.compile(
+    r"(?i)(?P<prefix>\bauthorization\s*[:=]\s*)"
+    r"(?P<value>bearer\s+[^\s,;&}\]]+|[^\s,;&}\]]+)"
+)
 _BEARER_RE = re.compile(
     r"(?i)\b(?P<scheme>bearer)\s+(?P<value>[A-Za-z0-9._~+/=-]{4,})"
 )
@@ -128,6 +132,10 @@ def redact_operator_text(
         return match.group("prefix") + REDACTED
 
     rendered = _QUERY_PARAM_RE.sub(redact_query, rendered)
+    rendered = _AUTHORIZATION_VALUE_RE.sub(
+        lambda match: match.group("prefix") + REDACTED,
+        rendered,
+    )
     rendered = _BEARER_RE.sub(
         lambda match: match.group("scheme") + " " + REDACTED,
         rendered,

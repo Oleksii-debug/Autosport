@@ -45,8 +45,36 @@ _SOURCE_RANK = {
 
 
 def _decimal_text(value: Decimal) -> str:
-    text = format(value.normalize(), "f")
-    return text.rstrip("0").rstrip(".") if "." in text else text
+    """Serialize Decimal exactly without consulting the ambient Decimal context."""
+    if not isinstance(value, Decimal) or not value.is_finite():
+        raise RealizedMatchEvidenceError("economic decimal must be finite")
+    sign, digits, exponent = value.as_tuple()
+    if not isinstance(exponent, int):
+        raise RealizedMatchEvidenceError("economic decimal exponent is invalid")
+
+    coefficient = "".join(str(digit) for digit in digits) or "0"
+    if all(digit == "0" for digit in coefficient):
+        return "0"
+
+    while len(coefficient) > 1 and coefficient.endswith("0"):
+        coefficient = coefficient[:-1]
+        exponent += 1
+
+    max_text_length = 4096
+    if exponent >= 0:
+        if len(coefficient) + exponent > max_text_length:
+            raise RealizedMatchEvidenceError("economic decimal text is too large")
+        body = coefficient + ("0" * exponent)
+    else:
+        point = len(coefficient) + exponent
+        if point > 0:
+            body = coefficient[:point] + "." + coefficient[point:]
+        else:
+            if 2 + (-point) + len(coefficient) > max_text_length:
+                raise RealizedMatchEvidenceError("economic decimal text is too large")
+            body = "0." + ("0" * (-point)) + coefficient
+
+    return ("-" if sign else "") + body
 
 
 def _canonical(value: Any) -> bytes:
@@ -195,6 +223,37 @@ class BetfairRealizedMatchEvidence:
         )
 
 
+def _exact_plan_fingerprint(plan: ExecutionPlan) -> str:
+    """Recompute the durable plan digest without context-sensitive Decimal.normalize."""
+    return _sha256(
+        {
+            "schema_version": plan.schema_version,
+            "plan_id": plan.plan_id,
+            "bookmaker_profile_version": plan.bookmaker_profile_version,
+            "decision_id": plan.decision_id,
+            "approval_id": plan.approval_id,
+            "created_at": plan.created_at,
+            "actions": [
+                {
+                    "action_id": action.action_id,
+                    "bookmaker_id": action.bookmaker_id,
+                    "account_id": action.account_id,
+                    "event_id": action.event_id,
+                    "market_id": action.market_id,
+                    "selection_id": action.selection_id,
+                    "side": action.side,
+                    "requested_odds": _decimal_text(action.requested_odds),
+                    "requested_stake": _decimal_text(action.requested_stake),
+                    "quote_id": action.quote_id,
+                    "quote_observed_at": action.quote_observed_at,
+                    "expires_at": action.expires_at,
+                }
+                for action in plan.actions
+            ],
+        }
+    )
+
+
 @dataclass(frozen=True, slots=True)
 class _AttemptBinding:
     action: ExecutionAction
@@ -221,7 +280,7 @@ def _attempt_binding(
     try:
         before = ledger.verified_snapshot()
         saga = ledger.saga(plan.plan_id)
-        if saga.plan_fingerprint != plan.fingerprint:
+        if saga.plan_fingerprint != _exact_plan_fingerprint(plan):
             raise RealizedMatchEvidenceError(
                 "caller plan does not match durable execution plan fingerprint"
             )

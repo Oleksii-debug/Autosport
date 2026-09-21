@@ -33,6 +33,7 @@ class BetfairRequestPriority(str, Enum):
     RECONCILIATION = "reconciliation"
     SAFETY = "safety"
     EXECUTION_READ = "execution_read"
+    EXECUTION_MUTATION = "execution_mutation"
     MONITORING = "monitoring"
     BACKGROUND = "background"
 
@@ -42,8 +43,9 @@ class BetfairRequestPriority(str, Enum):
             BetfairRequestPriority.RECONCILIATION: 0,
             BetfairRequestPriority.SAFETY: 1,
             BetfairRequestPriority.EXECUTION_READ: 2,
-            BetfairRequestPriority.MONITORING: 3,
-            BetfairRequestPriority.BACKGROUND: 4,
+            BetfairRequestPriority.EXECUTION_MUTATION: 3,
+            BetfairRequestPriority.MONITORING: 4,
+            BetfairRequestPriority.BACKGROUND: 5,
         }[self]
 
 
@@ -266,12 +268,14 @@ class BetfairRequestIntent:
                 raise BetfairRequestBudgetError(
                     "provider mutations cannot use read coalescing dedupe_key"
                 )
-            if self.priority in {
-                BetfairRequestPriority.RECONCILIATION,
-                BetfairRequestPriority.BACKGROUND,
-            }:
+            if self.operation is BetfairRequestOperation.CANCEL_ORDERS:
+                if self.priority is not BetfairRequestPriority.SAFETY:
+                    raise BetfairRequestBudgetError(
+                        "cancel_orders must use SAFETY priority"
+                    )
+            elif self.priority is not BetfairRequestPriority.EXECUTION_MUTATION:
                 raise BetfairRequestBudgetError(
-                    "provider mutation cannot use reconciliation/background priority"
+                    "place/update/replace must use EXECUTION_MUTATION priority"
                 )
 
     @property
@@ -646,6 +650,10 @@ def record_market_book_dispatch(
 ) -> BetfairRequestBudgetState:
     """Record an already-admitted market-book dispatch for rolling-limit evidence."""
 
+    if type(state) is not BetfairRequestBudgetState:
+        raise BetfairRequestBudgetError("state must be an exact BetfairRequestBudgetState")
+    if type(intent) is not BetfairRequestIntent:
+        raise BetfairRequestBudgetError("intent must be an exact BetfairRequestIntent")
     if intent.operation is not BetfairRequestOperation.LIST_MARKET_BOOK:
         raise BetfairRequestBudgetError(
             "record_market_book_dispatch requires listMarketBook intent"
@@ -681,6 +689,10 @@ def record_read_backpressure(
     reconciled by the execution authority, not retried by this rate-budget contract.
     """
 
+    if type(state) is not BetfairRequestBudgetState:
+        raise BetfairRequestBudgetError("state must be an exact BetfairRequestBudgetState")
+    if type(policy) is not BetfairRequestBudgetPolicy:
+        raise BetfairRequestBudgetError("policy must be an exact BetfairRequestBudgetPolicy")
     if type(pool) is not BetfairRequestPool:
         raise BetfairRequestBudgetError("pool must be a BetfairRequestPool value")
     if pool is BetfairRequestPool.MUTATION:

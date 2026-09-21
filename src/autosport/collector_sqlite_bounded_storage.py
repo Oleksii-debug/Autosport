@@ -2,16 +2,19 @@ from __future__ import annotations
 
 """SQLite-native allocation ceiling for the canonical collector delta store.
 
-This module augments the existing canonical ``CollectorDeltaStore`` in place.  It
-never creates a second store or retention authority: every connection to the same
-canonical SQLite file receives the configured ``max_page_count`` ceiling, while
-existing retention/compaction policy remains solely responsible for deciding what
-may be removed.
+This module augments the existing canonical ``CollectorDeltaStore`` in place. It
+never creates a second store or retention authority. Once a byte budget is first
+configured for a canonical SQLite path it is durably bound inside that database's
+existing ``collector_meta`` authority, and every later canonical handle resolves and
+enforces the same effective ceiling before using its connection.
 """
 
 import sqlite3
 from pathlib import Path
 from typing import Any
+
+
+_BUDGET_META_KEY = "collector_storage_max_bytes_v1"
 
 
 class CollectorStorageBudgetError(ValueError):
@@ -51,6 +54,108 @@ def _validated_max_bytes(value: object) -> int | None:
     return value
 
 
+def _read_durable_budget(connection: sqlite3.Connection) -> int | None:
+    row = connection.execute(
+        "SELECT value FROM collector_meta WHERE key=?",
+        (_BUDGET_META_KEY,),
+    ).fetchone()
+    if row is None:
+        return None
+    raw = row[0]
+    if not isinstance(raw, str):
+        raise CollectorStorageBudgetError("invalid durable collector max_bytes authority")
+    try:
+        value = int(raw, 10)
+    except ValueError as exc:
+        raise CollectorStorageBudgetError(
+            "invalid durable collector max_bytes authority"
+        ) from exc
+    if value <= 0 or str(value) != raw:
+        raise CollectorStorageBudgetError("invalid durable collector max_bytes authority")
+    return value
+
+
+def _apply_page_budget(connection: sqlite3.Connection, budget: int) -> None:
+    page_size_row = connection.execute("PRAGMA page_size").fetchone()
+    page_count_row = connection.execute("PRAGMA page_count").fetchone()
+    if page_size_row is None or page_count_row is None:
+        raise CollectorStorageBudgetError(
+            "cannot resolve SQLite page geometry for collector byte budget"
+        )
+    page_size = int(page_size_row[0])
+    page_count = int(page_count_row[0])
+    if page_size <= 0 or page_count < 0:
+        raise CollectorStorageBudgetError(
+            "invalid SQLite page geometry for collector byte budget"
+        )
+    requested_pages = budget // page_size
+    if requested_pages < 1:
+        raise CollectorStorageBudgetError("max_bytes is smaller than one SQLite page")
+    if page_count > requested_pages:
+        raise CollectorStorageBudgetError(
+            "existing collector SQLite store exceeds configured max_bytes"
+        )
+
+    applied_row = connection.execute(f"PRAGMA max_page_count={requested_pages}").fetchone()
+    if applied_row is None:
+        raise CollectorStorageBudgetError(
+            "cannot establish collector SQLite max_page_count"
+        )
+    applied_pages = int(applied_row[0])
+    # SQLite may clamp an extremely large request to its own hard maximum. A lower
+    # clamp is still safe; a larger result would violate the durable budget.
+    if applied_pages < page_count or applied_pages > requested_pages:
+        raise CollectorStorageBudgetError(
+            "collector SQLite max_page_count conflicts with configured max_bytes"
+        )
+
+
+def _resolve_effective_budget(
+    connection: sqlite3.Connection,
+    requested_budget: int | None,
+) -> int | None:
+    durable_budget = _read_durable_budget(connection)
+    if durable_budget is not None:
+        if requested_budget is not None and requested_budget != durable_budget:
+            raise CollectorStorageBudgetError(
+                "configured max_bytes conflicts with durable collector max_bytes"
+            )
+        return durable_budget
+    if requested_budget is None:
+        return None
+
+    # Constrain this connection before publishing the durable authority so even the
+    # metadata write itself cannot allocate beyond the requested page ceiling.
+    _apply_page_budget(connection, requested_budget)
+    try:
+        connection.execute("BEGIN IMMEDIATE")
+        # Another canonical process may have established the path authority while
+        # this connection was waiting for the SQLite writer lock. Re-read under the
+        # lock and never widen or narrow that already-published budget implicitly.
+        durable_budget = _read_durable_budget(connection)
+        if durable_budget is None:
+            connection.execute(
+                "INSERT INTO collector_meta(key, value) VALUES(?, ?)",
+                (_BUDGET_META_KEY, str(requested_budget)),
+            )
+            durable_budget = requested_budget
+        elif durable_budget != requested_budget:
+            raise CollectorStorageBudgetError(
+                "configured max_bytes conflicts with durable collector max_bytes"
+            )
+        connection.commit()
+    except Exception as exc:
+        if connection.in_transaction:
+            connection.rollback()
+        if _sqlite_full_in_chain(exc):
+            raise CollectorStorageBudgetError(
+                "configured max_bytes cannot durably record the collector budget "
+                "within its page ceiling"
+            ) from exc
+        raise
+    return durable_budget
+
+
 def install_collector_storage_budget(store_cls: type[Any]) -> None:
     """Install the bounded-storage contract on the canonical store class once.
 
@@ -72,51 +177,18 @@ def install_collector_storage_budget(store_cls: type[Any]) -> None:
         *,
         max_bytes: int | None = None,
     ) -> None:
-        self._collector_max_bytes_v1 = _validated_max_bytes(max_bytes)
+        self._collector_requested_max_bytes_v1 = _validated_max_bytes(max_bytes)
+        self._collector_max_bytes_v1 = None
         original_init(self, path)
 
     def bounded_connect(self: Any) -> sqlite3.Connection:
         connection = original_connect(self)
-        budget = getattr(self, "_collector_max_bytes_v1", None)
-        if budget is None:
-            return connection
+        requested_budget = getattr(self, "_collector_requested_max_bytes_v1", None)
         try:
-            page_size_row = connection.execute("PRAGMA page_size").fetchone()
-            page_count_row = connection.execute("PRAGMA page_count").fetchone()
-            if page_size_row is None or page_count_row is None:
-                raise CollectorStorageBudgetError(
-                    "cannot resolve SQLite page geometry for collector byte budget"
-                )
-            page_size = int(page_size_row[0])
-            page_count = int(page_count_row[0])
-            if page_size <= 0 or page_count < 0:
-                raise CollectorStorageBudgetError(
-                    "invalid SQLite page geometry for collector byte budget"
-                )
-            requested_pages = budget // page_size
-            if requested_pages < 1:
-                raise CollectorStorageBudgetError(
-                    "max_bytes is smaller than one SQLite page"
-                )
-            if page_count > requested_pages:
-                raise CollectorStorageBudgetError(
-                    "existing collector SQLite store exceeds configured max_bytes"
-                )
-
-            applied_row = connection.execute(
-                f"PRAGMA max_page_count={requested_pages}"
-            ).fetchone()
-            if applied_row is None:
-                raise CollectorStorageBudgetError(
-                    "cannot establish collector SQLite max_page_count"
-                )
-            applied_pages = int(applied_row[0])
-            # SQLite may clamp an extremely large request to its own hard maximum.
-            # A lower clamp is still safe; a larger result would violate our budget.
-            if applied_pages < page_count or applied_pages > requested_pages:
-                raise CollectorStorageBudgetError(
-                    "collector SQLite max_page_count conflicts with configured max_bytes"
-                )
+            budget = _resolve_effective_budget(connection, requested_budget)
+            if budget is not None:
+                _apply_page_budget(connection, budget)
+            self._collector_max_bytes_v1 = budget
             return connection
         except Exception:
             connection.close()

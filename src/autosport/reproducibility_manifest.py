@@ -12,7 +12,7 @@ import hashlib
 import json
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Final, Mapping
+from typing import Final, Mapping, Protocol, Sequence
 
 
 REPRODUCIBILITY_MANIFEST_KIND: Final = (
@@ -162,6 +162,112 @@ class WalkForwardSplit:
             training_cutoff=payload["training_cutoff"],
             evaluation_at=payload["evaluation_at"],
         )
+
+
+class _TrainingPointEvidence(Protocol):
+    observed_at: str
+
+    @property
+    def target_reveal_at(self) -> str: ...
+
+
+class _WalkForwardFoldEvidence(Protocol):
+    fold_id: str
+    training_cutoff: str
+    evaluation_at: str
+    causal_training_count: int
+
+
+def derive_walk_forward_splits(
+    points: Sequence[_TrainingPointEvidence],
+    folds: Sequence[_WalkForwardFoldEvidence],
+) -> tuple[WalkForwardSplit, ...]:
+    """Reconstruct exact evaluator indices from existing causal fold evidence.
+
+    The Strategy/Model Factory orders points by ``observed_at`` and, for each fold,
+    admits only prior labels revealed by that fold's training cutoff.  This adapter
+    repeats only that indexing rule and rejects any fold witness whose declared
+    causal training count cannot be reproduced from the governed inputs.
+    """
+
+    if not points:
+        raise ReproducibilityManifestError(
+            "walk-forward reproducibility requires governed input points"
+        )
+    if not folds:
+        raise ReproducibilityManifestError(
+            "walk-forward reproducibility requires fold evidence"
+        )
+
+    indexed_points = list(enumerate(points))
+    for _, point in indexed_points:
+        _instant("point observed_at", point.observed_at)
+        _instant("point target_reveal_at", point.target_reveal_at)
+    ordered = sorted(
+        indexed_points,
+        key=lambda item: _instant("point observed_at", item[1].observed_at),
+    )
+    ordered_instants = [
+        _instant("point observed_at", point.observed_at) for _, point in ordered
+    ]
+    if len(ordered_instants) != len(set(ordered_instants)):
+        raise ReproducibilityManifestError(
+            "walk-forward governed inputs require unique observed_at instants"
+        )
+
+    split_evidence: list[WalkForwardSplit] = []
+    for fold in folds:
+        fold_evaluation = _instant("fold evaluation_at", fold.evaluation_at)
+        matching_indices = [
+            index
+            for index, (_, point) in enumerate(ordered)
+            if _instant("point observed_at", point.observed_at) == fold_evaluation
+        ]
+        if len(matching_indices) != 1:
+            raise ReproducibilityManifestError(
+                "fold evaluation_at does not resolve to one governed input index"
+            )
+        evaluation_index = matching_indices[0]
+        if evaluation_index == 0:
+            raise ReproducibilityManifestError(
+                "walk-forward fold cannot evaluate the first governed input"
+            )
+        cutoff = _instant("fold training_cutoff", fold.training_cutoff)
+        expected_cutoff = _instant(
+            "prior point observed_at", ordered[evaluation_index - 1][1].observed_at
+        )
+        if cutoff != expected_cutoff:
+            raise ReproducibilityManifestError(
+                "fold training_cutoff does not match preceding governed input"
+            )
+        if (
+            isinstance(fold.causal_training_count, bool)
+            or not isinstance(fold.causal_training_count, int)
+            or fold.causal_training_count <= 0
+        ):
+            raise ReproducibilityManifestError(
+                "fold causal_training_count must be a positive integer"
+            )
+        training_indices = tuple(
+            index
+            for index, (_, point) in enumerate(ordered[:evaluation_index])
+            if _instant("point observed_at", point.observed_at) <= cutoff
+            and _instant("point target_reveal_at", point.target_reveal_at) <= cutoff
+        )
+        if len(training_indices) != fold.causal_training_count:
+            raise ReproducibilityManifestError(
+                "fold causal_training_count does not match governed input lineage"
+            )
+        split_evidence.append(
+            WalkForwardSplit(
+                fold_id=fold.fold_id,
+                training_indices=training_indices,
+                evaluation_index=evaluation_index,
+                training_cutoff=fold.training_cutoff,
+                evaluation_at=fold.evaluation_at,
+            )
+        )
+    return tuple(split_evidence)
 
 
 @dataclass(frozen=True, slots=True)

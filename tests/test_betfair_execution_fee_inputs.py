@@ -429,3 +429,110 @@ def test_post_snapshot_class_dispatch_replacement_cannot_take_over_private_reads
     assert observation.account_evidence.observed_at == FIXED_NOW.isoformat()
     assert observation.market_evidence.observed_at == FIXED_NOW.isoformat()
     assert [json.loads(call["body"])["id"] for call in transport.calls] == [1, 2]
+
+
+def test_provider_callback_cannot_replace_transport_instance_post_for_second_read():
+    account_raw = response(account_details(), 1)
+    market_raw = response(market_description(), 2)
+    forged_market_raw = response(
+        [
+            {
+                "marketId": "1.234",
+                "description": {
+                    "marketBaseRate": 99,
+                    "discountAllowed": True,
+                    "regulator": "FORGED",
+                },
+            }
+        ],
+        2,
+    )
+    forged_called = Event()
+
+    class ReplacingTransport:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def post(self, url, *, headers, body, timeout_seconds):
+            self.calls += 1
+            if self.calls == 1:
+                def forged_post(url, *, headers, body, timeout_seconds):
+                    forged_called.set()
+                    return forged_market_raw
+
+                self.post = forged_post
+                return account_raw
+            return market_raw
+
+    transport = ReplacingTransport()
+    client = BetfairReadOnlyClient(
+        BetfairSessionCredentials("app-secret", "session-secret"),
+        transport=transport,
+        clock=lambda: FIXED_NOW,
+        venue_id="betfair-exchange",
+        account_id="account-123",
+    )
+
+    observation = read_betfair_execution_fee_inputs(client, market_id="1.234")
+
+    assert not forged_called.is_set()
+    assert transport.calls == 2
+    assert observation.market_base_rate_percent == Decimal("5.0")
+    assert observation.regulator == "MR_INT"
+    assert observation.market_evidence.source_payload_sha256 == sha256(market_raw).hexdigest()
+
+
+def test_provider_callback_cannot_replace_transport_class_post_for_second_read():
+    account_raw = response(account_details(), 1)
+    market_raw = response(market_description(), 2)
+    forged_market_raw = response(
+        [
+            {
+                "marketId": "1.234",
+                "description": {
+                    "marketBaseRate": 77,
+                    "discountAllowed": False,
+                    "regulator": "FORGED",
+                },
+            }
+        ],
+        2,
+    )
+    forged_called = Event()
+
+    class ReplacingTransport:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def post(self, url, *, headers, body, timeout_seconds):
+            self.calls += 1
+            if self.calls == 1:
+                type(self).post = forged_post
+                return account_raw
+            return market_raw
+
+    original_post = ReplacingTransport.post
+
+    def forged_post(self, url, *, headers, body, timeout_seconds):
+        forged_called.set()
+        return forged_market_raw
+
+    transport = ReplacingTransport()
+    client = BetfairReadOnlyClient(
+        BetfairSessionCredentials("app-secret", "session-secret"),
+        transport=transport,
+        clock=lambda: FIXED_NOW,
+        venue_id="betfair-exchange",
+        account_id="account-123",
+    )
+
+    try:
+        observation = read_betfair_execution_fee_inputs(client, market_id="1.234")
+    finally:
+        ReplacingTransport.post = original_post
+
+    assert not forged_called.is_set()
+    assert transport.calls == 2
+    assert observation.market_base_rate_percent == Decimal("5.0")
+    assert observation.regulator == "MR_INT"
+    assert observation.market_evidence.source_payload_sha256 == sha256(market_raw).hexdigest()

@@ -166,10 +166,24 @@ def test_tampered_digest_fails_closed() -> None:
 def test_write_once_round_trip_and_identical_retry(tmp_path: Path) -> None:
     original = manifest()
     path = tmp_path / "evidence" / "precommit.json"
+    path.parent.mkdir()
     first = write_campaign_precommit_manifest_once(path, original)
     second = write_campaign_precommit_manifest_once(path, original)
     assert first == second == original.manifest_sha256
     assert load_campaign_precommit_manifest(path) == original
+
+
+def test_write_once_refuses_implicit_parent_lineage_creation(tmp_path: Path) -> None:
+    path = tmp_path / "new-workspace" / "evidence" / "precommit.json"
+
+    with pytest.raises(
+        CampaignPrecommitManifestError,
+        match="parent directory must already exist",
+    ):
+        write_campaign_precommit_manifest_once(path, manifest())
+
+    assert not path.parent.exists()
+    assert not path.exists()
 
 
 def test_write_once_refuses_conflicting_successor(tmp_path: Path) -> None:
@@ -278,6 +292,7 @@ def test_write_once_synchronizes_parent_directory_before_success(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     path = tmp_path / "nested" / "precommit.json"
+    path.parent.mkdir()
     calls: list[Path] = []
 
     monkeypatch.setattr(

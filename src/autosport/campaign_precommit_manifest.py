@@ -304,8 +304,11 @@ def write_campaign_precommit_manifest_once(
     """Persist exact precommit bytes once, with byte-identical idempotent retry.
 
     This protects the local artifact against silent in-place replacement and makes
-    later byte tampering detectable. It intentionally does not claim rollback
-    protection if an attacker can delete and recreate the whole workspace.
+    later byte tampering detectable. The parent directory must already exist and be
+    provisioned by the canonical workspace/storage authority: this writer will not
+    silently create a directory lineage whose crash durability it cannot prove. It
+    intentionally does not claim rollback protection if an attacker can delete and
+    recreate the whole workspace.
     """
 
     if type(manifest) is not CampaignPrecommitManifest:
@@ -313,7 +316,10 @@ def write_campaign_precommit_manifest_once(
             "manifest must be CampaignPrecommitManifest"
         )
     target = Path(path)
-    target.parent.mkdir(parents=True, exist_ok=True)
+    if not target.parent.is_dir():
+        raise CampaignPrecommitManifestError(
+            "campaign precommit parent directory must already exist"
+        )
     encoded = _canonical_bytes(manifest.to_record()) + b"\n"
 
     try:

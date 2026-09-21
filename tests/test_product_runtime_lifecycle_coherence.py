@@ -47,6 +47,7 @@ class Coordinator:
     def __init__(self, state: SessionState) -> None:
         self.state = state
         self.resume_calls = 0
+        self.pause_calls = 0
         self.stop_calls: list[str] = []
         self.tick_calls = 0
         self.resume_error: Exception | None = None
@@ -62,6 +63,7 @@ class Coordinator:
         self.state = SessionState.RUNNING
 
     def pause(self) -> None:
+        self.pause_calls += 1
         self.state = SessionState.PAUSED
 
     def stop(self, reason: str) -> None:
@@ -155,6 +157,38 @@ class ProductRuntimeLifecycleCoherenceTests(unittest.TestCase):
         self.assertEqual(coordinator.stop_calls, ["runtime_start_failed"])
         self.assertEqual(coordinator.state, SessionState.STOPPED)
         self.assertEqual(value.status().state, SessionState.STOPPED)
+
+    def test_pause_from_stopped_is_rejected_without_splitting_lifecycle(self) -> None:
+        value, collector, coordinator = runtime(True, SessionState.STOPPED)
+
+        with self.assertRaisesRegex(
+            ProductCompositionError,
+            "cannot pause a stopped product runtime",
+        ):
+            value.pause()
+
+        self.assertEqual(coordinator.pause_calls, 0)
+        self.assertTrue(collector.stopped)
+        self.assertEqual(coordinator.state, SessionState.STOPPED)
+        self.assertEqual(value.status().state, SessionState.STOPPED)
+
+    def test_repeated_pause_is_idempotent_without_durable_rewrite(self) -> None:
+        value, collector, coordinator = runtime(False, SessionState.PAUSED)
+
+        self.assertEqual(value.pause().state, SessionState.PAUSED)
+
+        self.assertEqual(coordinator.pause_calls, 0)
+        self.assertFalse(collector.stopped)
+        self.assertEqual(coordinator.state, SessionState.PAUSED)
+
+    def test_running_pause_preserves_coherent_paused_state(self) -> None:
+        value, collector, coordinator = runtime(False, SessionState.RUNNING)
+
+        self.assertEqual(value.pause().state, SessionState.PAUSED)
+
+        self.assertEqual(coordinator.pause_calls, 1)
+        self.assertFalse(collector.stopped)
+        self.assertEqual(coordinator.state, SessionState.PAUSED)
 
     def test_partial_stop_blocks_positive_work_until_explicit_stop_recovery(self) -> None:
         value, collector, coordinator = runtime(False, SessionState.RUNNING)

@@ -81,6 +81,17 @@ class RoutingCapitalAtRiskTruth:
                 raise RoutingContractError(
                     "routing state cannot carry non-money-moving proposal authority"
                 )
+            if (
+                self.routing_state is RoutingState.UNEXECUTABLE
+                and confirmed != 0
+            ):
+                raise RoutingContractError(
+                    "UNEXECUTABLE state cannot carry confirmed routing notional"
+                )
+            if self.routing_state is RoutingState.COMPLETE and confirmed <= 0:
+                raise RoutingContractError(
+                    "COMPLETE state requires positive confirmed routing notional"
+                )
         elif self.routing_state is RoutingState.ROUTE:
             if proposed <= 0:
                 raise RoutingContractError(

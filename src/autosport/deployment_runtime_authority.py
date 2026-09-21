@@ -23,6 +23,7 @@ from pathlib import Path
 from threading import RLock
 from typing import Final, Mapping
 
+from .integrity import durable_path_lock
 from .learning_environment import EnvironmentIdentity, Episode
 
 
@@ -402,16 +403,17 @@ class DeploymentRuntimeAuthorityStore:
     ) -> "DeploymentRuntimeAuthorityStore":
         destination = Path(path)
         destination.parent.mkdir(parents=True, exist_ok=True)
-        if destination.exists():
-            raise DeploymentRuntimeAuthorityError("runtime authority store already exists")
-        cls._write_atomic_path(
-            destination,
-            {
-                "schema": STORE_SCHEMA,
-                "schema_version": STORE_SCHEMA_VERSION,
-                "records": [],
-            },
-        )
+        with durable_path_lock(destination):
+            if destination.exists():
+                raise DeploymentRuntimeAuthorityError("runtime authority store already exists")
+            cls._write_atomic_path(
+                destination,
+                {
+                    "schema": STORE_SCHEMA,
+                    "schema_version": STORE_SCHEMA_VERSION,
+                    "records": [],
+                },
+            )
         return cls(destination)
 
     @staticmethod
@@ -505,50 +507,67 @@ class DeploymentRuntimeAuthorityStore:
         action_semantics_version: str,
         action_semantics_meanings: tuple[tuple[str, str], ...],
     ) -> DeploymentRuntimeAuthorityRecord:
+        # The instance RLock protects callers sharing one Store object.  A product
+        # restart or two independent runtimes can hold distinct Store instances for
+        # the same path, so the whole read/modify/write transaction also needs the
+        # canonical durable path fence.  Locking only os.replace() would still allow
+        # two writers to derive children from the same hash-chain head and silently
+        # erase one another with last-writer-wins publication.
         with self._lock:
-            records = self._read_validated_records()
-            previous = records[-1].record_sha256 if records else _EMPTY_CHAIN_SHA256
+            with durable_path_lock(self.path):
+                records = self._read_validated_records()
+                previous = records[-1].record_sha256 if records else _EMPTY_CHAIN_SHA256
 
-            # Compute the immutable semantic identity before consulting the clock so an
-            # exact retry returns the original first-seen record even if time advanced.
-            probe = DeploymentRuntimeAuthorityRecord.create(
-                environment=environment,
-                episode=episode,
-                action_semantics_version=action_semantics_version,
-                action_semantics_meanings=action_semantics_meanings,
-                available_at=records[-1].available_at if records else "1970-01-01T00:00:00Z",
-                previous_record_sha256=previous,
-            )
-            for existing in records:
-                if existing.runtime_authority_id == probe.runtime_authority_id:
-                    return existing
-
-            observed_at = self._observed_now()
-            if records and _instant(observed_at, "runtime authority store clock") < _instant(
-                records[-1].available_at,
-                "previous runtime authority available_at",
-            ):
-                raise DeploymentRuntimeAuthorityError(
-                    "runtime authority store clock moved backwards"
+                # Compute the immutable semantic identity before consulting the clock so an
+                # exact retry returns the original first-seen record even if time advanced.
+                probe = DeploymentRuntimeAuthorityRecord.create(
+                    environment=environment,
+                    episode=episode,
+                    action_semantics_version=action_semantics_version,
+                    action_semantics_meanings=action_semantics_meanings,
+                    available_at=(
+                        records[-1].available_at
+                        if records
+                        else "1970-01-01T00:00:00Z"
+                    ),
+                    previous_record_sha256=previous,
                 )
-            candidate = DeploymentRuntimeAuthorityRecord.create(
-                environment=environment,
-                episode=episode,
-                action_semantics_version=action_semantics_version,
-                action_semantics_meanings=action_semantics_meanings,
-                available_at=observed_at,
-                previous_record_sha256=previous,
-            )
-            payload = {
-                "schema": STORE_SCHEMA,
-                "schema_version": STORE_SCHEMA_VERSION,
-                "records": [record.to_dict() for record in (*records, candidate)],
-            }
-            self._write_atomic_path(self.path, payload)
-            verified = self.get(candidate.runtime_authority_id)
-            if verified is None:
-                raise DeploymentRuntimeAuthorityError("runtime authority append was not durable")
-            return verified
+                for existing in records:
+                    if existing.runtime_authority_id == probe.runtime_authority_id:
+                        return existing
+
+                observed_at = self._observed_now()
+                if records and _instant(
+                    observed_at, "runtime authority store clock"
+                ) < _instant(
+                    records[-1].available_at,
+                    "previous runtime authority available_at",
+                ):
+                    raise DeploymentRuntimeAuthorityError(
+                        "runtime authority store clock moved backwards"
+                    )
+                candidate = DeploymentRuntimeAuthorityRecord.create(
+                    environment=environment,
+                    episode=episode,
+                    action_semantics_version=action_semantics_version,
+                    action_semantics_meanings=action_semantics_meanings,
+                    available_at=observed_at,
+                    previous_record_sha256=previous,
+                )
+                payload = {
+                    "schema": STORE_SCHEMA,
+                    "schema_version": STORE_SCHEMA_VERSION,
+                    "records": [
+                        record.to_dict() for record in (*records, candidate)
+                    ],
+                }
+                self._write_atomic_path(self.path, payload)
+                verified = self.get(candidate.runtime_authority_id)
+                if verified is None:
+                    raise DeploymentRuntimeAuthorityError(
+                        "runtime authority append was not durable"
+                    )
+                return verified
 
     def get(self, runtime_authority_id: str) -> DeploymentRuntimeAuthorityRecord | None:
         identity = _sha(runtime_authority_id, "runtime_authority_id")

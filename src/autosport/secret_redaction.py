@@ -224,24 +224,78 @@ def safe_exception_detail(
     )
 
 
+_MAX_EXCEPTION_TYPE_LABEL_LENGTH = 128
+_SENSITIVE_EXCEPTION_TYPE_MARKERS = (
+    "apikey",
+    "applicationkey",
+    "authentication",
+    "authorization",
+    "token",
+    "password",
+    "passwd",
+    "pwd",
+    "secret",
+    "privatekey",
+    "credential",
+)
+
+
+def _is_safe_exception_type_label(value: str) -> bool:
+    if (
+        not value
+        or len(value) > _MAX_EXCEPTION_TYPE_LABEL_LENGTH
+        or not value.isidentifier()
+    ):
+        return False
+    normalized = _normalized_key(value)
+    return not any(
+        marker in normalized for marker in _SENSITIVE_EXCEPTION_TYPE_MARKERS
+    )
+
+
+def _safe_exception_type_label(exc: BaseException) -> str:
+    """Return the nearest bounded non-secret exception category.
+
+    Exception class names are code metadata but are still untrusted presentation
+    input: dynamically-created provider/plugin types can encode response data,
+    credentials, or control characters in their class name. Preserve an ordinary
+    safe custom type label; otherwise walk its MRO to a safe parent category.
+    """
+
+    try:
+        exception_type = type(exc)
+        mro = type.__getattribute__(exception_type, "__mro__")
+    except BaseException:
+        return "BaseException"
+
+    for candidate_type in mro:
+        try:
+            candidate = str.__str__(
+                type.__getattribute__(candidate_type, "__name__")
+            )
+        except BaseException:
+            continue
+        if _is_safe_exception_type_label(candidate):
+            return candidate
+    return "BaseException"
+
+
 def safe_exception_text(
     exc: BaseException,
     *,
     unavailable_detail: str = "exception details unavailable",
     extra_secret_values: Iterable[str] = (),
 ) -> str:
-    """Render a safe Type: detail string and redact secret material."""
+    """Render a bounded Type: detail string and redact secret material."""
 
-    try:
-        exception_type = str.__str__(type.__getattribute__(type(exc), "__name__"))
-    except BaseException:
-        exception_type = "BaseException"
-
+    exception_type = _safe_exception_type_label(exc)
     detail = safe_exception_detail(
         exc,
         unavailable_detail=unavailable_detail,
         extra_secret_values=extra_secret_values,
     )
-    if not detail:
-        return exception_type
-    return exception_type + ": " + detail
+    rendered = exception_type if not detail else exception_type + ": " + detail
+    return redact_operator_text(
+        rendered,
+        extra_secret_values=extra_secret_values,
+    )

@@ -226,8 +226,6 @@ def capture_historical_matches(
                 "human_tested": False,
                 "nvda_verified": False,
             }
-            atomic_write_json(evidence, evidence_payload)
-
             expected_evidence_bytes = (
                 json.dumps(
                     evidence_payload,
@@ -240,6 +238,7 @@ def capture_historical_matches(
             ).encode("utf-8")
             expected_evidence_sha256 = hashlib.sha256(expected_evidence_bytes).hexdigest()
             try:
+                atomic_write_json(evidence, evidence_payload)
                 _verify_published_pair(
                     output,
                     evidence,

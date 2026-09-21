@@ -281,6 +281,36 @@ def test_cleared_terminal_releases_live_risk_after_durable_partial(tmp_path):
     assert evidence.capital_at_risk == Decimal("0")
 
 
+def test_voided_cleared_order_can_release_live_risk_after_durable_partial(tmp_path):
+    ledger, bound, ref = _context(tmp_path, "PARTIAL")
+    evidence = _resolve(
+        ledger,
+        bound,
+        _capture(ref, cleared=_cleared(ref, status="VOIDED", profit=0)),
+    )
+    assert evidence.truth is BetfairLiveCapitalAtRiskTruth.EXACT
+    assert evidence.reason is BetfairLiveCapitalAtRiskReason.CLEARED_TERMINAL
+    assert evidence.capital_at_risk == Decimal("0")
+
+
+@pytest.mark.parametrize("status", ["CANCELLED", "LAPSED"])
+def test_cancelled_or_lapsed_cleared_order_does_not_release_matched_exposure(
+    tmp_path, status
+):
+    ledger, bound, ref = _context(tmp_path, "PARTIAL")
+    evidence = _resolve(
+        ledger,
+        bound,
+        _capture(ref, cleared=_cleared(ref, status=status)),
+    )
+    assert evidence.truth is BetfairLiveCapitalAtRiskTruth.UNKNOWN
+    assert (
+        evidence.reason
+        is BetfairLiveCapitalAtRiskReason.CLEARED_MATCHED_EXPOSURE_UNRESOLVED
+    )
+    assert evidence.capital_at_risk is None
+
+
 @pytest.mark.parametrize("state", ["SUBMITTED", "UNKNOWN"])
 def test_cleared_cannot_release_before_durable_reconciliation(tmp_path, state):
     ledger, bound, ref = _context(tmp_path, state)

@@ -136,6 +136,40 @@ class ProductOperatorControllerTests(unittest.TestCase):
             self.assertEqual(market_store.close_calls, 1)
             self.assertEqual(operator.status().state, "CLOSED")
 
+    def test_attach_to_running_runtime_reuses_canonical_state_and_persists_stop(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            runtime, collector, coordinator, _ = self._runtime(directory)
+            runtime.start()
+
+            operator = ProductOperatorController(runtime)
+
+            self.assertEqual(operator.status().state, "RUNNING")
+            self.assertEqual(operator.start().state, "RUNNING")
+            self.assertEqual(collector.resume_calls, 1)
+            self.assertEqual(coordinator.resume_calls, 1)
+            self.assertEqual(operator.tick().cycle_index, 1)
+
+            stopped = operator.stop("operator_requested_stop")
+            self.assertEqual(stopped.state, "STOPPED")
+            self.assertEqual(collector.stop_reasons, ["operator_requested_stop"])
+            self.assertEqual(coordinator.stop_reasons, ["operator_requested_stop"])
+            self.assertEqual(operator.status().state, "STOPPED")
+            operator.close()
+
+    def test_external_start_after_attach_is_reconciled_before_stop(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            runtime, collector, coordinator, _ = self._runtime(directory)
+            operator = ProductOperatorController(runtime)
+            runtime.start()
+
+            self.assertEqual(operator.status().state, "RUNNING")
+            stopped = operator.stop("external_surface_stop")
+
+            self.assertEqual(stopped.state, "STOPPED")
+            self.assertEqual(collector.stop_reasons, ["external_surface_stop"])
+            self.assertEqual(coordinator.stop_reasons, ["external_surface_stop"])
+            operator.close()
+
     def test_tick_before_start_and_invalid_stop_reason_have_zero_effect(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             runtime, collector, coordinator, _ = self._runtime(directory)

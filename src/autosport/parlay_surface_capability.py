@@ -31,7 +31,6 @@ class Surface(str, Enum):
 class TechnicalSupport(str, Enum):
     OBSERVED_SUPPORTED = "OBSERVED_SUPPORTED"
     ROUTE_ELSEWHERE = "ROUTE_ELSEWHERE"
-    ENTITLEMENT_BLOCKED = "ENTITLEMENT_BLOCKED"
     TRANSIENT_UNKNOWN = "TRANSIENT_UNKNOWN"
     UNKNOWN = "UNKNOWN"
 
@@ -269,9 +268,7 @@ def evaluate_surface_capability(
     if observation.status_code == 401:
         return result(TechnicalSupport.UNKNOWN, DataUsability.UNAVAILABLE, "AUTHENTICATION_UNRESOLVED")
     if observation.status_code == 403:
-        if observation.error_code in {"HISTORICAL_LIMIT", "TIER_GATED", "CREDIT_LIMIT"}:
-            return result(TechnicalSupport.ENTITLEMENT_BLOCKED, DataUsability.UNAVAILABLE, observation.error_code)
-        return result(TechnicalSupport.UNKNOWN, DataUsability.UNAVAILABLE, "FORBIDDEN_UNCLASSIFIED")
+        return result(TechnicalSupport.UNKNOWN, DataUsability.UNAVAILABLE, "FORBIDDEN_UNRESOLVED")
     if observation.status_code != 200:
         return result(TechnicalSupport.UNKNOWN, DataUsability.UNAVAILABLE, f"HTTP_{observation.status_code}")
 

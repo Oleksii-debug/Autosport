@@ -107,7 +107,7 @@ def test_product_owned_acquisition_is_durable_and_does_not_widen_authority(
     client, _ = client_for(*account_responses())
     store = BookmakerAccountAcquisitionStore(store_path)
 
-    acquired = store.acquire_betfair(client, balance_caps())
+    acquired = store.acquire_betfair(client, balance_caps(), acquisition_id="attempt-1")
 
     assert acquired.source_authority_proven is True
     assert acquired.allocation_authority_proven is False
@@ -131,7 +131,7 @@ def test_product_owned_acquisition_is_durable_and_does_not_widen_authority(
     assert resolved.snapshot.balance == acquired.snapshot.balance
 
 
-def test_same_provider_response_is_idempotent_even_when_local_clock_advances(
+def test_same_acquisition_id_resolves_durable_receipt_before_provider_io(
     tmp_path: Path,
 ) -> None:
     store = BookmakerAccountAcquisitionStore(tmp_path / "account.sqlite3")
@@ -139,18 +139,60 @@ def test_same_provider_response_is_idempotent_even_when_local_clock_advances(
         *account_responses(),
         clock=FIXED_NOW,
     )
-    second_client, _ = client_for(
+    retry_client, retry_transport = client_for(
         *account_responses(),
         clock=FIXED_NOW + timedelta(minutes=5),
     )
 
-    first = store.acquire_betfair(first_client, balance_caps())
-    second = store.acquire_betfair(second_client, balance_caps())
+    first = store.acquire_betfair(
+        first_client,
+        balance_caps(),
+        acquisition_id="attempt-1",
+    )
+    retry = store.acquire_betfair(
+        retry_client,
+        balance_caps(),
+        acquisition_id="attempt-1",
+    )
 
-    assert second.receipt.receipt_id == first.receipt.receipt_id
-    assert second.receipt.observation_key == first.receipt.observation_key
-    assert second.snapshot.observed_at == first.snapshot.observed_at
+    assert retry.receipt.receipt_id == first.receipt.receipt_id
+    assert retry.receipt.observation_key == first.receipt.observation_key
+    assert retry.snapshot.observed_at == first.snapshot.observed_at
+    assert retry_transport.calls == []
     assert store.count() == 1
+
+
+def test_new_acquisition_id_preserves_new_temporal_observation_even_for_same_bytes(
+    tmp_path: Path,
+) -> None:
+    store = BookmakerAccountAcquisitionStore(tmp_path / "account.sqlite3")
+    first_client, _ = client_for(*account_responses(), clock=FIXED_NOW)
+    later_client, later_transport = client_for(
+        *account_responses(),
+        clock=FIXED_NOW + timedelta(minutes=5),
+    )
+
+    first = store.acquire_betfair(
+        first_client,
+        balance_caps(),
+        acquisition_id="attempt-1",
+    )
+    later = store.acquire_betfair(
+        later_client,
+        balance_caps(),
+        acquisition_id="attempt-2",
+    )
+
+    assert later.receipt.receipt_id != first.receipt.receipt_id
+    assert later.receipt.observation_key != first.receipt.observation_key
+    assert later.snapshot.observed_at == (
+        FIXED_NOW + timedelta(minutes=5)
+    ).isoformat()
+    assert later.snapshot.balance is not None
+    assert first.snapshot.balance is not None
+    assert later.snapshot.balance.available_balance == first.snapshot.balance.available_balance
+    assert len(later_transport.calls) == 2
+    assert store.count() == 2
 
 
 def test_caller_constructed_snapshot_cannot_reuse_durable_receipt(
@@ -158,7 +200,7 @@ def test_caller_constructed_snapshot_cannot_reuse_durable_receipt(
 ) -> None:
     store = BookmakerAccountAcquisitionStore(tmp_path / "account.sqlite3")
     client, _ = client_for(*account_responses())
-    acquired = store.acquire_betfair(client, balance_caps())
+    acquired = store.acquire_betfair(client, balance_caps(), acquisition_id="attempt-1")
     assert acquired.snapshot.balance is not None
 
     forged_balance = replace(
@@ -184,8 +226,16 @@ def test_receipt_from_one_account_cannot_authorize_another_account_snapshot(
     client_a, _ = client_for(*account_responses(), account_id="account-a")
     client_b, _ = client_for(*account_responses(), account_id="account-b")
 
-    acquired_a = store.acquire_betfair(client_a, balance_caps())
-    acquired_b = store.acquire_betfair(client_b, balance_caps())
+    acquired_a = store.acquire_betfair(
+        client_a,
+        balance_caps(),
+        acquisition_id="account-a-attempt",
+    )
+    acquired_b = store.acquire_betfair(
+        client_b,
+        balance_caps(),
+        acquisition_id="account-b-attempt",
+    )
 
     assert acquired_a.receipt.receipt_id != acquired_b.receipt.receipt_id
     with pytest.raises(BookmakerAccountAcquisitionError):
@@ -198,7 +248,7 @@ def test_durable_snapshot_byte_tamper_fails_closed_after_restart(
     store_path = tmp_path / "account.sqlite3"
     store = BookmakerAccountAcquisitionStore(store_path)
     client, _ = client_for(*account_responses())
-    acquired = store.acquire_betfair(client, balance_caps())
+    acquired = store.acquire_betfair(client, balance_caps(), acquisition_id="attempt-1")
 
     connection = sqlite3.connect(store_path)
     try:
@@ -244,7 +294,7 @@ def test_credentials_are_never_persisted_in_receipt_or_snapshot_store(
     store = BookmakerAccountAcquisitionStore(store_path)
     client, _ = client_for(*account_responses())
 
-    acquired = store.acquire_betfair(client, balance_caps())
+    acquired = store.acquire_betfair(client, balance_caps(), acquisition_id="attempt-1")
     durable_bytes = store_path.read_bytes()
 
     assert b"app-secret" not in durable_bytes
@@ -260,7 +310,7 @@ def test_provider_read_failure_cannot_mint_positive_acquisition_receipt(
     client, _ = client_for(b"not-json")
 
     with pytest.raises(BetfairReadOnlyError):
-        store.acquire_betfair(client, balance_caps())
+        store.acquire_betfair(client, balance_caps(), acquisition_id="attempt-1")
 
     assert store.count() == 0
 
@@ -276,7 +326,7 @@ def test_instance_method_shadow_cannot_mint_product_acquisition_authority(
         BookmakerAccountAcquisitionError,
         match="shadowed on the client instance",
     ):
-        store.acquire_betfair(client, balance_caps())
+        store.acquire_betfair(client, balance_caps(), acquisition_id="attempt-1")
 
     assert transport.calls == []
     assert store.count() == 0
@@ -300,10 +350,56 @@ def test_client_subclass_cannot_mint_product_acquisition_authority(
         BookmakerAccountAcquisitionError,
         match="exact canonical BetfairReadOnlyClient",
     ):
-        store.acquire_betfair(client, balance_caps())
+        store.acquire_betfair(client, balance_caps(), acquisition_id="attempt-1")
 
     assert transport.calls == []
     assert store.count() == 0
+
+
+def test_acquisition_id_reuse_with_different_scope_or_capabilities_fails_before_io(
+    tmp_path: Path,
+) -> None:
+    store = BookmakerAccountAcquisitionStore(tmp_path / "account.sqlite3")
+    first_client, _ = client_for(*account_responses(), account_id="account-a")
+    first = store.acquire_betfair(
+        first_client,
+        balance_caps(),
+        acquisition_id="stable-attempt",
+    )
+    assert first.receipt.account_id == "account-a"
+
+    wrong_account, wrong_account_transport = client_for(
+        *account_responses(),
+        account_id="account-b",
+    )
+    with pytest.raises(
+        BookmakerAccountAcquisitionError,
+        match="another provider/account/adapter scope",
+    ):
+        store.acquire_betfair(
+            wrong_account,
+            balance_caps(),
+            acquisition_id="stable-attempt",
+        )
+    assert wrong_account_transport.calls == []
+
+    wrong_caps, wrong_caps_transport = client_for(*account_responses())
+    with pytest.raises(
+        BookmakerAccountAcquisitionError,
+        match="another capability request",
+    ):
+        store.acquire_betfair(
+            wrong_caps,
+            frozenset(
+                {
+                    BookmakerCapability.BALANCE_READ,
+                    BookmakerCapability.OPEN_POSITIONS_READ,
+                }
+            ),
+            acquisition_id="stable-attempt",
+        )
+    assert wrong_caps_transport.calls == []
+    assert store.count() == 1
 
 
 def test_untyped_snapshot_capability_is_rejected_before_provider_io(
@@ -319,6 +415,7 @@ def test_untyped_snapshot_capability_is_rejected_before_provider_io(
         store.acquire_betfair(
             client,
             frozenset({BookmakerCapability.BET_READBACK}),
+            acquisition_id="attempt-1",
         )
 
     assert transport.calls == []
@@ -332,12 +429,17 @@ def test_empty_or_non_exact_capability_container_is_rejected(
     client, transport = client_for(*account_responses())
 
     with pytest.raises(BookmakerAccountAcquisitionError):
-        store.acquire_betfair(client, frozenset())
+        store.acquire_betfair(
+            client,
+            frozenset(),
+            acquisition_id="attempt-empty",
+        )
 
     with pytest.raises(BookmakerAccountAcquisitionError):
         store.acquire_betfair(  # type: ignore[arg-type]
             client,
             {BookmakerCapability.BALANCE_READ},
+            acquisition_id="attempt-container",
         )
 
     assert transport.calls == []

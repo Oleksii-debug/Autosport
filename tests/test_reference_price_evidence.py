@@ -223,7 +223,8 @@ class ReferencePriceEvidenceTests(unittest.TestCase):
                         "2.10",
                         price_semantics="best_available_to_back",
                     ),
-                )
+                ),
+                protocol_price_semantics="last_traded_price",
             )
 
         missing = self.event("provider-b", "2.10")

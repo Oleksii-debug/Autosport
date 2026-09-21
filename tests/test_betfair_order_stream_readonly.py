@@ -230,6 +230,29 @@ def test_market_image_replaces_current_cache_without_erasing_identity_history() 
     assert state.bet_id_for_customer_order_ref("attempt-ref-1") == "bet-1"
 
 
+def test_rejected_multi_order_frame_rolls_back_cache_identity_and_cursor() -> None:
+    state = _initialized_state()
+    before_snapshot = state.snapshot()
+    before_cursor = state.reconnect_cursor()
+    rejected = _frame(
+        clk="clk-2",
+        publish_time_ms=200,
+        orders=[
+            _order(bet_id="bet-2", customer_order_ref="attempt-ref-2"),
+            _order(bet_id="bet-3", customer_order_ref="attempt-ref-1"),
+        ],
+    )
+
+    with pytest.raises(ValueError, match="customerOrderRef rebound"):
+        state.apply(_decoded(rejected))
+
+    assert state.snapshot() == before_snapshot
+    assert state.reconnect_cursor() == before_cursor
+    assert state.state_for_bet_id("bet-2") is None
+    assert state.bet_id_for_customer_order_ref("attempt-ref-2") is None
+    assert state.bet_id_for_customer_order_ref("attempt-ref-1") == "bet-1"
+
+
 def test_delta_before_subscription_image_fails_closed() -> None:
     state = BetfairOrderStreamState(subscription_sha256=SUBSCRIPTION_SHA256)
     frame = _decoded(

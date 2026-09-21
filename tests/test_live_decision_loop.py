@@ -417,10 +417,14 @@ class PersistentLiveDecisionLoopTests(unittest.TestCase):
                     }
                 ],
             )
-            evidence_files = tuple(
-                (workspace / loop.HEALTH_EVIDENCE_DIR_NAME).glob("*.json")
+            progress = json.loads(
+                (workspace / loop.PROGRESS_FILE_NAME).read_text(encoding="utf-8")
             )
-            self.assertEqual(len(evidence_files), 1)
+            self.assertEqual(progress["schema_version"], 2)
+            self.assertEqual(
+                progress["provider_health_boundaries"],
+                record.to_dict()["payload"]["provider_health_boundaries"],
+            )
             loop.close()
 
     def test_health_transition_invalidates_cached_intent_without_quote_delta(self) -> None:
@@ -473,8 +477,12 @@ class PersistentLiveDecisionLoopTests(unittest.TestCase):
             self.assertTrue(
                 all(record.payload["gate"] == "provider_health" for record in records)
             )
+            progress = json.loads(
+                (workspace / loop.PROGRESS_FILE_NAME).read_text(encoding="utf-8")
+            )
+            self.assertEqual(progress["schema_version"], 2)
             self.assertEqual(
-                len(tuple((workspace / loop.HEALTH_EVIDENCE_DIR_NAME).glob("*.json"))),
+                progress["provider_health_boundaries"][0]["transition_order"],
                 2,
             )
             loop.close()

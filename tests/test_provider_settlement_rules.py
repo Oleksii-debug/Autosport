@@ -3,7 +3,7 @@ from dataclasses import fields, replace
 import pytest
 
 from autosport.provider_settlement_rules import (
-    ProviderSettlementBinding,
+    ProviderSettlementRuleSelection,
     ProviderSettlementRule,
     ProviderSettlementRuleError,
     ProviderSettlementRuleTimeline,
@@ -60,28 +60,28 @@ def test_provider_specific_scenario_may_differ_without_cross_provider_inference(
 
     timeline_a = ProviderSettlementRuleTimeline(provider_a.provider_id, (provider_a,))
     timeline_b = ProviderSettlementRuleTimeline(provider_b.provider_id, (provider_b,))
-    accepted_at = "2026-03-01T12:00:00+00:00"
+    evaluated_at = "2026-03-01T12:00:00+00:00"
 
-    binding_a = timeline_a.bind(
-        accepted_at=accepted_at,
+    selection_a = timeline_a.select_rule(
+        evaluated_at=evaluated_at,
         market_family="synthetic.match_result",
         scenario_code="synthetic.interrupted",
     )
-    binding_b = timeline_b.bind(
-        accepted_at=accepted_at,
+    selection_b = timeline_b.select_rule(
+        evaluated_at=evaluated_at,
         market_family="synthetic.match_result",
         scenario_code="synthetic.interrupted",
     )
 
-    assert binding_a.treatment_code == "synthetic.void"
-    assert binding_b.treatment_code == "synthetic.loss"
-    assert binding_a.rulebook_id != binding_b.rulebook_id
-    assert binding_a.binding_id != binding_b.binding_id
+    assert selection_a.treatment_code == "synthetic.void"
+    assert selection_b.treatment_code == "synthetic.loss"
+    assert selection_a.rulebook_id != selection_b.rulebook_id
+    assert selection_a.selection_id != selection_b.selection_id
     with pytest.raises(ProviderSettlementRuleError, match="exact rulebook identity"):
-        binding_a.verify_rulebook(provider_b)
+        selection_a.verify_rulebook(provider_b)
 
 
-def test_rule_version_boundary_selects_by_acceptance_instant() -> None:
+def test_rule_version_boundary_selects_by_evaluation_instant() -> None:
     v1 = _book(
         version="rules-1",
         end="2026-06-01T00:00:00+00:00",
@@ -96,13 +96,13 @@ def test_rule_version_boundary_selects_by_acceptance_instant() -> None:
     )
     timeline = ProviderSettlementRuleTimeline(v1.provider_id, (v1, v2))
 
-    before = timeline.bind(
-        accepted_at="2026-05-31T23:59:59.999999+00:00",
+    before = timeline.select_rule(
+        evaluated_at="2026-05-31T23:59:59.999999+00:00",
         market_family="synthetic.match_result",
         scenario_code="synthetic.interrupted",
     )
-    boundary = timeline.bind(
-        accepted_at="2026-06-01T00:00:00+00:00",
+    boundary = timeline.select_rule(
+        evaluated_at="2026-06-01T00:00:00+00:00",
         market_family="synthetic.match_result",
         scenario_code="synthetic.interrupted",
     )
@@ -113,7 +113,7 @@ def test_rule_version_boundary_selects_by_acceptance_instant() -> None:
     assert boundary.treatment_code == "synthetic.push"
 
 
-def test_later_rulebook_cannot_reinterpret_historical_binding() -> None:
+def test_later_rulebook_cannot_reinterpret_structural_selection() -> None:
     v1 = _book(
         version="rules-1",
         end="2026-06-01T00:00:00+00:00",
@@ -128,16 +128,37 @@ def test_later_rulebook_cannot_reinterpret_historical_binding() -> None:
     )
     timeline = ProviderSettlementRuleTimeline(v1.provider_id, (v1, v2))
 
-    historical = timeline.bind(
-        accepted_at="2026-05-01T12:00:00+00:00",
+    structural = timeline.select_rule(
+        evaluated_at="2026-05-01T12:00:00+00:00",
         market_family="synthetic.match_result",
         scenario_code="synthetic.interrupted",
     )
 
-    historical.verify_rulebook(v1)
-    assert timeline.select(historical.accepted_at) is v1
+    structural.verify_rulebook(v1)
+    assert timeline.select(structural.evaluated_at) is v1
     with pytest.raises(ProviderSettlementRuleError, match="exact rulebook identity"):
-        historical.verify_rulebook(v2)
+        structural.verify_rulebook(v2)
+
+
+def test_caller_time_selection_is_not_accepted_position_authority() -> None:
+    book = _book()
+    timeline = ProviderSettlementRuleTimeline(book.provider_id, (book,))
+
+    selection = timeline.select_rule(
+        evaluated_at="2026-03-01T00:00:00+00:00",
+        market_family="synthetic.match_result",
+        scenario_code="synthetic.interrupted",
+    )
+
+    assert isinstance(selection, ProviderSettlementRuleSelection)
+    assert selection.evaluated_at == "2026-03-01T00:00:00+00:00"
+    assert not hasattr(timeline, "bind")
+    selection_fields = {field.name for field in fields(ProviderSettlementRuleSelection)}
+    assert "evaluated_at" in selection_fields
+    assert not (
+        selection_fields
+        & {"accepted_at", "position_id", "execution_id", "provider_ack", "receipt_id"}
+    )
 
 
 def test_rulebook_source_or_semantics_change_exact_identity() -> None:
@@ -232,20 +253,20 @@ def test_build_helper_orders_versions_but_keeps_gap_semantics() -> None:
         timeline.select("2026-04-15T00:00:00+00:00")
 
 
-def test_binding_detects_rule_identity_tampering() -> None:
+def test_structural_selection_detects_rule_identity_tampering() -> None:
     book = _book()
     timeline = ProviderSettlementRuleTimeline(book.provider_id, (book,))
-    binding = timeline.bind(
-        accepted_at="2026-03-01T00:00:00+00:00",
+    selection = timeline.select_rule(
+        evaluated_at="2026-03-01T00:00:00+00:00",
         market_family="synthetic.match_result",
         scenario_code="synthetic.interrupted",
     )
 
-    tampered = replace(binding, treatment_code="synthetic.loss")
+    tampered = replace(selection, treatment_code="synthetic.loss")
     with pytest.raises(ProviderSettlementRuleError, match="exact rule identity"):
         tampered.verify_rulebook(book)
 
-    tampered_rule_id = replace(binding, rule_id="f" * 64)
+    tampered_rule_id = replace(selection, rule_id="f" * 64)
     with pytest.raises(ProviderSettlementRuleError, match="exact rule identity"):
         tampered_rule_id.verify_rulebook(book)
 
@@ -279,7 +300,7 @@ def test_contract_contains_no_money_execution_or_receipt_authority_fields() -> N
         for cls in (
             ProviderSettlementRule,
             ProviderSettlementRulebook,
-            ProviderSettlementBinding,
+            ProviderSettlementRuleSelection,
         )
         for field in fields(cls)
     }

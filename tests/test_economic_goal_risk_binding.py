@@ -568,7 +568,12 @@ class EconomicGoalRiskBindingTests(unittest.TestCase):
                 Decimal("0.01"),
             ),
         )
-        self.assertTrue(at_boundary.allowed)
+        self.assertFalse(at_boundary.allowed)
+        self.assertEqual(
+            at_boundary.reason,
+            "portfolio risk-of-ruin evidence was not resolved from canonical "
+            "ScientificRegistry authority",
+        )
 
         exceeded = policy.evaluate(
             book,
@@ -583,7 +588,8 @@ class EconomicGoalRiskBindingTests(unittest.TestCase):
         self.assertFalse(exceeded.allowed)
         self.assertEqual(
             exceeded.reason,
-            "portfolio risk-of-ruin upper bound exceeds economic goal limit",
+            "portfolio risk-of-ruin evidence was not resolved from canonical "
+            "ScientificRegistry authority",
         )
 
         wrong_stake = policy.evaluate(
@@ -599,7 +605,8 @@ class EconomicGoalRiskBindingTests(unittest.TestCase):
         self.assertFalse(wrong_stake.allowed)
         self.assertEqual(
             wrong_stake.reason,
-            "portfolio risk-of-ruin evidence does not match exact proposal state",
+            "portfolio risk-of-ruin evidence was not resolved from canonical "
+            "ScientificRegistry authority",
         )
 
     def test_risk_of_ruin_evidence_rejects_future_or_changed_portfolio_state(self) -> None:
@@ -621,7 +628,8 @@ class EconomicGoalRiskBindingTests(unittest.TestCase):
         self.assertFalse(future.allowed)
         self.assertEqual(
             future.reason,
-            "portfolio risk-of-ruin evidence uses future information",
+            "portfolio risk-of-ruin evidence was not resolved from canonical "
+            "ScientificRegistry authority",
         )
 
         bound = self._bound_ruin_context(
@@ -642,10 +650,11 @@ class EconomicGoalRiskBindingTests(unittest.TestCase):
         self.assertFalse(changed.allowed)
         self.assertEqual(
             changed.reason,
-            "portfolio risk-of-ruin evidence does not match exact proposal state",
+            "portfolio risk-of-ruin evidence was not resolved from canonical "
+            "ScientificRegistry authority",
         )
 
-    def test_risk_of_ruin_portfolio_binding_is_stable_across_exact_restart(self) -> None:
+    def test_unresolved_risk_of_ruin_witness_stays_audit_only_across_book_restart(self) -> None:
         goal = self._goal(max_risk_of_ruin=Decimal("0.01"))
         policy = self._policy(goal)
         book = PaperBook("100")
@@ -662,7 +671,12 @@ class EconomicGoalRiskBindingTests(unittest.TestCase):
             restarted = PaperBook.load(path)
 
         decision = policy.evaluate(restarted, Decimal("1"), context=bound)
-        self.assertTrue(decision.allowed)
+        self.assertFalse(decision.allowed)
+        self.assertEqual(
+            decision.reason,
+            "portfolio risk-of-ruin evidence was not resolved from canonical "
+            "ScientificRegistry authority",
+        )
 
     def test_owner_concurrent_position_limit_counts_only_canonical_open_tickets(self) -> None:
         book = PaperBook("100")

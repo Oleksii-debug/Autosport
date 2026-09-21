@@ -3,7 +3,10 @@
 This module grants neither provider-health, source-quality, economic nor execution
 truth. It re-resolves technical capability from the canonical durable bookmaker
 capability registry. A fallback route still requires a separate downstream source-
-quality decision before observations may influence an economic decision.
+quality decision before observations may influence an economic decision. Account-
+scoped reads may fail over only to another adapter/profile for the same venue/account;
+cross-provider substitution is reserved for quote reads and still requires semantic
+compatibility qualification downstream.
 """
 from __future__ import annotations
 
@@ -54,6 +57,24 @@ _READ_ONLY_CAPABILITIES = frozenset(
         BookmakerCapability.BETSLIP_READ,
         BookmakerCapability.OPEN_POSITIONS_READ,
         BookmakerCapability.SETTLED_POSITIONS_READ,
+    }
+)
+
+_ACCOUNT_SCOPED_READ_CAPABILITIES = frozenset(
+    {
+        BookmakerCapability.ACCOUNT_IDENTITY_READ,
+        BookmakerCapability.BALANCE_READ,
+        BookmakerCapability.LIMITS_READ,
+        BookmakerCapability.BETSLIP_READ,
+        BookmakerCapability.OPEN_POSITIONS_READ,
+        BookmakerCapability.SETTLED_POSITIONS_READ,
+    }
+)
+
+_CROSS_PROVIDER_QUOTE_READ_CAPABILITIES = frozenset(
+    {
+        BookmakerCapability.PREMATCH_QUOTES_READ,
+        BookmakerCapability.LIVE_QUOTES_READ,
     }
 )
 
@@ -177,6 +198,13 @@ class ProviderFallbackDecision:
         return True
 
     @property
+    def downstream_semantic_compatibility_required(self) -> bool:
+        return (
+            self.disposition is ProviderFallbackDisposition.USE_FALLBACK_READ
+            and self.required_capability in _CROSS_PROVIDER_QUOTE_READ_CAPABILITIES
+        )
+
+    @property
     def decision_id(self) -> str:
         return _digest(
             {
@@ -282,6 +310,14 @@ def resolve_readonly_provider_route(
     )
     primary_capability = primary.state_of(required_capability)
 
+    supplied = (
+        fallback_route is not None,
+        fallback_integration is not None,
+        fallback_operational is not None,
+    )
+    if any(supplied) and not all(supplied):
+        raise ProviderFallbackPolicyError("fallback evidence must be supplied together")
+
     if primary_operational.state is ProviderOperationalState.HEALTHY:
         if primary_capability is BookmakerCapabilityState.SUPPORTED:
             return _decision(
@@ -303,13 +339,6 @@ def resolve_readonly_provider_route(
             reason=f"PRIMARY_HEALTHY_CAPABILITY_{primary_capability.value.upper()}",
         )
 
-    supplied = (
-        fallback_route is not None,
-        fallback_integration is not None,
-        fallback_operational is not None,
-    )
-    if any(supplied) and not all(supplied):
-        raise ProviderFallbackPolicyError("fallback evidence must be supplied together")
     if not all(supplied):
         return _decision(
             disposition=ProviderFallbackDisposition.ABSTAIN,
@@ -333,6 +362,21 @@ def resolve_readonly_provider_route(
         decided_at=decision_at,
         field="fallback",
     )
+    if (
+        required_capability in _ACCOUNT_SCOPED_READ_CAPABILITIES
+        and (fallback.venue_id, fallback.account_id)
+        != (primary.venue_id, primary.account_id)
+    ):
+        return _decision(
+            disposition=ProviderFallbackDisposition.ABSTAIN,
+            capability=required_capability,
+            primary=primary,
+            primary_observation=primary_operational,
+            fallback=fallback,
+            fallback_observation=fallback_operational,
+            decided_at=decided_at,
+            reason="ACCOUNT_SCOPED_FALLBACK_IDENTITY_MISMATCH",
+        )
     if fallback_operational.state is not ProviderOperationalState.HEALTHY:
         return _decision(
             disposition=ProviderFallbackDisposition.ABSTAIN,

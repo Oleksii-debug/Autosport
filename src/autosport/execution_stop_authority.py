@@ -221,16 +221,24 @@ class ExecutionStopAuthority:
         return self._anchor_path
 
     def _read_journal_unlocked(
-        self, *, require_anchor_match: bool = True
+        self,
+        *,
+        require_anchor_match: bool = True,
+        allow_missing_anchor: bool = False,
     ) -> list[dict[str, Any]]:
         journal_exists = self.path.exists()
         anchor_exists = self._anchor_path.exists()
         if not journal_exists and not anchor_exists:
             return []
         if journal_exists != anchor_exists:
-            raise ExecutionStopIntegrityError(
-                "STOP authority journal/anchor pair is incomplete"
-            )
+            if not (
+                allow_missing_anchor
+                and journal_exists
+                and not anchor_exists
+            ):
+                raise ExecutionStopIntegrityError(
+                    "STOP authority journal/anchor pair is incomplete"
+                )
 
         try:
             lines = self.path.read_text(encoding="utf-8").splitlines()
@@ -339,6 +347,9 @@ class ExecutionStopAuthority:
                 )
             previous_sha256 = record_sha256
             records.append(record)
+
+        if not anchor_exists:
+            return records
 
         anchor = self._read_anchor_unlocked()
         latest = records[-1]
@@ -571,11 +582,32 @@ class ExecutionStopAuthority:
         """
 
         with self._thread_lock, _exclusive_file_lock(self._lock_path):
-            records = self._read_journal_unlocked(require_anchor_match=False)
+            records = self._read_journal_unlocked(
+                require_anchor_match=False,
+                allow_missing_anchor=True,
+            )
             if not records:
                 raise ExecutionStopStateError(
                     "STOP authority is missing; there is no torn transition to recover"
                 )
+
+            if not self._anchor_path.exists():
+                if (
+                    len(records) != 1
+                    or records[0]["revision"] != 1
+                    or records[0]["previous_sha256"] is not None
+                    or records[0]["mode"] != ExecutionAuthorityMode.STOPPED.value
+                ):
+                    raise ExecutionStopIntegrityError(
+                        "STOP authority recovery cannot establish an ambiguous first anchor"
+                    )
+                initial = records[0]
+                self._write_anchor_unlocked(
+                    revision=1,
+                    record_sha256=initial["record_sha256"],
+                )
+                recovered = self._read_journal_unlocked()
+                return self._state_from_record(recovered[-1])
 
             anchor = self._read_anchor_unlocked()
             anchor_revision = anchor["revision"]

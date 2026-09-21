@@ -343,6 +343,27 @@ class BoundedMirrorInvalidationBufferTests(unittest.TestCase):
         self.assertEqual(len(incremental.events), 1)
         self.assertEqual(incremental.events[0].sequence, 1)
 
+    def test_registration_snapshot_failure_rolls_back_provisional_dependency(self) -> None:
+        mirror = MarketMirror()
+        dependencies = FocusedMirrorDependencyIndex(mirror)
+
+        with patch.object(
+            mirror,
+            "snapshot",
+            side_effect=RuntimeError("snapshot failed"),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "snapshot failed"):
+                dependencies.register("decision-a", source_ids="provider-a")
+
+        self.assertEqual(dependencies.input_ids, ())
+        with self.assertRaises(KeyError):
+            dependencies.matching_keys("decision-a")
+
+        registered = dependencies.register("decision-a", source_ids="provider-a")
+        self.assertEqual(registered.input_id, "decision-a")
+        self.assertEqual(dependencies.input_ids, ("decision-a",))
+        self.assertEqual(dependencies.matching_keys("decision-a"), ())
+
     def test_focused_dependency_overflow_fails_safe_to_all_registered_inputs(self) -> None:
         mirror = MarketMirror()
         runtime = BoundedMirrorInvalidationBuffer(mirror, max_dirty_keys=1)

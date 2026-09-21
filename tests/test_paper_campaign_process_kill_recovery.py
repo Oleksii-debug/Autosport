@@ -56,7 +56,7 @@ _CHILD_CODE = textwrap.dedent(
     ) = legacy._fixture(root)
 
     marker = {"ticket_id": ticket_id, "mode": mode}
-    if mode == "after_learning_ack":
+    if mode in {"after_learning_ack", "after_attribution", "after_postmortem"}:
         resolutions = legacy._settle(root, leg, "win")
         transitions = bridge.reconcile_after_settlement(
             paper_book_path=root / "paper_book.json",
@@ -67,6 +67,31 @@ _CHILD_CODE = textwrap.dedent(
         if len(transitions) != 1:
             raise AssertionError("expected one durable settlement->learning transition")
         marker["transition_id"] = transitions[0]
+        if mode in {"after_attribution", "after_postmortem"}:
+            witness = bridge.resolution_witness(ticket_id)
+            runtime = _runtime
+            runtime.agent_loop.advance(
+                expected=legacy.AgentLoopPhase.EVALUATE,
+                at=legacy.T4,
+            )
+            reflection_at = runtime._bind_finalization_plan(
+                witness,
+                available_at=legacy.T4,
+            )
+            attribution = runtime._attribution(
+                witness,
+                available_at=reflection_at,
+            )
+            runtime.agent_loop.record_attribution(attribution, at=legacy.T4)
+            marker["attribution_id"] = attribution.attribution_id
+            if mode == "after_postmortem":
+                postmortem = runtime._postmortem(
+                    attribution,
+                    witness,
+                    available_at=reflection_at,
+                )
+                runtime.agent_loop.record_postmortem(postmortem, at=legacy.T4)
+                marker["postmortem_id"] = postmortem.postmortem_id
     elif mode == "after_settlement_before_outbox":
         resolution = legacy.SettlementResolution(
             event_identity=f"campaign-provider:{leg.event_id}",
@@ -238,6 +263,53 @@ class PaperCampaignProcessKillRecoveryTests(unittest.TestCase):
             self.assertEqual(before["resolutions"][0]["transition_id"], transition_id)
             self.assertEqual(before["attributions"], [])
             self.assertEqual(before["postmortems"], [])
+
+            self._assert_terminal_exactly_once(
+                root=root,
+                ticket_id=ticket_id,
+                transition_id=transition_id,
+            )
+
+    def test_abrupt_exit_after_attribution_recovers_postmortem_and_checkpoint(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            marker = _run_abrupt_child(root, "after_attribution")
+            ticket_id = marker["ticket_id"]
+            transition_id = marker["transition_id"]
+
+            before = json.loads(
+                (root / "agent-loop.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(before["phase"], _legacy.AgentLoopPhase.REFLECT.value)
+            self.assertEqual(len(before["resolutions"]), 1)
+            self.assertEqual(len(before["attributions"]), 1)
+            self.assertEqual(before["attributions"][0]["attribution_id"], marker["attribution_id"])
+            self.assertEqual(before["postmortems"], [])
+            self.assertNotEqual(before["checkpointed_transition_id"], transition_id)
+
+            self._assert_terminal_exactly_once(
+                root=root,
+                ticket_id=ticket_id,
+                transition_id=transition_id,
+            )
+
+    def test_abrupt_exit_after_postmortem_recovers_checkpoint_only(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            marker = _run_abrupt_child(root, "after_postmortem")
+            ticket_id = marker["ticket_id"]
+            transition_id = marker["transition_id"]
+
+            before = json.loads(
+                (root / "agent-loop.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(before["phase"], _legacy.AgentLoopPhase.CHECKPOINT.value)
+            self.assertEqual(len(before["resolutions"]), 1)
+            self.assertEqual(len(before["attributions"]), 1)
+            self.assertEqual(len(before["postmortems"]), 1)
+            self.assertEqual(before["postmortems"][0]["postmortem_id"], marker["postmortem_id"])
+            self.assertNotEqual(before["environment_checkpoint_id"], marker.get("next_checkpoint_id"))
+            self.assertNotEqual(before["checkpointed_transition_id"], transition_id)
 
             self._assert_terminal_exactly_once(
                 root=root,

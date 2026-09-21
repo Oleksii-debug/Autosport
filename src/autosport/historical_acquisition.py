@@ -68,9 +68,14 @@ def _require_staged_digest(path: Path, expected_sha256: str, *, field: str) -> s
     return actual_sha256
 
 
-def _read_strict_json_object(path: Path, *, field: str) -> dict[str, Any]:
+def _read_strict_json_object_with_sha256(
+    path: Path,
+    *,
+    field: str,
+) -> tuple[dict[str, Any], str]:
     try:
-        raw = path.read_text(encoding="utf-8")
+        raw_bytes = path.read_bytes()
+        raw = raw_bytes.decode("utf-8")
     except (OSError, UnicodeError) as exc:
         raise ProviderPayloadError(f"{field} must be readable UTF-8 JSON") from exc
 
@@ -93,9 +98,98 @@ def _read_strict_json_object(path: Path, *, field: str) -> dict[str, Any]:
         )
     except json.JSONDecodeError as exc:
         raise ProviderPayloadError(f"{field} must be valid JSON") from exc
-    if not isinstance(payload, dict):
+    if type(payload) is not dict:
         raise ProviderPayloadError(f"{field} must be a JSON object")
+    return payload, hashlib.sha256(raw_bytes).hexdigest()
+
+
+def _read_strict_json_object(path: Path, *, field: str) -> dict[str, Any]:
+    payload, _ = _read_strict_json_object_with_sha256(path, field=field)
     return payload
+
+
+def _require_match_result_evidence_semantics(
+    payload: dict[str, Any],
+    *,
+    expected_sport_key: str,
+    expected_date: str,
+    expected_priced_only: bool,
+    expected_request_url: str,
+) -> dict[str, Any]:
+    if payload.get("provider") != "parlayapi":
+        raise ProviderPayloadError("match_results.evidence provider identity mismatch")
+    if payload.get("sport_key") != expected_sport_key:
+        raise ProviderPayloadError("match_results.evidence sport identity mismatch")
+    if payload.get("requested_date") != expected_date:
+        raise ProviderPayloadError("match_results.evidence requested_date mismatch")
+    if type(payload.get("priced_only")) is not bool or payload["priced_only"] is not expected_priced_only:
+        raise ProviderPayloadError("match_results.evidence priced_only mismatch")
+    if payload.get("request_url") != expected_request_url:
+        raise ProviderPayloadError("match_results.evidence request_url mismatch")
+
+    captured_at = payload.get("captured_at")
+    if type(captured_at) is not str:
+        raise ProviderPayloadError("match_results.evidence captured_at must be text")
+    _canonical_timestamp(captured_at, field="match_results.evidence.captured_at")
+
+    canonical_response_sha256 = payload.get("canonical_response_sha256")
+    capture_sha256 = payload.get("capture_sha256")
+    for field_name, value in (
+        ("canonical_response_sha256", canonical_response_sha256),
+        ("capture_sha256", capture_sha256),
+    ):
+        if (
+            type(value) is not str
+            or len(value) != 64
+            or any(character not in "0123456789abcdef" for character in value)
+        ):
+            raise ProviderPayloadError(
+                f"match_results.evidence {field_name} must be lowercase SHA-256 hex"
+            )
+
+    historical_window_hours = payload.get("historical_window_hours")
+    if (
+        type(historical_window_hours) is not int
+        or historical_window_hours <= 0
+    ):
+        raise ProviderPayloadError(
+            "match_results.evidence historical_window_hours must be a positive integer"
+        )
+    historical_window_from = payload.get("historical_window_from")
+    if type(historical_window_from) is not str or not historical_window_from.strip():
+        raise ProviderPayloadError(
+            "match_results.evidence historical_window_from must be text"
+        )
+    try:
+        date.fromisoformat(historical_window_from.strip()[:10])
+    except ValueError as exc:
+        raise ProviderPayloadError(
+            "match_results.evidence historical_window_from must start with an ISO date"
+        ) from exc
+
+    trust_fields = (
+        "product_owned_request_path_verified",
+        "product_owned_acquisition_clock_verified",
+        "provider_response_origin_verified",
+        "trusted_outcome_source_admissible",
+    )
+    for field_name in trust_fields:
+        if payload.get(field_name) is not False:
+            raise ProviderPayloadError(
+                f"match_results.evidence {field_name} must remain false on this authority"
+            )
+
+    return {
+        "requested_date": expected_date,
+        "priced_only": expected_priced_only,
+        "request_url": expected_request_url,
+        "captured_at": captured_at,
+        "capture_sha256": capture_sha256,
+        "canonical_response_sha256": canonical_response_sha256,
+        "historical_window_hours": historical_window_hours,
+        "historical_window_from": historical_window_from,
+        **{field_name: False for field_name in trust_fields},
+    }
 
 
 def capture_historical_acquisition_bundle(
@@ -238,35 +332,13 @@ def capture_historical_acquisition_bundle(
         result_evidence_relative = Path("match-results.evidence.json")
         result_path = staging / result_relative
         result_evidence_path = staging / result_evidence_relative
-        result_report = capture_historical_matches(
+        capture_historical_matches(
             provider,
             requested_date=canonical_results_date,
             output_path=result_path,
             evidence_path=result_evidence_path,
             priced_only=results_priced_only,
         )
-        if result_report.request_url != results_request_url:
-            raise ProviderPayloadError(
-                "historical match logical request provenance changed during acquisition"
-            )
-        result_entry = {
-            "requested_date": result_report.requested_date,
-            "priced_only": result_report.priced_only,
-            "request_url": result_report.request_url,
-            "captured_at": result_report.captured_at,
-            "capture_file": result_relative.as_posix(),
-            "evidence_file": result_evidence_relative.as_posix(),
-            "capture_sha256": result_report.capture_sha256,
-            "evidence_sha256": sha256_file(result_evidence_path),
-            "canonical_response_sha256": result_report.canonical_response_sha256,
-            "historical_window_hours": result_report.historical_window_hours,
-            "historical_window_from": result_report.historical_window_from,
-            "product_owned_request_path_verified": result_report.product_owned_request_path_verified,
-            "product_owned_acquisition_clock_verified": result_report.product_owned_acquisition_clock_verified,
-            "provider_response_origin_verified": result_report.provider_response_origin_verified,
-            "trusted_outcome_source_admissible": result_report.trusted_outcome_source_admissible,
-            "coverage_preflight": coverage_evidence,
-        }
 
         # Re-resolve every child byte set at the bundle publication boundary.
         # Returned report digests are authority claims, not permission to trust a
@@ -295,26 +367,34 @@ def capture_historical_acquisition_bundle(
             entry["market_sha256"] = market_sha256
             entry["evidence_sha256"] = evidence_sha256
 
+        result_evidence, result_evidence_sha256 = _read_strict_json_object_with_sha256(
+            result_evidence_path,
+            field="match_results.evidence",
+        )
+        result_semantics = _require_match_result_evidence_semantics(
+            result_evidence,
+            expected_sport_key=provider.sport_key,
+            expected_date=canonical_results_date,
+            expected_priced_only=results_priced_only,
+            expected_request_url=results_request_url,
+        )
         result_capture_sha256 = _require_staged_digest(
             result_path,
-            result_report.capture_sha256,
+            str(result_semantics["capture_sha256"]),
             field="match_results.capture",
-        )
-        result_evidence_sha256 = _require_staged_digest(
-            result_evidence_path,
-            str(result_entry["evidence_sha256"]),
-            field="match_results.evidence",
-        )
-        result_evidence = _read_strict_json_object(
-            result_evidence_path,
-            field="match_results.evidence",
         )
         if result_evidence.get("capture_sha256") != result_capture_sha256:
             raise ProviderPayloadError(
                 "match_results.evidence capture_sha256 does not bind staged capture bytes"
             )
-        result_entry["capture_sha256"] = result_capture_sha256
-        result_entry["evidence_sha256"] = result_evidence_sha256
+        result_entry = {
+            **result_semantics,
+            "capture_file": result_relative.as_posix(),
+            "evidence_file": result_evidence_relative.as_posix(),
+            "capture_sha256": result_capture_sha256,
+            "evidence_sha256": result_evidence_sha256,
+            "coverage_preflight": coverage_evidence,
+        }
 
         identity_payload = {
             "schema_version": 1,
@@ -332,10 +412,10 @@ def capture_historical_acquisition_bundle(
             "snapshot_count": len(snapshot_entries),
             "snapshots_with_odds": snapshots_with_odds,
             "all_requested_snapshots_returned_odds": snapshots_with_odds == len(snapshot_entries),
-            "match_result_product_owned_request_path_verified": result_report.product_owned_request_path_verified,
-            "match_result_product_owned_acquisition_clock_verified": result_report.product_owned_acquisition_clock_verified,
-            "match_result_provider_response_origin_verified": result_report.provider_response_origin_verified,
-            "trusted_outcome_source_admissible": result_report.trusted_outcome_source_admissible,
+            "match_result_product_owned_request_path_verified": result_entry["product_owned_request_path_verified"],
+            "match_result_product_owned_acquisition_clock_verified": result_entry["product_owned_acquisition_clock_verified"],
+            "match_result_provider_response_origin_verified": result_entry["provider_response_origin_verified"],
+            "trusted_outcome_source_admissible": result_entry["trusted_outcome_source_admissible"],
             "provider_result_schema_parsed": False,
             "sealed_quote_outcomes_derived": False,
             "point_in_time_odds_market_coverage_verified": False,
@@ -358,7 +438,7 @@ def capture_historical_acquisition_bundle(
             bundle_sha256=sha256_file(final_bundle),
             snapshot_count=len(snapshot_entries),
             snapshots_with_odds=snapshots_with_odds,
-            result_capture_sha256=result_report.capture_sha256,
+            result_capture_sha256=result_capture_sha256,
         )
     except Exception:
         shutil.rmtree(staging, ignore_errors=True)

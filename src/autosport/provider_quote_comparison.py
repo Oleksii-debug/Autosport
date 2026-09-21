@@ -190,10 +190,17 @@ class ProviderQuotePoint:
             raise ProviderQuoteComparisonError(
                 "quote decimal_odds must be greater than 1"
             )
-        _instant(self.observed_ts, "quote observed_ts")
-        if self.source_ts is not None:
+        observed = _instant(self.observed_ts, "quote observed_ts")
+        source_time = (
             _instant(self.source_ts, "quote source_ts")
-        _instant(self.ingest_ts, "quote ingest_ts")
+            if self.source_ts is not None
+            else observed
+        )
+        ingested = _instant(self.ingest_ts, "quote ingest_ts")
+        if source_time > observed or observed > ingested:
+            raise ProviderQuoteComparisonError(
+                "quote timestamps must satisfy source_ts <= observed_ts <= ingest_ts"
+            )
         _sha256(self.market_event_sha256, "quote market_event_sha256")
 
     def to_payload(self) -> dict[str, object]:
@@ -394,6 +401,10 @@ def compare_provider_quotes(
             if event.source_ts is not None
             else observed
         )
+        if source_time > observed or observed > ingested:
+            raise ProviderQuoteComparisonError(
+                "quote timestamps must satisfy source_ts <= observed_ts <= ingest_ts"
+            )
         if observed > boundary or ingested > boundary or source_time > boundary:
             continue
         age = boundary - source_time

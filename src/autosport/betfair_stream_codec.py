@@ -468,9 +468,8 @@ class BetfairMarketStreamState:
             raise ValueError("same Betfair clk arrived with different frame content")
 
         if frame.kind is BetfairFrameKind.HEARTBEAT:
-            if frame.initial_clk is not None and self._initial is not None:
-                if frame.initial_clk != self._initial:
-                    raise ValueError("heartbeat initialClk conflicts with active subscription")
+            if frame.initial_clk is not None:
+                self._initial = frame.initial_clk
             self._clk, self._pt, self._hash = (
                 frame.clk, frame.publish_time_ms, frame.frame_sha256
             )
@@ -495,8 +494,6 @@ class BetfairMarketStreamState:
         else:
             if not self._initialized:
                 raise ValueError("Betfair delta cannot be applied before SUB_IMAGE")
-            if frame.initial_clk is not None and frame.initial_clk != self._initial:
-                raise ValueError("Betfair delta initialClk conflicts with active subscription")
             if frame.kind is BetfairFrameKind.RESUB_DELTA and frame.initial_clk is None:
                 raise ValueError("RESUB_DELTA requires initialClk for resume binding")
 
@@ -523,6 +520,8 @@ class BetfairMarketStreamState:
                     changed.extend(c)
                     removed.extend(r)
 
+        if frame.initial_clk is not None:
+            self._initial = frame.initial_clk
         self._clk, self._pt, self._hash = frame.clk, frame.publish_time_ms, frame.frame_sha256
         return BetfairStreamApplyResult(
             BetfairApplyStatus.APPLIED,

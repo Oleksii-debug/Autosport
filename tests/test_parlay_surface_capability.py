@@ -24,7 +24,6 @@ def obs(**overrides):
         observed_at=T0,
         available_at=T0 + timedelta(seconds=1),
         status_code=200,
-        origin_verified=True,
         response_sha256=DIGEST,
         row_count=3,
         pagination_complete=True,

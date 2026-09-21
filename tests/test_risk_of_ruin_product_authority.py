@@ -17,6 +17,9 @@ from autosport.scientific_registry import DatasetSnapshot, EvaluationBundleRef, 
 PROPOSAL_TS = "2026-09-16T15:00:02+00:00"
 EVALUATED_AT = "2026-09-16T15:00:01+00:00"
 CAUSAL_CUTOFF = "2026-09-16T14:59:58+00:00"
+DATASET_MANIFEST = "9" * 64
+EVALUATOR_SOURCE = "e" * 64
+SAMPLE_SIZE = 1000
 
 
 def _goal(*, max_risk_of_ruin: Decimal = Decimal("0.01")) -> EconomicGoalContract:
@@ -78,7 +81,7 @@ def _registry(tmp_path) -> ScientificRegistry:
     registry.append(
         DatasetSnapshot(
             dataset_snapshot_id="risk-dataset",
-            manifest_sha256="9" * 64,
+            manifest_sha256=DATASET_MANIFEST,
             source_identity="risk-fixture",
             license_identity="internal-test",
             causal_cutoff=CAUSAL_CUTOFF,
@@ -88,17 +91,36 @@ def _registry(tmp_path) -> ScientificRegistry:
     return registry
 
 
-def _issue(registry: ScientificRegistry, evidence, *, kind: str, created_at=EVALUATED_AT) -> None:
+def _issue(
+    registry: ScientificRegistry,
+    evidence,
+    *,
+    kind: str,
+    created_at=EVALUATED_AT,
+    evaluator_source=EVALUATOR_SOURCE,
+    artifact_evaluator_source=None,
+) -> None:
+    artifact_evaluator_source = artifact_evaluator_source or evaluator_source
     registry.append(
         EvaluationBundleRef(
             evaluation_bundle_id=evidence.evidence_id,
             bundle_sha256=evidence.reproducibility_bundle_sha256,
-            evaluator_source_sha256="e" * 64,
+            evaluator_source_sha256=evaluator_source,
             dataset_snapshot_id="risk-dataset",
             protocol_sha256=evidence.research_protocol_sha256,
-            artifact_hashes=(risk_of_ruin_result_sha256(evidence, kind=kind),),
+            artifact_hashes=(
+                risk_of_ruin_result_sha256(
+                    evidence,
+                    kind=kind,
+                    evaluator_source_sha256=artifact_evaluator_source,
+                    dataset_snapshot_id="risk-dataset",
+                    dataset_manifest_sha256=DATASET_MANIFEST,
+                    effective_sample_size=SAMPLE_SIZE,
+                    evaluation_available_at=created_at,
+                ),
+            ),
             created_at=created_at,
-            effective_sample_size=1000,
+            effective_sample_size=SAMPLE_SIZE,
         )
     )
 
@@ -164,6 +186,29 @@ def test_product_issued_single_evidence_survives_restart_and_tamper_fails(tmp_pa
     )
     assert not rejected.allowed
     assert "result digest does not match" in rejected.reason
+
+
+def test_copied_result_digest_cannot_substitute_evaluator_method_identity(tmp_path) -> None:
+    registry = _registry(tmp_path)
+    policy = _policy(registry.path)
+    book = PaperBook("100")
+    context = _context(1)
+    evidence = replace(_single_evidence(policy, book, context), evidence_id="method-substitution")
+    _issue(
+        registry,
+        evidence,
+        kind="single",
+        evaluator_source="f" * 64,
+        artifact_evaluator_source=EVALUATOR_SOURCE,
+    )
+
+    decision = policy.evaluate(
+        book,
+        Decimal("1"),
+        context=replace(context, risk_of_ruin_evidence=evidence),
+    )
+    assert not decision.allowed
+    assert "result digest does not match" in decision.reason
 
 
 def test_bundle_created_after_proposal_cannot_retroactively_authorize(tmp_path) -> None:

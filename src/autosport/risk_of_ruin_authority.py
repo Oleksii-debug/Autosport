@@ -10,7 +10,9 @@ from typing import Any
 from .scientific_registry import ScientificRegistry
 
 
-_AUTHORITY_KIND = "autosport.risk-of-ruin-product-authority.v1"
+_AUTHORITY_KIND = "autosport.risk-of-ruin-product-authority.v2"
+_BOUND_SEMANTICS = "probability_upper_bound"
+_CONFIDENCE_SEMANTICS = "protocol_defined_upper_bound"
 
 
 def _canonical_decimal(value: Decimal) -> str:
@@ -20,6 +22,15 @@ def _canonical_decimal(value: Decimal) -> str:
     if "." in text:
         text = text.rstrip("0").rstrip(".")
     return "0" if text in {"", "-0"} else text
+
+
+def _canonical_sha256(value: object, name: str) -> str:
+    if type(value) is not str:
+        raise ValueError(f"{name} must be a SHA-256 string")
+    value = value.lower()
+    if len(value) != 64 or any(ch not in "0123456789abcdef" for ch in value):
+        raise ValueError(f"{name} must be a canonical SHA-256 digest")
+    return value
 
 
 def _instant(value: str) -> datetime:
@@ -63,20 +74,55 @@ def _payload(evidence: object, *, kind: str) -> dict[str, Any]:
         "currency": getattr(evidence, "currency"),
         "base_portfolio_sha256": getattr(evidence, "base_portfolio_sha256"),
         "upper_bound": _canonical_decimal(getattr(evidence, "upper_bound")),
+        "bound_semantics": _BOUND_SEMANTICS,
+        "confidence_semantics": _CONFIDENCE_SEMANTICS,
         **candidate,
     }
 
 
-def risk_of_ruin_result_sha256(evidence: object, *, kind: str) -> str:
-    """Digest the exact scalar/vector result that a durable bundle issued.
+def risk_of_ruin_result_sha256(
+    evidence: object,
+    *,
+    kind: str,
+    evaluator_source_sha256: str,
+    dataset_snapshot_id: str,
+    dataset_manifest_sha256: str,
+    effective_sample_size: int,
+    evaluation_available_at: str,
+) -> str:
+    """Digest the exact issued result plus canonical evaluation identity.
 
-    The digest is deliberately public: secrecy is not authority.  Authority comes
-    from the immutable EvaluationBundle record that must already contain this exact
-    result digest before the proposal can use it.
+    Secrecy is deliberately irrelevant. The digest binds method/source version,
+    dataset identity/content, sufficiency, evaluation availability, protocol and
+    the exact scalar/vector result. Positive authority still requires this digest
+    to be present in the immutable durable EvaluationBundle record.
     """
 
+    if type(dataset_snapshot_id) is not str or not dataset_snapshot_id:
+        raise ValueError("dataset_snapshot_id must be a non-empty string")
+    if (
+        isinstance(effective_sample_size, bool)
+        or not isinstance(effective_sample_size, int)
+        or effective_sample_size <= 0
+    ):
+        raise ValueError("effective_sample_size must be a positive integer")
+    evaluation_available_at = _instant(evaluation_available_at).isoformat()
+    payload = {
+        **_payload(evidence, kind=kind),
+        "evaluation": {
+            "evaluator_source_sha256": _canonical_sha256(
+                evaluator_source_sha256, "evaluator_source_sha256"
+            ),
+            "dataset_snapshot_id": dataset_snapshot_id,
+            "dataset_manifest_sha256": _canonical_sha256(
+                dataset_manifest_sha256, "dataset_manifest_sha256"
+            ),
+            "effective_sample_size": effective_sample_size,
+            "available_at": evaluation_available_at,
+        },
+    }
     encoded = json.dumps(
-        _payload(evidence, kind=kind),
+        payload,
         ensure_ascii=False,
         sort_keys=True,
         separators=(",", ":"),
@@ -104,6 +150,8 @@ def verify_risk_of_ruin_authority(
         if entry is None:
             return False, f"{prefix} risk-of-ruin evidence is not product-issued"
         bundle = entry.payload
+        if bundle.get("created_at") != entry.available_at:
+            return False, f"{prefix} risk-of-ruin durable evaluation identity is inconsistent"
         if (
             bundle.get("bundle_sha256")
             != getattr(evidence, "reproducibility_bundle_sha256").lower()
@@ -111,11 +159,6 @@ def verify_risk_of_ruin_authority(
             != getattr(evidence, "research_protocol_sha256").lower()
         ):
             return False, f"{prefix} risk-of-ruin durable authority lineage does not match"
-
-        result_sha256 = risk_of_ruin_result_sha256(evidence, kind=kind)
-        artifacts = bundle.get("artifact_hashes")
-        if type(artifacts) is not list or result_sha256 not in artifacts:
-            return False, f"{prefix} risk-of-ruin durable result digest does not match"
 
         issued_at = _instant(entry.available_at)
         evaluated_at = _instant(getattr(evidence, "evaluated_at"))
@@ -138,6 +181,30 @@ def verify_risk_of_ruin_authority(
             getattr(evidence, "causal_cutoff")
         ):
             return False, f"{prefix} risk-of-ruin authority dataset exceeds causal cutoff"
+        manifest_sha256 = dataset.payload.get("manifest_sha256")
+        evaluator_source_sha256 = bundle.get("evaluator_source_sha256")
+        effective_sample_size = bundle.get("effective_sample_size")
+        if (
+            type(manifest_sha256) is not str
+            or type(evaluator_source_sha256) is not str
+            or isinstance(effective_sample_size, bool)
+            or not isinstance(effective_sample_size, int)
+            or effective_sample_size <= 0
+        ):
+            return False, f"{prefix} risk-of-ruin scientific sufficiency is unknown"
+
+        result_sha256 = risk_of_ruin_result_sha256(
+            evidence,
+            kind=kind,
+            evaluator_source_sha256=evaluator_source_sha256,
+            dataset_snapshot_id=dataset_id,
+            dataset_manifest_sha256=manifest_sha256,
+            effective_sample_size=effective_sample_size,
+            evaluation_available_at=entry.available_at,
+        )
+        artifacts = bundle.get("artifact_hashes")
+        if type(artifacts) is not list or result_sha256 not in artifacts:
+            return False, f"{prefix} risk-of-ruin durable result digest does not match"
     except (AttributeError, OSError, TypeError, ValueError):
         return False, f"{prefix} risk-of-ruin durable authority is invalid"
 

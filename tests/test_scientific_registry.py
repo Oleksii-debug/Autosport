@@ -407,6 +407,41 @@ def test_negative_repeat_requires_durable_postmortem_provenance(tmp_path):
     # Restart must re-resolve the durable authorizing record, not merely trust the
     # evidence reference persisted in the repeated Experiment payload.
     original_raw = json.loads(path.read_text(encoding="utf-8"))
+
+    stripped = json.loads(json.dumps(original_raw))
+    stripped_repeat = next(
+        entry
+        for entry in stripped["records"]
+        if entry["record_type"] == "Experiment"
+        and entry["record_id"] == "experiment-2"
+    )
+    for key in (
+        "repeat_of_experiment_id",
+        "repeat_postmortem_id",
+        "retest_condition",
+        "repeat_evidence",
+    ):
+        stripped_repeat["payload"].pop(key)
+    stripped_envelope = {
+        key: stripped_repeat[key]
+        for key in ("record_type", "record_id", "available_at", "payload")
+    }
+    stripped_repeat["record_sha256"] = hashlib.sha256(
+        json.dumps(
+            stripped_envelope,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        ).encode("utf-8")
+    ).hexdigest()
+    path.write_text(json.dumps(stripped), encoding="utf-8")
+    with pytest.raises(
+        DuplicateExperimentFingerprintError,
+        match="lacks durable repeat provenance",
+    ):
+        ScientificRegistry(path)
+
     tampered = json.loads(json.dumps(original_raw))
     tampered_bundle = next(
         entry

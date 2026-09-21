@@ -140,9 +140,10 @@ from . import _point_in_time_class_dispatch_seal as _point_in_time_class_dispatc
 # family label. Compose the #716 ledger with registry-backed factory history while
 # retaining old stored freshness ids as readable migration input only.
 from . import _holdout_physical_content_guard as _holdout_physical_content_guard  # noqa: F401,E402
-# Preserve that composition across an explicit reload of the #716 runtime-repair
-# module without bypassing its existing class-dispatch compatibility seal.
+# Preserve that composition across explicit reloads of the #716 runtime-repair and
+# the factory implementation without bypassing existing compatibility seals.
 from . import _holdout_physical_runtime_reload_guard as _holdout_physical_runtime_reload_guard  # noqa: F401,E402
+from . import _holdout_physical_factory_reload_guard as _holdout_physical_factory_reload_guard  # noqa: F401,E402
 
 # Sequential multiplicity evidence and PromotionEvidence live in separate durable
 # journals. Seal the registry prefix observed at look registration so a later write

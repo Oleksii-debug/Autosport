@@ -3,14 +3,16 @@ from __future__ import annotations
 """Freeze campaign-denomination witness location in durable registry authority.
 
 The generic PAPER execution witness root may be selected by supported environment
-configuration.  Campaign denomination issuance is different: once a finalized
+configuration. Campaign denomination issuance is different: once a finalized
 campaign has acquired positive denomination authority, changing that configuration
 must not silently start a second issuance ancestry for the same registry/campaign.
 
 Persist one strict root record beside the existing denomination cache before the
-first campaign witness append.  Subsequent reads ignore later environment changes
-and re-resolve the originally pinned root.  This reuses ScientificRegistry as the
-existing canonical authority; it does not introduce another denomination store.
+first campaign witness append. Subsequent reads ignore later environment changes
+and re-resolve the originally pinned root. The same composition also extends the
+existing ScientificRegistry monotonic-byte detector to the two canonical
+campaign-denomination extension keys so those bytes cannot be rolled back to the
+pre-denomination registry image while machine authority survives.
 """
 
 import hashlib
@@ -19,6 +21,7 @@ from pathlib import Path
 from typing import Mapping
 
 from . import campaign_economic_authority as _impl
+from . import integrity as _integrity
 from .integrity import atomic_write_json
 
 
@@ -32,7 +35,12 @@ _ROOT_KEYS = {
     "root",
     "root_sha256",
 }
+_REGISTRY_BASE_KEYS = frozenset({"schema_version", "records"})
+_REGISTRY_DENOMINATION_EXTENSION_KEYS = frozenset(
+    {_impl._DENOMINATION_STATE_KEY, _ROOT_STATE_KEY}
+)
 
+_ORIGINAL_SCIENTIFIC_REGISTRY_DETECTOR = None
 _ORIGINAL_ISSUANCE_WITNESS_PATH = None
 _ORIGINAL_APPEND_ISSUANCE_WITNESS = None
 
@@ -57,6 +65,49 @@ def _root_text(path: Path) -> str:
 
 def _root_sha256(root: str) -> str:
     return hashlib.sha256(root.encode("utf-8")).hexdigest()
+
+
+def _scientific_registry_state_with_denomination(payload: dict[str, object]) -> bool:
+    assert _ORIGINAL_SCIENTIFIC_REGISTRY_DETECTOR is not None
+    if _ORIGINAL_SCIENTIFIC_REGISTRY_DETECTOR(payload):
+        return True
+    if type(payload) is not dict:
+        return False
+    actual = frozenset(payload)
+    if not _REGISTRY_BASE_KEYS.issubset(actual):
+        return False
+    if not actual.issubset(
+        _REGISTRY_BASE_KEYS | _REGISTRY_DENOMINATION_EXTENSION_KEYS
+    ):
+        return False
+    if not actual.intersection(_REGISTRY_DENOMINATION_EXTENSION_KEYS):
+        return False
+    # The existing detector remains the single validator for the scientific record
+    # envelope. This wrapper only says that these two exact product extensions are
+    # part of the same protected whole-file image rather than generic JSON metadata.
+    return _ORIGINAL_SCIENTIFIC_REGISTRY_DETECTOR(
+        {
+            "schema_version": payload.get("schema_version"),
+            "records": payload.get("records"),
+        }
+    )
+
+
+def _install_registry_extension_detector() -> None:
+    if getattr(
+        _integrity,
+        "_campaign_denomination_registry_extensions_installed",
+        False,
+    ):
+        return
+    global _ORIGINAL_SCIENTIFIC_REGISTRY_DETECTOR
+    _ORIGINAL_SCIENTIFIC_REGISTRY_DETECTOR = (
+        _integrity._looks_like_scientific_registry_state
+    )
+    _integrity._looks_like_scientific_registry_state = (
+        _scientific_registry_state_with_denomination
+    )
+    _integrity._campaign_denomination_registry_extensions_installed = True
 
 
 def _validated_root(value: object, *, registry) -> Path:
@@ -99,7 +150,10 @@ def _root_record(registry) -> Mapping[str, object] | None:
         raise _impl.CampaignEconomicAuthorityError(
             "campaign denomination witness root record is malformed"
         )
-    if raw["schema"] != _ROOT_SCHEMA or raw["schema_version"] != _ROOT_SCHEMA_VERSION:
+    if (
+        raw["schema"] != _ROOT_SCHEMA
+        or raw["schema_version"] != _ROOT_SCHEMA_VERSION
+    ):
         raise _impl.CampaignEconomicAuthorityError(
             "campaign denomination witness root schema is unsupported"
         )
@@ -129,7 +183,7 @@ def _ensure_pinned_root(registry) -> Path:
         return pinned
 
     # issue_denomination_binding owns WorkspaceEconomicLock while the witness append
-    # executes.  Pin the exact root before writing the first witness so a crash can
+    # executes. Pin the exact root before writing the first witness so a crash can
     # leave at most a harmless root-only prefix, never an unpinned positive witness.
     try:
         selected = _impl._authority_root(registry.path)
@@ -197,6 +251,7 @@ def _append_issuance_witness(
 
 
 def _install() -> None:
+    _install_registry_extension_detector()
     if getattr(_impl, "_campaign_denomination_witness_root_pin_installed", False):
         return
     global _ORIGINAL_ISSUANCE_WITNESS_PATH, _ORIGINAL_APPEND_ISSUANCE_WITNESS

@@ -21,7 +21,6 @@ MODEL_RUNTIME_SCHEMA: Final = "autosport.model_runtime_contract"
 MODEL_RUNTIME_SCHEMA_VERSION: Final = 1
 _HEX: Final = frozenset("0123456789abcdef")
 _CODE_RE: Final = re.compile(r"^[A-Z][A-Z0-9_]{0,63}$")
-_ENDPOINT_CLASS_RE: Final = re.compile(r"^[a-z][a-z0-9._-]{0,63}$")
 _MAX_DEADLINE_MS: Final = 300_000
 _MAX_ATTEMPTS: Final = 8
 
@@ -34,6 +33,11 @@ class ModelBackendMode(StrEnum):
     NO_LLM = "NO_LLM"
     LOCAL_OLLAMA = "LOCAL_OLLAMA"
     EXTERNAL_API = "EXTERNAL_API"
+
+
+class ModelEndpointClass(StrEnum):
+    LOCAL_LOOPBACK_HTTP = "local-loopback-http"
+    OWNER_CONFIGURED_EXTERNAL_API = "owner-configured-external-api"
 
 
 class ModelInvocationStatus(StrEnum):
@@ -120,7 +124,7 @@ class ModelBackendIdentity:
     """Non-secret identity for one optional model backend configuration."""
 
     mode: ModelBackendMode
-    endpoint_class: str | None
+    endpoint_class: ModelEndpointClass | None
     model_id: str | None
     request_schema_id: str | None
     config_sha256: str | None
@@ -144,10 +148,20 @@ class ModelBackendIdentity:
                 )
             return
 
-        endpoint_class = _canonical_text(self.endpoint_class, "endpoint_class")
-        if _ENDPOINT_CLASS_RE.fullmatch(endpoint_class) is None:
+        if not isinstance(self.endpoint_class, ModelEndpointClass):
             raise ModelRuntimeContractError(
-                "endpoint_class must be a symbolic non-secret class, not a URL or credential"
+                "endpoint_class must be ModelEndpointClass"
+            )
+        expected_endpoint_class = {
+            ModelBackendMode.LOCAL_OLLAMA: ModelEndpointClass.LOCAL_LOOPBACK_HTTP,
+            ModelBackendMode.EXTERNAL_API: (
+                ModelEndpointClass.OWNER_CONFIGURED_EXTERNAL_API
+            ),
+        }[self.mode]
+        if self.endpoint_class is not expected_endpoint_class:
+            raise ModelRuntimeContractError(
+                f"{self.mode.value} must use endpoint_class="
+                f"{expected_endpoint_class.value}"
             )
         _canonical_text(self.model_id, "model_id")
         _canonical_text(self.request_schema_id, "request_schema_id")
@@ -156,7 +170,7 @@ class ModelBackendIdentity:
     def canonical_payload(self) -> dict[str, object]:
         return {
             "mode": self.mode.value,
-            "endpoint_class": self.endpoint_class,
+            "endpoint_class": self.endpoint_class.value if self.endpoint_class is not None else None,
             "model_id": self.model_id,
             "request_schema_id": self.request_schema_id,
             "config_sha256": self.config_sha256,

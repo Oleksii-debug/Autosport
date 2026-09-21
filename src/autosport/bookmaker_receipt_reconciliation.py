@@ -438,6 +438,10 @@ def _validate_durable_effect_receipts(
             AttemptState.SUBMITTED,
             AttemptState.UNKNOWN,
             AttemptState.PARTIAL,
+            # Persistence alone is not trusted provider-absence provenance.
+            # Until a product-issued absence authority is integrated, NOT_FOUND
+            # remains fail-closed for positive residual routing.
+            AttemptState.RECONCILED_NOT_FOUND,
         }
         for state in attempt_states.values()
     )

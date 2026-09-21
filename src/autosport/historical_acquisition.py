@@ -182,7 +182,20 @@ def _require_match_result_evidence_semantics(
         "provider_response_origin_verified",
         "trusted_outcome_source_admissible",
     )
-    for field_name in trust_fields:
+    fail_closed_fields = (
+        *trust_fields,
+        "provider_result_schema_parsed",
+        "sealed_quote_outcomes_derived",
+        "point_in_time_odds_market_coverage_verified",
+        "historical_window_market_coverage_verified",
+        "replay_corpus_ready",
+        "licensing_or_retention_verified",
+        "redistribution_verified",
+        "real_money_execution",
+        "human_tested",
+        "nvda_verified",
+    )
+    for field_name in fail_closed_fields:
         if payload.get(field_name) is not False:
             raise ProviderPayloadError(
                 f"match_results.evidence {field_name} must remain false on this authority"

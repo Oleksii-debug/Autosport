@@ -266,10 +266,7 @@ class BetfairMarketBookDelayObservation:
 
     @property
     def application_key_class(self) -> str:
-        if (
-            self.application_key_delay_data is None
-            or self.application_key_active is not True
-        ):
+        if self.application_key_delay_data is None:
             return "unknown"
         return "delayed" if self.application_key_delay_data else "live"
 
@@ -515,7 +512,11 @@ def _install_market_book_authority() -> None:
             )
         if self.application_key_class != "live":
             raise BetfairMarketBookFreshnessError(
-                "positive market-book observation requires active provider LIVE application key"
+                "positive market-book observation requires provider LIVE application-key tier"
+            )
+        if self.application_key_active is not True:
+            raise BetfairMarketBookFreshnessError(
+                "positive market-book observation requires active provider application key"
             )
         client = record[3]
         credentials = record[4]

@@ -188,6 +188,21 @@ def test_authority_refs_are_exact_sorted_unique_and_not_source_resolution() -> N
         )
 
 
+def test_authority_identity_cannot_bind_to_multiple_digests() -> None:
+    first = _ref("same-family", "same-id", SHA_A)
+    changed_digest = _ref("same-family", "same-id", SHA_B)
+
+    with pytest.raises(
+        RewardAttributionError,
+        match="one authority identity to multiple digests",
+    ):
+        RewardComponentAttribution(
+            RewardAttributionComponent.FORECAST,
+            AttributionTruth.OBSERVED,
+            authority_refs=(first, changed_digest),
+        )
+
+
 def test_contract_has_no_monetary_decomposition_surface() -> None:
     raw = _unknown().to_dict()
     raw["components"][0]["monetary_contribution"] = "12.34"
@@ -223,6 +238,25 @@ def test_same_causal_reward_has_stable_semantic_key_but_attribution_drift_change
     assert changed.evidence_id != baseline.evidence_id
     assert changed.source_resolved is False
     assert changed.policy_update_eligible is False
+
+
+def test_schema_requires_exact_builtin_string_not_subclass() -> None:
+    class ForgedSchema(str):
+        pass
+
+    with pytest.raises(
+        RewardAttributionError,
+        match="unsupported reward attribution schema",
+    ):
+        replace(_unknown(), schema=ForgedSchema("autosport.reward_component_attribution"))
+
+    raw = _unknown().to_dict()
+    raw["schema"] = ForgedSchema("autosport.reward_component_attribution")
+    with pytest.raises(
+        RewardAttributionError,
+        match="unsupported reward attribution schema",
+    ):
+        RewardAttributionEvidence.from_dict(raw)
 
 
 def test_schema_version_requires_exact_integer_not_bool() -> None:

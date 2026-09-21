@@ -326,6 +326,22 @@ class ProviderLiveContinuityTests(unittest.TestCase):
                 self.synchronized(),
                 last_evidence_id=None,
             )
+        for impossible_status in (
+            ProviderContinuityStatus.DISCONNECTED,
+            ProviderContinuityStatus.STALE,
+            ProviderContinuityStatus.GAP_DETECTED,
+        ):
+            with self.subTest(impossible_status=impossible_status), self.assertRaisesRegex(
+                ValueError, "generation zero must be uninitialized"
+            ):
+                ProviderContinuityState(
+                    source_id="provider-a",
+                    max_silence_ns=1_000,
+                    generation=0,
+                    status=impossible_status,
+                )
+        with self.assertRaisesRegex(ValueError, "positive generation cannot be uninitialized"):
+            replace(self.synchronized(), status=ProviderContinuityStatus.UNINITIALIZED)
 
 
 if __name__ == "__main__":

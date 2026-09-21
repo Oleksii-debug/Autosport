@@ -462,6 +462,7 @@ def _issue_evidence(
     instruction_sha256: str,
 ) -> BetfairStandardLimitPriceBoundEvidence:
     item = object.__new__(BetfairStandardLimitPriceBoundEvidence)
+    action_payload = ExecutionAction.to_dict(action)
     values = {
         "execution_plan_id": bound.execution_plan.plan_id,
         "execution_plan_sha256": bound.execution_plan.fingerprint,
@@ -475,8 +476,8 @@ def _issue_evidence(
         "market_id": action.market_id,
         "selection_id": action.selection_id,
         "side": action.side,
-        "requested_stake": action.requested_stake,
-        "price_floor_odds": action.requested_odds,
+        "requested_stake": Decimal(action_payload["requested_stake"]),
+        "price_floor_odds": Decimal(action_payload["requested_odds"]),
         "quote_id": action.quote_id,
         "quote_observed_at": action.quote_observed_at,
         "quote_expires_at": action.expires_at,

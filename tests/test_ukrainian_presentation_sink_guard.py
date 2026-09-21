@@ -43,13 +43,50 @@ def _call_name(call: ast.Call) -> str | None:
     return None
 
 
+def _is_localized_text_call(node: ast.AST) -> bool:
+    """Return whether node is an explicit canonical localization call."""
+
+    if not isinstance(node, ast.Call):
+        return False
+    if isinstance(node.func, ast.Name):
+        return node.func.id == "text"
+    if not isinstance(node.func, ast.Attribute) or node.func.attr != "text":
+        return False
+
+    owner = node.func.value
+    if isinstance(owner, ast.Name):
+        return owner.id == "localization"
+    return (
+        isinstance(owner, ast.Attribute)
+        and owner.attr == "localization"
+        and isinstance(owner.value, ast.Name)
+        and owner.value.id == "autosport"
+    )
+
+
 def _direct_literal(node: ast.AST) -> str | None:
+    """Find hard-coded presentation copy inside one sink expression.
+
+    The canonical localization call is an intentional trust boundary: its
+    literal lookup key and formatting arguments are catalog inputs, not direct
+    presentation copy. Every other expression is traversed structurally so a
+    BinOp, str.format call, percent-format operation, wrapper call, or
+    conditional expression cannot hide an embedded non-empty string literal.
+    """
+
     if isinstance(node, ast.Constant) and isinstance(node.value, str):
         if node.value.strip():
             return repr(node.value)
         return None
     if isinstance(node, ast.JoinedStr):
         return "f-string"
+    if _is_localized_text_call(node):
+        return None
+
+    for child in ast.iter_child_nodes(node):
+        literal = _direct_literal(child)
+        if literal is not None:
+            return literal
     return None
 
 
@@ -91,6 +128,29 @@ def _direct_presentation_literals(path: Path) -> list[str]:
     return violations
 
 
+def test_composed_literal_detection_preserves_localization_boundary() -> None:
+    hardcoded = (
+        '"English prefix: " + name',
+        '"English value: {}".format(name)',
+        '"English %s" % name',
+        'wrapper(name, suffix="English suffix")',
+    )
+    localized = (
+        'text("ui.status.example", name=name)',
+        'text("ui.status.example") + name',
+        'localization.text("ui.status.example", name=name)',
+        'autosport.localization.text("ui.status.example", name=name)',
+    )
+
+    for expression in hardcoded:
+        node = ast.parse(expression, mode="eval").body
+        assert _direct_literal(node) is not None, expression
+
+    for expression in localized:
+        node = ast.parse(expression, mode="eval").body
+        assert _direct_literal(node) is None, expression
+
+
 def test_critical_gui_presentation_sinks_do_not_bypass_localization_catalog() -> None:
     violations = [
         violation
@@ -100,8 +160,8 @@ def test_critical_gui_presentation_sinks_do_not_bypass_localization_catalog() ->
 
     assert violations == [], (
         "Critical GUI/UIA presentation must come through autosport.localization.text(); "
-        "direct string/f-string sinks can silently reintroduce English or bypass the "
-        "uk-UA catalog. Raw domain/provider identifiers and internal diagnostics remain "
-        "outside this presentation-only fence.\n"
+        "direct or composed string/f-string sinks can silently reintroduce English or "
+        "bypass the uk-UA catalog. Raw domain/provider identifiers and internal "
+        "diagnostics remain outside this presentation-only fence.\n"
         + "\n".join(violations)
     )

@@ -1,6 +1,7 @@
 import hashlib
 import json
 import unittest
+from decimal import Decimal
 
 from autosport.domain import MarketEvent
 from autosport.replay import ReplayEngine
@@ -167,7 +168,7 @@ class ReplayTimestampOrderTests(unittest.TestCase):
             ingest_ts="2026-01-01T00:02:00+00:00",
             decimal_odds="2.1",
         )
-        seen: list[str] = []
+        seen: list[Decimal] = []
 
         with self.assertRaisesRegex(
             ValueError,
@@ -178,7 +179,7 @@ class ReplayTimestampOrderTests(unittest.TestCase):
                 run_id="conflict-parity",
             )
 
-        self.assertEqual(seen, ["2.0"])
+        self.assertEqual(seen, [Decimal("2.0")])
 
     def test_dataset_hash_keeps_historical_observed_time_order(self):
         late_old = self._event(

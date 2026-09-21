@@ -132,13 +132,14 @@ class MarketBookSnapshot:
     virtualise: bool
     is_truncated: bool
     status: str
+    selection_status: str
     market_version: int
     inplay: bool
     bet_delay_seconds: int
     observed_at: datetime
     received_at: datetime
-    sequence: int
-    has_ordering_gap: bool
+    sequence: int | None
+    has_ordering_gap: bool | None
     available_to_back: tuple[PriceSize, ...]
 
     def __post_init__(self) -> None:
@@ -150,6 +151,7 @@ class MarketBookSnapshot:
             self.market_id,
             self.selection_id,
             self.status,
+            self.selection_status,
         )
         if self.projection_depth is not None and self.projection_depth <= 0:
             raise ValueError("projection_depth must be positive when supplied")
@@ -157,8 +159,10 @@ class MarketBookSnapshot:
             raise ValueError("market_version must be non-negative")
         if self.bet_delay_seconds < 0:
             raise ValueError("bet_delay_seconds must be non-negative")
-        if self.sequence < 0:
-            raise ValueError("sequence must be non-negative")
+        if self.sequence is not None and self.sequence < 0:
+            raise ValueError("sequence must be non-negative when supplied")
+        if self.has_ordering_gap is not None and type(self.has_ordering_gap) is not bool:
+            raise ValueError("has_ordering_gap must be bool or None")
         _require_aware(self.observed_at, "observed_at")
         _require_aware(self.received_at, "received_at")
 
@@ -242,10 +246,11 @@ def _assess_execution_feasibility(
     _append_if(reasons, snapshot.selection_id != request.selection_id, "SELECTION_ID_MISMATCH")
     _append_if(reasons, snapshot.source_mode is not SourceMode.LIVE, "DELAYED_SOURCE")
     _append_if(reasons, snapshot.status.upper() != "OPEN", "MARKET_NOT_OPEN")
+    _append_if(reasons, snapshot.selection_status.upper() != "ACTIVE", "SELECTION_NOT_ACTIVE")
     _append_if(reasons, snapshot.market_version != request.expected_market_version, "MARKET_VERSION_MISMATCH")
     _append_if(reasons, snapshot.inplay != request.expected_inplay, "INPLAY_MISMATCH")
     _append_if(reasons, snapshot.bet_delay_seconds != request.expected_bet_delay_seconds, "BET_DELAY_MISMATCH")
-    _append_if(reasons, snapshot.has_ordering_gap, "SNAPSHOT_ORDERING_GAP")
+    _append_if(reasons, snapshot.has_ordering_gap is True, "SNAPSHOT_ORDERING_GAP")
     _append_if(reasons, snapshot.received_at < snapshot.observed_at, "RECEIVED_BEFORE_OBSERVED")
     _append_if(reasons, snapshot.observed_at > request.decision_at, "FUTURE_SNAPSHOT")
     _append_if(reasons, snapshot.received_at > request.decision_at, "RECEIVED_AFTER_DECISION")
@@ -436,13 +441,17 @@ def assess_authoritative_betfair_execution_feasibility(
         virtualise=receipt.virtualise,
         is_truncated=False,
         status=receipt.status,
+        selection_status=receipt.selection_status,
         market_version=receipt.market_version,
         inplay=receipt.inplay,
         bet_delay_seconds=receipt.bet_delay_seconds,
         observed_at=provider_observed_at,
         received_at=provider_observed_at,
-        sequence=receipt.market_version,
-        has_ordering_gap=False,
+        # listMarketBook is an independent point-in-time read, not a Stream API
+        # sequence. Keep stream sequence/gap explicitly unavailable instead of
+        # inventing one from marketVersion.
+        sequence=None,
+        has_ordering_gap=None,
         available_to_back=tuple(
             PriceSize(item.price, item.size)
             for item in receipt.available_to_back
@@ -538,6 +547,7 @@ def _liquidity_overlap_key(snapshot: MarketBookSnapshot) -> str:
             "selection_id": snapshot.selection_id,
             "snapshot_digest": snapshot.snapshot_digest,
             "market_version": snapshot.market_version,
+            "selection_status": snapshot.selection_status,
             "projection_kind": snapshot.projection_kind.value,
             "projection_depth": snapshot.projection_depth,
             "rollup_model": snapshot.rollup_model,
@@ -595,6 +605,7 @@ def _evidence_digest(
             "virtualise": snapshot.virtualise,
             "is_truncated": snapshot.is_truncated,
             "status": snapshot.status,
+            "selection_status": snapshot.selection_status,
             "market_version": snapshot.market_version,
             "inplay": snapshot.inplay,
             "bet_delay_seconds": snapshot.bet_delay_seconds,

@@ -2,6 +2,7 @@ from dataclasses import fields, replace
 
 import pytest
 
+import autosport.provider_settlement_rules as settlement_rules
 from autosport.provider_settlement_rules import (
     ProviderSettlementRuleSelection,
     ProviderSettlementRule,
@@ -153,6 +154,7 @@ def test_caller_time_selection_is_not_accepted_position_authority() -> None:
     assert isinstance(selection, ProviderSettlementRuleSelection)
     assert selection.evaluated_at == "2026-03-01T00:00:00+00:00"
     assert not hasattr(timeline, "bind")
+    assert not hasattr(settlement_rules, "ProviderSettlementBinding")
     selection_fields = {field.name for field in fields(ProviderSettlementRuleSelection)}
     assert "evaluated_at" in selection_fields
     assert not (

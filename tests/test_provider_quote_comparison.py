@@ -1,3 +1,4 @@
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 import unittest
@@ -5,7 +6,9 @@ import unittest
 from autosport.domain import MarketEvent
 from autosport.market_mirror import MirrorSnapshot
 from autosport.provider_quote_comparison import (
+    ProviderQuoteComparison,
     ProviderQuoteComparisonError,
+    ProviderQuotePoint,
     compare_provider_quotes,
 )
 
@@ -262,6 +265,52 @@ class ProviderQuoteComparisonTests(unittest.TestCase):
                 "provider-a": "official-api",
                 "provider-b": "licensed-feed",
             },
+        )
+
+    def test_direct_point_construction_rejects_invalid_evidence_fields(self) -> None:
+        comparison = self.compare(
+            self.event(source="provider-a", odds="2.00"),
+            self.event(source="provider-b", odds="2.10"),
+        )[0]
+        point = comparison.quotes[0]
+
+        with self.assertRaises(ProviderQuoteComparisonError):
+            replace(point, source_id=" provider-a")
+        with self.assertRaises(ProviderQuoteComparisonError):
+            replace(point, sequence=True)
+        with self.assertRaises(ProviderQuoteComparisonError):
+            replace(point, decimal_odds=Decimal("NaN"))
+        with self.assertRaises(ProviderQuoteComparisonError):
+            replace(point, observed_ts="not-a-time")
+        with self.assertRaises(ProviderQuoteComparisonError):
+            replace(point, market_event_sha256="caller-minted")
+
+    def test_direct_comparison_construction_rejects_noncanonical_container(self) -> None:
+        comparison = self.compare(
+            self.event(source="provider-a", odds="2.00"),
+            self.event(source="provider-b", odds="2.10"),
+        )[0]
+
+        with self.assertRaises(ProviderQuoteComparisonError):
+            replace(comparison, mirror_revision=True)
+        with self.assertRaises(ProviderQuoteComparisonError):
+            replace(comparison, mirror_snapshot_sha256="caller-minted")
+        with self.assertRaises(ProviderQuoteComparisonError):
+            replace(comparison, quotes=(comparison.quotes[0],))
+        with self.assertRaises(ProviderQuoteComparisonError):
+            replace(
+                comparison,
+                quotes=(comparison.quotes[1], comparison.quotes[0]),
+            )
+        with self.assertRaises(ProviderQuoteComparisonError):
+            replace(
+                comparison,
+                quotes=(comparison.quotes[0], comparison.quotes[0]),
+            )
+
+        self.assertIsInstance(comparison, ProviderQuoteComparison)
+        self.assertTrue(
+            all(type(point) is ProviderQuotePoint for point in comparison.quotes)
         )
 
     def test_minimum_sources_and_boundary_inputs_are_fail_closed(self) -> None:

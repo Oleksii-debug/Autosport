@@ -246,6 +246,13 @@ class ModelInvocationResult:
             raise ModelRuntimeContractError(
                 "invocation result is not bound to the supplied deadline start"
             )
+        expected_deadline = config.deadline(
+            started_monotonic=self.started_monotonic
+        )
+        if deadline.expires_monotonic != expected_deadline.expires_monotonic:
+            raise ModelRuntimeContractError(
+                "invocation deadline does not match the configured end-to-end budget"
+            )
 
         if self.state is ModelInvocationState.POLICY_BLOCKED:
             if self.attempt_count != 0 or self.backend_path:

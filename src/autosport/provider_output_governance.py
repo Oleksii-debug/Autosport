@@ -485,8 +485,8 @@ def decide_provider_output_use(
                 reason = "PERSISTENCE_FORBIDDEN"
             elif grant.retention_policy is RetentionPolicy.BOUNDED:
                 assert grant.max_retention_seconds is not None
-                maximum = acquired_at + timedelta(seconds=grant.max_retention_seconds)
-                if retain_until > maximum:
+                maximum_retention = timedelta(seconds=grant.max_retention_seconds)
+                if retain_until - acquired_at > maximum_retention:
                     reason = "RETENTION_HORIZON_EXCEEDS_GRANT"
 
     allowed = reason == "ALLOWED"

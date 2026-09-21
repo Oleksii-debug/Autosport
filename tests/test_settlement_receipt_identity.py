@@ -162,6 +162,26 @@ class SettlementReceiptIdentityTests(unittest.TestCase):
                 settlement_evidence=(reordered,)
             )
 
+    def test_duplicate_durable_receipt_ids_fail_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "continuous_session.json"
+            state = _state(path)
+            state.record_success(
+                at=_AT,
+                full_refresh=False,
+                settlement_evidence=(_resolution(),),
+            )
+            raw_state = json.loads(path.read_text(encoding="utf-8"))
+            duplicate = dict(raw_state["settlement_evidence"][0])
+            duplicate["quote_outcomes_sha256"] = "c" * 64
+            raw_state["settlement_evidence"].append(duplicate)
+            path.write_text(json.dumps(raw_state), encoding="utf-8")
+            with self.assertRaisesRegex(
+                ContinuousSessionError,
+                "evidence_id values must be unique",
+            ):
+                _state(path)
+
     def test_push_is_not_a_canonical_receipt_outcome(self) -> None:
         with self.assertRaisesRegex(ValueError, "unsupported outcome"):
             _resolution(outcome="push").validate(as_of=_AT)

@@ -304,6 +304,7 @@ def _response(
     matched: Decimal | str = "0",
     average: Decimal | str = "0",
     bet_id: str | None = "bet-123",
+    order_status: str | None = None,
 ) -> bytes:
     params = request["params"]
     instruction = params["instructions"][0]
@@ -328,6 +329,8 @@ def _response(
     }
     if bet_id is not None:
         report["betId"] = bet_id
+    if order_status is not None:
+        report["orderStatus"] = order_status
     if instruction_status == "FAILURE":
         report["errorCode"] = "BET_TAKEN_OR_LAPSED"
     if execution_status == "FAILURE":
@@ -892,7 +895,7 @@ def test_full_match_persists_provider_report_and_canonical_ack() -> None:
         assert ledger.verify_integrity() > 0
 
 
-def test_processed_with_errors_single_success_maps_partial_exactly() -> None:
+def test_processed_with_errors_single_success_is_unknown_until_readback() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         profile, bound, approval, ledger, action, goal_store = _prepared(tmp)
         transport = _Transport(
@@ -919,8 +922,8 @@ def test_processed_with_errors_single_success_maps_partial_exactly() -> None:
             clock=lambda: SUBMITTED_AT,
         )
 
-        assert result.outcome is PlaceOrdersOutcome.PARTIAL
-        assert result.attempt_state is AttemptState.PARTIAL
+        assert result.outcome is PlaceOrdersOutcome.UNKNOWN
+        assert result.attempt_state is AttemptState.UNKNOWN
         assert not ledger.can_retry_action(
             plan_id=bound.execution_plan.plan_id,
             action_id=action.action_id,
@@ -961,7 +964,48 @@ def test_provider_failure_report_is_rejected_not_inferred_from_absence() -> None
             provider_id="betfair",
         )
         assert provider_ref is not None
-        assert result.external_receipt_id == provider_ref
+        assert result.external_receipt_id is not None
+        assert result.external_receipt_id.startswith(
+            "betfair-response-sha256:"
+        )
+        assert result.external_receipt_id != provider_ref
+
+
+def test_failure_with_executable_order_state_is_unknown_not_rejected() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        profile, bound, approval, ledger, action, goal_store = _prepared(tmp)
+        transport = _Transport(
+            lambda request: _response(
+                request,
+                execution_status="FAILURE",
+                instruction_status="FAILURE",
+                matched="0",
+                average="0",
+                bet_id="bet-contradictory",
+                order_status="EXECUTABLE",
+            )
+        )
+        client = _enabled_client(profile, transport, store=goal_store)
+
+        result = execute_betfair_supervised_action(
+            ledger,
+            bound,
+            approval,
+            action_id=action.action_id,
+            attempt_id="attempt-contradictory-order-state",
+            profile=profile,
+            client=client,
+            clock=lambda: SUBMITTED_AT,
+        )
+
+        assert result.outcome is PlaceOrdersOutcome.UNKNOWN
+        assert result.attempt_state is AttemptState.UNKNOWN
+        assert result.evidence_id is None
+        assert result.external_receipt_id is None
+        assert not ledger.can_retry_action(
+            plan_id=bound.execution_plan.plan_id,
+            action_id=action.action_id,
+        )
 
 
 def test_transport_timeout_becomes_unknown_and_blocks_retry_after_restart(
@@ -1227,7 +1271,7 @@ def test_foreign_empty_provider_order_ref_cannot_release_retry() -> None:
         )
 
 
-def test_unmatched_success_is_unknown_until_readback() -> None:
+def test_unmatched_success_preserves_known_order_until_readback() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         profile, bound, approval, ledger, action, goal_store = _prepared(tmp)
         transport = _Transport(
@@ -1251,7 +1295,7 @@ def test_unmatched_success_is_unknown_until_readback() -> None:
             clock=lambda: SUBMITTED_AT,
         )
 
-        assert result.outcome is PlaceOrdersOutcome.UNKNOWN
+        assert result.outcome is PlaceOrdersOutcome.PLACED_UNMATCHED
         assert result.attempt_state is AttemptState.UNKNOWN
         assert result.external_receipt_id == "bet-unmatched"
         assert result.evidence_id is not None

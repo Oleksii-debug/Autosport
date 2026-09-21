@@ -11,6 +11,7 @@ from autosport.betfair_standard_limit_price_bound import (
     BetfairStandardLimitPriceBoundStatus,
     resolve_betfair_standard_limit_price_bound,
 )
+from autosport.real_execution_ledger import ExecutionAction
 
 from test_betfair_supervised_execution import _bound, _profile
 
@@ -136,13 +137,29 @@ def test_instruction_projection_is_captured_from_real_place_action_request() -> 
         "side": "BACK",
         "orderType": "LIMIT",
         "limitOrder": {
-            "size": str(action.requested_stake),
-            "price": str(action.requested_odds),
+            "size": ExecutionAction.to_dict(action)["requested_stake"],
+            "price": ExecutionAction.to_dict(action)["requested_odds"],
             "persistenceType": "LAPSE",
         },
     }
     assert evidence.instruction_sha256 == module._digest(projection)
     assert bound.execution_plan.created_at < action.expires_at
+
+
+def test_instruction_projection_identity_survives_decimal_scale_round_trip() -> None:
+    import autosport.betfair_standard_limit_price_bound as module
+
+    _bound_plan, action, _evidence_record = _evidence()
+    durable_action = ExecutionAction.to_dict(action)
+    reloaded_action = ExecutionAction(**durable_action)
+
+    before = module._canonical_instruction_projection(action)
+    after = module._canonical_instruction_projection(reloaded_action)
+
+    assert before == after
+    assert before["limitOrder"]["price"] == durable_action["requested_odds"]
+    assert before["limitOrder"]["size"] == durable_action["requested_stake"]
+    assert module._digest(before) == module._digest(after)
 
 
 def _replace_captured_request(

@@ -22,6 +22,8 @@ from .causal_collector_legacy import (
     _text,
 )
 from .collector_sqlite_active_store import CollectorDeltaStore as _CollectorDeltaStore
+from .decision_ledger import JsonlDecisionLedger
+from .run_registry import RunRegistry
 
 
 class RetentionPinKind(StrEnum):
@@ -232,6 +234,107 @@ class CollectorRetentionManager:
         finally:
             connection.close()
 
+    @staticmethod
+    def _owner_subject(
+        kind: RetentionPinKind,
+        owner_id: str,
+    ) -> str:
+        prefix = f"{kind.value.lower()}:"
+        if not owner_id.startswith(prefix):
+            raise CollectorRetentionError(
+                f"{kind.value} retention pin owner_id must use {prefix!r} namespace"
+            )
+        subject = owner_id[len(prefix):]
+        if not subject or subject.strip() != subject:
+            raise CollectorRetentionError(
+                "retention pin owner_id has an invalid lifecycle identity"
+            )
+        return subject
+
+    @staticmethod
+    def _terminal_ledger_prefix_count(
+        payload: bytes,
+        expected_sha256: str,
+    ) -> int:
+        expected_sha256 = CollectorRetentionManager._digest(
+            expected_sha256,
+            "terminal_decision_ledger_sha256",
+        )
+        digest = hashlib.sha256()
+        if digest.hexdigest() == expected_sha256:
+            return 0
+        for line_number, raw_line in enumerate(
+            payload.splitlines(keepends=True),
+            start=1,
+        ):
+            digest.update(raw_line)
+            if digest.hexdigest() == expected_sha256:
+                return line_number
+        raise CollectorRetentionError(
+            "completed owner Decision Ledger is not an append-prefix of current canonical truth"
+        )
+
+    def _require_releasable_owner(
+        self,
+        kind: RetentionPinKind,
+        owner_id: str,
+    ) -> None:
+        """Re-resolve durable terminal owner truth before releasing retention."""
+
+        subject = self._owner_subject(kind, owner_id)
+        workspace = self.collector.path.parent
+        try:
+            registry = RunRegistry(workspace / "run_registry.json")
+            if kind == RetentionPinKind.REPLAY:
+                registry.verified_completed_summary_for_run(subject)
+                return
+
+            ledger = JsonlDecisionLedger(workspace / "decisions.jsonl")
+            snapshot = ledger.verified_snapshot()
+            owner_line_number: int | None = None
+            replay_run_id: str | None = None
+            for line_number, raw_line in enumerate(
+                snapshot.payload.splitlines(keepends=True),
+                start=1,
+            ):
+                envelope = json.loads(raw_line)
+                record = envelope["record"]
+                if record.get("decision_id") == subject:
+                    owner_line_number = line_number
+                    replay_run_id = record.get("replay_run_id")
+                    break
+            if (
+                owner_line_number is None
+                or type(replay_run_id) is not str
+                or not replay_run_id
+            ):
+                raise CollectorRetentionError(
+                    "decision retention pin owner is absent from canonical Decision Ledger"
+                )
+
+            summary, _summary_sha256 = registry.verified_completed_summary_for_run(
+                replay_run_id
+            )
+            terminal_ledger_sha256 = summary.get("decision_ledger_sha256")
+            if type(terminal_ledger_sha256) is not str:
+                raise CollectorRetentionError(
+                    "completed replay lacks Decision Ledger terminal authority"
+                )
+            terminal_line_count = self._terminal_ledger_prefix_count(
+                snapshot.payload,
+                terminal_ledger_sha256,
+            )
+            if owner_line_number > terminal_line_count:
+                raise CollectorRetentionError(
+                    "decision retention pin owner was not durable before replay completion"
+                )
+        except CollectorRetentionError:
+            raise
+        except Exception as exc:
+            raise CollectorRetentionError(
+                "retention pin owner lacks verified terminal lifecycle authority"
+            ) from exc
+
     def release_pin(
         self,
         *,
@@ -267,6 +370,9 @@ class CollectorRetentionManager:
                 raise CollectorRetentionError(
                     "retention pin release digest conflicts"
                 )
+            # The caller tuple is assertion-only. Re-resolve the canonical owner
+            # lifecycle while the collector deletion transaction is still held.
+            self._require_releasable_owner(normalized, owner_id)
             connection.execute(
                 f"DELETE FROM {self._PIN_TABLE} "
                 "WHERE pin_kind=? AND owner_id=? AND delta_id=? "

@@ -22,7 +22,12 @@ from autosport.collector_retention import (
     CollectorRetentionPlanStaleError,
     RetentionPinKind,
 )
+from autosport.decision_ledger import DecisionRecord, JsonlDecisionLedger
 from autosport.domain import MarketEvent
+from autosport.integrity import sha256_file
+from autosport.paper import PaperBook
+from autosport.run_registry import RunRegistry
+from autosport.run_transaction import RunTransaction
 
 
 def make_delta(
@@ -126,6 +131,80 @@ def _seed_runtime_epoch_for_test(
 
 
 class CollectorRetentionCompactionTests(unittest.TestCase):
+    def make_owner_lifecycle(
+        self,
+        root: str,
+        *,
+        run_id: str = "run-7",
+        decision_id: str = "decision-42",
+        complete: bool,
+    ):
+        workspace = Path(root)
+        registry = RunRegistry.initialize_pristine(workspace / "run_registry.json")
+        book_path = workspace / "paper_book.json"
+        PaperBook("10000").save(book_path)
+        ledger = JsonlDecisionLedger(workspace / "decisions.jsonl")
+        ledger.path.touch()
+
+        market_sha256 = "a" * 64
+        results_sha256 = "b" * 64
+        strategy_id = "baseline-v1"
+        base_book_sha256 = sha256_file(book_path)
+        base_ledger_sha256 = sha256_file(ledger.path)
+        key = registry.begin(
+            market_sha256,
+            results_sha256,
+            strategy_id,
+            run_id,
+            base_paper_book_sha256=base_book_sha256,
+            base_decision_ledger_sha256=base_ledger_sha256,
+        )
+        transaction = RunTransaction.start(
+            workspace,
+            run_id=run_id,
+            experiment_key=key,
+            market_sha256=market_sha256,
+            results_sha256=results_sha256,
+            strategy_id=strategy_id,
+            base_paper_book_sha256=base_book_sha256,
+            base_decision_ledger_sha256=base_ledger_sha256,
+        )
+        staged_ledger = JsonlDecisionLedger(transaction.run_ledger_path)
+        staged_ledger.append(
+            DecisionRecord(
+                replay_run_id=run_id,
+                agent="retention-test",
+                observed_ts="2026-01-01T00:00:00+00:00",
+                action="OBSERVE",
+                payload={"fixture": "retention-owner"},
+                context_hash="retention-owner-context",
+                decision_id=decision_id,
+                recorded_at="2026-01-01T00:00:01+00:00",
+            )
+        )
+        if complete:
+            transaction.stage_outputs(PaperBook("10001"), ledger.path)
+            summary = transaction.precommit(
+                {
+                    "schema_version": 2,
+                    "run_id": run_id,
+                    "experiment_key": key,
+                    "market_sha256": market_sha256,
+                    "sealed_results_sha256": results_sha256,
+                    "strategy_id": strategy_id,
+                    "real_money_execution": False,
+                }
+            )
+            summary_path = transaction.commit()
+            registry.complete(
+                key,
+                str(summary_path),
+                paper_book_sha256=str(summary["paper_book_sha256"]),
+                decision_ledger_sha256=str(summary["decision_ledger_sha256"]),
+            )
+            transaction.mark_registry_completed()
+        return registry, ledger, transaction, key
+
     def make_history(self, root: str):
         path = Path(root) / "collector.sqlite"
         collector = CollectorDeltaStore(path)
@@ -220,6 +299,11 @@ class CollectorRetentionCompactionTests(unittest.TestCase):
             collector, desktop, first, terminal, _ = self.make_history(tmp)
             acknowledge(desktop, first)
             acknowledge(desktop, terminal)
+            self.make_owner_lifecycle(
+                tmp,
+                decision_id="42",
+                complete=True,
+            )
             manager = CollectorRetentionManager(collector)
             self.assertTrue(
                 manager.pin(
@@ -255,6 +339,156 @@ class CollectorRetentionCompactionTests(unittest.TestCase):
                 desktop_checkpoint=desktop,
             )
             self.assertEqual(released_plan.delete_delta_ids, ("d1",))
+            self.assertFalse(
+                CollectorRetentionManager(reopened).release_pin(
+                    kind=RetentionPinKind.DECISION,
+                    owner_id="decision:42",
+                    delta_id=first.delta_id,
+                    canonical_event_digest=first.canonical_event_digest,
+                )
+            )
+
+    def test_live_replay_owner_cannot_release_pin(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            collector, desktop, first, terminal, _ = self.make_history(tmp)
+            acknowledge(desktop, first)
+            acknowledge(desktop, terminal)
+            self.make_owner_lifecycle(tmp, complete=False)
+            manager = CollectorRetentionManager(collector)
+            manager.pin(
+                kind=RetentionPinKind.REPLAY,
+                owner_id="replay:run-7",
+                delta_id=first.delta_id,
+                canonical_event_digest=first.canonical_event_digest,
+                created_at="2026-01-01T00:00:07+00:00",
+            )
+
+            with self.assertRaisesRegex(
+                CollectorRetentionError,
+                "verified terminal lifecycle authority",
+            ):
+                manager.release_pin(
+                    kind=RetentionPinKind.REPLAY,
+                    owner_id="replay:run-7",
+                    delta_id=first.delta_id,
+                    canonical_event_digest=first.canonical_event_digest,
+                )
+            plan = manager.preview(
+                source_id="source-x",
+                stream_epoch="epoch-1",
+                desktop_checkpoint=desktop,
+            )
+            self.assertEqual(plan.pinned_delta_ids, ("d1",))
+            self.assertEqual(plan.delete_delta_ids, ())
+
+    def test_terminal_replay_owner_releases_exactly_once_across_restart(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            collector, desktop, first, terminal, _ = self.make_history(tmp)
+            acknowledge(desktop, first)
+            acknowledge(desktop, terminal)
+            self.make_owner_lifecycle(tmp, complete=True)
+            manager = CollectorRetentionManager(collector)
+            manager.pin(
+                kind=RetentionPinKind.REPLAY,
+                owner_id="replay:run-7",
+                delta_id=first.delta_id,
+                canonical_event_digest=first.canonical_event_digest,
+                created_at="2026-01-01T00:00:07+00:00",
+            )
+            self.assertTrue(
+                manager.release_pin(
+                    kind=RetentionPinKind.REPLAY,
+                    owner_id="replay:run-7",
+                    delta_id=first.delta_id,
+                    canonical_event_digest=first.canonical_event_digest,
+                )
+            )
+
+            reopened = CollectorDeltaStore(Path(tmp) / "collector.sqlite")
+            restarted = CollectorRetentionManager(reopened)
+            self.assertFalse(
+                restarted.release_pin(
+                    kind=RetentionPinKind.REPLAY,
+                    owner_id="replay:run-7",
+                    delta_id=first.delta_id,
+                    canonical_event_digest=first.canonical_event_digest,
+                )
+            )
+
+    def test_late_decision_cannot_backdate_release_authority(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            collector, desktop, first, terminal, _ = self.make_history(tmp)
+            acknowledge(desktop, first)
+            acknowledge(desktop, terminal)
+            self.make_owner_lifecycle(tmp, complete=True)
+            ledger = JsonlDecisionLedger(Path(tmp) / "decisions.jsonl")
+            ledger.append(
+                DecisionRecord(
+                    replay_run_id="run-7",
+                    agent="retention-test",
+                    observed_ts="2026-01-02T00:00:00+00:00",
+                    action="OBSERVE",
+                    payload={"fixture": "late-decision"},
+                    context_hash="late-context",
+                    decision_id="late-decision",
+                    recorded_at="2026-01-02T00:00:01+00:00",
+                )
+            )
+            manager = CollectorRetentionManager(collector)
+            manager.pin(
+                kind=RetentionPinKind.DECISION,
+                owner_id="decision:late-decision",
+                delta_id=first.delta_id,
+                canonical_event_digest=first.canonical_event_digest,
+                created_at="2026-01-02T00:00:02+00:00",
+            )
+            with self.assertRaisesRegex(
+                CollectorRetentionError,
+                "was not durable before replay completion",
+            ):
+                manager.release_pin(
+                    kind=RetentionPinKind.DECISION,
+                    owner_id="decision:late-decision",
+                    delta_id=first.delta_id,
+                    canonical_event_digest=first.canonical_event_digest,
+                )
+            plan = manager.preview(
+                source_id="source-x",
+                stream_epoch="epoch-1",
+                desktop_checkpoint=desktop,
+            )
+            self.assertEqual(plan.pinned_delta_ids, ("d1",))
+
+    def test_foreign_replay_owner_cannot_release_pin(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            collector, desktop, first, terminal, _ = self.make_history(tmp)
+            acknowledge(desktop, first)
+            acknowledge(desktop, terminal)
+            self.make_owner_lifecycle(tmp, complete=True)
+            manager = CollectorRetentionManager(collector)
+            manager.pin(
+                kind=RetentionPinKind.REPLAY,
+                owner_id="replay:foreign-run",
+                delta_id=first.delta_id,
+                canonical_event_digest=first.canonical_event_digest,
+                created_at="2026-01-01T00:00:07+00:00",
+            )
+            with self.assertRaisesRegex(
+                CollectorRetentionError,
+                "verified terminal lifecycle authority",
+            ):
+                manager.release_pin(
+                    kind=RetentionPinKind.REPLAY,
+                    owner_id="replay:foreign-run",
+                    delta_id=first.delta_id,
+                    canonical_event_digest=first.canonical_event_digest,
+                )
+            plan = manager.preview(
+                source_id="source-x",
+                stream_epoch="epoch-1",
+                desktop_checkpoint=desktop,
+            )
+            self.assertEqual(plan.pinned_delta_ids, ("d1",))
 
     def test_new_pin_invalidates_preview_before_any_delete(self):
         with tempfile.TemporaryDirectory() as tmp:

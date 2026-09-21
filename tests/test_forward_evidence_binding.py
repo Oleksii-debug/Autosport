@@ -8,6 +8,7 @@ from autosport.decision_ledger import DecisionRecord, JsonlDecisionLedger
 from autosport.forward_evidence_binding import (
     CAPTURE_PLAN_ACTION,
     bind_forward_evidence,
+    bind_structural_forward_evidence,
     register_forward_capture_plan,
 )
 from autosport.pre_evaluation_binding import (
@@ -20,6 +21,15 @@ from autosport.pre_evaluation_evidence import (
     PreEvaluationEvidenceAuthority,
     PreEvaluationPolicy,
 )
+from autosport.pre_evaluation_product_origin import (
+    derive_product_owned_pre_evaluation_session,
+    persist_pre_evaluation_cost_contract_authority,
+)
+from autosport.pre_evaluation_semantics import PreEvaluationCostContract
+from autosport.provider_observation_authority import (
+    CompleteGameBoardSnapshot,
+    ProviderObservationUnsupportedError,
+)
 from autosport.scientific_registry import (
     EvaluationBundleRef,
     ForwardCapturePlan,
@@ -28,6 +38,8 @@ from autosport.scientific_registry import (
     ScientificRegistry,
 )
 from autosport.strategy_experiment import ScientificProtocolBinding
+
+from test_pre_evaluation_product_origin_durable import _setup_authorities
 
 
 SHA_A = "a" * 64
@@ -217,14 +229,14 @@ def _ready(tmp_path):
 def test_happy_path_binds_exact_precommitted_lineage_and_is_deterministic(tmp_path):
     registry, ledger, protocol, plan, record_sha, bound = _ready(tmp_path)
 
-    first = bind_forward_evidence(
+    first = bind_structural_forward_evidence(
         registry=registry,
         ledger=ledger,
         capture_plan_id=plan.capture_plan_id,
         bound_session=bound,
         evaluation_bundle_id=plan.evaluation_bundle_id,
     )
-    second = bind_forward_evidence(
+    second = bind_structural_forward_evidence(
         registry=ScientificRegistry(registry.path),
         ledger=JsonlDecisionLedger(ledger.path),
         capture_plan_id=plan.capture_plan_id,
@@ -288,7 +300,7 @@ def test_late_plan_witness_outside_bound_prefix_is_rejected(tmp_path):
     registry.append(_evaluation(protocol))
 
     with pytest.raises(ValueError, match="exactly one forward capture plan witness"):
-        bind_forward_evidence(
+        bind_structural_forward_evidence(
             registry=registry,
             ledger=ledger,
             capture_plan_id=plan.capture_plan_id,
@@ -309,7 +321,7 @@ def test_evaluation_published_before_capture_plan_is_rejected(tmp_path):
     bound = _bound(ledger, protocol)
 
     with pytest.raises(ValueError, match="must durably precede EvaluationBundle"):
-        bind_forward_evidence(
+        bind_structural_forward_evidence(
             registry=registry,
             ledger=ledger,
             capture_plan_id=plan.capture_plan_id,
@@ -342,7 +354,7 @@ def test_valid_but_foreign_identity_cannot_be_composed(tmp_path, kind, expected)
         evaluation_id = "evaluation-foreign"
 
     with pytest.raises(ValueError, match=expected):
-        bind_forward_evidence(
+        bind_structural_forward_evidence(
             registry=registry,
             ledger=ledger,
             capture_plan_id=plan.capture_plan_id,
@@ -363,7 +375,7 @@ def test_valid_foreign_protocol_evaluation_cannot_be_composed(tmp_path):
     registry.append(_evaluation(protocol, protocol_sha256=SHA_E))
 
     with pytest.raises(ValueError, match="protocol_sha256 mismatch"):
-        bind_forward_evidence(
+        bind_structural_forward_evidence(
             registry=registry,
             ledger=ledger,
             capture_plan_id=plan.capture_plan_id,
@@ -377,7 +389,7 @@ def test_foreign_slot_membership_cannot_be_composed(tmp_path):
     foreign = _bound(ledger, protocol, row_keys=("row-a", "row-c"))
 
     with pytest.raises(ValueError, match="slot membership must exactly equal"):
-        bind_forward_evidence(
+        bind_structural_forward_evidence(
             registry=registry,
             ledger=ledger,
             capture_plan_id=plan.capture_plan_id,
@@ -396,7 +408,7 @@ def test_late_evaluation_and_pre_schedule_observation_fail_closed(tmp_path):
         observed_at_ns=_ns("2026-09-20T01:01:50+00:00"),
     )
     with pytest.raises(ValueError, match="pre-evaluation time is outside"):
-        bind_forward_evidence(
+        bind_structural_forward_evidence(
             registry=registry,
             ledger=ledger,
             capture_plan_id=plan.capture_plan_id,
@@ -410,7 +422,7 @@ def test_late_evaluation_and_pre_schedule_observation_fail_closed(tmp_path):
         observed_at_ns=_ns("2026-09-20T00:59:59+00:00"),
     )
     with pytest.raises(ValueError, match="observation time is outside"):
-        bind_forward_evidence(
+        bind_structural_forward_evidence(
             registry=registry,
             ledger=ledger,
             capture_plan_id=plan.capture_plan_id,
@@ -424,7 +436,7 @@ def test_missing_planned_observation_is_not_forward_evidence(tmp_path):
     incomplete = _bound(ledger, protocol, missing=frozenset({"row-b"}))
 
     with pytest.raises(ValueError, match="incomplete for planned slot row-b"):
-        bind_forward_evidence(
+        bind_structural_forward_evidence(
             registry=registry,
             ledger=ledger,
             capture_plan_id=plan.capture_plan_id,
@@ -458,7 +470,7 @@ def test_duplicate_plan_witness_inside_bound_prefix_is_rejected(tmp_path):
     registry.append(_evaluation(protocol))
 
     with pytest.raises(ValueError, match="exactly one forward capture plan witness"):
-        bind_forward_evidence(
+        bind_structural_forward_evidence(
             registry=registry,
             ledger=ledger,
             capture_plan_id=plan.capture_plan_id,
@@ -469,7 +481,7 @@ def test_duplicate_plan_witness_inside_bound_prefix_is_rejected(tmp_path):
 
 def test_ledger_suffix_after_bound_prefix_does_not_change_provenance(tmp_path):
     registry, ledger, _, plan, _, bound = _ready(tmp_path)
-    expected = bind_forward_evidence(
+    expected = bind_structural_forward_evidence(
         registry=registry,
         ledger=ledger,
         capture_plan_id=plan.capture_plan_id,
@@ -487,7 +499,7 @@ def test_ledger_suffix_after_bound_prefix_does_not_change_provenance(tmp_path):
         )
     )
 
-    replay = bind_forward_evidence(
+    replay = bind_structural_forward_evidence(
         registry=registry,
         ledger=ledger,
         capture_plan_id=plan.capture_plan_id,
@@ -503,3 +515,203 @@ def test_restart_revalidates_forward_plan_semantics(tmp_path):
     entry = reopened.get("ForwardCapturePlan", plan.capture_plan_id)
     assert entry is not None
     assert ForwardCapturePlan.from_payload(entry.payload) == plan
+
+def _product_owned_ready(tmp_path, monkeypatch):
+    (
+        snapshot,
+        provider,
+        intent,
+        book,
+        risk_policy,
+        graph,
+        _ledger_path,
+        ledger,
+    ) = _setup_authorities(tmp_path, monkeypatch)
+
+    contract = PreEvaluationCostContract(
+        contract_id="forward-cost-v1",
+        max_cost_micros=10,
+    )
+    persist_pre_evaluation_cost_contract_authority(
+        ledger=ledger,
+        material_action_id="pre-evaluation-origin-1",
+        risk_policy=risk_policy,
+        contract=contract,
+    )
+
+    forward_binding = ScientificProtocolBinding(
+        research_protocol_id="forward-protocol-product-1",
+        research_question_id="question-forward-product",
+        research_question_sha256=SHA_A,
+        hypothesis_id="hypothesis-forward-product",
+        hypothesis_sha256=SHA_B,
+        inclusion_criteria="predeclared complete-board forward capture",
+        exclusion_criteria="invalid or unissued provider origin",
+        lawful_source_requirements="canonical runtime-issued provider evidence",
+        causal_cutoff="2026-09-18T13:20:01+00:00",
+        evaluation_design="one precommitted forward provider snapshot",
+        feature_set_version="features-v1",
+        uncertainty_method="bootstrap intervals",
+        multiple_comparison_control="single frozen primary metric",
+        robustness_checks=("provider-origin", "durable-economic-origin"),
+        random_seed_policy="seed fixed before evaluation",
+        stopping_rule="one final evaluation",
+        promotion_rule="promote only if primary improves and guardrails pass",
+        expected_artifacts=("forward capture plan", "evaluation bundle"),
+        code_config_sha256=SHA_C,
+        frozen_at_utc="2026-09-18T13:19:40+00:00",
+    )
+    protocol = ResearchProtocol(
+        binding=forward_binding,
+        source_sha256=SHA_C,
+        environment_sha256=SHA_D,
+        dataset_manifest_sha256=SHA_A,
+        available_at_utc="2026-09-18T13:19:40+00:00",
+    )
+    registry = ScientificRegistry.initialize_pristine(
+        tmp_path / "forward-scientific.json"
+    )
+    registry.append(protocol)
+
+    plan = ForwardCapturePlan(
+        capture_plan_id="capture-plan-product-1",
+        run_id="forward-run-product-1",
+        session_id="forward-session-product-1",
+        campaign_id="forward-campaign-product-1",
+        research_protocol_id=protocol.record_id,
+        evaluation_bundle_id="forward-evaluation-product-1",
+        protocol_sha256=protocol.protocol_sha256,
+        window_open_utc="2026-09-18T13:19:58+00:00",
+        window_close_utc="2026-09-18T13:20:01+00:00",
+        slots=(
+            ForwardCaptureSlot(
+                provider.row_key,
+                "2026-09-18T13:19:58+00:00",
+                2,
+            ),
+        ),
+        created_at="2026-09-18T13:19:50+00:00",
+    )
+    register_forward_capture_plan(registry=registry, ledger=ledger, plan=plan)
+
+    evidence = PreEvaluationEvidenceAuthority(
+        PreEvaluationPolicy(max_age_ns=200)
+    ).evaluate_session(
+        session_id=plan.session_id,
+        candidate_ids=(provider.row_key,),
+        resolver=lambda _: None,
+        evaluated_at_ns=1000,
+    )
+    context = PreEvaluationDenominatorContext(
+        session_id=plan.session_id,
+        campaign_id=plan.campaign_id,
+        research_protocol_id=protocol.record_id,
+        protocol_sha256=protocol.protocol_sha256,
+        provider_evidence_sha256=snapshot.evidence_sha256,
+    )
+    bound = bind_pre_evaluation_session(
+        evidence,
+        context=context,
+        provider_members=(provider.identity,),
+        ledger=ledger,
+    )
+    product_session = derive_product_owned_pre_evaluation_session(
+        snapshot=snapshot,
+        bound=bound,
+        provider_selections=(provider,),
+        intents=(intent,),
+        risk_policy=risk_policy,
+        book=book,
+        dependency_graph=graph,
+        ledger=ledger,
+        material_action_id="pre-evaluation-origin-1",
+        expected_cost_contract_sha256=contract.contract_sha256,
+    )
+    registry.append(
+        EvaluationBundleRef(
+            evaluation_bundle_id=plan.evaluation_bundle_id,
+            bundle_sha256=SHA_A,
+            evaluator_source_sha256=SHA_B,
+            dataset_snapshot_id="dataset-product-1",
+            protocol_sha256=protocol.protocol_sha256,
+            artifact_hashes=(SHA_C,),
+            created_at="2026-09-18T13:20:05+00:00",
+        )
+    )
+    return registry, ledger, snapshot, product_session, bound, plan
+
+
+def test_production_binding_requires_issued_provider_and_product_origin(
+    tmp_path,
+    monkeypatch,
+):
+    registry, ledger, snapshot, product_session, bound, plan = _product_owned_ready(
+        tmp_path, monkeypatch
+    )
+
+    result = bind_forward_evidence(
+        registry=registry,
+        ledger=ledger,
+        capture_plan_id=plan.capture_plan_id,
+        bound_session=bound,
+        product_session=product_session,
+        provider_snapshot=snapshot,
+        evaluation_bundle_id=plan.evaluation_bundle_id,
+    )
+
+    assert result.provider_evidence_sha256 == snapshot.evidence_sha256
+    assert result.product_origin_sha256 == product_session.origin.origin_digest
+    assert (
+        result.product_semantic_authority_sha256
+        == product_session.authority_digest
+    )
+    assert result.structural.session_id == plan.session_id
+    assert result.authority_sha256
+
+
+def test_production_binding_rejects_structurally_valid_unissued_snapshot(
+    tmp_path,
+    monkeypatch,
+):
+    registry, ledger, snapshot, product_session, bound, plan = _product_owned_ready(
+        tmp_path, monkeypatch
+    )
+    unissued = CompleteGameBoardSnapshot.from_payload(snapshot.to_payload())
+    assert unissued.evidence_sha256 == snapshot.evidence_sha256
+
+    with pytest.raises(
+        ProviderObservationUnsupportedError,
+        match="not issued",
+    ):
+        bind_forward_evidence(
+            registry=registry,
+            ledger=ledger,
+            capture_plan_id=plan.capture_plan_id,
+            bound_session=bound,
+            product_session=product_session,
+            provider_snapshot=unissued,
+            evaluation_bundle_id=plan.evaluation_bundle_id,
+        )
+
+
+def test_production_binding_uses_provider_capture_not_legacy_fact_timestamp(
+    tmp_path,
+    monkeypatch,
+):
+    registry, ledger, snapshot, product_session, bound, plan = _product_owned_ready(
+        tmp_path, monkeypatch
+    )
+    # The durable product-origin fixture deliberately has no legacy CanonicalCandidateFacts.
+    assert bound.resolve_slot("row-a").facts is None
+
+    result = bind_forward_evidence(
+        registry=registry,
+        ledger=ledger,
+        capture_plan_id=plan.capture_plan_id,
+        bound_session=bound,
+        product_session=product_session,
+        provider_snapshot=snapshot,
+        evaluation_bundle_id=plan.evaluation_bundle_id,
+    )
+    assert result.provider_captured_at == snapshot.captured_at
+

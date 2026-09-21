@@ -83,8 +83,9 @@ class IngestionContinuityProjectionFailureTests(unittest.TestCase):
                 engine.poll_once(StaticProvider(), max_items=10)
 
             state = continuity.get("source")
-            self.assertEqual(state.status, "verified")
-            self.assertEqual(state.trusted_token, "token-2")
+            self.assertEqual(state.status, "unknown")
+            self.assertEqual(state.trusted_token, "token-1")
+            self.assertEqual(state.reason, "provider_native_evidence_required")
             market.close()
 
     def test_health_failure_persistence_error_does_not_skip_continuity_revocation(self):
@@ -109,7 +110,7 @@ class IngestionContinuityProjectionFailureTests(unittest.TestCase):
 
             state = continuity.get("source")
             self.assertEqual(state.status, "unknown")
-            self.assertEqual(state.trusted_token, "token-2")
+            self.assertEqual(state.trusted_token, "token-1")
             self.assertEqual(
                 state.reason,
                 "provider_failure_since_last_continuity_proof",

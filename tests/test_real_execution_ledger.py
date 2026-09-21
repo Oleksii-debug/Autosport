@@ -360,6 +360,45 @@ class RealExecutionLedgerTests(unittest.TestCase):
                 AttemptState.RESERVED,
             )
 
+    def test_recover_uncertain_multi_attempt_valid_clock_promotes_all(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "real.jsonl"
+            ledger = RealExecutionLedger(path)
+            ledger.reserve_plan(plan(action("a1"), action("a2")))
+            ledger.begin_attempt(
+                plan_id="p1",
+                action_id="a1",
+                attempt_id="try-1",
+                reserved_at=RESERVED_AT,
+            )
+            ledger.mark_submitted("try-1", submitted_at=SUBMITTED_AT)
+            ledger.begin_attempt(
+                plan_id="p1",
+                action_id="a2",
+                attempt_id="try-2",
+                reserved_at=RESERVED_AT,
+            )
+
+            with patch(
+                "autosport.real_execution_ledger._now",
+                return_value=UNKNOWN_AT,
+            ):
+                self.assertEqual(
+                    ledger.recover_uncertain(),
+                    ("try-1", "try-2"),
+                )
+
+            restarted = RealExecutionLedger(path)
+            self.assertEqual(restarted.verify_integrity(), 6)
+            self.assertEqual(
+                restarted.attempt_state("try-1"),
+                AttemptState.UNKNOWN,
+            )
+            self.assertEqual(
+                restarted.attempt_state("try-2"),
+                AttemptState.UNKNOWN,
+            )
+
     def test_unknown_ack_requires_durable_positive_reconciliation_evidence(self):
         with tempfile.TemporaryDirectory() as tmp:
             ledger = RealExecutionLedger(Path(tmp) / "real.jsonl")

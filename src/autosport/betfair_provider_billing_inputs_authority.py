@@ -57,6 +57,8 @@ def _build_observation_authority():
     stdlib_build_opener = _urllib_request.__dict__["build_opener"]
     stdlib_https_handler_cls = _urllib_request.__dict__["HTTPSHandler"]
     stdlib_https_handler_open = stdlib_https_handler_cls.__dict__["https_open"]
+    stdlib_abstract_http_handler_cls = _urllib_request.__dict__["AbstractHTTPHandler"]
+    stdlib_abstract_http_do_open = stdlib_abstract_http_handler_cls.__dict__["do_open"]
 
     # ``urllib.request.urlopen`` otherwise resolves the mutable module-global
     # ``_opener`` at call time. Own that exact dispatch root up front so public
@@ -150,6 +152,13 @@ def _build_observation_authority():
             is not stdlib_https_handler_open
         ):
             raise error_cls("provider billing HTTPS handler executable drifted")
+        if (
+            _urllib_request.__dict__.get("AbstractHTTPHandler")
+            is not stdlib_abstract_http_handler_cls
+            or stdlib_abstract_http_handler_cls.__dict__.get("do_open")
+            is not stdlib_abstract_http_do_open
+        ):
+            raise error_cls("provider billing lower HTTP handler executable drifted")
         if (
             _urllib_request.__dict__.get("_opener") is not product_opener
             or type(product_opener) is not stdlib_opener_cls

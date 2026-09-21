@@ -16,6 +16,11 @@ from autosport.sport_memory_runtime import (
     SportMemoryScope,
 )
 
+from test_sport_memory_matchup_decision import (
+    _bound_runtime_pair,
+    _scope as _canonical_scope,
+)
+
 
 T1 = "2026-09-20T10:00:00Z"
 T1_PUBLISHED = "2026-09-20T10:01:00Z"
@@ -107,9 +112,18 @@ def test_direct_instance_shadow_cannot_authorize_opportunity_binding():
     assert attacker_called is False
 
 
-def test_direct_instance_shadow_cannot_mutate_durable_consumption_state():
-    runtime = _runtime_without_io()
-    matchup = _matchup()
+def test_direct_instance_shadow_cannot_mutate_durable_consumption_state(tmp_path):
+    # Exercise the mutation guard through a fully composed durable product runtime.
+    # The transaction wrapper now requires canonical runtime/upstream paths before
+    # verifier dispatch, so the old object.__new__ no-I/O fixture is not a valid
+    # mutation-path fixture anymore.
+    runtime = _bound_runtime_pair(tmp_path)
+    matchup = runtime.matchup_as_of(
+        "participant-a",
+        "participant-b",
+        _canonical_scope(),
+        as_of=T2,
+    )
     attacker_called = False
 
     def attacker_verifier(candidate):

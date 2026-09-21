@@ -50,8 +50,10 @@ def _instant(value: str) -> datetime:
 
 
 def _decimal_text(value: object, field: str) -> str:
-    if isinstance(value, bool):
-        raise ModelDriftEvidenceError(f"{field} must be a finite decimal")
+    if isinstance(value, bool) or type(value) not in (str, int, Decimal):
+        raise ModelDriftEvidenceError(
+            f"{field} must be an exact decimal string, integer, or Decimal"
+        )
     try:
         decimal_value = Decimal(str(value))
     except (InvalidOperation, ValueError) as exc:
@@ -156,14 +158,19 @@ class DriftWindow:
 
         if type(self.observations) is not tuple or not self.observations:
             raise ModelDriftEvidenceError("observations must be a non-empty canonical tuple")
-        if any(not isinstance(item, DriftObservation) for item in self.observations):
+        if any(type(item) is not DriftObservation for item in self.observations):
             raise ModelDriftEvidenceError(
-                "observations must contain DriftObservation values"
+                "observations must contain exact DriftObservation values"
             )
 
         identities = [item.sample_id for item in self.observations]
         if len(identities) != len(set(identities)):
             raise ModelDriftEvidenceError("sample_id values must be unique within a window")
+        evidence_identities = [item.evidence_sha256 for item in self.observations]
+        if len(evidence_identities) != len(set(evidence_identities)):
+            raise ModelDriftEvidenceError(
+                "evidence_sha256 values must be unique within a window"
+            )
 
         for item in self.observations:
             available = _instant(item.available_at)
@@ -199,6 +206,7 @@ class DriftWindow:
             "model_id": self.model_id,
             "model_artifact_sha256": self.model_artifact_sha256,
             "metric_key": self.metric_key,
+            "window_basis": "available_at",
             "window_start": self.window_start,
             "window_end": self.window_end,
             "sample_count": self.sample_count,
@@ -287,6 +295,7 @@ class TwoSampleKSEvidence:
             "model_id": self.model_id,
             "model_artifact_sha256": self.model_artifact_sha256,
             "metric_key": self.metric_key,
+            "window_basis": "available_at",
             "evaluated_at": self.evaluated_at,
             "reference_count": self.reference_count,
             "current_count": self.current_count,
@@ -355,9 +364,13 @@ def build_two_sample_ks_evidence(
 ) -> TwoSampleKSEvidence:
     """Measure exact empirical CDF drift without producing a lifecycle verdict."""
 
-    if not isinstance(reference, DriftWindow) or not isinstance(current, DriftWindow):
-        raise ModelDriftEvidenceError("reference/current must be DriftWindow values")
+    if type(reference) is not DriftWindow or type(current) is not DriftWindow:
+        raise ModelDriftEvidenceError("reference/current must be exact DriftWindow values")
     evaluated = _instant_text(evaluated_at, "evaluated_at")
+    if reference.window_id == current.window_id:
+        raise ModelDriftEvidenceError(
+            "reference/current windows must have distinct window_id values"
+        )
     if (
         reference.model_id != current.model_id
         or reference.model_artifact_sha256 != current.model_artifact_sha256
@@ -379,6 +392,14 @@ def build_two_sample_ks_evidence(
         raise ModelDriftEvidenceError(
             "reference/current windows must not reuse sample_id values"
         )
+    reference_evidence = {
+        item.evidence_sha256 for item in reference.observations
+    }
+    current_evidence = {item.evidence_sha256 for item in current.observations}
+    if reference_evidence & current_evidence:
+        raise ModelDriftEvidenceError(
+            "reference/current windows must not reuse evidence_sha256 values"
+        )
 
     reference_values = tuple(Decimal(item.value) for item in reference.observations)
     current_values = tuple(Decimal(item.value) for item in current.observations)
@@ -392,6 +413,7 @@ def build_two_sample_ks_evidence(
         "model_id": reference.model_id,
         "model_artifact_sha256": reference.model_artifact_sha256,
         "metric_key": reference.metric_key,
+        "window_basis": "available_at",
         "evaluated_at": evaluated,
         "reference_count": reference.sample_count,
         "current_count": current.sample_count,
@@ -428,3 +450,23 @@ def build_two_sample_ks_evidence(
         max_difference_at=payload["max_difference_at"],
         evidence_sha256=_digest(payload),
     )
+
+
+def verify_two_sample_ks_evidence(
+    evidence: TwoSampleKSEvidence,
+    reference: DriftWindow,
+    current: DriftWindow,
+) -> None:
+    """Re-derive a measurement against exact windows and fail on any drift."""
+
+    if type(evidence) is not TwoSampleKSEvidence:
+        raise ModelDriftEvidenceError("evidence must be exact TwoSampleKSEvidence")
+    expected = build_two_sample_ks_evidence(
+        reference,
+        current,
+        evaluated_at=evidence.evaluated_at,
+    )
+    if evidence != expected:
+        raise ModelDriftEvidenceError(
+            "KS evidence does not match exact reference/current windows"
+        )

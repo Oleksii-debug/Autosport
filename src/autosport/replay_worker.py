@@ -57,6 +57,7 @@ class OneShotReplayWorker:
         self._busy = False
         self._thread: threading.Thread | None = None
         self._stop_token: ReplayStopToken | None = None
+        self._accepted_stop_token: ReplayStopToken | None = None
         self._stopped_pending = False
 
     @property
@@ -84,7 +85,10 @@ class OneShotReplayWorker:
             if not self._busy or self._stop_token is None:
                 return False
             token = self._stop_token
-        return token.request()
+            accepted = token.request()
+            if accepted:
+                self._accepted_stop_token = token
+            return accepted
 
     def start(self, task: ReplayTask) -> bool:
         with self._lock:
@@ -92,6 +96,7 @@ class OneShotReplayWorker:
                 return False
             self._busy = True
             self._stop_token = ReplayStopToken()
+            self._accepted_stop_token = None
             self._stopped_pending = False
             stop_token = self._stop_token
         # Economic replay may be inside PRECOMMIT/promotion. A daemon thread could
@@ -151,6 +156,7 @@ class OneShotReplayWorker:
         with self._lock:
             token = self._stop_token
             self._stop_token = None
+            self._accepted_stop_token = None
         if token is not None:
             token.disarm()
         self._messages.put(ReplayWorkerMessage(error=_terminal_error(exc)))
@@ -160,6 +166,7 @@ class OneShotReplayWorker:
         with self._lock:
             token = self._stop_token
             self._stop_token = None
+            self._accepted_stop_token = None
             self._busy = False
         if token is not None:
             token.disarm()
@@ -181,8 +188,13 @@ class OneShotReplayWorker:
         try:
             with replay_stop_scope(stop_token):
                 message = ReplayWorkerMessage(result=task())
-        except ReplayStopRequested:
-            message = ReplayWorkerMessage(stopped=True)
+        except ReplayStopRequested as exc:
+            with self._lock:
+                accepted_stop = self._accepted_stop_token is stop_token
+            if accepted_stop:
+                message = ReplayWorkerMessage(stopped=True)
+            else:
+                message = ReplayWorkerMessage(error=_terminal_error(exc))
         except BaseException as exc:
             # SystemExit/KeyboardInterrupt raised inside this detached background
             # thread do not provide a GUI terminal outcome by themselves. Publish
@@ -194,6 +206,8 @@ class OneShotReplayWorker:
         with self._lock:
             if self._stop_token is stop_token:
                 self._stop_token = None
+            if self._accepted_stop_token is stop_token:
+                self._accepted_stop_token = None
             self._stopped_pending = message.stopped
         self._messages.put(message)
 
@@ -205,6 +219,7 @@ class OneShotReplayWorker:
         with self._lock:
             self._busy = False
             self._stop_token = None
+            self._accepted_stop_token = None
             self._stopped_pending = False
         return message
 

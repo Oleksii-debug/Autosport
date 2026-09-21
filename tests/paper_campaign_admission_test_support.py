@@ -80,7 +80,11 @@ class _CanonicalOriginLedger(PaperExecutionLedger):
         )
 
     def load_run(self, **kwargs):
-        return self._target.load_run(**kwargs)
+        token = origin_module._DECISION_ORIGIN.set(self._origin)
+        try:
+            return self._target.load_run(**kwargs)
+        finally:
+            origin_module._DECISION_ORIGIN.reset(token)
 
     def record_attempt(self, attempt):
         return self._target.record_attempt(attempt)

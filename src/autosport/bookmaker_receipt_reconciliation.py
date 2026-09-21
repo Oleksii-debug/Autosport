@@ -15,6 +15,20 @@ from .bookmaker_routing_plan import (
     VenueLegProposal,
     plan_equal_split_residual,
 )
+from .real_execution_ledger import (
+    AttemptState,
+    ExternalReceiptIdentity,
+    RealExecutionLedger,
+)
+
+
+_LEDGER_STATES_BY_EFFECT = {
+    ExternalEffect.ACCEPTED: frozenset(
+        {AttemptState.ACCEPTED, AttemptState.PARTIAL}
+    ),
+    ExternalEffect.MARKET_REFUSED: frozenset({AttemptState.REJECTED}),
+    ExternalEffect.UNKNOWN: frozenset({AttemptState.UNKNOWN}),
+}
 
 
 def bind_leg_receipt(
@@ -29,8 +43,9 @@ def bind_leg_receipt(
 
     ACCEPTED evidence requires a real external receipt ID. UNKNOWN/refusal may
     truthfully have none yet; the deterministic child identity still prevents blind
-    reroute. This helper does not call a bookmaker, authorize money movement, or
-    create the future #353 real execution ledger.
+    reroute. This helper does not call a bookmaker or write the durable execution
+    ledger. Use reconcile_equal_split_residual_against_ledger when existing durable
+    execution facts must authorize terminal receipt reconciliation.
     """
     if not isinstance(leg, VenueLegProposal):
         raise RoutingContractError("leg must be a VenueLegProposal")
@@ -137,6 +152,56 @@ def _validated_child_receipts(
     return normalized
 
 
+def _validate_durable_effect_receipts(
+    observations: tuple[VenueObservation, ...],
+    *,
+    ledger: RealExecutionLedger,
+    parent_plan_id: str,
+) -> None:
+    """Fail closed unless claimed receipt effects match durable execution facts."""
+
+    if not isinstance(ledger, RealExecutionLedger):
+        raise RoutingContractError("ledger must be a RealExecutionLedger")
+    try:
+        saga = ledger.saga(parent_plan_id)
+    except KeyError as exc:
+        raise RoutingContractError(
+            "parent plan is absent from durable execution ledger"
+        ) from exc
+
+    for item in observations:
+        # UNKNOWN without a receipt is safe to preserve: it blocks routing rather
+        # than claiming a terminal external effect. If a receipt is supplied, it
+        # must still agree with the durable attempt below.
+        if item.external_receipt_id is None:
+            if item.effect is ExternalEffect.UNKNOWN:
+                continue
+            raise RoutingContractError(
+                "ledger-backed terminal reconciliation requires external_receipt_id"
+            )
+
+        identity = ExternalReceiptIdentity(
+            bookmaker_id=item.venue_id,
+            account_id=item.account_id,
+            external_receipt_id=item.external_receipt_id,
+        )
+        attempt_id = saga.receipts.get(identity)
+        if attempt_id is None:
+            raise RoutingContractError(
+                "routing receipt is absent from durable execution ledger"
+            )
+        if saga.attempt_action_ids.get(attempt_id) != item.proposal_leg_id:
+            raise RoutingContractError(
+                "durable receipt attempt does not own canonical proposal child"
+            )
+
+        state = saga.attempts.get(attempt_id)
+        if state not in _LEDGER_STATES_BY_EFFECT[item.effect]:
+            raise RoutingContractError(
+                "routing receipt effect disagrees with durable execution state"
+            )
+
+
 def reconcile_equal_split_residual(
     requested_stake: Decimal,
     selected_venues: Iterable[VenueQuote],
@@ -159,6 +224,51 @@ def reconcile_equal_split_residual(
         venues,
         observations,
         routing_request_id=routing_request_id,
+        parent_plan_id=parent_plan_id,
+    )
+    return plan_equal_split_residual(
+        requested_stake,
+        venues,
+        normalized,
+        routing_request_id=routing_request_id,
+        parent_plan_id=parent_plan_id,
+        stake_quantum=stake_quantum,
+    )
+
+
+def reconcile_equal_split_residual_against_ledger(
+    requested_stake: Decimal,
+    selected_venues: Iterable[VenueQuote],
+    observations: Iterable[VenueObservation],
+    *,
+    routing_request_id: str,
+    parent_plan_id: str,
+    stake_quantum: Decimal,
+    ledger: RealExecutionLedger,
+) -> ParallelRoutingProposal:
+    """Reconcile only after terminal child receipts agree with durable execution.
+
+    The routing parent plan ID is also the durable execution plan ID, and every
+    receipt-backed observation must resolve through provider/account receipt
+    identity to an attempt whose action ID is the canonical proposal leg ID. The
+    durable attempt state must agree with the routing effect. This function is
+    read-only with respect to the ledger and never calls a provider or moves money.
+
+    UNKNOWN without an external receipt remains admissible only because it blocks
+    routing. No accepted-stake equality claim is made here; the public durable saga
+    currently exposes receipt ownership and attempt state, not acknowledgement
+    payload amounts.
+    """
+    venues = tuple(selected_venues)
+    normalized = _validated_child_receipts(
+        venues,
+        observations,
+        routing_request_id=routing_request_id,
+        parent_plan_id=parent_plan_id,
+    )
+    _validate_durable_effect_receipts(
+        normalized,
+        ledger=ledger,
         parent_plan_id=parent_plan_id,
     )
     return plan_equal_split_residual(

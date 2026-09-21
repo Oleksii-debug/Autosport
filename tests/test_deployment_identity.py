@@ -211,6 +211,56 @@ class DeploymentIdentityTests(unittest.TestCase):
         self.assertFalse(result.accepted)
         self.assertIn("identity_mismatch:created_at", result.reasons)
 
+    def test_restart_rejects_subclass_before_virtual_dispatch(self) -> None:
+        class ForgedFingerprintIdentity(DeploymentRestartIdentity):
+            @property
+            def fingerprint_sha256(self) -> str:
+                return "f" * 64
+
+        previous = self._initial()
+        forged_previous = ForgedFingerprintIdentity(
+            deployment_id=previous.deployment_id,
+            generation=previous.generation,
+            restart_sequence=previous.restart_sequence,
+            strategy_version_id=previous.strategy_version_id,
+            strategy_artifact_sha256=previous.strategy_artifact_sha256,
+            model_version_id=previous.model_version_id,
+            model_artifact_sha256=previous.model_artifact_sha256,
+            config_sha256=previous.config_sha256,
+            scientific_registry_sha256=previous.scientific_registry_sha256,
+            created_at=previous.created_at,
+            observed_at=previous.observed_at,
+            predecessor_fingerprint_sha256=previous.predecessor_fingerprint_sha256,
+            evidence_refs=previous.evidence_refs,
+        )
+        observed = self._restart(forged_previous)
+
+        with self.assertRaisesRegex(TypeError, "exact DeploymentRestartIdentity"):
+            verify_restart_identity(forged_previous, observed)
+        with self.assertRaisesRegex(TypeError, "exact DeploymentRestartIdentity"):
+            validate_restart_successor(forged_previous, observed)
+
+        canonical_observed = self._restart(previous)
+        forged_observed = ForgedFingerprintIdentity(
+            deployment_id=canonical_observed.deployment_id,
+            generation=canonical_observed.generation,
+            restart_sequence=canonical_observed.restart_sequence,
+            strategy_version_id=canonical_observed.strategy_version_id,
+            strategy_artifact_sha256=canonical_observed.strategy_artifact_sha256,
+            model_version_id=canonical_observed.model_version_id,
+            model_artifact_sha256=canonical_observed.model_artifact_sha256,
+            config_sha256=canonical_observed.config_sha256,
+            scientific_registry_sha256=canonical_observed.scientific_registry_sha256,
+            created_at=canonical_observed.created_at,
+            observed_at=canonical_observed.observed_at,
+            predecessor_fingerprint_sha256=(
+                canonical_observed.predecessor_fingerprint_sha256
+            ),
+            evidence_refs=canonical_observed.evidence_refs,
+        )
+        with self.assertRaisesRegex(TypeError, "exact DeploymentRestartIdentity"):
+            verify_restart_identity(previous, forged_observed)
+
     def test_contract_does_not_mint_execution_promotion_or_release_truth(self) -> None:
         keys = set(self._initial().to_dict())
         for forbidden in (

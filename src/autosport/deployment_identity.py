@@ -272,10 +272,13 @@ def verify_restart_identity(
     it needs a separate deployment/promotion authority outside this module.
     """
 
-    if not isinstance(previous, DeploymentRestartIdentity) or not isinstance(
-        observed, DeploymentRestartIdentity
+    if (
+        type(previous) is not DeploymentRestartIdentity
+        or type(observed) is not DeploymentRestartIdentity
     ):
-        raise TypeError("restart verification requires DeploymentRestartIdentity values")
+        raise TypeError(
+            "restart verification requires exact DeploymentRestartIdentity values"
+        )
 
     reasons: list[str] = []
     for field in _IDENTITY_FIELDS:

@@ -2,12 +2,11 @@ from __future__ import annotations
 
 """Decision-time Betfair standard-LIMIT adverse-price bound authority.
 
-This module is deliberately narrower than realized execution/slippage truth.  It
+This module is deliberately narrower than realized execution/slippage truth. It
 re-resolves an exact canonical supervised execution action and records only the
-provider-enforced BACK LIMIT floor that is already hard-coded by the canonical
-Betfair supervised write adapter.  It does not predict whether an order will
-fill, how much will fill, when it will fill, or whether best execution improves
-its realized price.
+provider-enforced BACK LIMIT floor emitted by the canonical Betfair supervised
+write adapter. It does not predict whether an order will fill, how much will
+fill, when it will fill, or whether best execution improves its realized price.
 
 The authority is useful for conservative opportunity economics: on the supported
 plain BACK LIMIT path, the requested odds are the worst admissible matched odds.
@@ -20,10 +19,12 @@ from decimal import Decimal
 from enum import StrEnum
 import hashlib
 import json
+from pathlib import Path
 import re
-from typing import Any
+from typing import Any, Mapping
 
 from .betfair_supervised_execution import (
+    PLACE_ORDERS_METHOD,
     BetfairSupervisedPlaceOrdersClient,
     WRITE_ADAPTER_ID,
     WRITE_ADAPTER_VERSION,
@@ -42,6 +43,7 @@ _PROVIDER_CONTRACT_REF = (
 _WRITE_ADAPTER_ID = WRITE_ADAPTER_ID
 _WRITE_ADAPTER_VERSION = WRITE_ADAPTER_VERSION
 _CANONICAL_PLACE_ACTION = BetfairSupervisedPlaceOrdersClient.place_action
+_CAPTURE_PROVIDER_ORDER_REF = "0" * 32
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 
 
@@ -277,19 +279,151 @@ class BetfairStandardLimitPriceBoundEvidence:
         return payload
 
 
-def _canonical_instruction_projection(action: ExecutionAction) -> dict[str, Any]:
-    """Project only fields hard-coded by the canonical v1 provider write adapter.
+class _CapturedPlaceOrdersRequest(RuntimeError):
+    def __init__(self, body: bytes) -> None:
+        super().__init__("captured canonical placeOrders request")
+        self.body = body
 
-    This is evidence projection, not a provider request builder: no customer refs,
-    JSON-RPC ids, credentials, transport, or provider calls are accepted here.
-    The projection is bound to the exact v1 write adapter implementation captured
-    at module import and must be version-bumped if its provider instruction
-    semantics change.
+
+class _CaptureGate:
+    def require(self, **_kwargs: object) -> None:
+        return None
+
+
+class _CaptureCredentials:
+    application_key = "autosport-price-bound-capture"
+    session_token = "autosport-price-bound-capture"
+
+
+class _CaptureTransport:
+    def post(
+        self,
+        _url: str,
+        *,
+        headers: Mapping[str, str],
+        body: bytes,
+        timeout_seconds: float,
+    ) -> bytes:
+        del headers, timeout_seconds
+        if type(body) is not bytes:
+            raise BetfairStandardLimitPriceBoundError(
+                "canonical placeOrders request body is not bytes"
+            )
+        raise _CapturedPlaceOrdersRequest(body)
+
+
+def _capture_canonical_instruction(action: ExecutionAction) -> dict[str, Any]:
+    """Capture the exact instruction emitted by the real provider-write method.
+
+    The transport is a local fail-before-I/O capture object. Therefore this path
+    cannot contact Betfair, while any semantic change in ``place_action`` is
+    observed at the same serialized request boundary the real transport consumes.
+    Unsupported request drift fails closed instead of relying on a manually
+    duplicated request builder or an adapter-version bump.
     """
+
+    client = object.__new__(BetfairSupervisedPlaceOrdersClient)
+    client._credentials = _CaptureCredentials()
+    client._gate = _CaptureGate()
+    client._transport = _CaptureTransport()
+    client._timeout_seconds = 1.0
+    client._clock = lambda: "1970-01-01T00:00:00+00:00"
+    client._request_id = 0
+
+    try:
+        _CANONICAL_PLACE_ACTION(
+            client,
+            action,
+            profile=None,
+            bound=None,
+            provider_order_ref=_CAPTURE_PROVIDER_ORDER_REF,
+            execution_workspace=Path("."),
+        )
+    except _CapturedPlaceOrdersRequest as captured:
+        body = captured.body
+    except Exception as exc:
+        raise BetfairStandardLimitPriceBoundError(
+            "canonical Betfair placeOrders request could not be captured"
+        ) from exc
+    else:
+        raise BetfairStandardLimitPriceBoundError(
+            "canonical Betfair placeOrders path did not reach the sealed capture transport"
+        )
+
+    try:
+        envelope = json.loads(body.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise BetfairStandardLimitPriceBoundError(
+            "canonical Betfair placeOrders request is not valid JSON"
+        ) from exc
+    if type(envelope) is not dict or envelope.get("method") != PLACE_ORDERS_METHOD:
+        raise BetfairStandardLimitPriceBoundError(
+            "canonical Betfair write path did not emit placeOrders"
+        )
+    params = envelope.get("params")
+    if type(params) is not dict or params.get("marketId") != action.market_id:
+        raise BetfairStandardLimitPriceBoundError(
+            "canonical Betfair placeOrders request does not bind the action market"
+        )
+    instructions = params.get("instructions")
+    if type(instructions) is not list or len(instructions) != 1:
+        raise BetfairStandardLimitPriceBoundError(
+            "canonical Betfair placeOrders request must contain exactly one instruction"
+        )
+    instruction = instructions[0]
+    if type(instruction) is not dict:
+        raise BetfairStandardLimitPriceBoundError(
+            "canonical Betfair placeOrders instruction is not an object"
+        )
+    expected_keys = {
+        "selectionId",
+        "handicap",
+        "side",
+        "orderType",
+        "limitOrder",
+        "customerOrderRef",
+    }
+    if set(instruction) != expected_keys:
+        raise BetfairStandardLimitPriceBoundError(
+            "nonstandard Betfair order transformation is not supported"
+        )
+    if instruction.get("customerOrderRef") != _CAPTURE_PROVIDER_ORDER_REF:
+        raise BetfairStandardLimitPriceBoundError(
+            "canonical Betfair instruction changed the sealed provider order reference"
+        )
+    return {
+        key: instruction[key]
+        for key in ("selectionId", "handicap", "side", "orderType", "limitOrder")
+    }
+
+
+def _canonical_instruction_projection(action: ExecutionAction) -> dict[str, Any]:
+    """Return the exact semantic projection emitted by the real write request."""
 
     if type(action) is not ExecutionAction:
         raise BetfairStandardLimitPriceBoundError(
             "action must be the exact canonical ExecutionAction type"
+        )
+    _positive_decimal(action.requested_odds, "requested_odds")
+    _positive_decimal(action.requested_stake, "requested_stake")
+    if action.bookmaker_id != _PROVIDER_ID or action.side != "BACK":
+        raise BetfairStandardLimitPriceBoundError(
+            "only the canonical Betfair BACK standard-LIMIT path is supported"
+        )
+    if not callable(_CANONICAL_PLACE_ACTION):
+        raise BetfairStandardLimitPriceBoundError(
+            "canonical Betfair placeOrders implementation is unavailable"
+        )
+
+    instruction = _capture_canonical_instruction(action)
+    limit_order = instruction.get("limitOrder")
+    if type(limit_order) is not dict or set(limit_order) != {
+        "size",
+        "price",
+        "persistenceType",
+    }:
+        raise BetfairStandardLimitPriceBoundError(
+            "nonstandard Betfair LIMIT semantics are not supported"
         )
     try:
         selection_id = int(action.selection_id)
@@ -301,23 +435,20 @@ def _canonical_instruction_projection(action: ExecutionAction) -> dict[str, Any]
         raise BetfairStandardLimitPriceBoundError(
             "Betfair selection_id must be canonical positive integer text"
         )
-    _positive_decimal(action.requested_odds, "requested_odds")
-    _positive_decimal(action.requested_stake, "requested_stake")
-    if action.bookmaker_id != _PROVIDER_ID or action.side != "BACK":
+    if (
+        type(instruction.get("selectionId")) is not int
+        or instruction.get("selectionId") != selection_id
+        or instruction.get("handicap") != 0
+        or instruction.get("orderType") != "LIMIT"
+        or instruction.get("side") != "BACK"
+        or limit_order.get("persistenceType") != "LAPSE"
+        or limit_order.get("price") != str(action.requested_odds)
+        or limit_order.get("size") != str(action.requested_stake)
+    ):
         raise BetfairStandardLimitPriceBoundError(
-            "only the canonical Betfair BACK standard-LIMIT path is supported"
+            "provider instruction projection does not preserve the bound standard LIMIT"
         )
-    return {
-        "selectionId": selection_id,
-        "handicap": 0,
-        "side": "BACK",
-        "orderType": "LIMIT",
-        "limitOrder": {
-            "size": str(action.requested_stake),
-            "price": str(action.requested_odds),
-            "persistenceType": "LAPSE",
-        },
-    }
+    return instruction
 
 
 def _issue_evidence(
@@ -369,9 +500,9 @@ def resolve_betfair_standard_limit_price_bound(
 ) -> BetfairStandardLimitPriceBoundEvidence:
     """Re-resolve one exact current standard BACK LIMIT price floor.
 
-    The caller supplies only the bound plan and an action identity.  No caller
+    The caller supplies only the bound plan and an action identity. No caller
     instruction, price bound, zero/slippage flag, provider setting, accepted
-    price, or fill assumption is accepted.  The action and its quote are
+    price, or fill assumption is accepted. The action and its quote are
     re-resolved from the immutable bound plan, and the result remains explicitly
     silent about execution feasibility and favorable best-price improvement.
     """
@@ -382,7 +513,6 @@ def resolve_betfair_standard_limit_price_bound(
         )
     _text(action_id, "action_id")
 
-    # Fail closed on instance-level shadows before any authority-bearing reads.
     if hasattr(bound, "__dict__") and any(
         name in vars(bound) for name in ("verify_binding", "action_for", "profile_for")
     ):
@@ -401,39 +531,7 @@ def resolve_betfair_standard_limit_price_bound(
             "bound plan returned a non-canonical ExecutionAction"
         )
 
-    # The exact current v1 write adapter is captured as part of this authority.
-    # A caller/module rebinding of the public class or method cannot replace the
-    # captured implementation reference used to identify the supported contract.
-    if not callable(_CANONICAL_PLACE_ACTION):
-        raise BetfairStandardLimitPriceBoundError(
-            "canonical Betfair placeOrders implementation is unavailable"
-        )
-
     instruction = _canonical_instruction_projection(action)
-    if set(instruction) != {"selectionId", "handicap", "side", "orderType", "limitOrder"}:
-        raise BetfairStandardLimitPriceBoundError(
-            "nonstandard Betfair order transformation is not supported"
-        )
-    limit_order = instruction.get("limitOrder")
-    if type(limit_order) is not dict or set(limit_order) != {
-        "size",
-        "price",
-        "persistenceType",
-    }:
-        raise BetfairStandardLimitPriceBoundError(
-            "nonstandard Betfair LIMIT semantics are not supported"
-        )
-    if (
-        instruction.get("orderType") != "LIMIT"
-        or instruction.get("side") != "BACK"
-        or limit_order.get("persistenceType") != "LAPSE"
-        or limit_order.get("price") != str(action.requested_odds)
-        or limit_order.get("size") != str(action.requested_stake)
-    ):
-        raise BetfairStandardLimitPriceBoundError(
-            "provider instruction projection does not preserve the bound standard LIMIT"
-        )
-
     return _issue_evidence(
         bound=bound,
         action=action,

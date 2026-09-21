@@ -530,6 +530,11 @@ class PaperAbstentionLearningRuntime:
             raise PaperAbstentionLearningError(
                 "abstention outcome/reward simulation models differ"
             )
+        if reward.truth is EvidenceTruth.OBSERVED and reward.reward != 0:
+            raise PaperAbstentionLearningError(
+                "observed abstention reward must be zero; non-zero opportunity-cost "
+                "reward is counterfactual and must be SIMULATED"
+            )
 
         snapshot = self.agent_loop.snapshot()
         if snapshot.action_id != action.action_id:

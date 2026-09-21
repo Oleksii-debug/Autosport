@@ -122,6 +122,19 @@ def _authority_root_locator(authority_root: Path) -> str:
     return os.path.normcase(os.path.normpath(str(resolved)))
 
 
+def _machine_identity_key(workspace_instance_id: str, authority_root_locator: str) -> str:
+    """Scope moved-workspace identity lookup to the physical authority root.
+
+    Workspace instance ids are immutable inside one authority-root lineage, but
+    explicit ids are not globally unique across independent machine-state roots.
+    Same-path root switching is fenced by the stable path anchor, while a moved
+    workspace can use this root-scoped identity anchor without aliasing an unrelated
+    workspace that intentionally reuses the same explicit instance id elsewhere.
+    """
+    material = "\0".join((workspace_instance_id, authority_root_locator)).encode("utf-8")
+    return hashlib.sha256(material).hexdigest()
+
+
 def _absolute_machine_state_base(name: str, value: str | Path) -> Path:
     try:
         path = Path(value).expanduser()
@@ -356,12 +369,17 @@ class WorkspaceIdentityBinding:
         )
         if identity_probe is None and machine_path_id is not None:
             identity_probe = machine_path_id
+        identity_probe_sha = (
+            None
+            if identity_probe is None
+            else _machine_identity_key(identity_probe, root_locator)
+        )
         machine_identity_binding = (
             machine_root
             / "workspace-identity-bindings"
-            / hashlib.sha256(identity_probe.encode("utf-8")).hexdigest()[:2]
-            / f"{hashlib.sha256(identity_probe.encode('utf-8')).hexdigest()}.json"
-            if identity_probe is not None
+            / identity_probe_sha[:2]
+            / f"{identity_probe_sha}.json"
+            if identity_probe_sha is not None
             else machine_root / "workspace-identity-bindings" / "unbound"
         )
         machine_identity_id = (
@@ -409,7 +427,7 @@ class WorkspaceIdentityBinding:
                 "requested workspace_instance_id conflicts with durable workspace binding"
             )
         resolved_id = durable_id or requested or uuid.uuid4().hex
-        identity_sha = hashlib.sha256(resolved_id.encode("utf-8")).hexdigest()
+        identity_sha = _machine_identity_key(resolved_id, root_locator)
         machine_identity_binding = (
             machine_root / "workspace-identity-bindings" / identity_sha[:2] / f"{identity_sha}.json"
         )

@@ -1,3 +1,5 @@
+import hashlib
+import json
 import unittest
 
 from autosport.domain import MarketEvent
@@ -12,12 +14,13 @@ class ReplayTimestampOrderTests(unittest.TestCase):
         sequence: int,
         *,
         ingest_ts: str | None = None,
+        decimal_odds: str = "2.0",
     ) -> MarketEvent:
         payload = {
             "event_id": event_id,
             "market_id": "m",
             "selection_id": "a",
-            "decimal_odds": "2.0",
+            "decimal_odds": decimal_odds,
             "observed_ts": observed_ts,
             "source_id": "source",
             "sequence": sequence,
@@ -89,6 +92,115 @@ class ReplayTimestampOrderTests(unittest.TestCase):
         )
 
         self.assertEqual(seen, ["available-earlier", "observed-late"])
+
+    @staticmethod
+    def _dataset_hash_in_order(events: list[MarketEvent]) -> str:
+        digest = hashlib.sha256()
+        for event in events:
+            canonical = json.dumps(
+                event.to_dict(),
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+            digest.update(canonical.encode("utf-8"))
+            digest.update(b"\n")
+        return digest.hexdigest()
+
+    def test_replay_suppresses_late_stale_sequence_for_same_quote(self):
+        newer = self._event(
+            "same-event",
+            "2026-01-01T00:05:00+00:00",
+            2,
+            ingest_ts="2026-01-01T00:05:00+00:00",
+        )
+        late_stale = self._event(
+            "same-event",
+            "2026-01-01T00:00:00+00:00",
+            1,
+            ingest_ts="2026-01-01T00:10:00+00:00",
+        )
+
+        engine = ReplayEngine([late_stale, newer])
+        seen: list[int] = []
+        run = engine.run(lambda event: seen.append(event.sequence), run_id="stale-parity")
+
+        self.assertEqual([event.sequence for event in engine.events], [2, 1])
+        self.assertEqual(seen, [2])
+        self.assertEqual(run.event_count, 2)
+
+    def test_replay_suppresses_exact_duplicate_sequence_for_same_quote(self):
+        first = self._event(
+            "same-event",
+            "2026-01-01T00:01:00+00:00",
+            1,
+            ingest_ts="2026-01-01T00:01:00+00:00",
+        )
+        duplicate = self._event(
+            "same-event",
+            "2026-01-01T00:00:30+00:00",
+            1,
+            ingest_ts="2026-01-01T00:02:00+00:00",
+        )
+
+        seen: list[int] = []
+        run = ReplayEngine([duplicate, first]).run(
+            lambda event: seen.append(event.sequence),
+            run_id="duplicate-parity",
+        )
+
+        self.assertEqual(seen, [1])
+        self.assertEqual(run.event_count, 2)
+
+    def test_replay_rejects_conflicting_payload_reusing_sequence(self):
+        first = self._event(
+            "same-event",
+            "2026-01-01T00:01:00+00:00",
+            1,
+            ingest_ts="2026-01-01T00:01:00+00:00",
+            decimal_odds="2.0",
+        )
+        conflict = self._event(
+            "same-event",
+            "2026-01-01T00:00:30+00:00",
+            1,
+            ingest_ts="2026-01-01T00:02:00+00:00",
+            decimal_odds="2.1",
+        )
+        seen: list[str] = []
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "conflicting MarketEvent payload reused an existing source-local sequence",
+        ):
+            ReplayEngine([conflict, first]).run(
+                lambda event: seen.append(event.decimal_odds),
+                run_id="conflict-parity",
+            )
+
+        self.assertEqual(seen, ["2.0"])
+
+    def test_dataset_hash_keeps_historical_observed_time_order(self):
+        late_old = self._event(
+            "old",
+            "2026-01-01T00:00:00+00:00",
+            1,
+            ingest_ts="2026-01-01T00:10:00+00:00",
+        )
+        on_time_new = self._event(
+            "new",
+            "2026-01-01T00:05:00+00:00",
+            2,
+            ingest_ts="2026-01-01T00:05:00+00:00",
+        )
+        engine = ReplayEngine([on_time_new, late_old])
+
+        historical_hash = self._dataset_hash_in_order([late_old, on_time_new])
+        delivery_order_hash = self._dataset_hash_in_order([on_time_new, late_old])
+
+        self.assertEqual([event.event_id for event in engine.events], ["new", "old"])
+        self.assertEqual(engine.dataset_hash, historical_hash)
+        self.assertNotEqual(engine.dataset_hash, delivery_order_hash)
 
     def test_replay_rejects_naive_ingest_timestamp_fail_closed(self):
         event = self._event(

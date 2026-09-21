@@ -16,6 +16,7 @@ store, economic classifier, allocation authority, or durable cost record.
 from __future__ import annotations
 
 from datetime import datetime, timezone
+import urllib.request as _urllib_request
 
 from . import betfair_account_readonly as _readonly
 from . import betfair_provider_billing_inputs as _inputs
@@ -51,6 +52,8 @@ def _build_observation_authority():
     readonly_transport_export = _readonly.__dict__["UrllibBetfairHttpTransport"]
     request_ctor = _readonly.__dict__["Request"]
     network_open = _readonly.__dict__["urlopen"]
+    stdlib_opener_cls = _urllib_request.__dict__["OpenerDirector"]
+    stdlib_opener_open = stdlib_opener_cls.__dict__["open"]
 
     now_utc = datetime.now
     utc = timezone.utc
@@ -86,6 +89,11 @@ def _build_observation_authority():
             raise error_cls("provider billing HTTP request executable drifted")
         if _readonly.__dict__.get("urlopen") is not network_open:
             raise error_cls("provider billing network opener drifted")
+        if (
+            _urllib_request.__dict__.get("OpenerDirector") is not stdlib_opener_cls
+            or stdlib_opener_cls.__dict__.get("open") is not stdlib_opener_open
+        ):
+            raise error_cls("provider billing lower network opener drifted")
 
     def projection(source: object) -> tuple[object, ...]:
         entitlement = get_attr(source, "entitlement")

@@ -109,7 +109,7 @@ def test_direct_assessment_construction_cannot_mint_accept():
     with pytest.raises(ValueError, match="canonical provider authority"):
         SourceQualityAssessment(
             action=ConfidenceAction.ACCEPT,
-            effective_confidence=Decimal("1"),
+            input_confidence=Decimal("1"),
             reasons=("FORGED_ACCEPT",),
             corroborated=False,
         )
@@ -119,7 +119,7 @@ def test_direct_assessment_construction_cannot_mint_corroboration():
     with pytest.raises(ValueError, match="canonical corroborator authority"):
         SourceQualityAssessment(
             action=ConfidenceAction.DOWNWEIGHT,
-            effective_confidence=Decimal("0.75"),
+            input_confidence=Decimal("0.75"),
             reasons=("FORGED_CORROBORATION",),
             corroborated=True,
         )
@@ -140,6 +140,17 @@ def test_lower_authority_sources_are_bounded_to_downweight(source_class):
     result = assess_source_quality(obs(source_class=source_class, base_confidence=Decimal("1")), now=NOW, policy=policy())
     assert result.action is ConfidenceAction.DOWNWEIGHT
     assert result.reasons == (f"{source_class.value}_CANNOT_MINT_ACCEPT",)
+
+
+def test_downweight_preserves_only_explicit_input_confidence_not_effective_score():
+    result = assess_source_quality(
+        obs(source_class=SourceClass.BROWSER_ADAPTER, base_confidence=Decimal("1")),
+        now=NOW,
+        policy=policy(),
+    )
+    assert result.action is ConfidenceAction.DOWNWEIGHT
+    assert result.input_confidence == Decimal("1")
+    assert not hasattr(result, "effective_confidence")
 
 
 def test_stale_observation_abstains():
@@ -212,14 +223,14 @@ def test_hard_failure_precedes_unresolved_official_authority():
     assert result.reasons == ("TRANSPORT_UNVERIFIED",)
 
 
-def test_corroboration_never_raises_effective_confidence():
+def test_corroboration_never_rewrites_input_confidence():
     observation = obs(
         source_class=SourceClass.BROWSER_ADAPTER,
         base_confidence=Decimal("0.51"),
         corroborator_ids=("peer-1", "peer-2"),
     )
     result = assess_source_quality(observation, now=NOW, policy=policy())
-    assert result.effective_confidence == Decimal("0.51")
+    assert result.input_confidence == Decimal("0.51")
     assert result.action is ConfidenceAction.DOWNWEIGHT
 
 
@@ -384,7 +395,7 @@ def test_randomized_fail_closed_invariants_50000_cases():
         result = assess_source_quality(observation, now=NOW, policy=p)
 
         assert result.action is not ConfidenceAction.ACCEPT
-        assert result.effective_confidence == confidence
+        assert result.input_confidence == confidence
         assert result.corroborated is False
         assert result == assess_source_quality(observation, now=NOW, policy=p)
 
@@ -413,7 +424,7 @@ def test_corroboration_identity_never_escalates_action(source_class, confidence)
     plain_result = assess_source_quality(plain, now=NOW, policy=policy())
     corroborated_result = assess_source_quality(corroborated, now=NOW, policy=policy())
     assert corroborated_result.action is plain_result.action
-    assert corroborated_result.effective_confidence == plain_result.effective_confidence
+    assert corroborated_result.input_confidence == plain_result.input_confidence
     assert corroborated_result.corroborated is False
 
 
@@ -439,6 +450,7 @@ def test_exhaustive_fail_closed_truth_matrix():
                             )
                             result = assess_source_quality(observation, now=NOW, policy=p)
                             assert result.action is not ConfidenceAction.ACCEPT
+                            assert result.input_confidence == confidence
                             assert result.corroborated is False
 
                             hard_invalid = (

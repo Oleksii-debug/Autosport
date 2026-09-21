@@ -668,6 +668,7 @@ class RealExecutionLedger:
         state = None
         found_reconciliations: dict[str, dict[str, Any]] = {}
         found_receipt_id: str | None = None
+        provider_acknowledgements: dict[str, str] = {}
         for event in events:
             kind = event["event_type"]
             if kind == EventType.ATTEMPT_RESERVED.value:
@@ -730,6 +731,34 @@ class RealExecutionLedger:
                     raise ExecutionLedgerIntegrityError(
                         "provider evidence requires submitted/UNKNOWN attempt"
                     )
+                evidence_id = event["payload"].get("evidence_id")
+                if not isinstance(evidence_id, str):
+                    raise ExecutionLedgerIntegrityError(
+                        "provider evidence lacks evidence identity"
+                    )
+                acknowledgement_sha256 = event["payload"].get(
+                    "acknowledgement_sha256"
+                )
+                if acknowledgement_sha256 is not None:
+                    try:
+                        _sha256_text(
+                            acknowledgement_sha256,
+                            "acknowledgement_sha256",
+                        )
+                    except ValueError as exc:
+                        raise ExecutionLedgerIntegrityError(
+                            "provider acknowledgement binding digest is invalid"
+                        ) from exc
+                    prior = provider_acknowledgements.get(
+                        acknowledgement_sha256
+                    )
+                    if prior is not None and prior != evidence_id:
+                        raise ExecutionLedgerIntegrityError(
+                            "provider acknowledgement binding is ambiguous"
+                        )
+                    provider_acknowledgements[
+                        acknowledgement_sha256
+                    ] = evidence_id
             elif kind == EventType.EXTERNAL_ACKNOWLEDGEMENT.value:
                 if state not in {
                     AttemptState.SUBMITTED,
@@ -756,10 +785,17 @@ class RealExecutionLedger:
                         raise ExecutionLedgerIntegrityError(
                             "UNKNOWN acknowledgement receipt mismatches reconciliation evidence"
                         )
-                elif evidence_id:
-                    raise ExecutionLedgerIntegrityError(
-                        "reconciliation evidence is only valid for UNKNOWN acknowledgement"
-                    )
+                else:
+                    if evidence_id:
+                        raise ExecutionLedgerIntegrityError(
+                            "reconciliation evidence is only valid for UNKNOWN acknowledgement"
+                        )
+                    acknowledgement_sha256 = _digest(event["payload"])
+                    if acknowledgement_sha256 not in provider_acknowledgements:
+                        raise ExecutionLedgerIntegrityError(
+                            "SUBMITTED acknowledgement lacks exact provider-bound "
+                            "acknowledgement evidence"
+                        )
                 try:
                     state = AttemptState(event["payload"]["status"])
                 except (KeyError, ValueError) as exc:
@@ -1162,6 +1198,8 @@ class RealExecutionLedger:
             submitted_time: datetime | None = None
             unknown_time: datetime | None = None
             provider_order_reference_seen = False
+            provider_evidence_seen = False
+            provider_acknowledgements: dict[str, datetime] = {}
             found_reconciliations: dict[str, ExternalEffectReconciliation] = {}
             found_receipt_id: str | None = None
             for followup in attempt_events[1:]:
@@ -1316,14 +1354,24 @@ class RealExecutionLedger:
                         followup["event_type"]
                         == EventType.PROVIDER_EVIDENCE_BOUND.value
                     ):
-                        if set(followup["payload"]) != {
-                            "evidence_id",
-                            "observed_at",
-                            "source",
-                        }:
+                        payload_fields = set(followup["payload"])
+                        if payload_fields not in (
+                            {"evidence_id", "observed_at", "source"},
+                            {
+                                "evidence_id",
+                                "observed_at",
+                                "source",
+                                "acknowledgement_sha256",
+                            },
+                        ):
                             raise ExecutionLedgerIntegrityError(
                                 "provider evidence binding schema is invalid"
                             )
+                        if provider_evidence_seen:
+                            raise ExecutionLedgerIntegrityError(
+                                "attempt has multiple provider evidence bindings"
+                            )
+                        provider_evidence_seen = True
                         _sha256_text(
                             followup["payload"]["evidence_id"], "evidence_id"
                         )
@@ -1340,6 +1388,22 @@ class RealExecutionLedger:
                             raise ExecutionLedgerIntegrityError(
                                 "provider evidence precedes attempt causal boundary"
                             )
+                        acknowledgement_sha256 = followup["payload"].get(
+                            "acknowledgement_sha256"
+                        )
+                        if acknowledgement_sha256 is not None:
+                            try:
+                                _sha256_text(
+                                    acknowledgement_sha256,
+                                    "acknowledgement_sha256",
+                                )
+                            except ValueError as exc:
+                                raise ExecutionLedgerIntegrityError(
+                                    "provider acknowledgement binding digest is invalid"
+                                ) from exc
+                            provider_acknowledgements[
+                                acknowledgement_sha256
+                            ] = evidence_time
                     elif (
                         followup["event_type"]
                         == EventType.EXTERNAL_ACKNOWLEDGEMENT.value
@@ -1391,11 +1455,27 @@ class RealExecutionLedger:
                                 raise ExecutionLedgerIntegrityError(
                                     "acknowledgement precedes reconciliation evidence"
                                 )
-                        elif evidence_id:
-                            raise ExecutionLedgerIntegrityError(
-                                "reconciliation evidence is only valid for "
-                                "UNKNOWN acknowledgement"
+                        else:
+                            if evidence_id:
+                                raise ExecutionLedgerIntegrityError(
+                                    "reconciliation evidence is only valid for "
+                                    "UNKNOWN acknowledgement"
+                                )
+                            acknowledgement_sha256 = _digest(
+                                acknowledgement.to_dict()
                             )
+                            evidence_time = provider_acknowledgements.get(
+                                acknowledgement_sha256
+                            )
+                            if evidence_time is None:
+                                raise ExecutionLedgerIntegrityError(
+                                    "SUBMITTED acknowledgement lacks exact "
+                                    "provider-bound acknowledgement evidence"
+                                )
+                            if acknowledged_time < evidence_time:
+                                raise ExecutionLedgerIntegrityError(
+                                    "acknowledgement precedes provider evidence"
+                                )
                         if acknowledgement.accepted_stake is not None:
                             requested_stake = _decimal(
                                 action["requested_stake"], "requested_stake"
@@ -1736,18 +1816,25 @@ class RealExecutionLedger:
             )
         return value
 
-    def bind_provider_evidence(
+    def _bind_provider_evidence_payload(
         self,
         *,
         attempt_id: str,
         evidence_id: str,
         observed_at: str,
         source: str,
+        acknowledgement_sha256: str | None,
+        require_submitted: bool,
     ) -> None:
         _text(attempt_id, "attempt_id")
         _sha256_text(evidence_id, "evidence_id")
         _timestamp(observed_at, "observed_at")
         _text(source, "source")
+        if acknowledgement_sha256 is not None:
+            _sha256_text(
+                acknowledgement_sha256,
+                "acknowledgement_sha256",
+            )
 
         def operation() -> None:
             events = self._events()
@@ -1760,6 +1847,7 @@ class RealExecutionLedger:
                 "evidence_id": evidence_id,
                 "observed_at": observed_at,
                 "source": source,
+                "acknowledgement_sha256": acknowledgement_sha256,
             }
             existing = [
                 event
@@ -1773,9 +1861,19 @@ class RealExecutionLedger:
                     "attempt already has different provider evidence"
                 )
             state = self._state(attempt_events)
-            if state not in {AttemptState.SUBMITTED, AttemptState.UNKNOWN}:
+            allowed_states = (
+                {AttemptState.SUBMITTED}
+                if require_submitted
+                else {AttemptState.SUBMITTED, AttemptState.UNKNOWN}
+            )
+            if state not in allowed_states:
+                required = (
+                    "SUBMITTED attempt"
+                    if require_submitted
+                    else "SUBMITTED/UNKNOWN attempt"
+                )
                 raise ExecutionStateError(
-                    "new provider evidence requires SUBMITTED/UNKNOWN attempt"
+                    f"new provider evidence requires {required}"
                 )
             first = attempt_events[0]
             boundaries = [
@@ -1803,6 +1901,74 @@ class RealExecutionLedger:
             )
 
         self._mutate(operation)
+
+    def bind_provider_evidence(
+        self,
+        *,
+        attempt_id: str,
+        evidence_id: str,
+        observed_at: str,
+        source: str,
+    ) -> None:
+        """Persist provider evidence without granting immediate ACK authority.
+
+        This public seam is suitable for evidence that still requires an UNKNOWN
+        reconciliation path. It deliberately cannot authorize a direct
+        SUBMITTED-to-acknowledgement transition.
+        """
+
+        self._bind_provider_evidence_payload(
+            attempt_id=attempt_id,
+            evidence_id=evidence_id,
+            observed_at=observed_at,
+            source=source,
+            acknowledgement_sha256=None,
+            require_submitted=False,
+        )
+
+    def _bind_provider_acknowledgement_evidence(
+        self,
+        *,
+        attempt_id: str,
+        evidence_id: str,
+        observed_at: str,
+        source: str,
+        acknowledgement: ExternalAcknowledgement,
+    ) -> None:
+        """Bind one immediate provider response to its exact ACK payload.
+
+        This internal adapter seam is not a consumer acknowledgement API. The
+        durable binding commits the canonical acknowledgement payload before
+        acknowledge() may move a SUBMITTED attempt to a terminal state.
+        """
+
+        if type(acknowledgement) is not ExternalAcknowledgement:
+            raise TypeError(
+                "acknowledgement must be exact ExternalAcknowledgement"
+            )
+        if acknowledgement.attempt_id != attempt_id:
+            raise ExecutionIdentityConflict(
+                "provider evidence acknowledgement attempt mismatch"
+            )
+        if acknowledgement.reconciliation_evidence_id is not None:
+            raise ExecutionStateError(
+                "immediate provider evidence cannot carry reconciliation evidence"
+            )
+        if _timestamp(
+            acknowledgement.acknowledged_at,
+            "acknowledged_at",
+        ) != _timestamp(observed_at, "observed_at"):
+            raise ExecutionStateError(
+                "provider evidence time must equal acknowledgement time"
+            )
+        self._bind_provider_evidence_payload(
+            attempt_id=attempt_id,
+            evidence_id=evidence_id,
+            observed_at=observed_at,
+            source=source,
+            acknowledgement_sha256=_digest(acknowledgement.to_dict()),
+            require_submitted=True,
+        )
 
     def provider_evidence_binding(
         self,
@@ -2159,10 +2325,33 @@ class RealExecutionLedger:
                     raise ExecutionStateError(
                         "acknowledgement precedes reconciliation evidence"
                     )
-            elif acknowledgement.reconciliation_evidence_id:
-                raise ExecutionStateError(
-                    "reconciliation evidence is only valid for UNKNOWN acknowledgement"
+            else:
+                if acknowledgement.reconciliation_evidence_id:
+                    raise ExecutionStateError(
+                        "reconciliation evidence is only valid for UNKNOWN acknowledgement"
+                    )
+                acknowledgement_sha256 = _digest(payload)
+                matching_provider_evidence = [
+                    event
+                    for event in attempt_events
+                    if event["event_type"]
+                    == EventType.PROVIDER_EVIDENCE_BOUND.value
+                    and event["payload"].get("acknowledgement_sha256")
+                    == acknowledgement_sha256
+                ]
+                if len(matching_provider_evidence) != 1:
+                    raise ExecutionStateError(
+                        "SUBMITTED acknowledgement requires exact provider-bound "
+                        "acknowledgement evidence"
+                    )
+                provider_evidence_time = _timestamp(
+                    matching_provider_evidence[0]["payload"]["observed_at"],
+                    "observed_at",
                 )
+                if acknowledged_time < provider_evidence_time:
+                    raise ExecutionStateError(
+                        "acknowledgement precedes provider evidence"
+                    )
             if acknowledgement.accepted_stake is not None:
                 _, action = self._action_payload(
                     events, first["plan_id"], first["action_id"]

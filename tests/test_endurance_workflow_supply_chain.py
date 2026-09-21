@@ -14,7 +14,7 @@ def _workflow_text() -> str:
 
 def test_endurance_workflow_uses_only_immutable_external_action_commits() -> None:
     text = _workflow_text()
-    uses = re.findall(r"(?m)^\\s*-\\s+uses:\\s+([^\\s#]+)", text)
+    uses = re.findall(r"(?m)^\s*-\s+uses:\s+([^\s#]+)", text)
     assert uses, "Endurance workflow must contain external action uses"
 
     for action in uses:
@@ -25,22 +25,22 @@ def test_endurance_workflow_uses_only_immutable_external_action_commits() -> Non
 
 def test_endurance_workflow_declares_read_only_contents_permission() -> None:
     text = _workflow_text()
-    assert re.search(r"(?m)^permissions:\\s*$", text)
-    assert re.search(r"(?m)^\\s{2}contents:\\s+read\\s*$", text)
+    assert re.search(r"(?m)^permissions:\s*$", text)
+    assert re.search(r"(?m)^\s{2}contents:\s+read\s*$", text)
 
 
 def test_endurance_checkout_is_exact_head_and_does_not_persist_credentials() -> None:
     text = _workflow_text()
     checkout = re.search(
-        r"(?ms)^\\s*-\\s+uses:\\s+actions/checkout@[0-9a-f]{40}[^\\n]*\\n"
-        r"\\s+with:\\s*\\n"
-        r"(?P<body>(?:\\s{10}[^\\n]+\\n)+)",
+        r"(?ms)^\s*-\s+uses:\s+actions/checkout@[0-9a-f]{40}[^\n]*\n"
+        r"\s+with:\s*\n"
+        r"(?P<body>(?:\s{10}[^\n]+\n)+)",
         text,
     )
     assert checkout is not None, "pinned checkout step with with: block is required"
     body = checkout.group("body")
-    assert re.search(r"(?m)^\\s+persist-credentials:\\s+false\\s*$", body)
-    assert re.search(r"(?m)^\\s+fetch-depth:\\s+0\\s*$", body)
+    assert re.search(r"(?m)^\s+persist-credentials:\s+false\s*$", body)
+    assert re.search(r"(?m)^\s+fetch-depth:\s+0\s*$", body)
     assert "github.event.pull_request.head.sha || github.sha" in body
 
 

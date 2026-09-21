@@ -7,7 +7,7 @@ import json
 from . import _paper_execution_decision_origin as _origin
 from . import _paper_execution_reality_legacy as _legacy_reality
 from . import paper_execution_reality as _paper_reality
-from .decision_ledger import JsonlDecisionLedger
+from .decision_ledger import DecisionLedgerIntegrityError, JsonlDecisionLedger
 from .paper_execution_adoption import PaperExecutionAdoptionRuntime
 from .paper_execution_reality import (
     PaperExecutionLedger,
@@ -27,7 +27,7 @@ _EXECUTE_PLAN_CODE_SENTINEL = (
 _CALLSITE_EXECUTE_CODE_SENTINEL = (
     "_autosport_decision_origin_pristine_product_callsite_code"
 )
-_SEAL_MARKER = "autosport.paper_execution_decision_origin.instance_guard.seal.v2"
+_SEAL_MARKER = "autosport.paper_execution_decision_origin.instance_guard.seal.v3"
 _SEAL_PREFIX = "autosport.paper_execution_decision_origin.instance_guard.seal."
 
 # Preserve the exact context identities across importlib.reload. Installed guard
@@ -50,12 +50,20 @@ def _instance_shadows(obj: object, method_name: str) -> bool:
     return isinstance(namespace, dict) and method_name in namespace
 
 
+def _verify_bytes_descriptor() -> classmethod:
+    descriptor = JsonlDecisionLedger.__dict__.get("_verify_bytes")
+    if not isinstance(descriptor, classmethod):
+        raise RuntimeError("DecisionLedger canonical byte verifier is unavailable")
+    return descriptor
+
+
 def _initial_seal():
     """Re-derive primitive authority from the canonical owning implementations."""
 
     return (
         _SEAL_MARKER,
         JsonlDecisionLedger.verified_snapshot,
+        _verify_bytes_descriptor(),
         _legacy_reality.PaperExecutionLedger.reserve_run,
         _legacy_reality.PaperExecutionLedger._append_event,
         _paper_reality.execute_paper_plan.__code__,
@@ -63,7 +71,7 @@ def _initial_seal():
 
 
 def _seal_matches_canonical(value: object) -> bool:
-    if type(value) is not tuple or len(value) != 5 or value[0] != _SEAL_MARKER:
+    if type(value) is not tuple or len(value) != 6 or value[0] != _SEAL_MARKER:
         return False
     canonical = _initial_seal()
     return all(value[index] is canonical[index] for index in range(1, len(canonical)))
@@ -121,12 +129,29 @@ def _build_guard(seal):
             raise _origin.PaperExecutionDecisionOriginError(
                 "decision ledger shadows authority method verified_snapshot"
             )
+        if _instance_shadows(ledger, "_verify_bytes"):
+            raise _origin.PaperExecutionDecisionOriginError(
+                "decision ledger shadows authority method _verify_bytes"
+            )
         if type(decision_id) is not str or not decision_id or decision_id.strip() != decision_id:
             raise ValueError("decision_id must be non-empty canonical text")
 
-        snapshot = seal[1](ledger)
+        try:
+            raw = ledger.path.read_bytes()
+        except OSError as exc:
+            raise DecisionLedgerIntegrityError(
+                "Decision Ledger file is missing or unreadable"
+            ) from exc
+
+        # Revalidate after the filesystem read: a concurrent class-level rebind that
+        # races the read must fail closed, and the actual verification call below uses
+        # only the closure-sealed classmethod descriptor rather than dynamic dispatch.
+        require_canonical_seal()
+        verify_descriptor = seal[2]
+        verify_descriptor.__func__(JsonlDecisionLedger, raw)
+
         matches: list[_origin.DecisionRecordOrigin] = []
-        for line in snapshot.payload.decode("utf-8").splitlines():
+        for line in raw.decode("utf-8").splitlines():
             envelope = json.loads(line)
             record = envelope["record"]
             if record.get("decision_id") != decision_id:
@@ -169,7 +194,7 @@ def _build_guard(seal):
             execute_plan_frame = reserve_frame.f_back if reserve_frame is not None else None
             if (
                 execute_plan_frame is None
-                or execute_plan_frame.f_code is not seal[4]
+                or execute_plan_frame.f_code is not seal[5]
                 or execute_plan_frame.f_locals.get("ledger") is not ledger
             ):
                 raise _origin.PaperExecutionDecisionOriginError(
@@ -228,7 +253,7 @@ def _build_guard(seal):
                 )
             bound_payload = dict(payload)
             bound_payload["decision_origin"] = self._origin.to_dict()
-            seal[3](
+            seal[4](
                 self._ledger,
                 event_type=event_type,
                 run_id=run_id,
@@ -249,7 +274,7 @@ def _build_guard(seal):
         require_canonical_seal()
         origin = _origin._DECISION_ORIGIN.get()
         if origin is None:
-            return seal[2](
+            return seal[3](
                 self,
                 run_id=run_id,
                 trigger_id=trigger_id,
@@ -273,7 +298,7 @@ def _build_guard(seal):
                 "decision origin does not match execution trigger/plan decision identity"
             )
 
-        return seal[2](
+        return seal[3](
             CanonicalReservationView(self, origin),
             run_id=run_id,
             trigger_id=trigger_id,
@@ -306,8 +331,8 @@ def _install() -> None:
     # These are compatibility/debug mirrors only. Authority paths validate and use
     # the re-derived canonical seal, never these writable mirrors.
     setattr(JsonlDecisionLedger, _VERIFIED_SNAPSHOT_SENTINEL, seal[1])
-    setattr(PaperExecutionLedger, _RESERVE_SENTINEL, seal[2])
-    setattr(PaperExecutionLedger, _APPEND_SENTINEL, seal[3])
+    setattr(PaperExecutionLedger, _RESERVE_SENTINEL, seal[3])
+    setattr(PaperExecutionLedger, _APPEND_SENTINEL, seal[4])
     runtime_execute_code = getattr(
         PaperExecutionAdoptionRuntime,
         _RUNTIME_EXECUTE_CODE_SENTINEL,
@@ -318,9 +343,10 @@ def _install() -> None:
         _RUNTIME_EXECUTE_CODE_SENTINEL,
         runtime_execute_code,
     )
-    setattr(PaperExecutionAdoptionRuntime, _EXECUTE_PLAN_CODE_SENTINEL, seal[4])
+    setattr(PaperExecutionAdoptionRuntime, _EXECUTE_PLAN_CODE_SENTINEL, seal[5])
 
     global _STABLE_VERIFIED_SNAPSHOT
+    global _STABLE_VERIFY_BYTES_DESCRIPTOR
     global _STABLE_RESERVE_RUN
     global _STABLE_APPEND_EVENT
     global _STABLE_RUNTIME_EXECUTE_CODE
@@ -330,10 +356,11 @@ def _install() -> None:
     global _CanonicalReservationView
     global _reserve_run_without_shadowed_append
     _STABLE_VERIFIED_SNAPSHOT = seal[1]
-    _STABLE_RESERVE_RUN = seal[2]
-    _STABLE_APPEND_EVENT = seal[3]
+    _STABLE_VERIFY_BYTES_DESCRIPTOR = seal[2]
+    _STABLE_RESERVE_RUN = seal[3]
+    _STABLE_APPEND_EVENT = seal[4]
     _STABLE_RUNTIME_EXECUTE_CODE = runtime_execute_code
-    _EXECUTE_PAPER_PLAN_CODE = seal[4]
+    _EXECUTE_PAPER_PLAN_CODE = seal[5]
     (
         _verified_decision_origin_without_instance_dispatch,
         _require_canonical_product_reservation_path,

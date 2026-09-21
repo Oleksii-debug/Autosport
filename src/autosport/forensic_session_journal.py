@@ -16,6 +16,7 @@ SCHEMA_VERSION = 1
 GENESIS_SHA256 = "0" * 64
 REDACTED = "[REDACTED]"
 _LOCK_MAGIC = b"AUTOSPORT_FORENSIC_SESSION_LOCK_V1\n"
+_LOCK_NEW_MAGIC = b"AUTOSPORT_FORENSIC_SESSION_LOCK_NEW_V1\n"
 
 _EVENT_RE = re.compile(r"^[a-z][a-z0-9]*(?:[._-][a-z0-9]+)*$")
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
@@ -136,7 +137,6 @@ def _validate_timestamp(value: Any) -> str:
         parsed = datetime.strptime(value, "%Y-%m-%dT%H:%M:%S.%fZ")
     except ValueError as exc:
         raise JournalIntegrityError("journal timestamp is invalid") from exc
-    # strptime accepts some non-canonical edge cases; round-trip closes that gap.
     if parsed.strftime("%Y-%m-%dT%H:%M:%S.%fZ") != value:
         raise JournalIntegrityError("journal timestamp is not canonical UTC")
     return value
@@ -149,8 +149,6 @@ def _validate_event_type(value: Any) -> str:
 
 
 def _is_sensitive_key(key: str) -> bool:
-    # Convert common camel/PascalCase spellings before separator normalization so
-    # credential keys such as accessToken/clientSecret cannot bypass redaction.
     separated = re.sub(r"([A-Z]+)([A-Z][a-z])", r"\1_\2", key.strip())
     separated = re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", separated)
     normalized = re.sub(r"[^a-z0-9]+", "_", separated.lower()).strip("_")
@@ -178,7 +176,6 @@ def _redact(value: Any, *, key: str | None = None) -> Any:
         return output
     if isinstance(value, (list, tuple)):
         return [_redact(child) for child in value]
-    # Fail closed instead of silently serializing repr() that can expose secrets.
     raise TypeError(f"journal payload type is not JSON-safe: {type(value).__name__}")
 
 
@@ -360,16 +357,11 @@ class ForensicSessionJournal:
     ) -> None:
         requested_path = Path(path)
         requested_path.parent.mkdir(parents=True, exist_ok=True)
-        # Normalize symlink/relative aliases before deriving the sidecar lock path so
-        # cooperative writers cannot lock distinct names that resolve to one journal.
         self._path = requested_path.resolve(strict=False)
         if self._path.exists():
             st = self._path.stat()
             if not stat.S_ISREG(st.st_mode):
                 raise JournalIntegrityError("journal path must resolve to a regular file")
-            # A hard-linked journal has multiple path identities but only one inode.
-            # Sidecar locks are path-based, so fail closed rather than allow a second
-            # alias to bypass the single-writer lease.
             if st.st_nlink != 1:
                 raise JournalIntegrityError("hard-linked journal paths are not supported")
         self._clock = clock
@@ -386,10 +378,13 @@ class ForensicSessionJournal:
         try:
             self._records = list(read_verified_records(self._path))
             if self._writer_lock_created and self._records:
+                self._discard_fresh_writer_lock_path()
                 raise JournalIntegrityError(
                     "journal exists but durable writer lock sidecar was missing; "
                     "ownership continuity is ambiguous"
                 )
+            if self._writer_lock_created:
+                self._bind_fresh_writer_lock()
             if self._path.exists():
                 st = self._path.stat()
                 self._expected_file_identity = (st.st_dev, st.st_ino)
@@ -421,16 +416,7 @@ class ForensicSessionJournal:
                 )
             self._append_locked(_LIFECYCLE_STARTUP, {})
         except BaseException:
-            created_lock = self._writer_lock_created
-            lock_identity = self._writer_lock_identity
             self._release_writer_lock()
-            if created_lock and lock_identity is not None:
-                try:
-                    current = os.lstat(self._lock_path)
-                    if (current.st_dev, current.st_ino) == lock_identity:
-                        os.unlink(self._lock_path)
-                except OSError:
-                    pass
             raise
 
     @property
@@ -446,73 +432,161 @@ class ForensicSessionJournal:
         with self._lock:
             return self._closed
 
-    def _acquire_writer_lock(self) -> None:
-        base_flags = os.O_RDWR | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
-        created = False
-        try:
-            fd = os.open(self._lock_path, base_flags | os.O_CREAT | os.O_EXCL, 0o600)
-            created = True
-        except FileExistsError:
-            try:
-                fd = os.open(self._lock_path, base_flags, 0o600)
-            except OSError as exc:
-                raise JournalIntegrityError("writer lock sidecar is not safely openable") from exc
-        except OSError as exc:
-            raise JournalIntegrityError("writer lock sidecar is not safely creatable") from exc
+    @staticmethod
+    def _write_lock_marker(fd: int, marker: bytes) -> None:
+        os.lseek(fd, 0, os.SEEK_SET)
+        os.ftruncate(fd, 0)
+        view = memoryview(marker)
+        while view:
+            written = os.write(fd, view)
+            if written <= 0:
+                raise OSError("writer lock sidecar marker write made no progress")
+            view = view[written:]
+        os.fsync(fd)
 
+    @staticmethod
+    def _read_lock_marker(fd: int) -> bytes:
+        os.lseek(fd, 0, os.SEEK_SET)
+        return os.read(fd, max(len(_LOCK_MAGIC), len(_LOCK_NEW_MAGIC)) + 1)
+
+    def _try_publish_locked_sidecar(
+        self, base_flags: int
+    ) -> tuple[int, tuple[int, int]] | None:
+        temp_path = self._lock_path.with_name(
+            f".{self._lock_path.name}.{uuid.uuid4().hex}.claim"
+        )
+        try:
+            fd = os.open(temp_path, base_flags | os.O_CREAT | os.O_EXCL, 0o600)
+        except OSError as exc:
+            raise JournalIntegrityError("writer lock sidecar staging file is not creatable") from exc
+
+        locked = False
         try:
             opened = os.fstat(fd)
-            if not stat.S_ISREG(opened.st_mode) or opened.st_nlink != 1:
-                raise JournalIntegrityError("writer lock sidecar must be a single-link regular file")
-
-            # A Windows byte-range lock requires at least one byte. New lock files use
-            # a durable magic marker so later opens can reject deletion/recreation or
-            # unrelated-file substitution instead of silently establishing a new lease.
-            if created:
-                view = memoryview(_LOCK_MAGIC)
-                while view:
-                    written = os.write(fd, view)
-                    if written <= 0:
-                        raise OSError("writer lock sidecar initialization made no progress")
-                    view = view[written:]
-                os.fsync(fd)
-
+            if not stat.S_ISREG(opened.st_mode):
+                raise JournalIntegrityError("writer lock sidecar staging file is not regular")
+            self._write_lock_marker(fd, _LOCK_NEW_MAGIC)
             _acquire_process_lock(fd)
+            locked = True
+            try:
+                os.link(temp_path, self._lock_path)
+            except FileExistsError:
+                _release_process_lock(fd)
+                locked = False
+                os.close(fd)
+                fd = -1
+                try:
+                    os.unlink(temp_path)
+                except FileNotFoundError:
+                    pass
+                return None
+            except OSError as exc:
+                raise JournalIntegrityError("writer lock sidecar cannot be published atomically") from exc
 
-            os.lseek(fd, 0, os.SEEK_SET)
-            marker = os.read(fd, len(_LOCK_MAGIC) + 1)
-            if marker != _LOCK_MAGIC:
-                raise JournalIntegrityError("writer lock sidecar marker is invalid")
-
+            os.unlink(temp_path)
             current = os.lstat(self._lock_path)
             identity = (opened.st_dev, opened.st_ino)
-            if (
-                not stat.S_ISREG(current.st_mode)
-                or current.st_nlink != 1
-                or (current.st_dev, current.st_ino) != identity
-            ):
-                raise JournalIntegrityError("writer lock sidecar identity is ambiguous")
+            if not stat.S_ISREG(current.st_mode) or (current.st_dev, current.st_ino) != identity:
+                raise JournalIntegrityError("writer lock sidecar identity is ambiguous after publish")
+            return fd, identity
         except BaseException:
-            try:
-                if created:
+            if fd >= 0:
+                if locked:
                     try:
-                        current = os.lstat(self._lock_path)
-                        opened = os.fstat(fd)
-                        if (current.st_dev, current.st_ino) == (opened.st_dev, opened.st_ino):
-                            os.unlink(self._lock_path)
+                        _release_process_lock(fd)
                     except OSError:
                         pass
-            finally:
-                try:
-                    _release_process_lock(fd)
-                except OSError:
-                    pass
                 os.close(fd)
+            try:
+                os.unlink(temp_path)
+            except FileNotFoundError:
+                pass
             raise
 
-        self._writer_lock_fd = fd
-        self._writer_lock_identity = identity
-        self._writer_lock_created = created
+    def _acquire_writer_lock(self) -> None:
+        base_flags = os.O_RDWR | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
+
+        for _attempt in range(8):
+            try:
+                staged = self._try_publish_locked_sidecar(base_flags)
+                if staged is not None:
+                    staged_fd, staged_identity = staged
+                    self._writer_lock_fd = staged_fd
+                    self._writer_lock_identity = staged_identity
+                    self._writer_lock_created = True
+                    return
+            except FileNotFoundError:
+                continue
+
+            try:
+                fd = os.open(self._lock_path, base_flags, 0o600)
+            except FileNotFoundError:
+                continue
+            except OSError as exc:
+                raise JournalIntegrityError("writer lock sidecar is not safely openable") from exc
+
+            locked = False
+            try:
+                opened = os.fstat(fd)
+                if not stat.S_ISREG(opened.st_mode):
+                    raise JournalIntegrityError("writer lock sidecar must be a regular file")
+                _acquire_process_lock(fd)
+                locked = True
+                marker = self._read_lock_marker(fd)
+                if marker not in {_LOCK_MAGIC, _LOCK_NEW_MAGIC}:
+                    raise JournalIntegrityError("writer lock sidecar marker is invalid")
+
+                current = os.lstat(self._lock_path)
+                identity = (opened.st_dev, opened.st_ino)
+                if not stat.S_ISREG(current.st_mode) or (current.st_dev, current.st_ino) != identity:
+                    raise JournalIntegrityError("writer lock sidecar identity is ambiguous")
+            except BaseException:
+                if locked:
+                    try:
+                        _release_process_lock(fd)
+                    except OSError:
+                        pass
+                os.close(fd)
+                raise
+
+            self._writer_lock_fd = fd
+            self._writer_lock_identity = identity
+            self._writer_lock_created = marker == _LOCK_NEW_MAGIC
+            return
+
+        raise JournalIntegrityError("writer lock sidecar path was unstable during acquisition")
+
+    def _discard_fresh_writer_lock_path(self) -> None:
+        """Remove a newly published unbound sidecar while its inode is still locked.
+
+        If the platform refuses deletion, the NEW marker remains fail-closed: later
+        writers will continue to reject it for a non-empty journal.
+        """
+        if not self._writer_lock_created or self._writer_lock_identity is None:
+            return
+        try:
+            current = os.lstat(self._lock_path)
+            if (current.st_dev, current.st_ino) == self._writer_lock_identity:
+                os.unlink(self._lock_path)
+        except OSError:
+            pass
+
+    def _bind_fresh_writer_lock(self) -> None:
+        if not self._writer_lock_created:
+            return
+        fd = self._writer_lock_fd
+        if fd is None:
+            raise JournalLockedError("forensic session journal writer lock is not held")
+        try:
+            self._assert_writer_lock_continuity()
+            self._write_lock_marker(fd, _LOCK_MAGIC)
+        except OSError as exc:
+            self._uncertain = True
+            self._release_writer_lock()
+            raise JournalUncertainError(
+                "writer lock sidecar durability is uncertain; reopen and reverify before continuing"
+            ) from exc
+        self._writer_lock_created = False
 
     def _assert_writer_lock_continuity(self) -> None:
         fd = self._writer_lock_fd
@@ -523,11 +597,7 @@ class ForensicSessionJournal:
             current = os.lstat(self._lock_path)
         except FileNotFoundError as exc:
             raise JournalIntegrityError("writer lock sidecar disappeared while writer was active") from exc
-        if (
-            not stat.S_ISREG(current.st_mode)
-            or current.st_nlink != 1
-            or (current.st_dev, current.st_ino) != identity
-        ):
+        if not stat.S_ISREG(current.st_mode) or (current.st_dev, current.st_ino) != identity:
             raise JournalIntegrityError("writer lock sidecar identity changed while writer was active")
 
     def _release_writer_lock(self) -> None:
@@ -567,8 +637,6 @@ class ForensicSessionJournal:
 
         flags = os.O_WRONLY | os.O_APPEND | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
         if self._expected_file_identity is None:
-            # The first record may create a missing journal, but it must win creation
-            # atomically. Once any record exists, silent recreation is forbidden.
             flags |= os.O_CREAT | os.O_EXCL
 
         fd: int | None = None

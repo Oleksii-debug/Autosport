@@ -103,11 +103,35 @@ class ScenarioSearchEngine:
         self.sample_count = _require_positive_integer(sample_count, field="sample_count")
         self.seed = _require_integer(seed, field="seed")
 
+    @staticmethod
+    def _canonical_groups(groups: list[ScenarioGroup]) -> list[ScenarioGroup]:
+        """Return one caller-order-independent scenario-space representation."""
+        canonical = [
+            ScenarioGroup(
+                group.group_id,
+                tuple(
+                    sorted(
+                        group.outcomes,
+                        key=lambda outcome: outcome.quote_key,
+                    )
+                ),
+            )
+            for group in groups
+        ]
+        return sorted(
+            canonical,
+            key=lambda group: (
+                group.group_id,
+                tuple(outcome.quote_key for outcome in group.outcomes),
+            ),
+        )
+
     def analyse(self, tickets: list[PaperTicket], groups: list[ScenarioGroup]) -> ScenarioSearchReport:
         open_tickets = [ticket for ticket in tickets if ticket.status is TicketStatus.OPEN]
         if not open_tickets:
             zero = Decimal("0")
             return ScenarioSearchReport("exact", 1, 1, zero, zero, zero, zero, True, True, zero, "exact")
+        groups = self._canonical_groups(groups)
         mapping = self._validate_and_map(open_tickets, groups)
         total_states = math.prod(len(group.outcomes) for group in groups)
         floor = -sum((ticket.stake for ticket in open_tickets), Decimal("0"))

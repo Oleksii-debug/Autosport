@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 from decimal import Decimal, InvalidOperation
 from typing import Iterable
 

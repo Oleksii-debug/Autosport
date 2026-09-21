@@ -19,7 +19,7 @@ class SimulationModelBindingTests(unittest.TestCase):
             config_id="learning-config-v1",
             data_id="dataset-snapshot-v1",
             protocol_id="reward-hacking-protocol-v1",
-            cutoff_ts="2026-09-21T09:00:00+00:00",
+            cutoff_ts="2026-09-21T10:00:00+00:00",
             seed=21,
         )
         environment = CausalLearningEnvironment(

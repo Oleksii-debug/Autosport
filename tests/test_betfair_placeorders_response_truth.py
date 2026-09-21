@@ -45,6 +45,7 @@ def _payload(
     echoed_size: object | None = None,
     echoed_price: object | None = None,
     bet_id: str | None = None,
+    order_status: str | None = None,
     handicap: object = 0,
     persistence_type: str = "LAPSE",
     response_id: object = 1,
@@ -82,6 +83,8 @@ def _payload(
         report["sizeMatched"] = size_matched
     if bet_id is not None:
         report["betId"] = bet_id
+    if order_status is not None:
+        report["orderStatus"] = order_status
     if instruction_status == "FAILURE":
         report["errorCode"] = "BET_TAKEN_OR_LAPSED"
 
@@ -149,12 +152,67 @@ def test_explicit_zero_failure_remains_rejected() -> None:
         include_size_matched=True,
         size_matched=0,
         bet_id="bet-rejected-123",
+        order_status="EXECUTION_COMPLETE",
     )
 
     report = _parse(payload, action)
 
     assert report.instruction.size_matched == Decimal("0")
+    assert report.instruction.order_status == "EXECUTION_COMPLETE"
     assert _report_outcome(report, action) is PlaceOrdersOutcome.REJECTED
+
+
+def test_terminal_zero_effect_failure_without_bet_id_remains_rejected() -> None:
+    action = _action()
+    payload = _payload(
+        action,
+        execution_status="FAILURE",
+        instruction_status="FAILURE",
+        include_size_matched=True,
+        size_matched=0,
+        bet_id=None,
+        order_status="EXECUTION_COMPLETE",
+    )
+
+    report = _parse(payload, action)
+
+    assert report.instruction.bet_id is None
+    assert _report_outcome(report, action) is PlaceOrdersOutcome.REJECTED
+
+
+def test_failure_with_executable_order_status_is_ambiguous() -> None:
+    action = _action()
+    payload = _payload(
+        action,
+        execution_status="FAILURE",
+        instruction_status="FAILURE",
+        include_size_matched=True,
+        size_matched=0,
+        bet_id="bet-contradictory",
+        order_status="EXECUTABLE",
+    )
+
+    with pytest.raises(BetfairPlaceOrdersAmbiguous, match="EXECUTABLE"):
+        _parse(payload, action)
+
+
+def test_success_zero_fill_with_bet_id_is_known_placed_unmatched() -> None:
+    action = _action()
+    payload = _payload(
+        action,
+        execution_status="SUCCESS",
+        instruction_status="SUCCESS",
+        include_size_matched=True,
+        size_matched=0,
+        average_price_matched=0,
+        bet_id="bet-unmatched",
+        order_status="EXECUTABLE",
+    )
+
+    report = _parse(payload, action)
+
+    assert report.instruction.order_status == "EXECUTABLE"
+    assert _report_outcome(report, action) is PlaceOrdersOutcome.PLACED_UNMATCHED
 
 @pytest.mark.parametrize(
     ("handicap", "persistence_type"),

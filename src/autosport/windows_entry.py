@@ -9,7 +9,7 @@ _MACHINE_MODE_ARITY = {
     "--keyboard-audit-output": 2,
     "--restart-recovery-audit-output": 2,
     "--restart-recovery-stage-child": 3,
-    "--restart-restart-recovery-recover-child": 3,
+    "--restart-recovery-recover-child": 3,
     "--research-demo-audit-output": 3,
 }
 

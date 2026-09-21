@@ -800,11 +800,12 @@ class SportMemoryRuntime:
         decision_cutoff: str,
         consumed_at: str,
     ) -> tuple[DecisionMemoryConsumption, DecisionMemoryConsumption]:
-        """Durably bind both exact participant memories to one decision identity.
+        """Durably publish both exact participant bindings as one checkpoint write.
 
-        The two existing durable writes are idempotent. A crash after the first
-        leaves an inert partial witness; retrying the same decision completes the
-        second binding without rewriting historical evidence.
+        No checkpoint containing only one member is emitted by this path. If a
+        predecessor head crashed after its first member write, the surviving
+        durable member supplies the canonical consumed_at on retry so the missing
+        counterpart can be recovered without relabelling the existing witness.
         """
         if type(matchup) is not SportMemoryMatchupEvidence:
             raise TypeError("matchup must be SportMemoryMatchupEvidence")
@@ -813,30 +814,99 @@ class SportMemoryRuntime:
             != self.authority_generation_sha256
         ):
             raise SportMemoryError("matchup authority generation changed")
-        cutoff_instant = _instant("decision_cutoff", decision_cutoff)
+        decision = _text("decision_id", decision_id)
+        cutoff = _text("decision_cutoff", decision_cutoff)
+        requested_consumed = _text("consumed_at", consumed_at)
+        cutoff_instant = _instant("decision_cutoff", cutoff)
+        if _instant("consumed_at", requested_consumed) < cutoff_instant:
+            raise SportMemoryError("consumption cannot precede decision cutoff")
         if _instant("matchup as_of", matchup.as_of) != cutoff_instant:
             raise SportMemoryError(
                 "matchup as_of must equal decision cutoff"
             )
         self.verify_matchup_evidence(matchup)
 
-        subject = self.record_consumption(
-            decision_id=decision_id,
-            memory_id=matchup.subject_memory_id,
-            decision_cutoff=decision_cutoff,
-            consumed_at=consumed_at,
-            expected_scope=matchup.scope,
-            expected_view=matchup.identity_view,
+        artifacts = (
+            self.get(matchup.subject_memory_id),
+            self.get(matchup.opponent_memory_id),
         )
-        opponent = self.record_consumption(
-            decision_id=decision_id,
-            memory_id=matchup.opponent_memory_id,
-            decision_cutoff=decision_cutoff,
-            consumed_at=consumed_at,
-            expected_scope=matchup.scope,
-            expected_view=matchup.identity_view,
+        for artifact in artifacts:
+            if artifact.scope != matchup.scope:
+                raise SportMemoryError(
+                    "sport memory scope mismatch; refusing cross-domain reuse"
+                )
+            if artifact.identity_view is not matchup.identity_view:
+                raise SportMemoryError(
+                    "sport memory identity view mismatch; refusing causal-view reuse"
+                )
+
+        existing_records: list[DecisionMemoryConsumption] = []
+        for artifact in artifacts:
+            existing_id = self._decision_consumptions.get(
+                (decision, artifact.memory_id)
+            )
+            if existing_id is not None:
+                existing_records.append(self._consumptions[existing_id])
+
+        canonical_consumed = requested_consumed
+        if existing_records:
+            if any(record.decision_cutoff != cutoff for record in existing_records):
+                raise SportMemoryError("decision consumption semantic drift")
+            canonical_consumed = existing_records[0].consumed_at
+            if any(
+                record.consumed_at != canonical_consumed
+                for record in existing_records[1:]
+            ):
+                raise SportMemoryError("matchup consumption timestamp drift")
+
+        resolved: dict[str, DecisionMemoryConsumption] = {}
+        staged: list[tuple[tuple[str, str], DecisionMemoryConsumption]] = []
+        for artifact in artifacts:
+            payload = {
+                "decision_id": decision,
+                "memory_id": artifact.memory_id,
+                "decision_cutoff": cutoff,
+                "consumed_at": canonical_consumed,
+            }
+            record = DecisionMemoryConsumption(
+                consumption_id=_digest(payload),
+                **payload,
+            )
+            self._validate_consumption(record, artifact)
+            key = (decision, artifact.memory_id)
+            existing_id = self._decision_consumptions.get(key)
+            if existing_id is not None:
+                existing = self._consumptions[existing_id]
+                if (
+                    existing.decision_cutoff,
+                    existing.consumed_at,
+                ) != (cutoff, canonical_consumed):
+                    raise SportMemoryError("decision consumption semantic drift")
+                resolved[artifact.memory_id] = existing
+                continue
+            self._assert_no_participant_rebind(
+                decision_id=decision,
+                artifact=artifact,
+            )
+            staged.append((key, record))
+            resolved[artifact.memory_id] = record
+
+        for key, record in staged:
+            self._consumptions[record.consumption_id] = record
+            self._decision_consumptions[key] = record.consumption_id
+        try:
+            if staged:
+                self._persist()
+        except Exception:
+            for key, record in staged:
+                self._decision_consumptions.pop(key, None)
+                self._consumptions.pop(record.consumption_id, None)
+            raise
+
+        return (
+            resolved[matchup.subject_memory_id],
+            resolved[matchup.opponent_memory_id],
         )
-        return subject, opponent
 
     def _assert_no_participant_rebind(
         self,

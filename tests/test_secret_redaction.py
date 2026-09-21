@@ -1,0 +1,126 @@
+from __future__ import annotations
+
+import os
+import unittest
+from unittest import mock
+
+from autosport.dataset_worker import _safe_worker_error
+from autosport.diagnostic import _render_exception
+from autosport.replay_worker import _terminal_error
+from autosport.secret_redaction import (
+    REDACTED,
+    is_sensitive_key,
+    redact_operator_text,
+    redact_operator_value,
+    safe_exception_text,
+)
+
+
+class SecretRedactionTests(unittest.TestCase):
+    def test_sensitive_key_detection_is_case_and_separator_insensitive(self) -> None:
+        for key in (
+            "api_key",
+            "Api-Key",
+            "X-API-Key",
+            "AUTOSPORT_PARLAYAPI_KEY",
+            "accessToken",
+            "REFRESH_TOKEN",
+            "password",
+            "Authorization",
+            "client_secret",
+            "credentials",
+        ):
+            with self.subTest(key=key):
+                self.assertTrue(is_sensitive_key(key))
+
+        for key in ("market_key", "token_count", "secretary", "authorization_mode"):
+            with self.subTest(key=key):
+                self.assertFalse(is_sensitive_key(key))
+
+    def test_text_redacts_key_values_bearer_url_userinfo_and_sensitive_query(self) -> None:
+        source = (
+            "api_key=alpha123 password:'bravo456' Authorization: Bearer charlie789 "
+            "url=https://user:delta999@example.test/path?token=echo123&market=match"
+        )
+        redacted = redact_operator_text(source)
+
+        for secret in ("alpha123", "bravo456", "charlie789", "user", "delta999", "echo123"):
+            self.assertNotIn(secret, redacted)
+        self.assertIn("api_key=" + REDACTED, redacted)
+        self.assertIn("password:'" + REDACTED + "'", redacted)
+        self.assertIn("Bearer " + REDACTED, redacted)
+        self.assertIn("https://" + REDACTED + "@example.test/path", redacted)
+        self.assertIn("market=match", redacted)
+
+    def test_nested_sensitive_keys_are_redacted_without_hiding_normal_config(self) -> None:
+        source = {
+            "provider": "demo",
+            "nested": {
+                "Api_Key": "alpha",
+                "PASSWORD": "bravo",
+                "region": "eu",
+            },
+            "items": [
+                {"authorization": "Bearer charlie", "market": "winner"},
+                "plain",
+            ],
+        }
+
+        redacted = redact_operator_value(source)
+
+        self.assertEqual(redacted["provider"], "demo")
+        self.assertEqual(redacted["nested"]["region"], "eu")
+        self.assertEqual(redacted["nested"]["Api_Key"], REDACTED)
+        self.assertEqual(redacted["nested"]["PASSWORD"], REDACTED)
+        self.assertEqual(redacted["items"][0]["authorization"], REDACTED)
+        self.assertEqual(redacted["items"][0]["market"], "winner")
+        self.assertEqual(redacted["items"][1], "plain")
+
+    def test_current_parlay_environment_secret_is_redacted_even_when_unlabelled(self) -> None:
+        secret = "parlay-positive-control-secret"
+        with mock.patch.dict(
+            os.environ,
+            {"AUTOSPORT_PARLAYAPI_KEY": secret},
+            clear=False,
+        ):
+            rendered = redact_operator_text("provider failure echoed " + secret)
+        self.assertNotIn(secret, rendered)
+        self.assertIn(REDACTED, rendered)
+
+    def test_safe_exception_and_existing_worker_renderers_redact_secrets(self) -> None:
+        secret = "worker-secret-987"
+        error = RuntimeError("api_key=" + secret + " market=winner")
+
+        with mock.patch.dict(
+            os.environ,
+            {"AUTOSPORT_PARLAYAPI_KEY": secret},
+            clear=False,
+        ):
+            outputs = (
+                safe_exception_text(error),
+                _safe_worker_error(error),
+                _terminal_error(error),
+                _render_exception(error),
+            )
+
+        for rendered in outputs:
+            with self.subTest(rendered=rendered):
+                self.assertNotIn(secret, rendered)
+                self.assertIn("RuntimeError:", rendered)
+                self.assertIn("market=winner", rendered)
+
+    def test_hostile_exception_string_still_terminalizes_without_secret(self) -> None:
+        class HostileRenderedString(str):
+            def __format__(self, spec: str) -> str:
+                raise RuntimeError("format must not run")
+
+        class HostileError(BaseException):
+            def __str__(self) -> str:
+                return HostileRenderedString("token=hidden-token-123")
+
+        rendered = safe_exception_text(HostileError())
+        self.assertEqual(rendered, "HostileError: token=" + REDACTED)
+
+
+if __name__ == "__main__":
+    unittest.main()

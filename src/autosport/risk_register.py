@@ -197,6 +197,15 @@ _STATUS_RANK = {
 }
 
 
+def _record_sort_key(record: RiskRecord) -> tuple[bool, int, int, str]:
+    return (
+        record.status is RiskStatus.RESOLVED,
+        _SEVERITY_RANK[record.severity],
+        _STATUS_RANK[record.status],
+        record.risk_id,
+    )
+
+
 @dataclass(frozen=True, slots=True)
 class RiskRegisterSnapshot:
     generated_at: str
@@ -206,6 +215,7 @@ class RiskRegisterSnapshot:
         object.__setattr__(self, "generated_at", _canonical_utc(self.generated_at, "generated_at"))
         if type(self.records) is not tuple or any(type(item) is not RiskRecord for item in self.records):
             raise ValueError("records must be an exact tuple of RiskRecord")
+        object.__setattr__(self, "records", tuple(sorted(self.records, key=_record_sort_key)))
         ids: set[str] = set()
         evidence_by_identity: dict[tuple[str, str], str] = {}
         for record in self.records:
@@ -228,18 +238,7 @@ class RiskRegisterSnapshot:
         materialized = tuple(records)
         if any(type(item) is not RiskRecord for item in materialized):
             raise ValueError("records must contain only exact RiskRecord values")
-        ordered = tuple(
-            sorted(
-                materialized,
-                key=lambda item: (
-                    item.status is RiskStatus.RESOLVED,
-                    _SEVERITY_RANK[item.severity],
-                    _STATUS_RANK[item.status],
-                    item.risk_id,
-                ),
-            )
-        )
-        return cls(generated_at=generated_at, records=ordered)
+        return cls(generated_at=generated_at, records=materialized)
 
     @property
     def unresolved_count(self) -> int:

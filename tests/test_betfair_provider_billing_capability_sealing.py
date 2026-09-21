@@ -84,3 +84,33 @@ def test_provider_callback_cannot_rebind_parser_mid_capture() -> None:
         billing._provider_text = transport.original_provider_text
 
     assert transport.calls == 1
+
+
+def test_pre_call_module_rebind_cannot_replace_rpc_or_decoder() -> None:
+    original_rpc = billing._read_rpc
+    original_decode = billing._decode_json
+    attacker_called = {"rpc": False, "decode": False}
+
+    def attacker_rpc(*_args, **_kwargs):
+        attacker_called["rpc"] = True
+        raise AssertionError("module mirror RPC must not execute")
+
+    def attacker_decode(*_args, **_kwargs):
+        attacker_called["decode"] = True
+        raise AssertionError("module mirror decoder must not execute")
+
+    billing._read_rpc = attacker_rpc  # type: ignore[assignment]
+    billing._decode_json = attacker_decode  # type: ignore[assignment]
+    transport = _MissingCurrencyTransport(rebind_mid_call=False)
+    try:
+        with pytest.raises(
+            BetfairReadOnlyError,
+            match="currency_code is missing from provider response",
+        ):
+            billing.read_betfair_provider_billing_inputs(_client(transport))
+    finally:
+        billing._read_rpc = original_rpc
+        billing._decode_json = original_decode
+
+    assert attacker_called == {"rpc": False, "decode": False}
+    assert transport.calls == 1

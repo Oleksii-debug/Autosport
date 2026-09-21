@@ -987,3 +987,38 @@ def test_drift_evidence_is_causal_durable_and_has_no_promotion_authority(tmp_pat
             evidence=(DriftEvidence("mse", 0.30, 0.60, 0.10, "2026-01-09T00:00:00+00:00"),),
             recorded_at=T7,
         )
+
+
+class _ForbiddenPredictionFieldModel:
+    def __init__(self, model_id: str, training_cutoff: str, forbidden_field: str) -> None:
+        self.model_id = model_id
+        self.training_cutoff = training_cutoff
+        self.forbidden_field = forbidden_field
+
+    def predict(self, point, *, decision_at: str) -> float:
+        return float(getattr(point, self.forbidden_field))
+
+
+class _ForbiddenPredictionFieldFactory:
+    model_family = "adversarial-target-reader-v1"
+
+    def __init__(self, forbidden_field: str) -> None:
+        self.forbidden_field = forbidden_field
+
+    def fit(self, model_id, points, *, training_cutoff):
+        return _ForbiddenPredictionFieldModel(
+            model_id,
+            training_cutoff,
+            self.forbidden_field,
+        )
+
+
+@pytest.mark.parametrize("forbidden_field", ("target", "target_available_at"))
+def test_walk_forward_plugin_cannot_read_evaluation_label(forbidden_field: str):
+    with pytest.raises(AttributeError, match=forbidden_field):
+        WalkForwardRunner.run(
+            _points(),
+            minimum_train_size=2,
+            model_factory=_ForbiddenPredictionFieldFactory(forbidden_field),
+        )
+

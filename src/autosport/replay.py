@@ -156,6 +156,7 @@ class ReplayEngine:
         on_event: Callable[[MarketEvent], None],
         speed: float = 0.0,
         run_id: str | None = None,
+        on_raw_event: Callable[[MarketEvent], object] | None = None,
     ) -> ReplayRun:
         # Claim before any strategy-visible callback. The raw completion capability
         # remains local to this run; the firewall stores only its digest. A failed
@@ -172,11 +173,17 @@ class ReplayEngine:
                     time.sleep(max(0.0, current - previous) / speed)
                 previous = current
 
-            # Keep every raw arrival in self.events for audit, but expose only
-            # the same source-local current-state transitions that the live
-            # MarketMirror would make strategy-visible. Lower sequences and
-            # exact duplicates are retained yet suppressed; conflicting reuse
-            # of one source-local sequence fails closed via MarketMirror.apply.
+            # Preserve the live durable-first boundary: every causally ordered
+            # raw arrival may be persisted before source-local current-state
+            # semantics decide whether it is strategy-visible. The callback gets
+            # a detached value so it cannot mutate the engine's hash-bound state.
+            if on_raw_event is not None:
+                on_raw_event(_snapshot_replay_event(event))
+
+            # Expose only the same source-local current-state transitions that the
+            # live MarketMirror would make strategy-visible. Lower sequences and
+            # exact duplicates are retained yet suppressed; conflicting sequence
+            # reuse fails closed after the raw durable boundary has observed it.
             update = replay_mirror.apply(event)
             count += 1
             if update.status == MirrorUpdate.APPLIED:

@@ -5,7 +5,10 @@ from contextlib import redirect_stdout
 from io import StringIO
 from pathlib import Path
 
-from autosport.ingestion_negative_evidence import main, project_ingestion_negative_evidence
+from autosport.ingestion_negative_evidence import (
+    main,
+    project_ingestion_negative_evidence,
+)
 
 
 def _status(**overrides):
@@ -146,6 +149,30 @@ class IngestionNegativeEvidenceTests(unittest.TestCase):
         self.assertEqual(exit_code, 0)
         self.assertFalse(payload["has_negative_evidence"])
         self.assertEqual(payload["successful_fraction"], 1.0)
+
+    def test_unknown_lifecycle_state_is_explicit_invalid_evidence(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = self._write(Path(tmp), _status(state="mystery"))
+            evidence = project_ingestion_negative_evidence(path)
+
+        self.assertEqual(evidence.evidence_state, "invalid")
+        self.assertEqual(evidence.reason_codes, ("status_unknown_lifecycle_state",))
+
+    def test_wrong_status_kind_is_explicit_invalid_evidence(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = self._write(Path(tmp), _status(kind="other-authority"))
+            evidence = project_ingestion_negative_evidence(path)
+
+        self.assertEqual(evidence.evidence_state, "invalid")
+        self.assertEqual(evidence.reason_codes, ("status_wrong_kind",))
+
+    def test_non_object_json_is_explicit_invalid_evidence(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = self._write(Path(tmp), ["not", "a", "status"])
+            evidence = project_ingestion_negative_evidence(path)
+
+        self.assertEqual(evidence.evidence_state, "invalid")
+        self.assertEqual(evidence.reason_codes, ("status_not_object",))
 
     def test_invalid_expected_cycles_is_caller_error(self):
         with self.assertRaises(ValueError):

@@ -58,12 +58,20 @@ class StrategyExternalValidityReport:
     strategy_version_id: str
     config_sha256: str
     model_version_ids: tuple[str, ...]
+    research_protocol_id: str
+    research_protocol_sha256: str
+    primary_metric: str
+    uncertainty_method: str
+    portfolio_before_ids: tuple[str, ...]
+    cost_contract_sha256s: tuple[str, ...]
+    execution_model_ids: tuple[str, ...]
     universe_id: str
     universe_sha256: str
     membership_sha256: str
     ledger_sha256: str
     baseline_protocol_sha256: str
     baseline_report_sha256: str
+    candidate_evaluation_sha256: str
     evaluated_row_count: int
     stage_counts: tuple[tuple[str, int], ...]
     attrition_counts: tuple[tuple[str, int], ...]
@@ -84,12 +92,20 @@ class StrategyExternalValidityReport:
             "strategy_version_id": self.strategy_version_id,
             "config_sha256": self.config_sha256,
             "model_version_ids": list(self.model_version_ids),
+            "research_protocol_id": self.research_protocol_id,
+            "research_protocol_sha256": self.research_protocol_sha256,
+            "primary_metric": self.primary_metric,
+            "uncertainty_method": self.uncertainty_method,
+            "portfolio_before_ids": list(self.portfolio_before_ids),
+            "cost_contract_sha256s": list(self.cost_contract_sha256s),
+            "execution_model_ids": list(self.execution_model_ids),
             "universe_id": self.universe_id,
             "universe_sha256": self.universe_sha256,
             "membership_sha256": self.membership_sha256,
             "ledger_sha256": self.ledger_sha256,
             "baseline_protocol_sha256": self.baseline_protocol_sha256,
             "baseline_report_sha256": self.baseline_report_sha256,
+            "candidate_evaluation_sha256": self.candidate_evaluation_sha256,
             "evaluated_row_count": self.evaluated_row_count,
             "stage_counts": [list(x) for x in self.stage_counts],
             "attrition_counts": [list(x) for x in self.attrition_counts],
@@ -186,12 +202,22 @@ def evaluate_strategy_external_validity(
         model_version_ids=tuple(sorted({
             row.model_version_id for row in rows if row.model_version_id is not None
         })),
+        research_protocol_id=ledger.universe.research_protocol_id,
+        research_protocol_sha256=ledger.universe.protocol_sha256,
+        primary_metric=protocol.primary_metric,
+        uncertainty_method=protocol.uncertainty_method,
+        portfolio_before_ids=tuple(sorted({row.portfolio_before_id for row in rows})),
+        cost_contract_sha256s=tuple(sorted({row.cost_contract_sha256 for row in rows})),
+        execution_model_ids=tuple(sorted({
+            row.execution_model_id for row in rows if row.execution_model_id is not None
+        })),
         universe_id=ledger.universe.universe_id,
         universe_sha256=ledger.universe.universe_sha256,
         membership_sha256=ledger.universe.membership_sha256,
         ledger_sha256=ledger.ledger_sha256,
         baseline_protocol_sha256=protocol.identity_sha256,
         baseline_report_sha256=baseline_report.identity_sha256,
+        candidate_evaluation_sha256=candidate.identity_sha256,
         evaluated_row_count=len(rows),
         stage_counts=cohort.stage_counts,
         attrition_counts=cohort.attrition_counts,

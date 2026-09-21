@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
 from datetime import datetime, timezone
 from enum import Enum
 
@@ -14,25 +13,6 @@ class OutcomeRevisionRelation(str, Enum):
     STRICT_SUCCESSOR = "strict_successor"
 
 
-@dataclass(frozen=True, slots=True)
-class MarketOutcomeRevisionDecision:
-    """Deterministic result of a fail-closed outcome-authority lineage check.
-
-    The object does not mint or widen outcome authority. It only records why an
-    already-verified candidate may replace an already-verified predecessor.
-    """
-
-    relation: OutcomeRevisionRelation
-    previous_authority_sha256: str
-    current_authority_sha256: str
-    previous_source_revision: str
-    current_source_revision: str
-    previous_causal_cutoff: str
-    current_causal_cutoff: str
-    previous_observed_at: str
-    current_observed_at: str
-
-
 def _utc_timestamp(value: str) -> datetime:
     parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
     if parsed.tzinfo is None or parsed.utcoffset() is None:
@@ -43,8 +23,8 @@ def _utc_timestamp(value: str) -> datetime:
 def validate_market_outcome_authority_revision(
     previous: MarketSettlementOutcomeAuthority,
     current: MarketSettlementOutcomeAuthority,
-) -> MarketOutcomeRevisionDecision:
-    """Validate a replacement inside one exact provider/market authority lineage.
+) -> OutcomeRevisionRelation:
+    """Validate replacement inside one exact provider/market authority lineage.
 
     Both inputs must already be canonical verified authorities. This function
     prevents a cache/store/restart consumer from treating an older or ambiguous
@@ -56,6 +36,10 @@ def validate_market_outcome_authority_revision(
     observation time does not move backwards. A genuine replacement must advance
     the causal cutoff strictly. Same-cutoff disagreements, causal rollback,
     observation rollback, identity drift, and settlement/protocol drift fail closed.
+
+    The return value is only a relation label. It is deliberately not a durable
+    evidence or authority object and cannot mint outcome, settlement, or execution
+    authority.
     """
 
     if not isinstance(previous, MarketSettlementOutcomeAuthority):
@@ -95,18 +79,6 @@ def validate_market_outcome_authority_revision(
             raise ValueError(
                 "conflicting market outcome evidence at identical causal cutoff"
             )
-        relation = OutcomeRevisionRelation.SAME_REVISION
-    else:
-        relation = OutcomeRevisionRelation.STRICT_SUCCESSOR
+        return OutcomeRevisionRelation.SAME_REVISION
 
-    return MarketOutcomeRevisionDecision(
-        relation=relation,
-        previous_authority_sha256=previous.authority_sha256,
-        current_authority_sha256=current.authority_sha256,
-        previous_source_revision=previous.source_revision,
-        current_source_revision=current.source_revision,
-        previous_causal_cutoff=previous.causal_cutoff,
-        current_causal_cutoff=current.causal_cutoff,
-        previous_observed_at=previous.observed_at,
-        current_observed_at=current.observed_at,
-    )
+    return OutcomeRevisionRelation.STRICT_SUCCESSOR

@@ -226,7 +226,7 @@ def summarize_description(
         }
         if not widget.name:
             failures.append(f"automation_id={normalized_automation_id}: missing accessible name")
-        expected_role = _EXPECTEDED_ROLES[normalized_automation_id]
+        expected_role = _EXPECTED_ROLES[normalized_automation_id]
         if role_name != expected_role:
             actual_role = role_name if role_name is not None else "NONE"
             failures.append(

@@ -154,55 +154,52 @@ def _credential_binding(credentials: BetfairSessionCredentials) -> bytes:
     return hmac.digest(_PROCESS_HMAC_KEY, material, "sha256")
 
 
-def _install_client_origin_registry() -> WeakKeyDictionary:
-    """Record clients created with the canonical production transport and clock path."""
+_CANONICAL_CLIENT_ORIGINS: WeakKeyDictionary = WeakKeyDictionary()
 
-    origins: WeakKeyDictionary = WeakKeyDictionary()
-    raw_init = BetfairReadOnlyClient.__init__
-    if getattr(raw_init, "_autosport_k07_origin_registry", False):
-        existing = getattr(raw_init, "_autosport_k07_origins", None)
-        if isinstance(existing, WeakKeyDictionary):
-            return existing
 
-    def authoritative_init(
-        self: BetfairReadOnlyClient,
-        credentials,
-        *,
-        transport=None,
-        timeout_seconds: float = 10.0,
-        clock=None,
-        venue_id: str = "betfair",
-        account_id: str = "default-account",
-    ) -> None:
-        production_origin = transport is None and clock is None
-        raw_init(
-            self,
-            credentials,
-            transport=transport,
-            timeout_seconds=timeout_seconds,
-            clock=clock,
-            venue_id=venue_id,
-            account_id=account_id,
+def build_betfair_authenticated_client(
+    credentials: BetfairSessionCredentials,
+    *,
+    timeout_seconds: float = 10.0,
+    account_label: str = "authenticated-account",
+) -> BetfairReadOnlyClient:
+    """Create one canonical client whose authenticated origin K07 may attest.
+
+    K07 owns this narrow factory instead of rewriting BetfairReadOnlyClient.__init__
+    at import time. Directly constructed clients remain valid read-only clients,
+    but they do not gain K07 provenance merely because this module was imported.
+    """
+
+    if type(credentials) is not BetfairSessionCredentials:
+        raise BetfairAccountIdentityError(
+            "authenticated context requires canonical BetfairSessionCredentials"
         )
-        if production_origin and type(self) is BetfairReadOnlyClient:
-            try:
-                binding = _credential_binding(self._credentials)
-            except (AttributeError, BetfairAccountIdentityError):
-                return
-            origins[self] = _CanonicalClientOrigin(
-                self._transport,
-                self._clock,
-                self._credentials,
-                binding,
-            )
+    binding = _credential_binding(credentials)
+    client = BetfairReadOnlyClient(
+        credentials,
+        timeout_seconds=timeout_seconds,
+        venue_id=VENUE_ID,
+        account_id=account_label,
+    )
+    if (
+        type(client) is not BetfairReadOnlyClient
+        or type(client._transport) is not UrllibBetfairHttpTransport
+        or client._credentials is not credentials
+    ):
+        raise BetfairAccountIdentityError(
+            "canonical Betfair client factory produced invalid origin"
+        )
+    origin = _CanonicalClientOrigin(
+        client._transport,
+        client._clock,
+        client._credentials,
+        binding,
+    )
+    with _LOCK:
+        _CANONICAL_CLIENT_ORIGINS[client] = origin
+    return client
 
-    authoritative_init._autosport_k07_origin_registry = True  # type: ignore[attr-defined]
-    authoritative_init._autosport_k07_origins = origins  # type: ignore[attr-defined]
-    BetfairReadOnlyClient.__init__ = authoritative_init
-    return origins
 
-
-_CANONICAL_CLIENT_ORIGINS = _install_client_origin_registry()
 
 
 def resolve_betfair_authenticated_account_identity(

@@ -4,6 +4,7 @@ from datetime import datetime, timezone
 from decimal import Decimal
 from hashlib import sha256
 import json
+from threading import Event, Thread
 
 import pytest
 
@@ -46,6 +47,33 @@ class FakeTransport:
         return self.responses.pop(0)
 
 
+class FirstCallGateTransport(FakeTransport):
+    def __init__(self, responses: list[bytes]) -> None:
+        super().__init__(responses)
+        self.entered = Event()
+        self.release = Event()
+
+    def post(
+        self,
+        url: str,
+        *,
+        headers,
+        body: bytes,
+        timeout_seconds: float,
+    ) -> bytes:
+        first = not self.calls
+        if first:
+            self.entered.set()
+            if not self.release.wait(timeout=5):
+                raise AssertionError("test did not release provider read gate")
+        return super().post(
+            url,
+            headers=headers,
+            body=body,
+            timeout_seconds=timeout_seconds,
+        )
+
+
 def response(result: object, request_id: int) -> bytes:
     return json.dumps(
         {"jsonrpc": "2.0", "result": result, "id": request_id},
@@ -66,6 +94,19 @@ def account_details(*, discount_rate: object = 12.5) -> dict[str, object]:
     }
 
 
+def market_description() -> list[dict[str, object]]:
+    return [
+        {
+            "marketId": "1.234",
+            "description": {
+                "marketBaseRate": 5.0,
+                "discountAllowed": True,
+                "regulator": "MR_INT",
+            },
+        }
+    ]
+
+
 def client_for(*responses: bytes) -> tuple[BetfairReadOnlyClient, FakeTransport]:
     transport = FakeTransport(list(responses))
     client = BetfairReadOnlyClient(
@@ -80,19 +121,7 @@ def client_for(*responses: bytes) -> tuple[BetfairReadOnlyClient, FakeTransport]
 
 def test_reads_authenticated_account_and_exact_market_fee_inputs_with_causal_evidence():
     account_raw = response(account_details(), 1)
-    market_raw = response(
-        [
-            {
-                "marketId": "1.234",
-                "description": {
-                    "marketBaseRate": 5.0,
-                    "discountAllowed": True,
-                    "regulator": "MR_INT",
-                },
-            }
-        ],
-        2,
-    )
+    market_raw = response(market_description(), 2)
     client, transport = client_for(account_raw, market_raw)
 
     observation = read_betfair_execution_fee_inputs(client, market_id="1.234")
@@ -261,3 +290,85 @@ def test_instance_shadow_of_read_capability_fails_before_transport(method_name: 
         read_betfair_execution_fee_inputs(client, market_id="1.234")
 
     assert transport.calls == []
+
+
+def test_post_snapshot_identity_and_method_mutation_cannot_rebind_provider_evidence():
+    account_raw = response(account_details(), 1)
+    market_raw = response(market_description(), 2)
+    transport = FirstCallGateTransport([account_raw, market_raw])
+    client = BetfairReadOnlyClient(
+        BetfairSessionCredentials("app-secret", "session-secret"),
+        transport=transport,
+        clock=lambda: FIXED_NOW,
+        venue_id="betfair-exchange",
+        account_id="account-123",
+    )
+    result: list[object] = []
+    failures: list[BaseException] = []
+
+    def read() -> None:
+        try:
+            result.append(read_betfair_execution_fee_inputs(client, market_id="1.234"))
+        except BaseException as exc:  # pragma: no cover - surfaced below
+            failures.append(exc)
+
+    worker = Thread(target=read)
+    worker.start()
+    assert transport.entered.wait(timeout=5), "provider read did not reach deterministic gate"
+
+    # These mutations happen after snapshot/preflight while the first provider read
+    # is blocked. A validate-then-use implementation can bind authentic payloads to
+    # these forged identities or dynamically invoke the new method shadow.
+    client._venue_id = "forged-venue"
+    client._account_id = "forged-account"
+    client._observed_at = lambda: "2099-01-01T00:00:00+00:00"
+    client._next_request_id = lambda: 999
+    transport.release.set()
+    worker.join(timeout=5)
+
+    assert not worker.is_alive(), "fee-input read did not finish after gate release"
+    assert failures == []
+    assert len(result) == 1
+    observation = result[0]
+    assert observation.venue_id == "betfair-exchange"
+    assert observation.account_id == "account-123"
+    assert observation.account_evidence.observed_at == FIXED_NOW.isoformat()
+    assert observation.market_evidence.observed_at == FIXED_NOW.isoformat()
+    assert [json.loads(call["body"])["id"] for call in transport.calls] == [1, 2]
+
+
+def test_provider_callback_mutating_original_rpc_shadow_cannot_take_over_second_read():
+    account_raw = response(account_details(), 1)
+    market_raw = response(market_description(), 2)
+    transport = FakeTransport([account_raw, market_raw])
+    client = BetfairReadOnlyClient(
+        BetfairSessionCredentials("app-secret", "session-secret"),
+        transport=transport,
+        clock=lambda: FIXED_NOW,
+        venue_id="betfair-exchange",
+        account_id="account-123",
+    )
+    original_post = transport.post
+    calls = 0
+
+    def mutating_post(url, *, headers, body, timeout_seconds):
+        nonlocal calls
+        calls += 1
+        payload = original_post(
+            url,
+            headers=headers,
+            body=body,
+            timeout_seconds=timeout_seconds,
+        )
+        if calls == 1:
+            client._rpc = lambda *args, **kwargs: (_ for _ in ()).throw(
+                AssertionError("post-snapshot rpc shadow must never be invoked")
+            )
+        return payload
+
+    transport.post = mutating_post
+
+    observation = read_betfair_execution_fee_inputs(client, market_id="1.234")
+
+    assert observation.account_id == "account-123"
+    assert calls == 2

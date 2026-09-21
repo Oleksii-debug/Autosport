@@ -60,12 +60,38 @@ def _fraction(value: Decimal) -> Fraction:
     return Fraction(value)
 
 
+def _fraction_to_decimal_exact(value: Fraction) -> Decimal:
+    denominator = value.denominator
+    twos = 0
+    fives = 0
+    while denominator % 2 == 0:
+        denominator //= 2
+        twos += 1
+    while denominator % 5 == 0:
+        denominator //= 5
+        fives += 1
+    if denominator != 1:
+        raise BetfairOrderLiabilityError(
+            "exact Decimal conversion requires a finite decimal fraction"
+        )
+    scale = max(twos, fives)
+    scaled = (
+        value.numerator
+        * (2 ** (scale - twos))
+        * (5 ** (scale - fives))
+    )
+    sign = int(scaled < 0)
+    digits = tuple(int(ch) for ch in str(abs(scaled))) or (0,)
+    return Decimal((sign, digits, -scale))
+
+
 def _round_fraction_up(value: Fraction, quantum: Decimal) -> Decimal:
     quantum_fraction = _fraction(quantum)
     numerator = value.numerator * quantum_fraction.denominator
     denominator = value.denominator * quantum_fraction.numerator
     units = (numerator + denominator - 1) // denominator
-    rounded = Decimal(units) * quantum
+    rounded_fraction = units * quantum_fraction
+    rounded = _fraction_to_decimal_exact(rounded_fraction)
     if Fraction(rounded) < value:
         raise BetfairOrderLiabilityError(
             "currency reserve rounding lost exact rational coverage"
@@ -214,13 +240,7 @@ def derive_betfair_order_reserve(
             raw_reserve = backer_stake
         else:
             raw_reserve = backer_stake * (price_fraction - 1)
-        reserve = (
-            backer_stake_decimal * Decimal("2")
-            if each_way
-            else backer_stake_decimal
-            if side is BetfairOrderSide.BACK
-            else backer_stake_decimal * (limit_price - Decimal("1"))
-        )
+        reserve = _fraction_to_decimal_exact(raw_reserve)
         return BetfairOrderReserve(
             side=side,
             order_type=order_type,

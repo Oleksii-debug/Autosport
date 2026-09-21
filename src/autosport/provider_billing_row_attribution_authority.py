@@ -33,6 +33,31 @@ def _build_authority_capability():
     error_cls = ProviderBillingRowAuthorityError
     issuer = object()
     set_attr = object.__setattr__
+    get_attr = object.__getattribute__
+    evidence_field_names = (
+        "venue_id",
+        "provider_owner",
+        "app_id",
+        "app_version_id",
+        "currency_code",
+        "source_observed_at",
+        "source_evidence_sha256",
+        "statement_request_scope_sha256",
+        "statement_source_payload_sha256",
+        "statement_more_available",
+        "row_ref_id",
+        "row_item_date",
+        "row_amount",
+        "row_amount_sign",
+        "row_item_class",
+        "row_item_class_data_sha256",
+        "attribution_state",
+        "missing_authorities",
+        "evidence_sha256",
+    )
+
+    def evidence_projection(value: ProviderBillingRowAttributionEvidence) -> tuple[object, ...]:
+        return tuple(get_attr(value, name) for name in evidence_field_names)
 
     @dataclass(frozen=True, slots=True, init=False)
     class VerifiedProviderBillingRowAuthority:
@@ -63,7 +88,7 @@ def _build_authority_capability():
         evidence: ProviderBillingRowAttributionEvidence,
         row_ref_id: str,
     ) -> VerifiedProviderBillingRowAuthority:
-        """Re-resolve source+row and issue an opaque witness on exact equality only."""
+        """Re-resolve source+row and issue an opaque witness on exact fields only."""
 
         if type(source) is not source_cls:
             raise TypeError(
@@ -75,7 +100,7 @@ def _build_authority_capability():
             )
 
         expected = resolve_fn(source, row_ref_id)
-        if evidence != expected:
+        if evidence_projection(evidence) != evidence_projection(expected):
             raise error_cls(
                 "provider billing row evidence does not match canonical source re-resolution"
             )

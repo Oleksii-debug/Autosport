@@ -92,6 +92,31 @@ def test_raw_acquisition_minting_seams_are_not_exposed() -> None:
     )
 
 
+def test_caller_cannot_swap_canonical_client_or_store_after_initialization(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    calls = _install_transport(monkeypatch, [_DETAILS, _FUNDS])
+    acquirer = BetfairAccountSnapshotAcquirer(
+        tmp_path / "account.sqlite3",
+        _credentials(),
+    )
+
+    assert not hasattr(acquirer, "_client")
+    assert not hasattr(acquirer, "_store")
+    acquirer._client = object()
+    acquirer._store = object()
+
+    acquired = acquirer.acquire(_balance_capabilities())
+    assert len(calls) == 2
+    assert acquired.receipt.source_authority_proven is True
+    acquirer.verify(acquired.snapshot, acquired.receipt)
+    assert (
+        acquirer.resolve(acquired.receipt.acquisition_id).receipt
+        == acquired.receipt
+    )
+
+
 def test_product_owned_read_persists_restart_verifiable_receipt_without_secrets(
     tmp_path,
     monkeypatch,

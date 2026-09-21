@@ -113,7 +113,18 @@ class ForecastLogLossEndpointPolicyTests(unittest.TestCase):
     def test_ordinary_interior_probability_preserves_binary_log_loss_formula(self) -> None:
         report = self._evaluate_one("0.2", 0)
 
-        self.assertAlmostEqual(report.log_loss, -math.log(1.0 - 0.2))
+        self.assertAlmostEqual(report.log_loss, -math.log1p(-0.2))
+
+    def test_tiny_interior_probability_with_zero_outcome_keeps_positive_log_loss(self) -> None:
+        probability = 1e-17
+        report = self._evaluate_one("1e-17", 0)
+
+        expected = -math.log1p(-probability)
+        self.assertGreater(expected, 0.0)
+        self.assertGreater(report.log_loss, 0.0)
+        self.assertTrue(
+            math.isclose(report.log_loss, expected, rel_tol=1e-15, abs_tol=0.0)
+        )
 
     def test_interior_decimal_rounded_to_binary64_endpoint_fails_closed(self) -> None:
         with self.assertRaisesRegex(

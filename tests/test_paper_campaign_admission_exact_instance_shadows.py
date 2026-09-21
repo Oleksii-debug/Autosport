@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib
 import os
+from pathlib import Path
 from unittest.mock import patch
 
 import pytest
@@ -46,6 +47,32 @@ def test_alternate_same_workspace_decision_ledger_is_rejected_before_constructio
         fixture.coordinator(decision_ledger=alternate)
 
     assert not state_path.exists()
+
+
+def test_canonical_concrete_decision_ledger_path_is_accepted(tmp_path):
+    fixture = AdmissionFixture(tmp_path)
+    decision_ledger = JsonlDecisionLedger(fixture.workspace / "decisions.jsonl")
+
+    coordinator = fixture.coordinator(decision_ledger=decision_ledger)
+
+    assert coordinator.decision_ledger is decision_ledger
+    assert type(decision_ledger.path) is type(Path())
+
+
+def test_decision_ledger_path_subclass_is_rejected_before_construction(tmp_path):
+    fixture = AdmissionFixture(tmp_path)
+    decision_ledger = JsonlDecisionLedger(fixture.workspace / "decisions.jsonl")
+    canonical_path_type = type(Path())
+
+    class ForgedPath(canonical_path_type):
+        pass
+
+    decision_ledger.path = ForgedPath(fixture.workspace / "decisions.jsonl")
+
+    with pytest.raises(PaperCampaignAdmissionError, match="canonical workspace decisions.jsonl"):
+        fixture.coordinator(decision_ledger=decision_ledger)
+
+    assert not (fixture.workspace / "paper-campaign-admission.json").exists()
 
 
 def test_exact_execution_ledger_instance_shadow_is_rejected_before_admission(tmp_path):

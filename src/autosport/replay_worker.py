@@ -189,6 +189,10 @@ class OneShotReplayWorker:
             with replay_stop_scope(stop_token):
                 message = ReplayWorkerMessage(result=task())
         except ReplayStopRequested as exc:
+            # Close the exact token before classifying the exception so a forged
+            # task exception cannot be retroactively laundered into operator STOP
+            # by a request that arrives only after the exception has escaped task().
+            stop_token.disarm()
             with self._lock:
                 accepted_stop = self._accepted_stop_token is stop_token
             if accepted_stop:

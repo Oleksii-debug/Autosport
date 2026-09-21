@@ -21,6 +21,7 @@ from .historical_snapshot import capture_historical_snapshot
 from .integrity import atomic_write_json
 from .live_observation import observe_workspace_once
 from .paper import PaperBook
+from .paths import default_workspace
 from .parlayapi_provider import (
     ParlayApiTableTennisProvider,
     ProviderPayloadError,
@@ -148,7 +149,7 @@ def build_parser() -> argparse.ArgumentParser:
     snapshot.add_argument("--regions", default="us", help="comma-separated provider regions")
     snapshot.add_argument("--markets", default="h2h,spreads,totals", help="comma-separated historical game-line markets")
     repair = sub.add_parser("repair-workspace", help="reconcile only late-crashed runs with durable hash-matched completion evidence")
-    repair.add_argument("--workspace", type=Path, default=Path(".autosport-workspace"))
+    repair.add_argument("--workspace", type=Path, default=default_workspace())
     endurance = sub.add_parser("endurance", help="run deterministic bounded ingestion/replay/restart/settlement stress checks")
     endurance.add_argument("--workspace", type=Path, default=Path(".autosport-endurance"))
     endurance.add_argument("--events", type=int, default=20_000)

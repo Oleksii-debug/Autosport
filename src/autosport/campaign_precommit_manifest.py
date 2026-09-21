@@ -202,7 +202,6 @@ def _publish_bound_posix_file_once(
     temporary_name = f".{name}.{uuid.uuid4().hex}.tmp"
     descriptor: int | None = None
     temporary_exists = False
-    published = False
     primary_error: BaseException | None = None
 
     try:
@@ -234,8 +233,6 @@ def _publish_bound_posix_file_once(
                 "cannot atomically publish campaign precommit manifest"
             ) from exc
 
-        published = True
-        _fsync_bound_parent_directory(parent_fd)
         return True
     except BaseException as exc:
         primary_error = exc
@@ -265,13 +262,6 @@ def _publish_bound_posix_file_once(
                 pass
             except OSError as exc:
                 cleanup_error = exc
-
-        if published:
-            try:
-                _fsync_bound_parent_directory(parent_fd)
-            except BaseException as exc:
-                if cleanup_error is None:
-                    cleanup_error = exc
 
         if cleanup_error is not None:
             if primary_error is not None:
@@ -1217,6 +1207,7 @@ def write_campaign_precommit_manifest_once(
                     "existing campaign precommit manifest conflicts with precommit"
                 )
 
+        _fsync_bound_parent_directory(parent_fd)
         _assert_bound_posix_parent_identity(absolute_parent, parent_fd)
         if _read_bound_posix_file_bytes(parent_fd, name) != encoded:
             raise CampaignPrecommitManifestError(

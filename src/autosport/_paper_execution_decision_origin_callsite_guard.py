@@ -55,6 +55,7 @@ if not hasattr(PaperExecutionAdoptionRuntime, _CALLSITE_IDENTITY_SENTINEL):
     _PAPER_VALUE_RECOVERY_CODE,
     _DECISION_RECORD_CLASS,
 ) = getattr(PaperExecutionAdoptionRuntime, _CALLSITE_IDENTITY_SENTINEL)
+_PAPER_VALUE_MATERIAL_ACTION_ID = _PAPER_VALUE_AGENT_CLASS._material_action_id
 
 if not hasattr(_LIVE_LOOP_CLASS, _LIVE_INIT_SENTINEL):
     setattr(_LIVE_LOOP_CLASS, _LIVE_INIT_SENTINEL, _LIVE_LOOP_CLASS.__init__)
@@ -142,6 +143,7 @@ def _origin_from_direct_caller(
     _live_loop_class=_LIVE_LOOP_CLASS,
     _live_persist_plan_code=_LIVE_PERSIST_PLAN_CODE,
     _paper_value_agent_class=_PAPER_VALUE_AGENT_CLASS,
+    _paper_value_material_action_id=_PAPER_VALUE_MATERIAL_ACTION_ID,
     _paper_value_fresh_code=_PAPER_VALUE_FRESH_CODE,
     _paper_value_recovery_code=_PAPER_VALUE_RECOVERY_CODE,
     _decision_record_class=_DECISION_RECORD_CLASS,
@@ -190,7 +192,7 @@ def _origin_from_direct_caller(
             raise _origin.PaperExecutionDecisionOriginError(
                 "paper-value origin requires exact PaperValueAgent authority"
             )
-        if event is None or agent._material_action_id(context, event) != decision_id:
+        if event is None or _paper_value_material_action_id(context, event) != decision_id:
             raise _origin.PaperExecutionDecisionOriginError(
                 "paper-value decision call-site identity does not match execution plan"
             )
@@ -234,6 +236,7 @@ def _matching_product_ancestor(
     _live_loop_class=_LIVE_LOOP_CLASS,
     _live_persist_plan_code=_LIVE_PERSIST_PLAN_CODE,
     _paper_value_agent_class=_PAPER_VALUE_AGENT_CLASS,
+    _paper_value_material_action_id=_PAPER_VALUE_MATERIAL_ACTION_ID,
     _paper_value_fresh_code=_PAPER_VALUE_FRESH_CODE,
     _paper_value_recovery_code=_PAPER_VALUE_RECOVERY_CODE,
     _decision_record_class=_DECISION_RECORD_CLASS,
@@ -259,7 +262,7 @@ def _matching_product_ancestor(
                 type(agent) is _paper_value_agent_class
                 and getattr(context, "paper_execution", None) is runtime
                 and event is not None
-                and agent._material_action_id(context, event) == decision_id
+                and _paper_value_material_action_id(context, event) == decision_id
             ):
                 return True
         elif current.f_code is _paper_value_recovery_code:

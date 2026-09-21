@@ -793,6 +793,7 @@ class _Progress:
         except (TypeError, ValueError) as exc:
             raise LiveDecisionProgressError("live decision progress is invalid") from exc
 
+
 class PersistentLiveDecisionLoop:
     """Bounded, restart-safe paper/shadow decision loop over canonical authorities.
 
@@ -2421,6 +2422,13 @@ class PersistentLiveDecisionLoop:
         if payload_version not in {1, 2, 3}:
             raise DecisionLedgerIntegrityError(
                 "committed live decision has unsupported schema_version"
+            )
+        if (
+            progress.gate == _GATE_PROVIDER_HEALTH
+            and payload_version != 3
+        ):
+            raise DecisionLedgerIntegrityError(
+                "provider health progress requires decision schema_version 3"
             )
 
         context_payload = {

@@ -33,6 +33,7 @@ from .providers import ProviderUnavailableError
 
 _MAX_DELTA_PAGE_ITEMS = 5000
 _MAX_PROVIDER_RETRY_ATTEMPTS = 10
+_DEFAULT_MAX_STORE_BYTES = 1_073_741_824
 
 
 class CollectorServiceError(RuntimeError):
@@ -113,7 +114,7 @@ class CollectorServiceConfig:
     initial_backoff_seconds: float = 1.0
     max_backoff_seconds: float = 30.0
     jitter_fraction: float = 0.20
-    max_store_bytes: int = 1_073_741_824
+    max_store_bytes: int = _DEFAULT_MAX_STORE_BYTES
 
     def __post_init__(self) -> None:
         if (
@@ -792,6 +793,35 @@ def _load_source_factory(spec: str) -> Callable[[], CollectorServiceSource]:
     return factory
 
 
+def _open_collector_store_with_effective_budget(
+    path: Path,
+    requested_max_bytes: int | None,
+) -> tuple[CollectorDeltaStore, int]:
+    """Open the canonical store and resolve one durable operator byte budget.
+
+    CLI omission is assertion-free: an existing durable budget is adopted. A fresh
+    or previously unbound workspace establishes the product default. Explicit
+    values remain assertions and the canonical store rejects any durable conflict.
+    """
+
+    requested = requested_max_bytes
+    if requested is None and not path.exists():
+        requested = _DEFAULT_MAX_STORE_BYTES
+
+    store = CollectorDeltaStore(path, max_bytes=requested)
+    effective = store.configured_max_bytes
+    if effective is None:
+        # Existing unbound stores adopt the product default through the same
+        # canonical durable authority. Never duplicate or bypass its conflict fence.
+        store = CollectorDeltaStore(path, max_bytes=_DEFAULT_MAX_STORE_BYTES)
+        effective = store.configured_max_bytes
+    if effective is None:
+        raise CollectorServiceError(
+            "collector durable store did not resolve a max_store_bytes authority"
+        )
+    return store, effective
+
+
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="python -m autosport.collector_service",
@@ -815,7 +845,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--initial-backoff-seconds", type=float, default=1.0)
     parser.add_argument("--max-backoff-seconds", type=float, default=30.0)
     parser.add_argument("--jitter-fraction", type=float, default=0.20)
-    parser.add_argument("--max-store-bytes", type=int, default=1_073_741_824)
+    parser.add_argument("--max-store-bytes", type=int)
     return parser
 
 
@@ -834,11 +864,14 @@ def main(argv: Sequence[str] | None = None) -> int:
     try:
         factory = _load_source_factory(args.source_factory)
         source = factory()
-        service = HeadlessCollectorService(
-            delta_store=CollectorDeltaStore(
+        delta_store, effective_max_store_bytes = (
+            _open_collector_store_with_effective_budget(
                 root / "collector_deltas.json",
-                max_bytes=args.max_store_bytes,
-            ),
+                args.max_store_bytes,
+            )
+        )
+        service = HeadlessCollectorService(
+            delta_store=delta_store,
             lifecycle=ContinuousEventLifecycle(root / "collector_catalog.json"),
             source=source,
             state_path=root / "collector_service_state.json",
@@ -850,7 +883,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 initial_backoff_seconds=args.initial_backoff_seconds,
                 max_backoff_seconds=args.max_backoff_seconds,
                 jitter_fraction=args.jitter_fraction,
-                max_store_bytes=args.max_store_bytes,
+                max_store_bytes=effective_max_store_bytes,
             ),
             stop_requested=signal_stop,
             stop_reason=signal_stop.reason,

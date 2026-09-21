@@ -6,7 +6,6 @@ import json
 import math
 import random
 import signal
-import sqlite3
 import threading
 import time
 from dataclasses import dataclass
@@ -495,7 +494,7 @@ class HeadlessCollectorService:
         self.random_value = random_value or random.random
         self.stop_requested = stop_requested or (lambda: False)
         self.stop_reason = stop_reason or (lambda: "stop_requested")
-        self._adapter = RemoteCollectorAdapter(self.delta_store.append)
+        self._adapter = RemoteCollectorAdapter(self._append_admitted_delta)
         started_at = self.clock()
         _CollectorServiceState._instant(started_at, "started_at")
         self._state = _CollectorServiceState(
@@ -509,6 +508,16 @@ class HeadlessCollectorService:
             expected_stream_epoch=stream_epoch,
             allow_transition=False,
         )
+        try:
+            self.delta_store._recover_runtime_stream_epoch(
+                source_id=self._source_id,
+                stream_epoch=stream_epoch,
+                activated_at=started_at,
+            )
+        except (TypeError, ValueError) as exc:
+            raise CollectorServiceError(
+                "cannot recover collector active-epoch authority"
+            ) from exc
 
     def _require_source_identity(
         self,
@@ -548,51 +557,43 @@ class HeadlessCollectorService:
         expected_stream_epoch: str | None = None,
         allow_transition: bool = True,
     ) -> int:
-        """Publish only a product-admitted source epoch into retention authority.
-
-        Construction may bootstrap an empty activation journal, but it cannot move
-        an existing epoch. Later transitions are published only after run_cycle has
-        successfully admitted canonical provider data into the durable collector.
-        """
+        """Publish service-owned epoch authority through the canonical store."""
 
         _CollectorServiceState._instant(activated_at, "activated_at")
         source = self._require_source_identity(
             expected_stream_epoch=expected_stream_epoch
         )
-        source_id = self._source_id
-        stream_epoch = source.stream_epoch
-
-        connection = self.delta_store._connect()
         try:
-            connection.execute("BEGIN IMMEDIATE")
-            current = connection.execute(
-                "SELECT generation, stream_epoch FROM collector_epoch_activations_v1 "
-                "WHERE source_id=? ORDER BY generation DESC LIMIT 1",
-                (source_id,),
-            ).fetchone()
-            if current is not None and current["stream_epoch"] == stream_epoch:
-                connection.commit()
-                return int(current["generation"])
-            if current is not None and not allow_transition:
-                connection.commit()
-                return int(current["generation"])
-            generation = 1 if current is None else int(current["generation"]) + 1
-            connection.execute(
-                "INSERT INTO collector_epoch_activations_v1("
-                "source_id, generation, stream_epoch, activated_at"
-                ") VALUES(?,?,?,?)",
-                (source_id, generation, stream_epoch, activated_at),
+            return self.delta_store._record_runtime_stream_epoch(
+                source_id=self._source_id,
+                stream_epoch=source.stream_epoch,
+                activated_at=activated_at,
+                allow_transition=allow_transition,
             )
-            connection.commit()
-            return generation
-        except sqlite3.DatabaseError as exc:
-            if connection.in_transaction:
-                connection.rollback()
+        except (TypeError, ValueError) as exc:
             raise CollectorServiceError(
                 "cannot persist collector active-epoch authority"
             ) from exc
-        finally:
-            connection.close()
+
+    def _append_admitted_delta(self, delta: CollectorDelta) -> bool:
+        """Commit a validated provider delta and its epoch authority atomically."""
+
+        if not isinstance(delta, CollectorDelta):
+            raise TypeError("delta must be CollectorDelta")
+        delta.validate()
+        self._require_source_identity(
+            expected_stream_epoch=delta.stream_epoch
+        )
+        if delta.source_id != self._source_id:
+            raise CollectorServiceError(
+                "collector source returned a delta for another source_id"
+            )
+        activated_at = self.clock()
+        _CollectorServiceState._instant(activated_at, "activated_at")
+        return self.delta_store._append_with_runtime_stream_epoch(
+            delta,
+            activated_at=activated_at,
+        )
 
     @property
     def source_id(self) -> str:
@@ -738,11 +739,6 @@ class HeadlessCollectorService:
             )
             completed_at = self.clock()
             _CollectorServiceState._instant(completed_at, "completed_at")
-            if raw_deltas:
-                self._record_runtime_stream_epoch(
-                    activated_at=completed_at,
-                    expected_stream_epoch=cycle_stream_epoch,
-                )
             self._state.record_success(
                 at=completed_at,
                 committed=len(committed),

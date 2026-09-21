@@ -56,17 +56,10 @@ class HistoricalMatchCaptureTests(unittest.TestCase):
             capture = json.loads(capture_bytes.decode("utf-8"))
             evidence = json.loads(evidence_path.read_text(encoding="utf-8"))
 
-        parsed = urlparse(transport.urls[0])
-        expected_request_url = transport.urls[0]
         self.assertEqual(capture["payload"], payload)
-        self.assertEqual(
-            capture["request"],
-            {"date": "2026-09-10", "priced_only": False, "url": expected_request_url},
-        )
+        self.assertEqual(capture["request"], {"date": "2026-09-10", "priced_only": False})
         self.assertEqual(evidence["requested_date"], "2026-09-10")
         self.assertFalse(evidence["priced_only"])
-        self.assertEqual(evidence["request_url"], expected_request_url)
-        self.assertEqual(report.request_url, expected_request_url)
         self.assertEqual(report.capture_sha256, hashlib.sha256(capture_bytes).hexdigest())
         self.assertEqual(evidence["capture_sha256"], report.capture_sha256)
         self.assertEqual(evidence["coverage_hint"], "source=test-source")
@@ -94,6 +87,7 @@ class HistoricalMatchCaptureTests(unittest.TestCase):
         self.assertFalse(evidence["licensing_or_retention_verified"])
         self.assertNotIn("unit-test-key", json.dumps(capture) + json.dumps(evidence))
         self.assertEqual(transport.headers[0]["X-API-Key"], "unit-test-key")
+        parsed = urlparse(transport.urls[0])
         self.assertEqual(parsed.path, "/v1/historical/sports/table_tennis/matches")
         query = parse_qs(parsed.query)
         self.assertEqual(set(query), {"date", "pricedOnly"})

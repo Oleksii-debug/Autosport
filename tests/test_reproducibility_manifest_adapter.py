@@ -114,3 +114,36 @@ def test_adapter_rejects_duplicate_observation_instants():
             points,
             (Fold("fold-2", T0, T2, 1),),
         )
+
+
+def test_adapter_rejects_impossible_label_reveal_order():
+    points = (
+        Point(T0, T0),
+        Point(T1, T0),
+        Point(T2, T2),
+    )
+    with pytest.raises(
+        ReproducibilityManifestError,
+        match="target_reveal_at must not precede observed_at",
+    ):
+        derive_walk_forward_splits(
+            points,
+            (Fold("fold-2", T1, T2, 2),),
+        )
+
+
+def test_adapter_rejects_partial_fold_coverage_of_governed_population():
+    points = (
+        Point(T0, T0),
+        Point(T1, T1),
+        Point(T2, T2),
+        Point(T3, T3),
+    )
+    with pytest.raises(
+        ReproducibilityManifestError,
+        match="cover the final governed input",
+    ):
+        derive_walk_forward_splits(
+            points,
+            (Fold("fold-2", T1, T2, 2),),
+        )

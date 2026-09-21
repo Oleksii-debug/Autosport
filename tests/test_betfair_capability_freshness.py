@@ -102,16 +102,37 @@ def _observation(*, delayed: bool) -> BetfairMarketBookDelayObservation:
     return read_market_book_delay(client, "1.234")
 
 
-def _evidence(
+def _delayed_evidence(
     *,
-    delayed: bool = False,
-    key_class: BetfairApplicationKeyClass = BetfairApplicationKeyClass.LIVE,
     profile: BookmakerCapabilityProfile | None = None,
+    key_class: BetfairApplicationKeyClass = BetfairApplicationKeyClass.LIVE,
 ) -> BetfairCapabilityFreshnessEvidence:
     return BetfairCapabilityFreshnessEvidence.from_market_book_observation(
         profile or _profile(),
-        _observation(delayed=delayed),
+        _observation(delayed=True),
         application_key_class=key_class,
+    )
+
+
+def _direct_fresh_evidence(
+    profile: BookmakerCapabilityProfile | None = None,
+) -> BetfairCapabilityFreshnessEvidence:
+    profile = profile or _profile()
+    return BetfairCapabilityFreshnessEvidence(
+        profile_id=profile.profile_id,
+        venue_id=profile.venue_id,
+        account_id=profile.account_id,
+        adapter_id=profile.adapter_id,
+        adapter_version=profile.adapter_version,
+        profile_version=profile.profile_version,
+        market_id="1.234",
+        environment=BetfairProviderEnvironment.GLOBAL_PRODUCTION_EXCHANGE,
+        application_key_class=BetfairApplicationKeyClass.LIVE,
+        market_data_delay_state=BetfairMarketDataDelayState.FRESH,
+        stream_freshness_mode=BetfairStreamFreshnessMode.UNKNOWN,
+        observed_at=OBSERVED.isoformat(),
+        source_ref="betfair://market-book/1.234",
+        source_payload_sha256="c" * 64,
     )
 
 
@@ -131,80 +152,70 @@ def _require_live(
     )
 
 
-def test_non_delayed_provider_observation_can_issue_bounded_exact_market_freshness():
+def test_injected_transport_non_delayed_observation_cannot_issue_fresh_truth():
     profile = _profile()
-    evidence = _evidence(profile=profile)
+    observation = _observation(delayed=False)
 
-    _require_live(evidence, profile)
+    with pytest.raises(
+        BetfairMarketBookFreshnessError,
+        match="lacks canonical production network origin",
+    ):
+        BetfairCapabilityFreshnessEvidence.from_market_book_observation(
+            profile,
+            observation,
+            application_key_class=BetfairApplicationKeyClass.LIVE,
+        )
 
-    assert evidence.market_data_delay_state is BetfairMarketDataDelayState.FRESH
-    assert evidence.stream_freshness_mode is BetfairStreamFreshnessMode.UNKNOWN
-    assert evidence.environment is BetfairProviderEnvironment.GLOBAL_PRODUCTION_EXCHANGE
-    assert evidence.market_id == "1.234"
-    assert evidence.grants_product_write_authority is False
 
-
-def test_live_key_with_provider_delayed_true_fails_closed():
+def test_provider_delayed_true_from_test_transport_is_safe_negative_evidence():
     profile = _profile()
-    evidence = _evidence(delayed=True, profile=profile)
+    evidence = _delayed_evidence(profile=profile)
 
     assert evidence.market_data_delay_state is BetfairMarketDataDelayState.DELAYED
+    assert evidence.stream_freshness_mode is BetfairStreamFreshnessMode.UNKNOWN
+    assert evidence.environment is BetfairProviderEnvironment.GLOBAL_PRODUCTION_EXCHANGE
+    assert evidence.grants_product_write_authority is False
     with pytest.raises(DelayedBetfairMarketData, match="market data is delayed"):
         _require_live(evidence, profile)
 
 
-def test_delayed_key_is_production_but_cannot_contradict_non_delayed_observation():
-    with pytest.raises(
-        BetfairCapabilityFreshnessError,
-        match="delayed application key cannot assert fresh market data",
-    ):
-        _evidence(
-            delayed=False,
-            key_class=BetfairApplicationKeyClass.DELAYED,
-        )
-
-    delayed = _evidence(
-        delayed=True,
+def test_delayed_key_is_still_explicitly_production_not_sandbox():
+    evidence = _delayed_evidence(
         key_class=BetfairApplicationKeyClass.DELAYED,
     )
-    assert delayed.is_production_exchange is True
-    assert delayed.grants_product_write_authority is False
+
+    assert evidence.is_production_exchange is True
+    assert evidence.application_key_class is BetfairApplicationKeyClass.DELAYED
+    assert evidence.grants_product_write_authority is False
 
 
-def test_application_key_class_alone_does_not_create_stream_truth():
+def test_marketbook_evidence_cannot_assert_stream_live_even_by_direct_constructor():
     profile = _profile()
-    evidence = _evidence(profile=profile, key_class=BetfairApplicationKeyClass.LIVE)
-
     with pytest.raises(
-        UnknownBetfairMarketDataFreshness,
-        match="Stream freshness has not been observed",
+        BetfairCapabilityFreshnessError,
+        match="cannot assert Stream freshness",
     ):
-        evidence.require_subminute_stream_evidence(
-            profile,
+        BetfairCapabilityFreshnessEvidence(
+            profile_id=profile.profile_id,
+            venue_id=profile.venue_id,
+            account_id=profile.account_id,
+            adapter_id=profile.adapter_id,
+            adapter_version=profile.adapter_version,
+            profile_version=profile.profile_version,
             market_id="1.234",
-            as_of=AS_OF,
-            max_age_seconds=60,
+            environment=BetfairProviderEnvironment.GLOBAL_PRODUCTION_EXCHANGE,
+            application_key_class=BetfairApplicationKeyClass.LIVE,
+            market_data_delay_state=BetfairMarketDataDelayState.FRESH,
+            stream_freshness_mode=BetfairStreamFreshnessMode.LIVE,
+            observed_at=OBSERVED.isoformat(),
+            source_ref="betfair://market-book/1.234",
+            source_payload_sha256="c" * 64,
         )
 
 
 def test_direct_caller_constructed_fresh_evidence_cannot_pass_positive_gate():
     profile = _profile()
-    forged = BetfairCapabilityFreshnessEvidence(
-        profile_id=profile.profile_id,
-        venue_id=profile.venue_id,
-        account_id=profile.account_id,
-        adapter_id=profile.adapter_id,
-        adapter_version=profile.adapter_version,
-        profile_version=profile.profile_version,
-        market_id="1.234",
-        environment=BetfairProviderEnvironment.GLOBAL_PRODUCTION_EXCHANGE,
-        application_key_class=BetfairApplicationKeyClass.LIVE,
-        market_data_delay_state=BetfairMarketDataDelayState.FRESH,
-        stream_freshness_mode=BetfairStreamFreshnessMode.UNKNOWN,
-        observed_at=OBSERVED.isoformat(),
-        source_ref="betfair://market-book/1.234",
-        source_payload_sha256="c" * 64,
-    )
+    forged = _direct_fresh_evidence(profile)
 
     with pytest.raises(
         BetfairCapabilityFreshnessError,
@@ -237,9 +248,9 @@ def test_direct_caller_constructed_marketbook_observation_cannot_issue_freshness
         )
 
 
-def test_market_rebinding_fails_closed():
+def test_market_rebinding_fails_closed_before_delayed_state_is_consumed():
     profile = _profile()
-    evidence = _evidence(profile=profile)
+    evidence = _delayed_evidence(profile=profile)
 
     with pytest.raises(
         BetfairCapabilityFreshnessError,
@@ -248,33 +259,27 @@ def test_market_rebinding_fails_closed():
         _require_live(evidence, profile, market_id="9.999")
 
 
-def test_stale_evidence_fails_at_decision_time():
-    profile = _profile()
-    evidence = _evidence(profile=profile)
+def test_stale_policy_rejects_t0_plus_sixty_one_without_needing_live_network():
+    evidence = _direct_fresh_evidence()
 
     with pytest.raises(
         UnknownBetfairMarketDataFreshness,
         match="stale",
     ):
-        _require_live(
-            evidence,
-            profile,
+        evidence._assert_current(
             as_of="2026-09-21T10:01:01+00:00",
             max_age_seconds=60,
         )
 
 
-def test_future_evidence_fails_at_decision_time():
-    profile = _profile()
-    evidence = _evidence(profile=profile)
+def test_future_policy_rejects_observation_after_decision_cutoff():
+    evidence = _direct_fresh_evidence()
 
     with pytest.raises(
         UnknownBetfairMarketDataFreshness,
         match="future",
     ):
-        _require_live(
-            evidence,
-            profile,
+        evidence._assert_current(
             as_of="2026-09-21T09:59:59+00:00",
             max_age_seconds=60,
         )
@@ -282,23 +287,21 @@ def test_future_evidence_fails_at_decision_time():
 
 @pytest.mark.parametrize("max_age_seconds", [0, -1, True, 1.5])
 def test_max_age_policy_is_explicit_and_exact(max_age_seconds):
-    profile = _profile()
-    evidence = _evidence(profile=profile)
+    evidence = _direct_fresh_evidence()
 
     with pytest.raises(
         BetfairCapabilityFreshnessError,
         match="positive exact integer",
     ):
-        _require_live(
-            evidence,
-            profile,
+        evidence._assert_current(
+            as_of=AS_OF,
             max_age_seconds=max_age_seconds,
         )
 
 
-def test_subminute_policy_refuses_more_than_sixty_seconds():
+def test_subminute_policy_refuses_more_than_sixty_seconds_before_authority_use():
     profile = _profile()
-    evidence = _evidence(profile=profile)
+    evidence = _direct_fresh_evidence(profile)
 
     with pytest.raises(
         BetfairCapabilityFreshnessError,
@@ -314,7 +317,7 @@ def test_subminute_policy_refuses_more_than_sixty_seconds():
 
 def test_missing_live_quote_capability_still_fails_closed():
     profile = _profile(live_quotes=BookmakerCapabilityState.UNKNOWN)
-    evidence = _evidence(profile=profile)
+    evidence = _delayed_evidence(profile=profile)
 
     with pytest.raises(UnknownBookmakerCapability, match="live_quotes_read"):
         _require_live(evidence, profile)
@@ -323,7 +326,7 @@ def test_missing_live_quote_capability_still_fails_closed():
 def test_profile_identity_drift_fails_closed():
     original = _profile()
     changed = _profile(version=2, source_hash="b" * 64)
-    evidence = _evidence(profile=original)
+    evidence = _delayed_evidence(profile=original)
 
     with pytest.raises(
         BetfairCapabilityFreshnessError,
@@ -352,7 +355,7 @@ def test_profile_adapter_identity_must_match_marketbook_observation():
     ):
         BetfairCapabilityFreshnessEvidence.from_market_book_observation(
             mismatched,
-            _observation(delayed=False),
+            _observation(delayed=True),
             application_key_class=BetfairApplicationKeyClass.LIVE,
         )
 
@@ -380,7 +383,7 @@ def test_profile_subclass_is_rejected_before_overridable_dispatch():
     ):
         BetfairCapabilityFreshnessEvidence.from_market_book_observation(
             forged,
-            _observation(delayed=False),
+            _observation(delayed=True),
             application_key_class=BetfairApplicationKeyClass.LIVE,
         )
 
@@ -413,14 +416,14 @@ def test_nested_capability_fact_subclass_is_rejected():
     ):
         BetfairCapabilityFreshnessEvidence.from_market_book_observation(
             forged,
-            _observation(delayed=False),
+            _observation(delayed=True),
             application_key_class=BetfairApplicationKeyClass.LIVE,
         )
 
 
 def test_technical_place_bet_support_never_grants_product_write_authority():
     profile = _profile(place_bet=BookmakerCapabilityState.SUPPORTED)
-    evidence = _evidence(profile=profile)
+    evidence = _delayed_evidence(profile=profile)
 
     assert (
         evidence.technical_place_bet_state(profile)
@@ -429,9 +432,9 @@ def test_technical_place_bet_support_never_grants_product_write_authority():
     assert evidence.grants_product_write_authority is False
 
 
-def test_evidence_identity_is_deterministic_and_secret_free():
-    one = _evidence()
-    two = _evidence()
+def test_delayed_evidence_identity_is_deterministic_and_secret_free():
+    one = _delayed_evidence()
+    two = _delayed_evidence()
 
     assert one.evidence_id == two.evidence_id
     fields = set(BetfairCapabilityFreshnessEvidence.__dataclass_fields__)

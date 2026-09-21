@@ -220,7 +220,9 @@ class ExecutionStopAuthority:
     def anchor_path(self) -> Path:
         return self._anchor_path
 
-    def _read_journal_unlocked(self) -> list[dict[str, Any]]:
+    def _read_journal_unlocked(
+        self, *, require_anchor_match: bool = True
+    ) -> list[dict[str, Any]]:
         journal_exists = self.path.exists()
         anchor_exists = self._anchor_path.exists()
         if not journal_exists and not anchor_exists:
@@ -340,7 +342,7 @@ class ExecutionStopAuthority:
 
         anchor = self._read_anchor_unlocked()
         latest = records[-1]
-        if (
+        if require_anchor_match and (
             anchor["revision"] != latest["revision"]
             or anchor["record_sha256"] != latest["record_sha256"]
         ):
@@ -419,6 +421,43 @@ class ExecutionStopAuthority:
         except OSError as exc:
             raise ExecutionStopIntegrityError(
                 "STOP authority anchor durability barrier failed"
+            ) from exc
+        finally:
+            if temp_path is not None:
+                try:
+                    temp_path.unlink(missing_ok=True)
+                except OSError:
+                    pass
+
+    def _rewrite_journal_unlocked(
+        self, records: list[dict[str, Any]]
+    ) -> None:
+        if not records:
+            raise ExecutionStopIntegrityError(
+                "STOP authority recovery cannot erase the complete journal"
+            )
+        encoded = "".join(_canonical(record) + "\n" for record in records)
+        temp_path: Path | None = None
+        try:
+            with tempfile.NamedTemporaryFile(
+                mode="w",
+                encoding="utf-8",
+                newline="\n",
+                dir=self.path.parent,
+                prefix=self.path.name + ".",
+                suffix=".tmp",
+                delete=False,
+            ) as handle:
+                handle.write(encoded)
+                handle.flush()
+                os.fsync(handle.fileno())
+                temp_path = Path(handle.name)
+            os.replace(temp_path, self.path)
+            temp_path = None
+            _sync_directory(self.path.parent)
+        except OSError as exc:
+            raise ExecutionStopIntegrityError(
+                "STOP authority journal recovery durability barrier failed"
             ) from exc
         finally:
             if temp_path is not None:
@@ -521,6 +560,64 @@ class ExecutionStopAuthority:
             confirmation_id=record["confirmation_id"],
             record_sha256=record["record_sha256"],
         )
+
+    def recover_torn_transition(self) -> ExecutionAuthorityState:
+        """Recover one complete journal record that was not durably anchored.
+
+        Recovery is intentionally asymmetric. A complete unanchored STOPPED
+        record may be committed because it can only narrow execution authority.
+        A complete unanchored ARMED record is discarded back to the already
+        anchored prefix and is never promoted automatically.
+        """
+
+        with self._thread_lock, _exclusive_file_lock(self._lock_path):
+            records = self._read_journal_unlocked(require_anchor_match=False)
+            if not records:
+                raise ExecutionStopStateError(
+                    "STOP authority is missing; there is no torn transition to recover"
+                )
+
+            anchor = self._read_anchor_unlocked()
+            anchor_revision = anchor["revision"]
+            if anchor_revision > len(records):
+                raise ExecutionStopIntegrityError(
+                    "STOP authority anchor points beyond the journal"
+                )
+
+            anchored = records[anchor_revision - 1]
+            if anchored["record_sha256"] != anchor["record_sha256"]:
+                raise ExecutionStopIntegrityError(
+                    "STOP authority anchor does not match its journal prefix"
+                )
+
+            suffix_count = len(records) - anchor_revision
+            if suffix_count == 0:
+                return self._state_from_record(anchored)
+            if suffix_count != 1:
+                raise ExecutionStopIntegrityError(
+                    "STOP authority recovery requires exactly one unanchored record"
+                )
+
+            candidate = records[-1]
+            if (
+                candidate["revision"] != anchor_revision + 1
+                or candidate["previous_sha256"] != anchored["record_sha256"]
+            ):
+                raise ExecutionStopIntegrityError(
+                    "STOP authority recovery suffix does not extend the anchor"
+                )
+
+            mode = ExecutionAuthorityMode(candidate["mode"])
+            if mode is ExecutionAuthorityMode.STOPPED:
+                self._write_anchor_unlocked(
+                    revision=candidate["revision"],
+                    record_sha256=candidate["record_sha256"],
+                )
+            else:
+                self._rewrite_journal_unlocked(records[:anchor_revision])
+
+            recovered = self._read_journal_unlocked()
+            return self._state_from_record(recovered[-1])
 
     def current(self) -> ExecutionAuthorityState:
         with self._thread_lock, _exclusive_file_lock(self._lock_path):

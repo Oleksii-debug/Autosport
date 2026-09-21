@@ -3,6 +3,7 @@ from __future__ import annotations
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 import multiprocessing as mp
+import os
 from pathlib import Path
 
 import pytest
@@ -220,6 +221,43 @@ def test_spawned_processes_preserve_one_linear_append_chain(
     assert {record.runtime_authority_id for record in durable} == issued_ids
     for left, right in zip(durable, durable[1:], strict=False):
         assert right.previous_record_sha256 == left.record_sha256
+
+
+def test_file_symlink_alias_converges_to_canonical_store_path(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "runtime-authority.json"
+    alias = tmp_path / "runtime-authority-alias.json"
+    DeploymentRuntimeAuthorityStore.initialize_pristine(path)
+    try:
+        alias.symlink_to(path)
+    except OSError as exc:
+        pytest.skip(f"file symlink unavailable in this environment: {exc}")
+
+    store = DeploymentRuntimeAuthorityStore(alias)
+    issued = _append(store, "symlink-alias")
+
+    assert store.path == path.resolve(strict=True)
+    assert alias.is_symlink()
+    assert DeploymentRuntimeAuthorityStore(path).get(issued.runtime_authority_id) == issued
+
+
+def test_hard_link_alias_fails_closed_before_append(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "runtime-authority.json"
+    alias = tmp_path / "runtime-authority-hardlink.json"
+    DeploymentRuntimeAuthorityStore.initialize_pristine(path)
+    try:
+        os.link(path, alias)
+    except OSError as exc:
+        pytest.skip(f"hard links unavailable in this environment: {exc}")
+
+    with pytest.raises(
+        runtime_authority.DeploymentRuntimeAuthorityError,
+        match="hard-linked",
+    ):
+        DeploymentRuntimeAuthorityStore(alias)
 
 
 def test_concurrent_exact_retry_stays_single_record(

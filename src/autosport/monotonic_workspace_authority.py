@@ -22,6 +22,12 @@ from pathlib import Path
 from typing import Final
 
 from .json_integrity import strict_json_loads
+from .monotonic_authority_root_binding import (
+    AuthorityRootSelectionBinding,
+    AuthorityRootSelectionConfigurationError,
+    AuthorityRootSelectionConflictError,
+    AuthorityRootSelectionIntegrityError,
+)
 from .monotonic_workspace_binding import (
     WorkspaceBindingConflictError,
     WorkspaceBindingIntegrityError,
@@ -388,6 +394,20 @@ class MonotonicWorkspaceAuthority:
             self.workspace_binding.workspace_instance_id,
             max_length=256,
         )
+        try:
+            self.authority_root_selection = AuthorityRootSelectionBinding.resolve(
+                workspace=self.workspace,
+                workspace_instance_id=self.workspace_instance_id,
+                authority_root=self.authority_root,
+            )
+        except (
+            AuthorityRootSelectionConfigurationError,
+            AuthorityRootSelectionConflictError,
+        ) as exc:
+            raise MonotonicAuthorityConfigurationError(str(exc)) from exc
+        except AuthorityRootSelectionIntegrityError as exc:
+            raise MonotonicAuthorityIntegrityError(str(exc)) from exc
+        self.authority_root_binding_path = self.authority_root_selection.binding_path
         self.workspace_binding_path = self.workspace_binding.workspace_marker_path
         namespace_material = "\0".join(
             (AUTHORITY_ID, self.workspace_instance_id, self.domain, self.key)
@@ -640,10 +660,38 @@ class MonotonicWorkspaceAuthority:
         with WorkspaceEconomicLock(self.journal_dir):
             return self._load_bound_history().records
 
-    def _validate_workspace_binding(self) -> tuple[bool, bool]:
+    def _validate_authority_root_selection(self) -> bool:
+        try:
+            return self.authority_root_selection.validate_existing()
+        except (
+            AuthorityRootSelectionConfigurationError,
+            AuthorityRootSelectionConflictError,
+        ) as exc:
+            raise MonotonicAuthorityConfigurationError(str(exc)) from exc
+        except AuthorityRootSelectionIntegrityError as exc:
+            raise MonotonicAuthorityIntegrityError(str(exc)) from exc
+
+    def _ensure_authority_root_bound(self) -> None:
+        try:
+            self.authority_root_selection.ensure_bound()
+        except (
+            AuthorityRootSelectionConfigurationError,
+            AuthorityRootSelectionConflictError,
+        ) as exc:
+            raise MonotonicAuthorityConfigurationError(str(exc)) from exc
+        except AuthorityRootSelectionIntegrityError as exc:
+            raise MonotonicAuthorityIntegrityError(str(exc)) from exc
+        except OSError as exc:
+            raise MonotonicAuthorityIntegrityError(
+                "cannot durably persist monotonic authority-root selection"
+            ) from exc
+
+    def _validate_workspace_binding(
+        self, *, register_moved_or_copied_path: bool = True
+    ) -> tuple[bool, bool]:
         try:
             return self.workspace_binding.validate_existing(
-                register_moved_or_copied_path=True
+                register_moved_or_copied_path=register_moved_or_copied_path
             )
         except WorkspaceBindingConflictError as exc:
             raise MonotonicAuthorityConfigurationError(str(exc)) from exc
@@ -651,6 +699,7 @@ class MonotonicWorkspaceAuthority:
             raise MonotonicAuthorityIntegrityError(str(exc)) from exc
 
     def _ensure_workspace_bound(self) -> None:
+        self._ensure_authority_root_bound()
         try:
             self.workspace_binding.ensure_bound()
         except WorkspaceBindingConflictError as exc:
@@ -663,12 +712,35 @@ class MonotonicWorkspaceAuthority:
             ) from exc
 
     def _load_bound_history(self) -> _History:
-        workspace_bound, _path_bound = self._validate_workspace_binding()
+        root_bound = self._validate_authority_root_selection()
+        workspace_bound, path_bound = self._validate_workspace_binding(
+            register_moved_or_copied_path=False
+        )
         history = self._load_history()
+
+        if not root_bound:
+            if history.records or (workspace_bound and path_bound):
+                # Safe upgrade from the integrated pre-root-selection format:
+                # the selected machine root already proves ownership through
+                # non-empty authority history, or through both durable identity
+                # bindings created by a first PREPARE crash prefix.
+                self._ensure_authority_root_bound()
+                root_bound = True
+            elif workspace_bound or path_bound:
+                raise MonotonicAuthorityIntegrityError(
+                    "bound workspace has no authority-root selection proof or "
+                    "history under the selected machine root"
+                )
+
         if history.records and not workspace_bound:
             raise MonotonicAuthorityIntegrityError(
                 "authority history exists but workspace identity binding is missing"
             )
+
+        if root_bound:
+            # Only after the selected root is proven may a moved/copied local
+            # workspace marker register its new path inside that same root.
+            self._validate_workspace_binding(register_moved_or_copied_path=True)
         return history
 
     @staticmethod

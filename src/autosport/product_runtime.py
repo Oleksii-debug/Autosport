@@ -295,6 +295,13 @@ class AutonomousProductRuntime:
     invalidations: BoundedMirrorInvalidationBuffer
     dependencies: FocusedMirrorDependencyIndex
     _runtime_lease: _ProductRuntimeLease
+    _closed: bool = False
+
+    def _require_runtime_authority(self) -> None:
+        if self._closed:
+            raise ProductCompositionError(
+                "product runtime is closed and no longer owns workspace authority"
+            )
 
     @staticmethod
     def _state_value(status: ContinuousSessionStatus) -> str:
@@ -313,6 +320,7 @@ class AutonomousProductRuntime:
     def _coherent_status(self) -> ContinuousSessionStatus:
         """Project lifecycle truth only when collector and session durable state agree."""
 
+        self._require_runtime_authority()
         coordinator_status = self.coordinator.status()
         state = self._state_value(coordinator_status)
         try:
@@ -396,6 +404,7 @@ class AutonomousProductRuntime:
         return self.start()
 
     def stop(self, reason: str = "operator_stop") -> ContinuousSessionStatus:
+        self._require_runtime_authority()
         # STOP is also the explicit recovery action for a previously split
         # lifecycle graph, so do not preflight coherence here. Attempt both
         # durable STOP authorities even if either side reports an error.
@@ -430,6 +439,10 @@ class AutonomousProductRuntime:
         return self.coordinator.tick()
 
     def close(self) -> None:
+        # Revoke lifecycle authority before closing resources or releasing the
+        # workspace lease. Cleanup may fail, but a closing runtime must never
+        # become usable again after exclusive ownership can be transferred.
+        self._closed = True
         try:
             self.market_store.close()
         except BaseException as primary_error:

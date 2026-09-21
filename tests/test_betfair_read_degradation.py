@@ -121,6 +121,9 @@ def test_non_read_operations_are_rejected(operation):
 @pytest.mark.parametrize(
     "operation",
     [
+        "listEventTypes",
+        "listEvents",
+        "listMarketTypes",
         "listMarketCatalogue",
         "listMarketBook",
         "listRunnerBook",
@@ -137,6 +140,21 @@ def test_supported_reads_can_classify_common_temporary_provider_failures(operati
     assert result.automatic_repeat_allowed is True
     assert result.documented_for_api_family is True
     assert result.evidence_payload["read_only"] is True
+
+
+def test_multisport_discovery_reads_share_betting_degradation_policy():
+    for operation in ("listEventTypes", "listEvents", "listMarketTypes"):
+        temporary = BetfairReadDegradation(operation, "SERVICE_BUSY")
+        malformed_request = BetfairReadDegradation(operation, "TOO_MUCH_DATA")
+        account_only = BetfairReadDegradation(operation, "SUBSCRIPTION_EXPIRED")
+
+        assert temporary.api_family == "BETTING"
+        assert temporary.action is ReadRecoveryAction.RETRY_WITH_BACKOFF
+        assert temporary.automatic_repeat_allowed is True
+        assert malformed_request.action is ReadRecoveryAction.REPAIR_REQUEST
+        assert malformed_request.request_must_change is True
+        assert account_only.documented_for_api_family is False
+        assert account_only.action is ReadRecoveryAction.DO_NOT_RETRY
 
 
 def test_error_code_must_be_canonical_uppercase_without_whitespace():
@@ -190,6 +208,9 @@ def test_all_common_temporary_errors_are_repeatable_only_for_supported_reads():
         "UNEXPECTED_ERROR",
     )
     operations = (
+        "listEventTypes",
+        "listEvents",
+        "listMarketTypes",
         "listMarketCatalogue",
         "listMarketBook",
         "listRunnerBook",

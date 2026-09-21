@@ -41,7 +41,7 @@ class SourceHealthFailureQualityTruthTests(unittest.TestCase):
             self.assertEqual(failed.consecutive_failures, 1)
             self.assertEqual(failed.last_cursor, "cursor-17")
             self.assertEqual(failed.latest_source_ts, "2026-09-14T07:59:58+00:00")
-            self.assertEqual(failed.last_error, "RuntimeError: provider unavailable")
+            self.assertEqual(failed.last_error, "RuntimeError: provider failure")
 
             reopened = SourceHealthStore(path).get("source")
             self.assertEqual(reopened, failed)

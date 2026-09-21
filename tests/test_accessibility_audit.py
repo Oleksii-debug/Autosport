@@ -124,6 +124,47 @@ class AccessibilityAuditTests(unittest.TestCase):
         self.assertFalse(report["nvda_verified"])
         self.assertFalse(report["human_tested"])
 
+    def test_duplicate_critical_automation_id_fails_closed_without_overwrite(self):
+        description = self._passing_description()
+        original = next(
+            item
+            for item in description.widgets
+            if item.automation_id == AUTOMATION_IDS["run_replay"]
+        )
+        duplicate = self._widget(
+            original.automation_id,
+            "Дублікат запуску replay",
+            role="PUSH_BUTTON",
+            patterns=("INVOKE",),
+        )
+        duplicate.path = ".!duplicate_run_replay"
+        report = self._summarize(
+            SimpleNamespace(
+                **{
+                    **description.__dict__,
+                    "widgets": description.widgets + (duplicate,),
+                }
+            )
+        )
+
+        self.assertEqual(report["status"], "FAIL")
+        self.assertTrue(
+            any(
+                "duplicate critical control identity" in failure
+                and f"automation_id={original.automation_id}" in failure
+                and f"first_path={original.path}" in failure
+                and f"duplicate_path={duplicate.path}" in failure
+                for failure in report["failures"]
+            )
+        )
+        matching_controls = [
+            item
+            for item in report["critical_controls"]
+            if item["automation_id"] == original.automation_id
+        ]
+        self.assertEqual(len(matching_controls), 1)
+        self.assertEqual(matching_controls[0]["path"], original.path)
+
     def test_wrong_semantic_roles_fail_closed(self):
         cases = (
             (AUTOMATION_IDS["choose_dataset"], "BUTTON", "PUSH_BUTTON"),

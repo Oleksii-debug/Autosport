@@ -30,13 +30,17 @@ _BASE_EVENT = {
 
 class ParlayApiIdentityIngressTests(unittest.TestCase):
     @staticmethod
-    def _read(event: dict) -> tuple:
+    def _read_events(events: list[dict], *, max_items: int = 1000) -> tuple:
         provider = ParlayApiTableTennisProvider(
             "key",
-            transport=lambda *_: HttpJsonResponse([event], 200, {}),
+            transport=lambda *_: HttpJsonResponse(events, 200, {}),
             clock=lambda: "2026-09-12T20:00:10+00:00",
         )
-        return provider.read_batch().quotes
+        return provider.read_batch(max_items=max_items).quotes
+
+    @classmethod
+    def _read(cls, event: dict) -> tuple:
+        return cls._read_events([event])
 
     def test_non_string_event_id_does_not_fall_back_or_coerce(self):
         event = copy.deepcopy(_BASE_EVENT)
@@ -61,7 +65,7 @@ class ParlayApiIdentityIngressTests(unittest.TestCase):
     def test_non_string_bookmaker_key_does_not_fall_back_to_title(self):
         event = copy.deepcopy(_BASE_EVENT)
         event["bookmakers"][0]["key"] = 0
-        with self.assertRaisesRegex(ProviderPayloadError, "bookmaker identity must be a string"):
+        with self.assertRaisesRegex(ProviderPayloadError, "bookmaker key must be a string"):
             self._read(event)
 
     def test_empty_bookmaker_key_does_not_fall_back_to_title(self):
@@ -88,23 +92,91 @@ class ParlayApiIdentityIngressTests(unittest.TestCase):
         with self.assertRaisesRegex(ProviderPayloadError, "non-empty trimmed string"):
             self._read(event)
 
-    def test_missing_primary_string_fields_use_existing_fallbacks(self):
+    def test_missing_event_id_uses_existing_canonical_id_fallback(self):
         event = copy.deepcopy(_BASE_EVENT)
         del event["id"]
         event["canonical_event_id"] = "canonical-100"
-        del event["bookmakers"][0]["key"]
         quotes = self._read(event)
         self.assertEqual(len(quotes), 1)
         self.assertEqual(quotes[0].provider_event_id, "canonical-100")
-        self.assertEqual(quotes[0].provider_market_id, "Book A:h2h")
+        self.assertEqual(quotes[0].provider_market_id, "book-a:h2h")
         self.assertEqual(quotes[0].provider_selection_id, "Player A")
+
+    def test_bookmaker_title_cannot_mint_canonical_market_identity(self):
+        event = copy.deepcopy(_BASE_EVENT)
+        del event["bookmakers"][0]["key"]
+        with self.assertRaisesRegex(ProviderPayloadError, "stable provider key identity"):
+            self._read(event)
 
     def test_missing_bookmaker_identity_fails_closed_instead_of_colliding_on_synthetic_default(self):
         event = copy.deepcopy(_BASE_EVENT)
         del event["bookmakers"][0]["key"]
         del event["bookmakers"][0]["title"]
-        with self.assertRaisesRegex(ProviderPayloadError, "missing key/title identity"):
+        with self.assertRaisesRegex(ProviderPayloadError, "stable provider key identity"):
             self._read(event)
+
+    def test_repeated_event_id_cannot_change_declared_participants(self):
+        first = copy.deepcopy(_BASE_EVENT)
+        first.update(
+            commence_time="2026-09-12T20:30:00Z",
+            home_team="Player A",
+            away_team="Player B",
+        )
+        second = copy.deepcopy(first)
+        second["home_team"] = "Player C"
+        with self.assertRaisesRegex(ProviderPayloadError, "conflicting canonical identity witnesses"):
+            self._read_events([first, second])
+
+    def test_repeated_event_id_cannot_change_declared_start(self):
+        first = copy.deepcopy(_BASE_EVENT)
+        first.update(
+            commence_time="2026-09-12T20:30:00Z",
+            home_team="Player A",
+            away_team="Player B",
+        )
+        second = copy.deepcopy(first)
+        second["commence_time"] = "2026-09-12T20:31:00Z"
+        with self.assertRaisesRegex(ProviderPayloadError, "conflicting canonical identity witnesses"):
+            self._read_events([first, second])
+
+    def test_duplicate_selection_token_in_same_canonical_market_is_ambiguous(self):
+        event = copy.deepcopy(_BASE_EVENT)
+        outcomes = event["bookmakers"][0]["markets"][0]["outcomes"]
+        outcomes.append({"name": "Player A", "price": 1.90})
+        with self.assertRaisesRegex(ProviderPayloadError, "ambiguous duplicate"):
+            self._read(event)
+
+    def test_duplicate_beyond_requested_batch_limit_fails_before_partial_batch_escapes(self):
+        event = copy.deepcopy(_BASE_EVENT)
+        outcomes = event["bookmakers"][0]["markets"][0]["outcomes"]
+        outcomes.append({"name": "Player A", "price": 1.90})
+        with self.assertRaisesRegex(ProviderPayloadError, "ambiguous duplicate"):
+            self._read_events([event], max_items=1)
+
+    def test_same_selection_token_at_distinct_handicap_lines_remains_distinct(self):
+        event = copy.deepcopy(_BASE_EVENT)
+        market = event["bookmakers"][0]["markets"][0]
+        market["key"] = "spreads"
+        market["outcomes"] = [
+            {"name": "Player A", "price": 1.80, "point": -1.5},
+            {"name": "Player A", "price": 1.90, "point": -2.5},
+        ]
+        quotes = self._read(event)
+        self.assertEqual(len(quotes), 2)
+        self.assertNotEqual(quotes[0].provider_market_id, quotes[1].provider_market_id)
+
+    def test_same_participant_labels_under_distinct_provider_event_ids_do_not_alias(self):
+        first = copy.deepcopy(_BASE_EVENT)
+        first.update(
+            commence_time="2026-09-12T20:30:00Z",
+            home_team="Player A",
+            away_team="Player B",
+        )
+        second = copy.deepcopy(first)
+        second["id"] = "tt-101"
+        second["bookmakers"][0]["markets"][0]["outcomes"][0]["price"] = 1.95
+        quotes = self._read_events([first, second])
+        self.assertEqual({quote.provider_event_id for quote in quotes}, {"tt-100", "tt-101"})
 
 
 if __name__ == "__main__":

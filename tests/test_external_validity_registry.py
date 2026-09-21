@@ -18,6 +18,7 @@ from autosport.external_validity_baseline import (
 from autosport.external_validity_registry import (
     ExternalValidityRegistryError,
     build_registered_external_validity_report,
+    canonical_policy_evaluation_bundle_sha256,
 )
 from autosport.opportunity import StrategyClass
 from autosport.scientific_registry import (
@@ -95,7 +96,7 @@ def _result(
     scored: int = 1,
     abstained: int = 1,
 ) -> PolicyEvaluation:
-    return PolicyEvaluation(
+    provisional = PolicyEvaluation(
         policy_id=policy_id,
         policy_artifact_sha256=artifact_sha256,
         protocol_sha256=protocol.identity_sha256,
@@ -110,8 +111,14 @@ def _result(
         scored_count=scored,
         abstention_count=abstained,
         total_cost="0.01",
-        evaluation_bundle_sha256=_hash("bundle:" + policy_id),
+        evaluation_bundle_sha256=_hash("provisional:" + policy_id),
         baseline_definition_sha256=baseline_definition_sha256,
+    )
+    return replace(
+        provisional,
+        evaluation_bundle_sha256=canonical_policy_evaluation_bundle_sha256(
+            provisional
+        ),
     )
 
 
@@ -180,7 +187,7 @@ def _append_bundle(
             bundle_sha256=evaluation.evaluation_bundle_sha256,
             evaluator_source_sha256=_hash("evaluator-source"),
             dataset_snapshot_id=dataset_snapshot_id,
-            protocol_sha256=protocol_sha256 or _hash("registered-research-protocol"),
+            protocol_sha256=protocol_sha256 or evaluation.protocol_sha256,
             artifact_hashes=(evaluation.policy_artifact_sha256,),
             created_at=T2,
         )
@@ -256,6 +263,34 @@ def test_unregistered_or_tampered_candidate_bundle_fails_closed(tmp_path):
         )
 
 
+def test_fresh_matching_opaque_bundle_cannot_bless_changed_metric(tmp_path):
+    protocol = _protocol()
+    candidate, baselines = _evaluations(protocol)
+    changed = replace(candidate, metric_value="0.08")
+    registry = ScientificRegistry.initialize_pristine(tmp_path / "forged-registry.json")
+    _append_dataset(registry, protocol)
+    _append_bundle(registry, changed, bundle_id="bundle-id:changed")
+
+    baseline_ids: dict[str, str] = {}
+    for index, baseline in enumerate(baselines):
+        bundle_id = f"bundle-id:baseline:{index}"
+        baseline_ids[baseline.policy_id] = bundle_id
+        _append_bundle(registry, baseline, bundle_id=bundle_id)
+
+    with pytest.raises(
+        ExternalValidityRegistryError,
+        match="does not commit to canonical evaluation payload",
+    ):
+        build_registered_external_validity_report(
+            registry,
+            protocol,
+            changed,
+            baselines,
+            candidate_evaluation_bundle_id="bundle-id:changed",
+            baseline_evaluation_bundle_ids=baseline_ids,
+        )
+
+
 def test_registry_dataset_manifest_and_cutoff_must_match_frozen_scope(tmp_path):
     protocol = _protocol()
     candidate, baselines = _evaluations(protocol)
@@ -305,6 +340,43 @@ def test_registry_dataset_manifest_and_cutoff_must_match_frozen_scope(tmp_path):
         )
 
 
+def test_all_registry_bundles_must_bind_exact_frozen_protocol(tmp_path):
+    protocol = _protocol()
+    candidate, baselines = _evaluations(protocol)
+    wrong_protocol_sha = _hash("shared-but-wrong-frozen-protocol")
+    registry = ScientificRegistry.initialize_pristine(tmp_path / "wrong-protocol.json")
+    _append_dataset(registry, protocol)
+    _append_bundle(
+        registry,
+        candidate,
+        bundle_id="bundle-id:candidate",
+        protocol_sha256=wrong_protocol_sha,
+    )
+    baseline_ids: dict[str, str] = {}
+    for index, baseline in enumerate(baselines):
+        bundle_id = f"bundle-id:baseline:{index}"
+        baseline_ids[baseline.policy_id] = bundle_id
+        _append_bundle(
+            registry,
+            baseline,
+            bundle_id=bundle_id,
+            protocol_sha256=wrong_protocol_sha,
+        )
+
+    with pytest.raises(
+        ExternalValidityRegistryError,
+        match="protocol SHA does not match frozen protocol",
+    ):
+        build_registered_external_validity_report(
+            registry,
+            protocol,
+            candidate,
+            baselines,
+            candidate_evaluation_bundle_id="bundle-id:candidate",
+            baseline_evaluation_bundle_ids=baseline_ids,
+        )
+
+
 def test_supported_baselines_must_share_registry_dataset_and_protocol(tmp_path):
     protocol = _protocol()
     candidate, baselines = _evaluations(protocol)
@@ -349,7 +421,6 @@ def test_supported_baselines_must_share_registry_dataset_and_protocol(tmp_path):
         protocol_registry,
         candidate,
         bundle_id="bundle-id:candidate",
-        protocol_sha256=_hash("registered-research-protocol"),
     )
     protocol_baseline_ids: dict[str, str] = {}
     for index, baseline in enumerate(baselines):
@@ -362,11 +433,11 @@ def test_supported_baselines_must_share_registry_dataset_and_protocol(tmp_path):
             protocol_sha256=(
                 _hash("different-research-protocol")
                 if index == 0
-                else _hash("registered-research-protocol")
+                else protocol.identity_sha256
             ),
         )
 
-    with pytest.raises(ExternalValidityRegistryError, match="protocol SHA differs"):
+    with pytest.raises(ExternalValidityRegistryError, match="frozen protocol"):
         build_registered_external_validity_report(
             protocol_registry,
             protocol,

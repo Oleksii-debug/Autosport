@@ -54,6 +54,7 @@ def test_base_recovery_configuration_broken_str_stays_fail_closed() -> None:
     showerror.assert_called_once_with(
         text("ui.dialog.title"),
         _expected_error("ui.error.recovery.configuration"),
+        parent=app,
     )
 
 
@@ -68,4 +69,5 @@ def test_base_replay_configuration_broken_str_stays_fail_closed() -> None:
     showerror.assert_called_once_with(
         text("ui.dialog.title"),
         _expected_error("ui.error.replay.configuration"),
+        parent=app,
     )

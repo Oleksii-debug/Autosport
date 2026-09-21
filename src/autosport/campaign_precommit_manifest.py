@@ -8,6 +8,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Mapping
 
+from .json_integrity import strict_json_loads
+
 
 SCHEMA = "autosport.campaign_precommit_manifest"
 SCHEMA_VERSION = 1
@@ -253,8 +255,8 @@ def load_campaign_precommit_manifest(
 ) -> CampaignPrecommitManifest:
     target = Path(path)
     try:
-        raw = json.loads(target.read_text(encoding="utf-8"))
-    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raw = strict_json_loads(target.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, ValueError) as exc:
         raise CampaignPrecommitManifestError(
             "cannot read campaign precommit manifest"
         ) from exc

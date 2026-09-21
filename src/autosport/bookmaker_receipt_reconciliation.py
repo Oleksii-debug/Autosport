@@ -244,6 +244,7 @@ def _require_durable_action_matches_child(
         "event_id": item.quote.event_id,
         "market_id": item.quote.market_id,
         "selection_id": item.quote.selection_id,
+        "quote_id": item.quote.market_event_hash,
         "quote_observed_at": item.quote.observed_ts,
     }
     for field, expected in exact_text.items():

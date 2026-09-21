@@ -38,7 +38,7 @@ class ProductWorkspaceInitialization:
     workspace: Path
     workspace_instance_id: str
     workspace_marker_path: Path
-    machine_path_binding_path: Path
+    path_binding_path: Path
     binding_schema_version: int = PRODUCT_WORKSPACE_BINDING_SCHEMA_VERSION
 
 
@@ -115,7 +115,7 @@ def initialize_product_workspace(
                 workspace=workspace_path,
                 workspace_instance_id=binding.workspace_instance_id,
                 workspace_marker_path=binding.workspace_marker_path,
-                machine_path_binding_path=binding.path_binding_path,
+                path_binding_path=binding.path_binding_path,
             )
         except WorkspaceBindingConflictError as exc:
             last_conflict = exc

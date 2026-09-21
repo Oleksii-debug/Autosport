@@ -320,3 +320,29 @@ def test_request_time_must_itself_be_explicit_utc() -> None:
                 tzinfo=timezone(timedelta(hours=2)),
             ),
         )
+
+
+def test_low_level_tampered_requested_source_is_revalidated() -> None:
+    source = _source()
+    object.__setattr__(source, "content_sha256", "not-a-sha")
+    with pytest.raises(SourceRightsManifestError, match="lowercase SHA-256"):
+        evaluate_source_rights(
+            _manifest(),
+            source=source,
+            purpose=SourcePurpose.MODEL_TRAINING,
+            use_at=T2,
+        )
+
+
+def test_low_level_tampered_manifest_source_is_invalid_evidence() -> None:
+    manifest = _manifest()
+    object.__setattr__(manifest.source, "source_id", " tampered")
+    decision = evaluate_source_rights(
+        manifest,
+        source=_source(),
+        purpose=SourcePurpose.MODEL_TRAINING,
+        use_at=T2,
+    )
+    assert decision.code is SourceRightsDecisionCode.INVALID_EVIDENCE
+    assert decision.reason is SourceRightsReason.MALFORMED_MANIFEST
+    assert decision.manifest_sha256 is None

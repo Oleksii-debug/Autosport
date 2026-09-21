@@ -5,8 +5,11 @@ from datetime import datetime, timezone
 from decimal import Decimal
 import hashlib
 import json
+import os
+from pathlib import Path
 from typing import Any, Mapping
 
+from ._paper_execution_anti_rollback import _authority_root, _sync_authority_directory
 from .campaign_denomination import (
     CampaignDenominationBinding,
     CampaignDenominationError,
@@ -28,6 +31,8 @@ class CampaignEconomicAuthorityError(ValueError):
 
 
 _DENOMINATION_STATE_KEY = "campaign_denomination_bindings"
+_ISSUANCE_WITNESS_SCHEMA_VERSION = 1
+_ISSUANCE_WITNESS_SUFFIX = ".campaign-denomination-issuance.monotonic-witness.jsonl"
 
 
 def _sha256_payload(payload: object) -> str:
@@ -176,6 +181,170 @@ def _economic_goal_source(summary: Mapping[str, Any]) -> dict[str, object] | Non
     }
 
 
+def _registry_identity(path: Path) -> str:
+    try:
+        normalized = os.path.normcase(os.path.abspath(os.fspath(path.resolve(strict=False))))
+    except OSError as exc:
+        raise CampaignEconomicAuthorityError(
+            "cannot resolve campaign denomination registry identity"
+        ) from exc
+    return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+
+
+def _issuance_witness_path(registry: ScientificRegistry) -> Path:
+    try:
+        root = _authority_root(registry.path)
+    except Exception as exc:
+        raise CampaignEconomicAuthorityError(
+            "cannot establish independent campaign denomination issuance authority"
+        ) from exc
+    return root / f"{_registry_identity(registry.path)}{_ISSUANCE_WITNESS_SUFFIX}"
+
+
+def _read_issuance_witnesses(registry: ScientificRegistry) -> list[dict[str, object]]:
+    path = _issuance_witness_path(registry)
+    if not path.exists():
+        return []
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except (OSError, UnicodeError) as exc:
+        raise CampaignEconomicAuthorityError(
+            "cannot read campaign denomination issuance witness"
+        ) from exc
+    expected_keys = {
+        "witness_schema_version",
+        "sequence",
+        "registry_identity",
+        "registry_name",
+        "binding_key",
+        "binding_payload_sha256",
+        "available_at",
+        "previous_witness_sha256",
+        "witness_sha256",
+    }
+    records: list[dict[str, object]] = []
+    previous: str | None = None
+    seen_keys: set[str] = set()
+    for sequence, raw in enumerate(lines, start=1):
+        if not raw:
+            raise CampaignEconomicAuthorityError(
+                "campaign denomination issuance witness contains a blank line"
+            )
+        try:
+            record = json.loads(raw)
+        except (json.JSONDecodeError, TypeError) as exc:
+            raise CampaignEconomicAuthorityError(
+                "campaign denomination issuance witness is unreadable"
+            ) from exc
+        if type(record) is not dict or set(record) != expected_keys:
+            raise CampaignEconomicAuthorityError(
+                "campaign denomination issuance witness schema is invalid"
+            )
+        if record["witness_schema_version"] != _ISSUANCE_WITNESS_SCHEMA_VERSION:
+            raise CampaignEconomicAuthorityError(
+                "campaign denomination issuance witness version is unsupported"
+            )
+        if record["sequence"] != sequence:
+            raise CampaignEconomicAuthorityError(
+                "campaign denomination issuance witness sequence is not contiguous"
+            )
+        if record["registry_identity"] != _registry_identity(registry.path):
+            raise CampaignEconomicAuthorityError(
+                "campaign denomination issuance witness belongs to another registry"
+            )
+        if record["registry_name"] != registry.path.name:
+            raise CampaignEconomicAuthorityError(
+                "campaign denomination issuance witness names another registry"
+            )
+        key = _canonical_text(record["binding_key"], "issuance witness binding_key")
+        if key in seen_keys:
+            raise CampaignEconomicAuthorityError(
+                "campaign denomination issuance witness duplicates a binding key"
+            )
+        seen_keys.add(key)
+        _canonical_sha256(
+            record["binding_payload_sha256"],
+            "issuance witness binding_payload_sha256",
+        )
+        _utc_datetime(record["available_at"], "issuance witness available_at")
+        if record["previous_witness_sha256"] != previous:
+            raise CampaignEconomicAuthorityError(
+                "campaign denomination issuance witness predecessor mismatch"
+            )
+        body = {key: record[key] for key in expected_keys if key != "witness_sha256"}
+        digest = _canonical_sha256(record["witness_sha256"], "issuance witness_sha256")
+        if digest != _sha256_payload(body):
+            raise CampaignEconomicAuthorityError(
+                "campaign denomination issuance witness digest mismatch"
+            )
+        previous = digest
+        records.append(record)
+    return records
+
+
+def _append_issuance_witness(
+    registry: ScientificRegistry,
+    *,
+    binding_key: str,
+    binding_payload_sha256: str,
+    available_at: datetime,
+) -> dict[str, object]:
+    records = _read_issuance_witnesses(registry)
+    matches = [record for record in records if record["binding_key"] == binding_key]
+    available_text = available_at.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+    if matches:
+        record = matches[0]
+        if (
+            record["binding_payload_sha256"] != binding_payload_sha256
+            or record["available_at"] != available_text
+        ):
+            raise CampaignEconomicAuthorityError(
+                "campaign denomination issuance witness conflicts with candidate binding"
+            )
+        return record
+    body: dict[str, object] = {
+        "witness_schema_version": _ISSUANCE_WITNESS_SCHEMA_VERSION,
+        "sequence": len(records) + 1,
+        "registry_identity": _registry_identity(registry.path),
+        "registry_name": registry.path.name,
+        "binding_key": binding_key,
+        "binding_payload_sha256": _canonical_sha256(
+            binding_payload_sha256, "binding payload sha256"
+        ),
+        "available_at": available_text,
+        "previous_witness_sha256": None if not records else records[-1]["witness_sha256"],
+    }
+    record = {**body, "witness_sha256": _sha256_payload(body)}
+    path = _issuance_witness_path(registry)
+    existed = path.exists()
+    try:
+        with path.open("a", encoding="utf-8", newline="\n") as handle:
+            handle.write(
+                json.dumps(
+                    record,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                    allow_nan=False,
+                )
+                + "\n"
+            )
+            handle.flush()
+            os.fsync(handle.fileno())
+        if not existed:
+            _sync_authority_directory(path.parent)
+    except OSError as exc:
+        raise CampaignEconomicAuthorityError(
+            "campaign denomination issuance witness durability barrier failed"
+        ) from exc
+    reread = _read_issuance_witnesses(registry)
+    if not reread or reread[-1] != record:
+        raise CampaignEconomicAuthorityError(
+            "campaign denomination issuance witness was not durably re-resolved"
+        )
+    return record
+
+
 @dataclass(frozen=True, order=True, slots=True)
 class CanonicalSessionRef:
     evidence_id: str
@@ -202,9 +371,10 @@ class CanonicalCampaignProjection:
 class FinalizedCampaignAuthority:
     """Product-owned capability over an already-authoritative PaperCampaign.
 
-    Denomination is an explicitly issued immutable record persisted in the existing
-    ScientificRegistry state file. Reading campaign economics can only re-resolve
-    that persisted record; it can never manufacture positive authority on demand.
+    Denomination payload bytes remain co-located with ScientificRegistry state, but
+    positive authority additionally requires an append-only issuance witness in the
+    existing independent monotonic workspace authority root. A caller-written extra
+    top-level registry payload therefore cannot manufacture denomination authority.
     """
 
     __slots__ = ("_campaign",)
@@ -223,7 +393,6 @@ class FinalizedCampaignAuthority:
             raise CampaignEconomicAuthorityError(
                 "campaign authority requires a finalized PaperCampaign"
             )
-
         scientific_registry = campaign._scientific_registry
         run_registry = campaign._run_registry
         if type(scientific_registry) is not ScientificRegistry:
@@ -234,16 +403,13 @@ class FinalizedCampaignAuthority:
             raise CampaignEconomicAuthorityError(
                 "finalized campaign lacks RunRegistry authority"
             )
-
         if campaign.campaign_sha256 != campaign._computed_campaign_sha256():
             raise CampaignEconomicAuthorityError(
                 "finalized campaign state no longer matches campaign_sha256"
             )
-
         _validate_registry_bindings(campaign, scientific_registry)
         sessions: list[CanonicalSessionRef] = []
         memberships: list[CanonicalMembershipRef] = []
-
         for session in campaign.sessions:
             _validate_authoritative_session(
                 campaign,
@@ -264,7 +430,6 @@ class FinalizedCampaignAuthority:
                 raise CampaignEconomicAuthorityError(
                     "EvaluationBundle lacks canonical bundle_sha256"
                 )
-
             sessions.append(
                 CanonicalSessionRef(
                     evidence_id=session.evidence_id,
@@ -290,7 +455,6 @@ class FinalizedCampaignAuthority:
                     ),
                 )
             )
-
         summary = campaign.summary()
         if summary.status != "FINALIZED":
             raise CampaignEconomicAuthorityError("campaign summary is not finalized")
@@ -302,7 +466,6 @@ class FinalizedCampaignAuthority:
             raise CampaignEconomicAuthorityError(
                 "finalized campaign contains no authoritative session evidence"
             )
-
         return CanonicalCampaignProjection(
             campaign_id=campaign.campaign_id,
             campaign_version=campaign.campaign_version,
@@ -389,7 +552,11 @@ class FinalizedCampaignAuthority:
         projection, canonical_goal, source_rows, portfolio_rows = self._binding_source()
         if canonical_goal is None:
             return None
-        if type(available_at) is not datetime or available_at.tzinfo is None or available_at.utcoffset() is None:
+        if (
+            type(available_at) is not datetime
+            or available_at.tzinfo is None
+            or available_at.utcoffset() is None
+        ):
             raise CampaignEconomicAuthorityError(
                 "campaign denomination issuance clock must return timezone-aware datetime"
             )
@@ -400,7 +567,9 @@ class FinalizedCampaignAuthority:
                 "finalized campaign lacks finalized_at denomination boundary"
             )
         effective_at = min(
-            _utc_datetime(session.evaluation_window_start, "session evaluation_window_start")
+            _utc_datetime(
+                session.evaluation_window_start, "session evaluation_window_start"
+            )
             for session in self._campaign.sessions
         )
         observed_at = max(
@@ -454,8 +623,50 @@ class FinalizedCampaignAuthority:
             )
         return raw
 
+    def _issuance_witness(self) -> Mapping[str, object] | None:
+        key = self._binding_key()
+        records = _read_issuance_witnesses(self._registry())
+        matches = [record for record in records if record["binding_key"] == key]
+        if not matches:
+            return None
+        if len(matches) != 1:
+            raise CampaignEconomicAuthorityError(
+                "campaign denomination issuance witness is ambiguous"
+            )
+        return matches[0]
+
+    def _verified_persisted_binding(
+        self,
+        raw: Mapping[str, object],
+        witness: Mapping[str, object],
+    ) -> CampaignDenominationBinding:
+        try:
+            persisted = rehydrate_campaign_denomination_binding(raw)
+        except CampaignDenominationError as exc:
+            raise CampaignEconomicAuthorityError(
+                "persisted campaign denomination binding failed integrity validation"
+            ) from exc
+        payload_sha = _sha256_payload(dict(persisted.canonical_payload))
+        if witness.get("binding_payload_sha256") != payload_sha:
+            raise CampaignEconomicAuthorityError(
+                "persisted campaign denomination is not backed by its issuance witness"
+            )
+        witnessed_at = _utc_datetime(
+            witness.get("available_at"), "issuance witness available_at"
+        )
+        if persisted.available_at.astimezone(timezone.utc) != witnessed_at:
+            raise CampaignEconomicAuthorityError(
+                "persisted campaign denomination timestamp is not issuance-witnessed"
+            )
+        expected = self._derive_binding(available_at=witnessed_at)
+        if expected is None or persisted != expected:
+            raise CampaignEconomicAuthorityError(
+                "persisted campaign denomination binding drifts from live campaign authority"
+            )
+        return persisted
+
     def issue_denomination_binding(self) -> CampaignDenominationBinding | None:
-        """Issue once with product-owned time inside the durable publication lock."""
+        """Issue once and prove ancestry through independent monotonic authority."""
 
         registry = self._registry()
         with WorkspaceEconomicLock(registry.path.parent):
@@ -467,35 +678,53 @@ class FinalizedCampaignAuthority:
                 )
             key = self._binding_key()
             prior = None if raw_bindings is None else raw_bindings.get(key)
+            witness = self._issuance_witness()
+
             if prior is not None:
                 if type(prior) is not dict:
                     raise CampaignEconomicAuthorityError(
                         "persisted campaign denomination binding is malformed"
                     )
-                persisted = rehydrate_campaign_denomination_binding(prior)
-                expected = self._derive_binding(available_at=persisted.available_at)
-                if expected != persisted:
+                if witness is None:
                     raise CampaignEconomicAuthorityError(
-                        "persisted campaign denomination binding drifts from live campaign authority"
+                        "persisted campaign denomination lacks product issuance ancestry"
                     )
-                return persisted
+                return self._verified_persisted_binding(prior, witness)
 
-            # Availability is product-owned and sampled only after this process has
-            # won the serialization boundary.  A caller cannot inject/backdate the
-            # positive timestamp, and lock contention cannot create a pre-publication
-            # availability window.
-            candidate = self._derive_binding(
-                available_at=datetime.now(timezone.utc)
-            )
-            if candidate is None:
-                return None
+            if witness is not None:
+                # Recover the ordinary crash prefix where independent issuance was
+                # durable but the co-located registry cache was not yet replaced.
+                witnessed_at = _utc_datetime(
+                    witness.get("available_at"), "issuance witness available_at"
+                )
+                candidate = self._derive_binding(available_at=witnessed_at)
+                if candidate is None:
+                    raise CampaignEconomicAuthorityError(
+                        "issuance witness exists for a campaign without denomination authority"
+                    )
+                candidate_payload = dict(candidate.canonical_payload)
+                if witness.get("binding_payload_sha256") != _sha256_payload(candidate_payload):
+                    raise CampaignEconomicAuthorityError(
+                        "issuance witness does not match canonical campaign denomination"
+                    )
+            else:
+                candidate = self._derive_binding(available_at=datetime.now(timezone.utc))
+                if candidate is None:
+                    return None
+                candidate_payload = dict(candidate.canonical_payload)
+                witness = _append_issuance_witness(
+                    registry,
+                    binding_key=key,
+                    binding_payload_sha256=_sha256_payload(candidate_payload),
+                    available_at=candidate.available_at,
+                )
+
             if raw_bindings is None:
                 raw_bindings = {}
                 state[_DENOMINATION_STATE_KEY] = raw_bindings
-            raw_bindings[key] = dict(candidate.canonical_payload)
+            raw_bindings[key] = candidate_payload
             atomic_write_json(registry.path, state)
 
-            # Re-read the durable bytes before returning positive authority.
             persisted_state = registry._read()
             persisted_index = persisted_state.get(_DENOMINATION_STATE_KEY)
             if type(persisted_index) is not dict:
@@ -507,31 +736,25 @@ class FinalizedCampaignAuthority:
                 raise CampaignEconomicAuthorityError(
                     "persisted campaign denomination binding disappeared after publication"
                 )
-            persisted = rehydrate_campaign_denomination_binding(persisted_raw)
-            if persisted != candidate:
-                raise CampaignEconomicAuthorityError(
-                    "durable campaign denomination differs from issued authority"
-                )
-            return persisted
+            assert witness is not None
+            return self._verified_persisted_binding(persisted_raw, witness)
 
     def denomination_binding(self) -> CampaignDenominationBinding | None:
-        """Re-resolve only previously persisted campaign denomination authority."""
+        """Re-resolve only product-issued denomination with witnessed ancestry."""
 
         raw = self._persisted_payload()
+        witness = self._issuance_witness()
         if raw is None:
+            if witness is not None:
+                raise CampaignEconomicAuthorityError(
+                    "campaign denomination issuance is pending durable registry recovery"
+                )
             return None
-        try:
-            persisted = rehydrate_campaign_denomination_binding(raw)
-        except CampaignDenominationError as exc:
+        if witness is None:
             raise CampaignEconomicAuthorityError(
-                "persisted campaign denomination binding failed integrity validation"
-            ) from exc
-        expected = self._derive_binding(available_at=persisted.available_at)
-        if expected is None or persisted != expected:
-            raise CampaignEconomicAuthorityError(
-                "persisted campaign denomination binding drifts from live campaign authority"
+                "persisted campaign denomination lacks product issuance ancestry"
             )
-        return persisted
+        return self._verified_persisted_binding(raw, witness)
 
     def verify_denomination_binding(
         self, binding: CampaignDenominationBinding

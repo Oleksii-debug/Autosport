@@ -26,6 +26,10 @@ D1 = "1" * 64
 D2 = "2" * 64
 D3 = "3" * 64
 D4 = "4" * 64
+D5 = "5" * 64
+MANIFEST_REF = "provider-manifest:betfair:v3"
+MANIFEST_VERSION = 3
+MANIFEST_SHA = D5
 CODE_REF = "git:cb102d85:src/autosport/betfair_adapter.py"
 CONFIG_REF = "config:betfair-production-v1"
 
@@ -93,6 +97,9 @@ def _ref(
         account_scope=account_scope or profile.account_id,
         profile_id=profile.profile_id,
         integration_evidence_id=integration.evidence_id,
+        capability_manifest_ref=MANIFEST_REF,
+        capability_manifest_version=MANIFEST_VERSION,
+        capability_manifest_sha256=MANIFEST_SHA,
         adapter_code_ref=code_ref,
         adapter_code_sha256=code_sha,
         adapter_config_ref=config_ref,
@@ -140,6 +147,9 @@ def _artifact(
     artifact = build_provider_certification(
         profile,
         integration,
+        capability_manifest_ref=MANIFEST_REF,
+        capability_manifest_version=MANIFEST_VERSION,
+        capability_manifest_sha256=MANIFEST_SHA,
         adapter_code_ref=CODE_REF,
         adapter_code_sha256=D1,
         adapter_config_ref=CONFIG_REF,
@@ -158,7 +168,10 @@ def _artifact(
 
 def test_certification_projects_manifest_and_not_proven_capabilities():
     _, _, artifact = _artifact()
-    assert artifact.capability_manifest_version == 7
+    assert artifact.profile_version == 7
+    assert artifact.capability_manifest_version == MANIFEST_VERSION
+    assert artifact.capability_manifest_ref == MANIFEST_REF
+    assert artifact.capability_manifest_sha256 == MANIFEST_SHA
     assert tuple(item.capability for item in artifact.capability_states) == tuple(
         sorted(BookmakerCapability, key=lambda item: item.value)
     )
@@ -218,7 +231,10 @@ def test_every_tested_mode_requires_exact_bound_evidence():
         build_provider_certification(
             profile,
             integration,
-            adapter_code_ref=CODE_REF,
+            capability_manifest_ref=MANIFEST_REF,
+        capability_manifest_version=MANIFEST_VERSION,
+        capability_manifest_sha256=MANIFEST_SHA,
+        adapter_code_ref=CODE_REF,
             adapter_code_sha256=D1,
             adapter_config_ref=CONFIG_REF,
             adapter_config_sha256=D2,
@@ -241,7 +257,10 @@ def test_qualification_evidence_cannot_be_rebound_to_another_account_or_code():
         build_provider_certification(
             profile,
             integration,
-            adapter_code_ref=CODE_REF,
+            capability_manifest_ref=MANIFEST_REF,
+        capability_manifest_version=MANIFEST_VERSION,
+        capability_manifest_sha256=MANIFEST_SHA,
+        adapter_code_ref=CODE_REF,
             adapter_code_sha256=D1,
             adapter_config_ref=CONFIG_REF,
             adapter_config_sha256=D2,
@@ -260,7 +279,10 @@ def test_qualification_evidence_cannot_be_rebound_to_another_account_or_code():
         build_provider_certification(
             profile,
             integration,
-            adapter_code_ref=CODE_REF,
+            capability_manifest_ref=MANIFEST_REF,
+        capability_manifest_version=MANIFEST_VERSION,
+        capability_manifest_sha256=MANIFEST_SHA,
+        adapter_code_ref=CODE_REF,
             adapter_code_sha256=D1,
             adapter_config_ref=CONFIG_REF,
             adapter_config_sha256=D2,
@@ -275,6 +297,9 @@ def test_certification_identity_is_deterministic_under_input_order():
     second = build_provider_certification(
         profile,
         integration,
+        capability_manifest_ref=MANIFEST_REF,
+        capability_manifest_version=MANIFEST_VERSION,
+        capability_manifest_sha256=MANIFEST_SHA,
         adapter_code_ref=CODE_REF,
         adapter_code_sha256=D1,
         adapter_config_ref=CONFIG_REF,
@@ -293,6 +318,9 @@ def test_verify_current_fails_closed_on_code_config_and_test_evidence_drift():
     artifact.verify_current(
         profile,
         integration,
+        capability_manifest_ref=MANIFEST_REF,
+        capability_manifest_version=MANIFEST_VERSION,
+        capability_manifest_sha256=MANIFEST_SHA,
         adapter_code_ref=CODE_REF,
         adapter_code_sha256=D1,
         adapter_config_ref=CONFIG_REF,
@@ -302,6 +330,9 @@ def test_verify_current_fails_closed_on_code_config_and_test_evidence_drift():
     assert artifact.requalification_triggers == tuple(ProviderRequalificationTrigger)
 
     cases = (
+        ({"capability_manifest_ref": "provider-manifest:betfair:v4"}, "manifest drift"),
+        ({"capability_manifest_version": 4}, "manifest drift"),
+        ({"capability_manifest_sha256": D4}, "manifest drift"),
         ({"adapter_code_ref": "git:other:adapter.py"}, "code reference drift"),
         ({"adapter_code_sha256": D4}, "code drift"),
         ({"adapter_config_ref": "config:other"}, "config reference drift"),
@@ -309,6 +340,9 @@ def test_verify_current_fails_closed_on_code_config_and_test_evidence_drift():
     )
     for overrides, message in cases:
         args = {
+            "capability_manifest_ref": MANIFEST_REF,
+            "capability_manifest_version": MANIFEST_VERSION,
+            "capability_manifest_sha256": MANIFEST_SHA,
             "adapter_code_ref": CODE_REF,
             "adapter_code_sha256": D1,
             "adapter_config_ref": CONFIG_REF,
@@ -327,7 +361,10 @@ def test_verify_current_fails_closed_on_code_config_and_test_evidence_drift():
         artifact.verify_current(
             profile,
             integration,
-            adapter_code_ref=CODE_REF,
+            capability_manifest_ref=MANIFEST_REF,
+        capability_manifest_version=MANIFEST_VERSION,
+        capability_manifest_sha256=MANIFEST_SHA,
+        adapter_code_ref=CODE_REF,
             adapter_code_sha256=D1,
             adapter_config_ref=CONFIG_REF,
             adapter_config_sha256=D2,
@@ -342,7 +379,10 @@ def test_profile_integration_or_projection_drift_requires_requalification():
         artifact.verify_current(
             changed_profile,
             integration,
-            adapter_code_ref=CODE_REF,
+            capability_manifest_ref=MANIFEST_REF,
+        capability_manifest_version=MANIFEST_VERSION,
+        capability_manifest_sha256=MANIFEST_SHA,
+        adapter_code_ref=CODE_REF,
             adapter_code_sha256=D1,
             adapter_config_ref=CONFIG_REF,
             adapter_config_sha256=D2,
@@ -357,7 +397,10 @@ def test_profile_integration_or_projection_drift_requires_requalification():
         artifact.verify_current(
             profile,
             changed_integration,
-            adapter_code_ref=CODE_REF,
+            capability_manifest_ref=MANIFEST_REF,
+        capability_manifest_version=MANIFEST_VERSION,
+        capability_manifest_sha256=MANIFEST_SHA,
+        adapter_code_ref=CODE_REF,
             adapter_code_sha256=D1,
             adapter_config_ref=CONFIG_REF,
             adapter_config_sha256=D2,
@@ -378,7 +421,10 @@ def test_profile_integration_or_projection_drift_requires_requalification():
         forged.verify_current(
             profile,
             integration,
-            adapter_code_ref=CODE_REF,
+            capability_manifest_ref=MANIFEST_REF,
+        capability_manifest_version=MANIFEST_VERSION,
+        capability_manifest_sha256=MANIFEST_SHA,
+        adapter_code_ref=CODE_REF,
             adapter_code_sha256=D1,
             adapter_config_ref=CONFIG_REF,
             adapter_config_sha256=D2,
@@ -399,7 +445,10 @@ def test_builder_rejects_future_or_predating_qualification_evidence():
         build_provider_certification(
             profile,
             integration,
-            adapter_code_ref=CODE_REF,
+            capability_manifest_ref=MANIFEST_REF,
+        capability_manifest_version=MANIFEST_VERSION,
+        capability_manifest_sha256=MANIFEST_SHA,
+        adapter_code_ref=CODE_REF,
             adapter_code_sha256=D1,
             adapter_config_ref=CONFIG_REF,
             adapter_config_sha256=D2,
@@ -418,7 +467,10 @@ def test_builder_rejects_future_or_predating_qualification_evidence():
         build_provider_certification(
             profile,
             integration,
-            adapter_code_ref=CODE_REF,
+            capability_manifest_ref=MANIFEST_REF,
+        capability_manifest_version=MANIFEST_VERSION,
+        capability_manifest_sha256=MANIFEST_SHA,
+        adapter_code_ref=CODE_REF,
             adapter_code_sha256=D1,
             adapter_config_ref=CONFIG_REF,
             adapter_config_sha256=D2,
@@ -443,7 +495,10 @@ def test_conflicting_evidence_identity_is_rejected():
         build_provider_certification(
             profile,
             integration,
-            adapter_code_ref=CODE_REF,
+            capability_manifest_ref=MANIFEST_REF,
+        capability_manifest_version=MANIFEST_VERSION,
+        capability_manifest_sha256=MANIFEST_SHA,
+        adapter_code_ref=CODE_REF,
             adapter_code_sha256=D1,
             adapter_config_ref=CONFIG_REF,
             adapter_config_sha256=D2,

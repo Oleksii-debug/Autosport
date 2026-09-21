@@ -11,7 +11,7 @@ from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any, Sequence
 
-from .historical_matches import capture_historical_matches
+from .historical_matches import capture_historical_matches, historical_match_request_url
 from .historical_snapshot import capture_historical_snapshot
 from .integrity import atomic_write_json, sha256_file
 from .parlayapi_provider import (
@@ -77,10 +77,11 @@ def capture_historical_acquisition_bundle(
     entitlement/source-row evidence for that request window; it does not promote the
     selected snapshots to complete historical market coverage or derive outcomes.
 
-    Match-result trust facts from the canonical capture boundary are content-bound
-    into the bundle as well.  In particular, a product-owned initial request path is
-    not promoted into provider-response-origin proof or trusted outcome-source
-    authority when the provider response envelope cannot demonstrate those facts.
+    Match-result logical request provenance and fail-closed trust facts from the
+    canonical capture boundary are content-bound into the bundle as well.  The
+    intended request URL is not promoted into proof that a mutable provider object
+    actually used a product-owned transport/clock, and the response envelope cannot
+    prove final response origin or trusted outcome-source authority.
     """
 
     if provider.public_preview or not provider.api_key:
@@ -141,6 +142,11 @@ def capture_historical_acquisition_bundle(
         "redistribution_verified": False,
     }
 
+    results_request_url = historical_match_request_url(
+        provider,
+        requested_date=canonical_results_date,
+        priced_only=results_priced_only,
+    )
     request_scope = {
         "provider": "parlayapi",
         "sport_key": provider.sport_key,
@@ -149,6 +155,7 @@ def capture_historical_acquisition_bundle(
         "requested_snapshot_timestamps": list(canonical_requests),
         "coverage_preflight": coverage_request,
         "match_results": {
+            "url": results_request_url,
             "date": canonical_results_date,
             "priced_only": results_priced_only,
         },
@@ -201,9 +208,14 @@ def capture_historical_acquisition_bundle(
             evidence_path=result_evidence_path,
             priced_only=results_priced_only,
         )
+        if result_report.request_url != results_request_url:
+            raise ProviderPayloadError(
+                "historical match logical request provenance changed during acquisition"
+            )
         result_entry = {
             "requested_date": result_report.requested_date,
             "priced_only": result_report.priced_only,
+            "request_url": result_report.request_url,
             "captured_at": result_report.captured_at,
             "capture_file": result_relative.as_posix(),
             "evidence_file": result_evidence_relative.as_posix(),

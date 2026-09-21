@@ -62,7 +62,7 @@ def test_evidence_is_not_caller_constructible() -> None:
 
 
 def test_action_identity_is_re_resolved_from_bound_plan() -> None:
-    bound, _action, _evidence = _evidence()
+    bound, _action, _resolved_evidence = _evidence()
 
     with pytest.raises(
         BetfairStandardLimitPriceBoundError,
@@ -75,7 +75,7 @@ def test_action_identity_is_re_resolved_from_bound_plan() -> None:
 
 
 def test_exact_bound_type_is_required() -> None:
-    bound, action, _evidence = _evidence()
+    bound, action, _resolved_evidence = _evidence()
 
     class ShadowBound(type(bound)):
         pass
@@ -102,7 +102,7 @@ def test_exact_bound_type_is_required() -> None:
 def test_public_provider_client_rebinding_cannot_mint_a_different_contract(monkeypatch) -> None:
     import autosport.betfair_standard_limit_price_bound as module
 
-    bound, action, _evidence = _evidence()
+    bound, action, _resolved_evidence = _evidence()
 
     class ShadowClient:
         pass
@@ -171,7 +171,7 @@ def _replace_captured_request(
 
 
 def test_same_version_time_in_force_write_drift_fails_closed(monkeypatch) -> None:
-    bound, action, _evidence = _evidence()
+    bound, action, _resolved_evidence = _evidence()
 
     def add_fill_or_kill(instruction) -> None:
         instruction["timeInForce"] = "FILL_OR_KILL"
@@ -189,7 +189,7 @@ def test_same_version_time_in_force_write_drift_fails_closed(monkeypatch) -> Non
 
 
 def test_same_version_price_write_drift_fails_closed(monkeypatch) -> None:
-    bound, action, _evidence = _evidence()
+    bound, action, _resolved_evidence = _evidence()
 
     def worsen_submitted_limit(instruction) -> None:
         instruction["limitOrder"]["price"] = "1.99"
@@ -207,7 +207,7 @@ def test_same_version_price_write_drift_fails_closed(monkeypatch) -> None:
 
 
 def test_same_version_smart_order_write_drift_fails_closed(monkeypatch) -> None:
-    bound, action, _evidence = _evidence()
+    bound, action, _resolved_evidence = _evidence()
 
     def add_bet_target(instruction) -> None:
         instruction["betTargetType"] = "PAYOUT"

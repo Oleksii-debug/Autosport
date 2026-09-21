@@ -308,11 +308,11 @@ class BookmakerPositionObservation:
     provider_amount: Decimal | None = None
     provider_amount_semantics: str | None = None
     provider_side: str | None = None
-    provider_status: str | None = None
     decimal_odds: Decimal | None = None
     gross_return: Decimal | None = None
     external_receipt_id: str | None = None
     stake: InitVar[Decimal | None] = None
+    provider_status: str | None = None
 
     def __post_init__(self, stake: Decimal | None) -> None:
         _text(self.venue_id, "venue_id")

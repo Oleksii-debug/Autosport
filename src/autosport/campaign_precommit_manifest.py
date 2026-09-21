@@ -183,6 +183,625 @@ def _fsync_bound_parent_directory(directory_fd: int) -> None:
         ) from exc
 
 
+def _windows_api_path(path: Path) -> str:
+    text = str(path)
+    if text.startswith("\\\\?\\"):
+        return text
+    if text.startswith("\\\\"):
+        return "\\\\?\\UNC\\" + text[2:]
+    return "\\\\?\\" + text
+
+
+def _close_windows_handle(handle: int) -> None:
+    import ctypes
+    from ctypes import wintypes
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    close_handle = kernel32.CloseHandle
+    close_handle.argtypes = (wintypes.HANDLE,)
+    close_handle.restype = wintypes.BOOL
+    if not close_handle(handle):
+        raise CampaignPrecommitManifestError(
+            "cannot close campaign precommit Windows handle"
+        )
+
+
+def _open_bound_windows_parent_directory(
+    path: Path,
+) -> tuple[int, Path, tuple[int, int, int]]:
+    """Bind one existing reparse-free Windows parent lineage to a directory handle."""
+
+    if os.name != "nt":
+        raise CampaignPrecommitManifestError(
+            "Windows campaign precommit parent binding is unavailable on this platform"
+        )
+
+    import ctypes
+    from ctypes import wintypes
+
+    class UnicodeString(ctypes.Structure):
+        _fields_ = [
+            ("Length", wintypes.USHORT),
+            ("MaximumLength", wintypes.USHORT),
+            ("Buffer", wintypes.LPWSTR),
+        ]
+
+    class ObjectAttributes(ctypes.Structure):
+        _fields_ = [
+            ("Length", wintypes.ULONG),
+            ("RootDirectory", wintypes.HANDLE),
+            ("ObjectName", ctypes.POINTER(UnicodeString)),
+            ("Attributes", wintypes.ULONG),
+            ("SecurityDescriptor", wintypes.LPVOID),
+            ("SecurityQualityOfService", wintypes.LPVOID),
+        ]
+
+    class IoStatusUnion(ctypes.Union):
+        _fields_ = [("Status", wintypes.LONG), ("Pointer", wintypes.LPVOID)]
+
+    class IoStatusBlock(ctypes.Structure):
+        _fields_ = [("u", IoStatusUnion), ("Information", ctypes.c_size_t)]
+
+    class ByHandleFileInformation(ctypes.Structure):
+        _fields_ = [
+            ("dwFileAttributes", wintypes.DWORD),
+            ("ftCreationTime", wintypes.FILETIME),
+            ("ftLastAccessTime", wintypes.FILETIME),
+            ("ftLastWriteTime", wintypes.FILETIME),
+            ("dwVolumeSerialNumber", wintypes.DWORD),
+            ("nFileSizeHigh", wintypes.DWORD),
+            ("nFileSizeLow", wintypes.DWORD),
+            ("nNumberOfLinks", wintypes.DWORD),
+            ("nFileIndexHigh", wintypes.DWORD),
+            ("nFileIndexLow", wintypes.DWORD),
+        ]
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    ntdll = ctypes.WinDLL("ntdll")
+    create_file = kernel32.CreateFileW
+    create_file.argtypes = (
+        wintypes.LPCWSTR,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        ctypes.c_void_p,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        wintypes.HANDLE,
+    )
+    create_file.restype = wintypes.HANDLE
+    get_file_information = kernel32.GetFileInformationByHandle
+    get_file_information.argtypes = (
+        wintypes.HANDLE,
+        ctypes.POINTER(ByHandleFileInformation),
+    )
+    get_file_information.restype = wintypes.BOOL
+    close_handle = kernel32.CloseHandle
+    close_handle.argtypes = (wintypes.HANDLE,)
+    close_handle.restype = wintypes.BOOL
+    nt_create_file = ntdll.NtCreateFile
+    nt_create_file.argtypes = (
+        ctypes.POINTER(wintypes.HANDLE),
+        wintypes.ULONG,
+        ctypes.POINTER(ObjectAttributes),
+        ctypes.POINTER(IoStatusBlock),
+        ctypes.c_void_p,
+        wintypes.ULONG,
+        wintypes.ULONG,
+        wintypes.ULONG,
+        wintypes.ULONG,
+        ctypes.c_void_p,
+        wintypes.ULONG,
+    )
+    nt_create_file.restype = wintypes.LONG
+    rtl_status_to_dos_error = ntdll.RtlNtStatusToDosError
+    rtl_status_to_dos_error.argtypes = (wintypes.LONG,)
+    rtl_status_to_dos_error.restype = wintypes.ULONG
+
+    file_list_directory = 0x00000001
+    file_traverse = 0x00000020
+    file_read_attributes = 0x00000080
+    synchronize = 0x00100000
+    file_share_read = 0x00000001
+    file_share_write = 0x00000002
+    file_share_delete = 0x00000004
+    open_existing = 3
+    file_attribute_directory = 0x00000010
+    file_attribute_reparse_point = 0x00000400
+    file_flag_open_reparse_point = 0x00200000
+    file_flag_backup_semantics = 0x02000000
+    file_open = 1
+    file_directory_file = 0x00000001
+    file_synchronous_io_nonalert = 0x00000020
+    file_open_reparse_point = 0x00200000
+    obj_case_insensitive = 0x00000040
+    invalid_handle_value = ctypes.c_void_p(-1).value
+    directory_access = (
+        file_list_directory | file_traverse | file_read_attributes | synchronize
+    )
+    share_all = file_share_read | file_share_write | file_share_delete
+
+    def directory_identity(handle: int) -> tuple[int, int, int]:
+        information = ByHandleFileInformation()
+        if not get_file_information(handle, ctypes.byref(information)):
+            raise ctypes.WinError(ctypes.get_last_error())
+        if not information.dwFileAttributes & file_attribute_directory:
+            raise CampaignPrecommitManifestError(
+                "campaign precommit parent component is not a directory"
+            )
+        if information.dwFileAttributes & file_attribute_reparse_point:
+            raise CampaignPrecommitManifestError(
+                "campaign precommit parent directory contains reparse redirection"
+            )
+        return (
+            int(information.dwVolumeSerialNumber),
+            int(information.nFileIndexHigh),
+            int(information.nFileIndexLow),
+        )
+
+    absolute = Path(os.path.abspath(path))
+    if not absolute.is_absolute() or not absolute.anchor:
+        raise CampaignPrecommitManifestError(
+            "campaign precommit parent directory must be absolute"
+        )
+
+    root = create_file(
+        _windows_api_path(Path(absolute.anchor)),
+        directory_access,
+        share_all,
+        None,
+        open_existing,
+        file_flag_backup_semantics | file_flag_open_reparse_point,
+        None,
+    )
+    if root == invalid_handle_value:
+        raise CampaignPrecommitManifestError(
+            "campaign precommit parent directory must already exist "
+            "without reparse redirection"
+        )
+    current_handle = int(root)
+    try:
+        current_identity = directory_identity(current_handle)
+        for component in absolute.parts[1:]:
+            name_buffer = ctypes.create_unicode_buffer(component)
+            name_bytes = len(component.encode("utf-16-le"))
+            unicode_name = UnicodeString(
+                name_bytes,
+                name_bytes + 2,
+                ctypes.cast(name_buffer, wintypes.LPWSTR),
+            )
+            attributes = ObjectAttributes(
+                ctypes.sizeof(ObjectAttributes),
+                current_handle,
+                ctypes.pointer(unicode_name),
+                obj_case_insensitive,
+                None,
+                None,
+            )
+            io_status = IoStatusBlock()
+            child = wintypes.HANDLE()
+            status = nt_create_file(
+                ctypes.byref(child),
+                directory_access,
+                ctypes.byref(attributes),
+                ctypes.byref(io_status),
+                None,
+                file_attribute_directory,
+                share_all,
+                file_open,
+                file_directory_file
+                | file_synchronous_io_nonalert
+                | file_open_reparse_point,
+                None,
+                0,
+            )
+            if status < 0:
+                raise ctypes.WinError(int(rtl_status_to_dos_error(status)))
+            child_handle = int(child.value)
+            try:
+                child_identity = directory_identity(child_handle)
+            except BaseException:
+                close_handle(child_handle)
+                raise
+            if not close_handle(current_handle):
+                close_handle(child_handle)
+                raise ctypes.WinError(ctypes.get_last_error())
+            current_handle = child_handle
+            current_identity = child_identity
+        return current_handle, absolute, current_identity
+    except BaseException as exc:
+        if not close_handle(current_handle):
+            try:
+                exc.add_note("campaign precommit Windows parent handle cleanup also failed")
+            except BaseException:
+                pass
+        if isinstance(exc, CampaignPrecommitManifestError):
+            raise
+        raise CampaignPrecommitManifestError(
+            "campaign precommit parent directory must already exist "
+            "without reparse redirection"
+        ) from exc
+
+
+def _assert_bound_windows_parent_identity(
+    path: Path,
+    expected_identity: tuple[int, int, int],
+) -> None:
+    current_handle, _, current_identity = _open_bound_windows_parent_directory(path)
+    try:
+        if current_identity != expected_identity:
+            raise CampaignPrecommitManifestError(
+                "campaign precommit parent identity changed during publication"
+            )
+    finally:
+        _close_windows_handle(current_handle)
+
+
+def _read_bound_windows_file_bytes(parent_handle: int, name: str) -> bytes:
+    import ctypes
+    from ctypes import wintypes
+
+    class UnicodeString(ctypes.Structure):
+        _fields_ = [
+            ("Length", wintypes.USHORT),
+            ("MaximumLength", wintypes.USHORT),
+            ("Buffer", wintypes.LPWSTR),
+        ]
+
+    class ObjectAttributes(ctypes.Structure):
+        _fields_ = [
+            ("Length", wintypes.ULONG),
+            ("RootDirectory", wintypes.HANDLE),
+            ("ObjectName", ctypes.POINTER(UnicodeString)),
+            ("Attributes", wintypes.ULONG),
+            ("SecurityDescriptor", wintypes.LPVOID),
+            ("SecurityQualityOfService", wintypes.LPVOID),
+        ]
+
+    class IoStatusUnion(ctypes.Union):
+        _fields_ = [("Status", wintypes.LONG), ("Pointer", wintypes.LPVOID)]
+
+    class IoStatusBlock(ctypes.Structure):
+        _fields_ = [("u", IoStatusUnion), ("Information", ctypes.c_size_t)]
+
+    class ByHandleFileInformation(ctypes.Structure):
+        _fields_ = [
+            ("dwFileAttributes", wintypes.DWORD),
+            ("ftCreationTime", wintypes.FILETIME),
+            ("ftLastAccessTime", wintypes.FILETIME),
+            ("ftLastWriteTime", wintypes.FILETIME),
+            ("dwVolumeSerialNumber", wintypes.DWORD),
+            ("nFileSizeHigh", wintypes.DWORD),
+            ("nFileSizeLow", wintypes.DWORD),
+            ("nNumberOfLinks", wintypes.DWORD),
+            ("nFileIndexHigh", wintypes.DWORD),
+            ("nFileIndexLow", wintypes.DWORD),
+        ]
+
+    ntdll = ctypes.WinDLL("ntdll")
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    nt_create_file = ntdll.NtCreateFile
+    nt_create_file.argtypes = (
+        ctypes.POINTER(wintypes.HANDLE),
+        wintypes.ULONG,
+        ctypes.POINTER(ObjectAttributes),
+        ctypes.POINTER(IoStatusBlock),
+        ctypes.c_void_p,
+        wintypes.ULONG,
+        wintypes.ULONG,
+        wintypes.ULONG,
+        wintypes.ULONG,
+        ctypes.c_void_p,
+        wintypes.ULONG,
+    )
+    nt_create_file.restype = wintypes.LONG
+    rtl_status_to_dos_error = ntdll.RtlNtStatusToDosError
+    rtl_status_to_dos_error.argtypes = (wintypes.LONG,)
+    rtl_status_to_dos_error.restype = wintypes.ULONG
+    get_file_information = kernel32.GetFileInformationByHandle
+    get_file_information.argtypes = (
+        wintypes.HANDLE,
+        ctypes.POINTER(ByHandleFileInformation),
+    )
+    get_file_information.restype = wintypes.BOOL
+    read_file = kernel32.ReadFile
+    read_file.argtypes = (
+        wintypes.HANDLE,
+        wintypes.LPVOID,
+        wintypes.DWORD,
+        ctypes.POINTER(wintypes.DWORD),
+        wintypes.LPVOID,
+    )
+    read_file.restype = wintypes.BOOL
+    close_handle = kernel32.CloseHandle
+    close_handle.argtypes = (wintypes.HANDLE,)
+    close_handle.restype = wintypes.BOOL
+
+    file_read_data = 0x00000001
+    file_read_attributes = 0x00000080
+    synchronize = 0x00100000
+    file_share_read = 0x00000001
+    file_share_write = 0x00000002
+    file_share_delete = 0x00000004
+    file_attribute_reparse_point = 0x00000400
+    file_attribute_directory = 0x00000010
+    file_open = 1
+    file_synchronous_io_nonalert = 0x00000020
+    file_non_directory_file = 0x00000040
+    file_open_reparse_point = 0x00200000
+    obj_case_insensitive = 0x00000040
+
+    name_buffer = ctypes.create_unicode_buffer(name)
+    name_bytes = len(name.encode("utf-16-le"))
+    unicode_name = UnicodeString(
+        name_bytes,
+        name_bytes + 2,
+        ctypes.cast(name_buffer, wintypes.LPWSTR),
+    )
+    attributes = ObjectAttributes(
+        ctypes.sizeof(ObjectAttributes),
+        parent_handle,
+        ctypes.pointer(unicode_name),
+        obj_case_insensitive,
+        None,
+        None,
+    )
+    io_status = IoStatusBlock()
+    file_handle = wintypes.HANDLE()
+    status = nt_create_file(
+        ctypes.byref(file_handle),
+        file_read_data | file_read_attributes | synchronize,
+        ctypes.byref(attributes),
+        ctypes.byref(io_status),
+        None,
+        0,
+        file_share_read | file_share_write | file_share_delete,
+        file_open,
+        file_synchronous_io_nonalert
+        | file_non_directory_file
+        | file_open_reparse_point,
+        None,
+        0,
+    )
+    if status < 0:
+        raise CampaignPrecommitManifestError(
+            "cannot verify existing campaign precommit manifest"
+        ) from ctypes.WinError(int(rtl_status_to_dos_error(status)))
+
+    handle = int(file_handle.value)
+    primary_error: BaseException | None = None
+    try:
+        information = ByHandleFileInformation()
+        if not get_file_information(handle, ctypes.byref(information)):
+            raise ctypes.WinError(ctypes.get_last_error())
+        if (
+            information.dwFileAttributes & file_attribute_reparse_point
+            or information.dwFileAttributes & file_attribute_directory
+        ):
+            raise CampaignPrecommitManifestError(
+                "cannot verify existing campaign precommit manifest"
+            )
+
+        chunks: list[bytes] = []
+        while True:
+            buffer = ctypes.create_string_buffer(65536)
+            read = wintypes.DWORD()
+            if not read_file(
+                handle,
+                buffer,
+                len(buffer),
+                ctypes.byref(read),
+                None,
+            ):
+                raise ctypes.WinError(ctypes.get_last_error())
+            if read.value == 0:
+                break
+            chunks.append(buffer.raw[: read.value])
+        return b"".join(chunks)
+    except BaseException as exc:
+        primary_error = exc
+        if isinstance(exc, CampaignPrecommitManifestError):
+            raise
+        raise CampaignPrecommitManifestError(
+            "cannot verify existing campaign precommit manifest"
+        ) from exc
+    finally:
+        if not close_handle(handle) and primary_error is None:
+            raise CampaignPrecommitManifestError(
+                "cannot close campaign precommit manifest handle"
+            )
+
+
+def _create_bound_windows_file_once(
+    parent_handle: int,
+    name: str,
+    encoded: bytes,
+) -> bool:
+    import ctypes
+    from ctypes import wintypes
+
+    class UnicodeString(ctypes.Structure):
+        _fields_ = [
+            ("Length", wintypes.USHORT),
+            ("MaximumLength", wintypes.USHORT),
+            ("Buffer", wintypes.LPWSTR),
+        ]
+
+    class ObjectAttributes(ctypes.Structure):
+        _fields_ = [
+            ("Length", wintypes.ULONG),
+            ("RootDirectory", wintypes.HANDLE),
+            ("ObjectName", ctypes.POINTER(UnicodeString)),
+            ("Attributes", wintypes.ULONG),
+            ("SecurityDescriptor", wintypes.LPVOID),
+            ("SecurityQualityOfService", wintypes.LPVOID),
+        ]
+
+    class IoStatusUnion(ctypes.Union):
+        _fields_ = [("Status", wintypes.LONG), ("Pointer", wintypes.LPVOID)]
+
+    class IoStatusBlock(ctypes.Structure):
+        _fields_ = [("u", IoStatusUnion), ("Information", ctypes.c_size_t)]
+
+    class FileDispositionInfo(ctypes.Structure):
+        _fields_ = [("DeleteFile", ctypes.c_ubyte)]
+
+    ntdll = ctypes.WinDLL("ntdll")
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    nt_create_file = ntdll.NtCreateFile
+    nt_create_file.argtypes = (
+        ctypes.POINTER(wintypes.HANDLE),
+        wintypes.ULONG,
+        ctypes.POINTER(ObjectAttributes),
+        ctypes.POINTER(IoStatusBlock),
+        ctypes.c_void_p,
+        wintypes.ULONG,
+        wintypes.ULONG,
+        wintypes.ULONG,
+        wintypes.ULONG,
+        ctypes.c_void_p,
+        wintypes.ULONG,
+    )
+    nt_create_file.restype = wintypes.LONG
+    rtl_status_to_dos_error = ntdll.RtlNtStatusToDosError
+    rtl_status_to_dos_error.argtypes = (wintypes.LONG,)
+    rtl_status_to_dos_error.restype = wintypes.ULONG
+    write_file = kernel32.WriteFile
+    write_file.argtypes = (
+        wintypes.HANDLE,
+        wintypes.LPCVOID,
+        wintypes.DWORD,
+        ctypes.POINTER(wintypes.DWORD),
+        wintypes.LPVOID,
+    )
+    write_file.restype = wintypes.BOOL
+    flush_file_buffers = kernel32.FlushFileBuffers
+    flush_file_buffers.argtypes = (wintypes.HANDLE,)
+    flush_file_buffers.restype = wintypes.BOOL
+    set_file_information = kernel32.SetFileInformationByHandle
+    set_file_information.argtypes = (
+        wintypes.HANDLE,
+        ctypes.c_int,
+        wintypes.LPVOID,
+        wintypes.DWORD,
+    )
+    set_file_information.restype = wintypes.BOOL
+    close_handle = kernel32.CloseHandle
+    close_handle.argtypes = (wintypes.HANDLE,)
+    close_handle.restype = wintypes.BOOL
+
+    file_write_data = 0x00000002
+    delete_access = 0x00010000
+    synchronize = 0x00100000
+    file_share_read = 0x00000001
+    file_share_write = 0x00000002
+    file_share_delete = 0x00000004
+    file_attribute_normal = 0x00000080
+    file_create = 2
+    file_synchronous_io_nonalert = 0x00000020
+    file_non_directory_file = 0x00000040
+    file_open_reparse_point = 0x00200000
+    obj_case_insensitive = 0x00000040
+    file_disposition_info_class = 4
+    error_file_exists = 80
+    error_already_exists = 183
+
+    name_buffer = ctypes.create_unicode_buffer(name)
+    name_bytes = len(name.encode("utf-16-le"))
+    unicode_name = UnicodeString(
+        name_bytes,
+        name_bytes + 2,
+        ctypes.cast(name_buffer, wintypes.LPWSTR),
+    )
+    attributes = ObjectAttributes(
+        ctypes.sizeof(ObjectAttributes),
+        parent_handle,
+        ctypes.pointer(unicode_name),
+        obj_case_insensitive,
+        None,
+        None,
+    )
+    io_status = IoStatusBlock()
+    file_handle = wintypes.HANDLE()
+    status = nt_create_file(
+        ctypes.byref(file_handle),
+        file_write_data | delete_access | synchronize,
+        ctypes.byref(attributes),
+        ctypes.byref(io_status),
+        None,
+        file_attribute_normal,
+        file_share_read | file_share_write | file_share_delete,
+        file_create,
+        file_synchronous_io_nonalert
+        | file_non_directory_file
+        | file_open_reparse_point,
+        None,
+        0,
+    )
+    if status < 0:
+        error_code = int(rtl_status_to_dos_error(status))
+        if error_code in {error_file_exists, error_already_exists}:
+            return False
+        raise CampaignPrecommitManifestError(
+            "cannot create campaign precommit manifest"
+        ) from ctypes.WinError(error_code)
+
+    handle = int(file_handle.value)
+    primary_error: BaseException | None = None
+    created = False
+    try:
+        offset = 0
+        while offset < len(encoded):
+            chunk = encoded[offset : offset + 65536]
+            buffer = ctypes.create_string_buffer(chunk)
+            written = wintypes.DWORD()
+            if not write_file(
+                handle,
+                buffer,
+                len(chunk),
+                ctypes.byref(written),
+                None,
+            ):
+                raise ctypes.WinError(ctypes.get_last_error())
+            if written.value <= 0:
+                raise OSError("Windows campaign precommit wrote zero bytes")
+            offset += int(written.value)
+        if not flush_file_buffers(handle):
+            raise ctypes.WinError(ctypes.get_last_error())
+        created = True
+        return True
+    except BaseException as exc:
+        primary_error = exc
+        if isinstance(exc, CampaignPrecommitManifestError):
+            raise
+        raise CampaignPrecommitManifestError(
+            "cannot durably write campaign precommit manifest"
+        ) from exc
+    finally:
+        cleanup_error: BaseException | None = None
+        if not created:
+            disposition = FileDispositionInfo(1)
+            if not set_file_information(
+                handle,
+                file_disposition_info_class,
+                ctypes.byref(disposition),
+                ctypes.sizeof(disposition),
+            ):
+                cleanup_error = ctypes.WinError(ctypes.get_last_error())
+        if not close_handle(handle) and cleanup_error is None:
+            cleanup_error = ctypes.WinError(ctypes.get_last_error())
+        if primary_error is not None and cleanup_error is not None:
+            try:
+                primary_error.add_note(
+                    f"campaign precommit cleanup also failed: {cleanup_error}"
+                )
+            except BaseException:
+                pass
+        elif primary_error is None and cleanup_error is not None:
+            raise CampaignPrecommitManifestError(
+                "cannot finalize campaign precommit manifest handle"
+            ) from cleanup_error
+
+
 def _digest(value: object) -> str:
     return hashlib.sha256(_canonical_bytes(value)).hexdigest()
 
@@ -339,19 +958,25 @@ def load_campaign_precommit_manifest(
     path: str | os.PathLike[str],
 ) -> CampaignPrecommitManifest:
     target = Path(path)
+    name = target.name
+    if name in {"", ".", ".."} or Path(name).name != name:
+        raise CampaignPrecommitManifestError(
+            "campaign precommit target must name one file"
+        )
+
     if os.name == "nt":
+        parent_handle, absolute_parent, parent_identity = (
+            _open_bound_windows_parent_directory(target.parent)
+        )
         try:
-            raw_bytes = target.read_bytes()
-        except OSError as exc:
-            raise CampaignPrecommitManifestError(
-                "cannot read campaign precommit manifest"
-            ) from exc
-    else:
-        name = target.name
-        if name in {"", ".", ".."} or Path(name).name != name:
-            raise CampaignPrecommitManifestError(
-                "campaign precommit target must name one file"
+            raw_bytes = _read_bound_windows_file_bytes(parent_handle, name)
+            _assert_bound_windows_parent_identity(
+                absolute_parent,
+                parent_identity,
             )
+        finally:
+            _close_windows_handle(parent_handle)
+    else:
         parent_fd, absolute_parent = _open_bound_posix_parent_directory(target.parent)
         try:
             raw_bytes = _read_bound_posix_file_bytes(parent_fd, name)
@@ -396,59 +1021,41 @@ def write_campaign_precommit_manifest_once(
             "manifest must be CampaignPrecommitManifest"
         )
     target = Path(path)
-    encoded = _canonical_bytes(manifest.to_record()) + b"\n"
-
-    if os.name == "nt":
-        if not target.parent.is_dir():
-            raise CampaignPrecommitManifestError(
-                "campaign precommit parent directory must already exist"
-            )
-        try:
-            descriptor = os.open(
-                target,
-                os.O_WRONLY | os.O_CREAT | os.O_EXCL,
-                0o600,
-            )
-        except FileExistsError:
-            try:
-                existing = target.read_bytes()
-            except OSError as exc:
-                raise CampaignPrecommitManifestError(
-                    "cannot verify existing campaign precommit manifest"
-                ) from exc
-            if existing != encoded:
-                raise CampaignPrecommitManifestError(
-                    "existing campaign precommit manifest conflicts with precommit"
-                )
-        except OSError as exc:
-            raise CampaignPrecommitManifestError(
-                "cannot create campaign precommit manifest"
-            ) from exc
-        else:
-            try:
-                with os.fdopen(descriptor, "wb", closefd=True) as handle:
-                    handle.write(encoded)
-                    handle.flush()
-                    os.fsync(handle.fileno())
-            except BaseException:
-                try:
-                    target.unlink()
-                except OSError:
-                    pass
-                raise
-
-        verified = load_campaign_precommit_manifest(target)
-        if verified.manifest_sha256 != manifest.manifest_sha256:
-            raise CampaignPrecommitManifestError(
-                "persisted campaign precommit manifest failed exact re-read"
-            )
-        return manifest.manifest_sha256
-
     name = target.name
     if name in {"", ".", ".."} or Path(name).name != name:
         raise CampaignPrecommitManifestError(
             "campaign precommit target must name one file"
         )
+    encoded = _canonical_bytes(manifest.to_record()) + b"\n"
+
+    if os.name == "nt":
+        parent_handle, absolute_parent, parent_identity = (
+            _open_bound_windows_parent_directory(target.parent)
+        )
+        try:
+            created = _create_bound_windows_file_once(
+                parent_handle,
+                name,
+                encoded,
+            )
+            if not created:
+                existing = _read_bound_windows_file_bytes(parent_handle, name)
+                if existing != encoded:
+                    raise CampaignPrecommitManifestError(
+                        "existing campaign precommit manifest conflicts with precommit"
+                    )
+
+            _assert_bound_windows_parent_identity(
+                absolute_parent,
+                parent_identity,
+            )
+            if _read_bound_windows_file_bytes(parent_handle, name) != encoded:
+                raise CampaignPrecommitManifestError(
+                    "persisted campaign precommit manifest failed exact re-read"
+                )
+            return manifest.manifest_sha256
+        finally:
+            _close_windows_handle(parent_handle)
 
     parent_fd, absolute_parent = _open_bound_posix_parent_directory(target.parent)
     try:

@@ -273,6 +273,13 @@ def _require_monotonic_evaluation(
         raise LiveDecisionDispositionError("reevaluation decision time cannot move backwards")
     if successor_evaluated_at < predecessor_evaluated_at:
         raise LiveDecisionDispositionError("reevaluation evaluation time cannot move backwards")
+    if (
+        successor.product_policy_authority is not None
+        and successor_decision_at <= predecessor_evaluated_at
+    ):
+        raise LiveDecisionDispositionError(
+            "positive reevaluation policy decision must follow predecessor evaluation"
+        )
 
 
 def verify_reevaluation_transition(
@@ -292,6 +299,9 @@ def verify_reevaluation_transition(
     * ``EXPIRY_RECOMPUTE`` requires an EXPIRED predecessor and changed evidence.
     * ``SAFETY_REVALIDATION`` requires a HALT_SAFETY predecessor plus changed
       evidence or a newly/differently re-resolved product policy binding.
+    * Any positive policy successor must bind a re-resolved economic decision strictly
+      later than the predecessor evaluation, so later evidence/state cannot relabel an
+      older policy result as a causal reevaluation.
 
     Text, timestamps, TTL changes, or a caller-supplied predecessor digest alone are
     never sufficient evidence of a causal reevaluation.

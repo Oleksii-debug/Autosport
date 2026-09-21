@@ -155,10 +155,10 @@ class AnnouncementGate:
 
         if intended is AnnouncementPriority.ASSERTIVE:
             assert event.episode_id is not None
-            key = ("ASSERTIVE", event.kind.value, event.episode_id)
+            key = ("ASSERTIVE", event.episode_id)
             duplicate_reason = "DUPLICATE_CRITICAL_EPISODE"
         else:
-            key = ("POLITE", event.kind.value, event.state_token)
+            key = ("POLITE", event.state_token)
             duplicate_reason = "DUPLICATE_STATE_TRANSITION"
 
         if key in self._history:

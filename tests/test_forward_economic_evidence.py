@@ -115,4 +115,101 @@ def outcome(
     )
 
 
-class Resol
+class Resolver:
+    def __init__(self, mapping, *, authority_sha256=SHA_F):
+        self.mapping = mapping
+        self.authority_sha256 = authority_sha256
+
+    def resolve(self, *, policy_id, sequence, universe_event_sha256, decision_sha256):
+        return self.mapping[(sequence, policy_id)]
+
+
+def resolver_for(rows):
+    mapping = {}
+    for obs, challenger, champion in rows:
+        mapping[(obs.sequence, "challenger")] = challenger
+        mapping[(obs.sequence, "champion")] = champion
+    return Resolver(mapping)
+
+
+def test_alpha_registry_rejects_excess_familywise_allocation():
+    with pytest.raises(ForwardEconomicEvidenceError, match="exceed"):
+        FamilywiseAlphaRegistry(
+            family_id="family",
+            total_alpha=Decimal("0.05"),
+            allocations=(AlphaAllocation("a", Decimal("0.03")), AlphaAllocation("b", Decimal("0.03"))),
+            sealed_at=T0,
+        )
+
+
+def test_alpha_registry_requires_sorted_unique_challengers():
+    with pytest.raises(ForwardEconomicEvidenceError, match="sorted"):
+        FamilywiseAlphaRegistry(
+            family_id="family",
+            total_alpha=Decimal("0.1"),
+            allocations=(AlphaAllocation("b", Decimal("0.02")), AlphaAllocation("a", Decimal("0.02"))),
+            sealed_at=T0,
+        )
+    with pytest.raises(ForwardEconomicEvidenceError, match="unique"):
+        FamilywiseAlphaRegistry(
+            family_id="family",
+            total_alpha=Decimal("0.1"),
+            allocations=(AlphaAllocation("a", Decimal("0.02")), AlphaAllocation("a", Decimal("0.02"))),
+            sealed_at=T0,
+        )
+
+
+def test_protocol_requires_preallocated_challenger():
+    reg = FamilywiseAlphaRegistry(
+        family_id="family",
+        total_alpha=Decimal("0.1"),
+        allocations=(AlphaAllocation("other", Decimal("0.05")),),
+        sealed_at=T0,
+    )
+    with pytest.raises(ForwardEconomicEvidenceError, match="preallocated"):
+        protocol(alpha_registry=reg)
+
+
+def test_protocol_hash_binds_fixed_money_risk_unit():
+    assert protocol(risk_unit_currency=Decimal("10")).identity_sha256 != protocol(
+        risk_unit_currency=Decimal("20")
+    ).identity_sha256
+
+
+def test_protocol_hash_binds_universe_and_authority_commitments():
+    base = protocol().identity_sha256
+    assert protocol(universe_sha256=SHA_D).identity_sha256 != base
+    assert protocol(authority_binding_sha256=SHA_C).identity_sha256 != base
+
+
+def test_protocol_rejects_alpha_registry_sealed_after_freeze():
+    reg = FamilywiseAlphaRegistry(
+        family_id="family",
+        total_alpha=Decimal("0.2"),
+        allocations=(AlphaAllocation("challenger", Decimal("0.2")),),
+        sealed_at=T0 + timedelta(hours=2),
+    )
+    with pytest.raises(ForwardEconomicEvidenceError, match="sealed"):
+        protocol(alpha_registry=reg)
+
+
+def test_gap_in_universe_sequence_fails_without_state_mutation():
+    acc = ForwardEconomicEvidenceAccumulator(protocol())
+    obs = observation(1)
+    r = resolver_for([(obs, outcome("challenger", obs, side=BetSide.NONE, pnl="0"), outcome("champion", obs, side=BetSide.NONE, pnl="0"))])
+    with pytest.raises(ForwardEconomicEvidenceError, match="contiguous"):
+        acc.record(obs, r)
+    assert acc.steps == ()
+    assert acc.next_sequence == 0
+
+
+def test_duplicate_universe_sequence_fails_without_state_mutation():
+    acc = ForwardEconomicEvidenceAccumulator(protocol())
+    obs = observation(0)
+    r = resolver_for([(obs, outcome("challenger", obs, side=BetSide.NONE, pnl="0"), outcome("champion", obs, side=BetSide.NONE, pnl="0"))])
+    acc.record(obs, r)
+    before = acc.summary().evidence_sha256
+    with pytest.raises(ForwardEconomicEvidenceError, match="contiguous"):
+        acc.record(obs, r)
+    assert len(acc.steps) == 1
+    assert ac

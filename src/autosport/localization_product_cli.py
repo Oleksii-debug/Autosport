@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 from types import MappingProxyType
+from typing import Mapping
 
+
+DEFAULT_LOCALE = "uk-UA"
 
 PRODUCT_CLI_UK_UA = MappingProxyType(
     {
@@ -31,3 +34,36 @@ PRODUCT_CLI_UK_UA = MappingProxyType(
         ),
     }
 )
+
+
+def catalog(locale: str = DEFAULT_LOCALE) -> Mapping[str, str]:
+    """Expose the canonical catalog without creating a second text authority."""
+
+    if locale != DEFAULT_LOCALE:
+        raise ValueError(f"unsupported product CLI locale: {locale!r}")
+    from .localization import catalog as canonical_catalog
+
+    return canonical_catalog(locale)
+
+
+def product_cli_text(
+    key: str,
+    *,
+    locale: str = DEFAULT_LOCALE,
+    **values: object,
+) -> str:
+    """Render a product-CLI key through the canonical localization facade."""
+
+    if locale != DEFAULT_LOCALE:
+        raise ValueError(f"unsupported product CLI locale: {locale!r}")
+    if key not in PRODUCT_CLI_UK_UA:
+        raise KeyError(
+            f"missing product CLI localization key {key!r} for locale {locale!r}"
+        )
+
+    # Lazy import prevents the resource-extension import performed by localization.py
+    # from forming a module-initialization cycle. Rendering still belongs exclusively
+    # to the canonical localization facade/catalog.
+    from .localization import text as canonical_text
+
+    return canonical_text(key, locale=locale, **values)

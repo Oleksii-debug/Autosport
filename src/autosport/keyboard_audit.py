@@ -8,11 +8,13 @@ from .integrity import atomic_write_json
 from .windows_gui import WINDOWS_BANKROLL_AUTOMATION_ID, WindowsAutosportApp
 from .windows_layout import WINDOWS_SHELL_AUTOMATION_IDS
 from .windows_manual_calculation import WORKBENCH_AUTOMATION_IDS, show_manual_calculation_workbench
+from .windows_replay_stop import REPLAY_STOP_AUTOMATION_ID
 
 
 _ACTION_BINDINGS = {
     "<Control-o>": "choose_dataset",
     "<Control-r>": "run_replay",
+    "<Control-s>": "stop_replay",
     "<Control-Shift-R>": "repair_workspace",
     "<Control-l>": "live_refresh",
     "<Control-Alt-Left>": "shell_previous",
@@ -45,6 +47,7 @@ _FOCUSABLE_CONTROLS = (
     "research_plan",
     "choose_dataset",
     "run_replay",
+    "stop_replay",
     "repair_workspace",
     "replay_speed",
     "live_mode",
@@ -110,6 +113,8 @@ def summarize_keyboard_contract(
     def automation_id_for(name: str) -> int:
         if name == "bankroll":
             return WINDOWS_BANKROLL_AUTOMATION_ID
+        if name == "stop_replay":
+            return REPLAY_STOP_AUTOMATION_ID
         if name in workbench_names:
             return WORKBENCH_AUTOMATION_IDS[workbench_names[name]]
         if name.startswith("shell_") or name.startswith("owner_economic_"):
@@ -146,9 +151,9 @@ def summarize_keyboard_contract(
         "expected_automation_ids": expected_ids,
         "failures": failures,
         "evidence_scope": (
-            "in-process packaged Windows GUI keyboard contract: action shortcuts and shell cycling are bound, "
-            "F2/F6/F7/F8/F9/F10 focus shortcuts are executed, and critical shell controls plus the manual "
-            "calculation workbench are reachable through forward Tab and reverse Shift+Tab traversal; "
+            "in-process packaged Windows GUI keyboard contract: action shortcuts include cooperative Ctrl+S replay STOP, "
+            "shell cycling is bound, F2/F6/F7/F8/F9/F10 focus shortcuts are executed, and critical shell controls plus "
+            "the manual calculation workbench are reachable through forward Tab and reverse Shift+Tab traversal; "
             "not physical keyboard or NVDA speech proof"
         ),
         "human_tested": False,
@@ -173,6 +178,7 @@ def _critical_widgets(
         "research_plan": app.research_plan_button,
         "choose_dataset": app.choose_button,
         "run_replay": app.run_button,
+        "stop_replay": app.stop_replay_button,
         "repair_workspace": app.repair_button,
         "replay_speed": app.speed,
         "live_mode": app.live_mode,

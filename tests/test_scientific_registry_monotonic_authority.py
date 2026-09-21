@@ -12,6 +12,12 @@ T1 = "2026-09-20T01:00:00Z"
 T2 = "2026-09-20T02:00:00Z"
 
 
+@pytest.fixture(autouse=True)
+def _isolate_monotonic_root_selection_receipts(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("LOCALAPPDATA", str((tmp_path / "ProfileState").resolve()))
+    monkeypatch.delenv("XDG_STATE_HOME", raising=False)
+
+
 def _question(question_id: str, created_at: str) -> ResearchQuestion:
     return ResearchQuestion(
         question_id,

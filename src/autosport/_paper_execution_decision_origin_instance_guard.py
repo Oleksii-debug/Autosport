@@ -5,6 +5,7 @@ import inspect
 import json
 
 from . import _paper_execution_decision_origin as _origin
+from . import _paper_execution_reality_legacy as _legacy_reality
 from . import paper_execution_reality as _paper_reality
 from .decision_ledger import JsonlDecisionLedger
 from .paper_execution_adoption import PaperExecutionAdoptionRuntime
@@ -26,7 +27,8 @@ _EXECUTE_PLAN_CODE_SENTINEL = (
 _CALLSITE_EXECUTE_CODE_SENTINEL = (
     "_autosport_decision_origin_pristine_product_callsite_code"
 )
-_SEAL_MARKER = "autosport.paper_execution_decision_origin.instance_guard.seal.v1"
+_SEAL_MARKER = "autosport.paper_execution_decision_origin.instance_guard.seal.v2"
+_SEAL_PREFIX = "autosport.paper_execution_decision_origin.instance_guard.seal."
 
 # Preserve the exact context identities across importlib.reload. Installed guard
 # closures keep these objects as their execution-capability channel; replacing a
@@ -48,42 +50,69 @@ def _instance_shadows(obj: object, method_name: str) -> bool:
     return isinstance(namespace, dict) and method_name in namespace
 
 
+def _initial_seal():
+    """Re-derive primitive authority from the canonical owning implementations."""
+
+    return (
+        _SEAL_MARKER,
+        JsonlDecisionLedger.verified_snapshot,
+        _legacy_reality.PaperExecutionLedger.reserve_run,
+        _legacy_reality.PaperExecutionLedger._append_event,
+        _paper_reality.execute_paper_plan.__code__,
+    )
+
+
+def _seal_matches_canonical(value: object) -> bool:
+    if type(value) is not tuple or len(value) != 5 or value[0] != _SEAL_MARKER:
+        return False
+    canonical = _initial_seal()
+    return all(value[index] is canonical[index] for index in range(1, len(canonical)))
+
+
 def _sealed_tuple_from_callable(candidate: object):
+    """Recover only an unchanged seal; flag legacy/rebound seal cells for repair."""
+
     closure = getattr(candidate, "__closure__", None)
     if not closure:
-        return None
+        return None, False
+    saw_guard_seal = False
     for cell in closure:
         try:
             value = cell.cell_contents
         except ValueError:
             continue
-        if type(value) is tuple and len(value) == 6 and value[0] == _SEAL_MARKER:
-            return value
-    return None
-
-
-def _initial_seal():
-    return (
-        _SEAL_MARKER,
-        JsonlDecisionLedger.verified_snapshot,
-        _origin._ORIGINAL_LEDGER_RESERVE,
-        PaperExecutionLedger._append_event,
-        _origin._ORIGINAL_RUNTIME_EXECUTE.__code__,
-        _paper_reality.execute_paper_plan.__code__,
-    )
+        if (
+            type(value) is tuple
+            and value
+            and type(value[0]) is str
+            and value[0].startswith(_SEAL_PREFIX)
+        ):
+            saw_guard_seal = True
+            if _seal_matches_canonical(value):
+                return value, False
+    return None, saw_guard_seal
 
 
 def _build_guard(seal):
-    # Capture the capability contexts in this installed guard closure. The class
-    # sentinel remains a compatibility/debug mirror only; it is no longer read as
-    # positive authorization at reservation time.
+    # Capture the capability contexts in this installed guard closure. Every
+    # authority-bearing call revalidates the executable seal against the primitive
+    # implementations owned by DecisionLedger / legacy PAPER ledger / execute-plan
+    # code. A reflected closure-cell replacement therefore fails closed immediately,
+    # and reload discards/rebuilds the altered wrapper instead of trusting it.
     product_origin_runtime = _PRODUCT_ORIGIN_RUNTIME
     product_origin_callsite_code = _PRODUCT_ORIGIN_CALLSITE_CODE
+
+    def require_canonical_seal() -> None:
+        if not _seal_matches_canonical(seal):
+            raise _origin.PaperExecutionDecisionOriginError(
+                "decision-origin executable authority seal changed"
+            )
 
     def verified_decision_origin_without_instance_dispatch(
         ledger: JsonlDecisionLedger,
         decision_id: str,
     ) -> _origin.DecisionRecordOrigin:
+        require_canonical_seal()
         if type(ledger) is not JsonlDecisionLedger:
             raise _origin.PaperExecutionDecisionOriginError(
                 "decision origin requires exact JsonlDecisionLedger authority"
@@ -119,6 +148,7 @@ def _build_guard(seal):
     ) -> None:
         """Reject caller-injected ambient origin outside the exact product path."""
 
+        require_canonical_seal()
         runtime = product_origin_runtime.get()
         if type(runtime) is not PaperExecutionAdoptionRuntime:
             raise _origin.PaperExecutionDecisionOriginError(
@@ -139,26 +169,24 @@ def _build_guard(seal):
             execute_plan_frame = reserve_frame.f_back if reserve_frame is not None else None
             if (
                 execute_plan_frame is None
-                or execute_plan_frame.f_code is not seal[5]
+                or execute_plan_frame.f_code is not seal[4]
                 or execute_plan_frame.f_locals.get("ledger") is not ledger
             ):
                 raise _origin.PaperExecutionDecisionOriginError(
                     "decision origin reservation bypassed canonical execute_paper_plan"
                 )
 
-            saw_stable_runtime = False
             saw_product_wrapper = False
             cursor = execute_plan_frame.f_back
             while cursor is not None:
-                if cursor.f_code is seal[4] and cursor.f_locals.get("self") is runtime:
-                    saw_stable_runtime = True
                 if (
                     cursor.f_code is expected_callsite_code
                     and cursor.f_locals.get("self") is runtime
                 ):
                     saw_product_wrapper = True
+                    break
                 cursor = cursor.f_back
-            if not saw_stable_runtime or not saw_product_wrapper:
+            if not saw_product_wrapper:
                 raise _origin.PaperExecutionDecisionOriginError(
                     "decision origin reservation lacks canonical product execution ancestry"
                 )
@@ -189,6 +217,7 @@ def _build_guard(seal):
             key: str,
             payload,
         ) -> None:
+            require_canonical_seal()
             if event_type != "RUN_RESERVED":
                 raise _origin.PaperExecutionDecisionOriginError(
                     "canonical reserve path emitted unexpected event type"
@@ -217,6 +246,7 @@ def _build_guard(seal):
         started_at: str,
         observation_evidence_ids,
     ) -> None:
+        require_canonical_seal()
         origin = _origin._DECISION_ORIGIN.get()
         if origin is None:
             return seal[2](
@@ -265,19 +295,30 @@ def _install() -> None:
     already_installed = bool(
         getattr(PaperExecutionLedger, "_autosport_decision_origin_instance_guard", False)
     )
-    seal = _sealed_tuple_from_callable(PaperExecutionLedger.reserve_run)
-    if already_installed and seal is None:
-        raise RuntimeError("decision-origin instance guard executable seal is unavailable")
-    if seal is None:
-        seal = _initial_seal()
+    recovered_seal, stale_or_tampered = _sealed_tuple_from_callable(
+        PaperExecutionLedger.reserve_run
+    )
+    reinstall = already_installed and stale_or_tampered
+    seal = recovered_seal if recovered_seal is not None else _initial_seal()
+    if not _seal_matches_canonical(seal):
+        raise RuntimeError("decision-origin canonical executable seal is unavailable")
 
-    # These names remain available for compatibility/tests, but no authority path
-    # reads them. Reload repairs any tampering from the closure-held executable seal.
+    # These are compatibility/debug mirrors only. Authority paths validate and use
+    # the re-derived canonical seal, never these writable mirrors.
     setattr(JsonlDecisionLedger, _VERIFIED_SNAPSHOT_SENTINEL, seal[1])
     setattr(PaperExecutionLedger, _RESERVE_SENTINEL, seal[2])
     setattr(PaperExecutionLedger, _APPEND_SENTINEL, seal[3])
-    setattr(PaperExecutionAdoptionRuntime, _RUNTIME_EXECUTE_CODE_SENTINEL, seal[4])
-    setattr(PaperExecutionAdoptionRuntime, _EXECUTE_PLAN_CODE_SENTINEL, seal[5])
+    runtime_execute_code = getattr(
+        PaperExecutionAdoptionRuntime,
+        _RUNTIME_EXECUTE_CODE_SENTINEL,
+        _origin._ORIGINAL_RUNTIME_EXECUTE.__code__,
+    )
+    setattr(
+        PaperExecutionAdoptionRuntime,
+        _RUNTIME_EXECUTE_CODE_SENTINEL,
+        runtime_execute_code,
+    )
+    setattr(PaperExecutionAdoptionRuntime, _EXECUTE_PLAN_CODE_SENTINEL, seal[4])
 
     global _STABLE_VERIFIED_SNAPSHOT
     global _STABLE_RESERVE_RUN
@@ -291,8 +332,8 @@ def _install() -> None:
     _STABLE_VERIFIED_SNAPSHOT = seal[1]
     _STABLE_RESERVE_RUN = seal[2]
     _STABLE_APPEND_EVENT = seal[3]
-    _STABLE_RUNTIME_EXECUTE_CODE = seal[4]
-    _EXECUTE_PAPER_PLAN_CODE = seal[5]
+    _STABLE_RUNTIME_EXECUTE_CODE = runtime_execute_code
+    _EXECUTE_PAPER_PLAN_CODE = seal[4]
     (
         _verified_decision_origin_without_instance_dispatch,
         _require_canonical_product_reservation_path,
@@ -301,7 +342,7 @@ def _install() -> None:
     ) = _build_guard(seal)
 
     _origin.verified_decision_origin = _verified_decision_origin_without_instance_dispatch
-    if already_installed:
+    if already_installed and not reinstall:
         return
     PaperExecutionLedger.reserve_run = _reserve_run_without_shadowed_append
     PaperExecutionLedger._autosport_decision_origin_instance_guard = True

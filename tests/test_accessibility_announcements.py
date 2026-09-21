@@ -231,3 +231,41 @@ def test_emitted_decision_cannot_be_silent():
             text="Impossible",
             reason="EMIT",
         )
+
+
+@pytest.mark.parametrize(
+    "kwargs,message",
+    [
+        (
+            dict(
+                emit=1,
+                priority=AnnouncementPriority.POLITE,
+                text="x",
+                reason="EMIT",
+            ),
+            "emit must be bool",
+        ),
+        (
+            dict(
+                emit=True,
+                priority="POLITE",
+                text="x",
+                reason="EMIT",
+            ),
+            "priority must be AnnouncementPriority",
+        ),
+        (
+            dict(
+                emit=True,
+                priority=AnnouncementPriority.POLITE,
+                text="x",
+                reason="EMIT",
+                move_focus=1,
+            ),
+            "move_focus must be bool",
+        ),
+    ],
+)
+def test_malformed_decision_runtime_types_fail_closed(kwargs, message):
+    with pytest.raises(TypeError, match=message):
+        AnnouncementDecision(**kwargs)  # type: ignore[arg-type]

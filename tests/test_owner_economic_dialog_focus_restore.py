@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import ast
+from collections.abc import Callable
 import inspect
 import textwrap
 
@@ -19,9 +20,9 @@ class _App:
     def __init__(self, events: list[str]) -> None:
         self.events = events
         self.owner_economic_authority_button = _FocusButton(events)
-        self.idle_callbacks: list[object] = []
+        self.idle_callbacks: list[Callable[[], None]] = []
 
-    def after_idle(self, callback) -> None:
+    def after_idle(self, callback: Callable[[], None]) -> None:
         self.events.append("schedule")
         self.idle_callbacks.append(callback)
 
@@ -29,12 +30,12 @@ class _App:
 class _Dialog:
     def __init__(self, events: list[str]) -> None:
         self.events = events
-        self.protocols: dict[str, object] = {}
+        self.protocols: dict[str, Callable[[], None]] = {}
 
     def destroy(self) -> None:
         self.events.append("destroy")
 
-    def protocol(self, name: str, callback) -> None:
+    def protocol(self, name: str, callback: Callable[[], None]) -> None:
         self.protocols[name] = callback
 
 

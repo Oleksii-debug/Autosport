@@ -8,6 +8,10 @@ the existing sealed #530 Betfair readback authority and the durable execution le
 The timeout boundary is never accepted from a caller. It is derived from the
 ledger-verified ATTEMPT_UNKNOWN event recorded by the canonical Betfair execution
 path, and the provider order reference is reloaded from the same durable attempt.
+
+Definitive absence is also an in-process capability. A complete-empty provider
+capture is not enough: the exact absence object must have passed this resolver after
+the durable visibility deadline before generic execution reconciliation may consume it.
 """
 from __future__ import annotations
 
@@ -15,6 +19,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from enum import Enum
 import json
+from weakref import ref
 
 from .betfair_account_readonly import BetfairExecutionReadbackEnvelope
 from .bookmaker_capability import BookmakerCapabilityProfile
@@ -123,8 +128,6 @@ def _durable_timeout_authority(
             elif event_type == "ATTEMPT_UNKNOWN":
                 unknown_events.append(event)
     except (UnicodeDecodeError, json.JSONDecodeError, KeyError, AttributeError) as exc:
-        # verified_snapshot() already validated the bytes; a second decode failure is
-        # therefore an internal inconsistency and must never degrade to absence.
         raise BetfairTimeoutResolutionError(
             "verified execution ledger snapshot cannot be decoded"
         ) from exc
@@ -211,9 +214,6 @@ def resolve_betfair_timeout_provider_state(
         raise BetfairTimeoutResolutionError("provider verifier returned non-canonical state")
 
     if observed < deadline:
-        # Do not leak the verifier-issued absence capability before the provider's
-        # documented visibility window closes. Downstream reconciliation therefore
-        # has no object it can consume to release UNKNOWN/retry early.
         return BetfairTimeoutResolution(
             BetfairTimeoutResolutionKind.INDETERMINATE_BEFORE_VISIBILITY_HORIZON,
             timeout_boundary_at,
@@ -231,3 +231,65 @@ def resolve_betfair_timeout_provider_state(
         ledger_sha,
         evidence,
     )
+
+
+# A raw complete-empty Betfair capture is not retry authority. The exact absence
+# object is separately sealed only when the durable timeout resolver has observed it
+# at/after the provider visibility deadline. The private registry is intentionally a
+# closure so callers cannot mint the second capability by constructing a dataclass or
+# replaying a hash/timestamp.
+def _install_betfair_timeout_absence_authority() -> None:
+    issued: dict[int, object] = {}
+    raw_resolve = resolve_betfair_timeout_provider_state
+
+    def authoritative_resolve(
+        ledger: RealExecutionLedger,
+        action: ExecutionAction,
+        profile: BookmakerCapabilityProfile,
+        *,
+        attempt_id: str,
+        expected_profile_sha256: str,
+        readback: BetfairExecutionReadbackEnvelope,
+    ) -> BetfairTimeoutResolution:
+        result = raw_resolve(
+            ledger,
+            action,
+            profile,
+            attempt_id=attempt_id,
+            expected_profile_sha256=expected_profile_sha256,
+            readback=readback,
+        )
+        evidence = result.evidence
+        if (
+            result.kind is BetfairTimeoutResolutionKind.ABSENT_AFTER_VISIBILITY_HORIZON
+            and isinstance(evidence, VerifiedProviderAbsenceEvidence)
+        ):
+            evidence_key = id(evidence)
+
+            def forget(_weakref: object, *, key: int = evidence_key) -> None:
+                issued.pop(key, None)
+
+            issued[evidence_key] = ref(evidence, forget)
+        return result
+
+    def assert_betfair_timeout_absence_authoritative(
+        evidence: VerifiedProviderAbsenceEvidence,
+    ) -> None:
+        if not isinstance(evidence, VerifiedProviderAbsenceEvidence):
+            raise BetfairTimeoutResolutionError(
+                "timeout absence evidence type is not canonical"
+            )
+        record = issued.get(id(evidence))
+        if record is None or record() is not evidence:
+            raise BetfairTimeoutResolutionError(
+                "provider absence did not pass durable Betfair timeout visibility authority"
+            )
+
+    globals()["resolve_betfair_timeout_provider_state"] = authoritative_resolve
+    globals()[
+        "assert_betfair_timeout_absence_authoritative"
+    ] = assert_betfair_timeout_absence_authoritative
+
+
+_install_betfair_timeout_absence_authority()
+del _install_betfair_timeout_absence_authority

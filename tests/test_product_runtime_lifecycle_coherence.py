@@ -98,11 +98,13 @@ class Source:
 
 
 class Noop:
+    authority_active = True
+
     def close(self) -> None:
         pass
 
     def release(self) -> None:
-        pass
+        self.authority_active = False
 
 
 def runtime(stopped: bool, state: SessionState):

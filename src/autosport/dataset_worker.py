@@ -17,12 +17,10 @@ def _safe_worker_error(exc: BaseException) -> str:
     try:
         name = type.__getattribute__(type(exc), "__name__")
     except BaseException:
-        name = "BaseException"
-    try:
-        detail = str(exc)
-    except BaseException:
-        return f"{name}: dataset validation failed; exception details unavailable"
-    return f"{name}: {detail}" if detail else name
+        return "BaseException"
+    if not isinstance(name, str) or not name.isascii() or not name.isidentifier() or len(name) > 80:
+        return "BaseException"
+    return name
 
 
 @dataclass(frozen=True, slots=True)

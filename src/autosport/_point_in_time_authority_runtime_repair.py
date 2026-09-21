@@ -44,6 +44,8 @@ if "_PRISTINE_ACCESS_ID" not in globals():
     _PRISTINE_ACCESS_ID = evidence.HoldoutConsumptionLedger.access_id
 if "_PRISTINE_FRESHNESS_ID" not in globals():
     _PRISTINE_FRESHNESS_ID = evidence.HoldoutConsumptionLedger.freshness_id
+if "_PRISTINE_FIND_PHYSICAL_HOLDOUT" not in globals():
+    _PRISTINE_FIND_PHYSICAL_HOLDOUT = evidence._find_physical_holdout_consumption
 
 _PROVENANCE_GUARD_MODULE_NAME = (
     f"{__package__}._point_in_time_feature_provenance_guard"
@@ -607,7 +609,7 @@ def _assert_unused_from_lineage(
             evidence._text(
                 confirmation_trial_family_id, "confirmation_trial_family_id"
             )
-            existing = evidence._find_physical_holdout_consumption(
+            existing = _PRISTINE_FIND_PHYSICAL_HOLDOUT(
                 self._records,
                 dataset_snapshot=canonical,
             )
@@ -685,7 +687,7 @@ def _consume_from_lineage(
                     f"{existing.consumer_identity}"
                 )
 
-            physical_existing = evidence._find_physical_holdout_consumption(
+            physical_existing = _PRISTINE_FIND_PHYSICAL_HOLDOUT(
                 self._records,
                 dataset_snapshot=canonical,
             )

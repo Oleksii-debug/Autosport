@@ -53,6 +53,19 @@ def response(result: object, request_id: int) -> bytes:
     ).encode("utf-8")
 
 
+def account_details(*, discount_rate: object = 12.5) -> dict[str, object]:
+    return {
+        "currencyCode": "GBP",
+        "localeCode": "en",
+        "region": "GBR",
+        "timezone": "Europe/London",
+        "discountRate": discount_rate,
+        "pointsBalance": 1234,
+        "firstName": "DoNotPersist",
+        "lastName": "DoNotPersist",
+    }
+
+
 def client_for(*responses: bytes) -> tuple[BetfairReadOnlyClient, FakeTransport]:
     transport = FakeTransport(list(responses))
     client = BetfairReadOnlyClient(
@@ -66,16 +79,7 @@ def client_for(*responses: bytes) -> tuple[BetfairReadOnlyClient, FakeTransport]
 
 
 def test_reads_authenticated_account_and_exact_market_fee_inputs_with_causal_evidence():
-    account_raw = response(
-        {
-            "availableToBetBalance": 100.0,
-            "exposure": 0,
-            "retainedCommission": 0,
-            "exposureLimit": -5000,
-            "discountRate": 12.5,
-        },
-        1,
-    )
+    account_raw = response(account_details(), 1)
     market_raw = response(
         [
             {
@@ -83,6 +87,7 @@ def test_reads_authenticated_account_and_exact_market_fee_inputs_with_causal_evi
                 "description": {
                     "marketBaseRate": 5.0,
                     "discountAllowed": True,
+                    "regulator": "MR_INT",
                 },
             }
         ],
@@ -94,20 +99,25 @@ def test_reads_authenticated_account_and_exact_market_fee_inputs_with_causal_evi
 
     assert observation.venue_id == "betfair-exchange"
     assert observation.account_id == "account-123"
+    assert observation.currency_code == "GBP"
+    assert observation.region == "GBR"
     assert observation.market_id == "1.234"
     assert observation.discount_rate_percent == Decimal("12.5")
     assert observation.market_base_rate_percent == Decimal("5.0")
     assert observation.discount_allowed is True
+    assert observation.regulator == "MR_INT"
     assert observation.account_evidence.observed_at == FIXED_NOW.isoformat()
     assert observation.account_evidence.source_payload_sha256 == sha256(account_raw).hexdigest()
     assert observation.market_evidence.source_payload_sha256 == sha256(market_raw).hexdigest()
+    assert not hasattr(observation, "first_name")
+    assert not hasattr(observation, "last_name")
 
     assert [call["url"] for call in transport.calls] == [
         ACCOUNT_JSON_RPC_ENDPOINT,
         BETTING_JSON_RPC_ENDPOINT,
     ]
     requests = [json.loads(call["body"]) for call in transport.calls]
-    assert requests[0]["method"] == "AccountAPING/v1.0/getAccountFunds"
+    assert requests[0]["method"] == "AccountAPING/v1.0/getAccountDetails"
     assert requests[0]["params"] == {}
     assert requests[1]["method"] == "SportsAPING/v1.0/listMarketCatalogue"
     assert requests[1]["params"] == {
@@ -118,17 +128,9 @@ def test_reads_authenticated_account_and_exact_market_fee_inputs_with_causal_evi
 
 
 def test_missing_discount_rate_fails_closed_before_market_lookup():
-    client, transport = client_for(
-        response(
-            {
-                "availableToBetBalance": 100,
-                "exposure": 0,
-                "retainedCommission": 0,
-                "exposureLimit": -5000,
-            },
-            1,
-        )
-    )
+    details = account_details()
+    del details["discountRate"]
+    client, transport = client_for(response(details, 1))
 
     with pytest.raises(
         BetfairReadOnlyError,
@@ -141,18 +143,7 @@ def test_missing_discount_rate_fails_closed_before_market_lookup():
 
 @pytest.mark.parametrize("discount_rate", [-1, 101])
 def test_out_of_range_provider_discount_rate_fails_closed(discount_rate: int):
-    client, transport = client_for(
-        response(
-            {
-                "availableToBetBalance": 100,
-                "exposure": 0,
-                "retainedCommission": 0,
-                "exposureLimit": -5000,
-                "discountRate": discount_rate,
-            },
-            1,
-        )
-    )
+    client, transport = client_for(response(account_details(discount_rate=discount_rate), 1))
 
     with pytest.raises(BetfairReadOnlyError, match="between 0 and 100"):
         read_betfair_execution_fee_inputs(client, market_id="1.234")
@@ -161,18 +152,8 @@ def test_out_of_range_provider_discount_rate_fails_closed(discount_rate: int):
 
 
 def test_market_lookup_requires_one_exact_matching_market():
-    account = response(
-        {
-            "availableToBetBalance": 100,
-            "exposure": 0,
-            "retainedCommission": 0,
-            "exposureLimit": -5000,
-            "discountRate": 0,
-        },
-        1,
-    )
     client, _ = client_for(
-        account,
+        response(account_details(discount_rate=0), 1),
         response(
             [
                 {
@@ -192,16 +173,7 @@ def test_market_lookup_requires_one_exact_matching_market():
 
 
 def test_market_description_missing_or_malformed_fee_fields_fail_closed():
-    account = response(
-        {
-            "availableToBetBalance": 100,
-            "exposure": 0,
-            "retainedCommission": 0,
-            "exposureLimit": -5000,
-            "discountRate": 0,
-        },
-        1,
-    )
+    account = response(account_details(discount_rate=0), 1)
     client, _ = client_for(
         account,
         response([{"marketId": "1.234", "description": {}}], 2),
@@ -229,3 +201,29 @@ def test_market_description_missing_or_malformed_fee_fields_fail_closed():
     )
     with pytest.raises(BetfairReadOnlyError, match="discountAllowed must be bool"):
         read_betfair_execution_fee_inputs(client, market_id="1.234")
+
+
+def test_optional_region_and_regulator_are_preserved_without_becoming_authority():
+    details = account_details()
+    details.pop("region")
+    client, _ = client_for(
+        response(details, 1),
+        response(
+            [
+                {
+                    "marketId": "1.234",
+                    "description": {
+                        "marketBaseRate": 5,
+                        "discountAllowed": False,
+                    },
+                }
+            ],
+            2,
+        ),
+    )
+
+    observation = read_betfair_execution_fee_inputs(client, market_id="1.234")
+
+    assert observation.region is None
+    assert observation.regulator is None
+    assert observation.discount_allowed is False

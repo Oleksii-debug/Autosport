@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from decimal import Decimal
+import json
 
 import pytest
 
@@ -111,6 +112,106 @@ def test_public_provider_client_rebinding_cannot_mint_a_different_contract(monke
 
     assert second.instruction_sha256 == first.instruction_sha256
     assert second.evidence_id == first.evidence_id
+
+
+def test_instruction_projection_is_captured_from_real_place_action_request() -> None:
+    import autosport.betfair_standard_limit_price_bound as module
+
+    bound, action, evidence = _evidence()
+    projection = module._canonical_instruction_projection(action)
+
+    assert projection == {
+        "selectionId": int(action.selection_id),
+        "handicap": 0,
+        "side": "BACK",
+        "orderType": "LIMIT",
+        "limitOrder": {
+            "size": str(action.requested_stake),
+            "price": str(action.requested_odds),
+            "persistenceType": "LAPSE",
+        },
+    }
+    assert evidence.instruction_sha256 == module._digest(projection)
+    assert bound.execution_plan.created_at < action.expires_at
+
+
+def _replace_captured_request(
+    monkeypatch,
+    mutate,
+) -> None:
+    import autosport.betfair_standard_limit_price_bound as module
+
+    original = module._CANONICAL_PLACE_ACTION
+
+    def drifted(self, action, **kwargs):
+        try:
+            return original(self, action, **kwargs)
+        except module._CapturedPlaceOrdersRequest as captured:
+            envelope = json.loads(captured.body.decode("utf-8"))
+            mutate(envelope["params"]["instructions"][0])
+            raise module._CapturedPlaceOrdersRequest(
+                json.dumps(
+                    envelope,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ).encode("utf-8")
+            ) from None
+
+    monkeypatch.setattr(module, "_CANONICAL_PLACE_ACTION", drifted)
+
+
+def test_same_version_time_in_force_write_drift_fails_closed(monkeypatch) -> None:
+    bound, action, _evidence = _evidence()
+
+    def add_fill_or_kill(instruction) -> None:
+        instruction["timeInForce"] = "FILL_OR_KILL"
+
+    _replace_captured_request(monkeypatch, add_fill_or_kill)
+
+    with pytest.raises(
+        BetfairStandardLimitPriceBoundError,
+        match="nonstandard Betfair order transformation",
+    ):
+        resolve_betfair_standard_limit_price_bound(
+            bound=bound,
+            action_id=action.action_id,
+        )
+
+
+def test_same_version_price_write_drift_fails_closed(monkeypatch) -> None:
+    bound, action, _evidence = _evidence()
+
+    def worsen_submitted_limit(instruction) -> None:
+        instruction["limitOrder"]["price"] = "1.99"
+
+    _replace_captured_request(monkeypatch, worsen_submitted_limit)
+
+    with pytest.raises(
+        BetfairStandardLimitPriceBoundError,
+        match="does not preserve the bound standard LIMIT",
+    ):
+        resolve_betfair_standard_limit_price_bound(
+            bound=bound,
+            action_id=action.action_id,
+        )
+
+
+def test_same_version_smart_order_write_drift_fails_closed(monkeypatch) -> None:
+    bound, action, _evidence = _evidence()
+
+    def add_bet_target(instruction) -> None:
+        instruction["betTargetType"] = "PAYOUT"
+
+    _replace_captured_request(monkeypatch, add_bet_target)
+
+    with pytest.raises(
+        BetfairStandardLimitPriceBoundError,
+        match="nonstandard Betfair order transformation",
+    ):
+        resolve_betfair_standard_limit_price_bound(
+            bound=bound,
+            action_id=action.action_id,
+        )
 
 
 def test_bound_quote_is_unexpired_at_decision_and_realized_price_is_not_backfilled() -> None:

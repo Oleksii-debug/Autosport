@@ -393,6 +393,8 @@ class CampaignCloseEnvelope:
     first_sequence: int
     last_sequence: int
     close_reason: str
+    anchor_lower: datetime
+    anchor_upper: datetime
     close_state: str = "CLOSED"
     predecessor_close_sha256: str | None = None
 
@@ -404,6 +406,14 @@ class CampaignCloseEnvelope:
             "terminal_cohort_root_sha256",
         )
         _text(self.close_reason, "close_reason")
+        lower = _instant(self.anchor_lower, "anchor_lower")
+        upper = _instant(self.anchor_upper, "anchor_upper")
+        if lower > upper:
+            raise ForwardEvidenceCompletenessError(
+                "close anchor lower must not exceed upper"
+            )
+        object.__setattr__(self, "anchor_lower", lower)
+        object.__setattr__(self, "anchor_upper", upper)
         if self.close_state != "CLOSED":
             raise ForwardEvidenceCompletenessError("close_state must be CLOSED")
         if self.predecessor_close_sha256 is not None:
@@ -433,6 +443,8 @@ class CampaignCloseEnvelope:
             "first_sequence": self.first_sequence,
             "last_sequence": self.last_sequence,
             "close_reason": self.close_reason,
+            "anchor_lower": _iso(self.anchor_lower),
+            "anchor_upper": _iso(self.anchor_upper),
             "close_state": self.close_state,
             "predecessor_close_sha256": (
                 self.predecessor_close_sha256.lower()
@@ -549,7 +561,6 @@ class CampaignEvidence:
     authoritative_receipts: tuple[AuthoritativeSourceReceipt, ...]
     denominator_sequences: tuple[int, ...]
     cost_evidence: tuple[CostEvidence, ...]
-    first_candidate_admitted_at: datetime
     safety_margin: timedelta = timedelta(0)
     stopping_rule_satisfied: bool = True
 
@@ -558,11 +569,6 @@ class CampaignEvidence:
             raise ForwardEvidenceCompletenessError(
                 "protocol must be a ResearchProtocolEnvelope"
             )
-        object.__setattr__(
-            self,
-            "first_candidate_admitted_at",
-            _instant(self.first_candidate_admitted_at, "first_candidate_admitted_at"),
-        )
         object.__setattr__(
             self,
             "safety_margin",
@@ -747,12 +753,14 @@ def verify_campaign(evidence: CampaignEvidence) -> VerificationResult:
     details: dict[str, str] = {}
     protocol = evidence.protocol
 
-    if protocol.precommit_anchor_upper >= evidence.first_candidate_admitted_at:
-        codes.append(VerificationCode.PROTOCOL_PRECOMMIT_FAIL)
-
     opportunities, identity_conflict, fork = _dedupe_opportunities(
         evidence.opportunities
     )
+    if (
+        opportunities
+        and protocol.precommit_anchor_upper >= opportunities[0].observed_lower
+    ):
+        codes.append(VerificationCode.PROTOCOL_PRECOMMIT_FAIL)
     if identity_conflict:
         codes.append(VerificationCode.EVIDENCE_IDENTITY_CONFLICT)
     if fork:
@@ -796,13 +804,12 @@ def verify_campaign(evidence: CampaignEvidence) -> VerificationResult:
     for receipt in evidence.authoritative_receipts:
         if receipt.campaign_id != protocol.campaign_id:
             continue
-        if receipt.universe_rule_result is not UniverseResult.ADMITTED:
-            continue
         item = opportunity_by_receipt.get(receipt.receipt_id)
         if (
             item is None
             or item.opportunity_id != receipt.opportunity_id
             or item.source_receipt_sha256 != receipt.receipt_sha256
+            or item.universe_rule_result is not receipt.universe_rule_result
         ):
             codes.append(VerificationCode.COHORT_OMISSION_DETECTED)
             details.setdefault("omitted_source_receipt", receipt.receipt_id)

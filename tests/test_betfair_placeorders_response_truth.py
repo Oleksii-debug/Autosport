@@ -45,11 +45,17 @@ def _payload(
     bet_id: str | None = None,
     handicap: object = 0,
     persistence_type: str = "LAPSE",
+    response_id: object = 1,
+    selection_id: object | None = None,
 ) -> bytes:
     report: dict[str, object] = {
         "status": instruction_status,
         "instruction": {
-            "selectionId": int(action.selection_id),
+            "selectionId": (
+                int(action.selection_id)
+                if selection_id is None
+                else selection_id
+            ),
             "handicap": handicap,
             "side": action.side,
             "orderType": "LIMIT",
@@ -81,7 +87,7 @@ def _payload(
         {
             "jsonrpc": "2.0",
             "result": result,
-            "id": 1,
+            "id": response_id,
         }
     ).encode("utf-8")
 
@@ -132,6 +138,7 @@ def test_explicit_zero_failure_remains_rejected() -> None:
         instruction_status="FAILURE",
         include_size_matched=True,
         size_matched="0",
+        bet_id="bet-rejected-123",
     )
 
     report = _parse(payload, action)
@@ -161,6 +168,74 @@ def test_response_echo_rejects_handicap_or_persistence_drift(
         bet_id="bet-123",
         handicap=handicap,
         persistence_type=persistence_type,
+    )
+
+    with pytest.raises(
+        BetfairPlaceOrdersAmbiguous,
+        match="does not bind exact action",
+    ):
+        _parse(payload, action)
+
+@pytest.mark.parametrize("response_id", (True, 1.0, "1"))
+def test_response_id_rejects_coercible_non_integer_wire_identity(
+    response_id: object,
+) -> None:
+    action = _action()
+    payload = _payload(
+        action,
+        execution_status="SUCCESS",
+        instruction_status="SUCCESS",
+        include_size_matched=True,
+        size_matched="5.00",
+        average_price_matched="2.00",
+        bet_id="bet-123",
+        response_id=response_id,
+    )
+
+    with pytest.raises(
+        BetfairPlaceOrdersAmbiguous,
+        match="exact JSON-RPC request",
+    ):
+        _parse(payload, action)
+
+
+@pytest.mark.parametrize("selection_id", (42.5, "42", True))
+def test_response_echo_rejects_coercible_selection_identity(
+    selection_id: object,
+) -> None:
+    action = _action()
+    payload = _payload(
+        action,
+        execution_status="SUCCESS",
+        instruction_status="SUCCESS",
+        include_size_matched=True,
+        size_matched="5.00",
+        average_price_matched="2.00",
+        bet_id="bet-123",
+        selection_id=selection_id,
+    )
+
+    with pytest.raises(
+        BetfairPlaceOrdersAmbiguous,
+        match="echoed selection is malformed",
+    ):
+        _parse(payload, action)
+
+
+@pytest.mark.parametrize("handicap", (False, "0"))
+def test_response_echo_rejects_coercible_handicap_identity(
+    handicap: object,
+) -> None:
+    action = _action()
+    payload = _payload(
+        action,
+        execution_status="SUCCESS",
+        instruction_status="SUCCESS",
+        include_size_matched=True,
+        size_matched="5.00",
+        average_price_matched="2.00",
+        bet_id="bet-123",
+        handicap=handicap,
     )
 
     with pytest.raises(

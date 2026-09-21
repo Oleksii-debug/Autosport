@@ -51,21 +51,30 @@ def _workspace_configuration_error_detail(error: ValueError) -> str:
     )
 
 
+def _workspace_configuration_error_message(detail: str) -> str:
+    return (
+        "Автоспорт не відкрив робочу теку через недійсну конфігурацію.\n\n"
+        f"{detail}\n\n"
+        "Вкажіть абсолютний шлях у AUTOSPORT_WORKSPACE або виправте LOCALAPPDATA, "
+        "потім перезапустіть Автоспорт. "
+        "Економічний стан і стан виконання не змінено."
+    )
+
+
 def _show_workspace_configuration_error(detail: str) -> None:
     """Show an accessible native Windows error before any interactive GUI state opens."""
 
     import ctypes
 
-    title = "Автоспорт — помилка конфігурації workspace"
-    message = (
-        "Автоспорт не відкрив interactive workspace через недійсну конфігурацію.\n\n"
-        f"{detail}\n\n"
-        "Вкажіть абсолютний шлях у AUTOSPORT_WORKSPACE або виправте LOCALAPPDATA, "
-        "потім перезапустіть Автоспорт. Economic і live state не змінено."
-    )
+    title = "Автоспорт — помилка конфігурації робочої теки"
     # MB_OK | MB_ICONERROR. Native MessageBox is keyboard-operable and exposed
     # through standard Windows accessibility rather than a custom visual surface.
-    ctypes.windll.user32.MessageBoxW(None, message, title, 0x00000010)
+    ctypes.windll.user32.MessageBoxW(
+        None,
+        _workspace_configuration_error_message(detail),
+        title,
+        0x00000010,
+    )
 
 
 def _probe_workspace_writable(workspace: Path) -> None:

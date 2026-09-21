@@ -36,14 +36,21 @@ def test_adapter_derives_exact_indices_with_delayed_label_gap():
         Point(T3, T3),
     )
     folds = (
+        Fold("fold-1", T0, T1, 1),
         Fold("fold-2", T1, T2, 1),
         Fold("fold-3", T2, T3, 2),
     )
-    splits = derive_walk_forward_splits(points, folds)
-    assert splits[0].training_indices == (0,)
-    assert splits[0].evaluation_index == 2
-    assert splits[1].training_indices == (0, 2)
-    assert splits[1].evaluation_index == 3
+    splits = derive_walk_forward_splits(
+        points,
+        folds,
+        minimum_train_size=1,
+    )
+    assert tuple(split.training_indices for split in splits) == (
+        (0,),
+        (0,),
+        (0, 2),
+    )
+    assert tuple(split.evaluation_index for split in splits) == (1, 2, 3)
 
 
 def test_adapter_is_input_order_independent_but_indexed_to_canonical_order():

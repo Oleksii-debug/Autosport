@@ -498,6 +498,7 @@ def test_existing_runtime_without_checkpoint_cannot_self_attest_generation(tmp_p
             opponent,
         )
 
+
 def test_checkpoint_parser_rejects_duplicate_json_keys(tmp_path):
     identity, opponent = _canonical_stores(tmp_path)
     checkpoint_path, runtime_path = _paths(tmp_path)

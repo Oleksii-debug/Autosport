@@ -292,7 +292,7 @@ def _scenario_focused_projection(
     return _timed(
         operation,
         samples=samples,
-        operations_per_sample=selected,
+        operations_per_sample=1,
         timer_ns=timer_ns,
     )
 
@@ -315,7 +315,7 @@ def _scenario_full_snapshot(
     return _timed(
         operation,
         samples=samples,
-        operations_per_sample=quote_count,
+        operations_per_sample=1,
         timer_ns=timer_ns,
     )
 

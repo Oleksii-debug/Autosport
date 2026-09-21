@@ -200,6 +200,7 @@ class MarketImpliedBaselineEvidence:
                 "complete_verified_outcome_roster": True,
                 "decision_time_replay_visibility": True,
                 "fresh_open_quotes": True,
+                "source_stream_continuity_proven": False,
                 "forecast_comparator_only": True,
                 "execution_authority": False,
                 "promotion_authority": False,
@@ -404,6 +405,7 @@ class MarketImpliedBaselineCohortEvidence:
             "truth": {
                 "same_frozen_cohort": True,
                 "same_frozen_market_evidence": True,
+                "source_stream_continuity_proven": False,
                 "forecast_comparator_only": True,
                 "metric_computed": False,
                 "execution_authority": False,

@@ -405,16 +405,47 @@ def test_negative_repeat_requires_durable_postmortem_provenance(tmp_path):
 
     # Restart must re-resolve the durable authorizing record, not merely trust the
     # evidence reference persisted in the repeated Experiment payload.
-    raw = json.loads(path.read_text(encoding="utf-8"))
-    raw["records"] = [
+    original_raw = json.loads(path.read_text(encoding="utf-8"))
+    tampered = json.loads(json.dumps(original_raw))
+    tampered_bundle = next(
         entry
-        for entry in raw["records"]
+        for entry in tampered["records"]
+        if entry["record_type"] == "EvaluationBundle"
+        and entry["record_id"] == "eval-repeat"
+    )
+    tampered_bundle["payload"]["bundle_sha256"] = SHA_B
+    envelope = {
+        key: tampered_bundle[key]
+        for key in ("record_type", "record_id", "available_at", "payload")
+    }
+    import hashlib
+
+    tampered_bundle["record_sha256"] = hashlib.sha256(
+        json.dumps(
+            envelope,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        ).encode("utf-8")
+    ).hexdigest()
+    path.write_text(json.dumps(tampered), encoding="utf-8")
+    with pytest.raises(
+        DuplicateExperimentFingerprintError,
+        match="durable record digest mismatch",
+    ):
+        ScientificRegistry(path)
+
+    missing = json.loads(json.dumps(original_raw))
+    missing["records"] = [
+        entry
+        for entry in missing["records"]
         if not (
             entry["record_type"] == "EvaluationBundle"
             and entry["record_id"] == "eval-repeat"
         )
     ]
-    path.write_text(json.dumps(raw), encoding="utf-8")
+    path.write_text(json.dumps(missing), encoding="utf-8")
     with pytest.raises(
         DuplicateExperimentFingerprintError,
         match="missing durable scientific record",

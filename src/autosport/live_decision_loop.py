@@ -1528,19 +1528,28 @@ class PersistentLiveDecisionLoop:
         *,
         incremental: bool = True,
     ) -> dict[str, MirrorSnapshot]:
-        snapshots: dict[str, MirrorSnapshot] = {}
         reader = (
-            self.dependencies.incremental_decision_view
+            self.dependencies.incremental_decision_views
             if incremental
-            else self.dependencies.decision_view
+            else self.dependencies.decision_views
         )
-        for input_id in input_ids:
-            snapshot = reader(
-                input_id,
-                as_of=as_of,
-                max_age=self.max_quote_age,
+        snapshots = reader(
+            input_ids,
+            as_of=as_of,
+            max_age=self.max_quote_age,
+        )
+        if tuple(snapshots) != input_ids:
+            raise LiveDecisionProgressError(
+                "decision input snapshot set changed during coherent capture"
             )
-            snapshots[input_id] = snapshot
+        revisions = {snapshot.revision for snapshot in snapshots.values()}
+        if len(revisions) > 1:
+            raise LiveDecisionProgressError(
+                "decision input snapshots do not share one mirror revision"
+            )
+
+        for input_id in input_ids:
+            snapshot = snapshots[input_id]
             self._input_market_sha256[input_id] = _canonical_json_sha256(
                 [event.to_dict() for event in snapshot.events]
             )

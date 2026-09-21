@@ -1,6 +1,6 @@
 """Immutable provider settlement evidence with explicit rule lineage.
 
-This module is an integrity boundary for settlement/reconciliation evidence.  It
+This module is an integrity boundary for settlement/reconciliation evidence. It
 binds one provider settlement result to the exact execution/market/selection,
 provider evidence digest, settlement rule identity/version/digest, and UTC time.
 It does not acquire provider data and does not prove that a provider accepted a
@@ -154,7 +154,13 @@ class ProviderSettlementReceipt:
                 "record_sha256",
             },
         )
-        if raw["schema_version"] != SCHEMA_VERSION or raw["source_family"] != SOURCE_FAMILY:
+        schema_version = raw["schema_version"]
+        source_family = _string(raw["source_family"], "source_family")
+        if (
+            type(schema_version) is not int
+            or schema_version != SCHEMA_VERSION
+            or source_family != SOURCE_FAMILY
+        ):
             raise ProviderSettlementReceiptError("unsupported settlement receipt")
         disposition_raw = _string(raw["disposition"], "disposition")
         try:
@@ -188,7 +194,10 @@ class ProviderSettlementReceipt:
             revision=revision,
             supersedes_receipt_sha256=predecessor,
         )
-        if raw["receipt_sha256"] != item.receipt_sha256 or raw["record_sha256"] != item.record_sha256:
+        if (
+            raw["receipt_sha256"] != item.receipt_sha256
+            or raw["record_sha256"] != item.record_sha256
+        ):
             raise ProviderSettlementReceiptError("settlement receipt digest mismatch")
         return item
 
@@ -199,7 +208,10 @@ def verify_settlement_revision(
 ) -> None:
     """Fail closed unless ``current`` is the immediate correction to ``previous``."""
 
-    if type(previous) is not ProviderSettlementReceipt or type(current) is not ProviderSettlementReceipt:
+    if (
+        type(previous) is not ProviderSettlementReceipt
+        or type(current) is not ProviderSettlementReceipt
+    ):
         raise ProviderSettlementReceiptError(
             "revision verification requires canonical settlement receipts"
         )
@@ -252,7 +264,11 @@ def _sha256(value: object, label: str) -> str:
 
 
 def _utc(value: object, label: str) -> datetime:
-    if type(value) is not datetime or value.tzinfo is None or value.utcoffset() != timedelta(0):
+    if (
+        type(value) is not datetime
+        or value.tzinfo is None
+        or value.utcoffset() != timedelta(0)
+    ):
         raise ProviderSettlementReceiptError(f"{label} must be timezone-aware UTC")
     return value
 

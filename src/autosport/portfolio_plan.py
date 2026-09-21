@@ -836,6 +836,7 @@ class RobustPortfolioProposal:
             raise ValueError("serialized robust proposal fields mismatch")
         if (
             raw["schema"] != "autosport.robust_portfolio_proposal"
+            or type(raw["schema_version"]) is not int
             or raw["schema_version"] != 1
         ):
             raise ValueError("unsupported robust proposal schema")

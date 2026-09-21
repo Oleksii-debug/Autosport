@@ -12,6 +12,7 @@ therefore enforced inside the exact canonical provider market context.
 from __future__ import annotations
 
 from collections.abc import Iterator
+from datetime import datetime, timezone
 from typing import Any
 
 from . import parlayapi_provider as provider
@@ -48,6 +49,26 @@ def _event_id(event: dict[str, Any]) -> str:
     )
 
 
+def _canonical_commence_time(value: str) -> str:
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except (ValueError, OverflowError) as exc:
+        raise provider.ProviderPayloadError(
+            "event commence_time must be timezone-aware ISO-8601"
+        ) from exc
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        raise provider.ProviderPayloadError(
+            "event commence_time must include a timezone offset"
+        )
+    try:
+        canonical = parsed.astimezone(timezone.utc)
+    except (ValueError, OverflowError) as exc:
+        raise provider.ProviderPayloadError(
+            "event commence_time must resolve to a valid UTC instant"
+        ) from exc
+    return canonical.isoformat(timespec="microseconds").replace("+00:00", "Z")
+
+
 def _event_binding(event: dict[str, Any], expected_sport: str) -> tuple[str | None, ...]:
     sport_key = _declared_text(event, "sport_key")
     if sport_key is not None and sport_key != expected_sport:
@@ -55,7 +76,7 @@ def _event_binding(event: dict[str, Any], expected_sport: str) -> tuple[str | No
 
     commence_time = _declared_text(event, "commence_time")
     if commence_time is not None:
-        provider._sequence_from_timestamp(commence_time)  # noqa: SLF001
+        commence_time = _canonical_commence_time(commence_time)
 
     home_team = _declared_text(event, "home_team")
     away_team = _declared_text(event, "away_team")

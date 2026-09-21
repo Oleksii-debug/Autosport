@@ -10,13 +10,18 @@ from autosport.betfair_pre_provider_recovery import (
     BetfairPreProviderRecoveryError,
     recover_betfair_pre_provider_attempt,
 )
-from autosport.real_execution_ledger import AttemptState, ExecutionAction, ExecutionPlan, RealExecutionLedger
+from autosport.real_execution_ledger import (
+    AttemptState,
+    ExecutionAction,
+    ExecutionPlan,
+    ExecutionStateError,
+    RealExecutionLedger,
+)
 from autosport.supervised_execution import (
     BoundSupervisedExecutionPlan,
     ExecutionLegConstraint,
     ProfileBinding,
     SupervisedApproval,
-    SupervisedExecutionError,
     _bound_binding_sha256,
     begin_supervised_attempt,
     reserve_supervised_plan,
@@ -170,7 +175,7 @@ def test_restart_before_provider_reference_releases_exactly_one_retry(tmp_path) 
         plan_id=bound.execution_plan.plan_id,
         action_id=ACTION_ID,
     )
-    with pytest.raises(SupervisedExecutionError, match="unresolved/final attempt"):
+    with pytest.raises(ExecutionStateError, match="unresolved/final attempt"):
         begin_supervised_attempt(
             restarted,
             bound,

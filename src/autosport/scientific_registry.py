@@ -510,6 +510,27 @@ class EvaluationBundleRef:
 
 
 @dataclass(frozen=True, slots=True)
+class ScientificEvidenceRef:
+    record_type: str
+    record_id: str
+    record_sha256: str
+
+    def __post_init__(self) -> None:
+        record_type = _text(self.record_type, "record_type")
+        if record_type not in _RECORD_TYPES:
+            raise ValueError("repeat evidence record_type is unsupported")
+        _text(self.record_id, "record_id")
+        _sha256(self.record_sha256, "record_sha256")
+
+    def to_payload(self) -> dict[str, str]:
+        return {
+            "record_type": self.record_type,
+            "record_id": self.record_id,
+            "record_sha256": self.record_sha256.lower(),
+        }
+
+
+@dataclass(frozen=True, slots=True)
 class ExperimentRecord:
     experiment_id: str
     research_protocol_id: str
@@ -527,7 +548,7 @@ class ExperimentRecord:
     repeat_of_experiment_id: str | None = None
     repeat_postmortem_id: str | None = None
     retest_condition: str | None = None
-    repeat_evidence: tuple[str, ...] = ()
+    repeat_evidence: tuple[ScientificEvidenceRef, ...] = ()
 
     def __post_init__(self) -> None:
         for name in ("experiment_id", "research_protocol_id", "dataset_snapshot_id",
@@ -563,7 +584,16 @@ class ExperimentRecord:
             _text(self.repeat_of_experiment_id, "repeat_of_experiment_id")
             _text(self.repeat_postmortem_id, "repeat_postmortem_id")
             _text(self.retest_condition, "retest_condition")
-            _text_tuple(self.repeat_evidence, "repeat_evidence")
+            if not isinstance(self.repeat_evidence, tuple) or not self.repeat_evidence:
+                raise ValueError("repeat_evidence must be a non-empty tuple")
+            if any(not isinstance(value, ScientificEvidenceRef) for value in self.repeat_evidence):
+                raise ValueError("repeat_evidence must contain ScientificEvidenceRef values")
+            evidence_keys = tuple(
+                (value.record_type, value.record_id, value.record_sha256.lower())
+                for value in self.repeat_evidence
+            )
+            if len(evidence_keys) != len(set(evidence_keys)):
+                raise ValueError("repeat_evidence must not contain duplicates")
         elif not isinstance(self.repeat_evidence, tuple):
             raise ValueError("repeat_evidence must be a tuple")
 
@@ -594,7 +624,7 @@ class ExperimentRecord:
                 "repeat_of_experiment_id": self.repeat_of_experiment_id,
                 "repeat_postmortem_id": self.repeat_postmortem_id,
                 "retest_condition": self.retest_condition,
-                "repeat_evidence": list(self.repeat_evidence),
+                "repeat_evidence": [value.to_payload() for value in self.repeat_evidence],
             })
         return payload
 
@@ -980,7 +1010,7 @@ class ScientificRegistry:
             raise ValueError("scientific registry records must be a list")
         seen: set[tuple[str, str]] = set()
         fingerprints: set[str] = set()
-        for raw_entry in records:
+        for index, raw_entry in enumerate(records):
             self._validate_entry(raw_entry)
             key = (raw_entry["record_type"], raw_entry["record_id"])
             if key in seen:
@@ -988,10 +1018,25 @@ class ScientificRegistry:
             seen.add(key)
             if raw_entry["record_type"] == "Experiment":
                 fingerprint = raw_entry["payload"].get("fingerprint")
+                if raw_entry["payload"].get("repeat_of_experiment_id") is not None:
+                    prior_state = {
+                        "schema_version": self.SCHEMA_VERSION,
+                        "records": records[:index],
+                    }
+                    matching_experiments = [
+                        existing
+                        for existing in records[:index]
+                        if existing["record_type"] == "Experiment"
+                        and existing["payload"].get("fingerprint") == fingerprint
+                    ]
+                    self._validate_negative_repeat_authorization(
+                        prior_state,
+                        raw_entry,
+                        matching_experiments,
+                    )
                 if fingerprint in fingerprints:
-                    # Historical explicit repeats are represented by allow_repeat and therefore may
-                    # share a fingerprint. They remain detectable by lookup rather than invalidating
-                    # restart. Do not reject the persisted state here.
+                    # Historical explicit repeats may share a fingerprint. New repeats with
+                    # persisted provenance are re-resolved above on every restart.
                     pass
                 fingerprints.add(fingerprint)
         return state
@@ -1154,14 +1199,9 @@ class ScientificRegistry:
             raise DuplicateExperimentFingerprintError(
                 "negative-result repeat requires durable repeat provenance"
             )
-        if (
-            not isinstance(repeat_evidence, list)
-            or not repeat_evidence
-            or any(not isinstance(value, str) or not value for value in repeat_evidence)
-            or len(repeat_evidence) != len(set(repeat_evidence))
-        ):
+        if not isinstance(repeat_evidence, list) or not repeat_evidence:
             raise DuplicateExperimentFingerprintError(
-                "negative-result repeat requires non-empty unique repeat evidence"
+                "negative-result repeat requires durable repeat evidence references"
             )
         prior = next(
             (
@@ -1207,11 +1247,126 @@ class ScientificRegistry:
             raise DuplicateExperimentFingerprintError(
                 "retest_condition is not authorized by the durable postmortem"
             )
-        if _instant(postmortem["available_at"], "Postmortem.available_at") > _instant(
-            payload["created_at"], "Experiment.created_at"
-        ):
+        repeat_created = _instant(payload["created_at"], "Experiment.created_at")
+        if _instant(postmortem["available_at"], "Postmortem.available_at") > repeat_created:
             raise DuplicateExperimentFingerprintError(
                 "repeat experiment cannot predate its authorizing postmortem"
+            )
+
+        records = state["records"]
+        record_by_key = {
+            (raw["record_type"], raw["record_id"]): (index, raw)
+            for index, raw in enumerate(records)
+        }
+        resolved: list[tuple[int, Mapping[str, Any]]] = []
+        evidence_keys: set[tuple[str, str, str]] = set()
+        for raw_ref in repeat_evidence:
+            if type(raw_ref) is not dict or set(raw_ref) != {
+                "record_type",
+                "record_id",
+                "record_sha256",
+            }:
+                raise DuplicateExperimentFingerprintError(
+                    "repeat evidence reference fields are invalid"
+                )
+            record_type = raw_ref.get("record_type")
+            record_id = raw_ref.get("record_id")
+            record_sha256 = raw_ref.get("record_sha256")
+            if (
+                not isinstance(record_type, str)
+                or record_type not in _RECORD_TYPES
+                or not isinstance(record_id, str)
+                or not record_id
+                or not isinstance(record_sha256, str)
+            ):
+                raise DuplicateExperimentFingerprintError(
+                    "repeat evidence reference identity is invalid"
+                )
+            try:
+                expected_sha256 = _sha256(record_sha256, "repeat_evidence.record_sha256")
+            except ValueError as exc:
+                raise DuplicateExperimentFingerprintError(
+                    "repeat evidence reference digest is invalid"
+                ) from exc
+            evidence_key = (record_type, record_id, expected_sha256)
+            if evidence_key in evidence_keys:
+                raise DuplicateExperimentFingerprintError(
+                    "repeat evidence references must be unique"
+                )
+            evidence_keys.add(evidence_key)
+            resolved_record = record_by_key.get((record_type, record_id))
+            if resolved_record is None:
+                raise DuplicateExperimentFingerprintError(
+                    "repeat evidence references missing durable scientific record"
+                )
+            record_index, raw_record = resolved_record
+            if raw_record["record_sha256"] != expected_sha256:
+                raise DuplicateExperimentFingerprintError(
+                    "repeat evidence durable record digest mismatch"
+                )
+            if _instant(raw_record["available_at"], "repeat evidence available_at") > repeat_created:
+                raise DuplicateExperimentFingerprintError(
+                    "repeat evidence was not available before repeat creation"
+                )
+            resolved.append((record_index, raw_record))
+
+        prior_bundle_id = prior["payload"].get("evaluation_bundle_id")
+        current_bundle_id = payload.get("evaluation_bundle_id")
+        if current_bundle_id == prior_bundle_id:
+            raise DuplicateExperimentFingerprintError(
+                "negative-result repeat requires a new durable EvaluationBundle"
+            )
+        current_bundle_match = next(
+            (
+                (record_index, raw_record)
+                for record_index, raw_record in resolved
+                if raw_record["record_type"] == "EvaluationBundle"
+                and raw_record["record_id"] == current_bundle_id
+            ),
+            None,
+        )
+        if current_bundle_match is None:
+            raise DuplicateExperimentFingerprintError(
+                "repeat evidence must bind the repeat EvaluationBundle"
+            )
+        current_bundle_index, current_bundle = current_bundle_match
+        prior_bundle_match = record_by_key.get(("EvaluationBundle", prior_bundle_id))
+        if prior_bundle_match is None:
+            raise DuplicateExperimentFingerprintError(
+                "prior experiment EvaluationBundle is missing"
+            )
+        _, prior_bundle = prior_bundle_match
+        if current_bundle["payload"].get("bundle_sha256") == prior_bundle["payload"].get("bundle_sha256"):
+            raise DuplicateExperimentFingerprintError(
+                "repeat EvaluationBundle does not contain materially changed evidence"
+            )
+        postmortem_match = record_by_key.get(("Postmortem", repeat_postmortem_id))
+        if postmortem_match is None or current_bundle_index <= postmortem_match[0]:
+            raise DuplicateExperimentFingerprintError(
+                "repeat EvaluationBundle must be durably recorded after the authorizing postmortem"
+            )
+
+        bundle_payload = current_bundle["payload"]
+        if bundle_payload.get("dataset_snapshot_id") != payload.get("dataset_snapshot_id"):
+            raise DuplicateExperimentFingerprintError(
+                "repeat EvaluationBundle dataset lineage mismatch"
+            )
+        if bundle_payload.get("evaluated_strategy_version_id") != payload.get("strategy_version_id"):
+            raise DuplicateExperimentFingerprintError(
+                "repeat EvaluationBundle strategy lineage mismatch"
+            )
+        if bundle_payload.get("evaluated_model_version_id") != payload.get("model_version_id"):
+            raise DuplicateExperimentFingerprintError(
+                "repeat EvaluationBundle model lineage mismatch"
+            )
+        protocol_match = record_by_key.get(("ResearchProtocol", payload.get("research_protocol_id")))
+        if protocol_match is None:
+            raise DuplicateExperimentFingerprintError(
+                "repeat experiment ResearchProtocol is missing"
+            )
+        if bundle_payload.get("protocol_sha256") != protocol_match[1]["payload"].get("protocol_sha256"):
+            raise DuplicateExperimentFingerprintError(
+                "repeat EvaluationBundle protocol lineage mismatch"
             )
 
     def _append_entry_locked(

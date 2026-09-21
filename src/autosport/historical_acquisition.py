@@ -108,6 +108,103 @@ def _read_strict_json_object(path: Path, *, field: str) -> dict[str, Any]:
     return payload
 
 
+def _require_snapshot_evidence_semantics(
+    payload: dict[str, Any],
+    *,
+    expected_sport_key: str,
+    expected_requested_at: str,
+) -> dict[str, Any]:
+    if type(payload.get("schema_version")) is not int or payload["schema_version"] != 1:
+        raise ProviderPayloadError("snapshot evidence schema_version mismatch")
+    if payload.get("kind") != "parlayapi_point_in_time_historical_snapshot":
+        raise ProviderPayloadError("snapshot evidence kind mismatch")
+    if payload.get("provider") != "parlayapi":
+        raise ProviderPayloadError("snapshot evidence provider identity mismatch")
+    if payload.get("sport_key") != expected_sport_key:
+        raise ProviderPayloadError("snapshot evidence sport identity mismatch")
+    if payload.get("requested_at") != expected_requested_at:
+        raise ProviderPayloadError("snapshot evidence requested_at mismatch")
+
+    timestamps: dict[str, str] = {}
+    for field_name in ("snapshot_at", "captured_at"):
+        value = payload.get(field_name)
+        if type(value) is not str:
+            raise ProviderPayloadError(f"snapshot evidence {field_name} must be text")
+        try:
+            _canonical_timestamp(value, field=f"snapshot evidence {field_name}")
+        except ValueError as exc:
+            raise ProviderPayloadError(
+                f"snapshot evidence {field_name} must be a timezone-aware ISO timestamp"
+            ) from exc
+        timestamps[field_name] = value
+
+    snapshot_dt = datetime.fromisoformat(
+        _canonical_timestamp(timestamps["snapshot_at"], field="snapshot evidence snapshot_at").replace("Z", "+00:00")
+    )
+    requested_dt = datetime.fromisoformat(expected_requested_at.replace("Z", "+00:00"))
+    captured_dt = datetime.fromisoformat(
+        _canonical_timestamp(timestamps["captured_at"], field="snapshot evidence captured_at").replace("Z", "+00:00")
+    )
+    if snapshot_dt > requested_dt:
+        raise ProviderPayloadError("snapshot evidence snapshot_at is after requested_at")
+    if captured_dt < snapshot_dt:
+        raise ProviderPayloadError("snapshot evidence captured_at is before snapshot_at")
+
+    response_sha256 = payload.get("response_sha256")
+    market_sha256 = payload.get("market_sha256")
+    for field_name, value in (
+        ("response_sha256", response_sha256),
+        ("market_sha256", market_sha256),
+    ):
+        if (
+            type(value) is not str
+            or len(value) != 64
+            or any(character not in "0123456789abcdef" for character in value)
+        ):
+            raise ProviderPayloadError(
+                f"snapshot evidence {field_name} must be lowercase SHA-256 hex"
+            )
+
+    quote_count = payload.get("quote_count")
+    if type(quote_count) is not int or quote_count < 0:
+        raise ProviderPayloadError("snapshot evidence quote_count must be a non-negative integer")
+    has_data = payload.get("has_data")
+    if type(has_data) is not bool or has_data is not (quote_count > 0):
+        raise ProviderPayloadError("snapshot evidence has_data contradicts quote_count")
+    contains_odds = payload.get("point_in_time_snapshot_contains_odds")
+    if type(contains_odds) is not bool or contains_odds is not has_data:
+        raise ProviderPayloadError(
+            "snapshot evidence point_in_time_snapshot_contains_odds contradicts has_data"
+        )
+
+    fail_closed_fields = (
+        "point_in_time_odds_market_coverage_verified",
+        "historical_window_market_coverage_verified",
+        "sealed_outcomes_present",
+        "replay_corpus_ready",
+        "licensing_or_retention_verified",
+        "redistribution_verified",
+        "real_money_execution",
+        "human_tested",
+        "nvda_verified",
+    )
+    for field_name in fail_closed_fields:
+        if payload.get(field_name) is not False:
+            raise ProviderPayloadError(
+                f"snapshot evidence {field_name} must remain false on this authority"
+            )
+
+    return {
+        "requested_at": expected_requested_at,
+        "snapshot_at": timestamps["snapshot_at"],
+        "captured_at": timestamps["captured_at"],
+        "market_sha256": market_sha256,
+        "provider_response_sha256": response_sha256,
+        "quote_count": quote_count,
+        "point_in_time_snapshot_contains_odds": contains_odds,
+    }
+
+
 def _require_match_result_evidence_semantics(
     payload: dict[str, Any],
     *,
@@ -327,26 +424,16 @@ def capture_historical_acquisition_bundle(
             evidence_relative = Path("snapshots") / f"{index:04d}-evidence.json"
             market_path = staging / market_relative
             evidence_path = staging / evidence_relative
-            report = capture_historical_snapshot(
+            capture_historical_snapshot(
                 provider,
                 requested_at=instant,
                 output_path=market_path,
                 evidence_path=evidence_path,
             )
-            if report.has_data:
-                snapshots_with_odds += 1
             snapshot_entries.append(
                 {
-                    "requested_at": report.requested_at,
-                    "snapshot_at": report.snapshot_at,
-                    "captured_at": report.captured_at,
                     "market_file": market_relative.as_posix(),
                     "evidence_file": evidence_relative.as_posix(),
-                    "market_sha256": report.market_sha256,
-                    "evidence_sha256": sha256_file(evidence_path),
-                    "provider_response_sha256": report.response_sha256,
-                    "quote_count": report.quote_count,
-                    "point_in_time_snapshot_contains_odds": report.has_data,
                 }
             )
 
@@ -365,29 +452,38 @@ def capture_historical_acquisition_bundle(
         # Re-resolve every child byte set at the bundle publication boundary.
         # Returned report digests are authority claims, not permission to trust a
         # pathname that may have been replaced after the child function returned.
-        for index, entry in enumerate(snapshot_entries, start=1):
+        for index, (instant, entry) in enumerate(
+            zip(canonical_requests, snapshot_entries, strict=True),
+            start=1,
+        ):
             market_path = staging / str(entry["market_file"])
             snapshot_evidence_path = staging / str(entry["evidence_file"])
+            snapshot_evidence, evidence_sha256 = _read_strict_json_object_with_sha256(
+                snapshot_evidence_path,
+                field=f"snapshot[{index}].evidence",
+            )
+            snapshot_semantics = _require_snapshot_evidence_semantics(
+                snapshot_evidence,
+                expected_sport_key=str(request_scope["sport_key"]),
+                expected_requested_at=instant,
+            )
             market_sha256 = _require_staged_digest(
                 market_path,
-                str(entry["market_sha256"]),
+                str(snapshot_semantics["market_sha256"]),
                 field=f"snapshot[{index}].market",
             )
-            evidence_sha256 = _require_staged_digest(
-                snapshot_evidence_path,
-                str(entry["evidence_sha256"]),
-                field=f"snapshot[{index}].evidence",
+            entry.clear()
+            entry.update(
+                {
+                    **snapshot_semantics,
+                    "market_file": (Path("snapshots") / f"{index:04d}-market.jsonl").as_posix(),
+                    "evidence_file": (Path("snapshots") / f"{index:04d}-evidence.json").as_posix(),
+                    "market_sha256": market_sha256,
+                    "evidence_sha256": evidence_sha256,
+                }
             )
-            snapshot_evidence = _read_strict_json_object(
-                snapshot_evidence_path,
-                field=f"snapshot[{index}].evidence",
-            )
-            if snapshot_evidence.get("market_sha256") != market_sha256:
-                raise ProviderPayloadError(
-                    f"snapshot[{index}].evidence market_sha256 does not bind staged market bytes"
-                )
-            entry["market_sha256"] = market_sha256
-            entry["evidence_sha256"] = evidence_sha256
+            if bool(snapshot_semantics["point_in_time_snapshot_contains_odds"]):
+                snapshots_with_odds += 1
 
         result_evidence, result_evidence_sha256 = _read_strict_json_object_with_sha256(
             result_evidence_path,

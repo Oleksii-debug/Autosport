@@ -101,6 +101,46 @@ def _resolve(monkeypatch: pytest.MonkeyPatch, evidence: _ModelEvidence | None = 
     )
 
 
+def _forged_component(
+    *,
+    cost_class: CostClass,
+    status: subject.ProspectiveCostResolutionStatus,
+    dependency_axes: tuple[subject.ProspectiveCostDependencyAxis, ...],
+    reason: subject.ProspectiveApplicableCostReason,
+    source_family: str | None = None,
+    source_evidence_id: str | None = None,
+    source_sha256: str | None = None,
+):
+    component = object.__new__(subject.ProspectiveApplicableCostComponent)
+    object.__setattr__(component, "cost_class", cost_class)
+    object.__setattr__(component, "status", status)
+    object.__setattr__(component, "dependency_axes", dependency_axes)
+    object.__setattr__(component, "reason", reason)
+    object.__setattr__(component, "source_family", source_family)
+    object.__setattr__(component, "source_evidence_id", source_evidence_id)
+    object.__setattr__(component, "source_sha256", source_sha256)
+    return component
+
+
+def _forged_resolution(result, components):
+    resolution = object.__new__(subject.ProspectiveApplicableCostResolution)
+    object.__setattr__(resolution, "intent_sha256", result.intent_sha256)
+    object.__setattr__(resolution, "opportunity_id", result.opportunity_id)
+    object.__setattr__(
+        resolution, "portfolio_plan_sha256", result.portfolio_plan_sha256
+    )
+    object.__setattr__(resolution, "decision_at", result.decision_at)
+    object.__setattr__(resolution, "components", components)
+    object.__setattr__(
+        resolution,
+        "completeness",
+        subject.ProspectiveApplicableCostCompleteness.INCOMPLETE,
+    )
+    object.__setattr__(resolution, "total_subtractable_amount", None)
+    object.__setattr__(resolution, "currency", None)
+    return resolution
+
+
 def test_current_truth_is_incomplete_without_zero_invention(monkeypatch):
     result, _ = _resolve(monkeypatch)
     assert result.completeness is subject.ProspectiveApplicableCostCompleteness.INCOMPLETE
@@ -136,14 +176,86 @@ def test_dependency_axes_preserve_execution_vs_terminal_dimensions(monkeypatch):
     assert fees.to_dict()["amount"] is None
 
 
-def test_status_cannot_lie_about_dependency_axes():
-    with pytest.raises(subject.ProspectiveApplicableCostError, match="status and dependency_axes"):
+def test_public_component_constructor_cannot_mint_semantics():
+    with pytest.raises(subject.ProspectiveApplicableCostError, match="resolver-owned"):
         subject.ProspectiveApplicableCostComponent(
-            cost_class=CostClass.EXECUTION_SLIPPAGE,
-            status=subject.ProspectiveCostResolutionStatus.TERMINAL_STATE_DEPENDENT,
-            dependency_axes=(subject.ProspectiveCostDependencyAxis.EXECUTION_STATE,),
-            reason=subject.ProspectiveApplicableCostReason.EXECUTION_SLIPPAGE_DEPENDS_ON_EXECUTION,
+            cost_class=CostClass.PROVIDER_DATA,
+            status=(
+                subject.ProspectiveCostResolutionStatus.EXECUTION_AND_TERMINAL_STATE_DEPENDENT
+            ),
+            dependency_axes=(
+                subject.ProspectiveCostDependencyAxis.EXECUTION_STATE,
+                subject.ProspectiveCostDependencyAxis.TERMINAL_STATE,
+            ),
+            reason=(
+                subject.ProspectiveApplicableCostReason.EXECUTION_FEES_DEPEND_ON_EXECUTION_OR_TERMINAL_STATE
+            ),
+            source_family="caller-authored",
+            source_evidence_id="a" * 64,
+            source_sha256="b" * 64,
         )
+
+
+@pytest.mark.parametrize(
+    ("component", "error"),
+    [
+        (
+            _forged_component(
+                cost_class=CostClass.EXECUTION_SLIPPAGE,
+                status=subject.ProspectiveCostResolutionStatus.TERMINAL_STATE_DEPENDENT,
+                dependency_axes=(subject.ProspectiveCostDependencyAxis.EXECUTION_STATE,),
+                reason=(
+                    subject.ProspectiveApplicableCostReason.EXECUTION_SLIPPAGE_DEPENDS_ON_EXECUTION
+                ),
+            ),
+            "status and dependency_axes",
+        ),
+        (
+            _forged_component(
+                cost_class=CostClass.EXECUTION_FEES_COMMISSION_TAX,
+                status=subject.ProspectiveCostResolutionStatus.TERMINAL_STATE_DEPENDENT,
+                dependency_axes=(subject.ProspectiveCostDependencyAxis.TERMINAL_STATE,),
+                reason=(
+                    subject.ProspectiveApplicableCostReason.EXECUTION_FEES_DEPEND_ON_EXECUTION_OR_TERMINAL_STATE
+                ),
+            ),
+            "canonical schema-v2 semantic tuple",
+        ),
+        (
+            _forged_component(
+                cost_class=CostClass.PROVIDER_DATA,
+                status=subject.ProspectiveCostResolutionStatus.UNKNOWN_UNPROVEN,
+                dependency_axes=(),
+                reason=(
+                    subject.ProspectiveApplicableCostReason.NO_PROSPECTIVE_PROVIDER_DATA_AUTHORITY
+                ),
+                source_family="autosport.prospective_model_compute_money",
+                source_evidence_id="a" * 64,
+                source_sha256="a" * 64,
+            ),
+            "cannot carry source authority",
+        ),
+        (
+            _forged_component(
+                cost_class=CostClass.MODEL_COMPUTE_AI,
+                status=subject.ProspectiveCostResolutionStatus.UNKNOWN_UNPROVEN,
+                dependency_axes=(),
+                reason=(
+                    subject.ProspectiveApplicableCostReason.MODEL_COMPUTE_AUTHORITY_UNRESOLVED
+                ),
+                source_family="caller-authored",
+                source_evidence_id="a" * 64,
+                source_sha256="a" * 64,
+            ),
+            "source family",
+        ),
+    ],
+)
+def test_component_semantic_matrix_rejects_wrong_status_reason_or_source(
+    component, error
+):
+    with pytest.raises(subject.ProspectiveApplicableCostError, match=error):
+        component.__post_init__()
 
 
 def test_fee_dependency_cannot_be_flattened_to_execution_only_scalar(monkeypatch):
@@ -169,6 +281,7 @@ def test_model_compute_is_re_resolved_through_product_authority(monkeypatch):
     assert model.dependency_axes == ()
     assert model.source_family == "autosport.prospective_model_compute_money"
     assert model.source_evidence_id == "b" * 64
+    assert model.source_sha256 == model.source_evidence_id
 
 
 def test_public_resolver_has_no_caller_money_applicability_or_source_inputs():
@@ -179,7 +292,7 @@ def test_public_resolver_has_no_caller_money_applicability_or_source_inputs():
     )
 
 
-def test_schema_v2_cannot_be_minted_complete_or_with_monetary_total(monkeypatch):
+def test_public_resolution_constructor_cannot_mint_aggregate(monkeypatch):
     result, _ = _resolve(monkeypatch)
     common = dict(
         intent_sha256=result.intent_sha256,
@@ -188,19 +301,16 @@ def test_schema_v2_cannot_be_minted_complete_or_with_monetary_total(monkeypatch)
         decision_at=result.decision_at,
         components=result.components,
     )
-    with pytest.raises(subject.ProspectiveApplicableCostError, match="cannot represent COMPLETE"):
+    with pytest.raises(subject.ProspectiveApplicableCostError, match="resolver-owned"):
+        subject.ProspectiveApplicableCostResolution(**common)
+    with pytest.raises(subject.ProspectiveApplicableCostError, match="resolver-owned"):
         subject.ProspectiveApplicableCostResolution(
             **common,
             completeness="COMPLETE",  # type: ignore[arg-type]
-        )
-    with pytest.raises(
-        subject.ProspectiveApplicableCostError,
-        match="cannot represent an authoritative monetary total",
-    ):
-        subject.ProspectiveApplicableCostResolution(
-            **common,
             total_subtractable_amount=Decimal("0"),  # type: ignore[arg-type]
         )
+    assert "_from_resolver" not in subject.ProspectiveApplicableCostResolution.__dict__
+    assert "_RESOLUTION_TOKEN" not in vars(subject)
 
 
 def test_provider_and_fixed_classes_stay_unknown(monkeypatch):
@@ -214,6 +324,8 @@ def test_provider_and_fixed_classes_stay_unknown(monkeypatch):
     )
     assert by_class[CostClass.PROVIDER_DATA].dependency_axes == ()
     assert by_class[CostClass.FIXED_CAMPAIGN].dependency_axes == ()
+    assert by_class[CostClass.PROVIDER_DATA].source_family is None
+    assert by_class[CostClass.FIXED_CAMPAIGN].source_family is None
 
 
 @pytest.mark.parametrize(
@@ -322,39 +434,37 @@ def test_subclass_authorities_are_rejected(monkeypatch):
 
 def test_duplicate_or_missing_required_class_is_rejected(monkeypatch):
     result, _ = _resolve(monkeypatch)
-    with pytest.raises(subject.ProspectiveApplicableCostError, match="each required cost class exactly once"):
-        subject.ProspectiveApplicableCostResolution(
-            intent_sha256=result.intent_sha256,
-            opportunity_id=result.opportunity_id,
-            portfolio_plan_sha256=result.portfolio_plan_sha256,
-            decision_at=result.decision_at,
-            components=result.components[:-1] + (result.components[0],),
-        )
+    forged = _forged_resolution(
+        result,
+        result.components[:-1] + (result.components[0],),
+    )
+    with pytest.raises(
+        subject.ProspectiveApplicableCostError,
+        match="each required cost class exactly once",
+    ):
+        forged.__post_init__()
 
 
-def test_source_or_dependency_axis_changes_proof_identity(monkeypatch):
+def test_source_changes_proof_identity_but_dependency_semantics_cannot_be_reauthored(
+    monkeypatch,
+):
     first, _ = _resolve(monkeypatch, _ModelEvidence(evidence_id="b" * 64))
     second, _ = _resolve(monkeypatch, _ModelEvidence(evidence_id="c" * 64))
     assert first.evidence_id != second.evidence_id
 
-    fee = next(item for item in first.components if item.cost_class is CostClass.EXECUTION_FEES_COMMISSION_TAX)
-    altered_fee = subject.ProspectiveApplicableCostComponent(
-        cost_class=fee.cost_class,
+    forged_fee = _forged_component(
+        cost_class=CostClass.EXECUTION_FEES_COMMISSION_TAX,
         status=subject.ProspectiveCostResolutionStatus.TERMINAL_STATE_DEPENDENT,
         dependency_axes=(subject.ProspectiveCostDependencyAxis.TERMINAL_STATE,),
-        reason=fee.reason,
+        reason=(
+            subject.ProspectiveApplicableCostReason.EXECUTION_FEES_DEPEND_ON_EXECUTION_OR_TERMINAL_STATE
+        ),
     )
-    altered_components = tuple(
-        altered_fee if item.cost_class is fee.cost_class else item for item in first.components
-    )
-    altered = subject.ProspectiveApplicableCostResolution(
-        intent_sha256=first.intent_sha256,
-        opportunity_id=first.opportunity_id,
-        portfolio_plan_sha256=first.portfolio_plan_sha256,
-        decision_at=first.decision_at,
-        components=altered_components,
-    )
-    assert altered.evidence_id != first.evidence_id
+    with pytest.raises(
+        subject.ProspectiveApplicableCostError,
+        match="canonical schema-v2 semantic tuple",
+    ):
+        forged_fee.__post_init__()
 
 
 def _load_real_fixture():

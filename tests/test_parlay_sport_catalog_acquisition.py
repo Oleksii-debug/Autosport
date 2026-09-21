@@ -179,6 +179,19 @@ class ParlaySportCatalogAcquisitionTests(unittest.TestCase):
             self.acquire(transport, prior=prior)
         self.assertEqual(transport.calls, [])
 
+    def test_tampered_prior_acquisition_identity_is_rejected_before_request(self):
+        prior = self.acquire(
+            RecordingTransport([response(body=b"[]", etag='"v1"')])
+        )
+        object.__setattr__(prior, "acquisition_id", "forged")
+        transport = RecordingTransport([response(status=304, body=b"", etag='"v1"')])
+
+        with self.assertRaisesRegex(
+            ParlaySportCatalogEvidenceError, "identity mismatch"
+        ):
+            self.acquire(transport, prior=prior)
+        self.assertEqual(transport.calls, [])
+
     def test_duplicate_etag_headers_are_rejected(self):
         duplicate = RawCatalogHttpResponse(
             status_code=200,

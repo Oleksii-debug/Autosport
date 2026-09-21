@@ -5,6 +5,7 @@ import json
 import pytest
 
 import autosport.betfair_account_readonly as betfair_account_readonly
+import autosport.betfair_marketbook_freshness as betfair_marketbook_freshness
 from autosport.betfair_account_readonly import (
     ADAPTER_ID,
     ADAPTER_VERSION,
@@ -329,3 +330,48 @@ def test_authenticated_delay_data_must_be_exact_bool(monkeypatch, delay_data):
 def test_authenticated_app_active_must_be_exact_bool(monkeypatch, active):
     with pytest.raises(BetfairMarketBookFreshnessError, match="active must be bool"):
         _canonical_network_capture(monkeypatch, active=active)
+
+
+def test_credential_rotation_between_capture_and_authority_registration_fails(monkeypatch):
+    client = BetfairReadOnlyClient(
+        BetfairSessionCredentials("app-secret", "session-secret"),
+        venue_id="betfair-global",
+        account_id="configured-account",
+    )
+    synthetic = BetfairMarketBookDelayObservation(
+        venue_id="betfair-global",
+        configured_account_ref="configured-account",
+        adapter_id=ADAPTER_ID,
+        adapter_version=ADAPTER_VERSION,
+        market_id="1.234",
+        is_market_data_delayed=False,
+        observed_at=NOW.isoformat(),
+        source_payload_sha256="a" * 64,
+        authenticated_context_sha256="b" * 64,
+        developer_app_id=101,
+        application_version_id=202,
+        application_key_delay_data=False,
+        application_key_active=True,
+        application_key_owner_managed=False,
+    )
+
+    def rotate_after_capture(client_arg, market_id):
+        assert client_arg is client
+        assert market_id == "1.234"
+        client_arg._credentials = BetfairSessionCredentials(
+            "rotated-app-secret",
+            "rotated-session-secret",
+        )
+        return synthetic
+
+    monkeypatch.setattr(
+        betfair_marketbook_freshness,
+        "_read_market_book_delay",
+        rotate_after_capture,
+    )
+
+    with pytest.raises(
+        BetfairMarketBookFreshnessError,
+        match="changed before authority registration",
+    ):
+        read_market_book_delay(client, "1.234")

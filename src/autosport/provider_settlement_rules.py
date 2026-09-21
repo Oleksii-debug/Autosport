@@ -52,6 +52,12 @@ def _timestamp(value: object, field: str) -> datetime:
     return parsed.astimezone(timezone.utc)
 
 
+def _canonical_timestamp(value: object, field: str) -> str:
+    """Return one stable UTC spelling for a validated semantic instant."""
+
+    return _timestamp(value, field).isoformat(timespec="microseconds")
+
+
 def _canonical_sha256(payload: dict[str, object]) -> str:
     encoded = json.dumps(
         payload,
@@ -140,8 +146,14 @@ class ProviderSettlementRulebook:
 
     def to_canonical_dict(self) -> dict[str, object]:
         return {
-            "effective_from": self.effective_from,
-            "effective_until": self.effective_until,
+            "effective_from": _canonical_timestamp(
+                self.effective_from, "effective_from"
+            ),
+            "effective_until": (
+                None
+                if self.effective_until is None
+                else _canonical_timestamp(self.effective_until, "effective_until")
+            ),
             "provider_id": self.provider_id,
             "rulebook_version": self.rulebook_version,
             "rules": [
@@ -214,7 +226,7 @@ class ProviderSettlementRuleSelection:
 
     def to_canonical_dict(self) -> dict[str, object]:
         return {
-            "evaluated_at": self.evaluated_at,
+            "evaluated_at": _canonical_timestamp(self.evaluated_at, "evaluated_at"),
             "market_family": self.market_family,
             "provider_id": self.provider_id,
             "rule_id": self.rule_id,

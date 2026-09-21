@@ -55,6 +55,8 @@ def _build_observation_authority():
     stdlib_opener_cls = _urllib_request.__dict__["OpenerDirector"]
     stdlib_opener_open = stdlib_opener_cls.__dict__["open"]
     stdlib_build_opener = _urllib_request.__dict__["build_opener"]
+    stdlib_https_handler_cls = _urllib_request.__dict__["HTTPSHandler"]
+    stdlib_https_handler_open = stdlib_https_handler_cls.__dict__["https_open"]
 
     # ``urllib.request.urlopen`` otherwise resolves the mutable module-global
     # ``_opener`` at call time. Own that exact dispatch root up front so public
@@ -66,6 +68,40 @@ def _build_observation_authority():
         raise BetfairProviderBillingInputsAuthorityError(
             "provider billing canonical network opener is invalid"
         )
+
+    # OpenerDirector stores handler objects and resolves their protocol methods
+    # dynamically. Owning only the opener object is therefore insufficient:
+    # rebinding HTTPSHandler.https_open (or swapping the opener handler dispatch
+    # tables) would otherwise gain execution while _opener identity stayed
+    # unchanged. Seal the exact HTTPS handler executable and dispatch graph.
+    product_handlers = tuple(product_opener.handlers)
+    product_https_handlers = tuple(
+        handler
+        for handler in product_handlers
+        if type(handler) is stdlib_https_handler_cls
+    )
+    if len(product_https_handlers) != 1:
+        raise BetfairProviderBillingInputsAuthorityError(
+            "provider billing canonical HTTPS handler is invalid"
+        )
+    product_https_handler = product_https_handlers[0]
+    if "https_open" in vars(product_https_handler):
+        raise BetfairProviderBillingInputsAuthorityError(
+            "provider billing canonical HTTPS handler is shadowed"
+        )
+    product_handler_ids = tuple(id(handler) for handler in product_handlers)
+    product_https_dispatch = tuple(
+        (order, id(handler))
+        for order, handler in product_opener.handle_open.get("https", ())
+    )
+    if not any(
+        handler_id == id(product_https_handler)
+        for _order, handler_id in product_https_dispatch
+    ):
+        raise BetfairProviderBillingInputsAuthorityError(
+            "provider billing canonical HTTPS dispatch is invalid"
+        )
+
     _urllib_request.__dict__["_opener"] = product_opener
 
     now_utc = datetime.now
@@ -108,11 +144,30 @@ def _build_observation_authority():
         ):
             raise error_cls("provider billing lower network opener drifted")
         if (
+            _urllib_request.__dict__.get("HTTPSHandler")
+            is not stdlib_https_handler_cls
+            or stdlib_https_handler_cls.__dict__.get("https_open")
+            is not stdlib_https_handler_open
+        ):
+            raise error_cls("provider billing HTTPS handler executable drifted")
+        if (
             _urllib_request.__dict__.get("_opener") is not product_opener
             or type(product_opener) is not stdlib_opener_cls
             or "open" in vars(product_opener)
         ):
             raise error_cls("provider billing installed network opener drifted")
+        if (
+            tuple(id(handler) for handler in product_opener.handlers)
+            != product_handler_ids
+            or tuple(
+                (order, id(handler))
+                for order, handler in product_opener.handle_open.get("https", ())
+            )
+            != product_https_dispatch
+            or type(product_https_handler) is not stdlib_https_handler_cls
+            or "https_open" in vars(product_https_handler)
+        ):
+            raise error_cls("provider billing HTTPS handler dispatch drifted")
 
     def projection(source: object) -> tuple[object, ...]:
         entitlement = get_attr(source, "entitlement")

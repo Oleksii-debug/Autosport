@@ -236,4 +236,119 @@ def parse_market_catalogue_result(
     limit = _max_results(requested_max_results)
     rows = _rows(result, "listMarketCatalogue result")
     if len(rows) > limit:
-        raise BetfairCatalogError("listMarketCatalogue returned more rows than req
+        raise BetfairCatalogError("listMarketCatalogue returned more rows than requested")
+    items = []
+    for index, raw in enumerate(rows):
+        row = _mapping(raw, f"listMarketCatalogue[{index}]")
+        event_type = _mapping(row.get("eventType"), f"listMarketCatalogue[{index}].eventType")
+        event_type_id = _provider_text(event_type, "id", "event_type_id")
+        if event_type_id not in allowed:
+            raise BetfairCatalogError("catalogue row escaped the requested eventType scope")
+        event = _mapping(row.get("event"), f"listMarketCatalogue[{index}].event")
+        description = row.get("description")
+        market_type = None
+        if description is not None:
+            market_type = _optional_provider_text(
+                _mapping(description, f"listMarketCatalogue[{index}].description"),
+                "marketType",
+                "market_type_code",
+            )
+        items.append(
+            BetfairCatalogMarket(
+                _provider_text(row, "marketId", "market_id"),
+                event_type_id,
+                _provider_text(event, "id", "event_id"),
+                _provider_text(row, "marketName", "market_name"),
+                _provider_text(row, "marketStartTime", "market_start_time"),
+                market_type,
+            )
+        )
+    _reject_duplicate((item.market_id for item in items), "marketId", provider_result=True)
+    return BetfairMarketCatalogueBatch(tuple(items), limit, len(items) == limit)
+
+
+def _rows(value: object, field: str) -> list[object]:
+    if not isinstance(value, list):
+        raise BetfairCatalogError(f"{field} must be a list")
+    return value
+
+
+def _mapping(value: object, field: str) -> Mapping[str, object]:
+    if not isinstance(value, Mapping):
+        raise BetfairCatalogError(f"{field} must be an object")
+    return value
+
+
+def _text(value: object, field: str) -> str:
+    if not isinstance(value, str) or not value or value != value.strip():
+        raise BetfairCatalogError(f"{field} must be a non-empty trimmed string")
+    return value
+
+
+def _optional_text(value: object, field: str) -> str | None:
+    return None if value is None else _text(value, field)
+
+
+def _provider_text(row: Mapping[str, object], key: str, field: str) -> str:
+    return _text(row.get(key), field)
+
+
+def _optional_provider_text(row: Mapping[str, object], key: str, field: str) -> str | None:
+    return _optional_text(row.get(key), field)
+
+
+def _provider_id(value: object, field: str) -> str:
+    value = _text(value, field)
+    if any(ord(ch) < 33 or ord(ch) > 126 for ch in value):
+        raise BetfairCatalogError(f"{field} must be printable ASCII provider identity")
+    return value
+
+
+def _provider_code(value: object, field: str) -> str:
+    value = _provider_id(value, field)
+    if value != value.upper():
+        raise BetfairCatalogError(f"{field} must be an uppercase provider code")
+    return value
+
+
+def _unique_ids(values: Sequence[str], field: str) -> tuple[str, ...]:
+    if isinstance(values, (str, bytes)) or not isinstance(values, Sequence):
+        raise BetfairCatalogError(f"{field} must be a sequence")
+    values = tuple(_provider_id(value, field) for value in values)
+    if not values:
+        raise BetfairCatalogError(f"{field} must not be empty")
+    _reject_duplicate(iter(values), field)
+    return values
+
+
+def _unique_codes(values: Sequence[str], field: str) -> tuple[str, ...]:
+    if isinstance(values, (str, bytes)) or not isinstance(values, Sequence):
+        raise BetfairCatalogError(f"{field} must be a sequence")
+    values = tuple(_provider_code(value, field) for value in values)
+    _reject_duplicate(iter(values), field)
+    return values
+
+
+def _reject_duplicate(values, field: str, *, provider_result: bool = False) -> None:
+    seen = set()
+    for value in values:
+        if value in seen:
+            if provider_result:
+                raise BetfairCatalogError(f"duplicate {field} in provider result")
+            raise BetfairCatalogError(f"{field} must not contain duplicates")
+        seen.add(value)
+
+
+def _nonnegative_int(value: object, field: str) -> int:
+    if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+        raise BetfairCatalogError(f"{field} must be a non-negative integer")
+    return value
+
+
+def _provider_count(row: Mapping[str, object], key: str, field: str) -> int:
+    return _nonnegative_int(row.get(key), field)
+
+
+def _max_results(value: object) -> int:
+    if not isinstance(value, int) or isinstance(value, bool) or not 1 <= value <= 1000:
+        raise BetfairCatalogError("

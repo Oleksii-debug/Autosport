@@ -415,7 +415,7 @@ def _build_guard(seal):
                         "decision origin learning observation commitment is invalid"
                     )
                 try:
-                    learning_json = json.dumps(
+                    learning_json = json_dumps(
                         raw_learning,
                         ensure_ascii=False,
                         sort_keys=True,

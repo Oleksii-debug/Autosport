@@ -14,6 +14,7 @@ from autosport.betfair_account_readonly import (
 from autosport.betfair_marketbook_freshness import (
     BetfairMarketBookDelayObservation,
     BetfairMarketBookFreshnessError,
+    _canonical_network_transport,
     read_market_book_delay,
 )
 
@@ -66,13 +67,12 @@ def _client(payload: bytes) -> tuple[BetfairReadOnlyClient, FakeTransport]:
     return client, transport
 
 
-def test_list_market_book_delay_observation_is_exact_origin_bound_and_secret_free():
+def test_injected_transport_parses_non_delayed_payload_but_cannot_mint_positive_authority():
     payload = _payload(delayed=False)
     client, transport = _client(payload)
 
     observation = read_market_book_delay(client, "1.234")
 
-    observation.assert_authoritative()
     assert observation.venue_id == "betfair-global"
     assert observation.account_id == "acct-1"
     assert observation.adapter_id == ADAPTER_ID
@@ -81,6 +81,11 @@ def test_list_market_book_delay_observation_is_exact_origin_bound_and_secret_fre
     assert observation.is_market_data_delayed is False
     assert observation.observed_at == NOW.isoformat()
     assert observation.source_payload_sha256 == sha256(payload).hexdigest()
+    with pytest.raises(
+        BetfairMarketBookFreshnessError,
+        match="lacks canonical production network origin",
+    ):
+        observation.assert_authoritative()
 
     call = transport.calls[0]
     assert call["url"] == BETTING_JSON_RPC_ENDPOINT
@@ -91,13 +96,35 @@ def test_list_market_book_delay_observation_is_exact_origin_bound_and_secret_fre
     assert b"session-secret" not in call["body"]
 
 
-def test_provider_delayed_true_is_preserved_exactly():
+def test_provider_delayed_true_from_injected_transport_is_only_negative_authority():
     client, _ = _client(_payload(delayed=True))
 
     observation = read_market_book_delay(client, "1.234")
 
     observation.assert_authoritative()
     assert observation.is_market_data_delayed is True
+    with pytest.raises(
+        BetfairMarketBookFreshnessError,
+        match="lacks canonical production network origin",
+    ):
+        observation.assert_positive_authoritative()
+
+
+def test_unmodified_default_http_transport_is_the_only_positive_network_origin_shape():
+    client = BetfairReadOnlyClient(
+        BetfairSessionCredentials("app-secret", "session-secret")
+    )
+
+    assert _canonical_network_transport(client) is True
+
+    client._transport.post = lambda *args, **kwargs: b"{}"
+    assert _canonical_network_transport(client) is False
+
+
+def test_structurally_compatible_custom_transport_is_not_positive_network_origin():
+    client, _ = _client(_payload(delayed=False))
+
+    assert _canonical_network_transport(client) is False
 
 
 @pytest.mark.parametrize("delayed", [0, 1, "false", None, [], {}])

@@ -282,3 +282,48 @@ def test_typed_error_metadata_preserves_runtimeerror_args_contract() -> None:
     assert multiple_args.args == ("left", "right")
     assert multiple_args.json_rpc_code is None
     assert multiple_args.provider_error_code is None
+
+
+@pytest.mark.parametrize("rpc_code", [-32603, -32602, 0])
+def test_non_application_jsonrpc_code_cannot_mint_provider_semantics(
+    rpc_code: int,
+) -> None:
+    client = _client(
+        _error_payload(
+            code=rpc_code,
+            data={
+                "exceptionname": "APINGException",
+                "APINGException": {"errorCode": "TOO_MANY_REQUESTS"},
+            },
+        )
+    )
+
+    with pytest.raises(BetfairReadOnlyError) as raised:
+        client.read_current_orders_page()
+
+    assert raised.value.json_rpc_code == rpc_code
+    assert raised.value.provider_error_code is None
+
+
+def test_missing_jsonrpc_code_cannot_mint_provider_semantics() -> None:
+    payload = json.dumps(
+        {
+            "jsonrpc": "2.0",
+            "error": {
+                "message": "ANGX-0007",
+                "data": {
+                    "exceptionname": "APINGException",
+                    "APINGException": {"errorCode": "TOO_MANY_REQUESTS"},
+                },
+            },
+            "id": 1,
+        },
+        separators=(",", ":"),
+    ).encode("utf-8")
+    client = _client(payload)
+
+    with pytest.raises(BetfairReadOnlyError) as raised:
+        client.read_current_orders_page()
+
+    assert raised.value.json_rpc_code is None
+    assert raised.value.provider_error_code is None

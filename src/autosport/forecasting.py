@@ -270,7 +270,7 @@ def _binary_log_loss(probability: Decimal, outcome: int) -> float:
 
     if outcome == 1:
         return -math.log(binary_probability)
-    return -math.log(1.0 - binary_probability)
+    return -math.log1p(-binary_probability)
 
 
 def evaluate_forecast_window(

@@ -367,6 +367,8 @@ def test_exact_live_stake_addition_ignores_ambient_decimal_context():
         {"matched": 3, "remaining": 3},
         {"matched": 2, "remaining": 3, "average": 0},
         {"matched": 0, "remaining": 0, "average": 0},
+        {"status": "EXECUTABLE", "matched": 2, "remaining": 0},
+        {"status": "EXECUTION_COMPLETE", "matched": 2, "remaining": 3},
         {"status": "MYSTERY"},
     ],
 )
@@ -379,6 +381,24 @@ def test_current_economic_inconsistency_is_unknown(tmp_path, changes):
     )
     assert evidence.reason is BetfairLiveCapitalAtRiskReason.ECONOMIC_INCONSISTENCY
     assert evidence.capital_at_risk is None
+
+
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {"status": "EXECUTABLE", "matched": 2, "remaining": 3},
+        {"status": "EXECUTION_COMPLETE", "matched": 5, "remaining": 0},
+    ],
+)
+def test_current_status_remaining_coherence_valid_controls_are_exact(tmp_path, changes):
+    ledger, bound, ref = _context(tmp_path, "PARTIAL")
+    evidence = _resolve(
+        ledger,
+        bound,
+        _capture(ref, current=[_current(ref, **changes)]),
+    )
+    assert evidence.truth is BetfairLiveCapitalAtRiskTruth.EXACT
+    assert evidence.reason is BetfairLiveCapitalAtRiskReason.CURRENT_ORDER
 
 
 def test_rejected_ledger_conflicts_with_live_provider_row(tmp_path):

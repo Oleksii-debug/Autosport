@@ -473,6 +473,8 @@ def resolve_betfair_live_capital_at_risk(
             or row.requested_size != action.requested_stake
             or (row.size_matched > 0 and row.average_price_matched <= 0)
             or (row.size_matched == 0 and row.average_price_matched != 0)
+            or (row.status == "EXECUTABLE" and row.size_remaining <= 0)
+            or (row.status == "EXECUTION_COMPLETE" and row.size_remaining != 0)
         ):
             return finish(
                 BetfairLiveCapitalAtRiskTruth.UNKNOWN,

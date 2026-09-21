@@ -285,7 +285,7 @@ class RealExecutionLedgerTests(unittest.TestCase):
                 AttemptState.ACCEPTED,
             )
 
-    def test_legacy_generic_provider_evidence_rebind_stays_idempotent(self):
+    def test_generic_provider_evidence_schema_and_restart_stay_compatible(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "real.jsonl"
             ledger = RealExecutionLedger(path)
@@ -303,39 +303,12 @@ class RealExecutionLedgerTests(unittest.TestCase):
                 observed_at=RECONCILED_AT,
                 source="legacy-provider-evidence",
             )
-
-            lines = [
-                json.loads(line)
-                for line in path.read_text(encoding="utf-8").splitlines()
-            ]
-            evidence = next(
-                envelope
-                for envelope in lines
-                if envelope["event"]["event_type"]
-                == EventType.PROVIDER_EVIDENCE_BOUND.value
-            )
-            evidence["event"]["payload"].pop("acknowledgement_sha256")
-            body = json.dumps(
-                evidence["event"],
-                ensure_ascii=False,
-                sort_keys=True,
-                separators=(",", ":"),
-            )
-            evidence["sha256"] = hashlib.sha256(
-                body.encode("utf-8")
-            ).hexdigest()
-            path.write_text(
-                "\n".join(
-                    json.dumps(
-                        envelope,
-                        ensure_ascii=False,
-                        sort_keys=True,
-                        separators=(",", ":"),
-                    )
-                    for envelope in lines
-                )
-                + "\n",
-                encoding="utf-8",
+            binding = ledger.provider_evidence_binding("try-1")
+            self.assertIsNotNone(binding)
+            assert binding is not None
+            self.assertEqual(
+                set(binding),
+                {"evidence_id", "observed_at", "source"},
             )
 
             restarted = RealExecutionLedger(path)

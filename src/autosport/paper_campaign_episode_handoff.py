@@ -154,6 +154,34 @@ class PaperCampaignEpisodeHandoffResult:
     receipt: PaperCampaignEpisodeHandoffReceipt
 
 
+@dataclass(frozen=True, slots=True)
+class PaperCampaignEpisodeHandoffRecord:
+    """Immutable restart locator projected from one committed durable handoff."""
+
+    prepare_id: str
+    handoff_id: str
+    parent_checkpoint_id: str
+    parent_transition_id: str
+    parent_episode_id: str
+    parent_policy_id: str
+    parent_agent_loop_state_sha256: str
+    environment_id: str
+    child_agent_loop_path: str
+    child_loop_id: str
+    child_episode_key: str
+    canonical_strategy_id: str
+    champion_as_of: str
+    config_sha256: str
+    economic_goal_fingerprint: str
+    risk_fingerprint: str
+    source_sha256: str
+    admissible_actions: tuple[str, ...]
+    prepared_at: str
+    child_policy_id: str
+    child_episode_id: str
+    child_initial_checkpoint_id: str
+
+
 class PaperCampaignEpisodeHandoff:
     """Persist the smallest exactly-once witness between two existing authorities."""
 
@@ -229,6 +257,144 @@ class PaperCampaignEpisodeHandoff:
             _sha(checkpoint_id, "parent_checkpoint_id")
             self._validate_record(checkpoint_id, record)
         return state
+
+    @staticmethod
+    def _committed_projection(
+        record: dict[str, object],
+    ) -> PaperCampaignEpisodeHandoffRecord:
+        """Project one already-validated COMMITTED record without new authority."""
+
+        if record["status"] != _COMMITTED:
+            raise PaperCampaignEpisodeHandoffError(
+                "only COMMITTED handoffs can be projected for restart"
+            )
+        actions = record["admissible_actions"]
+        assert isinstance(actions, list)
+        return PaperCampaignEpisodeHandoffRecord(
+            prepare_id=_sha(record["prepare_id"], "prepare_id"),
+            handoff_id=_sha(record["handoff_id"], "handoff_id"),
+            parent_checkpoint_id=_sha(
+                record["parent_checkpoint_id"], "parent_checkpoint_id"
+            ),
+            parent_transition_id=_sha(
+                record["parent_transition_id"], "parent_transition_id"
+            ),
+            parent_episode_id=_sha(record["parent_episode_id"], "parent_episode_id"),
+            parent_policy_id=_text(record["parent_policy_id"], "parent_policy_id"),
+            parent_agent_loop_state_sha256=_sha(
+                record["parent_agent_loop_state_sha256"],
+                "parent_agent_loop_state_sha256",
+            ),
+            environment_id=_sha(record["environment_id"], "environment_id"),
+            child_agent_loop_path=_text(
+                record["child_agent_loop_path"], "child_agent_loop_path"
+            ),
+            child_loop_id=_text(record["child_loop_id"], "child_loop_id"),
+            child_episode_key=_text(
+                record["child_episode_key"], "child_episode_key"
+            ),
+            canonical_strategy_id=_text(
+                record["canonical_strategy_id"], "canonical_strategy_id"
+            ),
+            champion_as_of=_timestamp(record["champion_as_of"], "champion_as_of"),
+            config_sha256=_sha(record["config_sha256"], "config_sha256"),
+            economic_goal_fingerprint=_sha(
+                record["economic_goal_fingerprint"], "economic_goal_fingerprint"
+            ),
+            risk_fingerprint=_sha(record["risk_fingerprint"], "risk_fingerprint"),
+            source_sha256=_sha(record["source_sha256"], "source_sha256"),
+            admissible_actions=tuple(
+                _text(action, "admissible action") for action in actions
+            ),
+            prepared_at=_timestamp(record["prepared_at"], "prepared_at"),
+            child_policy_id=_text(record["child_policy_id"], "child_policy_id"),
+            child_episode_id=_sha(record["child_episode_id"], "child_episode_id"),
+            child_initial_checkpoint_id=_sha(
+                record["child_initial_checkpoint_id"],
+                "child_initial_checkpoint_id",
+            ),
+        )
+
+    def _verify_committed_authorities(
+        self,
+        record: dict[str, object],
+    ) -> None:
+        """Require both independent monotonic commits for a projected child."""
+
+        parent_checkpoint_id = _sha(
+            record["parent_checkpoint_id"], "parent_checkpoint_id"
+        )
+        prepare_id = _sha(record["prepare_id"], "prepare_id")
+        handoff_id = _sha(record["handoff_id"], "handoff_id")
+        try:
+            intent_history = self._intent_authority(
+                parent_checkpoint_id
+            ).read_history()
+            if (
+                not intent_history
+                or intent_history[-1].phase is not AuthorityPhase.COMMIT
+                or intent_history[-1].intended_state_sha256 != prepare_id
+                or intent_history[-1].semantic_binding_sha256
+                != self._intent_binding(parent_checkpoint_id, prepare_id)
+            ):
+                raise PaperCampaignEpisodeHandoffError(
+                    "committed child lacks exact independent intent authority"
+                )
+
+            consumption_binding = _digest(
+                {
+                    "kind": "paper-campaign-parent-consumption-v1",
+                    "parent_checkpoint_id": parent_checkpoint_id,
+                    "prepare_id": prepare_id,
+                    "handoff_id": handoff_id,
+                    "child_episode_id": _sha(
+                        record["child_episode_id"], "child_episode_id"
+                    ),
+                    "child_initial_checkpoint_id": _sha(
+                        record["child_initial_checkpoint_id"],
+                        "child_initial_checkpoint_id",
+                    ),
+                }
+            )
+            consumption_history = self._consumption_authority(
+                parent_checkpoint_id
+            ).read_history()
+            if (
+                not consumption_history
+                or consumption_history[-1].phase is not AuthorityPhase.COMMIT
+                or consumption_history[-1].intended_state_sha256 != handoff_id
+                or consumption_history[-1].semantic_binding_sha256
+                != consumption_binding
+            ):
+                raise PaperCampaignEpisodeHandoffError(
+                    "committed child lacks exact independent consumption authority"
+                )
+        except MonotonicWorkspaceAuthorityError as exc:
+            raise PaperCampaignEpisodeHandoffError(
+                "cannot verify independent committed handoff authority"
+            ) from exc
+
+    def committed_children(
+        self,
+    ) -> tuple[PaperCampaignEpisodeHandoffRecord, ...]:
+        """Return validated immutable restart locators for committed child episodes.
+
+        PREPARED crash-prefix records are intentionally invisible.  This is a
+        projection only: it neither creates a child nor advances either monotonic
+        handoff authority.
+        """
+
+        with WorkspaceEconomicLock(self.state_path.parent):
+            state = self._read_state()
+            projected: list[PaperCampaignEpisodeHandoffRecord] = []
+            for parent_checkpoint_id in sorted(state["handoffs"]):
+                raw = state["handoffs"][parent_checkpoint_id]
+                assert isinstance(raw, dict)
+                if raw["status"] != _COMMITTED:
+                    continue
+                self._verify_committed_authorities(raw)
+                projected.append(self._committed_projection(raw))
+            return tuple(projected)
 
     def _consumption_authority(
         self, parent_checkpoint_id: str
@@ -803,5 +969,6 @@ __all__ = [
     "PaperCampaignEpisodeHandoff",
     "PaperCampaignEpisodeHandoffError",
     "PaperCampaignEpisodeHandoffReceipt",
+    "PaperCampaignEpisodeHandoffRecord",
     "PaperCampaignEpisodeHandoffResult",
 ]

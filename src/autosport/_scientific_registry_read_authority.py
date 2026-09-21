@@ -125,6 +125,11 @@ def require_scientific_registry_read_authority() -> tuple[
         module=_integrity,
         qualname="read_verified_scientific_registry_text",
     )
+    baseline_fn = _source_owned_function(
+        _integrity.establish_validated_scientific_registry_read_baseline,
+        module=_integrity,
+        qualname="establish_validated_scientific_registry_read_baseline",
+    )
     _source_owned_function(
         _registry._reject_duplicate_keys,
         module=_registry,
@@ -145,6 +150,13 @@ def require_scientific_registry_read_authority() -> tuple[
     if _integrity.read_verified_scientific_registry_text is not read_text_fn:
         raise ScientificRegistryReadAuthorityError(
             "ScientificRegistry durable reader binding changed"
+        )
+    if (
+        _integrity.establish_validated_scientific_registry_read_baseline
+        is not baseline_fn
+    ):
+        raise ScientificRegistryReadAuthorityError(
+            "ScientificRegistry read-baseline binding changed"
         )
 
     return read_fn, validate_fn, get_fn, causal_fn
@@ -181,6 +193,11 @@ def _read_authority_verified(self: _registry.ScientificRegistry) -> dict[str, An
                 # therefore may share a fingerprint. Preserve existing semantics.
                 pass
             fingerprints.add(fingerprint)
+
+    # Only fully validated non-pristine bytes may establish a missing machine
+    # authority baseline. The helper rechecks the exact bytes under the durable
+    # path lock before PREPARE/COMMIT, closing the first-read legacy TOCTOU gap.
+    _integrity.establish_validated_scientific_registry_read_baseline(self.path, raw)
     return state
 
 

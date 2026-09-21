@@ -147,6 +147,16 @@ def _authorities(
         "projection",
         lambda self: projection,
     )
+    # This fixture intentionally isolates provider-cost composition from the
+    # campaign persistence subsystem.  It is not a positive denomination
+    # harness: generic campaign economics must remain denomination-negative.
+    # Production denomination_binding is never weakened; only this synthetic
+    # object.__new__ test double receives the explicit no-authority behavior.
+    monkeypatch.setattr(
+        FinalizedCampaignAuthority,
+        "denomination_binding",
+        lambda self: None,
+    )
     monkeypatch.setattr(
         bridge._source_origin,
         "resolve_bound_receipt",

@@ -51,3 +51,8 @@ def _sealed_product_denomination_reader(campaign: _Authority):
 
 
 _cost_evidence._PRODUCT_DENOMINATION_READER = _sealed_product_denomination_reader
+
+# Install only after FinalizedCampaignAuthority is fully composed and sealed.  The
+# lifecycle layer stages this exact authority on a draft clone before exposing the
+# irreversible PaperCampaign finalized transition.
+from . import _campaign_finalize_atomicity as _campaign_finalize_atomicity  # noqa: E402,F401

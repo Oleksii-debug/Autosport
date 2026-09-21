@@ -486,3 +486,55 @@ def test_snapshot_rejects_capability_without_typed_snapshot_evidence(
             observed_capabilities=frozenset({capability}),
             observed_at=_TS,
         )
+
+def test_position_provider_status_is_optional_opaque_evidence() -> None:
+    legacy = _position(BookmakerPositionState.OPEN)
+    assert legacy.provider_status is None
+
+    for status in ("PUSH", "PUSH_WIN", "PUSH_LOSE", "PROVIDER_FUTURE_STATUS_V7"):
+        position = _position(
+            BookmakerPositionState.OPEN,
+            observation_id=f"status-{status}",
+            external_position_id=f"external-{status}",
+            provider_status=status,
+        )
+        assert position.provider_status == status
+        assert position.state is BookmakerPositionState.OPEN
+        assert position.gross_return is None
+
+
+@pytest.mark.parametrize("provider_status", ["", " PUSH_WIN", "PUSH_WIN ", "   "])
+def test_position_provider_status_rejects_empty_or_untrimmed_text(
+    provider_status: str,
+) -> None:
+    with pytest.raises(BookmakerCapabilityError, match="provider_status"):
+        _position(
+            BookmakerPositionState.OPEN,
+            provider_status=provider_status,
+        )
+
+
+@pytest.mark.parametrize("provider_status", [7, True, object()])
+def test_position_provider_status_rejects_non_string_values(
+    provider_status: object,
+) -> None:
+    with pytest.raises(BookmakerCapabilityError, match="provider_status"):
+        _position(
+            BookmakerPositionState.OPEN,
+            provider_status=provider_status,
+        )
+
+
+def test_position_provider_status_does_not_rewrite_explicit_canonical_state() -> None:
+    settled = _position(
+        BookmakerPositionState.SETTLED,
+        observation_id="status-settled",
+        external_position_id="external-status-settled",
+        provider_status="PUSH_LOSE",
+        gross_return=Decimal("0"),
+    )
+
+    assert settled.provider_status == "PUSH_LOSE"
+    assert settled.state is BookmakerPositionState.SETTLED
+    assert settled.gross_return == Decimal("0")
+

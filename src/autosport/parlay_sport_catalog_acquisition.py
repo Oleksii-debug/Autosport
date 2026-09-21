@@ -201,6 +201,39 @@ def _acquisition_id(
     return "parlay-sports-acquisition:" + hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
+def _validate_prior_acquisition(prior: ParlaySportCatalogAcquisition) -> str | None:
+    if prior.status_code != 200 or prior.raw_body is None or prior.raw_body_sha256 is None:
+        raise ParlaySportCatalogEvidenceError(
+            "conditional acquisition requires an exact prior HTTP 200 body acquisition"
+        )
+    if prior.final_url != CANONICAL_PARLAY_SPORTS_URL:
+        raise ParlaySportCatalogEvidenceError("prior acquisition final URL is not canonical")
+    _validate_timestamp(prior.acquired_at)
+    if prior.prior_acquisition_id is not None:
+        raise ParlaySportCatalogEvidenceError(
+            "prior HTTP 200 acquisition must not reference another acquisition"
+        )
+    if hashlib.sha256(prior.raw_body).hexdigest() != prior.raw_body_sha256:
+        raise ParlaySportCatalogEvidenceError("prior acquisition raw-body digest mismatch")
+    if prior.etag is not None:
+        if not isinstance(prior.etag, str) or not prior.etag or prior.etag != prior.etag.strip():
+            raise ParlaySportCatalogEvidenceError(
+                "prior acquisition ETag must be non-empty trimmed text"
+            )
+    expected_id = _acquisition_id(
+        acquired_at=prior.acquired_at,
+        status_code=200,
+        final_url=prior.final_url,
+        etag=prior.etag,
+        raw_body_sha256=prior.raw_body_sha256,
+        prior_acquisition_id=None,
+        provider_origin_verified=prior.provider_origin_verified,
+    )
+    if prior.acquisition_id != expected_id:
+        raise ParlaySportCatalogEvidenceError("prior acquisition identity mismatch")
+    return prior.etag
+
+
 def acquire_parlay_sport_catalog(
     *,
     prior: ParlaySportCatalogAcquisition | None = None,
@@ -227,15 +260,9 @@ def acquire_parlay_sport_catalog(
     }
     conditional_etag: str | None = None
     if prior is not None:
-        if prior.status_code != 200 or prior.raw_body is None or prior.raw_body_sha256 is None:
-            raise ParlaySportCatalogEvidenceError(
-                "conditional acquisition requires an exact prior HTTP 200 body acquisition"
-            )
-        if hashlib.sha256(prior.raw_body).hexdigest() != prior.raw_body_sha256:
-            raise ParlaySportCatalogEvidenceError("prior acquisition raw-body digest mismatch")
-        if prior.etag is not None:
-            conditional_etag = prior.etag
-            headers["If-None-Match"] = prior.etag
+        conditional_etag = _validate_prior_acquisition(prior)
+        if conditional_etag is not None:
+            headers["If-None-Match"] = conditional_etag
 
     using_product_transport = transport is None
     active_transport = _default_transport if transport is None else transport

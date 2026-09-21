@@ -325,3 +325,36 @@ def test_credential_rotation_revalidation_can_link_predecessor_and_recover():
     )
     assert decision.allowed
     assert decision.evidence_id == fresh.evidence_id
+
+def test_positive_revalidation_cannot_bypass_latest_negative_without_predecessor():
+    first = _profile()
+    positive = _evidence(first)
+    journal = CapabilityEvidenceJournal()
+    journal.publish(positive)
+
+    revoked_profile = _profile(
+        state=BookmakerCapabilityState.UNSUPPORTED,
+        observed_at="2026-09-21T10:05:00+00:00",
+    )
+    revoked = _evidence(
+        revoked_profile,
+        support_state=BookmakerCapabilityState.UNSUPPORTED,
+        observed_at=revoked_profile.observed_at,
+        committed_at="2026-09-21T10:06:00+00:00",
+        review_due_at="2026-09-22T10:06:00+00:00",
+        predecessor_id=positive.evidence_id,
+    )
+    journal.publish(revoked)
+
+    recovered_profile = _profile(observed_at="2026-09-21T10:10:00+00:00")
+    unlinked_recovery = _evidence(
+        recovered_profile,
+        observed_at=recovered_profile.observed_at,
+        committed_at="2026-09-21T10:11:00+00:00",
+        review_due_at="2026-09-22T10:11:00+00:00",
+        predecessor_id=None,
+    )
+
+    with pytest.raises(CapabilityEvidenceError):
+        journal.publish(unlinked_recovery)
+

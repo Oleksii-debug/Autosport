@@ -254,9 +254,7 @@ def test_freshness_evidence_cannot_predate_bound_capability_profile() -> None:
 
 def test_nested_capability_fact_subclass_is_rejected() -> None:
     class ForgedFact(BookmakerCapabilityFact):
-        @property
-        def state(self) -> BookmakerCapabilityState:
-            return BookmakerCapabilityState.SUPPORTED
+        pass
 
     forged_fact = ForgedFact(
         BookmakerCapability.LIVE_QUOTES_READ,

@@ -485,7 +485,8 @@ def _install() -> None:
     ) = _build_guard(seal)
 
     # Compatibility/debug mirrors only. The installed wrappers above never read
-    # these names; mutating them cannot redirect an authority-bearing read.
+    # these names; mutating them cannot redirect an authority-bearing read. The
+    # authoritative binding map/lock are intentionally NOT aliased here.
     global _ORIGINAL_INIT
     global _ORIGINAL_GETATTRIBUTE
     global _ORIGINAL_RESOLVED_EXECUTION_DECISION_ID
@@ -503,8 +504,8 @@ def _install() -> None:
     _ORIGINAL_EXECUTION_ATTEMPT = seal[9]
     _PINNED_DECISION_VERIFIED_RECORDS = seal[10]
     _PINNED_EXECUTION_EVENTS = seal[11]
-    _AUTHORITY_BINDINGS = seal[12]
-    _AUTHORITY_BINDINGS_LOCK = seal[13]
+    _AUTHORITY_BINDINGS = WeakKeyDictionary()
+    _AUTHORITY_BINDINGS_LOCK = RLock()
     _reject_instance_shadow = reject_instance_shadow
     _assert_decision_ledger_class_method = assert_decision_ledger_class_method
     _assert_execution_ledger_class_method = assert_execution_ledger_class_method

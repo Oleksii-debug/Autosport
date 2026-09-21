@@ -232,11 +232,48 @@ def _tab_reachable_controls(
     return list(dict.fromkeys(reachable))
 
 
+def _export_evidence_binding_dispatches(app: WindowsAutosportApp) -> bool:
+    """Prove Ctrl+E dynamically dispatches to export_evidence without exporting."""
+
+    try:
+        instance_attributes = vars(app)
+    except TypeError:
+        return False
+    had_instance_value = "export_evidence" in instance_attributes
+    previous_instance_value = instance_attributes.get("export_evidence")
+    dispatched = False
+    restore_ok = True
+
+    def probe() -> None:
+        nonlocal dispatched
+        dispatched = True
+
+    try:
+        setattr(app, "export_evidence", probe)
+        app.event_generate("<Control-e>")
+        app.update()
+    except Exception:
+        dispatched = False
+    finally:
+        try:
+            if had_instance_value:
+                setattr(app, "export_evidence", previous_instance_value)
+            else:
+                delattr(app, "export_evidence")
+        except Exception:
+            restore_ok = False
+
+    return dispatched and restore_ok
+
+
 def _binding_presence(app: WindowsAutosportApp) -> dict[str, bool]:
-    return {
+    bindings = {
         sequence: bool(str(app.bind(sequence) or "").strip())
         for sequence in (*_ACTION_BINDINGS, *_FOCUS_BINDINGS)
     }
+    if bindings.get("<Control-e>", False):
+        bindings["<Control-e>"] = _export_evidence_binding_dispatches(app)
+    return bindings
 
 
 def _execute_focus_shortcuts(

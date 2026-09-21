@@ -7,7 +7,6 @@ from decimal import Decimal
 import pytest
 
 from autosport import _paper_execution_decision_origin as origin_module
-from autosport import _paper_execution_decision_origin_callsite_guard as callsite_guard
 from autosport import _paper_execution_decision_origin_instance_guard as instance_guard
 from autosport.agents import AgentContext
 from autosport.decision_ledger import EconomicDecisionAuthority, JsonlDecisionLedger
@@ -135,13 +134,6 @@ def test_live_product_callsite_rejects_nested_hook_and_binds_exact_origin(
         "_verified_decision_origin_without_instance_dispatch",
         forged_verified_origin,
     )
-    monkeypatch.setattr(
-        PaperExecutionAdoptionRuntime,
-        callsite_guard._CALLSITE_EXECUTE_CODE_SENTINEL,
-        (lambda: None).__code__,
-        raising=False,
-    )
-
     result = loop.run_cycle()
 
     assert forged_origin_calls == []
@@ -222,15 +214,49 @@ def _paper_value_agent(event: MarketEvent, goal: EconomicGoalContract) -> PaperV
     )
 
 
+def _paper_value_context(
+    tmp_path,
+    *,
+    event: MarketEvent,
+    replay_run_id: str,
+    ledger: JsonlDecisionLedger,
+    book: PaperBook | None = None,
+    paper_book_path=None,
+) -> AgentContext:
+    """Bind PaperValue tests to the same explicit #623 workspace authority as product code."""
+
+    active_book = PaperBook("100") if book is None else book
+    execution_book_path = (
+        tmp_path / "paper-execution-book.json"
+        if paper_book_path is None
+        else paper_book_path
+    )
+    runtime = PaperExecutionAdoptionRuntime(
+        book=active_book,
+        ledger=PaperExecutionLedger(tmp_path / "paper-execution.jsonl"),
+        config=_execution_model(),
+        max_quote_age=timedelta(seconds=5),
+        paper_book_path=execution_book_path,
+    )
+    return AgentContext(
+        active_book,
+        latest_quotes={event.quote_key: event},
+        replay_run_id=replay_run_id,
+        decision_ledger=ledger,
+        paper_execution=runtime,
+        paper_provider_accounts=((event.source_id, "test-account-1"),),
+    )
+
+
 def test_paper_value_rejects_shadowed_material_action_identity(tmp_path) -> None:
     goal = _paper_value_goal()
     event = _paper_value_event()
     ledger = JsonlDecisionLedger(tmp_path / "decisions.jsonl")
-    context = AgentContext(
-        PaperBook("100"),
-        latest_quotes={event.quote_key: event},
+    context = _paper_value_context(
+        tmp_path,
+        event=event,
         replay_run_id="run-origin-paper-value-shadow",
-        decision_ledger=ledger,
+        ledger=ledger,
     )
     agent = _paper_value_agent(event, goal)
     attacker_called = False
@@ -265,11 +291,13 @@ def test_paper_value_fresh_and_durable_recovery_keep_exact_origin(
     book_path = tmp_path / "paper-restart.json"
     ledger = JsonlDecisionLedger(ledger_path)
     book = PaperBook("100")
-    context = AgentContext(
-        book,
-        latest_quotes={event.quote_key: event},
+    context = _paper_value_context(
+        tmp_path,
+        event=event,
         replay_run_id="run-origin-paper-value",
-        decision_ledger=ledger,
+        ledger=ledger,
+        book=book,
+        paper_book_path=book_path,
     )
     agent = _paper_value_agent(event, goal)
     forged_origin_calls: list[str] = []
@@ -303,11 +331,13 @@ def test_paper_value_fresh_and_durable_recovery_keep_exact_origin(
 
     book.save(book_path)
     restarted_book = PaperBook.load(book_path)
-    restarted_context = AgentContext(
-        restarted_book,
-        latest_quotes={event.quote_key: event},
+    restarted_context = _paper_value_context(
+        tmp_path,
+        event=event,
         replay_run_id="run-origin-paper-value",
-        decision_ledger=JsonlDecisionLedger(ledger_path),
+        ledger=JsonlDecisionLedger(ledger_path),
+        book=restarted_book,
+        paper_book_path=book_path,
     )
     restarted_agent = _paper_value_agent(event, goal)
     restarted_runtime = restarted_context.paper_execution

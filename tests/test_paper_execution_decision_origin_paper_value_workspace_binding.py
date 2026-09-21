@@ -5,13 +5,12 @@ from dataclasses import replace
 import pytest
 
 from autosport import _paper_execution_decision_origin as origin_module
-from autosport.agents import AgentContext
 from autosport.decision_ledger import JsonlDecisionLedger
-from autosport.paper import PaperBook
 from autosport.paper_execution_adoption import PaperExecutionAdoptionRuntime
 
 from test_paper_execution_decision_origin_product_paths import (
     _paper_value_agent,
+    _paper_value_context,
     _paper_value_event,
     _paper_value_goal,
 )
@@ -23,11 +22,11 @@ def test_paper_value_product_path_rejects_replaced_decision_ledger_after_runtime
     goal = _paper_value_goal()
     first_event = _paper_value_event()
     canonical_ledger = JsonlDecisionLedger(tmp_path / "decisions.jsonl")
-    context = AgentContext(
-        PaperBook("100"),
-        latest_quotes={first_event.quote_key: first_event},
+    context = _paper_value_context(
+        tmp_path,
+        event=first_event,
         replay_run_id="run-origin-paper-value-workspace-binding",
-        decision_ledger=canonical_ledger,
+        ledger=canonical_ledger,
     )
 
     _paper_value_agent(first_event, goal).on_market_event(first_event, context)

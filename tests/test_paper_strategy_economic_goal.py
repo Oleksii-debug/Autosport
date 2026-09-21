@@ -250,7 +250,6 @@ class PaperValueEconomicGoalIntegrationTests(unittest.TestCase):
         event = self._event()
         agent = self._agent(event, goal)
         with tempfile.TemporaryDirectory() as tmp:
-            ledger_path = Path(tmp) / "decisions.jsonl"
             book = PaperBook("100")
             context = AgentContext(
                 book,
@@ -258,6 +257,8 @@ class PaperValueEconomicGoalIntegrationTests(unittest.TestCase):
                 replay_run_id="run-1",
                 decision_ledger=None,
             )
+            self.assertIsNotNone(context.paper_execution)
+            ledger_path = context.paper_execution.paper_book_path.parent / "decisions.jsonl"
 
             agent.on_market_event(event, context)
 

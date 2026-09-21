@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from types import ModuleType
+
 import pytest
 
 from autosport.event_lifecycle import CatalogPage, EventLifecycleRecord
@@ -329,3 +331,151 @@ def test_global_type_instance_dependency_fails_closed_without_running_constructo
         )
 
     assert _ConstructorProbeResolver.calls == 0
+
+
+_qualified_module_rules = ModuleType("autosport_test_qualified_rules")
+_qualified_module_rules.SAFE_SCALAR = "stable"
+_qualified_module_rules.MUTABLE_RULES = {"winner": "home"}
+
+
+class _QualifiedTypeRules:
+    SAFE_SCALAR = "stable"
+    MUTABLE_RULES = {"winner": "home"}
+
+
+class _ModuleQualifiedScalarProductSource(_ProductSource):
+    settlement_resolver_implementation_id = "provider-a-module-qualified-scalar-v1"
+
+    def resolve(self, record: EventLifecycleRecord, *, as_of: str):
+        if _qualified_module_rules.SAFE_SCALAR == "never":
+            raise AssertionError("qualified scalar semantics")
+        return None
+
+
+class _ModuleQualifiedMutableProductSource(_ProductSource):
+    settlement_resolver_implementation_id = "provider-a-module-qualified-mutable-v1"
+
+    def resolve(self, record: EventLifecycleRecord, *, as_of: str):
+        if _qualified_module_rules.MUTABLE_RULES.get("winner") == "never":
+            raise AssertionError("qualified mutable semantics")
+        return None
+
+
+class _TypeQualifiedScalarProductSource(_ProductSource):
+    settlement_resolver_implementation_id = "provider-a-type-qualified-scalar-v1"
+
+    def resolve(self, record: EventLifecycleRecord, *, as_of: str):
+        if _QualifiedTypeRules.SAFE_SCALAR == "never":
+            raise AssertionError("qualified type scalar semantics")
+        return None
+
+
+class _TypeQualifiedMutableProductSource(_ProductSource):
+    settlement_resolver_implementation_id = "provider-a-type-qualified-mutable-v1"
+
+    def resolve(self, record: EventLifecycleRecord, *, as_of: str):
+        if _QualifiedTypeRules.MUTABLE_RULES.get("winner") == "never":
+            raise AssertionError("qualified type mutable semantics")
+        return None
+
+
+def test_module_qualified_scalar_rebind_changes_authority_identity() -> None:
+    source = _ModuleQualifiedScalarProductSource()
+    expected = _settlement_authority_identity(
+        source=source,
+        source_id=source.source_id,
+        outcome_authority=source,
+    )
+    original = _qualified_module_rules.SAFE_SCALAR
+    try:
+        _qualified_module_rules.SAFE_SCALAR = "changed"
+        assert _settlement_authority_identity(
+            source=source,
+            source_id=source.source_id,
+            outcome_authority=source,
+        ) != expected
+    finally:
+        _qualified_module_rules.SAFE_SCALAR = original
+
+
+def test_module_qualified_mutable_data_fails_closed() -> None:
+    source = _ModuleQualifiedMutableProductSource()
+    with pytest.raises(
+        ProductCompositionError,
+        match="source-owned settlement resolve semantics cannot be fingerprinted safely",
+    ):
+        _settlement_authority_identity(
+            source=source,
+            source_id=source.source_id,
+            outcome_authority=source,
+        )
+
+
+def test_global_type_qualified_scalar_rebind_changes_authority_identity() -> None:
+    source = _TypeQualifiedScalarProductSource()
+    expected = _settlement_authority_identity(
+        source=source,
+        source_id=source.source_id,
+        outcome_authority=source,
+    )
+    original = _QualifiedTypeRules.SAFE_SCALAR
+    try:
+        _QualifiedTypeRules.SAFE_SCALAR = "changed"
+        assert _settlement_authority_identity(
+            source=source,
+            source_id=source.source_id,
+            outcome_authority=source,
+        ) != expected
+    finally:
+        _QualifiedTypeRules.SAFE_SCALAR = original
+
+
+def test_global_type_qualified_mutable_data_fails_closed() -> None:
+    source = _TypeQualifiedMutableProductSource()
+    with pytest.raises(
+        ProductCompositionError,
+        match="source-owned settlement resolve semantics cannot be fingerprinted safely",
+    ):
+        _settlement_authority_identity(
+            source=source,
+            source_id=source.source_id,
+            outcome_authority=source,
+        )
+
+
+class _CustomLookupResolverBase:
+    lookup_calls = 0
+
+    def __getattribute__(self, name):
+        if name == "resolve_instance":
+            type(self).lookup_calls += 1
+        return object.__getattribute__(self, name)
+
+    def resolve_instance(self, record: EventLifecycleRecord, *, as_of: str):
+        return None
+
+
+class _CustomLookupResolverChild(_CustomLookupResolverBase):
+    pass
+
+
+class _CustomLookupProductSource(_ProductSource):
+    settlement_resolver_implementation_id = "provider-a-custom-instance-lookup-v1"
+
+    def resolve(self, record: EventLifecycleRecord, *, as_of: str):
+        return _CustomLookupResolverChild().resolve_instance(record, as_of=as_of)
+
+
+def test_global_type_instance_dependency_rejects_custom_lookup_without_callback() -> None:
+    _CustomLookupResolverChild.lookup_calls = 0
+    source = _CustomLookupProductSource()
+    with pytest.raises(
+        ProductCompositionError,
+        match="source-owned settlement resolve semantics cannot be fingerprinted safely",
+    ):
+        _settlement_authority_identity(
+            source=source,
+            source_id=source.source_id,
+            outcome_authority=source,
+        )
+    assert _CustomLookupResolverChild.lookup_calls == 0

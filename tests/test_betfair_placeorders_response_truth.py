@@ -40,8 +40,10 @@ def _payload(
     execution_status: str,
     instruction_status: str,
     include_size_matched: bool,
-    size_matched: str = "0",
-    average_price_matched: str = "0",
+    size_matched: object = 0,
+    average_price_matched: object = 0,
+    echoed_size: object | None = None,
+    echoed_price: object | None = None,
     bet_id: str | None = None,
     handicap: object = 0,
     persistence_type: str = "LAPSE",
@@ -60,8 +62,16 @@ def _payload(
             "side": action.side,
             "orderType": "LIMIT",
             "limitOrder": {
-                "size": str(action.requested_stake),
-                "price": str(action.requested_odds),
+                "size": (
+                    float(action.requested_stake)
+                    if echoed_size is None
+                    else echoed_size
+                ),
+                "price": (
+                    float(action.requested_odds)
+                    if echoed_price is None
+                    else echoed_price
+                ),
                 "persistenceType": persistence_type,
             },
         },
@@ -137,7 +147,7 @@ def test_explicit_zero_failure_remains_rejected() -> None:
         execution_status="FAILURE",
         instruction_status="FAILURE",
         include_size_matched=True,
-        size_matched="0",
+        size_matched=0,
         bet_id="bet-rejected-123",
     )
 
@@ -163,8 +173,8 @@ def test_response_echo_rejects_handicap_or_persistence_drift(
         execution_status="SUCCESS",
         instruction_status="SUCCESS",
         include_size_matched=True,
-        size_matched="5.00",
-        average_price_matched="2.00",
+        size_matched=5,
+        average_price_matched=2,
         bet_id="bet-123",
         handicap=handicap,
         persistence_type=persistence_type,
@@ -186,8 +196,8 @@ def test_response_id_rejects_coercible_non_integer_wire_identity(
         execution_status="SUCCESS",
         instruction_status="SUCCESS",
         include_size_matched=True,
-        size_matched="5.00",
-        average_price_matched="2.00",
+        size_matched=5,
+        average_price_matched=2,
         bet_id="bet-123",
         response_id=response_id,
     )
@@ -209,8 +219,8 @@ def test_response_echo_rejects_coercible_selection_identity(
         execution_status="SUCCESS",
         instruction_status="SUCCESS",
         include_size_matched=True,
-        size_matched="5.00",
-        average_price_matched="2.00",
+        size_matched=5,
+        average_price_matched=2,
         bet_id="bet-123",
         selection_id=selection_id,
     )
@@ -232,8 +242,8 @@ def test_response_echo_rejects_coercible_handicap_identity(
         execution_status="SUCCESS",
         instruction_status="SUCCESS",
         include_size_matched=True,
-        size_matched="5.00",
-        average_price_matched="2.00",
+        size_matched=5,
+        average_price_matched=2,
         bet_id="bet-123",
         handicap=handicap,
     )
@@ -244,6 +254,42 @@ def test_response_echo_rejects_coercible_handicap_identity(
     ):
         _parse(payload, action)
 
+@pytest.mark.parametrize(
+    ("field", "value"),
+    (
+        ("echoed_price", "2.00"),
+        ("echoed_price", True),
+        ("echoed_size", "5.00"),
+        ("echoed_size", True),
+        ("size_matched", "5.00"),
+        ("size_matched", True),
+        ("average_price_matched", "2.00"),
+        ("average_price_matched", True),
+    ),
+)
+def test_response_authority_rejects_coercible_non_numeric_wire_values(
+    field: str,
+    value: object,
+) -> None:
+    action = _action()
+    kwargs: dict[str, object] = {
+        "size_matched": 5,
+        "average_price_matched": 2,
+    }
+    kwargs[field] = value
+    payload = _payload(
+        action,
+        execution_status="SUCCESS",
+        instruction_status="SUCCESS",
+        include_size_matched=True,
+        bet_id="bet-123",
+        **kwargs,
+    )
+
+    with pytest.raises(BetfairPlaceOrdersAmbiguous, match="JSON number"):
+        _parse(payload, action)
+
+
 def test_response_echo_accepts_equivalent_integral_numeric_wire_values() -> None:
     action = _action()
     payload = _payload(
@@ -251,8 +297,8 @@ def test_response_echo_accepts_equivalent_integral_numeric_wire_values() -> None
         execution_status="SUCCESS",
         instruction_status="SUCCESS",
         include_size_matched=True,
-        size_matched="5.00",
-        average_price_matched="2.00",
+        size_matched=5,
+        average_price_matched=2,
         bet_id="bet-123",
         response_id=1.0,
         selection_id=42.0,

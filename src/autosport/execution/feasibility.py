@@ -7,6 +7,7 @@ from enum import Enum
 import hashlib
 import json
 from typing import Iterable, Sequence
+from weakref import ref
 
 from ..betfair_account_readonly import (
     ADAPTER_ID as BETFAIR_ADAPTER_ID,
@@ -167,7 +168,7 @@ class MarketBookSnapshot:
         _require_aware(self.received_at, "received_at")
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True, slots=True, weakref_slot=True)
 class ExecutionFeasibilitySnapshot:
     state: FeasibilityState
     evidence_digest: str
@@ -193,7 +194,80 @@ class ExecutionFeasibilitySnapshot:
 
     @property
     def sufficient(self) -> bool:
-        return self.state is FeasibilityState.SNAPSHOT_DEPTH_SUFFICIENT_BUT_RACY
+        return (
+            self.state is FeasibilityState.SNAPSHOT_DEPTH_SUFFICIENT_BUT_RACY
+            and _is_execution_feasibility_result_authoritative(self)
+        )
+
+
+_EXECUTION_FEASIBILITY_RESULT_ISSUED: dict[int, tuple[object, str]] = {}
+
+
+def _feasibility_result_fingerprint(result: ExecutionFeasibilitySnapshot) -> str:
+    """Bind every semantics-bearing result field to one exact issued object."""
+
+    return _canonical_digest(
+        {
+            "schema": "autosport.execution-feasibility-result-authority.v1",
+            "state": result.state.value,
+            "evidence_digest": result.evidence_digest,
+            "reasons": list(result.reasons),
+            "requested_stake": str(result.requested_stake),
+            "limit_price": str(result.limit_price),
+            "displayed_acceptable_depth": str(result.displayed_acceptable_depth),
+            "snapshot_id": result.snapshot_id,
+            "snapshot_digest": result.snapshot_digest,
+            "provider_id": result.provider_id,
+            "account_id": result.account_id,
+            "market_id": result.market_id,
+            "selection_id": result.selection_id,
+            "market_version": result.market_version,
+            "inplay": result.inplay,
+            "bet_delay_seconds": result.bet_delay_seconds,
+            "observed_at": result.observed_at.isoformat(),
+            "received_at": result.received_at.isoformat(),
+            "decision_at": result.decision_at.isoformat(),
+            "source_mode": result.source_mode.value,
+            "projection_kind": result.projection_kind.value,
+            "liquidity_overlap_key": result.liquidity_overlap_key,
+        }
+    )
+
+
+def _issue_execution_feasibility_result(
+    result: ExecutionFeasibilitySnapshot,
+) -> ExecutionFeasibilitySnapshot:
+    """Seal resolver-issued authority without making the DTO self-authenticating."""
+
+    if type(result) is not ExecutionFeasibilitySnapshot:
+        raise TypeError("issued feasibility result must use the exact result type")
+    result_id = id(result)
+    fingerprint = _feasibility_result_fingerprint(result)
+
+    def forget(current: object, *, result_id: int = result_id) -> None:
+        existing = _EXECUTION_FEASIBILITY_RESULT_ISSUED.get(result_id)
+        if existing is not None and existing[0] is current:
+            _EXECUTION_FEASIBILITY_RESULT_ISSUED.pop(result_id, None)
+
+    reference = ref(result, forget)
+    _EXECUTION_FEASIBILITY_RESULT_ISSUED[result_id] = (reference, fingerprint)
+    return result
+
+
+def _is_execution_feasibility_result_authoritative(
+    result: ExecutionFeasibilitySnapshot,
+) -> bool:
+    """Fail closed for direct construction, copies, reconstruction, or mutation."""
+
+    if type(result) is not ExecutionFeasibilitySnapshot:
+        return False
+    current = _EXECUTION_FEASIBILITY_RESULT_ISSUED.get(id(result))
+    if current is None or current[0]() is not result:
+        return False
+    try:
+        return current[1] == _feasibility_result_fingerprint(result)
+    except Exception:
+        return False
 
 
 def assess_execution_feasibility(
@@ -480,13 +554,14 @@ def assess_authoritative_betfair_execution_feasibility(
         evidence_digest=limit_evidence,
         permitted=adapter_scope_matches,
     )
-    return _assess_execution_feasibility(
+    result = _assess_execution_feasibility(
         request,
         snapshot,
         limits,
         max_snapshot_age=max_snapshot_age,
         product_owned=True,
     )
+    return _issue_execution_feasibility_result(result)
 
 
 def _append_if(reasons: list[str], condition: bool, reason: str) -> None:

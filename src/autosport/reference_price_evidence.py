@@ -5,6 +5,7 @@ import json
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from decimal import Decimal
+from enum import Enum
 from typing import Iterable
 
 from .domain import MarketEvent
@@ -122,6 +123,138 @@ def _market_event_from_canonical_json(raw: object) -> MarketEvent:
     return event
 
 
+
+class ReferenceTargetInclusionPolicy(str, Enum):
+    """Whether the target provider may participate in the reference universe."""
+
+    EXCLUDE = "EXCLUDE"
+    INCLUDE = "INCLUDE"
+
+
+@dataclass(frozen=True, slots=True)
+class ReferencePriceProtocol:
+    """Immutable predeclared policy for one contemporaneous reference calculation.
+
+    The protocol freezes the complete eligible source universe and every policy
+    knob that can change qualification or aggregation. Evidence built under one
+    protocol therefore cannot silently omit an unfavorable eligible provider,
+    self-include the target, widen freshness, or change aggregation semantics
+    while retaining the same protocol identity.
+    """
+
+    eligible_source_ids: tuple[str, ...]
+    target_source_id: str
+    target_inclusion_policy: ReferenceTargetInclusionPolicy
+    price_semantics: str
+    max_age_seconds: int
+    max_skew_seconds: int
+    minimum_sources: int
+    aggregation_method: str = "median_decimal_odds.v1"
+    protocol_id: str = field(init=False)
+
+    def __post_init__(self) -> None:
+        if type(self.eligible_source_ids) is not tuple:
+            raise ReferencePriceEvidenceError(
+                "eligible_source_ids must be an exact tuple"
+            )
+        if not self.eligible_source_ids:
+            raise ReferencePriceEvidenceError(
+                "eligible_source_ids must not be empty"
+            )
+        source_ids = tuple(
+            _text(source_id, "eligible source_id")
+            for source_id in self.eligible_source_ids
+        )
+        if len(set(source_ids)) != len(source_ids):
+            raise ReferencePriceEvidenceError(
+                "eligible_source_ids must be unique"
+            )
+        source_ids = tuple(sorted(source_ids))
+        object.__setattr__(self, "eligible_source_ids", source_ids)
+
+        target = _text(self.target_source_id, "target_source_id")
+        if type(self.target_inclusion_policy) is not ReferenceTargetInclusionPolicy:
+            raise ReferencePriceEvidenceError(
+                "target_inclusion_policy must be ReferenceTargetInclusionPolicy"
+            )
+        if (
+            self.target_inclusion_policy
+            is ReferenceTargetInclusionPolicy.EXCLUDE
+            and target in source_ids
+        ):
+            raise ReferencePriceEvidenceError(
+                "excluded target_source_id cannot appear in eligible_source_ids"
+            )
+        if (
+            self.target_inclusion_policy
+            is ReferenceTargetInclusionPolicy.INCLUDE
+            and target not in source_ids
+        ):
+            raise ReferencePriceEvidenceError(
+                "included target_source_id must appear in eligible_source_ids"
+            )
+
+        semantics = _text(self.price_semantics, "price_semantics")
+        max_age = _bounded_nonnegative_int(
+            self.max_age_seconds,
+            "max_age_seconds",
+            positive=True,
+        )
+        max_skew = _bounded_nonnegative_int(
+            self.max_skew_seconds,
+            "max_skew_seconds",
+        )
+        minimum = _bounded_nonnegative_int(
+            self.minimum_sources,
+            "minimum_sources",
+            positive=True,
+        )
+        if minimum < 2:
+            raise ReferencePriceEvidenceError(
+                "minimum_sources must be at least 2"
+            )
+        if minimum > len(source_ids):
+            raise ReferencePriceEvidenceError(
+                "minimum_sources cannot exceed eligible source universe"
+            )
+        method = _text(self.aggregation_method, "aggregation_method")
+        if method != "median_decimal_odds.v1":
+            raise ReferencePriceEvidenceError(
+                "unsupported reference aggregation_method"
+            )
+
+        object.__setattr__(self, "target_source_id", target)
+        object.__setattr__(self, "price_semantics", semantics)
+        object.__setattr__(self, "max_age_seconds", max_age)
+        object.__setattr__(self, "max_skew_seconds", max_skew)
+        object.__setattr__(self, "minimum_sources", minimum)
+        object.__setattr__(self, "aggregation_method", method)
+        object.__setattr__(
+            self,
+            "protocol_id",
+            _canonical_json_sha256(self.identity_payload()),
+        )
+
+    def identity_payload(self) -> dict[str, object]:
+        return {
+            "schema": "autosport.reference_price_protocol",
+            "schema_version": 1,
+            "eligible_source_ids": list(self.eligible_source_ids),
+            "target_source_id": self.target_source_id,
+            "target_inclusion_policy": self.target_inclusion_policy.value,
+            "price_semantics": self.price_semantics,
+            "max_age_seconds": self.max_age_seconds,
+            "max_skew_seconds": self.max_skew_seconds,
+            "minimum_sources": self.minimum_sources,
+            "aggregation_method": self.aggregation_method,
+        }
+
+    def to_dict(self) -> dict[str, object]:
+        payload = self.identity_payload()
+        payload["protocol_id"] = self.protocol_id
+        return payload
+
+
 @dataclass(frozen=True, slots=True)
 class ReferenceObservation:
     """One exact canonical market observation used by a reference-price snapshot.
@@ -214,11 +347,8 @@ class ReferencePriceEvidence:
     selection_id: str
     market_type: str
     market_semantics_id: str | None
-    price_semantics: str
+    protocol: ReferencePriceProtocol
     decision_ts: str
-    max_age_seconds: int
-    max_skew_seconds: int
-    minimum_sources: int
     observations: tuple[ReferenceObservation, ...]
     evidence_id: str = field(init=False)
     median_decimal_odds: Decimal = field(init=False)
@@ -234,6 +364,26 @@ class ReferencePriceEvidence:
     @property
     def source_ids(self) -> tuple[str, ...]:
         return tuple(item.source_id for item in self.observations)
+
+    @property
+    def protocol_id(self) -> str:
+        return self.protocol.protocol_id
+
+    @property
+    def price_semantics(self) -> str:
+        return self.protocol.price_semantics
+
+    @property
+    def max_age_seconds(self) -> int:
+        return self.protocol.max_age_seconds
+
+    @property
+    def max_skew_seconds(self) -> int:
+        return self.protocol.max_skew_seconds
+
+    @property
+    def minimum_sources(self) -> int:
+        return self.protocol.minimum_sources
 
     def to_dict(self) -> dict[str, object]:
         payload = _evidence_identity_payload(self)
@@ -253,18 +403,15 @@ def _median(values: tuple[Decimal, ...]) -> Decimal:
 def _evidence_identity_payload(evidence: ReferencePriceEvidence) -> dict[str, object]:
     return {
         "schema": "autosport.reference_price_evidence",
-        "schema_version": 2,
+        "schema_version": 3,
+        "protocol": evidence.protocol.to_dict(),
         "sport": evidence.sport,
         "event_id": evidence.event_id,
         "market_id": evidence.market_id,
         "selection_id": evidence.selection_id,
         "market_type": evidence.market_type,
         "market_semantics_id": evidence.market_semantics_id,
-        "price_semantics": evidence.price_semantics,
         "decision_ts": evidence.decision_ts,
-        "max_age_seconds": evidence.max_age_seconds,
-        "max_skew_seconds": evidence.max_skew_seconds,
-        "minimum_sources": evidence.minimum_sources,
         "observations": [item.to_dict() for item in evidence.observations],
         "median_decimal_odds": str(evidence.median_decimal_odds),
         "min_decimal_odds": str(evidence.min_decimal_odds),
@@ -276,6 +423,10 @@ def _evidence_identity_payload(evidence: ReferencePriceEvidence) -> dict[str, ob
 
 
 def _validate_reference_price_evidence(evidence: ReferencePriceEvidence) -> None:
+    if type(evidence.protocol) is not ReferencePriceProtocol:
+        raise ReferencePriceEvidenceError(
+            "protocol must be exact ReferencePriceProtocol"
+        )
     if evidence.sport is not None:
         _text(evidence.sport, "sport")
     _text(evidence.event_id, "event_id")
@@ -397,6 +548,14 @@ def _validate_reference_price_evidence(evidence: ReferencePriceEvidence) -> None
         ingest_times.append(ingest)
         odds.append(event.decimal_odds)
 
+    expected_source_ids = set(evidence.protocol.eligible_source_ids)
+    if source_ids != expected_source_ids:
+        missing = tuple(sorted(expected_source_ids - source_ids))
+        unexpected = tuple(sorted(source_ids - expected_source_ids))
+        raise ReferencePriceEvidenceError(
+            "reference observations must exactly cover frozen eligible source "
+            f"universe; missing={missing!r}; unexpected={unexpected!r}"
+        )
     if len(source_ids) < minimum:
         raise ReferencePriceEvidenceError(
             "reference-price evidence has insufficient distinct sources"
@@ -425,41 +584,74 @@ def build_reference_price_evidence(
     events: Iterable[MarketEvent],
     *,
     decision_ts: str,
-    max_age_seconds: int,
-    max_skew_seconds: int,
-    minimum_sources: int = 2,
+    protocol: ReferencePriceProtocol | None = None,
+    max_age_seconds: int | None = None,
+    max_skew_seconds: int | None = None,
+    minimum_sources: int | None = None,
 ) -> ReferencePriceEvidence:
-    """Build exact contemporaneous reference-odds evidence from canonical events.
+    """Build exact contemporaneous evidence under one frozen reference protocol.
 
-    Every component must provide authoritative provider source_ts. Recent local
-    receipt is never substituted for unknown upstream quote age. The result is
-    observational only and cannot claim executable-price, fill or fair-probability
-    truth.
+    Policy authority is never accepted as a collection of free per-call knobs:
+    callers must supply one immutable protocol whose identity freezes the exact
+    eligible provider universe, target inclusion rule, freshness/skew bounds,
+    minimum coverage, price semantics and aggregation method.
+
+    The protocol is a structural/frozen-policy contract, not provider-origin
+    authority. Canonical provider/store provenance remains a separate boundary.
     """
 
-    max_age = _bounded_nonnegative_int(
-        max_age_seconds, "max_age_seconds", positive=True
-    )
-    max_skew = _bounded_nonnegative_int(max_skew_seconds, "max_skew_seconds")
-    minimum = _bounded_nonnegative_int(
-        minimum_sources, "minimum_sources", positive=True
-    )
-    if minimum < 2:
-        raise ReferencePriceEvidenceError("minimum_sources must be at least 2")
+    if protocol is None:
+        raise ReferencePriceEvidenceError(
+            "frozen ReferencePriceProtocol is required"
+        )
+    if type(protocol) is not ReferencePriceProtocol:
+        raise ReferencePriceEvidenceError(
+            "protocol must be exact ReferencePriceProtocol"
+        )
+    if any(
+        value is not None
+        for value in (
+            max_age_seconds,
+            max_skew_seconds,
+            minimum_sources,
+        )
+    ):
+        raise ReferencePriceEvidenceError(
+            "per-call reference policy overrides are forbidden; "
+            "use the frozen protocol"
+        )
+
     decision = _instant(decision_ts, "decision_ts")
     materialized = tuple(events)
-    if len(materialized) < minimum:
+    if len(materialized) < protocol.minimum_sources:
         raise ReferencePriceEvidenceError(
             "reference-price evidence has insufficient source observations"
         )
     canonical = tuple(_canonical_market_event(event) for event in materialized)
+    if not canonical:
+        raise ReferencePriceEvidenceError(
+            "reference-price evidence has no source observations"
+        )
+
     first = canonical[0]
     semantics = first.metadata.get("price_semantics")
-    if type(semantics) is not str or not semantics or semantics.strip() != semantics:
+    if (
+        type(semantics) is not str
+        or not semantics
+        or semantics.strip() != semantics
+    ):
         raise ReferencePriceEvidenceError(
             "reference observation requires explicit price_semantics"
         )
-    observations = tuple(ReferenceObservation.from_event(event) for event in canonical)
+    if semantics != protocol.price_semantics:
+        raise ReferencePriceEvidenceError(
+            "reference observation price_semantics does not match frozen protocol"
+        )
+
+    observations = tuple(
+        ReferenceObservation.from_event(event)
+        for event in canonical
+    )
     return ReferencePriceEvidence(
         sport=first.sport,
         event_id=first.event_id,
@@ -467,10 +659,7 @@ def build_reference_price_evidence(
         selection_id=first.selection_id,
         market_type=first.market_type.value,
         market_semantics_id=first.market_semantics_id,
-        price_semantics=semantics,
+        protocol=protocol,
         decision_ts=decision.astimezone(timezone.utc).isoformat(),
-        max_age_seconds=max_age,
-        max_skew_seconds=max_skew,
-        minimum_sources=minimum,
         observations=observations,
     )

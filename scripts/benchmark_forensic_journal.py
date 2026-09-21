@@ -18,12 +18,6 @@ from autosport.forensic_journal import ForensicSessionJournal, HeartbeatState
 
 
 @dataclass(frozen=True, slots=True)
-class ReadProbe:
-    calls: int = 0
-    bytes_read: int = 0
-
-
-@dataclass(frozen=True, slots=True)
 class WorkProfile:
     requested_heartbeats: int
     final_record_count: int
@@ -56,13 +50,13 @@ def _percentile_nearest_rank(values: list[int], percentile: int) -> int:
 
 @contextmanager
 def _probe_journal_reads(journal_path: Path) -> Iterator[dict[str, int]]:
-    target = journal_path.resolve(strict=False)
+    target = journal_path
     original = Path.read_bytes
     counters = {"calls": 0, "bytes_read": 0}
 
     def counted(path: Path) -> bytes:
         payload = original(path)
-        if path.resolve(strict=False) == target:
+        if path == target:
             counters["calls"] += 1
             counters["bytes_read"] += len(payload)
         return payload

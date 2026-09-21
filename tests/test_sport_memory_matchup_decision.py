@@ -8,13 +8,25 @@ import json
 import pytest
 
 from autosport import _sport_memory_authority_guard as _guard
+from autosport.learning_environment import EvidenceTruth
 from autosport.opponent_intelligence import (
     FeatureSnapshot,
     IdentityView,
+    ObservedPerformance,
+    OpponentIntelligenceStore,
     RatingSnapshot,
     SnapshotState,
 )
+from autosport.participant_identity import (
+    AliasRecord,
+    EntityIdentity,
+    EntityKind,
+    ParticipantIdentityRegistry,
+)
 from autosport.portfolio_plan import OpportunityEvidence
+from autosport.sport_memory_checkpoint import (
+    initialize_or_open_bound_sport_memory_runtime,
+)
 from autosport.sport_memory_decision_evidence import (
     bind_sport_memory_to_opportunity_evidence,
 )
@@ -28,6 +40,7 @@ from autosport.sport_memory_runtime import (
 GENERATION = "e" * 64
 CODE_SHA = "c" * 64
 DEPENDENCY_SHA = "d" * 64
+T0 = "2026-09-19T08:00:00Z"
 T1 = "2026-09-20T10:00:00Z"
 T1_PUBLISHED = "2026-09-20T10:00:01Z"
 T2 = "2026-09-20T10:05:00Z"
@@ -147,6 +160,111 @@ def _scope() -> SportMemoryScope:
     )
 
 
+def _entity(entity_id: str, kind: EntityKind) -> EntityIdentity:
+    return EntityIdentity(
+        entity_id,
+        kind,
+        f"provider:{entity_id}",
+        CODE_SHA,
+        T0,
+        T0,
+    )
+
+
+def _alias(text: str, entity_id: str) -> AliasRecord:
+    return AliasRecord(
+        "provider-a",
+        text,
+        entity_id,
+        T0,
+        None,
+        T0,
+        CODE_SHA,
+        T0,
+    )
+
+
+def _observed_performance(
+    *,
+    event_id: str,
+    subject_alias: str,
+    opponent_alias: str,
+    score: str,
+) -> ObservedPerformance:
+    return ObservedPerformance(
+        event_id=event_id,
+        source_id="provider-a",
+        subject_alias=subject_alias,
+        opponent_alias=opponent_alias,
+        sport_id="tennis",
+        league_alias="ATP",
+        market_context_id="match-winner",
+        score=score,
+        observed_at=T1,
+        available_at=T1,
+        recorded_at=T1,
+        evidence_sha256=CODE_SHA,
+        truth=EvidenceTruth.OBSERVED,
+    )
+
+
+def _bound_runtime_pair(tmp_path):
+    identity = ParticipantIdentityRegistry.initialize_pristine(
+        tmp_path / "participant-identity.json"
+    )
+    for entity in (
+        _entity("participant-a", EntityKind.PARTICIPANT),
+        _entity("participant-b", EntityKind.PARTICIPANT),
+        _entity("atp", EntityKind.LEAGUE),
+    ):
+        identity.add_entity(entity)
+    for alias in (
+        _alias("Alpha", "participant-a"),
+        _alias("Beta", "participant-b"),
+        _alias("ATP", "atp"),
+    ):
+        identity.add_alias(alias)
+
+    opponent = OpponentIntelligenceStore.initialize_pristine(
+        tmp_path / "opponent-intelligence.json",
+        identity,
+    )
+    opponent.record_performance(
+        _observed_performance(
+            event_id="event-a",
+            subject_alias="Alpha",
+            opponent_alias="Beta",
+            score="1",
+        )
+    )
+    opponent.record_performance(
+        _observed_performance(
+            event_id="event-b",
+            subject_alias="Beta",
+            opponent_alias="Alpha",
+            score="0",
+        )
+    )
+
+    runtime = initialize_or_open_bound_sport_memory_runtime(
+        tmp_path / "bound-sport-memory.json",
+        tmp_path / "bound-sport-memory-authority.json",
+        identity,
+        opponent,
+    )
+    for participant in ("participant-a", "participant-b"):
+        runtime.materialize(
+            participant_entity_id=participant,
+            scope=_scope(),
+            causal_cutoff=T1,
+            published_at=T1_PUBLISHED,
+            code_sha256=CODE_SHA,
+            dependency_sha256=DEPENDENCY_SHA,
+            min_support=1,
+        )
+    return runtime
+
+
 def _runtime(tmp_path):
     return SportMemoryRuntime.initialize_pristine(
         tmp_path / "sport-memory.json",
@@ -199,16 +317,15 @@ def test_matchup_evidence_binds_two_memories_into_normal_opportunity_evidence(
         causal_cutoff=T1,
         reproducibility_sha256=sha256(b"market-replay").hexdigest(),
     )
-    bound = bind_sport_memory_to_opportunity_evidence(
-        base,
-        matchup,
-        runtime=runtime,
-    )
-    assert bound.reproducibility_sha256 != base.reproducibility_sha256
-    assert bound.observed_at == base.observed_at
-    assert bound.causal_cutoff == matchup.causal_cutoff
-    assert bound.truth is base.truth
-    assert bound.execution_feasible is base.execution_feasible
+    with pytest.raises(
+        SportMemoryError,
+        match="canonical bound sport-memory runtime",
+    ):
+        bind_sport_memory_to_opportunity_evidence(
+            base,
+            matchup,
+            runtime=runtime,
+        )
 
     records = runtime.record_matchup_consumption(
         decision_id="decision-matchup-1",
@@ -237,6 +354,36 @@ def test_matchup_evidence_binds_two_memories_into_normal_opportunity_evidence(
         )
         == matchup
     )
+
+
+def test_bound_runtime_binds_matchup_into_normal_opportunity_evidence(
+    tmp_path,
+):
+    runtime = _bound_runtime_pair(tmp_path)
+    matchup = runtime.matchup_as_of(
+        "participant-a",
+        "participant-b",
+        _scope(),
+        as_of=T2,
+    )
+    base = OpportunityEvidence(
+        evidence_id="canonical-market-evidence",
+        observed_at=T2,
+        causal_cutoff=T1,
+        reproducibility_sha256=sha256(b"market-replay").hexdigest(),
+    )
+
+    bound = bind_sport_memory_to_opportunity_evidence(
+        base,
+        matchup,
+        runtime=runtime,
+    )
+
+    assert bound.reproducibility_sha256 != base.reproducibility_sha256
+    assert bound.observed_at == base.observed_at
+    assert bound.causal_cutoff == matchup.causal_cutoff
+    assert bound.truth is base.truth
+    assert bound.execution_feasible is base.execution_feasible
 
 
 def test_historical_decision_cannot_rebind_participant_after_later_snapshot(

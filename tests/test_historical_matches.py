@@ -57,9 +57,18 @@ class HistoricalMatchCaptureTests(unittest.TestCase):
             evidence = json.loads(evidence_path.read_text(encoding="utf-8"))
 
         self.assertEqual(capture["payload"], payload)
-        self.assertEqual(capture["request"], {"date": "2026-09-10", "priced_only": False})
+        expected_url = (
+            "https://parlay-api.com/v1/historical/sports/table_tennis/matches"
+            "?date=2026-09-10&pricedOnly=false"
+        )
+        self.assertEqual(
+            capture["request"],
+            {"url": expected_url, "date": "2026-09-10", "priced_only": False},
+        )
         self.assertEqual(evidence["requested_date"], "2026-09-10")
         self.assertFalse(evidence["priced_only"])
+        self.assertEqual(evidence["request_url"], expected_url)
+        self.assertEqual(report.request_url, expected_url)
         self.assertEqual(report.capture_sha256, hashlib.sha256(capture_bytes).hexdigest())
         self.assertEqual(evidence["capture_sha256"], report.capture_sha256)
         self.assertEqual(evidence["coverage_hint"], "source=test-source")
@@ -95,34 +104,88 @@ class HistoricalMatchCaptureTests(unittest.TestCase):
         self.assertEqual(query["pricedOnly"], ["false"])
         self.assertNotIn("unit-test-key", transport.urls[0])
 
-    def test_default_provider_recognizes_only_initial_product_owned_path_and_clock(self) -> None:
+    def test_mutable_default_provider_cannot_mint_positive_transport_or_clock_authority(self) -> None:
         provider = ParlayApiTableTennisProvider("unit-test-key")
-        self.assertTrue(historical_matches._product_owned_request_path_verified(provider))
-        self.assertTrue(historical_matches._product_owned_acquisition_clock_verified(provider))
+        response = HttpJsonResponse(
+            [],
+            200,
+            {
+                "x-historical-window-hours": "168",
+                "x-historical-window-from": "2026-09-06T00:00:00Z",
+            },
+        )
+        with tempfile.TemporaryDirectory() as temp:
+            with patch.object(provider, "_request", return_value=response):
+                report = capture_historical_matches(
+                    provider,
+                    requested_date="2026-09-10",
+                    output_path=Path(temp) / "matches.json",
+                )
+        self.assertFalse(report.product_owned_request_path_verified)
+        self.assertFalse(report.product_owned_acquisition_clock_verified)
+        self.assertFalse(report.provider_response_origin_verified)
+        self.assertFalse(report.trusted_outcome_source_admissible)
 
-    def test_injected_transport_cannot_mint_product_owned_request_path(self) -> None:
-        provider = self._provider(_Transport([]))
-        self.assertFalse(historical_matches._product_owned_request_path_verified(provider))
-        self.assertFalse(historical_matches._product_owned_acquisition_clock_verified(provider))
+    def test_custom_origins_with_identical_response_do_not_alias_provenance(self) -> None:
+        payload = [{"provider_defined_id": "same-match", "opaque": {"value": 1}}]
+        captures: list[tuple[str, str, str, dict[str, object]]] = []
+        with tempfile.TemporaryDirectory() as temp:
+            for index, base_url in enumerate(
+                ("https://origin-a.example", "https://origin-b.example"),
+                start=1,
+            ):
+                transport = _Transport(payload)
+                provider = ParlayApiTableTennisProvider(
+                    "unit-test-key",
+                    base_url=base_url,
+                    transport=transport,
+                    clock=lambda: "2026-09-13T03:00:00+00:00",
+                    sleeper=lambda _: None,
+                )
+                output = Path(temp) / f"matches-{index}.json"
+                evidence_path = Path(temp) / f"matches-{index}.evidence.json"
+                report = capture_historical_matches(
+                    provider,
+                    requested_date="2026-09-10",
+                    output_path=output,
+                    evidence_path=evidence_path,
+                )
+                evidence = json.loads(evidence_path.read_text(encoding="utf-8"))
+                captures.append(
+                    (
+                        report.request_url,
+                        report.capture_sha256,
+                        report.canonical_response_sha256,
+                        evidence,
+                    )
+                )
+                self.assertFalse(report.product_owned_request_path_verified)
+                self.assertFalse(report.product_owned_acquisition_clock_verified)
+                self.assertFalse(report.provider_response_origin_verified)
+                self.assertFalse(report.trusted_outcome_source_admissible)
 
-    def test_custom_origin_cannot_mint_product_owned_request_path(self) -> None:
+        self.assertNotEqual(captures[0][0], captures[1][0])
+        self.assertNotEqual(captures[0][1], captures[1][1])
+        self.assertEqual(captures[0][2], captures[1][2])
+        self.assertNotEqual(captures[0][3]["request_url"], captures[1][3]["request_url"])
+
+    def test_request_provenance_rejects_secret_bearing_base_url_before_network(self) -> None:
         transport = _Transport([])
         provider = ParlayApiTableTennisProvider(
             "unit-test-key",
-            base_url="https://example.invalid",
+            base_url="https://user:secret@example.invalid",
             transport=transport,
             clock=lambda: "2026-09-13T03:00:00+00:00",
             sleeper=lambda _: None,
         )
-        self.assertFalse(historical_matches._product_owned_request_path_verified(provider))
-
-    def test_provider_subclass_cannot_mint_product_owned_request_path(self) -> None:
-        class DerivedProvider(ParlayApiTableTennisProvider):
-            pass
-
-        provider = DerivedProvider("unit-test-key")
-        self.assertFalse(historical_matches._product_owned_request_path_verified(provider))
-        self.assertFalse(historical_matches._product_owned_acquisition_clock_verified(provider))
+        with tempfile.TemporaryDirectory() as temp:
+            with self.assertRaisesRegex(ValueError, "must not contain credentials"):
+                capture_historical_matches(
+                    provider,
+                    requested_date="2026-09-10",
+                    output_path=Path(temp) / "matches.json",
+                )
+        self.assertEqual(transport.urls, [])
 
     def test_capture_digest_stays_bound_to_published_bytes_after_path_replacement(self) -> None:
         payload = [{"provider_defined_id": "match-1", "opaque": {"value": 1}}]

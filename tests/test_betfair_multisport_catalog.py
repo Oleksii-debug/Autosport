@@ -22,8 +22,8 @@ def test_event_type_discovery_uses_provider_native_read_method():
 def test_events_and_market_types_are_scoped_by_event_type_id_not_name():
     events = build_list_events_request(event_type_ids=("1", "7"))
     types = build_list_market_types_request(event_type_ids=("1", "7"))
-    assert events.params["filter"] == {"eventTypeIds": ["1", "7"]}
-    assert types.params["filter"] == {"eventTypeIds": ["1", "7"]}
+    assert events.params["filter"] == {"eventTypeIds": ("1", "7")}
+    assert types.params["filter"] == {"eventTypeIds": ("1", "7")}
 
 
 def test_catalogue_request_uses_locale_independent_selectors_and_provider_limit():
@@ -36,8 +36,8 @@ def test_catalogue_request_uses_locale_independent_selectors_and_provider_limit(
     )
     assert request.method == "SportsAPING/v1.0/listMarketCatalogue"
     assert request.params["filter"] == {
-        "eventTypeIds": ["1", "7"],
-        "marketTypeCodes": ["MATCH_ODDS", "WIN"],
+        "eventTypeIds": ("1", "7"),
+        "marketTypeCodes": ("MATCH_ODDS", "WIN"),
         "marketStartTime": {
             "from": "2026-09-21T00:00:00Z",
             "to": "2026-09-22T00:00:00Z",

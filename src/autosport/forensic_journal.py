@@ -96,6 +96,15 @@ class HeartbeatState(str, Enum):
     IDLE = "IDLE"
 
 
+_LIFECYCLE_EVENT_NAMES = {
+    ForensicEventKind.STARTUP: "startup",
+    ForensicEventKind.SHUTDOWN: "shutdown",
+    ForensicEventKind.CRASH: "crash",
+    ForensicEventKind.HEARTBEAT: "heartbeat",
+}
+_RESERVED_LIFECYCLE_EVENT_NAMES = frozenset(_LIFECYCLE_EVENT_NAMES.values())
+
+
 @dataclass(frozen=True, slots=True)
 class ForensicJournalRecord:
     sequence: int
@@ -262,6 +271,39 @@ def _decode_object(raw: str, *, label: str) -> dict[str, object]:
     return payload
 
 
+def _validate_lifecycle(records: Sequence[ForensicJournalRecord]) -> None:
+    active = False
+    for record in records:
+        canonical_name = _LIFECYCLE_EVENT_NAMES.get(record.kind)
+        if canonical_name is not None and record.event_name != canonical_name:
+            raise ForensicJournalIntegrityError(
+                "forensic journal lifecycle event_name does not match kind"
+            )
+        if (
+            record.kind is ForensicEventKind.MATERIAL_EVENT
+            and record.event_name in _RESERVED_LIFECYCLE_EVENT_NAMES
+        ):
+            raise ForensicJournalIntegrityError(
+                "material event cannot use a reserved lifecycle event_name"
+            )
+
+        if record.kind is ForensicEventKind.STARTUP:
+            if active:
+                raise ForensicJournalIntegrityError(
+                    "forensic journal startup encountered while lifecycle is already active"
+                )
+            active = True
+            continue
+
+        if not active:
+            raise ForensicJournalIntegrityError(
+                "forensic journal event requires an active startup lifecycle"
+            )
+
+        if record.kind in (ForensicEventKind.SHUTDOWN, ForensicEventKind.CRASH):
+            active = False
+
+
 class ForensicSessionJournal:
     """Append-only forensic activity evidence, separate from economic authorities."""
 
@@ -360,6 +402,7 @@ class ForensicSessionJournal:
             )
             records.append(record)
             previous = record.record_sha256
+        _validate_lifecycle(records)
         return records
 
     def _validate_record(
@@ -554,6 +597,12 @@ class ForensicSessionJournal:
             }
             digest = _record_digest(payload)
             payload["record_sha256"] = digest
+            candidate = self._validate_record(
+                payload,
+                expected_sequence=sequence,
+                expected_previous=previous,
+            )
+            _validate_lifecycle([*records, candidate])
             _assert_safe_regular_or_absent(self.path, label="forensic journal")
             try:
                 with self.path.open("ab") as handle:
@@ -568,11 +617,7 @@ class ForensicSessionJournal:
                 self.checkpoint_path,
                 self._checkpoint_payload(sequence, digest),
             )
-            return self._validate_record(
-                payload,
-                expected_sequence=sequence,
-                expected_previous=previous,
-            )
+            return candidate
 
     def record_startup(
         self, source: str, *, message: str | None = None,

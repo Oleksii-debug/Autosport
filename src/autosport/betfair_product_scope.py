@@ -37,6 +37,7 @@ class BetfairProductOperation(str, Enum):
 
 class BetfairProductScopeState(str, Enum):
     COMPATIBLE = "COMPATIBLE"
+    REQUIRES_EXTERNAL_ENTITLEMENT = "REQUIRES_EXTERNAL_ENTITLEMENT"
     DENIED = "DENIED"
 
 
@@ -81,6 +82,7 @@ class BetfairProductScopeDecision:
     product_bet_placement_surface_available: bool
     sportsbook_read_only: bool
     requires_external_affiliate_entitlement: bool
+    requires_separate_sportsbook_adapter: bool
 
     def __post_init__(self) -> None:
         if not isinstance(self.state, BetfairProductScopeState):
@@ -111,20 +113,24 @@ class BetfairProductScopeDecision:
             "product_bet_placement_surface_available",
             "sportsbook_read_only",
             "requires_external_affiliate_entitlement",
+            "requires_separate_sportsbook_adapter",
         ):
             if type(getattr(self, field)) is not bool:
                 raise BetfairProductScopeError(f"{field} must be bool")
-        if (
-            self.state is BetfairProductScopeState.COMPATIBLE
-            and self.reason_codes
-        ):
-            raise BetfairProductScopeError(
-                "COMPATIBLE decision cannot carry denial reasons"
-            )
-        if (
-            self.state is BetfairProductScopeState.DENIED
-            and not self.reason_codes
-        ):
+
+        if self.state is BetfairProductScopeState.COMPATIBLE:
+            if self.reason_codes:
+                raise BetfairProductScopeError(
+                    "COMPATIBLE decision cannot carry reasons"
+                )
+        elif self.state is BetfairProductScopeState.REQUIRES_EXTERNAL_ENTITLEMENT:
+            if self.reason_codes != (
+                "SPORTSBOOK_AFFILIATE_ENTITLEMENT_REQUIRED",
+            ):
+                raise BetfairProductScopeError(
+                    "external-entitlement state requires canonical reason"
+                )
+        elif not self.reason_codes:
             raise BetfairProductScopeError(
                 "DENIED decision requires at least one reason"
             )
@@ -135,7 +141,7 @@ class BetfairProductScopeDecision:
 
     @property
     def provider_entitlement_authorized(self) -> bool:
-        """Static caller configuration cannot prove provider-issued entitlement."""
+        """This static boundary never proves provider-issued entitlement."""
         return False
 
     @property
@@ -148,9 +154,8 @@ def evaluate_betfair_product_scope(
     *,
     domain: BetfairProductDomain,
     operation: BetfairProductOperation,
-    sportsbook_affiliate_entitled: bool | None = None,
 ) -> BetfairProductScopeDecision:
-    """Evaluate product-family routing without duplicating key/freshness authority."""
+    """Evaluate product-family routing without minting external entitlement."""
 
     if not isinstance(domain, BetfairProductDomain):
         raise BetfairProductScopeError(
@@ -160,46 +165,38 @@ def evaluate_betfair_product_scope(
         raise BetfairProductScopeError(
             "operation must be a BetfairProductOperation value"
         )
-    if (
-        sportsbook_affiliate_entitled is not None
-        and type(sportsbook_affiliate_entitled) is not bool
-    ):
-        raise BetfairProductScopeError(
-            "sportsbook_affiliate_entitled must be bool or None"
-        )
 
     if domain is BetfairProductDomain.EXCHANGE:
-        reasons = (
-            ("SPORTSBOOK_ENTITLEMENT_CANNOT_SCOPE_EXCHANGE",)
-            if sportsbook_affiliate_entitled is not None
-            else ()
-        )
         return BetfairProductScopeDecision(
-            BetfairProductScopeState.DENIED
-            if reasons
-            else BetfairProductScopeState.COMPATIBLE,
-            reasons,
+            BetfairProductScopeState.COMPATIBLE,
+            (),
             BetfairProductDomain.EXCHANGE,
             "betfair.exchange",
             True,
             False,
             False,
+            False,
         )
 
-    reasons_list: list[str] = []
     if operation is BetfairProductOperation.PLACE_BET:
-        reasons_list.append("SPORTSBOOK_API_READ_ONLY")
-    if sportsbook_affiliate_entitled is not True:
-        reasons_list.append("SPORTSBOOK_AFFILIATE_ENTITLEMENT_REQUIRED")
+        return BetfairProductScopeDecision(
+            BetfairProductScopeState.DENIED,
+            ("SPORTSBOOK_API_READ_ONLY",),
+            BetfairProductDomain.SPORTSBOOK,
+            "betfair.sportsbook",
+            False,
+            True,
+            True,
+            True,
+        )
 
     return BetfairProductScopeDecision(
-        BetfairProductScopeState.DENIED
-        if reasons_list
-        else BetfairProductScopeState.COMPATIBLE,
-        tuple(reasons_list),
+        BetfairProductScopeState.REQUIRES_EXTERNAL_ENTITLEMENT,
+        ("SPORTSBOOK_AFFILIATE_ENTITLEMENT_REQUIRED",),
         BetfairProductDomain.SPORTSBOOK,
         "betfair.sportsbook",
         False,
+        True,
         True,
         True,
     )

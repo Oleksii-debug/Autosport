@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import fields
 import json
 from pathlib import Path
 from types import SimpleNamespace
@@ -7,6 +8,8 @@ from types import SimpleNamespace
 import pytest
 
 from autosport.betfair_standard_limit_price_bound import (
+    BetfairStandardLimitPriceBoundError,
+    BetfairStandardLimitPriceBoundEvidence,
     resolve_betfair_standard_limit_price_bound,
 )
 from autosport.betfair_standard_limit_price_bound_product_verifier import (
@@ -119,6 +122,35 @@ def test_deleted_issuance_fails_as_rollback_while_machine_authority_survives(
         store.load(bound.execution_plan.plan_id)
 
 
+def test_provider_request_projection_drift_after_issuance_fails_reload(
+    monkeypatch, tmp_path: Path
+) -> None:
+    import autosport.supervised_plan_issuance as module
+
+    bound, _approval, store, _issued = _issue(monkeypatch, tmp_path)
+    original = module.resolve_betfair_standard_limit_price_bound
+
+    def drifted(*, bound, action_id):
+        evidence = original(bound=bound, action_id=action_id)
+        forged = object.__new__(BetfairStandardLimitPriceBoundEvidence)
+        for field in fields(BetfairStandardLimitPriceBoundEvidence):
+            object.__setattr__(forged, field.name, getattr(evidence, field.name))
+        object.__setattr__(forged, "instruction_sha256", "1" * 64)
+        return forged
+
+    monkeypatch.setattr(
+        module,
+        "resolve_betfair_standard_limit_price_bound",
+        drifted,
+    )
+
+    with pytest.raises(
+        SupervisedPlanIssuanceError,
+        match="provider request identity no longer matches canonical adapter",
+    ):
+        store.load(bound.execution_plan.plan_id)
+
+
 def test_product_verifier_reloads_issuance_instead_of_accepting_caller_bound(
     monkeypatch, tmp_path: Path
 ) -> None:
@@ -169,7 +201,10 @@ def test_product_verifier_rejects_unissued_plan_identity(
         action_id=action.action_id,
     )
 
-    with pytest.raises(SupervisedPlanIssuanceError):
+    with pytest.raises(
+        BetfairStandardLimitPriceBoundError,
+        match="durable product supervised-plan issuance is missing or invalid",
+    ):
         verify_product_betfair_standard_limit_price_bound(
             evidence=evidence,
             ledger=ledger,

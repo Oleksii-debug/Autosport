@@ -150,36 +150,24 @@ def _validated_child_receipts(
 def _verified_ledger_events(
     ledger: RealExecutionLedger,
 ) -> tuple[dict[str, object], ...]:
-    """Freeze one integrity-verified ledger snapshot for the whole reconciliation."""
+    """Read one snapshot through the canonical ledger implementation only.
 
-    if not isinstance(ledger, RealExecutionLedger):
-        raise RoutingContractError("ledger must be a RealExecutionLedger")
+    Positive routing authority must not depend on caller-dispatched instance
+    methods. Exact-type admission blocks subclass overrides, and the unbound
+    canonical parser prevents instance method rebinding from substituting bytes
+    or parser semantics from another ledger.
+    """
+
+    if type(ledger) is not RealExecutionLedger:
+        raise RoutingContractError("ledger must be an exact RealExecutionLedger")
     try:
-        snapshot = ledger.verified_snapshot()
+        raw = ledger.path.read_bytes() if ledger.path.exists() else b""
+        events = RealExecutionLedger._parse(raw)
     except (ExecutionLedgerError, OSError) as exc:
         raise RoutingContractError(
             "durable execution ledger could not be verified"
         ) from exc
-
-    if not snapshot.payload:
-        return ()
-    try:
-        decoded = snapshot.payload.decode("utf-8")
-        events: list[dict[str, object]] = []
-        for line in decoded.splitlines():
-            envelope = json.loads(line)
-            event = envelope["event"]
-            if not isinstance(event, dict):
-                raise TypeError("event must be an object")
-            events.append(event)
-        return tuple(events)
-    except (UnicodeDecodeError, json.JSONDecodeError, KeyError, TypeError) as exc:
-        # verified_snapshot() has already validated these exact bytes with the
-        # ledger's strict parser. Any disagreement here is therefore a local
-        # decoding/contract failure and must not mint routing authority.
-        raise RoutingContractError(
-            "verified execution snapshot could not be decoded"
-        ) from exc
+    return tuple(events)
 
 
 def _durable_plan_action(

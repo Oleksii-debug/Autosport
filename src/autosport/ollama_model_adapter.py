@@ -17,7 +17,7 @@ from decimal import Decimal
 from typing import Final
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlsplit
-from urllib.request import HTTPRedirectHandler, Request, build_opener
+from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_opener
 
 from .model_invocation import (
     ModelAdapterDescriptor,
@@ -136,7 +136,7 @@ def _http_post_json(
         headers={"Accept": "application/json", "Content-Type": "application/json"},
         method="POST",
     )
-    opener = build_opener(_NoRedirectHandler())
+    opener = build_opener(ProxyHandler({}), _NoRedirectHandler())
     try:
         with opener.open(request, timeout=timeout_seconds) as response:
             status = getattr(response, "status", None)

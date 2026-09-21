@@ -264,6 +264,7 @@ class BetfairAccountSnapshotAcquirer:
         self,
         client: BetfairReadOnlyClient,
         requested_capabilities: frozenset[BookmakerCapability],
+        snapshot_reader: object,
     ) -> tuple[BookmakerAccountSnapshot, BookmakerIntegrationEvidence]:
         if type(requested_capabilities) is not frozenset:
             raise AccountSnapshotAcquisitionError(
@@ -289,7 +290,11 @@ class BetfairAccountSnapshotAcquirer:
             raise AccountSnapshotAcquisitionError(
                 "account acquisition client is not the canonical BetfairReadOnlyClient"
             )
-        snapshot = client.read_account_snapshot(requested_capabilities)
+        if not callable(snapshot_reader):
+            raise AccountSnapshotAcquisitionError(
+                "canonical Betfair account snapshot reader is unavailable"
+            )
+        snapshot = snapshot_reader(client, requested_capabilities)
         if type(snapshot) is not BookmakerAccountSnapshot:
             raise AccountSnapshotAcquisitionError(
                 "canonical Betfair client returned a non-canonical account snapshot"
@@ -1052,6 +1057,7 @@ def _install_account_snapshot_acquisition_authority() -> None:
     raw_read = BetfairAccountSnapshotAcquirer._read_provider_snapshot
     raw_record = _AccountSnapshotStore.record
     raw_resolve = _AccountSnapshotStore.resolve
+    canonical_snapshot_read = BetfairReadOnlyClient.read_account_snapshot
 
     def state(
         self: BetfairAccountSnapshotAcquirer,
@@ -1094,7 +1100,12 @@ def _install_account_snapshot_acquisition_authority() -> None:
         requested_capabilities: frozenset[BookmakerCapability],
     ) -> AuthoritativeAccountSnapshot:
         store, client = state(self)
-        snapshot, integration = raw_read(self, client, requested_capabilities)
+        snapshot, integration = raw_read(
+            self,
+            client,
+            requested_capabilities,
+            canonical_snapshot_read,
+        )
         return raw_record(
             store,
             snapshot,

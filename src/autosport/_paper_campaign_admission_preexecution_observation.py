@@ -13,7 +13,6 @@ commitment. No second observation store or decision-origin protocol is introduce
 
 from __future__ import annotations
 
-import inspect
 import json
 from datetime import datetime, timezone
 from functools import wraps
@@ -23,13 +22,11 @@ from weakref import WeakKeyDictionary
 
 from . import _paper_execution_decision_origin as _origin
 from . import _paper_execution_decision_origin_instance_guard as _instance_guard
-from .decision_ledger import JsonlDecisionLedger
 from .learning_environment import (
     CausalLearningEnvironment,
     LearningEnvironmentError,
     Observation,
 )
-from .live_decision_loop import PersistentLiveDecisionLoop
 from .paper_campaign_admission import (
     PaperCampaignAdmissionCoordinator,
     PaperCampaignAdmissionError,
@@ -260,91 +257,58 @@ def _install() -> None:
             return base
         _, bound_environment_id = binding
 
-        current = inspect.currentframe()
-        frame = current.f_back if current is not None else None
-        producer = None
+        # The exact DecisionLedger verifier already resolved these bytes from the
+        # economic DecisionRecord. #727 is only a carrier: it must never mint or
+        # reconstruct learning evidence from reservation/execution fields.
+        raw_json = self.learning_observation_json
+        observed_ts = self.decision_observed_ts
+        if raw_json is None:
+            return base
+        if type(raw_json) is not str or type(observed_ts) is not str:
+            raise _origin.PaperExecutionDecisionOriginError(
+                "decision origin lacks complete pre-published learning evidence"
+            )
         try:
-            while frame is not None:
-                if frame.f_code is PersistentLiveDecisionLoop._persist_plan.__code__:
-                    producer = frame
-                    break
-                frame = frame.f_back
-            if producer is None:
-                return base
-            owner = producer.f_locals.get("self")
-            if (
-                type(owner) is not PersistentLiveDecisionLoop
-                or getattr(owner, "paper_execution", None) is not runtime
-                or producer.f_locals.get("decision_id") != self.decision_id
-            ):
-                raise _origin.PaperExecutionDecisionOriginError(
-                    "learning observation producer identity changed before reservation"
-                )
-            ledger = getattr(owner, "decision_ledger", None)
-            if type(ledger) is not JsonlDecisionLedger:
-                raise _origin.PaperExecutionDecisionOriginError(
-                    "learning observation producer lacks exact DecisionLedger authority"
-                )
-            snapshot = ledger.verified_snapshot()
-            matches: list[dict[str, object]] = []
-            for line in snapshot.payload.decode("utf-8").splitlines():
-                envelope = json.loads(line)
-                record = envelope.get("record")
-                if type(record) is not dict or record.get("decision_id") != self.decision_id:
-                    continue
-                if envelope.get("sha256") != self.record_sha256:
-                    raise _origin.PaperExecutionDecisionOriginError(
-                        "learning observation DecisionRecord digest changed"
-                    )
-                matches.append(record)
-            if len(matches) != 1:
-                raise _origin.PaperExecutionDecisionOriginError(
-                    "learning observation requires one exact durable DecisionRecord"
-                )
-            record = matches[0]
-            payload = record.get("payload")
-            if type(payload) is not dict:
-                raise _origin.PaperExecutionDecisionOriginError(
-                    "learning observation DecisionRecord payload is invalid"
-                )
-            raw = payload.get("learning_observation")
-            if type(raw) is not dict:
-                raise _origin.PaperExecutionDecisionOriginError(
-                    "campaign decision lacks pre-published learning observation"
-                )
-            observation = _observation_from_payload(raw)
-            if observation.environment_id != bound_environment_id:
-                raise _origin.PaperExecutionDecisionOriginError(
-                    "learning observation belongs to another campaign environment"
-                )
-            observed_ts = record.get("observed_ts")
-            if type(observed_ts) is not str:
-                raise _origin.PaperExecutionDecisionOriginError(
-                    "learning observation DecisionRecord time is invalid"
-                )
-            if _utc(observation.available_at, "learning observation available_at") > _utc(
-                observed_ts,
-                "DecisionRecord observed_ts",
-            ):
-                raise _origin.PaperExecutionDecisionOriginError(
-                    "learning observation was not available before the economic decision"
-                )
-            canonical_raw = _observation_payload(observation)
-            if raw != canonical_raw:
-                raise _origin.PaperExecutionDecisionOriginError(
-                    "learning observation durable bytes are not canonical"
-                )
-            return {
-                "schema": _ORIGIN_SCHEMA,
-                "schema_version": _ORIGIN_SCHEMA_V2,
-                "decision_id": self.decision_id,
-                "record_sha256": self.record_sha256,
-                "learning_observation": canonical_raw,
-            }
-        finally:
-            del current
-            del frame
-            del producer
+            raw = json.loads(raw_json)
+        except (json.JSONDecodeError, TypeError, ValueError) as exc:
+            raise _origin.PaperExecutionDecisionOriginError(
+                "pre-published learning observation is not canonical JSON"
+            ) from exc
+        if type(raw) is not dict:
+            raise _origin.PaperExecutionDecisionOriginError(
+                "pre-published learning observation payload is invalid"
+            )
+        observation = _observation_from_payload(raw)
+        if observation.environment_id != bound_environment_id:
+            raise _origin.PaperExecutionDecisionOriginError(
+                "learning observation belongs to another campaign environment"
+            )
+        if _utc(observation.available_at, "learning observation available_at") > _utc(
+            observed_ts,
+            "DecisionRecord observed_ts",
+        ):
+            raise _origin.PaperExecutionDecisionOriginError(
+                "learning observation was not available before the economic decision"
+            )
+        canonical_raw = _observation_payload(observation)
+        canonical_json = json.dumps(
+            canonical_raw,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        )
+        if raw != canonical_raw or raw_json != canonical_json:
+            raise _origin.PaperExecutionDecisionOriginError(
+                "learning observation durable bytes are not canonical"
+            )
+        return {
+            "schema": _ORIGIN_SCHEMA,
+            "schema_version": _ORIGIN_SCHEMA_V2,
+            "decision_id": self.decision_id,
+            "record_sha256": self.record_sha256,
+            "learning_observation": canonical_raw,
+        }
 
     @classmethod
     def origin_from_dict(cls, raw: object):

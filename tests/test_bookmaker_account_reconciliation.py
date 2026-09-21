@@ -1,4 +1,4 @@
-from decimal import Decimal
+from decimal import Decimal, localcontext
 import json
 
 import pytest
@@ -468,3 +468,51 @@ def test_identical_balance_observation_repeated_in_later_snapshot_is_not_a_new_d
     assert state is not None
     assert state.latest_balance_observation == balance
     assert state.unexplained_balance_delta is None
+
+
+def test_snapshot_fingerprint_is_independent_of_decimal_context() -> None:
+    amount = "1234567890123456789012345678.9012345678901234567891"
+    snapshot = _snapshot(
+        _T1,
+        capabilities=(BookmakerCapability.BALANCE_READ,),
+        balance=_balance(_T1, amount, observation_id="balance-high-precision"),
+    )
+
+    with localcontext() as context:
+        context.prec = 6
+        low_precision_fingerprint = snapshot_fingerprint(snapshot)
+
+    with localcontext() as context:
+        context.prec = 80
+        high_precision_fingerprint = snapshot_fingerprint(snapshot)
+
+    assert low_precision_fingerprint == high_precision_fingerprint
+
+
+def test_high_precision_decimal_persists_and_reopens_exactly_across_contexts(
+    tmp_path,
+) -> None:
+    amount = "1234567890123456789012345678.9012345678901234567891"
+    snapshot = _snapshot(
+        _T1,
+        capabilities=(BookmakerCapability.BALANCE_READ,),
+        balance=_balance(_T1, amount, observation_id="balance-high-precision"),
+    )
+    path = tmp_path / "account.json"
+
+    with localcontext() as context:
+        context.prec = 6
+        assert BookmakerAccountReconciliationStore(path).append_snapshot(snapshot) is True
+
+    document = json.loads(path.read_text(encoding="utf-8"))
+    persisted = document["snapshots"][0]["snapshot"]["balance"]["available_balance"]
+    assert persisted == amount
+
+    with localcontext() as context:
+        context.prec = 80
+        reopened = BookmakerAccountReconciliationStore(path).history()
+
+    assert len(reopened) == 1
+    assert reopened[0].balance is not None
+    assert reopened[0].balance.available_balance == Decimal(amount)
+    assert snapshot_fingerprint(reopened[0]) == snapshot_fingerprint(snapshot)

@@ -8,7 +8,7 @@ import autosport.accessibility_audit as accessibility_audit
 from autosport.accessibility_audit import summarize_description
 from autosport.gui import AUTOMATION_IDS, _SPEEDS, _STRATEGY_CHOICES, strategy_id_from_display
 from autosport.windows_gui import WINDOWS_BANKROLL_AUTOMATION_ID
-from autosport.windows_layout import WINDOWS_SHELL_AUTOMATION_IDS
+from autosport.windows_layout import OWNER_ECONOMIC_DIALOG_AUTOMATION_IDS, WINDOWS_SHELL_AUTOMATION_IDS
 from autosport.windows_manual_calculation import WORKBENCH_AUTOMATION_IDS
 
 
@@ -33,6 +33,7 @@ class AccessibilityAuditTests(unittest.TestCase):
 
     def _passing_description(self):
         shell = WINDOWS_SHELL_AUTOMATION_IDS
+        owner_dialog = OWNER_ECONOMIC_DIALOG_AUTOMATION_IDS
         return SimpleNamespace(
             strategy=_Named("PROVIDER"),
             widgets=(
@@ -57,6 +58,8 @@ class AccessibilityAuditTests(unittest.TestCase):
                 self._widget(shell["owner_economic_open"], "Економічні межі власника", patterns=("INVOKE",)),
                 self._widget(shell["owner_economic_status"], "Стан економічних меж власника", role="TEXT", patterns=("VALUE",)),
                 self._widget(shell["owner_economic_readback"], "Точні економічні межі власника", role="LIST", answers_rows=True),
+                self._widget(owner_dialog["readback"], "Точні економічні межі власника", role="LIST", answers_rows=True),
+                self._widget(owner_dialog["close"], "Закрити", patterns=("INVOKE",)),
                 self._widget(WORKBENCH_AUTOMATION_IDS["open"], "Відкрити робочу поверхню ручних розрахунків", patterns=("INVOKE",)),
                 self._widget(WORKBENCH_AUTOMATION_IDS["operation"], "Операція ручного розрахунку", role="COMBO_BOX", patterns=("VALUE",)),
                 self._widget(WORKBENCH_AUTOMATION_IDS["input"], "Вхідні значення ручного розрахунку", role="TEXT", patterns=("VALUE",)),
@@ -109,7 +112,7 @@ class AccessibilityAuditTests(unittest.TestCase):
     def test_critical_contract_passes_with_names_roles_patterns_rows_and_readonly(self):
         report = self._summarize(self._passing_description())
         self.assertEqual(report["status"], "PASS")
-        self.assertEqual(len(report["critical_controls"]), 28)
+        self.assertEqual(len(report["critical_controls"]), 30)
         bankroll = next(
             item
             for item in report["critical_controls"]
@@ -185,6 +188,23 @@ class AccessibilityAuditTests(unittest.TestCase):
             )
         )
 
+    def test_owner_dialog_minimum_controls_are_required(self):
+        description = self._passing_description()
+        for key in ("readback", "close"):
+            automation_id = OWNER_ECONOMIC_DIALOG_AUTOMATION_IDS[key]
+            with self.subTest(key=key):
+                widgets = tuple(
+                    item for item in description.widgets if item.automation_id != automation_id
+                )
+                report = self._summarize(
+                    SimpleNamespace(**{**description.__dict__, "widgets": widgets})
+                )
+                self.assertEqual(report["status"], "FAIL")
+                self.assertIn(
+                    f"automation_id={automation_id}: critical control not found",
+                    report["failures"],
+                )
+
     def test_wrong_semantic_roles_fail_closed(self):
         cases = (
             (AUTOMATION_IDS["choose_dataset"], "BUTTON", "PUSH_BUTTON"),
@@ -194,6 +214,8 @@ class AccessibilityAuditTests(unittest.TestCase):
             (WINDOWS_BANKROLL_AUTOMATION_ID, "EDIT", "TEXT"),
             (WINDOWS_SHELL_AUTOMATION_IDS["navigation"], "TEXT", "COMBO_BOX"),
             (WINDOWS_SHELL_AUTOMATION_IDS["details"], "TEXT", "LIST"),
+            (OWNER_ECONOMIC_DIALOG_AUTOMATION_IDS["readback"], "TEXT", "LIST"),
+            (OWNER_ECONOMIC_DIALOG_AUTOMATION_IDS["close"], "TEXT", "PUSH_BUTTON"),
         )
         for automation_id, wrong_role, expected_role in cases:
             with self.subTest(automation_id=automation_id):

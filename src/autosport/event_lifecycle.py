@@ -8,7 +8,7 @@ from enum import StrEnum
 from pathlib import Path
 from typing import Callable, Iterable
 
-from .domain import _canonical_sport_value
+from .domain import _canonical_sport_value, _encoded_sport_identity
 from .integrity import atomic_write_json
 from .json_integrity import strict_json_loads
 from .providers import _scoped_identity
@@ -74,10 +74,18 @@ def _canonical_digest(payload: object) -> str:
     ).hexdigest()
 
 
-def canonical_event_identity(*, source_id: str, sport: str, event_id: str) -> str:
-    """Reuse the persisted MarketEvent identity from the provider boundary."""
-    _canonical_sport_value(sport)
+def _legacy_event_identity(*, source_id: str, event_id: str) -> str:
     return _scoped_identity(
+        _text(source_id, "source_id"),
+        _text(event_id, "event_id"),
+    )
+
+
+def canonical_event_identity(*, source_id: str, sport: str, event_id: str) -> str:
+    """Return a sport-scoped catalog identity disjoint from legacy event keys."""
+    return _encoded_sport_identity(
+        "catalog-event",
+        _canonical_sport_value(sport),
         _text(source_id, "source_id"),
         _text(event_id, "event_id"),
     )
@@ -358,7 +366,8 @@ class ContinuousEventLifecycle:
     """
 
     _SCHEMA = "autosport.continuous_event_lifecycle"
-    _VERSION = 1
+    _VERSION = 2
+    _LEGACY_VERSION = 1
     _PHASE_RANK = {
         EventPhase.PRE_MATCH: 0,
         EventPhase.LIVE: 1,
@@ -370,6 +379,8 @@ class ContinuousEventLifecycle:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         if not self.path.exists():
             atomic_write_json(self.path, self._empty())
+        else:
+            self._migrate_legacy_state()
         self._read()
 
     @classmethod
@@ -380,6 +391,76 @@ class ContinuousEventLifecycle:
             "sources": {},
             "events": {},
         }
+
+    def _migrate_legacy_state(self) -> None:
+        """One-way migrate exact schema-v1 records using their durable sport field."""
+
+        try:
+            raw = strict_json_loads(self.path.read_text(encoding="utf-8"))
+        except (OSError, TypeError, ValueError) as exc:
+            raise CatalogLifecycleError("cannot verify catalog lifecycle state") from exc
+        if type(raw) is not dict:
+            raise CatalogLifecycleError("unsupported catalog lifecycle state")
+        version = raw.get("schema_version")
+        if version == self._VERSION:
+            return
+        if (
+            set(raw) != {"schema", "schema_version", "sources", "events"}
+            or raw.get("schema") != self._SCHEMA
+            or version != self._LEGACY_VERSION
+            or type(raw.get("sources")) is not dict
+            or type(raw.get("events")) is not dict
+        ):
+            raise CatalogLifecycleError("unsupported catalog lifecycle state")
+
+        try:
+            for source_key, checkpoint in raw["sources"].items():
+                if type(checkpoint) is not dict or source_key != checkpoint.get("source_id"):
+                    raise ValueError("catalog checkpoint source key mismatch")
+                CatalogCheckpoint(**checkpoint)
+
+            migrated_events: dict[str, dict[str, object]] = {}
+            for legacy_identity, record in raw["events"].items():
+                if type(record) is not dict or legacy_identity != record.get("identity"):
+                    raise ValueError("catalog event identity key mismatch")
+                source_id = _text(record.get("source_id"), "source_id")
+                sport = _canonical_sport_value(record.get("sport"))
+                event_id = _text(record.get("event_id"), "event_id")
+                expected_legacy = _legacy_event_identity(
+                    source_id=source_id,
+                    event_id=event_id,
+                )
+                if legacy_identity != expected_legacy:
+                    raise CatalogConflictError(
+                        "legacy lifecycle identity does not match durable source/event identity"
+                    )
+                new_identity = canonical_event_identity(
+                    source_id=source_id,
+                    sport=sport,
+                    event_id=event_id,
+                )
+                if new_identity in migrated_events:
+                    raise CatalogConflictError(
+                        "legacy lifecycle migration would alias distinct durable events"
+                    )
+                migrated = dict(record)
+                migrated["identity"] = new_identity
+                verified = EventLifecycleRecord.from_dict(migrated)
+                migrated_events[new_identity] = verified.to_dict()
+        except (
+            AttributeError,
+            KeyError,
+            TypeError,
+            ValueError,
+            CatalogLifecycleError,
+        ) as exc:
+            raise CatalogLifecycleError(
+                "catalog lifecycle legacy migration contains invalid evidence"
+            ) from exc
+
+        raw["schema_version"] = self._VERSION
+        raw["events"] = migrated_events
+        atomic_write_json(self.path, raw)
 
     def _read(self) -> dict[str, object]:
         try:
@@ -777,7 +858,10 @@ class ContinuousEventLifecycle:
                 input_id,
                 source_ids=record.source_id,
                 sports=record.sport,
-                event_ids=record.identity,
+                event_ids=_legacy_event_identity(
+                    source_id=record.source_id,
+                    event_id=record.event_id,
+                ),
             )
             registered.append(input_id)
         return tuple(registered)

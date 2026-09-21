@@ -130,7 +130,7 @@ class MarketBookSnapshot:
     received_at: datetime
     sequence: int
     has_ordering_gap: bool
-    available_to_back: tuple[PriceSize, ...]
+    available_to_lay: tuple[PriceSize, ...]
 
     def __post_init__(self) -> None:
         _require_nonempty(
@@ -191,7 +191,7 @@ def assess_execution_feasibility(
 ) -> ExecutionFeasibilitySnapshot:
     """Derive conservative decision-time displayed-liquidity evidence.
 
-    The strongest result intentionally says only that the displayed acceptable
+    The strongest result intentionally says only that the displayed opposing
     depth was sufficient at one authenticated snapshot. It never reserves
     liquidity, predicts a fill, or proves atomic execution.
     """
@@ -233,6 +233,11 @@ def assess_execution_feasibility(
     _append_if(reasons, snapshot.observed_at > request.decision_at, "FUTURE_SNAPSHOT")
     _append_if(
         reasons,
+        snapshot.received_at > request.decision_at,
+        "RECEIVED_AFTER_DECISION",
+    )
+    _append_if(
+        reasons,
         request.decision_at - snapshot.observed_at > max_snapshot_age,
         "STALE_SNAPSHOT",
     )
@@ -249,7 +254,7 @@ def assess_execution_feasibility(
         if snapshot.projection_depth is not None:
             _append_if(
                 reasons,
-                len(snapshot.available_to_back) > snapshot.projection_depth,
+                len(snapshot.available_to_lay) > snapshot.projection_depth,
                 "BEST_OFFERS_DEPTH_INCONSISTENT",
             )
 
@@ -282,10 +287,13 @@ def assess_execution_feasibility(
             "PRICE_ABOVE_PROVIDER_MAXIMUM",
         )
 
+    # A BACK order executes against the opposing available-to-lay book. The
+    # backer's limit price is a minimum acceptable price, so prices at or above
+    # the limit are executable from the snapshot's displayed opposing depth.
     displayed_depth = sum(
         (
             quote.size
-            for quote in snapshot.available_to_back
+            for quote in snapshot.available_to_lay
             if quote.price >= request.limit_price
         ),
         Decimal("0"),
@@ -417,7 +425,7 @@ def _evidence_digest(
             "received_at": _timestamp(snapshot.received_at),
             "sequence": snapshot.sequence,
             "has_ordering_gap": snapshot.has_ordering_gap,
-            "available_to_back": _ladder_payload(snapshot.available_to_back),
+            "available_to_lay": _ladder_payload(snapshot.available_to_lay),
         },
         "limits": {
             "provider_id": limits.provider_id,

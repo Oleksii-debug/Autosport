@@ -8,6 +8,11 @@ import pytest
 from autosport.execution_empirical_evidence import (
     EmpiricalExecutionEvidenceError,
     EmpiricalExecutionEvidenceUnavailable,
+    SLIPPAGE_STATUS_KNOWN,
+    SLIPPAGE_STATUS_NOT_APPLICABLE,
+    SLIPPAGE_STATUS_UNKNOWN,
+    TIMING_REASON_NO_MONOTONIC_WITNESS,
+    TIMING_STATUS_UNKNOWN,
     build_empirical_execution_evidence,
 )
 from autosport.real_execution_ledger import (
@@ -46,7 +51,11 @@ def _action(**changes: object) -> ExecutionAction:
     return replace(action, **changes) if changes else action
 
 
-def _ledger(tmp_path, *, action: ExecutionAction | None = None) -> RealExecutionLedger:
+def _reserved_ledger(
+    tmp_path,
+    *,
+    action: ExecutionAction | None = None,
+) -> RealExecutionLedger:
     ledger = RealExecutionLedger(tmp_path / "execution.jsonl")
     plan = ExecutionPlan(
         plan_id="plan-1",
@@ -63,15 +72,28 @@ def _ledger(tmp_path, *, action: ExecutionAction | None = None) -> RealExecution
         attempt_id="attempt-1",
         reserved_at=RESERVED,
     )
+    return ledger
+
+
+def _ledger(
+    tmp_path,
+    *,
+    action: ExecutionAction | None = None,
+) -> RealExecutionLedger:
+    ledger = _reserved_ledger(tmp_path, action=action)
     ledger.mark_submitted("attempt-1", submitted_at=SUBMITTED)
     return ledger
 
 
-def _bind_provider(ledger: RealExecutionLedger) -> None:
+def _bind_provider(
+    ledger: RealExecutionLedger,
+    *,
+    observed_at: str = PROVIDER,
+) -> None:
     ledger.bind_provider_evidence(
         attempt_id="attempt-1",
         evidence_id=EVIDENCE_ID,
-        observed_at=PROVIDER,
+        observed_at=observed_at,
         source="provider-response",
     )
 
@@ -82,63 +104,141 @@ def _ack(
     status: AcknowledgementStatus = AcknowledgementStatus.ACCEPTED,
     accepted_odds: Decimal | None = Decimal("2.08"),
     accepted_stake: Decimal | None = Decimal("5.00"),
+    acknowledged_at: str = ACKED,
 ) -> None:
     ledger.acknowledge(
         ExternalAcknowledgement(
             attempt_id="attempt-1",
             external_receipt_id="receipt-1",
             status=status,
-            acknowledged_at=ACKED,
+            acknowledged_at=acknowledged_at,
             accepted_odds=accepted_odds,
             accepted_stake=accepted_stake,
         )
     )
 
 
-def _complete_evidence(tmp_path):
+def _accepted_evidence(tmp_path):
     ledger = _ledger(tmp_path)
     _bind_provider(ledger)
     _ack(ledger)
-    return build_empirical_execution_evidence(ledger, attempt_id="attempt-1")
+    return build_empirical_execution_evidence(
+        ledger,
+        attempt_id="attempt-1",
+    )
 
 
-def test_builds_exact_latency_and_adverse_back_slippage_from_durable_facts(
+def test_terminal_accepted_record_keeps_slippage_but_latency_unknown(tmp_path):
+    evidence = _accepted_evidence(tmp_path)
+
+    assert evidence.attempt_state == "ACCEPTED"
+    assert evidence.terminal is True
+    assert evidence.right_censored is False
+    assert evidence.censor_reason is None
+    assert evidence.censor_cutoff_recorded_at is None
+
+    assert evidence.slippage_status == SLIPPAGE_STATUS_KNOWN
+    assert evidence.accepted_minus_requested_odds == Decimal("-0.02")
+    assert evidence.adverse_odds_delta == Decimal("0.02")
+    assert evidence.unaccepted_stake == Decimal("0.00")
+
+    assert evidence.causal_timing_status == TIMING_STATUS_UNKNOWN
+    assert evidence.causal_timing_reason == TIMING_REASON_NO_MONOTONIC_WITNESS
+    assert evidence.quote_age_at_decision_us is None
+    assert evidence.decision_to_reserve_us is None
+    assert evidence.decision_to_submit_us is None
+    assert evidence.submit_to_provider_evidence_us is None
+    assert evidence.submit_to_acknowledgement_us is None
+    assert evidence.decision_to_acknowledgement_us is None
+
+
+def test_submitted_attempt_is_retained_as_right_censored_evidence(tmp_path):
+    ledger = _ledger(tmp_path)
+
+    evidence = build_empirical_execution_evidence(
+        ledger,
+        attempt_id="attempt-1",
+    )
+
+    assert evidence.attempt_state == "SUBMITTED"
+    assert evidence.terminal is False
+    assert evidence.right_censored is True
+    assert evidence.censor_reason == "SUBMITTED_NO_TERMINAL_ACK"
+    assert evidence.censor_cutoff_event_count == evidence.source_event_count
+    assert evidence.censor_cutoff_recorded_at is not None
+    assert evidence.acknowledgement_status is None
+    assert evidence.slippage_status == SLIPPAGE_STATUS_UNKNOWN
+    assert evidence.accepted_odds is None
+
+
+def test_reserved_attempt_is_retained_in_population(tmp_path):
+    ledger = _reserved_ledger(tmp_path)
+
+    evidence = build_empirical_execution_evidence(
+        ledger,
+        attempt_id="attempt-1",
+    )
+
+    assert evidence.attempt_state == "RESERVED"
+    assert evidence.submitted_at is None
+    assert evidence.right_censored is True
+    assert evidence.censor_reason == "RESERVED_NOT_SUBMITTED"
+    assert evidence.slippage_status == SLIPPAGE_STATUS_UNKNOWN
+
+
+def test_unknown_attempt_is_retained_with_explicit_censor_reason(tmp_path):
+    ledger = _ledger(tmp_path)
+    ledger.mark_unknown(
+        "attempt-1",
+        reason="provider timeout after submission",
+        observed_at="2026-09-21T10:00:02+00:00",
+    )
+
+    evidence = build_empirical_execution_evidence(
+        ledger,
+        attempt_id="attempt-1",
+    )
+
+    assert evidence.attempt_state == "UNKNOWN"
+    assert evidence.right_censored is True
+    assert evidence.censor_reason == "UNKNOWN_EXTERNAL_EFFECT"
+    assert evidence.slippage_status == SLIPPAGE_STATUS_UNKNOWN
+    assert evidence.acknowledged_at is None
+
+
+def test_provider_evidence_does_not_turn_nonterminal_attempt_into_slippage_sample(
     tmp_path,
 ):
     ledger = _ledger(tmp_path)
     _bind_provider(ledger)
-    _ack(ledger, accepted_odds=Decimal("2.08"))
 
     evidence = build_empirical_execution_evidence(
         ledger,
         attempt_id="attempt-1",
     )
 
-    assert evidence.quote_age_at_decision_us == 1_000_000
-    assert evidence.decision_to_reserve_us == 100_000
-    assert evidence.decision_to_submit_us == 250_000
-    assert evidence.submit_to_provider_evidence_us == 450_000
-    assert evidence.submit_to_acknowledgement_us == 550_000
-    assert evidence.decision_to_acknowledgement_us == 800_000
-    assert evidence.accepted_minus_requested_odds == Decimal("-0.02")
-    assert evidence.adverse_odds_delta == Decimal("0.02")
-    assert evidence.unaccepted_stake == Decimal("0.00")
+    assert evidence.attempt_state == "SUBMITTED"
     assert evidence.provider_evidence_id == EVIDENCE_ID
-    assert evidence.to_dict()["evidence_sha256"] == evidence.evidence_sha256
+    assert evidence.provider_evidence_observed_at == PROVIDER
+    assert evidence.slippage_status == SLIPPAGE_STATUS_UNKNOWN
+    assert evidence.accepted_odds is None
 
 
-def test_favorable_back_price_has_zero_adverse_delta(tmp_path):
+def test_terminal_ack_without_separate_provider_evidence_still_has_attempt_record(
+    tmp_path,
+):
     ledger = _ledger(tmp_path)
-    _bind_provider(ledger)
-    _ack(ledger, accepted_odds=Decimal("2.12"))
+    _ack(ledger)
 
     evidence = build_empirical_execution_evidence(
         ledger,
         attempt_id="attempt-1",
     )
 
-    assert evidence.accepted_minus_requested_odds == Decimal("0.02")
-    assert evidence.adverse_odds_delta == Decimal("0")
+    assert evidence.attempt_state == "ACCEPTED"
+    assert evidence.provider_evidence_id is None
+    assert evidence.slippage_status == SLIPPAGE_STATUS_KNOWN
+    assert evidence.accepted_odds == Decimal("2.08")
 
 
 def test_partial_acceptance_preserves_exact_unaccepted_stake(tmp_path):
@@ -156,12 +256,14 @@ def test_partial_acceptance_preserves_exact_unaccepted_stake(tmp_path):
         attempt_id="attempt-1",
     )
 
+    assert evidence.attempt_state == "PARTIAL"
     assert evidence.acknowledgement_status == "PARTIAL"
+    assert evidence.slippage_status == SLIPPAGE_STATUS_KNOWN
     assert evidence.unaccepted_stake == Decimal("1.75")
     assert evidence.adverse_odds_delta == Decimal("0")
 
 
-def test_rejected_attempt_has_latency_evidence_without_price_claim(tmp_path):
+def test_rejected_attempt_is_not_a_fake_zero_slippage_sample(tmp_path):
     ledger = _ledger(tmp_path)
     _bind_provider(ledger)
     _ack(
@@ -176,70 +278,11 @@ def test_rejected_attempt_has_latency_evidence_without_price_claim(tmp_path):
         attempt_id="attempt-1",
     )
 
-    assert evidence.acknowledgement_status == "REJECTED"
+    assert evidence.attempt_state == "REJECTED"
+    assert evidence.slippage_status == SLIPPAGE_STATUS_NOT_APPLICABLE
     assert evidence.accepted_odds is None
     assert evidence.adverse_odds_delta is None
     assert evidence.unaccepted_stake is None
-
-
-def test_positive_measurement_requires_durable_provider_evidence(tmp_path):
-    ledger = _ledger(tmp_path)
-    _ack(ledger)
-
-    with pytest.raises(
-        EmpiricalExecutionEvidenceUnavailable,
-        match="PROVIDER_EVIDENCE_BOUND",
-    ):
-        build_empirical_execution_evidence(
-            ledger,
-            attempt_id="attempt-1",
-        )
-
-
-def test_nonterminal_attempt_is_not_empirical_execution_evidence(tmp_path):
-    ledger = _ledger(tmp_path)
-    _bind_provider(ledger)
-
-    with pytest.raises(
-        EmpiricalExecutionEvidenceUnavailable,
-        match="terminal durable acknowledgement",
-    ):
-        build_empirical_execution_evidence(
-            ledger,
-            attempt_id="attempt-1",
-        )
-
-
-def test_negative_decision_to_reserve_timing_fails_closed(tmp_path):
-    ledger = RealExecutionLedger(tmp_path / "execution.jsonl")
-    action = _action()
-    plan = ExecutionPlan(
-        plan_id="plan-1",
-        bookmaker_profile_version="profile-1",
-        decision_id="decision-1",
-        approval_id="approval-1",
-        created_at=DECISION,
-        actions=(action,),
-    )
-    ledger.reserve_plan(plan)
-    ledger.begin_attempt(
-        plan_id="plan-1",
-        action_id="leg-1",
-        attempt_id="attempt-1",
-        reserved_at="2026-09-21T10:00:00.500000+00:00",
-    )
-    ledger.mark_submitted("attempt-1", submitted_at=SUBMITTED)
-    _bind_provider(ledger)
-    _ack(ledger)
-
-    with pytest.raises(
-        EmpiricalExecutionEvidenceUnavailable,
-        match="decision_to_reserve is negative",
-    ):
-        build_empirical_execution_evidence(
-            ledger,
-            attempt_id="attempt-1",
-        )
 
 
 def test_lay_higher_accepted_odds_are_adverse(tmp_path):
@@ -259,7 +302,7 @@ def test_lay_higher_accepted_odds_are_adverse(tmp_path):
     assert evidence.adverse_odds_delta == Decimal("0.05")
 
 
-def test_unsupported_side_cannot_mint_slippage_semantics(tmp_path):
+def test_unsupported_side_cannot_mint_known_slippage_semantics(tmp_path):
     ledger = _ledger(tmp_path, action=_action(side="CUSTOM"))
     _bind_provider(ledger)
     _ack(ledger)
@@ -274,35 +317,40 @@ def test_unsupported_side_cannot_mint_slippage_semantics(tmp_path):
         )
 
 
-def test_direct_construction_rejects_negative_adverse_delta(tmp_path):
-    evidence = _complete_evidence(tmp_path)
-
-    with pytest.raises(
-        EmpiricalExecutionEvidenceError,
-        match="adverse odds delta is inconsistent",
-    ):
-        replace(evidence, adverse_odds_delta=Decimal("-0.01"))
-
-
-def test_direct_construction_rejects_timestamp_metric_forgery(tmp_path):
-    evidence = _complete_evidence(tmp_path)
-
-    with pytest.raises(
-        EmpiricalExecutionEvidenceError,
-        match="decision_to_submit_us does not match bound timestamps",
-    ):
-        replace(evidence, decision_to_submit_us=evidence.decision_to_submit_us + 1)
-
-
-def test_direct_construction_rejects_rejected_metric_claim(tmp_path):
+def test_wall_clock_cross_stage_inversion_is_not_reported_as_latency(tmp_path):
     ledger = _ledger(tmp_path)
-    _bind_provider(ledger)
+    _bind_provider(
+        ledger,
+        observed_at="2026-09-21T10:00:01.900000+00:00",
+    )
     _ack(
         ledger,
-        status=AcknowledgementStatus.REJECTED,
-        accepted_odds=None,
-        accepted_stake=None,
+        acknowledged_at="2026-09-21T10:00:01.800000+00:00",
     )
+
+    evidence = build_empirical_execution_evidence(
+        ledger,
+        attempt_id="attempt-1",
+    )
+
+    assert evidence.provider_evidence_observed_at > evidence.acknowledged_at
+    assert evidence.causal_timing_status == TIMING_STATUS_UNKNOWN
+    assert evidence.submit_to_provider_evidence_us is None
+    assert evidence.submit_to_acknowledgement_us is None
+
+
+def test_direct_construction_cannot_turn_wall_timestamps_into_latency(tmp_path):
+    evidence = _accepted_evidence(tmp_path)
+
+    with pytest.raises(
+        EmpiricalExecutionEvidenceError,
+        match="wall-clock timestamps cannot mint causal latency",
+    ):
+        replace(evidence, decision_to_submit_us=250_000)
+
+
+def test_direct_construction_cannot_drop_nonterminal_censoring(tmp_path):
+    ledger = _ledger(tmp_path)
     evidence = build_empirical_execution_evidence(
         ledger,
         attempt_id="attempt-1",
@@ -310,12 +358,22 @@ def test_direct_construction_rejects_rejected_metric_claim(tmp_path):
 
     with pytest.raises(
         EmpiricalExecutionEvidenceError,
-        match="rejected evidence cannot claim accepted/slippage metrics",
+        match="nonterminal attempt must be explicitly right-censored",
     ):
-        replace(evidence, accepted_odds=Decimal("2.10"))
+        replace(evidence, right_censored=False)
 
 
-def test_restart_rebuild_is_byte_identical_evidence(tmp_path):
+def test_direct_construction_rejects_slippage_forgery(tmp_path):
+    evidence = _accepted_evidence(tmp_path)
+
+    with pytest.raises(
+        EmpiricalExecutionEvidenceError,
+        match="adverse odds delta is inconsistent",
+    ):
+        replace(evidence, adverse_odds_delta=Decimal("0.01"))
+
+
+def test_restart_rebuild_is_byte_identical_for_terminal_record(tmp_path):
     ledger = _ledger(tmp_path)
     _bind_provider(ledger)
     _ack(ledger)
@@ -334,6 +392,36 @@ def test_restart_rebuild_is_byte_identical_evidence(tmp_path):
     assert second.evidence_sha256 == first.evidence_sha256
 
 
+def test_restart_rebuild_is_byte_identical_for_censored_record(tmp_path):
+    ledger = _ledger(tmp_path)
+    first = build_empirical_execution_evidence(
+        ledger,
+        attempt_id="attempt-1",
+    )
+
+    restarted = RealExecutionLedger(ledger.path)
+    second = build_empirical_execution_evidence(
+        restarted,
+        attempt_id="attempt-1",
+    )
+
+    assert second.to_dict() == first.to_dict()
+    assert second.evidence_sha256 == first.evidence_sha256
+
+
+def test_missing_attempt_is_unavailable_not_synthetic_censor_record(tmp_path):
+    ledger = RealExecutionLedger(tmp_path / "execution.jsonl")
+
+    with pytest.raises(
+        EmpiricalExecutionEvidenceUnavailable,
+        match="attempt is not present",
+    ):
+        build_empirical_execution_evidence(
+            ledger,
+            attempt_id="missing",
+        )
+
+
 def test_tampered_ledger_fails_before_empirical_projection(tmp_path):
     ledger = _ledger(tmp_path)
     _bind_provider(ledger)
@@ -347,26 +435,6 @@ def test_tampered_ledger_fails_before_empirical_projection(tmp_path):
     )
 
     with pytest.raises(ExecutionLedgerIntegrityError):
-        build_empirical_execution_evidence(
-            ledger,
-            attempt_id="attempt-1",
-        )
-
-
-def test_provider_evidence_after_acknowledgement_fails_closed(tmp_path):
-    ledger = _ledger(tmp_path)
-    ledger.bind_provider_evidence(
-        attempt_id="attempt-1",
-        evidence_id=EVIDENCE_ID,
-        observed_at="2026-09-21T10:00:01.900000+00:00",
-        source="provider-response",
-    )
-    _ack(ledger)
-
-    with pytest.raises(
-        EmpiricalExecutionEvidenceUnavailable,
-        match="provider evidence cannot postdate",
-    ):
         build_empirical_execution_evidence(
             ledger,
             attempt_id="attempt-1",

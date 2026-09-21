@@ -13,6 +13,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from decimal import Decimal, localcontext
 from enum import StrEnum
+from fractions import Fraction
 from typing import Mapping, Sequence
 
 from .learning_environment import EvidenceTruth
@@ -338,6 +339,12 @@ class PolicyEvaluationCase:
         )
         if any(value <= 0 or value > 1 for value in propensities.values()):
             raise ValueError("behavior propensity must be in (0,1]")
+        propensity_mass = sum(
+            (Fraction(value) for value in propensities.values()),
+            Fraction(0),
+        )
+        if propensity_mass != 1:
+            raise ValueError("behavior propensities must sum to exactly 1")
         if set(costs) != set(rewards):
             raise ValueError(
                 "every supported reward action requires explicit cost evidence"

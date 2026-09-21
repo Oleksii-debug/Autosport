@@ -12,6 +12,8 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlencode
 
+from . import parlayapi_provider as _parlayapi_provider
+from .domain import utc_now_iso
 from .integrity import atomic_write_json
 from .parlayapi_provider import (
     ParlayApiTableTennisProvider,
@@ -21,6 +23,7 @@ from .parlayapi_provider import (
 
 TERMS_REFERENCE = "https://parlay-api.com/terms"
 REQUEST_CONTRACT_REFERENCE = "https://api.parlay-api.com/docs"
+_PARLAY_API_ORIGIN = "https://parlay-api.com"
 _CAPTURE_PUBLISH_LOCK = threading.Lock()
 
 
@@ -33,6 +36,11 @@ class HistoricalMatchCapture:
     capture_sha256: str
     historical_window_hours: int
     historical_window_from: str
+    request_url: str
+    product_owned_request_path_verified: bool
+    product_owned_acquisition_clock_verified: bool
+    provider_response_origin_verified: bool
+    trusted_outcome_source_admissible: bool
     output_path: str
     evidence_path: str
 
@@ -52,6 +60,13 @@ def capture_historical_matches(
     The result archive is intentionally kept opaque here: this capture proves a
     response identity and runtime entitlement metadata, not quote outcomes,
     historical market coverage, retention rights, or replay-corpus readiness.
+
+    Trust is deliberately split into narrow facts.  An exact product-owned
+    request path can be recognized from the canonical provider class, origin and
+    built-in transport.  The current provider response envelope does *not* carry
+    the transport's final URL or exact wire bytes, so this layer cannot prove the
+    final response origin and therefore cannot admit the capture as a trusted
+    outcome source.
     """
 
     if provider.public_preview or not provider.api_key:
@@ -73,6 +88,8 @@ def capture_historical_matches(
         f"{provider.base_url}/v1/historical/sports/{provider.sport_key}/matches?"
         + urlencode(query_values)
     )
+    product_owned_request_path_verified = _product_owned_request_path_verified(provider)
+    product_owned_acquisition_clock_verified = _product_owned_acquisition_clock_verified(provider)
     response = provider._request(url)
     captured_at = provider.clock()
     _parse_timestamp(captured_at, field="captured_at")
@@ -107,6 +124,20 @@ def capture_historical_matches(
         raise ProviderPayloadError("historical matches response must contain strict UTF-8 JSON values") from exc
     canonical_response_sha256 = hashlib.sha256(canonical_response_bytes).hexdigest()
 
+    # HttpJsonResponse currently contains parsed JSON/status/headers only.  It
+    # does not bind the final transport URL or exact response bytes, so neither
+    # an injected transport nor even the production request path can truthfully
+    # promote response-origin or trusted-outcome authority here.
+    provider_response_origin_verified = False
+    trusted_outcome_source_admissible = False
+
+    trust_payload = {
+        "product_owned_request_path_verified": product_owned_request_path_verified,
+        "product_owned_acquisition_clock_verified": product_owned_acquisition_clock_verified,
+        "provider_response_origin_verified": provider_response_origin_verified,
+        "trusted_outcome_source_admissible": trusted_outcome_source_admissible,
+        "response_origin_limitation": "provider_response_envelope_omits_final_url_and_exact_wire_bytes",
+    }
     capture_payload = {
         "schema_version": 1,
         "kind": "parlayapi_historical_match_result_capture",
@@ -115,10 +146,12 @@ def capture_historical_matches(
         "request": {
             "date": requested_date,
             "priced_only": priced_only,
+            "url": url,
         },
         "request_contract_reference": REQUEST_CONTRACT_REFERENCE,
         "captured_at": captured_at,
         "canonical_response_sha256": canonical_response_sha256,
+        "trust": trust_payload,
         "payload": payload,
     }
     capture_sha256 = _atomic_write_capture_json(output, capture_payload)
@@ -130,6 +163,7 @@ def capture_historical_matches(
         "sport_key": provider.sport_key,
         "requested_date": requested_date,
         "priced_only": priced_only,
+        "request_url": url,
         "request_contract_reference": REQUEST_CONTRACT_REFERENCE,
         "captured_at": captured_at,
         "canonical_response_sha256": canonical_response_sha256,
@@ -138,6 +172,7 @@ def capture_historical_matches(
         "historical_window_from": window_from_raw,
         "api_version": _header(response.headers, "x-api-version"),
         "coverage_hint": _header(response.headers, "x-coverage-hint"),
+        **trust_payload,
         "provider_result_schema_parsed": False,
         "sealed_quote_outcomes_derived": False,
         "point_in_time_odds_market_coverage_verified": False,
@@ -160,9 +195,33 @@ def capture_historical_matches(
         capture_sha256=capture_sha256,
         historical_window_hours=window_hours,
         historical_window_from=window_from_raw,
+        request_url=url,
+        product_owned_request_path_verified=product_owned_request_path_verified,
+        product_owned_acquisition_clock_verified=product_owned_acquisition_clock_verified,
+        provider_response_origin_verified=provider_response_origin_verified,
+        trusted_outcome_source_admissible=trusted_outcome_source_admissible,
         output_path=str(output),
         evidence_path=str(evidence),
     )
+
+
+def _product_owned_request_path_verified(provider: ParlayApiTableTennisProvider) -> bool:
+    """Recognize only the exact product-owned initial Parlay request path.
+
+    This is intentionally narrower than "provider response origin verified".
+    The latter needs final-URL/raw-response evidence from the transport envelope.
+    """
+
+    return (
+        type(provider) is ParlayApiTableTennisProvider
+        and provider.base_url == _PARLAY_API_ORIGIN
+        and provider.sport_key == "table_tennis"
+        and provider.transport is _parlayapi_provider._default_transport
+    )
+
+
+def _product_owned_acquisition_clock_verified(provider: ParlayApiTableTennisProvider) -> bool:
+    return type(provider) is ParlayApiTableTennisProvider and provider.clock is utc_now_iso
 
 
 def _atomic_write_capture_json(path: str | Path, payload: dict[str, Any]) -> str:
@@ -302,6 +361,11 @@ def main(argv: list[str] | None = None) -> int:
         "provider_result_schema_parsed=false sealed_quote_outcomes_derived=false "
         "point_in_time_odds_market_coverage_verified=false "
         "historical_window_market_coverage_verified=false replay_corpus_ready=false"
+    )
+    print(
+        "product_owned_request_path_verified="
+        f"{str(report.product_owned_request_path_verified).lower()} "
+        "provider_response_origin_verified=false trusted_outcome_source_admissible=false"
     )
     print("licensing_or_retention_verified=false real_money_execution=false")
     print(f"capture={report.output_path}")

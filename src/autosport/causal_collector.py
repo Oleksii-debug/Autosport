@@ -20,6 +20,16 @@ for _name, _value in vars(_legacy).items():
             pass
 
 from .collector_sqlite_active_store import CollectorDeltaStore as CollectorDeltaStore
+from .collector_sqlite_bounded_storage import (
+    CollectorStorageBackpressureError,
+    CollectorStorageBudgetError,
+    install_collector_storage_budget,
+)
+
+# Keep the exact canonical class identity required by retention/desktop guards while
+# installing the optional native SQLite allocation ceiling in place.
+install_collector_storage_budget(CollectorDeltaStore)
+
 from .collector_retention import (
     CollectorCompactionResult,
     CollectorRetentionError,

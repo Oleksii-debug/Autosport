@@ -69,8 +69,36 @@ class PackagedRepairDefaultWorkspaceTests(unittest.TestCase):
     def test_explicit_workspace_remains_operator_selected(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             selected = (Path(directory) / "manual repair target").resolve()
-            observed = self._repair_workspace("--workspace", str(selected))
+            with patch.dict(
+                os.environ,
+                {"AUTOSPORT_WORKSPACE": "relative-invalid-environment-workspace"},
+                clear=True,
+            ):
+                observed = self._repair_workspace("--workspace", str(selected))
         self.assertEqual(observed, selected)
+
+    def test_invalid_workspace_environment_does_not_break_unrelated_cli_parse(self) -> None:
+        with patch.dict(
+            os.environ,
+            {"AUTOSPORT_WORKSPACE": "relative-invalid-environment-workspace"},
+            clear=True,
+        ):
+            args = build_parser().parse_args(["verify-dataset", "dataset-dir"])
+
+        self.assertEqual(args.command, "verify-dataset")
+        self.assertEqual(args.path, Path("dataset-dir"))
+
+    def test_invalid_workspace_environment_fails_closed_when_default_is_needed(self) -> None:
+        with patch.dict(
+            os.environ,
+            {"AUTOSPORT_WORKSPACE": "relative-invalid-environment-workspace"},
+            clear=True,
+        ):
+            with self.assertRaisesRegex(
+                ValueError,
+                r"AUTOSPORT_WORKSPACE must be an absolute path",
+            ):
+                self._repair_workspace()
 
 
 if __name__ == "__main__":

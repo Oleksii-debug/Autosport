@@ -162,8 +162,8 @@ def test_transient_http_states_remain_unknown(status):
     assert result.data_usability is DataUsability.UNAVAILABLE
 
 
-@pytest.mark.parametrize("code", ["HISTORICAL_LIMIT", "TIER_GATED", "CREDIT_LIMIT"])
-def test_entitlement_403_is_not_provider_unsupported(code):
+@pytest.mark.parametrize("code", ["HISTORICAL_LIMIT", "TIER_GATED", "CREDIT_LIMIT", "OTHER"])
+def test_403_error_code_cannot_mint_entitlement_authority(code):
     result = decide(obs(
         surface=Surface.HISTORICAL_ODDS,
         status_code=403,
@@ -171,13 +171,10 @@ def test_entitlement_403_is_not_provider_unsupported(code):
         error_code=code,
         oldest_row_age_seconds=None,
     ))
-    assert result.technical_support is TechnicalSupport.ENTITLEMENT_BLOCKED
-    assert result.data_usability is DataUsability.UNAVAILABLE
-
-
-def test_unknown_403_does_not_invent_entitlement_classification():
-    result = decide(obs(status_code=403, row_count=0, error_code="OTHER", oldest_row_age_seconds=None))
     assert result.technical_support is TechnicalSupport.UNKNOWN
+    assert result.data_usability is DataUsability.UNAVAILABLE
+    assert result.reason == "FORBIDDEN_UNRESOLVED"
+    assert result.source_authority_resolved is False
 
 
 def test_market_cannot_be_both_served_and_unservable():

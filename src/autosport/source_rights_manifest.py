@@ -104,8 +104,11 @@ class SourceRightsManifest:
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "manifest_id", _text(self.manifest_id, "manifest_id"))
-        if type(self.source) is not SourceIdentity:
-            raise SourceRightsManifestError("source must be exact SourceIdentity")
+        object.__setattr__(
+            self,
+            "source",
+            _canonical_source(self.source, "source"),
+        )
         object.__setattr__(
             self,
             "authorization_artifact_id",
@@ -240,8 +243,11 @@ class SourceRightsDecision:
             raise SourceRightsManifestError("code must be SourceRightsDecisionCode")
         if type(self.reason) is not SourceRightsReason:
             raise SourceRightsManifestError("reason must be SourceRightsReason")
-        if type(self.source) is not SourceIdentity:
-            raise SourceRightsManifestError("source must be exact SourceIdentity")
+        object.__setattr__(
+            self,
+            "source",
+            _canonical_source(self.source, "source"),
+        )
         if type(self.requested_purpose) is not SourcePurpose:
             raise SourceRightsManifestError("requested_purpose must be SourcePurpose")
         object.__setattr__(self, "use_at", _utc(self.use_at, "use_at"))
@@ -294,8 +300,7 @@ def evaluate_source_rights(
     or any other heuristic outside the supplied human-approved artifact record.
     """
 
-    if type(source) is not SourceIdentity:
-        raise SourceRightsManifestError("source must be exact SourceIdentity")
+    checked_source = _canonical_source(source, "source")
     if type(purpose) is not SourcePurpose:
         raise SourceRightsManifestError("purpose must be exact SourcePurpose")
     checked_use_at = _utc(use_at, "use_at")
@@ -306,7 +311,7 @@ def evaluate_source_rights(
         return SourceRightsDecision(
             code=SourceRightsDecisionCode.INVALID_EVIDENCE,
             reason=SourceRightsReason.MALFORMED_MANIFEST,
-            source=source,
+            source=checked_source,
             requested_purpose=purpose,
             use_at=checked_use_at,
             manifest_id=None,
@@ -316,7 +321,7 @@ def evaluate_source_rights(
         )
 
     common = {
-        "source": source,
+        "source": checked_source,
         "requested_purpose": purpose,
         "use_at": checked_use_at,
         "manifest_id": checked.manifest_id,
@@ -324,7 +329,7 @@ def evaluate_source_rights(
         "authorization_artifact_id": checked.authorization_artifact_id,
         "authorization_artifact_sha256": checked.authorization_artifact_sha256,
     }
-    if checked.source != source:
+    if checked.source != checked_source:
         return SourceRightsDecision(
             code=SourceRightsDecisionCode.BLOCK,
             reason=SourceRightsReason.SOURCE_IDENTITY_MISMATCH,
@@ -373,6 +378,17 @@ def _coerce_manifest(value: ManifestInput) -> SourceRightsManifest:
     if isinstance(value, Mapping):
         return SourceRightsManifest.from_dict(value)
     raise SourceRightsManifestError("manifest must be SourceRightsManifest or mapping")
+
+
+def _canonical_source(value: object, field: str) -> SourceIdentity:
+    if type(value) is not SourceIdentity:
+        raise SourceRightsManifestError(f"{field} must be exact SourceIdentity")
+    return SourceIdentity(
+        family=value.family,
+        source_id=value.source_id,
+        revision=value.revision,
+        content_sha256=value.content_sha256,
+    )
 
 
 def _text(value: object, field: str) -> str:

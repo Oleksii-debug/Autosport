@@ -181,6 +181,8 @@ class _WalkForwardFoldEvidence(Protocol):
 def derive_walk_forward_splits(
     points: Sequence[_TrainingPointEvidence],
     folds: Sequence[_WalkForwardFoldEvidence],
+    *,
+    minimum_train_size: int = 2,
 ) -> tuple[WalkForwardSplit, ...]:
     """Reconstruct exact evaluator indices from existing causal fold evidence.
 
@@ -197,6 +199,14 @@ def derive_walk_forward_splits(
     if not folds:
         raise ReproducibilityManifestError(
             "walk-forward reproducibility requires fold evidence"
+        )
+    if (
+        isinstance(minimum_train_size, bool)
+        or not isinstance(minimum_train_size, int)
+        or minimum_train_size < 1
+    ):
+        raise ReproducibilityManifestError(
+            "minimum_train_size must be a positive integer"
         )
 
     indexed_points = list(enumerate(points))
@@ -278,13 +288,31 @@ def derive_walk_forward_splits(
         raise ReproducibilityManifestError(
             "fold evidence must be unique and ordered by evaluation_index"
         )
-    expected_evaluation_indices = tuple(
-        range(evaluation_indices[0], len(ordered))
-    )
+    canonical_evaluation_indices: list[int] = []
+    for evaluation_index in range(1, len(ordered)):
+        cutoff = _instant(
+            "prior point observed_at",
+            ordered[evaluation_index - 1][1].observed_at,
+        )
+        causal_training_count = sum(
+            1
+            for _, point in ordered[:evaluation_index]
+            if _instant("point observed_at", point.observed_at) <= cutoff
+            and _instant("point target_reveal_at", point.target_reveal_at) <= cutoff
+        )
+        if causal_training_count >= minimum_train_size:
+            canonical_evaluation_indices.append(evaluation_index)
+
+    expected_evaluation_indices = tuple(canonical_evaluation_indices)
+    if not expected_evaluation_indices:
+        raise ReproducibilityManifestError(
+            "governed inputs do not produce a canonical walk-forward fold "
+            "under minimum_train_size"
+        )
     if evaluation_indices != expected_evaluation_indices:
         raise ReproducibilityManifestError(
-            "fold evidence must provide contiguous complete coverage from "
-            "the first fold through the final governed input"
+            "fold evidence must match complete canonical evaluation coverage "
+            "from the first admissible fold through the final governed input"
         )
     return tuple(split_evidence)
 

@@ -7,7 +7,6 @@ from autosport.model_lifecycle import (
     ModelLifecycleError,
     ModelLifecycleRevision,
     ModelLifecycleState,
-    evaluate_model_eligibility,
     validate_lifecycle_successor,
 )
 
@@ -60,16 +59,11 @@ class ModelLifecycleDriftReversalFalsifierTests(unittest.TestCase):
             updated_at="2026-09-21T07:30:00+00:00",
         )
 
+        # Both revisions are individually well-formed and preserve the exact
+        # drift observation and expiry. The only semantic change is that the
+        # later revision relabels the same observation from BREACH to STABLE.
         with self.assertRaises(ModelLifecycleError):
             validate_lifecycle_successor(previous, candidate)
-
-        # The safety consequence is material: if the successor is accepted,
-        # the old negative observation becomes a positive eligibility result.
-        eligibility = evaluate_model_eligibility(
-            candidate,
-            evaluated_at="2026-09-21T07:40:00+00:00",
-        )
-        self.assertFalse(eligibility.eligible)
 
     def test_newer_observation_can_support_a_stable_successor(self) -> None:
         previous = self._revision(

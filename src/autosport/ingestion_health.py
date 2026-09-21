@@ -75,6 +75,26 @@ def _reject_nonfinite_json_constant(value: str) -> None:
     raise ValueError(f"non-finite JSON constant in source health store: {value}")
 
 
+def _failure_evidence(error: BaseException) -> str:
+    """Return durable failure evidence without persisting provider-controlled text."""
+
+    if not isinstance(error, BaseException):
+        raise TypeError("error must be BaseException")
+    try:
+        exception_type = type.__getattribute__(type(error), "__name__")
+    except BaseException:
+        exception_type = "Exception"
+    if (
+        not isinstance(exception_type, str)
+        or not exception_type
+        or len(exception_type) > 96
+        or not exception_type.isascii()
+        or not exception_type.isidentifier()
+    ):
+        exception_type = "Exception"
+    return f"{exception_type}: provider failure"
+
+
 @dataclass(frozen=True, slots=True)
 class IngestionPolicy:
     max_batch_size: int = 5000
@@ -492,7 +512,7 @@ class SourceHealthStore:
             state.total_failures += 1
             state.consecutive_failures += 1
             state.last_error_at = now
-            state.last_error = f"{type(error).__name__}: {error}"
+            state.last_error = _failure_evidence(error)
             state.quality_flags = ()
             state.status = "failed"
             self._put(state, recorded_at=now)

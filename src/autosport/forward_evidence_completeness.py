@@ -830,8 +830,18 @@ def verify_campaign(evidence: CampaignEvidence) -> VerificationResult:
     opportunity_by_receipt = {
         item.source_receipt_id: item for item in opportunities
     }
+    authoritative_by_receipt: dict[str, AuthoritativeSourceReceipt] = {}
+    authoritative_conflict = False
     for receipt in evidence.authoritative_receipts:
+        previous = authoritative_by_receipt.get(receipt.receipt_id)
+        if previous is not None and previous != receipt:
+            authoritative_conflict = True
+        else:
+            authoritative_by_receipt[receipt.receipt_id] = receipt
+
         if receipt.campaign_id != protocol.campaign_id:
+            codes.append(VerificationCode.COHORT_OMISSION_DETECTED)
+            details.setdefault("foreign_authoritative_receipt", receipt.receipt_id)
             continue
         item = opportunity_by_receipt.get(receipt.receipt_id)
         if (
@@ -842,6 +852,28 @@ def verify_campaign(evidence: CampaignEvidence) -> VerificationResult:
         ):
             codes.append(VerificationCode.COHORT_OMISSION_DETECTED)
             details.setdefault("omitted_source_receipt", receipt.receipt_id)
+
+    if authoritative_conflict:
+        codes.append(VerificationCode.EVIDENCE_IDENTITY_CONFLICT)
+
+    # Coverage is deliberately bidirectional.  The supplied authoritative
+    # inventory is still only an assertion until a product-owned inventory
+    # commitment is resolved upstream, but it cannot omit or rebind any
+    # opportunity that this structural verifier is asked to certify.
+    for item in opportunities:
+        receipt = authoritative_by_receipt.get(item.source_receipt_id)
+        if (
+            receipt is None
+            or receipt.campaign_id != protocol.campaign_id
+            or receipt.opportunity_id != item.opportunity_id
+            or receipt.receipt_sha256 != item.source_receipt_sha256
+            or receipt.universe_rule_result is not item.universe_rule_result
+        ):
+            codes.append(VerificationCode.COHORT_OMISSION_DETECTED)
+            details.setdefault(
+                "missing_authoritative_receipt",
+                item.source_receipt_id,
+            )
 
     roots, root_conflict = _dedupe_roots(evidence.cohort_roots)
     if root_conflict:
@@ -877,11 +909,17 @@ def verify_campaign(evidence: CampaignEvidence) -> VerificationResult:
         codes.append(VerificationCode.COHORT_OPEN)
     elif len(close_ids) != 1:
         codes.append(VerificationCode.EVIDENCE_IDENTITY_CONFLICT)
-    elif opportunities:
+    else:
         close = evidence.closes[-1]
         if close.close_state is CampaignCloseState.CLOSE_PENDING:
             codes.append(VerificationCode.COHORT_CLOSE_PENDING)
-        if (
+        if not opportunities:
+            # A close envelope cannot manufacture terminal membership when no
+            # candidate/root evidence exists.  This also prevents a forged
+            # non-empty final count from falling through to PASS.
+            codes.append(VerificationCode.COHORT_ROOT_MISMATCH)
+            details.setdefault("empty_campaign_close", close.close_sha256)
+        elif (
             close.campaign_id != protocol.campaign_id
             or close.protocol_sha256 != protocol.protocol_sha256
             or close.terminal_cohort_root_sha256 != terminal_root_sha256
@@ -897,9 +935,31 @@ def verify_campaign(evidence: CampaignEvidence) -> VerificationResult:
     if boundary_conflict:
         codes.append(VerificationCode.TEMPORAL_ELIGIBILITY_UNKNOWN)
 
+    superseded_boundary_ids = {
+        receipt.supersedes_receipt_id
+        for receipt in evidence.reveal_boundaries
+        if receipt.supersedes_receipt_id is not None
+    }
+
     for item in opportunities:
         boundary = boundary_by_id.get(item.reveal_boundary_receipt_id)
         if boundary is None:
+            codes.append(VerificationCode.TEMPORAL_ELIGIBILITY_UNKNOWN)
+            continue
+        if boundary.campaign_id != protocol.campaign_id:
+            # Receipt identifiers are not globally authoritative; a boundary
+            # from another campaign cannot authorize this campaign merely
+            # because its timing happens to fit.
+            codes.append(VerificationCode.TEMPORAL_ELIGIBILITY_UNKNOWN)
+            continue
+        if (
+            item.reveal_boundary_receipt_id in superseded_boundary_ids
+            or boundary.supersedes_receipt_id is not None
+        ):
+            # The current contract has no product-owned "correction available
+            # at" witness.  Resolving a historical id to a later correction
+            # could otherwise retroactively turn UNKNOWN into PASS.  Until that
+            # causal authority exists, every corrected boundary is fail-closed.
             codes.append(VerificationCode.TEMPORAL_ELIGIBILITY_UNKNOWN)
             continue
         candidate_roots = [

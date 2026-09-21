@@ -3,12 +3,12 @@ import json
 
 import pytest
 
+import autosport.betfair_account_readonly as betfair_account_readonly
 from autosport.bookmaker_capability import (
     BookmakerCapability,
     BookmakerCapabilityFact,
     BookmakerCapabilityProfile,
     BookmakerCapabilityState,
-    UnknownBookmakerCapability,
 )
 from autosport.betfair_account_readonly import (
     ADAPTER_ID,
@@ -45,12 +45,27 @@ class FakeTransport:
         return self.payload
 
 
+class FakeNetworkResponse:
+    def __init__(self, payload: bytes) -> None:
+        self.payload = payload
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        return False
+
+    def read(self, max_bytes: int) -> bytes:
+        return self.payload[:max_bytes]
+
+
 def _profile(
     *,
     live_quotes: BookmakerCapabilityState = BookmakerCapabilityState.SUPPORTED,
     place_bet: BookmakerCapabilityState = BookmakerCapabilityState.UNKNOWN,
     version: int = 1,
     source_hash: str = "a" * 64,
+    account_ref: str = "acct-1",
 ) -> BookmakerCapabilityProfile:
     facts = [
         BookmakerCapabilityFact(
@@ -67,7 +82,7 @@ def _profile(
         )
     return BookmakerCapabilityProfile(
         venue_id="betfair-global",
-        account_id="acct-1",
+        account_id=account_ref,
         adapter_id=ADAPTER_ID,
         adapter_version=ADAPTER_VERSION,
         profile_version=version,
@@ -102,6 +117,38 @@ def _observation(*, delayed: bool) -> BetfairMarketBookDelayObservation:
     return read_market_book_delay(client, "1.234")
 
 
+def _canonical_network_observation(
+    monkeypatch,
+    *,
+    delayed: bool = False,
+    account_ref: str = "configured-account-B",
+) -> BetfairMarketBookDelayObservation:
+    payload = json.dumps(
+        {
+            "jsonrpc": "2.0",
+            "result": [
+                {
+                    "marketId": "1.234",
+                    "isMarketDataDelayed": delayed,
+                }
+            ],
+            "id": 1,
+        },
+        separators=(",", ":"),
+    ).encode("utf-8")
+    monkeypatch.setattr(
+        betfair_account_readonly,
+        "urlopen",
+        lambda request, timeout: FakeNetworkResponse(payload),
+    )
+    client = BetfairReadOnlyClient(
+        BetfairSessionCredentials("app-secret-A", "session-secret-A"),
+        venue_id="betfair-global",
+        account_id=account_ref,
+    )
+    return read_market_book_delay(client, "1.234")
+
+
 def _delayed_evidence(
     *,
     profile: BookmakerCapabilityProfile | None = None,
@@ -121,7 +168,7 @@ def _direct_fresh_evidence(
     return BetfairCapabilityFreshnessEvidence(
         profile_id=profile.profile_id,
         venue_id=profile.venue_id,
-        account_id=profile.account_id,
+        configured_account_ref=profile.account_id,
         adapter_id=profile.adapter_id,
         adapter_version=profile.adapter_version,
         profile_version=profile.profile_version,
@@ -198,7 +245,7 @@ def test_marketbook_evidence_cannot_assert_stream_live_even_by_direct_constructo
         BetfairCapabilityFreshnessEvidence(
             profile_id=profile.profile_id,
             venue_id=profile.venue_id,
-            account_id=profile.account_id,
+            configured_account_ref=profile.account_id,
             adapter_id=profile.adapter_id,
             adapter_version=profile.adapter_version,
             profile_version=profile.profile_version,
@@ -228,7 +275,7 @@ def test_direct_caller_constructed_marketbook_observation_cannot_issue_freshness
     profile = _profile()
     forged = BetfairMarketBookDelayObservation(
         venue_id=profile.venue_id,
-        account_id=profile.account_id,
+        configured_account_ref=profile.account_id,
         adapter_id=profile.adapter_id,
         adapter_version=profile.adapter_version,
         market_id="1.234",
@@ -315,12 +362,34 @@ def test_subminute_policy_refuses_more_than_sixty_seconds_before_authority_use()
         )
 
 
-def test_missing_live_quote_capability_still_fails_closed():
-    profile = _profile(live_quotes=BookmakerCapabilityState.UNKNOWN)
-    evidence = _delayed_evidence(profile=profile)
+def test_caller_profile_live_quote_state_is_not_positive_freshness_authority(monkeypatch):
+    profile = _profile(
+        live_quotes=BookmakerCapabilityState.UNKNOWN,
+        account_ref="configured-account-B",
+    )
+    observation = _canonical_network_observation(
+        monkeypatch,
+        account_ref="configured-account-B",
+    )
+    evidence = BetfairCapabilityFreshnessEvidence.from_market_book_observation(
+        profile,
+        observation,
+        application_key_class=BetfairApplicationKeyClass.LIVE,
+    )
 
-    with pytest.raises(UnknownBookmakerCapability, match="live_quotes_read"):
-        _require_live(evidence, profile)
+    _require_live(
+        evidence,
+        profile,
+        as_of=evidence.observed_at,
+    )
+    assert evidence.configured_account_ref == "configured-account-B"
+    assert evidence.proves_provider_account_identity is False
+    canonical = evidence.to_canonical_dict()
+    assert canonical["configured_account_ref"] == "configured-account-B"
+    assert "account_id" not in canonical
+    fields = set(BetfairCapabilityFreshnessEvidence.__dataclass_fields__)
+    assert "configured_account_ref" in fields
+    assert "account_id" not in fields
 
 
 def test_profile_identity_drift_fails_closed():
@@ -330,7 +399,7 @@ def test_profile_identity_drift_fails_closed():
 
     with pytest.raises(
         BetfairCapabilityFreshnessError,
-        match="does not match capability profile identity",
+        match="does not match configured capability profile scope",
     ):
         _require_live(evidence, changed)
 
@@ -438,6 +507,8 @@ def test_delayed_evidence_identity_is_deterministic_and_secret_free():
 
     assert one.evidence_id == two.evidence_id
     fields = set(BetfairCapabilityFreshnessEvidence.__dataclass_fields__)
+    assert "configured_account_ref" in fields
+    assert "account_id" not in fields
     assert "application_key" not in fields
     assert "session_token" not in fields
     assert "credentials" not in fields

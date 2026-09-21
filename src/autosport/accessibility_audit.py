@@ -168,10 +168,19 @@ def summarize_description(
         automation_id = widget.automation_id
         if automation_id not in expected_ids:
             continue
+        automation_id = int(automation_id)
+        if automation_id in controls:
+            first_path = controls[automation_id]["path"]
+            duplicate_path = getattr(widget, "path", None)
+            failures.append(
+                f"automation_id={automation_id}: duplicate critical control "
+                f"paths={first_path},{duplicate_path}"
+            )
+            continue
         gap_names = sorted(_enum_name(gap) for gap in widget.gaps if _enum_name(gap))
         pattern_names = sorted(_enum_name(pattern) for pattern in widget.patterns if _enum_name(pattern))
         role_name = _enum_name(widget.role)
-        controls[int(automation_id)] = {
+        controls[automation_id] = {
             "path": widget.path,
             "tk_class": widget.tk_class,
             "role": role_name,
@@ -183,7 +192,7 @@ def summarize_description(
         }
         if not widget.name:
             failures.append(f"automation_id={automation_id}: missing accessible name")
-        expected_role = _EXPECTED_ROLES[int(automation_id)]
+        expected_role = _EXPECTED_ROLES[automation_id]
         if role_name != expected_role:
             actual_role = role_name if role_name is not None else "NONE"
             failures.append(
@@ -192,13 +201,13 @@ def summarize_description(
         blockers = sorted(set(gap_names) & _BLOCKING_GAPS)
         if blockers:
             failures.append(f"automation_id={automation_id}: blocking gaps={','.join(blockers)}")
-        required = _REQUIRED_PATTERNS[int(automation_id)]
+        required = _REQUIRED_PATTERNS[automation_id]
         missing_patterns = sorted(required - set(pattern_names))
         if missing_patterns:
             failures.append(
                 f"automation_id={automation_id}: missing UIA patterns={','.join(missing_patterns)}"
             )
-        if int(automation_id) in _ROW_CONTROLS and not widget.answers_rows:
+        if automation_id in _ROW_CONTROLS and not widget.answers_rows:
             failures.append(f"automation_id={automation_id}: list rows are not exposed through UIA")
 
     missing_ids = sorted(expected_ids - set(controls))

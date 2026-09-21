@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib
 from pathlib import Path
+import sys
 from types import SimpleNamespace
 
 import pytest
@@ -146,3 +147,111 @@ def test_runtime_repair_reload_reinstalls_class_dispatch_seal(
         )
 
     assert dispatched is False
+
+
+def test_rewriting_legacy_trusted_snapshot_cannot_authorize_forged_record(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    ledger, snapshot, _ = _canonical_holdout(tmp_path, monkeypatch)
+    dispatched = False
+
+    def forged_record(self, snapshot_id: str):
+        nonlocal dispatched
+        dispatched = True
+        return SimpleNamespace(
+            snapshot_id=snapshot_id,
+            manifest_sha256=snapshot.manifest_sha256,
+            source_identity=snapshot.source_identity,
+            license_identity=snapshot.license_identity,
+            causal_cutoff=snapshot.causal_cutoff,
+            available_at=snapshot.available_at_utc,
+        )
+
+    # Regression for review 5753770344: a caller-visible expected-value dict must
+    # not be the trust root.  Creating/rewriting the old name has no effect because
+    # the live expected identities are closure-owned.
+    monkeypatch.setattr(
+        seal,
+        "_TRUSTED_LINEAGE_NAMESPACE",
+        {"record": forged_record},
+        raising=False,
+    )
+    monkeypatch.setattr(DatasetSnapshotLineageAuthority, "record", forged_record)
+
+    with pytest.raises(
+        evidence.PointInTimeEvidenceError,
+        match="trusted DatasetSnapshotLineageAuthority class implementation changed: record",
+    ):
+        ledger.freshness_id(
+            dataset_snapshot=snapshot,
+            confirmation_trial_family_id="family-v1",
+        )
+
+    assert dispatched is False
+
+
+def test_rewriting_legacy_pristine_delegate_does_not_redirect_dispatch(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    ledger, snapshot, _ = _canonical_holdout(tmp_path, monkeypatch)
+    dispatched = False
+
+    def forged_resolve(*args, **kwargs):
+        nonlocal dispatched
+        dispatched = True
+        return snapshot
+
+    monkeypatch.setattr(
+        seal,
+        "_PRISTINE_RESOLVE_CANONICAL_SNAPSHOT",
+        forged_resolve,
+        raising=False,
+    )
+
+    with pytest.raises(evidence.PointInTimeEvidenceError):
+        ledger.freshness_id(
+            dataset_snapshot=snapshot,
+            confirmation_trial_family_id="family-v1",
+        )
+
+    assert dispatched is False
+
+
+def test_removing_public_reload_finder_does_not_drop_seal(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    ledger, snapshot, _ = _canonical_holdout(tmp_path, monkeypatch)
+    canonical = seal._CANONICAL_REPAIR_RELOAD_FINDER
+    original_meta_path = list(sys.meta_path)
+    try:
+        sys.meta_path[:] = [finder for finder in sys.meta_path if finder is not canonical]
+        reloaded = importlib.reload(repair)
+        assert reloaded._resolve_canonical_snapshot is seal._sealed_resolve_canonical_snapshot
+        assert (
+            reloaded._require_exact_lineage_authority
+            is seal._sealed_require_exact_lineage_authority
+        )
+
+        dispatched = False
+
+        def forged_record(self, snapshot_id: str):
+            nonlocal dispatched
+            dispatched = True
+            raise AssertionError("backup reload seal must reject forged record")
+
+        monkeypatch.setattr(DatasetSnapshotLineageAuthority, "record", forged_record)
+        with pytest.raises(
+            evidence.PointInTimeEvidenceError,
+            match="trusted DatasetSnapshotLineageAuthority class implementation changed: record",
+        ):
+            ledger.freshness_id(
+                dataset_snapshot=snapshot,
+                confirmation_trial_family_id="family-v1",
+            )
+        assert dispatched is False
+    finally:
+        sys.meta_path[:] = original_meta_path
+        seal._install_reload_finders()

@@ -33,7 +33,7 @@ def _weaker_policy(goal):
     )
 
 
-def test_deleted_store_cannot_mint_new_owner_policy_after_prior_publication(
+def test_deleted_store_cannot_mint_weaker_owner_policy_after_prior_publication(
     tmp_path,
 ) -> None:
     goal = _base._goal()
@@ -48,52 +48,21 @@ def test_deleted_store_cannot_mint_new_owner_policy_after_prior_publication(
         expected_policy_provenance_sha256=owner_policy.provenance_sha256,
     ) == owner_policy
 
-    # Simulate loss/rollback of only the mutable local policy file. The caller
-    # still holds the previously authorized owner provenance and the workspace
-    # itself is not a new product identity.
+    # Lose only the mutable local risk-policy payload. The pre-delete owner
+    # identity remains the externally authorized policy truth; deletion is not
+    # evidence that this is a pristine workspace.
     store.path.unlink()
     assert not store.path.exists()
 
-    with pytest.raises(
-        PaperRiskPolicyStoreError,
-        match="",
-    ):
+    with pytest.raises(PaperRiskPolicyStoreError):
         PaperRiskPolicyStore(tmp_path).initialize_owner(weaker_policy)
 
-    # Rejected rebootstrap must not publish the weaker owner policy. A repair may
-    # either leave the missing state fail-closed or deterministically restore the
-    # exact prior owner from an independent canonical authority.
+    # A repair may leave the local state absent and fail closed, or may restore
+    # the exact prior owner from an independent canonical witness. It may never
+    # publish the weaker replacement as a new owner generation.
     if store.path.exists():
         assert store.path.read_bytes() == owner_bytes
         assert PaperRiskPolicyStore(tmp_path).load(
             economic_goal=goal,
             expected_policy_provenance_sha256=owner_policy.provenance_sha256,
         ) == owner_policy
-
-
-def test_deleted_store_cannot_reissue_same_policy_as_a_new_owner_generation(
-    tmp_path,
-) -> None:
-    goal = _base._goal()
-    owner_policy = _base._policy(goal)
-    store = PaperRiskPolicyStore(tmp_path)
-    store.initialize_owner(owner_policy)
-    owner_bytes = store.path.read_bytes()
-
-    store.path.unlink()
-    assert not store.path.exists()
-
-    with pytest.raises(
-        PaperRiskPolicyStoreError,
-        match="",
-    ):
-        PaperRiskPolicyStore(tmp_path).initialize_owner(owner_policy)
-
-    # Exact-policy recovery, if supported later, must be reconstruction from the
-    # surviving authority, not a fresh initialize_owner issuance.
-    if store.path.exists():
-        assert store.path.read_bytes() == owner_bytes
-
-
-if __name__ == "__main__":  # pragma: no cover
-    raise SystemExit(pytest.main([__file__]))

@@ -1,15 +1,11 @@
-"""Fail-closed live decision disposition evidence.
+"""Fail-closed live decision disposition evidence with product policy re-resolution.
 
-This module deliberately separates evidence eligibility from execution authority.
-A disposition may say that a decision is ACTIONABLE, but that means only that the
-strategy's declared evidence predicates are positively proven for the exact bound
-market/evidence bundle before expiry.  It never authorizes a provider write,
-real-money execution, settlement, payout, or learning outcome.
-
-The contract is persistence-ready: canonical JSON, duplicate-key rejection,
-strict schema reconstruction, and a deterministic SHA-256 disposition identity
-allow a durable store to reopen exactly the same evidence after restart without
-reinterpreting UNKNOWN as NO_BET.
+A serialized disposition is evidence, never execution authority.  Positive policy
+outcomes (ACTIONABLE / NO_BET_POLICY) must carry a reference derived from the
+canonical economic Decision Ledger.  Any product consumer must re-resolve that
+reference against the product-owned EconomicDecisionAuthority before treating the
+policy outcome as verified.  Provider writes, real-money execution, settlement,
+payout and learning authority remain out of scope.
 """
 
 from __future__ import annotations
@@ -21,10 +17,21 @@ from datetime import datetime, timezone
 from enum import StrEnum
 from typing import Final
 
+from .decision_ledger import (
+    MATERIAL_ACTION_ID_PAYLOAD_KEY,
+    DecisionLedgerIntegrityError,
+    DecisionRecord,
+    EconomicDecisionAuthority,
+    JsonlDecisionLedger,
+)
+from .economic_goal_provenance import provenance_for
+
 
 SCHEMA: Final = "autosport.live_decision_disposition"
-SCHEMA_VERSION: Final = 1
+SCHEMA_VERSION: Final = 2
 _HEX: Final = frozenset("0123456789abcdef")
+_POSITIVE_POLICY_DISPOSITIONS: Final = frozenset({"ACTIONABLE", "NO_BET_POLICY"})
+_ZERO_PLAN_ACTIONS: Final = frozenset({"wait", "zero"})
 
 
 class LiveDecisionDispositionError(ValueError):
@@ -88,6 +95,19 @@ def _canonical_utc(value: object, field: str) -> datetime:
             f"{field} must use canonical UTC microsecond Z form"
         )
     return utc
+
+
+def _normalize_utc(value: object, field: str) -> str:
+    text = _text(value, field)
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise LiveDecisionDispositionError(f"{field} must be timezone-aware ISO-8601") from exc
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        raise LiveDecisionDispositionError(f"{field} must be timezone-aware ISO-8601")
+    return parsed.astimezone(timezone.utc).isoformat(timespec="microseconds").replace(
+        "+00:00", "Z"
+    )
 
 
 def _canonical_json(value: object) -> str:
@@ -261,6 +281,208 @@ class PredicateEvidence:
 
 
 @dataclass(frozen=True, slots=True)
+class ProductPolicyAuthorityBinding:
+    """Reference to one product-issued economic decision; never authority by itself."""
+
+    economic_decision_id: str
+    economic_decision_sha256: str
+    record_context_sha256: str
+    decision_context_sha256: str
+    market_state_sha256: str
+    intent_provenance_sha256: str
+    economic_goal_contract_sha256: str
+    risk_policy_sha256: str
+    plan_sha256: str
+    plan_action: str
+    policy_evaluated_at: str
+    has_positive_execution_stake: bool
+
+    def __post_init__(self) -> None:
+        _text(self.economic_decision_id, "economic_decision_id")
+        for field in (
+            "economic_decision_sha256",
+            "record_context_sha256",
+            "decision_context_sha256",
+            "market_state_sha256",
+            "intent_provenance_sha256",
+            "economic_goal_contract_sha256",
+            "risk_policy_sha256",
+            "plan_sha256",
+        ):
+            _sha256(getattr(self, field), field)
+        _text(self.plan_action, "plan_action")
+        _canonical_utc(self.policy_evaluated_at, "policy_evaluated_at")
+        if type(self.has_positive_execution_stake) is not bool:
+            raise LiveDecisionDispositionError(
+                "has_positive_execution_stake must be bool"
+            )
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "economic_decision_id": self.economic_decision_id,
+            "economic_decision_sha256": self.economic_decision_sha256,
+            "record_context_sha256": self.record_context_sha256,
+            "decision_context_sha256": self.decision_context_sha256,
+            "market_state_sha256": self.market_state_sha256,
+            "intent_provenance_sha256": self.intent_provenance_sha256,
+            "economic_goal_contract_sha256": self.economic_goal_contract_sha256,
+            "risk_policy_sha256": self.risk_policy_sha256,
+            "plan_sha256": self.plan_sha256,
+            "plan_action": self.plan_action,
+            "policy_evaluated_at": self.policy_evaluated_at,
+            "has_positive_execution_stake": self.has_positive_execution_stake,
+        }
+
+    @classmethod
+    def from_dict(cls, raw: object) -> "ProductPolicyAuthorityBinding":
+        fields = {
+            "economic_decision_id",
+            "economic_decision_sha256",
+            "record_context_sha256",
+            "decision_context_sha256",
+            "market_state_sha256",
+            "intent_provenance_sha256",
+            "economic_goal_contract_sha256",
+            "risk_policy_sha256",
+            "plan_sha256",
+            "plan_action",
+            "policy_evaluated_at",
+            "has_positive_execution_stake",
+        }
+        if type(raw) is not dict or set(raw) != fields:
+            raise LiveDecisionDispositionError("product policy binding fields mismatch")
+        try:
+            value = cls(**raw)
+        except (TypeError, ValueError) as exc:
+            if isinstance(exc, LiveDecisionDispositionError):
+                raise
+            raise LiveDecisionDispositionError("product policy binding is invalid") from exc
+        if value.to_dict() != raw:
+            raise LiveDecisionDispositionError("product policy binding is not canonical")
+        return value
+
+
+def _resolve_product_policy_binding(
+    *,
+    ledger: JsonlDecisionLedger,
+    authority: EconomicDecisionAuthority,
+    decision_id: str,
+) -> tuple[DecisionRecord, ProductPolicyAuthorityBinding, str]:
+    if not isinstance(ledger, JsonlDecisionLedger):
+        raise TypeError("ledger must be JsonlDecisionLedger")
+    if not isinstance(authority, EconomicDecisionAuthority):
+        raise TypeError("authority must be EconomicDecisionAuthority")
+    _text(decision_id, "decision_id")
+
+    try:
+        record = ledger.verified_economic_decision(
+            decision_id,
+            authority.contract,
+            risk_policy=authority.risk_policy,
+        )
+    except (DecisionLedgerIntegrityError, TypeError, ValueError) as exc:
+        raise LiveDecisionDispositionError(
+            "product policy economic decision cannot be re-resolved"
+        ) from exc
+
+    detached = record.to_dict()
+    payload = detached.get("payload")
+    if type(payload) is not dict:
+        raise LiveDecisionDispositionError("product policy DecisionRecord payload is invalid")
+    if (
+        payload.get("schema") != "autosport.persistent_live_decision"
+        or payload.get("schema_version") != 2
+    ):
+        raise LiveDecisionDispositionError(
+            "product policy authority must be a canonical persistent live decision"
+        )
+    if payload.get(MATERIAL_ACTION_ID_PAYLOAD_KEY) != decision_id:
+        raise LiveDecisionDispositionError(
+            "product policy material action identity mismatch"
+        )
+    if record.decision_id != decision_id:
+        raise LiveDecisionDispositionError("product policy decision identity mismatch")
+
+    from .portfolio_plan import PortfolioPlan
+
+    try:
+        plan = PortfolioPlan.from_dict(payload.get("plan"))
+    except (TypeError, ValueError) as exc:
+        raise LiveDecisionDispositionError(
+            "product policy PortfolioPlan cannot be re-resolved"
+        ) from exc
+
+    plan_sha256 = _sha256(payload.get("plan_sha256"), "plan_sha256")
+    if plan.plan_sha256 != plan_sha256:
+        raise LiveDecisionDispositionError("product policy plan identity mismatch")
+    expected_action = f"LIVE_{plan.action.value.upper()}"
+    if record.action != expected_action:
+        raise LiveDecisionDispositionError("product policy action/plan mismatch")
+
+    decision_context_sha256 = _sha256(
+        payload.get("decision_context_sha256"), "decision_context_sha256"
+    )
+    market_state_sha256 = _sha256(
+        payload.get("market_state_sha256"), "market_state_sha256"
+    )
+    intent_provenance_sha256 = _sha256(
+        payload.get("intent_provenance_sha256"), "intent_provenance_sha256"
+    )
+    record_context_sha256 = _sha256(record.context_hash, "record_context_sha256")
+
+    contract_sha256 = provenance_for(authority.contract).contract_sha256
+    if plan.economic_goal_contract_sha256 != contract_sha256:
+        raise LiveDecisionDispositionError(
+            "product policy plan economic-goal authority mismatch"
+        )
+    if plan.risk_policy_sha256 != authority.risk_policy.provenance_sha256:
+        raise LiveDecisionDispositionError(
+            "product policy plan risk-policy authority mismatch"
+        )
+
+    policy_evaluated_at = _normalize_utc(record.observed_ts, "record observed_ts")
+    if _normalize_utc(plan.decision_ts, "plan decision_ts") != policy_evaluated_at:
+        raise LiveDecisionDispositionError(
+            "product policy record/plan decision time mismatch"
+        )
+    strategy_version = _text(
+        payload.get("intent_strategy_version_id"),
+        "intent_strategy_version_id",
+    )
+    binding = ProductPolicyAuthorityBinding(
+        economic_decision_id=decision_id,
+        economic_decision_sha256=_digest(detached),
+        record_context_sha256=record_context_sha256,
+        decision_context_sha256=decision_context_sha256,
+        market_state_sha256=market_state_sha256,
+        intent_provenance_sha256=intent_provenance_sha256,
+        economic_goal_contract_sha256=contract_sha256,
+        risk_policy_sha256=authority.risk_policy.provenance_sha256,
+        plan_sha256=plan_sha256,
+        plan_action=plan.action.value,
+        policy_evaluated_at=policy_evaluated_at,
+        has_positive_execution_stake=any(stake > 0 for stake in plan.stakes),
+    )
+    return record, binding, strategy_version
+
+
+def bind_product_policy_authority(
+    *,
+    ledger: JsonlDecisionLedger,
+    authority: EconomicDecisionAuthority,
+    decision_id: str,
+) -> ProductPolicyAuthorityBinding:
+    """Derive a reference only from one verified product-owned economic record."""
+
+    _, binding, _ = _resolve_product_policy_binding(
+        ledger=ledger,
+        authority=authority,
+        decision_id=decision_id,
+    )
+    return binding
+
+
+@dataclass(frozen=True, slots=True)
 class LiveDecisionDisposition:
     decision_id: str
     strategy_id: str
@@ -273,6 +495,7 @@ class LiveDecisionDisposition:
     disposition: Disposition
     reason_code: str
     predicates: tuple[PredicateEvidence, ...]
+    product_policy_authority: ProductPolicyAuthorityBinding | None = None
     predecessor_disposition_id: str | None = None
     reevaluation_trigger: ReevaluationTrigger | None = None
     schema_version: int = SCHEMA_VERSION
@@ -323,6 +546,26 @@ class LiveDecisionDisposition:
         unknown = sum(item.truth is PredicateTruth.UNKNOWN for item in values)
         failed = sum(item.truth is PredicateTruth.FAILED for item in values)
         all_proven = all(item.truth is PredicateTruth.PROVEN for item in values)
+        positive_policy = self.disposition.value in _POSITIVE_POLICY_DISPOSITIONS
+
+        if positive_policy:
+            binding = self.product_policy_authority
+            if not isinstance(binding, ProductPolicyAuthorityBinding):
+                raise LiveDecisionDispositionError(
+                    f"{self.disposition.value} requires product-owned economic policy authority"
+                )
+            if binding.economic_decision_id != self.decision_id:
+                raise LiveDecisionDispositionError(
+                    "product policy authority decision_id mismatch"
+                )
+            if binding.policy_evaluated_at != self.decision_at:
+                raise LiveDecisionDispositionError(
+                    "product policy authority decision time mismatch"
+                )
+        elif self.product_policy_authority is not None:
+            raise LiveDecisionDispositionError(
+                "pre-policy disposition cannot claim product policy authority"
+            )
 
         if self.disposition is Disposition.ACTIONABLE:
             if evaluated_at >= expires_at:
@@ -331,12 +574,28 @@ class LiveDecisionDisposition:
                 raise LiveDecisionDispositionError(
                     "ACTIONABLE requires every required predicate to be PROVEN"
                 )
+            assert self.product_policy_authority is not None
+            if (
+                not self.product_policy_authority.has_positive_execution_stake
+                or self.product_policy_authority.plan_action in _ZERO_PLAN_ACTIONS
+            ):
+                raise LiveDecisionDispositionError(
+                    "ACTIONABLE requires a positive product-owned portfolio plan"
+                )
         elif self.disposition is Disposition.NO_BET_POLICY:
             if evaluated_at >= expires_at:
                 raise LiveDecisionDispositionError("NO_BET_POLICY disposition is expired")
             if not all_proven:
                 raise LiveDecisionDispositionError(
                     "NO_BET_POLICY requires every required predicate to be PROVEN"
+                )
+            assert self.product_policy_authority is not None
+            if (
+                self.product_policy_authority.has_positive_execution_stake
+                or self.product_policy_authority.plan_action not in _ZERO_PLAN_ACTIONS
+            ):
+                raise LiveDecisionDispositionError(
+                    "NO_BET_POLICY requires a zero-stake product-owned portfolio plan"
                 )
         elif self.disposition is Disposition.WAIT_EVIDENCE:
             if evaluated_at >= expires_at:
@@ -396,6 +655,11 @@ class LiveDecisionDisposition:
             "disposition": self.disposition.value,
             "reason_code": self.reason_code,
             "predicates": [item.to_dict() for item in self.predicates],
+            "product_policy_authority": (
+                None
+                if self.product_policy_authority is None
+                else self.product_policy_authority.to_dict()
+            ),
             "predecessor_disposition_id": self.predecessor_disposition_id,
             "reevaluation_trigger": (
                 self.reevaluation_trigger.value
@@ -435,6 +699,7 @@ class LiveDecisionDisposition:
             "disposition",
             "reason_code",
             "predicates",
+            "product_policy_authority",
             "predecessor_disposition_id",
             "reevaluation_trigger",
             "execution_authorized",
@@ -449,6 +714,7 @@ class LiveDecisionDisposition:
         if type(raw["predicates"]) is not list:
             raise LiveDecisionDispositionError("predicates must be a list")
         trigger_raw = raw["reevaluation_trigger"]
+        binding_raw = raw["product_policy_authority"]
         try:
             value = cls(
                 decision_id=raw["decision_id"],
@@ -462,6 +728,11 @@ class LiveDecisionDisposition:
                 disposition=Disposition(raw["disposition"]),
                 reason_code=raw["reason_code"],
                 predicates=tuple(PredicateEvidence.from_dict(item) for item in raw["predicates"]),
+                product_policy_authority=(
+                    None
+                    if binding_raw is None
+                    else ProductPolicyAuthorityBinding.from_dict(binding_raw)
+                ),
                 predecessor_disposition_id=raw["predecessor_disposition_id"],
                 reevaluation_trigger=(
                     ReevaluationTrigger(trigger_raw) if trigger_raw is not None else None
@@ -499,3 +770,66 @@ class LiveDecisionDisposition:
         except json.JSONDecodeError as exc:
             raise LiveDecisionDispositionError("disposition JSON is invalid") from exc
         return cls.from_dict(parsed)
+
+
+def verify_product_policy_authority(
+    disposition: LiveDecisionDisposition,
+    *,
+    ledger: JsonlDecisionLedger,
+    authority: EconomicDecisionAuthority,
+) -> DecisionRecord:
+    """Re-resolve one positive disposition against current product-owned authority.
+
+    The serialized binding is only a reference.  This function is the admission
+    boundary for product consumers: it re-reads the durable economic DecisionRecord,
+    re-verifies the EconomicGoalContract and PaperRiskPolicy, reconstructs the
+    PortfolioPlan, and compares the exact binding.  A caller-supplied digest or
+    ``PROVEN`` predicate can never substitute for this re-resolution.
+    """
+
+    if not isinstance(disposition, LiveDecisionDisposition):
+        raise TypeError("disposition must be LiveDecisionDisposition")
+    if disposition.disposition not in {
+        Disposition.ACTIONABLE,
+        Disposition.NO_BET_POLICY,
+    }:
+        raise LiveDecisionDispositionError(
+            "pre-policy disposition has no product policy authority to verify"
+        )
+    stored = disposition.product_policy_authority
+    if not isinstance(stored, ProductPolicyAuthorityBinding):
+        raise LiveDecisionDispositionError(
+            "positive disposition lacks product policy authority binding"
+        )
+
+    record, resolved, strategy_version = _resolve_product_policy_binding(
+        ledger=ledger,
+        authority=authority,
+        decision_id=disposition.decision_id,
+    )
+    if resolved != stored:
+        raise LiveDecisionDispositionError(
+            "product policy authority changed or binding does not match durable truth"
+        )
+    if strategy_version != disposition.strategy_version:
+        raise LiveDecisionDispositionError(
+            "product policy strategy-version identity mismatch"
+        )
+    if resolved.policy_evaluated_at != disposition.decision_at:
+        raise LiveDecisionDispositionError(
+            "product policy decision time mismatch"
+        )
+
+    if disposition.disposition is Disposition.NO_BET_POLICY:
+        if resolved.has_positive_execution_stake or resolved.plan_action not in _ZERO_PLAN_ACTIONS:
+            raise LiveDecisionDispositionError(
+                "positive-stake product record cannot authorize NO_BET_POLICY"
+            )
+    elif (
+        not resolved.has_positive_execution_stake
+        or resolved.plan_action in _ZERO_PLAN_ACTIONS
+    ):
+        raise LiveDecisionDispositionError(
+            "ACTIONABLE requires re-resolved positive product plan"
+        )
+    return record

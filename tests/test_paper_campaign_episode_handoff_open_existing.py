@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+import autosport.paper_campaign_episode_handoff as handoff_module
 from autosport.paper_campaign_episode_handoff import (
     PaperCampaignEpisodeHandoff,
     PaperCampaignEpisodeHandoffError,
@@ -76,6 +78,49 @@ class PaperCampaignEpisodeHandoffOpenExistingTests(unittest.TestCase):
                 PaperCampaignEpisodeHandoff.open_existing(runtime)
 
             self.assertFalse(state_path.exists())
+
+    def test_local_prepared_downgrade_cannot_hide_committed_child(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            runtime, handoff, result = self._committed_handoff(root)
+            state = json.loads(handoff.state_path.read_text(encoding="utf-8"))
+            self.assertEqual(len(state["handoffs"]), 1)
+            record = next(iter(state["handoffs"].values()))
+            self.assertEqual(record["status"], "COMMITTED")
+            self.assertEqual(record["handoff_id"], result.receipt.handoff_id)
+
+            # Roll back only the mutable local projection to an otherwise valid
+            # PREPARED record. The independent consumption authority remains
+            # COMMIT and therefore has stronger restart truth.
+            record["status"] = "PREPARED"
+            record["child_policy_id"] = None
+            record["child_episode_id"] = None
+            record["child_initial_checkpoint_id"] = None
+            record["handoff_id"] = None
+            bare = {
+                "schema": state["schema"],
+                "schema_version": state["schema_version"],
+                "handoffs": state["handoffs"],
+            }
+            state["state_sha256"] = handoff_module._digest(bare)
+            handoff.state_path.write_text(
+                json.dumps(
+                    state,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    indent=2,
+                    allow_nan=False,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            reopened = PaperCampaignEpisodeHandoff.open_existing(runtime)
+            with self.assertRaisesRegex(
+                PaperCampaignEpisodeHandoffError,
+                "conflicts with independent committed consumption authority",
+            ):
+                reopened.committed_children()
 
     def test_wrong_valid_state_path_after_commit_is_rejected_without_mutation(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

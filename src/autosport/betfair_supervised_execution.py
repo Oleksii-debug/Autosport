@@ -378,10 +378,10 @@ class BetfairInstructionReport:
     status: str
     error_code: str | None
     bet_id: str | None
-    order_status: str | None
     placed_date: str | None
     average_price_matched: Decimal
     size_matched: Decimal
+    order_status: str | None = None
 
     def __post_init__(self) -> None:
         if self.status not in {"SUCCESS", "FAILURE"}:

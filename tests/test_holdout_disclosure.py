@@ -95,9 +95,12 @@ def test_every_adaptive_outcome_disclosure_consumes_canonical_holdout(
         )
 
 
-@pytest.mark.parametrize("channel", tuple(DisclosureChannel))
-def test_non_outcome_metadata_does_not_consume_confirmation_capacity(
-    tmp_path, channel: DisclosureChannel
+@pytest.mark.parametrize("channel", _PUBLIC_CHANNELS)
+@pytest.mark.parametrize("declared_accessibility", (True, False))
+def test_public_metadata_label_cannot_mint_freshness_exemption(
+    tmp_path,
+    channel: DisclosureChannel,
+    declared_accessibility: bool,
 ) -> None:
     snapshot = _snapshot()
     ledger = _ledger(tmp_path)
@@ -107,17 +110,56 @@ def test_non_outcome_metadata_does_not_consume_confirmation_capacity(
         confirmation_trial_family_id="family-v1",
         channel=channel,
         kind=DisclosureKind.NON_OUTCOME_METADATA,
-        accessible_to_adaptive_actor=True,
+        accessible_to_adaptive_actor=declared_accessibility,
+        disclosed_at_utc=_DISCLOSED_AT,
+    )
+
+    assert decision.consumed is True
+    assert decision.accessible_to_adaptive_actor is True
+    assert decision.proves_holdout_untouched is False
+    with pytest.raises(HoldoutAlreadyConsumedError):
+        ledger.assert_unused(
+            dataset_snapshot=snapshot,
+            research_protocol_id="protocol-v1",
+            confirmation_trial_family_id="family-v1",
+        )
+
+
+def test_inaccessible_sealed_metadata_does_not_consume(tmp_path) -> None:
+    snapshot = _snapshot()
+    ledger = _ledger(tmp_path)
+    decision = HoldoutDisclosureGate(ledger).record(
+        dataset_snapshot=snapshot,
+        research_protocol_id="protocol-v1",
+        confirmation_trial_family_id="family-v1",
+        channel=DisclosureChannel.SEALED_EVALUATOR,
+        kind=DisclosureKind.NON_OUTCOME_METADATA,
+        accessible_to_adaptive_actor=False,
         disclosed_at_utc=_DISCLOSED_AT,
     )
 
     assert decision.consumed is False
-    assert decision.proves_holdout_untouched is False
     ledger.assert_unused(
         dataset_snapshot=snapshot,
         research_protocol_id="protocol-v1",
         confirmation_trial_family_id="family-v1",
     )
+
+
+def test_accessible_sealed_metadata_consumes_fail_closed(tmp_path) -> None:
+    snapshot = _snapshot()
+    ledger = _ledger(tmp_path)
+    decision = HoldoutDisclosureGate(ledger).record(
+        dataset_snapshot=snapshot,
+        research_protocol_id="protocol-v1",
+        confirmation_trial_family_id="family-v1",
+        channel=DisclosureChannel.SEALED_EVALUATOR,
+        kind=DisclosureKind.NON_OUTCOME_METADATA,
+        accessible_to_adaptive_actor=True,
+        disclosed_at_utc=_DISCLOSED_AT,
+    )
+
+    assert decision.consumed is True
 
 
 @pytest.mark.parametrize("channel", _PUBLIC_CHANNELS)

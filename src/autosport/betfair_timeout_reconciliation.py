@@ -1,24 +1,24 @@
 """Betfair ambiguous-placement-timeout readback resolution.
 
-Betfair documents that an order can remain invisible for a short period after a
-`placeOrders` TIMEOUT.  Complete current+cleared readback is therefore not, by
-itself, enough to issue NOT_FOUND immediately.  This module layers the provider
-visibility horizon over the existing sealed #530 Betfair readback authority.
+Complete current+cleared readback is not, by itself, enough to issue NOT_FOUND
+immediately after a `placeOrders` ambiguity. Betfair allows up to 15 seconds for a
+timed-out order to become visible. This module composes that provider horizon with
+the existing sealed #530 Betfair readback authority and the durable execution ledger.
 
-The underlying verifier already requires exact action/account/customerOrderRef
-scope, complete current pagination, and complete BET-level cleared pagination for
-SETTLED, VOIDED, LAPSED, and CANCELLED.  This resolver adds the missing temporal
-condition without creating another provider client or execution ledger.
+The timeout boundary is never accepted from a caller. It is derived from the
+ledger-verified ATTEMPT_UNKNOWN event recorded by the canonical Betfair execution
+path, and the provider order reference is reloaded from the same durable attempt.
 """
 from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from enum import Enum
+import json
 
 from .betfair_account_readonly import BetfairExecutionReadbackEnvelope
 from .bookmaker_capability import BookmakerCapabilityProfile
-from .real_execution_ledger import ExecutionAction
+from .real_execution_ledger import AttemptState, ExecutionAction, RealExecutionLedger
 from .supervised_provider_evidence import (
     VerifiedProviderAbsenceEvidence,
     VerifiedProviderEffectEvidence,
@@ -27,10 +27,13 @@ from .supervised_provider_evidence import (
 )
 
 BETFAIR_TIMEOUT_VISIBILITY_HORIZON_SECONDS = 15
+_BETFAIR_AMBIGUOUS_UNKNOWN_REASON = (
+    "betfair_placeOrders_ambiguous_effect_requires_readback"
+)
 
 
 class BetfairTimeoutResolutionError(RuntimeError):
-    """Raised when timeout/readback timing cannot safely resolve provider state."""
+    """Raised when timeout/readback evidence cannot safely resolve provider state."""
 
 
 class BetfairTimeoutResolutionKind(str, Enum):
@@ -44,9 +47,10 @@ class BetfairTimeoutResolutionKind(str, Enum):
 @dataclass(frozen=True, slots=True)
 class BetfairTimeoutResolution:
     kind: BetfairTimeoutResolutionKind
-    timeout_at: str
+    timeout_boundary_at: str
     observed_at: str
     visibility_deadline: str
+    ledger_snapshot_sha256: str
     evidence: VerifiedProviderState | None
 
     @property
@@ -66,41 +70,116 @@ def _time(value: str, name: str) -> datetime:
     return parsed
 
 
-def _provider_order_ref(value: str) -> str:
-    if (
-        type(value) is not str
-        or not value
-        or len(value) > 32
-        or any(character not in "0123456789abcdef" for character in value)
-    ):
+def _durable_timeout_authority(
+    ledger: RealExecutionLedger,
+    action: ExecutionAction,
+    attempt_id: str,
+) -> tuple[str, str, str]:
+    """Return durable provider ref, conservative timeout boundary, ledger SHA.
+
+    `recorded_at` is deliberately used instead of the ATTEMPT_UNKNOWN payload's
+    caller-supplied `observed_at`. The ledger writes `recorded_at` itself while
+    appending the durable event; using that later boundary can only delay absence.
+    """
+
+    if type(ledger) is not RealExecutionLedger:
+        raise BetfairTimeoutResolutionError("ledger must be exact RealExecutionLedger")
+    if type(action) is not ExecutionAction:
+        raise BetfairTimeoutResolutionError("action must be exact ExecutionAction")
+    if type(attempt_id) is not str or not attempt_id or attempt_id != attempt_id.strip():
+        raise BetfairTimeoutResolutionError("attempt_id must be non-empty canonical text")
+    try:
+        state = ledger.attempt_state(attempt_id)
+    except KeyError as exc:
+        raise BetfairTimeoutResolutionError("timeout attempt is not durable") from exc
+    if state is not AttemptState.UNKNOWN:
         raise BetfairTimeoutResolutionError(
-            "expected_provider_order_ref must be <=32 lowercase hex characters"
+            "timeout resolution requires a durable UNKNOWN attempt"
         )
-    return value
+    provider_order_ref = ledger.provider_order_reference(
+        attempt_id=attempt_id,
+        provider_id=action.bookmaker_id,
+    )
+    if provider_order_ref is None:
+        raise BetfairTimeoutResolutionError(
+            "timeout attempt lacks durable provider order reference"
+        )
+
+    snapshot = ledger.verified_snapshot()
+    unknown_events: list[dict[str, object]] = []
+    reserved_events: list[dict[str, object]] = []
+    submitted_events: list[dict[str, object]] = []
+    try:
+        for raw_line in snapshot.payload.splitlines():
+            envelope = json.loads(raw_line.decode("utf-8"))
+            event = envelope["event"]
+            if event.get("attempt_id") != attempt_id:
+                continue
+            event_type = event.get("event_type")
+            if event_type == "ATTEMPT_RESERVED":
+                reserved_events.append(event)
+            elif event_type == "ATTEMPT_SUBMITTED":
+                submitted_events.append(event)
+            elif event_type == "ATTEMPT_UNKNOWN":
+                unknown_events.append(event)
+    except (UnicodeDecodeError, json.JSONDecodeError, KeyError, AttributeError) as exc:
+        # verified_snapshot() already validated the bytes; a second decode failure is
+        # therefore an internal inconsistency and must never degrade to absence.
+        raise BetfairTimeoutResolutionError(
+            "verified execution ledger snapshot cannot be decoded"
+        ) from exc
+
+    if len(reserved_events) != 1 or reserved_events[0].get("action_id") != action.action_id:
+        raise BetfairTimeoutResolutionError(
+            "timeout attempt does not bind the exact execution action"
+        )
+    if len(submitted_events) != 1:
+        raise BetfairTimeoutResolutionError(
+            "timeout authority requires one durable provider submission boundary"
+        )
+    if len(unknown_events) != 1:
+        raise BetfairTimeoutResolutionError(
+            "timeout attempt lacks one canonical uncertainty boundary"
+        )
+    unknown = unknown_events[0]
+    payload = unknown.get("payload")
+    if not isinstance(payload, dict) or payload.get("reason") != _BETFAIR_AMBIGUOUS_UNKNOWN_REASON:
+        raise BetfairTimeoutResolutionError(
+            "UNKNOWN attempt is not a canonical ambiguous Betfair placeOrders timeout"
+        )
+    recorded_at = unknown.get("recorded_at")
+    if not isinstance(recorded_at, str):
+        raise BetfairTimeoutResolutionError(
+            "durable timeout boundary lacks ledger recorded_at"
+        )
+    _time(recorded_at, "durable timeout recorded_at")
+    return provider_order_ref, recorded_at, snapshot.sha256
 
 
 def resolve_betfair_timeout_provider_state(
+    ledger: RealExecutionLedger,
     action: ExecutionAction,
     profile: BookmakerCapabilityProfile,
     *,
+    attempt_id: str,
     expected_profile_sha256: str,
     readback: BetfairExecutionReadbackEnvelope,
-    expected_provider_order_ref: str,
-    timeout_at: str,
 ) -> BetfairTimeoutResolution:
-    """Resolve an ambiguous Betfair placement timeout without premature NOT_FOUND.
+    """Resolve one ambiguous Betfair placement without premature NOT_FOUND.
 
-    Positive canonical evidence wins immediately.  Canonical complete-empty evidence
+    Positive canonical evidence wins immediately. Canonical complete-empty evidence
     remains indeterminate until the fixed Betfair visibility horizon has elapsed.
-    The exact boundary is inclusive: an observation at timeout+15s may issue absence;
-    any earlier observation may not.
+    The exact boundary is inclusive: an observation at durable-boundary+15s may issue
+    absence; any earlier observation may not.
 
-    Provider/readback incompleteness or identity conflicts continue to fail closed in
-    ``verify_betfair_provider_state`` and can never be converted here into absence.
+    Provider/readback incompleteness, identity conflicts, wrong cleared-status
+    coverage, or stale evidence continue to fail closed in the canonical verifier.
     """
 
-    provider_order_ref = _provider_order_ref(expected_provider_order_ref)
-    timeout = _time(timeout_at, "timeout_at")
+    provider_order_ref, timeout_boundary_at, ledger_sha = _durable_timeout_authority(
+        ledger, action, attempt_id
+    )
+    timeout_boundary = _time(timeout_boundary_at, "durable timeout recorded_at")
     evidence = verify_betfair_provider_state(
         action,
         profile,
@@ -109,20 +188,23 @@ def resolve_betfair_timeout_provider_state(
         expected_provider_order_ref=provider_order_ref,
     )
     observed = _time(evidence.observed_at, "provider observed_at")
-    if observed < timeout:
+    if observed < timeout_boundary:
         raise BetfairTimeoutResolutionError(
-            "provider readback predates ambiguous placement timeout"
+            "provider readback predates durable ambiguous placement boundary"
         )
 
-    deadline = timeout + timedelta(seconds=BETFAIR_TIMEOUT_VISIBILITY_HORIZON_SECONDS)
+    deadline = timeout_boundary + timedelta(
+        seconds=BETFAIR_TIMEOUT_VISIBILITY_HORIZON_SECONDS
+    )
     deadline_raw = deadline.isoformat()
 
     if isinstance(evidence, VerifiedProviderEffectEvidence):
         return BetfairTimeoutResolution(
             BetfairTimeoutResolutionKind.EFFECT_PRESENT,
-            timeout_at,
+            timeout_boundary_at,
             evidence.observed_at,
             deadline_raw,
+            ledger_sha,
             evidence,
         )
     if not isinstance(evidence, VerifiedProviderAbsenceEvidence):
@@ -130,20 +212,22 @@ def resolve_betfair_timeout_provider_state(
 
     if observed < deadline:
         # Do not leak the verifier-issued absence capability before the provider's
-        # documented visibility window closes.  Downstream reconciliation therefore
-        # has no object it could use to release UNKNOWN/retry early.
+        # documented visibility window closes. Downstream reconciliation therefore
+        # has no object it can consume to release UNKNOWN/retry early.
         return BetfairTimeoutResolution(
             BetfairTimeoutResolutionKind.INDETERMINATE_BEFORE_VISIBILITY_HORIZON,
-            timeout_at,
+            timeout_boundary_at,
             evidence.observed_at,
             deadline_raw,
+            ledger_sha,
             None,
         )
 
     return BetfairTimeoutResolution(
         BetfairTimeoutResolutionKind.ABSENT_AFTER_VISIBILITY_HORIZON,
-        timeout_at,
+        timeout_boundary_at,
         evidence.observed_at,
         deadline_raw,
+        ledger_sha,
         evidence,
     )

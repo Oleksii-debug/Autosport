@@ -190,8 +190,8 @@ def capture_historical_matches(
         "payload": payload,
     }
     lock_paths = sorted(
-        (output, evidence),
-        key=lambda path: str(path.resolve(strict=False)),
+        (_publication_lock_path(output), _publication_lock_path(evidence)),
+        key=str,
     )
     with durable_path_lock(lock_paths[0]):
         with durable_path_lock(lock_paths[1]):
@@ -268,6 +268,13 @@ def capture_historical_matches(
         evidence_path=str(evidence),
     )
 
+
+
+
+def _publication_lock_path(destination: Path) -> Path:
+    canonical = str(destination.resolve(strict=False)).encode("utf-8")
+    identity = hashlib.sha256(canonical).hexdigest()
+    return Path(tempfile.gettempdir()) / "autosport-historical-match-locks" / identity
 
 
 def _read_strict_evidence_object(path: Path) -> dict[str, Any]:

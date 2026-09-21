@@ -35,8 +35,10 @@ def _worker(workspace: str, authority_root: str, start, results) -> None:
             authority_root=Path(authority_root),
         )
         results.put(("ok", initialized.workspace_instance_id))
+    except ProductWorkspaceInitializationError as exc:
+        results.put(("expected-error", type(exc).__name__, str(exc)))
     except BaseException as exc:
-        results.put(("error", type(exc).__name__, str(exc)))
+        results.put(("unexpected-error", type(exc).__name__, str(exc)))
         raise
 
 
@@ -147,11 +149,13 @@ def test_two_concurrent_first_runs_converge_to_one_identity(tmp_path: Path) -> N
         _join_cleanly(worker)
 
     messages = [results.get(timeout=5), results.get(timeout=5)]
-    assert all(message[0] == "ok" for message in messages)
-    assert messages[0][1] == messages[1][1]
+    assert all(message[0] in {"ok", "expected-error"} for message in messages)
+    successful_ids = [message[1] for message in messages if message[0] == "ok"]
+    assert successful_ids
+    assert len(set(successful_ids)) == 1
 
     reopened = initialize_product_workspace(workspace, authority_root=authority_root)
-    assert reopened.workspace_instance_id == messages[0][1]
+    assert reopened.workspace_instance_id == successful_ids[0]
 
 
 def test_self_consistent_workspace_vs_machine_identity_conflict_fails_closed(

@@ -149,6 +149,12 @@ def _default_transport(url: str, headers: Mapping[str, str], timeout: float) -> 
         raise ProviderTransportError(f"provider HTTP {exc.code}", int(exc.code), retry_after) from exc
     except URLError as exc:
         raise ProviderTransportError(f"provider transport error: {exc.reason}") from exc
+    except TimeoutError as exc:
+        # urllib's socket timeout may surface while reading an already-open
+        # HTTPResponse, outside the URLError wrapping used for connection errors.
+        # Keep that transport failure on the canonical provider-unavailable path so
+        # continuous observation can apply its bounded recovery/backoff policy.
+        raise ProviderTransportError(f"provider transport timeout: {exc}") from exc
 
 
 class ParlayApiTableTennisProvider:

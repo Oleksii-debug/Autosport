@@ -161,6 +161,7 @@ class MarketImpliedBaselineTests(unittest.TestCase):
         )
         truth = evidence.to_dict()["truth"]
         self.assertTrue(truth["forecast_comparator_only"])
+        self.assertFalse(truth["source_stream_continuity_proven"])
         self.assertFalse(truth["execution_authority"])
         self.assertFalse(truth["promotion_authority"])
         self.assertFalse(truth["real_money_execution"])

@@ -81,7 +81,13 @@ def _install() -> None:
         if not isinstance(event, Mapping):
             raise error("PAPER execution reservation is invalid")
         payload = event.get("payload")
-        if not isinstance(payload, Mapping) or set(payload) != reservation_fields:
+        if not isinstance(payload, Mapping):
+            raise error("PAPER execution reservation schema is invalid")
+        if "decision_origin" not in payload:
+            raise error(
+                "PAPER pre-execution decision-origin is missing from canonical reservation"
+            )
+        if set(payload) != reservation_fields:
             raise error("PAPER execution reservation schema is invalid")
         for field in (
             "trigger_id",

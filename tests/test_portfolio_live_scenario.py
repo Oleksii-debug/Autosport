@@ -300,6 +300,34 @@ def test_naive_timestamp_is_rejected() -> None:
         _spec(batch_opened_at="2026-09-21T18:00:00")
 
 
+@pytest.mark.parametrize(
+    "timestamp",
+    [
+        "2026-09-21T18:00:02.0000001+00:00",
+        "2026-09-21T18:00:02,0000001+00:00",
+    ],
+)
+def test_submicrosecond_component_timestamp_is_rejected(timestamp: str) -> None:
+    with pytest.raises(
+        LivePortfolioScenarioError,
+        match="must not exceed microsecond precision",
+    ):
+        _component(
+            "position-a",
+            provider_id="provider-a",
+            observed_at=timestamp,
+            committed_at=timestamp,
+        )
+
+
+def test_submicrosecond_batch_boundary_is_rejected() -> None:
+    with pytest.raises(
+        LivePortfolioScenarioError,
+        match="must not exceed microsecond precision",
+    ):
+        _spec(batch_closed_at="2026-09-21T18:00:02.0000001+00:00")
+
+
 def test_equivalent_timezone_spellings_have_same_identity() -> None:
     first, second = _pair()
     baseline = evaluate_live_portfolio_scenario(_spec(), (first, second))

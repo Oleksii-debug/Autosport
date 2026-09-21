@@ -216,11 +216,6 @@ class PolicyUtilityEvidence:
 
     @property
     def semantic_key(self) -> str:
-        # Unresolved schema-v1 evidence is deliberately scoped by immutable
-        # product-owner identity. A forged risk/economic/bankroll/portfolio
-        # assertion therefore cannot consume the key that a later correctly
-        # bound product record needs. Utility-definition changes remain semantic
-        # drift within the same owner/causal scope.
         return _digest(
             {
                 "environment_id": self.environment_id,
@@ -405,9 +400,10 @@ class PolicyUtilityStore:
 
     Every writer uses the same cross-process path fence and compare/publish
     protocol. Publication writes a complete successor image, fsyncs the file,
-    atomically replaces the canonical path, and then fsyncs the parent
-    directory on platforms that support directory descriptors. No receipt is
-    returned until that durability boundary succeeds.
+    then performs platform-aware metadata-durable replacement. Windows uses
+    ``MoveFileExW`` with ``MOVEFILE_WRITE_THROUGH``; POSIX uses ``os.replace``
+    followed by a containing-directory fsync. No receipt is returned until that
+    durability boundary succeeds.
     """
 
     _locks_guard = threading.Lock()
@@ -431,9 +427,6 @@ class PolicyUtilityStore:
             self._reload()
 
     def append(self, evidence: PolicyUtilityEvidence) -> bool:
-        # This exact-type admission is intrinsic to the canonical mutation
-        # boundary so importlib.reload/sys.meta_path manipulation cannot remove
-        # the invariant before semantic-key dispatch or durable publication.
         if type(evidence) is not PolicyUtilityEvidence:
             raise PolicyUtilityError("append requires exact PolicyUtilityEvidence")
         with self._lock:
@@ -512,11 +505,16 @@ class PolicyUtilityStore:
                 os.fsync(handle.fileno())
 
             self._fault("before_replace")
-            os.replace(temporary, self.path)
-            temporary = None
 
-            self._fault("after_replace_before_directory_fsync")
-            _fsync_directory(self.path.parent)
+            def after_posix_replace() -> None:
+                self._fault("after_replace_before_directory_fsync")
+
+            _durable_replace(
+                temporary,
+                self.path,
+                after_posix_replace=after_posix_replace,
+            )
+            temporary = None
             self._fault("after_directory_fsync")
         except PolicyUtilityError:
             raise
@@ -573,11 +571,49 @@ class PolicyUtilityStore:
         self._by_semantic_key = by_semantic
 
 
-def _fsync_directory(path: Path) -> None:
-    """Persist the rename on platforms where directory fsync is available."""
+def _durable_replace(
+    source: Path,
+    destination: Path,
+    *,
+    after_posix_replace: Callable[[], None] | None = None,
+) -> None:
+    """Publish one complete image with platform-appropriate metadata durability."""
 
-    if os.name == "nt" or not hasattr(os, "O_DIRECTORY"):
+    if os.name == "nt":
+        _replace_windows_write_through(source, destination)
         return
+
+    os.replace(source, destination)
+    if after_posix_replace is not None:
+        after_posix_replace()
+    _fsync_directory(destination.parent)
+
+
+def _replace_windows_write_through(source: Path, destination: Path) -> None:
+    """Atomically replace ``destination`` and synchronously flush Windows metadata."""
+
+    import ctypes
+
+    movefile_replace_existing = 0x1
+    movefile_write_through = 0x8
+    move_file_ex = ctypes.windll.kernel32.MoveFileExW
+    move_file_ex.argtypes = [ctypes.c_wchar_p, ctypes.c_wchar_p, ctypes.c_uint]
+    move_file_ex.restype = ctypes.c_int
+    if not move_file_ex(
+        str(source),
+        str(destination),
+        movefile_replace_existing | movefile_write_through,
+    ):
+        raise ctypes.WinError()
+
+
+def _fsync_directory(path: Path) -> None:
+    """Persist a POSIX rename by synchronizing its containing directory."""
+
+    if not hasattr(os, "O_DIRECTORY"):
+        raise PolicyUtilityError(
+            "platform lacks a directory durability primitive for policy utility store"
+        )
     try:
         directory_fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY)
     except OSError as exc:

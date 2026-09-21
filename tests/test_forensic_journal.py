@@ -71,7 +71,10 @@ def test_forensic_journal_redacts_secrets_before_persistence_and_export(tmp_path
     record = journal.record_material_event(
         "provider-health",
         "adapter-health",
-        message="Authorization: Bearer abc.def token=raw-token",
+        message=(
+            "Authorization: Bearer abc.def token=raw-token "
+            "client_secret=raw-client-secret"
+        ),
         details={
             "api_token": "raw-token",
             "password": "raw-password",
@@ -83,6 +86,7 @@ def test_forensic_journal_redacts_secrets_before_persistence_and_export(tmp_path
 
     persisted = path.read_text(encoding="utf-8")
     assert "raw-token" not in persisted
+    assert "raw-client-secret" not in persisted
     assert "raw-password" not in persisted
     assert "raw-secret" not in persisted
     assert "name:pass@" not in persisted
@@ -93,10 +97,12 @@ def test_forensic_journal_redacts_secrets_before_persistence_and_export(tmp_path
     export = journal.export(tmp_path / "owner-export.json")
     exported = export.read_text(encoding="utf-8")
     assert "raw-token" not in exported
+    assert "raw-client-secret" not in exported
     assert "raw-password" not in exported
     assert "raw-secret" not in exported
     payload = json.loads(exported)
     assert payload["record_count"] == 1
+    assert payload["records"][0]["schema_version"] == 1
     assert payload["records"][0]["details"]["api_token"] == "[REDACTED]"
 
 
@@ -203,6 +209,15 @@ def test_forensic_journal_rejects_nonfinite_details_without_appending(tmp_path, 
 
     assert journal.verify().record_count == 0
     assert path.read_bytes() == b""
+
+
+def test_forensic_journal_rejects_oversized_json_integer_before_schema(tmp_path):
+    path = tmp_path / "forensic.jsonl"
+    journal = ForensicSessionJournal(path, clock=FakeClock())
+    path.write_text('{"value":' + ("9" * 641) + "}\n", encoding="utf-8")
+
+    with pytest.raises(ForensicJournalIntegrityError, match="strict JSON"):
+        journal.verify()
 
 
 def test_forensic_journal_rejects_nonempty_journal_without_checkpoint(tmp_path):

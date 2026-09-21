@@ -219,8 +219,8 @@ class ProviderSettlementRevisionChain:
         for current in unique[1:]:
             if self._identity(current) != identity:
                 raise ProviderSettlementRevisionError(
-                    "settlement correction cannot rewrite provider/account/"
-                    "adapter/position/currency identity"
+                    "settlement correction cannot rewrite provider/account/adapter/"
+                    "position/currency or executed position terms"
                 )
             if current.supersedes_revision_id != previous.revision_id:
                 raise ProviderSettlementRevisionError(
@@ -248,7 +248,17 @@ class ProviderSettlementRevisionChain:
     @staticmethod
     def _identity(
         revision: ProviderSettlementRevision,
-    ) -> tuple[str, str, str, str, str]:
+    ) -> tuple[
+        str,
+        str,
+        str,
+        str,
+        str,
+        str | None,
+        str | None,
+        str | None,
+        str | None,
+    ]:
         settlement = revision.settlement
         return (
             settlement.venue_id,
@@ -256,6 +266,10 @@ class ProviderSettlementRevisionChain:
             settlement.adapter_id,
             settlement.external_position_id,
             settlement.currency,
+            _decimal_text(settlement.provider_amount),
+            settlement.provider_amount_semantics,
+            settlement.provider_side,
+            _decimal_text(settlement.decimal_odds),
         )
 
     @property

@@ -95,6 +95,12 @@ class AnnouncementDecision:
     move_focus: bool = False
 
     def __post_init__(self) -> None:
+        if type(self.emit) is not bool:
+            raise TypeError("emit must be bool")
+        if not isinstance(self.priority, AnnouncementPriority):
+            raise TypeError("priority must be AnnouncementPriority")
+        if type(self.move_focus) is not bool:
+            raise TypeError("move_focus must be bool")
         if self.emit:
             if self.priority is AnnouncementPriority.SILENT:
                 raise ValueError("emitted decision cannot be SILENT")

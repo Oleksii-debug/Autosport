@@ -5,7 +5,7 @@ from datetime import datetime, timezone
 from decimal import Decimal
 import hashlib
 import json
-from typing import Any, Callable, Mapping
+from typing import Any, Mapping
 
 from .campaign_denomination import (
     CampaignDenominationBinding,
@@ -207,22 +207,14 @@ class FinalizedCampaignAuthority:
     that persisted record; it can never manufacture positive authority on demand.
     """
 
-    __slots__ = ("_campaign", "_clock")
+    __slots__ = ("_campaign",)
 
-    def __init__(
-        self,
-        campaign: PaperCampaign,
-        *,
-        clock: Callable[[], datetime] | None = None,
-    ) -> None:
+    def __init__(self, campaign: PaperCampaign) -> None:
         if type(campaign) is not PaperCampaign:
             raise CampaignEconomicAuthorityError(
                 "campaign authority requires an exact PaperCampaign"
             )
-        if clock is not None and not callable(clock):
-            raise CampaignEconomicAuthorityError("clock must be callable")
         self._campaign = campaign
-        self._clock = clock or (lambda: datetime.now(timezone.utc))
         self.projection()
 
     def projection(self) -> CanonicalCampaignProjection:
@@ -463,27 +455,18 @@ class FinalizedCampaignAuthority:
         return raw
 
     def issue_denomination_binding(self) -> CampaignDenominationBinding | None:
-        """Issue once and durably persist denomination at the real issuance instant."""
+        """Issue once with product-owned time inside the durable publication lock."""
 
-        existing = self.denomination_binding()
-        if existing is not None:
-            return existing
-        candidate = self._derive_binding(available_at=self._clock())
-        if candidate is None:
-            return None
         registry = self._registry()
         with WorkspaceEconomicLock(registry.path.parent):
             state = registry._read()
             raw_bindings = state.get(_DENOMINATION_STATE_KEY)
-            if raw_bindings is None:
-                raw_bindings = {}
-                state[_DENOMINATION_STATE_KEY] = raw_bindings
-            if type(raw_bindings) is not dict:
+            if raw_bindings is not None and type(raw_bindings) is not dict:
                 raise CampaignEconomicAuthorityError(
                     "persisted campaign denomination index is malformed"
                 )
             key = self._binding_key()
-            prior = raw_bindings.get(key)
+            prior = None if raw_bindings is None else raw_bindings.get(key)
             if prior is not None:
                 if type(prior) is not dict:
                     raise CampaignEconomicAuthorityError(
@@ -496,10 +479,40 @@ class FinalizedCampaignAuthority:
                         "persisted campaign denomination binding drifts from live campaign authority"
                     )
                 return persisted
+
+            # Availability is product-owned and sampled only after this process has
+            # won the serialization boundary.  A caller cannot inject/backdate the
+            # positive timestamp, and lock contention cannot create a pre-publication
+            # availability window.
+            candidate = self._derive_binding(
+                available_at=datetime.now(timezone.utc)
+            )
+            if candidate is None:
+                return None
+            if raw_bindings is None:
+                raw_bindings = {}
+                state[_DENOMINATION_STATE_KEY] = raw_bindings
             raw_bindings[key] = dict(candidate.canonical_payload)
             atomic_write_json(registry.path, state)
-            registry._read()
-        return candidate
+
+            # Re-read the durable bytes before returning positive authority.
+            persisted_state = registry._read()
+            persisted_index = persisted_state.get(_DENOMINATION_STATE_KEY)
+            if type(persisted_index) is not dict:
+                raise CampaignEconomicAuthorityError(
+                    "persisted campaign denomination index disappeared after publication"
+                )
+            persisted_raw = persisted_index.get(key)
+            if type(persisted_raw) is not dict:
+                raise CampaignEconomicAuthorityError(
+                    "persisted campaign denomination binding disappeared after publication"
+                )
+            persisted = rehydrate_campaign_denomination_binding(persisted_raw)
+            if persisted != candidate:
+                raise CampaignEconomicAuthorityError(
+                    "durable campaign denomination differs from issued authority"
+                )
+            return persisted
 
     def denomination_binding(self) -> CampaignDenominationBinding | None:
         """Re-resolve only previously persisted campaign denomination authority."""

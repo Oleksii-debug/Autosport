@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+from autosport.gui import _safe_exception_text
 from autosport.presentation_error import safe_exception_text, safe_worker_error_text
+from autosport.windows_gui import _safe_exception_detail
 
 
 _SECRET = "WIN-SECRET-SENTINEL-9d8a4b"
@@ -45,3 +47,17 @@ def test_presented_error_text_is_deterministic_for_same_category() -> None:
     second = safe_worker_error_text("completely different provider failure")
 
     assert first == second
+
+
+def test_base_gui_legacy_exception_wrapper_uses_safe_boundary() -> None:
+    rendered = _safe_exception_text(RuntimeError(f"password={_SECRET}"))
+
+    assert _SECRET not in rendered
+    assert "RuntimeError" in rendered
+
+
+def test_windows_gui_legacy_exception_wrapper_uses_safe_boundary() -> None:
+    rendered = _safe_exception_detail(RuntimeError(f"X-Authentication={_SECRET}"))
+
+    assert _SECRET not in rendered
+    assert "RuntimeError" in rendered

@@ -295,6 +295,52 @@ class IngestionEngine:
             )
         return witness
 
+    def _record_committed_projections(
+        self,
+        outcome: CommittedIngestionOutcome,
+        *,
+        delivery_error: MarketEventDeliveryError | None = None,
+    ) -> tuple[str, str]:
+        """Attempt each durable projection even when its sibling projection fails."""
+        health_status = "degraded" if outcome.quality_flags else "healthy"
+        continuity_status = "unknown"
+        health_error: Exception | None = None
+        continuity_error: Exception | None = None
+
+        if self.health_store is not None:
+            try:
+                state = outcome._record_health_once(self.health_store)
+            except Exception as exc:
+                health_error = exc
+            else:
+                health_status = state.status
+
+        if self.continuity_store is not None:
+            try:
+                continuity_status = outcome._record_continuity_once(
+                    self.continuity_store
+                )
+            except Exception as exc:
+                continuity_error = exc
+
+        if health_error is not None:
+            wrapped = CommittedIngestionHealthError(
+                outcome,
+                delivery_error=delivery_error,
+            )
+            if continuity_error is not None:
+                wrapped.add_note(
+                    "source continuity persistence also failed: "
+                    f"{type(continuity_error).__name__}: {continuity_error}"
+                )
+            raise wrapped from health_error
+        if continuity_error is not None:
+            raise CommittedIngestionContinuityError(
+                outcome,
+                delivery_error=delivery_error,
+            ) from continuity_error
+        return health_status, continuity_status
+
     def poll_once(self, provider: MarketProvider, max_items: int = 1000) -> IngestionStats:
         if isinstance(max_items, bool) or not isinstance(max_items, int) or max_items <= 0:
             raise ValueError("max_items must be a positive integer")
@@ -319,27 +365,41 @@ class IngestionEngine:
                 )
         except Exception as exc:
             failure_now = self.clock()
+            health_error: Exception | None = None
+            continuity_error: Exception | None = None
             if self.health_store is not None and provider_source_id is not None:
                 try:
                     self.health_store.record_failure(
                         provider_source_id, now=failure_now, error=exc
                     )
-                except Exception as health_error:
-                    exc.add_note(
-                        "source health failure persistence also failed: "
-                        f"{type(health_error).__name__}: {health_error}"
-                    )
-                    raise exc from health_error
+                except Exception as projection_error:
+                    health_error = projection_error
             if self.continuity_store is not None and provider_source_id is not None:
                 try:
                     self.continuity_store.record_failure(
                         provider_source_id,
                         now=failure_now,
                     )
-                except Exception as continuity_error:
-                    raise RuntimeError(
-                        "source continuity failure persistence also failed"
-                    ) from continuity_error
+                except Exception as projection_error:
+                    continuity_error = projection_error
+
+            if health_error is not None:
+                exc.add_note(
+                    "source health failure persistence also failed: "
+                    f"{type(health_error).__name__}: {health_error}"
+                )
+                if continuity_error is not None:
+                    exc.add_note(
+                        "source continuity failure persistence also failed: "
+                        f"{type(continuity_error).__name__}: {continuity_error}"
+                    )
+                raise exc from health_error
+            if continuity_error is not None:
+                exc.add_note(
+                    "source continuity failure persistence also failed: "
+                    f"{type(continuity_error).__name__}: {continuity_error}"
+                )
+                raise exc from continuity_error
             raise
 
         # Continuity provenance is validated before normalization/persistence but does
@@ -418,22 +478,10 @@ class IngestionEngine:
                 health_before=health_before,
                 continuity_witness=continuity_witness,
             )
-            if self.health_store is not None:
-                try:
-                    outcome._record_health_once(self.health_store)
-                except Exception as health_error:
-                    raise CommittedIngestionHealthError(
-                        outcome,
-                        delivery_error=delivery_error,
-                    ) from health_error
-            if self.continuity_store is not None:
-                try:
-                    outcome._record_continuity_once(self.continuity_store)
-                except Exception as continuity_error:
-                    raise CommittedIngestionContinuityError(
-                        outcome,
-                        delivery_error=delivery_error,
-                    ) from continuity_error
+            self._record_committed_projections(
+                outcome,
+                delivery_error=delivery_error,
+            )
             raise
 
         outcome = CommittedIngestionOutcome(
@@ -449,22 +497,7 @@ class IngestionEngine:
             health_before=health_before,
             continuity_witness=continuity_witness,
         )
-        health_status = "degraded" if ordered_flags else "healthy"
-        if self.health_store is not None:
-            try:
-                state = outcome._record_health_once(self.health_store)
-            except Exception as health_error:
-                raise CommittedIngestionHealthError(outcome) from health_error
-            health_status = state.status
-
-        continuity_status = "unknown"
-        if self.continuity_store is not None:
-            try:
-                continuity_status = outcome._record_continuity_once(
-                    self.continuity_store
-                )
-            except Exception as continuity_error:
-                raise CommittedIngestionContinuityError(outcome) from continuity_error
+        health_status, continuity_status = self._record_committed_projections(outcome)
         return outcome.stats(
             health_status=health_status,
             continuity_status=continuity_status,

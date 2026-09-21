@@ -516,3 +516,50 @@ def test_high_precision_decimal_persists_and_reopens_exactly_across_contexts(
     assert reopened[0].balance is not None
     assert reopened[0].balance.available_balance == Decimal(amount)
     assert snapshot_fingerprint(reopened[0]) == snapshot_fingerprint(snapshot)
+
+
+def test_high_precision_balance_delta_is_exact_across_decimal_contexts(
+    tmp_path,
+) -> None:
+    previous_amount = "1234567890123456789012345678.9012345678901234567891"
+    current_amount = "1234567890123456789012345678.9012345678901234567892"
+    path = tmp_path / "account.json"
+
+    with localcontext() as context:
+        context.prec = 6
+        store = BookmakerAccountReconciliationStore(path)
+        assert store.append_snapshot(
+            _snapshot(
+                _T1,
+                capabilities=(BookmakerCapability.BALANCE_READ,),
+                balance=_balance(
+                    _T1,
+                    previous_amount,
+                    observation_id="balance-delta-1",
+                ),
+            )
+        )
+        assert store.append_snapshot(
+            _snapshot(
+                _T2,
+                capabilities=(BookmakerCapability.BALANCE_READ,),
+                balance=_balance(
+                    _T2,
+                    current_amount,
+                    observation_id="balance-delta-2",
+                ),
+            )
+        )
+        state = store.latest_state()
+
+    assert state is not None
+    assert state.unexplained_balance_delta is not None
+    assert state.unexplained_balance_delta.amount == Decimal("1E-22")
+
+    with localcontext() as context:
+        context.prec = 80
+        reopened_state = BookmakerAccountReconciliationStore(path).latest_state()
+
+    assert reopened_state is not None
+    assert reopened_state.unexplained_balance_delta is not None
+    assert reopened_state.unexplained_balance_delta.amount == Decimal("1E-22")

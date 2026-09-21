@@ -15,10 +15,10 @@ from autosport.bookmaker_integration_boundary import (
     BookmakerIntegrationKind,
     bind_bookmaker_integration,
 )
+from autosport.ingestion_health import IngestionPolicy, SourceHealthStore
 from autosport.provider_fallback_policy import (
     ProviderFallbackDisposition,
     ProviderFallbackPolicyError,
-    ProviderOperationalObservation,
     ProviderOperationalState,
     ProviderRouteIdentity,
     resolve_readonly_provider_route,
@@ -34,6 +34,7 @@ T1 = "2026-09-21T10:01:00+00:00"
 T2 = "2026-09-21T10:02:00+00:00"
 T3 = "2026-09-21T10:03:00+00:00"
 T4 = "2026-09-21T10:04:00+00:00"
+T5 = "2026-09-21T10:05:00+00:00"
 
 
 def _profile(
@@ -60,8 +61,13 @@ def _profile(
     )
 
 
-def _route(profile: BookmakerCapabilityProfile) -> ProviderRouteIdentity:
+def _route(
+    profile: BookmakerCapabilityProfile,
+    *,
+    source_id: str | None = None,
+) -> ProviderRouteIdentity:
     return ProviderRouteIdentity(
+        source_id=source_id or f"source:{profile.venue_id}:{profile.adapter_id}",
         venue_id=profile.venue_id,
         account_id=profile.account_id,
         adapter_id=profile.adapter_id,
@@ -84,30 +90,73 @@ def _integration(
     )
 
 
-def _operational(
-    profile: BookmakerCapabilityProfile,
-    *,
-    state: ProviderOperationalState,
-    observed_at: str = T2,
-) -> ProviderOperationalObservation:
-    return ProviderOperationalObservation(
-        route=_route(profile),
-        state=state,
-        observed_at=observed_at,
-        source_ref=f"runtime:{profile.venue_id}:{profile.adapter_id}",
-        source_payload_sha256=SHA_C,
-    )
-
-
-def _registry(tmp_path, *profiles: BookmakerCapabilityProfile) -> BookmakerCapabilityRegistry:
+def _registry(
+    tmp_path,
+    *profiles: BookmakerCapabilityProfile,
+) -> BookmakerCapabilityRegistry:
     registry = BookmakerCapabilityRegistry(tmp_path / "bookmaker_capabilities.json")
     for profile in profiles:
         assert registry.register_profile(profile)
     return registry
 
 
+def _health_store(tmp_path) -> SourceHealthStore:
+    return SourceHealthStore(tmp_path / "source_health.json")
+
+
+def _record_health(
+    store: SourceHealthStore,
+    source_id: str,
+    state: ProviderOperationalState,
+    *,
+    at: str = T2,
+) -> None:
+    if state is ProviderOperationalState.UNKNOWN:
+        return
+    if state is ProviderOperationalState.HEALTHY:
+        store.record_success(
+            source_id,
+            now=at,
+            received=1,
+            accepted=1,
+            rejected=0,
+            cursor="1",
+            latest_source_ts=at,
+            quality_flags=(),
+        )
+        return
+    if state is ProviderOperationalState.DEGRADED:
+        store.record_success(
+            source_id,
+            now=at,
+            received=1,
+            accepted=1,
+            rejected=0,
+            cursor="1",
+            latest_source_ts=at,
+            quality_flags=("DEGRADED_TEST_EVIDENCE",),
+        )
+        return
+    if state is ProviderOperationalState.UNAVAILABLE:
+        store.record_failure(source_id, now=at, error=RuntimeError("provider unavailable"))
+        return
+    if state is ProviderOperationalState.STALE:
+        store.record_success(
+            source_id,
+            now=T0,
+            received=1,
+            accepted=1,
+            rejected=0,
+            cursor="1",
+            latest_source_ts=T0,
+            quality_flags=(),
+        )
+        return
+    raise AssertionError(f"unsupported fixture state {state}")
+
+
 def _resolve(
-    registry: BookmakerCapabilityRegistry,
+    tmp_path,
     primary: BookmakerCapabilityProfile,
     *,
     primary_state: ProviderOperationalState,
@@ -115,85 +164,129 @@ def _resolve(
     fallback_state: ProviderOperationalState = ProviderOperationalState.HEALTHY,
     capability: BookmakerCapability = BookmakerCapability.LIVE_QUOTES_READ,
     fallback_kind: BookmakerIntegrationKind = BookmakerIntegrationKind.OFFICIAL_API,
+    policy: IngestionPolicy | None = None,
 ):
+    profiles = (primary,) if fallback is None else (primary, fallback)
+    registry = _registry(tmp_path, *profiles)
+    health_store = _health_store(tmp_path)
+    primary_route = _route(primary)
+    _record_health(health_store, primary_route.source_id, primary_state)
     fallback_args = {}
     if fallback is not None:
+        fallback_route = _route(fallback)
+        _record_health(health_store, fallback_route.source_id, fallback_state)
         fallback_args = {
-            "fallback_route": _route(fallback),
+            "fallback_route": fallback_route,
             "fallback_integration": _integration(fallback, kind=fallback_kind),
-            "fallback_operational": _operational(fallback, state=fallback_state),
         }
     return resolve_readonly_provider_route(
         registry=registry,
+        health_store=health_store,
         required_capability=capability,
-        primary_route=_route(primary),
+        primary_route=primary_route,
         primary_integration=_integration(primary),
-        primary_operational=_operational(primary, state=primary_state),
         decided_at=T3,
+        policy=policy,
         **fallback_args,
     )
 
 
-def test_healthy_supported_primary_is_selected_without_authority_widening(tmp_path):
+def test_healthy_supported_primary_is_only_technically_eligible(tmp_path):
     primary = _profile(venue="primary", account="acct-p", adapter="api-p")
     decision = _resolve(
-        _registry(tmp_path, primary),
+        tmp_path,
         primary,
         primary_state=ProviderOperationalState.HEALTHY,
     )
 
-    assert decision.disposition is ProviderFallbackDisposition.PRIMARY_TECHNICALLY_ELIGIBLE
+    assert (
+        decision.disposition
+        is ProviderFallbackDisposition.PRIMARY_TECHNICALLY_ELIGIBLE
+    )
     assert decision.selected_profile_id == primary.profile_id
-    assert decision.reason == "PRIMARY_HEALTHY_SUPPORTED"
+    assert decision.primary_health_state is ProviderOperationalState.HEALTHY
     assert decision.source_quality_authority is False
+    assert decision.source_identity_authority is False
     assert decision.execution_authority is False
     assert decision.downstream_source_quality_required is True
+    assert decision.downstream_source_identity_binding_required is True
 
 
 @pytest.mark.parametrize(
-    "state",
-    [ProviderOperationalState.DEGRADED, ProviderOperationalState.UNAVAILABLE],
+    "primary_state",
+    [
+        ProviderOperationalState.DEGRADED,
+        ProviderOperationalState.UNAVAILABLE,
+        ProviderOperationalState.STALE,
+        ProviderOperationalState.UNKNOWN,
+    ],
 )
-def test_degraded_or_unavailable_primary_can_use_healthy_supported_fallback(tmp_path, state):
+def test_nonhealthy_primary_can_yield_healthy_supported_fallback_candidate(
+    tmp_path, primary_state
+):
     primary = _profile(venue="primary", account="acct-p", adapter="api-p")
     fallback = _profile(
-        venue="fallback", account="acct-f", adapter="api-f", source_sha=SHA_D
+        venue="fallback",
+        account="acct-f",
+        adapter="api-f",
+        source_sha=SHA_D,
     )
     decision = _resolve(
-        _registry(tmp_path, primary, fallback),
+        tmp_path,
         primary,
-        primary_state=state,
+        primary_state=primary_state,
         fallback=fallback,
     )
 
-    assert decision.disposition is ProviderFallbackDisposition.FALLBACK_TECHNICALLY_ELIGIBLE
+    assert (
+        decision.disposition
+        is ProviderFallbackDisposition.FALLBACK_TECHNICALLY_ELIGIBLE
+    )
     assert decision.selected_profile_id == fallback.profile_id
-    assert decision.reason == f"PRIMARY_{state.value}_FALLBACK_HEALTHY_SUPPORTED"
-    assert decision.source_quality_authority is False
-    assert decision.execution_authority is False
+    assert decision.primary_health_state is primary_state
+    assert decision.fallback_health_state is ProviderOperationalState.HEALTHY
+    assert (
+        decision.reason
+        == f"PRIMARY_{primary_state.value}_FALLBACK_HEALTHY_SUPPORTED"
+    )
     assert decision.downstream_source_quality_required is True
+    assert decision.downstream_source_identity_binding_required is True
+    assert decision.downstream_semantic_compatibility_required is True
 
 
-def test_browser_fallback_remains_only_a_technical_route(tmp_path):
+@pytest.mark.parametrize(
+    "fallback_state",
+    [
+        ProviderOperationalState.DEGRADED,
+        ProviderOperationalState.UNAVAILABLE,
+        ProviderOperationalState.STALE,
+        ProviderOperationalState.UNKNOWN,
+    ],
+)
+def test_nonhealthy_fallback_never_becomes_candidate(tmp_path, fallback_state):
     primary = _profile(venue="primary", account="acct-p", adapter="api-p")
     fallback = _profile(
-        venue="fallback", account="acct-f", adapter="browser-f", source_sha=SHA_D
+        venue="fallback",
+        account="acct-f",
+        adapter="api-f",
+        source_sha=SHA_D,
     )
     decision = _resolve(
-        _registry(tmp_path, primary, fallback),
+        tmp_path,
         primary,
         primary_state=ProviderOperationalState.UNAVAILABLE,
         fallback=fallback,
-        fallback_kind=BookmakerIntegrationKind.BROWSER_AUTOMATION,
+        fallback_state=fallback_state,
     )
 
-    assert decision.disposition is ProviderFallbackDisposition.FALLBACK_TECHNICALLY_ELIGIBLE
-    assert decision.downstream_source_quality_required is True
-    assert decision.source_quality_authority is False
+    assert decision.disposition is ProviderFallbackDisposition.ABSTAIN
+    assert decision.reason == f"FALLBACK_{fallback_state.value}"
+    assert decision.downstream_source_quality_required is False
+    assert decision.downstream_source_identity_binding_required is False
 
 
 @pytest.mark.parametrize(
-    "primary_capability, expected_reason",
+    "capability_state, expected_reason",
     [
         (
             BookmakerCapabilityState.UNSUPPORTED,
@@ -202,10 +295,10 @@ def test_browser_fallback_remains_only_a_technical_route(tmp_path):
         (BookmakerCapabilityState.UNKNOWN, "PRIMARY_HEALTHY_CAPABILITY_UNKNOWN"),
     ],
 )
-def test_healthy_primary_capability_gap_does_not_silently_switch_sources(
-    tmp_path, primary_capability, expected_reason
+def test_healthy_primary_capability_gap_does_not_switch_sources(
+    tmp_path, capability_state, expected_reason
 ):
-    if primary_capability is BookmakerCapabilityState.UNKNOWN:
+    if capability_state is BookmakerCapabilityState.UNKNOWN:
         primary = _profile(
             venue="primary",
             account="acct-p",
@@ -217,27 +310,29 @@ def test_healthy_primary_capability_gap_does_not_silently_switch_sources(
             venue="primary",
             account="acct-p",
             adapter="api-p",
-            state=primary_capability,
+            state=capability_state,
         )
     fallback = _profile(
-        venue="fallback", account="acct-f", adapter="api-f", source_sha=SHA_D
+        venue="fallback",
+        account="acct-f",
+        adapter="api-f",
+        source_sha=SHA_D,
     )
     decision = _resolve(
-        _registry(tmp_path, primary, fallback),
+        tmp_path,
         primary,
         primary_state=ProviderOperationalState.HEALTHY,
         fallback=fallback,
     )
 
     assert decision.disposition is ProviderFallbackDisposition.ABSTAIN
-    assert decision.selected_profile_id is None
     assert decision.reason == expected_reason
 
 
-def test_degraded_primary_without_fallback_abstains(tmp_path):
+def test_nonhealthy_primary_without_fallback_abstains(tmp_path):
     primary = _profile(venue="primary", account="acct-p", adapter="api-p")
     decision = _resolve(
-        _registry(tmp_path, primary),
+        tmp_path,
         primary,
         primary_state=ProviderOperationalState.DEGRADED,
     )
@@ -247,38 +342,20 @@ def test_degraded_primary_without_fallback_abstains(tmp_path):
 
 
 @pytest.mark.parametrize(
-    "state",
-    [ProviderOperationalState.DEGRADED, ProviderOperationalState.UNAVAILABLE],
-)
-def test_nonhealthy_fallback_abstains(tmp_path, state):
-    primary = _profile(venue="primary", account="acct-p", adapter="api-p")
-    fallback = _profile(
-        venue="fallback", account="acct-f", adapter="api-f", source_sha=SHA_D
-    )
-    decision = _resolve(
-        _registry(tmp_path, primary, fallback),
-        primary,
-        primary_state=ProviderOperationalState.UNAVAILABLE,
-        fallback=fallback,
-        fallback_state=state,
-    )
-
-    assert decision.disposition is ProviderFallbackDisposition.ABSTAIN
-    assert decision.reason == f"FALLBACK_{state.value}"
-
-
-@pytest.mark.parametrize(
-    "fallback_state, expected_reason",
+    "fallback_capability_state, expected_reason",
     [
-        (BookmakerCapabilityState.UNSUPPORTED, "FALLBACK_CAPABILITY_UNSUPPORTED"),
+        (
+            BookmakerCapabilityState.UNSUPPORTED,
+            "FALLBACK_CAPABILITY_UNSUPPORTED",
+        ),
         (BookmakerCapabilityState.UNKNOWN, "FALLBACK_CAPABILITY_UNKNOWN"),
     ],
 )
-def test_fallback_must_durably_support_exact_required_capability(
-    tmp_path, fallback_state, expected_reason
+def test_fallback_must_durably_support_exact_capability(
+    tmp_path, fallback_capability_state, expected_reason
 ):
     primary = _profile(venue="primary", account="acct-p", adapter="api-p")
-    if fallback_state is BookmakerCapabilityState.UNKNOWN:
+    if fallback_capability_state is BookmakerCapabilityState.UNKNOWN:
         fallback = _profile(
             venue="fallback",
             account="acct-f",
@@ -291,11 +368,11 @@ def test_fallback_must_durably_support_exact_required_capability(
             venue="fallback",
             account="acct-f",
             adapter="api-f",
-            state=fallback_state,
+            state=fallback_capability_state,
             source_sha=SHA_D,
         )
     decision = _resolve(
-        _registry(tmp_path, primary, fallback),
+        tmp_path,
         primary,
         primary_state=ProviderOperationalState.UNAVAILABLE,
         fallback=fallback,
@@ -314,257 +391,18 @@ def test_fallback_must_durably_support_exact_required_capability(
         BookmakerCapability.CANCEL_BET,
     ],
 )
-def test_execution_or_execution_adjacent_capabilities_are_rejected(tmp_path, capability):
+def test_execution_or_execution_adjacent_capabilities_are_rejected(
+    tmp_path, capability
+):
     primary = _profile(venue="primary", account="acct-p", adapter="api-p")
     with pytest.raises(ProviderFallbackPolicyError, match="read-only"):
         _resolve(
-            _registry(tmp_path, primary),
+            tmp_path,
             primary,
             primary_state=ProviderOperationalState.HEALTHY,
             capability=capability,
         )
 
-
-def test_stale_primary_profile_fails_closed_after_registry_advances(tmp_path):
-    v1 = _profile(venue="primary", account="acct-p", adapter="api-p", version=1)
-    registry = _registry(tmp_path, v1)
-    v2 = _profile(
-        venue="primary",
-        account="acct-p",
-        adapter="api-p",
-        version=2,
-        observed_at=T1,
-        source_sha=SHA_D,
-    )
-    assert registry.register_profile(v2)
-
-    with pytest.raises(ProviderFallbackPolicyError, match="latest durable"):
-        resolve_readonly_provider_route(
-            registry=registry,
-            required_capability=BookmakerCapability.LIVE_QUOTES_READ,
-            primary_route=_route(v1),
-            primary_integration=_integration(v1),
-            primary_operational=_operational(
-                v1, state=ProviderOperationalState.HEALTHY
-            ),
-            decided_at=T3,
-        )
-
-
-def test_stale_fallback_profile_fails_closed_after_registry_advances(tmp_path):
-    primary = _profile(venue="primary", account="acct-p", adapter="api-p")
-    f1 = _profile(
-        venue="fallback", account="acct-f", adapter="api-f", version=1, source_sha=SHA_D
-    )
-    registry = _registry(tmp_path, primary, f1)
-    f2 = _profile(
-        venue="fallback",
-        account="acct-f",
-        adapter="api-f",
-        version=2,
-        observed_at=T1,
-        source_sha=SHA_C,
-    )
-    assert registry.register_profile(f2)
-
-    with pytest.raises(ProviderFallbackPolicyError, match="latest durable"):
-        _resolve(
-            registry,
-            primary,
-            primary_state=ProviderOperationalState.UNAVAILABLE,
-            fallback=f1,
-        )
-
-
-def test_invented_profile_id_cannot_substitute_for_registry_truth(tmp_path):
-    primary = _profile(venue="primary", account="acct-p", adapter="api-p")
-    registry = _registry(tmp_path, primary)
-    forged_route = replace(_route(primary), profile_id=SHA_D)
-    forged_operational = replace(
-        _operational(primary, state=ProviderOperationalState.HEALTHY),
-        route=forged_route,
-    )
-
-    with pytest.raises(ProviderFallbackPolicyError, match="latest durable"):
-        resolve_readonly_provider_route(
-            registry=registry,
-            required_capability=BookmakerCapability.LIVE_QUOTES_READ,
-            primary_route=forged_route,
-            primary_integration=_integration(primary),
-            primary_operational=forged_operational,
-            decided_at=T3,
-        )
-
-
-def test_integration_evidence_for_another_profile_fails_closed(tmp_path):
-    primary = _profile(venue="primary", account="acct-p", adapter="api-p")
-    other = _profile(venue="other", account="acct-o", adapter="api-o", source_sha=SHA_D)
-    registry = _registry(tmp_path, primary, other)
-
-    with pytest.raises(ProviderFallbackPolicyError, match="integration/profile"):
-        resolve_readonly_provider_route(
-            registry=registry,
-            required_capability=BookmakerCapability.LIVE_QUOTES_READ,
-            primary_route=_route(primary),
-            primary_integration=_integration(other),
-            primary_operational=_operational(
-                primary, state=ProviderOperationalState.HEALTHY
-            ),
-            decided_at=T3,
-        )
-
-
-def test_operational_evidence_for_another_route_fails_closed(tmp_path):
-    primary = _profile(venue="primary", account="acct-p", adapter="api-p")
-    other = _profile(venue="other", account="acct-o", adapter="api-o", source_sha=SHA_D)
-    registry = _registry(tmp_path, primary, other)
-
-    with pytest.raises(ProviderFallbackPolicyError, match="another route"):
-        resolve_readonly_provider_route(
-            registry=registry,
-            required_capability=BookmakerCapability.LIVE_QUOTES_READ,
-            primary_route=_route(primary),
-            primary_integration=_integration(primary),
-            primary_operational=_operational(
-                other, state=ProviderOperationalState.HEALTHY
-            ),
-            decided_at=T3,
-        )
-
-
-def test_operational_evidence_cannot_predate_profile(tmp_path):
-    primary = _profile(
-        venue="primary", account="acct-p", adapter="api-p", observed_at=T1
-    )
-    registry = _registry(tmp_path, primary)
-
-    with pytest.raises(ProviderFallbackPolicyError, match="predates"):
-        resolve_readonly_provider_route(
-            registry=registry,
-            required_capability=BookmakerCapability.LIVE_QUOTES_READ,
-            primary_route=_route(primary),
-            primary_integration=_integration(primary, observed_at=T1),
-            primary_operational=_operational(
-                primary,
-                state=ProviderOperationalState.HEALTHY,
-                observed_at=T0,
-            ),
-            decided_at=T3,
-        )
-
-
-@pytest.mark.parametrize("future_surface", ["integration", "operational"])
-def test_future_route_evidence_is_rejected(tmp_path, future_surface):
-    primary = _profile(venue="primary", account="acct-p", adapter="api-p")
-    registry = _registry(tmp_path, primary)
-    integration = _integration(
-        primary, observed_at=T4 if future_surface == "integration" else T1
-    )
-    operational = _operational(
-        primary,
-        state=ProviderOperationalState.HEALTHY,
-        observed_at=T4 if future_surface == "operational" else T2,
-    )
-
-    with pytest.raises(ProviderFallbackPolicyError, match="future at decided_at"):
-        resolve_readonly_provider_route(
-            registry=registry,
-            required_capability=BookmakerCapability.LIVE_QUOTES_READ,
-            primary_route=_route(primary),
-            primary_integration=integration,
-            primary_operational=operational,
-            decided_at=T3,
-        )
-
-
-def test_partial_fallback_evidence_is_rejected(tmp_path):
-    primary = _profile(venue="primary", account="acct-p", adapter="api-p")
-    fallback = _profile(
-        venue="fallback", account="acct-f", adapter="api-f", source_sha=SHA_D
-    )
-    registry = _registry(tmp_path, primary, fallback)
-
-    with pytest.raises(ProviderFallbackPolicyError, match="supplied together"):
-        resolve_readonly_provider_route(
-            registry=registry,
-            required_capability=BookmakerCapability.LIVE_QUOTES_READ,
-            primary_route=_route(primary),
-            primary_integration=_integration(primary),
-            primary_operational=_operational(
-                primary, state=ProviderOperationalState.UNAVAILABLE
-            ),
-            fallback_route=_route(fallback),
-            fallback_integration=None,
-            fallback_operational=None,
-            decided_at=T3,
-        )
-
-
-def test_primary_profile_cannot_be_its_own_fallback(tmp_path):
-    primary = _profile(venue="primary", account="acct-p", adapter="api-p")
-    with pytest.raises(ProviderFallbackPolicyError, match="must not reuse"):
-        _resolve(
-            _registry(tmp_path, primary),
-            primary,
-            primary_state=ProviderOperationalState.UNAVAILABLE,
-            fallback=primary,
-        )
-
-
-def test_decision_identity_is_deterministic_and_binds_operational_state(tmp_path):
-    primary = _profile(venue="primary", account="acct-p", adapter="api-p")
-    fallback = _profile(
-        venue="fallback", account="acct-f", adapter="api-f", source_sha=SHA_D
-    )
-    registry = _registry(tmp_path, primary, fallback)
-    first = _resolve(
-        registry,
-        primary,
-        primary_state=ProviderOperationalState.UNAVAILABLE,
-        fallback=fallback,
-    )
-    same = _resolve(
-        registry,
-        primary,
-        primary_state=ProviderOperationalState.UNAVAILABLE,
-        fallback=fallback,
-    )
-    different = _resolve(
-        registry,
-        primary,
-        primary_state=ProviderOperationalState.DEGRADED,
-        fallback=fallback,
-    )
-
-    assert first.decision_id == same.decision_id
-    assert first.decision_id != different.decision_id
-
-
-def test_operational_observation_identity_binds_source_evidence():
-    profile = _profile(venue="primary", account="acct-p", adapter="api-p")
-    observation = _operational(profile, state=ProviderOperationalState.HEALTHY)
-    changed = replace(observation, source_payload_sha256=SHA_D)
-
-    assert observation.observation_id != changed.observation_id
-
-
-def test_corrupt_registry_fails_closed_instead_of_accepting_caller_profile(tmp_path):
-    primary = _profile(venue="primary", account="acct-p", adapter="api-p")
-    path = tmp_path / "bookmaker_capabilities.json"
-    path.write_text('{"schema_version":1,"profiles":[', encoding="utf-8")
-    registry = BookmakerCapabilityRegistry(path)
-
-    with pytest.raises(ProviderFallbackPolicyError, match="cannot resolve canonical"):
-        resolve_readonly_provider_route(
-            registry=registry,
-            required_capability=BookmakerCapability.LIVE_QUOTES_READ,
-            primary_route=_route(primary),
-            primary_integration=_integration(primary),
-            primary_operational=_operational(
-                primary, state=ProviderOperationalState.HEALTHY
-            ),
-            decided_at=T3,
-        )
 
 def test_account_scoped_read_cannot_fallback_to_another_account(tmp_path):
     primary = _profile(
@@ -581,7 +419,7 @@ def test_account_scoped_read_cannot_fallback_to_another_account(tmp_path):
         source_sha=SHA_D,
     )
     decision = _resolve(
-        _registry(tmp_path, primary, fallback),
+        tmp_path,
         primary,
         primary_state=ProviderOperationalState.UNAVAILABLE,
         fallback=fallback,
@@ -607,58 +445,355 @@ def test_account_scoped_read_can_use_alternate_adapter_for_same_account(tmp_path
         source_sha=SHA_D,
     )
     decision = _resolve(
-        _registry(tmp_path, primary, fallback),
+        tmp_path,
         primary,
         primary_state=ProviderOperationalState.UNAVAILABLE,
         fallback=fallback,
         capability=BookmakerCapability.BALANCE_READ,
     )
 
-    assert decision.disposition is ProviderFallbackDisposition.FALLBACK_TECHNICALLY_ELIGIBLE
-    assert decision.selected_profile_id == fallback.profile_id
+    assert (
+        decision.disposition
+        is ProviderFallbackDisposition.FALLBACK_TECHNICALLY_ELIGIBLE
+    )
     assert decision.downstream_semantic_compatibility_required is False
+    assert decision.downstream_source_identity_binding_required is True
 
 
-def test_cross_provider_quote_fallback_requires_semantic_compatibility_gate(tmp_path):
-    primary = _profile(venue="venue-a", account="acct-a", adapter="api-a")
+def test_browser_fallback_is_not_promoted_to_source_quality_authority(tmp_path):
+    primary = _profile(venue="primary", account="acct-p", adapter="api-p")
     fallback = _profile(
-        venue="venue-b", account="acct-b", adapter="api-b", source_sha=SHA_D
+        venue="fallback",
+        account="acct-f",
+        adapter="browser-f",
+        source_sha=SHA_D,
     )
     decision = _resolve(
-        _registry(tmp_path, primary, fallback),
+        tmp_path,
         primary,
         primary_state=ProviderOperationalState.UNAVAILABLE,
         fallback=fallback,
+        fallback_kind=BookmakerIntegrationKind.BROWSER_AUTOMATION,
     )
 
-    assert decision.disposition is ProviderFallbackDisposition.FALLBACK_TECHNICALLY_ELIGIBLE
-    assert decision.downstream_semantic_compatibility_required is True
+    assert (
+        decision.disposition
+        is ProviderFallbackDisposition.FALLBACK_TECHNICALLY_ELIGIBLE
+    )
+    assert decision.source_quality_authority is False
     assert decision.downstream_source_quality_required is True
 
 
-def test_partial_fallback_is_rejected_even_when_primary_is_healthy(tmp_path):
+def test_health_is_resolved_as_of_decision_without_future_leakage(tmp_path):
+    primary = _profile(venue="primary", account="acct-p", adapter="api-p")
+    registry = _registry(tmp_path, primary)
+    health = _health_store(tmp_path)
+    route = _route(primary)
+    _record_health(health, route.source_id, ProviderOperationalState.HEALTHY, at=T2)
+    health.record_failure(
+        route.source_id,
+        now=T4,
+        error=RuntimeError("future failure"),
+    )
+
+    decision = resolve_readonly_provider_route(
+        registry=registry,
+        health_store=health,
+        required_capability=BookmakerCapability.LIVE_QUOTES_READ,
+        primary_route=route,
+        primary_integration=_integration(primary),
+        decided_at=T3,
+    )
+
+    assert (
+        decision.disposition
+        is ProviderFallbackDisposition.PRIMARY_TECHNICALLY_ELIGIBLE
+    )
+    assert decision.primary_health_state is ProviderOperationalState.HEALTHY
+
+
+def test_health_freshness_uses_ingestion_policy_and_fails_closed(tmp_path):
+    primary = _profile(venue="primary", account="acct-p", adapter="api-p")
+    registry = _registry(tmp_path, primary)
+    health = _health_store(tmp_path)
+    route = _route(primary)
+    _record_health(health, route.source_id, ProviderOperationalState.HEALTHY, at=T2)
+
+    fresh = resolve_readonly_provider_route(
+        registry=registry,
+        health_store=health,
+        required_capability=BookmakerCapability.LIVE_QUOTES_READ,
+        primary_route=route,
+        primary_integration=_integration(primary),
+        decided_at=T3,
+        policy=IngestionPolicy(stale_after_seconds=120.0),
+    )
+    stale = resolve_readonly_provider_route(
+        registry=registry,
+        health_store=health,
+        required_capability=BookmakerCapability.LIVE_QUOTES_READ,
+        primary_route=route,
+        primary_integration=_integration(primary),
+        decided_at=T3,
+        policy=IngestionPolicy(stale_after_seconds=30.0),
+    )
+
+    assert (
+        fresh.disposition
+        is ProviderFallbackDisposition.PRIMARY_TECHNICALLY_ELIGIBLE
+    )
+    assert stale.disposition is ProviderFallbackDisposition.ABSTAIN
+    assert stale.primary_health_state is ProviderOperationalState.STALE
+    assert stale.reason == "PRIMARY_STALE_NO_FALLBACK"
+
+
+def test_stale_primary_profile_fails_closed_after_registry_advances(tmp_path):
+    v1 = _profile(venue="primary", account="acct-p", adapter="api-p", version=1)
+    registry = _registry(tmp_path, v1)
+    v2 = _profile(
+        venue="primary",
+        account="acct-p",
+        adapter="api-p",
+        version=2,
+        observed_at=T1,
+        source_sha=SHA_D,
+    )
+    assert registry.register_profile(v2)
+    health = _health_store(tmp_path)
+    route = _route(v1)
+    _record_health(health, route.source_id, ProviderOperationalState.HEALTHY)
+
+    with pytest.raises(ProviderFallbackPolicyError, match="latest durable"):
+        resolve_readonly_provider_route(
+            registry=registry,
+            health_store=health,
+            required_capability=BookmakerCapability.LIVE_QUOTES_READ,
+            primary_route=route,
+            primary_integration=_integration(v1),
+            decided_at=T3,
+        )
+
+
+def test_invented_profile_id_cannot_substitute_for_registry_truth(tmp_path):
+    primary = _profile(venue="primary", account="acct-p", adapter="api-p")
+    registry = _registry(tmp_path, primary)
+    route = replace(_route(primary), profile_id=SHA_D)
+    health = _health_store(tmp_path)
+    _record_health(health, route.source_id, ProviderOperationalState.HEALTHY)
+
+    with pytest.raises(ProviderFallbackPolicyError, match="latest durable"):
+        resolve_readonly_provider_route(
+            registry=registry,
+            health_store=health,
+            required_capability=BookmakerCapability.LIVE_QUOTES_READ,
+            primary_route=route,
+            primary_integration=_integration(primary),
+            decided_at=T3,
+        )
+
+
+def test_integration_evidence_for_another_profile_fails_closed(tmp_path):
+    primary = _profile(venue="primary", account="acct-p", adapter="api-p")
+    other = _profile(
+        venue="other", account="acct-o", adapter="api-o", source_sha=SHA_D
+    )
+    registry = _registry(tmp_path, primary, other)
+    health = _health_store(tmp_path)
+    route = _route(primary)
+    _record_health(health, route.source_id, ProviderOperationalState.HEALTHY)
+
+    with pytest.raises(ProviderFallbackPolicyError, match="integration/profile"):
+        resolve_readonly_provider_route(
+            registry=registry,
+            health_store=health,
+            required_capability=BookmakerCapability.LIVE_QUOTES_READ,
+            primary_route=route,
+            primary_integration=_integration(other),
+            decided_at=T3,
+        )
+
+
+@pytest.mark.parametrize("future_surface", ["profile", "integration"])
+def test_future_technical_evidence_is_rejected(tmp_path, future_surface):
+    profile_at = T4 if future_surface == "profile" else T0
+    primary = _profile(
+        venue="primary",
+        account="acct-p",
+        adapter="api-p",
+        observed_at=profile_at,
+    )
+    registry = _registry(tmp_path, primary)
+    health = _health_store(tmp_path)
+    route = _route(primary)
+    _record_health(health, route.source_id, ProviderOperationalState.HEALTHY)
+    integration_at = T4 if future_surface == "integration" else T4
+
+    with pytest.raises(ProviderFallbackPolicyError, match="future at decided_at"):
+        resolve_readonly_provider_route(
+            registry=registry,
+            health_store=health,
+            required_capability=BookmakerCapability.LIVE_QUOTES_READ,
+            primary_route=route,
+            primary_integration=_integration(
+                primary,
+                observed_at=integration_at,
+            ),
+            decided_at=T3,
+        )
+
+
+def test_partial_fallback_evidence_is_rejected_even_when_primary_healthy(tmp_path):
     primary = _profile(venue="primary", account="acct-p", adapter="api-p")
     fallback = _profile(
         venue="fallback", account="acct-f", adapter="api-f", source_sha=SHA_D
     )
     registry = _registry(tmp_path, primary, fallback)
+    health = _health_store(tmp_path)
+    route = _route(primary)
+    _record_health(health, route.source_id, ProviderOperationalState.HEALTHY)
 
     with pytest.raises(ProviderFallbackPolicyError, match="supplied together"):
         resolve_readonly_provider_route(
             registry=registry,
+            health_store=health,
             required_capability=BookmakerCapability.LIVE_QUOTES_READ,
-            primary_route=_route(primary),
+            primary_route=route,
             primary_integration=_integration(primary),
-            primary_operational=_operational(
-                primary, state=ProviderOperationalState.HEALTHY
-            ),
             fallback_route=_route(fallback),
             fallback_integration=None,
-            fallback_operational=None,
             decided_at=T3,
         )
 
-def test_abstention_grants_no_downstream_consumption_gate(tmp_path):
+
+def test_exact_primary_source_and_profile_cannot_be_its_own_fallback(tmp_path):
+    primary = _profile(venue="primary", account="acct-p", adapter="api-p")
+    registry = _registry(tmp_path, primary)
+    health = _health_store(tmp_path)
+    route = _route(primary)
+    _record_health(health, route.source_id, ProviderOperationalState.UNAVAILABLE)
+
+    with pytest.raises(ProviderFallbackPolicyError, match="must not reuse"):
+        resolve_readonly_provider_route(
+            registry=registry,
+            health_store=health,
+            required_capability=BookmakerCapability.LIVE_QUOTES_READ,
+            primary_route=route,
+            primary_integration=_integration(primary),
+            fallback_route=route,
+            fallback_integration=_integration(primary),
+            decided_at=T3,
+        )
+
+
+def test_decision_identity_is_deterministic_for_same_durable_truth(tmp_path):
+    primary = _profile(venue="primary", account="acct-p", adapter="api-p")
+    fallback = _profile(
+        venue="fallback", account="acct-f", adapter="api-f", source_sha=SHA_D
+    )
+    registry = _registry(tmp_path, primary, fallback)
+    health = _health_store(tmp_path)
+    primary_route = _route(primary)
+    fallback_route = _route(fallback)
+    _record_health(
+        health,
+        primary_route.source_id,
+        ProviderOperationalState.UNAVAILABLE,
+    )
+    _record_health(
+        health,
+        fallback_route.source_id,
+        ProviderOperationalState.HEALTHY,
+    )
+    kwargs = dict(
+        registry=registry,
+        health_store=health,
+        required_capability=BookmakerCapability.LIVE_QUOTES_READ,
+        primary_route=primary_route,
+        primary_integration=_integration(primary),
+        fallback_route=fallback_route,
+        fallback_integration=_integration(fallback),
+        decided_at=T3,
+    )
+
+    first = resolve_readonly_provider_route(**kwargs)
+    second = resolve_readonly_provider_route(**kwargs)
+
+    assert first.decision_id == second.decision_id
+    assert first.primary_health_snapshot_id == second.primary_health_snapshot_id
+    assert first.fallback_health_snapshot_id == second.fallback_health_snapshot_id
+
+
+def test_new_durable_health_transition_changes_decision_identity(tmp_path):
+    primary = _profile(venue="primary", account="acct-p", adapter="api-p")
+    registry = _registry(tmp_path, primary)
+    health = _health_store(tmp_path)
+    route = _route(primary)
+    _record_health(health, route.source_id, ProviderOperationalState.HEALTHY, at=T2)
+
+    before = resolve_readonly_provider_route(
+        registry=registry,
+        health_store=health,
+        required_capability=BookmakerCapability.LIVE_QUOTES_READ,
+        primary_route=route,
+        primary_integration=_integration(primary),
+        decided_at=T3,
+    )
+    health.record_failure(route.source_id, now=T4, error=RuntimeError("lost"))
+    after = resolve_readonly_provider_route(
+        registry=registry,
+        health_store=health,
+        required_capability=BookmakerCapability.LIVE_QUOTES_READ,
+        primary_route=route,
+        primary_integration=_integration(primary),
+        decided_at=T5,
+    )
+
+    assert before.decision_id != after.decision_id
+    assert before.primary_health_state is ProviderOperationalState.HEALTHY
+    assert after.primary_health_state is ProviderOperationalState.UNAVAILABLE
+    assert after.disposition is ProviderFallbackDisposition.ABSTAIN
+
+
+def test_corrupt_registry_fails_closed(tmp_path):
+    primary = _profile(venue="primary", account="acct-p", adapter="api-p")
+    registry_path = tmp_path / "bookmaker_capabilities.json"
+    registry_path.write_text('{"schema_version":1,"profiles":[', encoding="utf-8")
+    registry = BookmakerCapabilityRegistry.__new__(BookmakerCapabilityRegistry)
+    registry.path = registry_path
+    health = _health_store(tmp_path)
+    route = _route(primary)
+    _record_health(health, route.source_id, ProviderOperationalState.HEALTHY)
+
+    with pytest.raises(ProviderFallbackPolicyError, match="cannot resolve canonical"):
+        resolve_readonly_provider_route(
+            registry=registry,
+            health_store=health,
+            required_capability=BookmakerCapability.LIVE_QUOTES_READ,
+            primary_route=route,
+            primary_integration=_integration(primary),
+            decided_at=T3,
+        )
+
+
+def test_corrupt_health_store_fails_closed(tmp_path):
+    primary = _profile(venue="primary", account="acct-p", adapter="api-p")
+    registry = _registry(tmp_path, primary)
+    health = _health_store(tmp_path)
+    route = _route(primary)
+    health.path.write_text('{"schema_version":3,"sources":', encoding="utf-8")
+
+    with pytest.raises(ProviderFallbackPolicyError, match="durable source health"):
+        resolve_readonly_provider_route(
+            registry=registry,
+            health_store=health,
+            required_capability=BookmakerCapability.LIVE_QUOTES_READ,
+            primary_route=route,
+            primary_integration=_integration(primary),
+            decided_at=T3,
+        )
+
+
+def test_abstention_grants_no_downstream_gates(tmp_path):
     primary = _profile(
         venue="primary",
         account="acct-p",
@@ -666,13 +801,15 @@ def test_abstention_grants_no_downstream_consumption_gate(tmp_path):
         state=BookmakerCapabilityState.UNSUPPORTED,
     )
     decision = _resolve(
-        _registry(tmp_path, primary),
+        tmp_path,
         primary,
         primary_state=ProviderOperationalState.HEALTHY,
     )
 
     assert decision.disposition is ProviderFallbackDisposition.ABSTAIN
     assert decision.downstream_source_quality_required is False
+    assert decision.downstream_source_identity_binding_required is False
+    assert decision.downstream_semantic_compatibility_required is False
     assert decision.execution_authority is False
     assert decision.source_quality_authority is False
-
+    assert decision.source_identity_authority is False

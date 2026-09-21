@@ -220,8 +220,12 @@ class BetfairCampaignEconomicEvidenceStore(CampaignEconomicEvidenceStore):
         record_sha256: str,
         as_of: datetime,
     ) -> bool:
-        if version.as_of != as_of or _UNRESOLVED_REASON in version.incomplete_reasons:
+        if _UNRESOLVED_REASON in version.incomplete_reasons:
             return False
+        if as_of < version.as_of:
+            raise CampaignEconomicStoreError(
+                "Betfair commission retry as_of cannot predate latest durable economic version"
+            )
         matches = tuple(
             item
             for item in _target_costs(version.costs)
@@ -231,7 +235,7 @@ class BetfairCampaignEconomicEvidenceStore(CampaignEconomicEvidenceStore):
         )
         if len(matches) != 1:
             return False
-        self._reverify_source_cost(version, matches[0])
+        self._reverify_source_cost(version, matches[0], as_of=as_of)
         return True
 
     def _validate_derived(
@@ -295,6 +299,7 @@ class BetfairCampaignEconomicEvidenceStore(CampaignEconomicEvidenceStore):
         observed: CostEvidence,
         *,
         previous: CampaignEconomicEvidenceVersion | None = None,
+        as_of: datetime | None = None,
     ) -> None:
         if not _is_betfair_source_cost(observed):
             raise CampaignEconomicStoreError(
@@ -312,7 +317,7 @@ class BetfairCampaignEconomicEvidenceStore(CampaignEconomicEvidenceStore):
                 provider_scope=self._provider_scope,
                 receipt_id=observed.source.evidence_id,
                 record_sha256=observed.source.sha256,
-                as_of=version.as_of,
+                as_of=version.as_of if as_of is None else as_of,
                 supersedes=predecessor,
             )
         except Exception as exc:

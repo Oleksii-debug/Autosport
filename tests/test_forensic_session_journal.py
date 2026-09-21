@@ -691,7 +691,11 @@ def test_deleted_lock_sidecar_cannot_admit_second_writer(tmp_path: Path) -> None
     owner = ForensicSessionJournal(path, clock=FakeClock(), session_id=str(uuid.UUID(int=51)))
     before = path.read_bytes()
     lock_path = path.with_name(path.name + ".lock")
-    lock_path.unlink()
+    try:
+        lock_path.unlink()
+    except OSError:
+        owner.close()
+        pytest.skip("platform prevents unlinking an active writer lock sidecar")
 
     with pytest.raises(JournalIntegrityError, match="lock sidecar was missing|ownership continuity"):
         ForensicSessionJournal(path, clock=FakeClock(), session_id=str(uuid.UUID(int=52)))
@@ -708,7 +712,11 @@ def test_replaced_lock_sidecar_invalidates_active_writer(tmp_path: Path) -> None
     owner = ForensicSessionJournal(path, clock=FakeClock(), session_id=str(uuid.UUID(int=53)))
     before = path.read_bytes()
     lock_path = path.with_name(path.name + ".lock")
-    lock_path.unlink()
+    try:
+        lock_path.unlink()
+    except OSError:
+        owner.close()
+        pytest.skip("platform prevents replacing an active writer lock sidecar")
     lock_path.write_bytes(b"AUTOSPORT_FORENSIC_SESSION_LOCK_V1\n")
 
     with pytest.raises(JournalIntegrityError, match="lock sidecar identity changed"):

@@ -930,7 +930,7 @@ def test_processed_with_errors_single_success_is_unknown_until_readback() -> Non
         )
 
 
-def test_provider_failure_report_is_rejected_not_inferred_from_absence() -> None:
+def test_provider_failure_without_bet_id_stays_unknown_until_readback() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         profile, bound, approval, ledger, action, goal_store = _prepared(tmp)
         transport = _Transport(
@@ -941,6 +941,7 @@ def test_provider_failure_report_is_rejected_not_inferred_from_absence() -> None
                 matched="0",
                 average="0",
                 bet_id=None,
+                order_status="EXECUTION_COMPLETE",
             )
         )
         client = _enabled_client(profile, transport, store=goal_store)
@@ -950,21 +951,95 @@ def test_provider_failure_report_is_rejected_not_inferred_from_absence() -> None
             bound,
             approval,
             action_id=action.action_id,
-            attempt_id="attempt-rejected",
+            attempt_id="attempt-failure-without-provider-id",
             profile=profile,
             client=client,
             clock=lambda: SUBMITTED_AT,
         )
 
-        assert result.outcome is PlaceOrdersOutcome.REJECTED
-        assert result.attempt_state is AttemptState.REJECTED
+        assert result.outcome is PlaceOrdersOutcome.UNKNOWN
+        assert result.attempt_state is AttemptState.UNKNOWN
         assert result.evidence_id is not None
+        assert result.external_receipt_id is None
         provider_ref = ledger.provider_order_reference(
-            attempt_id="attempt-rejected",
+            attempt_id="attempt-failure-without-provider-id",
             provider_id="betfair",
         )
         assert provider_ref is not None
-        assert result.external_receipt_id is None
+        assert not ledger.can_retry_action(
+            plan_id=bound.execution_plan.plan_id,
+            action_id=action.action_id,
+        )
+
+
+def test_partial_with_executable_remainder_stays_unknown_with_provider_identity() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        profile, bound, approval, ledger, action, goal_store = _prepared(tmp)
+        transport = _Transport(
+            lambda request: _response(
+                request,
+                matched=action.requested_stake / Decimal("2"),
+                average=action.requested_odds,
+                bet_id="bet-partial-live",
+                order_status="EXECUTABLE",
+            )
+        )
+        client = _enabled_client(profile, transport, store=goal_store)
+
+        result = execute_betfair_supervised_action(
+            ledger,
+            bound,
+            approval,
+            action_id=action.action_id,
+            attempt_id="attempt-partial-live-remainder",
+            profile=profile,
+            client=client,
+            clock=lambda: SUBMITTED_AT,
+        )
+
+        assert result.outcome is PlaceOrdersOutcome.UNKNOWN
+        assert result.attempt_state is AttemptState.UNKNOWN
+        assert result.evidence_id is not None
+        assert result.external_receipt_id == "bet-partial-live"
+        assert not ledger.can_retry_action(
+            plan_id=bound.execution_plan.plan_id,
+            action_id=action.action_id,
+        )
+
+
+def test_partial_with_execution_complete_is_terminal_partial() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        profile, bound, approval, ledger, action, goal_store = _prepared(tmp)
+        transport = _Transport(
+            lambda request: _response(
+                request,
+                matched=action.requested_stake / Decimal("2"),
+                average=action.requested_odds,
+                bet_id="bet-partial-terminal",
+                order_status="EXECUTION_COMPLETE",
+            )
+        )
+        client = _enabled_client(profile, transport, store=goal_store)
+
+        result = execute_betfair_supervised_action(
+            ledger,
+            bound,
+            approval,
+            action_id=action.action_id,
+            attempt_id="attempt-partial-terminal",
+            profile=profile,
+            client=client,
+            clock=lambda: SUBMITTED_AT,
+        )
+
+        assert result.outcome is PlaceOrdersOutcome.PARTIAL
+        assert result.attempt_state is AttemptState.PARTIAL
+        assert result.evidence_id is not None
+        assert result.external_receipt_id == "bet-partial-terminal"
+        assert not ledger.can_retry_action(
+            plan_id=bound.execution_plan.plan_id,
+            action_id=action.action_id,
+        )
 
 
 def test_failure_with_executable_order_state_is_unknown_not_rejected() -> None:

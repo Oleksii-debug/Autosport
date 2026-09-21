@@ -83,8 +83,10 @@ def _plan_ledger_payload(plan: ForwardCapturePlan, record_sha256: str) -> dict[s
             "capture_plan_record_sha256", record_sha256
         ),
         "capture_plan_sha256": plan.capture_plan_sha256,
+        "session_id": plan.session_id,
         "campaign_id": plan.campaign_id,
         "research_protocol_id": plan.research_protocol_id,
+        "evaluation_bundle_id": plan.evaluation_bundle_id,
         "protocol_sha256": plan.protocol_sha256.lower(),
     }
 
@@ -322,8 +324,11 @@ def bind_forward_evidence(
     ):
         raise ValueError("ResearchProtocol must durably precede ForwardCapturePlan")
 
+    requested_evaluation_bundle_id = _text("evaluation_bundle_id", evaluation_bundle_id)
+    if requested_evaluation_bundle_id != plan.evaluation_bundle_id:
+        raise ValueError("forward evidence evaluation_bundle_id mismatch")
     evaluation_entry = registry.get(
-        "EvaluationBundle", _text("evaluation_bundle_id", evaluation_bundle_id)
+        "EvaluationBundle", requested_evaluation_bundle_id
     )
     if evaluation_entry is None:
         raise ValueError("forward evaluation bundle is missing from ScientificRegistry")
@@ -342,6 +347,8 @@ def bind_forward_evidence(
         raise ValueError("evaluation bundle became available before capture window closed")
 
     context = bound_session.context
+    if context.session_id != plan.session_id:
+        raise ValueError("forward evidence session_id mismatch")
     if context.campaign_id != plan.campaign_id:
         raise ValueError("forward evidence campaign_id mismatch")
     if context.research_protocol_id != plan.research_protocol_id:

@@ -76,6 +76,11 @@ def capture_historical_acquisition_bundle(
     summary are content-bound into the bundle identities. This proves only runtime
     entitlement/source-row evidence for that request window; it does not promote the
     selected snapshots to complete historical market coverage or derive outcomes.
+
+    Match-result trust facts from the canonical capture boundary are content-bound
+    into the bundle as well.  In particular, a product-owned initial request path is
+    not promoted into provider-response-origin proof or trusted outcome-source
+    authority when the provider response envelope cannot demonstrate those facts.
     """
 
     if provider.public_preview or not provider.api_key:
@@ -200,6 +205,7 @@ def capture_historical_acquisition_bundle(
             "requested_date": result_report.requested_date,
             "priced_only": result_report.priced_only,
             "captured_at": result_report.captured_at,
+            "request_url": result_report.request_url,
             "capture_file": result_relative.as_posix(),
             "evidence_file": result_evidence_relative.as_posix(),
             "capture_sha256": result_report.capture_sha256,
@@ -207,6 +213,10 @@ def capture_historical_acquisition_bundle(
             "canonical_response_sha256": result_report.canonical_response_sha256,
             "historical_window_hours": result_report.historical_window_hours,
             "historical_window_from": result_report.historical_window_from,
+            "product_owned_request_path_verified": result_report.product_owned_request_path_verified,
+            "product_owned_acquisition_clock_verified": result_report.product_owned_acquisition_clock_verified,
+            "provider_response_origin_verified": result_report.provider_response_origin_verified,
+            "trusted_outcome_source_admissible": result_report.trusted_outcome_source_admissible,
             "coverage_preflight": coverage_evidence,
         }
 
@@ -226,6 +236,10 @@ def capture_historical_acquisition_bundle(
             "snapshot_count": len(snapshot_entries),
             "snapshots_with_odds": snapshots_with_odds,
             "all_requested_snapshots_returned_odds": snapshots_with_odds == len(snapshot_entries),
+            "match_result_product_owned_request_path_verified": result_report.product_owned_request_path_verified,
+            "match_result_product_owned_acquisition_clock_verified": result_report.product_owned_acquisition_clock_verified,
+            "match_result_provider_response_origin_verified": result_report.provider_response_origin_verified,
+            "trusted_outcome_source_admissible": result_report.trusted_outcome_source_admissible,
             "provider_result_schema_parsed": False,
             "sealed_quote_outcomes_derived": False,
             "point_in_time_odds_market_coverage_verified": False,
@@ -320,6 +334,7 @@ def main(argv: list[str] | None = None) -> int:
         "point_in_time_odds_market_coverage_verified=false "
         "historical_window_market_coverage_verified=false replay_corpus_ready=false"
     )
+    print("match_result_provider_response_origin_verified=false trusted_outcome_source_admissible=false")
     print("licensing_or_retention_verified=false redistribution_verified=false real_money_execution=false")
     print(f"bundle={report.root}")
     return 0

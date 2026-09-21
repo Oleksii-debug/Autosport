@@ -1,10 +1,12 @@
-"""Versioned provider-specific settlement-rule evidence.
+"""Versioned provider-specific structural settlement-rule evidence.
 
-This module records *which documented rule version* applies to a synthetic settlement
-scenario at a position acceptance instant.  It does not settle positions, calculate
-money, call a provider, validate credentials, or create settlement-receipt/execution
-authority.  Real provider rules must arrive as separately verified source evidence;
-callers must not treat the examples/tests as bookmaker facts.
+This module can answer only a structural question: which recorded rule version covers
+a caller-supplied evaluation instant for a synthetic settlement scenario. That instant
+is not proof that any provider position existed or was accepted then. This module does
+not settle positions, calculate money, call a provider, validate credentials, or create
+historical-applicability, settlement-receipt, execution, or real-money authority.
+Real provider rules must arrive as separately verified source evidence; callers must
+not treat the examples/tests as bookmaker facts.
 """
 
 from __future__ import annotations
@@ -151,8 +153,8 @@ class ProviderSettlementRulebook:
             "source_ref": self.source_ref,
         }
 
-    def applies_at(self, accepted_at: str) -> bool:
-        instant = _timestamp(accepted_at, "accepted_at")
+    def applies_at(self, evaluated_at: str) -> bool:
+        instant = _timestamp(evaluated_at, "evaluated_at")
         start = _timestamp(self.effective_from, "effective_from")
         if instant < start:
             return False
@@ -174,17 +176,20 @@ class ProviderSettlementRulebook:
 
 
 @dataclass(frozen=True, slots=True)
-class ProviderSettlementBinding:
-    """Exact historical rule identity selected for one acceptance instant.
+class ProviderSettlementRuleSelection:
+    """Structural rule selection for one caller-supplied evaluation instant.
 
-    The binding is evidence for rule interpretation only.  It is not a settlement
-    receipt, provider acknowledgement, execution record, or financial amount.
+    This value proves only that the selected rulebook/rule structurally covers
+    evaluated_at. It is not evidence that any provider position existed or was
+    accepted at that instant, and it is not historical-applicability authority,
+    settlement-receipt authority, provider acknowledgement, execution record, or a
+    financial amount.
     """
 
     provider_id: str
     rulebook_version: str
     rulebook_id: str
-    accepted_at: str
+    evaluated_at: str
     market_family: str
     scenario_code: str
     treatment_code: str
@@ -195,7 +200,7 @@ class ProviderSettlementBinding:
         _text(self.provider_id, "provider_id")
         _text(self.rulebook_version, "rulebook_version")
         _sha256(self.rulebook_id, "rulebook_id")
-        _timestamp(self.accepted_at, "accepted_at")
+        _timestamp(self.evaluated_at, "evaluated_at")
         _text(self.market_family, "market_family")
         _text(self.scenario_code, "scenario_code")
         _text(self.treatment_code, "treatment_code")
@@ -204,12 +209,12 @@ class ProviderSettlementBinding:
             raise ProviderSettlementRuleError("schema_version must be exactly 1")
 
     @property
-    def binding_id(self) -> str:
+    def selection_id(self) -> str:
         return _canonical_sha256(self.to_canonical_dict())
 
     def to_canonical_dict(self) -> dict[str, object]:
         return {
-            "accepted_at": self.accepted_at,
+            "evaluated_at": self.evaluated_at,
             "market_family": self.market_family,
             "provider_id": self.provider_id,
             "rule_id": self.rule_id,
@@ -231,16 +236,16 @@ class ProviderSettlementBinding:
             or self.rulebook_id != rulebook.rulebook_id
         ):
             raise ProviderSettlementRuleError(
-                "settlement binding does not match exact rulebook identity"
+                "settlement selection does not match exact rulebook identity"
             )
-        if not rulebook.applies_at(self.accepted_at):
+        if not rulebook.applies_at(self.evaluated_at):
             raise ProviderSettlementRuleError(
-                "settlement binding acceptance instant is outside rulebook interval"
+                "settlement selection evaluation instant is outside rulebook interval"
             )
         rule = rulebook.rule_for(self.market_family, self.scenario_code)
         if self.rule_id != rule.rule_id or self.treatment_code != rule.treatment_code:
             raise ProviderSettlementRuleError(
-                "settlement binding does not match exact rule identity"
+                "settlement selection does not match exact rule identity"
             )
 
 
@@ -289,36 +294,36 @@ class ProviderSettlementRuleTimeline:
                     "rulebook effective intervals must not overlap"
                 )
 
-    def select(self, accepted_at: str) -> ProviderSettlementRulebook:
-        _timestamp(accepted_at, "accepted_at")
-        matches = [book for book in self.rulebooks if book.applies_at(accepted_at)]
+    def select(self, evaluated_at: str) -> ProviderSettlementRulebook:
+        _timestamp(evaluated_at, "evaluated_at")
+        matches = [book for book in self.rulebooks if book.applies_at(evaluated_at)]
         if len(matches) != 1:
             raise ProviderSettlementRuleError(
-                "acceptance instant does not select exactly one rulebook version"
+                "evaluation instant does not select exactly one rulebook version"
             )
         return matches[0]
 
-    def bind(
+    def select_rule(
         self,
         *,
-        accepted_at: str,
+        evaluated_at: str,
         market_family: str,
         scenario_code: str,
-    ) -> ProviderSettlementBinding:
-        rulebook = self.select(accepted_at)
+    ) -> ProviderSettlementRuleSelection:
+        rulebook = self.select(evaluated_at)
         rule = rulebook.rule_for(market_family, scenario_code)
-        binding = ProviderSettlementBinding(
+        selection = ProviderSettlementRuleSelection(
             provider_id=self.provider_id,
             rulebook_version=rulebook.rulebook_version,
             rulebook_id=rulebook.rulebook_id,
-            accepted_at=accepted_at,
+            evaluated_at=evaluated_at,
             market_family=rule.market_family,
             scenario_code=rule.scenario_code,
             treatment_code=rule.treatment_code,
             rule_id=rule.rule_id,
         )
-        binding.verify_rulebook(rulebook)
-        return binding
+        selection.verify_rulebook(rulebook)
+        return selection
 
 
 def build_provider_settlement_timeline(

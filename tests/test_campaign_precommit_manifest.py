@@ -242,3 +242,32 @@ def test_loader_rejects_nonstandard_json_constants(tmp_path: Path) -> None:
     path.write_text(encoded, encoding="utf-8")
     with pytest.raises(CampaignPrecommitManifestError):
         load_campaign_precommit_manifest(path)
+
+
+@pytest.mark.parametrize("rewrite", ("whitespace", "key_order", "extra_newline"))
+def test_loader_rejects_semantically_equivalent_noncanonical_bytes(
+    tmp_path: Path, rewrite: str
+) -> None:
+    path = tmp_path / "precommit.json"
+    original = manifest()
+    write_campaign_precommit_manifest_once(path, original)
+    record = original.to_record()
+
+    if rewrite == "whitespace":
+        rewritten = json.dumps(record, ensure_ascii=False, sort_keys=True, indent=2) + "\n"
+    elif rewrite == "key_order":
+        reversed_record = dict(reversed(tuple(record.items())))
+        rewritten = json.dumps(
+            reversed_record,
+            ensure_ascii=False,
+            separators=(",", ":"),
+        ) + "\n"
+    else:
+        rewritten = path.read_text(encoding="utf-8") + "\n"
+
+    path.write_text(rewritten, encoding="utf-8")
+    with pytest.raises(
+        CampaignPrecommitManifestError,
+        match="bytes are not canonical",
+    ):
+        load_campaign_precommit_manifest(path)

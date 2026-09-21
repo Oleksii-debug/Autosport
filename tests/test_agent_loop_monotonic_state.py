@@ -100,6 +100,31 @@ def test_valid_older_agent_loop_state_is_rejected_after_newer_commit(
     assert reopened.snapshot().state_sha256 == advanced.state_sha256
 
 
+def test_workspace_move_preserves_agent_loop_rollback_fence(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    environment, runtime = _runtime(tmp_path, monkeypatch)
+    _begin(runtime, environment)
+    older_valid_bytes = runtime.path.read_bytes()
+    advanced = runtime.advance(
+        expected=AgentLoopPhase.OBSERVE,
+        at="2026-09-19T13:00:02Z",
+    )
+
+    moved_workspace = tmp_path / "workspace-moved"
+    runtime.path.parent.rename(moved_workspace)
+    moved_path = moved_workspace / runtime.path.name
+
+    reopened = AgentLoopRuntime(moved_path)
+    assert reopened.snapshot().state_sha256 == advanced.state_sha256
+    assert reopened.snapshot().phase is AgentLoopPhase.ASSESS
+
+    moved_path.write_bytes(older_valid_bytes)
+    with pytest.raises(AgentLoopError, match="monotonic|rolled back|authority"):
+        AgentLoopRuntime(moved_path)
+
+
 def test_missing_agent_loop_state_cannot_rebootstrap_after_authority_exists(
     tmp_path,
     monkeypatch,

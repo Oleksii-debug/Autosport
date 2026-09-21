@@ -339,7 +339,8 @@ class BookmakerCapabilityRegistry:
             raise BookmakerCapabilityRegistryError(
                 "capability registry root must be an object"
             )
-        if document.get("schema_version") != self.SCHEMA_VERSION:
+        schema_version = document.get("schema_version")
+        if type(schema_version) is not int or schema_version != self.SCHEMA_VERSION:
             raise BookmakerCapabilityRegistryError(
                 "unsupported capability registry schema_version"
             )

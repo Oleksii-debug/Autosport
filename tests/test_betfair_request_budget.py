@@ -11,6 +11,7 @@ from autosport.betfair_request_budget import (
     BetfairRequestPriority,
     BetfairStreamState,
     admit_betfair_request,
+    clear_read_backpressure,
     order_betfair_intents,
     record_market_book_dispatch,
     record_read_backpressure,
@@ -465,3 +466,53 @@ def test_bool_aliases_do_not_pass_integer_policy_or_clock_fields() -> None:
             policy=_policy(),
             now_monotonic_ns=True,
         )
+
+
+def test_future_market_dispatch_history_fails_closed_instead_of_bypassing_limit() -> None:
+    intent = _market("future-history")
+    state = record_market_book_dispatch(
+        BetfairRequestBudgetState(),
+        intent=intent,
+        now_monotonic_ns=2_000,
+    )
+
+    with pytest.raises(
+        BetfairRequestBudgetError,
+        match="cannot be from the future",
+    ):
+        admit_betfair_request(
+            intent,
+            state=state,
+            policy=_policy(),
+            now_monotonic_ns=1_999,
+        )
+
+
+def test_successful_read_clears_only_its_pool_backoff() -> None:
+    policy = _policy()
+    state = record_read_backpressure(
+        BetfairRequestBudgetState(),
+        pool=BetfairRequestPool.MARKET_DATA,
+        policy=policy,
+        now_monotonic_ns=1_000,
+    )
+    state = record_read_backpressure(
+        state,
+        pool=BetfairRequestPool.CLEARED_ORDERS,
+        policy=policy,
+        now_monotonic_ns=1_000,
+    )
+
+    cleared = clear_read_backpressure(
+        state,
+        pool=BetfairRequestPool.MARKET_DATA,
+    )
+
+    assert all(
+        item.pool is not BetfairRequestPool.MARKET_DATA
+        for item in cleared.backoffs
+    )
+    assert any(
+        item.pool is BetfairRequestPool.CLEARED_ORDERS
+        for item in cleared.backoffs
+    )

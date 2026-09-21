@@ -294,8 +294,12 @@ class RatingDifferenceBaselineModel:
     def from_payload(
         cls, payload: Mapping[str, object]
     ) -> "RatingDifferenceBaselineModel":
+        if payload.get("schema_version") != 1:
+            raise ParticipantStrengthError("unsupported baseline artifact schema")
         if payload.get("family") != cls.model_family:
             raise ParticipantStrengthError("baseline artifact family mismatch")
+        if payload.get("formula") != "p=(1+rating_difference)/2":
+            raise ParticipantStrengthError("baseline artifact formula mismatch")
         model = cls(
             _text(payload.get("model_id"), "model_id"),
             _text(payload.get("training_cutoff"), "training_cutoff"),
@@ -459,8 +463,19 @@ class HistogramCalibratedStrengthModel:
     def from_payload(
         cls, payload: Mapping[str, object]
     ) -> "HistogramCalibratedStrengthModel":
+        if payload.get("schema_version") != 1:
+            raise ParticipantStrengthError("unsupported calibrated artifact schema")
         if payload.get("family") != cls.model_family:
             raise ParticipantStrengthError("calibrated artifact family mismatch")
+        if payload.get("baseline_formula") != "p=(1+rating_difference)/2":
+            raise ParticipantStrengthError(
+                "calibrated artifact baseline formula mismatch"
+            )
+        if (
+            payload.get("calibration")
+            != "empirical-bin-rate-shrunk-to-bin-mean-baseline"
+        ):
+            raise ParticipantStrengthError("calibrated artifact method mismatch")
         counts = payload.get("bin_counts")
         probabilities = payload.get("bin_probabilities")
         if not isinstance(counts, list) or not isinstance(probabilities, list):

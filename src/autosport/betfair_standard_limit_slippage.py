@@ -12,7 +12,6 @@ from .betfair_supervised_execution import (
     WRITE_ADAPTER_VERSION,
     _validate_betfair_place_action,
 )
-from .prospective_applicable_cost import ApplicableCostKnowledge
 from .real_execution_ledger import ExecutionAction
 from .supervised_execution import BoundSupervisedExecutionPlan, SupervisedExecutionError
 
@@ -24,6 +23,11 @@ BETFAIR_STANDARD_BACK_LIMIT_SLIPPAGE_CONTRACT_VERSION = "1"
 
 class BetfairStandardLimitSlippageError(ValueError):
     pass
+
+
+class ProspectiveAdversePriceSlippageKnowledge(str, Enum):
+    KNOWN_ZERO = "KNOWN_ZERO"
+    UNKNOWN_UNPROVEN = "UNKNOWN_UNPROVEN"
 
 
 class ProspectiveSlippageUnknownReason(str, Enum):
@@ -160,8 +164,8 @@ class BetfairStandardBackLimitZeroSlippageEvidence:
         object.__setattr__(self, "evidence_sha256", _digest(payload))
 
     @property
-    def knowledge(self) -> ApplicableCostKnowledge:
-        return ApplicableCostKnowledge.KNOWN_ZERO
+    def knowledge(self) -> ProspectiveAdversePriceSlippageKnowledge:
+        return ProspectiveAdversePriceSlippageKnowledge.KNOWN_ZERO
 
     @property
     def amount(self) -> Decimal:
@@ -218,9 +222,9 @@ class ProspectiveAdversePriceSlippageAssessment:
             )
 
     @property
-    def knowledge(self) -> ApplicableCostKnowledge:
+    def knowledge(self) -> ProspectiveAdversePriceSlippageKnowledge:
         if self.evidence is None:
-            return ApplicableCostKnowledge.UNKNOWN_UNPROVEN
+            return ProspectiveAdversePriceSlippageKnowledge.UNKNOWN_UNPROVEN
         return self.evidence.knowledge
 
     @property
@@ -234,7 +238,9 @@ class ProspectiveAdversePriceSlippageAssessment:
         return self.evidence is not None
 
 
-def _unknown(reason: ProspectiveSlippageUnknownReason) -> ProspectiveAdversePriceSlippageAssessment:
+def _unknown(
+    reason: ProspectiveSlippageUnknownReason,
+) -> ProspectiveAdversePriceSlippageAssessment:
     return ProspectiveAdversePriceSlippageAssessment(unknown_reason=reason)
 
 

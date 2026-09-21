@@ -80,6 +80,14 @@ class UrllibBetfairHttpTransport:
         return payload
 
 
+def _system_utc_now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+_CANONICAL_URLLIB_POST = UrllibBetfairHttpTransport.post
+_CANONICAL_MARKET_BOOK_CLOCK = _system_utc_now
+
+
 @dataclass(frozen=True, slots=True)
 class BetfairEvidence:
     observed_at: str
@@ -166,7 +174,11 @@ class BetfairMarketBookDepthObservation:
             raise BetfairReadOnlyError("market-book receipt requires BetfairEvidence")
 
 
-_MARKET_BOOK_DEPTH_ISSUED: dict[int, tuple[object, str]] = {}
+# Receipt identity alone is not enough for positive decision-time authority:
+# callers may instantiate BetfairReadOnlyClient with an injected transport/clock
+# for parsing or deterministic tests. Keep the exact issuing client origin beside
+# the receipt so positive consumers can require the direct production IO path.
+_MARKET_BOOK_DEPTH_ISSUED: dict[int, tuple[object, str, object]] = {}
 
 
 def _market_book_depth_fingerprint(
@@ -198,8 +210,29 @@ def _market_book_depth_fingerprint(
     )
 
 
+def _market_book_source_origin_authoritative(source: object) -> bool:
+    """Return True only for the unchanged direct production read origin."""
+
+    if type(source) is not BetfairReadOnlyClient:
+        return False
+    transport = getattr(source, "_transport", None)
+    if type(transport) is not UrllibBetfairHttpTransport:
+        return False
+    if getattr(source, "_market_book_origin_transport", None) is not transport:
+        return False
+    if getattr(source, "_clock", None) is not _CANONICAL_MARKET_BOOK_CLOCK:
+        return False
+    if getattr(source, "_market_book_origin_clock", None) is not _CANONICAL_MARKET_BOOK_CLOCK:
+        return False
+    if "post" in vars(transport):
+        return False
+    return type(transport).post is _CANONICAL_URLLIB_POST
+
+
 def _issue_market_book_depth(
     observation: BetfairMarketBookDepthObservation,
+    *,
+    source: object,
 ) -> BetfairMarketBookDepthObservation:
     fingerprint = _market_book_depth_fingerprint(observation)
     observation_id = id(observation)
@@ -210,27 +243,37 @@ def _issue_market_book_depth(
             _MARKET_BOOK_DEPTH_ISSUED.pop(observation_id, None)
 
     reference = ref(observation, forget)
-    _MARKET_BOOK_DEPTH_ISSUED[observation_id] = (reference, fingerprint)
+    try:
+        source_reference = ref(source)
+    except TypeError:
+        source_reference = lambda: None
+    _MARKET_BOOK_DEPTH_ISSUED[observation_id] = (
+        reference,
+        fingerprint,
+        source_reference,
+    )
     return observation
 
 
 def assert_market_book_depth_authoritative(
     observation: BetfairMarketBookDepthObservation,
 ) -> None:
-    """Reject structurally valid receipts not issued by authenticated provider IO."""
+    """Reject receipts that lack exact direct provider-IO origin authority."""
 
-    if not isinstance(observation, BetfairMarketBookDepthObservation):
+    if type(observation) is not BetfairMarketBookDepthObservation:
         raise BetfairReadOnlyError(
-            "market-book depth authority requires BetfairMarketBookDepthObservation"
+            "market-book depth authority requires exact BetfairMarketBookDepthObservation"
         )
     current = _MARKET_BOOK_DEPTH_ISSUED.get(id(observation))
+    source = None if current is None else current[2]()
     if (
         current is None
         or current[0]() is not observation
         or current[1] != _market_book_depth_fingerprint(observation)
+        or not _market_book_source_origin_authoritative(source)
     ):
         raise BetfairReadOnlyError(
-            "market-book depth observation was not issued by canonical Betfair read IO"
+            "market-book depth observation lacks canonical direct Betfair provider IO origin"
         )
 
 
@@ -604,7 +647,14 @@ class BetfairReadOnlyClient:
         self._credentials = credentials
         self._transport = transport or UrllibBetfairHttpTransport()
         self._timeout_seconds = float(timeout_seconds)
-        self._clock = clock or (lambda: datetime.now(timezone.utc))
+        self._clock = clock or _CANONICAL_MARKET_BOOK_CLOCK
+        # Positive MarketBook authority is intentionally narrower than generic
+        # read-only parsing: only the direct default transport + product clock
+        # established at construction may mint a positive provider-origin receipt.
+        self._market_book_origin_transport = (
+            self._transport if transport is None else None
+        )
+        self._market_book_origin_clock = self._clock if clock is None else None
         self._request_id = 0
         self._request_lock = Lock()
         self._venue_id = _required_text(venue_id, "venue_id")
@@ -777,7 +827,7 @@ class BetfairReadOnlyClient:
             request_scope_sha256=_canonical_sha256(params),
             evidence=response.evidence,
         )
-        return _issue_market_book_depth(observation)
+        return _issue_market_book_depth(observation, source=self)
 
     def read_market_event(self, market_id: str) -> BetfairMarketEventObservation:
         market = _required_text(market_id, "market_id")

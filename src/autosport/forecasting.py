@@ -232,6 +232,47 @@ class ForecastEvaluationSummary:
     strategy_versions: tuple[str, ...]
 
 
+def _binary_log_loss(probability: Decimal, outcome: int) -> float:
+    """Return binary log loss without silently clipping declared probabilities.
+
+    Impossible realized endpoint predictions have unbounded log loss. Autosport
+    fails closed instead of replacing those declared probabilities with epsilon.
+    Interior Decimals that collapse to a binary64 endpoint also fail closed rather
+    than acquiring different evaluation semantics during float conversion.
+    """
+
+    if not isinstance(probability, Decimal) or not probability.is_finite():
+        raise ValueError("log-loss probability must be a finite Decimal")
+    if probability < 0 or probability > 1:
+        raise ValueError("log-loss probability must be between 0 and 1")
+    if outcome not in (0, 1):
+        raise ValueError("log-loss outcome must be 0 or 1")
+
+    if probability == 0:
+        if outcome == 0:
+            return 0.0
+        raise ValueError(
+            "log loss is unbounded for probability=0 and realized outcome=1"
+        )
+    if probability == 1:
+        if outcome == 1:
+            return 0.0
+        raise ValueError(
+            "log loss is unbounded for probability=1 and realized outcome=0"
+        )
+
+    binary_probability = float(probability)
+    if not 0.0 < binary_probability < 1.0:
+        raise ValueError(
+            "interior probability cannot be represented as an interior binary64 "
+            "value for log-loss evaluation"
+        )
+
+    if outcome == 1:
+        return -math.log(binary_probability)
+    return -math.log(1.0 - binary_probability)
+
+
 def evaluate_forecast_window(
     records: Iterable[ForecastRecord],
     outcomes: Iterable[ForecastOutcomeFact],
@@ -273,13 +314,10 @@ def evaluate_forecast_window(
     probabilities = [float(record.probability) for record, _fact in selected]
     actuals = [fact.outcome for _record, fact in selected]
     brier = sum((p - y) ** 2 for p, y in zip(probabilities, actuals, strict=True)) / len(selected)
-    epsilon = 1e-15
-    losses = []
-    for probability, outcome in zip(probabilities, actuals, strict=True):
-        clipped = min(1.0 - epsilon, max(epsilon, probability))
-        losses.append(
-            -(outcome * math.log(clipped) + (1 - outcome) * math.log(1 - clipped))
-        )
+    losses = [
+        _binary_log_loss(record.probability, fact.outcome)
+        for record, fact in selected
+    ]
     mean_uncertainty = sum(
         float(record.uncertainty) for record, _fact in selected
     ) / len(selected)

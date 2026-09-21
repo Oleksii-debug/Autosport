@@ -255,12 +255,21 @@ def load_campaign_precommit_manifest(
 ) -> CampaignPrecommitManifest:
     target = Path(path)
     try:
-        raw = strict_json_loads(target.read_text(encoding="utf-8"))
+        raw_bytes = target.read_bytes()
+        text = raw_bytes.decode("utf-8", errors="strict")
+        raw = strict_json_loads(text)
     except (OSError, UnicodeError, ValueError) as exc:
         raise CampaignPrecommitManifestError(
             "cannot read campaign precommit manifest"
         ) from exc
-    return CampaignPrecommitManifest.from_record(raw)
+
+    manifest = CampaignPrecommitManifest.from_record(raw)
+    canonical_bytes = _canonical_bytes(manifest.to_record()) + b"\n"
+    if raw_bytes != canonical_bytes:
+        raise CampaignPrecommitManifestError(
+            "campaign precommit manifest bytes are not canonical"
+        )
+    return manifest
 
 
 def write_campaign_precommit_manifest_once(

@@ -3,7 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 from dataclasses import dataclass
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from enum import Enum
 from typing import Any
 
@@ -63,6 +63,15 @@ def _timestamp(value: str, *, field: str) -> datetime:
     if parsed.tzinfo is None or parsed.utcoffset() is None:
         raise ValueError(f"{field} must include an explicit timezone")
     return parsed
+
+
+def _utc_iso(value: str, *, field: str) -> str:
+    return (
+        _timestamp(value, field=field)
+        .astimezone(timezone.utc)
+        .isoformat()
+        .replace("+00:00", "Z")
+    )
 
 
 def _date(value: str, *, field: str) -> date:
@@ -145,8 +154,9 @@ class HistoricalFileEvidence:
 
 
 @dataclass(frozen=True, slots=True)
-class LawfulEnrichmentEvidence:
+class EnrichmentProvenance:
     dataset_id: str
+    dataset_sha256: str
     source_identity: str
     observed_at: str
     license_or_terms_reference: str
@@ -155,6 +165,7 @@ class LawfulEnrichmentEvidence:
 
     def __post_init__(self) -> None:
         _text(self.dataset_id, field="enrichment.dataset_id")
+        _sha256(self.dataset_sha256, field="enrichment.dataset_sha256")
         _text(self.source_identity, field="enrichment.source_identity")
         _timestamp(self.observed_at, field="enrichment.observed_at")
         _text(self.license_or_terms_reference, field="enrichment.license_or_terms_reference")
@@ -172,6 +183,7 @@ class LawfulEnrichmentEvidence:
     def authority_payload(self) -> dict[str, Any]:
         return {
             "dataset_id": self.dataset_id,
+            "dataset_sha256": self.dataset_sha256,
             "source_identity": self.source_identity,
             "observed_at": self.observed_at,
             "license_or_terms_reference": self.license_or_terms_reference,
@@ -190,7 +202,7 @@ class BetfairHistoricalSnapshot:
     parser_version: str
     jurisdiction_class: str
     files: tuple[HistoricalFileEvidence, ...]
-    enrichments: tuple[LawfulEnrichmentEvidence, ...] = ()
+    enrichments: tuple[EnrichmentProvenance, ...] = ()
 
     def __post_init__(self) -> None:
         _text(self.dataset_id, field="dataset_id")
@@ -215,10 +227,18 @@ class BetfairHistoricalSnapshot:
         file_paths = [item.provider_file_path for item in self.files]
         if len(set(file_paths)) != len(file_paths):
             raise ValueError("provider_file_path must be unique within one immutable snapshot")
+        if self.canonical_layout is HistoricalFileLayout.MARKET_FILE:
+            market_ids = [item.market_id for item in self.files]
+            if len(set(market_ids)) != len(market_ids):
+                raise ValueError("one immutable MARKET_FILE snapshot may contain each market_id only once")
+        else:
+            event_ids = [item.event_id for item in self.files]
+            if len(set(event_ids)) != len(event_ids):
+                raise ValueError("one immutable EVENT_FILE snapshot may contain each event_id only once")
         if not isinstance(self.enrichments, tuple):
             raise TypeError("enrichments must be a tuple")
-        if any(not isinstance(item, LawfulEnrichmentEvidence) for item in self.enrichments):
-            raise TypeError("enrichments must contain LawfulEnrichmentEvidence values")
+        if any(not isinstance(item, EnrichmentProvenance) for item in self.enrichments):
+            raise TypeError("enrichments must contain EnrichmentProvenance values")
         enrichment_ids = [item.dataset_id for item in self.enrichments]
         if len(set(enrichment_ids)) != len(enrichment_ids):
             raise ValueError("enrichment dataset identities must be unique")
@@ -237,6 +257,16 @@ class BetfairHistoricalSnapshot:
 
     @property
     def historical_market_data_proves_execution(self) -> bool:
+        return False
+
+    @property
+    def external_licensing_authority_verified(self) -> bool:
+        """This structural record carries references; it does not verify legal authority."""
+        return False
+
+    @property
+    def provider_account_capability_verified(self) -> bool:
+        """Jurisdiction/account class is provenance metadata, not provider-issued authority."""
         return False
 
     @property
@@ -269,6 +299,8 @@ class BetfairHistoricalSnapshot:
                 "files": file_payloads,
                 "enrichments": enrichment_payloads,
                 "historical_market_data_proves_execution": False,
+                "external_licensing_authority_verified": False,
+                "provider_account_capability_verified": False,
             }
         )
 
@@ -285,10 +317,10 @@ def canonical_provider_change_identity(
         {
             "provider": _PROVIDER,
             "market_id": _text(market_id, field="market_id"),
-            "provider_publish_ts": _timestamp(
+            "provider_publish_ts": _utc_iso(
                 provider_publish_ts,
                 field="provider_publish_ts",
-            ).isoformat(),
+            ),
             "change_payload_sha256": _sha256(
                 change_payload_sha256,
                 field="change_payload_sha256",
@@ -386,9 +418,16 @@ class StreamCaptureEvidence:
 
 @dataclass(frozen=True, slots=True)
 class StratumQualification:
-    qualified: bool
+    compatible: bool
     requested: EvaluationStratum
+    promotion_authorized: bool
     reason: str
+
+    def __post_init__(self) -> None:
+        if self.promotion_authorized:
+            raise ValueError(
+                "provenance compatibility alone must never authorize model/policy promotion"
+            )
 
 
 def qualify_historical_stratum(
@@ -400,10 +439,11 @@ def qualify_historical_stratum(
     if type(requested) is not EvaluationStratum:
         raise TypeError("requested must be EvaluationStratum")
     if requested is EvaluationStratum.HISTORICAL_REPLAY:
-        return StratumQualification(True, requested, "historical archive is offline replay evidence")
+        return StratumQualification(True, requested, False, "historical archive is offline replay evidence")
     return StratumQualification(
         False,
         requested,
+        False,
         "settled historical archive cannot be promoted to forward/live/execution evidence",
     )
 
@@ -421,22 +461,30 @@ def qualify_stream_stratum(
         return StratumQualification(
             qualified,
             requested,
-            "delayed stream supports DELAYED_FORWARD only",
+            False,
+            "delayed stream supports DELAYED_FORWARD only; provenance alone is not promotion authority",
         )
     qualified = requested is EvaluationStratum.LIVE_READ_FORWARD
     return StratumQualification(
         qualified,
         requested,
-        "live read stream supports LIVE_READ_FORWARD only; execution strata require separate execution evidence",
+        False,
+        "live read stream supports LIVE_READ_FORWARD only; provider authority and execution evidence remain separate",
     )
 
 
-def enrichment_supports_feature(
+def enrichment_declares_feature_at(
     snapshot: BetfairHistoricalSnapshot,
     *,
     capability: str,
     decision_cutoff_ts: str,
 ) -> bool:
+    """Return causal declaration availability, never licensing/source authority.
+
+    A True result means only that an explicitly bound enrichment artifact declares the
+    capability and was observed by the cutoff. A separate authority verifier must decide
+    whether that source is lawful/authorized for the intended use.
+    """
     if not isinstance(snapshot, BetfairHistoricalSnapshot):
         raise TypeError("snapshot must be BetfairHistoricalSnapshot")
     wanted = _text(capability, field="capability")

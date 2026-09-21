@@ -270,6 +270,32 @@ def test_bounded_retention_rejects_one_microsecond_over_horizon():
     assert outcome.reason == "RETENTION_HORIZON_EXCEEDS_GRANT"
 
 
+def test_bounded_retention_near_datetime_max_fails_closed_without_overflow():
+    long_grant = ProviderOutputGrant(
+        "research",
+        "odds_snapshot",
+        RetentionPolicy.BOUNDED,
+        172800,
+    )
+    auth = authority(
+        valid_from="9999-12-29T00:00:00Z",
+        valid_until="9999-12-31T23:59:59Z",
+        grants=(long_grant,),
+    )
+    req = request(
+        auth,
+        acquired_at="9999-12-30T12:00:00Z",
+        requested_retain_until="9999-12-31T12:00:00Z",
+    )
+    outcome = decide_provider_output_use(
+        auth,
+        req,
+        decided_at="9999-12-30T12:00:00Z",
+    )
+    assert outcome.allowed is True
+    assert outcome.reason == "ALLOWED"
+
+
 def test_unbounded_retention_does_not_inherit_bounded_rule():
     auth = authority()
     req = request(

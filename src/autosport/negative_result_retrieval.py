@@ -16,6 +16,7 @@ from .scientific_registry import (
     RegistryEntry,
     ResearchOutcome,
     ScientificRegistry,
+    ScientificRegistryError,
 )
 
 
@@ -31,7 +32,7 @@ _TOKEN_RE = re.compile(r"[^\W_]+", flags=re.UNICODE)
 _SHA256_CHARS = frozenset("0123456789abcdef")
 
 
-class NegativeResultRetrievalError(RuntimeError):
+class NegativeResultRetrievalError(ScientificRegistryError):
     """Raised when canonical negative-result lineage cannot be resolved safely."""
 
 
@@ -62,9 +63,9 @@ class NegativeResultHit:
 
 
 def _normalized_terms(value: str, *, field: str) -> tuple[str, ...]:
-    if type(value) is not str or not value or value != value.strip() or "\x00" in value:
-        raise ValueError(f"{field} must be a non-empty canonical string")
-    normalized = unicodedata.normalize("NFKC", value).casefold().replace("_", " ")
+    if type(value) is not str or "\x00" in value:
+        raise ValueError(f"{field} must be text without NUL")
+    normalized = unicodedata.normalize("NFKC", value.strip()).casefold().replace("_", " ")
     terms = tuple(dict.fromkeys(_TOKEN_RE.findall(normalized)))
     if not terms:
         raise ValueError(f"{field} must contain searchable text")

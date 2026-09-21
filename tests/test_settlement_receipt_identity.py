@@ -7,6 +7,7 @@ from decimal import Decimal
 from pathlib import Path
 
 from autosport.continuous_session import (
+    ContinuousSessionCoordinator,
     ContinuousSessionError,
     SettlementResolution,
     _ContinuousSessionState,
@@ -206,6 +207,96 @@ class SettlementReceiptIdentityTests(unittest.TestCase):
         self.assertIs(ticket.status, TicketStatus.VOID)
         self.assertEqual(ticket.payout, Decimal("10"))
         self.assertEqual(book.balance, Decimal("100"))
+
+    def test_validation_detaches_outcome_authority_owned_mapping(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            book_path = root / "paper_book.json"
+            book = PaperBook("100")
+            leg = TicketLeg(
+                event_id="event-1",
+                market_id="winner",
+                selection_id="home",
+                locked_odds=Decimal("2.00"),
+                sport="table_tennis",
+            )
+            ticket = book.open_ticket(
+                (leg,),
+                Decimal("10"),
+                placed_at="2026-09-21T08:39:00+00:00",
+            )
+            book.save(book_path)
+
+            authority_outcomes = {leg.quote_key: "win"}
+            resolution = SettlementResolution(
+                event_identity="provider-a:event-1",
+                settlement_ref="provider-result:alias",
+                quote_outcomes=authority_outcomes,
+                evidence_id="receipt-alias",
+                evidence_sha256="d" * 64,
+                available_at=_AT,
+            )
+            resolution.validate(as_of=_AT)
+            authority_outcomes[leg.quote_key] = "loss"
+
+            coordinator = ContinuousSessionCoordinator.__new__(
+                ContinuousSessionCoordinator
+            )
+            coordinator.workspace = root
+            coordinator.paper_book_path = book_path
+            coordinator.initial_bankroll = "100"
+            settled, evidence_ids = coordinator._settle(resolutions=(resolution,))
+
+            reopened = PaperBook.load(book_path)
+            self.assertEqual(settled, (ticket.ticket_id,))
+            self.assertEqual(evidence_ids, ("receipt-alias",))
+            self.assertIs(reopened.tickets[ticket.ticket_id].status, TicketStatus.WON)
+            self.assertEqual(reopened.balance, Decimal("110"))
+
+    def test_settlement_rejects_post_validation_outcome_mutation_before_book_write(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            book_path = root / "paper_book.json"
+            book = PaperBook("100")
+            leg = TicketLeg(
+                event_id="event-1",
+                market_id="winner",
+                selection_id="home",
+                locked_odds=Decimal("2.00"),
+                sport="table_tennis",
+            )
+            ticket = book.open_ticket(
+                (leg,),
+                Decimal("10"),
+                placed_at="2026-09-21T08:39:00+00:00",
+            )
+            book.save(book_path)
+
+            resolution = SettlementResolution(
+                event_identity="provider-a:event-1",
+                settlement_ref="provider-result:mutated",
+                quote_outcomes={leg.quote_key: "win"},
+                evidence_id="receipt-mutated",
+                evidence_sha256="e" * 64,
+                available_at=_AT,
+            )
+            resolution.validate(as_of=_AT)
+            resolution.quote_outcomes[leg.quote_key] = "loss"
+
+            coordinator = ContinuousSessionCoordinator.__new__(
+                ContinuousSessionCoordinator
+            )
+            coordinator.workspace = root
+            coordinator.paper_book_path = book_path
+            coordinator.initial_bankroll = "100"
+            with self.assertRaisesRegex(ValueError, "changed after validation"):
+                coordinator._settle(resolutions=(resolution,))
+
+            reopened = PaperBook.load(book_path)
+            self.assertIs(reopened.tickets[ticket.ticket_id].status, TicketStatus.OPEN)
+            self.assertEqual(reopened.balance, Decimal("90"))
 
     def test_same_outcomes_cannot_hide_settlement_reference_drift(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

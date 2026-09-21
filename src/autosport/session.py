@@ -522,6 +522,7 @@ class AutosportSession:
             "sport_scope": list(verified_sports),
             "sport_identity_proven": sport_identity_proven,
             "dataset_schema_version": dataset.schema_version,
+            "dataset_manifest_sha256": dataset.manifest_sha256,
             "historical_import_identity": dataset.import_identity,
             "dataset_governance": asdict(dataset.governance) if dataset.governance is not None else None,
             "market_price_truth": market_price_truth.to_dict(),

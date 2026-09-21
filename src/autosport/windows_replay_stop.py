@@ -24,12 +24,30 @@ REPLAY_STOP_LOCALIZATION_KEYS = frozenset(
 require_keys(REPLAY_STOP_LOCALIZATION_KEYS)
 
 
+def _stop_control_enabled(worker) -> bool:
+    """Keep STOP discoverable when idle; disable only during an un-stoppable flight."""
+
+    if worker is None or not worker.busy:
+        return True
+    return bool(worker.stop_available)
+
+
+def _set_stop_control_state(button, worker) -> None:
+    if button is None:
+        return
+    if _stop_control_enabled(worker):
+        button.state(["!disabled"])
+    else:
+        button.state(["disabled"])
+
+
 def _request_replay_stop(app) -> None:
     worker = app.__dict__.get("replay_worker")
     if worker is None or not worker.request_stop():
-        button = app.__dict__.get("stop_replay_button")
-        if button is not None:
-            button.state(["disabled"])
+        # Idle STOP remains a real, focusable action so keyboard/NVDA users can
+        # discover it and receive truthful "nothing to stop" feedback. If a
+        # worker is in the narrow post-completion/pre-poll window, keep it disabled.
+        _set_stop_control_state(app.__dict__.get("stop_replay_button"), worker)
         message = text("ui.windows.replay_stop.status.unavailable")
         app.status.set(message)
         app._append_log(message)
@@ -38,6 +56,8 @@ def _request_replay_stop(app) -> None:
 
     button = app.__dict__.get("stop_replay_button")
     if button is not None:
+        # The accepted request is single-shot. Re-enable only after the worker
+        # publishes and the GUI consumes its terminal state.
         button.state(["disabled"])
     app.status.set(text("ui.windows.replay_stop.status.requested"))
     app._append_log(text("ui.windows.replay_stop.log.requested"))
@@ -69,7 +89,6 @@ def install_windows_replay_stop() -> None:
             controls,
             text=text("ui.windows.replay_stop.button"),
             command=lambda: _request_replay_stop(self),
-            state="disabled",
             takefocus=True,
         )
         self.stop_replay_button.pack(
@@ -93,14 +112,10 @@ def install_windows_replay_stop() -> None:
 
     def set_controls_with_replay_stop(self, busy: bool) -> None:
         original_set_replay_controls_busy(self, busy)
-        button = self.__dict__.get("stop_replay_button")
-        worker = self.__dict__.get("replay_worker")
-        if button is None:
-            return
-        if worker is not None and worker.stop_available:
-            button.state(["!disabled"])
-        else:
-            button.state(["disabled"])
+        _set_stop_control_state(
+            self.__dict__.get("stop_replay_button"),
+            self.__dict__.get("replay_worker"),
+        )
 
     def poll_windows_replay_worker_with_stop(self) -> None:
         worker = self.replay_worker

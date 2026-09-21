@@ -1,0 +1,234 @@
+from __future__ import annotations
+
+import tempfile
+import unittest
+from datetime import datetime, timedelta
+from pathlib import Path
+
+from autosport.causal_collector import CollectorDeltaStore
+from autosport.collector_service import (
+    CollectorServiceConfig,
+    HeadlessCollectorService,
+)
+from autosport.event_lifecycle import CatalogPage, ContinuousEventLifecycle
+
+
+class _Clock:
+    def __init__(self, value: str) -> None:
+        self.current = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        self.sleeps: list[float] = []
+
+    def __call__(self) -> str:
+        return self.current.isoformat()
+
+    def sleep(self, seconds: float) -> None:
+        value = float(seconds)
+        self.sleeps.append(value)
+        self.current += timedelta(seconds=value)
+
+    def advance(self, seconds: float) -> None:
+        self.current += timedelta(seconds=float(seconds))
+
+
+class _EmptySource:
+    source_id = "source-x"
+    stream_epoch = "epoch-1"
+
+    def __init__(
+        self,
+        clock: _Clock,
+        cycle_durations: list[float],
+        *,
+        start_position: int = 1,
+    ) -> None:
+        self.clock = clock
+        self.cycle_durations = list(cycle_durations)
+        self.position = start_position - 1
+
+    def fetch_catalog_page(self, checkpoint):
+        self.position += 1
+        if self.cycle_durations:
+            self.clock.advance(self.cycle_durations.pop(0))
+        return CatalogPage(
+            source_id=self.source_id,
+            stream_epoch="catalog-epoch-1",
+            cursor=f"catalog-{self.position}",
+            position=self.position,
+            events=(),
+        )
+
+    def fetch_deltas(self, checkpoint, records, max_items):
+        return ()
+
+
+def _service(
+    root: str,
+    *,
+    clock: _Clock,
+    source: _EmptySource,
+) -> HeadlessCollectorService:
+    return HeadlessCollectorService(
+        delta_store=CollectorDeltaStore(Path(root) / "collector.db"),
+        lifecycle=ContinuousEventLifecycle(Path(root) / "catalog.json"),
+        source=source,
+        state_path=Path(root) / "service.json",
+        run_id="run-1",
+        config=CollectorServiceConfig(
+            poll_interval_seconds=10,
+            retry_attempts=1,
+            initial_backoff_seconds=1,
+            max_backoff_seconds=1,
+            jitter_fraction=0,
+        ),
+        clock=clock,
+        sleep=clock.sleep,
+        random_value=lambda: 0,
+    )
+
+
+class ProspectiveCollectorScheduleTests(unittest.TestCase):
+    def test_run_uses_frozen_due_times_not_post_cycle_delay(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            clock = _Clock("2026-01-01T00:00:00+00:00")
+            service = _service(
+                tmp,
+                clock=clock,
+                source=_EmptySource(clock, [7, 12, 0]),
+            )
+
+            result = service.run(max_cycles=3)
+
+            self.assertEqual(result.cycles_executed, 3)
+            # Cycle 1 consumes seven seconds, so cycle 2 waits only three.
+            # Cycle 2 then overruns slot 2 by two seconds; no extra ten-second
+            # completion-relative delay is inserted.
+            self.assertEqual(clock.sleeps, [3.0])
+
+            evidence = service.delta_store.collector_schedule_evidence(
+                source_id="source-x",
+                run_id="run-1",
+                start_slot_ordinal=0,
+                end_slot_ordinal=2,
+            )
+            self.assertEqual(
+                tuple(slot["due_at"] for slot in evidence["slots"]),
+                (
+                    "2026-01-01T00:00:00+00:00",
+                    "2026-01-01T00:00:10+00:00",
+                    "2026-01-01T00:00:20+00:00",
+                ),
+            )
+            self.assertEqual(
+                tuple(slot["attempted_at"] for slot in evidence["slots"]),
+                (
+                    "2026-01-01T00:00:00+00:00",
+                    "2026-01-01T00:00:10+00:00",
+                    "2026-01-01T00:00:22+00:00",
+                ),
+            )
+            self.assertEqual(
+                tuple(slot["started_late"] for slot in evidence["slots"]),
+                (False, False, True),
+            )
+            self.assertFalse(
+                any(slot["started_before_due"] for slot in evidence["slots"])
+            )
+            self.assertEqual(
+                tuple(slot["cycle_seq"] for slot in evidence["slots"]),
+                (1, 2, 3),
+            )
+            self.assertEqual(len(evidence["commitment_sha256"]), 64)
+
+    def test_restart_keeps_original_anchor_and_exposes_overdue_slot(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            first_clock = _Clock("2026-01-01T00:00:00+00:00")
+            first = _service(
+                tmp,
+                clock=first_clock,
+                source=_EmptySource(first_clock, [0], start_position=1),
+            )
+            first.run(max_cycles=1)
+
+            restart_clock = _Clock("2026-01-01T00:00:35+00:00")
+            reopened = _service(
+                tmp,
+                clock=restart_clock,
+                source=_EmptySource(restart_clock, [0], start_position=2),
+            )
+            reopened.resume()
+            reopened.run(max_cycles=1)
+
+            evidence = reopened.delta_store.collector_schedule_evidence(
+                source_id="source-x",
+                run_id="run-1",
+                start_slot_ordinal=0,
+                end_slot_ordinal=1,
+            )
+            self.assertEqual(
+                evidence["anchor_at"],
+                "2026-01-01T00:00:00+00:00",
+            )
+            self.assertEqual(
+                evidence["slots"][1]["due_at"],
+                "2026-01-01T00:00:10+00:00",
+            )
+            self.assertEqual(
+                evidence["slots"][1]["attempted_at"],
+                "2026-01-01T00:00:35+00:00",
+            )
+            self.assertTrue(evidence["slots"][1]["started_late"])
+            self.assertEqual(restart_clock.sleeps, [])
+
+    def test_one_due_slot_cannot_mint_two_cycle_starts(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = CollectorDeltaStore(Path(tmp) / "collector.db")
+            store._ensure_collector_schedule(
+                source_id="source-x",
+                run_id="run-1",
+                anchor_at="2026-01-01T00:00:00+00:00",
+                interval_seconds=10,
+            )
+            slot = store._next_collector_schedule_slot(
+                source_id="source-x",
+                run_id="run-1",
+            )
+            cycle_seq = store._begin_scheduled_collector_cycle(
+                source_id="source-x",
+                run_id="run-1",
+                stream_epoch="epoch-1",
+                slot_ordinal=slot["slot_ordinal"],
+                due_at=slot["due_at"],
+                attempted_at="2026-01-01T00:00:00+00:00",
+            )
+            self.assertEqual(cycle_seq, 1)
+
+            with self.assertRaisesRegex(
+                ValueError,
+                "duplicate, skipped, or out of order",
+            ):
+                store._begin_scheduled_collector_cycle(
+                    source_id="source-x",
+                    run_id="run-1",
+                    stream_epoch="epoch-1",
+                    slot_ordinal=slot["slot_ordinal"],
+                    due_at=slot["due_at"],
+                    attempted_at="2026-01-01T00:00:00+00:00",
+                )
+
+            cycles = store.collector_cycle_evidence(
+                source_id="source-x",
+                start_cycle_seq=1,
+                end_cycle_seq=1,
+            )
+            self.assertEqual(len(cycles), 1)
+            schedule = store.collector_schedule_evidence(
+                source_id="source-x",
+                run_id="run-1",
+                start_slot_ordinal=0,
+                end_slot_ordinal=0,
+            )
+            self.assertEqual(schedule["slots"][0]["cycle_seq"], 1)
+
+
+if __name__ == "__main__":
+    unittest.main()

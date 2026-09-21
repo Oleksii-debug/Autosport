@@ -54,8 +54,11 @@ _OBSERVATION_FIELDS = frozenset(
     }
 )
 _RUNTIME_INIT_SENTINEL = "_autosport_campaign_observation_pristine_init"
+_RUNTIME_GETATTRIBUTE_SENTINEL = (
+    "_autosport_campaign_observation_pristine_getattribute"
+)
 _ISSUER_METHOD = "_autosport_issue_predecision_learning_observation"
-_INSTALL_SENTINEL = "_autosport_campaign_preexecution_observation_v3"
+_INSTALL_SENTINEL = "_autosport_campaign_preexecution_observation_v4"
 
 
 class _ProductIssuerDescriptor:
@@ -168,9 +171,19 @@ def _install() -> None:
             _RUNTIME_INIT_SENTINEL,
             PaperExecutionAdoptionRuntime.__init__,
         )
+    if not hasattr(PaperExecutionAdoptionRuntime, _RUNTIME_GETATTRIBUTE_SENTINEL):
+        setattr(
+            PaperExecutionAdoptionRuntime,
+            _RUNTIME_GETATTRIBUTE_SENTINEL,
+            PaperExecutionAdoptionRuntime.__getattribute__,
+        )
     stable_runtime_init = getattr(
         PaperExecutionAdoptionRuntime,
         _RUNTIME_INIT_SENTINEL,
+    )
+    stable_runtime_getattribute = getattr(
+        PaperExecutionAdoptionRuntime,
+        _RUNTIME_GETATTRIBUTE_SENTINEL,
     )
     stable_checkpoint = CausalLearningEnvironment.checkpoint
     stable_origin_to_dict = _origin.DecisionRecordOrigin.to_dict
@@ -264,6 +277,40 @@ def _install() -> None:
                 "decision-time learning observation is not causally valid"
             ) from exc
         return _observation_payload(observation)
+
+    runtime_type = PaperExecutionAdoptionRuntime
+    issuer_descriptor = _ProductIssuerDescriptor(issue_predecision_learning_observation)
+    canonical_issuer = issue_predecision_learning_observation
+
+    def runtime_getattribute(
+        self: PaperExecutionAdoptionRuntime,
+        name: str,
+    ):
+        if name != _ISSUER_METHOD:
+            return stable_runtime_getattribute(self, name)
+        if type(self) is not runtime_type:
+            raise _origin.PaperExecutionDecisionOriginError(
+                "learning observation issuer requires exact product execution runtime"
+            )
+        current_descriptor = runtime_type.__dict__.get(_ISSUER_METHOD)
+        if current_descriptor is not issuer_descriptor:
+            raise _origin.PaperExecutionDecisionOriginError(
+                "product learning Observation issuer class dispatch changed"
+            )
+        try:
+            current_issuer = object.__getattribute__(issuer_descriptor, "_issuer")
+        except AttributeError as exc:
+            raise _origin.PaperExecutionDecisionOriginError(
+                "product learning Observation issuer executable seal changed"
+            ) from exc
+        if current_issuer is not canonical_issuer:
+            raise _origin.PaperExecutionDecisionOriginError(
+                "product learning Observation issuer executable seal changed"
+            )
+        # Never dispatch through the mutable class attribute after verification.
+        # Bind and return the concrete source-owned function captured by this
+        # install closure, so a concurrent class replacement cannot execute.
+        return canonical_issuer.__get__(self, runtime_type)
 
     def origin_to_dict(self: _origin.DecisionRecordOrigin) -> dict[str, object]:
         base = stable_origin_to_dict(self)
@@ -361,11 +408,8 @@ def _install() -> None:
         )
 
     PaperExecutionAdoptionRuntime.__init__ = runtime_init_with_learning_environment
-    setattr(
-        PaperExecutionAdoptionRuntime,
-        _ISSUER_METHOD,
-        _ProductIssuerDescriptor(issue_predecision_learning_observation),
-    )
+    setattr(PaperExecutionAdoptionRuntime, _ISSUER_METHOD, issuer_descriptor)
+    PaperExecutionAdoptionRuntime.__getattribute__ = runtime_getattribute
     _origin.DecisionRecordOrigin.to_dict = origin_to_dict
     _origin.DecisionRecordOrigin.from_dict = origin_from_dict
 

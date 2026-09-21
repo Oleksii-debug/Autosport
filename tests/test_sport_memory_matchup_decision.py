@@ -298,6 +298,18 @@ def test_historical_decision_cannot_rebind_participant_after_later_snapshot(
         runtime.consumptions_for_decision("decision-historical")
         == earlier_records
     )
+
+    with pytest.raises(
+        SportMemoryError,
+        match="matchup as_of must equal decision cutoff",
+    ):
+        runtime.record_matchup_consumption(
+            decision_id="decision-stale-matchup",
+            matchup=earlier,
+            decision_cutoff=T4,
+            consumed_at=T4_CONSUMED,
+        )
+
     later_records = runtime.record_matchup_consumption(
         decision_id="decision-later",
         matchup=later,
@@ -339,7 +351,7 @@ def test_matchup_selection_and_binding_fail_closed_on_future_evidence(tmp_path):
     )
     with pytest.raises(
         SportMemoryError,
-        match="selected after opportunity evidence",
+        match="must exactly match opportunity evidence observed_at",
     ):
         bind_sport_memory_to_opportunity_evidence(
             early_base,
@@ -349,7 +361,7 @@ def test_matchup_selection_and_binding_fail_closed_on_future_evidence(tmp_path):
 
     with pytest.raises(
         SportMemoryError,
-        match="selected after decision cutoff",
+        match="matchup as_of must equal decision cutoff",
     ):
         runtime.record_matchup_consumption(
             decision_id="decision-too-early",

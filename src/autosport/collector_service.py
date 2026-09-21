@@ -661,7 +661,7 @@ class HeadlessCollectorService:
         committed: list[str] = []
         duplicates: list[str] = []
 
-        def finish_cycle(status: str, *, error_code: str | None = None) -> None:
+        def finish_cycle(status: str, *, error_code: str | None = None) -> str:
             completed_at = self.clock()
             _CollectorServiceState._instant(completed_at, "completed_at")
             self.delta_store._finish_collector_cycle(
@@ -675,6 +675,7 @@ class HeadlessCollectorService:
                 duplicate_delta_ids=tuple(duplicates),
                 error_code=error_code,
             )
+            return completed_at
 
         try:
             self._check_storage_budget()
@@ -745,9 +746,7 @@ class HeadlessCollectorService:
             self._require_source_identity(
                 expected_stream_epoch=cycle_stream_epoch
             )
-            finish_cycle("SUCCESS")
-            completed_at = self.clock()
-            _CollectorServiceState._instant(completed_at, "completed_at")
+            completed_at = finish_cycle("SUCCESS")
             self._state.record_success(
                 at=completed_at,
                 committed=len(committed),

@@ -23,6 +23,7 @@ class ParlayApiOutputClass(str, Enum):
 
 class ParlayApiRetentionState(str, Enum):
     NOT_YET_AVAILABLE = "NOT_YET_AVAILABLE"
+    ACQUISITION_AUTHORITY_UNRESOLVED = "ACQUISITION_AUTHORITY_UNRESOLVED"
     RAW_USABLE = "RAW_USABLE"
     DELETE_REQUIRED = "DELETE_REQUIRED"
     LEGAL_REVIEW_REQUIRED = "LEGAL_REVIEW_REQUIRED"
@@ -209,14 +210,27 @@ class ParlayApiOutputRetentionEvidence:
                 reason="raw Output has no finite product-owned internal retention horizon",
             )
 
+        # The structural evidence object is deliberately not positive acquisition
+        # authority. Its hashes and timestamps are caller-supplied, and the current
+        # canonical historical acquisition lineage does not yet expose a
+        # product-owned, re-resolvable acquisition-clock authority. Granting
+        # RAW_USABLE here would let old bytes be re-wrapped with a fresh
+        # acquisition identity/timestamp and restart the retention clock.
+        #
+        # Keep the computed deadline available for deletion/audit, but deny raw or
+        # corpus use until a future canonical resolver can re-establish the exact
+        # provider capture identity and acquisition time from durable product truth.
         return ParlayApiRetentionDecision(
-            state=ParlayApiRetentionState.RAW_USABLE,
+            state=ParlayApiRetentionState.ACQUISITION_AUTHORITY_UNRESOLVED,
             effective_retention_deadline=deadline,
-            raw_use_allowed=True,
-            training_corpus_allowed=True,
+            raw_use_allowed=False,
+            training_corpus_allowed=False,
             raw_redistribution_allowed=False,
             delete_raw_output=False,
-            reason="raw Output is within its finite internal-use retention window",
+            reason=(
+                "caller-supplied retention evidence cannot prove canonical "
+                "product-owned acquisition identity/time"
+            ),
         )
 
     def require_raw_use(

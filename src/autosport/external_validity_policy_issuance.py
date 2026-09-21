@@ -55,6 +55,7 @@ class ProductPolicyEvaluationWorkspace:
 
     workspace: Path
     workspace_instance_id: str
+    workspace_locator_sha256: str
 
     @classmethod
     def open(
@@ -91,7 +92,11 @@ class ProductPolicyEvaluationWorkspace:
             raise ProductPolicyEvaluationIssuanceError(
                 "product evaluator workspace must be durably bound before issuance"
             )
-        return cls(root, binding.workspace_instance_id)
+        return cls(
+            root,
+            binding.workspace_instance_id,
+            binding.workspace_locator_sha256,
+        )
 
 
 _ISSUER_SOURCE_SHA256 = "aa95112ec260878167b36071f2682f196cb27f8731c677e14d1d7659aac28c90"
@@ -247,7 +252,11 @@ def _open_canonical_authorities(
         raise ProductPolicyEvaluationIssuanceError(
             "product evaluator workspace identity cannot be re-verified"
         ) from exc
-    if root != authority.workspace or binding.workspace_instance_id != authority.workspace_instance_id:
+    if (
+        root != authority.workspace
+        or binding.workspace_instance_id != authority.workspace_instance_id
+        or binding.workspace_locator_sha256 != authority.workspace_locator_sha256
+    ):
         raise ProductPolicyEvaluationIssuanceError(
             "product evaluator workspace authority was rebound"
         )
@@ -338,6 +347,7 @@ class IssuedPolicyEvaluationRef:
 
     issuance_id: str
     workspace_instance_id: str
+    workspace_locator_sha256: str
     evaluation_bundle_id: str
     evaluation_bundle_sha256: str
     result_artifact_sha256: str
@@ -349,6 +359,7 @@ class IssuedPolicyEvaluationRef:
     def __post_init__(self) -> None:
         _sha256(self.issuance_id, "issuance_id")
         _text(self.workspace_instance_id, "workspace_instance_id")
+        _sha256(self.workspace_locator_sha256, "workspace_locator_sha256")
         _text(self.evaluation_bundle_id, "evaluation_bundle_id")
         _sha256(self.evaluation_bundle_sha256, "evaluation_bundle_sha256")
         _sha256(self.result_artifact_sha256, "result_artifact_sha256")
@@ -367,10 +378,11 @@ class IssuedPolicyEvaluationRef:
 
     def to_payload(self) -> dict[str, object]:
         return {
-            "schema_version": 2,
-            "kind": "autosport-issued-policy-evaluation-ref-v2",
+            "schema_version": 3,
+            "kind": "autosport-issued-policy-evaluation-ref-v3",
             "issuance_id": self.issuance_id,
             "workspace_instance_id": self.workspace_instance_id,
+            "workspace_locator_sha256": self.workspace_locator_sha256,
             "evaluation_bundle_id": self.evaluation_bundle_id,
             "evaluation_bundle_sha256": self.evaluation_bundle_sha256,
             "result_artifact_sha256": self.result_artifact_sha256,
@@ -389,6 +401,7 @@ class IssuedPolicyEvaluationRef:
             "kind",
             "issuance_id",
             "workspace_instance_id",
+            "workspace_locator_sha256",
             "evaluation_bundle_id",
             "evaluation_bundle_sha256",
             "result_artifact_sha256",
@@ -401,8 +414,8 @@ class IssuedPolicyEvaluationRef:
             raise ProductPolicyEvaluationIssuanceError(
                 "issued PolicyEvaluation reference fields mismatch"
             )
-        if payload.get("schema_version") != 2 or payload.get("kind") != (
-            "autosport-issued-policy-evaluation-ref-v2"
+        if payload.get("schema_version") != 3 or payload.get("kind") != (
+            "autosport-issued-policy-evaluation-ref-v3"
         ):
             raise ProductPolicyEvaluationIssuanceError(
                 "issued PolicyEvaluation reference schema mismatch"
@@ -417,6 +430,7 @@ class IssuedPolicyEvaluationRef:
         return cls(
             issuance_id=payload.get("issuance_id"),
             workspace_instance_id=payload.get("workspace_instance_id"),
+            workspace_locator_sha256=payload.get("workspace_locator_sha256"),
             evaluation_bundle_id=payload.get("evaluation_bundle_id"),
             evaluation_bundle_sha256=payload.get("evaluation_bundle_sha256"),
             result_artifact_sha256=payload.get("result_artifact_sha256"),
@@ -497,9 +511,10 @@ def _issuance_id(
 ) -> str:
     return _digest(
         {
-            "schema_version": 2,
-            "kind": "autosport-external-validity-product-issuance-identity-v2",
+            "schema_version": 3,
+            "kind": "autosport-external-validity-product-issuance-identity-v3",
             "workspace_instance_id": authority.workspace_instance_id,
+            "workspace_locator_sha256": authority.workspace_locator_sha256,
             "protocol_sha256": protocol.identity_sha256,
             "evidence_scope_sha256": protocol.evidence_scope.identity_sha256,
             "cohort_sha256": protocol.evidence_scope.cohort_sha256,
@@ -1072,10 +1087,11 @@ def issue_product_policy_evaluation(
     evaluation, projection = _derive_policy_evaluation(protocol, target, source)
 
     result_payload = {
-        "schema_version": 2,
-        "kind": "autosport-product-issued-external-validity-policy-evaluation-v2",
+        "schema_version": 3,
+        "kind": "autosport-product-issued-external-validity-policy-evaluation-v3",
         "issuance_id": issuance_id,
         "workspace_instance_id": authority.workspace_instance_id,
+        "workspace_locator_sha256": authority.workspace_locator_sha256,
         "protocol_sha256": protocol.identity_sha256,
         "evidence_scope_sha256": protocol.evidence_scope.identity_sha256,
         "policy_id": target.policy_id,
@@ -1151,6 +1167,7 @@ def issue_product_policy_evaluation(
     ref = IssuedPolicyEvaluationRef(
         issuance_id=issuance_id,
         workspace_instance_id=authority.workspace_instance_id,
+        workspace_locator_sha256=authority.workspace_locator_sha256,
         evaluation_bundle_id=evaluation_bundle_id,
         evaluation_bundle_sha256=evaluation.evaluation_bundle_sha256,
         result_artifact_sha256=result_artifact_sha256,
@@ -1179,7 +1196,10 @@ def resolve_product_policy_evaluation(
         raise ProductPolicyEvaluationIssuanceError(
             "reference must be an exact IssuedPolicyEvaluationRef"
         )
-    if reference.workspace_instance_id != authority.workspace_instance_id:
+    if (
+        reference.workspace_instance_id != authority.workspace_instance_id
+        or reference.workspace_locator_sha256 != authority.workspace_locator_sha256
+    ):
         raise ProductPolicyEvaluationIssuanceError(
             "issued reference belongs to another product workspace"
         )
@@ -1260,11 +1280,13 @@ def resolve_product_policy_evaluation(
 
     if (
         type(result_payload) is not dict
-        or result_payload.get("schema_version") != 2
+        or result_payload.get("schema_version") != 3
         or result_payload.get("kind")
-        != "autosport-product-issued-external-validity-policy-evaluation-v2"
+        != "autosport-product-issued-external-validity-policy-evaluation-v3"
         or result_payload.get("issuance_id") != expected_issuance_id
         or result_payload.get("workspace_instance_id") != authority.workspace_instance_id
+        or result_payload.get("workspace_locator_sha256")
+        != authority.workspace_locator_sha256
         or result_payload.get("protocol_sha256") != protocol.identity_sha256
         or result_payload.get("evidence_scope_sha256")
         != protocol.evidence_scope.identity_sha256

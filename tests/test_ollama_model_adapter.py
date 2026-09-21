@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from decimal import Decimal
 from urllib.error import URLError
+from urllib.request import ProxyHandler
 
 import pytest
 
@@ -167,6 +168,38 @@ def test_parent_contract_normalizes_timeout_and_unavailable_without_secret_detai
     )
     assert unavailable_completion.result.status is ModelInvocationStatus.UNAVAILABLE
     assert "SECRET" not in json.dumps(unavailable_completion.result.payload())
+
+
+def test_transport_disables_environment_proxies(monkeypatch):
+    captured = {}
+
+    class Response:
+        status = 200
+        def __enter__(self):
+            return self
+        def __exit__(self, *args):
+            return False
+        def read(self, size):
+            return b"{}"
+
+    class Opener:
+        def open(self, request, *, timeout):
+            captured["request"] = request
+            captured["timeout"] = timeout
+            return Response()
+
+    def fake_build_opener(*handlers):
+        captured["handlers"] = handlers
+        return Opener()
+
+    monkeypatch.setattr(module, "build_opener", fake_build_opener)
+    module._http_post_json(ENDPOINT, b"{}", timeout_seconds=1.5, max_response_bytes=1024)
+    proxy_handlers = [handler for handler in captured["handlers"] if isinstance(handler, ProxyHandler)]
+    assert len(proxy_handlers) == 1
+    assert proxy_handlers[0].proxies == {}
+    assert captured["request"].get_header("Authorization") is None
+    assert captured["request"].full_url == ENDPOINT
+    assert captured["timeout"] == 1.5
 
 
 def test_transport_helper_maps_url_errors_without_leaking_reason(monkeypatch):

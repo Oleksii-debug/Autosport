@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections import OrderedDict
 from dataclasses import dataclass
 from enum import Enum
+from hashlib import sha256
 from types import MappingProxyType
 from typing import Final, Mapping
 
@@ -51,6 +52,9 @@ if set(_PRIORITY_BY_KIND) != set(AnnouncementKind):
     raise RuntimeError("announcement policy must classify every AnnouncementKind exactly once")
 
 
+_ACTIVITY_ID_PREFIX = "autosport:announcement:v1:"
+
+
 @dataclass(frozen=True, slots=True)
 class AnnouncementEvent:
     """One already-localized product status event presented to the policy.
@@ -96,6 +100,7 @@ class AnnouncementDecision:
     priority: AnnouncementPriority
     text: str | None
     reason: str
+    activity_id: str | None = None
     move_focus: bool = False
 
     def __init__(self, *args: object, **kwargs: object) -> None:
@@ -114,11 +119,14 @@ class AnnouncementDecision:
             if self.priority is AnnouncementPriority.SILENT:
                 raise ValueError("emitted decision cannot be SILENT")
             _require_trimmed("text", self.text)
+            _validate_activity_id(self.activity_id)
         else:
             if self.priority is not AnnouncementPriority.SILENT:
                 raise ValueError("suppressed decision must be SILENT")
             if self.text is not None:
                 raise ValueError("suppressed decision must not carry announcement text")
+            if self.activity_id is not None:
+                raise ValueError("suppressed decision must not carry activity_id")
         if self.move_focus:
             raise ValueError("announcement policy must never request focus movement")
         _require_trimmed("reason", self.reason)
@@ -130,6 +138,7 @@ def _issue_announcement_decision(
     priority: AnnouncementPriority,
     text: str | None,
     reason: str,
+    activity_id: str | None = None,
     move_focus: bool = False,
 ) -> AnnouncementDecision:
     """Issue one validated decision from the product-owned policy path."""
@@ -140,6 +149,7 @@ def _issue_announcement_decision(
         ("priority", priority),
         ("text", text),
         ("reason", reason),
+        ("activity_id", activity_id),
         ("move_focus", move_focus),
     ):
         object.__setattr__(decision, name, value)
@@ -203,6 +213,7 @@ class AnnouncementGate:
             priority=intended,
             text=event.text,
             reason="EMIT",
+            activity_id=_activity_id_for_key(key),
             move_focus=False,
         )
 
@@ -220,12 +231,39 @@ def priority_for_kind(kind: AnnouncementKind) -> AnnouncementPriority:
     return _PRIORITY_BY_KIND[kind]
 
 
+def _activity_id_for_key(key: tuple[str, str]) -> str:
+    """Derive a stable opaque non-localized UIA activity identity."""
+
+    identity_kind, identity = key
+    payload = identity_kind.encode("ascii") + b"\0" + identity.encode("utf-8")
+    digest = sha256(payload).hexdigest()
+    return f"{_ACTIVITY_ID_PREFIX}{identity_kind.lower()}:sha256:{digest}"
+
+
+def _validate_activity_id(value: object) -> str:
+    _require_trimmed("activity_id", value)
+    assert isinstance(value, str)
+    if not value.isascii() or not value.startswith(_ACTIVITY_ID_PREFIX):
+        raise ValueError("activity_id must be a product-issued non-localized ASCII identity")
+    suffix = value[len(_ACTIVITY_ID_PREFIX):]
+    try:
+        identity_kind, algorithm, digest = suffix.split(":", 2)
+    except ValueError as exc:
+        raise ValueError("activity_id has invalid product-issued format") from exc
+    if identity_kind not in {"polite", "assertive"} or algorithm != "sha256":
+        raise ValueError("activity_id has invalid product-issued format")
+    if len(digest) != 64 or any(character not in "0123456789abcdef" for character in digest):
+        raise ValueError("activity_id has invalid product-issued digest")
+    return value
+
+
 def _suppressed(reason: str) -> AnnouncementDecision:
     return _issue_announcement_decision(
         emit=False,
         priority=AnnouncementPriority.SILENT,
         text=None,
         reason=reason,
+        activity_id=None,
         move_focus=False,
     )
 

@@ -1,14 +1,18 @@
 from __future__ import annotations
 
+import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 
 from autosport.continuous_session import SessionState
+from autosport.event_lifecycle import CatalogPage
 from autosport.product_runtime import (
     AutonomousProductRuntime,
     ProductCompositionError,
     ProductCompositionManifest,
+    build_autonomous_product_runtime,
 )
 
 
@@ -69,6 +73,28 @@ class Coordinator:
     def tick(self):
         self.tick_calls += 1
         return SimpleNamespace(cycle_index=self.tick_calls)
+
+
+
+
+class Source:
+    source_id = "provider-a"
+    stream_epoch = "epoch-1"
+
+    def fetch_catalog_page(self, checkpoint):
+        return CatalogPage(
+            source_id=self.source_id,
+            stream_epoch=self.stream_epoch,
+            cursor="catalog-1",
+            position=1,
+            events=(),
+        )
+
+    def fetch_deltas(self, checkpoint, records, max_items):
+        return ()
+
+    def resolve_event(self, delta):
+        raise AssertionError("no market delta should be resolved")
 
 
 class Noop:
@@ -173,6 +199,54 @@ class ProductRuntimeLifecycleCoherenceTests(unittest.TestCase):
             value.stop("operator_recovery_stop").state,
             SessionState.STOPPED,
         )
+
+
+    def test_split_stop_state_is_detected_after_real_runtime_restart(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            first = build_autonomous_product_runtime(
+                workspace=Path(directory),
+                source=Source(),
+                clock=lambda: "2026-09-21T12:00:00+00:00",
+                sleep=lambda _: None,
+                initial_bankroll="100",
+            )
+            try:
+                with patch.object(
+                    first.coordinator,
+                    "stop",
+                    side_effect=RuntimeError("durable session stop failed"),
+                ):
+                    with self.assertRaisesRegex(
+                        RuntimeError,
+                        "durable session stop failed",
+                    ):
+                        first.stop("operator_stop")
+            finally:
+                first.close()
+
+            restored = build_autonomous_product_runtime(
+                workspace=Path(directory),
+                source=Source(),
+                clock=lambda: "2026-09-21T12:01:00+00:00",
+                sleep=lambda _: None,
+                initial_bankroll="100",
+            )
+            try:
+                for action in (restored.status, restored.start, restored.tick):
+                    with self.assertRaisesRegex(
+                        ProductCompositionError,
+                        "lifecycle authorities disagree",
+                    ):
+                        action()
+
+                self.assertEqual(
+                    restored.stop("operator_recovery_stop").state,
+                    SessionState.STOPPED,
+                )
+                self.assertEqual(restored.status().state, SessionState.STOPPED)
+            finally:
+                restored.close()
+
 
 
 if __name__ == "__main__":

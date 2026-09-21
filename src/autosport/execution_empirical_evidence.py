@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from dataclasses import dataclass, field
+from dataclasses import InitVar, dataclass, field
 from datetime import datetime
 from decimal import Decimal, InvalidOperation
 from typing import Any
@@ -22,6 +22,8 @@ TIMING_REASON_NO_MONOTONIC_WITNESS = "NO_MONOTONIC_WITNESS"
 SLIPPAGE_STATUS_KNOWN = "KNOWN"
 SLIPPAGE_STATUS_UNKNOWN = "UNKNOWN"
 SLIPPAGE_STATUS_NOT_APPLICABLE = "NOT_APPLICABLE"
+
+_EMPIRICAL_EVIDENCE_ISSUANCE_TOKEN = object()
 
 _ACK_TERMINAL_STATES = frozenset(
     {
@@ -237,8 +239,9 @@ class EmpiricalExecutionEvidence:
 
     schema_version: int = SCHEMA_VERSION
     evidence_sha256: str = field(init=False)
+    _issuance_token: InitVar[object | None] = None
 
-    def __post_init__(self) -> None:
+    def __post_init__(self, _issuance_token: object | None) -> None:
         if self.schema_version != SCHEMA_VERSION:
             raise EmpiricalExecutionEvidenceError("unsupported empirical evidence schema")
 
@@ -478,6 +481,11 @@ class EmpiricalExecutionEvidence:
         if any(value is not None for value in timing_values):
             raise EmpiricalExecutionEvidenceError(
                 "wall-clock timestamps cannot mint causal latency values"
+            )
+
+        if _issuance_token is not _EMPIRICAL_EVIDENCE_ISSUANCE_TOKEN:
+            raise EmpiricalExecutionEvidenceError(
+                "empirical execution evidence must be issued by canonical ledger projection"
             )
 
         object.__setattr__(
@@ -809,4 +817,5 @@ def build_empirical_execution_evidence(
         censor_reason=censor_reason,
         censor_cutoff_recorded_at=censor_cutoff_recorded_at,
         censor_cutoff_event_count=censor_cutoff_event_count,
+        _issuance_token=_EMPIRICAL_EVIDENCE_ISSUANCE_TOKEN,
     )

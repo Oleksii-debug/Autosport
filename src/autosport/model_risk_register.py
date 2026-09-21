@@ -106,6 +106,17 @@ def _bool(value: bool, field: str) -> bool:
     return value
 
 
+def _sha256_digest(value: str, field: str) -> str:
+    _text(value, field)
+    if len(value) != 64 or any(
+        character not in "0123456789abcdef" for character in value
+    ):
+        raise ModelRiskRegisterError(
+            f"{field} must be a lowercase 64-character SHA-256 hex digest"
+        )
+    return value
+
+
 def _enum(value: object, enum_type: type[Enum], field: str) -> Enum:
     if not isinstance(value, enum_type):
         raise ModelRiskRegisterError(f"{field} must be a {enum_type.__name__} value")
@@ -133,6 +144,33 @@ def _canonical_json_bytes(value: object) -> bytes:
         separators=(",", ":"),
         ensure_ascii=True,
     ).encode("utf-8")
+
+
+def _operator_priority_for(
+    *,
+    status: RiskStatus,
+    severity: RiskSeverity,
+    blocks_product_readiness: bool,
+    blocks_execution: bool,
+) -> OperatorPriority:
+    if status is RiskStatus.RESOLVED:
+        return OperatorPriority.CLOSED
+    if blocks_execution or severity is RiskSeverity.CRITICAL:
+        return OperatorPriority.IMMEDIATE
+    if blocks_product_readiness or severity is RiskSeverity.HIGH:
+        return OperatorPriority.URGENT
+    return OperatorPriority.REVIEW
+
+
+def _timestamp_microseconds(value: str) -> int:
+    timestamp = _timestamp_value(value)
+    utc_epoch = datetime(1970, 1, 1, tzinfo=timezone.utc)
+    since_epoch = timestamp - utc_epoch
+    return (
+        since_epoch.days * 86_400_000_000
+        + since_epoch.seconds * 1_000_000
+        + since_epoch.microseconds
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -234,13 +272,12 @@ class RiskRegisterEntry:
 
     @property
     def operator_priority(self) -> OperatorPriority:
-        if self.status is RiskStatus.RESOLVED:
-            return OperatorPriority.CLOSED
-        if self.blocks_execution or self.severity is RiskSeverity.CRITICAL:
-            return OperatorPriority.IMMEDIATE
-        if self.blocks_product_readiness or self.severity is RiskSeverity.HIGH:
-            return OperatorPriority.URGENT
-        return OperatorPriority.REVIEW
+        return _operator_priority_for(
+            status=self.status,
+            severity=self.severity,
+            blocks_product_readiness=self.blocks_product_readiness,
+            blocks_execution=self.blocks_execution,
+        )
 
     def to_json(self) -> str:
         envelope = {
@@ -311,7 +348,9 @@ class RiskRegisterEntry:
             severity = RiskSeverity(entry_payload["severity"])
             status = RiskStatus(entry_payload["status"])
         except (TypeError, ValueError) as exc:
-            raise ModelRiskRegisterError("entry contains an unsupported enum value") from exc
+            raise ModelRiskRegisterError(
+                "entry contains an unsupported enum value"
+            ) from exc
 
         entry = cls(
             entry_id=entry_payload["entry_id"],
@@ -354,6 +393,45 @@ class OperatorRiskRow:
     blocks_product_readiness: bool
     blocks_execution: bool
     evidence_count: int
+
+    def __post_init__(self) -> None:
+        _text(self.entry_id, "entry_id")
+        _sha256_digest(self.entry_sha256, "entry_sha256")
+        _enum(self.entry_type, RegisterEntryType, "entry_type")
+        _enum(self.severity, RiskSeverity, "severity")
+        _enum(self.status, RiskStatus, "status")
+        _enum(self.priority, OperatorPriority, "priority")
+        _text(self.title, "title")
+        _text(self.summary, "summary")
+        object.__setattr__(
+            self, "updated_at", _canonical_timestamp(self.updated_at, "updated_at")
+        )
+        _bool(self.blocks_product_readiness, "blocks_product_readiness")
+        _bool(self.blocks_execution, "blocks_execution")
+        if self.blocks_execution and not self.blocks_product_readiness:
+            raise ModelRiskRegisterError(
+                "an execution-blocking row must also block product readiness"
+            )
+        if self.status is RiskStatus.RESOLVED and (
+            self.blocks_product_readiness or self.blocks_execution
+        ):
+            raise ModelRiskRegisterError(
+                "resolved rows cannot retain readiness/execution blockers"
+            )
+        expected_priority = _operator_priority_for(
+            status=self.status,
+            severity=self.severity,
+            blocks_product_readiness=self.blocks_product_readiness,
+            blocks_execution=self.blocks_execution,
+        )
+        if self.priority is not expected_priority:
+            raise ModelRiskRegisterError(
+                "operator row priority is inconsistent with risk facts"
+            )
+        if type(self.evidence_count) is not int or self.evidence_count < 0:
+            raise ModelRiskRegisterError(
+                "evidence_count must be a non-negative integer"
+            )
 
     @property
     def entry_type_key(self) -> str:
@@ -400,20 +478,78 @@ class OperatorRiskRegisterView:
     critical_unresolved_count: int
 
     def __post_init__(self) -> None:
-        object.__setattr__(self, "as_of", _canonical_timestamp(self.as_of, "as_of"))
+        canonical_as_of = _canonical_timestamp(self.as_of, "as_of")
+        object.__setattr__(self, "as_of", canonical_as_of)
         if not isinstance(self.rows, tuple) or not all(
             isinstance(row, OperatorRiskRow) for row in self.rows
         ):
             raise ModelRiskRegisterError("rows must be a tuple of OperatorRiskRow")
-        if type(self.unresolved_count) is not int or self.unresolved_count < 0:
-            raise ModelRiskRegisterError("unresolved_count must be a non-negative int")
+        seen_ids: set[str] = set()
+        for row in self.rows:
+            if row.entry_id in seen_ids:
+                raise ModelRiskRegisterError(
+                    f"duplicate operator row entry_id: {row.entry_id}"
+                )
+            seen_ids.add(row.entry_id)
+            if _timestamp_value(row.updated_at) > _timestamp_value(canonical_as_of):
+                raise ModelRiskRegisterError(
+                    f"operator row {row.entry_id} is not available by as_of"
+                )
+
+        expected_rows = tuple(
+            sorted(
+                self.rows,
+                key=lambda row: (
+                    -_PRIORITY_RANK[row.priority],
+                    -_SEVERITY_RANK[row.severity],
+                    -_timestamp_microseconds(row.updated_at),
+                    row.entry_id,
+                ),
+            )
+        )
+        if self.rows != expected_rows:
+            raise ModelRiskRegisterError(
+                "operator rows must use deterministic priority/recency order"
+            )
+
+        unresolved = tuple(
+            row for row in self.rows if row.status is not RiskStatus.RESOLVED
+        )
+        expected_readiness = tuple(
+            sorted(
+                row.entry_id
+                for row in unresolved
+                if row.blocks_product_readiness
+            )
+        )
+        expected_execution = tuple(
+            sorted(row.entry_id for row in unresolved if row.blocks_execution)
+        )
+        if self.readiness_blocking_ids != expected_readiness:
+            raise ModelRiskRegisterError(
+                "readiness_blocking_ids do not match unresolved rows"
+            )
+        if self.execution_blocking_ids != expected_execution:
+            raise ModelRiskRegisterError(
+                "execution_blocking_ids do not match unresolved rows"
+            )
+        expected_unresolved_count = len(unresolved)
         if (
-            type(self.critical_unresolved_count) is not int
-            or self.critical_unresolved_count < 0
-            or self.critical_unresolved_count > self.unresolved_count
+            type(self.unresolved_count) is not int
+            or self.unresolved_count != expected_unresolved_count
         ):
             raise ModelRiskRegisterError(
-                "critical_unresolved_count must be within unresolved_count"
+                "unresolved_count does not match operator rows"
+            )
+        expected_critical_count = sum(
+            row.severity is RiskSeverity.CRITICAL for row in unresolved
+        )
+        if (
+            type(self.critical_unresolved_count) is not int
+            or self.critical_unresolved_count != expected_critical_count
+        ):
+            raise ModelRiskRegisterError(
+                "critical_unresolved_count does not match operator rows"
             )
 
     @property
@@ -471,18 +607,10 @@ def build_operator_risk_register_view(
         materialized.append(entry)
 
     def _sort_key(entry: RiskRegisterEntry) -> tuple[int, int, int, str]:
-        updated = _timestamp_value(entry.updated_at)
-        utc_epoch = datetime(1970, 1, 1, tzinfo=timezone.utc)
-        since_epoch = updated - utc_epoch
-        updated_microseconds = (
-            since_epoch.days * 86_400_000_000
-            + since_epoch.seconds * 1_000_000
-            + since_epoch.microseconds
-        )
         return (
             -_PRIORITY_RANK[entry.operator_priority],
             -_SEVERITY_RANK[entry.severity],
-            -updated_microseconds,
+            -_timestamp_microseconds(entry.updated_at),
             entry.entry_id,
         )
 

@@ -98,29 +98,89 @@ def _canonical_bytes(value: object) -> bytes:
     ).encode("utf-8")
 
 
-def _fsync_parent_directory(path: Path) -> None:
-    """Durably publish a newly-created manifest directory entry on POSIX."""
+def _open_bound_posix_parent_directory(path: Path) -> tuple[int, Path]:
+    """Open one symlink-free parent lineage and bind later publication to its fd."""
 
     if os.name == "nt":
-        return
-    if not hasattr(os, "O_DIRECTORY"):
         raise CampaignPrecommitManifestError(
-            "platform lacks a directory durability primitive for campaign precommit"
+            "POSIX campaign precommit parent binding is unavailable on Windows"
         )
+    if (
+        not hasattr(os, "O_DIRECTORY")
+        or not hasattr(os, "O_NOFOLLOW")
+        or os.open not in os.supports_dir_fd
+    ):
+        raise CampaignPrecommitManifestError(
+            "platform lacks descriptor-relative campaign precommit primitives"
+        )
+
+    absolute = Path(os.path.abspath(path))
+    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
     try:
-        directory_fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY)
+        descriptor = os.open(absolute.anchor, flags)
+        try:
+            for component in absolute.parts[1:]:
+                next_descriptor = os.open(
+                    component,
+                    flags,
+                    dir_fd=descriptor,
+                )
+                os.close(descriptor)
+                descriptor = next_descriptor
+        except BaseException:
+            os.close(descriptor)
+            raise
     except OSError as exc:
         raise CampaignPrecommitManifestError(
-            "cannot open campaign precommit directory for durability sync"
+            "campaign precommit parent directory must already exist "
+            "without symlink redirection"
         ) from exc
+    return descriptor, absolute
+
+
+def _assert_bound_posix_parent_identity(path: Path, descriptor: int) -> None:
+    """Fail closed if the requested parent path stopped naming the bound directory."""
+
+    try:
+        current = os.stat(path, follow_symlinks=False)
+        bound = os.fstat(descriptor)
+    except OSError as exc:
+        raise CampaignPrecommitManifestError(
+            "cannot revalidate campaign precommit parent identity"
+        ) from exc
+    if (current.st_dev, current.st_ino) != (bound.st_dev, bound.st_ino):
+        raise CampaignPrecommitManifestError(
+            "campaign precommit parent identity changed during publication"
+        )
+
+
+def _read_bound_posix_file_bytes(directory_fd: int, name: str) -> bytes:
+    try:
+        descriptor = os.open(
+            name,
+            os.O_RDONLY | os.O_NOFOLLOW,
+            dir_fd=directory_fd,
+        )
+    except OSError as exc:
+        raise CampaignPrecommitManifestError(
+            "cannot verify existing campaign precommit manifest"
+        ) from exc
+    try:
+        with os.fdopen(descriptor, "rb", closefd=True) as handle:
+            return handle.read()
+    except OSError as exc:
+        raise CampaignPrecommitManifestError(
+            "cannot verify existing campaign precommit manifest"
+        ) from exc
+
+
+def _fsync_bound_parent_directory(directory_fd: int) -> None:
     try:
         os.fsync(directory_fd)
     except OSError as exc:
         raise CampaignPrecommitManifestError(
             "cannot fsync campaign precommit directory"
         ) from exc
-    finally:
-        os.close(directory_fd)
 
 
 def _digest(value: object) -> str:
@@ -306,9 +366,10 @@ def write_campaign_precommit_manifest_once(
     This protects the local artifact against silent in-place replacement and makes
     later byte tampering detectable. The parent directory must already exist and be
     provisioned by the canonical workspace/storage authority: this writer will not
-    silently create a directory lineage whose crash durability it cannot prove. It
-    intentionally does not claim rollback protection if an attacker can delete and
-    recreate the whole workspace.
+    silently create a directory lineage whose crash durability it cannot prove. On
+    POSIX, publication is descriptor-relative to one symlink-free parent identity.
+    It intentionally does not claim rollback protection if an attacker can delete
+    and recreate the whole workspace after publication.
     """
 
     if type(manifest) is not CampaignPrecommitManifest:
@@ -316,50 +377,101 @@ def write_campaign_precommit_manifest_once(
             "manifest must be CampaignPrecommitManifest"
         )
     target = Path(path)
-    if not target.parent.is_dir():
-        raise CampaignPrecommitManifestError(
-            "campaign precommit parent directory must already exist"
-        )
     encoded = _canonical_bytes(manifest.to_record()) + b"\n"
 
-    try:
-        descriptor = os.open(
-            target,
-            os.O_WRONLY | os.O_CREAT | os.O_EXCL,
-            0o600,
-        )
-    except FileExistsError:
+    if os.name == "nt":
+        if not target.parent.is_dir():
+            raise CampaignPrecommitManifestError(
+                "campaign precommit parent directory must already exist"
+            )
         try:
-            existing = target.read_bytes()
+            descriptor = os.open(
+                target,
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+                0o600,
+            )
+        except FileExistsError:
+            try:
+                existing = target.read_bytes()
+            except OSError as exc:
+                raise CampaignPrecommitManifestError(
+                    "cannot verify existing campaign precommit manifest"
+                ) from exc
+            if existing != encoded:
+                raise CampaignPrecommitManifestError(
+                    "existing campaign precommit manifest conflicts with precommit"
+                )
         except OSError as exc:
             raise CampaignPrecommitManifestError(
-                "cannot verify existing campaign precommit manifest"
+                "cannot create campaign precommit manifest"
             ) from exc
-        if existing != encoded:
-            raise CampaignPrecommitManifestError(
-                "existing campaign precommit manifest conflicts with precommit"
-            )
-    except OSError as exc:
-        raise CampaignPrecommitManifestError(
-            "cannot create campaign precommit manifest"
-        ) from exc
-    else:
-        try:
-            with os.fdopen(descriptor, "wb", closefd=True) as handle:
-                handle.write(encoded)
-                handle.flush()
-                os.fsync(handle.fileno())
-        except BaseException:
+        else:
             try:
-                target.unlink()
-            except OSError:
-                pass
-            raise
+                with os.fdopen(descriptor, "wb", closefd=True) as handle:
+                    handle.write(encoded)
+                    handle.flush()
+                    os.fsync(handle.fileno())
+            except BaseException:
+                try:
+                    target.unlink()
+                except OSError:
+                    pass
+                raise
 
-    _fsync_parent_directory(target.parent)
-    verified = load_campaign_precommit_manifest(target)
-    if verified.manifest_sha256 != manifest.manifest_sha256:
+        verified = load_campaign_precommit_manifest(target)
+        if verified.manifest_sha256 != manifest.manifest_sha256:
+            raise CampaignPrecommitManifestError(
+                "persisted campaign precommit manifest failed exact re-read"
+            )
+        return manifest.manifest_sha256
+
+    name = target.name
+    if name in {"", ".", ".."} or Path(name).name != name:
         raise CampaignPrecommitManifestError(
-            "persisted campaign precommit manifest failed exact re-read"
+            "campaign precommit target must name one file"
         )
-    return manifest.manifest_sha256
+
+    parent_fd, absolute_parent = _open_bound_posix_parent_directory(target.parent)
+    try:
+        try:
+            descriptor = os.open(
+                name,
+                os.O_WRONLY
+                | os.O_CREAT
+                | os.O_EXCL
+                | os.O_NOFOLLOW,
+                0o600,
+                dir_fd=parent_fd,
+            )
+        except FileExistsError:
+            existing = _read_bound_posix_file_bytes(parent_fd, name)
+            if existing != encoded:
+                raise CampaignPrecommitManifestError(
+                    "existing campaign precommit manifest conflicts with precommit"
+                )
+        except OSError as exc:
+            raise CampaignPrecommitManifestError(
+                "cannot create campaign precommit manifest"
+            ) from exc
+        else:
+            try:
+                with os.fdopen(descriptor, "wb", closefd=True) as handle:
+                    handle.write(encoded)
+                    handle.flush()
+                    os.fsync(handle.fileno())
+            except BaseException:
+                try:
+                    os.unlink(name, dir_fd=parent_fd)
+                except OSError:
+                    pass
+                raise
+
+        _fsync_bound_parent_directory(parent_fd)
+        _assert_bound_posix_parent_identity(absolute_parent, parent_fd)
+        if _read_bound_posix_file_bytes(parent_fd, name) != encoded:
+            raise CampaignPrecommitManifestError(
+                "persisted campaign precommit manifest failed exact re-read"
+            )
+        return manifest.manifest_sha256
+    finally:
+        os.close(parent_fd)

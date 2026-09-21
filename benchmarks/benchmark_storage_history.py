@@ -50,6 +50,7 @@ class StorageHistoryBenchmarkResult:
     python_version: str
     sqlite_version: str
     operating_system: str
+    read_after_reopen: bool
     write: OperationMeasurement
     full_history_read: OperationMeasurement
     event_history_read: OperationMeasurement
@@ -148,23 +149,26 @@ def run_benchmark(
 
     with tempfile.TemporaryDirectory() as tmp:
         database_path = Path(tmp) / "market-history-benchmark.db"
-        store = SQLiteMarketStore(database_path)
+        write_store = SQLiteMarketStore(database_path)
         try:
             persisted_events, write_elapsed = _measure(
                 "write",
-                lambda: store.append_many(events),
+                lambda: write_store.append_many(events),
             )
             if persisted_events != count:
                 raise RuntimeError(
                     "storage benchmark did not persist the complete workload: "
                     f"requested={count} persisted={persisted_events}"
                 )
+        finally:
+            write_store.close()
 
-            # The write workload is deliberately outside every read timing.
-            # Release its Python objects so full-history measurement is not
-            # distorted by retaining a second complete in-memory event graph.
-            del events
-
+        # Product endurance/restart consumers reopen the canonical database before
+        # reading history. Drop the generated workload objects and use a fresh
+        # SQLiteMarketStore so read timing cannot reuse the writer connection cache.
+        del events
+        store = SQLiteMarketStore(database_path)
+        try:
             full_history, full_elapsed = _measure(
                 "full_history_read",
                 store.events,
@@ -188,7 +192,7 @@ def run_benchmark(
 
             current_projection, current_elapsed = _measure(
                 "current_projection_read",
-                store.current_by_source,
+                store.current,
             )
             if len(current_projection) != expected_current_rows:
                 raise RuntimeError(
@@ -211,6 +215,7 @@ def run_benchmark(
                 python_version=platform.python_version(),
                 sqlite_version=sqlite3.sqlite_version,
                 operating_system=platform.system(),
+                read_after_reopen=True,
                 write=OperationMeasurement(
                     operation="write",
                     rows=persisted_events,

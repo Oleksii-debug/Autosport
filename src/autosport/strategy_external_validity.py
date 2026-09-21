@@ -37,7 +37,7 @@ _SUPPORTED = {
     StrategyClass.DUTCHING: EvaluationContractFamily.DUTCHING_EXECUTION,
     StrategyClass.HEDGE_REBALANCE: EvaluationContractFamily.HEDGE_PORTFOLIO_RISK,
 }
-_UNRESOLVED = {FunnelStage.UNKNOWN, FunnelStage.PENDING, FunnelStage.MISSING}
+_UNRESOLVED = {\n    FunnelStage.ATTEMPTED,\n    FunnelStage.UNKNOWN,\n    FunnelStage.PENDING,\n    FunnelStage.MISSING,\n}
 _PAPER = {
     FunnelStage.ACCEPTED, FunnelStage.PARTIAL, FunnelStage.REJECTED,
     FunnelStage.UNKNOWN, FunnelStage.RECONCILED, FunnelStage.SETTLED,

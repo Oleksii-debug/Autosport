@@ -326,8 +326,10 @@ class ForwardCapturePlan:
 
     capture_plan_id: str
     run_id: str
+    session_id: str
     campaign_id: str
     research_protocol_id: str
+    evaluation_bundle_id: str
     protocol_sha256: str
     window_open_utc: str
     window_close_utc: str
@@ -338,8 +340,10 @@ class ForwardCapturePlan:
         for name in (
             "capture_plan_id",
             "run_id",
+            "session_id",
             "campaign_id",
             "research_protocol_id",
+            "evaluation_bundle_id",
         ):
             _text(getattr(self, name), name)
         _sha256(self.protocol_sha256, "protocol_sha256")
@@ -360,7 +364,10 @@ class ForwardCapturePlan:
         canonical = tuple(
             sorted(
                 self.slots,
-                key=lambda slot: (_instant(slot.scheduled_at_utc, "scheduled_at_utc"), slot.slot_id),
+                key=lambda slot: (
+                    _instant(slot.scheduled_at_utc, "scheduled_at_utc"),
+                    slot.slot_id,
+                ),
             )
         )
         if self.slots != canonical:
@@ -393,8 +400,10 @@ class ForwardCapturePlan:
         return {
             "capture_plan_id": self.capture_plan_id,
             "run_id": self.run_id,
+            "session_id": self.session_id,
             "campaign_id": self.campaign_id,
             "research_protocol_id": self.research_protocol_id,
+            "evaluation_bundle_id": self.evaluation_bundle_id,
             "protocol_sha256": self.protocol_sha256.lower(),
             "window_open_utc": self.window_open_utc,
             "window_close_utc": self.window_close_utc,
@@ -407,8 +416,10 @@ class ForwardCapturePlan:
         expected = {
             "capture_plan_id",
             "run_id",
+            "session_id",
             "campaign_id",
             "research_protocol_id",
+            "evaluation_bundle_id",
             "protocol_sha256",
             "window_open_utc",
             "window_close_utc",
@@ -423,8 +434,10 @@ class ForwardCapturePlan:
         return cls(
             capture_plan_id=payload["capture_plan_id"],
             run_id=payload["run_id"],
+            session_id=payload["session_id"],
             campaign_id=payload["campaign_id"],
             research_protocol_id=payload["research_protocol_id"],
+            evaluation_bundle_id=payload["evaluation_bundle_id"],
             protocol_sha256=payload["protocol_sha256"],
             window_open_utc=payload["window_open_utc"],
             window_close_utc=payload["window_close_utc"],

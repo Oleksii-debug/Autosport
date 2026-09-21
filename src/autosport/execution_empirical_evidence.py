@@ -6,6 +6,7 @@ from dataclasses import InitVar, dataclass, field
 from datetime import datetime
 from decimal import Decimal, InvalidOperation
 from typing import Any
+from weakref import ReferenceType, ref
 
 from .real_execution_ledger import (
     AttemptState,
@@ -176,7 +177,7 @@ def _reconciliation_tuple_present(
     return all(present)
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True, slots=True, weakref_slot=True)
 class EmpiricalExecutionEvidence:
     source_ledger_sha256: str
     source_event_count: int
@@ -238,7 +239,7 @@ class EmpiricalExecutionEvidence:
     censor_cutoff_event_count: int | None
 
     schema_version: int = SCHEMA_VERSION
-    evidence_sha256: str = field(init=False)
+    _evidence_sha256: str = field(init=False, repr=False)
     _issuance_token: InitVar[object | None] = None
 
     def __post_init__(self, _issuance_token: object | None) -> None:
@@ -490,9 +491,25 @@ class EmpiricalExecutionEvidence:
 
         object.__setattr__(
             self,
-            "evidence_sha256",
+            "_evidence_sha256",
             _digest(self.to_dict(include_evidence_sha256=False)),
         )
+
+    def assert_projection_issued(self) -> None:
+        issued = _ISSUED_EMPIRICAL_EVIDENCE.get(id(self))
+        if (
+            issued is None
+            or issued[0]() is not self
+            or issued[1] != self._evidence_sha256
+        ):
+            raise EmpiricalExecutionEvidenceError(
+                "empirical execution evidence was not issued by canonical ledger projection"
+            )
+
+    @property
+    def evidence_sha256(self) -> str:
+        self.assert_projection_issued()
+        return self._evidence_sha256
 
     def to_dict(self, *, include_evidence_sha256: bool = True) -> dict[str, Any]:
         payload: dict[str, Any] = {
@@ -553,6 +570,25 @@ class EmpiricalExecutionEvidence:
         if include_evidence_sha256:
             payload["evidence_sha256"] = self.evidence_sha256
         return payload
+
+
+_ISSUED_EMPIRICAL_EVIDENCE: dict[
+    int, tuple[ReferenceType[EmpiricalExecutionEvidence], str]
+] = {}
+
+
+def _register_issued_empirical_evidence(
+    evidence: EmpiricalExecutionEvidence,
+) -> None:
+    identity = id(evidence)
+
+    def _discard(reference: ReferenceType[EmpiricalExecutionEvidence]) -> None:
+        current = _ISSUED_EMPIRICAL_EVIDENCE.get(identity)
+        if current is not None and current[0] is reference:
+            _ISSUED_EMPIRICAL_EVIDENCE.pop(identity, None)
+
+    reference = ref(evidence, _discard)
+    _ISSUED_EMPIRICAL_EVIDENCE[identity] = (reference, evidence._evidence_sha256)
 
 
 def build_empirical_execution_evidence(
@@ -753,7 +789,7 @@ def build_empirical_execution_evidence(
     )
     censor_cutoff_event_count = snapshot.event_count if right_censored else None
 
-    return EmpiricalExecutionEvidence(
+    evidence = EmpiricalExecutionEvidence(
         source_ledger_sha256=snapshot.sha256,
         source_event_count=snapshot.event_count,
         plan_id=plan_id,
@@ -819,3 +855,5 @@ def build_empirical_execution_evidence(
         censor_cutoff_event_count=censor_cutoff_event_count,
         _issuance_token=_EMPIRICAL_EVIDENCE_ISSUANCE_TOKEN,
     )
+    _register_issued_empirical_evidence(evidence)
+    return evidence

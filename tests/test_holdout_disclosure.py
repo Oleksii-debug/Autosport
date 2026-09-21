@@ -40,7 +40,7 @@ def _snapshot(
 def _ledger(tmp_path) -> HoldoutConsumptionLedger:
     return HoldoutConsumptionLedger(
         tmp_path / "holdout-consumption.json",
-        authority_root=tmp_path / "machine-authority",
+        authority_root=tmp_path.parent / f"{tmp_path.name}-machine-authority",
     )
 
 

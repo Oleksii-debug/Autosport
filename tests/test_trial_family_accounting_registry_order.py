@@ -255,3 +255,19 @@ def test_completion_accepts_bundle_published_before_experiment(tmp_path):
     )
     assert completed.status is TrialAttemptStatus.COMPLETED
     assert completed.experiment_id == experiment.experiment_id
+
+
+def test_trial_family_discards_exact_registry_instance_method_shadows(tmp_path):
+    registry, protocol, _candidate, _member, store = _foundation(tmp_path)
+    caller = ScientificRegistry(registry.path)
+
+    caller._read = lambda: {"schema_version": 1, "records": []}
+    caller.get = lambda *_args, **_kwargs: None
+    caller.causal_precedes = lambda *_args, **_kwargs: False
+
+    canonical = store._require_canonical_registry(caller, store._read_state())
+
+    assert canonical is not caller
+    assert canonical.path.resolve(strict=False) == registry.path.resolve(strict=False)
+    assert canonical.get("ResearchProtocol", protocol.record_id) is not None
+    assert canonical._read()["records"]

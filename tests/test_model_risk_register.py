@@ -5,6 +5,8 @@ import pytest
 from autosport.model_risk_register import (
     ModelRiskRegisterError,
     OperatorPriority,
+    OperatorRiskRegisterView,
+    OperatorRiskRow,
     RegisterEntryType,
     RiskRegisterEntry,
     RiskSeverity,
@@ -210,6 +212,66 @@ def test_operator_view_rejects_duplicate_current_ids_and_future_entry():
     with pytest.raises(ModelRiskRegisterError, match="not available by as_of"):
         build_operator_risk_register_view(
             [current], as_of="2026-09-21T16:04:59Z"
+        )
+
+
+def test_operator_row_rejects_fabricated_digest_priority_and_counts():
+    source = entry()
+    with pytest.raises(ModelRiskRegisterError, match="SHA-256"):
+        OperatorRiskRow(
+            entry_id=source.entry_id,
+            entry_sha256="not-a-digest",
+            entry_type=source.entry_type,
+            severity=source.severity,
+            status=source.status,
+            priority=source.operator_priority,
+            title=source.title,
+            summary=source.summary,
+            updated_at=source.updated_at,
+            blocks_product_readiness=source.blocks_product_readiness,
+            blocks_execution=source.blocks_execution,
+            evidence_count=1,
+        )
+
+    with pytest.raises(ModelRiskRegisterError, match="priority is inconsistent"):
+        OperatorRiskRow(
+            entry_id=source.entry_id,
+            entry_sha256=source.entry_sha256,
+            entry_type=source.entry_type,
+            severity=source.severity,
+            status=source.status,
+            priority=OperatorPriority.REVIEW,
+            title=source.title,
+            summary=source.summary,
+            updated_at=source.updated_at,
+            blocks_product_readiness=source.blocks_product_readiness,
+            blocks_execution=source.blocks_execution,
+            evidence_count=1,
+        )
+
+
+def test_operator_view_constructor_rejects_fabricated_summary_state():
+    built = build_operator_risk_register_view(
+        [entry()], as_of="2026-09-21T16:10:00Z"
+    )
+    with pytest.raises(ModelRiskRegisterError, match="readiness_blocking_ids"):
+        OperatorRiskRegisterView(
+            as_of=built.as_of,
+            rows=built.rows,
+            readiness_blocking_ids=(),
+            execution_blocking_ids=built.execution_blocking_ids,
+            unresolved_count=built.unresolved_count,
+            critical_unresolved_count=built.critical_unresolved_count,
+        )
+
+    with pytest.raises(ModelRiskRegisterError, match="unresolved_count"):
+        OperatorRiskRegisterView(
+            as_of=built.as_of,
+            rows=built.rows,
+            readiness_blocking_ids=built.readiness_blocking_ids,
+            execution_blocking_ids=built.execution_blocking_ids,
+            unresolved_count=0,
+            critical_unresolved_count=built.critical_unresolved_count,
         )
 
 

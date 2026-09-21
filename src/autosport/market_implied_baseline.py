@@ -315,12 +315,8 @@ def build_market_implied_baseline_evidence(
                 "quote identity does not match verified outcome authority"
             )
 
-    unbound = tuple(QuoteRef.from_market_event(event) for event in events)
-    snapshot_sha = _snapshot_hash(unbound)
-    quotes = tuple(
-        QuoteRef.from_market_event(event, market_snapshot_hash=snapshot_sha)
-        for event in events
-    )
+    quotes = tuple(QuoteRef.from_market_event(event) for event in events)
+    snapshot_sha = _snapshot_hash(quotes)
     overround, probabilities = _probabilities(quotes)
     return MarketImpliedBaselineEvidence(
         cohort_key=key,

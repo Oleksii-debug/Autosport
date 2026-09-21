@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from decimal import Decimal
-from types import MethodType
+from types import MethodType, SimpleNamespace
 from typing import Mapping
 
 from .betfair_account_readonly import (
@@ -98,14 +98,15 @@ def read_betfair_execution_fee_inputs(
 
     Betfair exposes ``discountRate`` from ``getAccountDetails`` rather than
     ``getAccountFunds``. The function composes the existing authenticated,
-    read-only client; it creates no second transport, credential path, provider
-    client, or store. Missing, ambiguous, mismatched, or malformed data fails
-    closed.
+    read-only client; it creates no second transport stack, credential source,
+    provider adapter architecture, or store. Missing, ambiguous, mismatched, or
+    malformed data fails closed.
 
     The caller's mutable client is snapshotted into a private exact client before
     either provider read. Canonical RPC and its dynamically-dispatched helper
-    implementations are pinned before provider callbacks, so later instance or
-    class replacement cannot change the executable authority used mid-capture.
+    implementations, plus one bound transport POST capability, are pinned before
+    provider callbacks. Later caller/client/class/transport dispatch replacement
+    therefore cannot change the executable authority used mid-capture.
     """
 
     pinned_client, venue_id, account_id = _snapshot_canonical_client(client)
@@ -207,6 +208,9 @@ def _snapshot_canonical_client(
     clock = state.get("_clock")
     if transport is None:
         raise BetfairReadOnlyError("BetfairReadOnlyClient transport is missing")
+    transport_post = getattr(transport, "post", None)
+    if not callable(transport_post):
+        raise BetfairReadOnlyError("BetfairReadOnlyClient transport post capability is invalid")
     if not isinstance(timeout_seconds, (int, float)) or isinstance(timeout_seconds, bool):
         raise BetfairReadOnlyError("BetfairReadOnlyClient timeout is invalid")
     if timeout_seconds <= 0:
@@ -218,9 +222,17 @@ def _snapshot_canonical_client(
         credentials.application_key,
         credentials.session_token,
     )
+
+    # Capture the already-resolved bound POST capability once. A bound Python
+    # method retains its function object even if the caller later shadows the
+    # instance attribute or replaces the transport class method. Store it on a
+    # private built-in namespace so canonical _rpc sees a stable instance-level
+    # `post` value on both provider reads rather than re-resolving the mutable
+    # caller-owned transport object.
+    pinned_transport = SimpleNamespace(post=transport_post)
     pinned_client = BetfairReadOnlyClient(
         pinned_credentials,
-        transport=transport,
+        transport=pinned_transport,
         timeout_seconds=float(timeout_seconds),
         clock=clock,
         venue_id=venue_id,

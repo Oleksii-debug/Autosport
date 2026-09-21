@@ -46,10 +46,7 @@ class PaperRiskReport:
     realized_gross_loss: Decimal
     turnover: Decimal
     current_drawdown_amount: Decimal
-    session_loss_room: Decimal
-    day_loss_room: Decimal
     drawdown_loss_room: Decimal
-    turnover_room: Decimal
     max_drawdown_fraction: Decimal
     risk_of_ruin_limit: Decimal
     risk_of_ruin_upper_bound: None
@@ -78,7 +75,7 @@ def build_paper_risk_report(
     if metrics is None or rooms is None or paper_state_sha256 is None:
         raise ValueError("canonical PAPER risk state cannot be reported")
 
-    session_loss_room, day_loss_room, drawdown_loss_room, turnover_room = rooms
+    _, _, drawdown_loss_room, _ = rooms
     try:
         with localcontext(PaperRiskPolicy._decimal_context()):
             current_drawdown_amount = metrics.peak_equity - metrics.current_equity
@@ -99,10 +96,7 @@ def build_paper_risk_report(
         realized_gross_loss=metrics.realized_gross_loss,
         turnover=metrics.turnover,
         current_drawdown_amount=current_drawdown_amount,
-        session_loss_room=session_loss_room,
-        day_loss_room=day_loss_room,
         drawdown_loss_room=drawdown_loss_room,
-        turnover_room=turnover_room,
         max_drawdown_fraction=goal.max_drawdown_fraction,
         risk_of_ruin_limit=goal.max_risk_of_ruin,
         risk_of_ruin_upper_bound=None,

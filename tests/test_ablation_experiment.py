@@ -32,11 +32,7 @@ class AblationExperimentTests(unittest.TestCase):
 
     def _one_factor_protocol(self) -> AblationProtocol:
         baseline_factors = self._baseline_factors()
-        baseline = AblationCellSpec(
-            "baseline",
-            baseline_factors,
-            (),
-        )
+        baseline = AblationCellSpec("baseline", baseline_factors, ())
         model = AblationCellSpec(
             "model-v2",
             replace(baseline_factors, model_sha256=_sha("6")),
@@ -56,6 +52,7 @@ class AblationExperimentTests(unittest.TestCase):
 
     @staticmethod
     def _observation(
+        protocol: AblationProtocol,
         cell: AblationCellSpec,
         *,
         evidence: str,
@@ -64,6 +61,7 @@ class AblationExperimentTests(unittest.TestCase):
     ) -> AblationCellObservation:
         return AblationCellObservation(
             cell_id=cell.cell_id,
+            protocol_sha256=protocol.protocol_sha256,
             cell_spec_sha256=cell.spec_sha256,
             run_evidence_sha256=_sha(evidence),
             metric_value=Decimal(value),
@@ -77,8 +75,8 @@ class AblationExperimentTests(unittest.TestCase):
         report = evaluate_ablation(
             protocol,
             (
-                self._observation(baseline, evidence="c", value="10.00"),
-                self._observation(model, evidence="d", value="12.50"),
+                self._observation(protocol, baseline, evidence="c", value="10.00"),
+                self._observation(protocol, model, evidence="d", value="12.50"),
             ),
             evaluated_at="2026-09-21T10:00:00Z",
         )
@@ -87,10 +85,9 @@ class AblationExperimentTests(unittest.TestCase):
         contrast = report.contrasts[0]
         self.assertEqual(contrast.identified_factor_set, (AblationFactor.MODEL,))
         self.assertEqual(contrast.delta, Decimal("2.50"))
+        self.assertEqual(report.protocol_sha256, protocol.protocol_sha256)
         payload = report.to_dict()
-        self.assertTrue(
-            payload["truth"]["external_metric_evidence_must_be_resolved"]
-        )
+        self.assertTrue(payload["truth"]["external_metric_evidence_must_be_resolved"])
         self.assertFalse(payload["truth"]["factor_contributions_additive"])
         self.assertFalse(payload["truth"]["active_strategy_mutation"])
         self.assertFalse(payload["truth"]["real_money_execution"])
@@ -187,9 +184,11 @@ class AblationExperimentTests(unittest.TestCase):
         report = evaluate_ablation(
             protocol,
             (
-                self._observation(baseline, evidence="c", value="10"),
-                self._observation(model, evidence="d", value="11"),
-                self._observation(model_sizing, evidence="e", value="14"),
+                self._observation(protocol, baseline, evidence="c", value="10"),
+                self._observation(protocol, model, evidence="d", value="11"),
+                self._observation(
+                    protocol, model_sizing, evidence="e", value="14"
+                ),
             ),
             evaluated_at="2026-09-21T10:00:00Z",
         )
@@ -215,6 +214,7 @@ class AblationExperimentTests(unittest.TestCase):
                 protocol,
                 (
                     self._observation(
+                        protocol,
                         protocol.baseline,
                         evidence="c",
                         value="10",
@@ -228,23 +228,58 @@ class AblationExperimentTests(unittest.TestCase):
         baseline, model = protocol.baseline, protocol.interventions[0]
         forged = AblationCellObservation(
             cell_id=model.cell_id,
+            protocol_sha256=protocol.protocol_sha256,
             cell_spec_sha256=_sha("f"),
             run_evidence_sha256=_sha("d"),
             metric_value=Decimal("12"),
             evidence_available_at="2026-09-21T09:00:00Z",
         )
 
-        with self.assertRaisesRegex(
-            ValueError, "cell specification mismatch"
-        ):
+        with self.assertRaisesRegex(ValueError, "cell specification mismatch"):
             evaluate_ablation(
                 protocol,
                 (
-                    self._observation(baseline, evidence="c", value="10"),
+                    self._observation(protocol, baseline, evidence="c", value="10"),
                     forged,
                 ),
                 evaluated_at="2026-09-21T10:00:00Z",
             )
+
+    def test_cross_protocol_evidence_rebinding_fails_closed(self) -> None:
+        protocol = self._one_factor_protocol()
+        baseline, model = protocol.baseline, protocol.interventions[0]
+        observations = (
+            self._observation(protocol, baseline, evidence="c", value="10"),
+            self._observation(protocol, model, evidence="d", value="12"),
+        )
+
+        rebound_protocols = (
+            replace(protocol, primary_metric="roi"),
+            replace(protocol, case_population_sha256=_sha("e")),
+            replace(protocol, scientific_protocol_sha256=_sha("f")),
+            replace(protocol, causal_cutoff="2026-09-21T08:30:00Z"),
+        )
+        for rebound in rebound_protocols:
+            self.assertNotEqual(rebound.protocol_sha256, protocol.protocol_sha256)
+            with self.subTest(protocol_sha256=rebound.protocol_sha256):
+                with self.assertRaisesRegex(ValueError, "protocol mismatch"):
+                    evaluate_ablation(
+                        rebound,
+                        observations,
+                        evaluated_at="2026-09-21T10:00:00Z",
+                    )
+
+    def test_observation_serialization_carries_protocol_binding(self) -> None:
+        protocol = self._one_factor_protocol()
+        observation = self._observation(
+            protocol,
+            protocol.baseline,
+            evidence="c",
+            value="10",
+        )
+        payload = observation.to_dict()
+        self.assertEqual(payload["protocol_sha256"], protocol.protocol_sha256)
+        self.assertEqual(payload["cell_spec_sha256"], protocol.baseline.spec_sha256)
 
     def test_run_evidence_cannot_be_reused_across_cells(self) -> None:
         protocol = self._one_factor_protocol()
@@ -254,8 +289,8 @@ class AblationExperimentTests(unittest.TestCase):
             evaluate_ablation(
                 protocol,
                 (
-                    self._observation(baseline, evidence="c", value="10"),
-                    self._observation(model, evidence="c", value="12"),
+                    self._observation(protocol, baseline, evidence="c", value="10"),
+                    self._observation(protocol, model, evidence="c", value="12"),
                 ),
                 evaluated_at="2026-09-21T10:00:00Z",
             )
@@ -268,8 +303,9 @@ class AblationExperimentTests(unittest.TestCase):
             evaluate_ablation(
                 protocol,
                 (
-                    self._observation(baseline, evidence="c", value="10"),
+                    self._observation(protocol, baseline, evidence="c", value="10"),
                     self._observation(
+                        protocol,
                         model,
                         evidence="d",
                         value="12",
@@ -291,11 +327,13 @@ class AblationExperimentTests(unittest.TestCase):
 
         observation = AblationCellObservation(
             cell_id="canonical",
+            protocol_sha256=_sha("F"),
             cell_spec_sha256=_sha("A"),
             run_evidence_sha256=_sha("B"),
             metric_value=Decimal("1"),
             evidence_available_at="2026-09-21T11:00:00+02:00",
         )
+        self.assertEqual(observation.protocol_sha256, _sha("f"))
         self.assertEqual(observation.cell_spec_sha256, _sha("a"))
         self.assertEqual(observation.run_evidence_sha256, _sha("b"))
         self.assertEqual(
@@ -313,11 +351,13 @@ class AblationExperimentTests(unittest.TestCase):
                 protocol,
                 (
                     self._observation(
+                        protocol,
                         baseline,
                         evidence="c",
                         value="123456789.123456789",
                     ),
                     self._observation(
+                        protocol,
                         model,
                         evidence="d",
                         value="123456790.123456789",

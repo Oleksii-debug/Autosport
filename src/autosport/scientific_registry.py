@@ -182,6 +182,10 @@ class PromotionAction(StrEnum):
     ROLLBACK = "ROLLBACK"
 
 
+class RetestCondition(StrEnum):
+    NEW_EVALUATION_BUNDLE = "NEW_EVALUATION_BUNDLE"
+
+
 class ScientificRecord(Protocol):
     @property
     def record_type(self) -> str: ...
@@ -1253,6 +1257,10 @@ class ScientificRegistry:
         if _instant(postmortem["available_at"], "Postmortem.available_at") > repeat_created:
             raise DuplicateExperimentFingerprintError(
                 "repeat experiment cannot predate its authorizing postmortem"
+            )
+        if retest_condition != RetestCondition.NEW_EVALUATION_BUNDLE.value:
+            raise DuplicateExperimentFingerprintError(
+                "retest_condition is not a mechanically supported repeat authorization"
             )
 
         records = state["records"]

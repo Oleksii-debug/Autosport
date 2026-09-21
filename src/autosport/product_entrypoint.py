@@ -11,6 +11,7 @@ from typing import Callable, Sequence
 
 from .collector_service import _load_source_factory
 from .product_runtime import AutonomousProductRuntime, build_autonomous_product_runtime
+from .product_source import create_parlay_product_source_for_workspace
 
 
 class ProductEntrypointError(RuntimeError):
@@ -60,9 +61,24 @@ def _normalized_workspace(value: object, *, label: str) -> Path:
         raise ProductEntrypointError(f"{label} workspace cannot be resolved") from exc
 
 
-def _validated_source(source_factory: str, *, workspace: str | Path) -> object:
-    factory = _load_source_factory(source_factory)
-    source = factory()
+def _validated_source(
+    source_factory: str | None = None,
+    *,
+    provider: str | None = None,
+    workspace: str | Path,
+) -> object:
+    if (source_factory is None) == (provider is None):
+        raise ProductEntrypointError(
+            "select exactly one product source: built-in provider or external source factory"
+        )
+    if provider is not None:
+        if provider != "parlay-table-tennis":
+            raise ProductEntrypointError("unsupported built-in product provider")
+        source = create_parlay_product_source_for_workspace(workspace)
+    else:
+        assert source_factory is not None
+        factory = _load_source_factory(source_factory)
+        source = factory()
     for field in ("source_id", "stream_epoch"):
         value = getattr(source, field, None)
         if type(value) is not str or not value or value.strip() != value:
@@ -129,7 +145,8 @@ def _print_failure(*, kind: str, error_code: str, error_type: str) -> None:
 def run_product(
     *,
     workspace: str | Path,
-    source_factory: str,
+    source_factory: str | None = None,
+    provider: str | None = None,
     initial_bankroll: str = "10000",
     max_cycles: int | None = None,
     poll_seconds: float = 30.0,
@@ -163,7 +180,11 @@ def run_product(
     # Validate the complete production source capability before the composition root
     # creates a workspace or durable manifest. Missing event resolution or a split
     # source/runtime workspace must never be hidden by runtime initialization.
-    source = _validated_source(source_factory, workspace=workspace)
+    source = _validated_source(
+        source_factory,
+        provider=provider,
+        workspace=workspace,
+    )
     runtime = build_autonomous_product_runtime(
         workspace=workspace,
         source=source,
@@ -235,7 +256,8 @@ def run_product(
 def run_product_command(
     *,
     workspace: Path,
-    source_factory: str,
+    source_factory: str | None = None,
+    provider: str | None = None,
     initial_bankroll: str,
     max_cycles: int | None,
     poll_seconds: float,
@@ -244,6 +266,7 @@ def run_product_command(
         return run_product(
             workspace=workspace,
             source_factory=source_factory,
+            provider=provider,
             initial_bankroll=initial_bankroll,
             max_cycles=max_cycles,
             poll_seconds=poll_seconds,
@@ -277,10 +300,18 @@ def _parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument("--workspace", type=Path, default=Path(".autosport-product"))
-    parser.add_argument(
+    source = parser.add_mutually_exclusive_group(required=True)
+    source.add_argument(
+        "--provider",
+        choices=("parlay-table-tennis",),
+        help=(
+            "built-in read-only product provider; credentials and operator authority "
+            "remain in AUTOSPORT_PARLAY_* environment variables"
+        ),
+    )
+    source.add_argument(
         "--source-factory",
-        required=True,
-        help="external product source factory in module:function form",
+        help="advanced external product source factory in module:function form",
     )
     parser.add_argument("--bankroll", default="10000")
     parser.add_argument(
@@ -298,6 +329,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     return run_product_command(
         workspace=args.workspace,
         source_factory=args.source_factory,
+        provider=args.provider,
         initial_bankroll=args.bankroll,
         max_cycles=args.max_cycles,
         poll_seconds=args.poll_seconds,

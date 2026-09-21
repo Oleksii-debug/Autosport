@@ -24,12 +24,15 @@ Clock = Callable[[], str]
 _MAX_SNAPSHOT_BATCHES = 256
 _MAX_BATCH_ATTEMPTS = 2
 _SECRET_ASSIGNMENT = re.compile(
-    r"(?i)\b([A-Z0-9_]*(?:API_KEY|APP_KEY|ACCESS_TOKEN|AUTH_TOKEN|CLIENT_SECRET|PASSWORD|PASSWD)|"
-    r"api[-_]?key|app[-_]?key|access[-_]?token|auth[-_]?token|client[-_]?secret|password|passwd)"
-    r"(\s*[:=]\s*)(?:[\"']?)([^&\s,;\"']+)(?:[\"']?)"
+    r"(?i)\b([A-Z0-9_]*(?:API_KEY|APP_KEY|API_SECRET|SECRET_KEY|ACCESS_TOKEN|AUTH_TOKEN|"
+    r"SESSION_TOKEN|REFRESH_TOKEN|CLIENT_SECRET|PASSWORD|PASSWD)|"
+    r"api[-_]?key|app[-_]?key|api[-_]?secret|secret[-_]?key|access[-_]?token|auth[-_]?token|"
+    r"session[-_]?token|refresh[-_]?token|client[-_]?secret|password|passwd|token)"
+    r"(\s*[:=]\s*)(?:\"[^\"]*\"|'[^']*'|[^&\s,;]+)"
 )
-_AUTHORIZATION_HEADER = re.compile(
-    r"(?i)\b(Authorization\s*:\s*(?:Bearer|Basic)\s+)[^\s,;]+"
+_CREDENTIAL_HEADER = re.compile(
+    r"(?i)\b((?:Authorization|Proxy-Authorization)\s*:\s*(?:Bearer|Basic)\s+|"
+    r"(?:X-Application|X-Authentication)\s*:\s*)[^\s,;]+"
 )
 _URL_USERINFO = re.compile(r"(?i)\b(https?://)[^/@\s]+@")
 
@@ -37,7 +40,7 @@ _URL_USERINFO = re.compile(r"(?i)\b(https?://)[^/@\s]+@")
 def _redact_sensitive_text(value: str) -> str:
     """Remove credential-shaped values before a worker error reaches presentation surfaces."""
 
-    value = _AUTHORIZATION_HEADER.sub(r"\1[REDACTED]", value)
+    value = _CREDENTIAL_HEADER.sub(r"\1[REDACTED]", value)
     value = _URL_USERINFO.sub(r"\1[REDACTED]@", value)
     return _SECRET_ASSIGNMENT.sub(
         lambda match: f"{match.group(1)}{match.group(2)}[REDACTED]",

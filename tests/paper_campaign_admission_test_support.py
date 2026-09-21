@@ -6,6 +6,8 @@ from decimal import Decimal
 from pathlib import Path
 from unittest.mock import patch
 
+from autosport import _paper_execution_decision_origin as origin_module
+from autosport import _paper_execution_decision_origin_instance_guard as origin_instance_guard
 from autosport.agent_loop import AgentLoopRuntime
 from autosport.decision_ledger import (
     ECONOMIC_DECISION_KIND,
@@ -23,7 +25,6 @@ from autosport.paper_execution_adoption import (
     PaperExposureBinding,
     PreparedPaperExecution,
 )
-from autosport.paper_execution_decision_origin import execute_with_decision_origin
 from autosport.paper_execution_reality import (
     EvidenceGrade,
     PaperAttemptOutcome,
@@ -58,6 +59,53 @@ def _config() -> PaperExecutionModelConfig:
         unknown_bps=0,
         partial_fill_bps=5_000,
         max_slippage_bps=0,
+    )
+
+
+class _CanonicalOriginLedger(PaperExecutionLedger):
+    """Test-only adapter: reserve through #727, delegate all later state to target."""
+
+    def __init__(self, target: PaperExecutionLedger, origin) -> None:
+        self._target = target
+        self._origin = origin
+
+    @property
+    def path(self):
+        return self._target.path
+
+    def reserve_run(self, **kwargs):
+        return origin_instance_guard._STABLE_RESERVE_RUN(
+            origin_instance_guard._CanonicalReservationView(self._target, self._origin),
+            **kwargs,
+        )
+
+    def load_run(self, **kwargs):
+        return self._target.load_run(**kwargs)
+
+    def record_attempt(self, attempt):
+        return self._target.record_attempt(attempt)
+
+    def complete_run(self, **kwargs):
+        return self._target.complete_run(**kwargs)
+
+    def events(self, run_id=None):
+        return self._target.events(run_id)
+
+
+def _canonical_observation(environment, record, record_sha256: str) -> Observation:
+    return Observation(
+        environment_id=environment.environment_id,
+        observed_at=record.observed_ts,
+        available_at=record.observed_ts,
+        evidence=tuple(
+            sorted(
+                (
+                    ("context_hash", record.context_hash),
+                    ("decision_id", record.decision_id),
+                    ("decision_record_sha256", record_sha256),
+                )
+            )
+        ),
     )
 
 
@@ -96,6 +144,8 @@ class AdmissionFixture:
             policy_id="admission-policy",
             admissible_actions=frozenset({"PAPER_PROPOSAL"}),
         )
+        # Originless negative fixtures retain a non-authoritative caller observation.
+        # Positive fixtures replace this below with the exact durable decision projection.
         self.observation = Observation(
             environment_id=self.environment.environment_id,
             observed_at=T0,
@@ -173,10 +223,9 @@ class AdmissionFixture:
         self.execution_run_id = execution_runtime.expected_run_id(
             prepared, self.execution_decision_id
         )
+        decision_ledger = JsonlDecisionLedger(self.workspace / "decisions.jsonl")
         if seed_execution_decision:
-            self.append_execution_decision(
-                plan_fingerprint=decision_plan_fingerprint
-            )
+            self.append_execution_decision(plan_fingerprint=decision_plan_fingerprint)
 
         evidence = PaperExecutionEvidenceRecord(
             action_id=action.action_id,
@@ -204,26 +253,48 @@ class AdmissionFixture:
         )
         registry = PaperExecutionEvidenceRegistry(execution_ledger)
         registry.register(evidence)
+        observed = evidence.as_observation()
+
         if seed_execution_decision:
-            result = execute_with_decision_origin(
-                runtime=execution_runtime,
-                decision_ledger=JsonlDecisionLedger(self.workspace / "decisions.jsonl"),
-                prepared=prepared,
-                trigger_id=self.execution_decision_id,
-                started_at=T3,
-                materialize_exposure=True,
-                observations={action.action_id: evidence.as_observation()},
-                evidence_registry=registry,
+            records = decision_ledger.verified_records()
+            record = next(item for item in records if item.decision_id == self.execution_decision_id)
+            origin = origin_instance_guard._verified_decision_origin_without_instance_dispatch(
+                decision_ledger,
+                self.execution_decision_id,
             )
+            self.observation = _canonical_observation(
+                self.environment,
+                record,
+                origin.record_sha256,
+            )
+            canonical_ledger = _CanonicalOriginLedger(execution_ledger, origin)
+            original_ledger = execution_runtime.ledger
+            execution_runtime.ledger = canonical_ledger
+            try:
+                result = origin_module._ORIGINAL_RUNTIME_EXECUTE(
+                    execution_runtime,
+                    prepared=prepared,
+                    trigger_id=self.execution_decision_id,
+                    started_at=T3,
+                    materialize_exposure=True,
+                    observations={action.action_id: observed},
+                    evidence_registry=registry,
+                )
+            finally:
+                execution_runtime.ledger = original_ledger
         else:
-            result = execution_runtime.execute(
+            # Deliberately originless: used to prove a later matching decision cannot
+            # retroactively bless already-started PAPER execution.
+            result = origin_module._ORIGINAL_RUNTIME_EXECUTE(
+                execution_runtime,
                 prepared=prepared,
                 trigger_id=self.execution_decision_id,
                 started_at=T3,
                 materialize_exposure=True,
-                observations={action.action_id: evidence.as_observation()},
+                observations={action.action_id: observed},
                 evidence_registry=registry,
             )
+
         if result.run.run_id != self.execution_run_id:
             raise AssertionError("fixture expected deterministic PAPER execution run identity")
         self.execution_attempt_id = result.run.attempts[0].attempt_id

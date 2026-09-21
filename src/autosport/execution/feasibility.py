@@ -189,11 +189,11 @@ def assess_execution_feasibility(
     *,
     max_snapshot_age: timedelta,
 ) -> ExecutionFeasibilitySnapshot:
-    """Derive conservative decision-time displayed-liquidity evidence.
+    """Validate caller assertions and derive conservative displayed depth.
 
-    The strongest result intentionally says only that the displayed opposing
-    depth was sufficient at one authenticated snapshot. It never reserves
-    liquidity, predicts a fill, or proves atomic execution.
+    Public DTOs are assertion-only. Until this path re-resolves a canonical
+    product-issued depth receipt plus provider/account limit authority, it must
+    fail closed and cannot mint SNAPSHOT_DEPTH_SUFFICIENT_BUT_RACY.
     """
     if max_snapshot_age <= timedelta(0):
         raise ValueError("max_snapshot_age must be positive")
@@ -203,11 +203,7 @@ def assess_execution_feasibility(
     _append_if(reasons, request.order_type != "LIMIT", "UNSUPPORTED_ORDER_TYPE")
     _append_if(reasons, request.leg_count != 1, "MULTI_LEG_LIQUIDITY_REUSE_FORBIDDEN")
     _append_if(reasons, request.fill_or_kill, "FILL_OR_KILL_NOT_STANDARD_LIMIT")
-    _append_if(
-        reasons,
-        request.minimum_fill_size is not None,
-        "MINIMUM_FILL_NOT_STANDARD_LIMIT",
-    )
+    _append_if(reasons, request.minimum_fill_size is not None, "MINIMUM_FILL_NOT_STANDARD_LIMIT")
     _append_if(reasons, request.bet_target_type is not None, "BET_TARGET_FORBIDDEN")
     _append_if(reasons, request.smart_order, "SMART_ORDER_FORBIDDEN")
 
@@ -217,95 +213,57 @@ def assess_execution_feasibility(
     _append_if(reasons, snapshot.selection_id != request.selection_id, "SELECTION_ID_MISMATCH")
     _append_if(reasons, snapshot.source_mode is not SourceMode.LIVE, "DELAYED_SOURCE")
     _append_if(reasons, snapshot.status.upper() != "OPEN", "MARKET_NOT_OPEN")
-    _append_if(
-        reasons,
-        snapshot.market_version != request.expected_market_version,
-        "MARKET_VERSION_MISMATCH",
-    )
+    _append_if(reasons, snapshot.market_version != request.expected_market_version, "MARKET_VERSION_MISMATCH")
     _append_if(reasons, snapshot.inplay != request.expected_inplay, "INPLAY_MISMATCH")
-    _append_if(
-        reasons,
-        snapshot.bet_delay_seconds != request.expected_bet_delay_seconds,
-        "BET_DELAY_MISMATCH",
-    )
+    _append_if(reasons, snapshot.bet_delay_seconds != request.expected_bet_delay_seconds, "BET_DELAY_MISMATCH")
     _append_if(reasons, snapshot.has_ordering_gap, "SNAPSHOT_ORDERING_GAP")
     _append_if(reasons, snapshot.received_at < snapshot.observed_at, "RECEIVED_BEFORE_OBSERVED")
     _append_if(reasons, snapshot.observed_at > request.decision_at, "FUTURE_SNAPSHOT")
-    _append_if(
-        reasons,
-        snapshot.received_at > request.decision_at,
-        "RECEIVED_AFTER_DECISION",
-    )
-    _append_if(
-        reasons,
-        request.decision_at - snapshot.observed_at > max_snapshot_age,
-        "STALE_SNAPSHOT",
-    )
-    _append_if(
-        reasons,
-        snapshot.rollup_model not in (None, "", "NONE"),
-        "ROLLUP_SUBSTITUTION_FORBIDDEN",
-    )
+    _append_if(reasons, snapshot.received_at > request.decision_at, "RECEIVED_AFTER_DECISION")
+    _append_if(reasons, request.decision_at - snapshot.observed_at > max_snapshot_age, "STALE_SNAPSHOT")
+    _append_if(reasons, snapshot.rollup_model not in (None, "", "NONE"), "ROLLUP_SUBSTITUTION_FORBIDDEN")
     _append_if(reasons, snapshot.virtualise, "VIRTUALISED_LADDER_FORBIDDEN")
     _append_if(reasons, snapshot.is_truncated, "TRUNCATED_PROJECTION")
 
     if snapshot.projection_kind is ProjectionKind.EX_BEST_OFFERS:
         _append_if(reasons, snapshot.projection_depth is None, "BEST_OFFERS_DEPTH_UNBOUND")
         if snapshot.projection_depth is not None:
-            _append_if(
-                reasons,
-                len(snapshot.available_to_lay) > snapshot.projection_depth,
-                "BEST_OFFERS_DEPTH_INCONSISTENT",
-            )
+            _append_if(reasons, len(snapshot.available_to_lay) > snapshot.projection_depth, "BEST_OFFERS_DEPTH_INCONSISTENT")
 
     _append_if(reasons, limits.provider_id != request.provider_id, "LIMIT_PROVIDER_MISMATCH")
     _append_if(reasons, limits.account_id != request.account_id, "LIMIT_ACCOUNT_MISMATCH")
     _append_if(reasons, limits.market_id != request.market_id, "LIMIT_MARKET_MISMATCH")
     _append_if(reasons, not limits.permitted, "LIMIT_AUTHORITY_REJECTED")
     if limits.min_stake is not None:
-        _append_if(
-            reasons,
-            request.requested_stake < limits.min_stake,
-            "STAKE_BELOW_PROVIDER_MINIMUM",
-        )
+        _append_if(reasons, request.requested_stake < limits.min_stake, "STAKE_BELOW_PROVIDER_MINIMUM")
     if limits.max_stake is not None:
-        _append_if(
-            reasons,
-            request.requested_stake > limits.max_stake,
-            "STAKE_ABOVE_PROVIDER_MAXIMUM",
-        )
+        _append_if(reasons, request.requested_stake > limits.max_stake, "STAKE_ABOVE_PROVIDER_MAXIMUM")
     if limits.min_price is not None:
-        _append_if(
-            reasons,
-            request.limit_price < limits.min_price,
-            "PRICE_BELOW_PROVIDER_MINIMUM",
-        )
+        _append_if(reasons, request.limit_price < limits.min_price, "PRICE_BELOW_PROVIDER_MINIMUM")
     if limits.max_price is not None:
-        _append_if(
-            reasons,
-            request.limit_price > limits.max_price,
-            "PRICE_ABOVE_PROVIDER_MAXIMUM",
-        )
+        _append_if(reasons, request.limit_price > limits.max_price, "PRICE_ABOVE_PROVIDER_MAXIMUM")
+
+    # Public request/snapshot/limit DTOs are not product-owned authority. The
+    # canonical Market Mirror / provider-depth receipt / account-limit resolver
+    # has not yet been wired into this branch, so the public assertion path must
+    # remain fail-closed even when all caller-provided values are self-consistent.
+    reasons.append("PRODUCT_OWNED_EVIDENCE_UNRESOLVED")
 
     # A BACK order executes against the opposing available-to-lay book. The
     # backer's limit price is a minimum acceptable price, so prices at or above
     # the limit are executable from the snapshot's displayed opposing depth.
     displayed_depth = sum(
-        (
-            quote.size
-            for quote in snapshot.available_to_lay
-            if quote.price >= request.limit_price
-        ),
+        (quote.size for quote in snapshot.available_to_lay if quote.price >= request.limit_price),
         Decimal("0"),
     )
 
+    if displayed_depth < request.requested_stake:
+        reasons.append("DISPLAYED_DEPTH_INSUFFICIENT")
+
     if reasons:
         state = FeasibilityState.UNKNOWN_UNPROVEN
-    elif displayed_depth >= request.requested_stake:
-        state = FeasibilityState.SNAPSHOT_DEPTH_SUFFICIENT_BUT_RACY
     else:
-        state = FeasibilityState.DISPLAYED_DEPTH_AT_SNAPSHOT
-        reasons.append("DISPLAYED_DEPTH_INSUFFICIENT")
+        state = FeasibilityState.SNAPSHOT_DEPTH_SUFFICIENT_BUT_RACY
 
     evidence_digest = _evidence_digest(
         request=request,
@@ -369,13 +327,9 @@ def _ladder_payload(quotes: Iterable[PriceSize]) -> list[dict[str, str | None]]:
 
 
 def _evidence_digest(
-    *,
-    request: ExecutionFeasibilityRequest,
-    snapshot: MarketBookSnapshot,
-    limits: ProviderLimitAuthority,
-    displayed_depth: Decimal,
-    state: FeasibilityState,
-    reasons: Sequence[str],
+    *, request: ExecutionFeasibilityRequest, snapshot: MarketBookSnapshot,
+    limits: ProviderLimitAuthority, displayed_depth: Decimal,
+    state: FeasibilityState, reasons: Sequence[str],
 ) -> str:
     payload = {
         "schema": "autosport.execution-feasibility-snapshot.v1",
@@ -444,10 +398,5 @@ def _evidence_digest(
             "reasons": list(reasons),
         },
     }
-    encoded = json.dumps(
-        payload,
-        sort_keys=True,
-        separators=(",", ":"),
-        ensure_ascii=True,
-    ).encode("utf-8")
+    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()

@@ -43,18 +43,20 @@ def _payload(
     size_matched: str = "0",
     average_price_matched: str = "0",
     bet_id: str | None = None,
+    handicap: object = 0,
+    persistence_type: str = "LAPSE",
 ) -> bytes:
     report: dict[str, object] = {
         "status": instruction_status,
         "instruction": {
             "selectionId": int(action.selection_id),
-            "handicap": 0,
+            "handicap": handicap,
             "side": action.side,
             "orderType": "LIMIT",
             "limitOrder": {
                 "size": str(action.requested_stake),
                 "price": str(action.requested_odds),
-                "persistenceType": "LAPSE",
+                "persistenceType": persistence_type,
             },
         },
         "placedDate": OBSERVED_AT,
@@ -136,3 +138,34 @@ def test_explicit_zero_failure_remains_rejected() -> None:
 
     assert report.instruction.size_matched == Decimal("0")
     assert _report_outcome(report, action) is PlaceOrdersOutcome.REJECTED
+
+@pytest.mark.parametrize(
+    ("handicap", "persistence_type"),
+    (
+        (1, "LAPSE"),
+        (0, "PERSIST"),
+    ),
+)
+def test_response_echo_rejects_handicap_or_persistence_drift(
+    handicap: object,
+    persistence_type: str,
+) -> None:
+    action = _action()
+    payload = _payload(
+        action,
+        execution_status="SUCCESS",
+        instruction_status="SUCCESS",
+        include_size_matched=True,
+        size_matched="5.00",
+        average_price_matched="2.00",
+        bet_id="bet-123",
+        handicap=handicap,
+        persistence_type=persistence_type,
+    )
+
+    with pytest.raises(
+        BetfairPlaceOrdersAmbiguous,
+        match="does not bind exact action",
+    ):
+        _parse(payload, action)
+

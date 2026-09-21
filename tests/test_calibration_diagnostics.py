@@ -188,6 +188,34 @@ class CalibrationDiagnosticsTests(unittest.TestCase):
                 confidence_level=1,
             )
 
+    def test_probability_endpoints_follow_canonical_bin_membership(self):
+        records = (
+            self._record("f-zero", "0"),
+            self._record(
+                "f-one",
+                "1",
+                generated_at="2026-02-11T12:00:00+00:00",
+                input_cutoff="2026-02-11T11:59:00+00:00",
+            ),
+        )
+        outcomes = (
+            ForecastOutcomeFact("f-zero", 0, "2026-02-10T14:00:00+00:00"),
+            ForecastOutcomeFact("f-one", 1, "2026-02-11T14:00:00+00:00"),
+        )
+        report = evaluate_calibration_diagnostics(
+            records,
+            outcomes,
+            self._window(),
+            bins=2,
+        )
+        self.assertEqual(
+            tuple(
+                (item.bin_lower, item.bin_upper, item.count)
+                for item in report.calibration
+            ),
+            ((0.0, 0.5, 1), (0.5, 1.0, 1)),
+        )
+
     def test_causal_and_training_boundary_checks_are_preserved(self):
         records, outcomes = self._cohort()
         leaked = (

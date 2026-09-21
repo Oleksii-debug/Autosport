@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import sqlite3
 import threading
 from pathlib import Path
@@ -99,6 +100,58 @@ def test_failed_bounded_legacy_migration_preserves_original_json_authority(
         CollectorDeltaStore(path, max_bytes=one_page_budget)
 
     assert path.read_bytes() == legacy_bytes
+    assert not path.with_name(f"{path.name}.legacy-v1.json").exists()
+    assert not list(tmp_path.glob(f".{path.name}.sqlite-migrate-*.tmp"))
+
+
+def test_failed_bounded_legacy_replay_overflow_preserves_nonempty_json_authority(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "collector.json"
+    page_size = _default_page_size()
+    max_bytes = page_size * 64
+
+    # Prove this exact ceiling can admit a complete empty canonical store. The
+    # migration below must therefore fail during legacy replay, not during schema
+    # construction as the smaller-budget regression above already covers.
+    probe = tmp_path / "empty-probe.sqlite"
+    empty = CollectorDeltaStore(probe, max_bytes=max_bytes)
+    assert empty.configured_max_bytes == max_bytes
+    _, empty_pages = _page_geometry(probe)
+    assert empty_pages <= max_bytes // page_size
+
+    delta = _delta(1, padding=max_bytes * 4)
+    legacy = {
+        "schema_version": 1,
+        "deltas": [delta.to_dict()],
+        "streams": {
+            "budget-source|epoch-1": {
+                "source_id": "budget-source",
+                "stream_epoch": "epoch-1",
+                "last_cursor": "cursor-1",
+                "last_position": 1,
+                "last_delta_id": "delta-1",
+            }
+        },
+    }
+    legacy_bytes = json.dumps(
+        legacy,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    ).encode("utf-8")
+    path.write_bytes(legacy_bytes)
+
+    with pytest.raises(CollectorStorageBudgetError, match="cannot initialize"):
+        CollectorDeltaStore(path, max_bytes=max_bytes)
+
+    # Replay overflow is pre-switch: exact legacy bytes remain authoritative and
+    # independently readable, with no backup or migration candidate published.
+    assert path.read_bytes() == legacy_bytes
+    decoded = json.loads(path.read_text(encoding="utf-8"))
+    assert CollectorDelta.from_dict(decoded["deltas"][0]) == delta
+    assert decoded["streams"] == legacy["streams"]
     assert not path.with_name(f"{path.name}.legacy-v1.json").exists()
     assert not list(tmp_path.glob(f".{path.name}.sqlite-migrate-*.tmp"))
 

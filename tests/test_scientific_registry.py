@@ -328,6 +328,128 @@ def test_restart_preserves_negative_memory_and_blocks_duplicate_fingerprint(tmp_
         reopened.append(repeat)
 
 
+
+def test_negative_repeat_requires_durable_postmortem_provenance(tmp_path):
+    path = tmp_path / "scientific_registry.json"
+    registry = ScientificRegistry.initialize_pristine(path)
+    _foundation(registry)
+    experiment = _experiment()
+    registry.append(experiment)
+
+    repeat = replace(
+        experiment,
+        experiment_id="experiment-2",
+        created_at=T3,
+        completed_at=T3,
+    )
+    with pytest.raises(DuplicateExperimentFingerprintError, match="durable repeat provenance"):
+        registry.append(repeat, allow_repeat_experiment=True)
+
+    postmortem = Postmortem(
+        "postmortem-repeat",
+        "experiment-1",
+        ResearchOutcome.NEGATIVE,
+        "No primary-metric improvement.",
+        ("independent replication on frozen inputs",),
+        T3,
+    )
+    registry.append(postmortem)
+
+    with pytest.raises(DuplicateExperimentFingerprintError, match="durable repeat provenance"):
+        registry.append(repeat, allow_repeat_experiment=True)
+
+    authorized = replace(
+        repeat,
+        repeat_of_experiment_id="experiment-1",
+        repeat_postmortem_id="postmortem-repeat",
+        retest_condition="independent replication on frozen inputs",
+        repeat_evidence=("operator-approved replication:evidence-1",),
+    )
+    registry.append(authorized, allow_repeat_experiment=True)
+
+    reopened = ScientificRegistry(path)
+    stored = reopened.get("Experiment", "experiment-2")
+    assert stored is not None
+    assert stored.payload["repeat_of_experiment_id"] == "experiment-1"
+    assert stored.payload["repeat_postmortem_id"] == "postmortem-repeat"
+    assert stored.payload["retest_condition"] == "independent replication on frozen inputs"
+    assert stored.payload["repeat_evidence"] == ["operator-approved replication:evidence-1"]
+    assert len(reopened.find_experiment_fingerprint(experiment.fingerprint)) == 2
+
+
+def test_negative_repeat_rejects_wrong_postmortem_condition_or_time(tmp_path):
+    registry = ScientificRegistry.initialize_pristine(tmp_path / "scientific_registry.json")
+    _foundation(registry)
+    experiment = _experiment()
+    registry.append(experiment)
+
+    with pytest.raises(DuplicateExperimentFingerprintError, match="missing experiment"):
+        registry.append(
+            Postmortem(
+                "postmortem-missing",
+                "does-not-exist",
+                ResearchOutcome.NEGATIVE,
+                "No result.",
+                ("replicate",),
+                T3,
+            )
+        )
+    with pytest.raises(DuplicateExperimentFingerprintError, match="classification"):
+        registry.append(
+            Postmortem(
+                "postmortem-wrong-class",
+                "experiment-1",
+                ResearchOutcome.HARMFUL,
+                "Wrong classification.",
+                ("replicate",),
+                T3,
+            )
+        )
+    with pytest.raises(DuplicateExperimentFingerprintError, match="predate"):
+        registry.append(
+            Postmortem(
+                "postmortem-too-early",
+                "experiment-1",
+                ResearchOutcome.NEGATIVE,
+                "Premature.",
+                ("replicate",),
+                T1,
+            )
+        )
+
+    registry.append(
+        Postmortem(
+            "postmortem-valid",
+            "experiment-1",
+            ResearchOutcome.NEGATIVE,
+            "Replication is permitted only under the frozen condition.",
+            ("replicate on frozen inputs",),
+            T3,
+        )
+    )
+    repeat = replace(
+        experiment,
+        experiment_id="experiment-2",
+        created_at=T3,
+        completed_at=T3,
+        repeat_of_experiment_id="experiment-1",
+        repeat_postmortem_id="postmortem-valid",
+        retest_condition="different condition",
+        repeat_evidence=("evidence:1",),
+    )
+    with pytest.raises(DuplicateExperimentFingerprintError, match="retest_condition"):
+        registry.append(repeat, allow_repeat_experiment=True)
+
+    future_repeat = replace(
+        repeat,
+        retest_condition="replicate on frozen inputs",
+        created_at=T2,
+        completed_at=T3,
+    )
+    with pytest.raises(DuplicateExperimentFingerprintError, match="predate its authorizing postmortem"):
+        registry.append(future_repeat, allow_repeat_experiment=True)
+
+
 def test_conflicting_identity_rejected_but_exact_replay_is_idempotent(tmp_path):
     registry = ScientificRegistry.initialize_pristine(tmp_path / "scientific_registry.json")
     question = ResearchQuestion("q", "Frozen question", SHA_A, T0)

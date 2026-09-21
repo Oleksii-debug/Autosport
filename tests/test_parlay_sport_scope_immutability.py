@@ -98,6 +98,47 @@ class ParlaySportScopeImmutabilityTests(unittest.TestCase):
 
         self._assert_original_scope(provider, calls)
 
+    def test_sport_key_rebinding_cannot_retarget_historical_coverage_scope(self) -> None:
+        calls: list[str] = []
+        payload = {
+            "sport_key": "basketball_nba",
+            "window": {"date_from": "2026-09-20", "date_to": "2026-09-21"},
+            "by_source": {
+                "book-a": {
+                    "rows": 2,
+                    "priced_rows": 2,
+                    "first_date": "2026-09-20",
+                    "last_date": "2026-09-21",
+                }
+            },
+        }
+        response_headers = {
+            "x-historical-window-hours": "168",
+            "x-historical-window-from": "2026-09-14T00:00:00Z",
+            "x-api-version": "test",
+        }
+
+        def transport(url, headers, timeout):
+            calls.append(url)
+            return HttpJsonResponse(payload, 200, response_headers)
+
+        provider = ParlayApiSportProvider(
+            "basketball_nba",
+            "secret",
+            transport=transport,
+            clock=lambda: "2026-09-21T12:00:01+00:00",
+            sleeper=lambda _: None,
+        )
+        _attempt_rebind(provider, "sport_key", "tennis_atp")
+
+        report = provider.historical_coverage("2026-09-20", "2026-09-21")
+
+        self.assertEqual(
+            urlparse(calls[0]).path,
+            "/v1/historical/sports/basketball_nba/coverage",
+        )
+        self.assertEqual(report.sport_key, "basketball_nba")
+
 
 if __name__ == "__main__":
     unittest.main()

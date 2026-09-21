@@ -50,10 +50,19 @@ _SECRET_KEY_MARKERS = (
     "apikey",
     "private_key",
 )
-_SECRET_ASSIGNMENT_RE = re.compile(
-    r"(?i)\b(?:client[_-]?secret|access[_-]?token|refresh[_-]?token|"
+_SECRET_NAME_PATTERN = (
+    r"(?:client[_-]?secret|access[_-]?token|refresh[_-]?token|"
     r"private[_-]?key|credential|password|passwd|secret|token|"
-    r"api[_-]?key|authorization|cookie)\s*([:=])\s*([^\s,;]+)"
+    r"api[_-]?key|authorization|cookie)"
+)
+_SECRET_ASSIGNMENT_RE = re.compile(
+    rf"(?i)\b(?P<name>{_SECRET_NAME_PATTERN})\s*(?P<separator>[:=])\s*"
+    r"(?P<value>\"(?:\\.|[^\"\\\r\n])*\"|'(?:\\.|[^'\\\r\n])*'|"
+    r"(?![\"'])[^\s,;]+)"
+)
+_UNTERMINATED_SECRET_ASSIGNMENT_RE = re.compile(
+    rf"(?i)\b(?P<name>{_SECRET_NAME_PATTERN})\s*(?P<separator>[:=])\s*"
+    r"(?P<quote>[\"'])"
 )
 _BEARER_RE = re.compile(r"(?i)\bbearer\s+[A-Za-z0-9._~+/=-]+")
 _URI_CREDENTIAL_RE = re.compile(
@@ -166,11 +175,19 @@ def _is_secret_key(key: str) -> bool:
 def _redact_text(value: str) -> str:
     value = _URI_CREDENTIAL_RE.sub(r"\1[REDACTED]:[REDACTED]@", value)
     value = _BEARER_RE.sub("Bearer [REDACTED]", value)
-    return _SECRET_ASSIGNMENT_RE.sub(
-        lambda match: f"{match.group(0)[:match.start(1)-match.start(0)]}"
-        f"{match.group(1)}{_REDACTED}",
+    value = _SECRET_ASSIGNMENT_RE.sub(
+        lambda match: (
+            f"{match.group('name')}{match.group('separator')}{_REDACTED}"
+        ),
         value,
     )
+    malformed = _UNTERMINATED_SECRET_ASSIGNMENT_RE.search(value)
+    if malformed is not None:
+        value = (
+            value[: malformed.start()]
+            + f"{malformed.group('name')}{malformed.group('separator')}{_REDACTED}"
+        )
+    return value
 
 
 def _sanitize_json_value(value: object, *, secret_context: bool = False) -> JsonValue:

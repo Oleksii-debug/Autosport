@@ -7,6 +7,9 @@ from dataclasses import dataclass
 from .causal_collector import CollectorDeltaStore
 
 
+_CANONICAL_COLLECTOR_CYCLE_EVIDENCE = CollectorDeltaStore.collector_cycle_evidence
+
+
 class SourceUniverseCommitmentError(ValueError):
     """Canonical collector evidence cannot support a bounded universe commitment."""
 
@@ -101,8 +104,8 @@ def build_source_universe_commitment(
 ) -> SourceUniverseCommitment:
     """Bind every canonical collector cycle in an explicit closed sequence range."""
 
-    if not isinstance(store, CollectorDeltaStore):
-        raise TypeError("store must be the canonical CollectorDeltaStore")
+    if type(store) is not CollectorDeltaStore:
+        raise TypeError("store must be the exact canonical CollectorDeltaStore")
     if type(source_id) is not str or not source_id or source_id.strip() != source_id:
         raise SourceUniverseCommitmentError(
             "source_id must be a non-empty trimmed string"
@@ -118,7 +121,8 @@ def build_source_universe_commitment(
             "end_cycle_seq cannot precede start_cycle_seq"
         )
 
-    evidence = store.collector_cycle_evidence(
+    evidence = _CANONICAL_COLLECTOR_CYCLE_EVIDENCE(
+        store,
         source_id=source_id,
         start_cycle_seq=start_cycle_seq,
         end_cycle_seq=end_cycle_seq,
@@ -241,3 +245,67 @@ def build_source_universe_commitment(
             "commitment_sha256": commitment_sha256,
         }
     )
+
+
+_COMMITMENT_FIELD_NAMES = (
+    "schema_version",
+    "source_id",
+    "start_cycle_seq",
+    "end_cycle_seq",
+    "cycle_count",
+    "success_count",
+    "zero_result_success_count",
+    "provider_unavailable_count",
+    "local_failure_count",
+    "stop_requested_count",
+    "pending_count",
+    "observed_delta_occurrence_count",
+    "observed_unique_delta_count",
+    "cycle_evidence_sha256",
+    "commitment_sha256",
+    "observation_ledger_complete",
+    "provider_observation_complete",
+    "external_provider_universe_complete",
+    "promotion_ready",
+)
+
+
+def verify_source_universe_commitment(
+    store: CollectorDeltaStore,
+    candidate: SourceUniverseCommitment,
+    *,
+    expected_source_id: str,
+    expected_start_cycle_seq: int,
+    expected_end_cycle_seq: int,
+) -> SourceUniverseCommitment:
+    """Re-resolve one candidate from canonical bytes and product-owned scope.
+
+    The candidate is evidence to compare, never authority to choose its own source
+    or sequence window. Callers must supply the expected scope from the owning
+    schedule/campaign/precommit contract.
+    """
+
+    if type(store) is not CollectorDeltaStore:
+        raise TypeError("store must be the exact canonical CollectorDeltaStore")
+    if type(candidate) is not SourceUniverseCommitment:
+        raise TypeError("candidate must be an exact SourceUniverseCommitment")
+
+    rebuilt = build_source_universe_commitment(
+        store,
+        source_id=expected_source_id,
+        start_cycle_seq=expected_start_cycle_seq,
+        end_cycle_seq=expected_end_cycle_seq,
+    )
+    try:
+        for field_name in _COMMITMENT_FIELD_NAMES:
+            supplied = getattr(candidate, field_name)
+            canonical = getattr(rebuilt, field_name)
+            if type(supplied) is not type(canonical) or supplied != canonical:
+                raise SourceUniverseCommitmentError(
+                    "source-universe commitment does not match canonical expected scope"
+                )
+    except AttributeError as exc:
+        raise SourceUniverseCommitmentError(
+            "source-universe commitment is structurally incomplete"
+        ) from exc
+    return rebuilt

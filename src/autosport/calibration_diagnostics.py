@@ -428,7 +428,11 @@ def evaluate_calibration_diagnostics(
         confidence_level=confidence_level,
         method=_BRIER_INTERVAL_METHOD,
     )
-    max_log_loss = -math.log(_EPSILON)
+    upper_clip = 1.0 - _EPSILON
+    max_log_loss = max(
+        -math.log(_EPSILON),
+        -math.log1p(-upper_clip),
+    )
     log_loss = _bounded_mean_interval(
         summary.log_loss,
         count=summary.count,

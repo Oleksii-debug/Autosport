@@ -239,7 +239,7 @@ def test_market_image_inside_delta_replaces_only_that_market() -> None:
     assert first[0].price == Decimal("2.5")
 
 
-def test_resub_delta_requires_matching_initial_clock() -> None:
+def test_resub_delta_requires_and_refreshes_initial_clock() -> None:
     state = BetfairMarketStreamState()
     state.apply(decode_market_change_message(_image()))
 
@@ -249,18 +249,38 @@ def test_resub_delta_requires_matching_initial_clock() -> None:
     with pytest.raises(ValueError, match="requires initialClk"):
         state.apply(missing)
 
-    wrong = decode_market_change_message(
-        {
-            "op": "mcm",
-            "ct": "RESUB_DELTA",
-            "initialClk": "other",
-            "clk": "c3",
-            "pt": 1001,
-            "mc": [],
-        }
+    refreshed = state.apply(
+        decode_market_change_message(
+            {
+                "op": "mcm",
+                "ct": "RESUB_DELTA",
+                "initialClk": "initial-2",
+                "clk": "c3",
+                "pt": 1001,
+                "mc": [],
+            }
+        )
     )
-    with pytest.raises(ValueError, match="conflicts"):
-        state.apply(wrong)
+    assert refreshed.cursor.initial_clk == "initial-2"
+    assert refreshed.cursor.clk == "c3"
+
+
+def test_server_supplied_initial_clock_is_refreshed_on_later_messages() -> None:
+    state = BetfairMarketStreamState()
+    state.apply(decode_market_change_message(_image()))
+    result = state.apply(
+        decode_market_change_message(
+            {
+                "op": "mcm",
+                "initialClk": "initial-3",
+                "clk": "c4",
+                "pt": 1002,
+                "mc": [],
+            }
+        )
+    )
+    assert result.cursor.initial_clk == "initial-3"
+    assert result.cursor.clk == "c4"
 
 
 def test_same_clock_is_idempotent_only_for_identical_frame() -> None:

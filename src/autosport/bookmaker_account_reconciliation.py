@@ -151,10 +151,30 @@ def _time(value: str, field: str) -> datetime:
 def _decimal_text(value: Decimal) -> str:
     if not isinstance(value, Decimal) or not value.is_finite():
         raise AccountReconciliationIntegrityError("money must be a finite Decimal")
-    text = format(value.normalize(), "f")
-    if "." in text:
-        text = text.rstrip("0").rstrip(".")
-    return "0" if text in {"", "-0"} else text
+
+    sign, raw_digits, exponent = value.as_tuple()
+    digits = list(raw_digits)
+    if not any(digits):
+        return "0"
+
+    # Canonicalize numeric aliases without Decimal arithmetic. Decimal.normalize()
+    # is context-sensitive and may round high-precision provider values before
+    # durable persistence/fingerprinting.
+    while digits[-1] == 0:
+        digits.pop()
+        exponent += 1
+
+    coefficient = "".join(str(digit) for digit in digits)
+    if exponent >= 0:
+        text = coefficient + ("0" * exponent)
+    else:
+        point = len(coefficient) + exponent
+        if point > 0:
+            text = f"{coefficient[:point]}.{coefficient[point:]}"
+        else:
+            text = f"0.{('0' * -point)}{coefficient}"
+
+    return f"-{text}" if sign else text
 
 
 def _optional_decimal_text(value: Decimal | None) -> str | None:

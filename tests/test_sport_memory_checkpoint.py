@@ -514,12 +514,13 @@ def test_checkpoint_parser_rejects_duplicate_json_keys(tmp_path):
         sort_keys=True,
         separators=(",", ":"),
     )
+    invalid_root = "0" * 64
     unique_field = f'"identity_root_sha256":"{valid_root}"'
     assert canonical.count(unique_field) == 1
     tampered = canonical.replace(
         unique_field,
         (
-            f'"identity_root_sha256":"{"0" * 64}",'
+            f'"identity_root_sha256":"{invalid_root}",'
             f'"identity_root_sha256":"{valid_root}"'
         ),
         1,

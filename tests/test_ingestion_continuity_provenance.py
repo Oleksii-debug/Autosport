@@ -5,9 +5,10 @@ from decimal import Decimal
 from pathlib import Path
 
 from autosport.ingestion import IngestionEngine
+from autosport.ingestion_health import SourceHealthStore
 from autosport.market_bus import MarketEventBus
 from autosport.providers import ProviderBatch, ProviderQuote
-from autosport.source_continuity import ProviderContinuityWitness
+from autosport.source_continuity import ProviderContinuityWitness, SourceContinuityStore
 from autosport.storage import SQLiteMarketStore
 
 
@@ -51,12 +52,14 @@ class IngestionContinuityProvenanceTests(unittest.TestCase):
             self.assertIsNone(engine.continuity_store)
             market.close()
 
-    def test_forged_witness_is_rejected_before_market_commit(self):
+    def test_forged_witness_is_rejected_before_commit_without_provider_health_failure(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "market.db"
+            health = SourceHealthStore(Path(tmp) / "source_health.json")
             market = SQLiteMarketStore(path)
             engine = IngestionEngine(
                 MarketEventBus(market),
+                health_store=health,
                 continuity_witness_resolver=lambda _provider, _batch: ForgedContinuityWitness(
                     None, "token-1"
                 ),
@@ -68,6 +71,17 @@ class IngestionContinuityProvenanceTests(unittest.TestCase):
                 "continuity_witness_resolver must return ProviderContinuityWitness or null",
             ):
                 engine.poll_once(StaticProvider(), max_items=10)
+
+            health_state = health.get("source")
+            self.assertEqual(health_state.status, "unknown")
+            self.assertEqual(health_state.poll_count, 0)
+            self.assertEqual(health_state.total_failures, 0)
+
+            continuity_state = SourceContinuityStore(
+                Path(tmp) / "source_continuity.json"
+            ).get("source")
+            self.assertEqual(continuity_state.status, "unknown")
+            self.assertEqual(continuity_state.reason, "no_continuity_evidence")
 
             connection = sqlite3.connect(path)
             try:

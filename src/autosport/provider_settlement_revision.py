@@ -187,9 +187,13 @@ class ProviderSettlementRevisionChain:
             observation = _observation_payload(revision.settlement)
             observation_id = revision.settlement.observation_id
             existing_observation = observation_payloads.get(observation_id)
-            if existing_observation is not None and existing_observation != observation:
+            if existing_observation is not None:
+                if existing_observation != observation:
+                    raise ProviderSettlementRevisionError(
+                        "provider observation_id was reused with conflicting content"
+                    )
                 raise ProviderSettlementRevisionError(
-                    "provider observation_id was reused with conflicting content"
+                    "provider observation_id cannot create a distinct settlement revision"
                 )
             observation_payloads[observation_id] = observation
             unique.append(revision)

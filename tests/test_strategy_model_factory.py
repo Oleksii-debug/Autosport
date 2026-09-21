@@ -506,6 +506,38 @@ class _RecordingMeanFactory:
         )
 
 
+class _SparsePayloadMeanModel:
+    def __init__(self, inner):
+        self._inner = inner
+        self.model_id = inner.model_id
+        self.training_cutoff = inner.training_cutoff
+
+    @property
+    def identity_sha256(self):
+        return self._inner.identity_sha256
+
+    def predict(self, point, *, decision_at):
+        return self._inner.predict(point, decision_at=decision_at)
+
+    def to_payload(self):
+        payload = self._inner.to_payload()
+        payload.pop("identity_sha256")
+        return payload
+
+
+class _SparsePayloadMeanFactory:
+    model_family = "mean-baseline-v1"
+
+    def fit(self, model_id, points, *, training_cutoff):
+        return _SparsePayloadMeanModel(
+            MeanBaselineModel.fit(
+                model_id,
+                points,
+                training_cutoff=training_cutoff,
+            )
+        )
+
+
 def test_mean_baseline_uses_only_observations_at_or_before_training_cutoff():
     model = MeanBaselineModel.fit("baseline-1", _points(), training_cutoff=T1)
     assert model.training_count == 2
@@ -906,6 +938,51 @@ def test_protective_metric_degradation_is_durably_rejected(tmp_path):
     decision = registry.get("PromotionDecision", "promotion-v2")
     assert decision.payload["action"] == "REJECT"
     assert "protective metric degraded" in decision.payload["reason"]
+
+
+def test_factory_owns_learner_state_binding_when_model_payload_omits_identity(
+    tmp_path,
+):
+    registry, registry_path, rule, store, _, _ = _factory_foundation(tmp_path)
+    runner = ExperimentRunner(
+        registry,
+        store,
+        baseline_model_factory=_SparsePayloadMeanFactory(),
+    )
+    _run_candidate(runner, _candidate_points(), rule)
+
+    model = registry.get("ModelVersion", "model-v2")
+    assert model is not None
+    model_payload = store.read(
+        "model",
+        "model-v2",
+        expected_sha256=model.payload["artifact_sha256"],
+    )
+    assert "identity_sha256" not in model_payload
+    assert len(model_payload["learner_state_sha256"]) == 64
+
+    evaluation_payload = store.read(
+        "evaluation",
+        "eval-v2",
+        expected_sha256=registry.get("EvaluationBundle", "eval-v2").payload[
+            "bundle_sha256"
+        ],
+    )
+    manifest = FactoryReproducibilityManifest.from_envelope(
+        store.read(
+            "reproducibility-manifest",
+            "eval-v2",
+            expected_sha256=evaluation_payload["reproducibility_manifest_sha256"],
+        )
+    )
+    assert manifest.learner_state_sha256 == model_payload["learner_state_sha256"]
+
+    ExperimentRunner.verify_restart(
+        registry_path,
+        tmp_path / "factory-artifacts",
+        "experiment-v2",
+        as_of=T7,
+    )
 
 
 def test_factory_emits_hash_bound_reproducibility_manifest_and_restart_verifies(

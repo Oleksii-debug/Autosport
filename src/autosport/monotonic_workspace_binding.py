@@ -1,10 +1,10 @@
 """Durable workspace-instance identity binding for monotonic authority.
 
 The immutable workspace instance id is not a caller-controlled namespace switch.
-A workspace-local marker survives normal move/copy, while an Autosport machine-state
-path alias prevents silent identity remint after local marker/workspace deletion at a
-previously bound path. Paths are metadata aliases only; authority history remains
-keyed by the immutable workspace instance id.
+Workspace-local receipts support normal move/copy, while a stable Autosport
+machine-state registry is consulted before any configurable monotonic-authority root.
+That pre-selection registry prevents a workspace rollback/deletion plus root switch
+from hiding surviving authority history behind a fresh physical root.
 """
 
 from __future__ import annotations
@@ -24,38 +24,30 @@ from .json_integrity import strict_json_loads
 WORKSPACE_BINDING_SCHEMA: Final = "autosport.monotonic_authority.workspace_binding"
 PATH_BINDING_SCHEMA: Final = "autosport.monotonic_authority.workspace_path_binding"
 AUTHORITY_ROOT_BINDING_SCHEMA: Final = "autosport.monotonic_authority.authority_root_binding"
+MACHINE_ROOT_BINDING_SCHEMA: Final = "autosport.monotonic_authority.machine_root_binding"
 BINDING_SCHEMA_VERSION: Final = 1
 BINDING_AUTHORITY_ID: Final = "autosport.machine.monotonic.v1"
 
 _WORKSPACE_MARKER_KEYS: Final = frozenset(
-    {
-        "schema",
-        "schema_version",
-        "authority_id",
-        "workspace_instance_id",
-        "binding_sha256",
-    }
+    {"schema", "schema_version", "authority_id", "workspace_instance_id", "binding_sha256"}
 )
 _PATH_BINDING_KEYS: Final = frozenset(
     {
-        "schema",
-        "schema_version",
-        "authority_id",
-        "workspace_locator",
-        "workspace_locator_sha256",
-        "workspace_instance_id",
-        "binding_sha256",
+        "schema", "schema_version", "authority_id", "workspace_locator",
+        "workspace_locator_sha256", "workspace_instance_id", "binding_sha256",
     }
 )
 _AUTHORITY_ROOT_BINDING_KEYS: Final = frozenset(
     {
-        "schema",
-        "schema_version",
-        "authority_id",
-        "workspace_instance_id",
-        "authority_root_locator",
-        "authority_root_locator_sha256",
-        "binding_sha256",
+        "schema", "schema_version", "authority_id", "workspace_instance_id",
+        "authority_root_locator", "authority_root_locator_sha256", "binding_sha256",
+    }
+)
+_MACHINE_ROOT_BINDING_KEYS: Final = frozenset(
+    {
+        "schema", "schema_version", "authority_id", "workspace_locator",
+        "workspace_locator_sha256", "workspace_instance_id", "authority_root_locator",
+        "authority_root_locator_sha256", "binding_sha256",
     }
 )
 _SHA256_LENGTH: Final = 64
@@ -76,11 +68,7 @@ class WorkspaceBindingIntegrityError(WorkspaceBindingError):
 def _canonical_bytes(payload: dict[str, object]) -> bytes:
     try:
         return json.dumps(
-            payload,
-            ensure_ascii=False,
-            sort_keys=True,
-            separators=(",", ":"),
-            allow_nan=False,
+            payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False
         ).encode("utf-8")
     except (TypeError, ValueError) as exc:
         raise WorkspaceBindingIntegrityError(
@@ -111,16 +99,7 @@ def _canonical_instance_id(value: object) -> str:
 
 
 def _workspace_locator(workspace: Path) -> str:
-    """Return the stable lexical path identity without following reparses/symlinks.
-
-    The machine path receipt exists specifically to reserve a previously used
-    workspace location even when the local workspace is later deleted. Resolving
-    the path through the filesystem would let the same lexical location select a
-    new receipt merely by recreating it as a symlink/junction to another target.
-    Trust-root disjointness is still checked separately against resolved paths by
-    ``resolve_monotonic_authority_root``.
-    """
-
+    """Return stable lexical workspace identity without following links."""
     if not workspace.is_absolute():
         raise WorkspaceBindingIntegrityError(
             "workspace path for identity binding must be absolute"
@@ -129,8 +108,7 @@ def _workspace_locator(workspace: Path) -> str:
 
 
 def _authority_root_locator(authority_root: Path) -> str:
-    """Return the resolved machine-root identity pinned by a bound workspace."""
-
+    """Return the resolved physical machine-authority root identity."""
     if not authority_root.is_absolute():
         raise WorkspaceBindingIntegrityError(
             "monotonic authority root for identity binding must be absolute"
@@ -142,6 +120,74 @@ def _authority_root_locator(authority_root: Path) -> str:
             "cannot resolve monotonic authority root for identity binding"
         ) from exc
     return os.path.normcase(os.path.normpath(str(resolved)))
+
+
+def _absolute_machine_state_base(name: str, value: str | Path) -> Path:
+    try:
+        path = Path(value).expanduser()
+    except RuntimeError as exc:
+        raise WorkspaceBindingIntegrityError(
+            f"{name} home expansion could not be resolved"
+        ) from exc
+    if not path.is_absolute():
+        raise WorkspaceBindingIntegrityError(f"{name} must be an absolute path")
+    return path
+
+
+def _machine_binding_root(*, workspace: Path, authority_root: Path) -> Path:
+    """Return a non-configurable registry root consulted before authority-root selection.
+
+    `AUTOSPORT_MONOTONIC_AUTHORITY_ROOT` intentionally does not influence this path.
+    Otherwise changing that supported setting could select both a fresh journal and a
+    fresh receipt namespace, recreating the rollback/rebind defect this registry closes.
+    """
+    local_app_data = os.environ.get("LOCALAPPDATA")
+    if local_app_data:
+        base = _absolute_machine_state_base("LOCALAPPDATA", local_app_data)
+        root = base / "Autosport" / "application-state" / "monotonic-root-bindings-v1"
+    else:
+        xdg_state_home = os.environ.get("XDG_STATE_HOME")
+        if xdg_state_home:
+            base = _absolute_machine_state_base("XDG_STATE_HOME", xdg_state_home)
+            root = base / "autosport" / "monotonic-root-bindings-v1"
+        else:
+            try:
+                home = Path.home()
+            except RuntimeError as exc:
+                raise WorkspaceBindingIntegrityError(
+                    "home directory could not be resolved for monotonic root binding"
+                ) from exc
+            if not home.is_absolute():
+                raise WorkspaceBindingIntegrityError(
+                    "home directory must be absolute for monotonic root binding"
+                )
+            root = home / ".local" / "state" / "autosport" / "monotonic-root-bindings-v1"
+
+    try:
+        resolved_root = root.resolve(strict=False)
+        resolved_workspace = workspace.resolve(strict=False)
+        resolved_authority = authority_root.resolve(strict=False)
+    except (OSError, RuntimeError) as exc:
+        raise WorkspaceBindingIntegrityError(
+            "cannot resolve monotonic root-binding trust boundaries"
+        ) from exc
+    for protected, label in (
+        (resolved_workspace, "workspace"),
+        (resolved_authority, "configured authority root"),
+    ):
+        if (
+            resolved_root == protected
+            or resolved_root.is_relative_to(protected)
+            or protected.is_relative_to(resolved_root)
+        ):
+            raise WorkspaceBindingIntegrityError(
+                f"stable monotonic root-binding registry must be disjoint from {label}"
+            )
+    if root.exists() and not root.is_dir():
+        raise WorkspaceBindingIntegrityError(
+            "stable monotonic root-binding registry must be a directory"
+        )
+    return root
 
 
 def _fsync_directory(path: Path) -> None:
@@ -180,10 +226,7 @@ def _sync_existing_lineage(leaf: Path, boundary: Path) -> None:
 
 
 def _durable_exclusive_json_create(
-    path: Path,
-    payload: dict[str, object],
-    *,
-    lineage_boundary: Path,
+    path: Path, payload: dict[str, object], *, lineage_boundary: Path
 ) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     _sync_existing_lineage(path.parent, lineage_boundary)
@@ -197,14 +240,7 @@ def _durable_exclusive_json_create(
         created = True
         with os.fdopen(descriptor, "w", encoding="utf-8", newline="\n") as handle:
             descriptor = None
-            json.dump(
-                payload,
-                handle,
-                ensure_ascii=False,
-                indent=2,
-                sort_keys=True,
-                allow_nan=False,
-            )
+            json.dump(payload, handle, ensure_ascii=False, indent=2, sort_keys=True, allow_nan=False)
             handle.write("\n")
             handle.flush()
             os.fsync(handle.fileno())
@@ -275,6 +311,9 @@ class WorkspaceIdentityBinding:
     workspace_marker_path: Path
     path_binding_path: Path
     authority_root_binding_path: Path
+    machine_binding_root: Path
+    machine_path_binding_path: Path
+    machine_identity_binding_path: Path
     workspace_locator: str
     workspace_locator_sha256: str
     authority_root_locator: str
@@ -287,7 +326,7 @@ class WorkspaceIdentityBinding:
         workspace: Path,
         authority_root: Path,
         requested_workspace_instance_id: str | None,
-    ) -> WorkspaceIdentityBinding:
+    ) -> "WorkspaceIdentityBinding":
         requested = (
             None
             if requested_workspace_instance_id is None
@@ -297,40 +336,72 @@ class WorkspaceIdentityBinding:
         locator_sha = hashlib.sha256(locator.encode("utf-8")).hexdigest()
         root_locator = _authority_root_locator(authority_root)
         root_locator_sha = hashlib.sha256(root_locator.encode("utf-8")).hexdigest()
+        machine_root = _machine_binding_root(workspace=workspace, authority_root=authority_root)
         workspace_marker = workspace / ".autosport" / "monotonic-workspace-binding.json"
-        authority_root_binding = (
-            workspace / ".autosport" / "monotonic-authority-root-binding.json"
-        )
-        path_binding = (
-            authority_root
-            / "workspace-bindings"
-            / locator_sha[:2]
-            / f"{locator_sha}.json"
+        authority_root_binding = workspace / ".autosport" / "monotonic-authority-root-binding.json"
+        path_binding = authority_root / "workspace-bindings" / locator_sha[:2] / f"{locator_sha}.json"
+        machine_path_binding = (
+            machine_root / "workspace-path-bindings" / locator_sha[:2] / f"{locator_sha}.json"
         )
 
         workspace_id = cls._read_workspace_marker_id(workspace_marker)
+        identity_probe = workspace_id or requested
+        machine_path_id = cls._read_machine_binding_id(
+            machine_path_binding,
+            expected_workspace_locator=locator,
+            expected_workspace_locator_sha=locator_sha,
+            expected_workspace_instance_id=None,
+            expected_authority_root_locator=root_locator,
+            expected_authority_root_locator_sha=root_locator_sha,
+        )
+        if identity_probe is None and machine_path_id is not None:
+            identity_probe = machine_path_id
+        machine_identity_binding = (
+            machine_root
+            / "workspace-identity-bindings"
+            / hashlib.sha256(identity_probe.encode("utf-8")).hexdigest()[:2]
+            / f"{hashlib.sha256(identity_probe.encode('utf-8')).hexdigest()}.json"
+            if identity_probe is not None
+            else machine_root / "workspace-identity-bindings" / "unbound"
+        )
+        machine_identity_id = (
+            None
+            if identity_probe is None
+            else cls._read_machine_binding_id(
+                machine_identity_binding,
+                expected_workspace_locator=None,
+                expected_workspace_locator_sha=None,
+                expected_workspace_instance_id=identity_probe,
+                expected_authority_root_locator=root_locator,
+                expected_authority_root_locator_sha=root_locator_sha,
+            )
+        )
         path_id = cls._read_path_binding_id(
-            path_binding,
-            expected_locator=locator,
-            expected_locator_sha=locator_sha,
+            path_binding, expected_locator=locator, expected_locator_sha=locator_sha
         )
         root_id = cls._read_authority_root_binding_id(
             authority_root_binding,
             expected_locator=root_locator,
             expected_locator_sha=root_locator_sha,
         )
-        if workspace_id is not None and path_id is None and root_id is None:
+        if workspace_id is not None and path_id is None and root_id is None and machine_identity_id is None:
             raise WorkspaceBindingConflictError(
-                "bound workspace is missing authority-root binding for the selected "
-                "monotonic authority root"
+                "bound workspace is missing authority-root proof for the selected monotonic authority root"
             )
         durable_ids = {
-            value for value in (workspace_id, path_id, root_id) if value is not None
+            value
+            for value in (
+                workspace_id,
+                path_id,
+                root_id,
+                machine_path_id,
+                machine_identity_id,
+            )
+            if value is not None
         }
         if len(durable_ids) > 1:
             raise WorkspaceBindingConflictError(
-                "workspace, machine path, and authority-root bindings disagree on "
-                "instance identity"
+                "workspace and machine bindings disagree on instance identity"
             )
         durable_id = next(iter(durable_ids), None)
         if requested is not None and durable_id is not None and requested != durable_id:
@@ -338,6 +409,10 @@ class WorkspaceIdentityBinding:
                 "requested workspace_instance_id conflicts with durable workspace binding"
             )
         resolved_id = durable_id or requested or uuid.uuid4().hex
+        identity_sha = hashlib.sha256(resolved_id.encode("utf-8")).hexdigest()
+        machine_identity_binding = (
+            machine_root / "workspace-identity-bindings" / identity_sha[:2] / f"{identity_sha}.json"
+        )
         return cls(
             workspace=workspace,
             authority_root=authority_root,
@@ -345,6 +420,9 @@ class WorkspaceIdentityBinding:
             workspace_marker_path=workspace_marker,
             path_binding_path=path_binding,
             authority_root_binding_path=authority_root_binding,
+            machine_binding_root=machine_root,
+            machine_path_binding_path=machine_path_binding,
+            machine_identity_binding_path=machine_identity_binding,
             workspace_locator=locator,
             workspace_locator_sha256=locator_sha,
             authority_root_locator=root_locator,
@@ -370,10 +448,7 @@ class WorkspaceIdentityBinding:
 
     @staticmethod
     def _read_path_binding_id(
-        path: Path,
-        *,
-        expected_locator: str,
-        expected_locator_sha: str,
+        path: Path, *, expected_locator: str, expected_locator_sha: str
     ) -> str | None:
         if not path.exists():
             return None
@@ -394,10 +469,7 @@ class WorkspaceIdentityBinding:
 
     @staticmethod
     def _read_authority_root_binding_id(
-        path: Path,
-        *,
-        expected_locator: str,
-        expected_locator_sha: str,
+        path: Path, *, expected_locator: str, expected_locator_sha: str
     ) -> str | None:
         if not path.exists():
             return None
@@ -422,10 +494,69 @@ class WorkspaceIdentityBinding:
             )
         if locator != expected_locator or locator_sha != expected_locator_sha:
             raise WorkspaceBindingConflictError(
-                "configured monotonic authority root conflicts with immutable "
-                "workspace authority-root binding"
+                "configured monotonic authority root conflicts with immutable workspace authority-root binding"
             )
         return _canonical_instance_id(raw["workspace_instance_id"])
+
+    @staticmethod
+    def _read_machine_binding_id(
+        path: Path,
+        *,
+        expected_workspace_locator: str | None,
+        expected_workspace_locator_sha: str | None,
+        expected_workspace_instance_id: str | None,
+        expected_authority_root_locator: str,
+        expected_authority_root_locator_sha: str,
+    ) -> str | None:
+        if not path.exists():
+            return None
+        raw = _read_strict_object(path, _MACHINE_ROOT_BINDING_KEYS)
+        if (
+            raw["schema"] != MACHINE_ROOT_BINDING_SCHEMA
+            or raw["schema_version"] != BINDING_SCHEMA_VERSION
+            or isinstance(raw["schema_version"], bool)
+            or raw["authority_id"] != BINDING_AUTHORITY_ID
+            or type(raw["workspace_locator"]) is not str
+            or type(raw["workspace_locator_sha256"]) is not str
+            or type(raw["authority_root_locator"]) is not str
+            or type(raw["authority_root_locator_sha256"]) is not str
+        ):
+            raise WorkspaceBindingIntegrityError(
+                "stable machine root binding identity/schema mismatch"
+            )
+        _verify_binding_hash(raw)
+        locator = raw["workspace_locator"]
+        locator_sha = raw["workspace_locator_sha256"]
+        root_locator = raw["authority_root_locator"]
+        root_sha = raw["authority_root_locator_sha256"]
+        if hashlib.sha256(locator.encode("utf-8")).hexdigest() != locator_sha:
+            raise WorkspaceBindingIntegrityError(
+                "stable machine workspace locator digest mismatch"
+            )
+        if hashlib.sha256(root_locator.encode("utf-8")).hexdigest() != root_sha:
+            raise WorkspaceBindingIntegrityError(
+                "stable machine authority-root locator digest mismatch"
+            )
+        instance_id = _canonical_instance_id(raw["workspace_instance_id"])
+        if (
+            expected_workspace_locator is not None
+            and (locator != expected_workspace_locator or locator_sha != expected_workspace_locator_sha)
+        ):
+            raise WorkspaceBindingIntegrityError(
+                "stable machine path binding locator mismatch"
+            )
+        if expected_workspace_instance_id is not None and instance_id != expected_workspace_instance_id:
+            raise WorkspaceBindingConflictError(
+                "stable machine identity binding belongs to another workspace instance"
+            )
+        if (
+            root_locator != expected_authority_root_locator
+            or root_sha != expected_authority_root_locator_sha
+        ):
+            raise WorkspaceBindingConflictError(
+                "configured monotonic authority root conflicts with stable machine root binding"
+            )
+        return instance_id
 
     def validate_existing(self, *, register_moved_or_copied_path: bool = True) -> tuple[bool, bool]:
         workspace_id = self._read_workspace_marker_id(self.workspace_marker_path)
@@ -439,22 +570,53 @@ class WorkspaceIdentityBinding:
             expected_locator=self.authority_root_locator,
             expected_locator_sha=self.authority_root_locator_sha256,
         )
-        if workspace_id is not None and workspace_id != self.workspace_instance_id:
-            raise WorkspaceBindingConflictError(
-                "workspace marker changed immutable workspace instance identity"
-            )
-        if path_id is not None and path_id != self.workspace_instance_id:
-            raise WorkspaceBindingConflictError(
-                "machine path binding reserves this workspace path for another identity"
-            )
-        if root_id is not None and root_id != self.workspace_instance_id:
-            raise WorkspaceBindingConflictError(
-                "workspace authority-root binding belongs to another instance identity"
-            )
+        machine_path_id = self._read_machine_binding_id(
+            self.machine_path_binding_path,
+            expected_workspace_locator=self.workspace_locator,
+            expected_workspace_locator_sha=self.workspace_locator_sha256,
+            expected_workspace_instance_id=None,
+            expected_authority_root_locator=self.authority_root_locator,
+            expected_authority_root_locator_sha=self.authority_root_locator_sha256,
+        )
+        machine_identity_id = self._read_machine_binding_id(
+            self.machine_identity_binding_path,
+            expected_workspace_locator=None,
+            expected_workspace_locator_sha=None,
+            expected_workspace_instance_id=self.workspace_instance_id,
+            expected_authority_root_locator=self.authority_root_locator,
+            expected_authority_root_locator_sha=self.authority_root_locator_sha256,
+        )
+        for value, message in (
+            (workspace_id, "workspace marker changed immutable workspace instance identity"),
+            (path_id, "machine path binding reserves this workspace path for another identity"),
+            (root_id, "workspace authority-root binding belongs to another instance identity"),
+            (machine_path_id, "stable machine path binding belongs to another instance identity"),
+            (machine_identity_id, "stable machine identity binding belongs to another instance identity"),
+        ):
+            if value is not None and value != self.workspace_instance_id:
+                raise WorkspaceBindingConflictError(message)
+
+        if machine_path_id is None and machine_identity_id is None and path_id == self.workspace_instance_id:
+            self._ensure_machine_path_binding()
+            self._ensure_machine_identity_binding()
+            machine_path_id = machine_identity_id = self.workspace_instance_id
+        elif machine_identity_id == self.workspace_instance_id and machine_path_id is None:
+            if workspace_id != self.workspace_instance_id:
+                raise WorkspaceBindingConflictError(
+                    "unregistered workspace path lacks immutable identity proof"
+                )
+            self._ensure_machine_path_binding()
+            machine_path_id = self.workspace_instance_id
+        elif machine_path_id == self.workspace_instance_id and machine_identity_id is None:
+            self._ensure_machine_identity_binding()
+            machine_identity_id = self.workspace_instance_id
+
         if root_id is None:
             if (
                 workspace_id == self.workspace_instance_id
                 and path_id == self.workspace_instance_id
+                and machine_path_id == self.workspace_instance_id
+                and machine_identity_id == self.workspace_instance_id
             ):
                 self._ensure_authority_root_binding()
                 root_id = self.workspace_instance_id
@@ -466,14 +628,18 @@ class WorkspaceIdentityBinding:
             register_moved_or_copied_path
             and workspace_id == self.workspace_instance_id
             and root_id == self.workspace_instance_id
+            and machine_identity_id == self.workspace_instance_id
             and path_id is None
         ):
+            self._ensure_machine_path_binding()
             self._ensure_path_binding()
             path_id = self.workspace_instance_id
         return workspace_id is not None, path_id is not None
 
     def ensure_bound(self) -> None:
-        """Durably bind this workspace identity to one machine authority root."""
+        """Durably bind identity/root before publishing workspace-local receipts."""
+        self._ensure_machine_path_binding()
+        self._ensure_machine_identity_binding()
         self._ensure_path_binding()
         self._ensure_workspace_marker()
         self._ensure_authority_root_binding()
@@ -509,6 +675,19 @@ class WorkspaceIdentityBinding:
         }
         return {**unhashed, "binding_sha256": _payload_hash(unhashed)}
 
+    def _machine_payload(self) -> dict[str, object]:
+        unhashed: dict[str, object] = {
+            "schema": MACHINE_ROOT_BINDING_SCHEMA,
+            "schema_version": BINDING_SCHEMA_VERSION,
+            "authority_id": BINDING_AUTHORITY_ID,
+            "workspace_locator": self.workspace_locator,
+            "workspace_locator_sha256": self.workspace_locator_sha256,
+            "workspace_instance_id": self.workspace_instance_id,
+            "authority_root_locator": self.authority_root_locator,
+            "authority_root_locator_sha256": self.authority_root_locator_sha256,
+        }
+        return {**unhashed, "binding_sha256": _payload_hash(unhashed)}
+
     def _ensure_workspace_marker(self) -> None:
         existing = self._read_workspace_marker_id(self.workspace_marker_path)
         if existing is not None:
@@ -517,13 +696,10 @@ class WorkspaceIdentityBinding:
                     "workspace marker conflicts with immutable instance identity"
                 )
             return
-        boundary = self.workspace
         self.workspace.mkdir(parents=True, exist_ok=True)
         try:
             _durable_exclusive_json_create(
-                self.workspace_marker_path,
-                self._workspace_payload(),
-                lineage_boundary=boundary,
+                self.workspace_marker_path, self._workspace_payload(), lineage_boundary=self.workspace
             )
         except FileExistsError:
             existing = self._read_workspace_marker_id(self.workspace_marker_path)
@@ -541,8 +717,7 @@ class WorkspaceIdentityBinding:
         if existing is not None:
             if existing != self.workspace_instance_id:
                 raise WorkspaceBindingConflictError(
-                    "workspace authority-root binding conflicts with immutable "
-                    "instance identity"
+                    "workspace authority-root binding conflicts with immutable instance identity"
                 )
             return
         self.workspace.mkdir(parents=True, exist_ok=True)
@@ -578,9 +753,7 @@ class WorkspaceIdentityBinding:
         self.authority_root.mkdir(parents=True, exist_ok=True)
         try:
             _durable_exclusive_json_create(
-                self.path_binding_path,
-                self._path_payload(),
-                lineage_boundary=self.authority_root,
+                self.path_binding_path, self._path_payload(), lineage_boundary=self.authority_root
             )
         except FileExistsError:
             existing = self._read_path_binding_id(
@@ -591,4 +764,72 @@ class WorkspaceIdentityBinding:
             if existing != self.workspace_instance_id:
                 raise WorkspaceBindingConflictError(
                     "workspace path was concurrently bound to another identity"
+                )
+
+    def _ensure_machine_path_binding(self) -> None:
+        existing = self._read_machine_binding_id(
+            self.machine_path_binding_path,
+            expected_workspace_locator=self.workspace_locator,
+            expected_workspace_locator_sha=self.workspace_locator_sha256,
+            expected_workspace_instance_id=None,
+            expected_authority_root_locator=self.authority_root_locator,
+            expected_authority_root_locator_sha=self.authority_root_locator_sha256,
+        )
+        if existing is not None:
+            if existing != self.workspace_instance_id:
+                raise WorkspaceBindingConflictError(
+                    "stable machine path is already bound to another instance identity"
+                )
+            return
+        self.machine_binding_root.mkdir(parents=True, exist_ok=True)
+        try:
+            _durable_exclusive_json_create(
+                self.machine_path_binding_path,
+                self._machine_payload(),
+                lineage_boundary=self.machine_binding_root,
+            )
+        except FileExistsError:
+            existing = self._read_machine_binding_id(
+                self.machine_path_binding_path,
+                expected_workspace_locator=self.workspace_locator,
+                expected_workspace_locator_sha=self.workspace_locator_sha256,
+                expected_workspace_instance_id=None,
+                expected_authority_root_locator=self.authority_root_locator,
+                expected_authority_root_locator_sha=self.authority_root_locator_sha256,
+            )
+            if existing != self.workspace_instance_id:
+                raise WorkspaceBindingConflictError(
+                    "stable machine path was concurrently bound to another identity"
+                )
+
+    def _ensure_machine_identity_binding(self) -> None:
+        existing = self._read_machine_binding_id(
+            self.machine_identity_binding_path,
+            expected_workspace_locator=None,
+            expected_workspace_locator_sha=None,
+            expected_workspace_instance_id=self.workspace_instance_id,
+            expected_authority_root_locator=self.authority_root_locator,
+            expected_authority_root_locator_sha=self.authority_root_locator_sha256,
+        )
+        if existing is not None:
+            return
+        self.machine_binding_root.mkdir(parents=True, exist_ok=True)
+        try:
+            _durable_exclusive_json_create(
+                self.machine_identity_binding_path,
+                self._machine_payload(),
+                lineage_boundary=self.machine_binding_root,
+            )
+        except FileExistsError:
+            existing = self._read_machine_binding_id(
+                self.machine_identity_binding_path,
+                expected_workspace_locator=None,
+                expected_workspace_locator_sha=None,
+                expected_workspace_instance_id=self.workspace_instance_id,
+                expected_authority_root_locator=self.authority_root_locator,
+                expected_authority_root_locator_sha=self.authority_root_locator_sha256,
+            )
+            if existing != self.workspace_instance_id:
+                raise WorkspaceBindingConflictError(
+                    "stable machine identity was concurrently bound to another identity"
                 )

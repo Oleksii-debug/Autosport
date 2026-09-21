@@ -417,7 +417,7 @@ class MarketOutcomeAuthorityTests(unittest.TestCase):
                 decision_as_of=self.DECISION_AS_OF,
             )
 
-    def test_cross_provider_rule_disagreement_cannot_share_state_axis(self):
+    def test_forged_cross_provider_copy_is_rejected_before_rule_comparison(self):
         authority_a = self._authority(("away", "home"))
         authority_b = copy.copy(authority_a)
         object.__setattr__(
@@ -450,7 +450,7 @@ class MarketOutcomeAuthorityTests(unittest.TestCase):
         )
         with self.assertRaisesRegex(
             ValueError,
-            "provider authorities disagree on canonical settlement rules",
+            "not the exact product-issued instance",
         ):
             ScenarioSearchEngine().analyse_authoritative(
                 [ticket],

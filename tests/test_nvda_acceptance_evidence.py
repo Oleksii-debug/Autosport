@@ -148,7 +148,7 @@ class NvdaAcceptanceEvidenceTests(unittest.TestCase):
                 "real_money_execution": False,
                 "human_tested": False,
                 "nvda_verified": False,
-            "v1_ready": False,
+                "v1_ready": False,
             }
             package = root / "legacy-fake.zip"
             with zipfile.ZipFile(package, "w") as archive:

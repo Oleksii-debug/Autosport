@@ -17,6 +17,10 @@ GENESIS_SHA256 = "0" * 64
 REDACTED = "[REDACTED]"
 _LOCK_MAGIC = b"AUTOSPORT_FORENSIC_SESSION_LOCK_V1\n"
 _LOCK_NEW_MAGIC = b"AUTOSPORT_FORENSIC_SESSION_LOCK_NEW_V1\n"
+_CHECKPOINT_KEYS = frozenset(
+    {"schema_version", "record_count", "last_record_sha256"}
+)
+_CHECKPOINT_MAX_BYTES = 4096
 
 _EVENT_RE = re.compile(r"^[a-z][a-z0-9]*(?:[._-][a-z0-9]+)*$")
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
@@ -225,6 +229,203 @@ def _reject_duplicate_object_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any
     return output
 
 
+def _checkpoint_path(journal_path: Path) -> Path:
+    return journal_path.with_name(journal_path.name + ".head.json")
+
+
+def _checkpoint_payload(record_count: int, last_record_sha256: str) -> dict[str, Any]:
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "record_count": record_count,
+        "last_record_sha256": last_record_sha256,
+    }
+
+
+def _read_checkpoint(path: Path) -> tuple[int, str] | None:
+    try:
+        lst = os.lstat(path)
+    except FileNotFoundError:
+        return None
+    if not stat.S_ISREG(lst.st_mode) or lst.st_nlink != 1:
+        raise JournalIntegrityError(
+            "forensic session journal checkpoint must be a single-link regular file"
+        )
+
+    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        fd = os.open(path, flags)
+    except OSError as exc:
+        raise JournalIntegrityError(
+            "forensic session journal checkpoint is not safely readable"
+        ) from exc
+    try:
+        opened = os.fstat(fd)
+        if not stat.S_ISREG(opened.st_mode) or opened.st_nlink != 1:
+            raise JournalIntegrityError(
+                "forensic session journal checkpoint identity is unsafe"
+            )
+        chunks: list[bytes] = []
+        remaining = _CHECKPOINT_MAX_BYTES + 1
+        while remaining:
+            chunk = os.read(fd, min(remaining, 4096))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        raw = b"".join(chunks)
+    finally:
+        os.close(fd)
+
+    if len(raw) > _CHECKPOINT_MAX_BYTES:
+        raise JournalIntegrityError("forensic session journal checkpoint is oversized")
+    if not raw.endswith(b"\n"):
+        raise JournalIntegrityError(
+            "forensic session journal checkpoint is not canonically terminated"
+        )
+    try:
+        text = raw[:-1].decode("utf-8", errors="strict")
+        payload = json.loads(
+            text,
+            object_pairs_hook=_reject_duplicate_object_keys,
+            parse_constant=_reject_json_constant,
+        )
+    except UnicodeDecodeError as exc:
+        raise JournalIntegrityError(
+            "forensic session journal checkpoint is not valid UTF-8"
+        ) from exc
+    except json.JSONDecodeError as exc:
+        raise JournalIntegrityError(
+            "forensic session journal checkpoint is not valid JSON"
+        ) from exc
+
+    if type(payload) is not dict or set(payload) != _CHECKPOINT_KEYS:
+        raise JournalIntegrityError(
+            "forensic session journal checkpoint schema drift detected"
+        )
+    if raw != _canonical_json(payload) + b"\n":
+        raise JournalIntegrityError(
+            "forensic session journal checkpoint is not canonical JSON"
+        )
+    if payload.get("schema_version") != SCHEMA_VERSION:
+        raise JournalIntegrityError(
+            "unsupported forensic session journal checkpoint schema version"
+        )
+    count = payload.get("record_count")
+    digest = payload.get("last_record_sha256")
+    if type(count) is not int or count < 0:
+        raise JournalIntegrityError(
+            "forensic session journal checkpoint record_count is invalid"
+        )
+    if not isinstance(digest, str) or not _SHA256_RE.fullmatch(digest):
+        raise JournalIntegrityError(
+            "forensic session journal checkpoint digest is invalid"
+        )
+    if (count == 0) != (digest == GENESIS_SHA256):
+        raise JournalIntegrityError(
+            "forensic session journal checkpoint genesis state is inconsistent"
+        )
+    return count, digest
+
+
+def _fsync_parent_directory(path: Path) -> None:
+    if os.name == "nt":
+        return
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+    fd = os.open(path.parent, flags)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+def _write_checkpoint(path: Path, record_count: int, digest: str) -> None:
+    payload = _checkpoint_payload(record_count, digest)
+    serialized = _canonical_json(payload) + b"\n"
+    existing = _read_checkpoint(path)
+    if existing is not None and existing == (record_count, digest):
+        return
+
+    temp_path = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+    flags = (
+        os.O_WRONLY
+        | os.O_CREAT
+        | os.O_EXCL
+        | getattr(os, "O_BINARY", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+    )
+    fd: int | None = None
+    try:
+        fd = os.open(temp_path, flags, 0o600)
+        view = memoryview(serialized)
+        while view:
+            written = os.write(fd, view)
+            if written <= 0:
+                raise OSError("checkpoint write made no progress")
+            view = view[written:]
+        os.fsync(fd)
+        os.close(fd)
+        fd = None
+        os.replace(temp_path, path)
+        _fsync_parent_directory(path)
+        if _read_checkpoint(path) != (record_count, digest):
+            raise OSError("checkpoint publication did not preserve intended head")
+    finally:
+        if fd is not None:
+            os.close(fd)
+        try:
+            os.unlink(temp_path)
+        except FileNotFoundError:
+            pass
+
+
+def _reconcile_checkpoint(
+    journal_path: Path,
+    records: tuple[JournalRecord, ...] | list[JournalRecord],
+    *,
+    recover: bool,
+) -> None:
+    path = _checkpoint_path(journal_path)
+    checkpoint = _read_checkpoint(path)
+    count = len(records)
+    digest = records[-1].sha256 if records else GENESIS_SHA256
+
+    if checkpoint is None:
+        if count:
+            raise JournalIntegrityError(
+                "non-empty forensic session journal is missing its durable checkpoint"
+            )
+        if recover:
+            _write_checkpoint(path, 0, GENESIS_SHA256)
+        return
+
+    checkpoint_count, checkpoint_digest = checkpoint
+    if checkpoint_count > count:
+        raise JournalIntegrityError(
+            "forensic session journal tail was truncated behind its durable checkpoint"
+        )
+    if checkpoint_count == count:
+        if checkpoint_digest != digest:
+            raise JournalIntegrityError(
+                "forensic session journal checkpoint does not match journal head"
+            )
+        return
+
+    prefix_digest = (
+        GENESIS_SHA256
+        if checkpoint_count == 0
+        else records[checkpoint_count - 1].sha256
+    )
+    if checkpoint_digest != prefix_digest:
+        raise JournalIntegrityError(
+            "forensic session journal checkpoint is not a valid journal prefix"
+        )
+    if not recover:
+        raise JournalIntegrityError(
+            "forensic session journal contains durable records beyond its checkpoint"
+        )
+    _write_checkpoint(path, count, digest)
+
+
 def _parse_line(line: str, *, expected_seq: int, expected_prev: str) -> JournalRecord:
     try:
         raw = json.loads(
@@ -306,7 +507,7 @@ def _parse_line(line: str, *, expected_seq: int, expected_prev: str) -> JournalR
     )
 
 
-def read_verified_records(path: str | os.PathLike[str]) -> tuple[JournalRecord, ...]:
+def _read_verified_records_only(path: str | os.PathLike[str]) -> tuple[JournalRecord, ...]:
     journal_path = Path(path)
     if not journal_path.exists():
         return ()
@@ -329,6 +530,13 @@ def read_verified_records(path: str | os.PathLike[str]) -> tuple[JournalRecord, 
         records.append(record)
         expected_prev = record.sha256
     return tuple(records)
+
+
+def read_verified_records(path: str | os.PathLike[str]) -> tuple[JournalRecord, ...]:
+    journal_path = Path(path)
+    records = _read_verified_records_only(journal_path)
+    _reconcile_checkpoint(journal_path, records, recover=False)
+    return records
 
 
 def verify_journal(path: str | os.PathLike[str]) -> tuple[JournalRecord, ...]:
@@ -372,11 +580,12 @@ class ForensicSessionJournal:
         self._writer_lock_identity: tuple[int, int] | None = None
         self._writer_lock_created = False
         self._lock_path = self._path.with_name(self._path.name + ".lock")
+        self._checkpoint_path = _checkpoint_path(self._path)
         self._expected_file_identity: tuple[int, int] | None = None
         self._expected_file_size = 0
         self._acquire_writer_lock()
         try:
-            self._records = list(read_verified_records(self._path))
+            self._records = list(_read_verified_records_only(self._path))
             if self._writer_lock_created and self._records:
                 self._discard_fresh_writer_lock_path()
                 raise JournalIntegrityError(
@@ -385,6 +594,7 @@ class ForensicSessionJournal:
                 )
             if self._writer_lock_created:
                 self._bind_fresh_writer_lock()
+            _reconcile_checkpoint(self._path, self._records, recover=True)
             if self._path.exists():
                 st = self._path.stat()
                 self._expected_file_identity = (st.st_dev, st.st_ino)
@@ -426,6 +636,10 @@ class ForensicSessionJournal:
     @property
     def session_id(self) -> str:
         return self._session_id
+
+    @property
+    def checkpoint_path(self) -> Path:
+        return self._checkpoint_path
 
     @property
     def closed(self) -> bool:
@@ -669,6 +883,9 @@ class ForensicSessionJournal:
             self._expected_file_size = post.st_size
             os.close(fd)
             fd = None
+            self._assert_writer_lock_continuity()
+            _write_checkpoint(self._checkpoint_path, seq, digest)
+            self._assert_writer_lock_continuity()
         except JournalIntegrityError:
             self._uncertain = True
             if fd is not None:

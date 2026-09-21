@@ -7,6 +7,7 @@ import pytest
 import autosport._trial_family_cross_ledger_witness as cross_ledger
 from autosport.research_multiplicity import SequentialDecision
 from autosport.scientific_registry import ResearchOutcome
+from autosport.workspace_lock import WorkspaceEconomicLockBusyError
 
 from test_trial_family_accounting import (
     _experiment,
@@ -93,7 +94,7 @@ def test_promotion_eligibility_serializes_concurrent_attempt_publication(
 
     entered_witness_check = threading.Event()
     release_witness_check = threading.Event()
-    writer_started = threading.Event()
+    race_barrier = threading.Barrier(2)
     writer_done = threading.Event()
     reader_errors: list[BaseException] = []
     writer_errors: list[BaseException] = []
@@ -125,8 +126,8 @@ def test_promotion_eligibility_serializes_concurrent_attempt_publication(
     assert entered_witness_check.wait(timeout=5)
 
     def publish_attempt() -> None:
-        writer_started.set()
         try:
+            race_barrier.wait(timeout=5)
             store.start_attempt(
                 semantic_attempt_id="concurrent-promotion-race",
                 member_authority_id=attempt.member_authority_id,
@@ -140,25 +141,110 @@ def test_promotion_eligibility_serializes_concurrent_attempt_publication(
 
     writer = threading.Thread(target=publish_attempt)
     writer.start()
-    assert writer_started.wait(timeout=5)
+    race_barrier.wait(timeout=5)
 
-    # The public writer uses the same workspace lock. While promotion is paused
-    # inside its second authority read, the writer must not be able to publish the
-    # new OPEN attempt into the same as-of boundary.
-    assert not writer_done.wait(timeout=0.25)
+    # WorkspaceEconomicLock is deliberately nonblocking. The promotion reader owns
+    # the serialization boundary, so the losing writer must fail closed and retry;
+    # it must never publish into the middle of the multi-ledger eligibility read.
+    assert writer_done.wait(timeout=5)
+    assert len(writer_errors) == 1
+    assert isinstance(writer_errors[0], WorkspaceEconomicLockBusyError)
+    assert len(store.attempts(as_of=promotion.created_at)) == 1
+
     release_witness_check.set()
-
     reader.join(timeout=5)
     writer.join(timeout=5)
     assert not reader.is_alive()
     assert not writer.is_alive()
     assert not reader_errors
-    assert not writer_errors
     assert len(snapshots) == 1
     assert snapshots[0].total_attempts == 1
     assert snapshots[0].open_attempts == 0
-    assert writer_done.is_set()
+
+    # Once the winning reader releases the boundary, the exact writer retry may
+    # publish. A fresh eligibility read must then see that OPEN attempt and reject
+    # the stale accounted-attempt assertion rather than replaying the old snapshot.
+    store.start_attempt(
+        semantic_attempt_id="concurrent-promotion-race",
+        member_authority_id=attempt.member_authority_id,
+        candidate=attempt.candidate,
+        created_at=promotion.created_at,
+    )
     assert len(store.attempts(as_of=promotion.created_at)) == 2
+    with pytest.raises(ValueError, match="accounted-attempt|remains open"):
+        store.assert_promotion_evidence_eligible(
+            evidence=promotion,
+            registry=registry,
+            accounted_attempt_count=1,
+        )
+
+
+def test_promotion_eligibility_unchanged_reader_retry_is_deterministic(
+    tmp_path,
+    monkeypatch,
+):
+    registry, _, _, _, store, attempt, _, look, promotion = _completed_positive(tmp_path)
+    assert store.register_sequential_look(
+        attempt_id=attempt.attempt_id,
+        evidence=look,
+        registry=registry,
+    ) is SequentialDecision.REJECT_NULL
+    registry.append(promotion)
+
+    entered_first_reader = threading.Event()
+    release_first_reader = threading.Event()
+    first_snapshots = []
+    first_errors: list[BaseException] = []
+    real_matching_witnesses = cross_ledger._matching_witnesses
+
+    def pause_first_reader(*args, **kwargs):
+        if threading.current_thread().name == "promotion-reader-a":
+            entered_first_reader.set()
+            if not release_first_reader.wait(timeout=5):
+                raise AssertionError("timed out waiting to release first promotion reader")
+        return real_matching_witnesses(*args, **kwargs)
+
+    monkeypatch.setattr(cross_ledger, "_matching_witnesses", pause_first_reader)
+
+    def read_first() -> None:
+        try:
+            first_snapshots.append(
+                store.assert_promotion_evidence_eligible(
+                    evidence=promotion,
+                    registry=registry,
+                    accounted_attempt_count=1,
+                )
+            )
+        except BaseException as exc:  # pragma: no cover - surfaced below
+            first_errors.append(exc)
+
+    first = threading.Thread(target=read_first, name="promotion-reader-a")
+    first.start()
+    assert entered_first_reader.wait(timeout=5)
+
+    # A concurrent unchanged-state reader loses the same nonblocking serialization
+    # boundary. Retrying after the winner releases must reproduce the exact snapshot.
+    with pytest.raises(WorkspaceEconomicLockBusyError):
+        store.assert_promotion_evidence_eligible(
+            evidence=promotion,
+            registry=registry,
+            accounted_attempt_count=1,
+        )
+
+    release_first_reader.set()
+    first.join(timeout=5)
+    assert not first.is_alive()
+    assert not first_errors
+    assert len(first_snapshots) == 1
+
+    retry = store.assert_promotion_evidence_eligible(
+        evidence=promotion,
+        registry=registry,
+        accounted_attempt_count=1,
+    )
+    assert retry == first_snapshots[0]
+    assert retry.total_attempts == retry.completed_attempts == retry.positive == 1
+    assert retry.open_attempts == 0
 
 
 def test_orphan_sequential_append_never_authorizes_promotion(tmp_path, monkeypatch):

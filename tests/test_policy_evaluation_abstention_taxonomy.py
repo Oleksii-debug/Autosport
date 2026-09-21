@@ -1,3 +1,4 @@
+from dataclasses import replace
 from decimal import Decimal
 
 import pytest
@@ -154,4 +155,45 @@ def test_material_bet_cannot_be_configured_as_custom_abstention():
             abstain_action="BET",
             counterfactual_authority=_authority(),
         )
+
+def test_sample_id_alias_cannot_duplicate_identical_causal_case():
+    actions = ("BET", "NO_BET", "WAIT")
+    predecessor = _policy("NO_BET", actions)
+    challenger = _policy("WAIT", actions)
+    original = _case(actions)
+    aliased_duplicate = replace(
+        original,
+        sample_id="abstention-taxonomy-fragment-b",
+    )
+
+    with pytest.raises(ValueError, match="duplicate causal evidence|sample_id aliases"):
+        evaluate_policy_pair(
+            predecessor,
+            challenger,
+            (original, aliased_duplicate),
+            completed_at=T2,
+            counterfactual_authority=_authority(),
+        )
+
+
+def test_distinct_source_evidence_remains_distinct_causal_support():
+    actions = ("BET", "NO_BET", "WAIT")
+    predecessor = _policy("NO_BET", actions)
+    challenger = _policy("WAIT", actions)
+    original = _case(actions)
+    distinct = replace(
+        original,
+        sample_id="abstention-taxonomy-distinct-b",
+        source_evidence_sha256="1" * 64,
+    )
+
+    result = evaluate_policy_pair(
+        predecessor,
+        challenger,
+        (original, distinct),
+        completed_at=T2,
+        counterfactual_authority=_authority(),
+    )
+
+    assert len(result.samples) == 2
 

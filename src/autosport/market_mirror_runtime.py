@@ -110,16 +110,30 @@ class FocusedMirrorDependencyIndex:
             market_ids=self._selector(market_ids, name="market_ids"),
             selection_ids=self._selector(selection_ids, name="selection_ids"),
         )
-        initial_keys = {
-            (event.source_id, event.quote_key)
-            for event in self._mirror.snapshot()
-            if dependency.matches(event)
-        }
         with self._lock:
             if normalized_id in self._dependencies:
                 raise ValueError(f"input_id {normalized_id!r} is already registered")
+
+            # Publish the dependency before capturing its initial mirror keys while
+            # holding the index lock. This makes registration linearizable with
+            # affected_inputs(): an update routed after publication either lands in
+            # this provisional key set or waits until the initial snapshot is merged.
+            # Without this ordering, an update can be applied and its invalidation
+            # fully routed between snapshot() and dependency publication, leaving the
+            # incremental view permanently unaware of a current matching quote.
             self._dependencies[normalized_id] = dependency
-            self._matched_keys[normalized_id] = initial_keys
+            self._matched_keys[normalized_id] = set()
+            try:
+                initial_keys = {
+                    (event.source_id, event.quote_key)
+                    for event in self._mirror.snapshot()
+                    if dependency.matches(event)
+                }
+            except BaseException:
+                self._dependencies.pop(normalized_id, None)
+                self._matched_keys.pop(normalized_id, None)
+                raise
+            self._matched_keys[normalized_id].update(initial_keys)
         return dependency
 
     def unregister(self, input_id: str) -> bool:

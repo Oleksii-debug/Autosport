@@ -279,6 +279,7 @@ class TrialFamilyAccountingStore:
         registry_path = registry.path.resolve(strict=False)
         if registry_path.parent != workspace:
             raise ValueError('ScientificRegistry must use the same workspace root as trial-family accounting')
+        require_scientific_registry_read_authority()
         canonical_registry = ScientificRegistry(registry_path)
         relative_registry = registry_path.relative_to(workspace).as_posix()
         family = TrialFamilyDefinition.resolve(canonical_registry, plan)
@@ -363,6 +364,7 @@ class TrialFamilyAccountingStore:
             raise ValueError('ScientificRegistry path escaped trial workspace') from exc
         if registry_path.parent != self.workspace_root:
             raise ValueError('ScientificRegistry must share the trial workspace lock')
+        require_scientific_registry_read_authority()
         ScientificRegistry(registry_path)
         sequential_rel = _text(state['sequential_store'], 'sequential_store')
         sequential_path = (self.workspace_root / sequential_rel).resolve(strict=False)

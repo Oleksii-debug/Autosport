@@ -10,8 +10,9 @@ ledger-verified ATTEMPT_UNKNOWN event recorded by the canonical Betfair executio
 path, and the provider order reference is reloaded from the same durable attempt.
 
 Definitive absence is also an in-process capability. A complete-empty provider
-capture is not enough: the exact absence object must have passed this resolver after
-the durable visibility deadline before generic execution reconciliation may consume it.
+capture is not enough when it carries the product-issued provider reference: the
+exact absence object must have passed this resolver after the durable visibility
+deadline before generic execution reconciliation may consume it.
 """
 from __future__ import annotations
 
@@ -233,11 +234,12 @@ def resolve_betfair_timeout_provider_state(
     )
 
 
-# A raw complete-empty Betfair capture is not retry authority. The exact absence
-# object is separately sealed only when the durable timeout resolver has observed it
-# at/after the provider visibility deadline. The private registry is intentionally a
-# closure so callers cannot mint the second capability by constructing a dataclass or
-# replaying a hash/timestamp.
+# A raw complete-empty Betfair capture is not retry authority for the product-issued
+# per-instruction reference. The exact absence object is separately sealed only when
+# the durable timeout resolver has observed it at/after the provider visibility
+# deadline. Legacy generic evidence with no provider-order binding keeps its existing
+# semantics; if a ledger attempt has a durable ref, downstream exact-ref validation
+# rejects such unbound evidence before a transition.
 def _install_betfair_timeout_absence_authority() -> None:
     issued: dict[int, object] = {}
     raw_resolve = resolve_betfair_timeout_provider_state
@@ -279,6 +281,11 @@ def _install_betfair_timeout_absence_authority() -> None:
             raise BetfairTimeoutResolutionError(
                 "timeout absence evidence type is not canonical"
             )
+        # #1197 applies to the product-issued per-instruction reference used by the
+        # ambiguous Betfair write path. Generic historical reconciliation without a
+        # provider-order binding remains governed by its pre-existing authority.
+        if evidence.provider_order_ref is None:
+            return
         record = issued.get(id(evidence))
         if record is None or record() is not evidence:
             raise BetfairTimeoutResolutionError(

@@ -708,6 +708,17 @@ class HoldoutConsumptionLedger:
                         f"{existing.consumer_identity}"
                     )
 
+                physical_existing = _find_physical_holdout_consumption(
+                    self._records,
+                    dataset_snapshot=dataset_snapshot,
+                )
+                if physical_existing is not None:
+                    raise HoldoutAlreadyConsumedError(
+                        f"physical holdout {physical_existing.holdout_access_id} was already "
+                        f"consumed under confirmation trial family "
+                        f"{physical_existing.confirmation_trial_family_id}"
+                    )
+
                 previous_state_sha256 = self._state_sha256
                 self._records[freshness_id] = record
                 tx_id = self._next_transition_tx_id(record.consumption_id)

@@ -478,3 +478,70 @@ def test_fixed_page_read_has_no_local_ownership_filter() -> None:
     assert "customerOrderRefs" not in params
     assert "customerStrategyRefs" not in params
     assert "betIds" not in params
+
+
+def test_durable_reopen_preserves_evidence_identity_without_minting_source_authority(
+    tmp_path, monkeypatch
+) -> None:
+    source = _source(tmp_path)
+    receipt = _receipt()
+    _bind_source(monkeypatch, source, receipt)
+    monkeypatch.setattr(
+        population,
+        "_read_page",
+        lambda **kwargs: _page([], status=kwargs["bet_status"], marker=1),
+    )
+    value = _capture(population.BetfairClearedMarketPopulationAuthority(source), receipt)
+
+    reopened = population.BetfairClearedMarketPopulation.from_dict(
+        json.loads(json.dumps(value.to_dict()))
+    )
+
+    assert reopened.evidence_sha256 == value.evidence_sha256
+    assert reopened.population_sha256 == value.population_sha256
+    assert reopened.request_scope_sha256 == value.request_scope_sha256
+    reopened.assert_integrity()
+    with pytest.raises(population.BetfairClearedMarketPopulationError, match="not issued"):
+        population.assert_betfair_cleared_market_population_authoritative(reopened)
+
+
+def test_durable_page_substitution_breaks_population_integrity(
+    tmp_path, monkeypatch
+) -> None:
+    source = _source(tmp_path)
+    receipt = _receipt()
+    _bind_source(monkeypatch, source, receipt)
+    monkeypatch.setattr(
+        population,
+        "_read_page",
+        lambda **kwargs: _page([], status=kwargs["bet_status"], marker=1),
+    )
+    value = _capture(population.BetfairClearedMarketPopulationAuthority(source), receipt)
+    raw = json.loads(json.dumps(value.to_dict()))
+    raw["first_pass_pages"][0]["response_sha256"] = "f" * 64
+
+    with pytest.raises(
+        population.BetfairClearedMarketPopulationError,
+        match="evidence digest mismatch",
+    ):
+        population.BetfairClearedMarketPopulation.from_dict(raw)
+
+
+def test_durable_population_missing_field_is_rejected(tmp_path, monkeypatch) -> None:
+    source = _source(tmp_path)
+    receipt = _receipt()
+    _bind_source(monkeypatch, source, receipt)
+    monkeypatch.setattr(
+        population,
+        "_read_page",
+        lambda **kwargs: _page([], status=kwargs["bet_status"], marker=1),
+    )
+    value = _capture(population.BetfairClearedMarketPopulationAuthority(source), receipt)
+    raw = json.loads(json.dumps(value.to_dict()))
+    del raw["population_sha256"]
+
+    with pytest.raises(
+        population.BetfairClearedMarketPopulationError,
+        match="unexpected fields",
+    ):
+        population.BetfairClearedMarketPopulation.from_dict(raw)

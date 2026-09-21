@@ -1,6 +1,7 @@
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from autosport.real_execution_ledger import (
     AttemptState,
@@ -54,14 +55,19 @@ def plan(plan_id: str = "p1", action_id: str = "a1") -> ExecutionPlan:
     )
 
 
-def account_snapshot() -> AccountExposureSnapshot:
+def account_snapshot(
+    *,
+    observed_at: str = ACCOUNT_OBSERVED_AT,
+    available_bankroll: str = "100.00",
+    open_exposure: str = "0.00",
+) -> AccountExposureSnapshot:
     return AccountExposureSnapshot(
         bookmaker_id=ACCOUNT.bookmaker_id,
         account_id=ACCOUNT.account_id,
         currency="EUR",
-        available_bankroll="100.00",
-        open_exposure="0.00",
-        observed_at=ACCOUNT_OBSERVED_AT,
+        available_bankroll=available_bankroll,
+        open_exposure=open_exposure,
+        observed_at=observed_at,
     )
 
 
@@ -167,7 +173,7 @@ class StartupExecutionGateTests(unittest.TestCase):
             )
             self.assertEqual(ledger.attempt_state("try-1"), AttemptState.UNKNOWN)
 
-    def test_not_found_reconciliation_plus_complete_account_rebuild_enables_execution(self):
+    def test_reconciled_execution_stays_blocked_without_product_account_authority(self):
         with tempfile.TemporaryDirectory() as tmp:
             ledger = RealExecutionLedger(Path(tmp) / "execution.jsonl")
             begin_uncertain(ledger)
@@ -190,14 +196,54 @@ class StartupExecutionGateTests(unittest.TestCase):
                 rebuild=lambda: (account_snapshot(),),
             ).evaluate()
 
-            self.assertTrue(status.execution_enabled)
+            self.assertFalse(status.execution_enabled)
             self.assertTrue(status.analysis_read_only_enabled)
-            self.assertIsNone(status.reason)
+            self.assertEqual(
+                status.reason,
+                StartupExecutionBlockReason.ACCOUNT_STATE_AUTHORITY_UNAVAILABLE,
+            )
             self.assertEqual(status.unresolved_attempt_ids, ())
             self.assertEqual(status.account_snapshots, (account_snapshot(),))
             self.assertEqual(
                 ledger.attempt_state("try-1"), AttemptState.RECONCILED_NOT_FOUND
             )
+
+    def test_caller_minted_account_snapshot_cannot_enable_execution(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            ledger = RealExecutionLedger(Path(tmp) / "execution.jsonl")
+            forged = account_snapshot(
+                available_bankroll="999999999.99",
+                open_exposure="0",
+            )
+
+            status = self.gate(
+                ledger,
+                rebuild=lambda: (forged,),
+            ).evaluate()
+
+            self.assertFalse(status.execution_enabled)
+            self.assertEqual(
+                status.reason,
+                StartupExecutionBlockReason.ACCOUNT_STATE_AUTHORITY_UNAVAILABLE,
+            )
+            self.assertEqual(status.account_snapshots, (forged,))
+
+    def test_stale_caller_snapshot_cannot_enable_execution(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            ledger = RealExecutionLedger(Path(tmp) / "execution.jsonl")
+            stale = account_snapshot(observed_at="2000-01-01T00:00:00+00:00")
+
+            status = self.gate(
+                ledger,
+                rebuild=lambda: (stale,),
+            ).evaluate()
+
+            self.assertFalse(status.execution_enabled)
+            self.assertEqual(
+                status.reason,
+                StartupExecutionBlockReason.ACCOUNT_STATE_AUTHORITY_UNAVAILABLE,
+            )
+            self.assertEqual(status.account_snapshots, (stale,))
 
     def test_account_rebuild_must_cover_exact_configured_account_set(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -282,6 +328,51 @@ class StartupExecutionGateTests(unittest.TestCase):
             )
             self.assertEqual(status.unresolved_attempt_ids, ("try-race",))
             self.assertEqual(status.account_snapshots, (account_snapshot(),))
+
+    def test_attempt_appended_after_final_snapshot_is_not_hidden(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            ledger = RealExecutionLedger(Path(tmp) / "execution.jsonl")
+            original_verified_snapshot = ledger.verified_snapshot
+            snapshot_calls = 0
+
+            def verified_snapshot_with_post_capture_append():
+                nonlocal snapshot_calls
+                snapshot = original_verified_snapshot()
+                snapshot_calls += 1
+                if snapshot_calls == 2:
+                    ledger.reserve_plan(plan("race-plan", "race-action"))
+                    ledger.begin_attempt(
+                        plan_id="race-plan",
+                        action_id="race-action",
+                        attempt_id="race-attempt",
+                        reserved_at=RESERVED_AT,
+                    )
+                return snapshot
+
+            gate = self.gate(
+                ledger,
+                reconcile=lambda _attempt_ids: None,
+                rebuild=lambda: (account_snapshot(),),
+            )
+
+            with patch.object(
+                ledger,
+                "verified_snapshot",
+                side_effect=verified_snapshot_with_post_capture_append,
+            ):
+                status = gate.evaluate()
+
+            self.assertEqual(snapshot_calls, 2)
+            self.assertEqual(
+                ledger.attempt_state("race-attempt"),
+                AttemptState.RESERVED,
+            )
+            self.assertFalse(status.execution_enabled)
+            self.assertEqual(
+                status.reason,
+                StartupExecutionBlockReason.UNRESOLVED_EXTERNAL_EFFECTS,
+            )
+            self.assertEqual(status.unresolved_attempt_ids, ("race-attempt",))
 
     def test_corrupt_ledger_disables_execution_without_disabling_read_only_mode(self):
         with tempfile.TemporaryDirectory() as tmp:

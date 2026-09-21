@@ -167,45 +167,53 @@ def test_raw_item_class_data_must_match_captured_digest() -> None:
         classify_betfair_statement_item(_row(captured), substituted)
 
 
-def test_malformed_nested_unknown_statement_item_fails_closed() -> None:
-    raw = {"unknownStatementItem": '{"transactionType":"ACCOUNT_CREDIT"'}
-
-    with pytest.raises(
-        BetfairStatementSemanticError,
-        match="unknownStatementItem is not valid JSON",
-    ):
-        classify_betfair_statement_item(_row(raw), raw)
-
-
-def test_duplicate_nested_semantic_key_fails_closed() -> None:
-    raw = {
-        "unknownStatementItem": (
+@pytest.mark.parametrize(
+    "unknown_statement_item",
+    [
+        "transactionType=ACCOUNT_CREDIT,winLose=RESULT_WON",
+        '{"transactionType":"ACCOUNT_CREDIT"',
+        (
             '{"transactionType":"ACCOUNT_CREDIT",'
             '"transactionType":"ACCOUNT_DEBIT",'
             '"winLose":"RESULT_FIX"}'
-        )
-    }
-
-    with pytest.raises(
-        BetfairStatementSemanticError,
-        match="duplicate object key",
-    ):
-        classify_betfair_statement_item(_row(raw), raw)
-
-
-def test_non_standard_nested_numeric_constant_fails_closed() -> None:
-    raw = {
-        "unknownStatementItem": (
+        ),
+        (
             '{"transactionType":"ACCOUNT_CREDIT",'
             '"winLose":"RESULT_WON","value":NaN}'
-        )
-    }
+        ),
+    ],
+    ids=[
+        "documented-opaque-string-form",
+        "malformed-json",
+        "duplicate-semantic-key",
+        "non-standard-numeric-constant",
+    ],
+)
+def test_opaque_or_ambiguous_unknown_statement_item_remains_unclassified(
+    unknown_statement_item: str,
+) -> None:
+    raw = {"unknownStatementItem": unknown_statement_item}
+
+    evidence = classify_betfair_statement_item(_row(raw), raw)
+
+    assert evidence.transaction_type is None
+    assert evidence.win_lose is None
+    assert evidence.classification_state == "UNCLASSIFIED_ACCOUNT_MOVEMENT"
+    assert evidence.economic_effect == "UNKNOWN"
+    assert evidence.commission_reversal is False
+
+
+def test_mapping_subclass_cannot_drive_semantic_classification() -> None:
+    raw = _raw("ACCOUNT_CREDIT", "RESULT_WON")
+
+    class _HostileMapping(dict[str, object]):
+        pass
 
     with pytest.raises(
         BetfairStatementSemanticError,
-        match="non-standard numeric constant",
+        match="exact JSON object",
     ):
-        classify_betfair_statement_item(_row(raw), raw)
+        classify_betfair_statement_item(_row(raw), _HostileMapping(raw))
 
 
 def test_unknown_item_class_rejects_unbound_outer_semantic_fields() -> None:

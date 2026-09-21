@@ -484,14 +484,14 @@ class BetfairStreamTlsTransport:
             marker = self._receive_buffer.find(b"\r\n")
             if marker >= 0:
                 if marker > self._max_frame_bytes:
-                    self.close()
+                    self._close_with_backoff()
                     raise BetfairStreamProtocolError(
                         "Betfair stream frame exceeded the configured size limit"
                     )
                 payload = bytes(self._receive_buffer[: marker + 2])
                 del self._receive_buffer[: marker + 2]
                 if marker == 0:
-                    self.close()
+                    self._close_with_backoff()
                     raise BetfairStreamProtocolError(
                         "Betfair stream frame must not be empty"
                     )
@@ -501,12 +501,12 @@ class BetfairStreamTlsTransport:
             if bare_lf >= 0 and (
                 bare_lf == 0 or self._receive_buffer[bare_lf - 1] != 0x0D
             ):
-                self.close()
+                self._close_with_backoff()
                 raise BetfairStreamProtocolError(
                     "Betfair stream frame used a non-CRLF delimiter"
                 )
             if len(self._receive_buffer) > self._max_frame_bytes:
-                self.close()
+                self._close_with_backoff()
                 raise BetfairStreamProtocolError(
                     "Betfair stream frame exceeded the configured size limit"
                 )
@@ -514,13 +514,13 @@ class BetfairStreamTlsTransport:
             try:
                 block = stream.recv(_SOCKET_READ_BYTES)
             except (OSError, ssl.SSLError, TimeoutError):
-                self.close()
+                self._close_with_backoff()
                 raise BetfairStreamTransportError(
                     "Betfair stream receive failed"
                 ) from None
             if not block:
                 had_partial = bool(self._receive_buffer)
-                self.close()
+                self._close_with_backoff()
                 if had_partial:
                     raise BetfairStreamProtocolError(
                         "Betfair stream disconnected with a truncated frame"
@@ -541,7 +541,7 @@ class BetfairStreamTlsTransport:
         try:
             receipt = sink.persist(raw_frame)
         except Exception:
-            self.close()
+            self._close_with_backoff()
             raise BetfairStreamPersistenceError(
                 "Betfair stream raw frame persistence failed"
             ) from None
@@ -549,7 +549,7 @@ class BetfairStreamTlsTransport:
             type(receipt) is not BetfairStreamPersistenceReceipt
             or not receipt.matches(raw_frame)
         ):
-            self.close()
+            self._close_with_backoff()
             raise BetfairStreamPersistenceError(
                 "Betfair stream persistence receipt did not match the raw frame"
             )
@@ -563,6 +563,13 @@ class BetfairStreamTlsTransport:
         )
         _ISSUED_PERSISTED_FRAMES[issued] = _persisted_frame_fingerprint(issued)
         return issued
+
+
+    def _close_with_backoff(self) -> None:
+        """Close a failed live connection and rate-limit the next reconnect attempt."""
+
+        self.close()
+        self._record_connect_failure()
 
     def close(self) -> None:
         stream = self._socket

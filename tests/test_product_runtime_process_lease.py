@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import multiprocessing
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -35,6 +37,22 @@ class _Source:
 
     def resolve_event(self, delta):
         raise AssertionError("no market delta should be resolved in this test")
+
+
+def _hold_runtime_until_abrupt_exit(workspace: str, ready, crash) -> None:
+    runtime = build_autonomous_product_runtime(
+        workspace=Path(workspace),
+        source=_Source(),
+        clock=_Clock(),
+        sleep=lambda _: None,
+        initial_bankroll="100",
+    )
+    ready.set()
+    if not crash.wait(20):
+        os._exit(74)
+    # Deliberately bypass runtime.close() and Python teardown. The product lease
+    # must rely on OS handle lifetime so an actual process death releases authority.
+    os._exit(73)
 
 
 class ProductRuntimeProcessLeaseTests(unittest.TestCase):
@@ -80,6 +98,52 @@ class ProductRuntimeProcessLeaseTests(unittest.TestCase):
                 self.assertEqual(restored.status().cycles_completed, 1)
             finally:
                 restored.close()
+
+    def test_abrupt_owner_process_exit_releases_product_runtime_lease(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            context = multiprocessing.get_context("spawn")
+            ready = context.Event()
+            crash = context.Event()
+            process = context.Process(
+                target=_hold_runtime_until_abrupt_exit,
+                args=(str(root), ready, crash),
+            )
+            process.start()
+            self.assertTrue(ready.wait(20), "child product runtime did not acquire lease")
+            try:
+                with self.assertRaisesRegex(
+                    ProductCompositionError,
+                    "already owns this workspace",
+                ):
+                    build_autonomous_product_runtime(
+                        workspace=root,
+                        source=_Source(),
+                        clock=_Clock(),
+                        sleep=lambda _: None,
+                        initial_bankroll="100",
+                    )
+
+                crash.set()
+                process.join(20)
+                if process.is_alive():
+                    process.terminate()
+                    process.join(10)
+                    self.fail("child product runtime did not terminate after crash request")
+                self.assertEqual(process.exitcode, 73)
+
+                recovered = build_autonomous_product_runtime(
+                    workspace=root,
+                    source=_Source(),
+                    clock=_Clock(),
+                    sleep=lambda _: None,
+                    initial_bankroll="100",
+                )
+                recovered.close()
+            finally:
+                if process.is_alive():
+                    process.terminate()
+                    process.join(10)
 
     def test_failed_construction_releases_runtime_lease(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

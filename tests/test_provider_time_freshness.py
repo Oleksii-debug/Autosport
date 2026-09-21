@@ -168,9 +168,7 @@ class ProviderTimeFreshnessTests(unittest.TestCase):
             ("sequence_id", -(1 << 63) - 1),
         )
         for field, value in cases:
-            with self.subTest(field=field, value=value), self.assertRaises(
-                (TypeError, ValueError)
-            ):
+            with self.subTest(field=field, value=value), self.assertRaises((TypeError, ValueError)):
                 self.evidence(**{field: value})
 
     def test_decision_and_policy_boundaries_must_be_explicit_and_valid(self) -> None:
@@ -183,9 +181,7 @@ class ProviderTimeFreshnessTests(unittest.TestCase):
             )
         with self.assertRaisesRegex(ValueError, "max_quote_age must be non-negative"):
             self.assess(evidence, max_quote_age=timedelta(microseconds=-1))
-        with self.assertRaisesRegex(
-            ValueError, "max_source_clock_skew must be non-negative"
-        ):
+        with self.assertRaisesRegex(ValueError, "max_source_clock_skew must be non-negative"):
             self.assess(
                 evidence,
                 max_source_clock_skew=timedelta(microseconds=-1),

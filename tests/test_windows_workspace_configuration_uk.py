@@ -7,7 +7,10 @@ from autosport.paths import (
     WorkspaceConfigurationReason,
     default_workspace,
 )
-from autosport.windows_entry import _workspace_configuration_error_detail
+from autosport.windows_entry import (
+    _workspace_configuration_error_detail,
+    _workspace_configuration_error_message,
+)
 
 
 def test_relative_workspace_keeps_legacy_value_error_text_and_adds_reason(
@@ -85,3 +88,15 @@ def test_unknown_value_error_is_fail_closed_without_echoing_internal_text() -> N
 
     assert detail == "Некоректне налаштування шляху до робочої теки."
     assert "unexpected English" not in detail
+
+
+def test_native_configuration_message_shell_has_no_mixed_english_status_text() -> None:
+    message = _workspace_configuration_error_message(
+        "Шлях у AUTOSPORT_WORKSPACE має бути абсолютним."
+    )
+
+    assert "робочу теку" in message
+    assert "Економічний стан і стан виконання не змінено." in message
+    assert "interactive workspace" not in message
+    assert "Economic" not in message
+    assert "live state" not in message

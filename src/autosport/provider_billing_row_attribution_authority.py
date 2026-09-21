@@ -6,6 +6,11 @@ provider authority. This module re-resolves the exact authenticated provider
 observation and row id, then issues a closure-gated witness only when supplied
 evidence is semantically identical to the product resolver result.
 
+Possession, exact type and public fields of the witness are not sufficient
+authority either. Supported consumers must pass it through the closure-private
+issuance validator below; this prevents ``object.__new__``/``object.__setattr__``
+from manufacturing or mutating a bearer capability from public fields.
+
 The witness carries no cost class, allocation, known-zero, applicability or
 real-money authority. It proves only that descriptive row evidence was re-derived
 from the supplied canonical provider observation.
@@ -61,7 +66,7 @@ def _build_authority_capability():
 
     @dataclass(frozen=True, slots=True, init=False)
     class VerifiedProviderBillingRowAuthority:
-        """Opaque proof that row evidence re-resolved from canonical provider input."""
+        """Opaque handle whose authority exists only through closure validation."""
 
         source_evidence_sha256: str
         row_ref_id: str
@@ -83,12 +88,42 @@ def _build_authority_capability():
             set_attr(self, "row_ref_id", row_ref_id)
             set_attr(self, "evidence_sha256", evidence_sha256)
 
+    authority_field_names = (
+        "source_evidence_sha256",
+        "row_ref_id",
+        "evidence_sha256",
+    )
+    issued_authorities: dict[int, tuple[object, tuple[object, ...]]] = {}
+
+    def authority_projection(value: VerifiedProviderBillingRowAuthority) -> tuple[object, ...]:
+        return tuple(get_attr(value, name) for name in authority_field_names)
+
+    def validate_authority(
+        authority: VerifiedProviderBillingRowAuthority,
+    ) -> VerifiedProviderBillingRowAuthority:
+        """Accept only the exact untampered object registered by this issuer closure."""
+
+        if type(authority) is not VerifiedProviderBillingRowAuthority:
+            raise TypeError(
+                "authority must be exact VerifiedProviderBillingRowAuthority"
+            )
+        issued = issued_authorities.get(id(authority))
+        if issued is None or issued[0] is not authority:
+            raise error_cls(
+                "provider billing row authority must be product-issued and registered"
+            )
+        if authority_projection(authority) != issued[1]:
+            raise error_cls(
+                "provider billing row authority no longer matches issued identity"
+            )
+        return authority
+
     def verify(
         source: BetfairProviderBillingInputsObservation,
         evidence: ProviderBillingRowAttributionEvidence,
         row_ref_id: str,
     ) -> VerifiedProviderBillingRowAuthority:
-        """Re-resolve source+row and issue an opaque witness on exact fields only."""
+        """Re-resolve source+row and register an exact closure-private witness."""
 
         if type(source) is not source_cls:
             raise TypeError(
@@ -105,12 +140,17 @@ def _build_authority_capability():
                 "provider billing row evidence does not match canonical source re-resolution"
             )
 
-        return VerifiedProviderBillingRowAuthority(
+        authority = VerifiedProviderBillingRowAuthority(
             source_evidence_sha256=expected.source_evidence_sha256,
             row_ref_id=expected.row_ref_id,
             evidence_sha256=expected.evidence_sha256,
             _issuer=issuer,
         )
+        issued_authorities[id(authority)] = (
+            authority,
+            authority_projection(authority),
+        )
+        return authority
 
     def resolve_verified(
         source: BetfairProviderBillingInputsObservation,
@@ -119,17 +159,23 @@ def _build_authority_capability():
         ProviderBillingRowAttributionEvidence,
         VerifiedProviderBillingRowAuthority,
     ]:
-        """Resolve descriptive evidence and its product-issued verification witness."""
+        """Resolve descriptive evidence and its registered verification witness."""
 
         evidence = resolve_fn(source, row_ref_id)
         authority = verify(source, evidence, row_ref_id)
         return evidence, authority
 
-    return verify, resolve_verified, VerifiedProviderBillingRowAuthority
+    return (
+        verify,
+        resolve_verified,
+        validate_authority,
+        VerifiedProviderBillingRowAuthority,
+    )
 
 
 (
     verify_provider_billing_row_attribution,
     resolve_verified_provider_billing_row_attribution,
+    validate_verified_provider_billing_row_authority,
     VerifiedProviderBillingRowAuthority,
 ) = _build_authority_capability()

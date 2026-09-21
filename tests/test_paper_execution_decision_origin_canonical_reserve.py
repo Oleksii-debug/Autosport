@@ -113,3 +113,59 @@ def test_origin_bound_reserve_keeps_pristine_preappend_rejection(tmp_path) -> No
 
     assert plain.events(RUN_ID) == ()
     assert bound.events(RUN_ID) == ()
+
+
+def test_mutable_append_alias_cannot_replace_sealed_reservation_sink(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    ledger = PaperExecutionLedger(tmp_path / "sealed-append.jsonl")
+    origin = origin_module.DecisionRecordOrigin(
+        decision_id=DECISION_ID,
+        record_sha256="c" * 64,
+    )
+    attacker_called = False
+
+    def forged_append(*args, **kwargs):
+        nonlocal attacker_called
+        attacker_called = True
+        raise AssertionError("mutable append alias must not be authority")
+
+    monkeypatch.setattr(instance_guard, "_STABLE_APPEND_EVENT", forged_append)
+    _reserve(
+        instance_guard._CanonicalReservationView(ledger, origin),
+        observation_evidence_ids={},
+    )
+
+    assert attacker_called is False
+    events = ledger.events(RUN_ID)
+    assert len(events) == 1
+    assert events[0]["payload"]["decision_origin"] == origin.to_dict()
+
+
+def test_mutable_reserve_alias_cannot_replace_installed_originless_reserve(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    ledger = PaperExecutionLedger(tmp_path / "sealed-reserve.jsonl")
+    attacker_called = False
+
+    def forged_reserve(*args, **kwargs):
+        nonlocal attacker_called
+        attacker_called = True
+        raise AssertionError("mutable reserve alias must not be authority")
+
+    monkeypatch.setattr(instance_guard, "_STABLE_RESERVE_RUN", forged_reserve)
+    ledger.reserve_run(
+        run_id=RUN_ID,
+        trigger_id=DECISION_ID,
+        plan=_plan(),
+        config=_config(),
+        started_at=STARTED_AT,
+        observation_evidence_ids={},
+    )
+
+    assert attacker_called is False
+    events = ledger.events(RUN_ID)
+    assert len(events) == 1
+    assert events[0]["event_type"] == "RUN_RESERVED"

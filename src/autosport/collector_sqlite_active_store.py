@@ -205,7 +205,7 @@ class CollectorDeltaStore(_SQLiteCollectorDeltaStore):
         stream_epoch: str,
         activated_at: str,
         allow_transition: bool = True,
-    ) -> int:
+    ) -> int | None:
         """Record one activation inside the caller's existing SQLite transaction."""
 
         source_id = _text(source_id, "source_id")
@@ -220,6 +220,14 @@ class CollectorDeltaStore(_SQLiteCollectorDeltaStore):
             return int(current["generation"])
         if current is not None and not allow_transition:
             return int(current["generation"])
+        if current is None and not allow_transition:
+            latest = connection.execute(
+                "SELECT stream_epoch FROM collector_deltas "
+                "WHERE source_id=? ORDER BY commit_seq DESC LIMIT 1",
+                (source_id,),
+            ).fetchone()
+            if latest is not None and latest["stream_epoch"] != stream_epoch:
+                return None
         generation = 1 if current is None else int(current["generation"]) + 1
         connection.execute(
             "INSERT INTO collector_epoch_activations_v1("
@@ -236,7 +244,7 @@ class CollectorDeltaStore(_SQLiteCollectorDeltaStore):
         stream_epoch: str,
         activated_at: str,
         allow_transition: bool = True,
-    ) -> int:
+    ) -> int | None:
         """Record service-owned epoch authority in one durable transaction."""
 
         connection = self._connect()

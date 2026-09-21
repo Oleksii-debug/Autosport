@@ -475,4 +475,151 @@ class ForwardEconomicEvidenceSummary:
             "champion_total_pnl_currency": _decimal_text(self.champion_total_pnl_currency),
             "challenger_peak_pnl_currency": _decimal_text(self.challenger_peak_pnl_currency),
             "challenger_max_drawdown_currency": _decimal_text(self.challenger_max_drawdown_currency),
-            "absolute_log_e": _decimal_text(self.absol
+            "absolute_log_e": _decimal_text(self.absolute_log_e),
+            "paired_log_e": _decimal_text(self.paired_log_e),
+            "log_threshold": _decimal_text(self.log_threshold),
+            "absolute_threshold_crossed": self.absolute_threshold_crossed,
+            "paired_threshold_crossed": self.paired_threshold_crossed,
+            "minimum_events_satisfied": self.minimum_events_satisfied,
+            "drawdown_guard_passed": self.drawdown_guard_passed,
+            "scientific_promotion_gate_passed": self.scientific_promotion_gate_passed,
+            "evidence_sha256": self.evidence_sha256,
+            "promotion_authority": self.promotion_authority,
+        }
+
+
+class ForwardEconomicEvidenceAccumulator:
+    """Prospective, append-only scientific evidence over one precommitted universe."""
+
+    def __init__(self, protocol: ForwardEconomicProtocol) -> None:
+        if type(protocol) is not ForwardEconomicProtocol:
+            raise ForwardEconomicEvidenceError("protocol must be an exact ForwardEconomicProtocol")
+        self.protocol = protocol
+        self._steps: list[ForwardEconomicStep] = []
+        self._absolute_log_e = Decimal(0)
+        self._paired_log_e = Decimal(0)
+        self._challenger_total = Decimal(0)
+        self._champion_total = Decimal(0)
+        self._challenger_peak = Decimal(0)
+        self._challenger_max_drawdown = Decimal(0)
+
+    @property
+    def steps(self) -> tuple[ForwardEconomicStep, ...]:
+        return tuple(self._steps)
+
+    @property
+    def next_sequence(self) -> int:
+        return self.protocol.start_sequence + len(self._steps)
+
+    def _resolver_authority_sha256(self, resolver: EconomicAuthorityResolver) -> str:
+        try:
+            authority_sha256 = resolver.authority_sha256
+        except (AttributeError, TypeError) as exc:
+            raise ForwardEconomicEvidenceError(
+                "authority resolver must expose its canonical authority_sha256"
+            ) from exc
+        authority_sha256 = _sha256(authority_sha256, "resolver authority_sha256")
+        if authority_sha256 != self.protocol.authority_binding_sha256:
+            raise ForwardEconomicEvidenceError(
+                "authority resolver does not match the frozen authority binding"
+            )
+        return authority_sha256
+
+    def _resolve_exact(
+        self,
+        resolver: EconomicAuthorityResolver,
+        *,
+        policy_id: str,
+        observation: ForwardDecisionObservation,
+        decision_sha256: str,
+    ) -> ResolvedPolicyOutcome:
+        outcome = resolver.resolve(
+            policy_id=policy_id,
+            sequence=observation.sequence,
+            universe_event_sha256=observation.universe_event_sha256,
+            decision_sha256=decision_sha256,
+        )
+        if type(outcome) is not ResolvedPolicyOutcome:
+            raise ForwardEconomicEvidenceError("authority resolver must return exact ResolvedPolicyOutcome")
+        if outcome.policy_id != policy_id:
+            raise ForwardEconomicEvidenceError("resolved policy identity mismatch")
+        if outcome.sequence != observation.sequence:
+            raise ForwardEconomicEvidenceError("resolved sequence mismatch")
+        if outcome.universe_event_sha256 != observation.universe_event_sha256:
+            raise ForwardEconomicEvidenceError("resolved universe event mismatch")
+        if outcome.decision_sha256 != decision_sha256:
+            raise ForwardEconomicEvidenceError("resolved decision digest mismatch")
+        if outcome.decision_committed_at < self.protocol.frozen_at:
+            raise ForwardEconomicEvidenceError("decision predates frozen prospective protocol")
+        if outcome.side is not BetSide.NONE and outcome.accepted_odds > self.protocol.maximum_accepted_odds:
+            raise ForwardEconomicEvidenceError("accepted odds exceed frozen protocol maximum")
+        return outcome
+
+    def _normalized_payoff_and_bounds(
+        self,
+        outcome: ResolvedPolicyOutcome,
+    ) -> tuple[Decimal, Decimal, Decimal]:
+        risk = self.protocol.risk_unit_currency
+        if outcome.side is BetSide.NONE:
+            return Decimal(0), Decimal(0), Decimal(0)
+        odds = outcome.accepted_odds
+        stake = outcome.accepted_stake
+        with localcontext() as context:
+            context.prec = _DECIMAL_PRECISION
+            if outcome.side is BetSide.BACK:
+                exposure = stake
+                low_money = -stake
+                high_money = (odds - Decimal(1)) * stake
+            else:
+                exposure = (odds - Decimal(1)) * stake
+                low_money = -exposure
+                high_money = stake
+            if exposure > risk:
+                raise ForwardEconomicEvidenceError(
+                    "accepted downside exposure exceeds fixed risk unit"
+                )
+            return (
+                +(outcome.net_pnl_currency / risk),
+                +(low_money / risk),
+                +(high_money / risk),
+            )
+
+    def record(
+        self,
+        observation: ForwardDecisionObservation,
+        resolver: EconomicAuthorityResolver,
+    ) -> ForwardEconomicStep:
+        if type(observation) is not ForwardDecisionObservation:
+            raise ForwardEconomicEvidenceError("observation must be an exact ForwardDecisionObservation")
+        if observation.sequence != self.next_sequence:
+            raise ForwardEconomicEvidenceError("universe sequence must be contiguous and duplicate-free")
+        if observation.universe_sha256 != self.protocol.universe_sha256:
+            raise ForwardEconomicEvidenceError(
+                "observation universe does not match the frozen universe commitment"
+            )
+        self._resolver_authority_sha256(resolver)
+
+        challenger = self._resolve_exact(
+            resolver,
+            policy_id=self.protocol.challenger_id,
+            observation=observation,
+            decision_sha256=observation.challenger_decision_sha256,
+        )
+        champion = self._resolve_exact(
+            resolver,
+            policy_id=self.protocol.champion_id,
+            observation=observation,
+            decision_sha256=observation.champion_decision_sha256,
+        )
+        challenger_x, challenger_low, challenger_high = self._normalized_payoff_and_bounds(challenger)
+        champion_x, champion_low, champion_high = self._normalized_payoff_and_bounds(champion)
+        with localcontext() as context:
+            context.prec = _DECIMAL_PRECISION
+            paired_x = +(challenger_x - champion_x)
+            paired_low = +(challenger_low - champion_high)
+            paired_high = +(challenger_high - champion_low)
+            new_absolute_log_e = +(
+                self._absolute_log_e
+                + _log_e_increment(
+                    self.protocol.absolute_lambda,
+         

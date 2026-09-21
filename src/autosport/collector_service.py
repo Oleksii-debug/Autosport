@@ -644,11 +644,41 @@ class HeadlessCollectorService:
         attempt_at = self.clock()
         _CollectorServiceState._instant(attempt_at, "attempt_at")
         self._state.record_attempt(at=attempt_at)
+
+        # Reserve immutable source-observation evidence immediately before the first
+        # provider-facing operation. A crash after this point leaves an explicit
+        # pending cycle rather than silently shrinking a future evidence denominator.
+        cycle_source = self._require_source_identity()
+        cycle_stream_epoch = cycle_source.stream_epoch
+        cycle_seq = self.delta_store._begin_collector_cycle(
+            source_id=self.source_id,
+            run_id=self._state.run_id,
+            stream_epoch=cycle_stream_epoch,
+            attempted_at=attempt_at,
+        )
+        catalog_changes: tuple[str, ...] = ()
+        observed: list[str] = []
+        committed: list[str] = []
+        duplicates: list[str] = []
+
+        def finish_cycle(status: str, *, error_code: str | None = None) -> None:
+            completed_at = self.clock()
+            _CollectorServiceState._instant(completed_at, "completed_at")
+            self.delta_store._finish_collector_cycle(
+                source_id=self.source_id,
+                cycle_seq=cycle_seq,
+                status=status,
+                completed_at=completed_at,
+                catalog_changes=catalog_changes,
+                observed_delta_ids=tuple(observed),
+                committed_delta_ids=tuple(committed),
+                duplicate_delta_ids=tuple(duplicates),
+                error_code=error_code,
+            )
+
         try:
-            cycle_source = self._require_source_identity()
-            cycle_stream_epoch = cycle_source.stream_epoch
             self._check_storage_budget()
-            catalog_changes = self._bounded_provider_call(
+            refreshed = self._bounded_provider_call(
                 lambda: self.lifecycle.refresh_once(
                     cycle_source.fetch_catalog_page,
                     source_id=self.source_id,
@@ -658,8 +688,9 @@ class HeadlessCollectorService:
             self._require_source_identity(
                 expected_stream_epoch=cycle_stream_epoch
             )
-            if not isinstance(catalog_changes, tuple):
+            if not isinstance(refreshed, tuple):
                 raise TypeError("lifecycle refresh must return a tuple")
+            catalog_changes = tuple(refreshed)
             records = tuple(
                 item
                 for item in self.lifecycle.records()
@@ -686,8 +717,6 @@ class HeadlessCollectorService:
                 )
 
             discovered_event_ids = {item.identity for item in records}
-            committed: list[str] = []
-            duplicates: list[str] = []
             for delta in raw_deltas:
                 if not isinstance(delta, CollectorDelta):
                     raise TypeError(
@@ -706,6 +735,7 @@ class HeadlessCollectorService:
                     raise CollectorServiceError(
                         "collector delta event is absent from durable event lifecycle"
                     )
+                observed.append(delta.delta_id)
                 if self._adapter.submit_committed_delta(delta):
                     committed.append(delta.delta_id)
                 else:
@@ -715,6 +745,7 @@ class HeadlessCollectorService:
             self._require_source_identity(
                 expected_stream_epoch=cycle_stream_epoch
             )
+            finish_cycle("SUCCESS")
             completed_at = self.clock()
             _CollectorServiceState._instant(completed_at, "completed_at")
             self._state.record_success(
@@ -724,13 +755,27 @@ class HeadlessCollectorService:
             )
             return CollectorCycleResult(
                 source_id=self.source_id,
-                catalog_changes=tuple(catalog_changes),
+                catalog_changes=catalog_changes,
                 committed_delta_ids=tuple(committed),
                 duplicate_delta_ids=tuple(duplicates),
             )
-        except _StopRequested:
+        except _StopRequested as exc:
+            try:
+                finish_cycle("STOP_REQUESTED", error_code="STOP_REQUESTED")
+            except BaseException as evidence_error:
+                try:
+                    exc.add_note(
+                        "collector cycle STOP evidence also failed: "
+                        f"{type(evidence_error).__name__}: {evidence_error}"
+                    )
+                except BaseException:
+                    pass
             raise
         except ProviderUnavailableError as exc:
+            finish_cycle(
+                "PROVIDER_UNAVAILABLE",
+                error_code=type(exc).__name__,
+            )
             self._state.record_provider_failure(code=type(exc).__name__)
             return CollectorCycleResult(
                 source_id=self.source_id,
@@ -740,7 +785,26 @@ class HeadlessCollectorService:
                 provider_unavailable=True,
             )
         except BaseException as exc:
-            self._state.record_local_failure(code=type(exc).__name__)
+            try:
+                finish_cycle("LOCAL_FAILURE", error_code=type(exc).__name__)
+            except BaseException as evidence_error:
+                try:
+                    exc.add_note(
+                        "collector cycle failure evidence also failed: "
+                        f"{type(evidence_error).__name__}: {evidence_error}"
+                    )
+                except BaseException:
+                    pass
+            try:
+                self._state.record_local_failure(code=type(exc).__name__)
+            except BaseException as state_error:
+                try:
+                    exc.add_note(
+                        "collector service failure projection also failed: "
+                        f"{type(state_error).__name__}: {state_error}"
+                    )
+                except BaseException:
+                    pass
             raise
 
     def stop(self, reason: str = "operator_stop") -> None:

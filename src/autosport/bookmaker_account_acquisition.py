@@ -90,6 +90,7 @@ class BookmakerAccountAcquisitionReceipt:
     """
 
     receipt_id: str
+    acquisition_id: str
     observation_key: str
     venue_id: str
     account_id: str
@@ -207,11 +208,24 @@ class BookmakerAccountAcquisitionStore:
         self,
         client: BetfairReadOnlyClient,
         requested_capabilities: frozenset[BookmakerCapability],
+        *,
+        acquisition_id: str,
     ) -> AcquiredBookmakerAccountSnapshot:
-        """Perform a canonical provider read and durably bind its exact result."""
+        """Perform or idempotently resume one canonical provider acquisition.
+
+        acquisition_id is a product retry/idempotency identity, not evidence of
+        provider truth. Reusing an already-durable id resolves that exact acquisition
+        before any network I/O. A genuinely new temporal read must use a new id even
+        when the provider returns byte-identical content.
+        """
 
         _assert_canonical_betfair_client(client)
         capabilities = _validate_requested_capabilities(requested_capabilities)
+        acquisition_id = _exact_text(acquisition_id, "acquisition_id")
+        existing = self._load_by_acquisition_id(acquisition_id)
+        if existing is not None:
+            _validate_retry_request(existing, client, capabilities, acquisition_id)
+            return existing
 
         # Do not dispatch through client.read_account_snapshot: a caller could
         # shadow that instance attribute.  The class surface itself is sealed
@@ -234,24 +248,15 @@ class BookmakerAccountAcquisitionStore:
         snapshot_payload_sha256 = _digest(snapshot_payload)
         snapshot_semantic_sha256 = _digest(semantic_payload)
         observation_key = _observation_key(
+            acquisition_id,
             snapshot,
             capabilities,
             integration.integration_kind,
         )
 
-        existing = self._load_by_observation_key(observation_key)
-        if existing is not None:
-            if (
-                existing.receipt.snapshot_semantic_sha256
-                != snapshot_semantic_sha256
-            ):
-                raise BookmakerAccountAcquisitionError(
-                    "same provider observation identity produced conflicting semantics"
-                )
-            return existing
-
         record_without_receipt = {
             "schema_version": _SCHEMA_VERSION,
+            "acquisition_id": acquisition_id,
             "observation_key": observation_key,
             "venue_id": snapshot.profile.venue_id,
             "account_id": snapshot.profile.account_id,
@@ -293,29 +298,49 @@ class BookmakerAccountAcquisitionStore:
                 """
                 SELECT record_json, record_sha256
                 FROM bookmaker_account_acquisition
-                WHERE observation_key = ?
+                WHERE acquisition_id = ?
                 """,
-                (observation_key,),
+                (acquisition_id,),
             ).fetchone()
             if row is not None:
                 connection.rollback()
                 durable = _decode_record(row[0], row[1])
+                _validate_retry_request(
+                    durable,
+                    client,
+                    capabilities,
+                    acquisition_id,
+                )
                 if (
-                    durable.receipt.snapshot_semantic_sha256
+                    durable.receipt.provider_response_sha256
+                    != snapshot.profile.source_payload_sha256
+                    or durable.receipt.snapshot_semantic_sha256
                     != snapshot_semantic_sha256
                 ):
                     raise BookmakerAccountAcquisitionError(
-                        "same provider observation identity produced conflicting semantics"
+                        "same acquisition_id produced conflicting provider evidence"
                     )
                 return durable
 
             connection.execute(
                 """
                 INSERT INTO bookmaker_account_acquisition
-                    (receipt_id, observation_key, record_json, record_sha256)
-                VALUES (?, ?, ?, ?)
+                    (
+                        receipt_id,
+                        acquisition_id,
+                        observation_key,
+                        record_json,
+                        record_sha256
+                    )
+                VALUES (?, ?, ?, ?, ?)
                 """,
-                (receipt_id, observation_key, record_json, record_sha256),
+                (
+                    receipt_id,
+                    acquisition_id,
+                    observation_key,
+                    record_json,
+                    record_sha256,
+                ),
             )
             connection.commit()
         except Exception:
@@ -360,8 +385,8 @@ class BookmakerAccountAcquisitionStore:
         assert row is not None
         return int(row[0])
 
-    def _load_by_observation_key(
-        self, observation_key: str
+    def _load_by_acquisition_id(
+        self, acquisition_id: str
     ) -> AcquiredBookmakerAccountSnapshot | None:
         connection = self._connect()
         try:
@@ -369,9 +394,9 @@ class BookmakerAccountAcquisitionStore:
                 """
                 SELECT record_json, record_sha256
                 FROM bookmaker_account_acquisition
-                WHERE observation_key = ?
+                WHERE acquisition_id = ?
                 """,
-                (observation_key,),
+                (acquisition_id,),
             ).fetchone()
         finally:
             connection.close()
@@ -397,6 +422,7 @@ class BookmakerAccountAcquisitionStore:
                 """
                 CREATE TABLE IF NOT EXISTS bookmaker_account_acquisition (
                     receipt_id TEXT PRIMARY KEY,
+                    acquisition_id TEXT NOT NULL UNIQUE,
                     observation_key TEXT NOT NULL UNIQUE,
                     record_json TEXT NOT NULL,
                     record_sha256 TEXT NOT NULL
@@ -425,6 +451,43 @@ def _assert_canonical_betfair_client(client: object) -> None:
             raise BookmakerAccountAcquisitionError(
                 f"canonical Betfair method {name} changed after acquisition authority loaded"
             )
+
+
+def _client_scope(client: BetfairReadOnlyClient) -> tuple[str, str, str, str]:
+    return (
+        _exact_text(getattr(client, "_venue_id", None), "client.venue_id"),
+        _exact_text(getattr(client, "_account_id", None), "client.account_id"),
+        ADAPTER_ID,
+        ADAPTER_VERSION,
+    )
+
+
+def _validate_retry_request(
+    acquired: AcquiredBookmakerAccountSnapshot,
+    client: BetfairReadOnlyClient,
+    capabilities: frozenset[BookmakerCapability],
+    acquisition_id: str,
+) -> None:
+    expected_capabilities = tuple(
+        sorted(capabilities, key=lambda item: item.value)
+    )
+    if acquired.receipt.acquisition_id != acquisition_id:
+        raise BookmakerAccountAcquisitionError(
+            "durable acquisition id does not match retry request"
+        )
+    if (
+        acquired.receipt.venue_id,
+        acquired.receipt.account_id,
+        acquired.receipt.adapter_id,
+        acquired.receipt.adapter_version,
+    ) != _client_scope(client):
+        raise BookmakerAccountAcquisitionError(
+            "acquisition_id cannot be reused for another provider/account/adapter scope"
+        )
+    if acquired.receipt.requested_capabilities != expected_capabilities:
+        raise BookmakerAccountAcquisitionError(
+            "acquisition_id cannot be reused for another capability request"
+        )
 
 
 def _validate_requested_capabilities(
@@ -475,16 +538,17 @@ def _canonical_betfair_integration_evidence(
 
 
 def _observation_key(
+    acquisition_id: str,
     snapshot: BookmakerAccountSnapshot,
     capabilities: frozenset[BookmakerCapability],
     integration_kind: BookmakerIntegrationKind,
 ) -> str:
-    # Deliberately excludes local observation times and profile_id.  The
-    # provider response aggregate plus account/adapter/request scope identifies
-    # the provider observation.  A retry of the same exact response bytes is
-    # therefore idempotent even if the local clock has advanced.
+    # acquisition_id is the temporal attempt boundary. Provider bytes are bound
+    # inside that attempt but never collapse two distinct reads: byte-identical
+    # observations remain separate when their product acquisition ids differ.
     return _digest(
         {
+            "acquisition_id": acquisition_id,
             "venue_id": snapshot.profile.venue_id,
             "account_id": snapshot.profile.account_id,
             "adapter_id": snapshot.profile.adapter_id,
@@ -860,6 +924,7 @@ def _decode_record(
         decoded,
         {
             "schema_version",
+            "acquisition_id",
             "observation_key",
             "venue_id",
             "account_id",
@@ -1010,6 +1075,7 @@ def _decode_record(
 
     receipt = BookmakerAccountAcquisitionReceipt(
         receipt_id=receipt_id,
+        acquisition_id=_exact_text(record["acquisition_id"], "acquisition_id"),
         observation_key=_exact_text(record["observation_key"], "observation_key"),
         venue_id=_exact_text(record["venue_id"], "venue_id"),
         account_id=_exact_text(record["account_id"], "account_id"),
@@ -1030,6 +1096,7 @@ def _decode_record(
             "receipt profile id differs from durable snapshot"
         )
     expected_observation_key = _observation_key(
+        receipt.acquisition_id,
         snapshot,
         frozenset(capabilities),
         integration.integration_kind,

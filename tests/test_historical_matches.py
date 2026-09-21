@@ -10,7 +10,12 @@ from urllib.parse import parse_qs, urlparse
 
 from autosport import historical_matches
 from autosport.historical_matches import capture_historical_matches
-from autosport.parlayapi_provider import HttpJsonResponse, ParlayApiTableTennisProvider, ProviderPayloadError
+from autosport.parlayapi_provider import (
+    HttpJsonResponse,
+    ParlayApiTableTennisProvider,
+    ProviderPayloadError,
+    ProviderTransportError,
+)
 
 
 class _Transport:
@@ -121,6 +126,48 @@ class HistoricalMatchCaptureTests(unittest.TestCase):
                     requested_date="2026-09-10",
                     output_path=Path(temp) / "matches.json",
                 )
+        self.assertFalse(report.product_owned_request_path_verified)
+        self.assertFalse(report.product_owned_acquisition_clock_verified)
+        self.assertFalse(report.provider_response_origin_verified)
+        self.assertFalse(report.trusted_outcome_source_admissible)
+
+    def test_retry_transport_and_clock_mutation_cannot_mint_positive_trust(self) -> None:
+        payload = [{"provider_defined_id": "retry-match"}]
+        second_transport = _Transport(payload)
+        attempts: list[str] = []
+
+        def first_transport(url: str, headers: dict[str, str], timeout: float) -> HttpJsonResponse:
+            attempts.append(url)
+            raise ProviderTransportError("retryable", status_code=500)
+
+        provider = ParlayApiTableTennisProvider(
+            "unit-test-key",
+            transport=first_transport,
+            clock=lambda: "2026-09-13T02:59:59+00:00",
+            max_attempts=2,
+            sleeper=lambda _: None,
+        )
+
+        def mutate_before_retry(_: float) -> None:
+            provider.transport = second_transport
+            provider.clock = lambda: "2026-09-13T03:00:00+00:00"
+
+        provider.sleeper = mutate_before_retry
+        with tempfile.TemporaryDirectory() as temp:
+            report = capture_historical_matches(
+                provider,
+                requested_date="2026-09-10",
+                output_path=Path(temp) / "matches.json",
+            )
+
+        expected_url = (
+            "https://parlay-api.com/v1/historical/sports/table_tennis/matches"
+            "?date=2026-09-10&pricedOnly=false"
+        )
+        self.assertEqual(attempts, [expected_url])
+        self.assertEqual(second_transport.urls, [expected_url])
+        self.assertEqual(report.request_url, expected_url)
+        self.assertEqual(report.captured_at, "2026-09-13T03:00:00+00:00")
         self.assertFalse(report.product_owned_request_path_verified)
         self.assertFalse(report.product_owned_acquisition_clock_verified)
         self.assertFalse(report.provider_response_origin_verified)

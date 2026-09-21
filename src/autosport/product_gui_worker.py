@@ -115,6 +115,9 @@ class ProductGuiWorker:
         with self._lock:
             if self._busy:
                 return False
+            # A fresh run owns a fresh queue so an unconsumed terminal message
+            # from a prior run can never be mistaken for current runtime state.
+            self._messages = queue.Queue()
             self._busy = True
             self._stop_event = threading.Event()
             self._stop_reason = "operator_stop"

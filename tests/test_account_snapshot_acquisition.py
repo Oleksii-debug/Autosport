@@ -117,6 +117,32 @@ def test_caller_cannot_swap_canonical_client_or_store_after_initialization(
     )
 
 
+def test_class_level_snapshot_reader_rebinding_cannot_mint_authority(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    calls = _install_transport(monkeypatch, [_DETAILS, _FUNDS])
+    acquirer = BetfairAccountSnapshotAcquirer(
+        tmp_path / "account.sqlite3",
+        _credentials(),
+    )
+
+    def shadowed_read(self, requested_capabilities):
+        raise AssertionError("shadowed account snapshot reader must not execute")
+
+    monkeypatch.setattr(
+        betfair_readonly.BetfairReadOnlyClient,
+        "read_account_snapshot",
+        shadowed_read,
+    )
+
+    acquired = acquirer.acquire(_balance_capabilities())
+
+    assert len(calls) == 2
+    assert acquired.snapshot.balance is not None
+    assert acquired.receipt.source_authority_proven is True
+
+
 def test_product_owned_read_persists_restart_verifiable_receipt_without_secrets(
     tmp_path,
     monkeypatch,

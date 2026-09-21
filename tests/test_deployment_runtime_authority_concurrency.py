@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
+import multiprocessing as mp
 from pathlib import Path
 
 import pytest
@@ -52,6 +53,24 @@ def _append(
         action_semantics_version=version,
         action_semantics_meanings=meanings,
     )
+
+
+def _process_append(
+    path: str,
+    label: str,
+    start_event,
+    result_queue,
+) -> None:
+    store = DeploymentRuntimeAuthorityStore(path)
+    if not start_event.wait(timeout=10):
+        result_queue.put(("error", label, "start-timeout"))
+        return
+    try:
+        record = _append(store, label)
+    except BaseException as exc:
+        result_queue.put(("error", label, f"{type(exc).__name__}: {exc}"))
+        return
+    result_queue.put(("ok", label, record.runtime_authority_id))
 
 
 def test_append_holds_durable_path_fence_across_read_publish_and_verify(
@@ -156,6 +175,49 @@ def test_concurrent_distinct_store_instances_preserve_every_append(
         record.runtime_authority_id for record in issued
     }
     assert len({record.record_sha256 for record in durable}) == len(labels)
+    for left, right in zip(durable, durable[1:], strict=False):
+        assert right.previous_record_sha256 == left.record_sha256
+
+
+def test_spawned_processes_preserve_one_linear_append_chain(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "runtime-authority.json"
+    DeploymentRuntimeAuthorityStore.initialize_pristine(path)
+    labels = tuple(f"process-{index:02d}" for index in range(4))
+    context = mp.get_context("spawn")
+    start_event = context.Event()
+    result_queue = context.Queue()
+    processes = [
+        context.Process(
+            target=_process_append,
+            args=(str(path), label, start_event, result_queue),
+        )
+        for label in labels
+    ]
+
+    for process in processes:
+        process.start()
+    start_event.set()
+
+    for process in processes:
+        process.join(timeout=20)
+        if process.is_alive():
+            process.terminate()
+            process.join(timeout=5)
+            pytest.fail("spawned runtime-authority writer did not terminate")
+        assert process.exitcode == 0
+
+    results = [result_queue.get(timeout=5) for _ in processes]
+    result_queue.close()
+    result_queue.join_thread()
+
+    assert all(result[0] == "ok" for result in results), results
+    issued_ids = {result[2] for result in results}
+    durable = DeploymentRuntimeAuthorityStore(path).records()
+
+    assert len(durable) == len(labels)
+    assert {record.runtime_authority_id for record in durable} == issued_ids
     for left, right in zip(durable, durable[1:], strict=False):
         assert right.previous_record_sha256 == left.record_sha256
 

@@ -603,26 +603,28 @@ class BookmakerAccountReconciliationStore:
                     raise AccountReconciliationIntegrityError(
                         "balance observation_id was reused with conflicting content"
                     )
+                is_new_balance_observation = prior_balance_payload is None
                 balance_observations[
                     snapshot.balance.observation_id
                 ] = balance_payload
-                if latest_balance is not None:
-                    if latest_balance.currency != snapshot.balance.currency:
-                        raise AccountReconciliationIntegrityError(
-                            "available-balance currency changed within one account history"
+                if is_new_balance_observation:
+                    if latest_balance is not None:
+                        if latest_balance.currency != snapshot.balance.currency:
+                            raise AccountReconciliationIntegrityError(
+                                "available-balance currency changed within one account history"
+                            )
+                        balance_delta = UnexplainedBalanceDelta(
+                            currency=snapshot.balance.currency,
+                            amount=(
+                                snapshot.balance.available_balance
+                                - latest_balance.available_balance
+                            ),
+                            previous_observation_id=latest_balance.observation_id,
+                            current_observation_id=snapshot.balance.observation_id,
+                            previous_observed_at=latest_balance.observed_at,
+                            current_observed_at=snapshot.balance.observed_at,
                         )
-                    balance_delta = UnexplainedBalanceDelta(
-                        currency=snapshot.balance.currency,
-                        amount=(
-                            snapshot.balance.available_balance
-                            - latest_balance.available_balance
-                        ),
-                        previous_observation_id=latest_balance.observation_id,
-                        current_observation_id=snapshot.balance.observation_id,
-                        previous_observed_at=latest_balance.observed_at,
-                        current_observed_at=snapshot.balance.observed_at,
-                    )
-                latest_balance = snapshot.balance
+                    latest_balance = snapshot.balance
 
         latest = history[-1]
         return ReconciledAccountState(

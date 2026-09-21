@@ -2,13 +2,17 @@
 
 This is a narrow read-only extension of the canonical Betfair JSON-RPC client.
 It issues one exact ``listMarketBook`` request and turns the required provider
-``isMarketDataDelayed`` boolean into an origin-bound observation.  The module
-never performs a provider write and never stores credentials in evidence.
+``isMarketDataDelayed`` boolean into an origin-bound observation. Positive
+(non-delayed) authority additionally requires the canonical production network
+transport; injected transports remain usable for deterministic negative/parser
+tests but can never mint FRESH truth. The module never performs provider writes
+or stores credentials in evidence.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from hashlib import sha256
 import json
 from weakref import ref
@@ -17,6 +21,7 @@ from . import betfair_account_readonly as _base
 
 
 _LIST_MARKET_BOOK = "SportsAPING/v1.0/listMarketBook"
+_CANONICAL_NETWORK_POST = _base.UrllibBetfairHttpTransport.post
 
 
 class BetfairMarketBookFreshnessError(_base.BetfairReadOnlyError):
@@ -69,6 +74,32 @@ class BetfairMarketBookDelayObservation:
             "market-book observation was not issued by canonical Betfair adapter"
         )
 
+    def assert_positive_authoritative(self) -> None:
+        raise BetfairMarketBookFreshnessError(
+            "positive market-book observation lacks canonical production network origin"
+        )
+
+
+def _canonical_network_transport(client: _base.BetfairReadOnlyClient) -> bool:
+    """Return true only for the unmodified built-in production HTTP transport.
+
+    A structurally compatible caller transport is intentionally insufficient for
+    positive freshness. Instance-level ``post`` replacement and class-level
+    replacement after this module was imported are rejected as well.
+    """
+
+    transport = client._transport
+    if type(transport) is not _base.UrllibBetfairHttpTransport:
+        return False
+    if type(transport).post is not _CANONICAL_NETWORK_POST:
+        return False
+    transport_dict = getattr(transport, "__dict__", None)
+    if type(transport_dict) is not dict:
+        return False
+    if set(transport_dict) != {"_max_response_bytes"}:
+        return False
+    return True
+
 
 def _read_market_book_delay(
     client: _base.BetfairReadOnlyClient,
@@ -77,6 +108,7 @@ def _read_market_book_delay(
     if type(client) is not _base.BetfairReadOnlyClient:
         raise TypeError("client must be an exact BetfairReadOnlyClient")
     market = _base._required_text(market_id, "market_id")
+    network_origin = _canonical_network_transport(client)
     request_id = client._next_request_id()
     body = json.dumps(
         {
@@ -104,7 +136,15 @@ def _read_market_book_delay(
     if not isinstance(payload, bytes):
         raise BetfairMarketBookFreshnessError("Betfair transport must return bytes")
 
-    observed_at = client._observed_at()
+    # Positive evidence uses receipt time from the product's real wall clock,
+    # never the BetfairReadOnlyClient injected test clock. Injected transports
+    # remain deterministic by using the existing client clock for negative/parser
+    # evidence, which cannot authorize FRESH below.
+    observed_at = (
+        datetime.now(timezone.utc).isoformat()
+        if network_origin
+        else client._observed_at()
+    )
     source_payload_sha256 = sha256(payload).hexdigest()
     decoded = _base._decode_json(payload)
     envelope = _base._mapping(decoded, "JSON-RPC response")
@@ -162,13 +202,14 @@ def _read_market_book_delay(
 
 
 def _install_market_book_authority() -> None:
-    issued: dict[int, tuple[object, str]] = {}
+    issued: dict[int, tuple[object, str, bool]] = {}
     validate = BetfairMarketBookDelayObservation.__post_init__
 
     def read_market_book_delay(
         client: _base.BetfairReadOnlyClient,
         market_id: str,
     ) -> BetfairMarketBookDelayObservation:
+        positive_origin = _canonical_network_transport(client)
         observation = _read_market_book_delay(client, market_id)
         key = id(observation)
 
@@ -178,10 +219,13 @@ def _install_market_book_authority() -> None:
         issued[key] = (
             ref(observation, forget),
             observation._authority_fingerprint(),
+            positive_origin,
         )
         return observation
 
-    def assert_authoritative(self: BetfairMarketBookDelayObservation) -> None:
+    def _record(
+        self: BetfairMarketBookDelayObservation,
+    ) -> tuple[object, str, bool]:
         validate(self)
         record = issued.get(id(self))
         if record is None or record[0]() is not self:
@@ -192,9 +236,25 @@ def _install_market_book_authority() -> None:
             raise BetfairMarketBookFreshnessError(
                 "market-book observation changed after canonical adapter capture"
             )
+        return record
+
+    def assert_authoritative(self: BetfairMarketBookDelayObservation) -> None:
+        _record(self)
+
+    def assert_positive_authoritative(
+        self: BetfairMarketBookDelayObservation,
+    ) -> None:
+        record = _record(self)
+        if not record[2]:
+            raise BetfairMarketBookFreshnessError(
+                "positive market-book observation lacks canonical production network origin"
+            )
 
     globals()["read_market_book_delay"] = read_market_book_delay
     BetfairMarketBookDelayObservation.assert_authoritative = assert_authoritative
+    BetfairMarketBookDelayObservation.assert_positive_authoritative = (
+        assert_positive_authoritative
+    )
 
 
 _install_market_book_authority()

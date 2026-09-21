@@ -8,6 +8,7 @@ import pytest
 from autosport.forward_evidence_completeness import (
     AuthoritativeSourceReceipt,
     CampaignCloseEnvelope,
+    CampaignCloseState,
     CampaignEvidence,
     CostEvidence,
     DecisionState,
@@ -311,6 +312,15 @@ def test_authoritative_excluded_candidate_cannot_disappear() -> None:
     assert has(result, VerificationCode.COHORT_OMISSION_DETECTED)
 
 
+def test_excluded_candidate_cannot_claim_action() -> None:
+    data = campaign()
+    with pytest.raises(ValueError, match="excluded candidate"):
+        replace(
+            data.opportunities[0],
+            universe_rule_result=UniverseResult.EXCLUDED,
+        )
+
+
 def test_provider_failure_is_a_candidate_not_permission_to_erase_it() -> None:
     data = campaign(states=(DecisionState.ACTION, DecisionState.PROVIDER_FAILURE))
     assert verify_campaign(data).ok is True
@@ -347,6 +357,44 @@ def test_candidate_appended_after_terminal_close_cannot_silently_reopen() -> Non
         )
     )
     assert has(result, VerificationCode.COHORT_ROOT_MISMATCH)
+
+
+def test_duplicate_source_receipt_identity_fails_closed() -> None:
+    data = campaign()
+    duplicate = opportunity(
+        data.protocol,
+        4,
+        predecessor=data.opportunities[-1].opportunity_sha256,
+        receipt_id=data.opportunities[0].source_receipt_id,
+    )
+    result = verify_campaign(
+        replace(
+            data,
+            opportunities=data.opportunities + (duplicate,),
+            denominator_sequences=(1, 2, 3, 4),
+            cost_evidence=data.cost_evidence + (CostEvidence(4, True),),
+        )
+    )
+    assert has(result, VerificationCode.EVIDENCE_IDENTITY_CONFLICT)
+
+
+def test_duplicate_decision_identity_fails_closed() -> None:
+    data = campaign()
+    duplicate = opportunity(
+        data.protocol,
+        4,
+        predecessor=data.opportunities[-1].opportunity_sha256,
+    )
+    duplicate = replace(duplicate, decision_id=data.opportunities[0].decision_id)
+    result = verify_campaign(
+        replace(
+            data,
+            opportunities=data.opportunities + (duplicate,),
+            denominator_sequences=(1, 2, 3, 4),
+            cost_evidence=data.cost_evidence + (CostEvidence(4, True),),
+        )
+    )
+    assert has(result, VerificationCode.EVIDENCE_IDENTITY_CONFLICT)
 
 
 def test_missing_close_is_open_not_confirmatory_pass() -> None:
@@ -484,6 +532,33 @@ def test_unknown_material_cost_keeps_economics_incomplete() -> None:
     costs = (CostEvidence(1, True), CostEvidence(2, False), CostEvidence(3, True))
     result = verify_campaign(replace(data, cost_evidence=costs))
     assert has(result, VerificationCode.ECONOMICS_INCOMPLETE)
+
+
+def test_duplicate_denominator_sequence_cannot_be_normalized_away() -> None:
+    data = campaign()
+    result = verify_campaign(replace(data, denominator_sequences=(1, 2, 2, 3)))
+    assert has(result, VerificationCode.DENOMINATOR_INCOMPLETE)
+
+
+def test_conflicting_duplicate_cost_evidence_fails_closed() -> None:
+    data = campaign()
+    costs = data.cost_evidence + (CostEvidence(2, False),)
+    result = verify_campaign(replace(data, cost_evidence=costs))
+    assert has(result, VerificationCode.EVIDENCE_IDENTITY_CONFLICT)
+    assert has(result, VerificationCode.ECONOMICS_INCOMPLETE)
+
+
+def test_close_pending_preserves_terminal_membership_but_is_not_complete() -> None:
+    data = campaign()
+    pending = replace(
+        data.closes[0],
+        close_state=CampaignCloseState.CLOSE_PENDING,
+        anchor_lower=None,
+        anchor_upper=None,
+    )
+    result = verify_campaign(replace(data, closes=(pending,)))
+    assert has(result, VerificationCode.COHORT_CLOSE_PENDING)
+    assert result.candidate_count == 3
 
 
 def test_optional_stopping_violation_fails_confirmation() -> None:

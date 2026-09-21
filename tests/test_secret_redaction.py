@@ -32,6 +32,8 @@ class SecretRedactionTests(unittest.TestCase):
             "password",
             "Authorization",
             "client_secret",
+            "AWS_SECRET_ACCESS_KEY",
+            "private_key",
             "credentials",
         ):
             with self.subTest(key=key):
@@ -55,6 +57,16 @@ class SecretRedactionTests(unittest.TestCase):
         self.assertIn("Authorization: " + REDACTED, redacted)
         self.assertIn("https://" + REDACTED + "@example.test/path", redacted)
         self.assertIn("market=match", redacted)
+
+    def test_text_redaction_is_idempotent(self) -> None:
+        source = (
+            "Authorization: Bearer alpha123 "
+            "api_key=bravo456 "
+            "https://user:charlie789@example.test/?token=delta123"
+        )
+        once = redact_operator_text(source)
+        twice = redact_operator_text(once)
+        self.assertEqual(twice, once)
 
     def test_nested_sensitive_keys_are_redacted_without_hiding_normal_config(self) -> None:
         source = {

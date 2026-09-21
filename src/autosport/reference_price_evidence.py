@@ -107,13 +107,19 @@ def _canonical_market_event(event: object) -> MarketEvent:
 
 
 def _market_event_from_canonical_json(raw: object) -> MarketEvent:
-    payload = _json_object_exact(raw, "event_canonical_json")
+    text = _text(raw, "event_canonical_json")
+    payload = _json_object_exact(text, "event_canonical_json")
     try:
-        return MarketEvent.from_dict(payload)
+        event = MarketEvent.from_dict(payload)
     except (TypeError, ValueError) as exc:
         raise ReferencePriceEvidenceError(
             "event_canonical_json does not encode a canonical MarketEvent"
         ) from exc
+    if _canonical_json(event.to_dict()) != text:
+        raise ReferencePriceEvidenceError(
+            "event_canonical_json must be exact canonical MarketEvent bytes"
+        )
+    return event
 
 
 @dataclass(frozen=True, slots=True)

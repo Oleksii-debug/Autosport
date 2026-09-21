@@ -50,12 +50,16 @@ def _market(
     )
 
 
-def _reconcile(request_id: str = "reconcile-1") -> BetfairRequestIntent:
+def _reconcile(
+    request_id: str = "reconcile-1",
+    *,
+    target_request_id: str = "write-timeout-1",
+) -> BetfairRequestIntent:
     return BetfairRequestIntent(
         request_id=request_id,
         operation=BetfairRequestOperation.LIST_CURRENT_ORDERS,
         priority=BetfairRequestPriority.RECONCILIATION,
-        reconciliation_for_request_id="write-timeout-1",
+        reconciliation_for_request_id=target_request_id,
     )
 
 
@@ -137,6 +141,7 @@ def test_one_second_old_market_dispatch_no_longer_consumes_rate_budget() -> None
 def test_reconciliation_reserve_cannot_be_consumed_by_monitoring_projection_reads() -> None:
     state = BetfairRequestBudgetState(
         in_flight_shared_order_reads=3,
+        unresolved_external_mutation_ids=frozenset({"write-timeout-1"}),
     )
     monitoring = _market(
         "monitoring-projection",
@@ -159,6 +164,54 @@ def test_reconciliation_reserve_cannot_be_consumed_by_monitoring_projection_read
 
     assert blocked.decision is BetfairAdmissionDecision.THROTTLE
     assert reconciliation.decision is BetfairAdmissionDecision.ADMIT
+
+
+def test_invented_reconciliation_target_cannot_steal_reserved_shared_read_capacity() -> None:
+    state = BetfairRequestBudgetState(
+        in_flight_shared_order_reads=3,
+        unresolved_external_mutation_ids=frozenset(),
+    )
+
+    result = admit_betfair_request(
+        _reconcile(target_request_id="invented-write"),
+        state=state,
+        policy=_policy(),
+        now_monotonic_ns=0,
+    )
+
+    assert result.decision is BetfairAdmissionDecision.THROTTLE
+    assert "currently unresolved" in result.reason
+
+
+def test_resolved_reconciliation_target_cannot_reclaim_reserved_shared_read_capacity() -> None:
+    intent = _reconcile(target_request_id="write-timeout-1")
+    unresolved = BetfairRequestBudgetState(
+        in_flight_shared_order_reads=3,
+        unresolved_external_mutation_ids=frozenset({"write-timeout-1"}),
+    )
+    resolved = BetfairRequestBudgetState(
+        in_flight_shared_order_reads=3,
+        unresolved_external_mutation_ids=frozenset(),
+    )
+
+    assert (
+        admit_betfair_request(
+            intent,
+            state=unresolved,
+            policy=_policy(),
+            now_monotonic_ns=0,
+        ).decision
+        is BetfairAdmissionDecision.ADMIT
+    )
+    assert (
+        admit_betfair_request(
+            intent,
+            state=resolved,
+            policy=_policy(),
+            now_monotonic_ns=0,
+        ).decision
+        is BetfairAdmissionDecision.THROTTLE
+    )
 
 
 def test_list_cleared_orders_uses_separate_pool_when_shared_reads_are_full() -> None:

@@ -55,6 +55,12 @@ class SourceUniverseCommitment:
     external_provider_universe_complete: bool
     promotion_ready: bool
 
+    def __new__(cls, *args: object, **kwargs: object) -> "SourceUniverseCommitment":
+        raise TypeError(
+            "SourceUniverseCommitment is product-issued; "
+            "use build_source_universe_commitment"
+        )
+
     @classmethod
     def _issue(cls, payload: dict[str, object]) -> "SourceUniverseCommitment":
         instance = object.__new__(cls)

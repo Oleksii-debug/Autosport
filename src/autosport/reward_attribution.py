@@ -154,6 +154,13 @@ class RewardComponentAttribution:
             raise RewardAttributionError("authority_refs must be sorted")
         if len(set(self.authority_refs)) != len(self.authority_refs):
             raise RewardAttributionError("authority_refs must be unique")
+        authority_identities = tuple(
+            (item.family, item.evidence_id) for item in self.authority_refs
+        )
+        if len(set(authority_identities)) != len(authority_identities):
+            raise RewardAttributionError(
+                "authority_refs cannot bind one authority identity to multiple digests"
+            )
 
         if self.truth is AttributionTruth.UNKNOWN:
             if self.authority_refs or self.counterfactual_ref is not None:
@@ -240,7 +247,8 @@ class RewardAttributionEvidence:
 
     def __post_init__(self) -> None:
         if (
-            self.schema != SCHEMA
+            type(self.schema) is not str
+            or self.schema != SCHEMA
             or type(self.schema_version) is not int
             or self.schema_version != SCHEMA_VERSION
         ):
@@ -346,7 +354,8 @@ class RewardAttributionEvidence:
         }
         _exact_keys(raw, expected, "RewardAttributionEvidence")
         if (
-            raw["schema"] != SCHEMA
+            type(raw["schema"]) is not str
+            or raw["schema"] != SCHEMA
             or type(raw["schema_version"]) is not int
             or raw["schema_version"] != SCHEMA_VERSION
         ):

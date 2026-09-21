@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+from pathlib import Path
 from types import SimpleNamespace
 
-import autosport.keyboard_audit as keyboard_audit
+import autosport.keyboard_audit as base_keyboard_audit
+from autosport import windows_entry
 from autosport.product_windows_gui import (
     PRODUCT_RUNTIME_AUTOMATION_IDS,
     ProductWindowsAutosportApp,
@@ -39,46 +41,73 @@ def _fake_packaged_app() -> SimpleNamespace:
     return SimpleNamespace(**{name: object() for name in names})
 
 
-def test_keyboard_audit_targets_packaged_product_gui_and_runtime_controls() -> None:
-    assert issubclass(
-        keyboard_audit.WindowsAutosportApp,
-        ProductWindowsAutosportApp,
-    ), "canonical keyboard audit still instantiates the predecessor Windows GUI"
+def test_packaged_keyboard_entrypoint_gates_product_runtime_controls(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    observed: dict[str, object] = {}
 
-    app = _fake_packaged_app()
-    controls = keyboard_audit._critical_widgets(app)
+    def fake_canonical_run(output_path: str | Path) -> int:
+        app = _fake_packaged_app()
+        controls = base_keyboard_audit._critical_widgets(app)
+        product_widgets = {
+            app.product_start_button,
+            app.product_stop_button,
+            app.product_status_entry,
+        }
+        product_control_names = {
+            name for name, widget in controls.items() if widget in product_widgets
+        }
 
-    product_widgets = {
-        app.product_start_button,
-        app.product_stop_button,
-        app.product_status_entry,
-    }
-    assert product_widgets <= set(controls.values())
-
-    product_control_names = {
-        name for name, widget in controls.items() if widget in product_widgets
-    }
-    assert len(product_control_names) == 3
-    assert product_control_names <= set(keyboard_audit._FOCUSABLE_CONTROLS)
-
-    bindings = {
-        sequence: True
-        for sequence in (
-            *keyboard_audit._ACTION_BINDINGS,
-            *keyboard_audit._FOCUS_BINDINGS,
+        bindings = {
+            sequence: True
+            for sequence in (
+                *base_keyboard_audit._ACTION_BINDINGS,
+                *base_keyboard_audit._FOCUS_BINDINGS,
+            )
+        }
+        focus_results = {
+            sequence: True for sequence in base_keyboard_audit._FOCUS_BINDINGS
+        }
+        reachable = list(base_keyboard_audit._FOCUSABLE_CONTROLS)
+        report = base_keyboard_audit.summarize_keyboard_contract(
+            bindings,
+            focus_results,
+            reachable,
+            list(reversed(reachable)),
         )
-    }
-    focus_results = {
-        sequence: True for sequence in keyboard_audit._FOCUS_BINDINGS
-    }
-    reachable = list(keyboard_audit._FOCUSABLE_CONTROLS)
-    report = keyboard_audit.summarize_keyboard_contract(
-        bindings,
-        focus_results,
-        reachable,
-        list(reversed(reachable)),
-    )
 
+        observed.update(
+            {
+                "path": Path(output_path),
+                "app_class": base_keyboard_audit.WindowsAutosportApp,
+                "product_control_names": product_control_names,
+                "focusable": set(base_keyboard_audit._FOCUSABLE_CONTROLS),
+                "report": report,
+            }
+        )
+        return 0
+
+    monkeypatch.setattr(
+        base_keyboard_audit,
+        "run_keyboard_audit",
+        fake_canonical_run,
+    )
+    destination = tmp_path / "keyboard.json"
+    assert windows_entry.main(["--keyboard-audit-output", str(destination)]) == 0
+
+    assert observed["path"] == destination
+    app_class = observed["app_class"]
+    assert isinstance(app_class, type)
+    assert issubclass(app_class, ProductWindowsAutosportApp)
+
+    product_control_names = observed["product_control_names"]
+    assert isinstance(product_control_names, set)
+    assert len(product_control_names) == 3
+    assert product_control_names <= observed["focusable"]
+
+    report = observed["report"]
+    assert isinstance(report, dict)
     assert report["status"] == "PASS"
     expected_ids = list(report["expected_automation_ids"].values())
     assert set(PRODUCT_RUNTIME_AUTOMATION_IDS.values()) <= set(expected_ids)

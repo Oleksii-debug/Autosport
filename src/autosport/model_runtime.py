@@ -32,14 +32,18 @@ class ModelInvocationState(str, Enum):
 
 
 def _require_sha256(value: str, *, field: str) -> None:
-    if len(value) != 64:
+    if not isinstance(value, str) or len(value) != 64:
         raise ModelRuntimeContractError(f"{field} must be a lowercase sha256 hex digest")
     if value != value.lower() or any(character not in "0123456789abcdef" for character in value):
         raise ModelRuntimeContractError(f"{field} must be a lowercase sha256 hex digest")
 
 
 def _require_finite(value: float, *, field: str) -> None:
-    if not math.isfinite(value):
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, (int, float))
+        or not math.isfinite(value)
+    ):
         raise ModelRuntimeContractError(f"{field} must be finite")
 
 
@@ -94,6 +98,16 @@ class ModelRuntimeConfig:
     max_attempts: int
 
     def __post_init__(self) -> None:
+        if not isinstance(self.mode, ModelBackendMode):
+            raise ModelRuntimeContractError("mode must be a ModelBackendMode")
+        if not isinstance(self.endpoint_class, ModelEndpointClass):
+            raise ModelRuntimeContractError(
+                "endpoint_class must be a ModelEndpointClass"
+            )
+        if self.model_id is not None and not isinstance(self.model_id, str):
+            raise ModelRuntimeContractError("model_id must be a string or None")
+        if isinstance(self.max_attempts, bool) or not isinstance(self.max_attempts, int):
+            raise ModelRuntimeContractError("max_attempts must be an integer")
         _require_sha256(self.config_digest, field="config_digest")
 
         if self.mode is ModelBackendMode.NO_LLM:
@@ -127,7 +141,7 @@ class ModelRuntimeConfig:
         _require_finite(self.timeout_seconds, field="timeout_seconds")
         if self.timeout_seconds <= 0:
             raise ModelRuntimeContractError("timeout_seconds must be positive")
-        if isinstance(self.max_attempts, bool) or self.max_attempts < 1:
+        if self.max_attempts < 1:
             raise ModelRuntimeContractError("enabled model runtime must use max_attempts >= 1")
 
     @property
@@ -158,6 +172,24 @@ class ModelInvocationResult:
     backend_path: tuple[ModelBackendMode, ...]
 
     def __post_init__(self) -> None:
+        if not isinstance(self.state, ModelInvocationState):
+            raise ModelRuntimeContractError("state must be a ModelInvocationState")
+        if not isinstance(self.mode, ModelBackendMode):
+            raise ModelRuntimeContractError("mode must be a ModelBackendMode")
+        if not isinstance(self.endpoint_class, ModelEndpointClass):
+            raise ModelRuntimeContractError(
+                "endpoint_class must be a ModelEndpointClass"
+            )
+        if self.model_id is not None and not isinstance(self.model_id, str):
+            raise ModelRuntimeContractError("model_id must be a string or None")
+        if isinstance(self.attempt_count, bool) or not isinstance(self.attempt_count, int):
+            raise ModelRuntimeContractError("attempt_count must be a non-negative integer")
+        if not isinstance(self.backend_path, tuple) or any(
+            not isinstance(mode, ModelBackendMode) for mode in self.backend_path
+        ):
+            raise ModelRuntimeContractError(
+                "backend_path must be a tuple of ModelBackendMode values"
+            )
         _require_sha256(self.config_digest, field="config_digest")
         _require_sha256(self.request_digest, field="request_digest")
         if self.response_digest is not None:
@@ -168,7 +200,7 @@ class ModelInvocationResult:
             raise ModelRuntimeContractError(
                 "completed_monotonic cannot precede started_monotonic"
             )
-        if isinstance(self.attempt_count, bool) or self.attempt_count < 0:
+        if self.attempt_count < 0:
             raise ModelRuntimeContractError("attempt_count must be a non-negative integer")
 
         if self.state is ModelInvocationState.SUCCESS:

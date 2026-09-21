@@ -296,7 +296,10 @@ class IncidentRiskEntry:
             return tuple(value)
 
         try:
-            severity = RiskSeverity[raw["severity"].upper()]
+            severity = {
+                member.token: member
+                for member in RiskSeverity
+            }[raw["severity"]]
             return cls(
                 entry_id=raw["entry_id"],
                 revision=raw["revision"],

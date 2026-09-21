@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import sqlite3
+from datetime import timedelta
 from pathlib import Path
 from typing import Any
 
@@ -44,6 +46,11 @@ _CYCLE_START_IMMUTABLE_UPDATE_TRIGGER = "collector_cycle_starts_immutable_update
 _CYCLE_START_IMMUTABLE_DELETE_TRIGGER = "collector_cycle_starts_immutable_delete_v1"
 _CYCLE_TERMINAL_IMMUTABLE_UPDATE_TRIGGER = "collector_cycle_terminals_immutable_update_v1"
 _CYCLE_TERMINAL_IMMUTABLE_DELETE_TRIGGER = "collector_cycle_terminals_immutable_delete_v1"
+_SCHEDULE_POLICY = "fixed_interval_v1"
+_SCHEDULE_IMMUTABLE_UPDATE_TRIGGER = "collector_schedules_immutable_update_v1"
+_SCHEDULE_IMMUTABLE_DELETE_TRIGGER = "collector_schedules_immutable_delete_v1"
+_SCHEDULE_SLOT_IMMUTABLE_UPDATE_TRIGGER = "collector_schedule_slots_immutable_update_v1"
+_SCHEDULE_SLOT_IMMUTABLE_DELETE_TRIGGER = "collector_schedule_slots_immutable_delete_v1"
 
 
 class CollectorDeltaStore(_SQLiteCollectorDeltaStore):
@@ -132,6 +139,49 @@ class CollectorDeltaStore(_SQLiteCollectorDeltaStore):
                 "FOREIGN KEY(source_id, cycle_seq) "
                 "REFERENCES collector_cycle_starts_v1(source_id, cycle_seq))"
             )
+            connection.execute(
+                "CREATE TABLE IF NOT EXISTS collector_schedules_v1 ("
+                "source_id TEXT NOT NULL,"
+                "run_id TEXT NOT NULL,"
+                "schedule_id TEXT NOT NULL UNIQUE,"
+                "policy TEXT NOT NULL,"
+                "anchor_at TEXT NOT NULL,"
+                "interval_seconds TEXT NOT NULL,"
+                "PRIMARY KEY(source_id, run_id))"
+            )
+            connection.execute(
+                "CREATE TABLE IF NOT EXISTS collector_schedule_slots_v1 ("
+                "source_id TEXT NOT NULL,"
+                "run_id TEXT NOT NULL,"
+                "slot_ordinal INTEGER NOT NULL CHECK(slot_ordinal >= 0),"
+                "due_at TEXT NOT NULL,"
+                "cycle_seq INTEGER NOT NULL CHECK(cycle_seq > 0),"
+                "PRIMARY KEY(source_id, run_id, slot_ordinal),"
+                "UNIQUE(source_id, cycle_seq),"
+                "FOREIGN KEY(source_id, run_id) "
+                "REFERENCES collector_schedules_v1(source_id, run_id),"
+                "FOREIGN KEY(source_id, cycle_seq) "
+                "REFERENCES collector_cycle_starts_v1(source_id, cycle_seq))"
+            )
+            for trigger_name, table_name, timing in (
+                (_SCHEDULE_IMMUTABLE_UPDATE_TRIGGER, "collector_schedules_v1", "UPDATE"),
+                (_SCHEDULE_IMMUTABLE_DELETE_TRIGGER, "collector_schedules_v1", "DELETE"),
+                (
+                    _SCHEDULE_SLOT_IMMUTABLE_UPDATE_TRIGGER,
+                    "collector_schedule_slots_v1",
+                    "UPDATE",
+                ),
+                (
+                    _SCHEDULE_SLOT_IMMUTABLE_DELETE_TRIGGER,
+                    "collector_schedule_slots_v1",
+                    "DELETE",
+                ),
+            ):
+                connection.execute(
+                    f"CREATE TRIGGER IF NOT EXISTS {trigger_name} "
+                    f"BEFORE {timing} ON {table_name} BEGIN "
+                    "SELECT RAISE(ABORT, 'collector schedule evidence is immutable'); END"
+                )
             for trigger_name, timing in (
                 (_CYCLE_START_IMMUTABLE_UPDATE_TRIGGER, "UPDATE"),
                 (_CYCLE_START_IMMUTABLE_DELETE_TRIGGER, "DELETE"),
@@ -237,6 +287,419 @@ class CollectorDeltaStore(_SQLiteCollectorDeltaStore):
             separators=(",", ":"),
             allow_nan=False,
         )
+
+    @staticmethod
+    def _schedule_interval_text(value: object) -> str:
+        if (
+            isinstance(value, bool)
+            or not isinstance(value, (int, float))
+            or not math.isfinite(float(value))
+            or float(value) <= 0
+        ):
+            raise ValueError("schedule interval_seconds must be positive and finite")
+        return repr(float(value))
+
+    @classmethod
+    def _collector_schedule_id(
+        cls,
+        *,
+        source_id: str,
+        run_id: str,
+        anchor_at: str,
+        interval_seconds: str,
+    ) -> str:
+        payload = cls._cycle_terminal_payload_json(
+            {
+                "schema_version": 1,
+                "policy": _SCHEDULE_POLICY,
+                "source_id": source_id,
+                "run_id": run_id,
+                "anchor_at": anchor_at,
+                "interval_seconds": interval_seconds,
+            }
+        )
+        return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+    @staticmethod
+    def _collector_schedule_due_at(
+        *,
+        anchor_at: str,
+        interval_seconds: str,
+        slot_ordinal: int,
+    ) -> str:
+        if (
+            isinstance(slot_ordinal, bool)
+            or not isinstance(slot_ordinal, int)
+            or slot_ordinal < 0
+        ):
+            raise ValueError("slot_ordinal must be a non-negative integer")
+        anchor = _instant(anchor_at, "anchor_at")
+        interval = float(interval_seconds)
+        if not math.isfinite(interval) or interval <= 0:
+            raise ValueError("stored collector schedule interval is invalid")
+        return (anchor + timedelta(seconds=interval * slot_ordinal)).isoformat()
+
+    def _ensure_collector_schedule(
+        self,
+        *,
+        source_id: str,
+        run_id: str,
+        anchor_at: str,
+        interval_seconds: float,
+    ) -> dict[str, object]:
+        """Create or re-resolve one immutable prospective schedule for a durable run."""
+
+        source_id = _text(source_id, "source_id")
+        run_id = _text(run_id, "run_id")
+        canonical_anchor = _instant(anchor_at, "anchor_at").isoformat()
+        interval_text = self._schedule_interval_text(interval_seconds)
+        candidate_id = self._collector_schedule_id(
+            source_id=source_id,
+            run_id=run_id,
+            anchor_at=canonical_anchor,
+            interval_seconds=interval_text,
+        )
+
+        connection = self._connect()
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                "SELECT schedule_id, policy, anchor_at, interval_seconds "
+                "FROM collector_schedules_v1 WHERE source_id=? AND run_id=?",
+                (source_id, run_id),
+            ).fetchone()
+            if row is None:
+                connection.execute(
+                    "INSERT INTO collector_schedules_v1("
+                    "source_id, run_id, schedule_id, policy, anchor_at, interval_seconds"
+                    ") VALUES(?,?,?,?,?,?)",
+                    (
+                        source_id,
+                        run_id,
+                        candidate_id,
+                        _SCHEDULE_POLICY,
+                        canonical_anchor,
+                        interval_text,
+                    ),
+                )
+                schedule_id = candidate_id
+                stored_anchor = canonical_anchor
+                stored_interval = interval_text
+            else:
+                stored_anchor = _instant(row["anchor_at"], "anchor_at").isoformat()
+                stored_interval = self._schedule_interval_text(
+                    float(row["interval_seconds"])
+                )
+                expected_id = self._collector_schedule_id(
+                    source_id=source_id,
+                    run_id=run_id,
+                    anchor_at=stored_anchor,
+                    interval_seconds=stored_interval,
+                )
+                if (
+                    row["policy"] != _SCHEDULE_POLICY
+                    or row["schedule_id"] != expected_id
+                    or row["anchor_at"] != stored_anchor
+                    or row["interval_seconds"] != stored_interval
+                ):
+                    raise ValueError("collector schedule identity is corrupt")
+                if stored_interval != interval_text:
+                    raise ValueError(
+                        "collector schedule interval cannot change within a durable run"
+                    )
+                schedule_id = row["schedule_id"]
+            connection.commit()
+            return {
+                "schema_version": 1,
+                "schedule_id": schedule_id,
+                "policy": _SCHEDULE_POLICY,
+                "source_id": source_id,
+                "run_id": run_id,
+                "anchor_at": stored_anchor,
+                "interval_seconds": stored_interval,
+            }
+        except sqlite3.DatabaseError as exc:
+            if connection.in_transaction:
+                connection.rollback()
+            raise ValueError("cannot establish collector schedule authority") from exc
+        except Exception:
+            if connection.in_transaction:
+                connection.rollback()
+            raise
+        finally:
+            connection.close()
+
+    def _next_collector_schedule_slot(
+        self,
+        *,
+        source_id: str,
+        run_id: str,
+    ) -> dict[str, object]:
+        """Resolve the next immutable logical due slot without minting a START."""
+
+        source_id = _text(source_id, "source_id")
+        run_id = _text(run_id, "run_id")
+        connection = self._connect()
+        try:
+            schedule = connection.execute(
+                "SELECT schedule_id, policy, anchor_at, interval_seconds "
+                "FROM collector_schedules_v1 WHERE source_id=? AND run_id=?",
+                (source_id, run_id),
+            ).fetchone()
+            if schedule is None:
+                raise ValueError("collector schedule authority is missing")
+            if schedule["policy"] != _SCHEDULE_POLICY:
+                raise ValueError("collector schedule policy is unsupported")
+            expected_id = self._collector_schedule_id(
+                source_id=source_id,
+                run_id=run_id,
+                anchor_at=schedule["anchor_at"],
+                interval_seconds=schedule["interval_seconds"],
+            )
+            if schedule["schedule_id"] != expected_id:
+                raise ValueError("collector schedule identity digest mismatch")
+            row = connection.execute(
+                "SELECT MAX(slot_ordinal) FROM collector_schedule_slots_v1 "
+                "WHERE source_id=? AND run_id=?",
+                (source_id, run_id),
+            ).fetchone()
+            slot_ordinal = (
+                0 if row is None or row[0] is None else int(row[0]) + 1
+            )
+            due_at = self._collector_schedule_due_at(
+                anchor_at=schedule["anchor_at"],
+                interval_seconds=schedule["interval_seconds"],
+                slot_ordinal=slot_ordinal,
+            )
+            return {
+                "schedule_id": schedule["schedule_id"],
+                "slot_ordinal": slot_ordinal,
+                "due_at": due_at,
+            }
+        finally:
+            connection.close()
+
+    def _begin_scheduled_collector_cycle(
+        self,
+        *,
+        source_id: str,
+        run_id: str,
+        stream_epoch: str,
+        slot_ordinal: int,
+        due_at: str,
+        attempted_at: str,
+    ) -> int:
+        """Atomically bind one due slot to exactly one canonical collector START."""
+
+        source_id = _text(source_id, "source_id")
+        run_id = _text(run_id, "run_id")
+        stream_epoch = _text(stream_epoch, "stream_epoch")
+        if (
+            isinstance(slot_ordinal, bool)
+            or not isinstance(slot_ordinal, int)
+            or slot_ordinal < 0
+        ):
+            raise ValueError("slot_ordinal must be a non-negative integer")
+        canonical_due = _instant(due_at, "due_at").isoformat()
+        canonical_attempt = _instant(attempted_at, "attempted_at").isoformat()
+
+        connection = self._connect()
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            schedule = connection.execute(
+                "SELECT schedule_id, policy, anchor_at, interval_seconds "
+                "FROM collector_schedules_v1 WHERE source_id=? AND run_id=?",
+                (source_id, run_id),
+            ).fetchone()
+            if schedule is None or schedule["policy"] != _SCHEDULE_POLICY:
+                raise ValueError("collector schedule authority is missing or invalid")
+            expected_id = self._collector_schedule_id(
+                source_id=source_id,
+                run_id=run_id,
+                anchor_at=schedule["anchor_at"],
+                interval_seconds=schedule["interval_seconds"],
+            )
+            if schedule["schedule_id"] != expected_id:
+                raise ValueError("collector schedule identity digest mismatch")
+            expected_due = self._collector_schedule_due_at(
+                anchor_at=schedule["anchor_at"],
+                interval_seconds=schedule["interval_seconds"],
+                slot_ordinal=slot_ordinal,
+            )
+            if canonical_due != expected_due:
+                raise ValueError("collector schedule slot due_at is not canonical")
+            last = connection.execute(
+                "SELECT MAX(slot_ordinal) FROM collector_schedule_slots_v1 "
+                "WHERE source_id=? AND run_id=?",
+                (source_id, run_id),
+            ).fetchone()
+            next_ordinal = (
+                0 if last is None or last[0] is None else int(last[0]) + 1
+            )
+            if slot_ordinal != next_ordinal:
+                raise ValueError(
+                    "collector schedule slot is duplicate, skipped, or out of order"
+                )
+
+            row = connection.execute(
+                "SELECT MAX(cycle_seq) FROM collector_cycle_starts_v1 "
+                "WHERE source_id=?",
+                (source_id,),
+            ).fetchone()
+            cycle_seq = 1 if row is None or row[0] is None else int(row[0]) + 1
+            connection.execute(
+                "INSERT INTO collector_cycle_starts_v1("
+                "source_id, cycle_seq, run_id, stream_epoch, attempted_at"
+                ") VALUES(?,?,?,?,?)",
+                (
+                    source_id,
+                    cycle_seq,
+                    run_id,
+                    stream_epoch,
+                    canonical_attempt,
+                ),
+            )
+            connection.execute(
+                "INSERT INTO collector_schedule_slots_v1("
+                "source_id, run_id, slot_ordinal, due_at, cycle_seq"
+                ") VALUES(?,?,?,?,?)",
+                (
+                    source_id,
+                    run_id,
+                    slot_ordinal,
+                    canonical_due,
+                    cycle_seq,
+                ),
+            )
+            connection.commit()
+            return cycle_seq
+        except sqlite3.DatabaseError as exc:
+            if connection.in_transaction:
+                connection.rollback()
+            raise ValueError(
+                "cannot atomically bind collector schedule slot to cycle START"
+            ) from exc
+        except Exception:
+            if connection.in_transaction:
+                connection.rollback()
+            raise
+        finally:
+            connection.close()
+
+    def collector_schedule_evidence(
+        self,
+        *,
+        source_id: str,
+        run_id: str,
+        start_slot_ordinal: int,
+        end_slot_ordinal: int,
+    ) -> dict[str, object]:
+        """Read one exact schedule window and bind it to canonical cycle STARTs."""
+
+        source_id = _text(source_id, "source_id")
+        run_id = _text(run_id, "run_id")
+        for name, value in (
+            ("start_slot_ordinal", start_slot_ordinal),
+            ("end_slot_ordinal", end_slot_ordinal),
+        ):
+            if (
+                isinstance(value, bool)
+                or not isinstance(value, int)
+                or value < 0
+            ):
+                raise ValueError(f"{name} must be a non-negative integer")
+        if end_slot_ordinal < start_slot_ordinal:
+            raise ValueError("end_slot_ordinal cannot precede start_slot_ordinal")
+
+        connection = self._connect()
+        try:
+            schedule = connection.execute(
+                "SELECT schedule_id, policy, anchor_at, interval_seconds "
+                "FROM collector_schedules_v1 WHERE source_id=? AND run_id=?",
+                (source_id, run_id),
+            ).fetchone()
+            if schedule is None or schedule["policy"] != _SCHEDULE_POLICY:
+                raise ValueError("collector schedule authority is missing or invalid")
+            expected_id = self._collector_schedule_id(
+                source_id=source_id,
+                run_id=run_id,
+                anchor_at=schedule["anchor_at"],
+                interval_seconds=schedule["interval_seconds"],
+            )
+            if schedule["schedule_id"] != expected_id:
+                raise ValueError("collector schedule identity digest mismatch")
+
+            rows = connection.execute(
+                "SELECT b.slot_ordinal, b.due_at, b.cycle_seq, "
+                "s.stream_epoch, s.attempted_at "
+                "FROM collector_schedule_slots_v1 AS b "
+                "JOIN collector_cycle_starts_v1 AS s "
+                "ON s.source_id=b.source_id AND s.cycle_seq=b.cycle_seq "
+                "WHERE b.source_id=? AND b.run_id=? "
+                "AND b.slot_ordinal>=? AND b.slot_ordinal<=? "
+                "ORDER BY b.slot_ordinal",
+                (
+                    source_id,
+                    run_id,
+                    start_slot_ordinal,
+                    end_slot_ordinal,
+                ),
+            ).fetchall()
+            expected_count = end_slot_ordinal - start_slot_ordinal + 1
+            if len(rows) != expected_count:
+                raise ValueError(
+                    "collector schedule window is incomplete or non-contiguous"
+                )
+
+            slots: list[dict[str, object]] = []
+            for offset, row in enumerate(rows):
+                ordinal = start_slot_ordinal + offset
+                if int(row["slot_ordinal"]) != ordinal:
+                    raise ValueError(
+                        "collector schedule window is incomplete or non-contiguous"
+                    )
+                canonical_due = self._collector_schedule_due_at(
+                    anchor_at=schedule["anchor_at"],
+                    interval_seconds=schedule["interval_seconds"],
+                    slot_ordinal=ordinal,
+                )
+                if row["due_at"] != canonical_due:
+                    raise ValueError("collector schedule slot due_at conflicts with schedule")
+                attempted = _instant(row["attempted_at"], "attempted_at")
+                due = _instant(canonical_due, "due_at")
+                slots.append(
+                    {
+                        "slot_ordinal": ordinal,
+                        "due_at": canonical_due,
+                        "cycle_seq": int(row["cycle_seq"]),
+                        "stream_epoch": row["stream_epoch"],
+                        "attempted_at": attempted.isoformat(),
+                        "started_before_due": attempted < due,
+                        "started_late": attempted > due,
+                    }
+                )
+
+            commitment_payload = {
+                "schema_version": 1,
+                "schedule_id": schedule["schedule_id"],
+                "policy": schedule["policy"],
+                "source_id": source_id,
+                "run_id": run_id,
+                "anchor_at": schedule["anchor_at"],
+                "interval_seconds": schedule["interval_seconds"],
+                "start_slot_ordinal": start_slot_ordinal,
+                "end_slot_ordinal": end_slot_ordinal,
+                "slots": slots,
+            }
+            commitment_json = self._cycle_terminal_payload_json(commitment_payload)
+            return {
+                **commitment_payload,
+                "commitment_sha256": hashlib.sha256(
+                    commitment_json.encode("utf-8")
+                ).hexdigest(),
+            }
+        finally:
+            connection.close()
 
     def _begin_collector_cycle(
         self,

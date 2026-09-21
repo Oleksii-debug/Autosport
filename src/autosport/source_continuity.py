@@ -54,6 +54,10 @@ def _instant(value: object, name: str, *, nullable: bool = False) -> str | None:
     return raw
 
 
+def _parse_validated_instant(value: str) -> datetime:
+    return datetime.fromisoformat(value.replace("Z", "+00:00"))
+
+
 @dataclass(frozen=True, slots=True)
 class ProviderContinuityWitness:
     """Provider-owned proof that one cursor transition covers the intervening interval."""
@@ -122,6 +126,21 @@ class SourceContinuityStore:
             raise ValueError("source continuity state identity mismatch")
         return SourceContinuityState(**payload)
 
+    @staticmethod
+    def _require_non_regressing_evidence_time(
+        before: SourceContinuityState,
+        now: str,
+    ) -> None:
+        previous = [
+            _parse_validated_instant(value)
+            for value in (before.last_success_at, before.last_failure_at)
+            if value is not None
+        ]
+        if previous and _parse_validated_instant(now) < max(previous):
+            raise ValueError(
+                "source continuity transitions cannot move backwards in evidence time"
+            )
+
     def _read_locked(self) -> dict[str, object]:
         try:
             raw = strict_json_loads(self.path.read_text(encoding="utf-8"))
@@ -180,6 +199,7 @@ class SourceContinuityStore:
                 if payload is None
                 else self._state_from_payload(source_id, payload)
             )
+            self._require_non_regressing_evidence_time(before, now)
             state = SourceContinuityState(
                 source_id=source_id,
                 status="unknown",
@@ -217,6 +237,7 @@ class SourceContinuityStore:
                 if payload is None
                 else self._state_from_payload(source_id, payload)
             )
+            self._require_non_regressing_evidence_time(before, now)
 
             trusted_token = before.trusted_token
             status = "unknown"

@@ -215,7 +215,7 @@ class ProspectiveCollectorScheduleTests(unittest.TestCase):
             self.assertEqual(evidence["interval_seconds"], "10.0")
             self.assertEqual(restart_clock.sleeps, [])
 
-    def test_unstarted_schedule_window_fails_closed_as_incomplete(self) -> None:
+    def test_unstarted_schedule_window_exposes_exact_missing_slot(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             clock = _Clock("2026-01-01T00:00:00+00:00")
             service = _service(
@@ -225,16 +225,31 @@ class ProspectiveCollectorScheduleTests(unittest.TestCase):
             )
             service.run(max_cycles=1)
 
-            with self.assertRaisesRegex(
-                ValueError,
-                "incomplete or non-contiguous",
-            ):
-                service.delta_store.collector_schedule_evidence(
-                    source_id="source-x",
-                    run_id="run-1",
-                    start_slot_ordinal=0,
-                    end_slot_ordinal=1,
-                )
+            evidence = service.delta_store.collector_schedule_evidence(
+                source_id="source-x",
+                run_id="run-1",
+                start_slot_ordinal=0,
+                end_slot_ordinal=1,
+            )
+            self.assertEqual(evidence["expected_slot_count"], 2)
+            self.assertEqual(evidence["bound_start_count"], 1)
+            self.assertEqual(evidence["missing_start_count"], 1)
+            self.assertEqual(evidence["early_start_count"], 0)
+            self.assertEqual(evidence["late_start_count"], 0)
+            self.assertEqual(evidence["slots"][0]["cycle_seq"], 1)
+            self.assertEqual(
+                evidence["slots"][1],
+                {
+                    "slot_ordinal": 1,
+                    "due_at": "2026-01-01T00:00:10+00:00",
+                    "cycle_seq": None,
+                    "stream_epoch": None,
+                    "attempted_at": None,
+                    "started_before_due": None,
+                    "started_late": None,
+                },
+            )
+            self.assertEqual(len(evidence["commitment_sha256"]), 64)
 
     def test_caller_cannot_rebind_due_time_or_skip_slot(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

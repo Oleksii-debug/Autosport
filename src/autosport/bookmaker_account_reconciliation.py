@@ -526,6 +526,8 @@ class BookmakerAccountReconciliationStore:
         positions: dict[str, ReconciledPosition] = {}
         latest_balance: BookmakerBalanceObservation | None = None
         balance_delta: UnexplainedBalanceDelta | None = None
+        balance_observations: dict[str, dict[str, object]] = {}
+        position_observations: dict[str, dict[str, object]] = {}
 
         for snapshot in history:
             cls._require_same_account(first, snapshot)
@@ -539,6 +541,13 @@ class BookmakerAccountReconciliationStore:
 
             explicitly_seen: set[str] = set()
             for observation in snapshot.open_positions:
+                observation_payload = _position_to_dict(observation)
+                prior_payload = position_observations.get(observation.observation_id)
+                if prior_payload is not None and prior_payload != observation_payload:
+                    raise AccountReconciliationIntegrityError(
+                        "position observation_id was reused with conflicting content"
+                    )
+                position_observations[observation.observation_id] = observation_payload
                 external_id = observation.external_position_id
                 prior = positions.get(external_id)
                 if prior is not None and prior.state is ReconciledPositionState.SETTLED:
@@ -554,6 +563,13 @@ class BookmakerAccountReconciliationStore:
                 explicitly_seen.add(external_id)
 
             for observation in snapshot.settled_positions:
+                observation_payload = _position_to_dict(observation)
+                prior_payload = position_observations.get(observation.observation_id)
+                if prior_payload is not None and prior_payload != observation_payload:
+                    raise AccountReconciliationIntegrityError(
+                        "position observation_id was reused with conflicting content"
+                    )
+                position_observations[observation.observation_id] = observation_payload
                 external_id = observation.external_position_id
                 positions[external_id] = ReconciledPosition(
                     external_position_id=external_id,
@@ -576,6 +592,20 @@ class BookmakerAccountReconciliationStore:
                 )
 
             if snapshot.balance is not None:
+                balance_payload = _balance_to_dict(snapshot.balance)
+                prior_balance_payload = balance_observations.get(
+                    snapshot.balance.observation_id
+                )
+                if (
+                    prior_balance_payload is not None
+                    and prior_balance_payload != balance_payload
+                ):
+                    raise AccountReconciliationIntegrityError(
+                        "balance observation_id was reused with conflicting content"
+                    )
+                balance_observations[
+                    snapshot.balance.observation_id
+                ] = balance_payload
                 if latest_balance is not None:
                     if latest_balance.currency != snapshot.balance.currency:
                         raise AccountReconciliationIntegrityError(

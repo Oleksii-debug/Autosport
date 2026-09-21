@@ -89,11 +89,22 @@ def _validate_profile_progression(
     previous: BookmakerCapabilityProfile,
     current: BookmakerCapabilityProfile,
 ) -> None:
-    previous_scope = (previous.venue_id, previous.account_id, previous.adapter_id)
-    current_scope = (current.venue_id, current.account_id, current.adapter_id)
+    previous_scope = (
+        previous.venue_id,
+        previous.account_id,
+        previous.adapter_id,
+        previous.adapter_version,
+    )
+    current_scope = (
+        current.venue_id,
+        current.account_id,
+        current.adapter_id,
+        current.adapter_version,
+    )
     if current_scope != previous_scope:
         raise ProviderHealthEvidenceError(
-            "capability drift profiles must describe one exact venue/account/adapter scope"
+            "capability drift profiles must describe one exact "
+            "venue/account/adapter/version scope"
         )
     if current.profile_version <= previous.profile_version:
         raise ProviderHealthEvidenceError(

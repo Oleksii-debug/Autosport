@@ -30,6 +30,7 @@ def _install() -> None:
     coordinator = PaperCampaignAdmissionCoordinator
     error = PaperCampaignAdmissionError
     observation_type = Observation
+    mapping_type = Mapping
     original_resolver = coordinator._resolved_execution_decision_id
     adapter_schema = _ADAPTER_SCHEMA
     adapter_schema_version = _ADAPTER_SCHEMA_VERSION
@@ -56,7 +57,7 @@ def _install() -> None:
         if record is None or type(record_sha256) is not str:
             raise error("PAPER pre-execution Observation origin is unavailable")
         payload = getattr(record, "payload", None)
-        if not isinstance(payload, Mapping):
+        if not isinstance(payload, mapping_type):
             raise error("PAPER pre-execution Observation producer payload is invalid")
 
         if payload.get("schema") == live_schema:

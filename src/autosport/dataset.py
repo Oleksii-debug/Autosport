@@ -261,16 +261,16 @@ class ReplayDataset:
     schema_version: int = 1
     governance: DatasetGovernance | None = None
     import_identity: str | None = None
-    manifest_sha256: str | None = None
+    manifest_file_sha256: str | None = None
 
     def _assert_retention_current(self, retention_as_of: str | None = None) -> None:
         _assert_governance_retention_current(self.governance, retention_as_of)
 
     def _assert_manifest_current(self) -> None:
-        if self.manifest_sha256 is None:
+        if self.manifest_file_sha256 is None:
             return
         payload = (self.root / "manifest.json").read_bytes()
-        if hashlib.sha256(payload).hexdigest() != self.manifest_sha256:
+        if hashlib.sha256(payload).hexdigest() != self.manifest_file_sha256:
             raise ValueError("dataset manifest hash changed after verification")
 
     def _assert_sport_scope(self, events: list[MarketEvent]) -> tuple[str, ...]:
@@ -814,7 +814,7 @@ def load_dataset(root: str | Path) -> ReplayDataset:
     root = Path(root)
     manifest_path = root / "manifest.json"
     manifest_payload = manifest_path.read_bytes()
-    manifest_sha256 = hashlib.sha256(manifest_payload).hexdigest()
+    manifest_file_sha256 = hashlib.sha256(manifest_payload).hexdigest()
     raw = _strict_json_bytes(
         manifest_payload,
         context="dataset manifest",
@@ -900,7 +900,7 @@ def load_dataset(root: str | Path) -> ReplayDataset:
         schema_version=schema_version,
         governance=governance,
         import_identity=import_identity,
-        manifest_sha256=manifest_sha256,
+        manifest_file_sha256=manifest_file_sha256,
     )
     if schema_version == 3:
         # Prove event-level sport truth while the verified market bytes are still

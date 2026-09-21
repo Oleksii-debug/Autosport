@@ -181,6 +181,43 @@ def _optional_decimal_text(value: Decimal | None) -> str | None:
     return None if value is None else _decimal_text(value)
 
 
+def _exact_decimal_difference(left: Decimal, right: Decimal) -> Decimal:
+    if (
+        not isinstance(left, Decimal)
+        or not isinstance(right, Decimal)
+        or not left.is_finite()
+        or not right.is_finite()
+    ):
+        raise AccountReconciliationIntegrityError(
+            "balance delta operands must be finite Decimals"
+        )
+
+    def signed_coefficient(value: Decimal) -> tuple[int, int]:
+        sign, digits, exponent = value.as_tuple()
+        coefficient = 0
+        for digit in digits:
+            coefficient = (coefficient * 10) + digit
+        return (-coefficient if sign else coefficient), exponent
+
+    left_coefficient, left_exponent = signed_coefficient(left)
+    right_coefficient, right_exponent = signed_coefficient(right)
+    common_exponent = min(left_exponent, right_exponent)
+    left_coefficient *= 10 ** (left_exponent - common_exponent)
+    right_coefficient *= 10 ** (right_exponent - common_exponent)
+    coefficient = left_coefficient - right_coefficient
+
+    if coefficient == 0:
+        return Decimal(0)
+
+    while coefficient % 10 == 0:
+        coefficient //= 10
+        common_exponent += 1
+
+    sign = 1 if coefficient < 0 else 0
+    digits = tuple(int(character) for character in str(abs(coefficient)))
+    return Decimal((sign, digits, common_exponent))
+
+
 def _balance_to_dict(value: BookmakerBalanceObservation) -> dict[str, object]:
     return {
         "venue_id": value.venue_id,
@@ -635,9 +672,9 @@ class BookmakerAccountReconciliationStore:
                             )
                         balance_delta = UnexplainedBalanceDelta(
                             currency=snapshot.balance.currency,
-                            amount=(
-                                snapshot.balance.available_balance
-                                - latest_balance.available_balance
+                            amount=_exact_decimal_difference(
+                                snapshot.balance.available_balance,
+                                latest_balance.available_balance,
                             ),
                             previous_observation_id=latest_balance.observation_id,
                             current_observation_id=snapshot.balance.observation_id,

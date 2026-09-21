@@ -69,11 +69,17 @@ def build_paper_risk_report(
     if type(goal) is not EconomicGoalContract:
         raise TypeError("goal must be canonical EconomicGoalContract")
 
+    before_sha256 = PaperRiskPolicy.risk_of_ruin_portfolio_sha256(book)
+    if before_sha256 is None:
+        raise ValueError("canonical PAPER risk state cannot be reported")
+
     metrics = PaperRiskPolicy._historical_risk_metrics(book)
     rooms = PaperRiskPolicy._goal_history_rooms(book, goal)
-    portfolio_risk_state_sha256 = PaperRiskPolicy.risk_of_ruin_portfolio_sha256(book)
-    if metrics is None or rooms is None or portfolio_risk_state_sha256 is None:
+    after_sha256 = PaperRiskPolicy.risk_of_ruin_portfolio_sha256(book)
+    if metrics is None or rooms is None or after_sha256 is None:
         raise ValueError("canonical PAPER risk state cannot be reported")
+    if after_sha256 != before_sha256:
+        raise ValueError("canonical PAPER risk state changed during reporting")
 
     _, _, drawdown_loss_room, _ = rooms
     try:
@@ -86,7 +92,7 @@ def build_paper_risk_report(
 
     return PaperRiskReport(
         schema=RISK_REPORT_SCHEMA,
-        portfolio_risk_state_sha256=portfolio_risk_state_sha256,
+        portfolio_risk_state_sha256=after_sha256,
         goal_id=goal.goal_id,
         goal_revision=goal.revision,
         initial_bankroll=metrics.initial_bankroll,

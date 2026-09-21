@@ -1,8 +1,8 @@
 from __future__ import annotations
 
 from dataclasses import replace
-from datetime import datetime, timedelta, timezone
 from decimal import Decimal
+import gc
 import json
 from pathlib import Path
 import sqlite3
@@ -11,44 +11,48 @@ import pytest
 
 from autosport.betfair_account_readonly import (
     BetfairReadOnlyClient,
-    BetfairReadOnlyError,
     BetfairSessionCredentials,
+    UrllibBetfairHttpTransport,
 )
 from autosport.bookmaker_account_acquisition import (
     BookmakerAccountAcquisitionError,
     BookmakerAccountAcquisitionStore,
+    assert_bookmaker_account_acquisition_authoritative,
 )
 from autosport.bookmaker_capability import BookmakerCapability
 from autosport.bookmaker_integration_boundary import BookmakerIntegrationKind
 
 
-FIXED_NOW = datetime(2026, 9, 21, 18, 0, tzinfo=timezone.utc)
-
-
-class FakeTransport:
+class TransportHarness:
     def __init__(self, responses: list[bytes]) -> None:
         self.responses = list(responses)
         self.calls: list[dict[str, object]] = []
 
-    def post(
-        self,
-        url: str,
-        *,
-        headers,
-        body: bytes,
-        timeout_seconds: float,
-    ) -> bytes:
-        self.calls.append(
-            {
-                "url": url,
-                "headers": dict(headers),
-                "body": body,
-                "timeout_seconds": timeout_seconds,
-            }
-        )
-        if not self.responses:
-            raise AssertionError("unexpected transport call")
-        return self.responses.pop(0)
+    def install(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        harness = self
+
+        def post(
+            transport: UrllibBetfairHttpTransport,
+            url: str,
+            *,
+            headers,
+            body: bytes,
+            timeout_seconds: float,
+        ) -> bytes:
+            assert type(transport) is UrllibBetfairHttpTransport
+            harness.calls.append(
+                {
+                    "url": url,
+                    "headers": dict(headers),
+                    "body": body,
+                    "timeout_seconds": timeout_seconds,
+                }
+            )
+            if not harness.responses:
+                raise AssertionError("unexpected canonical transport call")
+            return harness.responses.pop(0)
+
+        monkeypatch.setattr(UrllibBetfairHttpTransport, "post", post)
 
 
 def response(result: object, request_id: int) -> bytes:
@@ -81,38 +85,43 @@ def account_responses(balance: float = 100.10) -> tuple[bytes, bytes]:
     )
 
 
-def client_for(
-    *responses: bytes,
-    clock: datetime = FIXED_NOW,
-    account_id: str = "account-a",
-) -> tuple[BetfairReadOnlyClient, FakeTransport]:
-    transport = FakeTransport(list(responses))
-    client = BetfairReadOnlyClient(
-        BetfairSessionCredentials("app-secret", "session-secret"),
-        transport=transport,
-        clock=lambda: clock,
-        account_id=account_id,
-    )
-    return client, transport
+def credentials() -> BetfairSessionCredentials:
+    return BetfairSessionCredentials("app-secret", "session-secret")
 
 
 def balance_caps() -> frozenset[BookmakerCapability]:
     return frozenset({BookmakerCapability.BALANCE_READ})
 
 
-def test_product_owned_acquisition_is_durable_and_does_not_widen_authority(
+def acquire_balance(
+    store: BookmakerAccountAcquisitionStore,
+    *,
+    acquisition_id: str,
+    account_id: str = "account-a",
+):
+    return store.acquire_betfair(
+        credentials(),
+        balance_caps(),
+        acquisition_id=acquisition_id,
+        account_id=account_id,
+    )
+
+
+def test_live_product_acquisition_is_authoritative_but_durable_receipt_is_not(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    harness = TransportHarness(list(account_responses()))
+    harness.install(monkeypatch)
     store_path = tmp_path / "account-acquisition.sqlite3"
-    client, _ = client_for(*account_responses())
     store = BookmakerAccountAcquisitionStore(store_path)
 
-    acquired = store.acquire_betfair(client, balance_caps(), acquisition_id="attempt-1")
+    acquired = acquire_balance(store, acquisition_id="attempt-1")
 
     assert acquired.source_authority_proven is True
+    assert acquired.receipt.source_authority_proven is False
     assert acquired.allocation_authority_proven is False
     assert acquired.atomicity_proven is False
-    assert acquired.receipt.source_authority_proven is True
     assert acquired.receipt.allocation_authority_proven is False
     assert acquired.receipt.atomicity_proven is False
     assert acquired.receipt.execution_authorized is False
@@ -121,86 +130,95 @@ def test_product_owned_acquisition_is_durable_and_does_not_widen_authority(
     assert acquired.receipt.provider_native_observed_at is None
     assert acquired.snapshot.balance is not None
     assert acquired.snapshot.balance.available_balance == Decimal("100.1")
+    assert len(harness.calls) == 2
     assert store.count() == 1
+    assert_bookmaker_account_acquisition_authoritative(acquired)
 
     reopened = BookmakerAccountAcquisitionStore(store_path)
     resolved = reopened.resolve(acquired.receipt.receipt_id)
 
     assert resolved.receipt == acquired.receipt
     assert resolved.snapshot == acquired.snapshot
-    assert resolved.snapshot.balance == acquired.snapshot.balance
+    assert resolved.source_authority_proven is False
+    with pytest.raises(
+        BookmakerAccountAcquisitionError,
+        match="not issued by live canonical provider acquisition",
+    ):
+        assert_bookmaker_account_acquisition_authoritative(resolved)
 
 
-def test_same_acquisition_id_resolves_durable_receipt_before_provider_io(
+def test_same_live_acquisition_id_returns_ephemeral_issued_object_without_more_io(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    harness = TransportHarness(list(account_responses()))
+    harness.install(monkeypatch)
     store = BookmakerAccountAcquisitionStore(tmp_path / "account.sqlite3")
-    first_client, _ = client_for(
-        *account_responses(),
-        clock=FIXED_NOW,
-    )
-    retry_client, retry_transport = client_for(
-        *account_responses(),
-        clock=FIXED_NOW + timedelta(minutes=5),
-    )
 
-    first = store.acquire_betfair(
-        first_client,
-        balance_caps(),
-        acquisition_id="attempt-1",
-    )
-    retry = store.acquire_betfair(
-        retry_client,
-        balance_caps(),
-        acquisition_id="attempt-1",
-    )
+    first = acquire_balance(store, acquisition_id="attempt-1")
+    calls_after_first = len(harness.calls)
+    retry = acquire_balance(store, acquisition_id="attempt-1")
 
-    assert retry.receipt.receipt_id == first.receipt.receipt_id
-    assert retry.receipt.observation_key == first.receipt.observation_key
-    assert retry.snapshot.observed_at == first.snapshot.observed_at
-    assert retry_transport.calls == []
+    assert retry is first
+    assert retry.source_authority_proven is True
+    assert len(harness.calls) == calls_after_first == 2
     assert store.count() == 1
 
 
-def test_new_acquisition_id_preserves_new_temporal_observation_even_for_same_bytes(
+def test_lost_ephemeral_origin_requires_new_acquisition_id_to_reacquire(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    harness = TransportHarness(list(account_responses()))
+    harness.install(monkeypatch)
     store = BookmakerAccountAcquisitionStore(tmp_path / "account.sqlite3")
-    first_client, _ = client_for(*account_responses(), clock=FIXED_NOW)
-    later_client, later_transport = client_for(
-        *account_responses(),
-        clock=FIXED_NOW + timedelta(minutes=5),
-    )
 
-    first = store.acquire_betfair(
-        first_client,
-        balance_caps(),
-        acquisition_id="attempt-1",
-    )
-    later = store.acquire_betfair(
-        later_client,
-        balance_caps(),
-        acquisition_id="attempt-2",
-    )
+    acquired = acquire_balance(store, acquisition_id="attempt-1")
+    receipt_id = acquired.receipt.receipt_id
+    del acquired
+    gc.collect()
 
-    assert later.receipt.receipt_id != first.receipt.receipt_id
-    assert later.receipt.observation_key != first.receipt.observation_key
-    assert later.snapshot.observed_at == (
-        FIXED_NOW + timedelta(minutes=5)
-    ).isoformat()
-    assert later.snapshot.balance is not None
-    assert first.snapshot.balance is not None
-    assert later.snapshot.balance.available_balance == first.snapshot.balance.available_balance
-    assert len(later_transport.calls) == 2
+    with pytest.raises(
+        BookmakerAccountAcquisitionError,
+        match="cannot reissue provider-origin authority",
+    ):
+        acquire_balance(store, acquisition_id="attempt-1")
+    assert len(harness.calls) == 2
+
+    durable = store.resolve(receipt_id)
+    assert durable.source_authority_proven is False
+
+
+def test_new_acquisition_id_keeps_identical_provider_bytes_as_new_observation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    harness = TransportHarness(
+        [*account_responses(), *account_responses()]
+    )
+    harness.install(monkeypatch)
+    store = BookmakerAccountAcquisitionStore(tmp_path / "account.sqlite3")
+
+    first = acquire_balance(store, acquisition_id="attempt-1")
+    second = acquire_balance(store, acquisition_id="attempt-2")
+
+    assert first.receipt.provider_response_sha256 == second.receipt.provider_response_sha256
+    assert first.receipt.receipt_id != second.receipt.receipt_id
+    assert first.receipt.observation_key != second.receipt.observation_key
+    assert first.receipt.acquisition_id == "attempt-1"
+    assert second.receipt.acquisition_id == "attempt-2"
+    assert len(harness.calls) == 4
     assert store.count() == 2
 
 
 def test_caller_constructed_snapshot_cannot_reuse_durable_receipt(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    harness = TransportHarness(list(account_responses()))
+    harness.install(monkeypatch)
     store = BookmakerAccountAcquisitionStore(tmp_path / "account.sqlite3")
-    client, _ = client_for(*account_responses())
-    acquired = store.acquire_betfair(client, balance_caps(), acquisition_id="attempt-1")
+    acquired = acquire_balance(store, acquisition_id="attempt-1")
     assert acquired.snapshot.balance is not None
 
     forged_balance = replace(
@@ -221,20 +239,23 @@ def test_caller_constructed_snapshot_cannot_reuse_durable_receipt(
 
 def test_receipt_from_one_account_cannot_authorize_another_account_snapshot(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    store = BookmakerAccountAcquisitionStore(tmp_path / "account.sqlite3")
-    client_a, _ = client_for(*account_responses(), account_id="account-a")
-    client_b, _ = client_for(*account_responses(), account_id="account-b")
-
-    acquired_a = store.acquire_betfair(
-        client_a,
-        balance_caps(),
-        acquisition_id="account-a-attempt",
+    harness = TransportHarness(
+        [*account_responses(), *account_responses()]
     )
-    acquired_b = store.acquire_betfair(
-        client_b,
-        balance_caps(),
+    harness.install(monkeypatch)
+    store = BookmakerAccountAcquisitionStore(tmp_path / "account.sqlite3")
+
+    acquired_a = acquire_balance(
+        store,
+        acquisition_id="account-a-attempt",
+        account_id="account-a",
+    )
+    acquired_b = acquire_balance(
+        store,
         acquisition_id="account-b-attempt",
+        account_id="account-b",
     )
 
     assert acquired_a.receipt.receipt_id != acquired_b.receipt.receipt_id
@@ -242,13 +263,15 @@ def test_receipt_from_one_account_cannot_authorize_another_account_snapshot(
         acquired_a.receipt.verify_snapshot(acquired_b.snapshot)
 
 
-def test_durable_snapshot_byte_tamper_fails_closed_after_restart(
+def test_durable_snapshot_byte_tamper_fails_closed_after_reopen(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    harness = TransportHarness(list(account_responses()))
+    harness.install(monkeypatch)
     store_path = tmp_path / "account.sqlite3"
     store = BookmakerAccountAcquisitionStore(store_path)
-    client, _ = client_for(*account_responses())
-    acquired = store.acquire_betfair(client, balance_caps(), acquisition_id="attempt-1")
+    acquired = acquire_balance(store, acquisition_id="attempt-1")
 
     connection = sqlite3.connect(store_path)
     try:
@@ -287,14 +310,16 @@ def test_durable_snapshot_byte_tamper_fails_closed_after_restart(
         reopened.resolve(acquired.receipt.receipt_id)
 
 
-def test_credentials_are_never_persisted_in_receipt_or_snapshot_store(
+def test_credentials_never_persist_in_receipt_or_snapshot_store(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    harness = TransportHarness(list(account_responses()))
+    harness.install(monkeypatch)
     store_path = tmp_path / "account.sqlite3"
     store = BookmakerAccountAcquisitionStore(store_path)
-    client, _ = client_for(*account_responses())
 
-    acquired = store.acquire_betfair(client, balance_caps(), acquisition_id="attempt-1")
+    acquired = acquire_balance(store, acquisition_id="attempt-1")
     durable_bytes = store_path.read_bytes()
 
     assert b"app-secret" not in durable_bytes
@@ -305,91 +330,73 @@ def test_credentials_are_never_persisted_in_receipt_or_snapshot_store(
 
 def test_provider_read_failure_cannot_mint_positive_acquisition_receipt(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    harness = TransportHarness([b"not-json"])
+    harness.install(monkeypatch)
     store = BookmakerAccountAcquisitionStore(tmp_path / "account.sqlite3")
-    client, _ = client_for(b"not-json")
 
-    with pytest.raises(BetfairReadOnlyError):
-        store.acquire_betfair(client, balance_caps(), acquisition_id="attempt-1")
+    with pytest.raises(Exception, match="valid UTF-8 JSON"):
+        acquire_balance(store, acquisition_id="failed-attempt")
 
+    assert len(harness.calls) == 1
     assert store.count() == 0
 
 
-def test_instance_method_shadow_cannot_mint_product_acquisition_authority(
+def test_authority_entrypoint_rejects_caller_supplied_client_object(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    store = BookmakerAccountAcquisitionStore(tmp_path / "account.sqlite3")
-    client, transport = client_for(*account_responses())
-    client.read_account_snapshot = lambda _caps: object()  # type: ignore[method-assign]
-
-    with pytest.raises(
-        BookmakerAccountAcquisitionError,
-        match="shadowed on the client instance",
-    ):
-        store.acquire_betfair(client, balance_caps(), acquisition_id="attempt-1")
-
-    assert transport.calls == []
-    assert store.count() == 0
-
-
-def test_client_subclass_cannot_mint_product_acquisition_authority(
-    tmp_path: Path,
-) -> None:
-    class CallerClient(BetfairReadOnlyClient):
-        pass
-
-    transport = FakeTransport(list(account_responses()))
-    client = CallerClient(
-        BetfairSessionCredentials("app-secret", "session-secret"),
-        transport=transport,
-        clock=lambda: FIXED_NOW,
-    )
+    harness = TransportHarness(list(account_responses()))
+    harness.install(monkeypatch)
+    client = BetfairReadOnlyClient(credentials())
     store = BookmakerAccountAcquisitionStore(tmp_path / "account.sqlite3")
 
     with pytest.raises(
         BookmakerAccountAcquisitionError,
-        match="exact canonical BetfairReadOnlyClient",
+        match="exact BetfairSessionCredentials",
     ):
-        store.acquire_betfair(client, balance_caps(), acquisition_id="attempt-1")
+        store.acquire_betfair(  # type: ignore[arg-type]
+            client,
+            balance_caps(),
+            acquisition_id="attempt-1",
+        )
 
-    assert transport.calls == []
+    assert harness.calls == []
     assert store.count() == 0
 
 
 def test_acquisition_id_reuse_with_different_scope_or_capabilities_fails_before_io(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    harness = TransportHarness(list(account_responses()))
+    harness.install(monkeypatch)
     store = BookmakerAccountAcquisitionStore(tmp_path / "account.sqlite3")
-    first_client, _ = client_for(*account_responses(), account_id="account-a")
-    first = store.acquire_betfair(
-        first_client,
-        balance_caps(),
+    first = acquire_balance(
+        store,
         acquisition_id="stable-attempt",
+        account_id="account-a",
     )
     assert first.receipt.account_id == "account-a"
+    calls_after_first = len(harness.calls)
 
-    wrong_account, wrong_account_transport = client_for(
-        *account_responses(),
-        account_id="account-b",
-    )
     with pytest.raises(
         BookmakerAccountAcquisitionError,
         match="another provider/account/adapter scope",
     ):
-        store.acquire_betfair(
-            wrong_account,
-            balance_caps(),
+        acquire_balance(
+            store,
             acquisition_id="stable-attempt",
+            account_id="account-b",
         )
-    assert wrong_account_transport.calls == []
 
-    wrong_caps, wrong_caps_transport = client_for(*account_responses())
     with pytest.raises(
         BookmakerAccountAcquisitionError,
         match="another capability request",
     ):
         store.acquire_betfair(
-            wrong_caps,
+            credentials(),
             frozenset(
                 {
                     BookmakerCapability.BALANCE_READ,
@@ -397,50 +404,56 @@ def test_acquisition_id_reuse_with_different_scope_or_capabilities_fails_before_
                 }
             ),
             acquisition_id="stable-attempt",
+            account_id="account-a",
         )
-    assert wrong_caps_transport.calls == []
+
+    assert len(harness.calls) == calls_after_first == 2
     assert store.count() == 1
 
 
 def test_untyped_snapshot_capability_is_rejected_before_provider_io(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    harness = TransportHarness(list(account_responses()))
+    harness.install(monkeypatch)
     store = BookmakerAccountAcquisitionStore(tmp_path / "account.sqlite3")
-    client, transport = client_for(*account_responses())
 
     with pytest.raises(
         BookmakerAccountAcquisitionError,
         match="not typed account-snapshot acquisition evidence",
     ):
         store.acquire_betfair(
-            client,
+            credentials(),
             frozenset({BookmakerCapability.BET_READBACK}),
             acquisition_id="attempt-1",
         )
 
-    assert transport.calls == []
+    assert harness.calls == []
     assert store.count() == 0
 
 
 def test_empty_or_non_exact_capability_container_is_rejected(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    harness = TransportHarness(list(account_responses()))
+    harness.install(monkeypatch)
     store = BookmakerAccountAcquisitionStore(tmp_path / "account.sqlite3")
-    client, transport = client_for(*account_responses())
 
     with pytest.raises(BookmakerAccountAcquisitionError):
         store.acquire_betfair(
-            client,
+            credentials(),
             frozenset(),
             acquisition_id="attempt-empty",
         )
 
     with pytest.raises(BookmakerAccountAcquisitionError):
         store.acquire_betfair(  # type: ignore[arg-type]
-            client,
+            credentials(),
             {BookmakerCapability.BALANCE_READ},
             acquisition_id="attempt-container",
         )
 
-    assert transport.calls == []
+    assert harness.calls == []
     assert store.count() == 0

@@ -47,6 +47,7 @@ def _snapshot(
         provider="betfair",
         market_id="1.234",
         selection_id="77",
+        currency="EUR",
         side=side,
         captured_at=captured_at,
         market_status=market_status,
@@ -59,6 +60,7 @@ def _snapshot(
 def _assess(snapshot: LiquiditySnapshot, **overrides):
     kwargs = {
         "requested_size": Decimal("7"),
+        "requested_currency": "EUR",
         "limit_price": Decimal("2.0"),
         "as_of": NOW,
         "max_age": timedelta(seconds=5),
@@ -125,6 +127,19 @@ def test_all_offers_shortfall_reports_observed_shortfall_only() -> None:
     assert result.observed_qualifying_size == Decimal("6")
     assert result.execution_guaranteed is False
     assert "this observation" in result.reason
+
+
+def test_currency_identity_is_bound_to_capacity_comparison() -> None:
+    snapshot = _snapshot(
+        levels=(LiquidityLevel(Decimal("2.0"), Decimal("100")),),
+    )
+
+    mismatch = _assess(snapshot, requested_currency="GBP")
+    matching_casefold = _assess(snapshot, requested_currency="eur")
+
+    assert mismatch.status is LiquidityEvidenceStatus.CURRENCY_MISMATCH
+    assert mismatch.observed_qualifying_size == Decimal("0")
+    assert matching_casefold.status is LiquidityEvidenceStatus.SUFFICIENT_VISIBLE_CAPACITY
 
 
 def test_exact_max_age_boundary_is_usable_but_one_microsecond_older_is_stale() -> None:
@@ -228,6 +243,18 @@ def test_duplicate_prices_are_rejected_to_prevent_double_counting() -> None:
                 LiquidityLevel(Decimal("2.0"), Decimal("1")),
                 LiquidityLevel(Decimal("2.0"), Decimal("2")),
             )
+        )
+
+
+def test_snapshot_rejects_more_levels_than_declared_best_offers_depth() -> None:
+    with pytest.raises(ValueError, match="exceed declared"):
+        _snapshot(
+            projection=_projection(depth=2),
+            levels=(
+                LiquidityLevel(Decimal("2.0"), Decimal("1")),
+                LiquidityLevel(Decimal("2.1"), Decimal("1")),
+                LiquidityLevel(Decimal("2.2"), Decimal("1")),
+            ),
         )
 
 

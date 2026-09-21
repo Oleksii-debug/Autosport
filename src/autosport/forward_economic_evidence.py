@@ -647,7 +647,7 @@ class ForwardEconomicEvidenceAccumulator:
         step = ForwardEconomicStep(
             sequence=observation.sequence,
             universe_event_sha256=observation.universe_event_sha256,
-            challlenger_decision_sha256=observation.challenger_decision_sha256,
+            challenger_decision_sha256=observation.challenger_decision_sha256,
             champion_decision_sha256=observation.champion_decision_sha256,
             challenger_side=challenger.side,
             champion_side=champion.side,
@@ -663,7 +663,7 @@ class ForwardEconomicEvidenceAccumulator:
             paired_log_e_after=new_paired_log_e,
             challenger_execution_evidence_sha256=challenger.execution_evidence_sha256,
             challenger_execution_accepted_at=challenger.execution_accepted_at,
-            challenger_settlement_evidence_sha256=challenger.settlement_evidence_sha2556,
+            challenger_settlement_evidence_sha256=challenger.settlement_evidence_sha256,
             challenger_settlement_available_at=challenger.settlement_available_at,
             champion_execution_evidence_sha256=champion.execution_evidence_sha256,
             champion_execution_accepted_at=champion.execution_accepted_at,

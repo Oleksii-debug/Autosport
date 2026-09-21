@@ -146,6 +146,7 @@ def _protocol(
     strategy_class: StrategyClass = StrategyClass.ARBITRAGE,
     family: EvaluationContractFamily = EvaluationContractFamily.ARBITRAGE_EXECUTION,
     keys: tuple[str, ...] | None = None,
+    candidate_id: str = "strategy-1",
 ) -> FrozenBaselineProtocol:
     contract = canonical_evaluation_contract(family)
     scope = FrozenEvidenceScope(
@@ -161,8 +162,8 @@ def _protocol(
         protocol_id="extval:strategy-1:v1",
         frozen_at="2026-09-20T00:06:00Z",
         evidence_scope=scope,
-        candidate_id="strategy-1",
-        candidate_artifact_sha256=_hash("strategy-1-artifact"),
+        candidate_id=candidate_id,
+        candidate_artifact_sha256=_hash(candidate_id + "-artifact"),
         strategy_class=strategy_class,
         evaluation_contract_family=family,
         evaluation_semantics=contract["evaluation_semantics"],
@@ -253,6 +254,14 @@ def test_arbitrage_without_terminal_space_authority_is_insufficient():
 
     assert report.evidence_grade is StrategyEvidenceGrade.INSUFFICIENT
     assert "terminal_space_authority_incomplete" in report.external_evidence_gaps
+
+
+def test_protocol_candidate_cannot_rebind_frozen_strategy_identity():
+    ledger = _ledger(_row("candidate", strategy="strategy-1"))
+    protocol = _protocol(ledger, candidate_id="strategy-2")
+    candidate, baselines = _results(protocol)
+    with pytest.raises(StrategyExternalValidityError, match="candidate_id does not match"):
+        evaluate_strategy_external_validity(ledger, protocol, candidate, baselines)
 
 
 def test_predictive_metric_family_cannot_be_reused_for_execution_validity():

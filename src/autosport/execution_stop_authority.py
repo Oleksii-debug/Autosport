@@ -1036,22 +1036,46 @@ class ExecutionStopAuthority:
             )
             return self._state_from_record(recovered[-1])
 
-    def current(self) -> ExecutionAuthorityState:
-        with self._thread_lock, _exclusive_file_lock(self._lock_path):
-            records = self._read_journal_unlocked()
-            if not records:
-                self._ensure_monotonic_current_unlocked(
-                    records,
-                    adopt_if_missing=False,
-                )
-                raise ExecutionStopStateError(
-                    "STOP authority is missing; execution remains stopped"
-                )
+    def _current_unlocked(self) -> ExecutionAuthorityState:
+        """Return current durable STOP state while the canonical locks are held."""
+
+        records = self._read_journal_unlocked()
+        if not records:
             self._ensure_monotonic_current_unlocked(
                 records,
-                adopt_if_missing=True,
+                adopt_if_missing=False,
             )
-            return self._state_from_record(records[-1])
+            raise ExecutionStopStateError(
+                "STOP authority is missing; execution remains stopped"
+            )
+        self._ensure_monotonic_current_unlocked(
+            records,
+            adopt_if_missing=True,
+        )
+        return self._state_from_record(records[-1])
+
+    def current(self) -> ExecutionAuthorityState:
+        with self._thread_lock, _exclusive_file_lock(self._lock_path):
+            return self._current_unlocked()
+
+    @contextmanager
+    def admission_lease(self) -> Iterator[ExecutionAuthorityState]:
+        """Hold exact ARMED authority across one irreversible execution effect.
+
+        The existing thread and cross-process STOP locks remain held for the whole
+        context.  A concurrent STOP/ARM command therefore linearizes either before
+        admission or after the caller leaves this lease; it cannot commit between
+        the positive ARMED check and the protected provider-write boundary.
+        """
+
+        with self._thread_lock, _exclusive_file_lock(self._lock_path):
+            state = self._current_unlocked()
+            if state.mode is not ExecutionAuthorityMode.ARMED:
+                raise ExecutionStoppedError(
+                    f"execution STOP is active at revision {state.revision}: "
+                    f"{state.reason}"
+                )
+            yield state
 
     def initialize_stopped(
         self,

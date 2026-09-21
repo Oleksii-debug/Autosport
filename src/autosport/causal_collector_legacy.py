@@ -707,6 +707,20 @@ class CollectorDeltaStore(_JsonAtomicStore):
 
 
 class DesktopDeltaCheckpointStore(_JsonAtomicStore):
+    def __init__(self, path: str | Path) -> None:
+        # First-open publication is part of the same shared checkpoint authority.
+        # Without this double-check, two fresh processes can both observe "missing"
+        # and a delayed empty initializer can replace a peer's first durable ACK.
+        self.path = Path(path)
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        if self.path.exists():
+            self._read()
+            return
+        with self._workspace_lock():
+            if not self.path.exists():
+                self._write(self._empty())
+            self._read()
+
     def _empty(self) -> dict[str, Any]:
         return {"schema_version": 1, "acks": [], "streams": {}}
 

@@ -363,17 +363,29 @@ def evaluate_calibration_diagnostics(
         raise ValueError("confidence_level is too extreme for stable Wilson quantile")
     z_value = NormalDist().inv_cdf(quantile_probability)
 
+    bucket_outcomes: dict[int, list[int]] = {}
+    for record, fact in paired:
+        bucket_index = min(bins - 1, int(float(record.probability) * bins))
+        bucket_outcomes.setdefault(bucket_index, []).append(fact.outcome)
+    non_empty_indexes = tuple(sorted(bucket_outcomes))
+    if len(non_empty_indexes) != len(summary.calibration):
+        raise ValueError("canonical calibration bin membership mismatch")
+
     calibration_output: list[CalibrationBinUncertainty] = []
     ece_point = 0.0
     ece_lower = 0.0
     ece_upper = 0.0
-    for item in summary.calibration:
-        successes = sum(
-            fact.outcome
-            for record, fact in paired
-            if min(bins - 1, int(float(record.probability) * bins))
-            == int(round(item.lower * bins))
-        )
+    for bucket_index, item in zip(non_empty_indexes, summary.calibration, strict=True):
+        expected_lower = bucket_index / bins
+        expected_upper = (bucket_index + 1) / bins
+        outcomes_in_bin = bucket_outcomes[bucket_index]
+        if (
+            item.lower != expected_lower
+            or item.upper != expected_upper
+            or item.count != len(outcomes_in_bin)
+        ):
+            raise ValueError("canonical calibration bin semantics changed")
+        successes = sum(outcomes_in_bin)
         lower_rate, upper_rate = _wilson_interval(successes, item.count, z_value=z_value)
         absolute_gap = abs(item.mean_probability - item.observed_rate)
         absolute_gap_lower = _distance_to_interval(

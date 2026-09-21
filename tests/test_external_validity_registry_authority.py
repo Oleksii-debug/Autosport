@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import pytest
 
+from autosport.external_validity_baseline import PolicyEvaluation
 from autosport.external_validity_registry import (
     ExternalValidityRegistryError,
     build_registered_external_validity_report,
@@ -39,6 +40,52 @@ def test_wrapper_rejects_spoofed_registry_subclass_before_fake_get() -> None:
         )
 
     assert calls == []
+
+
+def test_exact_policy_evaluation_boundary_rejects_subclass(tmp_path) -> None:
+    protocol = _protocol()
+    candidate, baselines = _evaluations(protocol)
+    registry, candidate_bundle_id, baseline_ids = _seed_happy_registry(
+        tmp_path,
+        protocol,
+        candidate,
+        baselines,
+    )
+
+    class SpoofedPolicyEvaluation(PolicyEvaluation):
+        pass
+
+    spoofed = SpoofedPolicyEvaluation(
+        policy_id=candidate.policy_id,
+        policy_artifact_sha256=candidate.policy_artifact_sha256,
+        protocol_sha256=candidate.protocol_sha256,
+        evidence_scope_sha256=candidate.evidence_scope_sha256,
+        cohort_sha256=candidate.cohort_sha256,
+        primary_metric=candidate.primary_metric,
+        evaluated_at=candidate.evaluated_at,
+        metric_value=candidate.metric_value,
+        uncertainty_low=candidate.uncertainty_low,
+        uncertainty_high=candidate.uncertainty_high,
+        observed_count=candidate.observed_count,
+        scored_count=candidate.scored_count,
+        abstention_count=candidate.abstention_count,
+        total_cost=candidate.total_cost,
+        evaluation_bundle_sha256=candidate.evaluation_bundle_sha256,
+        baseline_definition_sha256=candidate.baseline_definition_sha256,
+    )
+
+    with pytest.raises(
+        ExternalValidityRegistryError,
+        match="candidate must be an exact PolicyEvaluation value",
+    ):
+        build_registered_external_validity_report(
+            registry,
+            protocol,
+            spoofed,
+            baselines,
+            candidate_evaluation_bundle_id=candidate_bundle_id,
+            baseline_evaluation_bundle_ids=baseline_ids,
+        )
 
 
 def test_exact_registry_instance_read_shadow_is_rejected_before_fake_read(

@@ -54,6 +54,7 @@ class BetfairLiveCapitalAtRiskReason(str, Enum):
     UNSUPPORTED_ACTION_SEMANTICS = "UNSUPPORTED_ACTION_SEMANTICS"
     DURABLE_STATE_CONFLICT = "DURABLE_STATE_CONFLICT"
     ECONOMIC_INCONSISTENCY = "ECONOMIC_INCONSISTENCY"
+    CLEARED_MATCHED_EXPOSURE_UNRESOLVED = "CLEARED_MATCHED_EXPOSURE_UNRESOLVED"
 
 
 _CURRENT_STATUSES = frozenset({"EXECUTABLE", "EXECUTION_COMPLETE"})
@@ -509,11 +510,17 @@ def resolve_betfair_live_capital_at_risk(
             row.bet_id,
         )
 
-    _, row = cleared[0]
+    cleared_status, row = cleared[0]
     if state not in {AttemptState.ACCEPTED, AttemptState.PARTIAL}:
         return finish(
             BetfairLiveCapitalAtRiskTruth.UNKNOWN,
             BetfairLiveCapitalAtRiskReason.DURABLE_STATE_CONFLICT,
+            bet_id=row.bet_id,
+        )
+    if cleared_status not in {"SETTLED", "VOIDED"}:
+        return finish(
+            BetfairLiveCapitalAtRiskTruth.UNKNOWN,
+            BetfairLiveCapitalAtRiskReason.CLEARED_MATCHED_EXPOSURE_UNRESOLVED,
             bet_id=row.bet_id,
         )
     if (

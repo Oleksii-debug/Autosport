@@ -568,6 +568,7 @@ class SQLiteMarketStore:
         self._connection_lock = RLock()
         self._mirror_restore_snapshot: tuple[int, tuple[MarketEvent, ...]] | None = None
         self._mirror_restore_error: str | None = None
+        self._mirror_restore_data_version: int | None = None
         self.connection = sqlite3.connect(self.path, check_same_thread=False)
         try:
             self.connection.execute("PRAGMA journal_mode=WAL")
@@ -577,6 +578,17 @@ class SQLiteMarketStore:
         except Exception:
             self.connection.close()
             raise
+
+    def _data_version(self) -> int:
+        row = self.connection.execute("PRAGMA data_version").fetchone()
+        if (
+            row is None
+            or len(row) != 1
+            or isinstance(row[0], bool)
+            or not isinstance(row[0], int)
+        ):
+            raise RuntimeError("SQLite data_version is unavailable")
+        return row[0]
 
     def _create_current_quotes(self) -> None:
         self.connection.execute(
@@ -683,6 +695,7 @@ class SQLiteMarketStore:
             restore_revision, restore_events, restore_error = (
                 _build_market_mirror_restore_snapshot(history_events)
             )
+            restore_data_version = self._data_version()
 
             projection_rows = self.connection.execute(
                 f"SELECT {_CURRENT_COLUMNS_SQL} FROM current_quotes"
@@ -727,6 +740,7 @@ class SQLiteMarketStore:
             self.connection.commit()
             self._mirror_restore_snapshot = (restore_revision, restore_events)
             self._mirror_restore_error = restore_error
+            self._mirror_restore_data_version = restore_data_version
 
     def _insert_one(self, event: MarketEvent) -> bool:
         payload = _validate_incoming_event(event)
@@ -788,6 +802,7 @@ class SQLiteMarketStore:
             )
         self._mirror_restore_snapshot = None
         self._mirror_restore_error = None
+        self._mirror_restore_data_version = None
         return True
 
     def append(self, event: MarketEvent) -> bool:
@@ -826,21 +841,36 @@ class SQLiteMarketStore:
         """Return validated latest mirror state plus exact replay-derived revision.
 
         Startup rebuild computes this from the authoritative history rows it already
-        decodes. A successful append invalidates the cache because an out-of-order
-        observation can change replay revision semantics; the next restore then
-        recomputes once from history and caches the new compact state.
+        decodes. Same-connection appends invalidate the cache directly. SQLite
+        data_version additionally detects commits from other connections/processes so
+        an old store object cannot publish stale restart state.
         """
         with self._connection_lock:
-            if self._mirror_restore_snapshot is None and self._mirror_restore_error is None:
-                rows = self.connection.execute(
-                    f"SELECT {_HISTORY_COLUMNS_SQL} FROM market_events"
-                ).fetchall()
-                history_events = [_event_from_history_row(row) for row in rows]
-                revision, events, error = _build_market_mirror_restore_snapshot(
-                    history_events
+            current_data_version = self._data_version()
+            cache_is_current = (
+                self._mirror_restore_data_version == current_data_version
+                and (
+                    self._mirror_restore_snapshot is not None
+                    or self._mirror_restore_error is not None
                 )
-                self._mirror_restore_snapshot = (revision, events)
-                self._mirror_restore_error = error
+            )
+
+            if not cache_is_current:
+                while True:
+                    before_data_version = self._data_version()
+                    rows = self.connection.execute(
+                        f"SELECT {_HISTORY_COLUMNS_SQL} FROM market_events"
+                    ).fetchall()
+                    history_events = [_event_from_history_row(row) for row in rows]
+                    revision, events, error = _build_market_mirror_restore_snapshot(
+                        history_events
+                    )
+                    after_data_version = self._data_version()
+                    if before_data_version == after_data_version:
+                        self._mirror_restore_snapshot = (revision, events)
+                        self._mirror_restore_error = error
+                        self._mirror_restore_data_version = after_data_version
+                        break
 
             if self._mirror_restore_error is not None:
                 raise ValueError(self._mirror_restore_error)

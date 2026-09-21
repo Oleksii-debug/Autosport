@@ -577,6 +577,60 @@ class MarketMirrorTests(unittest.TestCase):
                 store.connection.set_trace_callback(None)
                 store.close()
 
+    def test_from_store_detects_other_connection_append_before_reusing_cache(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            db_path = Path(directory) / "market.db"
+            primary = SQLiteMarketStore(db_path)
+            secondary: SQLiteMarketStore | None = None
+            try:
+                primary.append(self.event(sequence=1, odds="2.00"))
+                first = MarketMirror.from_store(primary)
+                self.assertEqual(first.view().revision, 1)
+
+                secondary = SQLiteMarketStore(db_path)
+                secondary.append(
+                    self.event(
+                        sequence=2,
+                        odds="2.20",
+                        observed_ts="2026-09-16T19:00:01+00:00",
+                    )
+                )
+
+                statements: list[str] = []
+                primary.connection.set_trace_callback(statements.append)
+                refreshed = MarketMirror.from_store(primary)
+                primary.connection.set_trace_callback(None)
+
+                self.assertEqual(refreshed.view().revision, 2)
+                self.assertEqual(refreshed.snapshot()[0].sequence, 2)
+                self.assertEqual(refreshed.snapshot()[0].decimal_odds, Decimal("2.20"))
+                self.assertEqual(
+                    len(
+                        [
+                            statement
+                            for statement in statements
+                            if "FROM market_events" in statement
+                        ]
+                    ),
+                    1,
+                    statements,
+                )
+
+                statements.clear()
+                primary.connection.set_trace_callback(statements.append)
+                cached = MarketMirror.from_store(primary)
+                primary.connection.set_trace_callback(None)
+                self.assertEqual(cached.view().revision, 2)
+                self.assertFalse(
+                    any("FROM market_events" in statement for statement in statements),
+                    statements,
+                )
+            finally:
+                primary.connection.set_trace_callback(None)
+                if secondary is not None:
+                    secondary.close()
+                primary.close()
+
     def test_from_store_preserves_historical_revision_for_out_of_order_appends(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             store = SQLiteMarketStore(Path(directory) / "market.db")

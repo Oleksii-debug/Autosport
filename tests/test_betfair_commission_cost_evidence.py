@@ -7,6 +7,7 @@ from decimal import Decimal
 import pytest
 
 import autosport.betfair_commission_cost_evidence as bridge
+import autosport.campaign_cost_evidence as campaign_costs
 from autosport.betfair_account_readonly import (
     ADAPTER_ID,
     ADAPTER_VERSION,
@@ -156,6 +157,11 @@ def _authorities(
         FinalizedCampaignAuthority,
         "denomination_binding",
         lambda self: None,
+    )
+    monkeypatch.setattr(
+        campaign_costs,
+        "_PRODUCT_DENOMINATION_READER",
+        lambda value: None,
     )
     monkeypatch.setattr(
         bridge._source_origin,

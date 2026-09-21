@@ -295,3 +295,47 @@ def test_result_identity_is_deterministic_across_required_capability_order() -> 
     )
 
     assert one.result_id == two.result_id
+
+
+def test_stale_scope_evidence_cannot_be_laundered_by_fresh_snapshot_timestamp() -> None:
+    snapshot = _snapshot(BookmakerCapability.BALANCE_READ)
+    stale_scope = ProviderReadScopeEvidence(
+        capability=BookmakerCapability.BALANCE_READ,
+        request_scope_sha256=_SCOPE_HASH,
+        response_sha256=_RESPONSE_HASH,
+        observed_at="2026-09-21T17:59:00+00:00",
+    )
+
+    health = classify_provider_readback_health(
+        required_capabilities=(BookmakerCapability.BALANCE_READ,),
+        evaluated_at="2026-09-21T18:00:05+00:00",
+        freshness_limit_seconds=30,
+        snapshot=snapshot,
+        successful_scopes=(stale_scope,),
+    )
+
+    assert health.state is ProviderReadbackHealthState.STALE_LAST_KNOWN
+    assert health.can_authorize_current_state is False
+    assert health.last_known_snapshot_sha256 == canonical_snapshot_sha256(snapshot)
+
+
+def test_future_scope_timestamp_is_rejected_fail_closed() -> None:
+    snapshot = _snapshot(BookmakerCapability.BALANCE_READ)
+    future_scope = ProviderReadScopeEvidence(
+        capability=BookmakerCapability.BALANCE_READ,
+        request_scope_sha256=_SCOPE_HASH,
+        response_sha256=_RESPONSE_HASH,
+        observed_at="2026-09-21T18:00:06+00:00",
+    )
+
+    with pytest.raises(
+        ProviderReadbackHealthError,
+        match="scope observation cannot be after health evaluation",
+    ):
+        classify_provider_readback_health(
+            required_capabilities=(BookmakerCapability.BALANCE_READ,),
+            evaluated_at="2026-09-21T18:00:05+00:00",
+            freshness_limit_seconds=30,
+            snapshot=snapshot,
+            successful_scopes=(future_scope,),
+        )

@@ -8,6 +8,15 @@ import hashlib
 import json
 from typing import Iterable, Sequence
 
+from ..betfair_account_readonly import (
+    ADAPTER_ID as BETFAIR_ADAPTER_ID,
+    ADAPTER_VERSION as BETFAIR_ADAPTER_VERSION,
+    BetfairMarketBookDepthObservation,
+    assert_market_book_depth_authoritative,
+)
+from ..real_execution_ledger import RealExecutionLedger
+from ..supervised_execution import BoundSupervisedExecutionPlan
+
 
 class FeasibilityState(str, Enum):
     UNKNOWN_UNPROVEN = "UNKNOWN_UNPROVEN"
@@ -130,7 +139,7 @@ class MarketBookSnapshot:
     received_at: datetime
     sequence: int
     has_ordering_gap: bool
-    available_to_lay: tuple[PriceSize, ...]
+    available_to_back: tuple[PriceSize, ...]
 
     def __post_init__(self) -> None:
         _require_nonempty(
@@ -176,6 +185,7 @@ class ExecutionFeasibilitySnapshot:
     decision_at: datetime
     source_mode: SourceMode
     projection_kind: ProjectionKind
+    liquidity_overlap_key: str
 
     @property
     def sufficient(self) -> bool:
@@ -188,6 +198,25 @@ def assess_execution_feasibility(
     limits: ProviderLimitAuthority,
     *,
     max_snapshot_age: timedelta,
+) -> ExecutionFeasibilitySnapshot:
+    """Validate untrusted/caller-supplied assertions without issuing positive truth."""
+
+    return _assess_execution_feasibility(
+        request,
+        snapshot,
+        limits,
+        max_snapshot_age=max_snapshot_age,
+        product_owned=False,
+    )
+
+
+def _assess_execution_feasibility(
+    request: ExecutionFeasibilityRequest,
+    snapshot: MarketBookSnapshot,
+    limits: ProviderLimitAuthority,
+    *,
+    max_snapshot_age: timedelta,
+    product_owned: bool,
 ) -> ExecutionFeasibilitySnapshot:
     """Validate caller assertions and derive conservative displayed depth.
 
@@ -228,7 +257,7 @@ def assess_execution_feasibility(
     if snapshot.projection_kind is ProjectionKind.EX_BEST_OFFERS:
         _append_if(reasons, snapshot.projection_depth is None, "BEST_OFFERS_DEPTH_UNBOUND")
         if snapshot.projection_depth is not None:
-            _append_if(reasons, len(snapshot.available_to_lay) > snapshot.projection_depth, "BEST_OFFERS_DEPTH_INCONSISTENT")
+            _append_if(reasons, len(snapshot.available_to_back) > snapshot.projection_depth, "BEST_OFFERS_DEPTH_INCONSISTENT")
 
     _append_if(reasons, limits.provider_id != request.provider_id, "LIMIT_PROVIDER_MISMATCH")
     _append_if(reasons, limits.account_id != request.account_id, "LIMIT_ACCOUNT_MISMATCH")
@@ -243,17 +272,16 @@ def assess_execution_feasibility(
     if limits.max_price is not None:
         _append_if(reasons, request.limit_price > limits.max_price, "PRICE_ABOVE_PROVIDER_MAXIMUM")
 
-    # Public request/snapshot/limit DTOs are not product-owned authority. The
-    # canonical Market Mirror / provider-depth receipt / account-limit resolver
-    # has not yet been wired into this branch, so the public assertion path must
-    # remain fail-closed even when all caller-provided values are self-consistent.
-    reasons.append("PRODUCT_OWNED_EVIDENCE_UNRESOLVED")
+    # Public DTOs are assertion-only. Only the product-owned resolver below can
+    # cross this seam after validating a provider-issued receipt and durable plan.
+    if not product_owned:
+        reasons.append("PRODUCT_OWNED_EVIDENCE_UNRESOLVED")
 
-    # A BACK order executes against the opposing available-to-lay book. The
-    # backer's limit price is a minimum acceptable price, so prices at or above
-    # the limit are executable from the snapshot's displayed opposing depth.
+    # Betfair names availableToBack from the customer's action perspective.
+    # A standard BACK LIMIT can consume displayed available-to-back offers at the
+    # requested price or better. This is still snapshot evidence, never a fill.
     displayed_depth = sum(
-        (quote.size for quote in snapshot.available_to_lay if quote.price >= request.limit_price),
+        (quote.size for quote in snapshot.available_to_back if quote.price >= request.limit_price),
         Decimal("0"),
     )
 
@@ -265,6 +293,7 @@ def assess_execution_feasibility(
     else:
         state = FeasibilityState.SNAPSHOT_DEPTH_SUFFICIENT_BUT_RACY
 
+    liquidity_overlap_key = _liquidity_overlap_key(snapshot)
     evidence_digest = _evidence_digest(
         request=request,
         snapshot=snapshot,
@@ -272,6 +301,7 @@ def assess_execution_feasibility(
         displayed_depth=displayed_depth,
         state=state,
         reasons=reasons,
+        liquidity_overlap_key=liquidity_overlap_key,
     )
     return ExecutionFeasibilitySnapshot(
         state=state,
@@ -294,6 +324,156 @@ def assess_execution_feasibility(
         decision_at=request.decision_at,
         source_mode=snapshot.source_mode,
         projection_kind=snapshot.projection_kind,
+        liquidity_overlap_key=liquidity_overlap_key,
+    )
+
+
+def assess_authoritative_betfair_execution_feasibility(
+    ledger: RealExecutionLedger,
+    bound: BoundSupervisedExecutionPlan,
+    receipt: BetfairMarketBookDepthObservation,
+    *,
+    action_id: str,
+    decision_at: datetime,
+    max_snapshot_age: timedelta,
+) -> ExecutionFeasibilitySnapshot:
+    """Issue positive feasibility only from provider IO + durable reserved plan.
+
+    The receipt must have been minted by the authenticated Betfair read-only
+    client. The exact execution plan must already exist in the canonical real
+    execution ledger with the same fingerprint. The result proves only displayed
+    depth at one point in time and is capped at SNAPSHOT_DEPTH_SUFFICIENT_BUT_RACY.
+    """
+
+    if not isinstance(ledger, RealExecutionLedger):
+        raise TypeError("ledger must be RealExecutionLedger")
+    if not isinstance(bound, BoundSupervisedExecutionPlan):
+        raise TypeError("bound must be BoundSupervisedExecutionPlan")
+    if not isinstance(receipt, BetfairMarketBookDepthObservation):
+        raise TypeError("receipt must be BetfairMarketBookDepthObservation")
+    _require_aware(decision_at, "decision_at")
+    assert_market_book_depth_authoritative(receipt)
+    bound.verify_binding()
+    try:
+        saga = ledger.saga(bound.execution_plan.plan_id)
+    except KeyError as exc:
+        raise ValueError(
+            "product-owned feasibility requires a durably reserved execution plan"
+        ) from exc
+    if saga.plan_fingerprint != bound.execution_plan.fingerprint:
+        raise ValueError("durable execution-plan fingerprint mismatch")
+
+    action = bound.action_for(action_id)
+    try:
+        provider_selection_id = int(action.selection_id)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("Betfair selection_id must be canonical positive integer text") from exc
+    if provider_selection_id <= 0 or str(provider_selection_id) != action.selection_id:
+        raise ValueError("Betfair selection_id must be canonical positive integer text")
+
+    action_expiry = datetime.fromisoformat(
+        action.expires_at.replace("Z", "+00:00")
+    ).astimezone(timezone.utc)
+    decision_utc = decision_at.astimezone(timezone.utc)
+    if decision_utc >= action_expiry:
+        raise ValueError("execution action expired before feasibility decision")
+
+    binding = bound.profile_for(action.bookmaker_id, action.account_id)
+    adapter_scope_matches = (
+        binding.adapter_id == BETFAIR_ADAPTER_ID
+        and binding.adapter_version == BETFAIR_ADAPTER_VERSION
+    )
+    action_digest = _canonical_digest(action.to_dict())
+    provider_observed_at = _provider_timestamp(receipt.evidence.observed_at)
+    request = ExecutionFeasibilityRequest(
+        opportunity_id=bound.intent_id,
+        opportunity_digest=bound.intent_sha256,
+        plan_id=bound.execution_plan.plan_id,
+        plan_digest=bound.execution_plan.fingerprint,
+        action_id=action.action_id,
+        action_digest=action_digest,
+        provider_id=action.bookmaker_id,
+        account_id=action.account_id,
+        market_id=action.market_id,
+        selection_id=action.selection_id,
+        requested_stake=action.requested_stake,
+        limit_price=action.requested_odds,
+        decision_at=decision_at,
+        expected_market_version=receipt.market_version,
+        expected_inplay=receipt.inplay,
+        expected_bet_delay_seconds=receipt.bet_delay_seconds,
+        side=action.side,
+        order_type="LIMIT",
+    )
+    snapshot_digest = _canonical_digest(
+        {
+            "schema": "autosport.betfair.market-book-authority.v1",
+            "request_scope_sha256": receipt.request_scope_sha256,
+            "source_payload_sha256": receipt.evidence.source_payload_sha256,
+            "provider_observed_at": receipt.evidence.observed_at,
+        }
+    )
+    snapshot = MarketBookSnapshot(
+        snapshot_id=(
+            "betfair-market-book:"
+            + receipt.request_scope_sha256
+            + ":"
+            + receipt.evidence.source_payload_sha256
+        ),
+        snapshot_digest=snapshot_digest,
+        provider_id=receipt.venue_id,
+        account_id=receipt.account_id,
+        market_id=receipt.market_id,
+        selection_id=str(receipt.selection_id),
+        source_mode=(
+            SourceMode.DELAYED
+            if receipt.is_market_data_delayed
+            else SourceMode.LIVE
+        ),
+        projection_kind=ProjectionKind.EX_ALL_OFFERS,
+        projection_depth=None,
+        rollup_model=None,
+        virtualise=receipt.virtualise,
+        is_truncated=False,
+        status=receipt.status,
+        market_version=receipt.market_version,
+        inplay=receipt.inplay,
+        bet_delay_seconds=receipt.bet_delay_seconds,
+        observed_at=provider_observed_at,
+        received_at=provider_observed_at,
+        sequence=receipt.market_version,
+        has_ordering_gap=False,
+        available_to_back=tuple(
+            PriceSize(item.price, item.size)
+            for item in receipt.available_to_back
+        ),
+    )
+    limit_evidence = _canonical_digest(
+        {
+            "schema": "autosport.execution-feasibility-plan-profile-binding.v1",
+            "plan_id": bound.execution_plan.plan_id,
+            "plan_fingerprint": bound.execution_plan.fingerprint,
+            "venue_id": binding.venue_id,
+            "account_id": binding.account_id,
+            "adapter_id": binding.adapter_id,
+            "adapter_version": binding.adapter_version,
+            "profile_version": binding.profile_version,
+            "profile_sha256": binding.profile_sha256,
+        }
+    )
+    limits = ProviderLimitAuthority(
+        provider_id=action.bookmaker_id,
+        account_id=action.account_id,
+        market_id=action.market_id,
+        evidence_digest=limit_evidence,
+        permitted=adapter_scope_matches,
+    )
+    return _assess_execution_feasibility(
+        request,
+        snapshot,
+        limits,
+        max_snapshot_age=max_snapshot_age,
+        product_owned=True,
     )
 
 
@@ -326,10 +506,53 @@ def _ladder_payload(quotes: Iterable[PriceSize]) -> list[dict[str, str | None]]:
     return [{"price": _decimal(q.price), "size": _decimal(q.size)} for q in quotes]
 
 
+
+
+def _canonical_digest(value: object) -> str:
+    encoded = json.dumps(
+        value,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
+        allow_nan=False,
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _provider_timestamp(value: str) -> datetime:
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except (AttributeError, ValueError) as exc:
+        raise ValueError("provider observed_at must be ISO-8601") from exc
+    _require_aware(parsed, "provider observed_at")
+    return parsed
+
+
+def _liquidity_overlap_key(snapshot: MarketBookSnapshot) -> str:
+    return _canonical_digest(
+        {
+            "schema": "autosport.execution-feasibility-liquidity-overlap.v1",
+            "provider_id": snapshot.provider_id,
+            "account_id": snapshot.account_id,
+            "market_id": snapshot.market_id,
+            "selection_id": snapshot.selection_id,
+            "snapshot_digest": snapshot.snapshot_digest,
+            "market_version": snapshot.market_version,
+            "projection_kind": snapshot.projection_kind.value,
+            "projection_depth": snapshot.projection_depth,
+            "rollup_model": snapshot.rollup_model,
+            "virtualise": snapshot.virtualise,
+            "side": "BACK",
+            "ladder": _ladder_payload(snapshot.available_to_back),
+        }
+    )
+
+
 def _evidence_digest(
     *, request: ExecutionFeasibilityRequest, snapshot: MarketBookSnapshot,
     limits: ProviderLimitAuthority, displayed_depth: Decimal,
     state: FeasibilityState, reasons: Sequence[str],
+    liquidity_overlap_key: str,
 ) -> str:
     payload = {
         "schema": "autosport.execution-feasibility-snapshot.v1",
@@ -379,7 +602,7 @@ def _evidence_digest(
             "received_at": _timestamp(snapshot.received_at),
             "sequence": snapshot.sequence,
             "has_ordering_gap": snapshot.has_ordering_gap,
-            "available_to_lay": _ladder_payload(snapshot.available_to_lay),
+            "available_to_back": _ladder_payload(snapshot.available_to_back),
         },
         "limits": {
             "provider_id": limits.provider_id,
@@ -396,6 +619,7 @@ def _evidence_digest(
             "state": state.value,
             "displayed_acceptable_depth": _decimal(displayed_depth),
             "reasons": list(reasons),
+            "liquidity_overlap_key": liquidity_overlap_key,
         },
     }
     encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode("utf-8")

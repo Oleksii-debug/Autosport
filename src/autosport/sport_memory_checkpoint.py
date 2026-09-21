@@ -420,6 +420,31 @@ def _verify_runtime_snapshot_bindings(
 class BoundSportMemoryRuntime(SportMemoryRuntime):
     """Product-owned runtime that refreshes canonical source authority per write."""
 
+    def __setattr__(self, name: str, value: object) -> None:
+        # Positive authority is dispatched through this exact concrete runtime.
+        # Never allow an instance attribute to shadow a class/inherited member:
+        # doing so could replace verification/write methods while preserving the
+        # exact BoundSportMemoryRuntime type checked by product binders.
+        for authority_class in type(self).__mro__:
+            if name in authority_class.__dict__:
+                raise SportMemoryCheckpointError(
+                    f"bound sport-memory runtime forbids instance authority shadow: {name}"
+                )
+        object.__setattr__(self, name, value)
+
+    def __getattribute__(self, name: str):
+        # Also fail closed on direct __dict__ injection, which bypasses
+        # __setattr__. Special-method dispatch resolves this guard on the class,
+        # so an instance shadow cannot bypass the check itself.
+        instance_state = object.__getattribute__(self, "__dict__")
+        if name in instance_state:
+            for authority_class in type(self).__mro__:
+                if name in authority_class.__dict__:
+                    raise SportMemoryCheckpointError(
+                        f"bound sport-memory runtime detected instance authority shadow: {name}"
+                    )
+        return object.__getattribute__(self, name)
+
     def __init__(
         self,
         path: Path,
@@ -455,6 +480,22 @@ class BoundSportMemoryRuntime(SportMemoryRuntime):
             )
         self.opponent_authority = verified_opponent
         return verified_opponent
+
+    def matchup_as_of(self, *args, **kwargs):
+        """Read decision-time memory only under the current canonical roots."""
+        identity_path = Path(self._bound_identity_selector.path)
+        opponent_path = Path(self._bound_opponent_selector.path)
+        first_path, second_path = sorted(
+            (identity_path, opponent_path), key=lambda path: str(_resolved(path))
+        )
+        with durable_path_lock(first_path):
+            with durable_path_lock(second_path):
+                verified_opponent = self._refresh_bound_authority()
+                _verify_runtime_snapshot_bindings(self, verified_opponent)
+                evidence = super().matchup_as_of(*args, **kwargs)
+                verified_opponent = self._refresh_bound_authority()
+                _verify_runtime_snapshot_bindings(self, verified_opponent)
+                return evidence
 
     def materialize(self, **kwargs):
         # Identity and opponent source evidence jointly define the authority

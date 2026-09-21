@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Callable, Sequence
 
 from .collector_service import _load_source_factory
+from .localization_product_cli import product_cli_text
 from .product_runtime import AutonomousProductRuntime, build_autonomous_product_runtime
 
 
@@ -268,28 +269,74 @@ def run_product_command(
         return 3
 
 
+class _UkrainianArgumentParser(argparse.ArgumentParser):
+    """Argparse formatter with Ukrainian public presentation text."""
+
+    def format_usage(self) -> str:
+        return super().format_usage().replace(
+            "usage: ", product_cli_text("product.cli.usage_prefix"), 1
+        )
+
+    def format_help(self) -> str:
+        rendered = super().format_help().replace(
+            "usage: ", product_cli_text("product.cli.usage_prefix"), 1
+        )
+        rendered = rendered.replace(
+            "options:\n", f"{product_cli_text('product.cli.options_heading')}\n", 1
+        )
+        rendered = rendered.replace(
+            "optional arguments:\n",
+            f"{product_cli_text('product.cli.options_heading')}\n",
+            1,
+        )
+        return rendered
+
+
 def _parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(
+    parser = _UkrainianArgumentParser(
         prog="autosport-product",
-        description=(
-            "Run the canonical durable Autosport PAPER product. Provider credentials "
-            "remain external to Autosport and are never accepted as CLI arguments."
-        ),
+        description=product_cli_text("product.cli.description"),
+        add_help=False,
     )
-    parser.add_argument("--workspace", type=Path, default=Path(".autosport-product"))
+    parser.add_argument(
+        "-h",
+        "--help",
+        action="help",
+        help=product_cli_text("product.cli.help"),
+    )
+    parser.add_argument(
+        "--workspace",
+        type=Path,
+        default=Path(".autosport-product"),
+        metavar="ШЛЯХ",
+        help=product_cli_text("product.cli.workspace.help"),
+    )
     parser.add_argument(
         "--source-factory",
         required=True,
-        help="external product source factory in module:function form",
+        metavar="МОДУЛЬ:ФУНКЦІЯ",
+        help=product_cli_text("product.cli.source_factory.help"),
     )
-    parser.add_argument("--bankroll", default="10000")
+    parser.add_argument(
+        "--bankroll",
+        default="10000",
+        metavar="СУМА",
+        help=product_cli_text("product.cli.bankroll.help"),
+    )
     parser.add_argument(
         "--max-cycles",
         type=int,
         default=None,
-        help="optional bounded cycle count for qualification/supervised runs",
+        metavar="N",
+        help=product_cli_text("product.cli.max_cycles.help"),
     )
-    parser.add_argument("--poll-seconds", type=float, default=30.0)
+    parser.add_argument(
+        "--poll-seconds",
+        type=float,
+        default=30.0,
+        metavar="СЕКУНДИ",
+        help=product_cli_text("product.cli.poll_seconds.help"),
+    )
     return parser
 
 

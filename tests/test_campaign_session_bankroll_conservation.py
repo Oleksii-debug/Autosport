@@ -1,12 +1,16 @@
 from __future__ import annotations
 
+import hashlib
+import json
 import unittest
 from decimal import Decimal, localcontext
 
 from autosport.campaign_evidence import (
     CampaignError,
+    CampaignIntegrityError,
     CampaignOutcome,
     SessionEvidence,
+    _session_from_payload,
 )
 
 
@@ -83,6 +87,27 @@ class CampaignSessionBankrollConservationTests(unittest.TestCase):
     def test_missing_net_profit_is_rejected(self) -> None:
         with self.assertRaisesRegex(CampaignError, "net_profit is required"):
             self._session(net_profit=None)
+
+    def test_rehashed_inconsistent_durable_payload_fails_closed(self) -> None:
+        raw = self._session().to_payload()
+        raw["ending_bankroll"] = "1059"
+        payload_without_evidence_sha = dict(raw)
+        payload_without_evidence_sha.pop("evidence_sha256")
+        raw["evidence_sha256"] = hashlib.sha256(
+            json.dumps(
+                payload_without_evidence_sha,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+                allow_nan=False,
+            ).encode("utf-8")
+        ).hexdigest()
+
+        with self.assertRaisesRegex(
+            CampaignIntegrityError,
+            "invalid session evidence payload",
+        ):
+            _session_from_payload(raw)
 
     def test_conservation_is_independent_of_ambient_decimal_precision(self) -> None:
         with localcontext() as context:

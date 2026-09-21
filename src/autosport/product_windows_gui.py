@@ -160,6 +160,14 @@ class ProductWindowsAutosportApp(WindowsAutosportApp):
             self.bell()
             return
 
+        workspace = Path(self.workspace)
+        if workspace in self._recovery_required_workspaces:
+            message = product_text("ui.product_runtime.status.recovery_required")
+            self.product_status.set(message)
+            self.status.set(message)
+            self.bell()
+            return
+
         source_factory = os.environ.get(_PRODUCT_SOURCE_FACTORY_ENV)
         if source_factory is None or not source_factory:
             message = product_text("ui.product_runtime.status.configuration_missing")
@@ -174,12 +182,12 @@ class ProductWindowsAutosportApp(WindowsAutosportApp):
             self.bell()
             return
 
-        self._active_workspace = Path(self.workspace)
+        self._active_workspace = workspace
         self._recovery_view = None
         if not self._hide_uncertain_economic_state(
             product_text("ui.product_runtime.status.starting")
         ):
-            self._block_workspace_for_recovery(Path(self.workspace))
+            self._block_workspace_for_recovery(workspace)
             message = product_text("ui.product_runtime.status.session_close_failed")
             self.product_status.set(message)
             self.status.set(message)
@@ -188,7 +196,7 @@ class ProductWindowsAutosportApp(WindowsAutosportApp):
 
         try:
             started = self.product_worker.start(
-                workspace=self.workspace,
+                workspace=workspace,
                 source_factory=source_factory,
                 initial_bankroll="10000",
                 poll_seconds=_PRODUCT_POLL_SECONDS,

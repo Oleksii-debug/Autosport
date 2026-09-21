@@ -6,6 +6,12 @@ provider authority. This module re-resolves the exact authenticated provider
 observation and row id, then issues a closure-gated witness only when supplied
 evidence is semantically identical to the product resolver result.
 
+The upstream provider observation is also descriptive data unless it was issued by
+the canonical provider-read authority.  Positive row issuance therefore validates
+the exact source object against that closure-private issuance relation before any
+row re-resolution.  Caller-constructed checksum-valid observation DTOs cannot mint
+a registered row authority.
+
 Possession, exact type and public fields of the witness are not sufficient
 authority either. Supported consumers must pass it through the closure-private
 issuance validator below; this prevents ``object.__new__``/``object.__setattr__``
@@ -13,13 +19,17 @@ from manufacturing or mutating a bearer capability from public fields.
 
 The witness carries no cost class, allocation, known-zero, applicability or
 real-money authority. It proves only that descriptive row evidence was re-derived
-from the supplied canonical provider observation.
+from one product-issued provider observation.
 """
 from __future__ import annotations
 
 from dataclasses import dataclass
 
 from .betfair_provider_billing_inputs import BetfairProviderBillingInputsObservation
+from .betfair_provider_billing_inputs_authority import (
+    BetfairProviderBillingInputsAuthorityError,
+    validate_betfair_provider_billing_inputs_observation,
+)
 from .provider_billing_row_attribution import (
     ProviderBillingAttributionError,
     ProviderBillingRowAttributionEvidence,
@@ -35,6 +45,8 @@ def _build_authority_capability():
     source_cls = BetfairProviderBillingInputsObservation
     evidence_cls = ProviderBillingRowAttributionEvidence
     resolve_fn = resolve_provider_billing_row_attribution
+    validate_source_fn = validate_betfair_provider_billing_inputs_observation
+    source_authority_error_cls = BetfairProviderBillingInputsAuthorityError
     error_cls = ProviderBillingRowAuthorityError
     issuer = object()
     set_attr = object.__setattr__
@@ -118,12 +130,20 @@ def _build_authority_capability():
             )
         return authority
 
+    def require_issued_source(source: BetfairProviderBillingInputsObservation) -> None:
+        try:
+            validate_source_fn(source)
+        except source_authority_error_cls as exc:
+            raise error_cls(
+                "provider billing source must be issued by canonical provider read"
+            ) from exc
+
     def verify(
         source: BetfairProviderBillingInputsObservation,
         evidence: ProviderBillingRowAttributionEvidence,
         row_ref_id: str,
     ) -> VerifiedProviderBillingRowAuthority:
-        """Re-resolve source+row and register an exact closure-private witness."""
+        """Re-resolve one product-issued source row and register an exact witness."""
 
         if type(source) is not source_cls:
             raise TypeError(
@@ -134,6 +154,7 @@ def _build_authority_capability():
                 "evidence must be exact ProviderBillingRowAttributionEvidence"
             )
 
+        require_issued_source(source)
         expected = resolve_fn(source, row_ref_id)
         if evidence_projection(evidence) != evidence_projection(expected):
             raise error_cls(
@@ -159,8 +180,13 @@ def _build_authority_capability():
         ProviderBillingRowAttributionEvidence,
         VerifiedProviderBillingRowAuthority,
     ]:
-        """Resolve descriptive evidence and its registered verification witness."""
+        """Resolve descriptive evidence from one product-issued source observation."""
 
+        if type(source) is not source_cls:
+            raise TypeError(
+                "source must be exact BetfairProviderBillingInputsObservation"
+            )
+        require_issued_source(source)
         evidence = resolve_fn(source, row_ref_id)
         authority = verify(source, evidence, row_ref_id)
         return evidence, authority

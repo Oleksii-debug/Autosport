@@ -27,6 +27,11 @@ from .integrity import atomic_write_json
 from .json_integrity import strict_json_loads
 from .live_observation import poll_open_market_store_once
 from .market_mirror import MarketMirror, MirrorSnapshot
+from .market_mirror_health import (
+    HealthGatedMirrorDecisionIndex,
+    HealthGatedMirrorSnapshot,
+    ProviderHealthReplayBoundary,
+)
 from .market_mirror_runtime import (
     BoundedMirrorInvalidationBuffer,
     FocusedMirrorDependency,
@@ -142,8 +147,24 @@ _PHASE_PENDING = "pending"
 _PHASE_APPEND_PENDING = "append_pending"
 _PHASE_COMMITTED = "committed"
 _GATE_NORMAL = "normal"
+_GATE_PROVIDER_HEALTH = "provider_health"
 _GATE_PROVIDER_GAP = "provider_gap"
 _SHA256_HEX = frozenset("0123456789abcdef")
+_HEALTH_EVIDENCE_SCHEMA = "autosport.live_decision_provider_health"
+_HEALTH_EVIDENCE_VERSION = 1
+_HEALTH_EVIDENCE_KEYS = frozenset(
+    {
+        "schema",
+        "schema_version",
+        "loop_id",
+        "decision_ts",
+        "market_state_sha256",
+        "boundaries",
+    }
+)
+_HEALTH_BOUNDARY_KEYS = frozenset(
+    {"source_id", "recorded_at", "transition_order"}
+)
 _CONTROL_SCHEMA = "autosport.live_decision_control"
 _CONTROL_VERSION = 1
 _CONTROL_KEYS = frozenset({"schema", "schema_version", "loop_id", "state"})
@@ -201,6 +222,89 @@ def _canonical_json_sha256(payload: object) -> str:
         allow_nan=False,
     ).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()
+
+
+def _canonical_health_boundaries(
+    value: object,
+) -> tuple[ProviderHealthReplayBoundary, ...]:
+    if type(value) is not tuple:
+        raise LiveDecisionProgressError(
+            "provider health boundaries must be a tuple"
+        )
+    boundaries: list[ProviderHealthReplayBoundary] = []
+    previous_source_id: str | None = None
+    for boundary in value:
+        if type(boundary) is not ProviderHealthReplayBoundary:
+            raise LiveDecisionProgressError(
+                "provider health boundary has invalid type"
+            )
+        source_id = _canonical_text(
+            "provider health boundary source_id",
+            boundary.source_id,
+        )
+        if previous_source_id is not None and source_id <= previous_source_id:
+            raise LiveDecisionProgressError(
+                "provider health boundaries must be sorted and unique by source_id"
+            )
+        previous_source_id = source_id
+        order = boundary.transition_order
+        if isinstance(order, bool) or not isinstance(order, int) or order < 0:
+            raise LiveDecisionProgressError(
+                "provider health transition_order must be a non-negative integer"
+            )
+        if order == 0:
+            if boundary.recorded_at is not None:
+                raise LiveDecisionProgressError(
+                    "provider health order zero cannot claim recorded_at"
+                )
+        else:
+            if boundary.recorded_at is None:
+                raise LiveDecisionProgressError(
+                    "provider health durable transition requires recorded_at"
+                )
+            _canonical_timestamp(
+                "provider health boundary recorded_at",
+                boundary.recorded_at,
+            )
+        boundaries.append(boundary)
+    return tuple(boundaries)
+
+
+def _health_boundaries_payload(
+    boundaries: tuple[ProviderHealthReplayBoundary, ...],
+) -> list[dict[str, object]]:
+    canonical = _canonical_health_boundaries(boundaries)
+    return [
+        {
+            "source_id": boundary.source_id,
+            "recorded_at": boundary.recorded_at,
+            "transition_order": boundary.transition_order,
+        }
+        for boundary in canonical
+    ]
+
+
+def _health_boundaries_from_payload(
+    raw: object,
+) -> tuple[ProviderHealthReplayBoundary, ...]:
+    if type(raw) is not list:
+        raise LiveDecisionProgressError(
+            "provider health boundaries must be a JSON array"
+        )
+    values: list[ProviderHealthReplayBoundary] = []
+    for item in raw:
+        if type(item) is not dict or set(item) != _HEALTH_BOUNDARY_KEYS:
+            raise LiveDecisionProgressError(
+                "provider health boundary must contain canonical fields"
+            )
+        values.append(
+            ProviderHealthReplayBoundary(
+                source_id=item["source_id"],
+                recorded_at=item["recorded_at"],
+                transition_order=item["transition_order"],
+            )
+        )
+    return _canonical_health_boundaries(tuple(values))
 
 
 @dataclass(frozen=True, slots=True)
@@ -538,6 +642,58 @@ class _InputSpec:
 
 
 @dataclass(frozen=True, slots=True)
+class _HealthEvidence:
+    loop_id: str
+    decision_ts: str
+    market_state_sha256: str
+    boundaries: tuple[ProviderHealthReplayBoundary, ...]
+
+    def __post_init__(self) -> None:
+        _canonical_text("health evidence loop_id", self.loop_id)
+        _canonical_timestamp("health evidence decision_ts", self.decision_ts)
+        _canonical_sha256(
+            "health evidence market_state_sha256",
+            self.market_state_sha256,
+        )
+        _canonical_health_boundaries(self.boundaries)
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "schema": _HEALTH_EVIDENCE_SCHEMA,
+            "schema_version": _HEALTH_EVIDENCE_VERSION,
+            "loop_id": self.loop_id,
+            "decision_ts": self.decision_ts,
+            "market_state_sha256": self.market_state_sha256,
+            "boundaries": _health_boundaries_payload(self.boundaries),
+        }
+
+    @classmethod
+    def from_dict(cls, raw: object) -> "_HealthEvidence":
+        if type(raw) is not dict or set(raw) != _HEALTH_EVIDENCE_KEYS:
+            raise LiveDecisionProgressError(
+                "provider health evidence must contain canonical fields"
+            )
+        if (
+            raw["schema"] != _HEALTH_EVIDENCE_SCHEMA
+            or raw["schema_version"] != _HEALTH_EVIDENCE_VERSION
+        ):
+            raise LiveDecisionProgressError(
+                "unsupported provider health evidence schema"
+            )
+        try:
+            return cls(
+                loop_id=raw["loop_id"],
+                decision_ts=raw["decision_ts"],
+                market_state_sha256=raw["market_state_sha256"],
+                boundaries=_health_boundaries_from_payload(raw["boundaries"]),
+            )
+        except (TypeError, ValueError) as exc:
+            raise LiveDecisionProgressError(
+                "provider health evidence is invalid"
+            ) from exc
+
+
+@dataclass(frozen=True, slots=True)
 class _Progress:
     loop_id: str
     phase: str
@@ -562,7 +718,11 @@ class _Progress:
             _PHASE_COMMITTED,
         }:
             raise LiveDecisionProgressError("unsupported live progress phase")
-        if self.gate not in {_GATE_NORMAL, _GATE_PROVIDER_GAP}:
+        if self.gate not in {
+            _GATE_NORMAL,
+            _GATE_PROVIDER_HEALTH,
+            _GATE_PROVIDER_GAP,
+        }:
             raise LiveDecisionProgressError("unsupported live progress gate")
         if type(self.affected_input_ids) is not tuple:
             raise LiveDecisionProgressError("affected_input_ids must be a tuple")
@@ -795,6 +955,8 @@ class PersistentLiveDecisionLoop:
         self.catalog_required_history = catalog_required_history
         self._default_market_store: SQLiteMarketStore | None = None
         self._default_health_store: SourceHealthStore | None = None
+        self._default_health_gate: HealthGatedMirrorDecisionIndex | None = None
+        self._default_health_status_by_source: dict[str, str] = {}
 
         store = SQLiteMarketStore(self.workspace / "market.db")
         try:
@@ -843,6 +1005,11 @@ class PersistentLiveDecisionLoop:
                         health_store = SourceHealthStore(
                             self.workspace / "source_health.json"
                         )
+                        health_gate = HealthGatedMirrorDecisionIndex(
+                            self.dependencies,
+                            health_store,
+                            max_health_age=self.max_quote_age,
+                        )
                         # One bounded-current reconciliation covers durable changes
                         # between construction and the first live poll. Subsequent
                         # cycles reuse this exact canonical store and rely on the bus.
@@ -853,15 +1020,37 @@ class PersistentLiveDecisionLoop:
                         raise
                     self._default_market_store = store
                     self._default_health_store = health_store
+                    self._default_health_gate = health_gate
                 assert health_store is not None
-                return poll_open_market_store_once(
+                stats = poll_open_market_store_once(
                     store,
                     health_store,
                     provider,
                     mirror_updates=updates,
                     max_items=self.bounds.observation_max_items,
                     policy=self.ingestion_policy,
+                    clock=lambda: _require_utc_clock(self.clock).isoformat(),
                 )
+                previous_status = self._default_health_status_by_source.get(
+                    stats.source_id
+                )
+                self._default_health_status_by_source[stats.source_id] = (
+                    stats.health_status
+                )
+                health_gate = self._default_health_gate
+                if (
+                    health_gate is not None
+                    and previous_status is not None
+                    and previous_status != stats.health_status
+                ):
+                    health_as_of = _require_utc_clock(self.clock)
+                    for input_id in health_gate.affected_inputs_for_source(
+                        stats.source_id,
+                        as_of=health_as_of,
+                        max_age=self.max_quote_age,
+                    ):
+                        self._pending_affected[input_id] = None
+                return stats
 
             self._observe = _default_observer
         else:
@@ -869,6 +1058,7 @@ class PersistentLiveDecisionLoop:
 
         self.progress_path = self.workspace / self.PROGRESS_FILE_NAME
         self.pre_action_book_path = self.workspace / self.PRE_ACTION_BOOK_FILE_NAME
+        self.health_evidence_path = self.workspace / "live_decision_provider_health.json"
         self.control_path = self.workspace / self.CONTROL_FILE_NAME
         self._progress = self._load_progress()
         if self._progress is not None and self._progress.loop_id != self.loop_id:
@@ -919,6 +1109,8 @@ class PersistentLiveDecisionLoop:
         store = self._default_market_store
         self._default_market_store = None
         self._default_health_store = None
+        self._default_health_gate = None
+        self._default_health_status_by_source.clear()
         if store is not None:
             store.close()
 
@@ -1135,7 +1327,7 @@ class PersistentLiveDecisionLoop:
             self._needs_cache_rebuild
             and self._progress is not None
             and self._progress.phase == _PHASE_COMMITTED
-            and self._progress.gate == _GATE_NORMAL
+            and self._progress.gate in {_GATE_NORMAL, _GATE_PROVIDER_HEALTH}
             and self._progress.market_state_sha256 == current_market_sha
             and self._progress.registered_input_ids == registered_input_ids
             and not batch_affected
@@ -1155,11 +1347,20 @@ class PersistentLiveDecisionLoop:
             )
 
         decision_ts = now.isoformat()
+        gate = (
+            _GATE_PROVIDER_HEALTH
+            if self._default_health_gate is not None
+            else _GATE_NORMAL
+        )
+        provider_health_boundaries = self._current_provider_health_boundaries(
+            decision_time
+        )
         self._write_pending(
             decision_ts=decision_ts,
             market_state_sha256=current_market_sha,
             affected_input_ids=affected,
-            gate=_GATE_NORMAL,
+            gate=gate,
+            provider_health_boundaries=provider_health_boundaries,
         )
         self._refresh_intents_from_snapshots(snapshots)
 
@@ -1182,7 +1383,8 @@ class PersistentLiveDecisionLoop:
             intents=intents,
             market_state_sha256=current_market_sha,
             affected_input_ids=affected,
-            gate=_GATE_NORMAL,
+            gate=gate,
+            provider_health_boundaries=provider_health_boundaries,
         )
         self._pending_affected.clear()
         self._needs_cache_rebuild = False
@@ -1324,11 +1526,13 @@ class PersistentLiveDecisionLoop:
                 "PaperBook changed before durable decision"
             )
 
-        if progress.gate == _GATE_NORMAL:
+        provider_health_boundaries = self._health_boundaries_for_progress(progress)
+        if progress.gate in {_GATE_NORMAL, _GATE_PROVIDER_HEALTH}:
             self._refresh_intents_from_replay(
                 progress.registered_input_ids,
                 decision_time,
                 expected_market_state_sha256=progress.market_state_sha256,
+                provider_health_boundaries=provider_health_boundaries,
             )
             intents = self._all_cached_intents()
         else:
@@ -1432,6 +1636,7 @@ class PersistentLiveDecisionLoop:
                 "recovered unfinished durable live decision before provider polling"
             ),
             decision_context_sha256_override=progress.decision_context_sha256,
+            provider_health_boundaries=provider_health_boundaries,
         )
         self._pending_affected.clear()
         self._needs_cache_rebuild = True
@@ -1447,6 +1652,7 @@ class PersistentLiveDecisionLoop:
         as_of: datetime,
         *,
         expected_market_state_sha256: str,
+        provider_health_boundaries: tuple[ProviderHealthReplayBoundary, ...] = (),
     ) -> None:
         _canonical_sha256(
             "expected replay market_state_sha256",
@@ -1462,7 +1668,57 @@ class PersistentLiveDecisionLoop:
         finally:
             store.close()
 
-        replay_market_sha256 = self._market_state_sha256_for_events(snapshot.events)
+        replay_events = snapshot.events
+        canonical_boundaries = _canonical_health_boundaries(
+            provider_health_boundaries
+        )
+        if canonical_boundaries:
+            health_store = SourceHealthStore(
+                self.workspace / "source_health.json"
+            )
+            health_gate = HealthGatedMirrorDecisionIndex(
+                self.dependencies,
+                health_store,
+                max_health_age=self.max_quote_age,
+            )
+            boundary_map = {
+                boundary.source_id: boundary
+                for boundary in canonical_boundaries
+            }
+            relevant_source_ids: set[str] = set()
+            for spec in self._input_specs.values():
+                for event in snapshot.events:
+                    if (
+                        (spec.source_ids is None or event.source_id in spec.source_ids)
+                        and (spec.sports is None or event.sport in spec.sports)
+                        and (spec.event_ids is None or event.event_id in spec.event_ids)
+                        and (spec.market_ids is None or event.market_id in spec.market_ids)
+                        and (
+                            spec.selection_ids is None
+                            or event.selection_id in spec.selection_ids
+                        )
+                    ):
+                        relevant_source_ids.add(event.source_id)
+            if set(boundary_map) != relevant_source_ids:
+                raise LiveDecisionProgressError(
+                    "provider health replay evidence does not match replayed sources"
+                )
+            eligible_sources = {
+                source_id
+                for source_id, boundary in boundary_map.items()
+                if health_gate.provider_health(
+                    source_id,
+                    as_of=as_of,
+                    replay_boundary=boundary,
+                ).eligible
+            }
+            replay_events = tuple(
+                event
+                for event in snapshot.events
+                if event.source_id in eligible_sources
+            )
+
+        replay_market_sha256 = self._market_state_sha256_for_events(replay_events)
         if replay_market_sha256 != expected_market_state_sha256:
             raise LiveDecisionProgressError(
                 "unfinished live decision replayed market state changed across restart"
@@ -1479,7 +1735,7 @@ class PersistentLiveDecisionLoop:
                 revision=snapshot.revision,
                 events=tuple(
                     event
-                    for event in snapshot.events
+                    for event in replay_events
                     if (
                         (spec.source_ids is None or event.source_id in spec.source_ids)
                         and (spec.sports is None or event.sport in spec.sports)
@@ -1540,12 +1796,80 @@ class PersistentLiveDecisionLoop:
                 as_of=as_of,
                 max_age=self.max_quote_age,
             )
+            if self._default_health_gate is not None:
+                snapshot = self._health_filter_snapshot(
+                    snapshot,
+                    gate=self._default_health_gate,
+                    as_of=as_of,
+                )
             snapshots[input_id] = snapshot
             self._input_market_sha256[input_id] = _canonical_json_sha256(
                 [event.to_dict() for event in snapshot.events]
             )
             self._record_freshness_deadline(input_id, snapshot)
         return snapshots
+
+    @staticmethod
+    def _health_filter_snapshot(
+        snapshot: MirrorSnapshot,
+        *,
+        gate: HealthGatedMirrorDecisionIndex,
+        as_of: datetime,
+        replay_boundaries: dict[str, ProviderHealthReplayBoundary] | None = None,
+    ) -> HealthGatedMirrorSnapshot:
+        source_ids = tuple(sorted({event.source_id for event in snapshot.events}))
+        if replay_boundaries is not None and set(replay_boundaries) != set(source_ids):
+            raise LiveDecisionProgressError(
+                "provider health replay boundaries do not match decision-visible sources"
+            )
+        decisions = {
+            source_id: gate.provider_health(
+                source_id,
+                as_of=as_of,
+                replay_boundary=(
+                    None
+                    if replay_boundaries is None
+                    else replay_boundaries[source_id]
+                ),
+            )
+            for source_id in source_ids
+        }
+        return HealthGatedMirrorSnapshot(
+            revision=snapshot.revision,
+            events=tuple(
+                event
+                for event in snapshot.events
+                if decisions[event.source_id].eligible
+            ),
+            health_boundaries=tuple(
+                decisions[source_id].replay_boundary for source_id in source_ids
+            ),
+        )
+
+    def _current_provider_health_boundaries(
+        self,
+        as_of: datetime,
+    ) -> tuple[ProviderHealthReplayBoundary, ...]:
+        gate = self._default_health_gate
+        if gate is None:
+            return ()
+        decisions: dict[str, ProviderHealthReplayBoundary] = {}
+        for input_id in self.dependencies.input_ids:
+            raw = self.dependencies.decision_view(
+                input_id,
+                as_of=as_of,
+                max_age=self.max_quote_age,
+            )
+            for source_id in sorted({event.source_id for event in raw.events}):
+                if source_id in decisions:
+                    continue
+                decisions[source_id] = gate.provider_health(
+                    source_id,
+                    as_of=as_of,
+                ).replay_boundary
+        return _canonical_health_boundaries(
+            tuple(decisions[source_id] for source_id in sorted(decisions))
+        )
 
     def _refresh_intents_from_snapshots(
         self,
@@ -1663,6 +1987,7 @@ class PersistentLiveDecisionLoop:
         gate: str,
         detail: str = "",
         decision_context_sha256_override: str | None = None,
+        provider_health_boundaries: tuple[ProviderHealthReplayBoundary, ...] = (),
     ) -> LiveCycleResult:
         if decision_context_sha256_override is None:
             decision_context_sha256 = self._decision_context_sha256()
@@ -1671,10 +1996,33 @@ class PersistentLiveDecisionLoop:
                 "recovery decision_context_sha256",
                 decision_context_sha256_override,
             )
+        canonical_health_boundaries = _canonical_health_boundaries(
+            provider_health_boundaries
+        )
+        if gate == _GATE_PROVIDER_HEALTH:
+            health_evidence = self._load_health_evidence()
+            if (
+                health_evidence is None
+                or health_evidence.loop_id != self.loop_id
+                or health_evidence.decision_ts != plan.decision_ts
+                or health_evidence.market_state_sha256 != market_state_sha256
+                or health_evidence.boundaries != canonical_health_boundaries
+            ):
+                raise LiveDecisionProgressError(
+                    "provider health evidence changed before durable decision publication"
+                )
+            payload_version = 3
+        else:
+            if canonical_health_boundaries:
+                raise LiveDecisionProgressError(
+                    "provider health boundaries require provider_health gate"
+                )
+            payload_version = 2
+
         provenance = self.intent_provenance
         context_payload = {
             "schema": "autosport.live_decision_context",
-            "schema_version": 2,
+            "schema_version": payload_version,
             "loop_id": self.loop_id,
             "mode": self.mode.value,
             "gate": gate,
@@ -1685,6 +2033,10 @@ class PersistentLiveDecisionLoop:
             "intent_provenance_sha256": provenance.provenance_sha256,
             "plan_sha256": plan.plan_sha256,
         }
+        if payload_version == 3:
+            context_payload["provider_health_boundaries"] = (
+                _health_boundaries_payload(canonical_health_boundaries)
+            )
         context_hash = _canonical_json_sha256(context_payload)
         decision_id = f"live-{context_hash}"
         prepared_execution: PreparedPaperExecution | None = None
@@ -1716,7 +2068,7 @@ class PersistentLiveDecisionLoop:
 
         record_payload = {
             "schema": "autosport.persistent_live_decision",
-            "schema_version": 2,
+            "schema_version": payload_version,
             "loop_id": self.loop_id,
             "mode": self.mode.value,
             "gate": gate,
@@ -1730,6 +2082,10 @@ class PersistentLiveDecisionLoop:
             "plan": plan.to_dict(),
             MATERIAL_ACTION_ID_PAYLOAD_KEY: decision_id,
         }
+        if payload_version == 3:
+            record_payload["provider_health_boundaries"] = (
+                _health_boundaries_payload(canonical_health_boundaries)
+            )
         if expected_execution_payload is not None:
             # Keep the established top-level live-decision schema/version so the
             # decision identity remains stable; execution adoption is additive,
@@ -1845,6 +2201,15 @@ class PersistentLiveDecisionLoop:
                     or existing.payload.get("gate") != gate
                     or existing.payload.get(MATERIAL_ACTION_ID_PAYLOAD_KEY)
                     != decision_id
+                    or (
+                        payload_version == 3
+                        and existing.to_dict()["payload"].get(
+                            "provider_health_boundaries"
+                        )
+                        != _health_boundaries_payload(
+                            canonical_health_boundaries
+                        )
+                    )
                 ):
                     raise DecisionLedgerIntegrityError(
                         "reserved live decision identity conflicts with durable evidence"
@@ -1917,10 +2282,32 @@ class PersistentLiveDecisionLoop:
         market_state_sha256: str,
         affected_input_ids: tuple[str, ...],
         gate: str,
+        provider_health_boundaries: tuple[ProviderHealthReplayBoundary, ...] = (),
     ) -> None:
         _, decision_time = _canonical_timestamp("decision_ts", decision_ts)
         self.intent_provenance.assert_available_at(decision_time)
+        canonical_health_boundaries = _canonical_health_boundaries(
+            provider_health_boundaries
+        )
+        if gate == _GATE_PROVIDER_HEALTH:
+            health_evidence = _HealthEvidence(
+                loop_id=self.loop_id,
+                decision_ts=decision_ts,
+                market_state_sha256=market_state_sha256,
+                boundaries=canonical_health_boundaries,
+            )
+        else:
+            if canonical_health_boundaries:
+                raise LiveDecisionProgressError(
+                    "provider health boundaries require provider_health gate"
+                )
+            health_evidence = None
         with WorkspaceEconomicLock(self.workspace):
+            if health_evidence is not None:
+                atomic_write_json(
+                    self.health_evidence_path,
+                    health_evidence.to_dict(),
+                )
             # The snapshot is written before the cursor: a crash before cursor
             # publication leaves only ignorable stale snapshot bytes, while every
             # visible PENDING cursor has an exact pre-action portfolio witness.
@@ -2075,7 +2462,7 @@ class PersistentLiveDecisionLoop:
             self.authority.risk_policy,
         )
         payload_version = existing.payload.get("schema_version")
-        if payload_version not in {1, 2}:
+        if payload_version not in {1, 2, 3}:
             raise DecisionLedgerIntegrityError(
                 "committed live decision has unsupported schema_version"
             )
@@ -2090,7 +2477,7 @@ class PersistentLiveDecisionLoop:
             "decision_context_sha256": progress.decision_context_sha256,
             "plan_sha256": progress.plan_sha256,
         }
-        if payload_version == 2:
+        if payload_version in {2, 3}:
             _, committed_decision_time = _canonical_timestamp(
                 "committed decision_ts",
                 progress.decision_ts,
@@ -2121,6 +2508,25 @@ class PersistentLiveDecisionLoop:
                     "intent_provenance_sha256": provenance.provenance_sha256,
                 }
             )
+        if payload_version == 3:
+            if progress.gate != _GATE_PROVIDER_HEALTH:
+                raise DecisionLedgerIntegrityError(
+                    "provider health decision schema requires provider_health gate"
+                )
+            health_evidence = self._health_evidence_for_progress(progress)
+            health_payload = _health_boundaries_payload(
+                health_evidence.boundaries
+            )
+            if (
+                existing.to_dict()["payload"].get(
+                    "provider_health_boundaries"
+                )
+                != health_payload
+            ):
+                raise DecisionLedgerIntegrityError(
+                    "committed provider health evidence conflicts with Decision Ledger"
+                )
+            context_payload["provider_health_boundaries"] = health_payload
 
         expected_context_hash = _canonical_json_sha256(context_payload)
         expected_decision_id = f"live-{expected_context_hash}"
@@ -2154,6 +2560,47 @@ class PersistentLiveDecisionLoop:
             raise DecisionLedgerIntegrityError(
                 "committed live progress conflicts with Decision Ledger record"
             )
+
+    def _load_health_evidence(self) -> _HealthEvidence | None:
+        if not self.health_evidence_path.exists():
+            return None
+        try:
+            raw = strict_json_loads(
+                self.health_evidence_path.read_text(encoding="utf-8")
+            )
+            return _HealthEvidence.from_dict(raw)
+        except (OSError, TypeError, ValueError) as exc:
+            raise LiveDecisionProgressError(
+                "cannot verify persisted provider health evidence"
+            ) from exc
+
+    def _health_evidence_for_progress(
+        self,
+        progress: _Progress,
+    ) -> _HealthEvidence:
+        if progress.gate != _GATE_PROVIDER_HEALTH:
+            raise LiveDecisionProgressError(
+                "provider health evidence requested for non-health-gated progress"
+            )
+        evidence = self._load_health_evidence()
+        if (
+            evidence is None
+            or evidence.loop_id != progress.loop_id
+            or evidence.decision_ts != progress.decision_ts
+            or evidence.market_state_sha256 != progress.market_state_sha256
+        ):
+            raise LiveDecisionProgressError(
+                "provider health evidence is missing or does not match progress"
+            )
+        return evidence
+
+    def _health_boundaries_for_progress(
+        self,
+        progress: _Progress,
+    ) -> tuple[ProviderHealthReplayBoundary, ...]:
+        if progress.gate == _GATE_PROVIDER_HEALTH:
+            return self._health_evidence_for_progress(progress).boundaries
+        return ()
 
     def _persist_control(self, state: LiveControlState) -> None:
         candidate = _Control(self.loop_id, state)

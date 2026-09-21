@@ -11,6 +11,7 @@ from unittest.mock import patch
 from autosport.agent_loop import AgentLoopPhase, AgentLoopRuntime, ExternalEffectState
 from autosport.decision_ledger import (
     ECONOMIC_DECISION_KIND,
+    DecisionLedgerIntegrityError,
     DecisionRecord,
     EconomicDecisionAuthority,
     JsonlDecisionLedger,
@@ -410,6 +411,84 @@ class PaperSettlementLearningBridgeTests(unittest.TestCase):
             with self.assertRaisesRegex(
                 PaperSettlementLearningBridgeError,
                 "reference differs from product-owned source truth",
+            ):
+                reopened_bridge.reconcile_after_settlement(
+                    paper_book_path=root / "paper_book.json",
+                    resolutions=(),
+                    settled_ticket_ids=(),
+                    at="2026-09-19T21:20:01+00:00",
+                )
+
+            self.assertIs(reopened_runtime.snapshot().phase, AgentLoopPhase.WAIT_OUTCOME)
+            loop_state = json.loads(
+                (root / "agent-loop.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(loop_state["resolutions"], [])
+
+    def test_restart_rechecks_decision_ledger_before_observed_reward_ack(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            leg = TicketLeg(
+                event_id="event-1",
+                market_id="winner",
+                selection_id="home",
+                locked_odds=Decimal("2.00"),
+                sport="table_tennis",
+            )
+            (
+                goal,
+                risk,
+                ticket,
+                decision,
+                environment,
+                baseline,
+                runtime,
+                observation,
+                action,
+                bridge,
+            ) = _fixture(root, legs=(leg,))
+            bridge.bind_ticket(
+                ticket_id=ticket.ticket_id,
+                decision_id=decision.decision_id,
+                environment=environment,
+                observation=observation,
+                action=action,
+                baseline_checkpoint=baseline,
+            )
+            _book, resolutions = _settle(root, outcomes={leg.quote_key: "win"})
+
+            with patch.object(
+                AgentLoopRuntime,
+                "record_resolution",
+                side_effect=RuntimeError("crash before learner acknowledgement"),
+            ):
+                with self.assertRaisesRegex(RuntimeError, "crash before learner"):
+                    bridge.reconcile_after_settlement(
+                        paper_book_path=root / "paper_book.json",
+                        resolutions=resolutions,
+                        settled_ticket_ids=(ticket.ticket_id,),
+                        at="2026-09-19T21:20:00+00:00",
+                    )
+
+            ledger_path = root / "decisions.jsonl"
+            ledger_bytes = ledger_path.read_bytes()
+            self.assertIn(b"bridge-fixture", ledger_bytes)
+            ledger_path.write_bytes(
+                ledger_bytes.replace(b"bridge-fixture", b"forged-fixture", 1)
+            )
+
+            reopened_runtime = AgentLoopRuntime(root / "agent-loop.json")
+            reopened_bridge = PaperSettlementLearningBridge(
+                root / "paper_learning_bridge.json",
+                paper_book_path=root / "paper_book.json",
+                decision_ledger=JsonlDecisionLedger(ledger_path),
+                agent_loop=reopened_runtime,
+                economic_goal=goal,
+                risk_policy=risk,
+            )
+            with self.assertRaisesRegex(
+                DecisionLedgerIntegrityError,
+                "SHA-256 mismatch",
             ):
                 reopened_bridge.reconcile_after_settlement(
                     paper_book_path=root / "paper_book.json",

@@ -1,18 +1,24 @@
 """Post-#727 convergence for PAPER campaign admission.
 
-#727 makes the exact durable DecisionLedger origin part of RUN_RESERVED. This
-module retires #708's provisional standalone origin event and makes campaign
-learning consume only the nested canonical origin. It is imported immediately
-before the admission consumer guard so that guard closure-pins these methods.
+#727 makes the exact durable DecisionLedger origin part of RUN_RESERVED. Campaign
+learning additionally requires that same pre-execution origin to carry the exact
+learning Observation issued before any PAPER attempt.  No admission-time surrogate
+or second origin store is accepted.
 """
 
 from __future__ import annotations
 
+import hashlib
+import json
 from typing import Mapping
 
 from . import paper_campaign_admission as _admission
 from .decision_ledger import DecisionLedgerIntegrityError
-from .learning_environment import Observation
+from .learning_environment import (
+    CausalLearningEnvironment,
+    LearningEnvironmentError,
+    Observation,
+)
 from .paper_execution_reality import (
     PaperExecutionIntegrityError,
     PaperExecutionStateError,
@@ -20,10 +26,29 @@ from .paper_execution_reality import (
 )
 
 _CANONICAL_ORIGIN_FIELDS = frozenset(
-    {"schema", "schema_version", "decision_id", "record_sha256"}
+    {
+        "schema",
+        "schema_version",
+        "decision_id",
+        "record_sha256",
+        "learning_observation",
+    }
 )
 _CANONICAL_ORIGIN_SCHEMA = "autosport.paper_execution_decision_origin"
-_CANONICAL_ORIGIN_SCHEMA_VERSION = 1
+_CANONICAL_ORIGIN_SCHEMA_VERSION = 2
+_LEARNING_OBSERVATION_FIELDS = frozenset(
+    {
+        "schema",
+        "schema_version",
+        "environment_id",
+        "observed_at",
+        "available_at",
+        "evidence",
+        "observation_id",
+    }
+)
+_LEARNING_OBSERVATION_SCHEMA = "autosport.paper_execution_learning_observation"
+_LEARNING_OBSERVATION_SCHEMA_VERSION = 1
 _CANONICAL_RESERVATION_FIELDS = frozenset(
     {
         "trigger_id",
@@ -37,6 +62,17 @@ _CANONICAL_RESERVATION_FIELDS = frozenset(
     }
 )
 _LEGACY_ORIGIN_EVENT = "DECISION_ORIGIN_BOUND"
+
+
+def _digest(value: object) -> str:
+    encoded = json.dumps(
+        value,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
 
 
 class _ResolvedExecutionDecisionId(str):
@@ -62,6 +98,8 @@ def _install() -> None:
     binding_type = _admission._ExecutionAdmissionBinding
     accepted_equivalent = _admission._ACCEPTED_EQUIVALENT
     observation_type = Observation
+    environment_type = CausalLearningEnvironment
+    environment_checkpoint = CausalLearningEnvironment.checkpoint
     paper_leg_from_dict = PaperLegAttempt.from_dict
     decision_integrity_error = DecisionLedgerIntegrityError
     execution_integrity_errors = (PaperExecutionIntegrityError, PaperExecutionStateError)
@@ -70,12 +108,16 @@ def _install() -> None:
     origin_fields = _CANONICAL_ORIGIN_FIELDS
     origin_schema = _CANONICAL_ORIGIN_SCHEMA
     origin_schema_version = _CANONICAL_ORIGIN_SCHEMA_VERSION
+    learning_fields = _LEARNING_OBSERVATION_FIELDS
+    learning_schema = _LEARNING_OBSERVATION_SCHEMA
+    learning_schema_version = _LEARNING_OBSERVATION_SCHEMA_VERSION
     legacy_origin_event = _LEGACY_ORIGIN_EVENT
     resolved_type = _ResolvedExecutionDecisionId
     execution_decision_key = _admission._EXECUTION_DECISION_ID
     execution_run_key = _admission._EXECUTION_RUN_ID
     execution_attempt_key = _admission._EXECUTION_ATTEMPT_ID
     execution_ticket_key = _admission._EXECUTION_TICKET_ID
+    digest = _digest
 
     def reservation_payload(event: object) -> Mapping[str, object]:
         if not isinstance(event, Mapping):
@@ -126,7 +168,9 @@ def _install() -> None:
             origin.get("schema") != origin_schema
             or origin.get("schema_version") != origin_schema_version
         ):
-            raise error("unsupported PAPER execution decision_origin schema")
+            raise error(
+                "PAPER execution origin lacks canonical pre-execution learning Observation"
+            )
         decision_id = origin.get("decision_id")
         record_sha256 = origin.get("record_sha256")
         if (
@@ -142,6 +186,14 @@ def _install() -> None:
             or any(ch not in sha_chars for ch in record_sha256)
         ):
             raise error("PAPER execution decision_origin record_sha256 is invalid")
+        raw_learning = origin.get("learning_observation")
+        if type(raw_learning) is not dict or set(raw_learning) != learning_fields:
+            raise error("PAPER pre-execution learning Observation schema is invalid")
+        if (
+            raw_learning.get("schema") != learning_schema
+            or raw_learning.get("schema_version") != learning_schema_version
+        ):
+            raise error("unsupported PAPER pre-execution learning Observation schema")
         return payload
 
     def execution_attempt(self, *, run_id: str, attempt_id: str):
@@ -217,28 +269,72 @@ def _install() -> None:
         legacy = matches_legacy(payload, decision_id=trigger_id, run_id=run_id, reservation=reservation)
         if live == legacy:
             raise error("PAPER execution decision lacks one canonical execution authority")
-        context_hash = getattr(record, "context_hash", None)
+
+        raw_learning = origin.get("learning_observation")
+        if not isinstance(raw_learning, Mapping) or set(raw_learning) != learning_fields:
+            raise error("PAPER pre-execution learning Observation is unavailable")
+        raw_evidence = raw_learning.get("evidence")
+        if type(raw_evidence) is not list:
+            raise error("PAPER pre-execution learning Observation evidence is invalid")
+        normalized_evidence: list[tuple[str, str]] = []
+        for item in raw_evidence:
+            if (
+                type(item) is not list
+                or len(item) != 2
+                or type(item[0]) is not str
+                or type(item[1]) is not str
+            ):
+                raise error("PAPER pre-execution learning Observation evidence is invalid")
+            normalized_evidence.append((item[0], item[1]))
+        try:
+            observation = observation_type(
+                environment_id=raw_learning.get("environment_id"),
+                observed_at=raw_learning.get("observed_at"),
+                available_at=raw_learning.get("available_at"),
+                evidence=tuple(normalized_evidence),
+            )
+        except (LearningEnvironmentError, TypeError, ValueError) as exc:
+            raise error("PAPER pre-execution learning Observation is invalid") from exc
+        if raw_learning.get("observation_id") != observation.observation_id:
+            raise error("PAPER pre-execution learning Observation identity changed")
+
+        environment = self.runtime.environment
+        if type(environment) is not environment_type:
+            raise error("PAPER campaign learning environment must be canonical")
+        if observation.environment_id != environment.environment_id:
+            raise error("PAPER pre-execution learning Observation belongs to another environment")
+        try:
+            checkpoint = environment_checkpoint(environment)
+        except LearningEnvironmentError as exc:
+            raise error("PAPER campaign learning environment is not at the bound checkpoint") from exc
+
+        action_ids = reservation.get("action_ids")
+        reservation_evidence = reservation.get("observation_evidence_ids")
+        assert isinstance(action_ids, list)
+        assert isinstance(reservation_evidence, dict)
+        expected_evidence = {
+            "decision_id": trigger_id,
+            "decision_record_sha256": record_sha256,
+            "environment_checkpoint_id": checkpoint.checkpoint_id,
+            "execution_action_ids_sha256": digest(action_ids),
+            "execution_model_fingerprint": reservation["model_fingerprint"],
+            "execution_observation_evidence_ids_sha256": digest(reservation_evidence),
+            "execution_plan_fingerprint": reservation["plan_fingerprint"],
+            "execution_plan_id": reservation["plan_id"],
+        }
+        if dict(observation.evidence) != expected_evidence:
+            raise error(
+                "PAPER pre-execution learning Observation evidence conflicts with durable origin"
+            )
         if (
-            type(context_hash) is not str
-            or len(context_hash) != 64
-            or context_hash.lower() != context_hash
-            or any(ch not in sha_chars for ch in context_hash)
+            observation.observed_at != record.observed_ts
+            or observation.available_at != record.observed_ts
+            or observation.available_at != reservation["started_at"]
         ):
-            raise error("PAPER execution decision context_hash is invalid")
-        observation = observation_type(
-            environment_id=self.runtime.environment.environment_id,
-            observed_at=record.observed_ts,
-            available_at=record.observed_ts,
-            evidence=tuple(
-                sorted(
-                    (
-                        ("context_hash", context_hash),
-                        ("decision_id", trigger_id),
-                        ("decision_record_sha256", record_sha256),
-                    )
-                )
-            ),
-        )
+            raise error(
+                "PAPER pre-execution learning Observation time conflicts with durable decision"
+            )
+
         return resolved_type(
             trigger_id,
             record_sha256=record_sha256,

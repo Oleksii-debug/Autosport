@@ -78,14 +78,15 @@ def _ledger_with_timeout(
     ledger.mark_unknown(
         "attempt-1",
         reason=reason,
-        # Deliberately earlier than ledger recorded_at: this caller-provided payload
-        # timestamp must NOT shorten the provider visibility horizon.
         observed_at=UNKNOWN_OBSERVED_AT,
     )
     return ledger, action, provider_ref, path
 
 
-def _absence(observed_at: str, provider_ref: str) -> VerifiedProviderAbsenceEvidence:
+def _absence(
+    observed_at: str,
+    provider_ref: str | None,
+) -> VerifiedProviderAbsenceEvidence:
     return VerifiedProviderAbsenceEvidence(
         bookmaker_id="betfair",
         account_id="acct-1",
@@ -152,19 +153,19 @@ def test_complete_empty_before_visibility_horizon_stays_indeterminate(
 ) -> None:
     ledger, action, provider_ref, _ = _ledger_with_timeout(tmp_path, monkeypatch)
     assert provider_ref is not None
-    result = _resolve(
-        monkeypatch,
-        ledger,
-        action,
-        provider_ref,
-        _absence("2026-09-21T18:00:14.999999+00:00", provider_ref),
-    )
+    evidence = _absence("2026-09-21T18:00:14.999999+00:00", provider_ref)
+    result = _resolve(monkeypatch, ledger, action, provider_ref, evidence)
 
     assert result.kind is timeout_resolution.BetfairTimeoutResolutionKind.INDETERMINATE_BEFORE_VISIBILITY_HORIZON
     assert result.definitive is False
     assert result.timeout_boundary_at == LEDGER_TIMEOUT_BOUNDARY
     assert result.visibility_deadline == "2026-09-21T18:00:15+00:00"
     assert result.evidence is None
+    with pytest.raises(
+        timeout_resolution.BetfairTimeoutResolutionError,
+        match="did not pass durable Betfair timeout visibility authority",
+    ):
+        timeout_resolution.assert_betfair_timeout_absence_authoritative(evidence)
 
 
 def test_complete_empty_exactly_at_visibility_horizon_can_issue_absence(
@@ -178,6 +179,24 @@ def test_complete_empty_exactly_at_visibility_horizon_can_issue_absence(
     assert result.kind is timeout_resolution.BetfairTimeoutResolutionKind.ABSENT_AFTER_VISIBILITY_HORIZON
     assert result.definitive is True
     assert result.evidence is evidence
+    timeout_resolution.assert_betfair_timeout_absence_authoritative(evidence)
+
+
+def test_bound_absence_not_issued_by_timeout_resolver_is_rejected() -> None:
+    evidence = _absence(
+        "2026-09-21T18:00:30+00:00",
+        "0123456789abcdef0123456789abcdef",
+    )
+    with pytest.raises(
+        timeout_resolution.BetfairTimeoutResolutionError,
+        match="did not pass durable Betfair timeout visibility authority",
+    ):
+        timeout_resolution.assert_betfair_timeout_absence_authoritative(evidence)
+
+
+def test_legacy_unbound_absence_keeps_generic_authority_scope() -> None:
+    evidence = _absence("2026-09-21T18:00:30+00:00", None)
+    timeout_resolution.assert_betfair_timeout_absence_authoritative(evidence)
 
 
 def test_provider_effect_wins_before_visibility_horizon(tmp_path, monkeypatch) -> None:
@@ -196,8 +215,6 @@ def test_caller_unknown_observed_at_cannot_shorten_durable_horizon(
 ) -> None:
     ledger, action, provider_ref, _ = _ledger_with_timeout(tmp_path, monkeypatch)
     assert provider_ref is not None
-    # This is >15s after caller payload observed_at (17:59:57) but still <15s
-    # after the ledger-owned recorded_at boundary (18:00:00).
     result = _resolve(
         monkeypatch,
         ledger,

@@ -7,6 +7,7 @@ import pytest
 
 from autosport.portfolio_snapshot_coherence import (
     PortfolioComponentEvidence,
+    PortfolioSnapshotCoherence,
     PortfolioSnapshotCoherenceError,
     SnapshotCoherenceStatus,
     evaluate_portfolio_snapshot_coherence,
@@ -185,7 +186,6 @@ def test_age_and_skew_boundaries_are_inclusive() -> None:
     assert result.status is SnapshotCoherenceStatus.COHERENT
 
 
-
 def test_fractional_second_boundaries_do_not_round_down() -> None:
     stale_items = list(coherent_components())
     stale_items[0] = evidence(
@@ -205,6 +205,7 @@ def test_fractional_second_boundaries_do_not_round_down() -> None:
     mixed = evaluate(mixed_items, max_age_seconds=20, max_cut_skew_seconds=5)
     assert mixed.status is SnapshotCoherenceStatus.WAIT_MIXED_CUT
     assert mixed.reasons == ("cut_skew_microseconds:5000001",)
+
 
 def test_causal_timestamp_and_canonical_identity_validation_fail_closed() -> None:
     with pytest.raises(PortfolioSnapshotCoherenceError, match="cannot precede"):
@@ -262,3 +263,49 @@ def test_required_policy_is_exact_and_canonical() -> None:
             max_age_seconds=-1,
             max_cut_skew_seconds=5,
         )
+
+
+def test_result_contract_rejects_direct_positive_status_forgery() -> None:
+    wait = evaluate(coherent_components()[:2])
+    assert wait.status is SnapshotCoherenceStatus.WAIT_INCOMPLETE
+
+    with pytest.raises(
+        PortfolioSnapshotCoherenceError,
+        match="status must match deterministic coherence derivation",
+    ):
+        PortfolioSnapshotCoherence(
+            status=SnapshotCoherenceStatus.COHERENT,
+            decision_as_of=wait.decision_as_of,
+            required_components=wait.required_components,
+            max_age_seconds=wait.max_age_seconds,
+            max_cut_skew_seconds=wait.max_cut_skew_seconds,
+            components=wait.components,
+            reasons=wait.reasons,
+            policy_sha256=wait.policy_sha256,
+            component_set_sha256=wait.component_set_sha256,
+            coherence_id=wait.coherence_id,
+        )
+
+    with pytest.raises(
+        PortfolioSnapshotCoherenceError,
+        match="status must match deterministic coherence derivation",
+    ):
+        replace(wait, status=SnapshotCoherenceStatus.COHERENT)
+
+
+@pytest.mark.parametrize(
+    ("field", "forged"),
+    (
+        ("reasons", ("forged:positive",)),
+        ("policy_sha256", "0" * 64),
+        ("component_set_sha256", "0" * 64),
+        ("coherence_id", "0" * 64),
+    ),
+)
+def test_result_contract_rejects_derived_identity_tampering(field, forged) -> None:
+    coherent = evaluate(coherent_components())
+    with pytest.raises(
+        PortfolioSnapshotCoherenceError,
+        match=rf"{field} must match deterministic coherence derivation",
+    ):
+        replace(coherent, **{field: forged})

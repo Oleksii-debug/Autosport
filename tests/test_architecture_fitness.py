@@ -44,6 +44,18 @@ def test_detects_relative_and_absolute_package_cycle_deterministically(tmp_path)
     assert report.healthy is False
 
 
+def test_from_package_import_submodule_is_counted_as_local_dependency(tmp_path):
+    root = tmp_path / "autosport"
+    _write(root, "__init__.py", "")
+    _write(root, "a.py", "from autosport import b\n")
+    _write(root, "b.py", "VALUE = 1\n")
+
+    report = analyze_package(root)
+
+    assert ("autosport.a", "autosport") in report.edges
+    assert ("autosport.a", "autosport.b") in report.edges
+
+
 def test_external_imports_are_not_misreported_as_local_dependencies(tmp_path):
     root = tmp_path / "autosport"
     _write(root, "__init__.py", "")

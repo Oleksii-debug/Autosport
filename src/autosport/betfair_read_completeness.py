@@ -660,6 +660,37 @@ def _classify_failure(
 ) -> tuple[BetfairObservationCompleteness, str]:
     if partial:
         return BetfairObservationCompleteness.PARTIAL, "acquisition_interrupted"
+
+    provider_error_code = getattr(exc, "provider_error_code", None)
+    if provider_error_code is not None:
+        if provider_error_code in {
+            "TOO_MANY_REQUESTS",
+            "SERVICE_BUSY",
+            "TIMEOUT_ERROR",
+        }:
+            return (
+                BetfairObservationCompleteness.UNAVAILABLE_TRANSIENT,
+                "provider_transient",
+            )
+        if provider_error_code in {
+            "INVALID_SESSION_INFORMATION",
+            "INVALID_APP_KEY",
+            "NO_SESSION",
+            "NO_APP_KEY",
+        }:
+            return (
+                BetfairObservationCompleteness.AUTH_INVALID_OR_EXPIRED,
+                "provider_auth",
+            )
+        # A present typed provider code is the semantic authority. Unknown values
+        # fail closed instead of falling back to provider-controlled message text.
+        return (
+            BetfairObservationCompleteness.INVALID_REQUEST_OR_CONTRACT,
+            "provider_contract",
+        )
+
+    # Legacy fallback is intentionally limited to errors with no typed Betfair
+    # provider semantic code (transport/HTTP failures and pre-#1259 clients).
     message = str(exc).upper()
     if any(
         marker in message

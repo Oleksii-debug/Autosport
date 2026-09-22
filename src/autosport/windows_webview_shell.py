@@ -1,0 +1,944 @@
+from __future__ import annotations
+
+import os
+import sys
+import threading
+from pathlib import Path
+from typing import Any, Mapping
+
+from .calculation_manual import ManualCalculationEvidence, ManualCalculationService
+from .dataset import ReplayDataset, load_dataset
+from .dataset_worker import OneShotDatasetValidationWorker
+from .gui_evidence_export import OneShotEvidenceExportWorker, resolve_evidence_output_destination
+from .live_observation import OneShotObservationWorker, observe_workspace_once
+from .localization import text
+from .owner_economic_authority import (
+    INITIAL_OWNER_FORM_DEFAULTS,
+    OWNER_ECONOMIC_FORM_FIELDS,
+    OwnerEconomicAuthorityError,
+    OwnerEconomicAuthorityService,
+    OwnerEconomicReviewSnapshot,
+)
+from .parlayapi_provider import ParlayApiTableTennisProvider
+from .paths import default_workspace
+from .recovery_worker import OneShotRecoveryWorker, recover_workspace_once
+from .replay_worker import OneShotReplayWorker, run_workspace_dataset_once, workspace_for_strategy
+from .research_strategy import RESEARCH_STRATEGY_ID, ResearchStrategyPlan
+from .session import AutosportSession
+from .strategies import available_strategies, strategy_spec, validate_strategy_configuration
+from .ui_model import (
+    evaluation_lines,
+    observation_quote_lines,
+    observation_summary,
+    result_summary,
+    ticket_lines,
+)
+from .windows_surface_contract import (
+    DEFAULT_SURFACE_KEY,
+    SURFACE_BY_KEY,
+    SURFACES,
+    load_surface_selection,
+    save_surface_selection,
+    surface_detail_lines,
+)
+
+
+WEB_SHELL_DIRNAME = "windows_web"
+WEB_SHELL_INDEX = "index.html"
+_ALLOWED_SPEEDS = {0.0, 1.0, 10.0, 100.0, 1000.0}
+_ALLOWED_LIVE_MODES = {"public_preview", "api_key"}
+_MANUAL_OPERATION_KEYS = {
+    "odds_conversion": "ui.windows.manual_calculation.operation.odds_conversion",
+    "implied_probability": "ui.windows.manual_calculation.operation.implied_probability",
+    "multiplicative_devig": "ui.windows.manual_calculation.operation.multiplicative_devig",
+    "expected_return": "ui.windows.manual_calculation.operation.expected_return",
+    "paper_payout": "ui.windows.manual_calculation.operation.paper_payout",
+    "fractional_kelly": "ui.windows.manual_calculation.operation.fractional_kelly",
+    "maximum_drawdown": "ui.windows.manual_calculation.operation.maximum_drawdown",
+}
+_CANONICAL_MESSAGE_KEYS = {
+    "decimal odds are the supplied analysis input": "ui.windows.manual_calculation.message.decimal_odds_supplied",
+    "American output is the unrounded mathematical conversion; bookmaker display conventions may round it": "ui.windows.manual_calculation.message.american_unrounded",
+    "American output is the unrounded mathematical conversion in the deterministic decimal context": "ui.windows.manual_calculation.message.american_decimal_context",
+    "bookmaker display conventions may round American odds": "ui.windows.manual_calculation.message.american_display_rounding",
+    "division is rounded in the deterministic decimal context": "ui.windows.manual_calculation.message.division_rounding",
+    "all selections belong to one supplied market": "ui.windows.manual_calculation.message.one_market",
+    "multiplicative normalization is a modelling method, not objective fair value": "ui.windows.manual_calculation.message.devig_model",
+    "probability is supplied by the caller and is not inferred by this calculator": "ui.windows.manual_calculation.message.probability_caller",
+    "paper-only calculation; no real-money execution authority": "ui.windows.manual_calculation.message.paper_only",
+    "probability is a caller-supplied research assumption": "ui.windows.manual_calculation.message.probability_research",
+    "single-position Kelly formula; dependence with other positions is not modelled": "ui.windows.manual_calculation.message.kelly_single_position",
+    "paper research only; result is not execution authority": "ui.windows.manual_calculation.message.paper_research",
+    "Kelly division is rounded in the deterministic decimal context": "ui.windows.manual_calculation.message.kelly_rounding",
+    "balances are supplied in chronological order": "ui.windows.manual_calculation.message.balances_chronological",
+    "drawdown fraction division is rounded in the deterministic decimal context": "ui.windows.manual_calculation.message.drawdown_rounding",
+}
+
+
+class WindowsWebViewUnavailable(RuntimeError):
+    pass
+
+
+def web_shell_index_path() -> Path:
+    return Path(__file__).resolve().with_name(WEB_SHELL_DIRNAME) / WEB_SHELL_INDEX
+
+
+def _safe_exception_text(exc: BaseException) -> str:
+    try:
+        name = type.__getattribute__(type(exc), "__name__")
+    except BaseException:
+        name = "BaseException"
+    try:
+        detail = str(exc)
+    except BaseException:
+        return text("ui.error.exception.message_unavailable", exception_type=name)
+    return f"{name}: {detail}" if detail else name
+
+
+def _lines_from_manual_input(raw: object) -> list[str]:
+    if not isinstance(raw, str):
+        raise ValueError(text("ui.windows.manual_calculation.error.nonempty"))
+    lines = [line.strip() for line in raw.replace(",", "\n").splitlines() if line.strip()]
+    if not lines:
+        raise ValueError(text("ui.windows.manual_calculation.error.nonempty"))
+    return lines
+
+
+def _selection_odds_from_text(raw: object) -> dict[str, str]:
+    values: dict[str, str] = {}
+    for line in _lines_from_manual_input(raw):
+        if "=" not in line:
+            raise ValueError(text("ui.windows.manual_calculation.error.selection_format"))
+        selection, odds = (part.strip() for part in line.split("=", 1))
+        if not selection or not odds:
+            raise ValueError(text("ui.windows.manual_calculation.error.selection_empty"))
+        if selection in values:
+            raise ValueError(
+                text("ui.windows.manual_calculation.error.duplicate", selection=selection)
+            )
+        values[selection] = odds
+    return values
+
+
+def _manual_calculation(service: ManualCalculationService, operation: str, raw: object) -> ManualCalculationEvidence:
+    if operation not in _MANUAL_OPERATION_KEYS:
+        raise ValueError(text("ui.windows.manual_calculation.error.unknown"))
+    if operation in {"odds_conversion", "implied_probability"}:
+        values = _lines_from_manual_input(raw)
+        if len(values) != 1:
+            raise ValueError(text("ui.windows.manual_calculation.error.single"))
+        return getattr(service, operation)(values[0])
+    if operation == "multiplicative_devig":
+        return service.multiplicative_devig(_selection_odds_from_text(raw))
+
+    values = _lines_from_manual_input(raw)
+    if operation == "expected_return":
+        if len(values) != 3:
+            raise ValueError(text("ui.windows.manual_calculation.error.expected_return"))
+        return service.expected_return(values[0], values[1], values[2])
+    if operation == "paper_payout":
+        if len(values) != 2:
+            raise ValueError(text("ui.windows.manual_calculation.error.paper_payout"))
+        return service.paper_payout(values[0], values[1])
+    if operation == "fractional_kelly":
+        if len(values) != 4:
+            raise ValueError(text("ui.windows.manual_calculation.error.kelly"))
+        return service.fractional_kelly(
+            values[0], values[1], fraction=values[2], cap=values[3]
+        )
+    if operation == "maximum_drawdown":
+        return service.maximum_drawdown(values)
+    raise ValueError(text("ui.windows.manual_calculation.error.unknown"))
+
+
+def _localized_manual_message(value: str) -> str:
+    key = _CANONICAL_MESSAGE_KEYS.get(value)
+    return text(key) if key is not None else value
+
+
+def _render_manual_evidence(evidence: ManualCalculationEvidence) -> str:
+    result = evidence.result
+    operation_label = text(_MANUAL_OPERATION_KEYS[result.calculation_id])
+    classification = text(
+        f"ui.windows.manual_calculation.result.classification.{result.classification}"
+    )
+    unit_label = text("ui.windows.manual_calculation.result.unit")
+    none_label = text("ui.windows.manual_calculation.result.none")
+    input_units = dict(result.input_units)
+    output_units = dict(result.output_units)
+    lines = [
+        text("ui.windows.manual_calculation.result.heading"),
+        f'{text("ui.windows.manual_calculation.result.operation")}: {operation_label}',
+        f'{text("ui.windows.manual_calculation.result.method")}: {result.method}',
+        f'{text("ui.windows.manual_calculation.result.classification")}: {classification} ({result.classification})',
+        text("ui.windows.manual_calculation.result.inputs") + ":",
+    ]
+    if result.inputs:
+        lines.extend(
+            f"- {name}: {value}; {unit_label}: {input_units[name]}"
+            for name, value in result.inputs
+        )
+    else:
+        lines.append(f"- {none_label}")
+    lines.append(text("ui.windows.manual_calculation.result.assumptions") + ":")
+    lines.extend(f"- {_localized_manual_message(item)}" for item in result.assumptions)
+    if not result.assumptions:
+        lines.append(f"- {none_label}")
+    lines.append(text("ui.windows.manual_calculation.result.outputs") + ":")
+    if result.outputs:
+        lines.extend(
+            f"- {name}: {value}; {unit_label}: {output_units[name]}"
+            for name, value in result.outputs
+        )
+    else:
+        lines.append(f"- {none_label}")
+    lines.append(text("ui.windows.manual_calculation.result.warnings") + ":")
+    lines.extend(f"- {_localized_manual_message(item)}" for item in result.warnings)
+    if not result.warnings:
+        lines.append(f"- {none_label}")
+    lines.extend(
+        [
+            f'{text("ui.windows.manual_calculation.result.input_hash")}: {result.input_hash}',
+            f'{text("ui.windows.manual_calculation.result.result_hash")}: {result.result_hash}',
+            f'{text("ui.windows.manual_calculation.result.evidence_hash")}: {evidence.evidence_sha256}',
+            f'{text("ui.windows.manual_calculation.result.service_version")}: {evidence.service_version}',
+            f'{text("ui.windows.manual_calculation.result.input_mode")}: {evidence.input_mode}',
+            f'{text("ui.windows.manual_calculation.result.real_money_execution")}: '
+            f'{text("ui.windows.manual_calculation.result.real_money_false")}',
+            "",
+            text("ui.windows.manual_calculation.result.canonical_json") + ":",
+            evidence.to_text().rstrip("\n"),
+        ]
+    )
+    return "\n".join(lines) + "\n"
+
+
+class AutosportWebController:
+    """Headless product controller for the semantic Windows shell.
+
+    Domain and economic authority stay in existing Autosport services. This object
+    only serializes user intent, starts the existing single-flight workers, and
+    publishes bounded presentation state for semantic HTML.
+    """
+
+    def __init__(self, workspace: str | Path | None = None) -> None:
+        self._lock = threading.RLock()
+        self.workspace = Path(default_workspace() if workspace is None else workspace)
+        self._active_workspace = self.workspace
+        self.dataset_path: Path | None = None
+        self.research_plan_path: Path | None = None
+        self.research_plan: ResearchStrategyPlan | None = None
+        self.strategy_id = "baseline-v1"
+        self.replay_speed = 0.0
+        self.live_mode = "public_preview"
+        self.dataset_worker = OneShotDatasetValidationWorker()
+        self.replay_worker = OneShotReplayWorker()
+        self.live_worker = OneShotObservationWorker()
+        self.recovery_worker = OneShotRecoveryWorker()
+        self.evidence_export_worker = OneShotEvidenceExportWorker()
+        self._pending_dataset_path: Path | None = None
+        self._recovery_required_workspaces: set[Path] = set()
+        self._owner_review: tuple[Path, OwnerEconomicReviewSnapshot] | None = None
+        self._closing = False
+        self.status = text("ui.status.startup.ready")
+        self.dataset_summary = text("ui.status.dataset.none")
+        self.live_status = text("ui.status.live.never")
+        self.live_quotes = [text("ui.status.live_quotes.empty")]
+        self.evaluation = [text("ui.status.evaluation.empty")]
+        self.tickets: list[str] = []
+        self.bank = ""
+        self.log: list[str] = []
+        self.last_error = ""
+        self.manual_result = ""
+        self.manual_status = text("ui.windows.manual_calculation.status.ready")
+        self.owner_review_lines: list[str] = []
+        selected = load_surface_selection(self.workspace)
+        self.surface_key = selected if selected in SURFACE_BY_KEY else DEFAULT_SURFACE_KEY
+        self._refresh_economic_projection()
+        self._refresh_owner_projection()
+
+    def _append_log(self, value: str) -> None:
+        self.log.append(str(value))
+        if len(self.log) > 200:
+            self.log = self.log[-200:]
+
+    def _fail(self, message: str) -> dict[str, Any]:
+        self.last_error = message
+        self.status = message
+        self._append_log(message)
+        return {"status": "rejected", "message": message}
+
+    def _ok(self, message: str = "", *, focus_id: str | None = None) -> dict[str, Any]:
+        self.last_error = ""
+        if message:
+            self.status = message
+            self._append_log(message)
+        result: dict[str, Any] = {"status": "completed", "message": message}
+        if focus_id:
+            result["focus_id"] = focus_id
+        return result
+
+    def _busy(self) -> bool:
+        return any(
+            worker.busy
+            for worker in (
+                self.dataset_worker,
+                self.replay_worker,
+                self.live_worker,
+                self.recovery_worker,
+                self.evidence_export_worker,
+            )
+        )
+
+    def _selected_configuration(self) -> tuple[str, ResearchStrategyPlan | None]:
+        validate_strategy_configuration(self.strategy_id, self.research_plan)
+        return self.strategy_id, self.research_plan
+
+    def _refresh_economic_projection(self) -> None:
+        strategy_id = self.strategy_id
+        plan = self.research_plan
+        try:
+            validate_strategy_configuration(strategy_id, plan)
+        except Exception:
+            self.bank = text(
+                "ui.status.bank.quarantined", workspace=self._active_workspace
+            )
+            self.tickets = [text("ui.status.tickets.startup_failure")]
+            return
+        workspace = workspace_for_strategy(self.workspace, strategy_id, plan)
+        self._active_workspace = Path(workspace)
+        session: AutosportSession | None = None
+        try:
+            session = AutosportSession(
+                workspace,
+                "10000",
+                strategy_id=strategy_id,
+                research_plan=plan,
+            )
+            self.bank = text(
+                "ui.status.bank.current",
+                balance=session.book.balance,
+                committed_stake=session.book.committed_stake,
+                strategy_id=session.strategy_id,
+                workspace=session.workspace,
+            )
+            self.tickets = list(ticket_lines(session))
+        except Exception as exc:
+            self._recovery_required_workspaces.add(Path(workspace))
+            self.bank = text("ui.status.bank.quarantined", workspace=workspace)
+            self.tickets = [text("ui.status.tickets.startup_failure")]
+            self.last_error = _safe_exception_text(exc)
+            self.status = text("ui.status.startup.recovery_required")
+        finally:
+            if session is not None:
+                try:
+                    session.close()
+                except Exception as exc:
+                    self._recovery_required_workspaces.add(Path(workspace))
+                    self.last_error = _safe_exception_text(exc)
+                    self.status = text("ui.status.startup.recovery_required")
+
+    def _owner_workspace(self) -> Path | None:
+        if self.strategy_id != RESEARCH_STRATEGY_ID or self.research_plan is None:
+            return None
+        try:
+            return Path(
+                workspace_for_strategy(
+                    self.workspace,
+                    self.strategy_id,
+                    self.research_plan,
+                )
+            )
+        except Exception:
+            return None
+
+    def _refresh_owner_projection(self) -> None:
+        workspace = self._owner_workspace()
+        if workspace is None:
+            self.owner_state = "blocked"
+            self.owner_summary = text("ui.windows.owner_authority.error.strategy_blocked")
+            self.owner_lines = [self.owner_summary]
+            self.owner_can_initialize = False
+            return
+        view = OwnerEconomicAuthorityService(workspace).read_view()
+        self.owner_state = view.state
+        self.owner_summary = view.summary_uk
+        self.owner_lines = list(view.lines_uk)
+        self.owner_can_initialize = view.can_initialize
+
+    def _poll_workers(self) -> None:
+        message = self.dataset_worker.poll()
+        if message is not None:
+            pending = self._pending_dataset_path
+            self._pending_dataset_path = None
+            if message.error is not None:
+                self._fail(text("ui.error.dataset.rejected", detail=message.error))
+            elif (
+                not isinstance(message.result, ReplayDataset)
+                or pending is None
+                or Path(message.result.root) != pending
+            ):
+                self._fail(text("ui.error.dataset.identity_mismatch"))
+            else:
+                dataset = message.result
+                self.dataset_path = pending
+                self.dataset_summary = text(
+                    "ui.status.dataset.summary",
+                    name=dataset.name,
+                    sport=dataset.sport,
+                    market_sha=dataset.market_sha256[:12],
+                    results_sha=dataset.results_sha256[:12],
+                )
+                self._ok(text("ui.status.dataset.ready"))
+
+        replay_message = self.replay_worker.poll()
+        if replay_message is not None:
+            if replay_message.error is not None:
+                self._recovery_required_workspaces.add(Path(self._active_workspace))
+                self.bank = text(
+                    "ui.status.bank.quarantined", workspace=self._active_workspace
+                )
+                self.tickets = [text("ui.status.replay.error_ticket")]
+                self.evaluation = [text("ui.evaluation.replay_failed")]
+                self._fail(
+                    text("ui.error.replay.worker", detail=replay_message.error)
+                )
+            elif replay_message.result is None:
+                self._recovery_required_workspaces.add(Path(self._active_workspace))
+                self.evaluation = [text("ui.evaluation.no_terminal_result")]
+                self._fail(text("ui.status.replay.no_terminal_result"))
+            else:
+                self._refresh_economic_projection()
+                self.evaluation = list(evaluation_lines(replay_message.result))
+                self._ok(result_summary(replay_message.result))
+
+        live_message = self.live_worker.poll()
+        if live_message is not None:
+            if live_message.error is not None:
+                self.live_status = text(
+                    "ui.error.live.snapshot", detail=live_message.error
+                )
+                self._fail(text("ui.status.live.failed"))
+            elif live_message.result is None:
+                self.live_status = text("ui.status.live.no_result")
+            else:
+                self.live_status = observation_summary(live_message.result)
+                self.live_quotes = list(observation_quote_lines(live_message.result))
+                self._ok(text("ui.status.live.updated"))
+                self._append_log(self.live_status)
+
+        recovery_message = self.recovery_worker.poll()
+        if recovery_message is not None:
+            if recovery_message.error is not None:
+                self._recovery_required_workspaces.add(Path(self._active_workspace))
+                self._fail(
+                    text("ui.error.recovery.failure", detail=recovery_message.error)
+                )
+            elif recovery_message.result is None:
+                self._recovery_required_workspaces.add(Path(self._active_workspace))
+                self._fail(text("ui.status.recovery.no_result"))
+            else:
+                report = recovery_message.result.report
+                workspace = Path(recovery_message.result.session_view.workspace)
+                summary = text(
+                    "ui.recovery.summary",
+                    reconciled=len(report.reconciled_keys),
+                    aborted_uncommitted=len(report.aborted_uncommitted_keys),
+                    unresolved=len(report.unresolved_without_summary),
+                    workspace=workspace,
+                )
+                if report.unresolved_without_summary:
+                    self._recovery_required_workspaces.add(workspace)
+                    self._fail(summary + text("ui.status.recovery.unresolved_suffix"))
+                else:
+                    self._recovery_required_workspaces.discard(workspace)
+                    self._refresh_economic_projection()
+                    self._ok(summary + text("ui.status.recovery.ready_suffix"))
+
+        export_message = self.evidence_export_worker.poll()
+        if export_message is not None:
+            if export_message.error is not None:
+                self._fail(
+                    text(
+                        "ui.error.evidence_export.failed",
+                        error=export_message.error,
+                    )
+                )
+            else:
+                self._ok(text("ui.status.evidence_export.complete"))
+
+        self._refresh_owner_projection()
+
+    def _strategy_choices(self) -> list[dict[str, Any]]:
+        return [
+            {
+                "id": spec.strategy_id,
+                "label": text("ui.strategy.display", strategy_id=spec.strategy_id),
+                "requires_research_plan": spec.requires_research_plan,
+                "opens_paper_tickets": spec.opens_paper_tickets,
+            }
+            for spec in available_strategies()
+        ]
+
+    def state(self) -> dict[str, Any]:
+        with self._lock:
+            self._poll_workers()
+            spec = strategy_spec(self.strategy_id)
+            surfaces = [
+                {
+                    "key": item.key,
+                    "title": item.title_uk,
+                    "phase": item.phase,
+                    "blocked_reason": item.blocked_reason_uk,
+                }
+                for item in SURFACES
+            ]
+            surface = SURFACE_BY_KEY[self.surface_key]
+            return {
+                "status": self.status,
+                "last_error": self.last_error,
+                "workspace": str(self.workspace),
+                "active_workspace": str(self._active_workspace),
+                "bank": self.bank,
+                "dataset_summary": self.dataset_summary,
+                "dataset_path": "" if self.dataset_path is None else str(self.dataset_path),
+                "research_plan_path": (
+                    "" if self.research_plan_path is None else str(self.research_plan_path)
+                ),
+                "research_plan_summary": (
+                    text("ui.status.research_plan.baseline")
+                    if self.research_plan is None
+                    else text(
+                        "ui.status.research_plan.selected",
+                        path=self.research_plan_path,
+                        sha_suffix=f"{self.research_plan.source_sha256[:12]}…",
+                    )
+                ),
+                "strategy_id": self.strategy_id,
+                "strategy_choices": self._strategy_choices(),
+                "strategy_requires_plan": spec.requires_research_plan,
+                "replay_speed": self.replay_speed,
+                "live_mode": self.live_mode,
+                "live_status": self.live_status,
+                "live_quotes": list(self.live_quotes),
+                "tickets": list(self.tickets),
+                "evaluation": list(self.evaluation),
+                "log": list(self.log),
+                "busy": {
+                    "dataset": self.dataset_worker.busy,
+                    "replay": self.replay_worker.busy,
+                    "live": self.live_worker.busy,
+                    "recovery": self.recovery_worker.busy,
+                    "evidence_export": self.evidence_export_worker.busy,
+                },
+                "surface_key": self.surface_key,
+                "surfaces": surfaces,
+                "surface_state": surface.phase,
+                "surface_details": list(surface_detail_lines(surface)),
+                "owner": {
+                    "state": self.owner_state,
+                    "summary": self.owner_summary,
+                    "lines": list(self.owner_lines),
+                    "can_initialize": self.owner_can_initialize,
+                    "defaults": dict(INITIAL_OWNER_FORM_DEFAULTS),
+                    "review_lines": list(self.owner_review_lines),
+                },
+                "manual": {
+                    "status": self.manual_status,
+                    "result": self.manual_result,
+                    "operations": [
+                        {"id": key, "label": text(label_key)}
+                        for key, label_key in _MANUAL_OPERATION_KEYS.items()
+                    ],
+                },
+                "truth": {
+                    "real_money_execution": False,
+                    "human_tested": False,
+                    "nvda_verified": False,
+                    "whole_product_complete": False,
+                },
+            }
+
+    def _action_dataset_select(self, payload: Mapping[str, Any]) -> dict[str, Any]:
+        if self._busy():
+            return self._fail(text("ui.status.dataset.validation_busy"))
+        raw = payload.get("path")
+        if not isinstance(raw, str) or not raw.strip():
+            return self._fail(text("ui.status.dataset.validation_failed"))
+        selected = Path(raw).expanduser().absolute()
+        self._pending_dataset_path = selected
+
+        def task() -> ReplayDataset:
+            return load_dataset(selected)
+
+        if not self.dataset_worker.start(task):
+            self._pending_dataset_path = None
+            return self._fail(text("ui.error.dataset.worker_not_started"))
+        return self._ok(
+            text("ui.status.dataset.validation_running", path=selected),
+            focus_id="dataset-path",
+        )
+
+    def _action_strategy_set(self, payload: Mapping[str, Any]) -> dict[str, Any]:
+        if self._busy():
+            return self._fail(text("ui.status.strategy.dataset_busy"))
+        strategy_id = payload.get("strategy_id")
+        if not isinstance(strategy_id, str):
+            return self._fail(text("ui.error.strategy.unknown_display", display=repr(strategy_id)))
+        try:
+            spec = strategy_spec(strategy_id)
+        except Exception as exc:
+            return self._fail(_safe_exception_text(exc))
+        self.strategy_id = spec.strategy_id
+        if not spec.requires_research_plan:
+            self.research_plan = None
+            self.research_plan_path = None
+        self._owner_review = None
+        self.owner_review_lines = []
+        self._refresh_economic_projection()
+        self._refresh_owner_projection()
+        return self._ok(text("ui.status.strategy.changed"), focus_id="106")
+
+    def _action_research_plan_select(self, payload: Mapping[str, Any]) -> dict[str, Any]:
+        if self._busy():
+            return self._fail(text("ui.status.research_plan.dataset_busy"))
+        raw = payload.get("path")
+        if not isinstance(raw, str) or not raw.strip():
+            return self._fail(text("ui.status.research_plan.invalid"))
+        try:
+            plan_path = Path(raw).expanduser().absolute()
+            plan = ResearchStrategyPlan.from_path(plan_path)
+            validate_strategy_configuration(self.strategy_id, plan)
+        except Exception as exc:
+            return self._fail(
+                text("ui.error.research_plan.invalid", detail=_safe_exception_text(exc))
+            )
+        self.research_plan_path = plan_path
+        self.research_plan = plan
+        self._owner_review = None
+        self.owner_review_lines = []
+        self._refresh_economic_projection()
+        self._refresh_owner_projection()
+        return self._ok(text("ui.status.research_plan.ready"), focus_id="research-plan-path")
+
+    def _action_speed_set(self, payload: Mapping[str, Any]) -> dict[str, Any]:
+        value = payload.get("speed")
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            return self._fail(text("ui.status.replay.start_failed"))
+        speed = float(value)
+        if speed not in _ALLOWED_SPEEDS:
+            return self._fail(text("ui.status.replay.start_failed"))
+        if self._busy():
+            return self._fail(text("ui.status.replay.replay_busy"))
+        self.replay_speed = speed
+        return self._ok()
+
+    def _action_live_mode_set(self, payload: Mapping[str, Any]) -> dict[str, Any]:
+        mode = payload.get("mode")
+        if not isinstance(mode, str) or mode not in _ALLOWED_LIVE_MODES:
+            return self._fail(text("ui.status.live.unknown_mode"))
+        if self._busy():
+            return self._fail(text("ui.status.live.busy"))
+        self.live_mode = mode
+        return self._ok()
+
+    def _action_replay_run(self, payload: Mapping[str, Any]) -> dict[str, Any]:
+        if self._busy():
+            return self._fail(text("ui.status.replay.replay_busy"))
+        if self.dataset_path is None:
+            return self._fail(text("ui.info.replay.dataset_required"))
+        try:
+            strategy_id, plan = self._selected_configuration()
+            replay_workspace = Path(
+                workspace_for_strategy(self.workspace, strategy_id, plan)
+            )
+        except Exception as exc:
+            return self._fail(_safe_exception_text(exc))
+        if replay_workspace in self._recovery_required_workspaces:
+            return self._fail(text("ui.status.replay.quarantined"))
+        dataset_path = self.dataset_path
+        speed = self.replay_speed
+        self._active_workspace = replay_workspace
+
+        def task():
+            return run_workspace_dataset_once(
+                replay_workspace,
+                dataset_path,
+                initial_bankroll="10000",
+                speed=speed,
+                strategy_id=strategy_id,
+                research_plan=plan,
+            )
+
+        if not self.replay_worker.start(task):
+            return self._fail(text("ui.status.replay.start_failed"))
+        self.evaluation = [text("ui.evaluation.running")]
+        return self._ok(
+            text("ui.status.replay.running", strategy_id=strategy_id, plan_identity="")
+        )
+
+    def _action_live_refresh(self, payload: Mapping[str, Any]) -> dict[str, Any]:
+        if self._busy():
+            return self._fail(text("ui.status.live.busy"))
+        public_preview = self.live_mode == "public_preview"
+        workspace = self.workspace
+
+        def task():
+            api_key = None if public_preview else os.environ.get("AUTOSPORT_PARLAYAPI_KEY")
+            if not public_preview and not api_key:
+                raise RuntimeError(text("ui.error.live.api_key_missing"))
+            provider = ParlayApiTableTennisProvider(
+                api_key,
+                public_preview=public_preview,
+            )
+            return observe_workspace_once(workspace, provider, max_items=250)
+
+        if not self.live_worker.start(task):
+            return self._fail(text("ui.status.live.busy"))
+        self.live_status = text("ui.status.live.running")
+        return self._ok(text("ui.status.live.read_only_running"))
+
+    def _action_recovery_run(self, payload: Mapping[str, Any]) -> dict[str, Any]:
+        if self._busy():
+            return self._fail(text("ui.status.recovery.already_busy"))
+        try:
+            strategy_id, plan = self._selected_configuration()
+            workspace = Path(workspace_for_strategy(self.workspace, strategy_id, plan))
+        except Exception as exc:
+            return self._fail(
+                text("ui.error.recovery.configuration", detail=_safe_exception_text(exc))
+            )
+        self._active_workspace = workspace
+        self._recovery_required_workspaces.add(workspace)
+
+        def task():
+            return recover_workspace_once(
+                workspace,
+                initial_bankroll="10000",
+                strategy_id=strategy_id,
+                research_plan=plan,
+            )
+
+        if not self.recovery_worker.start(task):
+            return self._fail(text("ui.status.recovery.start_failed"))
+        self.bank = text("ui.status.bank.quarantined", workspace=workspace)
+        self.tickets = [text("ui.status.recovery.in_progress_ticket")]
+        return self._ok(text("ui.status.recovery.running", strategy_id=strategy_id, plan_identity=""))
+
+    def _action_evidence_export(self, payload: Mapping[str, Any]) -> dict[str, Any]:
+        if self._busy():
+            return self._fail(text("ui.status.evidence_export.operation_busy"))
+        raw = payload.get("path")
+        if not isinstance(raw, str) or not raw.strip():
+            return self._fail(text("ui.status.evidence_export.destination_invalid"))
+        workspace = Path(self._active_workspace)
+        try:
+            destination = resolve_evidence_output_destination(
+                workspace,
+                Path(raw).expanduser().absolute(),
+            )
+        except (OSError, TypeError, ValueError):
+            return self._fail(text("ui.status.evidence_export.destination_invalid"))
+        if not self.evidence_export_worker.start(workspace, destination):
+            return self._fail(text("ui.status.evidence_export.start_failed"))
+        return self._ok(text("ui.status.evidence_export.running"))
+
+    def _action_surface_select(self, payload: Mapping[str, Any]) -> dict[str, Any]:
+        key = payload.get("surface_key")
+        if not isinstance(key, str) or key not in SURFACE_BY_KEY:
+            return self._fail("Невідомий екран продукту.")
+        self.surface_key = key
+        save_surface_selection(self.workspace, key)
+        return self._ok("", focus_id=303)
+
+    def _action_owner_preview(self, payload: Mapping[str, Any]) -> dict[str, Any]:
+        if self._busy():
+            return self._fail(text("ui.windows.owner_authority.error.busy"))
+        workspace = self._owner_workspace()
+        if workspace is None:
+            return self._fail(text("ui.windows.owner_authority.error.strategy_blocked"))
+        values = payload.get("values")
+        emergency_stop = payload.get("emergency_stop")
+        if not isinstance(values, dict) or type(emergency_stop) is not bool:
+            return self._fail(text("ui.windows.owner_authority.error.review_stale"))
+        if set(values) != set(OWNER_ECONOMIC_FORM_FIELDS):
+            return self._fail(text("ui.windows.owner_authority.error.review_stale"))
+        try:
+            review = OwnerEconomicReviewSnapshot.from_form(
+                values,
+                emergency_stop=emergency_stop,
+            )
+        except OwnerEconomicAuthorityError as exc:
+            return self._fail(_safe_exception_text(exc))
+        self._owner_review = (workspace, review)
+        self.owner_review_lines = list(review.lines_uk)
+        return self._ok(text("ui.windows.owner_authority.review.prompt"), focus_id="owner-review")
+
+    def _action_owner_initialize(self, payload: Mapping[str, Any]) -> dict[str, Any]:
+        if self._busy():
+            return self._fail(text("ui.windows.owner_authority.error.busy"))
+        confirmed = payload.get("confirmed")
+        values = payload.get("values")
+        emergency_stop = payload.get("emergency_stop")
+        workspace = self._owner_workspace()
+        review_pair = self._owner_review
+        if (
+            confirmed is not True
+            or workspace is None
+            or review_pair is None
+            or review_pair[0] != workspace
+            or not isinstance(values, dict)
+            or type(emergency_stop) is not bool
+            or not review_pair[1].still_matches(values, emergency_stop=emergency_stop)
+        ):
+            return self._fail(text("ui.windows.owner_authority.error.review_stale"))
+        try:
+            OwnerEconomicAuthorityService(workspace).initialize_from_form(
+                values,
+                emergency_stop=emergency_stop,
+                confirmed=True,
+            )
+        except OwnerEconomicAuthorityError as exc:
+            return self._fail(_safe_exception_text(exc))
+        self._owner_review = None
+        self.owner_review_lines = []
+        self._refresh_owner_projection()
+        self._refresh_economic_projection()
+        return self._ok(self.owner_summary, focus_id="306")
+
+    def _action_manual_calculate(self, payload: Mapping[str, Any]) -> dict[str, Any]:
+        operation = payload.get("operation")
+        raw = payload.get("input")
+        if not isinstance(operation, str):
+            return self._fail(text("ui.windows.manual_calculation.error.operation_empty"))
+        try:
+            evidence = _manual_calculation(
+                ManualCalculationService(),
+                operation,
+                raw,
+            )
+            self.manual_result = _render_manual_evidence(evidence)
+        except (TypeError, ValueError, ArithmeticError) as exc:
+            self.manual_result = ""
+            self.manual_status = text("ui.windows.manual_calculation.status.error")
+            return self._fail(
+                f"{self.manual_status}: {_safe_exception_text(exc)}"
+            )
+        self.manual_status = text("ui.windows.manual_calculation.status.success")
+        return self._ok(self.manual_status, focus_id="334")
+
+    def _action_manual_clear(self, payload: Mapping[str, Any]) -> dict[str, Any]:
+        self.manual_result = ""
+        self.manual_status = text("ui.windows.manual_calculation.status.cleared")
+        return self._ok(self.manual_status, focus_id="332")
+
+    def dispatch(self, raw: Mapping[str, Any]) -> dict[str, Any]:
+        if not isinstance(raw, Mapping):
+            return {"request_id": "invalid", "status": "rejected", "message": "Invalid UI command."}
+        request_id = raw.get("request_id")
+        action_id = raw.get("action_id")
+        payload = raw.get("payload", {})
+        if not isinstance(request_id, str) or not request_id:
+            request_id = "invalid"
+        if not isinstance(action_id, str) or not isinstance(payload, Mapping):
+            return {"request_id": request_id, "status": "rejected", "message": "Invalid UI command."}
+        handlers = {
+            "dataset.select": self._action_dataset_select,
+            "strategy.set": self._action_strategy_set,
+            "research_plan.select": self._action_research_plan_select,
+            "replay_speed.set": self._action_speed_set,
+            "live_mode.set": self._action_live_mode_set,
+            "replay.run": self._action_replay_run,
+            "live.refresh": self._action_live_refresh,
+            "recovery.run": self._action_recovery_run,
+            "evidence.export": self._action_evidence_export,
+            "surface.select": self._action_surface_select,
+            "owner.preview": self._action_owner_preview,
+            "owner.initialize": self._action_owner_initialize,
+            "manual.calculate": self._action_manual_calculate,
+            "manual.clear": self._action_manual_clear,
+        }
+        handler = handlers.get(action_id)
+        if handler is None:
+            return {
+                "request_id": request_id,
+                "status": "rejected",
+                "message": f"Unknown UI action: {action_id}",
+            }
+        with self._lock:
+            if self._closing:
+                response = self._fail("Автоспорт завершує роботу.")
+            else:
+                try:
+                    response = handler(payload)
+                except BaseException as exc:
+                    if not isinstance(exc, Exception):
+                        raise
+                    response = self._fail(_safe_exception_text(exc))
+        return {"request_id": request_id, **response}
+
+    def close(self) -> None:
+        with self._lock:
+            self._closing = True
+
+
+class AutosportWebBridge:
+    """Minimal pywebview API: one command ingress and one read-only state egress."""
+
+    def __init__(self, controller: AutosportWebController | None = None) -> None:
+        self._controller = controller or AutosportWebController()
+
+    def dispatch(self, raw: Mapping[str, Any]) -> dict[str, Any]:
+        return self._controller.dispatch(raw)
+
+    def get_state(self) -> dict[str, Any]:
+        return {"ok": True, "state": self._controller.state()}
+
+    def close(self) -> None:
+        self._controller.close()
+
+
+def launch_windows_shell(
+    bridge: AutosportWebBridge | None = None,
+    *,
+    title: str | None = None,
+) -> int:
+    try:
+        import webview
+    except Exception as exc:
+        raise WindowsWebViewUnavailable(
+            "pywebview is unavailable; the Windows semantic shell cannot start"
+        ) from exc
+
+    asset = web_shell_index_path()
+    if not asset.is_file():
+        raise WindowsWebViewUnavailable(
+            f"Windows semantic shell asset is missing: {asset}"
+        )
+
+    api = bridge or AutosportWebBridge()
+    try:
+        webview.create_window(
+            title or text("ui.app.title"),
+            str(asset),
+            js_api=api,
+            width=1180,
+            height=820,
+            min_size=(820, 680),
+        )
+        webview.start(gui="edgechromium")
+    except Exception as exc:
+        raise WindowsWebViewUnavailable(
+            "Microsoft Edge WebView2 could not start the Autosport semantic shell"
+        ) from exc
+    finally:
+        api.close()
+    return 0
+
+
+def main() -> int:
+    return launch_windows_shell()
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

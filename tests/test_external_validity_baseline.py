@@ -637,3 +637,54 @@ def test_decimal_evidence_and_report_identity_ignore_ambient_decimal_context():
         low_precision[0]["total_cost"]
         == "0.0100000000000000000000000000000001"
     )
+
+
+@pytest.mark.parametrize(
+    ("metric", "low", "high", "scored", "abstained", "total_cost"),
+    (
+        ("0.01", "0", "0.01", 0, 3, "0"),
+        ("0", "-0.01", "0.01", 0, 3, "0"),
+        ("0", "0", "0", 1, 2, "0"),
+        ("0", "0", "0", 0, 3, "0.01"),
+    ),
+)
+def test_no_bet_wait_baseline_rejects_nonzero_action_or_economic_evidence(
+    metric: str,
+    low: str,
+    high: str,
+    scored: int,
+    abstained: int,
+    total_cost: str,
+):
+    protocol = _protocol()
+    candidate = _result(
+        protocol,
+        protocol.candidate_id,
+        artifact_sha256=protocol.candidate_artifact_sha256,
+    )
+    definition = next(
+        item for item in protocol.baselines if item.kind is BaselineKind.NO_BET_WAIT
+    )
+    results = list(_supported_results(protocol))
+    index = next(
+        i for i, item in enumerate(results) if item.policy_id == definition.baseline_id
+    )
+    results[index] = _result(
+        protocol,
+        definition.baseline_id,
+        artifact_sha256=definition.implementation_sha256,
+        baseline_definition_sha256=definition.definition_sha256,
+        metric=metric,
+        low=low,
+        high=high,
+        scored=scored,
+        abstained=abstained,
+        total_cost=total_cost,
+    )
+
+    with pytest.raises(
+        ExternalValidityError,
+        match="no-bet-wait baseline must represent deterministic zero action",
+    ):
+        build_external_validity_report(protocol, candidate, results)
+

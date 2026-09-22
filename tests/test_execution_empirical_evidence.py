@@ -565,3 +565,211 @@ def test_tampered_ledger_fails_before_empirical_projection(tmp_path):
             ledger,
             attempt_id="attempt-1",
         )
+
+from autosport.execution_empirical_evidence import (
+    EmpiricalExecutionPopulationEvidence,
+    build_empirical_execution_population_evidence,
+)
+
+
+def _population_ledger(tmp_path) -> RealExecutionLedger:
+    ledger = RealExecutionLedger(tmp_path / "execution-population.jsonl")
+    specs = (
+        ("z", "ACCEPTED"),
+        ("a", "REJECTED"),
+        ("m", "UNKNOWN"),
+        ("p", "PARTIAL"),
+        ("r", "RESERVED"),
+        ("s", "SUBMITTED"),
+        ("n", "RECONCILED_NOT_FOUND"),
+    )
+    for index, (suffix, state) in enumerate(specs, start=1):
+        action = replace(
+            _action(),
+            action_id=f"leg-{suffix}",
+            selection_id=f"selection-{suffix}",
+            quote_id=f"quote-{suffix}",
+        )
+        plan = ExecutionPlan(
+            plan_id=f"plan-{suffix}",
+            bookmaker_profile_version="profile-1",
+            decision_id=f"decision-{suffix}",
+            approval_id=f"approval-{suffix}",
+            created_at=DECISION,
+            actions=(action,),
+        )
+        attempt_id = f"attempt-{suffix}"
+        ledger.reserve_plan(plan)
+        ledger.begin_attempt(
+            plan_id=plan.plan_id,
+            action_id=action.action_id,
+            attempt_id=attempt_id,
+            reserved_at=RESERVED,
+        )
+        if state == "RESERVED":
+            continue
+
+        ledger.mark_submitted(attempt_id, submitted_at=SUBMITTED)
+        if state == "SUBMITTED":
+            continue
+        if state == "UNKNOWN":
+            ledger.mark_unknown(
+                attempt_id,
+                reason="provider timeout after submission",
+                observed_at="2026-09-21T10:00:02+00:00",
+            )
+            continue
+        if state == "RECONCILED_NOT_FOUND":
+            ledger.mark_unknown(
+                attempt_id,
+                reason="provider timeout after submission",
+                observed_at="2026-09-21T10:00:02+00:00",
+            )
+            ledger.reconcile_not_found(
+                ReconciliationSnapshot(
+                    attempt_id=attempt_id,
+                    evidence_id=format(index, "064x"),
+                    observed_at=RECONCILIATION_AT,
+                    external_effect_found=False,
+                    source=RECONCILIATION_SOURCE,
+                )
+            )
+            continue
+
+        ledger.bind_provider_evidence(
+            attempt_id=attempt_id,
+            evidence_id=format(index, "064x"),
+            observed_at=PROVIDER,
+            source="provider-response",
+        )
+        status = {
+            "ACCEPTED": AcknowledgementStatus.ACCEPTED,
+            "PARTIAL": AcknowledgementStatus.PARTIAL,
+            "REJECTED": AcknowledgementStatus.REJECTED,
+        }[state]
+        ledger.acknowledge(
+            ExternalAcknowledgement(
+                attempt_id=attempt_id,
+                external_receipt_id=f"receipt-{suffix}",
+                status=status,
+                acknowledged_at=ACKED,
+                accepted_odds=(
+                    None if status is AcknowledgementStatus.REJECTED else Decimal("2.08")
+                ),
+                accepted_stake=(
+                    None
+                    if status is AcknowledgementStatus.REJECTED
+                    else (
+                        Decimal("2.00")
+                        if status is AcknowledgementStatus.PARTIAL
+                        else Decimal("5.00")
+                    )
+                ),
+            )
+        )
+    return ledger
+
+
+def test_population_aggregate_keeps_complete_funnel_denominator(tmp_path):
+    aggregate = build_empirical_execution_population_evidence(
+        _population_ledger(tmp_path),
+        evaluation_protocol_sha256="a" * 64,
+    )
+
+    assert isinstance(aggregate, EmpiricalExecutionPopulationEvidence)
+    assert aggregate.total_attempts == 7
+    assert tuple(sample.attempt_id for sample in aggregate.samples) == tuple(
+        sorted(sample.attempt_id for sample in aggregate.samples)
+    )
+    assert dict(aggregate.state_counts) == {
+        "RESERVED": 1,
+        "SUBMITTED": 1,
+        "UNKNOWN": 1,
+        "ACCEPTED": 1,
+        "PARTIAL": 1,
+        "REJECTED": 1,
+        "RECONCILED_NOT_FOUND": 1,
+    }
+    assert aggregate.terminal_count == 4
+    assert aggregate.right_censored_count == 3
+    assert aggregate.provider_evidence_count == 3
+    assert aggregate.slippage_known_count == 0
+    assert aggregate.slippage_unknown_count == 6
+    assert aggregate.slippage_not_applicable_count == 1
+    assert aggregate.causal_timing_known_count == 0
+    assert aggregate.causal_timing_unknown_count == 7
+
+    payload = aggregate.to_dict()
+    assert payload["state_rates"]["ACCEPTED"] == {
+        "numerator": 1,
+        "denominator": 7,
+    }
+    assert payload["right_censored_rate"] == {
+        "numerator": 3,
+        "denominator": 7,
+    }
+    assert payload["provider_evidence_rate"] == {
+        "numerator": 3,
+        "denominator": 7,
+    }
+
+
+def test_population_aggregate_cannot_hide_rejected_or_unknown_samples(tmp_path):
+    aggregate = build_empirical_execution_population_evidence(
+        _population_ledger(tmp_path),
+        evaluation_protocol_sha256="b" * 64,
+    )
+
+    states = [sample.attempt_state for sample in aggregate.samples]
+    assert "ACCEPTED" in states
+    assert "REJECTED" in states
+    assert "UNKNOWN" in states
+    assert aggregate.total_attempts == len(states)
+    assert sum(dict(aggregate.state_counts).values()) == aggregate.total_attempts
+
+
+def test_population_aggregate_is_restart_deterministic(tmp_path):
+    ledger = _population_ledger(tmp_path)
+    first = build_empirical_execution_population_evidence(
+        ledger,
+        evaluation_protocol_sha256="c" * 64,
+    )
+
+    restarted = RealExecutionLedger(ledger.path)
+    second = build_empirical_execution_population_evidence(
+        restarted,
+        evaluation_protocol_sha256="c" * 64,
+    )
+
+    assert second.to_dict() == first.to_dict()
+    assert second.denominator_sha256 == first.denominator_sha256
+    assert second.evidence_sha256 == first.evidence_sha256
+
+
+def test_population_aggregate_rejects_noncanonical_protocol_digest(tmp_path):
+    with pytest.raises(
+        EmpiricalExecutionEvidenceError,
+        match="evaluation_protocol_sha256",
+    ):
+        build_empirical_execution_population_evidence(
+            _population_ledger(tmp_path),
+            evaluation_protocol_sha256="caller-label",
+        )
+
+
+def test_population_direct_construction_rejects_duplicate_attempt_sample(tmp_path):
+    aggregate = build_empirical_execution_population_evidence(
+        _population_ledger(tmp_path),
+        evaluation_protocol_sha256="d" * 64,
+    )
+    first = aggregate.samples[0]
+
+    with pytest.raises(
+        EmpiricalExecutionEvidenceError,
+        match="duplicate an attempt",
+    ):
+        replace(
+            aggregate,
+            samples=(first, first),
+        )
+

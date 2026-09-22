@@ -273,6 +273,16 @@ def run_product_command(
 class _UkrainianArgumentParser(argparse.ArgumentParser):
     """Argparse formatter with Ukrainian public presentation text."""
 
+    def parse_args(
+        self,
+        args: Sequence[str] | None = None,
+        namespace: argparse.Namespace | None = None,
+    ) -> argparse.Namespace:
+        parsed = super().parse_args(args, namespace)
+        if getattr(parsed, "workspace", None) is None:
+            parsed.workspace = default_workspace()
+        return parsed
+
     def format_usage(self) -> str:
         return super().format_usage().replace(
             "usage: ", product_cli_text("product.cli.usage_prefix"), 1
@@ -308,7 +318,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--workspace",
         type=Path,
-        default=default_workspace(),
+        default=None,
         metavar="ШЛЯХ",
         help=product_cli_text("product.cli.workspace.help"),
     )

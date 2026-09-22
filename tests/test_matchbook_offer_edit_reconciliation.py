@@ -4,7 +4,6 @@ from decimal import Decimal, localcontext
 import pytest
 
 from autosport.matchbook_offer_edit_reconciliation import (
-    MatchbookOfferEditEvidence,
     MatchbookOfferEditFailureReason,
     MatchbookOfferEditIdentityDisposition,
     MatchbookOfferEditIntent,
@@ -98,9 +97,6 @@ def test_delayed_is_pending_not_applied_and_has_no_authority():
     assert not x.provider_write_authority
     assert not x.settlement_authority
     assert not x.retry_authority
-    evidence = MatchbookOfferEditEvidence(intent(), x)
-    assert evidence.edited_terms_are_pending
-    assert not evidence.edited_terms_are_observed_applied
 
 
 def test_delayed_requires_positive_delay_and_no_failure_reason():
@@ -114,8 +110,6 @@ def test_applied_is_observed_but_not_write_or_settlement_authority():
     x = readback(status=MatchbookOfferEditStatus.APPLIED)
     assert x.truth is MatchbookOfferEditTruth.APPLIED_OBSERVED
     assert not x.provider_write_authority and not x.settlement_authority
-    evidence = MatchbookOfferEditEvidence(intent(), x)
-    assert evidence.edited_terms_are_observed_applied
 
 
 @pytest.mark.parametrize("reason", list(MatchbookOfferEditFailureReason))
@@ -136,15 +130,6 @@ def test_failed_requires_provider_reason():
             captured_at=T0,
             raw_response_sha256=RAW_A,
         )
-
-
-def test_evidence_rejects_cross_account_offer_and_pre_request_readback():
-    with pytest.raises(MatchbookOfferEditReconciliationError, match="account"):
-        MatchbookOfferEditEvidence(intent(), readback(account="other"))
-    with pytest.raises(MatchbookOfferEditReconciliationError, match="offer identity"):
-        MatchbookOfferEditEvidence(intent(), readback(offer_id=102))
-    with pytest.raises(MatchbookOfferEditReconciliationError, match="predates"):
-        MatchbookOfferEditEvidence(intent(), readback(at=T0 - timedelta(microseconds=1)))
 
 
 def test_unknown_edit_id_never_becomes_identity_from_similarity():

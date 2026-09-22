@@ -586,6 +586,66 @@ def test_first_postdeadline_negative_capture_never_proves_elapsed_horizon(
     assert result.evidence is None
 
 
+def test_forward_wall_clock_jump_cannot_manufacture_elapsed_visibility(
+    tmp_path, monkeypatch
+) -> None:
+    ledger, action, provider_ref, _ = _ledger_with_timeout(tmp_path, monkeypatch)
+    assert provider_ref is not None
+
+    wall_values = iter(
+        [
+            datetime.fromisoformat("2026-09-21T18:00:01+00:00"),
+            datetime.fromisoformat("2026-09-21T18:00:30+00:00"),
+        ]
+    )
+
+    class _JumpingAuthorityDateTime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            value = next(wall_values)
+            return value if tz is None else value.astimezone(tz)
+
+    monkeypatch.setattr(timeout_resolution, "datetime", _JumpingAuthorityDateTime)
+    ticks = iter([1_000_000_000, 1_200_000_000])
+    monkeypatch.setattr(timeout_resolution, "monotonic_ns", lambda: next(ticks))
+    profile = _profile()
+
+    first_capture = _empty_provider_capture(
+        action,
+        provider_ref,
+        observed_at="2026-09-21T18:00:01+00:00",
+    )
+    first = timeout_resolution.resolve_betfair_timeout_provider_state(
+        ledger,
+        action,
+        profile,
+        attempt_id="attempt-1",
+        expected_profile_sha256=profile.profile_id,
+        readback=first_capture,
+    )
+    assert first.evidence is None
+
+    second_capture = _empty_provider_capture(
+        action,
+        provider_ref,
+        observed_at="2026-09-21T18:00:30+00:00",
+    )
+    second = timeout_resolution.resolve_betfair_timeout_provider_state(
+        ledger,
+        action,
+        profile,
+        attempt_id="attempt-1",
+        expected_profile_sha256=profile.profile_id,
+        readback=second_capture,
+    )
+
+    assert (
+        second.kind
+        is timeout_resolution.BetfairTimeoutResolutionKind.INDETERMINATE_BEFORE_VISIBILITY_HORIZON
+    )
+    assert second.evidence is None
+
+
 def test_fresh_negative_capture_after_full_monotonic_horizon_can_issue_absence(
     tmp_path, monkeypatch
 ) -> None:

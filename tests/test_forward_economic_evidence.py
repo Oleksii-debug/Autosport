@@ -286,20 +286,34 @@ def test_second_policy_identity_failure_does_not_commit_first_resolution():
     assert acc.summary().evidence_sha256 == before
 
 
-def test_decision_must_not_predate_prospective_protocol_freeze():
-    acc = ForwardEconomicEvidenceAccumulator(protocol())
+@pytest.mark.parametrize(
+    "decision_committed_at",
+    (
+        T0,
+        T0 + timedelta(minutes=1),
+    ),
+)
+def test_decision_must_causally_follow_prospective_protocol_freeze(
+    decision_committed_at,
+):
+    frozen_protocol = protocol()
+    acc = ForwardEconomicEvidenceAccumulator(frozen_protocol)
     obs = observation(0)
     challenger = replace(
         outcome("challenger", obs, side=BetSide.BACK, pnl="5"),
-        decision_committed_at=T0,
+        decision_committed_at=decision_committed_at,
     )
     champion = outcome("champion", obs, side=BetSide.NONE, pnl="0")
     resolver = resolver_for([(obs, challenger, champion)])
 
-    with pytest.raises(ForwardEconomicEvidenceError, match="predates frozen"):
+    with pytest.raises(
+        ForwardEconomicEvidenceError,
+        match="causally follow frozen prospective protocol",
+    ):
         acc.record(obs, resolver)
 
     assert acc.steps == ()
+    assert acc.next_sequence == 0
 
 
 def test_protocol_maximum_accepted_odds_is_enforced_before_recording():

@@ -10,6 +10,7 @@ from autosport.calibration_diagnostics import (
     evaluate_calibration_coverage,
     evaluate_calibration_diagnostics,
 )
+from autosport.domain import TicketLeg
 from autosport.forecasting import (
     ForecastOutcomeFact,
     ForecastRecord,
@@ -404,6 +405,55 @@ class CalibrationDiagnosticsTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "repeated canonical event cluster"):
             self._evaluate(
                 (records[0], same_event),
+                outcomes[:2],
+                self._window(),
+                bins=2,
+            )
+
+    def test_iid_screen_supports_sport_v2_and_clusters_same_event(self):
+        records, outcomes = self._cohort()
+        first = replace(
+            records[0],
+            quote_key=TicketLeg(
+                "sport-event-1",
+                "winner",
+                "selection-a",
+                Decimal("2"),
+                sport="soccer",
+            ).quote_key,
+        )
+        second = replace(
+            records[1],
+            quote_key=TicketLeg(
+                "sport-event-2",
+                "winner",
+                "selection-b",
+                Decimal("2"),
+                sport="soccer",
+            ).quote_key,
+        )
+
+        report = self._evaluate(
+            (first, second),
+            outcomes[:2],
+            self._window(),
+            bins=2,
+        )
+        self.assertEqual(report.count, 2)
+
+        same_event = replace(
+            second,
+            quote_key=TicketLeg(
+                "sport-event-1",
+                "total",
+                "selection-c",
+                Decimal("2"),
+                sport="soccer",
+            ).quote_key,
+        )
+        with self.assertRaisesRegex(ValueError, "repeated canonical event cluster"):
+            self._evaluate(
+                (first, same_event),
                 outcomes[:2],
                 self._window(),
                 bins=2,

@@ -24,6 +24,11 @@ from .betfair_account_readonly import (
     BetfairExecutionReadbackEnvelope,
     BetfairReadOnlyError,
 )
+from .monotonic_workspace_authority import (
+    AuthorityPhase,
+    MonotonicWorkspaceAuthority,
+    MonotonicWorkspaceAuthorityError,
+)
 from .real_execution_ledger import (
     AttemptState,
     ExecutionAction,
@@ -35,6 +40,11 @@ from .real_execution_ledger import (
 _SCHEMA = "autosport.betfair_settlement_revision"
 _SCHEMA_VERSION = 1
 _ALLOWED_STATUSES = frozenset({"SETTLED", "VOIDED", "LAPSED", "CANCELLED"})
+_MONOTONIC_DOMAIN = "betfair-settlement-revisions"
+_MONOTONIC_BINDING_SCHEMA = "autosport.betfair_settlement_revision.monotonic_binding"
+_MONOTONIC_BINDING_VERSION = 1
+_MONOTONIC_STATE_SCHEMA = "autosport.betfair_settlement_revision.monotonic_state"
+_MONOTONIC_STATE_VERSION = 1
 
 
 class BetfairSettlementRevisionError(RuntimeError):
@@ -253,6 +263,167 @@ class BetfairSettlementRevisionStore:
         self._last_record_sha256: str | None = None
         self._reload()
 
+    @staticmethod
+    def _monotonic_key(path: Path) -> str:
+        name = os.path.normcase(path.name)
+        return "settlement-" + sha256(name.encode("utf-8")).hexdigest()
+
+    def _monotonic_authority(self) -> MonotonicWorkspaceAuthority:
+        absolute = Path(os.path.abspath(os.fspath(self.path)))
+        return MonotonicWorkspaceAuthority(
+            workspace=absolute.parent,
+            domain=_MONOTONIC_DOMAIN,
+            key=self._monotonic_key(absolute),
+        )
+
+    def _monotonic_binding(self) -> str:
+        return _digest({
+            "schema": _MONOTONIC_BINDING_SCHEMA,
+            "schema_version": _MONOTONIC_BINDING_VERSION,
+            "journal_schema": _SCHEMA,
+            "journal_schema_version": _SCHEMA_VERSION,
+            "journal_key": self._monotonic_key(
+                Path(os.path.abspath(os.fspath(self.path)))
+            ),
+        })
+
+    def _monotonic_state_digest_for(
+        self,
+        *,
+        record_count: int,
+        tail_record_sha256: str | None,
+        tail_revision_id: str | None,
+    ) -> str | None:
+        if record_count == 0:
+            if tail_record_sha256 is not None or tail_revision_id is not None:
+                raise BetfairSettlementRevisionError(
+                    "empty settlement journal cannot have a monotonic tail"
+                )
+            return None
+        if (
+            type(record_count) is not int
+            or record_count < 1
+            or tail_record_sha256 is None
+            or tail_revision_id is None
+        ):
+            raise BetfairSettlementRevisionError(
+                "settlement monotonic state is internally inconsistent"
+            )
+        return _digest({
+            "schema": _MONOTONIC_STATE_SCHEMA,
+            "schema_version": _MONOTONIC_STATE_VERSION,
+            "journal_key": self._monotonic_key(
+                Path(os.path.abspath(os.fspath(self.path)))
+            ),
+            "record_count": record_count,
+            "tail_record_sha256": _sha(
+                tail_record_sha256, "tail_record_sha256"
+            ),
+            "tail_revision_id": _sha(tail_revision_id, "tail_revision_id"),
+        })
+
+    def _monotonic_state_digest(self) -> str | None:
+        tail_revision_id = (
+            None if not self._revisions else self._revisions[-1].revision_id
+        )
+        return self._monotonic_state_digest_for(
+            record_count=len(self._revisions),
+            tail_record_sha256=self._last_record_sha256,
+            tail_revision_id=tail_revision_id,
+        )
+
+    def _ensure_monotonic_current(self, *, adopt_if_missing: bool) -> None:
+        observed = self._monotonic_state_digest()
+        binding = self._monotonic_binding()
+        try:
+            authority = self._monotonic_authority()
+            history = authority.read_history()
+            if not history:
+                if observed is None:
+                    return
+                if not adopt_if_missing:
+                    raise BetfairSettlementRevisionError(
+                        "settlement journal lacks independent monotonic authority"
+                    )
+                tx_id = _digest({
+                    "operation": "ADOPT_VALIDATED_SETTLEMENT_BASELINE",
+                    "state_sha256": observed,
+                    "semantic_binding_sha256": binding,
+                })
+                authority.prepare(
+                    tx_id=tx_id,
+                    observed_state_sha256=None,
+                    intended_state_sha256=observed,
+                    semantic_binding_sha256=binding,
+                )
+                authority.commit(
+                    tx_id=tx_id,
+                    observed_state_sha256=observed,
+                    semantic_binding_sha256=binding,
+                )
+                return
+
+            latest = history[-1]
+            if (
+                latest.phase is AuthorityPhase.PREPARE
+                and observed == latest.intended_state_sha256
+            ):
+                authority.recover(
+                    observed_state_sha256=observed,
+                    tx_id=latest.tx_id,
+                    semantic_binding_sha256=binding,
+                )
+            else:
+                authority.recover(observed_state_sha256=observed)
+        except MonotonicWorkspaceAuthorityError as exc:
+            raise BetfairSettlementRevisionError(
+                "settlement monotonic authority rejected journal state"
+            ) from exc
+
+    def _record_unsigned(
+        self,
+        revision: BetfairSettlementRevision,
+    ) -> dict[str, object]:
+        return {
+            "schema": _SCHEMA,
+            "schema_version": _SCHEMA_VERSION,
+            "previous_record_sha256": self._last_record_sha256,
+            "revision": revision.to_dict(),
+        }
+
+    def _prepare_monotonic_append(
+        self,
+        revision: BetfairSettlementRevision,
+    ) -> None:
+        unsigned = self._record_unsigned(revision)
+        record_hash = _digest(unsigned)
+        observed = self._monotonic_state_digest()
+        intended = self._monotonic_state_digest_for(
+            record_count=len(self._revisions) + 1,
+            tail_record_sha256=record_hash,
+            tail_revision_id=revision.revision_id,
+        )
+        assert intended is not None
+        binding = self._monotonic_binding()
+        tx_id = _digest({
+            "operation": "APPEND_SETTLEMENT_REVISION",
+            "observed_state_sha256": observed,
+            "intended_state_sha256": intended,
+            "revision_id": revision.revision_id,
+            "semantic_binding_sha256": binding,
+        })
+        try:
+            self._monotonic_authority().prepare(
+                tx_id=tx_id,
+                observed_state_sha256=observed,
+                intended_state_sha256=intended,
+                semantic_binding_sha256=binding,
+            )
+        except MonotonicWorkspaceAuthorityError as exc:
+            raise BetfairSettlementRevisionError(
+                "settlement monotonic authority rejected append"
+            ) from exc
+
     @property
     def revisions(self) -> tuple[BetfairSettlementRevision, ...]:
         with self._thread_lock:
@@ -349,9 +520,19 @@ class BetfairSettlementRevisionStore:
                 capture_evidence_sha256=capture.evidence_sha256,
                 content_sha256=content_sha,
             )
+            self._prepare_monotonic_append(revision)
             self._append(revision)
-            self._accept(revision)
-            return SettlementIngestResult(revision, True)
+            # Re-read the durable journal before exposing the new revision. This
+            # also resolves PREPARE -> COMMIT only when the exact intended local
+            # state is present, so crashes on either side of the append remain
+            # deterministic and stale complete prefixes fail closed.
+            self._reload()
+            persisted = self._by_bet.get(key, [])[-1]
+            if persisted.revision_id != revision.revision_id:
+                raise BetfairSettlementRevisionError(
+                    "persisted settlement revision differs from prepared append"
+                )
+            return SettlementIngestResult(persisted, True)
 
     @contextmanager
     def _writer_lock(self) -> Iterator[None]:
@@ -377,33 +558,62 @@ class BetfairSettlementRevisionStore:
         self._by_bet = {}
         self._last_record_sha256 = None
         try:
-            if not self.path.exists():
-                return
             previous_hash: str | None = None
-            try:
-                with self.path.open("r", encoding="utf-8") as handle:
-                    for line_no, line in enumerate(handle, 1):
-                        if not line.endswith("\n"):
-                            raise BetfairSettlementRevisionError("settlement log has partial final record")
-                        record = json.loads(line, object_pairs_hook=_pairs, parse_constant=_nonfinite)
-                        if type(record) is not dict or set(record) != {
-                            "schema", "schema_version", "previous_record_sha256", "revision", "record_sha256"
-                        }:
-                            raise BetfairSettlementRevisionError(f"settlement record {line_no} schema invalid")
-                        if record["schema"] != _SCHEMA or record["schema_version"] != _SCHEMA_VERSION:
-                            raise BetfairSettlementRevisionError(f"settlement record {line_no} schema unsupported")
-                        if record["previous_record_sha256"] != previous_hash:
-                            raise BetfairSettlementRevisionError(f"settlement record {line_no} hash chain broken")
-                        supplied = _sha(record["record_sha256"], "record_sha256")
-                        unsigned = dict(record)
-                        unsigned.pop("record_sha256")
-                        if supplied != _digest(unsigned):
-                            raise BetfairSettlementRevisionError(f"settlement record {line_no} digest mismatch")
-                        self._accept(BetfairSettlementRevision.from_dict(record["revision"]))
-                        previous_hash = supplied
-            except json.JSONDecodeError as exc:
-                raise BetfairSettlementRevisionError("settlement log is invalid JSON") from exc
+            if self.path.exists():
+                try:
+                    with self.path.open("r", encoding="utf-8") as handle:
+                        for line_no, line in enumerate(handle, 1):
+                            if not line.endswith("\n"):
+                                raise BetfairSettlementRevisionError(
+                                    "settlement log has partial final record"
+                                )
+                            record = json.loads(
+                                line,
+                                object_pairs_hook=_pairs,
+                                parse_constant=_nonfinite,
+                            )
+                            if type(record) is not dict or set(record) != {
+                                "schema",
+                                "schema_version",
+                                "previous_record_sha256",
+                                "revision",
+                                "record_sha256",
+                            }:
+                                raise BetfairSettlementRevisionError(
+                                    f"settlement record {line_no} schema invalid"
+                                )
+                            if (
+                                record["schema"] != _SCHEMA
+                                or record["schema_version"] != _SCHEMA_VERSION
+                            ):
+                                raise BetfairSettlementRevisionError(
+                                    f"settlement record {line_no} schema unsupported"
+                                )
+                            if record["previous_record_sha256"] != previous_hash:
+                                raise BetfairSettlementRevisionError(
+                                    f"settlement record {line_no} hash chain broken"
+                                )
+                            supplied = _sha(
+                                record["record_sha256"], "record_sha256"
+                            )
+                            unsigned = dict(record)
+                            unsigned.pop("record_sha256")
+                            if supplied != _digest(unsigned):
+                                raise BetfairSettlementRevisionError(
+                                    f"settlement record {line_no} digest mismatch"
+                                )
+                            self._accept(
+                                BetfairSettlementRevision.from_dict(
+                                    record["revision"]
+                                )
+                            )
+                            previous_hash = supplied
+                except json.JSONDecodeError as exc:
+                    raise BetfairSettlementRevisionError(
+                        "settlement log is invalid JSON"
+                    ) from exc
             self._last_record_sha256 = previous_hash
+            self._ensure_monotonic_current(adopt_if_missing=True)
         except Exception:
             # A failed reload must never publish a validated prefix as current truth.
             # Restore the previously complete in-memory authority atomically.
@@ -431,12 +641,7 @@ class BetfairSettlementRevisionStore:
         self._revisions.append(revision)
 
     def _append(self, revision: BetfairSettlementRevision) -> None:
-        unsigned = {
-            "schema": _SCHEMA,
-            "schema_version": _SCHEMA_VERSION,
-            "previous_record_sha256": self._last_record_sha256,
-            "revision": revision.to_dict(),
-        }
+        unsigned = self._record_unsigned(revision)
         record_hash = _digest(unsigned)
         line = (_canonical({**unsigned, "record_sha256": record_hash}) + "\n").encode("utf-8")
         with self.path.open("ab") as handle:
@@ -450,7 +655,9 @@ class BetfairSettlementRevisionStore:
                 os.fsync(fd)
             finally:
                 os.close(fd)
-        self._last_record_sha256 = record_hash
+        # Do not publish the new tail in memory before an exact durable re-read
+        # has reconciled the independent monotonic PREPARE.
+        return None
 
 
 def _match_order(action: ExecutionAction, capture: BetfairExecutionReadbackEnvelope) -> BetfairClearedOrderObservation:

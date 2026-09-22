@@ -1,6 +1,9 @@
 import unittest
 from decimal import Decimal
+from urllib.error import HTTPError
+from unittest.mock import patch
 
+import autosport.the_odds_api_provider as odds_api_module
 from autosport.domain import MarketType
 from autosport.providers import CanonicalNormalizer, ProviderUnavailableError
 from autosport.the_odds_api_provider import (
@@ -82,7 +85,14 @@ class TheOddsApiProviderTests(unittest.TestCase):
         batch = provider.read_batch()
 
         self.assertEqual(batch.source_id, "the-odds-api:soccer_epl")
-        self.assertEqual(batch.quality_flags, ("DYNAMIC_COVERAGE",))
+        self.assertEqual(
+            batch.quality_flags,
+            (
+                "DYNAMIC_COVERAGE",
+                "UNVERIFIED_PROVIDER_ORIGIN",
+                "UNVERIFIED_RECEIPT_CLOCK",
+            ),
+        )
         self.assertEqual(len(batch.quotes), 1)
         quote = batch.quotes[0]
         self.assertEqual(quote.decimal_odds, Decimal("2.10"))
@@ -467,6 +477,87 @@ class TheOddsApiProviderTests(unittest.TestCase):
                 sport="soccer_epl",
                 timeout_seconds=float("inf"),
             )
+
+    def test_injected_transport_and_clock_are_explicitly_non_authoritative(self):
+        provider = TheOddsApiProvider(
+            "k",
+            sport="soccer_epl",
+            transport=lambda *_: HttpJsonResponse([event()], 200, {}),
+            clock=lambda: "2026-09-22T14:00:00+00:00",
+        )
+        batch = provider.read_batch()
+        request = batch.quotes[0].metadata["request"]
+
+        self.assertFalse(request["provider_origin_verified"])
+        self.assertFalse(request["receipt_clock_verified"])
+        self.assertIn("UNVERIFIED_PROVIDER_ORIGIN", batch.quality_flags)
+        self.assertIn("UNVERIFIED_RECEIPT_CLOCK", batch.quality_flags)
+
+    def test_default_transport_rejects_redirect_shape_and_final_url_drift(self):
+        seen = {}
+
+        class FakeResponse:
+            status = 200
+            headers = {}
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, traceback):
+                return False
+
+            def read(self):
+                return b"[]"
+
+            def geturl(self):
+                return "https://attacker.example/steal?apiKey=secret"
+
+        class FakeOpener:
+            def open(self, request, timeout):
+                seen["request_url"] = request.full_url
+                return FakeResponse()
+
+        def fake_build_opener(handler):
+            seen["handler"] = handler
+            return FakeOpener()
+
+        url = (
+            "https://api.the-odds-api.com/v4/sports/soccer_epl/odds"
+            "?apiKey=secret&regions=eu&markets=h2h"
+        )
+        with patch.object(odds_api_module, "build_opener", fake_build_opener):
+            with self.assertRaisesRegex(
+                TheOddsApiTransportError,
+                "final URL",
+            ):
+                odds_api_module._default_transport(url, 1.0)
+
+        self.assertIsInstance(seen["handler"], odds_api_module._RejectRedirects)
+        self.assertEqual(seen["request_url"], url)
+
+    def test_secret_bearing_http_error_context_is_not_retained(self):
+        secret = "SECRET_SENTINEL_DO_NOT_RETAIN"
+        url = (
+            "https://api.the-odds-api.com/v4/sports/soccer_epl/odds"
+            f"?apiKey={secret}&regions=eu&markets=h2h"
+        )
+
+        class FailingOpener:
+            def open(self, request, timeout):
+                raise HTTPError(request.full_url, 401, "Unauthorized", {}, None)
+
+        with patch.object(
+            odds_api_module,
+            "build_opener",
+            lambda *_: FailingOpener(),
+        ):
+            with self.assertRaises(TheOddsApiTransportError) as context:
+                odds_api_module._default_transport(url, 1.0)
+
+        self.assertEqual(context.exception.status_code, 401)
+        self.assertIsNone(context.exception.__cause__)
+        self.assertIsNone(context.exception.__context__)
+        self.assertNotIn(secret, str(context.exception))
 
     def test_adapter_exposes_no_provider_write_or_real_money_surface(self):
         provider = TheOddsApiProvider(

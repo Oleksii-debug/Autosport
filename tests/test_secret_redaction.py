@@ -125,6 +125,18 @@ class SecretRedactionTests(unittest.TestCase):
             "Provider" + REDACTED + "Error: ordinary detail",
         )
 
+    def test_known_secret_containing_redacted_marker_is_fully_redacted(self) -> None:
+        secret = "alpha" + REDACTED + "omega"
+
+        rendered = redact_operator_text(
+            "provider echoed " + secret + " end",
+            extra_secret_values=(secret,),
+        )
+
+        self.assertEqual(rendered, "provider echoed " + REDACTED + " end")
+        self.assertNotIn("alpha", rendered)
+        self.assertNotIn("omega", rendered)
+
     def test_text_redaction_is_idempotent(self) -> None:
         source = (
             "Authorization: Bearer alpha123 "

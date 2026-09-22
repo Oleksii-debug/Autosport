@@ -2,10 +2,13 @@ from __future__ import annotations
 
 from copy import deepcopy
 from decimal import Decimal
+import hashlib
+import json
 from urllib.parse import parse_qs, urlparse
 
 import pytest
 
+import autosport.matchbook_provider as matchbook_module
 from autosport.matchbook_provider import (
     MatchbookHttpJsonResponse,
     MatchbookPayloadError,
@@ -103,6 +106,118 @@ def response(payload=None):
 def test_transport_error_is_typed_provider_unavailability():
     error = MatchbookTransportError("Matchbook unavailable", 503)
     assert isinstance(error, ProviderUnavailableError)
+
+
+def test_injected_transport_cannot_mint_provider_origin_from_caller_digest() -> None:
+    injected_size = 987
+    batch = provider(
+        lambda *_: MatchbookHttpJsonResponse(
+            sample_payload(),
+            200,
+            {},
+            BODY_SHA,
+            injected_size,
+        )
+    ).read_batch()
+
+    assert batch.quotes
+    for quote in batch.quotes:
+        assert quote.metadata["provider_origin_verified"] is False
+        assert quote.metadata["raw_payload_bound_to_response"] is False
+        assert quote.metadata["response_sha256"] == BODY_SHA
+        assert quote.metadata["response_size_bytes"] == injected_size
+
+
+def test_default_https_transport_binds_exact_raw_digest_and_size(monkeypatch) -> None:
+    payload = sample_payload()
+    for price_row in payload["events"][0]["markets"][0]["runners"][0]["prices"]:
+        price_row["decimal-odds"] = float(price_row["decimal-odds"])
+        price_row["available-amount"] = float(price_row["available-amount"])
+    raw = json.dumps(payload, separators=(",", ":")).encode("utf-8")
+
+    class FakeResponse:
+        status = 200
+        headers: dict[str, str] = {}
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, traceback):
+            return False
+
+        def read(self) -> bytes:
+            return raw
+
+    monkeypatch.setattr(
+        matchbook_module,
+        "urlopen",
+        lambda request, timeout: FakeResponse(),
+    )
+    client = MatchbookReadOnlyProvider(
+        "secret-session-token",
+        sport_key="soccer",
+        currency="EUR",
+        sport_ids=(15,),
+        clock=lambda: OBSERVED,
+        sequence_allocator=_sequence_allocator(),
+    )
+
+    batch = client.read_batch()
+    expected_digest = hashlib.sha256(raw).hexdigest()
+    assert batch.quotes
+    for quote in batch.quotes:
+        assert quote.metadata["provider_origin_verified"] is True
+        assert quote.metadata["raw_payload_bound_to_response"] is True
+        assert quote.metadata["response_sha256"] == expected_digest
+        assert quote.metadata["response_size_bytes"] == len(raw)
+        assert "secret-session-token" not in repr(quote.metadata)
+
+
+@pytest.mark.parametrize(
+    "bad_clock",
+    [
+        "2026-09-22T06:20:00",
+        "not-a-timestamp",
+        "",
+    ],
+)
+def test_invalid_observation_clock_fails_before_sequence_allocation(bad_clock: str) -> None:
+    allocations: list[str] = []
+
+    def allocate(source_id: str) -> int:
+        allocations.append(source_id)
+        return 1
+
+    client = provider(
+        lambda *_: response(),
+        clock=lambda: bad_clock,
+        sequence_allocator=allocate,
+    )
+    with pytest.raises(MatchbookPayloadError, match="observation clock"):
+        client.read_batch()
+    assert allocations == []
+
+
+def test_invalid_raw_body_size_fails_before_sequence_allocation() -> None:
+    allocations: list[str] = []
+
+    def allocate(source_id: str) -> int:
+        allocations.append(source_id)
+        return 1
+
+    client = provider(
+        lambda *_: MatchbookHttpJsonResponse(
+            sample_payload(),
+            200,
+            {},
+            BODY_SHA,
+            0,
+        ),
+        sequence_allocator=allocate,
+    )
+    with pytest.raises(MatchbookPayloadError, match="body_size_bytes"):
+        client.read_batch()
+    assert allocations == []
 
 
 def test_observation_clock_is_sampled_only_after_successful_response():

@@ -246,6 +246,31 @@ def test_module_helper_rebinding_cannot_weaken_k07_identity_integrity(
     assert not is_authoritative_betfair_account_identity(value, client=client)
 
 
+def test_identity_class_post_init_rebinding_cannot_mint_altered_k07_identity(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _install_details_transport(
+        monkeypatch,
+        result=_details_result(currency_code="EUR"),
+    )
+    client = _client()
+
+    def forged_post_init(value) -> None:
+        object.__setattr__(value, "currency_code", "GBP")
+
+    monkeypatch.setattr(
+        _identity.BetfairAuthenticatedAccountIdentity,
+        "__post_init__",
+        forged_post_init,
+    )
+
+    with pytest.raises(
+        BetfairAccountIdentityError,
+        match="identity implementation changed|identity construction was altered",
+    ):
+        resolve_betfair_authenticated_account_identity(client)
+
+
 def test_personal_developer_identity_never_claims_cross_session_stability(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

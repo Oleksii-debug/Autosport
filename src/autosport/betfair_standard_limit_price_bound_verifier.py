@@ -115,6 +115,37 @@ def _require_execution_state_continuity(
         )
 
 
+def _require_issuance_time_provider_request(
+    *,
+    issued_requests: tuple[dict[str, object], ...],
+    expected: BetfairStandardLimitPriceBoundEvidence,
+) -> None:
+    """Require that this action had positive canonical request proof at issuance."""
+
+    matches = [
+        item
+        for item in issued_requests
+        if item.get("action_id") == expected.action_id
+    ]
+    if len(matches) != 1:
+        raise BetfairStandardLimitPriceBoundError(
+            "Betfair request identity was not durably proven at plan issuance"
+        )
+    durable = matches[0]
+    expected_request = {
+        "action_id": expected.action_id,
+        "bookmaker_id": expected.bookmaker_id,
+        "account_id": expected.account_id,
+        "instruction_sha256": expected.instruction_sha256,
+        "write_adapter_id": expected.write_adapter_id,
+        "write_adapter_version": expected.write_adapter_version,
+    }
+    if durable != expected_request:
+        raise BetfairStandardLimitPriceBoundError(
+            "durable issuance-time Betfair request identity changed"
+        )
+
+
 def verify_betfair_standard_limit_price_bound(
     *,
     evidence: BetfairStandardLimitPriceBoundEvidence,
@@ -151,6 +182,10 @@ def verify_betfair_standard_limit_price_bound(
     expected = resolve_betfair_standard_limit_price_bound(
         bound=bound,
         action_id=action_id,
+    )
+    _require_issuance_time_provider_request(
+        issued_requests=issued.provider_requests,
+        expected=expected,
     )
     if _exact_snapshot(evidence) != _exact_snapshot(expected):
         raise BetfairStandardLimitPriceBoundError(

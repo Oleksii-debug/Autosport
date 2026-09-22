@@ -167,7 +167,7 @@ class FallbackReadEvidence:
         moment = _aware_exact_datetime("as_of", as_of).astimezone(timezone.utc)
         observed = self.observed_at.astimezone(timezone.utc)
         expires = self.expires_at.astimezone(timezone.utc)
-        return observed <= moment <= expires
+        return observed <= moment < expires
 
 
 class ProviderHealthAuthority:

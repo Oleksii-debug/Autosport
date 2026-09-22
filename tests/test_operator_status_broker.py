@@ -263,3 +263,34 @@ def test_two_instances_share_monotonic_sequence(tmp_path):
     second = two.publish(idempotency_key="two", priority=AnnouncementPriority.ASSERTIVE, message="Два")
     assert (first.sequence, second.sequence) == (1, 2)
     assert [x.sequence for x in one.pending()] == [1, 2]
+
+def test_ack_clock_regression_rolls_back_without_corrupting_store(tmp_path):
+    path = tmp_path / "status.sqlite3"
+    publish_clock = Clock()
+    broker = OperatorStatusAnnouncementBroker(path, clock=publish_clock)
+    record = broker.publish(
+        idempotency_key="ack/clock-regression",
+        priority=AnnouncementPriority.ASSERTIVE,
+        message="Потрібне підтвердження.",
+    )
+    broker.close()
+
+    regressed = record.published_at - timedelta(seconds=1)
+    reopened = OperatorStatusAnnouncementBroker(path, clock=lambda: regressed)
+    with pytest.raises(
+        OperatorStatusIntegrityError,
+        match="acknowledgement clock predates publication",
+    ):
+        reopened.acknowledge(record.event_id)
+
+    pending = reopened.pending()
+    assert [item.event_id for item in pending] == [record.event_id]
+    assert pending[0].acknowledged_at is None
+    reopened.verify_integrity()
+    reopened.close()
+
+    final = OperatorStatusAnnouncementBroker(path, clock=publish_clock)
+    assert [item.event_id for item in final.pending()] == [record.event_id]
+    final.verify_integrity()
+    final.close()
+

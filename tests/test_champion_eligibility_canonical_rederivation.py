@@ -110,6 +110,40 @@ def test_canonical_eligible_decision_still_persists_and_activates(tmp_path) -> N
     _validate(registry, decision)
 
 
+def test_later_canonical_drift_invalidates_old_eligible_decision_without_future_leakage(
+    tmp_path,
+) -> None:
+    registry, findings, windows = _scoped_history(
+        tmp_path,
+        values_sequence=(("1", "2"), ("1", "2"), ("3", "4"), ("3", "4")),
+    )
+    decision = _scoped_decision(registry, findings[:2], windows[:2])
+    assert decision.status is ChampionEligibilityStatus.ELIGIBLE
+    persist_eligibility_decision(registry, decision)
+
+    # The later degraded windows exist durably but are not yet causal at this cutoff.
+    _validate(registry, decision)
+
+    # Once a later same-scope DRIFT_DETECTED window is causally visible, replaying
+    # the old ELIGIBLE decision must not reactivate the champion.
+    with pytest.raises(
+        ChampionEligibilityError,
+        match="later canonical drift invalidates champion eligibility",
+    ):
+        validate_activation_eligibility(
+            registry,
+            decision,
+            as_of="2026-02-17T12:00:00Z",
+            canonical_strategy_id="strategy-context",
+            expected_strategy_version_id="strategy-1",
+            expected_model_version_id="model-1",
+            expected_environment_sha256=ENV,
+            expected_protocol_id="protocol-1",
+            expected_config_sha256=CONFIG,
+            admissible_actions=frozenset({"WAIT"}),
+        )
+
+
 def test_decision_subclass_cannot_cross_authority_boundary(tmp_path) -> None:
     registry, decision = _eligible_scoped_decision(tmp_path)
 

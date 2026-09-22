@@ -215,6 +215,11 @@ def test_visible_exception_projection_never_contains_raw_detail() -> None:
     assert "token" not in projected
     assert "/secret/path" not in projected
 
+    hostile_type = type("СекретнийТип", (Exception,), {})
+    hostile = _safe_exception_text(hostile_type("credential=hidden"))
+    assert "СекретнийТип" not in hostile
+    assert "credential" not in hostile
+
 
 def test_semantic_shell_contains_runtime_controls_and_real_tickets_table() -> None:
     html = (_ROOT / "src/autosport/windows_web/index.html").read_text(encoding="utf-8")
@@ -238,6 +243,8 @@ def test_semantic_shell_contains_runtime_controls_and_real_tickets_table() -> No
 
     assert '"product_runtime.start": self._action_product_runtime_start' in shell
     assert '"product_runtime.stop": self._action_product_runtime_stop' in shell
+    assert "text_select=True" in shell
+    assert "zoomable=True" in shell
     assert "detail=message.error" not in shell
     assert "detail=replay_message.error" not in shell
     assert "detail=live_message.error" not in shell

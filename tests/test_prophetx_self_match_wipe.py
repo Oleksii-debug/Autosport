@@ -488,3 +488,38 @@ def test_incident_requires_distinct_nonempty_resting_ids():
         incident(relevant_resting_provider_order_ids=("incoming-1",))
     with pytest.raises(ProphetXSelfMatchError):
         incident(relevant_resting_provider_order_ids=("rest-1", "rest-1"))
+
+
+def test_same_strike_proven_non_crossing_does_not_overblock():
+    i = intent(strike_id="same-strike")
+    r = resting(strike_id="same-strike")
+    out = screen_pre_submit(
+        i,
+        snapshot(r),
+        [fact(i, r, would_cross=False)],
+        writer_coordination=WriterCoordination.PROVEN_PRODUCT_SERIALIZED,
+    )
+    assert out.decision is PreSubmitDecision.NO_KNOWN_CONFLICT_NOT_GUARANTEED
+    assert out.authorizes_write is False
+
+
+def test_two_product_workers_from_same_snapshot_never_receive_write_authority():
+    snap = snapshot()
+    i1 = intent(client_order_id="worker-1")
+    i2 = intent(client_order_id="worker-2")
+    out1 = screen_pre_submit(
+        i1,
+        snap,
+        [fact(i1, snap.orders[0], would_cross=False)],
+        writer_coordination=WriterCoordination.PROVEN_PRODUCT_SERIALIZED,
+    )
+    out2 = screen_pre_submit(
+        i2,
+        snap,
+        [fact(i2, snap.orders[0], would_cross=False)],
+        writer_coordination=WriterCoordination.PROVEN_PRODUCT_SERIALIZED,
+    )
+    assert out1.authorizes_write is False
+    assert out2.authorizes_write is False
+    assert out1.requires_immediate_recheck_before_submit is True
+    assert out2.requires_immediate_recheck_before_submit is True

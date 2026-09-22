@@ -92,6 +92,7 @@ def _validated_source(source_factory: str, *, workspace: str | Path) -> object:
     return source
 
 
+
 def _source_owned_settlement_authority(
     source: object,
 ) -> SettlementOutcomeAuthority | None:
@@ -149,7 +150,6 @@ def _source_owned_settlement_authority(
             "product source settlement_configuration_sha256 must be lowercase SHA-256 hex"
         )
     return source
-
 
 def _print_record(kind: str, *, runtime: AutonomousProductRuntime, value: object) -> None:
     print(

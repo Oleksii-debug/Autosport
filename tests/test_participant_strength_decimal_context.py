@@ -5,10 +5,12 @@ from decimal import Decimal, localcontext
 from autosport.opponent_intelligence import RatingSnapshot, SnapshotState
 from autosport.participant_identity import IdentityView
 from autosport.participant_strength import (
+    HistogramCalibratedStrengthFactory,
     HistogramCalibratedStrengthModel,
     RatingDifferenceBaselineModel,
     StrengthSnapshotPair,
 )
+from autosport.strategy_model_factory import TrainingPoint
 
 
 DECISION_AT = "2026-01-02T00:00:00Z"
@@ -128,3 +130,50 @@ def test_histogram_prediction_bin_is_independent_of_ambient_decimal_context() ->
         high_precision = model.predict_feature(feature, decision_at=DECISION_AT)
 
     assert low_precision == high_precision
+
+
+def test_histogram_training_is_independent_of_ambient_decimal_context() -> None:
+    points = (
+        TrainingPoint(
+            observed_at="2026-01-01T00:00:01Z",
+            feature=0.12345678901234568,
+            target=1.0,
+            target_available_at="2026-01-01T00:01:01Z",
+            evidence_sha256s=("1" * 64,),
+        ),
+        TrainingPoint(
+            observed_at="2026-01-01T00:00:02Z",
+            feature=0.22345678901234567,
+            target=0.0,
+            target_available_at="2026-01-01T00:01:02Z",
+            evidence_sha256s=("2" * 64,),
+        ),
+        TrainingPoint(
+            observed_at="2026-01-01T00:00:03Z",
+            feature=0.3234567890123457,
+            target=1.0,
+            target_available_at="2026-01-01T00:01:03Z",
+            evidence_sha256s=("3" * 64,),
+        ),
+    )
+    factory = HistogramCalibratedStrengthFactory(bin_count=2, prior_weight="2")
+    cutoff = "2026-01-01T00:02:00Z"
+
+    with localcontext() as context:
+        context.prec = 5
+        low_precision = factory.fit(
+            "histogram-training-decimal-context",
+            points,
+            training_cutoff=cutoff,
+        )
+
+    with localcontext() as context:
+        context.prec = 50
+        high_precision = factory.fit(
+            "histogram-training-decimal-context",
+            points,
+            training_cutoff=cutoff,
+        )
+
+    assert low_precision == high_precision
+    assert low_precision.identity_sha256 == high_precision.identity_sha256

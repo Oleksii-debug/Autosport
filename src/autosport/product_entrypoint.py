@@ -3,7 +3,9 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import re
 import signal
+import sys
 import time
 from dataclasses import asdict
 from pathlib import Path
@@ -270,8 +272,67 @@ def run_product_command(
         return 3
 
 
+_REQUIRED_ARGUMENTS_RE = re.compile(
+    r"^the following arguments are required: (?P<arguments>.+)$"
+)
+_INVALID_NUMBER_RE = re.compile(
+    r"^argument (?P<option>--?[^\\s:]+): invalid (?:int|float) value: (?P<value>.+)$"
+)
+_UNRECOGNIZED_ARGUMENTS_RE = re.compile(
+    r"^unrecognized arguments: (?P<arguments>.+)$"
+)
+_MISSING_OPTION_VALUE_RE = re.compile(
+    r"^argument (?P<option>--?[^\\s:]+): expected one argument$"
+)
+
+
+def _localized_argparse_error(message: str) -> str:
+    match = _REQUIRED_ARGUMENTS_RE.fullmatch(message)
+    if match is not None:
+        return product_cli_text(
+            "product.cli.error.required",
+            arguments=match.group("arguments"),
+        )
+
+    match = _INVALID_NUMBER_RE.fullmatch(message)
+    if match is not None:
+        return product_cli_text(
+            "product.cli.error.invalid_number",
+            option=match.group("option"),
+            value=match.group("value"),
+        )
+
+    match = _UNRECOGNIZED_ARGUMENTS_RE.fullmatch(message)
+    if match is not None:
+        return product_cli_text(
+            "product.cli.error.unrecognized",
+            arguments=match.group("arguments"),
+        )
+
+    match = _MISSING_OPTION_VALUE_RE.fullmatch(message)
+    if match is not None:
+        return product_cli_text(
+            "product.cli.error.missing_value",
+            option=match.group("option"),
+        )
+
+    return product_cli_text("product.cli.error.generic")
+
+
 class _UkrainianArgumentParser(argparse.ArgumentParser):
     """Argparse formatter with Ukrainian public presentation text."""
+
+    def error(self, message: str) -> None:
+        self.print_usage(sys.stderr)
+        rendered = _localized_argparse_error(message)
+        self.exit(
+            2,
+            (
+                f"{self.prog}: "
+                f"{product_cli_text('product.cli.error.prefix')} "
+                f"{rendered}\n"
+            ),
+        )
 
     def parse_args(
         self,
@@ -319,33 +380,33 @@ def _parser() -> argparse.ArgumentParser:
         "--workspace",
         type=Path,
         default=None,
-        metavar="ШЛЯХ",
+        metavar=product_cli_text("product.cli.workspace.metavar"),
         help=product_cli_text("product.cli.workspace.help"),
     )
     parser.add_argument(
         "--source-factory",
         required=True,
-        metavar="МОДУЛЬ:ФУНКЦІЯ",
+        metavar=product_cli_text("product.cli.source_factory.metavar"),
         help=product_cli_text("product.cli.source_factory.help"),
     )
     parser.add_argument(
         "--bankroll",
         default="10000",
-        metavar="СУМА",
+        metavar=product_cli_text("product.cli.bankroll.metavar"),
         help=product_cli_text("product.cli.bankroll.help"),
     )
     parser.add_argument(
         "--max-cycles",
         type=int,
         default=None,
-        metavar="N",
+        metavar=product_cli_text("product.cli.max_cycles.metavar"),
         help=product_cli_text("product.cli.max_cycles.help"),
     )
     parser.add_argument(
         "--poll-seconds",
         type=float,
         default=30.0,
-        metavar="СЕКУНДИ",
+        metavar=product_cli_text("product.cli.poll_seconds.metavar"),
         help=product_cli_text("product.cli.poll_seconds.help"),
     )
     return parser

@@ -930,6 +930,13 @@ def _parse_place_orders_response(
             "placeOrders instruction report is internally inconsistent"
         ) from exc
     if (
+        instruction.bet_id is not None
+        and instruction.placed_date is None
+    ):
+        raise BetfairPlaceOrdersAmbiguous(
+            "synchronous placeOrders report with betId omits placedDate"
+        )
+    if (
         (status == "SUCCESS" and instruction.status != "SUCCESS")
         or (
             status == "FAILURE"

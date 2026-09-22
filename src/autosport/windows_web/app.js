@@ -1,0 +1,357 @@
+(() => {
+  "use strict";
+
+  const byId = (id) => document.getElementById(String(id));
+  const statusNode = byId("app-status");
+  const errorNode = byId("error-status");
+  const ownerPanel = byId("owner-panel");
+  const manualPanel = byId("manual-panel");
+  let latestState = null;
+  let pollHandle = null;
+  let ownerDefaultsApplied = false;
+
+  function requestId() {
+    if (globalThis.crypto && typeof globalThis.crypto.randomUUID === "function") {
+      return globalThis.crypto.randomUUID();
+    }
+    return "autosport-" + Date.now() + "-" + Math.random().toString(16).slice(2);
+  }
+
+  function isEditable(target) {
+    if (!(target instanceof Element)) return false;
+    if (target.matches("input, textarea, select")) return true;
+    return target instanceof HTMLElement && target.isContentEditable;
+  }
+
+  function announce(message, assertive = false) {
+    const value = message || "Готово.";
+    statusNode.textContent = value;
+    if (assertive) {
+      errorNode.hidden = false;
+      errorNode.textContent = value;
+    } else {
+      errorNode.hidden = true;
+      errorNode.textContent = "";
+    }
+  }
+
+  function renderList(node, values) {
+    node.replaceChildren();
+    for (const value of values || []) {
+      const item = document.createElement("li");
+      item.textContent = String(value);
+      node.appendChild(item);
+    }
+  }
+
+  function setSelectOptions(node, options, valueKey = "id", labelKey = "label") {
+    const current = node.value;
+    node.replaceChildren();
+    for (const option of options || []) {
+      const element = document.createElement("option");
+      element.value = String(option[valueKey]);
+      element.textContent = String(option[labelKey]);
+      node.appendChild(element);
+    }
+    if (current && Array.from(node.options).some((item) => item.value === current)) {
+      node.value = current;
+    }
+  }
+
+  function ownerValues() {
+    const values = {};
+    document.querySelectorAll("[data-owner-field]").forEach((node) => {
+      values[node.dataset.ownerField] = node.value;
+    });
+    return values;
+  }
+
+  function applyOwnerDefaults(defaults) {
+    if (ownerDefaultsApplied || !defaults) return;
+    document.querySelectorAll("[data-owner-field]").forEach((node) => {
+      const key = node.dataset.ownerField;
+      if (Object.prototype.hasOwnProperty.call(defaults, key)) {
+        node.value = String(defaults[key]);
+      }
+    });
+    ownerDefaultsApplied = true;
+  }
+
+  function focusResult(result) {
+    if (!result || !result.focus_id) return;
+    const target = byId(result.focus_id);
+    if (target instanceof HTMLElement) target.focus();
+  }
+
+  async function apiState() {
+    if (!globalThis.pywebview || !globalThis.pywebview.api) {
+      throw new Error("Python bridge недоступний.");
+    }
+    const response = await globalThis.pywebview.api.get_state();
+    if (!response || response.ok !== true || !response.state) {
+      throw new Error("Стан продукту недоступний.");
+    }
+    return response.state;
+  }
+
+  async function dispatch(actionId, payload = {}) {
+    try {
+      const result = await globalThis.pywebview.api.dispatch({
+        request_id: requestId(),
+        action_id: actionId,
+        payload,
+      });
+      const rejected = !result || result.status !== "completed";
+      announce(result && result.message ? result.message : (rejected ? "Дію відхилено." : "Готово."), rejected);
+      focusResult(result);
+      await refreshState();
+      return result;
+    } catch (error) {
+      announce("Помилка bridge: " + String(error), true);
+      return null;
+    }
+  }
+
+  function renderState(state) {
+    latestState = state;
+    statusNode.textContent = state.status || "Готово.";
+    errorNode.hidden = !state.last_error;
+    errorNode.textContent = state.last_error || "";
+
+    byId("workspace-value").textContent = state.workspace || "—";
+    byId("active-workspace-value").textContent = state.active_workspace || "—";
+    byId(205).value = state.bank || "";
+    byId("dataset-summary").textContent = state.dataset_summary || "";
+    if (document.activeElement !== byId("dataset-path")) {
+      byId("dataset-path").value = state.dataset_path || byId("dataset-path").value;
+    }
+    if (document.activeElement !== byId("research-plan-path")) {
+      byId("research-plan-path").value = state.research_plan_path || byId("research-plan-path").value;
+    }
+    byId("research-plan-summary").textContent = state.research_plan_summary || "";
+
+    const strategy = byId(106);
+    const previousStrategy = strategy.value;
+    setSelectOptions(strategy, state.strategy_choices || []);
+    strategy.value = state.strategy_id || previousStrategy;
+
+    byId(103).value = String(state.replay_speed);
+    byId(104).value = state.live_mode;
+    byId("live-status").textContent = state.live_status || "";
+    renderList(byId(203), state.live_quotes);
+    renderList(byId(201), state.tickets);
+    renderList(byId(204), state.evaluation);
+    byId(202).value = (state.log || []).join("\n");
+
+    const nav = byId(301);
+    const priorNav = nav.value;
+    setSelectOptions(nav, state.surfaces || [], "key", "title");
+    nav.value = state.surface_key || priorNav;
+    byId(302).value = state.surface_state || "";
+    renderList(byId(304), state.surface_details);
+
+    byId(306).value = state.owner.summary || "";
+    renderList(byId(307), state.owner.lines || []);
+    renderList(byId("owner-review-list"), state.owner.review_lines || []);
+    applyOwnerDefaults(state.owner.defaults);
+    document.querySelectorAll("[data-owner-field], #327, #328, #owner-confirm-checkbox, #owner-confirm")
+      .forEach((node) => {
+        node.disabled = !state.owner.can_initialize;
+      });
+
+    const operations = byId(331);
+    if (operations.options.length === 0) {
+      setSelectOptions(operations, state.manual.operations || []);
+    }
+    byId("manual-status").textContent = state.manual.status || "";
+    byId(334).value = state.manual.result || "";
+
+    const busy = state.busy && Object.values(state.busy).some(Boolean);
+    [101, 102, 103, 104, 105, 106, 107, 108, 109].forEach((id) => {
+      byId(id).disabled = Boolean(busy);
+    });
+    if (state.strategy_requires_plan === false) {
+      byId(107).disabled = true;
+      byId("research-plan-path").disabled = true;
+    } else {
+      byId("research-plan-path").disabled = Boolean(busy);
+    }
+  }
+
+  async function refreshState() {
+    try {
+      renderState(await apiState());
+    } catch (error) {
+      announce(String(error), true);
+    }
+  }
+
+  function selectedSurfaceTarget() {
+    const mapping = {
+      home_dashboard: 205,
+      market_mirror: 104,
+      research_agents: 106,
+      portfolio: 204,
+      paper_bank: 205,
+      tickets_positions: 201,
+      evaluation_learning: 204,
+      history_results: 202,
+      settings: 305,
+      manual_calculation: 330,
+      diagnostics_recovery: 108,
+      help_about: "help-heading",
+    };
+    return mapping[byId(301).value] || 304;
+  }
+
+  byId(101).addEventListener("click", () => {
+    dispatch("dataset.select", { path: byId("dataset-path").value });
+  });
+  byId(106).addEventListener("change", () => {
+    dispatch("strategy.set", { strategy_id: byId(106).value });
+  });
+  byId(107).addEventListener("click", () => {
+    dispatch("research_plan.select", { path: byId("research-plan-path").value });
+  });
+  byId(103).addEventListener("change", () => {
+    dispatch("replay_speed.set", { speed: Number(byId(103).value) });
+  });
+  byId(104).addEventListener("change", () => {
+    dispatch("live_mode.set", { mode: byId(104).value });
+  });
+  byId(102).addEventListener("click", () => dispatch("replay.run"));
+  byId(105).addEventListener("click", () => dispatch("live.refresh"));
+  byId(108).addEventListener("click", () => dispatch("recovery.run"));
+  byId(109).addEventListener("click", () => {
+    dispatch("evidence.export", { path: byId("evidence-path").value });
+  });
+
+  byId(301).addEventListener("change", () => {
+    dispatch("surface.select", { surface_key: byId(301).value });
+  });
+  byId(303).addEventListener("click", () => {
+    const target = byId(selectedSurfaceTarget());
+    if (target instanceof HTMLElement) target.focus();
+  });
+
+  byId(305).addEventListener("click", () => {
+    ownerPanel.hidden = false;
+    byId(306).focus();
+  });
+  byId(329).addEventListener("click", () => {
+    ownerPanel.hidden = true;
+    byId(305).focus();
+  });
+  byId(328).addEventListener("click", () => {
+    dispatch("owner.preview", {
+      values: ownerValues(),
+      emergency_stop: byId(327).checked,
+    });
+  });
+  byId("owner-confirm").addEventListener("click", () => {
+    dispatch("owner.initialize", {
+      values: ownerValues(),
+      emergency_stop: byId(327).checked,
+      confirmed: byId("owner-confirm-checkbox").checked,
+    });
+  });
+
+  byId(330).addEventListener("click", () => {
+    manualPanel.hidden = false;
+    byId(331).focus();
+  });
+  byId(336).addEventListener("click", () => {
+    manualPanel.hidden = true;
+    byId(330).focus();
+  });
+  byId(333).addEventListener("click", () => {
+    dispatch("manual.calculate", {
+      operation: byId(331).value,
+      input: byId(332).value,
+    });
+  });
+  byId(335).addEventListener("click", async () => {
+    byId(332).value = "";
+    await dispatch("manual.clear");
+    byId(332).focus();
+  });
+
+  document.addEventListener("keydown", (event) => {
+    const key = String(event.key || "").toLowerCase();
+    const editable = isEditable(event.target);
+
+    if (event.key === "F2") {
+      event.preventDefault();
+      byId(301).focus();
+      return;
+    }
+    if (event.key === "F6") {
+      event.preventDefault();
+      byId(201).focus();
+      return;
+    }
+    if (event.key === "F7") {
+      event.preventDefault();
+      byId(203).focus();
+      return;
+    }
+    if (event.key === "F8") {
+      event.preventDefault();
+      byId(204).focus();
+      return;
+    }
+    if (event.key === "F9") {
+      event.preventDefault();
+      byId(305).click();
+      return;
+    }
+    if (event.key === "F10") {
+      event.preventDefault();
+      byId(330).click();
+      return;
+    }
+
+    if (event.ctrlKey && event.altKey && (event.key === "ArrowLeft" || event.key === "ArrowRight")) {
+      event.preventDefault();
+      const select = byId(301);
+      const delta = event.key === "ArrowLeft" ? -1 : 1;
+      const count = select.options.length;
+      if (count > 0) {
+        select.selectedIndex = (select.selectedIndex + delta + count) % count;
+        select.dispatchEvent(new Event("change"));
+        select.focus();
+      }
+      return;
+    }
+
+    if (!event.ctrlKey || event.altKey || event.metaKey) return;
+    if (editable && !["o", "r", "e", "l"].includes(key)) return;
+
+    if (key === "o" && !event.shiftKey) {
+      event.preventDefault();
+      byId("dataset-path").focus();
+    } else if (key === "r" && event.shiftKey) {
+      event.preventDefault();
+      byId(108).click();
+    } else if (key === "r") {
+      event.preventDefault();
+      byId(102).click();
+    } else if (key === "e") {
+      event.preventDefault();
+      byId("evidence-path").focus();
+    } else if (key === "l") {
+      event.preventDefault();
+      byId(105).click();
+    }
+  });
+
+  window.addEventListener("pywebviewready", async () => {
+    await refreshState();
+    byId("main-content").focus();
+    pollHandle = window.setInterval(refreshState, 250);
+  });
+
+  window.addEventListener("beforeunload", () => {
+    if (pollHandle !== null) window.clearInterval(pollHandle);
+  });
+})();

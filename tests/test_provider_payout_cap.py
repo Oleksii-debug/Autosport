@@ -11,6 +11,7 @@ from autosport.provider_payout_cap import (
     ProviderPayoutCapError,
     ProviderPayoutCapEvidence,
     ProviderPayoutCapMeasure,
+    ProviderPayoutCapRuleKind,
     ProviderPayoutCapScope,
     ProviderPayoutCapSourceKind,
     assess_provider_payout_cap,
@@ -31,12 +32,14 @@ SHA_ACTION = "5" * 64
 def _evidence(**changes: object) -> ProviderPayoutCapEvidence:
     values: dict[str, object] = {
         "provider_id": "provider-a",
+        "service_scope": "EXCHANGE",
         "account_id": "account-a",
         "adapter_id": "adapter-a",
         "jurisdiction": "SK",
         "currency": "EUR",
         "scope_kind": ProviderPayoutCapScope.PER_BET,
         "cap_measure": ProviderPayoutCapMeasure.GROSS_RETURN,
+        "rule_kind": ProviderPayoutCapRuleKind.PAYOUT_OR_RETURN_CAP,
         "maximum_amount": Decimal("100.00"),
         "scope_binding_sha256": SHA_SCOPE,
         "settlement_rule_sha256": SHA_SETTLEMENT,
@@ -59,12 +62,14 @@ def _seal(
 ) -> ProviderPayoutCapEvidence:
     expected: dict[str, object] = {
         "provider_id": evidence.provider_id,
+        "service_scope": evidence.service_scope,
         "account_id": evidence.account_id,
         "adapter_id": evidence.adapter_id,
         "jurisdiction": evidence.jurisdiction,
         "currency": evidence.currency,
         "scope_kind": evidence.scope_kind,
         "cap_measure": evidence.cap_measure,
+        "rule_kind": evidence.rule_kind,
         "scope_binding_sha256": evidence.scope_binding_sha256,
         "settlement_rule_sha256": evidence.settlement_rule_sha256,
         "action_binding_sha256": evidence.action_binding_sha256,
@@ -304,12 +309,14 @@ def test_fabricated_large_cap_never_becomes_provider_origin_authority() -> None:
             evidence,
             as_of=NOW,
             provider_id=evidence.provider_id,
+            service_scope=evidence.service_scope,
             account_id=evidence.account_id,
             adapter_id=evidence.adapter_id,
             jurisdiction=evidence.jurisdiction,
             currency=evidence.currency,
             scope_kind=evidence.scope_kind,
             cap_measure=evidence.cap_measure,
+            rule_kind=evidence.rule_kind,
             scope_binding_sha256=evidence.scope_binding_sha256,
             settlement_rule_sha256=evidence.settlement_rule_sha256,
         )
@@ -381,6 +388,59 @@ def test_evidence_digest_is_independent_of_ambient_decimal_context() -> None:
         ).evidence_sha256
 
     assert low_precision == high_precision
+
+
+@pytest.mark.parametrize(
+    "rule_kind",
+    [
+        ProviderPayoutCapRuleKind.ORDER_STAKE_MAX,
+        ProviderPayoutCapRuleKind.TURNOVER_THRESHOLD,
+        ProviderPayoutCapRuleKind.SPENDING_LIMIT,
+        ProviderPayoutCapRuleKind.WITHDRAWAL_LIMIT,
+        ProviderPayoutCapRuleKind.DEPOSIT_LIMIT,
+        ProviderPayoutCapRuleKind.API_QUOTA,
+    ],
+)
+def test_non_payout_economic_rule_kinds_cannot_enter_payout_cap_contract(
+    rule_kind: ProviderPayoutCapRuleKind,
+) -> None:
+    with pytest.raises(
+        ProviderPayoutCapError,
+        match="rejects non-payout economic rule kind",
+    ):
+        _evidence(rule_kind=rule_kind)
+
+
+def test_rule_kind_must_be_exact_enum_not_caller_text() -> None:
+    with pytest.raises(
+        ProviderPayoutCapError,
+        match="rule_kind must be exact",
+    ):
+        _evidence(rule_kind="PAYOUT_OR_RETURN_CAP")
+
+
+def test_service_scope_is_first_class_verification_identity() -> None:
+    evidence = _evidence(service_scope="EXCHANGE")
+
+    with pytest.raises(
+        ProviderPayoutCapError,
+        match="service_scope scope mismatch",
+    ):
+        _seal(evidence, service_scope="SPORTSBOOK")
+
+
+def test_service_scope_changes_evidence_identity_and_assessment_preserves_it() -> None:
+    exchange = _evidence(service_scope="EXCHANGE")
+    sportsbook = _evidence(service_scope="SPORTSBOOK")
+
+    assert exchange.evidence_sha256 != sportsbook.evidence_sha256
+
+    result = assess_provider_payout_cap(
+        evidence=_seal(exchange),
+        candidate_amount=Decimal("1"),
+    )
+    assert result.service_scope == "EXCHANGE"
+    assert result.rule_kind is ProviderPayoutCapRuleKind.PAYOUT_OR_RETURN_CAP
 
 
 def test_structural_seal_registry_does_not_retain_evidence_forever() -> None:

@@ -40,6 +40,7 @@ from .supervised_provider_evidence import (
 
 BETFAIR_TIMEOUT_VISIBILITY_HORIZON_SECONDS = 15
 BETFAIR_CLEARED_HISTORY_MAX_AGE_DAYS = 90
+_CANONICAL_DATETIME = datetime
 _BETFAIR_AMBIGUOUS_UNKNOWN_REASON = (
     "betfair_placeOrders_ambiguous_effect_requires_readback"
 )
@@ -81,7 +82,7 @@ def _time(value: str, name: str) -> datetime:
     if type(value) is not str or not value or value != value.strip():
         raise BetfairTimeoutResolutionError(f"{name} must be non-empty canonical text")
     try:
-        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        parsed = _CANONICAL_DATETIME.fromisoformat(value.replace("Z", "+00:00"))
     except ValueError as exc:
         raise BetfairTimeoutResolutionError(f"{name} must be ISO-8601") from exc
     if parsed.tzinfo is None or parsed.utcoffset() is None:

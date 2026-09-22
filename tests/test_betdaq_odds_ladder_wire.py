@@ -145,6 +145,23 @@ def test_invalid_or_empty_ladder_cannot_be_current_authority() -> None:
             )
 
 
+def test_price_lexeme_must_follow_xml_schema_decimal_grammar() -> None:
+    for price in ("2E0", "2e0", "2_0", "1_2.5", "2E+3"):
+        with pytest.raises(BetdaqSoapProtocolError, match="XML Schema decimal"):
+            parse_get_odds_ladder_response(
+                _response(
+                    entries=f'<Ladder price="{price}" representation="invalid" />'
+                )
+            )
+
+    for price in ("+2.00", "2.", "002.00"):
+        response = parse_get_odds_ladder_response(
+            _response(entries=f'<Ladder price="{price}" representation="valid" />')
+        )
+        assert response.entries[0].price == Decimal("2")
+        assert response.entries[0].price_text == price
+
+
 def test_price_lexeme_must_be_trimmed_and_representation_nonempty() -> None:
     with pytest.raises(BetdaqSoapProtocolError, match="trimmed"):
         parse_get_odds_ladder_response(

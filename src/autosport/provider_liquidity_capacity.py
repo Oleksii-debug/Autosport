@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from enum import Enum
 
@@ -179,7 +179,13 @@ def assess_liquidity_capacity(
     if max_age < timedelta(0):
         raise ValueError("max_age must not be negative")
 
-    age = as_of - snapshot.captured_at
+    # Aware datetime subtraction with the same tzinfo object intentionally uses
+    # wall-clock arithmetic and can erase a repeated-hour DST fold. Freshness is
+    # elapsed-time authority, so compare absolute UTC instants instead.
+    age = (
+        as_of.astimezone(timezone.utc)
+        - snapshot.captured_at.astimezone(timezone.utc)
+    )
     if age < timedelta(0):
         return LiquidityCapacityAssessment(
             status=LiquidityEvidenceStatus.FUTURE_EVIDENCE,

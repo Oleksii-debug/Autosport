@@ -1,10 +1,8 @@
 from __future__ import annotations
 
-from dataclasses import replace
+from dataclasses import asdict
 from datetime import datetime, timedelta
 from decimal import Decimal
-import pickle
-
 import pytest
 
 import autosport.smarkets_execution_approval as sut
@@ -235,6 +233,8 @@ def test_consumed_product_confirmation_issues_restart_resolvable_smarkets_approv
     )
     assert restored.evidence_id == witness.evidence_id
     assert restored.consumer_key == witness.consumer_key
+    verified = sut.verify_smarkets_execution_approval(witness, bound, approval)
+    assert verified == restored
 
 
 def test_wrong_durable_decision_digest_fails_before_receipt_consumption(
@@ -471,7 +471,9 @@ def test_receipt_consumed_by_another_product_identity_cannot_be_rebound(
         )
 
 
-def test_caller_cannot_construct_copy_or_pickle_approval_witness(tmp_path, monkeypatch):
+def test_caller_constructed_self_hashed_record_is_not_authority(
+    tmp_path, monkeypatch
+):
     authority = SupervisedConfirmationAuthority(
         tmp_path / "supervised-confirmation.jsonl",
         clock=FakeClock(),
@@ -480,7 +482,7 @@ def test_caller_cannot_construct_copy_or_pickle_approval_witness(tmp_path, monke
     bound = _bound(approval)
     review, receipt = _confirmed(authority, bound, approval)
     _patch_authority(monkeypatch, authority)
-    witness = sut.consume_smarkets_execution_approval(
+    canonical = sut.consume_smarkets_execution_approval(
         bound,
         approval,
         action_id="a" * 64,
@@ -488,10 +490,30 @@ def test_caller_cannot_construct_copy_or_pickle_approval_witness(tmp_path, monke
         expected_review_sha256=review.review_sha256,
     )
 
-    with pytest.raises(TypeError, match="issued only by product approval authority"):
-        replace(witness, action_id="b" * 64)
-    with pytest.raises(TypeError, match="non-serializable"):
-        pickle.dumps(witness)
+    # The record is structural data, not a capability: ordinary caller code can
+    # reproduce an exact record or self-hash fabricated fields.
+    copied = sut.SmarketsExecutionApprovalRecord(**asdict(canonical))
+    assert copied == canonical
+    assert sut.verify_smarkets_execution_approval(copied, bound, approval) == canonical
+
+    forged_payload = asdict(canonical)
+    forged_payload["receipt_id"] = "f" * 64
+    evidence_material = dict(forged_payload)
+    evidence_material.pop("evidence_id")
+    forged_payload["evidence_id"] = sut._digest(
+        {
+            "schema": "autosport.smarkets_execution_approval",
+            "schema_version": 1,
+            **evidence_material,
+        }
+    )
+    forged = sut.SmarketsExecutionApprovalRecord(**forged_payload)
+
+    with pytest.raises(
+        sut.SmarketsExecutionApprovalError,
+        match="could not be re-resolved",
+    ):
+        sut.verify_smarkets_execution_approval(forged, bound, approval)
 
 
 def test_canonical_confirmation_path_is_product_workspace_scoped(tmp_path, monkeypatch):

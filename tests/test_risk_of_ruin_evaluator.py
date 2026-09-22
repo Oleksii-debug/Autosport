@@ -93,16 +93,11 @@ def test_request_has_no_caller_upper_bound_field() -> None:
     assert "upper_bound" not in names
 
 
-class _ExplodingFormatDecimal(Decimal):
-    def __format__(self, format_spec: str) -> str:
-        raise AssertionError("fixed-point formatting must not run past the size fence")
-
-
 @pytest.mark.parametrize(
     "value",
     (
-        _ExplodingFormatDecimal("1E+1000000"),
-        _ExplodingFormatDecimal("1E-1000000"),
+        Decimal("1E+1000000"),
+        Decimal("1E-1000000"),
     ),
 )
 def test_extreme_decimal_exponents_fail_before_fixed_point_materialization(
@@ -111,6 +106,27 @@ def test_extreme_decimal_exponents_fail_before_fixed_point_materialization(
     with pytest.raises(
         RiskOfRuinEvaluationError,
         match="fixed-point representation exceeds supported canonical size",
+    ):
+        replace(_observation(0), minimum_equity=value)
+
+
+class _AdversarialDecimal(Decimal):
+    def is_finite(self) -> bool:
+        raise AssertionError("subclass hook must not run")
+
+    def as_tuple(self):
+        raise AssertionError("subclass hook must not run")
+
+    def __format__(self, format_spec: str) -> str:
+        raise AssertionError("subclass hook must not run")
+
+
+def test_decimal_subclass_is_rejected_before_virtual_dispatch() -> None:
+    value = _AdversarialDecimal("1")
+
+    with pytest.raises(
+        RiskOfRuinEvaluationError,
+        match="must be a finite exact Decimal",
     ):
         replace(_observation(0), minimum_equity=value)
 

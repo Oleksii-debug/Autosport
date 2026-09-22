@@ -303,6 +303,25 @@ def _phase_one(tmp_path):
         rule=rule,
         at=T7,
     )
+
+    shadow_registry_path = tmp_path / "shadow-scientific-registry.json"
+    shadow_registry_path.write_bytes(registry.path.read_bytes())
+    shadow_registry = ScientificRegistry(shadow_registry_path)
+    with pytest.raises(
+        ClosedLoopBindingError,
+        match="ScientificRegistry does not match ResearchSupervisor authority",
+    ):
+        bind_challenger_artifact(
+            runtime=AgentLoopRuntime(runtime.path),
+            curriculum=curriculum,
+            selection=selection,
+            replay_binding=replay_binding,
+            supervisor=supervisor,
+            registry=shadow_registry,
+            spec=spec,
+            staged=staged,
+        )
+
     artifact = bind_challenger_artifact(
         runtime=AgentLoopRuntime(runtime.path),
         curriculum=curriculum,

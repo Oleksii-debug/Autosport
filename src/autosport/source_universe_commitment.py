@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 from dataclasses import dataclass
+from pathlib import Path
 
 from .causal_collector import CollectorDeltaStore
 
@@ -20,6 +21,35 @@ _CANONICAL_READ_SEAM_NAMES = frozenset(
 
 class SourceUniverseCommitmentError(ValueError):
     """Canonical collector evidence cannot support a bounded universe commitment."""
+
+
+def _require_product_expected_store_path(
+    store: CollectorDeltaStore,
+    expected_store_path: str | Path,
+) -> Path:
+    """Fail closed if a caller redirects the canonical store object to another DB."""
+
+    if isinstance(expected_store_path, str):
+        if not expected_store_path or expected_store_path.strip() != expected_store_path:
+            raise SourceUniverseCommitmentError(
+                "expected_store_path must be a non-empty trimmed path"
+            )
+        expected = Path(expected_store_path)
+    elif isinstance(expected_store_path, Path):
+        expected = expected_store_path
+    else:
+        raise TypeError("expected_store_path must be str or Path")
+
+    current = getattr(store, "path", None)
+    if not isinstance(current, Path):
+        raise SourceUniverseCommitmentError(
+            "canonical collector store path identity is unavailable"
+        )
+    if current != expected:
+        raise SourceUniverseCommitmentError(
+            "canonical collector store path does not match product-expected authority path"
+        )
+    return expected
 
 
 def _canonical_json(value: object) -> bytes:
@@ -106,6 +136,7 @@ class SourceUniverseCommitment:
 def build_source_universe_commitment(
     store: CollectorDeltaStore,
     *,
+    expected_store_path: str | Path,
     source_id: str,
     start_cycle_seq: int,
     end_cycle_seq: int,
@@ -114,6 +145,7 @@ def build_source_universe_commitment(
 
     if type(store) is not CollectorDeltaStore:
         raise TypeError("store must be the exact canonical CollectorDeltaStore")
+    _require_product_expected_store_path(store, expected_store_path)
     instance_state = vars(store)
     rebound = sorted(
         name for name in _CANONICAL_READ_SEAM_NAMES if name in instance_state
@@ -291,6 +323,7 @@ def verify_source_universe_commitment(
     store: CollectorDeltaStore,
     candidate: SourceUniverseCommitment,
     *,
+    expected_store_path: str | Path,
     expected_source_id: str,
     expected_start_cycle_seq: int,
     expected_end_cycle_seq: int,
@@ -309,6 +342,7 @@ def verify_source_universe_commitment(
 
     rebuilt = build_source_universe_commitment(
         store,
+        expected_store_path=expected_store_path,
         source_id=expected_source_id,
         start_cycle_seq=expected_start_cycle_seq,
         end_cycle_seq=expected_end_cycle_seq,

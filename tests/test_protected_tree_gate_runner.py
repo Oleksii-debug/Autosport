@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import json
+import tempfile
 import unittest
+from pathlib import Path
+from unittest.mock import patch
 
 from scripts import verify_protected_tree_gate as runner
 
@@ -98,6 +101,7 @@ class ProtectedTreeGateRunnerTests(unittest.TestCase):
         first = runner._build_wrapper_evidence(
             repository="Oleksii-debug/Autosport",
             pr_number=42,
+            base_ref="main",
             base_sha=A,
             candidate_sha=B,
             result=result,
@@ -105,6 +109,7 @@ class ProtectedTreeGateRunnerTests(unittest.TestCase):
         second = runner._build_wrapper_evidence(
             repository="Oleksii-debug/Autosport",
             pr_number=42,
+            base_ref="main",
             base_sha=A,
             candidate_sha="d" * 40,
             result=result,
@@ -117,6 +122,48 @@ class ProtectedTreeGateRunnerTests(unittest.TestCase):
         self.assertEqual(first["candidate_sha"], B)
         self.assertFalse(first["merge_authorized"])
         self.assertFalse(first["release_authorized"])
+
+    def test_github_event_rejects_non_default_base_ref(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            event_path = Path(tmp) / "event.json"
+            event_path.write_text(
+                json.dumps(
+                    {
+                        "repository": {
+                            "full_name": "Oleksii-debug/Autosport",
+                            "default_branch": "main",
+                        },
+                        "pull_request": {
+                            "number": 42,
+                            "base": {
+                                "sha": A,
+                                "ref": "staging",
+                                "repo": {"full_name": "Oleksii-debug/Autosport"},
+                            },
+                            "head": {"sha": B},
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+            with patch.dict(
+                "os.environ",
+                {
+                    "GITHUB_ACTIONS": "true",
+                    "GITHUB_EVENT_PATH": str(event_path),
+                    "GITHUB_REPOSITORY": "Oleksii-debug/Autosport",
+                },
+                clear=False,
+            ):
+                with self.assertRaisesRegex(
+                    runner.ProtectedTreeRunnerError,
+                    "default branch",
+                ):
+                    runner._validate_github_event(
+                        base_sha=A,
+                        candidate_sha=B,
+                        pr_number=42,
+                    )
 
     def test_non_ci_only_result_cannot_be_wrapped(self) -> None:
         result = runner.ProtectedTreeGateResult(

@@ -18,6 +18,7 @@ from autosport.prophetx_marketdata import (
 )
 from autosport.providers import CanonicalNormalizer, ProviderUnavailableError
 from autosport.provider_sequence_authority import SQLiteProviderSequenceAuthority
+from autosport.storage import SQLiteMarketStore
 
 
 def _response(payload, status_code=200):
@@ -364,6 +365,51 @@ class ProphetXMarketDataTests(unittest.TestCase):
             first_quote.metadata["snapshot_fingerprint_sha256"],
             second_quote.metadata["snapshot_fingerprint_sha256"],
         )
+
+    def test_same_microsecond_changed_payload_advances_canonical_current_projection(self):
+        first_provider, _ = self._provider(clock="2026-09-22T19:00:00+00:00")
+        first_batch = first_provider.read_batch()
+
+        changed = _market_payload()
+        changed["data"]["markets"][0]["selections"][0][0]["price"] = 160
+        second_provider, _ = self._provider(
+            changed,
+            clock="2026-09-22T19:00:00+00:00",
+        )
+        second_batch = second_provider.read_batch()
+
+        self.assertLess(
+            first_batch.quotes[0].sequence,
+            second_batch.quotes[0].sequence,
+        )
+
+        normalizer = CanonicalNormalizer()
+        store = SQLiteMarketStore(Path(self._tmp.name) / "market-store.sqlite")
+        try:
+            self.assertEqual(
+                store.append_many(
+                    normalizer.normalize(first_batch.source_id, quote)
+                    for quote in first_batch.quotes
+                ),
+                len(first_batch.quotes),
+            )
+            self.assertEqual(
+                store.append_many(
+                    normalizer.normalize(second_batch.source_id, quote)
+                    for quote in second_batch.quotes
+                ),
+                len(second_batch.quotes),
+            )
+            current = store.current_by_source()
+            strike_a = next(
+                event
+                for (_source_id, _quote_key), event in current.items()
+                if event.selection_id.endswith(":strike-a")
+            )
+            self.assertEqual(strike_a.sequence, second_batch.quotes[0].sequence)
+            self.assertEqual(strike_a.decimal_odds, Decimal("2.6"))
+        finally:
+            store.close()
 
     def test_clock_rollback_cannot_regress_current_sequence(self):
         first, _ = self._provider(clock="2026-09-22T19:00:01+00:00")

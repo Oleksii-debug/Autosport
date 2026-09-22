@@ -31,6 +31,7 @@ REQUIRED_JOURNEY_IDS = (
 )
 
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+_GIT_COMMIT_SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 _MAX_TEXT_LENGTH = 16_384
 _MAX_STEPS_PER_JOURNEY = 1_000
 
@@ -128,6 +129,14 @@ def _require_sha256(name: str, value: object) -> str:
     return value
 
 
+def _require_git_commit_sha(name: str, value: object) -> str:
+    if type(value) is not str or _GIT_COMMIT_SHA_RE.fullmatch(value) is None:
+        raise NvdaHumanAcceptanceError(
+            f"{name} must be exactly 40 lowercase hexadecimal Git commit characters"
+        )
+    return value
+
+
 def _canonical_sha256(value: dict[str, Any]) -> str:
     payload = json.dumps(
         value,
@@ -182,7 +191,7 @@ def validate_human_nvda_acceptance_transcript(
     expected_artifact = _require_sha256(
         "expected_artifact_sha256", expected_artifact_sha256
     )
-    expected_source = _require_sha256("expected_source_sha", expected_source_sha)
+    expected_source = _require_git_commit_sha("expected_source_sha", expected_source_sha)
     frozen = _require_exact_dict("transcript", transcript)
     _require_exact_keys("transcript", frozen, _TOP_LEVEL_KEYS)
 
@@ -190,7 +199,7 @@ def validate_human_nvda_acceptance_transcript(
         raise NvdaHumanAcceptanceError(f"schema_version must equal {SCHEMA_VERSION}")
 
     artifact_sha = _require_sha256("artifact_sha256", frozen["artifact_sha256"])
-    source_sha = _require_sha256("source_sha", frozen["source_sha"])
+    source_sha = _require_git_commit_sha("source_sha", frozen["source_sha"])
     if artifact_sha != expected_artifact:
         raise NvdaHumanAcceptanceError(
             "artifact_sha256 does not match the artifact under review"
@@ -234,7 +243,7 @@ def build_manual_nvda_transcript_template(
     """
 
     artifact = _require_sha256("artifact_sha256", artifact_sha256)
-    source = _require_sha256("source_sha", source_sha)
+    source = _require_git_commit_sha("source_sha", source_sha)
     return {
         "schema_version": SCHEMA_VERSION,
         "artifact_sha256": artifact,

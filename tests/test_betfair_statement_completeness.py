@@ -148,6 +148,7 @@ def test_structural_derivation_proves_only_terminal_pagination_traversal() -> No
     assert len(result.evidence_sha256) == 64
 
     assert result.same_authenticated_session_proven is True
+    assert result.acquisition_owned_traversal_proven is True
     assert result.coherent_snapshot_proven is False
     assert result.stable_account_identity_proven is False
     assert result.temporal_finality_attested is False
@@ -387,6 +388,7 @@ def test_evidence_schema_cannot_mint_finality_or_cost_authority() -> None:
         "pagination_complete",
         "provider_origin_verified",
         "same_authenticated_session_proven",
+        "acquisition_owned_traversal_proven",
         "coherent_snapshot_proven",
         "stable_account_identity_proven",
         "temporal_finality_attested",

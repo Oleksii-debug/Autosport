@@ -29,6 +29,33 @@ from .betdaq_readonly_market_wire import (
 _MAX_SELECTION_ROWS = 100_000
 _MAX_SETTLEMENT_ROWS = 1_000
 
+_RETURN_STATUS_ATTRIBUTES = frozenset({"Code", "Description", "CallId"})
+_CURRENT_SEQUENCE_RESULT_ATTRIBUTES = frozenset({"SelectionSequenceNumber"})
+_CHANGED_RESULT_ATTRIBUTES = frozenset()
+_CHANGED_SELECTION_ATTRIBUTES = frozenset(
+    {
+        "Id",
+        "Name",
+        "DisplayOrder",
+        "IsHidden",
+        "Status",
+        "ResetCount",
+        "WithdrawalFactor",
+        "MarketId",
+        "SelectionSequenceNumber",
+        "CancelOrdersTime",
+    }
+)
+_SETTLEMENT_INFORMATION_ATTRIBUTES = frozenset(
+    {
+        "SettledTime",
+        "VoidPercentage",
+        "LeftSideFactor",
+        "RightSideFactor",
+        "SettlementResultString",
+    }
+)
+
 
 @dataclass(frozen=True, slots=True)
 class BetdaqWireTimestamp:
@@ -99,6 +126,19 @@ def _wire_timestamp(value: str, field: str) -> BetdaqWireTimestamp:
     )
 
 
+def _reject_unknown_attributes(
+    element: ET.Element,
+    allowed: frozenset[str],
+    field: str,
+) -> None:
+    unexpected = sorted(set(element.attrib) - allowed)
+    if unexpected:
+        joined = ", ".join(unexpected)
+        raise BetdaqSoapProtocolError(
+            f"{field} contains unexpected attribute(s): {joined}"
+        )
+
+
 def _parse_return_status(
     result: ET.Element,
 ) -> tuple[bool, int | None, str | None, str | None]:
@@ -109,6 +149,7 @@ def _parse_return_status(
         return False, None, None, None
 
     status = statuses[0]
+    _reject_unknown_attributes(status, _RETURN_STATUS_ATTRIBUTES, "ReturnStatus")
     code = _integer(_required_attr(status, "Code"), "ReturnStatus Code")
     description = _safe_text(
         _required_attr(status, "Description"),
@@ -187,6 +228,11 @@ def _parse_envelope(
 def _parse_settlement_information(
     element: ET.Element,
 ) -> BetdaqSettlementInformation:
+    _reject_unknown_attributes(
+        element,
+        _SETTLEMENT_INFORMATION_ATTRIBUTES,
+        "SettlementInformation",
+    )
     if list(element) or (element.text and element.text.strip()):
         raise BetdaqSoapProtocolError(
             "SettlementInformation must not contain child content"
@@ -219,6 +265,11 @@ def _parse_settlement_information(
 
 
 def _parse_changed_selection(element: ET.Element) -> BetdaqChangedSelection:
+    _reject_unknown_attributes(
+        element,
+        _CHANGED_SELECTION_ATTRIBUTES,
+        "Selections",
+    )
     settlement_rows: list[BetdaqSettlementInformation] = []
     for child in list(element):
         if child.tag != _tag(EXTERNAL_API_NS, "SettlementInformation"):
@@ -295,6 +346,11 @@ def parse_get_current_selection_sequence_number_response(
         call_id,
     ) = _parse_return_status(result)
 
+    _reject_unknown_attributes(
+        result,
+        _CURRENT_SEQUENCE_RESULT_ATTRIBUTES,
+        "GetCurrentSelectionSequenceNumberResult",
+    )
     allowed_child = _tag(EXTERNAL_API_NS, "ReturnStatus")
     if any(child.tag != allowed_child for child in list(result)):
         raise BetdaqSoapProtocolError(
@@ -324,6 +380,11 @@ def parse_list_selections_changed_since_response(
     result, provider_created_at, provider_created_at_text = _parse_envelope(
         xml_payload,
         operation="ListSelectionsChangedSince",
+    )
+    _reject_unknown_attributes(
+        result,
+        _CHANGED_RESULT_ATTRIBUTES,
+        "ListSelectionsChangedSinceResult",
     )
     (
         return_status_present,

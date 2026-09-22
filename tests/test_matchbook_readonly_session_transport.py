@@ -61,7 +61,7 @@ class LoginFactory:
 
 def build_transport(
     *,
-    read: Callable[[str, str], MatchbookReadResponse],
+    read: Callable[[str, str, tuple[tuple[str, str], ...]], MatchbookReadResponse],
     login: Callable[[], MatchbookLoginResponse] | None = None,
     lifecycle: MatchbookSessionLifecycle | None = None,
     generation_factory: Callable[[], str] | None = None,
@@ -109,7 +109,11 @@ def run_in_thread(
 def test_first_read_logs_in_once_and_commits_generation_bound_response() -> None:
     observed: list[tuple[str, str]] = []
 
-    def read(token: str, path: str) -> MatchbookReadResponse:
+    def read(
+        token: str,
+        path: str,
+        query: tuple[tuple[str, str], ...],
+    ) -> MatchbookReadResponse:
         observed.append((token, path))
         return MatchbookReadResponse(200, {"ok": True})
 
@@ -140,7 +144,11 @@ def test_concurrent_cold_reads_share_one_login_flight() -> None:
         assert release_login.wait(timeout=2.0)
         return MatchbookLoginResponse(200, f"token-{call}")
 
-    def read(token: str, path: str) -> MatchbookReadResponse:
+    def read(
+        token: str,
+        path: str,
+        query: tuple[tuple[str, str], ...],
+    ) -> MatchbookReadResponse:
         return MatchbookReadResponse(200, token)
 
     transport, lifecycle, _, _ = build_transport(read=read, login=login)
@@ -180,7 +188,11 @@ def test_two_concurrent_401s_trigger_exactly_one_successor_login() -> None:
     read_lock = Lock()
     old_generation_reads = 0
 
-    def read(token: str, path: str) -> MatchbookReadResponse:
+    def read(
+        token: str,
+        path: str,
+        query: tuple[tuple[str, str], ...],
+    ) -> MatchbookReadResponse:
         nonlocal old_generation_reads
         if token == "token-1" and arm_401.is_set():
             with read_lock:
@@ -227,7 +239,11 @@ def test_late_predecessor_200_cannot_be_relabelled_as_successor_truth() -> None:
     lock = Lock()
     old_calls = 0
 
-    def read(token: str, path: str) -> MatchbookReadResponse:
+    def read(
+        token: str,
+        path: str,
+        query: tuple[tuple[str, str], ...],
+    ) -> MatchbookReadResponse:
         nonlocal old_calls
         if token == "token-1" and armed.is_set():
             with lock:
@@ -283,7 +299,11 @@ def test_403_never_triggers_relogin_and_retires_ticket() -> None:
     login = LoginFactory()
     forbidden = True
 
-    def read(token: str, path: str) -> MatchbookReadResponse:
+    def read(
+        token: str,
+        path: str,
+        query: tuple[tuple[str, str], ...],
+    ) -> MatchbookReadResponse:
         if forbidden:
             return MatchbookReadResponse(403)
         return MatchbookReadResponse(200, "allowed")
@@ -306,7 +326,11 @@ def test_403_never_triggers_relogin_and_retires_ticket() -> None:
 def test_non_401_provider_failure_does_not_relogin_or_leak_ticket(status: int) -> None:
     login = LoginFactory()
 
-    def read(token: str, path: str) -> MatchbookReadResponse:
+    def read(
+        token: str,
+        path: str,
+        query: tuple[tuple[str, str], ...],
+    ) -> MatchbookReadResponse:
         return MatchbookReadResponse(status)
 
     transport, lifecycle, _, _ = build_transport(read=read, login=login)
@@ -323,7 +347,11 @@ def test_network_failure_is_typed_secret_safe_and_next_call_uses_fresh_generatio
     login = LoginFactory()
     fail = True
 
-    def read(token: str, path: str) -> MatchbookReadResponse:
+    def read(
+        token: str,
+        path: str,
+        query: tuple[tuple[str, str], ...],
+    ) -> MatchbookReadResponse:
         if fail:
             raise RuntimeError(f"provider failed session-token={token}")
         return MatchbookReadResponse(200, token)
@@ -346,7 +374,11 @@ def test_network_failure_is_typed_secret_safe_and_next_call_uses_fresh_generatio
 def test_persistent_401_stops_after_one_bounded_relogin() -> None:
     login = LoginFactory()
 
-    def read(token: str, path: str) -> MatchbookReadResponse:
+    def read(
+        token: str,
+        path: str,
+        query: tuple[tuple[str, str], ...],
+    ) -> MatchbookReadResponse:
         return MatchbookReadResponse(401)
 
     transport, lifecycle, _, _ = build_transport(read=read, login=login)
@@ -381,7 +413,7 @@ def test_concurrent_failed_login_is_single_flight_and_all_waiters_fail(
 
     transport, _, _, _ = build_transport(
         login=login,
-        read=lambda token, path: MatchbookReadResponse(200),
+        read=lambda token, path, query: MatchbookReadResponse(200),
     )
     results: list[object] = []
     errors: list[BaseException] = []
@@ -416,7 +448,7 @@ def test_login_exception_does_not_leak_secret_text() -> None:
 
     transport, _, _, _ = build_transport(
         login=login,
-        read=lambda token, path: MatchbookReadResponse(200),
+        read=lambda token, path, query: MatchbookReadResponse(200),
     )
 
     with pytest.raises(MatchbookAuthenticationUnavailable) as exc_info:
@@ -431,7 +463,11 @@ def test_logout_invalidates_generation_and_next_read_reauthenticates() -> None:
     login = LoginFactory()
     logged_out: list[str] = []
 
-    def read(token: str, path: str) -> MatchbookReadResponse:
+    def read(
+        token: str,
+        path: str,
+        query: tuple[tuple[str, str], ...],
+    ) -> MatchbookReadResponse:
         return MatchbookReadResponse(200, token)
 
     def logout(token: str) -> int:
@@ -459,7 +495,7 @@ def test_logout_invalidates_generation_and_next_read_reauthenticates() -> None:
 def test_restart_never_restores_raw_token_or_active_generation() -> None:
     first_login = LoginFactory()
     first, original_lifecycle, _, _ = build_transport(
-        read=lambda token, path: MatchbookReadResponse(200, token),
+        read=lambda token, path, query: MatchbookReadResponse(200, token),
         login=first_login,
     )
     assert first.read(path="/edge/rest/events").payload == "token-1"
@@ -469,7 +505,7 @@ def test_restart_never_restores_raw_token_or_active_generation() -> None:
     restored_login = LoginFactory()
     restored, _, _, _ = build_transport(
         lifecycle=restored_lifecycle,
-        read=lambda token, path: MatchbookReadResponse(200, token),
+        read=lambda token, path, query: MatchbookReadResponse(200, token),
         login=restored_login,
         generation_factory=GenerationFactory(start=1),
     )
@@ -509,7 +545,7 @@ def test_non_200_login_response_cannot_carry_token() -> None:
 def test_read_only_allowlist_fails_closed_before_authentication(bad_path: str) -> None:
     login = LoginFactory()
     transport, _, _, _ = build_transport(
-        read=lambda token, path: MatchbookReadResponse(200),
+        read=lambda token, path, query: MatchbookReadResponse(200),
         login=login,
     )
 
@@ -521,7 +557,7 @@ def test_read_only_allowlist_fails_closed_before_authentication(bad_path: str) -
 
 def test_surface_exposes_no_betting_write_method() -> None:
     transport, _, _, _ = build_transport(
-        read=lambda token, path: MatchbookReadResponse(200),
+        read=lambda token, path, query: MatchbookReadResponse(200),
     )
 
     assert not hasattr(transport, "write")
@@ -532,7 +568,7 @@ def test_surface_exposes_no_betting_write_method() -> None:
 
 def test_unconfigured_logout_is_fail_closed_without_changing_session() -> None:
     transport, lifecycle, _, login = build_transport(
-        read=lambda token, path: MatchbookReadResponse(200, token),
+        read=lambda token, path, query: MatchbookReadResponse(200, token),
     )
     assert transport.read(path="/edge/rest/events").payload == "token-1"
 
@@ -563,7 +599,7 @@ def test_response_commit_clock_failure_drops_token_authority_and_rotates_on_retr
     transport = MatchbookReadOnlySessionTransport(
         lifecycle=lifecycle,
         login=login,
-        read=lambda token, path: MatchbookReadResponse(200, token),
+        read=lambda token, path, query: MatchbookReadResponse(200, token),
         clock_ns=clock,
         generation_factory=GenerationFactory(),
     )
@@ -603,7 +639,7 @@ def test_confirmed_logout_clock_failure_still_clears_local_token_authority() -> 
     transport = MatchbookReadOnlySessionTransport(
         lifecycle=lifecycle,
         login=login,
-        read=lambda token, path: MatchbookReadResponse(200, token),
+        read=lambda token, path, query: MatchbookReadResponse(200, token),
         logout=lambda token: logged_out.append(token) or 200,
         clock_ns=clock,
         generation_factory=GenerationFactory(),
@@ -629,7 +665,11 @@ def test_logout_while_read_is_inflight_fences_late_predecessor_response() -> Non
     read_started = Event()
     release_read = Event()
 
-    def read(token: str, path: str) -> MatchbookReadResponse:
+    def read(
+        token: str,
+        path: str,
+        query: tuple[tuple[str, str], ...],
+    ) -> MatchbookReadResponse:
         if path == "/edge/rest/account/positions":
             read_started.set()
             assert release_read.wait(timeout=2.0)
@@ -678,7 +718,7 @@ def test_committed_read_keeps_exact_generation_provenance_after_later_rotation()
     login = LoginFactory()
     payload = {"same-provider-payload": True}
     transport, lifecycle, _, _ = build_transport(
-        read=lambda token, path: MatchbookReadResponse(200, payload),
+        read=lambda token, path, query: MatchbookReadResponse(200, payload),
         login=login,
         logout=lambda token: 200,
     )
@@ -709,7 +749,7 @@ def test_provider_error_payload_and_committed_payload_are_not_projected_by_repr(
     assert "raw-token-secret" not in repr(raw)
 
     transport, _, _, _ = build_transport(
-        read=lambda token, path: raw,
+        read=lambda token, path, query: raw,
     )
     with pytest.raises(MatchbookReadUnavailable) as exc_info:
         transport.read(path="/edge/rest/events")
@@ -729,7 +769,7 @@ def test_generation_factory_cannot_reuse_raw_session_token_as_audit_identity() -
     raw_token = "must-never-be-generation-id"
     transport, lifecycle, _, _ = build_transport(
         login=lambda: MatchbookLoginResponse(200, raw_token),
-        read=lambda token, path: MatchbookReadResponse(200, {"ok": True}),
+        read=lambda token, path, query: MatchbookReadResponse(200, {"ok": True}),
         generation_factory=lambda: raw_token,
     )
 
@@ -758,7 +798,7 @@ def test_concurrent_local_generation_failure_is_not_laundered_as_provider_outage
 
     transport, lifecycle, _, _ = build_transport(
         login=login,
-        read=lambda token, path: MatchbookReadResponse(200, {"ok": True}),
+        read=lambda token, path, query: MatchbookReadResponse(200, {"ok": True}),
         generation_factory=lambda: raw_token,
     )
     results: list[object] = []
@@ -803,7 +843,7 @@ def test_per_request_clock_regression_is_lifecycle_failure_and_rotates_before_re
     transport = MatchbookReadOnlySessionTransport(
         lifecycle=lifecycle,
         login=login,
-        read=lambda token, path: MatchbookReadResponse(200, token),
+        read=lambda token, path, query: MatchbookReadResponse(200, token),
         clock_ns=clock,
         generation_factory=GenerationFactory(),
     )
@@ -842,7 +882,11 @@ def test_generation_rotation_between_session_lookup_and_ticket_capture_sends_no_
     login = LoginFactory()
     read_calls: list[tuple[str, str]] = []
 
-    def read(token: str, path: str) -> MatchbookReadResponse:
+    def read(
+        token: str,
+        path: str,
+        query: tuple[tuple[str, str], ...],
+    ) -> MatchbookReadResponse:
         read_calls.append((token, path))
         return MatchbookReadResponse(200, {"ok": True})
 
@@ -869,3 +913,53 @@ def test_generation_rotation_between_session_lookup_and_ticket_capture_sends_no_
     assert recovered.payload == {"ok": True}
     assert read_calls == [("token-2", "/edge/rest/events")]
     assert lifecycle._issued_read_tickets == {}
+
+
+def test_query_pairs_are_preserved_exactly_without_weakening_path_allowlist() -> None:
+    observed: list[tuple[str, str, tuple[tuple[str, str], ...]]] = []
+
+    def read(
+        token: str,
+        path: str,
+        query: tuple[tuple[str, str], ...],
+    ) -> MatchbookReadResponse:
+        observed.append((token, path, query))
+        return MatchbookReadResponse(200, {"ok": True})
+
+    transport, _, _, login = build_transport(read=read)
+    query = (
+        ("sport-ids", "15,24735152712200"),
+        ("states", "open,suspended"),
+        ("price-depth", "1"),
+    )
+
+    committed = transport.read(path="/edge/rest/events", query=query)
+
+    assert committed.generation_id == "gen-1"
+    assert committed.payload == {"ok": True}
+    assert observed == [("token-1", "/edge/rest/events", query)]
+    assert login is not None and login.calls == 1
+
+
+@pytest.mark.parametrize(
+    "query",
+    [
+        [("sport-ids", "15")],
+        (("session-token", "raw-secret"),),
+        (("password", "hunter2"),),
+        (("sport-ids", "15\nwrite=true"),),
+        (("sport-ids", 15),),
+        (("sport-ids",),),
+    ],
+)
+def test_query_validation_fails_before_authentication(query: object) -> None:
+    login = LoginFactory()
+    transport, _, _, _ = build_transport(
+        read=lambda token, path, query: MatchbookReadResponse(200, {"ok": True}),
+        login=login,
+    )
+
+    with pytest.raises((TypeError, ValueError)):
+        transport.read(path="/edge/rest/events", query=query)  # type: ignore[arg-type]
+
+    assert login.calls == 0

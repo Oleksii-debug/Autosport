@@ -39,7 +39,7 @@ class TreeEntry:
 class ScenarioResult:
     name: str
     path_component: str
-    artifact_sha256: str
+    artifact_tree_sha256: str
     copied_bytes_equal: bool
     launched: bool
     startup_stable: bool
@@ -58,7 +58,7 @@ class MatrixReport:
     schema_version: int
     semantic_key: str
     authority_family: str
-    artifact_sha256: str
+    artifact_tree_sha256: str
     executable_relative_path: str
     probe_mode: str
     startup_seconds: float
@@ -303,7 +303,7 @@ def run_matrix(
             ScenarioResult(
                 name=scenario_name,
                 path_component=component,
-                artifact_sha256=copied_sha,
+                artifact_tree_sha256=copied_sha,
                 copied_bytes_equal=copied_equal,
                 launched=launched,
                 startup_stable=stable,
@@ -325,7 +325,7 @@ def run_matrix(
         schema_version=SCHEMA_VERSION,
         semantic_key=SEMANTIC_KEY,
         authority_family=AUTHORITY_FAMILY,
-        artifact_sha256=artifact_sha,
+        artifact_tree_sha256=artifact_sha,
         executable_relative_path=rel,
         probe_mode=mode,
         startup_seconds=startup_seconds,

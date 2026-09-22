@@ -229,6 +229,7 @@ class PaperBaselineAgent:
                 event.selection_id,
                 event.decimal_odds,
                 sport=event.sport,
+                market_semantics_id=event.market_semantics_id,
             )],
             self.stake,
             reason=f"fixture baseline signal {signal_id}",

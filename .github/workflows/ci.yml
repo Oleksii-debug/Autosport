@@ -13,6 +13,7 @@ on:
       - '.gitattributes'
       - '.github/workflows/ci.yml'
   pull_request:
+    types: [opened, synchronize, reopened, ready_for_review, converted_to_draft]
 
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
@@ -20,6 +21,9 @@ concurrency:
 
 jobs:
   test:
+    # Draft PRs are high-churn work-in-progress. Preserve the exact heavy gate
+    # for every integration-capable head without consuming runners while draft.
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     strategy:
       matrix:
         os: [ubuntu-latest, windows-latest]

@@ -67,10 +67,47 @@ class RiskSeverity(IntEnum):
 
 class RiskStatus(str, Enum):
     OPEN = "open"
-    INVESTIGATING = "investigating"
+    ACKNOWLEDGED = "acknowledged"
     MITIGATING = "mitigating"
-    MONITORING = "monitoring"
-    CLOSED = "closed"
+    RESOLVED = "resolved"
+    SUPERSEDED = "superseded"
+
+
+_TERMINAL_RISK_STATUSES: Final = frozenset(
+    {RiskStatus.RESOLVED, RiskStatus.SUPERSEDED}
+)
+_ALLOWED_STATUS_SUCCESSORS: Final = {
+    RiskStatus.OPEN: frozenset(
+        {
+            RiskStatus.OPEN,
+            RiskStatus.ACKNOWLEDGED,
+            RiskStatus.MITIGATING,
+            RiskStatus.RESOLVED,
+            RiskStatus.SUPERSEDED,
+        }
+    ),
+    RiskStatus.ACKNOWLEDGED: frozenset(
+        {
+            RiskStatus.ACKNOWLEDGED,
+            RiskStatus.MITIGATING,
+            RiskStatus.RESOLVED,
+            RiskStatus.SUPERSEDED,
+        }
+    ),
+    RiskStatus.MITIGATING: frozenset(
+        {
+            RiskStatus.MITIGATING,
+            RiskStatus.RESOLVED,
+            RiskStatus.SUPERSEDED,
+        }
+    ),
+    RiskStatus.RESOLVED: frozenset(
+        {RiskStatus.RESOLVED, RiskStatus.OPEN}
+    ),
+    RiskStatus.SUPERSEDED: frozenset(
+        {RiskStatus.SUPERSEDED, RiskStatus.OPEN}
+    ),
+}
 
 
 class RiskEvidenceState(str, Enum):
@@ -227,27 +264,32 @@ class IncidentRiskEntry:
                 "partial/verified evidence state requires at least one evidence_ref"
             )
         if (
-            self.status in {RiskStatus.MITIGATING, RiskStatus.CLOSED}
+            self.status
+            in {
+                RiskStatus.MITIGATING,
+                RiskStatus.RESOLVED,
+                RiskStatus.SUPERSEDED,
+            }
             and not self.mitigation
         ):
             raise IncidentRiskRegisterError(
-                "mitigating/closed entries require a non-empty mitigation"
+                "mitigating/resolved/superseded entries require a non-empty mitigation"
             )
-        if self.status is RiskStatus.CLOSED:
+        if self.status in _TERMINAL_RISK_STATUSES:
             if self.evidence_state is not RiskEvidenceState.VERIFIED:
                 raise IncidentRiskRegisterError(
-                    "closed entries require verified evidence"
+                    "terminal entries require verified evidence"
                 )
             if self.requires_operator_action:
                 raise IncidentRiskRegisterError(
-                    "closed entries cannot require operator action"
+                    "terminal entries cannot require operator action"
                 )
         elif (
             self.severity is RiskSeverity.CRITICAL
             and not self.requires_operator_action
         ):
             raise IncidentRiskRegisterError(
-                "open critical entries must require operator action"
+                "unresolved critical entries must require operator action"
             )
 
     def to_dict(self) -> dict[str, object]:
@@ -363,6 +405,27 @@ def validate_successor(
         raise IncidentRiskRegisterError(
             "successor updated_at must move strictly forward"
         )
+
+    if candidate.status not in _ALLOWED_STATUS_SUCCESSORS[previous.status]:
+        raise IncidentRiskRegisterError(
+            "unsupported incident/model-risk lifecycle transition"
+        )
+
+    previous_evidence = set(previous.evidence_refs)
+    candidate_evidence = set(candidate.evidence_refs)
+    enters_terminal = (
+        candidate.status in _TERMINAL_RISK_STATUSES
+        and candidate.status is not previous.status
+    )
+    follows_terminal = previous.status in _TERMINAL_RISK_STATUSES
+    if enters_terminal or follows_terminal:
+        if (
+            candidate.evidence_state is not RiskEvidenceState.VERIFIED
+            or not previous_evidence < candidate_evidence
+        ):
+            raise IncidentRiskRegisterError(
+                "terminal transition/reopen requires new verified evidence"
+            )
 
 
 @dataclass(frozen=True, slots=True)

@@ -20,13 +20,19 @@ STREAM_EPOCH = "epoch-1"
 ANCHOR = "2026-09-22T00:00:00+00:00"
 
 
-def _ensure_schedule(store: CollectorDeltaStore) -> None:
+def _ensure_schedule(
+    store: CollectorDeltaStore,
+    *,
+    end_slot: int | None = 0,
+) -> None:
     store._ensure_collector_schedule(
         source_id=SOURCE_ID,
         run_id=RUN_ID,
         stream_epoch=STREAM_EPOCH,
         anchor_at=ANCHOR,
         interval_seconds=10,
+        evaluation_start_slot_ordinal=(0 if end_slot is not None else None),
+        evaluation_end_slot_ordinal=end_slot,
     )
 
 
@@ -114,7 +120,7 @@ class ScheduledSourceUniverseTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "collector.db"
             store = CollectorDeltaStore(path)
-            _ensure_schedule(store)
+            _ensure_schedule(store, end_slot=1)
             first = _start_scheduled(store, ordinal=0)
             _finish(store, first)
             second = _start_scheduled(store, ordinal=1)
@@ -148,7 +154,7 @@ class ScheduledSourceUniverseTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "collector.db"
             store = CollectorDeltaStore(path)
-            _ensure_schedule(store)
+            _ensure_schedule(store, end_slot=1)
             first = _start_scheduled(store, ordinal=0)
             _finish(store, first)
             candidate = _candidate(
@@ -168,6 +174,58 @@ class ScheduledSourceUniverseTests(unittest.TestCase):
                     candidate,
                     start_slot=0,
                     end_slot=1,
+                )
+
+    def test_frozen_two_slot_window_rejects_caller_selected_shorter_scope(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "collector.db"
+            store = CollectorDeltaStore(path)
+            _ensure_schedule(store, end_slot=1)
+            first = _start_scheduled(store, ordinal=0)
+            _finish(store, first)
+            candidate = _candidate(
+                store,
+                path,
+                start_cycle_seq=first,
+                end_cycle_seq=first,
+            )
+
+            with self.assertRaisesRegex(
+                ScheduledSourceUniverseError,
+                "prospectively frozen evaluation window",
+            ):
+                _resolve(
+                    store,
+                    path,
+                    candidate,
+                    start_slot=0,
+                    end_slot=0,
+                )
+
+    def test_unbounded_schedule_cannot_mint_positive_scientific_resolution(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "collector.db"
+            store = CollectorDeltaStore(path)
+            _ensure_schedule(store, end_slot=None)
+            first = _start_scheduled(store, ordinal=0)
+            _finish(store, first)
+            candidate = _candidate(
+                store,
+                path,
+                start_cycle_seq=first,
+                end_cycle_seq=first,
+            )
+
+            with self.assertRaisesRegex(
+                ScheduledSourceUniverseError,
+                "lacks prospectively frozen evaluation window",
+            ):
+                _resolve(
+                    store,
+                    path,
+                    candidate,
+                    start_slot=0,
+                    end_slot=0,
                 )
 
     def test_pending_start_is_schedule_covered_but_not_provider_complete(self):
@@ -259,7 +317,7 @@ class ScheduledSourceUniverseTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "collector.db"
             store = CollectorDeltaStore(path)
-            _ensure_schedule(store)
+            _ensure_schedule(store, end_slot=1)
             first = _start_scheduled(store, ordinal=0)
             _finish(store, first)
 
@@ -308,7 +366,7 @@ class ScheduledSourceUniverseTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "collector.db"
             store = CollectorDeltaStore(path)
-            _ensure_schedule(store)
+            _ensure_schedule(store, end_slot=1)
             first = _start_scheduled(store, ordinal=0)
             _finish(store, first)
             second = _start_scheduled(

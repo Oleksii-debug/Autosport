@@ -43,10 +43,11 @@ _ZIP_UTF8_FLAG = 0x800
 _ZIP_LOCAL_HEADER = struct.Struct("<IHHHHHIIIHH")
 _ZIP_LOCAL_HEADER_SIGNATURE = 0x04034B50
 _SECRET_KEY_PATTERN = (
-    rb"(?:"
+    rb"(?:x[._ -]?)?(?:"
     rb"api(?:[._ -]?(?:key|secret|token|hash))|"
     rb"access[._ -]?token|refresh[._ -]?token|auth[._ -]?token|bearer[._ -]?token|"
-    rb"oauth(?:[._ -]?(?:token|secret))|client[._ -]?secret|consumer[._ -]?secret|"
+    rb"oauth2?(?:[._ -]?(?:(?:access|refresh)[._ -]?token|token|secret))|"
+    rb"client[._ -]?secret|consumer[._ -]?secret|"
     rb"session(?:[._ -]?(?:token|id))|bot[._ -]?token|password|passwd|authorization|"
     rb"cookie|set[._ -]?cookie"
     rb")"

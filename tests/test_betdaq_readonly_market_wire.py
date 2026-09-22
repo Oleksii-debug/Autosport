@@ -249,6 +249,49 @@ def test_nonfinite_or_invalid_economic_fields_fail_closed() -> None:
         )
 
 
+def test_multi_level_prices_preserve_documented_provider_competitiveness_order() -> None:
+    response = parse_get_prices_response(
+        _response(
+            price_nodes=(
+                '<ForSidePrices Price="3.00" Stake="5" />'
+                '<ForSidePrices Price="2.50" Stake="7" />'
+                '<AgainstSidePrices Price="2.10" Stake="4" />'
+                '<AgainstSidePrices Price="2.20" Stake="6" />'
+            )
+        )
+    )
+
+    selection = response.markets[0].selections[0]
+    assert [level.price for level in selection.for_side_prices] == [
+        Decimal("3.00"),
+        Decimal("2.50"),
+    ]
+    assert [level.price for level in selection.against_side_prices] == [
+        Decimal("2.10"),
+        Decimal("2.20"),
+    ]
+
+
+@pytest.mark.parametrize(
+    "price_nodes",
+    [
+        (
+            '<ForSidePrices Price="2.00" Stake="5" />'
+            '<ForSidePrices Price="2.50" Stake="7" />'
+        ),
+        (
+            '<AgainstSidePrices Price="2.20" Stake="5" />'
+            '<AgainstSidePrices Price="2.10" Stake="7" />'
+        ),
+    ],
+)
+def test_provider_competitiveness_order_violation_fails_closed(
+    price_nodes: str,
+) -> None:
+    with pytest.raises(BetdaqSoapProtocolError, match="competitiveness order"):
+        parse_get_prices_response(_response(price_nodes=price_nodes))
+
+
 def test_duplicate_price_level_is_rejected_not_double_counted() -> None:
     payload = _response(
         price_nodes=(

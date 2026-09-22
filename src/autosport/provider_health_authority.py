@@ -278,7 +278,8 @@ class ProviderHealthAuthority:
             failures += 1
             next_status = (
                 ProviderHealthStatus.OPEN
-                if failures >= self._policy.operational_failures_to_open
+                if status is ProviderHealthStatus.OPEN
+                or failures >= self._policy.operational_failures_to_open
                 else ProviderHealthStatus.DEGRADED
             )
 
@@ -329,3 +330,4 @@ def _sha256(name: str, value: object) -> str:
     text = _trimmed(name, value)
     if len(text) != 64 or any(ch not in "0123456789abcdef" for ch in text):
         raise ProviderHealthError(f"{name} must be a lowercase SHA-256 hex digest")
+    return text

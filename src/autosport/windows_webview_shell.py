@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import sys
 import threading
@@ -21,6 +22,7 @@ from .owner_economic_authority import (
 )
 from .parlayapi_provider import ParlayApiTableTennisProvider
 from .paths import default_workspace
+from .product_gui_worker import ProductGuiMessage, ProductGuiWorker
 from .recovery_worker import OneShotRecoveryWorker, recover_workspace_once
 from .replay_worker import OneShotReplayWorker, run_workspace_dataset_once, workspace_for_strategy
 from .research_strategy import RESEARCH_STRATEGY_ID, ResearchStrategyPlan
@@ -47,6 +49,9 @@ WEB_SHELL_DIRNAME = "windows_web"
 WEB_SHELL_INDEX = "index.html"
 _ALLOWED_SPEEDS = {0.0, 1.0, 10.0, 100.0, 1000.0}
 _ALLOWED_LIVE_MODES = {"public_preview", "api_key"}
+_PRODUCT_SOURCE_FACTORY_ENV = "AUTOSPORT_PRODUCT_SOURCE_FACTORY"
+_PRODUCT_POLL_SECONDS = 30.0
+_REQUEST_REPLAY_LIMIT = 256
 _MANUAL_OPERATION_KEYS = {
     "odds_conversion": "ui.windows.manual_calculation.operation.odds_conversion",
     "implied_probability": "ui.windows.manual_calculation.operation.implied_probability",
@@ -84,15 +89,27 @@ def web_shell_index_path() -> Path:
 
 
 def _safe_exception_text(exc: BaseException) -> str:
+    """Project only bounded exception type; raw detail may contain secrets or paths."""
+
     try:
         name = type.__getattribute__(type(exc), "__name__")
     except BaseException:
         name = "BaseException"
-    try:
-        detail = str(exc)
-    except BaseException:
-        return text("ui.error.exception.message_unavailable", exception_type=name)
-    return f"{name}: {detail}" if detail else name
+    if (
+        type(name) is not str
+        or not name
+        or len(name) > 64
+        or not name.replace("_", "a").isalnum()
+        or not (name[0].isalpha() or name[0] == "_")
+    ):
+        name = "BaseException"
+    return text("ui.error.exception.message_unavailable", exception_type=name)
+
+
+def _safe_worker_error_detail(_value: object) -> str:
+    """Never project worker/provider exception detail into visible or spoken UI."""
+
+    return "деталі приховано"
 
 
 def _lines_from_manual_input(raw: object) -> list[str]:
@@ -236,6 +253,9 @@ class AutosportWebController:
         self.live_worker = OneShotObservationWorker()
         self.recovery_worker = OneShotRecoveryWorker()
         self.evidence_export_worker = OneShotEvidenceExportWorker()
+        self.product_worker = ProductGuiWorker()
+        self.product_runtime_status = "Тривала PAPER-робота не запущена."
+        self._request_results: dict[str, tuple[str, dict[str, Any]]] = {}
         self._pending_dataset_path: Path | None = None
         self._recovery_required_workspaces: set[Path] = set()
         self._owner_review: tuple[Path, OwnerEconomicReviewSnapshot] | None = None
@@ -287,6 +307,7 @@ class AutosportWebController:
                 self.live_worker,
                 self.recovery_worker,
                 self.evidence_export_worker,
+                self.product_worker,
             )
         )
 
@@ -372,7 +393,7 @@ class AutosportWebController:
             pending = self._pending_dataset_path
             self._pending_dataset_path = None
             if message.error is not None:
-                self._fail(text("ui.error.dataset.rejected", detail=message.error))
+                self._fail(text("ui.error.dataset.rejected", detail=_safe_worker_error_detail(message.error)))
             elif (
                 not isinstance(message.result, ReplayDataset)
                 or pending is None
@@ -401,7 +422,7 @@ class AutosportWebController:
                 self.tickets = [text("ui.status.replay.error_ticket")]
                 self.evaluation = [text("ui.evaluation.replay_failed")]
                 self._fail(
-                    text("ui.error.replay.worker", detail=replay_message.error)
+                    text("ui.error.replay.worker", detail=_safe_worker_error_detail(replay_message.error))
                 )
             elif replay_message.result is None:
                 self._recovery_required_workspaces.add(Path(self._active_workspace))
@@ -416,7 +437,8 @@ class AutosportWebController:
         if live_message is not None:
             if live_message.error is not None:
                 self.live_status = text(
-                    "ui.error.live.snapshot", detail=live_message.error
+                    "ui.error.live.snapshot",
+                    detail=_safe_worker_error_detail(live_message.error),
                 )
                 self._fail(text("ui.status.live.failed"))
             elif live_message.result is None:
@@ -432,7 +454,7 @@ class AutosportWebController:
             if recovery_message.error is not None:
                 self._recovery_required_workspaces.add(Path(self._active_workspace))
                 self._fail(
-                    text("ui.error.recovery.failure", detail=recovery_message.error)
+                    text("ui.error.recovery.failure", detail=_safe_worker_error_detail(recovery_message.error))
                 )
             elif recovery_message.result is None:
                 self._recovery_required_workspaces.add(Path(self._active_workspace))
@@ -461,11 +483,49 @@ class AutosportWebController:
                 self._fail(
                     text(
                         "ui.error.evidence_export.failed",
-                        error=export_message.error,
+                        error=_safe_worker_error_detail(export_message.error),
                     )
                 )
             else:
                 self._ok(text("ui.status.evidence_export.complete"))
+
+        product_message = self.product_worker.poll()
+        if product_message is not None:
+            if product_message.kind == "STARTED" and product_message.status is not None:
+                self.product_runtime_status = (
+                    "Тривала PAPER-робота активна: "
+                    f"джерело {product_message.status.source_id}; "
+                    f"циклів {product_message.status.cycles_completed}."
+                )
+                self._ok(self.product_runtime_status)
+            elif product_message.kind == "TICK" and product_message.tick is not None:
+                self.product_runtime_status = (
+                    "PAPER runtime: завершено цикл "
+                    f"{product_message.tick.cycle_index}; "
+                    f"delta {len(product_message.tick.committed_delta_ids)}; "
+                    f"settlement {len(product_message.tick.settled_ticket_ids)}."
+                )
+                self.status = self.product_runtime_status
+            elif product_message.kind == "STOPPED" and product_message.status is not None:
+                reason = {
+                    "operator_stop": "операторська зупинка",
+                    "app_close": "закриття програми",
+                    "runtime_error": "аварійне завершення",
+                }.get(product_message.stop_reason, "зупинено")
+                self.product_runtime_status = (
+                    "Тривалу PAPER-роботу зупинено: "
+                    f"{reason}; циклів {product_message.status.cycles_completed}."
+                )
+                self._ok(self.product_runtime_status)
+                self._refresh_economic_projection()
+            elif product_message.kind == "ERROR":
+                self._recovery_required_workspaces.add(Path(self.workspace))
+                error_type = product_message.error_type or "BaseException"
+                self.product_runtime_status = (
+                    "Тривала PAPER-робота завершилась помилкою типу "
+                    f"{error_type}. Спочатку відновіть робочу область."
+                )
+                self._fail(self.product_runtime_status)
 
         self._refresh_owner_projection()
 
@@ -541,6 +601,26 @@ class AutosportWebController:
                     "live": self.live_worker.busy,
                     "recovery": self.recovery_worker.busy,
                     "evidence_export": self.evidence_export_worker.busy,
+                    "product_runtime": self.product_worker.busy,
+                },
+                "product_runtime": {
+                    "status": self.product_runtime_status,
+                    "running": self.product_worker.busy,
+                    "can_start": (
+                        not self.product_worker.busy
+                        and not any(
+                            worker.busy
+                            for worker in (
+                                self.dataset_worker,
+                                self.replay_worker,
+                                self.live_worker,
+                                self.recovery_worker,
+                                self.evidence_export_worker,
+                            )
+                        )
+                        and Path(self.workspace) not in self._recovery_required_workspaces
+                    ),
+                    "can_stop": self.product_worker.busy,
                 },
                 "surface_key": self.surface_key,
                 "surfaces": surfaces,
@@ -762,6 +842,49 @@ class AutosportWebController:
             return self._fail(text("ui.status.evidence_export.start_failed"))
         return self._ok(text("ui.status.evidence_export.running"))
 
+    def _action_product_runtime_start(self, payload: Mapping[str, Any]) -> dict[str, Any]:
+        if self._busy():
+            return self._fail("Спочатку завершіть поточну операцію.")
+        workspace = Path(self.workspace)
+        if workspace in self._recovery_required_workspaces:
+            return self._fail(
+                "Тривала PAPER-робота заблокована: спочатку відновіть робочу область."
+            )
+        source_factory = os.environ.get(_PRODUCT_SOURCE_FACTORY_ENV)
+        if source_factory is None or not source_factory:
+            return self._fail(
+                "Тривала PAPER-робота не запущена: "
+                "AUTOSPORT_PRODUCT_SOURCE_FACTORY не задано."
+            )
+        if source_factory.strip() != source_factory:
+            return self._fail(
+                "Тривала PAPER-робота не запущена: "
+                "AUTOSPORT_PRODUCT_SOURCE_FACTORY має неоднозначний формат."
+            )
+        try:
+            started = self.product_worker.start(
+                workspace=workspace,
+                source_factory=source_factory,
+                initial_bankroll="10000",
+                poll_seconds=_PRODUCT_POLL_SECONDS,
+            )
+        except Exception as exc:
+            return self._fail(_safe_exception_text(exc))
+        if not started:
+            return self._fail("Тривалу PAPER-роботу вже запущено.")
+        self.product_runtime_status = "Запускається канонічна тривала PAPER-робота…"
+        return self._ok(self.product_runtime_status, focus_id="product-runtime-status")
+
+    def _action_product_runtime_stop(self, payload: Mapping[str, Any]) -> dict[str, Any]:
+        if not self.product_worker.busy:
+            return self._fail("Тривала PAPER-робота зараз не виконується.")
+        if not self.product_worker.request_stop("operator_stop"):
+            return self._fail("Не вдалося передати команду STOP.")
+        self.product_runtime_status = (
+            "Надіслано команду STOP; очікується безпечне завершення PAPER runtime."
+        )
+        return self._ok(self.product_runtime_status, focus_id="product-runtime-status")
+
     def _action_surface_select(self, payload: Mapping[str, Any]) -> dict[str, Any]:
         key = payload.get("surface_key")
         if not isinstance(key, str) or key not in SURFACE_BY_KEY:
@@ -853,14 +976,45 @@ class AutosportWebController:
 
     def dispatch(self, raw: Mapping[str, Any]) -> dict[str, Any]:
         if not isinstance(raw, Mapping):
-            return {"request_id": "invalid", "status": "rejected", "message": "Invalid UI command."}
+            return {
+                "request_id": "invalid",
+                "status": "rejected",
+                "message": "Некоректна команда інтерфейсу.",
+            }
         request_id = raw.get("request_id")
         action_id = raw.get("action_id")
         payload = raw.get("payload", {})
-        if not isinstance(request_id, str) or not request_id:
-            request_id = "invalid"
-        if not isinstance(action_id, str) or not isinstance(payload, Mapping):
-            return {"request_id": request_id, "status": "rejected", "message": "Invalid UI command."}
+        if (
+            type(request_id) is not str
+            or not request_id
+            or request_id.strip() != request_id
+            or len(request_id) > 128
+        ):
+            return {
+                "request_id": "invalid",
+                "status": "rejected",
+                "message": "Некоректний ідентифікатор команди.",
+            }
+        if type(action_id) is not str or not isinstance(payload, Mapping):
+            return {
+                "request_id": request_id,
+                "status": "rejected",
+                "message": "Некоректна команда інтерфейсу.",
+            }
+        try:
+            command_identity = json.dumps(
+                {"action_id": action_id, "payload": dict(payload)},
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+                allow_nan=False,
+            )
+        except (TypeError, ValueError):
+            return {
+                "request_id": request_id,
+                "status": "rejected",
+                "message": "Некоректні дані команди інтерфейсу.",
+            }
         handlers = {
             "dataset.select": self._action_dataset_select,
             "strategy.set": self._action_strategy_set,
@@ -871,6 +1025,8 @@ class AutosportWebController:
             "live.refresh": self._action_live_refresh,
             "recovery.run": self._action_recovery_run,
             "evidence.export": self._action_evidence_export,
+            "product_runtime.start": self._action_product_runtime_start,
+            "product_runtime.stop": self._action_product_runtime_stop,
             "surface.select": self._action_surface_select,
             "owner.preview": self._action_owner_preview,
             "owner.initialize": self._action_owner_initialize,
@@ -882,9 +1038,20 @@ class AutosportWebController:
             return {
                 "request_id": request_id,
                 "status": "rejected",
-                "message": f"Unknown UI action: {action_id}",
+                "message": "Невідома команда інтерфейсу.",
             }
         with self._lock:
+            previous = self._request_results.get(request_id)
+            if previous is not None:
+                previous_identity, previous_result = previous
+                if previous_identity != command_identity:
+                    return {
+                        "request_id": request_id,
+                        "status": "rejected",
+                        "message": "Повторний ідентифікатор належить іншій команді.",
+                    }
+                return dict(previous_result)
+
             if self._closing:
                 response = self._fail("Автоспорт завершує роботу.")
             else:
@@ -894,11 +1061,17 @@ class AutosportWebController:
                     if not isinstance(exc, Exception):
                         raise
                     response = self._fail(_safe_exception_text(exc))
-        return {"request_id": request_id, **response}
+            result = {"request_id": request_id, **response}
+            self._request_results[request_id] = (command_identity, dict(result))
+            while len(self._request_results) > _REQUEST_REPLAY_LIMIT:
+                oldest = next(iter(self._request_results))
+                del self._request_results[oldest]
+            return result
 
     def close(self) -> None:
         with self._lock:
             self._closing = True
+        self.product_worker.request_stop("app_close")
 
 
 class AutosportWebBridge:

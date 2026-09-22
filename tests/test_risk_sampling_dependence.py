@@ -312,6 +312,18 @@ class RiskSamplingDependenceTests(unittest.TestCase):
                 occurrences=self._occurrences(structure),
             )
 
+    def test_uppercase_sha_text_is_not_canonical_identity(self):
+        with self.assertRaisesRegex(
+            RiskSamplingDependenceError,
+            "canonical SHA-256 hex string",
+        ):
+            inspect_fixed_n_iid_sampling_structure(
+                self._membership(),
+                sampling_manifest_json=self._manifest(
+                    randomization_root_sha256="A" * 64
+                ),
+            )
+
     def test_noncanonical_json_and_unknown_fields_fail_closed(self):
         payload = json.loads(self._manifest())
         noncanonical = json.dumps(payload, sort_keys=True)

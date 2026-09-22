@@ -14,6 +14,10 @@ _MACHINE_MODE_ARITY = {
     "--restart-recovery-recover-child": 3,
     "--research-demo-audit-output": 3,
 }
+_WEBVIEW2_STARTUP_ERROR = (
+    "Автоспорт не може відкрити доступний інтерфейс WebView2. "
+    "Перевірте наявність Microsoft Edge WebView2 Runtime."
+)
 
 
 def _show_workspace_configuration_error(detail: str) -> None:
@@ -28,8 +32,6 @@ def _show_workspace_configuration_error(detail: str) -> None:
         "Вкажіть абсолютний шлях у AUTOSPORT_WORKSPACE або виправте LOCALAPPDATA, "
         "потім перезапустіть Автоспорт. Economic і live state не змінено."
     )
-    # MB_OK | MB_ICONERROR. Native MessageBox is keyboard-operable and exposed
-    # through standard Windows accessibility rather than a custom visual surface.
     ctypes.windll.user32.MessageBoxW(None, message, title, 0x00000010)
 
 
@@ -59,10 +61,6 @@ def _probe_workspace_writable(workspace: Path) -> None:
             probe.flush()
             os.fsync(probe.fileno())
 
-        # Replace an already-existing disposable sibling while holding the same
-        # per-destination durable path fence used by canonical durable writers.
-        # The probe lock is unique and disposable; canonical state lock files
-        # remain persistent by design and are never removed here.
         with tempfile.NamedTemporaryFile(
             mode="wb",
             dir=workspace,
@@ -80,9 +78,6 @@ def _probe_workspace_writable(workspace: Path) -> None:
         if destination.read_bytes() != payload:
             raise OSError("workspace atomic replace did not publish expected probe bytes")
     finally:
-        # durable_path_lock intentionally persists sidecars for canonical state,
-        # but this preflight target is uniquely disposable. Clean every probe
-        # artifact only after lock release, including acquisition-failure cases.
         for candidate in (source, destination, lock_path):
             if candidate is None:
                 continue
@@ -130,16 +125,10 @@ def _show_startup_error(message: str) -> None:
             0x00000010,
         )
     except Exception:
-        # The windowed executable has no reliable console. A failed native dialog
-        # must not make the startup path fall back to the retired Tk operator shell.
         pass
 
 
 def _run_interactive_gui() -> int:
-    # Validate durable workspace identity before importing/constructing the GUI.
-    # `default_workspace()` remains the canonical path resolver. This packaged
-    # boundary also requires its resolved result to be absolute so the current
-    # main path implementation cannot silently make durable identity depend on CWD.
     from autosport.paths import default_workspace
 
     try:
@@ -159,25 +148,30 @@ def _run_interactive_gui() -> int:
         _show_workspace_access_error(workspace, exc)
         return 2
 
+    try:
+        from autosport.webview2_runtime_preflight import probe_webview2_runtime
+
+        runtime_preflight = probe_webview2_runtime()
+    except Exception:
+        _show_startup_error(_WEBVIEW2_STARTUP_ERROR)
+        return 3
+
+    if runtime_preflight.available is not True:
+        _show_startup_error(_WEBVIEW2_STARTUP_ERROR)
+        return 3
+
     from autosport.windows_webview_shell import WindowsWebViewUnavailable, main as gui_main
 
     try:
         return gui_main()
     except WindowsWebViewUnavailable as exc:
-        _show_startup_error(
-            "Автоспорт не може відкрити доступний інтерфейс WebView2. "
-            "Перевірте наявність Microsoft Edge WebView2 Runtime.\n\n"
-            + str(exc)
-        )
+        _show_startup_error(_WEBVIEW2_STARTUP_ERROR + "\n\n" + str(exc))
         return 3
 
 
 def main(argv: list[str] | None = None) -> int:
     args = list(sys.argv[1:] if argv is None else argv)
 
-    # Packaged machine/audit invocations must fail closed. Previously any
-    # unknown flag silently fell through into the interactive GUI, which could
-    # turn a typo in CI/release automation into a hung or misleading run.
     if args:
         expected_arity = _MACHINE_MODE_ARITY.get(args[0])
         if expected_arity is None or len(args) != expected_arity:

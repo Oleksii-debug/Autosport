@@ -1587,6 +1587,148 @@ class RealExecutionLedgerTests(unittest.TestCase):
             )
 
 
+    def test_receiptless_rejected_ack_requires_exact_provider_evidence_and_reopens(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "real.jsonl"
+            ledger = RealExecutionLedger(path)
+            ledger.reserve_plan(plan(action()))
+            ledger.begin_attempt(
+                plan_id="p1",
+                action_id="a1",
+                attempt_id="try-1",
+                reserved_at=RESERVED_AT,
+            )
+            ledger.mark_submitted("try-1", submitted_at=SUBMITTED_AT)
+            acknowledgement = ExternalAcknowledgement(
+                attempt_id="try-1",
+                external_receipt_id=None,
+                status=AcknowledgementStatus.REJECTED,
+                acknowledged_at=RECONCILED_AT,
+            )
+
+            with self.assertRaisesRegex(
+                ExecutionStateError,
+                "exact provider-bound acknowledgement evidence",
+            ):
+                ledger.acknowledge(acknowledgement)
+
+            _acknowledge_submitted_with_provider_evidence(
+                ledger,
+                acknowledgement,
+            )
+            self.assertEqual(
+                ledger.attempt_state("try-1"),
+                AttemptState.REJECTED,
+            )
+
+            restarted = RealExecutionLedger(path)
+            self.assertEqual(
+                restarted.attempt_state("try-1"),
+                AttemptState.REJECTED,
+            )
+            self.assertEqual(restarted.verify_integrity(), 5)
+
+    def test_receiptless_rejections_do_not_share_external_receipt_identity(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            ledger = RealExecutionLedger(Path(tmp) / "real.jsonl")
+            ledger.reserve_plan(plan(action("a1"), plan_id="p1"))
+            ledger.reserve_plan(plan(action("a2"), plan_id="p2"))
+            ledger.begin_attempt(
+                plan_id="p1",
+                action_id="a1",
+                attempt_id="try-1",
+                reserved_at=RESERVED_AT,
+            )
+            ledger.begin_attempt(
+                plan_id="p2",
+                action_id="a2",
+                attempt_id="try-2",
+                reserved_at=RESERVED_AT,
+            )
+            ledger.mark_submitted("try-1", submitted_at=SUBMITTED_AT)
+            ledger.mark_submitted("try-2", submitted_at=SUBMITTED_AT)
+
+            for attempt_id in ("try-1", "try-2"):
+                _acknowledge_submitted_with_provider_evidence(
+                    ledger,
+                    ExternalAcknowledgement(
+                        attempt_id=attempt_id,
+                        external_receipt_id=None,
+                        status=AcknowledgementStatus.REJECTED,
+                        acknowledged_at=RECONCILED_AT,
+                    ),
+                )
+
+            self.assertEqual(
+                ledger.attempt_state("try-1"),
+                AttemptState.REJECTED,
+            )
+            self.assertEqual(
+                ledger.attempt_state("try-2"),
+                AttemptState.REJECTED,
+            )
+            self.assertEqual(ledger.verify_integrity(), 10)
+
+    def test_accepted_and_partial_acknowledgements_still_require_receipt_identity(self):
+        for status, accepted_stake in (
+            (AcknowledgementStatus.ACCEPTED, "10"),
+            (AcknowledgementStatus.PARTIAL, "5"),
+        ):
+            with self.subTest(status=status):
+                with self.assertRaisesRegex(ValueError, "external_receipt_id"):
+                    ExternalAcknowledgement(
+                        attempt_id="try-1",
+                        external_receipt_id=None,
+                        status=status,
+                        acknowledged_at=RECONCILED_AT,
+                        accepted_odds="2.5",
+                        accepted_stake=accepted_stake,
+                    )
+
+    def test_unknown_reconciliation_cannot_terminalize_with_receiptless_rejection(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            ledger = RealExecutionLedger(Path(tmp) / "real.jsonl")
+            ledger.reserve_plan(plan(action()))
+            ledger.begin_attempt(
+                plan_id="p1",
+                action_id="a1",
+                attempt_id="try-1",
+                reserved_at=RESERVED_AT,
+            )
+            ledger.mark_unknown(
+                "try-1",
+                reason="ambiguous-provider-effect",
+                observed_at=UNKNOWN_AT,
+            )
+            ledger.reconcile_found(
+                ExternalEffectReconciliation(
+                    attempt_id="try-1",
+                    evidence_id="readback-1",
+                    external_receipt_id="provider-bet-1",
+                    observed_at=RECONCILED_AT,
+                    source="provider-readback",
+                )
+            )
+
+            with self.assertRaisesRegex(
+                ExecutionStateError,
+                "receipt mismatches reconciliation evidence",
+            ):
+                ledger.acknowledge(
+                    ExternalAcknowledgement(
+                        attempt_id="try-1",
+                        external_receipt_id=None,
+                        status=AcknowledgementStatus.REJECTED,
+                        acknowledged_at=SECOND_RECONCILED_AT,
+                        reconciliation_evidence_id="readback-1",
+                    )
+                )
+            self.assertEqual(
+                ledger.attempt_state("try-1"),
+                AttemptState.UNKNOWN,
+            )
+
+
     def test_restart_rejects_hash_valid_not_found_claiming_found_external_effect(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "real.jsonl"

@@ -92,3 +92,44 @@ def test_listener_unsubscribes_in_finally() -> None:
     finally_index = TEXT.index("} finally {")
     remove_index = TEXT.index("RemoveAutomationEventHandler")
     assert remove_index > finally_index
+
+
+def test_capability_probe_executes_on_windows(tmp_path: Path) -> None:
+    import json
+    import shutil
+    import subprocess
+    import sys
+
+    if sys.platform != "win32":
+        import pytest
+
+        pytest.skip("UI Automation capability probe is Windows-only")
+
+    pwsh = shutil.which("pwsh")
+    assert pwsh is not None
+    output = tmp_path / "uia-notification-capability.json"
+    completed = subprocess.run(
+        [
+            pwsh,
+            "-NoProfile",
+            "-File",
+            str(SCRIPT),
+            "-Output",
+            str(output),
+            "-CapabilityProbeOnly",
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+    report = json.loads(output.read_text(encoding="utf-8-sig"))
+    assert report["status"] == "CAPABILITY_READY"
+    assert report["notification_event_args_type"] == (
+        "System.Windows.Automation.NotificationEventArgs"
+    )
+    assert report["real_money_execution"] is False
+    assert report["human_tested"] is False
+    assert report["nvda_verified"] is False
+    assert report["whole_product_complete"] is False

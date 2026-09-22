@@ -554,3 +554,52 @@ def test_copied_result_cannot_mint_authority(tmp_path):
     evidence.assert_authoritative()
     with pytest.raises(BetfairLiveCapitalAtRiskError, match="not issued"):
         replace(evidence).assert_authoritative()
+
+def test_class_method_rebinding_cannot_authorize_caller_exact_risk(monkeypatch):
+    """Public class-method rebinding cannot bypass the closure-owned issuer registry."""
+
+    forged = live_risk.BetfairLiveCapitalAtRiskEvidence(
+        truth=BetfairLiveCapitalAtRiskTruth.EXACT,
+        reason=BetfairLiveCapitalAtRiskReason.CURRENT_ORDER,
+        capital_at_risk=Decimal("500.00"),
+        plan_id="caller-plan",
+        attempt_id="caller-attempt",
+        attempt_state=live_risk.AttemptState.SUBMITTED,
+        action_id="caller-action",
+        provider_order_ref="caller-provider-ref",
+        bet_id=None,
+        readback_observed_at="2026-09-22T14:49:59Z",
+        provider_row_observed_at="2026-09-22T14:49:59Z",
+        readback_request_scope_sha256="1" * 64,
+        readback_evidence_sha256="2" * 64,
+        ledger_snapshot_sha256="3" * 64,
+    )
+
+    monkeypatch.setattr(
+        live_risk.BetfairLiveCapitalAtRiskEvidence,
+        "assert_authoritative",
+        lambda self: None,
+    )
+
+    with pytest.raises(BetfairLiveCapitalAtRiskError, match="not issued"):
+        forged.assert_authoritative()
+
+
+def test_class_method_rebinding_keeps_canonical_evidence_authoritative(
+    tmp_path, monkeypatch
+):
+    ledger, bound, ref = _context(tmp_path, "PARTIAL")
+    evidence = _resolve(
+        ledger,
+        bound,
+        _capture(ref, current=[_current(ref, matched=2, remaining=3)]),
+    )
+
+    monkeypatch.setattr(
+        live_risk.BetfairLiveCapitalAtRiskEvidence,
+        "assert_authoritative",
+        lambda self: None,
+    )
+
+    evidence.assert_authoritative()
+

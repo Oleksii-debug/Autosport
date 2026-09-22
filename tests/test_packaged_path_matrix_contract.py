@@ -277,3 +277,87 @@ def test_no_raw_arguments_are_serialized_in_report(tmp_path: Path) -> None:
     )
     report_text = (tmp_path / "out" / "path-matrix-report.json").read_text(encoding="utf-8")
     assert secret_marker not in report_text
+
+def test_matrix_uses_unrelated_cwd_and_isolated_absolute_workspace(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    artifact = _artifact(tmp_path)
+    observed: list[tuple[Path, str]] = []
+
+    def fake_probe(
+        command: object,
+        *,
+        cwd: Path,
+        environment: dict[str, str] | None = None,
+        **_kwargs: object,
+    ) -> tuple[bool, bool, int | None, float, str, str | None]:
+        assert command
+        assert environment is not None
+        observed.append((Path(cwd), environment["AUTOSPORT_WORKSPACE"]))
+        return True, True, 0, 0.001, "PASS", None
+
+    monkeypatch.setattr(m, "probe_process", fake_probe)
+    monkeypatch.setattr(m, "detect_privilege_context", lambda: "ADMINISTRATOR")
+
+    output = tmp_path / "out"
+    report = m.run_matrix(
+        artifact_root=artifact,
+        executable_relative_path=Path("app.py"),
+        output_dir=output,
+        arguments=("--workspace={WORKSPACE_ROOT}",),
+        launcher=(sys.executable,),
+        mode="exit-zero",
+        startup_seconds=0.01,
+        timeout_seconds=2,
+        keep_copies=True,
+    )
+
+    assert report.schema_version == 2
+    assert report.launch_cwd_policy == m.LAUNCH_CWD_POLICY
+    assert report.workspace_policy == m.WORKSPACE_POLICY
+    assert report.privilege_context == "ADMINISTRATOR"
+    assert report.non_admin_verified is False
+    assert len(observed) == len(m.SCENARIOS)
+
+    for (cwd, workspace), (_name, component) in zip(observed, m.SCENARIOS, strict=True):
+        case_root = output / "cases" / component
+        package_root = case_root / "package"
+        expected_workspace = (case_root / "workspace").resolve()
+        assert cwd == case_root / "launch-cwd"
+        assert cwd != package_root
+        assert package_root not in cwd.parents
+        assert Path(workspace).is_absolute()
+        assert Path(workspace) == expected_workspace
+        assert cwd != expected_workspace
+        assert expected_workspace not in cwd.parents
+
+    payload = json.loads((output / "path-matrix-report.json").read_text(encoding="utf-8"))
+    assert payload["launch_cwd_policy"] == "UNRELATED_CASE_DIRECTORY"
+    assert payload["workspace_policy"] == "AUTOSPORT_WORKSPACE_PER_CASE_ABSOLUTE"
+    assert payload["privilege_context"] == "ADMINISTRATOR"
+    assert payload["non_admin_verified"] is False
+
+
+def test_non_admin_verification_requires_observed_standard_user(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    artifact = _artifact(tmp_path)
+    monkeypatch.setattr(m, "detect_privilege_context", lambda: "STANDARD_USER")
+
+    report = m.run_matrix(
+        artifact_root=artifact,
+        executable_relative_path=Path("app.py"),
+        output_dir=tmp_path / "out",
+        arguments=(),
+        launcher=(sys.executable,),
+        mode="exit-zero",
+        startup_seconds=0.01,
+        timeout_seconds=2,
+        keep_copies=False,
+    )
+
+    assert report.privilege_context == "STANDARD_USER"
+    assert report.non_admin_verified is True
+

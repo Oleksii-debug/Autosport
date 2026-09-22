@@ -10,6 +10,15 @@
   let pollHandle = null;
   let ownerDefaultsApplied = false;
 
+  function setTextIfChanged(node, value) {
+    const text = String(value ?? "");
+    if (node.textContent !== text) node.textContent = text;
+  }
+
+  function setHiddenIfChanged(node, hidden) {
+    if (node.hidden !== hidden) node.hidden = hidden;
+  }
+
   function requestId() {
     if (globalThis.crypto && typeof globalThis.crypto.randomUUID === "function") {
       return globalThis.crypto.randomUUID();
@@ -25,45 +34,77 @@
 
   function announce(message, assertive = false) {
     const value = message || "Готово.";
-    statusNode.textContent = value;
     if (assertive) {
-      errorNode.hidden = false;
-      errorNode.textContent = value;
-    } else {
-      errorNode.hidden = true;
-      errorNode.textContent = "";
+      setHiddenIfChanged(errorNode, false);
+      setTextIfChanged(errorNode, value);
+      return;
     }
+    setHiddenIfChanged(errorNode, true);
+    setTextIfChanged(errorNode, "");
+    setTextIfChanged(statusNode, value);
+  }
+
+  function projectLiveState(status, error) {
+    const errorValue = error || "";
+    if (errorValue) {
+      setHiddenIfChanged(errorNode, false);
+      setTextIfChanged(errorNode, errorValue);
+      return;
+    }
+    setHiddenIfChanged(errorNode, true);
+    setTextIfChanged(errorNode, "");
+    setTextIfChanged(statusNode, status || "Готово.");
+  }
+
+  function syncTextChildren(node, values, tagName) {
+    const projected = Array.from(values || [], (value) => String(value));
+    while (node.children.length > projected.length) {
+      node.removeChild(node.lastElementChild);
+    }
+    projected.forEach((value, index) => {
+      let item = node.children[index];
+      if (!item) {
+        item = document.createElement(tagName);
+        node.appendChild(item);
+      }
+      setTextIfChanged(item, value);
+    });
   }
 
   function renderList(node, values) {
-    node.replaceChildren();
-    for (const value of values || []) {
-      const item = document.createElement("li");
-      item.textContent = String(value);
-      node.appendChild(item);
-    }
+    syncTextChildren(node, values, "li");
   }
 
   function renderSingleColumnTable(body, values) {
-    body.replaceChildren();
-    for (const value of values || []) {
-      const row = document.createElement("tr");
-      const cell = document.createElement("td");
-      cell.textContent = String(value);
-      row.appendChild(cell);
-      body.appendChild(row);
+    const projected = Array.from(values || [], (value) => String(value));
+    while (body.rows.length > projected.length) {
+      body.deleteRow(body.rows.length - 1);
     }
+    projected.forEach((value, index) => {
+      const row = body.rows[index] || body.insertRow();
+      const cell = row.cells[0] || row.insertCell();
+      setTextIfChanged(cell, value);
+    });
   }
 
   function setSelectOptions(node, options, valueKey = "id", labelKey = "label") {
     const current = node.value;
-    node.replaceChildren();
-    for (const option of options || []) {
-      const element = document.createElement("option");
-      element.value = String(option[valueKey]);
-      element.textContent = String(option[labelKey]);
-      node.appendChild(element);
+    const projected = Array.from(options || [], (option) => ({
+      value: String(option[valueKey]),
+      label: String(option[labelKey]),
+    }));
+    while (node.options.length > projected.length) {
+      node.remove(node.options.length - 1);
     }
+    projected.forEach((option, index) => {
+      let element = node.options[index];
+      if (!element) {
+        element = document.createElement("option");
+        node.appendChild(element);
+      }
+      if (element.value !== option.value) element.value = option.value;
+      setTextIfChanged(element, option.label);
+    });
     if (current && Array.from(node.options).some((item) => item.value === current)) {
       node.value = current;
     }
@@ -125,9 +166,7 @@
 
   function renderState(state) {
     latestState = state;
-    statusNode.textContent = state.status || "Готово.";
-    errorNode.hidden = !state.last_error;
-    errorNode.textContent = state.last_error || "";
+    projectLiveState(state.status, state.last_error);
 
     byId("workspace-value").textContent = state.workspace || "—";
     byId("active-workspace-value").textContent = state.active_workspace || "—";
@@ -333,31 +372,12 @@
       return;
     }
 
-    if (event.ctrlKey && event.altKey && (event.key === "ArrowLeft" || event.key === "ArrowRight")) {
-      event.preventDefault();
-      const select = byId(301);
-      const delta = event.key === "ArrowLeft" ? -1 : 1;
-      const count = select.options.length;
-      if (count > 0) {
-        select.selectedIndex = (select.selectedIndex + delta + count) % count;
-        select.dispatchEvent(new Event("change"));
-        select.focus();
-      }
-      return;
-    }
-
     if (!event.ctrlKey || event.altKey || event.metaKey) return;
-    if (editable && !["o", "r", "e", "l"].includes(key)) return;
+    if (editable && !["o", "e", "l"].includes(key)) return;
 
     if (key === "o" && !event.shiftKey) {
       event.preventDefault();
       byId("dataset-path").focus();
-    } else if (key === "r" && event.shiftKey) {
-      event.preventDefault();
-      byId(108).click();
-    } else if (key === "r") {
-      event.preventDefault();
-      byId(102).click();
     } else if (key === "e") {
       event.preventDefault();
       byId("evidence-path").focus();

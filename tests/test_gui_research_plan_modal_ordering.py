@@ -15,6 +15,43 @@ class _Value:
         self.value = value
 
 
+
+
+def test_research_plan_not_required_status_precedes_blocking_modal() -> None:
+    app = object.__new__(AutosportApp)
+    app.dataset_worker = SimpleNamespace(busy=False)
+    app.replay_worker = SimpleNamespace(busy=False)
+    app.status = _Value()
+    app.strategy_text = SimpleNamespace(get=lambda: "synthetic")
+
+    def assert_persistent_status_before_modal(*_args: object) -> None:
+        assert app.status.value == text(
+            "ui.status.research_plan.not_required_short",
+            strategy_id="non-research-strategy",
+        )
+
+    with (
+        patch(
+            "autosport.gui.strategy_id_from_display",
+            return_value="non-research-strategy",
+        ),
+        patch(
+            "autosport.gui.strategy_spec",
+            return_value=SimpleNamespace(requires_research_plan=False),
+        ),
+        patch(
+            "autosport.gui.messagebox.showinfo",
+            side_effect=assert_persistent_status_before_modal,
+        ) as showinfo,
+    ):
+        AutosportApp.choose_research_plan(app)
+
+    assert app.status.value == text(
+        "ui.status.research_plan.not_required_short",
+        strategy_id="non-research-strategy",
+    )
+    showinfo.assert_called_once()
+
 def test_research_plan_validation_status_precedes_blocking_modal() -> None:
     app = object.__new__(AutosportApp)
     app.dataset_worker = SimpleNamespace(busy=False)

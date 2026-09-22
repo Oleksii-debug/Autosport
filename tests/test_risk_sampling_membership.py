@@ -5,6 +5,7 @@ from pathlib import Path
 
 from autosport.risk_sampling_membership import (
     RiskSamplingMembershipError,
+    inspect_fixed_n_risk_membership_structure,
     resolve_fixed_n_risk_membership,
 )
 from autosport.scientific_registry import (
@@ -108,12 +109,12 @@ class RiskSamplingMembershipTests(unittest.TestCase):
     def test_resolves_exact_membership_and_restarts_identically(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = self._registry(Path(tmp))
-            first = resolve_fixed_n_risk_membership(
+            first = inspect_fixed_n_risk_membership_structure(
                 path,
                 research_protocol_id=self.PROTOCOL_ID,
                 dataset_snapshot_id=self.DATASET_ID,
             )
-            second = resolve_fixed_n_risk_membership(
+            second = inspect_fixed_n_risk_membership_structure(
                 path,
                 research_protocol_id=self.PROTOCOL_ID,
                 dataset_snapshot_id=self.DATASET_ID,
@@ -133,7 +134,7 @@ class RiskSamplingMembershipTests(unittest.TestCase):
                 RiskSamplingMembershipError,
                 "missing canonical ResearchProtocol",
             ):
-                resolve_fixed_n_risk_membership(
+                inspect_fixed_n_risk_membership_structure(
                     path,
                     research_protocol_id="caller-invented-protocol",
                     dataset_snapshot_id=self.DATASET_ID,
@@ -154,7 +155,7 @@ class RiskSamplingMembershipTests(unittest.TestCase):
             with self.subTest(message=message), tempfile.TemporaryDirectory() as tmp:
                 path = self._registry(Path(tmp), design=design)
                 with self.assertRaisesRegex(RiskSamplingMembershipError, message):
-                    resolve_fixed_n_risk_membership(
+                    inspect_fixed_n_risk_membership_structure(
                         path,
                         research_protocol_id=self.PROTOCOL_ID,
                         dataset_snapshot_id=self.DATASET_ID,
@@ -167,7 +168,7 @@ class RiskSamplingMembershipTests(unittest.TestCase):
             )
             path = self._registry(Path(tmp), design=raw)
             with self.assertRaisesRegex(RiskSamplingMembershipError, "lexical order"):
-                resolve_fixed_n_risk_membership(
+                inspect_fixed_n_risk_membership_structure(
                     path,
                     research_protocol_id=self.PROTOCOL_ID,
                     dataset_snapshot_id=self.DATASET_ID,
@@ -184,7 +185,7 @@ class RiskSamplingMembershipTests(unittest.TestCase):
                 RiskSamplingMembershipError,
                 "canonical JSON serialization",
             ):
-                resolve_fixed_n_risk_membership(
+                inspect_fixed_n_risk_membership_structure(
                     path,
                     research_protocol_id=self.PROTOCOL_ID,
                     dataset_snapshot_id=self.DATASET_ID,
@@ -197,7 +198,7 @@ class RiskSamplingMembershipTests(unittest.TestCase):
                 design=self._design(dataset_snapshot_id="other-dataset"),
             )
             with self.assertRaisesRegex(RiskSamplingMembershipError, "dataset identity"):
-                resolve_fixed_n_risk_membership(
+                inspect_fixed_n_risk_membership_structure(
                     path,
                     research_protocol_id=self.PROTOCOL_ID,
                     dataset_snapshot_id=self.DATASET_ID,
@@ -213,7 +214,7 @@ class RiskSamplingMembershipTests(unittest.TestCase):
                 RiskSamplingMembershipError,
                 "manifest identities differ",
             ):
-                resolve_fixed_n_risk_membership(
+                inspect_fixed_n_risk_membership_structure(
                     path,
                     research_protocol_id=self.PROTOCOL_ID,
                     dataset_snapshot_id=self.DATASET_ID,
@@ -230,7 +231,7 @@ class RiskSamplingMembershipTests(unittest.TestCase):
                 RiskSamplingMembershipError,
                 "before the exact DatasetSnapshot was available",
             ):
-                resolve_fixed_n_risk_membership(
+                inspect_fixed_n_risk_membership_structure(
                     path,
                     research_protocol_id=self.PROTOCOL_ID,
                     dataset_snapshot_id=self.DATASET_ID,
@@ -252,7 +253,7 @@ class RiskSamplingMembershipTests(unittest.TestCase):
                     RiskSamplingMembershipError,
                     "strictly before outcome reveal",
                 ):
-                    resolve_fixed_n_risk_membership(
+                    inspect_fixed_n_risk_membership_structure(
                         path,
                         research_protocol_id=self.PROTOCOL_ID,
                         dataset_snapshot_id=self.DATASET_ID,
@@ -265,7 +266,7 @@ class RiskSamplingMembershipTests(unittest.TestCase):
                 RiskSamplingMembershipError,
                 "outcome_reveal_after is required",
             ):
-                resolve_fixed_n_risk_membership(
+                inspect_fixed_n_risk_membership_structure(
                     path,
                     research_protocol_id=self.PROTOCOL_ID,
                     dataset_snapshot_id=self.DATASET_ID,
@@ -280,7 +281,7 @@ class RiskSamplingMembershipTests(unittest.TestCase):
                 RiskSamplingMembershipError,
                 "causal cutoffs differ",
             ):
-                resolve_fixed_n_risk_membership(
+                inspect_fixed_n_risk_membership_structure(
                     path,
                     research_protocol_id=self.PROTOCOL_ID,
                     dataset_snapshot_id=self.DATASET_ID,
@@ -299,7 +300,7 @@ class RiskSamplingMembershipTests(unittest.TestCase):
                     RiskSamplingMembershipError,
                     "keep dependence qualification separate",
                 ):
-                    resolve_fixed_n_risk_membership(
+                    inspect_fixed_n_risk_membership_structure(
                         path,
                         research_protocol_id=self.PROTOCOL_ID,
                         dataset_snapshot_id=self.DATASET_ID,
@@ -314,6 +315,38 @@ class RiskSamplingMembershipTests(unittest.TestCase):
             with self.assertRaisesRegex(
                 RiskSamplingMembershipError,
                 "risk method is unsupported",
+            ):
+                inspect_fixed_n_risk_membership_structure(
+                    path,
+                    research_protocol_id=self.PROTOCOL_ID,
+                    dataset_snapshot_id=self.DATASET_ID,
+                )
+
+
+    def test_positive_resolution_rejects_backdateable_registry_chronology(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = self._registry(Path(tmp))
+            registry = ScientificRegistry(path)
+            self.assertTrue(
+                registry.causal_precedes(
+                    "DatasetSnapshot",
+                    self.DATASET_ID,
+                    "ResearchProtocol",
+                    self.PROTOCOL_ID,
+                )
+            )
+
+            structural = inspect_fixed_n_risk_membership_structure(
+                path,
+                research_protocol_id=self.PROTOCOL_ID,
+                dataset_snapshot_id=self.DATASET_ID,
+            )
+            self.assertFalse(structural.causal_precommit_proven)
+            self.assertFalse(structural.iid_qualified)
+
+            with self.assertRaisesRegex(
+                RiskSamplingMembershipError,
+                "non-backdateable product-owned pre-outcome chronology authority",
             ):
                 resolve_fixed_n_risk_membership(
                     path,

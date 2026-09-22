@@ -372,7 +372,7 @@ def _execution_request_scope(
     customer_order_ref = provider_order_ref or action_id
     scope: dict[str, object] = {
         "schema": "autosport.betfair_execution_readback_scope",
-        "schema_version": 2 if provider_order_ref is not None else 1,
+        "schema_version": 3 if provider_order_ref is not None else 1,
         "venue_id": venue_id,
         "account_id": account_id,
         "adapter_id": ADAPTER_ID,
@@ -404,6 +404,15 @@ def _execution_request_scope(
     }
     if provider_order_ref is not None:
         scope["provider_order_ref"] = provider_order_ref
+        scope["empty_exact_ref_coherence"] = {
+            "required_when_first_complete_sweep_empty": True,
+            "passes": 2,
+            "surfaces": [
+                "CURRENT",
+                *_EXECUTION_CLEARED_STATUSES,
+            ],
+            "transition_policy": "fail_closed",
+        }
     return scope
 
 
@@ -620,53 +629,91 @@ class BetfairReadOnlyClient:
             # eventId. Empty evidence remains fail-closed.
             market_event = None
 
-        current_pages: list[BetfairCurrentOrderPage] = []
-        offset = 0
-        for _ in range(max_pages):
-            page = self.read_current_orders_page(
-                from_record=offset,
-                record_count=page_size,
-                customer_order_refs=(order_ref,),
-                market_ids=(market,),
-            )
-            current_pages.append(page)
-            if not page.more_available:
-                break
-            if not page.orders:
-                raise BetfairReadOnlyError(
-                    "execution currentOrders cannot advance from an empty page"
-                )
-            offset += len(page.orders)
-        else:
-            raise BetfairReadOnlyError(
-                "execution currentOrders pagination exceeded max_pages"
-            )
-
-        cleared_groups: list[tuple[str, tuple[BetfairClearedOrderPage, ...]]] = []
-        for status in _EXECUTION_CLEARED_STATUSES:
-            pages: list[BetfairClearedOrderPage] = []
+        def read_current_scope() -> list[BetfairCurrentOrderPage]:
+            pages: list[BetfairCurrentOrderPage] = []
             offset = 0
             for _ in range(max_pages):
-                page = self.read_cleared_orders_page(
+                page = self.read_current_orders_page(
                     from_record=offset,
                     record_count=page_size,
-                    bet_status=status,
                     customer_order_refs=(order_ref,),
                     market_ids=(market,),
                 )
                 pages.append(page)
                 if not page.more_available:
-                    break
+                    return pages
                 if not page.orders:
                     raise BetfairReadOnlyError(
-                        f"execution {status} pagination cannot advance from an empty page"
+                        "execution currentOrders cannot advance from an empty page"
                     )
                 offset += len(page.orders)
-            else:
+            raise BetfairReadOnlyError(
+                "execution currentOrders pagination exceeded max_pages"
+            )
+
+        def read_cleared_scope() -> list[
+            tuple[str, tuple[BetfairClearedOrderPage, ...]]
+        ]:
+            groups: list[
+                tuple[str, tuple[BetfairClearedOrderPage, ...]]
+            ] = []
+            for status in _EXECUTION_CLEARED_STATUSES:
+                pages: list[BetfairClearedOrderPage] = []
+                offset = 0
+                for _ in range(max_pages):
+                    page = self.read_cleared_orders_page(
+                        from_record=offset,
+                        record_count=page_size,
+                        bet_status=status,
+                        customer_order_refs=(order_ref,),
+                        market_ids=(market,),
+                    )
+                    pages.append(page)
+                    if not page.more_available:
+                        break
+                    if not page.orders:
+                        raise BetfairReadOnlyError(
+                            f"execution {status} pagination cannot advance from an empty page"
+                        )
+                    offset += len(page.orders)
+                else:
+                    raise BetfairReadOnlyError(
+                        f"execution {status} pagination exceeded max_pages"
+                    )
+                groups.append((status, tuple(pages)))
+            return groups
+
+        current_pages = read_current_scope()
+        cleared_groups = read_cleared_scope()
+
+        first_scope_empty = (
+            not any(page.orders for page in current_pages)
+            and not any(
+                page.orders
+                for _, pages in cleared_groups
+                for page in pages
+            )
+        )
+        if provider_order_ref is not None and first_scope_empty:
+            coherence_current_pages = read_current_scope()
+            if any(page.orders for page in coherence_current_pages):
                 raise BetfairReadOnlyError(
-                    f"execution {status} pagination exceeded max_pages"
+                    "execution readback changed during empty-sweep coherence check"
                 )
-            cleared_groups.append((status, tuple(pages)))
+            coherence_cleared_groups = read_cleared_scope()
+            if any(
+                page.orders
+                for _, pages in coherence_cleared_groups
+                for page in pages
+            ):
+                raise BetfairReadOnlyError(
+                    "execution readback changed during empty-sweep coherence check"
+                )
+            # Seal the latest complete empty observation. The request-scope schema
+            # declares that an exact-ref empty result is issued only after this
+            # second complete current+cleared pass.
+            current_pages = coherence_current_pages
+            cleared_groups = coherence_cleared_groups
 
         if market_event is None:
             event_sources = [
@@ -733,44 +780,6 @@ class BetfairReadOnlyClient:
             evidence_sha256,
             provider_order_ref,
         )
-
-    def _read_all_current_orders_with_evidence(self, *, page_size: int = 1000, max_pages: int = 100) -> tuple[tuple[BetfairCurrentOrderObservation, ...], tuple[BetfairEvidence, ...]]:
-        _positive_int(max_pages, "max_pages")
-        _page_bounds(0, page_size)
-        offset, result, seen, page_evidence = 0, [], set(), []
-        for _ in range(max_pages):
-            page = self.read_current_orders_page(from_record=offset, record_count=page_size)
-            page_evidence.append(page.evidence)
-            _extend_unique(result, seen, page.orders, "currentOrders")
-            if not page.more_available:
-                return tuple(result), tuple(page_evidence)
-            if not page.orders:
-                raise BetfairReadOnlyError("currentOrders reported moreAvailable with an empty page")
-            offset += len(page.orders)
-        raise BetfairReadOnlyError("currentOrders pagination exceeded max_pages while more data remained")
-
-    def read_all_current_orders(self, *, page_size: int = 1000, max_pages: int = 100) -> tuple[BetfairCurrentOrderObservation, ...]:
-        orders, _ = self._read_all_current_orders_with_evidence(page_size=page_size, max_pages=max_pages)
-        return orders
-
-    def _read_all_cleared_orders_with_evidence(self, *, settled_from: str | None = None, page_size: int = 1000, max_pages: int = 100) -> tuple[tuple[BetfairClearedOrderObservation, ...], tuple[BetfairEvidence, ...]]:
-        _positive_int(max_pages, "max_pages")
-        _page_bounds(0, page_size)
-        offset, result, seen, page_evidence = 0, [], set(), []
-        for _ in range(max_pages):
-            page = self.read_cleared_orders_page(from_record=offset, record_count=page_size, settled_from=settled_from)
-            page_evidence.append(page.evidence)
-            _extend_unique(result, seen, page.orders, "clearedOrders")
-            if not page.more_available:
-                return tuple(result), tuple(page_evidence)
-            if not page.orders:
-                raise BetfairReadOnlyError("clearedOrders reported moreAvailable with an empty page")
-            offset += len(page.orders)
-        raise BetfairReadOnlyError("clearedOrders pagination exceeded max_pages while more data remained")
-
-    def read_all_cleared_orders(self, *, settled_from: str | None = None, page_size: int = 1000, max_pages: int = 100) -> tuple[BetfairClearedOrderObservation, ...]:
-        orders, _ = self._read_all_cleared_orders_with_evidence(settled_from=settled_from, page_size=page_size, max_pages=max_pages)
-        return orders
 
     def read_account_snapshot(self, requested_capabilities: frozenset) -> object:
         from .bookmaker_capability import (

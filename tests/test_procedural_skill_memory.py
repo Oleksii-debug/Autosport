@@ -151,6 +151,21 @@ def test_successor_must_extend_latest_version(tmp_path):
         memory.publish(branch)
 
 
+def test_successor_available_at_must_strictly_advance(tmp_path):
+    memory = ProceduralSkillMemory.initialize(tmp_path / "memory.json")
+    first = _version()
+    memory.publish(first)
+    same_time = _version(
+        version="1.1.0",
+        available_at=first.available_at,
+        domain=("sport:football",),
+        predecessor_id=first.version_id,
+        procedure_sha256=H2,
+    )
+    with pytest.raises(ProceduralSkillMemoryError, match="must advance"):
+        memory.publish(same_time)
+
+
 def test_same_skill_version_conflict_is_rejected(tmp_path):
     memory = ProceduralSkillMemory.initialize(tmp_path / "memory.json")
     first = _version()

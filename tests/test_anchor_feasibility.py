@@ -117,6 +117,18 @@ def test_short_complete_window_collects_more() -> None:
     assert report.disposition is FeasibilityDisposition.COLLECT_MORE
 
 
+def test_fourteen_days_minus_one_microsecond_does_not_cross_checkpoint() -> None:
+    report = evaluate_anchor_feasibility(
+        scope=SCOPE,
+        window_start=BASE,
+        window_end=BASE + timedelta(days=14) - timedelta(microseconds=1),
+        review_as_of=BASE + timedelta(days=15),
+        observations=[obs(1, AcquisitionState.ZERO_RESULT)],
+    )
+    assert report.disposition is FeasibilityDisposition.COLLECT_MORE
+    assert report.review_window_days < Decimal("14")
+
+
 def test_distinct_events_not_quote_count_define_recurrence() -> None:
     report = evaluate(
         [

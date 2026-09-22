@@ -245,3 +245,50 @@ def test_soap_fault_is_never_empty_changed_truth() -> None:
     </soap:Envelope>"""
     with pytest.raises(BetdaqSoapFaultError):
         parse_list_selections_changed_since_response(fault)
+
+def test_unknown_wire_attributes_fail_closed_instead_of_aliasing_modeled_evidence() -> None:
+    current_extra = _current().replace(
+        'SelectionSequenceNumber="1234"',
+        'SelectionSequenceNumber="1234" FutureSemanticField="future"',
+    )
+    with pytest.raises(BetdaqSoapProtocolError, match="unexpected attribute"):
+        parse_get_current_selection_sequence_number_response(current_extra)
+
+    changed_result_extra = _changed(_selection()).replace(
+        "<ListSelectionsChangedSinceResult>",
+        '<ListSelectionsChangedSinceResult FutureSemanticField="future">',
+    )
+    with pytest.raises(BetdaqSoapProtocolError, match="unexpected attribute"):
+        parse_list_selections_changed_since_response(changed_result_extra)
+
+    selection_extra = _changed(_selection()).replace(
+        'CancelOrdersTime="2026-09-23T01:10:00Z"',
+        'CancelOrdersTime="2026-09-23T01:10:00Z" FutureSemanticField="future"',
+    )
+    with pytest.raises(BetdaqSoapProtocolError, match="unexpected attribute"):
+        parse_list_selections_changed_since_response(selection_extra)
+
+    settlement = """
+      <SettlementInformation
+        SettledTime="2026-09-23T01:12:00+00:00"
+        VoidPercentage="0"
+        LeftSideFactor="1.0"
+        RightSideFactor="0.5"
+        SettlementResultString="Win"
+        FutureSemanticField="future" />
+    """
+    with pytest.raises(BetdaqSoapProtocolError, match="unexpected attribute"):
+        parse_list_selections_changed_since_response(
+            _changed(_selection(settlement=settlement))
+        )
+
+    return_status_extra = _changed(
+        _selection(),
+        status=(
+            '<ReturnStatus Code="0" Description="Success" '
+            'CallId="seq-1" FutureSemanticField="future" />'
+        ),
+    )
+    with pytest.raises(BetdaqSoapProtocolError, match="unexpected attribute"):
+        parse_list_selections_changed_since_response(return_status_extra)
+

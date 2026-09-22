@@ -19,6 +19,7 @@ from decimal import Decimal
 from hashlib import sha256
 import json
 from typing import Mapping
+from weakref import ref
 
 from .betfair_account_readonly import BetfairReadOnlyError
 from .betfair_provider_billing_inputs import (
@@ -137,6 +138,41 @@ def _decode_unknown_statement_item(raw: str) -> Mapping[str, object]:
     return decoded
 
 
+def _canonical_semantics(
+    *,
+    row_item_class: str,
+    transaction_type: str | None,
+    win_lose: str | None,
+) -> tuple[str, str, bool]:
+    default = ("UNCLASSIFIED_ACCOUNT_MOVEMENT", "UNKNOWN", False)
+    if row_item_class != "UNKNOWN":
+        if transaction_type is not None or win_lose is not None:
+            raise BetfairStatementSemanticError(
+                "non-UNKNOWN row cannot carry decoded UNKNOWN statement semantics"
+            )
+        return default
+    if (
+        transaction_type not in _KNOWN_TRANSACTION_TYPES
+        or win_lose not in _KNOWN_WIN_LOSE
+    ):
+        return default
+    if win_lose == "RESULT_ERR":
+        return ("RESTATED_ERROR_LABEL", "NO_NEW_BALANCE_EFFECT", False)
+    if win_lose == "RESULT_FIX":
+        if transaction_type == "COMMISSION_REVERSAL":
+            return ("COMMISSION_REVERSAL_CORRECTION", "BALANCE_CORRECTION", True)
+        return ("BALANCE_CORRECTION", "BALANCE_CORRECTION", False)
+    if win_lose == "COMMISSION_REVERSAL":
+        return ("COMMISSION_REVERSAL_CORRECTION", "BALANCE_CORRECTION", True)
+    if win_lose == "RESULT_WON":
+        return ("SETTLEMENT_RESULT_WON", "ACCOUNT_MOVEMENT", False)
+    if win_lose == "RESULT_LOST":
+        return ("SETTLEMENT_RESULT_LOST", "ACCOUNT_MOVEMENT", False)
+    if win_lose == "RESULT_NOT_APPLICABLE":
+        return ("NON_RESULT_ACCOUNT_MOVEMENT", "ACCOUNT_MOVEMENT", False)
+    return default
+
+
 def _semantic_projection(
     *,
     row_ref_id: str,
@@ -170,7 +206,7 @@ def _semantic_projection(
     }
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True, slots=True, weakref_slot=True)
 class BetfairStatementRowSemanticEvidence:
     """Deterministic descriptive interpretation of one captured statement row."""
 
@@ -213,6 +249,20 @@ class BetfairStatementRowSemanticEvidence:
             raise BetfairStatementSemanticError("unsupported economic_effect")
         if type(self.commission_reversal) is not bool:
             raise BetfairStatementSemanticError("commission_reversal must be bool")
+        canonical = _canonical_semantics(
+            row_item_class=self.row_item_class,
+            transaction_type=self.transaction_type,
+            win_lose=self.win_lose,
+        )
+        supplied = (
+            self.classification_state,
+            self.economic_effect,
+            self.commission_reversal,
+        )
+        if supplied != canonical:
+            raise BetfairStatementSemanticError(
+                "statement semantic fields do not match canonical classification"
+            )
         evidence = _required_canonical_text(self.evidence_sha256, "evidence_sha256")
         if len(evidence) != 64 or any(
             ch not in "0123456789abcdef" for ch in evidence
@@ -239,6 +289,35 @@ class BetfairStatementRowSemanticEvidence:
             raise BetfairStatementSemanticError(
                 "statement semantic evidence digest mismatch"
             )
+
+
+_ISSUED_SEMANTICS: dict[int, ref[BetfairStatementRowSemanticEvidence]] = {}
+
+
+def _register_issued_semantics(
+    evidence: BetfairStatementRowSemanticEvidence,
+) -> None:
+    key = id(evidence)
+
+    def cleanup(dead: ref[BetfairStatementRowSemanticEvidence]) -> None:
+        if _ISSUED_SEMANTICS.get(key) is dead:
+            _ISSUED_SEMANTICS.pop(key, None)
+
+    _ISSUED_SEMANTICS[key] = ref(evidence, cleanup)
+
+
+def assert_betfair_statement_semantic_authoritative(
+    evidence: BetfairStatementRowSemanticEvidence,
+) -> None:
+    if type(evidence) is not BetfairStatementRowSemanticEvidence:
+        raise BetfairStatementSemanticError(
+            "semantic evidence must be exact BetfairStatementRowSemanticEvidence"
+        )
+    issued = _ISSUED_SEMANTICS.get(id(evidence))
+    if issued is None or issued() is not evidence:
+        raise BetfairStatementSemanticError(
+            "statement semantic evidence lacks canonical classifier issuance"
+        )
 
 
 def classify_betfair_statement_item(
@@ -332,7 +411,7 @@ def classify_betfair_statement_item(
         economic_effect=economic_effect,
         commission_reversal=commission_reversal,
     )
-    return BetfairStatementRowSemanticEvidence(
+    evidence = BetfairStatementRowSemanticEvidence(
         row_ref_id=row.ref_id,
         row_item_date=row.item_date,
         row_amount=row.amount,
@@ -346,3 +425,21 @@ def classify_betfair_statement_item(
         commission_reversal=commission_reversal,
         evidence_sha256=_canonical_sha256(projection),
     )
+    _register_issued_semantics(evidence)
+    return evidence
+
+
+def verify_betfair_statement_semantic_evidence(
+    *,
+    row: BetfairAccountStatementItemObservation,
+    item_class_data: dict[str, object],
+    evidence: BetfairStatementRowSemanticEvidence,
+) -> bool:
+    """Freshly re-derive exact row semantics instead of trusting DTO self-hash."""
+    if type(evidence) is not BetfairStatementRowSemanticEvidence:
+        return False
+    try:
+        expected = classify_betfair_statement_item(row, item_class_data)
+    except (BetfairStatementSemanticError, TypeError, ValueError):
+        return False
+    return evidence == expected

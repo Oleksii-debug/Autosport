@@ -494,6 +494,11 @@ def validate_successor(
 
     previous_evidence = set(previous.evidence_refs)
     candidate_evidence = set(candidate.evidence_refs)
+    if not previous_evidence.issubset(candidate_evidence):
+        raise IncidentRiskRegisterError(
+            "successor must preserve all prior evidence_refs"
+        )
+
     enters_terminal = (
         candidate.status in _TERMINAL_RISK_STATUSES
         and candidate.status is not previous.status

@@ -279,6 +279,57 @@ class IncidentRiskRegisterTests(unittest.TestCase):
         with self.assertRaisesRegex(IncidentRiskRegisterError, "strictly forward"):
             validate_successor(previous, self._entry(revision=2))
 
+    def test_successor_preserves_all_prior_evidence_refs(self) -> None:
+        previous = self._entry(
+            evidence_refs=(
+                "evidence://analysis/001",
+                "evidence://provider-gap/001",
+            ),
+        )
+
+        with self.assertRaisesRegex(
+            IncidentRiskRegisterError,
+            "preserve all prior evidence_refs",
+        ):
+            validate_successor(
+                previous,
+                self._entry(
+                    revision=2,
+                    updated_at="2026-09-21T07:06:00+00:00",
+                    status=RiskStatus.ACKNOWLEDGED,
+                    evidence_refs=("evidence://provider-gap/001",),
+                ),
+            )
+
+        with self.assertRaisesRegex(
+            IncidentRiskRegisterError,
+            "preserve all prior evidence_refs",
+        ):
+            validate_successor(
+                previous,
+                self._entry(
+                    revision=2,
+                    updated_at="2026-09-21T07:06:00+00:00",
+                    status=RiskStatus.ACKNOWLEDGED,
+                    evidence_refs=(
+                        "evidence://provider-gap/001",
+                        "evidence://replacement/001",
+                    ),
+                ),
+            )
+
+        appended = self._entry(
+            revision=2,
+            updated_at="2026-09-21T07:06:00+00:00",
+            status=RiskStatus.ACKNOWLEDGED,
+            evidence_refs=(
+                "evidence://analysis/001",
+                "evidence://followup/001",
+                "evidence://provider-gap/001",
+            ),
+        )
+        validate_successor(previous, appended)
+
     def test_lifecycle_transitions_are_explicit_and_evidence_bound(self) -> None:
         opened = self._entry()
         acknowledged = self._entry(

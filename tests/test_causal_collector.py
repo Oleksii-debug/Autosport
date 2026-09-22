@@ -1191,6 +1191,60 @@ class CollectorDeltaTests(unittest.TestCase):
             self.assertEqual(stream.last_position, 2)
             self.assertEqual(stream.last_delta_id, "d2")
 
+    def test_hidden_old_epoch_does_not_imply_gap_in_explicit_new_epoch(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            collector = CollectorDeltaStore(root / "collector.db")
+            checkpoint_path = root / "desktop.json"
+            old_epoch = self.make_delta(
+                delta_id="old-hidden",
+                cursor_position=9,
+                epoch="epoch-1",
+                available="2026-01-01T00:00:06+00:00",
+                payload=event_payload(event_id="old-event"),
+            )
+            new_epoch = self.make_delta(
+                delta_id="new-visible",
+                cursor_position=0,
+                epoch="epoch-2",
+                available="2026-01-01T00:00:04+00:00",
+                payload=event_payload(event_id="new-event"),
+                sync_state=SyncState.EPOCH_CHANGED,
+            )
+            collector.append(old_epoch)
+            collector.append(new_epoch)
+            applied = []
+
+            consumer = DesktopDeltaConsumer(
+                collector,
+                DesktopDeltaCheckpointStore(checkpoint_path),
+                resolve_event=lambda current: event_payload(event_id=current.event_id),
+                apply_event=lambda current, _event: (
+                    applied.append(current.delta_id)
+                    or DesktopApplicationReceipt(
+                        delta_id=current.delta_id,
+                        canonical_event_digest=current.canonical_event_digest,
+                        receipt_id=f"receipt:{current.delta_id}",
+                        applied_at="2026-01-01T00:00:05+00:00",
+                    )
+                ),
+                lookup_application_receipt=lambda _current: None,
+            )
+            self.assertEqual(
+                consumer.drain(as_of="2026-01-01T00:00:05+00:00"),
+                ("new-visible",),
+            )
+            self.assertEqual(applied, ["new-visible"])
+            checkpoint = DesktopDeltaCheckpointStore(checkpoint_path)
+            self.assertFalse(checkpoint.has_ack("old-hidden"))
+            self.assertTrue(checkpoint.has_ack("new-visible"))
+            self.assertIsNone(
+                checkpoint.stream_checkpoint("source-x", "epoch-1")
+            )
+            new_stream = checkpoint.stream_checkpoint("source-x", "epoch-2")
+            self.assertIsNotNone(new_stream)
+            self.assertEqual(new_stream.last_position, 0)
+
     def test_hidden_revision_committed_before_later_row_blocks_later_ack(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

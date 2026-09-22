@@ -11,6 +11,7 @@ from autosport.live_market_abstention import (
     ContinuityStatus,
     LiveMarketAbstentionError,
     LiveMarketEligibility,
+    LiveMarketEligibilityDecision,
     LiveMarketEligibilityInput,
     MarketStatus,
     ProviderHealth,
@@ -52,6 +53,51 @@ def test_clean_snapshot_is_only_eligible_for_downstream_evaluation() -> None:
     assert result.quote_age == timedelta(seconds=1)
     assert result.execution_authorized is False
     assert result.eligible_for_downstream_evaluation is True
+
+
+def test_decision_authority_flags_are_hard_false_properties() -> None:
+    result = evaluate_live_market_eligibility(clean())
+
+    assert result.execution_authorized is False
+    assert result.provider_authorities_bound is False
+    with pytest.raises(TypeError):
+        LiveMarketEligibilityDecision(
+            status=LiveMarketEligibility.ELIGIBLE_FOR_DOWNSTREAM_EVALUATION,
+            reasons=(),
+            quote_age=timedelta(seconds=1),
+            execution_authorized=True,  # type: ignore[call-arg]
+        )
+
+
+@pytest.mark.parametrize(
+    ("status", "reasons"),
+    [
+        (LiveMarketEligibility.WAIT, ()),
+        (
+            LiveMarketEligibility.ELIGIBLE_FOR_DOWNSTREAM_EVALUATION,
+            (AbstentionReason.STALE_QUOTE,),
+        ),
+    ],
+)
+def test_manually_constructed_decision_state_must_be_consistent(
+    status: LiveMarketEligibility,
+    reasons: tuple[AbstentionReason, ...],
+) -> None:
+    with pytest.raises(LiveMarketAbstentionError):
+        LiveMarketEligibilityDecision(
+            status=status,
+            reasons=reasons,
+            quote_age=timedelta(seconds=1),
+        )
+
+
+def test_manually_constructed_decision_shape_fails_closed() -> None:
+    with pytest.raises(LiveMarketAbstentionError):
+        LiveMarketEligibilityDecision(
+            status=LiveMarketEligibility.WAIT,
+            reasons=(object(),),  # type: ignore[arg-type]
+            quote_age=timedelta(seconds=1),
+        )
 
 
 def test_exact_freshness_boundary_is_conservative_wait() -> None:

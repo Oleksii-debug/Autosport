@@ -536,3 +536,42 @@ def test_unconfigured_logout_is_fail_closed_without_changing_session() -> None:
     assert login is not None and login.calls == 1
     assert transport.generation_id == "gen-1"
     assert lifecycle.state is SessionState.ACTIVE
+
+
+def test_response_commit_clock_failure_drops_token_authority_and_rotates_on_retry() -> None:
+    login = LoginFactory()
+
+    class FailThirdClock:
+        def __init__(self) -> None:
+            self.calls = 0
+            self.fail = True
+
+        def __call__(self) -> int:
+            self.calls += 1
+            if self.fail and self.calls == 3:
+                raise RuntimeError("clock unavailable")
+            return 100 + self.calls
+
+    clock = FailThirdClock()
+    lifecycle = MatchbookSessionLifecycle()
+    transport = MatchbookReadOnlySessionTransport(
+        lifecycle=lifecycle,
+        login=login,
+        read=lambda token, path: MatchbookReadResponse(200, token),
+        clock_ns=clock,
+        generation_factory=GenerationFactory(),
+    )
+
+    with pytest.raises(MatchbookSessionTransportError, match="clock failed"):
+        transport.read(path="/edge/rest/events")
+
+    assert transport.generation_id is None
+    assert lifecycle.state is SessionState.ACTIVE
+    assert len(lifecycle._issued_read_tickets) == 1
+
+    clock.fail = False
+    assert transport.read(path="/edge/rest/events").payload == "token-2"
+    assert login.calls == 2
+    assert transport.generation_id == "gen-2"
+    assert lifecycle.state is SessionState.ACTIVE
+    assert lifecycle._issued_read_tickets == {}

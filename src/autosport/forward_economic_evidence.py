@@ -334,10 +334,26 @@ class ForwardDecisionObservation:
     def __post_init__(self) -> None:
         if isinstance(self.sequence, bool) or not isinstance(self.sequence, int) or self.sequence < 0:
             raise ForwardEconomicEvidenceError("sequence must be a non-negative integer")
-        _sha256(self.universe_sha256, "universe_sha256")
-        _sha256(self.universe_event_sha256, "universe_event_sha256")
-        _sha256(self.challenger_decision_sha256, "challenger_decision_sha256")
-        _sha256(self.champion_decision_sha256, "champion_decision_sha256")
+        object.__setattr__(
+            self,
+            "universe_sha256",
+            _sha256(self.universe_sha256, "universe_sha256"),
+        )
+        object.__setattr__(
+            self,
+            "universe_event_sha256",
+            _sha256(self.universe_event_sha256, "universe_event_sha256"),
+        )
+        object.__setattr__(
+            self,
+            "challenger_decision_sha256",
+            _sha256(self.challenger_decision_sha256, "challenger_decision_sha256"),
+        )
+        object.__setattr__(
+            self,
+            "champion_decision_sha256",
+            _sha256(self.champion_decision_sha256, "champion_decision_sha256"),
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -366,8 +382,16 @@ class ResolvedPolicyOutcome:
         _text(self.policy_id, "policy_id")
         if isinstance(self.sequence, bool) or not isinstance(self.sequence, int) or self.sequence < 0:
             raise ForwardEconomicEvidenceError("sequence must be a non-negative integer")
-        _sha256(self.universe_event_sha256, "universe_event_sha256")
-        _sha256(self.decision_sha256, "decision_sha256")
+        object.__setattr__(
+            self,
+            "universe_event_sha256",
+            _sha256(self.universe_event_sha256, "universe_event_sha256"),
+        )
+        object.__setattr__(
+            self,
+            "decision_sha256",
+            _sha256(self.decision_sha256, "decision_sha256"),
+        )
         committed = _instant(self.decision_committed_at, "decision_committed_at")
         if type(self.side) is not BetSide:
             raise ForwardEconomicEvidenceError("side must be an exact BetSide")
@@ -385,9 +409,13 @@ class ResolvedPolicyOutcome:
             )
         cost_available = None
         if self.economic_cost_evidence_sha256 is not None:
-            _sha256(
-                self.economic_cost_evidence_sha256,
+            object.__setattr__(
+                self,
                 "economic_cost_evidence_sha256",
+                _sha256(
+                    self.economic_cost_evidence_sha256,
+                    "economic_cost_evidence_sha256",
+                ),
             )
             cost_available = _instant(
                 self.economic_cost_available_at,
@@ -431,9 +459,13 @@ class ResolvedPolicyOutcome:
             )
         if self.currency_code is not None:
             _currency_code(self.currency_code, "currency_code")
-            _sha256(
-                self.denomination_authority_sha256,
+            object.__setattr__(
+                self,
                 "denomination_authority_sha256",
+                _sha256(
+                    self.denomination_authority_sha256,
+                    "denomination_authority_sha256",
+                ),
             )
         if self.side is BetSide.NONE:
             if self.accepted_odds is not None or self.accepted_stake is not None:
@@ -465,9 +497,17 @@ class ResolvedPolicyOutcome:
         if odds <= 1:
             raise ForwardEconomicEvidenceError("accepted_odds must exceed one")
         stake = _positive_decimal(self.accepted_stake, "accepted_stake")
-        _sha256(self.execution_evidence_sha256, "execution_evidence_sha256")
+        object.__setattr__(
+            self,
+            "execution_evidence_sha256",
+            _sha256(self.execution_evidence_sha256, "execution_evidence_sha256"),
+        )
         accepted = _instant(self.execution_accepted_at, "execution_accepted_at")
-        _sha256(self.settlement_evidence_sha256, "settlement_evidence_sha256")
+        object.__setattr__(
+            self,
+            "settlement_evidence_sha256",
+            _sha256(self.settlement_evidence_sha256, "settlement_evidence_sha256"),
+        )
         available = _instant(self.settlement_available_at, "settlement_available_at")
         if accepted < committed:
             raise ForwardEconomicEvidenceError(

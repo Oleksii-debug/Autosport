@@ -213,6 +213,10 @@ def verify_base_trusted_protected_tree(
                     f"allowlisted path changes Git entry kind: {path}"
                 )
             if candidate_entry.object_id != base_entry.object_id:
+                if base_entry.mode in {"120000", "160000"}:
+                    raise ProtectedTreeGateError(
+                        f"allowlisted special Git entry changes target/commit: {path}"
+                    )
                 allowed_changes.append(path)
             continue
 

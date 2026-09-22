@@ -1,6 +1,7 @@
 from dataclasses import replace
 from decimal import Decimal
 
+
 from autosport.domain import MarketEvent, TicketLeg
 from autosport.economic_goal import EconomicGoalContract
 from autosport.paper import PaperBook
@@ -76,7 +77,7 @@ def _context(index: int) -> ProposedTicketRiskContext:
     )
 
 
-def _registry(tmp_path) -> ScientificRegistry:
+def _registry(tmp_path, *, outcome_reveal_after=None) -> ScientificRegistry:
     registry = ScientificRegistry.initialize_pristine(tmp_path / "scientific-registry.json")
     registry.append(
         DatasetSnapshot(
@@ -86,6 +87,7 @@ def _registry(tmp_path) -> ScientificRegistry:
             license_identity="internal-test",
             causal_cutoff=CAUSAL_CUTOFF,
             available_at_utc="2026-09-16T14:59:59+00:00",
+            outcome_reveal_after=outcome_reveal_after,
         )
     )
     return registry
@@ -162,7 +164,7 @@ def test_caller_constructed_single_evidence_fails_closed_without_issuance(tmp_pa
     assert "not product-issued" in decision.reason
 
 
-def test_product_issued_single_evidence_survives_restart_and_tamper_fails(tmp_path) -> None:
+def test_public_registry_rows_remain_assertion_only_after_restart(tmp_path) -> None:
     registry = _registry(tmp_path)
     policy = _policy(registry.path)
     book = PaperBook("100")
@@ -171,21 +173,22 @@ def test_product_issued_single_evidence_survives_restart_and_tamper_fails(tmp_pa
     _issue(registry, evidence, kind="single")
 
     restarted = _policy(registry.path)
-    allowed = restarted.evaluate(
+    rejected = restarted.evaluate(
         book,
         Decimal("1"),
         context=replace(context, risk_of_ruin_evidence=evidence),
     )
-    assert allowed.allowed
+    assert not rejected.allowed
+    assert "lacks canonical product-issued evaluator authority" in rejected.reason
 
     tampered = replace(evidence, upper_bound=Decimal("0.001"))
-    rejected = restarted.evaluate(
+    tampered_rejected = restarted.evaluate(
         book,
         Decimal("1"),
         context=replace(context, risk_of_ruin_evidence=tampered),
     )
-    assert not rejected.allowed
-    assert "result digest does not match" in rejected.reason
+    assert not tampered_rejected.allowed
+    assert "result digest does not match" in tampered_rejected.reason
 
 
 def test_copied_result_digest_cannot_substitute_evaluator_method_identity(tmp_path) -> None:
@@ -228,6 +231,57 @@ def test_bundle_created_after_proposal_cannot_retroactively_authorize(tmp_path) 
     assert "not available at proposal time" in decision.reason
 
 
+def test_dataset_outcomes_must_be_revealed_by_evaluation_time(tmp_path) -> None:
+    registry = _registry(
+        tmp_path,
+        outcome_reveal_after="2026-09-16T15:00:03+00:00",
+    )
+    policy = _policy(registry.path)
+    book = PaperBook("100")
+    context = _context(1)
+    evidence = replace(
+        _single_evidence(policy, book, context),
+        evidence_id="future-outcome",
+    )
+    _issue(registry, evidence, kind="single")
+
+    decision = policy.evaluate(
+        book,
+        Decimal("1"),
+        context=replace(context, risk_of_ruin_evidence=evidence),
+    )
+
+    assert not decision.allowed
+    assert "outcomes were not causally available at evaluation time" in decision.reason
+
+
+def test_rebound_registry_get_fails_closed_before_authority_use(tmp_path, monkeypatch) -> None:
+    registry = _registry(tmp_path)
+    policy = _policy(registry.path)
+    book = PaperBook("100")
+    context = _context(1)
+    evidence = replace(
+        _single_evidence(policy, book, context),
+        evidence_id="rebound-read",
+    )
+    _issue(registry, evidence, kind="single")
+
+    monkeypatch.setattr(
+        ScientificRegistry,
+        "get",
+        lambda self, record_type, record_id: None,
+    )
+
+    decision = policy.evaluate(
+        book,
+        Decimal("1"),
+        context=replace(context, risk_of_ruin_evidence=evidence),
+    )
+
+    assert not decision.allowed
+    assert "durable authority is invalid" in decision.reason
+
+
 def test_vector_evidence_requires_exact_product_issued_result(tmp_path) -> None:
     registry = _registry(tmp_path)
     policy = _policy(registry.path)
@@ -265,11 +319,10 @@ def test_vector_evidence_requires_exact_product_issued_result(tmp_path) -> None:
     assert forged.action != "STAKE_VECTOR"
 
     _issue(registry, evidence, kind="vector")
-    issued = _policy(registry.path).derive_goal_stake_vector(
+    asserted_only = _policy(registry.path).derive_goal_stake_vector(
         book,
         signals,
         contexts=contexts,
         risk_of_ruin_vector_evidence=evidence,
     )
-    assert issued.action == "STAKE_VECTOR"
-    assert issued.stakes == baseline.stakes
+    assert asserted_only.action != "STAKE_VECTOR"

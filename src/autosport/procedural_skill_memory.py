@@ -295,8 +295,8 @@ class ProceduralSkillMemory:
                     raise ProceduralSkillMemoryError("procedural memory predecessor belongs to another skill")
                 if latest_by_skill.get(version.skill_key) != predecessor:
                     raise ProceduralSkillMemoryError("procedural memory successor must extend the latest version")
-                if _instant_value(version.available_at, "available_at") < _instant_value(predecessor.available_at, "predecessor available_at"):
-                    raise ProceduralSkillMemoryError("procedural memory availability regresses")
+                if _instant_value(version.available_at, "available_at") <= _instant_value(predecessor.available_at, "predecessor available_at"):
+                    raise ProceduralSkillMemoryError("procedural memory successor availability must advance")
                 if not set(version.validity_domain).issubset(predecessor.validity_domain):
                     raise ProceduralSkillMemoryError("procedural memory validity domain cannot expand")
             elif version.skill_key in latest_by_skill:
@@ -368,8 +368,8 @@ class ProceduralSkillMemory:
             else:
                 if version.predecessor_id != latest.version_id:
                     raise ProceduralSkillMemoryError("successor must name the latest procedural memory version")
-                if _instant_value(version.available_at, "available_at") < _instant_value(latest.available_at, "latest available_at"):
-                    raise ProceduralSkillMemoryError("procedural memory availability regresses")
+                if _instant_value(version.available_at, "available_at") <= _instant_value(latest.available_at, "latest available_at"):
+                    raise ProceduralSkillMemoryError("procedural memory successor availability must advance")
                 if not set(version.validity_domain).issubset(latest.validity_domain):
                     raise ProceduralSkillMemoryError("procedural memory validity domain cannot expand")
             state["versions"].append(entry)

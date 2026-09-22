@@ -156,11 +156,7 @@ def _install_historical_transport(
 def _acquire(monkeypatch: pytest.MonkeyPatch):
     client, identity = _context(monkeypatch)
     _install_historical_transport(monkeypatch)
-    historical = BetfairHistoricalEntitlementClient(
-        client,
-        identity,
-        clock=lambda: NOW,
-    )
+    historical = BetfairHistoricalEntitlementClient(client, identity)
     snapshot = historical.get_entitlement_snapshot()
     listing = historical.list_files(snapshot, _filter())
     evidence, raw = historical.download_file(snapshot, listing, PATH_A)
@@ -188,7 +184,7 @@ def test_caller_constructed_snapshot_cannot_authorize_listing(
 ) -> None:
     client, identity = _context(monkeypatch)
     _install_historical_transport(monkeypatch)
-    historical = BetfairHistoricalEntitlementClient(client, identity, clock=lambda: NOW)
+    historical = BetfairHistoricalEntitlementClient(client, identity)
     issued = historical.get_entitlement_snapshot()
     forged = HistoricalEntitlementSnapshot(
         session_context_id=issued.session_context_id,
@@ -209,7 +205,7 @@ def test_caller_constructed_snapshot_cannot_authorize_listing(
 def test_copy_of_listing_cannot_authorize_download(monkeypatch: pytest.MonkeyPatch) -> None:
     client, identity = _context(monkeypatch)
     _install_historical_transport(monkeypatch)
-    historical = BetfairHistoricalEntitlementClient(client, identity, clock=lambda: NOW)
+    historical = BetfairHistoricalEntitlementClient(client, identity)
     snapshot = historical.get_entitlement_snapshot()
     listing = historical.list_files(snapshot, _filter())
     copied = replace(listing)
@@ -222,7 +218,7 @@ def test_copy_of_listing_cannot_authorize_download(monkeypatch: pytest.MonkeyPat
 def test_unlisted_path_cannot_be_downloaded(monkeypatch: pytest.MonkeyPatch) -> None:
     client, identity = _context(monkeypatch)
     _install_historical_transport(monkeypatch, paths=[PATH_A])
-    historical = BetfairHistoricalEntitlementClient(client, identity, clock=lambda: NOW)
+    historical = BetfairHistoricalEntitlementClient(client, identity)
     snapshot = historical.get_entitlement_snapshot()
     listing = historical.list_files(snapshot, _filter())
 
@@ -273,7 +269,7 @@ def test_filter_must_be_covered_for_every_requested_month(
 ) -> None:
     client, identity = _context(monkeypatch)
     _install_historical_transport(monkeypatch)
-    historical = BetfairHistoricalEntitlementClient(client, identity, clock=lambda: NOW)
+    historical = BetfairHistoricalEntitlementClient(client, identity)
     snapshot = historical.get_entitlement_snapshot()
 
     with pytest.raises(BetfairHistoricalEntitlementError, match="month range"):
@@ -302,7 +298,7 @@ def test_duplicate_purchase_item_id_fails_closed(monkeypatch: pytest.MonkeyPatch
         },
     ]
     _install_historical_transport(monkeypatch, my_data=duplicate)
-    historical = BetfairHistoricalEntitlementClient(client, identity, clock=lambda: NOW)
+    historical = BetfairHistoricalEntitlementClient(client, identity)
 
     with pytest.raises(BetfairHistoricalEntitlementError, match="duplicate/conflicting"):
         historical.get_entitlement_snapshot()
@@ -325,10 +321,21 @@ def test_conflicting_purchase_item_id_fails_closed(monkeypatch: pytest.MonkeyPat
         },
     ]
     _install_historical_transport(monkeypatch, my_data=conflict)
-    historical = BetfairHistoricalEntitlementClient(client, identity, clock=lambda: NOW)
+    historical = BetfairHistoricalEntitlementClient(client, identity)
 
     with pytest.raises(BetfairHistoricalEntitlementError, match="duplicate/conflicting"):
         historical.get_entitlement_snapshot()
+
+
+def test_caller_cannot_inject_acquisition_clock(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client, identity = _context(monkeypatch)
+
+    with pytest.raises(TypeError, match="clock"):
+        BetfairHistoricalEntitlementClient(
+            client, identity, clock=lambda: NOW  # type: ignore[call-arg]
+        )
 
 
 def test_transport_replacement_after_capture_revokes_authority(
@@ -336,7 +343,7 @@ def test_transport_replacement_after_capture_revokes_authority(
 ) -> None:
     client, identity = _context(monkeypatch)
     _install_historical_transport(monkeypatch)
-    historical = BetfairHistoricalEntitlementClient(client, identity, clock=lambda: NOW)
+    historical = BetfairHistoricalEntitlementClient(client, identity)
     snapshot = historical.get_entitlement_snapshot()
     historical._transport = UrllibBetfairHistoricalTransport()
 
@@ -349,7 +356,7 @@ def test_context_rotation_after_capture_revokes_snapshot_use(
 ) -> None:
     client, identity = _context(monkeypatch)
     _install_historical_transport(monkeypatch)
-    historical = BetfairHistoricalEntitlementClient(client, identity, clock=lambda: NOW)
+    historical = BetfairHistoricalEntitlementClient(client, identity)
     snapshot = historical.get_entitlement_snapshot()
     object.__setattr__(client._credentials, "session_token", "rotated-session")
 
@@ -362,7 +369,7 @@ def test_duplicate_or_traversal_provider_paths_fail_closed(
 ) -> None:
     client, identity = _context(monkeypatch)
     _install_historical_transport(monkeypatch, paths=[PATH_A, "/data/../secret"])
-    historical = BetfairHistoricalEntitlementClient(client, identity, clock=lambda: NOW)
+    historical = BetfairHistoricalEntitlementClient(client, identity)
     snapshot = historical.get_entitlement_snapshot()
 
     with pytest.raises(BetfairHistoricalEntitlementError, match="traversal"):
@@ -380,7 +387,7 @@ def test_strict_provider_json_rejects_duplicate_keys(monkeypatch: pytest.MonkeyP
         )
 
     monkeypatch.setattr(UrllibBetfairHistoricalTransport, "post_json", post_json)
-    historical = BetfairHistoricalEntitlementClient(client, identity, clock=lambda: NOW)
+    historical = BetfairHistoricalEntitlementClient(client, identity)
 
     with pytest.raises(BetfairHistoricalEntitlementError, match="duplicate object key"):
         historical.get_entitlement_snapshot()

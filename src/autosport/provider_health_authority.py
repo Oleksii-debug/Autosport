@@ -234,8 +234,15 @@ class ProviderHealthAuthority:
         return next_state
 
     def replay(self, events: Iterable[ProviderHealthEvent]) -> dict[str, ProviderHealthState]:
+        staged = ProviderHealthAuthority(self._policy)
+        staged._states = dict(self._states)
+        staged._events_by_id = dict(self._events_by_id)
+        staged._events_by_sequence = dict(self._events_by_sequence)
         for event in events:
-            self.apply(event)
+            staged.apply(event)
+        self._states = staged._states
+        self._events_by_id = staged._events_by_id
+        self._events_by_sequence = staged._events_by_sequence
         return dict(self._states)
 
     def bind_write_decision(self, *, provider_id: str, decision_id: str) -> ProviderWriteBinding:

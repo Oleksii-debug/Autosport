@@ -120,6 +120,50 @@ class ProtectedTreeGateTests(unittest.TestCase):
         with self.assertRaisesRegex(ProtectedTreeGateError, "entry kind"):
             self.verify(candidate=tuple(candidate))
 
+    def test_allowlisted_existing_symlink_target_change_rejected(self):
+        base = (
+            entry("src/autosport/protected-link", A, "120000", "blob"),
+        )
+        policy = TrustedProtectedTreePolicy(
+            protected_paths=("src/autosport/protected-link",),
+            content_change_allowlist=("src/autosport/protected-link",),
+        )
+        candidate = (
+            entry("src/autosport/protected-link", B, "120000", "blob"),
+        )
+        with self.assertRaisesRegex(
+            ProtectedTreeGateError,
+            "special Git entry changes target/commit",
+        ):
+            verify_base_trusted_protected_tree(
+                base_tree=base,
+                candidate_tree=candidate,
+                trusted_base_manifest=base,
+                policy=policy,
+            )
+
+    def test_allowlisted_existing_submodule_commit_change_rejected(self):
+        base = (
+            entry("vendor/protected-module", A, "160000", "commit"),
+        )
+        policy = TrustedProtectedTreePolicy(
+            protected_paths=("vendor/protected-module",),
+            content_change_allowlist=("vendor/protected-module",),
+        )
+        candidate = (
+            entry("vendor/protected-module", B, "160000", "commit"),
+        )
+        with self.assertRaisesRegex(
+            ProtectedTreeGateError,
+            "special Git entry changes target/commit",
+        ):
+            verify_base_trusted_protected_tree(
+                base_tree=base,
+                candidate_tree=candidate,
+                trusted_base_manifest=base,
+                policy=policy,
+            )
+
     def test_candidate_new_protected_path_rejected(self):
         candidate = self.base + (entry("src/autosport/new_guard.py", A),)
         with self.assertRaisesRegex(ProtectedTreeGateError, "adds untrusted path"):

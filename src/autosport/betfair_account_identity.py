@@ -144,12 +144,37 @@ def _make_account_identity_authority():
     """
 
     process_hmac_key = token_bytes(32)
-    canonical_client_init = BetfairReadOnlyClient.__init__
-    canonical_read_account_details = BetfairReadOnlyClient.read_account_details
-    canonical_rpc = BetfairReadOnlyClient._rpc
-    canonical_next_request_id = BetfairReadOnlyClient._next_request_id
-    canonical_observed_at = BetfairReadOnlyClient._observed_at
-    canonical_network_post = UrllibBetfairHttpTransport.post
+    credentials_type = BetfairSessionCredentials
+    client_type = BetfairReadOnlyClient
+    transport_type = UrllibBetfairHttpTransport
+    details_type = BetfairAccountDetailsObservation
+    identity_type = BetfairAuthenticatedAccountIdentity
+    origin_type = _CanonicalClientOrigin
+    context_record_type = _ClientContextRecord
+    issued_record_type = _IssuedIdentityRecord
+    identity_error_type = BetfairAccountIdentityError
+    personal_mode = BetfairAccountIdentityMode.PERSONAL_DEVELOPER
+    venue_id = VENUE_ID
+    identity_scope = IDENTITY_SCOPE
+    identity_schema = IDENTITY_SCHEMA
+    identity_schema_version = IDENTITY_SCHEMA_VERSION
+    context_prefix = _CONTEXT_PREFIX
+    validate_currency = _currency_code
+    validate_sha256 = _sha256_hex
+    validate_timestamp = _canonical_timestamp
+    json_dumps = json.dumps
+    sha256_fn = sha256
+    hmac_digest = hmac.digest
+    hmac_compare_digest = hmac.compare_digest
+    token_hex_fn = token_hex
+    weakref_fn = ref
+
+    canonical_client_init = client_type.__init__
+    canonical_read_account_details = client_type.read_account_details
+    canonical_rpc = client_type._rpc
+    canonical_next_request_id = client_type._next_request_id
+    canonical_observed_at = client_type._observed_at
+    canonical_network_post = transport_type.post
     canonical_urlopen = _urllib_request.urlopen
 
     lock = RLock()
@@ -158,8 +183,8 @@ def _make_account_identity_authority():
     issued: dict[int, _IssuedIdentityRecord] = {}
 
     def credential_binding(credentials: BetfairSessionCredentials) -> bytes:
-        if type(credentials) is not BetfairSessionCredentials:
-            raise BetfairAccountIdentityError(
+        if type(credentials) is not credentials_type:
+            raise identity_error_type(
                 "authenticated context requires canonical BetfairSessionCredentials"
             )
         material = (
@@ -167,18 +192,47 @@ def _make_account_identity_authority():
             + b"\x00"
             + credentials.session_token.encode("utf-8")
         )
-        return hmac.digest(process_hmac_key, material, "sha256")
+        return hmac_digest(process_hmac_key, material, "sha256")
+
+    def issued_identity_digest(value: BetfairAuthenticatedAccountIdentity) -> str:
+        # Authority integrity must not depend on the public identity_id property
+        # or module-level validation/JSON helpers after closure initialization.
+        payload = {
+            "schema": identity_schema,
+            "schema_version": identity_schema_version,
+            "venue_id": value.venue_id,
+            "mode": value.mode.value,
+            "identity_scope": value.identity_scope,
+            "session_context_id": value.session_context_id,
+            "currency_code": value.currency_code,
+            "account_details_sha256": value.account_details_sha256,
+            "observed_at": value.observed_at,
+            "stable_account_identity_proven": False,
+        }
+        try:
+            encoded = json_dumps(
+                payload,
+                sort_keys=True,
+                separators=(",", ":"),
+                ensure_ascii=True,
+                allow_nan=False,
+            ).encode("utf-8")
+        except (AttributeError, TypeError, ValueError, UnicodeEncodeError) as exc:
+            raise identity_error_type(
+                "account identity cannot be verified as canonical JSON"
+            ) from exc
+        return sha256_fn(encoded).hexdigest()
 
     def client_class_dispatch_is_current() -> bool:
         return (
-            BetfairReadOnlyClient.__init__ is canonical_client_init
+            client_type.__init__ is canonical_client_init
             and BetfairReadOnlyClient.read_account_details
             is canonical_read_account_details
-            and BetfairReadOnlyClient._rpc is canonical_rpc
+            and client_type._rpc is canonical_rpc
             and BetfairReadOnlyClient._next_request_id
             is canonical_next_request_id
-            and BetfairReadOnlyClient._observed_at is canonical_observed_at
-            and UrllibBetfairHttpTransport.post is canonical_network_post
+            and client_type._observed_at is canonical_observed_at
+            and transport_type.post is canonical_network_post
             and _readonly_module.urlopen is canonical_urlopen
         )
 
@@ -201,7 +255,7 @@ def _make_account_identity_authority():
     def canonical_network_transport(transport: object) -> bool:
         if not client_class_dispatch_is_current():
             return False
-        if type(transport) is not UrllibBetfairHttpTransport:
+        if type(transport) is not transport_type:
             return False
         transport_dict = getattr(transport, "__dict__", None)
         if type(transport_dict) is not dict:
@@ -217,16 +271,16 @@ def _make_account_identity_authority():
     ) -> bool:
         try:
             if (
-                type(client) is not BetfairReadOnlyClient
+                type(client) is not client_type
                 or not client_dispatch_is_current(client)
                 or not canonical_network_transport(client._transport)
                 or client._transport is not origin.transport
                 or client._clock is not origin.clock
                 or client._credentials is not origin.credentials
-                or client._venue_id != VENUE_ID
+                or client._venue_id != venue_id
             ):
                 return False
-            return hmac.compare_digest(
+            return hmac_compare_digest(
                 origin.credential_binding,
                 credential_binding(client._credentials),
             )
@@ -250,7 +304,7 @@ def _make_account_identity_authority():
         with lock:
             origin = canonical_client_origins.get(client)
             if origin is None:
-                raise BetfairAccountIdentityError(
+                raise identity_error_type(
                     "account identity requires product-owned Betfair transport/clock origin"
                 )
             existing = client_contexts.get(id(client))
@@ -262,14 +316,14 @@ def _make_account_identity_authority():
                     client,
                     revoke_on_failure=True,
                 ):
-                    raise BetfairAccountIdentityError(
+                    raise identity_error_type(
                         "authenticated client/session context was rotated or mutated"
                     )
                 else:
                     return existing
 
             if not origin_matches(origin, client):
-                raise BetfairAccountIdentityError(
+                raise identity_error_type(
                     "authenticated client origin changed before identity issuance"
                 )
             identity = id(client)
@@ -280,10 +334,10 @@ def _make_account_identity_authority():
                     if record is not None and record.client_ref is dead_ref:
                         client_contexts.pop(identity, None)
 
-            record = _ClientContextRecord(
-                client_ref=ref(client, discard),
+            record = context_record_type(
+                client_ref=weakref_fn(client, discard),
                 origin=origin,
-                session_context_id=_CONTEXT_PREFIX + token_hex(32),
+                session_context_id=context_prefix + token_hex_fn(32),
             )
             client_contexts[identity] = record
             return record
@@ -304,10 +358,10 @@ def _make_account_identity_authority():
                     issued.pop(identity, None)
 
         with lock:
-            issued[identity] = _IssuedIdentityRecord(
-                value_ref=ref(value, discard),
-                identity_id=value.identity_id,
-                client_ref=ref(client),
+            issued[identity] = issued_record_type(
+                value_ref=weakref_fn(value, discard),
+                identity_id=issued_identity_digest(value),
+                client_ref=weakref_fn(client),
                 session_context_id=context.session_context_id,
             )
 
@@ -319,28 +373,28 @@ def _make_account_identity_authority():
     ) -> BetfairReadOnlyClient:
         """Create one canonical client whose authenticated origin K07 may attest."""
 
-        if type(credentials) is not BetfairSessionCredentials:
-            raise BetfairAccountIdentityError(
+        if type(credentials) is not credentials_type:
+            raise identity_error_type(
                 "authenticated context requires canonical BetfairSessionCredentials"
             )
         if not client_class_dispatch_is_current():
-            raise BetfairAccountIdentityError(
+            raise identity_error_type(
                 "canonical Betfair client/network implementation changed"
             )
         binding = credential_binding(credentials)
-        client = BetfairReadOnlyClient(
+        client = client_type(
             credentials,
             timeout_seconds=timeout_seconds,
-            venue_id=VENUE_ID,
+            venue_id=venue_id,
             account_id=account_label,
         )
         if (
-            type(client) is not BetfairReadOnlyClient
+            type(client) is not client_type
             or not client_dispatch_is_current(client)
             or not canonical_network_transport(client._transport)
             or client._credentials is not credentials
         ):
-            raise BetfairAccountIdentityError(
+            raise identity_error_type(
                 "canonical Betfair client factory produced invalid origin"
             )
         origin = _CanonicalClientOrigin(
@@ -360,12 +414,12 @@ def _make_account_identity_authority():
     ) -> BetfairAuthenticatedAccountIdentity:
         """Issue identity for the exact current authenticated client/session context."""
 
-        if type(client) is not BetfairReadOnlyClient:
-            raise BetfairAccountIdentityError(
+        if type(client) is not client_type:
+            raise identity_error_type(
                 "account identity requires exact canonical BetfairReadOnlyClient"
             )
-        if mode is not BetfairAccountIdentityMode.PERSONAL_DEVELOPER:
-            raise BetfairAccountIdentityError(
+        if mode is not personal_mode:
+            raise identity_error_type(
                 "LICENSED_VENDOR stable account identity is not implemented on canonical transport"
             )
 
@@ -377,29 +431,29 @@ def _make_account_identity_authority():
             # rechecked after acquisition.
             details = canonical_read_account_details(client)
         except BetfairReadOnlyError as exc:
-            raise BetfairAccountIdentityError(
+            raise identity_error_type(
                 "authenticated Betfair account-details acquisition failed"
             ) from exc
-        if type(details) is not BetfairAccountDetailsObservation:
-            raise BetfairAccountIdentityError(
+        if type(details) is not details_type:
+            raise identity_error_type(
                 "account-details acquisition returned non-canonical evidence"
             )
         if not context_is_current(context, client, revoke_on_failure=True):
-            raise BetfairAccountIdentityError(
+            raise identity_error_type(
                 "authenticated client/session context changed during account-details acquisition"
             )
 
-        value = BetfairAuthenticatedAccountIdentity(
-            venue_id=VENUE_ID,
-            mode=BetfairAccountIdentityMode.PERSONAL_DEVELOPER,
-            identity_scope=IDENTITY_SCOPE,
+        value = identity_type(
+            venue_id=venue_id,
+            mode=personal_mode,
+            identity_scope=identity_scope,
             session_context_id=context.session_context_id,
-            currency_code=_currency_code(details.currency_code),
-            account_details_sha256=_sha256_hex(
+            currency_code=validate_currency(details.currency_code),
+            account_details_sha256=validate_sha256(
                 details.evidence.source_payload_sha256,
                 "account_details_sha256",
             ),
-            observed_at=_canonical_timestamp(details.evidence.observed_at),
+            observed_at=validate_timestamp(details.evidence.observed_at),
         )
         remember_issued(value, client, context)
         return value
@@ -409,13 +463,17 @@ def _make_account_identity_authority():
         *,
         client: BetfairReadOnlyClient | None = None,
     ) -> bool:
-        if type(value) is not BetfairAuthenticatedAccountIdentity:
+        if type(value) is not identity_type:
             return False
         with lock:
             record = issued.get(id(value))
             if record is None or record.value_ref() is not value:
                 return False
-            if not hmac.compare_digest(record.identity_id, value.identity_id):
+            try:
+                current_identity_digest = issued_identity_digest(value)
+            except identity_error_type:
+                return False
+            if not hmac_compare_digest(record.identity_id, current_identity_digest):
                 return False
             issued_client = record.client_ref()
             if issued_client is None:
@@ -441,10 +499,10 @@ def _make_account_identity_authority():
         client: BetfairReadOnlyClient | None = None,
     ) -> BetfairAuthenticatedAccountIdentity:
         if not is_authoritative(value, client=client):
-            raise BetfairAccountIdentityError(
+            raise identity_error_type(
                 "Betfair account identity lacks current authenticated-context authority"
             )
-        assert type(value) is BetfairAuthenticatedAccountIdentity
+        assert type(value) is identity_type
         return value
 
     return build_client, resolve_identity, is_authoritative, require_authoritative

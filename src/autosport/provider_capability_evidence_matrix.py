@@ -109,6 +109,8 @@ class ProviderCapabilityEvidence:
     grade: ProviderCapabilityTruthGrade
     profile_id: str
     integration_evidence_id: str
+    environment: str | None = None
+    application_mode: str | None = None
     observed_at: str | None = None
     expires_at: str | None = None
     evidence_ref: str | None = None
@@ -134,6 +136,10 @@ class ProviderCapabilityEvidence:
             raise ProviderCapabilityEvidenceMatrixError("schema_version must be exactly 1")
 
         if self.grade is ProviderCapabilityTruthGrade.UNKNOWN_UNPROVEN:
+            if self.environment is not None or self.application_mode is not None:
+                raise ProviderCapabilityEvidenceMatrixError(
+                    "unknown evidence cannot carry environment/application scope"
+                )
             if any(
                 value is not None
                 for value in (
@@ -150,6 +156,8 @@ class ProviderCapabilityEvidence:
                 )
             return
 
+        _text(self.environment, "environment")
+        _text(self.application_mode, "application_mode")
         if (
             self.grade in _REQUIRES_SUPPORTED
             and self.profile_state is not BookmakerCapabilityState.SUPPORTED
@@ -211,6 +219,8 @@ class ProviderCapabilityEvidence:
             "grade": self.grade.value,
             "profile_id": self.profile_id,
             "integration_evidence_id": self.integration_evidence_id,
+            "environment": self.environment,
+            "application_mode": self.application_mode,
             "observed_at": self.observed_at,
             "expires_at": self.expires_at,
             "evidence_ref": self.evidence_ref,
@@ -233,6 +243,8 @@ def issue_provider_capability_evidence(
     grade: ProviderCapabilityTruthGrade,
     profile_id: str,
     integration_evidence_id: str,
+    environment: str | None = None,
+    application_mode: str | None = None,
     observed_at: str | None = None,
     expires_at: str | None = None,
     evidence_ref: str | None = None,
@@ -257,6 +269,8 @@ def issue_provider_capability_evidence(
         grade=grade,
         profile_id=profile_id,
         integration_evidence_id=integration_evidence_id,
+        environment=environment,
+        application_mode=application_mode,
         observed_at=observed_at,
         expires_at=expires_at,
         evidence_ref=evidence_ref,
@@ -331,6 +345,16 @@ class ProviderCapabilityEvidenceMatrix:
                 raise ProviderCapabilityEvidenceMatrixError(
                     "positive capability evidence must be product-issued exact object"
                 )
+            if (
+                fact.grade is not ProviderCapabilityTruthGrade.UNKNOWN_UNPROVEN
+                and (
+                    fact.environment != self.environment
+                    or fact.application_mode != self.application_mode
+                )
+            ):
+                raise ProviderCapabilityEvidenceMatrixError(
+                    "fact environment/application scope mismatch"
+                )
             if fact.profile_id != self.profile.profile_id:
                 raise ProviderCapabilityEvidenceMatrixError("fact profile binding mismatch")
             if fact.integration_evidence_id != self.integration.evidence_id:
@@ -380,6 +404,14 @@ class ProviderCapabilityEvidenceMatrix:
         if requested_at > _time(self.as_of, "as_of"):
             return False
         fact = self.fact_for(capability)
+        if (
+            fact.grade is not ProviderCapabilityTruthGrade.UNKNOWN_UNPROVEN
+            and (
+                fact.environment != self.environment
+                or fact.application_mode != self.application_mode
+            )
+        ):
+            return False
         if (
             fact.grade is not ProviderCapabilityTruthGrade.UNKNOWN_UNPROVEN
             and not _is_product_issued(fact)

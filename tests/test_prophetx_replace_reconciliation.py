@@ -34,7 +34,7 @@ def request(**kw):
         replace_cl_ord_id="repl-1",
         new_price="2.25",
         new_quantity="8",
-        requested_at="2026-09-22T20:00:00Z",
+        requested_at="2026-09-22T20:00:02Z",
     )
     d.update(kw)
     return ReplaceRequest(**d)
@@ -124,6 +124,7 @@ def test_unfilled_successful_fix_replace():
     assert p.original_filled_quantity == 0
     assert p.replacement_open_quantity == Decimal("8")
     assert p.active_cl_ord_id == "repl-1"
+    assert p.original_status is OrderStatus.REPLACED
 
 
 def test_old_partial_fill_survives_cumqty_reset():
@@ -176,6 +177,15 @@ def test_pending_new_cannot_be_locally_promoted_to_working():
         reconcile(
             request(),
             working(status=OrderStatus.PENDING_NEW),
+            [],
+        )
+
+
+def test_working_evidence_cannot_be_retroactively_acquired():
+    with pytest.raises(ProphetXReplaceError):
+        reconcile(
+            request(requested_at="2026-09-22T20:00:00Z"),
+            working(),
             [],
         )
 
@@ -331,6 +341,12 @@ def test_fill_conservation_is_fail_closed():
         reconcile(request(), working(), [f])
 
 
+def test_full_fill_race_before_replaced_fails_closed():
+    old_fill = fill("fill-all", "orig-1", "10", "2.10", "10", "0", 11)
+    with pytest.raises(ProphetXReplaceConflict):
+        reconcile(request(), working(), [old_fill, replaced()])
+
+
 def test_checkpoint_is_deterministic_restart_cache():
     p = reconcile(request(), working(), [replaced()])
     raw = encode_checkpoint(p)
@@ -413,5 +429,19 @@ def test_working_order_conservation_and_average_rules():
         working(
             cumulative_filled="1",
             leaves_quantity="9",
+            average_fill_price=None,
+        )
+    with pytest.raises(ProphetXReplaceError):
+        working(
+            status=OrderStatus.NEW,
+            cumulative_filled="1",
+            leaves_quantity="9",
+            average_fill_price="2",
+        )
+    with pytest.raises(ProphetXReplaceError):
+        working(
+            status=OrderStatus.PARTIALLY_FILLED,
+            cumulative_filled="0",
+            leaves_quantity="10",
             average_fill_price=None,
         )

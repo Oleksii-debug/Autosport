@@ -169,12 +169,28 @@ def test_non_success_base_return_status_fails_closed_before_markets() -> None:
     assert exc.value.scope == "response"
 
 
-def test_market_level_return_code_fails_whole_wire_response() -> None:
-    payload = _response(market_attrs='ReturnCode="16"')
+def test_rc016_unavailable_market_preserves_valid_sibling_market() -> None:
+    unavailable = f'''<MarketPrices xmlns="{API}" Id="9002" ReturnCode="16" />'''
+    response = parse_get_prices_response(_response(result_extra=unavailable))
+
+    assert [market.market_id for market in response.markets] == [9001]
+    assert len(response.unavailable_markets) == 1
+    assert response.unavailable_markets[0].market_id == 9002
+    assert response.unavailable_markets[0].return_code == 16
+
+
+def test_non_rc016_market_level_return_code_still_fails_whole_response() -> None:
+    payload = _response(market_attrs='ReturnCode="17"')
     with pytest.raises(BetdaqProviderStatusError) as exc:
         parse_get_prices_response(payload)
-    assert exc.value.code == 16
+    assert exc.value.code == 17
     assert exc.value.scope == "market 9001"
+
+
+def test_rc016_cannot_carry_partial_price_children() -> None:
+    payload = _response(market_attrs='ReturnCode="16"')
+    with pytest.raises(BetdaqSoapProtocolError, match="RC016 unavailable market"):
+        parse_get_prices_response(payload)
 
 
 def test_soap11_fault_is_typed_and_does_not_parse_partial_payload() -> None:

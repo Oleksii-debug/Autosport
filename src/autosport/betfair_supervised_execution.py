@@ -819,6 +819,15 @@ def _parse_place_orders_response(
         echoed.get("limitOrder"),
         "echoed limitOrder",
     )
+    if "customerOrderRef" in echoed:
+        echoed_customer_order_ref = _optional_provider_text(
+            echoed.get("customerOrderRef"),
+            "echoed customerOrderRef",
+        )
+        if echoed_customer_order_ref != provider_order_ref:
+            raise BetfairPlaceOrdersAmbiguous(
+                "placeOrders echoed customerOrderRef does not bind exact request"
+            )
     raw_selection = echoed.get("selectionId")
     if (
         isinstance(raw_selection, bool)

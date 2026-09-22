@@ -472,10 +472,15 @@ class BetfairClearedMarketPopulationAuthority:
             raise BetfairClearedMarketPopulationError(
                 "population acquisition produced no page evidence"
             )
-        observed = (
-            *tuple(_parse_instant(page.observed_at) for page in all_pages),
-            _parse_instant(market_rollup_witness.observed_at),
+        page_observed = tuple(
+            _parse_instant(page.observed_at) for page in all_pages
         )
+        market_observed = _parse_instant(market_rollup_witness.observed_at)
+        if market_observed < max(page_observed):
+            raise BetfairClearedMarketPopulationError(
+                "fresh MARKET witness cannot predate completed BET revalidation"
+            )
+        observed = (*page_observed, market_observed)
         source_interval_start = _instant_text(min(observed))
         source_interval_end = _instant_text(max(observed))
         population_sha256 = _digest(
@@ -887,10 +892,15 @@ def _validate_population(value: BetfairClearedMarketPopulation) -> None:
         page_size=value.page_size,
     )
     all_pages = (*value.first_pass_pages, *value.second_pass_pages)
-    observed = (
-        *tuple(_parse_instant(page.observed_at) for page in all_pages),
-        _parse_instant(value.market_rollup_witness.observed_at),
+    page_observed = tuple(
+        _parse_instant(page.observed_at) for page in all_pages
     )
+    market_observed = _parse_instant(value.market_rollup_witness.observed_at)
+    if not page_observed or market_observed < max(page_observed):
+        raise BetfairClearedMarketPopulationError(
+            "MARKET witness does not causally follow BET revalidation"
+        )
+    observed = (*page_observed, market_observed)
     if (
         not observed
         or value.source_interval_start != _instant_text(min(observed))

@@ -63,7 +63,7 @@ def test_paperbook_round_trip_preserves_exchange_side_and_side_identity(tmp_path
     book.save(path)
 
     payload = json.loads(path.read_text(encoding="utf-8"))
-    assert payload["schema_version"] == 7
+    assert payload["schema_version"] == 8
     assert [item["exchange_side"] for item in payload["tickets"][0]["legs"]] == [
         "back",
         "lay",
@@ -100,6 +100,8 @@ def test_schema7_requires_explicit_exchange_side_field_even_when_none(tmp_path) 
     book.save(path)
 
     payload = json.loads(path.read_text(encoding="utf-8"))
+    payload["schema_version"] = 7
+    payload["tickets"][0]["legs"][0].pop("market_semantics_id")
     payload["tickets"][0]["legs"][0].pop("exchange_side")
     path.write_text(json.dumps(payload), encoding="utf-8")
 

@@ -93,6 +93,49 @@ def test_request_has_no_caller_upper_bound_field() -> None:
     assert "upper_bound" not in names
 
 
+class _ExplodingFormatDecimal(Decimal):
+    def __format__(self, format_spec: str) -> str:
+        raise AssertionError("fixed-point formatting must not run past the size fence")
+
+
+@pytest.mark.parametrize(
+    "value",
+    (
+        _ExplodingFormatDecimal("1E+1000000"),
+        _ExplodingFormatDecimal("1E-1000000"),
+    ),
+)
+def test_extreme_decimal_exponents_fail_before_fixed_point_materialization(
+    value: Decimal,
+) -> None:
+    with pytest.raises(
+        RiskOfRuinEvaluationError,
+        match="fixed-point representation exceeds supported canonical size",
+    ):
+        replace(_observation(0), minimum_equity=value)
+
+
+def test_decimal_materialization_bound_matches_durable_parser_domain() -> None:
+    accepted_text = "9" * 512
+    accepted = Decimal(accepted_text)
+
+    assert risk_module._decimal_text(accepted) == accepted_text
+    assert risk_module._decimal_from_payload(accepted_text, "value") == accepted
+
+    with pytest.raises(
+        RiskOfRuinEvaluationError,
+        match="fixed-point representation exceeds supported canonical size",
+    ):
+        risk_module._decimal_text(Decimal("9" * 513))
+
+    assert risk_module._decimal_text(Decimal("1." + ("0" * 510))) == "1"
+    with pytest.raises(
+        RiskOfRuinEvaluationError,
+        match="fixed-point representation exceeds supported canonical size",
+    ):
+        risk_module._decimal_text(Decimal("1." + ("0" * 511)))
+
+
 def test_zero_events_never_become_zero_risk() -> None:
     bound = clopper_pearson_upper_bound(
         ruin_count=0,

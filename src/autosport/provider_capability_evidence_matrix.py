@@ -256,10 +256,11 @@ def issue_provider_capability_evidence(
 ) -> ProviderCapabilityEvidence:
     """Issue one exact in-process evidence object after structural validation.
 
-    Non-write positive facts are accepted by a matrix only by exact object identity
-    through this product factory. Current write-capability authority is deliberately
-    not generically issuable: WRITE_PERMISSION_PROVEN and write-capability
-    OBSERVED_OPERATIONAL require a future provider-specific sealed upstream verifier.
+    Weak/negative facts may be issued here after structural validation. Current
+    observed authority is deliberately not generically issuable: authenticated reads,
+    operational observations, and write permission all require a provider-specific
+    sealed upstream verifier. Caller refs, hashes, endpoint names, or exact-object
+    identity cannot prove that an authenticated/provider operation actually occurred.
     Reconstructing/copying a dataclass does not recreate issuance authority, and restart
     time alone cannot renew freshness.
     """
@@ -281,12 +282,20 @@ def issue_provider_capability_evidence(
         market_scope=market_scope,
         quality_constraint=quality_constraint,
     )
+    if fact.grade is ProviderCapabilityTruthGrade.AUTHENTICATED_READ_PROVEN:
+        raise ProviderCapabilityEvidenceMatrixError(
+            "authenticated-read current authority requires sealed upstream provider verification"
+        )
     if fact.grade is ProviderCapabilityTruthGrade.WRITE_PERMISSION_PROVEN or (
         fact.grade is ProviderCapabilityTruthGrade.OBSERVED_OPERATIONAL
         and fact.capability in _WRITE
     ):
         raise ProviderCapabilityEvidenceMatrixError(
             "write-capability current authority requires sealed upstream provider verification"
+        )
+    if fact.grade is ProviderCapabilityTruthGrade.OBSERVED_OPERATIONAL:
+        raise ProviderCapabilityEvidenceMatrixError(
+            "observed-operational current authority requires sealed upstream provider verification"
         )
     _ISSUED_EVIDENCE[id(fact)] = fact
     return fact

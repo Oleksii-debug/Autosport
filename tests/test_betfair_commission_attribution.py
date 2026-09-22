@@ -1,8 +1,10 @@
+from dataclasses import replace
 from decimal import Decimal, localcontext
 
 import pytest
 
 from autosport.betfair_commission_attribution import (
+    BetAttributedNet,
     BetCommissionAllocation,
     BetGrossAmount,
     BetfairCommissionAttributionError,
@@ -21,10 +23,14 @@ def _bet(
     bet_id: str,
     gross: str,
     *,
+    venue: str = "betfair",
+    account: str = "account-a",
     market: str = "1.234",
     currency: str = "EUR",
 ) -> BetGrossAmount:
     return BetGrossAmount(
+        venue_id=venue,
+        account_id=account,
         bet_id=bet_id,
         market_id=market,
         currency=currency,
@@ -36,10 +42,14 @@ def _bet(
 def _commission(
     value: str = "1.5",
     *,
+    venue: str = "betfair",
+    account: str = "account-a",
     market: str = "1.234",
     currency: str = "EUR",
 ) -> MarketCommissionAmount:
     return MarketCommissionAmount(
+        venue_id=venue,
+        account_id=account,
         market_id=market,
         currency=currency,
         commission_charge=Decimal(value),
@@ -89,6 +99,10 @@ def test_explicit_allocation_conserves_market_commission_and_is_derived() -> Non
         Decimal("-4.5"),
     )
     assert all(item.provider_exact is False for item in per_bet)
+    assert all(item.account_id == "account-a" for item in per_bet)
+    assert all(item.venue_id == "betfair" for item in per_bet)
+    for item in per_bet:
+        item.assert_derived_from(value)
     assert (
         sum((item.derived_net_profit for item in per_bet), Decimal("0"))
         == value.market_net_profit
@@ -172,11 +186,15 @@ def test_duplicate_allocation_bet_id_is_rejected() -> None:
 @pytest.mark.parametrize(
     ("bet", "commission", "match"),
     [
+        (_bet("bet-1", "1", venue="other"), _commission(), "venue_id differ"),
+        (_bet("bet-1", "1", account="account-b"), _commission(), "account_id differ"),
         (_bet("bet-1", "1", market="other"), _commission(), "market_id differ"),
         (_bet("bet-1", "1", currency="GBP"), _commission(), "currency differ"),
     ],
 )
-def test_market_and_currency_scope_must_match(bet, commission, match) -> None:
+def test_provider_account_market_and_currency_scope_must_match(
+    bet, commission, match
+) -> None:
     with pytest.raises(BetfairCommissionAttributionError, match=match):
         MarketCommissionAttribution(
             gross_bets=(bet,),
@@ -279,6 +297,98 @@ def test_attribution_identity_is_decimal_context_independent() -> None:
     assert low == high
 
 
+def test_per_bet_child_is_parent_and_policy_bound_and_copy_fails_closed() -> None:
+    value = MarketCommissionAttribution(
+        gross_bets=(_bet("bet-1", "10"),),
+        market_commission=_commission("1"),
+        allocations=(BetCommissionAllocation("bet-1", Decimal("1")),),
+        allocation_policy=_policy(),
+    )
+    child = value.per_bet_net()[0]
+
+    child.assert_derived_from(value)
+    assert child.attribution_id == value.attribution_id
+    assert child.allocation_policy_sha256 == value.allocation_policy.policy_sha256
+
+    copied = replace(child)
+    with pytest.raises(
+        BetfairCommissionAttributionError,
+        match="not issued",
+    ):
+        copied.assert_derived_from(value)
+
+    other_policy = CommissionAllocationPolicyRef(
+        policy_id=value.allocation_policy.policy_id,
+        policy_version=value.allocation_policy.policy_version,
+        policy_sha256="d" * 64,
+    )
+    other_parent = MarketCommissionAttribution(
+        gross_bets=value.gross_bets,
+        market_commission=value.market_commission,
+        allocations=value.allocations,
+        allocation_policy=other_policy,
+    )
+    with pytest.raises(
+        BetfairCommissionAttributionError,
+        match="not bound",
+    ):
+        child.assert_derived_from(other_parent)
+
+
+def test_direct_per_bet_child_cannot_mint_accepted_derivation() -> None:
+    value = MarketCommissionAttribution(
+        gross_bets=(_bet("bet-1", "10"),),
+        market_commission=_commission("1"),
+        allocations=(BetCommissionAllocation("bet-1", Decimal("1")),),
+        allocation_policy=_policy(),
+    )
+    forged = BetAttributedNet(
+        venue_id="betfair",
+        account_id="account-a",
+        market_id="1.234",
+        bet_id="bet-1",
+        gross_profit=Decimal("10"),
+        allocated_commission=Decimal("1"),
+        derived_net_profit=Decimal("9"),
+        attribution_id=value.attribution_id,
+        allocation_policy_id=value.allocation_policy.policy_id,
+        allocation_policy_version=value.allocation_policy.policy_version,
+        allocation_policy_sha256=value.allocation_policy.policy_sha256,
+        provider_exact=False,
+    )
+    with pytest.raises(
+        BetfairCommissionAttributionError,
+        match="not issued",
+    ):
+        forged.assert_derived_from(value)
+
+
+@pytest.mark.parametrize(
+    "value",
+    (
+        "1E+100000000",
+        "1E-100000000",
+        "0E+100000000",
+        "0E-100000000",
+        "1E+37",
+        "1E-19",
+    ),
+)
+def test_money_domain_rejects_exponent_resource_escape(value: str) -> None:
+    with pytest.raises(
+        BetfairCommissionAttributionError,
+        match="bounded monetary Decimal domain",
+    ):
+        _bet("bet-1", value)
+
+
+def test_money_domain_accepts_bounded_large_and_scaled_values() -> None:
+    high = "9999999999999999999999999999999999999"
+    scaled = "0.000000000000000001"
+    assert _bet("bet-1", high).gross_profit == Decimal(high)
+    assert _bet("bet-1", scaled).gross_profit == Decimal(scaled)
+
+
 def test_nonfinite_money_is_rejected() -> None:
     with pytest.raises(BetfairCommissionAttributionError, match="finite Decimal"):
         _bet("bet-1", "NaN")
@@ -295,7 +405,15 @@ def test_subclasses_cannot_mint_canonical_economic_components() -> None:
     class ForgedBet(BetGrossAmount):
         pass
 
-    forged = ForgedBet("bet-1", "1.234", "EUR", Decimal("2"), A)
+    forged = ForgedBet(
+        venue_id="betfair",
+        account_id="account-a",
+        bet_id="bet-1",
+        market_id="1.234",
+        currency="EUR",
+        gross_profit=Decimal("2"),
+        evidence_sha256=A,
+    )
     with pytest.raises(
         BetfairCommissionAttributionError,
         match="exact BetGrossAmount",

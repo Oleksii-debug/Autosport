@@ -176,6 +176,17 @@ class ProviderTimeFreshnessTests(unittest.TestCase):
         self.assertEqual(self.assess(numeric).sequence_id, 17)
         self.assertEqual(self.assess(opaque).sequence_id, "17")
 
+    def test_opaque_sequence_limit_is_measured_in_utf8_bytes(self) -> None:
+        accepted = self.evidence(sequence_id="é" * 512)
+        self.assertEqual(self.assess(accepted).sequence_id, "é" * 512)
+
+        with self.assertRaisesRegex(ValueError, "1024 UTF-8 bytes"):
+            self.evidence(sequence_id="é" * 513)
+
+    def test_opaque_sequence_requires_valid_utf8(self) -> None:
+        with self.assertRaisesRegex(ValueError, "valid UTF-8"):
+            self.evidence(sequence_id="\ud800")
+
     def test_rejects_naive_or_malformed_timestamps(self) -> None:
         for field, value in (
             ("source_updated_at", "2026-09-21T12:00:00"),

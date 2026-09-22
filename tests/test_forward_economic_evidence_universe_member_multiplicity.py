@@ -153,3 +153,34 @@ def test_distinct_universe_members_remain_independent_observations() -> None:
     assert summary.minimum_events_satisfied is True
     assert summary.positive_authority_verified is False
     assert summary.scientific_promotion_gate_passed is False
+
+def test_sha256_case_alias_cannot_mint_second_universe_member() -> None:
+    accumulator = ForwardEconomicEvidenceAccumulator(_protocol())
+    first = _observation(0, EVENT_A_SHA, "a" * 64, "b" * 64)
+    aliased_duplicate = _observation(
+        1,
+        EVENT_A_SHA.upper(),
+        "c" * 64,
+        "d" * 64,
+    )
+
+    first_step = accumulator.record(first, _Resolver(first))
+    before = accumulator.summary()
+    duplicate_resolver = _Resolver(aliased_duplicate)
+
+    with pytest.raises(
+        ForwardEconomicEvidenceError,
+        match="cannot be counted more than once",
+    ):
+        accumulator.record(aliased_duplicate, duplicate_resolver)
+
+    after = accumulator.summary()
+    assert duplicate_resolver.calls == []
+    assert aliased_duplicate.universe_event_sha256 == EVENT_A_SHA
+    assert accumulator.steps == (first_step,)
+    assert after.observed_events == 1
+    assert after.next_sequence == 1
+    assert after.evidence_sha256 == before.evidence_sha256
+    assert after.positive_authority_verified is False
+    assert after.scientific_promotion_gate_passed is False
+

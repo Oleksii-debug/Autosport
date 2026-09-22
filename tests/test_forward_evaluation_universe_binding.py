@@ -435,3 +435,33 @@ def test_wrong_candidate_rule_or_fake_store_cannot_mint_authority(tmp_path, monk
 
     with pytest.raises(TypeError, match="exact ProviderEvaluationUniverseStore"):
         resolve_forward_universe_members(store=FakeStore(), protocol=_protocol())
+
+def test_exact_store_instance_load_rebinding_cannot_replace_durable_authority(
+    tmp_path, monkeypatch
+):
+    store = _stored_universe(tmp_path, monkeypatch, empty=False)
+    protocol = _protocol()
+    expectations = resolve_forward_universe_members(store=store, protocol=protocol)
+    opportunities = _opportunities(protocol, expectations)
+    trusted_ledger = ProviderEvaluationUniverseStore.load(store)
+    assert trusted_ledger is not None
+
+    empty_store = ProviderEvaluationUniverseStore(
+        tmp_path / "empty-workspace",
+        authority_id=store.authority_id,
+        source_id=store.source_id,
+        authority_root=tmp_path / "empty-authority",
+    )
+    store._store = empty_store._store
+    assert ProviderEvaluationUniverseStore.load(store) is None
+
+    store.load = lambda: trusted_ledger
+    assert type(store) is ProviderEvaluationUniverseStore
+
+    with pytest.raises(ForwardEvaluationUniverseBindingError):
+        authorize_forward_source_receipts(
+            store=store,
+            protocol=protocol,
+            opportunities=opportunities,
+        )
+

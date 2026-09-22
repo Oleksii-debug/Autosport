@@ -55,7 +55,10 @@ def test_research_candidate_parser_rejects_sport_quote_key_mismatch() -> None:
     raw = _raw_leg(event)
     raw["sport"] = "tennis"
 
-    with pytest.raises(ValueError, match="sport-qualified identity"):
+    with pytest.raises(
+        ValueError,
+        match="structured event/market/selection identity does not match quote_key",
+    ):
         _candidate_leg_from_dict(raw)
 
 

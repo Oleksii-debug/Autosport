@@ -4,6 +4,7 @@ from email.message import Message
 from hashlib import sha256
 from io import BytesIO
 import pickle
+import traceback
 from urllib.error import HTTPError
 
 import pytest
@@ -374,7 +375,9 @@ def test_duplicate_key_payload_error_does_not_leak_provider_controlled_secret(
     with pytest.raises(SmarketsSessionContextError) as caught:
         open_smarkets_authenticated_session(secret)
 
+    rendered = "".join(traceback.format_exception(caught.value))
     assert secret not in str(caught.value)
+    assert secret not in rendered
     assert "duplicate" not in str(caught.value).lower()
 
 
@@ -398,7 +401,9 @@ def test_orders_error_does_not_leak_secret(monkeypatch) -> None:
     with pytest.raises(SmarketsSessionContextError) as caught:
         session.acquire_orders()
 
+    rendered = "".join(traceback.format_exception(caught.value))
     assert secret not in str(caught.value)
+    assert secret not in rendered
 
 
 def test_rate_limit_is_unavailable_not_empty_success(monkeypatch) -> None:

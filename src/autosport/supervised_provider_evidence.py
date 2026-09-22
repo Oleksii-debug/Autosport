@@ -582,6 +582,7 @@ def verify_betfair_provider_state(
 def _install_verified_provider_evidence_authority() -> None:
     issued: dict[int, tuple[object, str]] = {}
     raw_verify = verify_betfair_provider_state
+    raw_verify_code = raw_verify.__code__
     sealed_effect_type = VerifiedProviderEffectEvidence
     sealed_absence_type = VerifiedProviderAbsenceEvidence
     sealed_fingerprint = _verified_provider_evidence_fingerprint
@@ -626,6 +627,8 @@ def _install_verified_provider_evidence_authority() -> None:
 
     def assert_executable_authority_intact() -> None:
         module_globals = globals()
+        if raw_verify.__code__ is not raw_verify_code:
+            raise sealed_error("provider verifier executable code changed")
         for name, (expected, expected_code) in sealed_verify_graph.items():
             current = module_globals.get(name, missing)
             if current is not expected:

@@ -53,7 +53,7 @@ def test_replay_preserves_transient_minimum_after_later_win(tmp_path) -> None:
         base,
         final,
         expected_changed_ticket_ids=frozenset({ticket.ticket_id}),
-        require_causal_timestamps=True,
+        require_complete_observed_timestamps=True,
     )
 
     assert replay.start_balance == Decimal("100")
@@ -63,8 +63,8 @@ def test_replay_preserves_transient_minimum_after_later_win(tmp_path) -> None:
         Decimal("60"),
         Decimal("120"),
     ]
-    assert replay.causal_available_at == "2026-01-01T11:00:00+00:00"
-    assert replay.causal_complete is True
+    assert replay.latest_observed_at == "2026-01-01T11:00:00+00:00"
+    assert replay.observed_timestamps_complete is True
 
 
 def test_replay_uses_materialized_partial_stake_not_requested_alias(tmp_path) -> None:
@@ -200,15 +200,15 @@ def test_missing_settlement_timestamp_is_noncausal_and_strict_mode_rejects(
         final,
         expected_changed_ticket_ids=frozenset({ticket.ticket_id}),
     )
-    assert relaxed.causal_complete is False
-    assert relaxed.causal_available_at == "2026-01-01T10:00:00+00:00"
+    assert relaxed.observed_timestamps_complete is False
+    assert relaxed.latest_observed_at == "2026-01-01T10:00:00+00:00"
 
     with pytest.raises(RiskPathEquityReplayError, match="lacks causal timestamp"):
         replay_paper_book_equity_path(
             base,
             final,
             expected_changed_ticket_ids=frozenset({ticket.ticket_id}),
-            require_causal_timestamps=True,
+            require_complete_observed_timestamps=True,
         )
 
 

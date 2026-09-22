@@ -760,7 +760,7 @@ class MarketMirrorReplayCutoffGenerationTests(unittest.TestCase):
 
                 with self.assertRaisesRegex(
                     MonotonicAuthorityRollbackError,
-                    "lacks unique independent product issuance authority",
+                    "workspace state is missing, rolled back, or unproven",
                 ):
                     self.replay(store)
                 self.assertNotEqual(
@@ -786,20 +786,23 @@ class MarketMirrorReplayCutoffGenerationTests(unittest.TestCase):
                         observed_ts="2026-09-16T19:00:00+00:00",
                     )
                 )
-                original_commit = MonotonicWorkspaceAuthority.commit
+                original_recover = MonotonicWorkspaceAuthority.recover
                 calls = 0
 
-                def fail_first_commit(authority, **kwargs):
+                def fail_after_sqlite_commit(authority, **kwargs):
                     nonlocal calls
                     calls += 1
-                    if calls == 1:
+                    # First recover: outer preflight. Second: under SQLite BEGIN
+                    # IMMEDIATE before PREPARE. Third: SQLite row is committed and
+                    # the machine authority still has the live PREPARE.
+                    if calls == 3:
                         raise RuntimeError("simulated post-SQLite authority commit crash")
-                    return original_commit(authority, **kwargs)
+                    return original_recover(authority, **kwargs)
 
                 with patch.object(
                     MonotonicWorkspaceAuthority,
-                    "commit",
-                    new=fail_first_commit,
+                    "recover",
+                    new=fail_after_sqlite_commit,
                 ):
                     with self.assertRaisesRegex(
                         RuntimeError,

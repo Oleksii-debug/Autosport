@@ -10,7 +10,7 @@ from .localization_windows_surfaces import WINDOWS_SURFACE_CONTENT_UK_UA
 
 
 DEFAULT_LOCALE = _v2.DEFAULT_LOCALE
-CATALOG_VERSION = 7
+CATALOG_VERSION = 8
 
 # Public v4 keeps one localization API while preserving the proven v2 catalog
 # as an immutable base resource. Windows shell chrome and surface-contract
@@ -18,6 +18,17 @@ CATALOG_VERSION = 7
 # UI text authorities.
 _WINDOWS_SHELL_UK_UA = MappingProxyType(
     {
+        "ui.windows.workspace_access.title": "Автоспорт — робоча тека недоступна для запису",
+        "ui.windows.workspace_access.unknown_error": "невідома помилка файлової системи",
+        "ui.windows.workspace_access.message": (
+            "Автоспорт не може підготувати робочу теку для запису.\n\n"
+            "Робоча тека: {workspace}\n"
+            "Помилка: {error_type}: {error_detail}\n\n"
+            "Вкажіть AUTOSPORT_WORKSPACE як абсолютний шлях до теки вашого користувача, "
+            "доступної для запису, і перезапустіть Автоспорт. "
+            "Права адміністратора не потрібні. "
+            "Економічний стан і стан виконання не змінено."
+        ),
         "ui.windows.manual_calculation.frame.title": "Ручні розрахунки",
         "ui.windows.manual_calculation.button.open": "Відкрити ручні розрахунки",
         "ui.windows.manual_calculation.accessibility.open.name": "Відкрити робочу поверхню ручних розрахунків",

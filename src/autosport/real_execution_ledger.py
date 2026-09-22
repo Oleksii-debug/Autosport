@@ -2102,10 +2102,6 @@ class RealExecutionLedger:
             plan_event, action = self._action_payload(
                 events, plan_id, action_id
             )
-            if self._stale(events, plan_id):
-                raise ExecutionStateError(
-                    "execution plan is stale; recompute before another action"
-                )
             fingerprint = _digest(
                 {
                     "plan_fingerprint": plan_event["payload"][
@@ -2131,6 +2127,10 @@ class RealExecutionLedger:
                     action_id,
                     fingerprint,
                     prior["payload"]["reserved_at"],
+                )
+            if self._stale(events, plan_id):
+                raise ExecutionStateError(
+                    "execution plan is stale; recompute before another action"
                 )
             for event in events:
                 if (

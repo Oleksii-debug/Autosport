@@ -187,7 +187,7 @@
 
     byId(103).value = String(state.replay_speed);
     byId(104).value = state.live_mode;
-    byId("live-status").textContent = state.live_status || "";
+    setTextIfChanged(byId("live-status"), state.live_status || "");
     renderList(byId(203), state.live_quotes);
     renderSingleColumnTable(byId("tickets-table-body"), state.tickets);
     renderList(byId(204), state.evaluation);

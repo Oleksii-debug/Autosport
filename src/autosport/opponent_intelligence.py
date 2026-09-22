@@ -398,6 +398,40 @@ class OpponentIntelligenceStore:
         store._persist()
         return store
 
+    def resolve_rating_snapshot(
+        self,
+        snapshot_id: str,
+        *,
+        as_of: str,
+    ) -> RatingSnapshot:
+        """Re-resolve one product-owned rating snapshot at a causal decision time."""
+
+        key = _sha256("snapshot_id", snapshot_id)
+        decision = _instant("as_of", as_of)
+        snapshot = self._ratings.get(key)
+        if snapshot is None:
+            raise OpponentIntelligenceError(
+                "rating snapshot is not present in the product-owned store"
+            )
+        if _instant("rating snapshot published_at", snapshot.published_at) > decision:
+            raise OpponentIntelligenceError(
+                "rating snapshot was not published by the decision time"
+            )
+        for invalidation in self._invalidations.values():
+            if (
+                invalidation.target_kind is InvalidationTarget.RATING_SNAPSHOT
+                and invalidation.target_id == key
+                and _instant(
+                    "rating snapshot invalidation detected_at",
+                    invalidation.detected_at,
+                )
+                <= decision
+            ):
+                raise OpponentIntelligenceError(
+                    "rating snapshot was invalidated by the decision time"
+                )
+        return snapshot
+
     def record_performance(
         self,
         observation: ObservedPerformance,

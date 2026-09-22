@@ -252,3 +252,21 @@ def test_strike_id_presence_does_not_mint_current_provider_identity():
         "product-issued provider evidence" in reason
         for reason in result.reasons
     )
+
+
+def test_caller_constructed_all_proven_assessment_cannot_mint_execution_authority():
+    from autosport.prophetx_order_admission import ProphetXOrderAdmissionAssessment
+
+    forged = ProphetXOrderAdmissionAssessment(
+        order_fingerprint="0" * 64,
+        instrument_identity=AdmissionState.PROVEN,
+        price_ladder=AdmissionState.PROVEN,
+        quantity_format=AdmissionState.PROVEN,
+        min_max_stake=AdmissionState.PROVEN,
+        exposure_limit=AdmissionState.PROVEN,
+        order_type_tif=AdmissionState.PROVEN,
+        batch_shape=AdmissionState.PROVEN,
+        reasons=(),
+    )
+
+    assert forged.provider_execution_admissible is False

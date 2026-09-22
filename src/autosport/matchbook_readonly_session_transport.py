@@ -164,6 +164,20 @@ def _validate_retry_after_seconds(value: object) -> float | None:
     return result
 
 
+def _provider_error_metadata(
+    error: ProviderUnavailableError,
+) -> tuple[int | None, float | None]:
+    status_value = getattr(error, "status_code", None)
+    status_code = (
+        None if status_value is None else _validate_status(status_value)
+    )
+    retry_value = getattr(error, "retry_after_seconds", None)
+    if retry_value is None:
+        retry_value = getattr(error, "retry_after", None)
+    retry_after_seconds = _validate_retry_after_seconds(retry_value)
+    return status_code, retry_after_seconds
+
+
 def _validate_session_token(value: object) -> str:
     if not isinstance(value, str):
         raise TypeError("session token must be str")
@@ -307,6 +321,20 @@ class MatchbookReadOnlySessionTransport:
 
             try:
                 response = self._read(session.session_token, path, query)
+            except ProviderUnavailableError as exc:
+                status_code, retry_after_seconds = _provider_error_metadata(exc)
+                if status_code is None:
+                    self._invalidate_generation_after_network_failure(
+                        session.generation_id
+                    )
+                    raise MatchbookReadUnavailable(
+                        "Matchbook read transport failed",
+                        retry_after_seconds=retry_after_seconds,
+                    ) from None
+                response = MatchbookReadResponse(
+                    status_code=status_code,
+                    retry_after_seconds=retry_after_seconds,
+                )
             except Exception:
                 self._invalidate_generation_after_network_failure(
                     session.generation_id
@@ -342,11 +370,15 @@ class MatchbookReadOnlySessionTransport:
                     is not RetryDisposition.REAUTH_THEN_SINGLE_READ_RETRY
                 ):
                     raise MatchbookAuthenticationUnavailable(
-                        "Matchbook lifecycle does not permit read re-authentication"
+                        "Matchbook lifecycle does not permit read re-authentication",
+                        status_code=401,
+                        retry_after_seconds=response.retry_after_seconds,
                     )
                 if recovered_after_401:
                     raise MatchbookAuthenticationUnavailable(
-                        "Matchbook authentication remained unavailable after one re-login"
+                        "Matchbook authentication remained unavailable after one re-login",
+                        status_code=401,
+                        retry_after_seconds=response.retry_after_seconds,
                     )
                 recovered_after_401 = True
                 self._ensure_active_session()
@@ -380,8 +412,13 @@ class MatchbookReadOnlySessionTransport:
 
         try:
             status = _validate_status(self._logout(session.session_token))
-        except MatchbookSessionTransportError:
-            raise
+        except ProviderUnavailableError as exc:
+            status_code, retry_after_seconds = _provider_error_metadata(exc)
+            raise MatchbookSessionTransportError(
+                "Matchbook logout transport failed",
+                status_code=status_code,
+                retry_after_seconds=retry_after_seconds,
+            ) from None
         except Exception:
             raise MatchbookSessionTransportError(
                 "Matchbook logout transport failed"
@@ -507,6 +544,19 @@ class MatchbookReadOnlySessionTransport:
 
         try:
             response = self._login()
+        except ProviderUnavailableError as exc:
+            status_code, retry_after_seconds = _provider_error_metadata(exc)
+            failure = _LoginFailure(
+                "provider",
+                status_code=status_code,
+                retry_after_seconds=retry_after_seconds,
+            )
+            self._finish_login_failure(flight_id, failure=failure)
+            raise MatchbookAuthenticationUnavailable(
+                "Matchbook login transport failed",
+                status_code=status_code,
+                retry_after_seconds=retry_after_seconds,
+            ) from None
         except Exception:
             self._finish_login_failure(
                 flight_id,

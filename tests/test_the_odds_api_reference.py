@@ -127,7 +127,10 @@ def test_reference_quotes_preserve_acquisition_and_provider_publish_times() -> N
     batch = current_provider(lambda *_: response()).read_batch()
     h2h, _, spread, _ = batch.quotes
 
-    assert batch.source_id == "the-odds-api:basketball_nba:current"
+    assert batch.source_id == (
+        "the-odds-api:basketball_nba:current:"
+        + batch.quotes[0].metadata["request_scope_sha256"]
+    )
     assert h2h.provider_event_id == "event-123"
     assert h2h.provider_market_id == "draftkings:h2h"
     assert h2h.provider_selection_id == "Home Team"
@@ -248,8 +251,10 @@ def test_two_sport_keys_remain_distinct_reference_sources() -> None:
         clock=lambda: ACQUIRED,
     ).read_batch()
 
-    assert basketball.source_id == "the-odds-api:basketball_nba:current"
-    assert soccer.source_id == "the-odds-api:soccer_epl:current"
+    assert basketball.source_id.startswith(
+        "the-odds-api:basketball_nba:current:"
+    )
+    assert soccer.source_id.startswith("the-odds-api:soccer_epl:current:")
     assert basketball.source_id != soccer.source_id
     assert soccer.quotes[0].sport == "soccer_epl"
 
@@ -574,4 +579,50 @@ def test_market_without_any_provider_last_update_fails_closed() -> None:
         match="requires provider last_update timestamp",
     ):
         provider.poll(None)
+
+def test_request_scope_is_part_of_source_identity_but_secret_and_tuple_order_are_not() -> None:
+    first = TheOddsApiReferenceProvider(
+        SECRET,
+        sport_key="basketball_nba",
+        markets=("h2h", "spreads"),
+        bookmakers=("draftkings", "fanduel"),
+    )
+    reordered = TheOddsApiReferenceProvider(
+        "another-secret-key",
+        sport_key="basketball_nba",
+        markets=("spreads", "h2h"),
+        bookmakers=("fanduel", "draftkings"),
+    )
+    narrower = TheOddsApiReferenceProvider(
+        SECRET,
+        sport_key="basketball_nba",
+        markets=("h2h", "spreads"),
+        bookmakers=("draftkings",),
+    )
+
+    assert first.source_id == reordered.source_id
+    assert first.request_scope_sha256 == reordered.request_scope_sha256
+    assert first.source_id != narrower.source_id
+    assert SECRET not in first.source_id
+    assert "another-secret-key" not in reordered.source_id
+
+
+def test_historical_cutoff_is_part_of_source_identity() -> None:
+    earlier = TheOddsApiReferenceProvider(
+        SECRET,
+        sport_key="basketball_nba",
+        markets=("h2h",),
+        regions=("us",),
+        historical_at="2026-09-22T00:55:00Z",
+    )
+    later = TheOddsApiReferenceProvider(
+        SECRET,
+        sport_key="basketball_nba",
+        markets=("h2h",),
+        regions=("us",),
+        historical_at="2026-09-22T01:00:00Z",
+    )
+
+    assert earlier.source_id != later.source_id
+    assert earlier.request_scope_sha256 != later.request_scope_sha256
 

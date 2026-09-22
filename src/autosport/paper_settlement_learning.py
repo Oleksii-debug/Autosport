@@ -934,6 +934,60 @@ class PaperSettlementLearningBridge:
                 return False
         return True
 
+    @classmethod
+    def _assert_acknowledged_settlement_consistency(
+        cls,
+        binding: dict[str, object],
+        ticket: PaperTicket,
+        resolutions: tuple[SettlementResolution, ...],
+        *,
+        at: str,
+    ) -> None:
+        """Reject later settlement truth that would invalidate an ACKED reward.
+
+        The current bridge has no canonical successor/resettlement generation yet.
+        Therefore a correction to quote truth already sealed into an acknowledged
+        learner outbox must fail closed instead of silently retaining stale reward
+        evidence. Additional evidence that agrees with sealed outcomes, or fills
+        previously unknown legs of an already-lost ticket, remains idempotent.
+        """
+
+        if not resolutions:
+            return
+        outbox = binding.get("outbox")
+        if type(outbox) is not dict:
+            raise PaperSettlementLearningBridgeError(
+                "ACKED binding lacks canonical learner outbox"
+            )
+        sealed = outbox.get("known_quote_outcomes")
+        if type(sealed) is not dict:
+            raise PaperSettlementLearningBridgeError(
+                "ACKED learner outbox lacks canonical quote outcomes"
+            )
+        leg_keys = {leg.quote_key for leg in ticket.legs}
+        for quote_key, outcome in sealed.items():
+            if (
+                type(quote_key) is not str
+                or quote_key not in leg_keys
+                or type(outcome) is not str
+                or outcome not in {"win", "loss", "void"}
+            ):
+                raise PaperSettlementLearningBridgeError(
+                    "ACKED learner outbox contains invalid quote outcomes"
+                )
+
+        collected = cls._collect_evidence(ticket, resolutions, at=at)
+        if collected is None:
+            return
+        _bundle, incoming = collected
+        for quote_key, outcome in incoming.items():
+            previous = sealed.get(quote_key)
+            if previous is not None and previous != outcome:
+                raise PaperSettlementLearningBridgeError(
+                    "later settlement evidence conflicts with acknowledged learner reward; "
+                    "successor settlement/reward generation required"
+                )
+
     @staticmethod
     def _paper_observed_evidence(
         binding: dict[str, object],
@@ -1635,6 +1689,14 @@ class PaperSettlementLearningBridge:
             changed = False
             for ticket_id, binding in state["bindings"].items():
                 if binding["status"] == ACKED:
+                    if resolutions:
+                        ticket = self._bound_ticket(book, binding)
+                        self._assert_acknowledged_settlement_consistency(
+                            binding,
+                            ticket,
+                            resolutions,
+                            at=at,
+                        )
                     continue
                 ticket = self._bound_ticket(book, binding)
                 if binding["status"] == BOUND:

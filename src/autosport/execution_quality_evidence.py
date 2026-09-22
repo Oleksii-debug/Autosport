@@ -3,7 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 from dataclasses import dataclass
-from decimal import Decimal, localcontext
+from decimal import Decimal, DecimalTuple, localcontext
 from enum import StrEnum
 from typing import Any
 from weakref import ReferenceType, ref
@@ -68,7 +68,7 @@ def _exact_decimal_subtract(left: Decimal, right: Decimal) -> Decimal:
     right_tuple = right.as_tuple()
     common_exponent = min(left_tuple.exponent, right_tuple.exponent)
 
-    def scaled_coefficient(value_tuple: object) -> int:
+    def scaled_coefficient(value_tuple: DecimalTuple) -> int:
         coefficient = 0
         for digit in value_tuple.digits:
             coefficient = coefficient * 10 + digit

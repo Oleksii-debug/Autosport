@@ -469,11 +469,6 @@ def _resolve_betfair_timeout_provider_state_core(
     capture_started_monotonic_ns = (
         _betfair_readback_capture_started_monotonic_ns(readback)
     )
-    elapsed_visibility_ready = _timeout_elapsed_visibility_ready(
-        ledger,
-        attempt_id,
-        capture_started_monotonic_ns,
-    )
     capture_floor = _time(
         _absence_capture_floor(readback),
         "provider order-scope capture floor",
@@ -484,11 +479,25 @@ def _resolve_betfair_timeout_provider_state_core(
     )
     if (
         capture_started is None
-        or not elapsed_visibility_ready
         or capture_started < deadline
         or observed < deadline
         or capture_floor < deadline
     ):
+        return BetfairTimeoutResolution(
+            BetfairTimeoutResolutionKind.INDETERMINATE_BEFORE_VISIBILITY_HORIZON,
+            timeout_boundary_at,
+            evidence.observed_at,
+            deadline_raw,
+            ledger_sha,
+            None,
+        )
+
+    elapsed_visibility_ready = _timeout_elapsed_visibility_ready(
+        ledger,
+        attempt_id,
+        capture_started_monotonic_ns,
+    )
+    if not elapsed_visibility_ready:
         return BetfairTimeoutResolution(
             BetfairTimeoutResolutionKind.INDETERMINATE_BEFORE_VISIBILITY_HORIZON,
             timeout_boundary_at,

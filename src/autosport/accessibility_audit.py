@@ -233,13 +233,19 @@ def summarize_description(
     if provider_trouble:
         failures.extend(f"provider trouble: {item}" for item in provider_trouble)
 
+    providers_stood_down_because = description.providers_stood_down_because
+    if providers_stood_down_because is not None:
+        providers_stood_down_because = redact_operator_text(
+            str(providers_stood_down_because)
+        )
+
     return {
         "status": "PASS" if not failures else "FAIL",
         "strategy": _enum_name(description.strategy),
         "critical_controls": [controls[key] for key in sorted(controls)],
         "failures": failures,
         "provider_trouble": provider_trouble,
-        "providers_stood_down_because": description.providers_stood_down_because,
+        "providers_stood_down_because": providers_stood_down_because,
         "evidence_scope": (
             "in-process tk-uia annotation/provider audit plus runtime Tk readonly-state audit "
             "of the packaged Windows GUI and canonical product-shell controls; not external UIA "

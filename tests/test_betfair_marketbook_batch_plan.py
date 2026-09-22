@@ -67,6 +67,8 @@ def test_open_and_closed_truth_are_separate_plan_identities():
 def test_response_shaping_request_fields_are_hash_bound():
     base = plan(3, ("EX_BEST_OFFERS",), best_prices_depth=3)
     variants = [
+        plan(3, ("EX_BEST_OFFERS",), best_prices_depth=3, virtualise=True),
+        plan(3, ("EX_BEST_OFFERS",), best_prices_depth=3, rollover_stakes=True),
         plan(3, ("EX_BEST_OFFERS",), best_prices_depth=3, order_projection="EXECUTABLE"),
         plan(3, ("EX_BEST_OFFERS",), best_prices_depth=3, match_projection="NO_ROLLUP"),
         plan(3, ("EX_BEST_OFFERS",), best_prices_depth=3, include_overall_position=True),
@@ -76,14 +78,32 @@ def test_response_shaping_request_fields_are_hash_bound():
         plan(3, ("EX_BEST_OFFERS",), best_prices_depth=3, bet_ids=("bet-1",)),
         plan(3, ("EX_BEST_OFFERS",), best_prices_depth=3, currency_code="EUR"),
         plan(3, ("EX_BEST_OFFERS",), best_prices_depth=3, locale="en"),
-        plan(3, ("EX_BEST_OFFERS",), best_prices_depth=3, rollup_model="STAKE"),
-        plan(3, ("EX_BEST_OFFERS",), best_prices_depth=3, rollup_limit=5),
-        plan(3, ("EX_BEST_OFFERS",), best_prices_depth=3, rollup_liability_threshold="10.00"),
-        plan(3, ("EX_BEST_OFFERS",), best_prices_depth=3, rollup_liability_factor=2),
+        plan(3, ("EX_BEST_OFFERS",), best_prices_depth=3, rollup_model="STAKE", rollup_limit=5),
         plan(3, ("EX_BEST_OFFERS",), best_prices_depth=3, provider_scope_id="BETFAIR:APP-A"),
         plan(3, ("EX_BEST_OFFERS",), best_prices_depth=3, policy_version="v2"),
     ]
     assert len({base.plan_id, *(item.plan_id for item in variants)}) == len(variants) + 1
+
+
+def test_best_offer_overrides_follow_provider_applicability_and_fail_closed():
+    valid = plan(2, ("EX_BEST_OFFERS",), virtualise=True, rollover_stakes=True, rollup_model="PAYOUT", rollup_limit=10)
+    assert valid.request_contract_payload["virtualise"] is True
+    assert valid.request_contract_payload["rollover_stakes"] is True
+    assert valid.request_contract_payload["ex_best_offers_overrides"] == {
+        "rollup_model": "PAYOUT", "rollup_limit": 10
+    }
+    with pytest.raises(MarketBookBatchPlanError, match="rollup_limit is required"):
+        plan(1, ("EX_BEST_OFFERS",), rollup_model="STAKE")
+    with pytest.raises(MarketBookBatchPlanError, match="ignored by Betfair"):
+        plan(1, ("EX_BEST_OFFERS",), rollup_limit=10)
+    with pytest.raises(MarketBookBatchPlanError, match="unsupported rollup_model"):
+        plan(1, ("EX_BEST_OFFERS",), rollup_model="RISK", rollup_limit=10)
+    with pytest.raises(MarketBookBatchPlanError, match="effective EX_BEST_OFFERS"):
+        plan(1, ("EX_ALL_OFFERS",), rollup_model="STAKE", rollup_limit=10)
+    with pytest.raises(MarketBookBatchPlanError, match="exchange-offers"):
+        plan(1, ("SP_TRADED",), virtualise=True)
+    with pytest.raises(MarketBookBatchPlanError, match="exchange-offers"):
+        plan(1, ("SP_TRADED",), rollover_stakes=True)
 
 
 def test_order_and_match_projection_unknown_values_fail_closed():

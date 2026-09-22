@@ -660,16 +660,20 @@ def _validate_baseline_semantics(
     if definition.kind is not BaselineKind.NO_BET_WAIT:
         return
 
-    zero_fields = (
+    # NO_BET_WAIT constrains action semantics, not the complete economic
+    # cost surface. A zero-position policy may still carry fixed/shared costs
+    # already bound by the frozen cost_model_sha256. Cost provenance and
+    # completeness remain separate authorities; this validator must not erase
+    # a canonically applicable cost merely because no execution was requested.
+    zero_action_fields = (
         ("metric_value", result.metric_value),
         ("uncertainty_low", result.uncertainty_low),
         ("uncertainty_high", result.uncertainty_high),
-        ("total_cost", result.total_cost),
     )
     if (
         result.scored_count != 0
         or result.abstention_count != result.observed_count
-        or any(_decimal(value, field) != 0 for field, value in zero_fields)
+        or any(_decimal(value, field) != 0 for field, value in zero_action_fields)
     ):
         raise ExternalValidityError(
             f"{definition.baseline_id}: no-bet-wait baseline must represent "

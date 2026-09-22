@@ -439,11 +439,16 @@ class OperatorStatusAnnouncementBroker:
                 return record
             if record.priority is AnnouncementPriority.SILENT or record.superseded_by is not None:
                 raise OperatorStatusNotPendingError("announcement is not pending delivery")
+            acknowledged_at = self._now()
+            if acknowledged_at < record.published_at:
+                raise OperatorStatusIntegrityError(
+                    "acknowledgement clock predates publication"
+                )
             self._write_state(
                 AnnouncementRecord(
                     record.sequence, record.event_id, record.idempotency_key, record.priority,
                     record.coalesce_key, record.message, record.occurred_at, record.published_at,
-                    None, self._now(), "",
+                    None, acknowledged_at, "",
                 )
             )
             self._db.execute("COMMIT")

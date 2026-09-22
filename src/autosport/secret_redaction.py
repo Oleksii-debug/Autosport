@@ -83,6 +83,16 @@ _KEY_VALUE_RE = re.compile(
     r")\s*[:=]\s*)"
     r"(?P<value>\[REDACTED\]|\"(?:\\.|[^\"\\\r\n])*\"|'(?:\\.|[^'\\\r\n])*'|[^\s,;&}\]]+)"
 )
+_SPACED_SENSITIVE_KEY_VALUE_RE = re.compile(
+    r"(?i)(?P<prefix>\b(?P<key>"
+    r"(?:x[ \t]+)?api[ \t]+key|"
+    r"application[ \t]+key|x[ \t]+application|x[ \t]+authentication|"
+    r"session[ \t]+token|access[ \t]+token|refresh[ \t]+token|"
+    r"id[ \t]+token|auth[ \t]+token|bearer[ \t]+token|"
+    r"client[ \t]+secret|secret[ \t]+access[ \t]+key|private[ \t]+key"
+    r")\s*[:=]\s*)"
+    r"(?P<value>\[REDACTED\]|\"(?:\\.|[^\"\\\r\n])*\"|'(?:\\.|[^'\\\r\n])*'|[^\s,;&}\]]+)"
+)
 _KEY_ESCAPE_RE = re.compile(
     r"\\(?:(?P<u16>u[0-9A-Fa-f]{4})|"
     r"(?P<u32>U[0-9A-Fa-f]{8})|(?P<x8>x[0-9A-Fa-f]{2}))"
@@ -208,6 +218,16 @@ def redact_operator_text(
     )
     rendered = _BEARER_RE.sub(
         lambda match: match.group("scheme") + " " + REDACTED,
+        rendered,
+    )
+
+    def redact_spaced_key_value(match: re.Match[str]) -> str:
+        if not is_sensitive_key(match.group("key")):
+            return match.group(0)
+        return match.group("prefix") + _redacted_value_literal(match.group("value"))
+
+    rendered = _SPACED_SENSITIVE_KEY_VALUE_RE.sub(
+        redact_spaced_key_value,
         rendered,
     )
 

@@ -10,6 +10,8 @@ from autosport.domain import MarketEvent, MarketType
 from autosport.reference_price_evidence import (
     ReferenceObservation,
     ReferencePriceEvidenceError,
+    ReferencePriceProtocol,
+    ReferenceTargetInclusionPolicy,
     build_reference_price_evidence,
 )
 
@@ -40,6 +42,7 @@ def _event(
         metadata={
             "price_semantics": "best_available_to_back",
             "execution_quote_verified": False,
+            "bookmaker_key": source,
         },
         sport="table_tennis",
         market_semantics_id="winner.match.v1",
@@ -47,11 +50,24 @@ def _event(
 
 
 def _build(events: tuple[MarketEvent, ...]):
+    source_ids = tuple(sorted({event.source_id for event in events}))
+    price_source_ids = tuple(
+        sorted({event.metadata["bookmaker_key"] for event in events})
+    )
+    protocol = ReferencePriceProtocol(
+        eligible_source_ids=source_ids,
+        eligible_price_source_ids=price_source_ids,
+        target_source_id="target-provider",
+        target_inclusion_policy=ReferenceTargetInclusionPolicy.EXCLUDE,
+        price_semantics="best_available_to_back",
+        max_age_seconds=30,
+        max_skew_seconds=5,
+        minimum_sources=2,
+    )
     return build_reference_price_evidence(
         events,
         decision_ts=_DECISION,
-        max_age_seconds=30,
-        max_skew_seconds=5,
+        protocol=protocol,
     )
 
 
@@ -78,6 +94,10 @@ def test_derived_statistics_and_evidence_id_are_not_caller_replaceable() -> None
 
     with pytest.raises((TypeError, ValueError)):
         replace(evidence, median_decimal_odds=Decimal("999"))
+    with pytest.raises((TypeError, ValueError)):
+        replace(evidence, lower_median_decimal_odds=Decimal("999"))
+    with pytest.raises((TypeError, ValueError)):
+        replace(evidence, upper_median_decimal_odds=Decimal("999"))
     with pytest.raises((TypeError, ValueError)):
         replace(evidence, evidence_id="f" * 64)
 
@@ -115,8 +135,12 @@ def test_valid_component_change_recomputes_statistics_and_identity() -> None:
     revised = _build((_event("provider-a", "2.0"), _event("provider-b", "2.4")))
 
     assert baseline.evidence_id != revised.evidence_id
-    assert baseline.median_decimal_odds == Decimal("2.1")
-    assert revised.median_decimal_odds == Decimal("2.2")
+    assert baseline.median_decimal_odds is None
+    assert baseline.lower_median_decimal_odds == Decimal("2.0")
+    assert baseline.upper_median_decimal_odds == Decimal("2.2")
+    assert revised.median_decimal_odds is None
+    assert revised.lower_median_decimal_odds == Decimal("2.0")
+    assert revised.upper_median_decimal_odds == Decimal("2.4")
 
 
 def test_provider_source_time_remains_the_freshness_authority() -> None:

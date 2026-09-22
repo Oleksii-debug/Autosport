@@ -182,10 +182,12 @@ class PortfolioEngine:
                     "settlement_by_quote values must be win, loss, or void"
                 )
 
+        ticket_snapshot = _snapshot_open_tickets_for_analysis(tickets)
+
         try:
             with localcontext(_PORTFOLIO_DECIMAL_CONTEXT):
                 total = Decimal("0")
-                for ticket in tickets:
+                for ticket in ticket_snapshot:
                     if ticket.status is not TicketStatus.OPEN:
                         continue
                     stake = _require_finite_decimal(

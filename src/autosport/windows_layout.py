@@ -412,7 +412,9 @@ def _show_owner_economic_dialog(app: Any) -> None:
         OWNER_ECONOMIC_DIALOG_AUTOMATION_IDS["readback"],
     )
 
-    close_dialog = _owner_economic_dialog_close_handler(app, dialog)\n\n    def add_close_button(parent: Any) -> Any:
+    close_dialog = _owner_economic_dialog_close_handler(app, dialog)
+
+    def add_close_button(parent: Any) -> Any:
         close_button = ttk.Button(
             parent,
             text=text("ui.windows.owner_authority.button.close"),

@@ -82,7 +82,28 @@ def test_back_exact_visible_capacity_boundary_is_sufficient_but_not_guaranteed()
 
     assert result.status is LiquidityEvidenceStatus.SUFFICIENT_VISIBLE_CAPACITY
     assert result.observed_qualifying_size == Decimal("7")
-    assert result.supports_requested_size is True
+    assert result.visible_capacity_numerically_sufficient is True
+    assert result.provider_snapshot_origin_proven is False
+    assert result.observation_time_proven is False
+    assert result.supports_requested_size is False
+    assert result.execution_guaranteed is False
+
+
+def test_caller_authored_huge_ladder_cannot_mint_authoritative_support() -> None:
+    result = _assess(
+        _snapshot(
+            projection=_projection(OfferProjection.EX_ALL_OFFERS),
+            levels=(LiquidityLevel(Decimal("2.0"), Decimal("1000000000")),),
+        ),
+        requested_size=Decimal("999999999"),
+    )
+
+    assert result.status is LiquidityEvidenceStatus.SUFFICIENT_VISIBLE_CAPACITY
+    assert result.observed_qualifying_size == Decimal("1000000000")
+    assert result.visible_capacity_numerically_sufficient is True
+    assert result.provider_snapshot_origin_proven is False
+    assert result.observation_time_proven is False
+    assert result.supports_requested_size is False
     assert result.execution_guaranteed is False
 
 

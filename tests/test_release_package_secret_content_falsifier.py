@@ -130,5 +130,137 @@ class ReleasePackageSecretContentFalsifierTests(unittest.TestCase):
                 )
 
 
+    def test_environment_references_are_not_embedded_credentials(self) -> None:
+        controls = (
+            b"api_key=${AUTOSPORT_API_KEY}\n",
+            b"client_secret=%CLIENT_SECRET%\n",
+            b"access_token=$ACCESS_TOKEN\n",
+            b"authorization=$env:AUTOSPORT_AUTH\n",
+            b"Authorization: Bearer ${BEARER_TOKEN}\n",
+        )
+        for payload in controls:
+            with self.subTest(payload=payload):
+                with tempfile.TemporaryDirectory() as temporary:
+                    package = self._build_candidate(
+                        Path(temporary),
+                        example_payload=payload,
+                    )
+                    result = verify_windows_package(
+                        package,
+                        expected_source_sha=self.SOURCE_SHA,
+                    )
+                    self.assertEqual(result["status"], "PASS")
+
+    def test_json_secret_assignment_is_rejected(self) -> None:
+        payload = b'{"api_key": "abcdefghijklmnopqrstuvwxyz012345"}\n'
+        with tempfile.TemporaryDirectory() as temporary:
+            package = self._build_candidate(
+                Path(temporary),
+                example_payload=payload,
+            )
+            with self.assertRaisesRegex(ValueError, "secret|credential"):
+                verify_windows_package(
+                    package,
+                    expected_source_sha=self.SOURCE_SHA,
+                )
+
+    def test_authorization_bearer_and_basic_headers_are_rejected(self) -> None:
+        cases = (
+            b"Authorization:   Bearer   abcdefghijklmnopqrstuvwxyz012345\n",
+            b"Authorization:\tBasic\tabcdefghijklmnopqrstuvwxyz012345\n",
+        )
+        for payload in cases:
+            with self.subTest(payload=payload):
+                with tempfile.TemporaryDirectory() as temporary:
+                    package = self._build_candidate(
+                        Path(temporary),
+                        example_payload=payload,
+                    )
+                    with self.assertRaisesRegex(ValueError, "secret|credential"):
+                        verify_windows_package(
+                            package,
+                            expected_source_sha=self.SOURCE_SHA,
+                        )
+
+    def test_punctuation_leading_concrete_secret_is_rejected(self) -> None:
+        payload = b"api_key=!abcdefghijklmnopqrstuvwxyz012345\n"
+        with tempfile.TemporaryDirectory() as temporary:
+            package = self._build_candidate(
+                Path(temporary),
+                example_payload=payload,
+            )
+            with self.assertRaisesRegex(ValueError, "secret|credential"):
+                verify_windows_package(
+                    package,
+                    expected_source_sha=self.SOURCE_SHA,
+                )
+
+    def test_very_long_concrete_secret_has_no_upper_length_escape(self) -> None:
+        payload = b"client_secret=" + (b"Z" * 100_000) + b"\n"
+        with tempfile.TemporaryDirectory() as temporary:
+            package = self._build_candidate(
+                Path(temporary),
+                example_payload=payload,
+            )
+            with self.assertRaisesRegex(ValueError, "secret|credential"):
+                verify_windows_package(
+                    package,
+                    expected_source_sha=self.SOURCE_SHA,
+                )
+
+    def test_key_and_value_on_different_lines_are_not_joined(self) -> None:
+        payload = b"api_key=\n" + (b"Q" * 100) + b"\n"
+        with tempfile.TemporaryDirectory() as temporary:
+            package = self._build_candidate(
+                Path(temporary),
+                example_payload=payload,
+            )
+            result = verify_windows_package(
+                package,
+                expected_source_sha=self.SOURCE_SHA,
+            )
+            self.assertEqual(result["status"], "PASS")
+
+    def test_extended_high_confidence_key_families_are_rejected(self) -> None:
+        keys = (
+            b"api_hash",
+            b"oauth_secret",
+            b"consumer_secret",
+            b"session_id",
+            b"bot_token",
+            b"cookie",
+            b"set_cookie",
+        )
+        for key in keys:
+            with self.subTest(key=key):
+                payload = key + b"=" + (b"S" * 48) + b"\n"
+                with tempfile.TemporaryDirectory() as temporary:
+                    package = self._build_candidate(
+                        Path(temporary),
+                        example_payload=payload,
+                    )
+                    with self.assertRaisesRegex(ValueError, "secret|credential"):
+                        verify_windows_package(
+                            package,
+                            expected_source_sha=self.SOURCE_SHA,
+                        )
+
+    def test_encrypted_private_key_header_is_rejected(self) -> None:
+        payload = (
+            b"-----BEGIN ENCRYPTED PRIVATE KEY-----\n"
+            b"synthetic-fixture-not-a-real-key\n"
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            package = self._build_candidate(
+                Path(temporary),
+                example_payload=payload,
+            )
+            with self.assertRaisesRegex(ValueError, "secret|credential"):
+                verify_windows_package(
+                    package,
+                    expected_source_sha=self.SOURCE_SHA,
+                )
+
+
 if __name__ == "__main__":
     unittest.main()

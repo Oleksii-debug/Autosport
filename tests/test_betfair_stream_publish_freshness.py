@@ -11,6 +11,7 @@ from autosport.betfair_stream_codec import (
     BetfairStreamApplyResult,
 )
 from autosport.betfair_stream_publish_freshness import (
+    BetfairStreamFreshnessDecision,
     BetfairStreamFreshnessPolicy,
     BetfairStreamFreshnessVerdict,
     BetfairStreamPublishFreshnessRuntime,
@@ -21,41 +22,120 @@ from autosport.betfair_stream_publish_freshness import (
 def sha(c='a'): return c * 64
 
 
-def context(*, generation=1, conflate_ms=0, subscription_id='sub-1'):
+def context(*, generation=1, conflate_ms=0, subscription_id='sub-1', provider_request_id=None):
+    if provider_request_id is None:
+        provider_request_id = 6 + generation
     return BetfairStreamSubscriptionContext(
-        authenticated_context_id='betfair-auth-context-1',
+        upstream_context_sha256=sha('b'),
         subscription_id=subscription_id,
+        provider_request_id=provider_request_id,
         subscription_generation=generation,
         criteria_sha256=sha(),
-        heartbeat_ms=5000,
-        conflate_ms=conflate_ms,
+        requested_heartbeat_ms=5000,
+        requested_conflate_ms=conflate_ms,
     )
 
 
-def image(*, market='1.A', selection=1, price=2.0, pt=1000, clk='c1', initial='i1', con=False, status=None):
+def image(
+    *,
+    market='1.A',
+    selection=1,
+    price=2.0,
+    pt=1000,
+    clk='c1',
+    initial='i1',
+    con=False,
+    status=None,
+    request_id=7,
+    provider_conflate_ms=0,
+    provider_heartbeat_ms=5000,
+):
     raw = {
-        'op': 'mcm', 'ct': 'SUB_IMAGE', 'initialClk': initial, 'clk': clk,
-        'pt': pt, 'con': con,
-        'mc': [{'id': market, 'img': True, 'rc': [{'id': selection, 'hc': 0, 'ltp': price}]}],
+        'op': 'mcm',
+        'id': request_id,
+        'ct': 'SUB_IMAGE',
+        'initialClk': initial,
+        'clk': clk,
+        'pt': pt,
+        'conflateMs': provider_conflate_ms,
+        'heartbeatMs': provider_heartbeat_ms,
+        'mc': [
+            {
+                'id': market,
+                'img': True,
+                'con': con,
+                'rc': [{'id': selection, 'hc': 0, 'ltp': price}],
+            }
+        ],
     }
-    if status is not None: raw['status'] = status
+    if status is not None:
+        raw['status'] = status
     return raw
 
 
-def delta(*, market='1.A', selection=1, price=2.1, pt=1001, clk='c2', con=False, status=None, image=False, ct=None, initial=None):
+def delta(
+    *,
+    market='1.A',
+    selection=1,
+    price=2.1,
+    pt=1001,
+    clk='c2',
+    con=False,
+    status=None,
+    image=False,
+    ct=None,
+    initial=None,
+    request_id=7,
+    provider_conflate_ms=0,
+    provider_heartbeat_ms=5000,
+):
     raw = {
-        'op': 'mcm', 'clk': clk, 'pt': pt, 'con': con,
-        'mc': [{'id': market, 'img': image, 'rc': [{'id': selection, 'hc': 0, 'ltp': price}]}],
+        'op': 'mcm',
+        'id': request_id,
+        'clk': clk,
+        'pt': pt,
+        'conflateMs': provider_conflate_ms,
+        'heartbeatMs': provider_heartbeat_ms,
+        'mc': [
+            {
+                'id': market,
+                'img': image,
+                'con': con,
+                'rc': [{'id': selection, 'hc': 0, 'ltp': price}],
+            }
+        ],
     }
-    if ct is not None: raw['ct'] = ct
-    if initial is not None: raw['initialClk'] = initial
-    if status is not None: raw['status'] = status
+    if ct is not None:
+        raw['ct'] = ct
+    if initial is not None:
+        raw['initialClk'] = initial
+    if status is not None:
+        raw['status'] = status
     return raw
 
 
-def heartbeat(*, pt=1001, clk='hb', status=None):
-    raw = {'op': 'mcm', 'ct': 'HEARTBEAT', 'initialClk': 'i1', 'clk': clk, 'pt': pt, 'mc': []}
-    if status is not None: raw['status'] = status
+def heartbeat(
+    *,
+    pt=1001,
+    clk='hb',
+    status=None,
+    request_id=7,
+    provider_conflate_ms=0,
+    provider_heartbeat_ms=5000,
+):
+    raw = {
+        'op': 'mcm',
+        'id': request_id,
+        'ct': 'HEARTBEAT',
+        'initialClk': 'i1',
+        'clk': clk,
+        'pt': pt,
+        'conflateMs': provider_conflate_ms,
+        'heartbeatMs': provider_heartbeat_ms,
+        'mc': [],
+    }
+    if status is not None:
+        raw['status'] = status
     return raw
 
 
@@ -68,8 +148,9 @@ def test_positive_provider_publish_is_issued_only_through_raw_canonical_codec_st
     issued = rt.ingest_raw(image(), received_time_ms=1001, ingested_time_ms=1002)
     assert len(issued) == 1
     d = rt.evaluate(ltp_identity(), as_of_ms=1005, policy=BetfairStreamFreshnessPolicy(10))
-    assert d.verdict is BetfairStreamFreshnessVerdict.FRESH_PROVIDER_PUBLISH
+    assert d.verdict is BetfairStreamFreshnessVerdict.AUTH_CONTEXT_UNPROVEN
     assert d.age_ms == 5
+    assert not d.decision_eligible
     # Public runtime deliberately exposes no decoded-frame/apply-result mutation seam.
     assert not hasattr(rt, 'observe')
     assert not hasattr(rt, 'ingest_result')
@@ -111,7 +192,9 @@ def test_503_invalidates_cached_positive_and_healthy_heartbeat_does_not_restore_
     rt.ingest_raw(heartbeat(pt=1002, clk='hb2'), received_time_ms=1002, ingested_time_ms=1002)
     assert rt.evaluate(ltp_identity(), as_of_ms=1002, policy=BetfairStreamFreshnessPolicy(100)).verdict is BetfairStreamFreshnessVerdict.UNKNOWN
     rt.ingest_raw(delta(pt=1003, clk='c3'), received_time_ms=1003, ingested_time_ms=1003)
-    assert rt.evaluate(ltp_identity(), as_of_ms=1003, policy=BetfairStreamFreshnessPolicy(100)).decision_eligible
+    d = rt.evaluate(ltp_identity(), as_of_ms=1003, policy=BetfairStreamFreshnessPolicy(100))
+    assert d.verdict is BetfairStreamFreshnessVerdict.AUTH_CONTEXT_UNPROVEN
+    assert not d.decision_eligible
 
 
 def test_conflated_change_supersedes_exact_record_without_minting_new_exact_age():
@@ -123,9 +206,13 @@ def test_conflated_change_supersedes_exact_record_without_minting_new_exact_age(
     assert rt.resolve(ltp_identity()) is None
 
 
-def test_delayed_180s_context_cannot_pass_60s_freshness_gate_even_with_recent_pt():
-    rt = BetfairStreamPublishFreshnessRuntime(context(conflate_ms=180_000))
-    rt.ingest_raw(image(), received_time_ms=1000, ingested_time_ms=1000)
+def test_delayed_180s_provider_timing_cannot_pass_60s_freshness_gate_even_with_recent_pt():
+    rt = BetfairStreamPublishFreshnessRuntime(context(conflate_ms=0))
+    rt.ingest_raw(
+        image(provider_conflate_ms=180_000),
+        received_time_ms=1000,
+        ingested_time_ms=1000,
+    )
     d = rt.evaluate(ltp_identity(), as_of_ms=1001, policy=BetfairStreamFreshnessPolicy(60_000))
     assert d.verdict is BetfairStreamFreshnessVerdict.UNKNOWN
     assert 'conflation' in d.reason
@@ -167,7 +254,8 @@ def test_provider_publish_receive_clock_skew_requires_explicit_bounded_policy():
     strict = rt.evaluate(ltp_identity(), as_of_ms=1002, policy=BetfairStreamFreshnessPolicy(10, 0))
     assert strict.verdict is BetfairStreamFreshnessVerdict.FUTURE
     bounded = rt.evaluate(ltp_identity(), as_of_ms=1002, policy=BetfairStreamFreshnessPolicy(10, 1))
-    assert bounded.decision_eligible
+    assert bounded.verdict is BetfairStreamFreshnessVerdict.AUTH_CONTEXT_UNPROVEN
+    assert not bounded.decision_eligible
 
 
 def test_restart_restores_exact_audit_record_but_quarantines_positive_until_resync():
@@ -181,7 +269,13 @@ def test_restart_restores_exact_audit_record_but_quarantines_positive_until_resy
     assert 'resynchronization' in d.reason
     # New canonical image re-establishes the datum rather than restart itself doing so.
     restarted.ingest_raw(image(pt=1006, clk='newc', initial='newi'), received_time_ms=1006, ingested_time_ms=1006)
-    assert restarted.evaluate(ltp_identity(), as_of_ms=1006, policy=BetfairStreamFreshnessPolicy(10)).decision_eligible
+    refreshed = restarted.evaluate(
+        ltp_identity(),
+        as_of_ms=1006,
+        policy=BetfairStreamFreshnessPolicy(10),
+    )
+    assert refreshed.verdict is BetfairStreamFreshnessVerdict.AUTH_CONTEXT_UNPROVEN
+    assert not refreshed.decision_eligible
 
 
 def test_restart_payload_tamper_is_rejected():
@@ -217,5 +311,164 @@ def test_same_provider_pt_with_different_receive_latency_has_same_publish_bounda
     assert e1.publish_time_ms == e2.publish_time_ms == 1000
     assert e1.frame_sha256 == e2.frame_sha256
     assert e1.evidence_id != e2.evidence_id
-    assert r1.evaluate(ltp_identity(), as_of_ms=1005, policy=BetfairStreamFreshnessPolicy(100)).decision_eligible
+    d1 = r1.evaluate(ltp_identity(), as_of_ms=1005, policy=BetfairStreamFreshnessPolicy(100))
+    assert d1.verdict is BetfairStreamFreshnessVerdict.AUTH_CONTEXT_UNPROVEN
+    assert not d1.decision_eligible
     assert r2.evaluate(ltp_identity(), as_of_ms=1005, policy=BetfairStreamFreshnessPolicy(100)).verdict is BetfairStreamFreshnessVerdict.UNKNOWN
+
+
+def test_missing_provider_request_id_is_rejected_before_state_mutation():
+    rt = BetfairStreamPublishFreshnessRuntime(context())
+    raw = image()
+    raw.pop('id')
+    with pytest.raises(ValueError, match='lacks provider request id'):
+        rt.ingest_raw(raw, received_time_ms=1000, ingested_time_ms=1000)
+    assert rt.resolve(ltp_identity()) is None
+
+
+def test_mismatched_provider_request_id_is_rejected_before_state_mutation():
+    rt = BetfairStreamPublishFreshnessRuntime(context())
+    with pytest.raises(ValueError, match='another subscription'):
+        rt.ingest_raw(
+            image(request_id=99),
+            received_time_ms=1000,
+            ingested_time_ms=1000,
+        )
+    assert rt.resolve(ltp_identity()) is None
+    issued = rt.ingest_raw(image(), received_time_ms=1000, ingested_time_ms=1000)
+    assert len(issued) == 1
+
+
+def test_subscription_generation_cannot_reuse_provider_request_id():
+    rt = BetfairStreamPublishFreshnessRuntime(context(generation=1, provider_request_id=7))
+    with pytest.raises(ValueError, match='new provider request id'):
+        rt.replace_subscription(
+            context(
+                generation=2,
+                subscription_id='sub-2',
+                provider_request_id=7,
+            )
+        )
+
+
+def test_delayed_message_from_retired_subscription_has_zero_effect():
+    rt = BetfairStreamPublishFreshnessRuntime(context(generation=1, provider_request_id=7))
+    rt.ingest_raw(image(request_id=7), received_time_ms=1000, ingested_time_ms=1000)
+    rt.replace_subscription(
+        context(
+            generation=2,
+            subscription_id='sub-2',
+            provider_request_id=8,
+        )
+    )
+    assert rt.resolve(ltp_identity()) is None
+    with pytest.raises(ValueError, match='another subscription'):
+        rt.ingest_raw(
+            delta(request_id=7, pt=1010, clk='late-a'),
+            received_time_ms=1010,
+            ingested_time_ms=1010,
+        )
+    assert rt.resolve(ltp_identity()) is None
+    issued = rt.ingest_raw(
+        image(request_id=8, pt=1011, clk='b1', initial='bi'),
+        received_time_ms=1011,
+        ingested_time_ms=1011,
+    )
+    assert len(issued) == 1
+    assert issued[0].provider_request_id == 8
+
+
+def test_server_reported_conflation_overrides_optimistic_requested_configuration():
+    rt = BetfairStreamPublishFreshnessRuntime(context(conflate_ms=0))
+    rec = rt.ingest_raw(
+        image(provider_conflate_ms=180_000),
+        received_time_ms=1000,
+        ingested_time_ms=1000,
+    )[0]
+    assert rec.requested_conflate_ms == 0
+    assert rec.provider_conflate_ms == 180_000
+    d = rt.evaluate(
+        ltp_identity(),
+        as_of_ms=1001,
+        policy=BetfairStreamFreshnessPolicy(60_000),
+    )
+    assert d.verdict is BetfairStreamFreshnessVerdict.UNKNOWN
+    assert 'provider-reported conflation' in d.reason
+
+
+def test_missing_provider_reported_timing_cannot_mint_current_freshness():
+    rt = BetfairStreamPublishFreshnessRuntime(context())
+    rec = rt.ingest_raw(
+        image(provider_conflate_ms=None, provider_heartbeat_ms=None),
+        received_time_ms=1000,
+        ingested_time_ms=1000,
+    )[0]
+    assert rec.provider_conflate_ms is None
+    assert rec.provider_heartbeat_ms is None
+    d = rt.evaluate(
+        ltp_identity(),
+        as_of_ms=1001,
+        policy=BetfairStreamFreshnessPolicy(100),
+    )
+    assert d.verdict is BetfairStreamFreshnessVerdict.UNKNOWN
+    assert 'provider-reported stream timing is unavailable' in d.reason
+
+
+def test_provider_timing_change_invalidates_prior_datum_until_republished():
+    rt = BetfairStreamPublishFreshnessRuntime(context())
+    rt.ingest_raw(image(), received_time_ms=1000, ingested_time_ms=1000)
+    assert rt.resolve(ltp_identity()) is not None
+    rt.ingest_raw(
+        heartbeat(pt=1001, clk='timing-change', provider_conflate_ms=1000),
+        received_time_ms=1001,
+        ingested_time_ms=1001,
+    )
+    assert rt.resolve(ltp_identity()) is None
+    assert rt.evaluate(
+        ltp_identity(),
+        as_of_ms=1001,
+        policy=BetfairStreamFreshnessPolicy(10_000),
+    ).verdict is BetfairStreamFreshnessVerdict.UNKNOWN
+
+
+def test_plaintext_upstream_auth_label_is_rejected_as_persisted_provenance():
+    with pytest.raises(ValueError, match='upstream_context_sha256'):
+        BetfairStreamSubscriptionContext(
+            upstream_context_sha256='betfair-prod',
+            subscription_id='sub-1',
+            provider_request_id=7,
+            subscription_generation=1,
+            criteria_sha256=sha(),
+            requested_heartbeat_ms=5000,
+            requested_conflate_ms=0,
+        )
+
+
+def test_direct_fresh_decision_dto_is_never_decision_eligible_without_origin_authority():
+    d = BetfairStreamFreshnessDecision(
+        verdict=BetfairStreamFreshnessVerdict.FRESH_PROVIDER_PUBLISH,
+        reason='caller-created',
+        evidence_id=sha('c'),
+        age_ms=0,
+        policy_id=sha('d'),
+        context_id=sha('e'),
+    )
+    assert not d.decision_eligible
+
+
+def test_persisted_context_uses_secret_free_digest_and_distinguishes_requested_timing():
+    rt = BetfairStreamPublishFreshnessRuntime(context(conflate_ms=1234))
+    rt.ingest_raw(
+        image(provider_conflate_ms=4321),
+        received_time_ms=1000,
+        ingested_time_ms=1000,
+    )
+    payload = rt.to_dict()
+    ctx = payload['context']
+    assert ctx['upstream_context_sha256'] == sha('b')
+    assert ctx['requested_conflate_ms'] == 1234
+    assert 'authenticated_context_id' not in ctx
+    assert 'conflate_ms' not in ctx
+    row = payload['records'][0]
+    assert row['provider_conflate_ms'] == 4321
+    assert row['requested_conflate_ms'] == 1234

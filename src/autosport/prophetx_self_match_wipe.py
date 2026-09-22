@@ -6,8 +6,9 @@ an account-wide writer lock.  Its two responsibilities are:
 
 * screen a current own-order snapshot for known self-match conflicts without ever turning
   "none observed" into a positive safety guarantee; and
-* project provider-observed ``wiped`` terminal states into deterministic, idempotent
-  release effects while keeping the wipe cause unresolved unless the provider proves it.
+* validate caller-shaped ``wiped`` terminal observations structurally while refusing
+  economic release authority until canonical provider-origin order evidence can be
+  mechanically re-resolved.
 
 ProphetX uses ``wiped`` for more than self-match prevention, so this module never labels a
 wipe SELF_MATCH from status/correlation alone.
@@ -336,6 +337,13 @@ class TrackedOrder:
 
 @dataclass(frozen=True, slots=True)
 class WipeObservation:
+    """Non-authoritative structural shape for a claimed provider wipe.
+
+    Construction, copying, reconstruction, or a matching digest never proves provider
+    origin.  Until the canonical #1634 order-readback authority is mechanically bound,
+    this type may only tighten validation/readback requirements.
+    """
+
     evidence_id: str
     environment: str
     account_id: str
@@ -404,6 +412,12 @@ class WipeIncident:
 
 @dataclass(frozen=True, slots=True)
 class WipeReleaseEffect:
+    """Reserved positive projection for a future canonical provider-origin binding.
+
+    The current reconciliation function never issues this public shape from
+    WipeObservation alone.
+    """
+
     canonical_order_id: str
     provider_order_id: str
     filled_quantity: Decimal
@@ -416,12 +430,26 @@ class WipeReleaseEffect:
 class WipeReconciliation:
     effects: tuple[WipeReleaseEffect, ...]
     required_readback_provider_order_ids: tuple[str, ...]
+    unverified_observation_evidence_ids: tuple[str, ...]
+    unverified_observed_provider_order_ids: tuple[str, ...]
     cause: WipeCause
     projection_id: str
 
     @property
+    def provider_origin_verified(self) -> bool:
+        """Caller-shaped observations never prove canonical provider origin."""
+        return False
+
+    @property
+    def economic_release_authority(self) -> bool:
+        """No capital-release authority exists before #1634 origin re-resolution."""
+        return False
+
+    @property
     def total_released_quantity(self) -> Decimal:
-        return sum((effect.released_quantity for effect in self.effects), Decimal("0"))
+        raise ProphetXSelfMatchError(
+            "authoritative released quantity unavailable without canonical provider-origin evidence"
+        )
 
     @property
     def requires_readback(self) -> bool:
@@ -505,34 +533,15 @@ def reconcile_wipes(
                 raise ProphetXSelfMatchConflict("conflicting terminal wipe evidence")
         final_by_order[observation.provider_order_id] = observation
 
-    effects: list[WipeReleaseEffect] = []
-    for provider_order_id in sorted(final_by_order):
-        observation = final_by_order[provider_order_id]
-        tracked = tracked_by_id[provider_order_id]
-        released = tracked.order_quantity - observation.cumulative_filled
-        effect_payload = {
-            "environment": incident.environment,
-            "account_id": incident.account_id,
-            "canonical_order_id": tracked.canonical_order_id,
-            "provider_order_id": provider_order_id,
-            "provider_status": "wiped",
-            "filled_quantity": _dtext(observation.cumulative_filled),
-            "released_quantity": _dtext(released),
-            "cause": WipeCause.WIPED_CAUSE_UNRESOLVED.value,
-        }
-        effects.append(
-            WipeReleaseEffect(
-                canonical_order_id=tracked.canonical_order_id,
-                provider_order_id=provider_order_id,
-                filled_quantity=observation.cumulative_filled,
-                released_quantity=released,
-                cause=WipeCause.WIPED_CAUSE_UNRESOLVED,
-                effect_id=_digest(effect_payload),
-            )
-        )
-
-    observed_ids = set(final_by_order)
-    required = tuple(sorted(expected_ids - observed_ids))
+    # WipeObservation is a public structural DTO.  It cannot satisfy the provider-origin
+    # prerequisite named by #1663/#1634, so it cannot issue an economic release effect.
+    # Preserve its structural contradictions for fail-closed validation, but require
+    # canonical provider-origin readback for every incident order before any release can
+    # be projected by a future composition layer.
+    effects: tuple[WipeReleaseEffect, ...] = ()
+    unverified_evidence_ids = tuple(sorted(by_evidence_id))
+    unverified_order_ids = tuple(sorted(final_by_order))
+    required = tuple(sorted(expected_ids))
     projection_payload = {
         "incident": {
             "environment": incident.environment,
@@ -542,23 +551,19 @@ def reconcile_wipes(
                 incident.relevant_resting_provider_order_ids
             ),
         },
-        "effects": [
-            {
-                "canonical_order_id": effect.canonical_order_id,
-                "provider_order_id": effect.provider_order_id,
-                "filled_quantity": _dtext(effect.filled_quantity),
-                "released_quantity": _dtext(effect.released_quantity),
-                "cause": effect.cause.value,
-                "effect_id": effect.effect_id,
-            }
-            for effect in effects
-        ],
+        "effects": [],
         "required_readback_provider_order_ids": list(required),
+        "unverified_observation_evidence_ids": list(unverified_evidence_ids),
+        "unverified_observed_provider_order_ids": list(unverified_order_ids),
+        "provider_origin_verified": False,
+        "economic_release_authority": False,
         "cause": WipeCause.WIPED_CAUSE_UNRESOLVED.value,
     }
     return WipeReconciliation(
-        effects=tuple(effects),
+        effects=effects,
         required_readback_provider_order_ids=required,
+        unverified_observation_evidence_ids=unverified_evidence_ids,
+        unverified_observed_provider_order_ids=unverified_order_ids,
         cause=WipeCause.WIPED_CAUSE_UNRESOLVED,
         projection_id=_digest(projection_payload),
     )

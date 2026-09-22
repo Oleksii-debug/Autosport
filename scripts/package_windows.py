@@ -341,7 +341,17 @@ def _write_exact_git_blob(
         dir=destination.parent,
     )
     try:
-        with os.fdopen(fd, "wb") as handle:
+        try:
+            handle = os.fdopen(fd, "wb")
+        except BaseException as exc:
+            try:
+                os.close(fd)
+            except OSError as cleanup_error:
+                exc.add_note(
+                    f"exact Git blob temporary descriptor cleanup also failed: {cleanup_error}"
+                )
+            raise
+        with handle:
             handle.write(data)
             handle.flush()
             os.fsync(handle.fileno())

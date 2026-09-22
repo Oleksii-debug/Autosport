@@ -354,3 +354,41 @@ def test_reopen_rejects_missing_performance_index(tmp_path):
 def test_open_refuses_missing_ledger(tmp_path):
     with pytest.raises(RewardCorrectionError, match="does not exist"):
         RewardCorrectionLedger.open(tmp_path / "missing.sqlite3")
+
+
+def test_reopen_rejects_hash_valid_second_lineage_reusing_reward_identity(tmp_path):
+    path = tmp_path / "corrections.sqlite3"
+    reward0 = ref("learning.reward", "reward-0")
+    reward1 = ref("learning.reward", "reward-1")
+    with RewardCorrectionLedger.create(path) as ledger:
+        ledger.append_correction(correction(superseded=reward0, corrected=reward1))
+
+    forged = RewardCorrectionAssertion(
+        action_id=sha("forged-action"),
+        transition_id=sha("forged-transition"),
+        superseded_reward=reward1,
+        corrected_reward=ref("learning.reward", "forged-new"),
+        corrected_reward_value=Decimal("4"),
+        corrected_available_at="2026-09-23T02:00:00Z",
+        correction_source=ref("settlement.authority", "forged-source"),
+        generation=1,
+    )
+    raw = sqlite3.connect(path)
+    raw.execute(
+        "INSERT INTO corrections VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        (
+            forged.correction_id, forged.action_id, forged.transition_id, forged.generation,
+            forged.predecessor_correction_id,
+            forged.superseded_reward.authority_family, forged.superseded_reward.evidence_id,
+            forged.superseded_reward.evidence_sha256,
+            forged.corrected_reward.authority_family, forged.corrected_reward.evidence_id,
+            forged.corrected_reward.evidence_sha256, str(forged.corrected_reward_value),
+            forged.corrected_available_at, forged.correction_source.authority_family,
+            forged.correction_source.evidence_id, forged.correction_source.evidence_sha256,
+            forged.correction_id,
+        ),
+    )
+    raw.commit()
+    raw.close()
+    with pytest.raises(RewardCorrectionError, match="reuses durable reward identity"):
+        RewardCorrectionLedger.open(path)

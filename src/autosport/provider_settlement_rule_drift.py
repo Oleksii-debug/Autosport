@@ -18,7 +18,7 @@ class ProviderSettlementRuleDriftError(ValueError):
 
 
 class RulesetDisposition(str, Enum):
-    USE_BOUND_SNAPSHOT = "USE_BOUND_SNAPSHOT"
+    BOUND_SNAPSHOT_STRUCTURALLY_VALID = "BOUND_SNAPSHOT_STRUCTURALLY_VALID"
     QUARANTINE = "QUARANTINE"
 
 
@@ -336,7 +336,7 @@ def assess_settlement_rule_drift(
 
     return ProviderSettlementRuleDriftAssessment(
         assertion_id=assertion.assertion_id,
-        disposition=RulesetDisposition.USE_BOUND_SNAPSHOT,
+        disposition=RulesetDisposition.BOUND_SNAPSHOT_STRUCTURALLY_VALID,
         latest_signal=latest_signal,
         quarantine_reason=QuarantineReason.NONE,
         bound_rulebook_id=bound_rulebook.rulebook_id,

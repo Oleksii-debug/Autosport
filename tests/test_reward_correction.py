@@ -291,6 +291,56 @@ def test_validation_rejects_noncanonical_inputs():
         DependencyArtifact(ref("artifact", "x"), (dep_a, dep_b))
 
 
+def test_dependency_graph_rejects_cycle_created_by_late_registration(tmp_path):
+    path = tmp_path / "corrections.sqlite3"
+    a = ref("learning.policy", "a")
+    b = ref("learning.policy", "b")
+    with RewardCorrectionLedger.create(path) as ledger:
+        ledger.append_artifact(DependencyArtifact(a, (b,)))
+        with pytest.raises(RewardCorrectionError, match="acyclic"):
+            ledger.append_artifact(DependencyArtifact(b, (a,)))
+
+
+def test_reopen_rejects_correction_metadata_rebinding(tmp_path):
+    path = tmp_path / "corrections.sqlite3"
+    with RewardCorrectionLedger.create(path) as ledger:
+        ledger.append_correction(
+            correction(
+                superseded=ref("learning.reward", "reward-0"),
+                corrected=ref("learning.reward", "reward-1"),
+            )
+        )
+    raw = sqlite3.connect(path)
+    raw.execute("DROP TRIGGER corrections_no_update")
+    raw.execute("UPDATE corrections SET action_id=?", (sha("forged-action"),))
+    raw.execute(
+        "CREATE TRIGGER corrections_no_update BEFORE UPDATE ON corrections "
+        "BEGIN SELECT RAISE(ABORT,'reward corrections are immutable'); END"
+    )
+    raw.commit()
+    raw.close()
+    with pytest.raises(RewardCorrectionError, match="row metadata"):
+        RewardCorrectionLedger.open(path)
+
+
+def test_reopen_rejects_orphan_invalidation_row(tmp_path):
+    path = tmp_path / "corrections.sqlite3"
+    reward0 = ref("learning.reward", "reward-0")
+    node = artifact("learning.policy", "policy-1", reward0)
+    with RewardCorrectionLedger.create(path) as ledger:
+        ledger.append_artifact(node)
+    raw = sqlite3.connect(path)
+    raw.execute(
+        "INSERT INTO invalidations VALUES (?,?,?,?)",
+        (sha("missing-correction"), node.artifact.authority_family,
+         node.artifact.evidence_id, node.artifact.evidence_sha256),
+    )
+    raw.commit()
+    raw.close()
+    with pytest.raises(RewardCorrectionError, match="orphan"):
+        RewardCorrectionLedger.open(path)
+
+
 def test_open_refuses_missing_ledger(tmp_path):
     with pytest.raises(RewardCorrectionError, match="does not exist"):
         RewardCorrectionLedger.open(tmp_path / "missing.sqlite3")

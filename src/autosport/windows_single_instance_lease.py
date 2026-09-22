@@ -97,7 +97,8 @@ def _create_exclusive_windows_handle(path: Path) -> int:
     )
 
     if isinstance(handle, int):
-        raw_handle = handle
+        # Normalize a possible signed INVALID_HANDLE_VALUE to pointer width.
+        raw_handle = ctypes.c_void_p(handle).value
     elif handle is None:
         raw_handle = None
     else:

@@ -82,6 +82,35 @@ def _no_provider_io(_updates: object) -> None:
     """
 
 
+def _force_redecision_for_changed_runtime_context(
+    decision_loop: PersistentLiveDecisionLoop,
+) -> None:
+    """Prevent a clean-restart shortcut from hiding a changed durable PaperBook.
+
+    PersistentLiveDecisionLoop intentionally treats an unchanged market snapshot as a
+    clean restart. Product composition has one additional causal input: settlement can
+    change the durable PaperBook between product cycles without changing quote bytes.
+    For a previously COMMITTED decision only, compare the canonical runtime-context
+    digest (which binds PaperBook, strategy, goal/risk and quote-age authority). When
+    it changed, reuse the already-restored dependency registry to request one complete
+    local re-decision without provider polling.
+
+    Unfinished PENDING/APPEND_PENDING progress is never rewritten here; canonical live
+    loop recovery remains its sole authority.
+    """
+
+    progress = decision_loop._progress
+    if progress is None or progress.phase != "committed":
+        return
+    if progress.decision_context_sha256 == decision_loop._decision_context_sha256():
+        return
+
+    decision_loop._pending_affected = {
+        input_id: None for input_id in decision_loop.dependencies.input_ids
+    }
+    decision_loop._needs_cache_rebuild = False
+
+
 def run_product_paper_decision_cycle(
     *,
     workspace: str | Path,
@@ -162,4 +191,5 @@ def run_product_paper_decision_cycle(
         clock=clock,
         observation_runner=_no_provider_io,
     ) as decision_loop:
+        _force_redecision_for_changed_runtime_context(decision_loop)
         return decision_loop.run_cycle()

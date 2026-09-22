@@ -11,6 +11,8 @@ EXTERNAL_API_NS: Final = "http://www.GlobalBettingExchange.com/ExternalAPI/"
 SOAP11_NS: Final = "http://schemas.xmlsoap.org/soap/envelope/"
 SOAP12_NS: Final = "http://www.w3.org/2003/05/soap-envelope"
 XSI_NS: Final = "http://www.w3.org/2001/XMLSchema-instance"
+WSSE_NS: Final = "http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-wssecurity-secext-1.0.xsd"
+WSU_NS: Final = "http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-wssecurity-utility-1.0.xsd"
 _MAX_XML_BYTES: Final = 4 * 1024 * 1024
 _MAX_TEXT: Final = 512
 
@@ -97,6 +99,8 @@ class BetdaqGetPricesWireResponse:
     return_code: int
     return_description: str
     call_id: str | None
+    provider_created_at: datetime | None
+    provider_created_at_text: str | None
     markets: tuple[BetdaqMarketPrices, ...]
 
 
@@ -191,6 +195,35 @@ def _one_child(element: ET.Element, tag: str, field: str) -> ET.Element:
     if len(matches) != 1:
         raise BetdaqSoapProtocolError(f"{field} must occur exactly once")
     return matches[0]
+
+
+def _provider_created_at(
+    root: ET.Element,
+    soap_ns: str,
+) -> tuple[datetime | None, str | None]:
+    headers = _children_exact(root, _tag(soap_ns, "Header"))
+    if len(headers) > 1:
+        raise BetdaqSoapProtocolError("SOAP Header must occur at most once")
+    if not headers:
+        return None, None
+
+    securities = _children_exact(headers[0], _tag(WSSE_NS, "Security"))
+    if not securities:
+        return None, None
+    if len(securities) != 1:
+        raise BetdaqSoapProtocolError("WS-Security node must occur at most once")
+
+    timestamps = _children_exact(securities[0], _tag(WSU_NS, "Timestamp"))
+    if not timestamps:
+        return None, None
+    if len(timestamps) != 1:
+        raise BetdaqSoapProtocolError("WS-Security Timestamp must occur at most once")
+    created = _children_exact(timestamps[0], _tag(WSU_NS, "Created"))
+    if len(created) != 1 or created[0].text is None:
+        raise BetdaqSoapProtocolError(
+            "WS-Security Timestamp requires exactly one Created value"
+        )
+    return _timestamp(created[0].text, "WS-Security Created")
 
 
 def _soap_fault(body: ET.Element, soap_ns: str) -> BetdaqSoapFaultError | None:
@@ -441,6 +474,10 @@ def parse_get_prices_response(
     else:
         raise BetdaqSoapProtocolError("unsupported SOAP envelope namespace")
 
+    provider_created_at, provider_created_at_text = _provider_created_at(
+        root,
+        soap_ns,
+    )
     body = _one_child(root, _tag(soap_ns, "Body"), "SOAP Body")
     fault = _soap_fault(body, soap_ns)
     if fault is not None:
@@ -499,5 +536,7 @@ def parse_get_prices_response(
         return_code=return_code,
         return_description=description,
         call_id=call_id,
+        provider_created_at=provider_created_at,
+        provider_created_at_text=provider_created_at_text,
         markets=tuple(markets),
     )

@@ -480,6 +480,38 @@ def test_identical_balance_observation_repeated_in_later_snapshot_is_not_a_new_d
     assert state.unexplained_balance_delta is None
 
 
+def test_identical_open_position_observation_can_carry_forward(
+    tmp_path,
+) -> None:
+    store = BookmakerAccountReconciliationStore(tmp_path / "account.json")
+    position = _position(
+        BookmakerPositionState.OPEN,
+        _T1,
+        observation_id="position-same",
+    )
+    assert store.append_snapshot(
+        _snapshot(
+            _T1,
+            capabilities=(BookmakerCapability.OPEN_POSITIONS_READ,),
+            open_positions=(position,),
+        )
+    )
+    assert store.append_snapshot(
+        _snapshot(
+            _T2,
+            capabilities=(BookmakerCapability.OPEN_POSITIONS_READ,),
+            open_positions=(position,),
+        )
+    )
+
+    state = store.latest_state()
+    assert state is not None
+    assert state.position_state("pos-1") is ReconciledPositionState.OPEN
+    [reconciled] = state.positions
+    assert reconciled.last_observation_id == position.observation_id
+    assert reconciled.last_observed_at == position.observed_at
+
+
 def test_snapshot_fingerprint_is_independent_of_decimal_context() -> None:
     amount = "1234567890123456789012345678.9012345678901234567891"
     snapshot = _snapshot(

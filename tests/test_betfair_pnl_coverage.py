@@ -262,6 +262,24 @@ def test_complete_mixed_open_and_closed_scope_is_accepted() -> None:
     assert witness.closed_market_ids == ("1.closed",)
 
 
+def test_closed_non_odds_market_uses_cleared_orders_authority() -> None:
+    markets = (
+        market("1.closed-line", status=MarketStatus.CLOSED, betting_type="LINE"),
+    )
+    witness = build_coverage_witness(
+        scope=scope(),
+        markets=markets,
+        open_batches=(),
+        closed_pages=(
+            closed_page(("1.closed-line",), ("1.closed-line",)),
+        ),
+    )
+
+    assert_complete(witness, scope=scope(), markets=markets)
+    assert witness.closed_market_ids == ("1.closed-line",)
+    assert witness.unsupported_market_ids == ()
+
+
 @pytest.mark.parametrize(
     ("status", "betting_type"),
     [

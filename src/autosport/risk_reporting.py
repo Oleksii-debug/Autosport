@@ -19,7 +19,7 @@ from .paper import PaperBook
 from .risk import PaperRiskPolicy
 
 
-RISK_REPORT_SCHEMA = "autosport.paper-risk-report.v2"
+RISK_REPORT_SCHEMA = "autosport.paper-risk-report.v3"
 RISK_OF_RUIN_STATUS_UNKNOWN = "UNKNOWN_REQUIRES_PROVENANCE_BOUND_EVIDENCE"
 _INITIAL_EQUITY_POINT_ID = "paper-initial-bankroll"
 
@@ -27,6 +27,7 @@ _INITIAL_EQUITY_POINT_ID = "paper-initial-bankroll"
 @dataclass(frozen=True, slots=True)
 class _HistoricalMaxDrawdown:
     amount: Decimal
+    fraction: Decimal | None
     peak_id: str | None
     trough_id: str | None
     current_equity: Decimal
@@ -62,6 +63,7 @@ class PaperRiskReport:
     turnover: Decimal
     current_drawdown_amount: Decimal
     historical_max_drawdown_amount: Decimal
+    historical_max_drawdown_fraction: Decimal | None
     historical_max_drawdown_peak_id: str | None
     historical_max_drawdown_trough_id: str | None
     drawdown_loss_room: Decimal
@@ -92,6 +94,9 @@ def _historical_max_drawdown(book: PaperBook) -> _HistoricalMaxDrawdown | None:
         running_peak = book.initial_bankroll
         running_peak_id = _INITIAL_EQUITY_POINT_ID
         maximum = Decimal("0")
+        maximum_fraction: Decimal | None = (
+            Decimal("0") if running_peak > 0 else None
+        )
         maximum_peak_id: str | None = None
         maximum_trough_id: str | None = None
 
@@ -138,6 +143,11 @@ def _historical_max_drawdown(book: PaperBook) -> _HistoricalMaxDrawdown | None:
                 return None
             if drawdown > maximum:
                 maximum = drawdown
+                if running_peak > 0:
+                    with localcontext(PaperRiskPolicy._decimal_context()):
+                        maximum_fraction = drawdown / running_peak
+                else:
+                    maximum_fraction = None
                 maximum_peak_id = running_peak_id
                 maximum_trough_id = point_id
 
@@ -170,6 +180,12 @@ def _historical_max_drawdown(book: PaperBook) -> _HistoricalMaxDrawdown | None:
         return None
     if running_peak <= 0 or current_equity > running_peak:
         return None
+    if maximum_fraction is not None and (
+        not isinstance(maximum_fraction, Decimal)
+        or not maximum_fraction.is_finite()
+        or maximum_fraction < Decimal("0")
+    ):
+        return None
     if maximum == 0 and (
         maximum_peak_id is not None or maximum_trough_id is not None
     ):
@@ -181,6 +197,7 @@ def _historical_max_drawdown(book: PaperBook) -> _HistoricalMaxDrawdown | None:
 
     return _HistoricalMaxDrawdown(
         amount=maximum,
+        fraction=maximum_fraction,
         peak_id=maximum_peak_id,
         trough_id=maximum_trough_id,
         current_equity=current_equity,
@@ -253,6 +270,7 @@ def build_paper_risk_report(
         turnover=metrics.turnover,
         current_drawdown_amount=current_drawdown_amount,
         historical_max_drawdown_amount=maximum_drawdown.amount,
+        historical_max_drawdown_fraction=maximum_drawdown.fraction,
         historical_max_drawdown_peak_id=maximum_drawdown.peak_id,
         historical_max_drawdown_trough_id=maximum_drawdown.trough_id,
         drawdown_loss_room=drawdown_loss_room,

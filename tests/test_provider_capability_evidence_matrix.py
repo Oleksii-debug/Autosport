@@ -18,6 +18,7 @@ from autosport.provider_capability_evidence_matrix import (
     ProviderCapabilityEvidenceMatrixError,
     ProviderCapabilityTruthGrade,
     build_provider_capability_evidence_matrix,
+    issue_provider_capability_evidence,
     validate_capability_matrix_successor,
 )
 
@@ -66,7 +67,7 @@ def evidence(p, cap, grade, *, i=None, observed=T2, expires=T4, quality=None, sp
         ProviderCapabilityTruthGrade.REVOKED_OR_UNAVAILABLE,
     }:
         expires = None
-    return ProviderCapabilityEvidence(
+    return issue_provider_capability_evidence(
         capability=cap,
         profile_state=p.state_of(cap),
         grade=grade,
@@ -230,6 +231,25 @@ def test_evidence_cannot_transfer_to_other_account_or_adapter_version():
     p2 = profile(account="acct-b", adapter_version="2")
     with pytest.raises(ProviderCapabilityEvidenceMatrixError, match="profile binding mismatch"):
         matrix(p=p2, facts=(f,))
+
+
+def test_caller_constructed_or_copied_positive_fact_cannot_mint_matrix_authority():
+    p = profile()
+    issued = evidence(
+        p,
+        BookmakerCapability.BALANCE_READ,
+        ProviderCapabilityTruthGrade.AUTHENTICATED_READ_PROVEN,
+    )
+    direct = ProviderCapabilityEvidence(**{
+        field.name: getattr(issued, field.name)
+        for field in fields(ProviderCapabilityEvidence)
+    })
+    copied = replace(issued)
+    assert direct.evidence_id == issued.evidence_id == copied.evidence_id
+    for forged in (direct, copied):
+        with pytest.raises(ProviderCapabilityEvidenceMatrixError, match="product-issued exact object"):
+            matrix(p=p, facts=(forged,))
+
 
 
 def test_matrix_is_complete_and_builder_rejects_duplicate_capability():

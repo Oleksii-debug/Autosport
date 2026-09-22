@@ -1,0 +1,60 @@
+name: Protected tree gate
+
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened, ready_for_review]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: protected-tree-gate-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  gate:
+    runs-on: ubuntu-latest
+    env:
+      AUTOSPORT_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+      AUTOSPORT_CANDIDATE_SHA: ${{ github.event.pull_request.head.sha }}
+      AUTOSPORT_PR_NUMBER: ${{ github.event.pull_request.number }}
+    steps:
+      - name: Checkout exact trusted base only
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ env.AUTOSPORT_BASE_SHA }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Set up trusted Python
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: '3.12'
+      - name: Fetch exact PR head as Git objects only
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ ! "$AUTOSPORT_BASE_SHA" =~ ^[0-9a-f]{40}$ ]]; then exit 2; fi
+          if [[ ! "$AUTOSPORT_CANDIDATE_SHA" =~ ^[0-9a-f]{40}$ ]]; then exit 2; fi
+          if [[ ! "$AUTOSPORT_PR_NUMBER" =~ ^[1-9][0-9]*$ ]]; then exit 2; fi
+          gate_ref="refs/autosport-gate/pr-${AUTOSPORT_PR_NUMBER}"
+          git fetch --no-tags --no-recurse-submodules --depth=1 origin \
+            "+refs/pull/${AUTOSPORT_PR_NUMBER}/head:${gate_ref}"
+          fetched="$(git rev-parse --verify "${gate_ref}^{commit}")"
+          test "$fetched" = "$AUTOSPORT_CANDIDATE_SHA"
+          test "$(git rev-parse --verify HEAD)" = "$AUTOSPORT_BASE_SHA"
+      - name: Evaluate base-trusted protected tree
+        shell: bash
+        run: |
+          set -euo pipefail
+          python scripts/verify_protected_tree_gate.py \
+            --base-sha "$AUTOSPORT_BASE_SHA" \
+            --candidate-sha "$AUTOSPORT_CANDIDATE_SHA" \
+            --pr-number "$AUTOSPORT_PR_NUMBER" \
+            --evidence-output protected-tree-gate-evidence.json
+      - name: Upload exact Gate-A evidence
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: protected-tree-gate-${{ github.event.pull_request.number }}-${{ github.event.pull_request.head.sha }}
+          path: protected-tree-gate-evidence.json
+          if-no-files-found: error
+          retention-days: 14

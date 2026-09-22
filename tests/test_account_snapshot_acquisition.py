@@ -107,7 +107,10 @@ def test_caller_cannot_swap_canonical_client_or_store_after_initialization(
     acquirer._client = object()
     acquirer._store = object()
 
-    acquired = acquirer.acquire(_balance_capabilities())
+    acquired = acquirer.acquire(
+        _balance_capabilities(),
+        acquisition_id="canonical-hidden-state",
+    )
     assert len(calls) == 2
     assert acquired.receipt.source_authority_proven is True
     acquirer.verify(acquired.snapshot, acquired.receipt)
@@ -136,7 +139,10 @@ def test_class_level_snapshot_reader_rebinding_cannot_mint_authority(
         shadowed_read,
     )
 
-    acquired = acquirer.acquire(_balance_capabilities())
+    acquired = acquirer.acquire(
+        _balance_capabilities(),
+        acquisition_id="class-rebinding",
+    )
 
     assert len(calls) == 2
     assert acquired.snapshot.balance is not None
@@ -151,7 +157,10 @@ def test_product_owned_read_persists_restart_verifiable_receipt_without_secrets(
     database = tmp_path / "state" / "account-snapshots.sqlite3"
     acquirer = BetfairAccountSnapshotAcquirer(database, _credentials())
 
-    acquired = acquirer.acquire(_balance_capabilities())
+    acquired = acquirer.acquire(
+        _balance_capabilities(),
+        acquisition_id="restart-receipt",
+    )
 
     assert acquired.snapshot.balance is not None
     assert acquired.snapshot.balance.available_balance == Decimal("100.1")
@@ -179,32 +188,82 @@ def test_product_owned_read_persists_restart_verifiable_receipt_without_secrets(
     assert b"SESSION-SECRET-SENTINEL" not in persisted
 
 
-def test_identical_provider_bytes_are_idempotent_and_do_not_refresh_freshness(
+def test_retry_identity_is_idempotent_but_new_read_preserves_identical_content(
     tmp_path,
     monkeypatch,
 ) -> None:
     database = tmp_path / "account.sqlite3"
 
-    _install_transport(monkeypatch, [_DETAILS, _FUNDS])
+    first_calls = _install_transport(monkeypatch, [_DETAILS, _FUNDS])
     first = BetfairAccountSnapshotAcquirer(database, _credentials()).acquire(
-        _balance_capabilities()
+        _balance_capabilities(),
+        acquisition_id="read-attempt-1",
     )
+    assert len(first_calls) == 2
 
-    _install_transport(monkeypatch, [_DETAILS, _FUNDS])
+    retry_calls = _install_transport(monkeypatch, [])
+    retry = BetfairAccountSnapshotAcquirer(database, _credentials()).acquire(
+        _balance_capabilities(),
+        acquisition_id="read-attempt-1",
+    )
+    assert retry_calls == []
+    assert retry == first
+
+    second_calls = _install_transport(monkeypatch, [_DETAILS, _FUNDS])
     second = BetfairAccountSnapshotAcquirer(database, _credentials()).acquire(
-        _balance_capabilities()
+        _balance_capabilities(),
+        acquisition_id="read-attempt-2",
     )
-
-    assert second.receipt.acquisition_id == first.receipt.acquisition_id
+    assert len(second_calls) == 2
+    assert second.receipt.acquisition_id != first.receipt.acquisition_id
+    assert (
+        second.receipt.acquisition_request_id_sha256
+        != first.receipt.acquisition_request_id_sha256
+    )
     assert second.receipt.source_observation_id == first.receipt.source_observation_id
-    assert second.receipt.acquired_at == first.receipt.acquired_at
-    assert second.snapshot == first.snapshot
+    assert (
+        second.receipt.snapshot_content_sha256
+        == first.receipt.snapshot_content_sha256
+    )
+    assert second.receipt.source_payload_sha256 == first.receipt.source_payload_sha256
 
     with sqlite3.connect(database) as connection:
         count = connection.execute(
             "SELECT COUNT(*) FROM account_snapshot_acquisitions"
         ).fetchone()[0]
-    assert count == 1
+    assert count == 2
+
+
+def test_acquisition_id_reuse_with_changed_scope_fails_before_provider_io(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    database = tmp_path / "account.sqlite3"
+    first_calls = _install_transport(monkeypatch, [_DETAILS, _FUNDS])
+    BetfairAccountSnapshotAcquirer(
+        database,
+        _credentials(),
+        account_id="account-a",
+    ).acquire(
+        _balance_capabilities(),
+        acquisition_id="scope-bound-attempt",
+    )
+    assert len(first_calls) == 2
+
+    retry_calls = _install_transport(monkeypatch, [])
+    with pytest.raises(
+        AccountSnapshotAcquisitionError,
+        match="cannot be reused for another provider/account/capability scope",
+    ):
+        BetfairAccountSnapshotAcquirer(
+            database,
+            _credentials(),
+            account_id="account-b",
+        ).acquire(
+            _balance_capabilities(),
+            acquisition_id="scope-bound-attempt",
+        )
+    assert retry_calls == []
 
 
 def test_account_scope_is_bound_and_cross_account_receipt_reuse_fails(
@@ -219,7 +278,10 @@ def test_account_scope_is_bound_and_cross_account_receipt_reuse_fails(
         _credentials(),
         account_id="account-a",
     )
-    first = first_acquirer.acquire(_balance_capabilities())
+    first = first_acquirer.acquire(
+        _balance_capabilities(),
+        acquisition_id="account-a-read",
+    )
 
     _install_transport(monkeypatch, [_DETAILS, _FUNDS])
     second_acquirer = BetfairAccountSnapshotAcquirer(
@@ -227,7 +289,10 @@ def test_account_scope_is_bound_and_cross_account_receipt_reuse_fails(
         _credentials(),
         account_id="account-b",
     )
-    second = second_acquirer.acquire(_balance_capabilities())
+    second = second_acquirer.acquire(
+        _balance_capabilities(),
+        acquisition_id="account-b-read",
+    )
 
     assert first.receipt.source_observation_id != second.receipt.source_observation_id
     assert first.receipt.account_id == "account-a"
@@ -249,7 +314,10 @@ def test_caller_mutated_snapshot_or_receipt_cannot_reuse_durable_authority(
         tmp_path / "account.sqlite3",
         _credentials(),
     )
-    acquired = acquirer.acquire(_balance_capabilities())
+    acquired = acquirer.acquire(
+        _balance_capabilities(),
+        acquisition_id="mutation-test",
+    )
 
     forged_snapshot = replace(
         acquired.snapshot,
@@ -305,7 +373,10 @@ def test_bet_readback_is_rejected_before_provider_transport(
         AccountSnapshotAcquisitionError,
         match="does not authorize capability: bet_readback",
     ):
-        acquirer.acquire(frozenset({BookmakerCapability.BET_READBACK}))
+        acquirer.acquire(
+            frozenset({BookmakerCapability.BET_READBACK}),
+            acquisition_id="unsupported-read",
+        )
 
     assert calls == []
 
@@ -327,7 +398,10 @@ def test_provider_failure_creates_no_positive_receipt(
     acquirer = BetfairAccountSnapshotAcquirer(database, _credentials())
 
     with pytest.raises(BetfairReadOnlyError, match="simulated provider timeout"):
-        acquirer.acquire(_balance_capabilities())
+        acquirer.acquire(
+            _balance_capabilities(),
+            acquisition_id="failed-read",
+        )
 
     with sqlite3.connect(database) as connection:
         count = connection.execute(
@@ -343,7 +417,10 @@ def test_sql_rows_are_immutable_and_record_tamper_fails_closed(
     database = tmp_path / "account.sqlite3"
     _install_transport(monkeypatch, [_DETAILS, _FUNDS])
     acquirer = BetfairAccountSnapshotAcquirer(database, _credentials())
-    acquired = acquirer.acquire(_balance_capabilities())
+    acquired = acquirer.acquire(
+        _balance_capabilities(),
+        acquisition_id="tamper-read",
+    )
 
     with sqlite3.connect(database) as connection:
         with pytest.raises(sqlite3.IntegrityError, match="immutable"):
@@ -386,7 +463,8 @@ def test_source_observation_identity_binds_requested_capability_scope(
 
     _install_transport(monkeypatch, [_DETAILS, _FUNDS])
     balance_only = BetfairAccountSnapshotAcquirer(database, _credentials()).acquire(
-        _balance_capabilities()
+        _balance_capabilities(),
+        acquisition_id="balance-scope-read",
     )
 
     current_empty = _response(
@@ -395,7 +473,8 @@ def test_source_observation_identity_binds_requested_capability_scope(
     )
     _install_transport(monkeypatch, [_DETAILS, current_empty])
     open_only = BetfairAccountSnapshotAcquirer(database, _credentials()).acquire(
-        frozenset({BookmakerCapability.OPEN_POSITIONS_READ})
+        frozenset({BookmakerCapability.OPEN_POSITIONS_READ}),
+        acquisition_id="open-scope-read",
     )
 
     assert (
@@ -415,7 +494,10 @@ def test_unknown_or_malformed_durable_id_fails_closed(
         tmp_path / "account.sqlite3",
         _credentials(),
     )
-    acquirer.acquire(_balance_capabilities())
+    acquirer.acquire(
+        _balance_capabilities(),
+        acquisition_id="unknown-id-seed",
+    )
 
     with pytest.raises(AccountSnapshotAcquisitionError, match="unknown durable"):
         acquirer.resolve("a" * 64)

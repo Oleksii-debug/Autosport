@@ -416,18 +416,43 @@ def test_restart_cannot_reuse_process_local_read_generation_ticket() -> None:
     assert restored.audit_snapshot() == before
 
 
-def test_read_ticket_capture_requires_active_session_and_respects_clock_rollback() -> None:
+def test_read_timing_is_per_ticket_while_session_clock_rollback_still_fails_closed() -> None:
     lifecycle = MatchbookSessionLifecycle()
     with pytest.raises(SessionLifecycleError, match="active session generation"):
         lifecycle.capture_read_generation(monotonic_ns=0)
 
-    lifecycle.record_login_200(generation_id="gen-1", monotonic_ns=ns(10))
-    lifecycle.capture_read_generation(monotonic_ns=ns(20))
+    lifecycle = active()
+    ticket = lifecycle.capture_read_generation(monotonic_ns=ns(20))
+    before = lifecycle.audit_snapshot()
+    with pytest.raises(SessionLifecycleError, match="precedes its generation ticket"):
+        lifecycle.authorize_read_response_commit(ticket, monotonic_ns=ns(19))
+    assert lifecycle.audit_snapshot() == before
+    assert lifecycle.state is SessionState.ACTIVE
+
+    lifecycle = active()
+    lifecycle.record_get_session_result(
+        generation_id="gen-1", http_status=200, monotonic_ns=ns(20)
+    )
     with pytest.raises(SessionClockRollbackError):
         lifecycle.capture_read_generation(monotonic_ns=ns(19))
-
     assert lifecycle.state is SessionState.CLOCK_FAULT
     assert lifecycle.is_active is False
+
+
+def test_concurrent_read_commit_order_does_not_advance_global_session_clock() -> None:
+    lifecycle = active()
+    first = lifecycle.capture_read_generation(monotonic_ns=ns(20))
+    second = lifecycle.capture_read_generation(monotonic_ns=ns(21))
+
+    assert lifecycle.authorize_read_response_commit(
+        second,
+        monotonic_ns=ns(23),
+    ) == "gen-1"
+    assert lifecycle.authorize_read_response_commit(
+        first,
+        monotonic_ns=ns(22),
+    ) == "gen-1"
+    assert lifecycle.state is SessionState.ACTIVE
 
 
 def test_response_commit_and_generation_rotation_share_one_atomic_lock() -> None:

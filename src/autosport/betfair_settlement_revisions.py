@@ -721,6 +721,14 @@ def _require_attempt_receipt_owner(
     external_bet_id: str,
 ) -> None:
     try:
+        events = ledger._events()
+        _, durable_action = ledger._action_payload(
+            events, plan_id, action.action_id
+        )
+        if durable_action != action.to_dict():
+            raise BetfairSettlementRevisionError(
+                "settlement action differs from durable execution plan"
+            )
         saga = ledger.saga(plan_id)
         state = saga.attempts.get(attempt_id)
         if state not in {AttemptState.ACCEPTED, AttemptState.PARTIAL}:

@@ -13,28 +13,30 @@ class _CapturingRiskPolicy:
         )
         self.allowed = allowed
         self.derived_signal = None
+        self.captured_risk_amount = None
         self.captured_context = None
 
     def derive_goal_stake(self, _book, expected_profit_per_unit):
         self.derived_signal = expected_profit_per_unit
         return Decimal("10")
 
-    def evaluate(self, _book, _stake, *, context=None):
+    def evaluate(self, _book, risk_amount, *, context=None):
+        self.captured_risk_amount = risk_amount
         self.captured_context = context
         return SimpleNamespace(allowed=self.allowed)
 
 
-def _lay_event() -> MarketEvent:
+def _event(*, exchange_side: str | None = "lay", odds: str = "2.0") -> MarketEvent:
     return MarketEvent(
         event_id="event-1",
         market_id="market-1",
         selection_id="selection-1",
-        decimal_odds=Decimal("2.0"),
+        decimal_odds=Decimal(odds),
         observed_ts="2026-09-22T12:00:00+00:00",
         source_id="provider-1",
         sequence=1,
         sport="basketball",
-        exchange_side="lay",
+        exchange_side=exchange_side,
     )
 
 
@@ -42,8 +44,10 @@ def _run(
     probability: str,
     *,
     risk_allowed: bool = False,
+    exchange_side: str | None = "lay",
+    odds: str = "2.0",
 ) -> tuple[_CapturingRiskPolicy, SimpleNamespace]:
-    event = _lay_event()
+    event = _event(exchange_side=exchange_side, odds=odds)
     policy = _CapturingRiskPolicy(allowed=risk_allowed)
     agent = PaperValueAgent(
         {
@@ -95,3 +99,19 @@ def test_positive_ev_lay_fails_closed_before_back_only_execution_bridge() -> Non
         "paper-value material action withheld: canonical #623 paper "
         "execution bridge is BACK-only for LAY"
     ]
+
+def test_lay_risk_uses_liability_not_order_stake_above_odds_two() -> None:
+    # One unit of LAY order stake at odds 3 risks two units of bankroll liability.
+    policy, _context = _run("0.25", odds="3.0")
+
+    assert policy.derived_signal == Decimal("0.25")
+    assert policy.captured_risk_amount == Decimal("20.0")
+    assert policy.captured_context is not None
+
+
+def test_back_and_legacy_risk_amount_remains_order_stake() -> None:
+    back_policy, _ = _run("0.50", exchange_side="back", odds="3.0")
+    legacy_policy, _ = _run("0.50", exchange_side=None, odds="3.0")
+
+    assert back_policy.captured_risk_amount == Decimal("10")
+    assert legacy_policy.captured_risk_amount == Decimal("10")

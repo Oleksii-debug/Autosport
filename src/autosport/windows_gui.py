@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import hashlib
 from pathlib import Path
 from tkinter import messagebox, ttk
 
@@ -33,18 +32,13 @@ def _safe_exception_detail(exc: BaseException) -> str:
     return f"{exception_type}: {detail}"
 
 
-_RECOVERY_WORKER_DIAGNOSTIC_DOMAIN = b"autosport.windows.recovery-worker-diagnostic.v1\0"
+def _operator_safe_recovery_error_detail() -> str:
+    """Return product-owned operator copy without deriving presentation from raw detail."""
 
-
-def _operator_safe_recovery_error_reference(error: object) -> str:
-    """Return a stable diagnostic reference without copying worker detail into UI."""
-
-    if type(error) is str:
-        payload = error.encode("utf-8", errors="surrogatepass")
-    else:
-        payload = b"<invalid-non-text-recovery-worker-diagnostic>"
-    digest = hashlib.sha256(_RECOVERY_WORKER_DIAGNOSTIC_DOMAIN + payload).hexdigest()
-    return f"sha256={digest}"
+    return text(
+        "ui.error.exception.message_unavailable",
+        exception_type="RECOVERY_WORKER_FAILURE",
+    )
 
 
 class WindowsAutosportApp(AutosportApp):
@@ -327,7 +321,7 @@ class WindowsAutosportApp(AutosportApp):
             self._refresh_tickets()
             detail = text(
                 "ui.error.recovery.worker",
-                detail=_operator_safe_recovery_error_reference(message.error),
+                detail=_operator_safe_recovery_error_detail(),
             )
             self.status.set(text("ui.status.recovery.blocked"))
             self._append_log(detail)

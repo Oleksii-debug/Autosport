@@ -668,7 +668,13 @@ class ResearchScheduler:
     def _read_occurrence_history_records(
         self,
         schedules: dict[str, Any],
+        *,
+        limit: int | None = None,
     ) -> list[tuple[str, dict[str, Any], str]]:
+        if limit is not None:
+            _nonnegative_int(limit, "occurrence history read limit")
+            if limit == 0:
+                return []
         records: list[tuple[str, dict[str, Any], str]] = []
         previous = _HISTORY_ZERO_SHA256
         expected_sequence = 1
@@ -702,6 +708,8 @@ class ResearchScheduler:
                 records.append((occurrence_id, occurrence, entry_sha256))
                 previous = entry_sha256
                 expected_sequence += 1
+                if limit is not None and len(records) == limit:
+                    return records
         return records
 
     def _validate_occurrence_history_tail(self, state: dict[str, Any]) -> None:
@@ -1005,7 +1013,7 @@ class ResearchScheduler:
             "state_sha256",
         }
         fields = set(state)
-        if fields not in {frozenset(required), frozenset(required) | _HISTORY_FIELDS}:
+        if fields != required and fields != required | _HISTORY_FIELDS:
             raise ResearchSchedulerError("research scheduler state fields mismatch")
         self._occurrence_history_anchor(state)
         if state["schema"] != SCHEMA or state["schema_version"] != SCHEMA_VERSION:
@@ -1583,7 +1591,10 @@ class ResearchScheduler:
         anchor = self._occurrence_history_anchor(frozen)
         assert anchor is not None
         count, tail = anchor
-        records = self._read_occurrence_history_records(frozen["schedules"])
+        records = self._read_occurrence_history_records(
+            frozen["schedules"],
+            limit=count,
+        )
         if len(records) < count:
             raise ResearchSchedulerError("occurrence history was truncated")
         if count and records[count - 1][2] != tail:

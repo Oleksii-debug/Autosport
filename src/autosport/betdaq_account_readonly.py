@@ -15,7 +15,9 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 from hashlib import sha256
-from threading import Lock
+import hmac
+from secrets import token_bytes, token_hex
+from threading import Lock, RLock
 from typing import Callable, Protocol, runtime_checkable
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
@@ -55,6 +57,10 @@ _STATUS_NAMES = {
 _POLARITY_NAMES = {1: "BACK", 2: "LAY"}
 _TERMINAL_STATUS_CODES = frozenset({4, 5})
 _INTEGER_RE = re.compile(r"-?[0-9]+\Z")
+_ACCOUNT_CONTEXT_PREFIX = "betdaq-auth-context:"
+_ACCOUNT_CONTEXT_SCOPE = "AUTHENTICATED_CREDENTIAL_APPLICATION_CONTEXT"
+_PROCESS_HMAC_KEY = token_bytes(32)
+_ACCOUNT_CONTEXT_LOCK = RLock()
 
 
 class BetdaqAccountReadOnlyError(RuntimeError):
@@ -81,6 +87,97 @@ class BetdaqCredentials:
 
     def __repr__(self) -> str:
         return "BetdaqCredentials(<redacted>)"
+
+
+@dataclass(frozen=True, slots=True)
+class BetdaqAuthenticatedAccountContext:
+    """Opaque process-local scope for one exact BETDAQ credential/app context.
+
+    BETDAQ account/order reads used here do not expose a stable provider account id.
+    This object therefore prevents caller labels from becoming account authority while
+    explicitly refusing to claim cross-session physical-account equivalence.
+    """
+
+    venue_id: str
+    session_context_id: str
+    identity_scope: str = _ACCOUNT_CONTEXT_SCOPE
+    stable_account_identity_proven: bool = False
+    cross_session_equivalence_proven: bool = False
+
+    def __post_init__(self) -> None:
+        _required_text(self.venue_id, "venue_id")
+        if (
+            type(self.session_context_id) is not str
+            or not self.session_context_id.startswith(_ACCOUNT_CONTEXT_PREFIX)
+        ):
+            raise BetdaqAccountReadOnlyError(
+                "session_context_id is not a canonical BETDAQ context id"
+            )
+        _sha256_hex(
+            self.session_context_id.removeprefix(_ACCOUNT_CONTEXT_PREFIX),
+            "session_context_id",
+        )
+        if self.identity_scope != _ACCOUNT_CONTEXT_SCOPE:
+            raise BetdaqAccountReadOnlyError(
+                "BETDAQ account context identity scope is product-owned"
+            )
+        if self.stable_account_identity_proven is not False:
+            raise BetdaqAccountReadOnlyError(
+                "BETDAQ secure reads do not prove stable account identity"
+            )
+        if self.cross_session_equivalence_proven is not False:
+            raise BetdaqAccountReadOnlyError(
+                "BETDAQ secure reads do not prove cross-session account equivalence"
+            )
+
+
+_ACCOUNT_CONTEXTS: dict[
+    tuple[str, bytes], BetdaqAuthenticatedAccountContext
+] = {}
+
+
+def _credential_context_binding(credentials: BetdaqCredentials) -> bytes:
+    if type(credentials) is not BetdaqCredentials:
+        raise BetdaqAccountReadOnlyError(
+            "authenticated account context requires canonical BetdaqCredentials"
+        )
+    material = json.dumps(
+        {
+            "adapter_id": ADAPTER_ID,
+            "adapter_version": ADAPTER_VERSION,
+            "application_identifier": credentials.application_identifier,
+            "endpoint": _SECURE_ENDPOINT,
+            "language_code": credentials.language_code,
+            "password": credentials.password,
+            "username": credentials.username,
+            "version": credentials.version,
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+    ).encode("utf-8")
+    # The keyed digest never leaves process memory and is never serialized or exposed.
+    # It only lets equal live credential/application contexts share one opaque random id.
+    return hmac.digest(_PROCESS_HMAC_KEY, material, "sha256")
+
+
+def _authenticated_account_context(
+    credentials: BetdaqCredentials,
+    venue_id: str,
+) -> BetdaqAuthenticatedAccountContext:
+    venue = _required_text(venue_id, "venue_id")
+    binding = _credential_context_binding(credentials)
+    key = (venue, binding)
+    with _ACCOUNT_CONTEXT_LOCK:
+        existing = _ACCOUNT_CONTEXTS.get(key)
+        if existing is not None:
+            return existing
+        value = BetdaqAuthenticatedAccountContext(
+            venue_id=venue,
+            session_context_id=_ACCOUNT_CONTEXT_PREFIX + token_hex(32),
+        )
+        _ACCOUNT_CONTEXTS[key] = value
+        return value
 
 
 @runtime_checkable
@@ -294,6 +391,7 @@ class BetdaqAccountEvidence:
     snapshot: BookmakerAccountSnapshot
     balance: BetdaqBalanceObservation
     current_orders: BetdaqCurrentOrderBook | None
+    account_context: BetdaqAuthenticatedAccountContext
 
     def __post_init__(self) -> None:
         if not isinstance(self.snapshot, BookmakerAccountSnapshot):
@@ -305,6 +403,20 @@ class BetdaqAccountEvidence:
         ):
             raise BetdaqAccountReadOnlyError(
                 "current_orders must be BetdaqCurrentOrderBook or None"
+            )
+        if not isinstance(
+            self.account_context, BetdaqAuthenticatedAccountContext
+        ):
+            raise BetdaqAccountReadOnlyError(
+                "account_context must be BetdaqAuthenticatedAccountContext"
+            )
+        if (
+            self.snapshot.profile.venue_id != self.account_context.venue_id
+            or self.snapshot.profile.account_id
+            != self.account_context.session_context_id
+        ):
+            raise BetdaqAccountReadOnlyError(
+                "snapshot identity is not bound to authenticated account context"
             )
 
 
@@ -334,7 +446,9 @@ class BetdaqAccountReadOnlyClient:
         self._timeout_seconds = float(timeout_seconds)
         self._clock = clock or (lambda: datetime.now(timezone.utc))
         self._venue_id = _required_text(venue_id, "venue_id")
-        self._account_id = _required_text(account_id, "account_id")
+        # Retained only as a human/configuration label for API compatibility. It is
+        # deliberately excluded from canonical account evidence and authority.
+        self._account_label = _required_text(account_id, "account_id")
         self._call_lock = Lock()
 
     def __repr__(self) -> str:
@@ -494,6 +608,10 @@ class BetdaqAccountReadOnlyClient:
                 f"BETDAQ read-only adapter cannot prove complete capability: {names}"
             )
 
+        context_before = _authenticated_account_context(
+            self._credentials,
+            self._venue_id,
+        )
         balance = self.read_account_balance()
         order_requested = bool(
             requested_capabilities
@@ -505,6 +623,15 @@ class BetdaqAccountReadOnlyClient:
             )
         )
         order_book = self.read_complete_current_orders() if order_requested else None
+        context_after = _authenticated_account_context(
+            self._credentials,
+            self._venue_id,
+        )
+        if context_after.session_context_id != context_before.session_context_id:
+            raise BetdaqAccountReadOnlyError(
+                "BETDAQ authenticated account context changed during acquisition"
+            )
+        account_scope_id = context_before.session_context_id
 
         # Currency is required by the canonical position contract, so a balance read is
         # always surfaced rather than silently used as hidden account context.
@@ -517,6 +644,7 @@ class BetdaqAccountReadOnlyClient:
         observed_at = _latest_observed_at(all_evidence)
         evidence_sha256 = _canonical_sha256(
             {
+                "account_context_id": account_scope_id,
                 "balance": balance.evidence.source_payload_sha256,
                 "orders": None if order_book is None else order_book.evidence_sha256,
             }
@@ -526,8 +654,8 @@ class BetdaqAccountReadOnlyClient:
             for capability in sorted(observed_capabilities, key=lambda item: item.value)
         )
         profile = BookmakerCapabilityProfile(
-            self._venue_id,
-            self._account_id,
+            context_before.venue_id,
+            account_scope_id,
             ADAPTER_ID,
             ADAPTER_VERSION,
             1,
@@ -537,8 +665,8 @@ class BetdaqAccountReadOnlyClient:
             evidence_sha256,
         )
         canonical_balance = BookmakerBalanceObservation(
-            self._venue_id,
-            self._account_id,
+            context_before.venue_id,
+            account_scope_id,
             ADAPTER_ID,
             f"betdaq-balance:{balance.evidence.source_payload_sha256}",
             balance.currency,
@@ -557,8 +685,8 @@ class BetdaqAccountReadOnlyClient:
             open_positions = tuple(
                 _to_open_position(
                     item,
-                    venue_id=self._venue_id,
-                    account_id=self._account_id,
+                    venue_id=context_before.venue_id,
+                    account_id=account_scope_id,
                     currency=balance.currency,
                 )
                 for item in order_book.orders
@@ -573,7 +701,12 @@ class BetdaqAccountReadOnlyClient:
             open_positions,
             (),
         )
-        return BetdaqAccountEvidence(snapshot, balance, order_book)
+        return BetdaqAccountEvidence(
+            snapshot,
+            balance,
+            order_book,
+            context_before,
+        )
 
     def read_account_snapshot(
         self,

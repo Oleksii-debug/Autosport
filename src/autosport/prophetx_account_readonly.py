@@ -42,7 +42,7 @@ class ProphetXSessionToken:
     access_token: str
 
     def __post_init__(self) -> None:
-        _required_text(self.access_token, "access_token")
+        _session_token(self.access_token)
 
     def __repr__(self) -> str:
         return "ProphetXSessionToken(access_token=<redacted>)"
@@ -123,8 +123,10 @@ class UrllibProphetXHttpTransport:
         except ProphetXReadOnlyError:
             raise
         except HTTPError as exc:
+            status = exc.code
+            exc.close()
             raise ProphetXReadOnlyError(
-                f"ProphetX HTTP request failed with status {exc.code}"
+                f"ProphetX HTTP request failed with status {status}"
             ) from None
         except (URLError, TimeoutError, OSError):
             raise ProphetXReadOnlyError("ProphetX network request failed") from None
@@ -441,6 +443,15 @@ def _provider_money(value: Mapping[str, object], key: str) -> Decimal:
             f"{key} must be a JSON number decoded without binary float"
         )
     return _nonnegative_decimal(raw, key)
+
+
+def _session_token(value: object) -> str:
+    text = _required_text(value, "access_token")
+    if any(character.isspace() or ord(character) < 32 or ord(character) == 127 for character in text):
+        raise ProphetXReadOnlyError(
+            "access_token must not contain whitespace or control characters"
+        )
+    return text
 
 
 def _required_text(value: object, field: str) -> str:

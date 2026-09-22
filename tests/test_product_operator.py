@@ -25,12 +25,24 @@ class _Collector:
     def __init__(self) -> None:
         self.resume_calls = 0
         self.stop_reasons: list[str] = []
+        self.stopped = True
+        self.stop_reason: str | None = "fixture_initial_stop"
+
+    def status(self) -> dict[str, object]:
+        return {
+            "stopped_at": "2026-09-22T14:15:00+00:00" if self.stopped else None,
+            "stop_reason": self.stop_reason if self.stopped else None,
+        }
 
     def resume(self) -> None:
         self.resume_calls += 1
+        self.stopped = False
+        self.stop_reason = None
 
     def stop(self, reason: str) -> None:
         self.stop_reasons.append(reason)
+        self.stopped = True
+        self.stop_reason = reason
 
 
 class _Coordinator:
@@ -41,6 +53,7 @@ class _Coordinator:
         self.state = "STOPPED"
         self.stop_reason: str | None = None
         self.resume_error: Exception | None = None
+        self.status_error: Exception | None = None
 
     def resume(self) -> None:
         self.resume_calls += 1
@@ -55,6 +68,8 @@ class _Coordinator:
         self.stop_reason = reason
 
     def status(self) -> _Status:
+        if self.status_error is not None:
+            raise self.status_error
         return _Status(state=self.state, stop_reason=self.stop_reason)
 
     def tick(self) -> _Tick:
@@ -67,12 +82,75 @@ class _Coordinator:
 class _MarketStore:
     def __init__(self) -> None:
         self.close_calls = 0
+        self.close_error: Exception | None = None
 
     def close(self) -> None:
         self.close_calls += 1
+        if self.close_error is not None:
+            raise self.close_error
+
+
+class _RuntimeLease:
+    authority_active = True
+
+    def release(self) -> None:
+        self.authority_active = False
+
+
+class _StartTransitionStore:
+    def __init__(self) -> None:
+        self.generation = 0
+        self.phase: str | None = None
+        self.collector_was_stopped: bool | None = None
+        self.session_pre_state: str | None = None
+
+    def pending(self):
+        if self.phase not in {"STARTING", "RECOVERY_REQUIRED"}:
+            return None
+        return {
+            "generation": self.generation,
+            "phase": self.phase,
+            "collector_was_stopped": self.collector_was_stopped,
+            "session_pre_state": self.session_pre_state,
+        }
+
+    def begin(self, *, collector_was_stopped: bool, session_pre_state: str) -> int:
+        if self.pending() is not None:
+            raise RuntimeError("unfinished fixture START transition")
+        self.generation += 1
+        self.phase = "STARTING"
+        self.collector_was_stopped = collector_was_stopped
+        self.session_pre_state = session_pre_state
+        return self.generation
+
+    def _require_generation(self, generation: int) -> None:
+        if generation != self.generation:
+            raise RuntimeError("fixture START generation changed")
+
+    def mark_completed(self, generation: int) -> None:
+        self._require_generation(generation)
+        self.phase = "COMPLETED"
+
+    def mark_rolled_back(self, generation: int) -> None:
+        self._require_generation(generation)
+        self.phase = "ROLLED_BACK"
+
+    def mark_recovery_required(self, generation: int) -> None:
+        self._require_generation(generation)
+        self.phase = "RECOVERY_REQUIRED"
 
 
 class ProductOperatorControllerTests(unittest.TestCase):
+    @staticmethod
+    def _runtime_optional_fields() -> dict[str, object]:
+        fields = getattr(AutonomousProductRuntime, "__dataclass_fields__", {})
+        optional: dict[str, object] = {}
+        if "_runtime_lease" in fields:
+            optional["_runtime_lease"] = _RuntimeLease()
+        if "_start_transition_store" in fields:
+            optional["_start_transition_store"] = _StartTransitionStore()
+        return optional
+
     def _runtime(self, directory: str) -> tuple[
         AutonomousProductRuntime,
         _Collector,
@@ -95,6 +173,7 @@ class ProductOperatorControllerTests(unittest.TestCase):
             mirror=object(),  # type: ignore[arg-type]
             invalidations=object(),  # type: ignore[arg-type]
             dependencies=object(),  # type: ignore[arg-type]
+            **self._runtime_optional_fields(),  # type: ignore[arg-type]
         )
         return runtime, collector, coordinator, market_store
 
@@ -143,6 +222,7 @@ class ProductOperatorControllerTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             runtime, collector, coordinator, _ = self._runtime(directory)
             coordinator.stop_reason = "durable_prior_stop"
+            collector.stop_reason = "durable_prior_stop"
 
             operator = ProductOperatorController(runtime)
 
@@ -206,8 +286,18 @@ class ProductOperatorControllerTests(unittest.TestCase):
 
             self.assertEqual(collector.resume_calls, 1)
             self.assertEqual(coordinator.resume_calls, 1)
-            self.assertEqual(collector.stop_reasons, ["operator_start_failed"])
-            self.assertEqual(coordinator.stop_reasons, ["operator_start_failed"])
+            self.assertEqual(collector.stop_reasons[-1], "operator_start_failed")
+            self.assertEqual(coordinator.stop_reasons[-1], "operator_start_failed")
+            self.assertTrue(
+                set(collector.stop_reasons).issubset(
+                    {"runtime_start_failed", "operator_start_failed"}
+                )
+            )
+            self.assertTrue(
+                set(coordinator.stop_reasons).issubset(
+                    {"runtime_start_failed", "operator_start_failed"}
+                )
+            )
             snapshot = operator.status()
             self.assertEqual(snapshot.state, "STOPPED")
             self.assertEqual(snapshot.canonical_status.stop_reason, "operator_start_failed")
@@ -236,6 +326,7 @@ class ProductOperatorControllerTests(unittest.TestCase):
             operator.start()
 
             operator.close()
+            coordinator.status_error = RuntimeError("status after runtime close is forbidden")
 
             self.assertEqual(market_store.close_calls, 1)
             self.assertEqual(collector.stop_reasons, [])
@@ -243,6 +334,23 @@ class ProductOperatorControllerTests(unittest.TestCase):
             snapshot = operator.status()
             self.assertEqual(snapshot.state, "CLOSED")
             self.assertEqual(snapshot.canonical_status.state, "RUNNING")
+            for operation in (operator.start, operator.tick, operator.stop):
+                with self.assertRaisesRegex(ProductOperatorError, "closed"):
+                    operation()
+
+    def test_close_failure_still_revokes_controller_operations(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            runtime, _, coordinator, market_store = self._runtime(directory)
+            operator = ProductOperatorController(runtime)
+            market_store.close_error = RuntimeError("injected runtime close failure")
+
+            with self.assertRaisesRegex(RuntimeError, "injected runtime close failure"):
+                operator.close()
+
+            coordinator.status_error = RuntimeError("closed runtime must not be reread")
+            snapshot = operator.status()
+            self.assertEqual(snapshot.state, "CLOSED")
+            self.assertEqual(snapshot.canonical_status.state, "STOPPED")
             for operation in (operator.start, operator.tick, operator.stop):
                 with self.assertRaisesRegex(ProductOperatorError, "closed"):
                     operation()
@@ -299,6 +407,7 @@ class ProductOperatorControllerTests(unittest.TestCase):
                 mirror=runtime.mirror,
                 invalidations=runtime.invalidations,
                 dependencies=runtime.dependencies,
+                **self._runtime_optional_fields(),  # type: ignore[arg-type]
             )
             with self.assertRaisesRegex(TypeError, "exact AutonomousProductRuntime"):
                 ProductOperatorController(substitute)

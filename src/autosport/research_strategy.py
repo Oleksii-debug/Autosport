@@ -23,6 +23,8 @@ from .scenario_search import ScenarioGroup, ScenarioOutcome
 
 RESEARCH_STRATEGY_ID = "research-replay-v1"
 _MAX_RESEARCH_PLAN_JSON_DEPTH = 64
+_RESEARCH_EVENT_EVIDENCE_HASH_SCHEMA = "autosport.research.market-event-evidence.v2"
+_RESEARCH_MARKET_SNAPSHOT_HASH_SCHEMA = "autosport.research.market-snapshot.v2"
 
 
 def _reject_duplicate_json_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
@@ -90,9 +92,11 @@ def _canonical_plan_json(raw: Any) -> str:
 
 
 def _stable_event_projection(event: MarketEvent) -> dict[str, Any]:
-    """Stable causal quote projection used to bind offline research evidence to replay state."""
+    """Versioned causal quote projection used to bind research evidence to replay state."""
 
     return {
+        "schema": _RESEARCH_EVENT_EVIDENCE_HASH_SCHEMA,
+        "sport": event.sport,
         "event_id": event.event_id,
         "market_id": event.market_id,
         "selection_id": event.selection_id,
@@ -130,7 +134,10 @@ def research_market_snapshot_hash(
             raise ValueError(f"research snapshot missing replay quote: {key}")
         projection[key] = _stable_event_projection(event)
     canonical = json.dumps(
-        projection,
+        {
+            "schema": _RESEARCH_MARKET_SNAPSHOT_HASH_SCHEMA,
+            "quotes": projection,
+        },
         ensure_ascii=False,
         sort_keys=True,
         separators=(",", ":"),

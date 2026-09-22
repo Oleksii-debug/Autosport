@@ -171,11 +171,17 @@ class FallbackReadEvidence:
 
 
 class ProviderHealthAuthority:
-    """Provider-neutral fail-closed health authority.
+    """Provider-neutral health reducer with a fail-closed write gate.
 
-    The authority consumes ordered provider-health evidence and exposes an exact
-    provider + health_epoch binding for write decisions.  Fallback read evidence
-    is deliberately separate and can never mint write authority.
+    The authority consumes ordered provider-health events for advisory
+    degradation/recovery state and epoch invalidation.  Because
+    ProviderHealthEvent is publicly constructible, this module alone cannot
+    prove provider/transport origin and therefore cannot issue positive write
+    authority.  A future composition must re-resolve a product-owned origin
+    witness before positive write admission is possible.
+
+    Fallback read evidence is deliberately separate and can never mint write
+    authority.
     """
 
     def __init__(self, policy: ProviderHealthPolicy | None = None) -> None:

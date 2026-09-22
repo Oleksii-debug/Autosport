@@ -140,6 +140,36 @@ def test_ascii_control_failure_is_inconclusive_not_path_failure(tmp_path: Path) 
 
 
 
+def test_stale_case_workspace_is_removed_before_probe(tmp_path: Path) -> None:
+    artifact = tmp_path / "artifact"
+    artifact.mkdir()
+    app = artifact / "app.py"
+    app.write_text(
+        "from pathlib import Path\n"
+        "import sys\n"
+        "workspace = Path(sys.argv[1])\n"
+        "raise SystemExit(17 if (workspace / 'stale.txt').exists() else 0)\n",
+        encoding="utf-8",
+    )
+    out = tmp_path / "out"
+    stale = out / "cases" / m.SCENARIOS[0][1] / "workspace"
+    stale.mkdir(parents=True)
+    (stale / "stale.txt").write_text("old", encoding="utf-8")
+
+    report = m.run_matrix(
+        artifact_root=artifact,
+        executable_relative_path=Path("app.py"),
+        output_dir=out,
+        arguments=("{WORKSPACE_ROOT}",),
+        launcher=(sys.executable,),
+        mode="exit-zero",
+        startup_seconds=0.01,
+        timeout_seconds=2,
+        keep_copies=False,
+    )
+    assert report.matrix_status == "PASS"
+
+
 def test_output_capture_is_opt_in(tmp_path: Path) -> None:
     artifact = _artifact(tmp_path)
     quiet_out = tmp_path / "quiet"

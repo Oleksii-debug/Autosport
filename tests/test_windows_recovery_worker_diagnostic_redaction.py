@@ -80,3 +80,17 @@ def test_recovery_worker_raw_secret_diagnostic_never_reaches_operator_surfaces(
 
     assert "Відновлення" in rendered or "відновлення" in rendered
     assert "RECOVERY_WORKER_FAILURE" in rendered
+
+    dialogs.clear()
+    other = _RecoveryPollHarness("password=DIFFERENT-RAW-DIAGNOSTIC")
+    WindowsAutosportApp._poll_recovery_worker(other)
+    rendered_other = "\n".join(
+        other.log
+        + other.status.values
+        + [title for title, _message in dialogs]
+        + [message for _title, message in dialogs]
+    )
+
+    assert rendered_other == rendered
+    assert "DIFFERENT-RAW-DIAGNOSTIC" not in rendered_other
+    assert "password" not in rendered_other.casefold()

@@ -577,7 +577,7 @@ def _candidate_leg_from_dict(raw: Any) -> CandidateLeg:
 
     odds = Decimal(str(raw["decimal_odds"]))
     probability = Decimal(str(raw["probability"]))
-    return CandidateLeg(
+    leg = CandidateLeg(
         quote_key,
         event_id,
         odds,
@@ -586,6 +586,9 @@ def _candidate_leg_from_dict(raw: Any) -> CandidateLeg:
         selection_id,
         sport=sport,
     )
+    if sport is not None:
+        leg.ticket_identity()
+    return leg
 
 
 def _instruction_from_dict(raw: Any) -> ResearchReplayInstruction:

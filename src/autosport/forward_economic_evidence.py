@@ -957,18 +957,31 @@ class ForwardEconomicEvidenceAccumulator:
         return deepcopy(step)
 
     def _realized_challenger_drawdown(self) -> tuple[Decimal, Decimal, bool]:
-        settlement_groups: dict[datetime, list[Decimal]] = {}
+        capital_groups: dict[datetime, list[Decimal]] = {}
         for step in self._steps:
-            available_at = step.challenger_economic_available_at
-            if available_at is None:
-                if step.challenger_net_pnl_currency == 0:
-                    continue
-                raise ForwardEconomicEvidenceError(
-                    "economically material challenger row is missing causal availability"
+            cost = step.challenger_economic_cost_currency
+            if cost != 0:
+                cost_available_at = step.challenger_economic_cost_available_at
+                if cost_available_at is None:
+                    raise ForwardEconomicEvidenceError(
+                        "challenger economic cost is missing causal availability"
+                    )
+                capital_groups.setdefault(cost_available_at, []).append(-cost)
+
+            wager_pnl = step.challenger_wager_pnl_currency
+            if wager_pnl != 0:
+                if step.challenger_side is BetSide.NONE:
+                    raise ForwardEconomicEvidenceError(
+                        "NONE row cannot carry realized wager P&L"
+                    )
+                settlement_available_at = step.challenger_settlement_available_at
+                if settlement_available_at is None:
+                    raise ForwardEconomicEvidenceError(
+                        "challenger wager P&L is missing settlement availability"
+                    )
+                capital_groups.setdefault(settlement_available_at, []).append(
+                    wager_pnl
                 )
-            settlement_groups.setdefault(available_at, []).append(
-                step.challenger_net_pnl_currency
-            )
 
         total = Decimal(0)
         peak = Decimal(0)
@@ -976,16 +989,16 @@ class ForwardEconomicEvidenceAccumulator:
         chronology_unambiguous = True
         with localcontext() as context:
             context.prec = _DECIMAL_PRECISION
-            for available_at in sorted(settlement_groups):
-                pnls = settlement_groups[available_at]
+            for available_at in sorted(capital_groups):
+                pnls = capital_groups[available_at]
                 positive = [pnl for pnl in pnls if pnl > 0]
                 zero = [pnl for pnl in pnls if pnl == 0]
                 negative = [pnl for pnl in pnls if pnl < 0]
                 if positive and negative:
                     chronology_unambiguous = False
 
-                # Simultaneous mixed-sign settlements have no authoritative
-                # intra-instant order. Positive-before-negative is the
+                # Equal-time mixed-sign capital changes have no authoritative
+                # intra-instant order. Positive-before-negative gives the
                 # conservative drawdown envelope, while the gate remains
                 # fail-closed because the exact chronology is ambiguous.
                 for pnl in (*positive, *zero, *negative):
@@ -996,6 +1009,10 @@ class ForwardEconomicEvidenceAccumulator:
                         +(peak - total),
                     )
 
+        if total != self._challenger_total:
+            raise ForwardEconomicEvidenceError(
+                "causal capital deltas do not reconcile to all-in challenger P&L"
+            )
         return peak, maximum_drawdown, chronology_unambiguous
 
     def summary(self) -> ForwardEconomicEvidenceSummary:

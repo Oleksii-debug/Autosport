@@ -93,7 +93,8 @@ def test_nonpositive_or_nonfinite_request_terms_fail_closed(field, value):
 
 def test_delayed_is_pending_not_applied_and_has_no_authority():
     x = readback()
-    assert x.truth is MatchbookOfferEditTruth.PENDING_DELAY
+    assert x.truth is MatchbookOfferEditTruth.PENDING_DELAY_ASSERTION
+    assert x.provider_origin_verified is False
     assert not x.provider_write_authority
     assert not x.settlement_authority
     assert not x.retry_authority
@@ -108,14 +109,16 @@ def test_delayed_requires_positive_delay_and_no_failure_reason():
 
 def test_applied_is_observed_but_not_write_or_settlement_authority():
     x = readback(status=MatchbookOfferEditStatus.APPLIED)
-    assert x.truth is MatchbookOfferEditTruth.APPLIED_OBSERVED
+    assert x.truth is MatchbookOfferEditTruth.APPLIED_ASSERTION_UNVERIFIED
+    assert x.provider_origin_verified is False
     assert not x.provider_write_authority and not x.settlement_authority
 
 
 @pytest.mark.parametrize("reason", list(MatchbookOfferEditFailureReason))
 def test_failed_preserves_documented_failure_reason(reason):
     x = readback(status=MatchbookOfferEditStatus.FAILED, reason=reason)
-    assert x.truth is MatchbookOfferEditTruth.FAILED_OBSERVED
+    assert x.truth is MatchbookOfferEditTruth.FAILED_ASSERTION_UNVERIFIED
+    assert x.provider_origin_verified is False
     assert x.failure_reason is reason
     assert not x.retry_authority
 
@@ -149,13 +152,23 @@ def test_transport_exception_without_readback_requires_reconciliation():
     assert retry_disposition(transport_exception=True) is MatchbookOfferEditRetryDisposition.RECONCILE_BEFORE_ANY_NEW_EDIT
 
 
-def test_delayed_readback_requires_wait_not_repeat():
-    assert retry_disposition(readback=readback()) is MatchbookOfferEditRetryDisposition.WAIT_FOR_DELAYED_EDIT
+def test_detached_delayed_readback_cannot_mint_wait_authority():
+    detached = readback()
+    assert detached.provider_origin_verified is False
+    assert (
+        retry_disposition(readback=detached)
+        is MatchbookOfferEditRetryDisposition.RECONCILE_BEFORE_ANY_NEW_EDIT
+    )
 
 
 @pytest.mark.parametrize("status", [MatchbookOfferEditStatus.APPLIED, MatchbookOfferEditStatus.FAILED])
-def test_terminal_readback_never_authorizes_repeating_same_edit(status):
-    assert retry_disposition(readback=readback(status=status)) is MatchbookOfferEditRetryDisposition.DO_NOT_REPEAT_SAME_EDIT
+def test_detached_terminal_readback_cannot_mint_repeat_suppression(status):
+    detached = readback(status=status)
+    assert detached.provider_origin_verified is False
+    assert (
+        retry_disposition(readback=detached)
+        is MatchbookOfferEditRetryDisposition.RECONCILE_BEFORE_ANY_NEW_EDIT
+    )
 
 
 def test_replay_delayed_to_applied_is_valid():
@@ -165,7 +178,7 @@ def test_replay_delayed_to_applied_is_valid():
         at=T0 + timedelta(seconds=6),
         raw=RAW_B,
     )
-    assert reconcile_offer_edit_replay((delayed, applied))[9001] == applied
+    assert reconcile_offer_edit_replay((delayed, applied))[delayed.scoped_identity] == applied
 
 
 def test_replay_delayed_to_failed_is_valid_and_preserves_reason():
@@ -176,7 +189,7 @@ def test_replay_delayed_to_failed_is_valid_and_preserves_reason():
         raw=RAW_B,
         reason=MatchbookOfferEditFailureReason.MARKET_STATUS,
     )
-    latest = reconcile_offer_edit_replay((delayed, failed))[9001]
+    latest = reconcile_offer_edit_replay((delayed, failed))[delayed.scoped_identity]
     assert latest.status is MatchbookOfferEditStatus.FAILED
     assert latest.failure_reason is MatchbookOfferEditFailureReason.MARKET_STATUS
 
@@ -209,12 +222,23 @@ def test_replay_rejects_time_rollback_and_same_time_conflict():
         reconcile_offer_edit_replay((x, y))
 
 
-def test_replay_rejects_cross_account_and_cross_offer_identity_for_same_edit_id():
-    x = readback()
-    with pytest.raises(MatchbookOfferEditReconciliationError, match="account"):
-        reconcile_offer_edit_replay((x, readback(account="other", at=T0 + timedelta(seconds=2), raw=RAW_B)))
-    with pytest.raises(MatchbookOfferEditReconciliationError, match="offer identity"):
-        reconcile_offer_edit_replay((x, readback(offer_id=102, at=T0 + timedelta(seconds=2), raw=RAW_B)))
+def test_replay_scopes_same_numeric_edit_id_by_account_and_offer():
+    base = readback()
+    other_account = readback(
+        account="other",
+        at=T0 + timedelta(seconds=2),
+        raw=RAW_B,
+    )
+    other_offer = readback(
+        offer_id=102,
+        at=T0 + timedelta(seconds=2),
+        raw=RAW_C,
+    )
+    latest = reconcile_offer_edit_replay((base, other_account, other_offer))
+    assert latest[base.scoped_identity] == base
+    assert latest[other_account.scoped_identity] == other_account
+    assert latest[other_offer.scoped_identity] == other_offer
+    assert len(latest) == 3
 
 
 def test_delayed_repeat_cannot_rewrite_delay_evidence():
@@ -227,7 +251,7 @@ def test_delayed_repeat_cannot_rewrite_delay_evidence():
 def test_terminal_repeat_may_refresh_raw_bytes_but_not_semantics():
     x = readback(status=MatchbookOfferEditStatus.APPLIED, at=T0 + timedelta(seconds=2), raw=RAW_A)
     y = readback(status=MatchbookOfferEditStatus.APPLIED, at=T0 + timedelta(seconds=3), raw=RAW_B)
-    assert reconcile_offer_edit_replay((x, y))[9001] == y
+    assert reconcile_offer_edit_replay((x, y))[x.scoped_identity] == y
 
     f1 = readback(
         status=MatchbookOfferEditStatus.FAILED,

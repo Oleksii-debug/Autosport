@@ -11,12 +11,13 @@ protected by ``MonotonicWorkspaceAuthority`` with PREPARE -> durable publish ->
 COMMIT, so restoring a valid-old ledger or deleting it cannot silently erase a
 later first-publication fact while the independent machine authority survives.
 
-Low-level publication is deliberately not a public evaluator operation.  The only
-writer is ``SourceFeatureArtifactMaterializer.materialize``: the source-facing
-materialization seam re-resolves the exact registry records, exact lineage proof,
-and exact bytes-derived ``FeatureArtifactProvenance`` before asking the authority to
-stamp NOW.  Callers may resolve/reuse a publication, but cannot mint one by calling
-the authority directly.
+Low-level publication is deliberately not a public evaluator operation.  A writer
+capability is issued only by the canonical ``HeadlessCollectorService`` source
+runtime.  The resulting ``SourceFeatureArtifactMaterializer`` re-resolves the exact
+collector delta, registry records, lineage proof, and bytes-derived
+``FeatureArtifactProvenance`` before asking the authority to stamp NOW.  Ordinary
+callers may construct the resolver-facing object, but cannot exercise publication
+without that source-runtime capability.
 """
 
 from __future__ import annotations
@@ -127,6 +128,7 @@ COLLECTOR_SOURCE_FEATURE_PRODUCER_SHA256: Final = hashlib.sha256(
     ).encode("utf-8")
 ).hexdigest()
 _CANONICAL_COLLECTOR_FILENAME: Final = "collector_deltas.json"
+_HEADLESS_COLLECTOR_ISSUANCE_CAPABILITY: Final[object] = object()
 
 
 def _require_canonical_collector_store(
@@ -654,6 +656,9 @@ class SourceFeatureArtifactAuthority:
             or type(materializer) is not SourceFeatureArtifactMaterializer
             or materializer._authority is not self
             or materializer.lineage_authority is not self.lineage_authority
+            or materializer._issuance_capability
+            is not _HEADLESS_COLLECTOR_ISSUANCE_CAPABILITY
+            or materializer._source_service is None
         ):
             raise evidence.PointInTimeEvidenceError(
                 "source publication capability may only be exercised by the canonical materializer"
@@ -835,12 +840,16 @@ class SourceFeatureArtifactMaterializer:
         lineage_authority: DatasetSnapshotLineageAuthority,
         *,
         collector_store: CollectorDeltaStore,
+        _issuance_capability: object | None = None,
+        _source_service: object | None = None,
     ) -> None:
         runtime_repair._require_exact_lineage_authority(lineage_authority)
         self.lineage_authority = lineage_authority
         self.collector_store = _require_canonical_collector_store(
             lineage_authority, collector_store
         )
+        self._issuance_capability = _issuance_capability
+        self._source_service = _source_service
         self._authority = SourceFeatureArtifactAuthority.for_lineage(
             lineage_authority
         )
@@ -857,6 +866,28 @@ class SourceFeatureArtifactMaterializer:
         source_delta_id: str | None = None,
         feature_payload: bytes | None = None,
     ) -> SourceFeatureArtifactPublication:
+        if (
+            self._issuance_capability
+            is not _HEADLESS_COLLECTOR_ISSUANCE_CAPABILITY
+            or self._source_service is None
+        ):
+            raise evidence.PointInTimeEvidenceError(
+                "source feature publication requires issuance by the canonical "
+                "HeadlessCollectorService source runtime"
+            )
+        from .collector_service import HeadlessCollectorService
+
+        if type(self._source_service) is not HeadlessCollectorService:
+            raise evidence.PointInTimeEvidenceError(
+                "source feature publication requires the exact canonical "
+                "HeadlessCollectorService"
+            )
+        if self._source_service.delta_store is not self.collector_store:
+            raise evidence.PointInTimeEvidenceError(
+                "source feature materializer is not bound to the collector service store"
+            )
+        source_service = self._source_service._require_source_identity()
+
         if feature_payload is not None:
             raise evidence.PointInTimeEvidenceError(
                 "caller-supplied feature_payload is forbidden; "
@@ -881,6 +912,15 @@ class SourceFeatureArtifactMaterializer:
         if source_delta is None:
             raise evidence.PointInTimeEvidenceError(
                 "source_delta_id is not present in the canonical collector store"
+            )
+        if (
+            source_delta.source_id != self._source_service.source_id
+            or source_delta.source_id != source_service.source_id
+            or source_delta.stream_epoch != source_service.stream_epoch
+        ):
+            raise evidence.PointInTimeEvidenceError(
+                "source feature publication delta is outside the active collector "
+                "service source/epoch authority"
             )
 
         generated_payload = collector_source_feature_payload(
@@ -937,6 +977,47 @@ class SourceFeatureArtifactMaterializer:
             feature_provenance=feature_provenance,
             lineage_proof_sha256=lineage_record.proof_sha256,
         )
+
+def _materializer_from_headless_collector_service(
+    *,
+    service: object,
+    lineage_authority: DatasetSnapshotLineageAuthority,
+) -> SourceFeatureArtifactMaterializer:
+    """Issue one source-feature writer capability from the real collector runtime.
+
+    This is intentionally private.  The caller must be the method installed on the
+    exact canonical HeadlessCollectorService class; an evaluator importing this
+    helper directly cannot turn exact DTOs/store bytes into publication authority.
+    """
+
+    from .collector_service import HeadlessCollectorService
+
+    if type(service) is not HeadlessCollectorService:
+        raise evidence.PointInTimeEvidenceError(
+            "feature materializer issuance requires exact HeadlessCollectorService"
+        )
+    source_method = getattr(
+        HeadlessCollectorService, "source_feature_materializer", None
+    )
+    frame = inspect.currentframe()
+    caller = None if frame is None else frame.f_back
+    if (
+        source_method is None
+        or caller is None
+        or caller.f_code is not getattr(source_method, "__code__", None)
+    ):
+        raise evidence.PointInTimeEvidenceError(
+            "feature materializer capability may only be issued by "
+            "HeadlessCollectorService.source_feature_materializer"
+        )
+    service._require_source_identity()
+    return SourceFeatureArtifactMaterializer(
+        lineage_authority,
+        collector_store=service.delta_store,
+        _issuance_capability=_HEADLESS_COLLECTOR_ISSUANCE_CAPABILITY,
+        _source_service=service,
+    )
+
 
 def _same_lineage_authority(
     left: DatasetSnapshotLineageAuthority,

@@ -75,6 +75,14 @@ def _sha256_bytes(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
+def _sha256_file(path: Path, *, chunk_size: int = 1024 * 1024) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        while chunk := stream.read(chunk_size):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
 def _canonical_json_sha(value: object) -> str:
     payload = json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
     return _sha256_bytes(payload)
@@ -97,8 +105,12 @@ def tree_manifest(root: Path) -> tuple[TreeEntry, ...]:
     entries: list[TreeEntry] = []
     for path in (p for p in all_paths if p.is_file()):
         rel = path.relative_to(root).as_posix()
-        data = path.read_bytes()
-        entries.append(TreeEntry(rel, len(data), _sha256_bytes(data)))
+        stat_before = path.stat()
+        file_sha = _sha256_file(path)
+        stat_after = path.stat()
+        if (stat_before.st_size, stat_before.st_mtime_ns) != (stat_after.st_size, stat_after.st_mtime_ns):
+            raise MatrixError(f"artifact file changed while hashing: {rel}")
+        entries.append(TreeEntry(rel, stat_after.st_size, file_sha))
     if not entries:
         raise MatrixError("artifact root contains no files")
     return tuple(entries)
@@ -109,15 +121,14 @@ def tree_manifest_sha(entries: Iterable[TreeEntry]) -> str:
     return _canonical_json_sha(serial)
 
 
-def copy_tree_verified(source: Path, destination: Path) -> str:
+def copy_tree_verified(source: Path, destination: Path, *, expected_source_sha: str | None = None) -> str:
     source = source.resolve(strict=True)
     if destination.exists():
         shutil.rmtree(destination)
     destination.parent.mkdir(parents=True, exist_ok=True)
     shutil.copytree(source, destination, symlinks=True)
-    src_manifest = tree_manifest(source)
     dst_manifest = tree_manifest(destination)
-    src_sha = tree_manifest_sha(src_manifest)
+    src_sha = expected_source_sha or tree_manifest_sha(tree_manifest(source))
     dst_sha = tree_manifest_sha(dst_manifest)
     if src_sha != dst_sha:
         raise MatrixError("copied package bytes differ from source artifact")
@@ -269,7 +280,7 @@ def run_matrix(
         error_type: str | None = None
         rendered_args: tuple[str, ...] = ()
         try:
-            copied_sha = copy_tree_verified(artifact_root, package_root)
+            copied_sha = copy_tree_verified(artifact_root, package_root, expected_source_sha=artifact_sha)
             copied_equal = copied_sha == artifact_sha
             executable = package_root / executable_relative_path
             if not executable.is_file():

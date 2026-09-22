@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timedelta
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal, InvalidOperation, ROUND_HALF_UP, localcontext
 from enum import Enum
 from hashlib import sha256
 import json
@@ -226,18 +226,120 @@ class SmarketsExecutionAuthority:
             raise SmarketsReconciliationError("action market is outside approved Smarkets scope")
 
 
+_UINT64_MAX = (1 << 64) - 1
+_PERCENT_PRICE_SCALE = 10_000
+_QUANTITY_SCALE = 10_000
+_STAKE_SCALE = Decimal(_PERCENT_PRICE_SCALE * _QUANTITY_SCALE)
+
+
+def _provider_uint(
+    value: object,
+    name: str,
+    *,
+    minimum: int = 0,
+    maximum: int = _UINT64_MAX,
+) -> int:
+    if type(value) is not int or value < minimum or value > maximum:
+        raise SmarketsReconciliationError(
+            f"{name} must be an integer in [{minimum}, {maximum}]"
+        )
+    return value
+
+
+def _odds_range(start: str, stop: str, step: str) -> tuple[Decimal, ...]:
+    current = Decimal(start)
+    final = Decimal(stop)
+    increment = Decimal(step)
+    values: list[Decimal] = []
+    while current <= final:
+        values.append(current)
+        current += increment
+    return tuple(values)
+
+
+# Smarkets' published exchange ladder. Provider prices are inverse probability
+# percentages rounded to two decimals, represented by the API as integer units.
+_SMK_ODDS_LADDER = frozenset(
+    (Decimal("1.0001"),)
+    + _odds_range("1.01", "2.00", "0.01")
+    + _odds_range("2.02", "3.00", "0.02")
+    + _odds_range("3.05", "4.00", "0.05")
+    + _odds_range("4.1", "6.0", "0.1")
+    + _odds_range("6.2", "10.0", "0.2")
+    + _odds_range("10.5", "20.0", "0.5")
+    + _odds_range("21", "30", "1")
+    + _odds_range("32", "50", "2")
+    + _odds_range("55", "100", "5")
+    + _odds_range("110", "300", "10")
+    + (Decimal("500"), Decimal("1000"), Decimal("10000"))
+)
+
+
+def _price_units_for_decimal_odds(odds: Decimal) -> int:
+    if odds not in _SMK_ODDS_LADDER:
+        raise SmarketsReconciliationError(
+            "requested_odds is not on the published Smarkets exchange ladder"
+        )
+    with localcontext() as context:
+        context.prec = 50
+        units = (Decimal(_PERCENT_PRICE_SCALE) / odds).quantize(
+            Decimal("1"), rounding=ROUND_HALF_UP
+        )
+    return int(units)
+
+
+def _decimal_odds_from_price_units(price_units: int) -> Decimal:
+    _provider_uint(
+        price_units,
+        "executed_avg_price_units",
+        minimum=1,
+        maximum=_PERCENT_PRICE_SCALE - 1,
+    )
+    with localcontext() as context:
+        context.prec = 50
+        return +(Decimal(_PERCENT_PRICE_SCALE) / Decimal(price_units))
+
+
+def _quantity_units_for_action(action: ExecutionAction) -> int:
+    # Smarkets quantity is payout/return, not stake: quantity = stake * odds.
+    scaled = action.requested_stake * action.requested_odds * Decimal(_QUANTITY_SCALE)
+    integral = scaled.to_integral_value()
+    if scaled != integral:
+        raise SmarketsReconciliationError(
+            "requested stake/odds cannot be represented exactly in Smarkets quantity units"
+        )
+    return _provider_uint(
+        int(integral),
+        "expected_requested_quantity_units",
+        minimum=1,
+    )
+
+
+def _provider_side_for_action(action: ExecutionAction) -> str:
+    if action.side == "BACK":
+        return "buy"
+    if action.side == "LAY":
+        return "sell"
+    raise SmarketsReconciliationError(
+        "canonical action side must be BACK or LAY for Smarkets"
+    )
+
+
 @dataclass(frozen=True, slots=True)
 class SmarketsOrderReadback:
+    """Normalized official-API order readback in provider-native fixed-point units."""
+
     provider_order_id: str
+    reference_id: str
     account_id: str
     event_id: str
     market_id: str
     contract_id: str
     side: str
-    requested_price: Decimal | str | int
-    requested_quantity: Decimal | str | int
-    matched_quantity: Decimal | str | int
-    average_matched_price: Decimal | str | int | None
+    requested_price_units: int
+    requested_quantity_units: int
+    executed_quantity_units: int
+    executed_avg_price_units: int | None
     state: SmarketsOrderState
     observed_at: str
     source_payload_sha256: str
@@ -245,6 +347,7 @@ class SmarketsOrderReadback:
     def __post_init__(self) -> None:
         for name in (
             "provider_order_id",
+            "reference_id",
             "account_id",
             "event_id",
             "market_id",
@@ -252,66 +355,81 @@ class SmarketsOrderReadback:
             "side",
         ):
             _text(getattr(self, name), name)
-        object.__setattr__(
-            self, "requested_price", _positive_decimal(self.requested_price, "requested_price")
+        if self.side not in {"buy", "sell"}:
+            raise SmarketsReconciliationError("side must be Smarkets buy or sell")
+        _provider_uint(
+            self.requested_price_units,
+            "requested_price_units",
+            minimum=1,
+            maximum=_PERCENT_PRICE_SCALE - 1,
         )
-        object.__setattr__(
-            self,
-            "requested_quantity",
-            _positive_decimal(self.requested_quantity, "requested_quantity"),
+        _provider_uint(
+            self.requested_quantity_units,
+            "requested_quantity_units",
+            minimum=1,
         )
-        object.__setattr__(
-            self,
-            "matched_quantity",
-            _nonnegative_decimal(self.matched_quantity, "matched_quantity"),
+        _provider_uint(
+            self.executed_quantity_units,
+            "executed_quantity_units",
         )
-        if self.matched_quantity > self.requested_quantity:
-            raise SmarketsReconciliationError("matched_quantity exceeds requested_quantity")
-        if self.average_matched_price is not None:
-            object.__setattr__(
-                self,
-                "average_matched_price",
-                _positive_decimal(self.average_matched_price, "average_matched_price"),
-            )
-        if self.matched_quantity > 0 and self.average_matched_price is None:
+        if self.executed_quantity_units > self.requested_quantity_units:
             raise SmarketsReconciliationError(
-                "matched order requires average_matched_price"
+                "executed_quantity_units exceeds requested_quantity_units"
             )
-        if self.matched_quantity == 0 and self.average_matched_price is not None:
-            raise SmarketsReconciliationError(
-                "unmatched order must not claim average_matched_price"
+        if self.executed_avg_price_units is None:
+            if self.executed_quantity_units != 0:
+                raise SmarketsReconciliationError(
+                    "executed order requires executed_avg_price_units"
+                )
+        else:
+            _provider_uint(
+                self.executed_avg_price_units,
+                "executed_avg_price_units",
+                minimum=1,
+                maximum=_PERCENT_PRICE_SCALE - 1,
             )
+            if self.executed_quantity_units == 0:
+                raise SmarketsReconciliationError(
+                    "unexecuted order must not claim executed_avg_price_units"
+                )
         if type(self.state) is not SmarketsOrderState:
             raise SmarketsReconciliationError("state must be SmarketsOrderState")
         if self.state is SmarketsOrderState.FILLED and (
-            self.matched_quantity != self.requested_quantity
+            self.executed_quantity_units != self.requested_quantity_units
         ):
-            raise SmarketsReconciliationError("FILLED must match full requested_quantity")
+            raise SmarketsReconciliationError(
+                "FILLED must execute full requested_quantity_units"
+            )
         if self.state is SmarketsOrderState.PARTIAL and not (
-            Decimal("0") < self.matched_quantity < self.requested_quantity
+            0 < self.executed_quantity_units < self.requested_quantity_units
         ):
-            raise SmarketsReconciliationError("PARTIAL requires partial matched quantity")
-        if self.state is SmarketsOrderState.REJECTED and self.matched_quantity != 0:
-            raise SmarketsReconciliationError("REJECTED cannot contain matched quantity")
+            raise SmarketsReconciliationError(
+                "PARTIAL requires partial executed quantity"
+            )
+        if self.state is SmarketsOrderState.OPEN and self.executed_quantity_units != 0:
+            raise SmarketsReconciliationError(
+                "OPEN normalized state cannot claim executed quantity"
+            )
+        if self.state is SmarketsOrderState.REJECTED and self.executed_quantity_units != 0:
+            raise SmarketsReconciliationError(
+                "REJECTED cannot contain executed quantity"
+            )
         _timestamp(self.observed_at, "observed_at")
         _sha256(self.source_payload_sha256, "source_payload_sha256")
 
     def to_canonical_dict(self) -> dict[str, object]:
         return {
             "account_id": self.account_id,
-            "average_matched_price": (
-                None
-                if self.average_matched_price is None
-                else _decimal_text(self.average_matched_price)
-            ),
             "contract_id": self.contract_id,
             "event_id": self.event_id,
+            "executed_avg_price_units": self.executed_avg_price_units,
+            "executed_quantity_units": self.executed_quantity_units,
             "market_id": self.market_id,
-            "matched_quantity": _decimal_text(self.matched_quantity),
             "observed_at": self.observed_at,
             "provider_order_id": self.provider_order_id,
-            "requested_price": _decimal_text(self.requested_price),
-            "requested_quantity": _decimal_text(self.requested_quantity),
+            "reference_id": self.reference_id,
+            "requested_price_units": self.requested_price_units,
+            "requested_quantity_units": self.requested_quantity_units,
             "side": self.side,
             "source_payload_sha256": self.source_payload_sha256,
             "state": self.state.value,
@@ -322,9 +440,12 @@ class SmarketsOrderReadback:
 class VerifiedSmarketsOrderEffect:
     action_id: str
     provider_order_id: str
+    reference_id: str
     status: AcknowledgementStatus
     accepted_odds: Decimal | None
     accepted_stake: Decimal
+    executed_quantity_units: int
+    executed_avg_price_units: int | None
     observed_at: str
     authority_id: str
     profile_id: str
@@ -340,9 +461,12 @@ class VerifiedSmarketsOrderEffect:
             "action_id": self.action_id,
             "authority_id": self.authority_id,
             "evidence_id": self.evidence_id,
+            "executed_avg_price_units": self.executed_avg_price_units,
+            "executed_quantity_units": self.executed_quantity_units,
             "observed_at": self.observed_at,
             "profile_id": self.profile_id,
             "provider_order_id": self.provider_order_id,
+            "reference_id": self.reference_id,
             "source_payload_sha256": self.source_payload_sha256,
             "status": self.status.value,
         }
@@ -354,9 +478,15 @@ def verify_smarkets_order_readback(
     authority: SmarketsExecutionAuthority,
     readback: SmarketsOrderReadback,
     *,
-    expected_provider_order_id: str,
+    expected_reference_id: str,
 ) -> VerifiedSmarketsOrderEffect:
-    """Promote provider readback to bounded canonical acknowledgement evidence."""
+    """Promote exact provider readback into bounded canonical execution evidence.
+
+    Smarkets' order quantity is payout/return (stake * odds) in 1e-4 units.
+    Consequently a best-price fill can execute the full provider quantity while
+    using less conventional stake. Provider fixed-point fields remain embedded
+    in the evidence digest; HTTP success alone never creates this effect.
+    """
 
     if type(action) is not ExecutionAction:
         raise SmarketsReconciliationError("action must be canonical ExecutionAction")
@@ -368,9 +498,8 @@ def verify_smarkets_order_readback(
         raise SmarketsReconciliationError("authority must be SmarketsExecutionAuthority")
     if type(readback) is not SmarketsOrderReadback:
         raise SmarketsReconciliationError("readback must be SmarketsOrderReadback")
-    expected_order_id = _text(
-        expected_provider_order_id, "expected_provider_order_id"
-    )
+    expected_reference = _text(expected_reference_id, "expected_reference_id")
+
     if profile.venue_id != action.bookmaker_id:
         raise SmarketsReconciliationError("bookmaker profile does not match action")
     if profile.venue_id.lower() != "smarkets":
@@ -399,34 +528,38 @@ def verify_smarkets_order_readback(
         raise SmarketsReconciliationError(
             "provider readback cannot predate the execution action evidence"
         )
-    if readback.provider_order_id != expected_order_id:
+
+    if readback.reference_id != expected_reference:
         raise SmarketsReconciliationError(
-            "provider readback order id does not match durable submission identity"
+            "provider readback reference_id does not match durable submission identity"
         )
     if (
         readback.event_id != action.event_id
         or readback.market_id != action.market_id
         or readback.contract_id != action.selection_id
-        or readback.side != action.side
+        or readback.side != _provider_side_for_action(action)
     ):
         raise SmarketsReconciliationError(
             "provider order identity conflicts with execution action"
         )
-    if readback.requested_price != action.requested_odds:
+
+    expected_price_units = _price_units_for_decimal_odds(action.requested_odds)
+    if readback.requested_price_units != expected_price_units:
         raise SmarketsReconciliationError(
-            "provider requested price conflicts with execution action"
+            "provider requested price conflicts with canonical odds"
         )
-    if readback.requested_quantity != action.requested_stake:
+    expected_quantity_units = _quantity_units_for_action(action)
+    if readback.requested_quantity_units != expected_quantity_units:
         raise SmarketsReconciliationError(
-            "provider requested quantity conflicts with execution action"
+            "provider requested quantity conflicts with stake-times-odds economics"
         )
 
-    if readback.state is SmarketsOrderState.OPEN and readback.matched_quantity == 0:
+    if readback.state is SmarketsOrderState.OPEN:
         raise SmarketsReconciliationPending(
-            "open unmatched provider order does not prove acceptance economics"
+            "open provider order does not prove terminal execution economics"
         )
 
-    if readback.matched_quantity == 0:
+    if readback.executed_quantity_units == 0:
         if readback.state not in (
             SmarketsOrderState.REJECTED,
             SmarketsOrderState.CANCELLED,
@@ -436,25 +569,47 @@ def verify_smarkets_order_readback(
             )
         status = AcknowledgementStatus.REJECTED
         accepted_odds = None
+        accepted_stake = Decimal("0")
     else:
-        accepted_odds = readback.average_matched_price
-        if accepted_odds is None:
-            raise SmarketsReconciliationError("matched effect lacks accepted odds")
+        executed_price_units = readback.executed_avg_price_units
+        if executed_price_units is None:
+            raise SmarketsReconciliationError(
+                "executed provider effect lacks executed_avg_price_units"
+            )
+        # Best-price execution must not worsen the requested exchange price.
+        if readback.side == "buy" and executed_price_units > readback.requested_price_units:
+            raise SmarketsReconciliationError(
+                "Smarkets buy execution is worse than requested price"
+            )
+        if readback.side == "sell" and executed_price_units < readback.requested_price_units:
+            raise SmarketsReconciliationError(
+                "Smarkets sell execution is worse than requested price"
+            )
+        accepted_stake = (
+            Decimal(readback.executed_quantity_units)
+            * Decimal(executed_price_units)
+            / _STAKE_SCALE
+        )
+        if accepted_stake > action.requested_stake:
+            raise SmarketsReconciliationError(
+                "provider execution stake exceeds canonical requested stake"
+            )
+        accepted_odds = _decimal_odds_from_price_units(executed_price_units)
         status = (
             AcknowledgementStatus.ACCEPTED
-            if readback.matched_quantity == action.requested_stake
+            if readback.executed_quantity_units == readback.requested_quantity_units
             else AcknowledgementStatus.PARTIAL
         )
         if readback.state is SmarketsOrderState.REJECTED:
             raise SmarketsReconciliationError(
-                "rejected provider state conflicts with matched quantity"
+                "rejected provider state conflicts with executed quantity"
             )
 
     profile_id = profile.profile_id
     authority_id = authority.authority_id
     payload = {
         "schema": "autosport.smarkets_order_effect",
-        "schema_version": 1,
+        "schema_version": 2,
         "action": action.to_dict(),
         "authority_id": authority_id,
         "profile_id": profile_id,
@@ -463,15 +618,18 @@ def verify_smarkets_order_readback(
         "accepted_odds": (
             None if accepted_odds is None else _decimal_text(accepted_odds)
         ),
-        "accepted_stake": _decimal_text(readback.matched_quantity),
+        "accepted_stake": _decimal_text(accepted_stake),
     }
     evidence_id = _digest(payload)
     return VerifiedSmarketsOrderEffect(
         action_id=action.action_id,
         provider_order_id=readback.provider_order_id,
+        reference_id=readback.reference_id,
         status=status,
         accepted_odds=accepted_odds,
-        accepted_stake=readback.matched_quantity,
+        accepted_stake=accepted_stake,
+        executed_quantity_units=readback.executed_quantity_units,
+        executed_avg_price_units=readback.executed_avg_price_units,
         observed_at=readback.observed_at,
         authority_id=authority_id,
         profile_id=profile_id,
@@ -522,9 +680,12 @@ _EFFECT_RECORD_KEYS = {
     "action_id",
     "authority_id",
     "evidence_id",
+    "executed_avg_price_units",
+    "executed_quantity_units",
     "observed_at",
     "profile_id",
     "provider_order_id",
+    "reference_id",
     "source_payload_sha256",
     "status",
 }
@@ -537,6 +698,19 @@ def _validated_effect_record(
         raise SmarketsReconciliationError("invalid Smarkets effect record shape")
     _text(record["action_id"], "record.action_id")
     _text(record["provider_order_id"], "record.provider_order_id")
+    _text(record["reference_id"], "record.reference_id")
+    executed_quantity_units = _provider_uint(
+        record["executed_quantity_units"],
+        "record.executed_quantity_units",
+    )
+    executed_avg_price_units = record["executed_avg_price_units"]
+    if executed_avg_price_units is not None:
+        _provider_uint(
+            executed_avg_price_units,
+            "record.executed_avg_price_units",
+            minimum=1,
+            maximum=_PERCENT_PRICE_SCALE - 1,
+        )
     for name in (
         "authority_id",
         "evidence_id",
@@ -559,11 +733,21 @@ def _validated_effect_record(
         else _positive_decimal(odds_raw, "record.accepted_odds")
     )
     if status is AcknowledgementStatus.REJECTED:
-        if stake != 0 or odds is not None:
+        if (
+            stake != 0
+            or odds is not None
+            or executed_quantity_units != 0
+            or executed_avg_price_units is not None
+        ):
             raise SmarketsReconciliationError(
                 "REJECTED record cannot carry accepted execution economics"
             )
-    elif stake <= 0 or odds is None:
+    elif (
+        stake <= 0
+        or odds is None
+        or executed_quantity_units <= 0
+        or executed_avg_price_units is None
+    ):
         raise SmarketsReconciliationError(
             "accepted/partial record requires positive execution economics"
         )
@@ -662,11 +846,22 @@ class SmarketsReconciliationJournal:
                 raise SmarketsReconciliationError(
                     "evidence_id was reused with conflicting journal payload"
                 )
+            if record.get("reference_id") == effect.reference_id and (
+                record.get("action_id") != effect.action_id
+                or record.get("provider_order_id") != effect.provider_order_id
+            ):
+                raise SmarketsReconciliationError(
+                    "reference_id conflicts with prior provider order/action"
+                )
             if record.get("provider_order_id") != effect.provider_order_id:
                 continue
             if record.get("action_id") != effect.action_id:
                 raise SmarketsReconciliationError(
                     "provider_order_id conflicts with prior action"
+                )
+            if record.get("reference_id") != effect.reference_id:
+                raise SmarketsReconciliationError(
+                    "provider_order_id changed durable reference_id"
                 )
             old_status, old_stake, old_odds, old_observed = _validated_effect_record(
                 record

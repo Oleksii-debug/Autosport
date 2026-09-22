@@ -275,17 +275,32 @@ _SMK_ODDS_LADDER = frozenset(
 )
 
 
-def _price_units_for_decimal_odds(odds: Decimal) -> int:
-    if odds not in _SMK_ODDS_LADDER:
-        raise SmarketsReconciliationError(
-            "requested_odds is not on the published Smarkets exchange ladder"
-        )
+def _rounded_price_units(odds: Decimal) -> int:
     with localcontext() as context:
         context.prec = 50
         units = (Decimal(_PERCENT_PRICE_SCALE) / odds).quantize(
             Decimal("1"), rounding=ROUND_HALF_UP
         )
     return int(units)
+
+
+_SMK_ODDS_TO_PRICE_UNITS = {
+    odds: _rounded_price_units(odds) for odds in _SMK_ODDS_LADDER
+}
+_SMK_PRICE_UNITS_TO_ODDS = {
+    units: odds for odds, units in _SMK_ODDS_TO_PRICE_UNITS.items()
+}
+if len(_SMK_PRICE_UNITS_TO_ODDS) != len(_SMK_ODDS_TO_PRICE_UNITS):
+    raise RuntimeError("published Smarkets odds ladder has ambiguous percentage prices")
+
+
+def _price_units_for_decimal_odds(odds: Decimal) -> int:
+    try:
+        return _SMK_ODDS_TO_PRICE_UNITS[odds]
+    except KeyError as exc:
+        raise SmarketsReconciliationError(
+            "requested_odds is not on the published Smarkets exchange ladder"
+        ) from exc
 
 
 def _decimal_odds_from_price_units(price_units: int) -> Decimal:
@@ -295,6 +310,11 @@ def _decimal_odds_from_price_units(price_units: int) -> Decimal:
         minimum=1,
         maximum=_PERCENT_PRICE_SCALE - 1,
     )
+    published = _SMK_PRICE_UNITS_TO_ODDS.get(price_units)
+    if published is not None:
+        return published
+    # Average execution prices can sit between exchange ticks. Preserve those
+    # provider-native units in evidence and project them to Decimal at high precision.
     with localcontext() as context:
         context.prec = 50
         return +(Decimal(_PERCENT_PRICE_SCALE) / Decimal(price_units))

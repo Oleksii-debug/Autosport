@@ -46,6 +46,9 @@ class _HeadlessAutosportApp(AutosportApp):
     def update_idletasks(self) -> None:
         return None
 
+    def after_idle(self, callback) -> None:
+        callback()
+
     def _configure_accessibility(self) -> None:
         self.accessibility_configured = True
 
@@ -75,6 +78,9 @@ class _HeadlessWindowsAutosportApp(WindowsAutosportApp):
 
     def update_idletasks(self) -> None:
         return None
+
+    def after_idle(self, callback) -> None:
+        callback()
 
     def _configure_accessibility(self) -> None:
         self.accessibility_configured = True

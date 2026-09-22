@@ -140,8 +140,37 @@ class LiquidityCapacityAssessment:
     reason: str
 
     @property
-    def supports_requested_size(self) -> bool:
+    def visible_capacity_numerically_sufficient(self) -> bool:
+        """Whether the supplied ladder arithmetic covers the requested size.
+
+        This is descriptive arithmetic over caller-supplied observation data. It is
+        not proof that the provider emitted the snapshot or that its timestamp is
+        product-owned.
+        """
+
         return self.status is LiquidityEvidenceStatus.SUFFICIENT_VISIBLE_CAPACITY
+
+    @property
+    def provider_snapshot_origin_proven(self) -> bool:
+        """This caller-constructible contract cannot prove provider acquisition."""
+
+        return False
+
+    @property
+    def observation_time_proven(self) -> bool:
+        """This caller-constructible contract cannot prove provider observation time."""
+
+        return False
+
+    @property
+    def supports_requested_size(self) -> bool:
+        """Authoritative support requires independent provider-origin/time proof."""
+
+        return (
+            self.visible_capacity_numerically_sufficient
+            and self.provider_snapshot_origin_proven
+            and self.observation_time_proven
+        )
 
     @property
     def execution_guaranteed(self) -> bool:

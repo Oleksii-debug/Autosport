@@ -362,7 +362,10 @@ def test_persistent_401_stops_after_one_bounded_relogin() -> None:
     assert lifecycle.state is SessionState.EXPIRED
 
 
-def test_concurrent_failed_login_is_single_flight_and_all_waiters_fail() -> None:
+@pytest.mark.parametrize("status", [400, 503])
+def test_concurrent_failed_login_is_single_flight_and_all_waiters_fail(
+    status: int,
+) -> None:
     started = Event()
     release = Event()
     call_lock = Lock()
@@ -374,7 +377,7 @@ def test_concurrent_failed_login_is_single_flight_and_all_waiters_fail() -> None
             calls += 1
         started.set()
         assert release.wait(timeout=2.0)
-        return MatchbookLoginResponse(503)
+        return MatchbookLoginResponse(status)
 
     transport, _, _, _ = build_transport(
         login=login,

@@ -298,7 +298,10 @@ def test_cross_sport_activation_fails_even_when_other_semantics_match(tmp_path) 
     # Sport is an authority-bearing compatibility dimension, not presentation
     # metadata. Keep every other semantic dimension byte-for-byte identical.
     assert training_scope.scope_id != second_sport_scope.scope_id
-    assert replace(second_sport_scope, sport_domain=training_scope.sport_domain) == training_scope
+    assert (
+        replace(second_sport_scope, sport_domain=training_scope.sport_domain)
+        == training_scope
+    )
 
     training_authority = _authority(
         training,

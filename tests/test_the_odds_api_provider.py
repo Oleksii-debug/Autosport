@@ -425,14 +425,28 @@ class TheOddsApiProviderTests(unittest.TestCase):
                 },
             ]
         )
+        response_digests = iter(("1" * 64, "2" * 64))
+
+        def transport(url, timeout):
+            return HttpJsonResponse(
+                next(payloads),
+                200,
+                {},
+                body_sha256=next(response_digests),
+            )
+
         provider = TheOddsApiProvider(
             "k",
             sport="soccer_epl",
-            transport=lambda *_: HttpJsonResponse(next(payloads), 200, {}),
+            transport=transport,
             clock=lambda: "2026-09-22T14:00:00+00:00",
         )
         first = provider.read_historical_snapshot("2026-09-22T12:42:00Z")
         second = provider.read_historical_snapshot("2026-09-22T12:42:00Z")
+        self.assertEqual(first.snapshot_at, second.snapshot_at)
+        self.assertNotEqual(first.batch.cursor, second.batch.cursor)
+        self.assertEqual(first.batch.cursor, "1" * 64)
+        self.assertEqual(second.batch.cursor, "2" * 64)
         self.assertNotEqual(
             first.batch.quotes[0].sequence,
             second.batch.quotes[0].sequence,

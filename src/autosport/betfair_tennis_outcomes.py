@@ -118,14 +118,25 @@ def assess_betfair_tennis_historical_market_definition_authority(
             refusal_reason="betfair_market_definition_is_not_open_at_roster_revision",
         )
 
+    complete = market_definition.get("complete")
+    if type(complete) is not bool:
+        raise ValueError("marketDefinition.complete must be a boolean")
+    if not complete:
+        return MarketOutcomeAuthorityAssessment(
+            identity=identity,
+            status=OutcomeAuthorityStatus.REFUSED,
+            authority=None,
+            refusal_reason="betfair_market_definition_runner_roster_is_not_complete",
+        )
+
     runners = market_definition.get("runners")
-    if type(runners) is not list or len(runners) < 2:
+    if type(runners) is not list or len(runners) != 2:
         return MarketOutcomeAuthorityAssessment(
             identity=identity,
             status=OutcomeAuthorityStatus.REFUSED,
             authority=None,
             refusal_reason=(
-                "betfair_market_definition_lacks_authoritative_runner_roster"
+                "betfair_tennis_match_odds_requires_exact_two_runner_roster"
             ),
         )
 
@@ -182,6 +193,8 @@ def assess_betfair_tennis_historical_market_definition_authority(
             "event_type_id": _BETFAIR_TENNIS_EVENT_TYPE_ID,
             "market_type": _BETFAIR_MATCH_ODDS_TYPE,
             "requires_open_status": True,
+            "requires_complete_runner_roster": True,
+            "requires_runner_count": 2,
             "runner_ids_derived_from": "marketDefinition.runners",
             "settlement_protocol_sha256": settlement_rules_sha256,
         }

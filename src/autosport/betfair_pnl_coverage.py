@@ -146,12 +146,6 @@ class CoverageWitness:
     open_batches: tuple[BetfairMarketPnlCoverageBatch, ...]
     closed_pages: tuple[BetfairClearedMarketPnlCoveragePage, ...]
 
-    @property
-    def candidate_complete(self) -> bool:
-        """Convenience only. Persisted witnesses must be revalidated contextually."""
-        return not self.unsupported_market_ids
-
-
 def _unique_market_map(markets: Sequence[MarketDescriptor]) -> Mapping[str, MarketDescriptor]:
     result: dict[str, MarketDescriptor] = {}
     for market in markets:
@@ -451,7 +445,11 @@ def verify_coverage_witness(
     scope: ScopeIdentity,
     markets: Sequence[MarketDescriptor],
 ) -> CoverageWitness:
-    """Rebuild untrusted persisted evidence against the exact external scope."""
+    """Rebuild an untrusted in-memory witness against the exact external scope.
+
+    Provider-issued DTO authority is process-local. Durable replay must first
+    re-establish provider evidence through the product-owned evidence store.
+    """
     if not isinstance(witness, CoverageWitness):
         raise BetfairPnlCoverageError("witness must be CoverageWitness")
     rebuilt = build_coverage_witness(

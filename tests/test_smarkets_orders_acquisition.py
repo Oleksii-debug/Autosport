@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from email.message import Message
+from http.client import IncompleteRead
 import pickle
 
 import pytest
@@ -23,6 +24,9 @@ class _FakeResponse:
         status: int = 200,
         content_type: str = "application/json; charset=utf-8",
         date: str = "Tue, 22 Sep 2026 14:45:00 GMT",
+        content_length: str | int | None = None,
+        max_chunk: int | None = None,
+        incomplete_read: bool = False,
     ) -> None:
         self.payload = payload
         self.url = url
@@ -30,7 +34,12 @@ class _FakeResponse:
         self.headers = Message()
         self.headers["Content-Type"] = content_type
         self.headers["Date"] = date
-        self.requested_read_size = None
+        if content_length is not None:
+            self.headers["Content-Length"] = str(content_length)
+        self.max_chunk = max_chunk
+        self.incomplete_read = incomplete_read
+        self.requested_read_sizes: list[int] = []
+        self._offset = 0
 
     def __enter__(self):
         return self
@@ -45,8 +54,18 @@ class _FakeResponse:
         return self.status
 
     def read(self, size=-1):
-        self.requested_read_size = size
-        return self.payload[:size] if size >= 0 else self.payload
+        self.requested_read_sizes.append(size)
+        if self.incomplete_read:
+            raise IncompleteRead(self.payload, max(1, len(self.payload)))
+        if self._offset >= len(self.payload):
+            return b""
+        if size < 0:
+            size = len(self.payload) - self._offset
+        if self.max_chunk is not None:
+            size = min(size, self.max_chunk)
+        start = self._offset
+        self._offset = min(len(self.payload), self._offset + size)
+        return self.payload[start : self._offset]
 
 
 def _install(monkeypatch, response: _FakeResponse):
@@ -80,7 +99,7 @@ def test_fixed_origin_get_issues_exact_payload_witness(monkeypatch) -> None:
     assert witness.payload_size == len(response.payload)
     assert witness.matches_payload(response.payload)
     assert witness.parsed_json() == {"orders": [{"id": "o-1"}]}
-    assert response.requested_read_size == 8 * 1024 * 1024 + 1
+    assert len(response.requested_read_sizes) >= 2
 
 
 def test_witness_cannot_be_constructed_by_ordinary_caller() -> None:
@@ -154,6 +173,82 @@ def test_oversize_payload_fails_closed(monkeypatch) -> None:
     payload = b" " * (8 * 1024 * 1024 + 1)
     _install(monkeypatch, _FakeResponse(payload))
     with pytest.raises(SmarketsOrdersAcquisitionError, match="byte limit"):
+        acquire_smarkets_orders_payload("secret-token")
+
+
+def test_short_reads_without_content_length_are_drained_to_eof(monkeypatch) -> None:
+    payload = b'{"orders":[{"id":"o-short"}]}'
+    response = _FakeResponse(payload, max_chunk=3)
+    _install(monkeypatch, response)
+
+    witness = acquire_smarkets_orders_payload("secret-token")
+
+    assert witness.payload_bytes == payload
+    assert len(response.requested_read_sizes) > 3
+
+
+def test_declared_content_length_is_read_completely_across_short_reads(monkeypatch) -> None:
+    payload = b'{"orders":[{"id":"o-complete"}]}'
+    response = _FakeResponse(payload, content_length=len(payload), max_chunk=4)
+    _install(monkeypatch, response)
+
+    witness = acquire_smarkets_orders_payload("secret-token")
+
+    assert witness.payload_bytes == payload
+    assert witness.payload_size == len(payload)
+
+
+def test_premature_eof_before_declared_content_length_fails_closed(monkeypatch) -> None:
+    payload = b'{"orders":[]}'
+    response = _FakeResponse(payload, content_length=len(payload) + 7, max_chunk=4)
+    _install(monkeypatch, response)
+
+    with pytest.raises(SmarketsOrdersAcquisitionError, match="before Content-Length"):
+        acquire_smarkets_orders_payload("secret-token")
+
+
+def test_incomplete_read_exception_fails_closed(monkeypatch) -> None:
+    response = _FakeResponse(b'{"orders":[]}', incomplete_read=True)
+    _install(monkeypatch, response)
+
+    with pytest.raises(SmarketsOrdersAcquisitionError, match="body is incomplete"):
+        acquire_smarkets_orders_payload("secret-token")
+
+
+@pytest.mark.parametrize("content_length", ["-1", "not-a-number", "1.5", "  "])
+def test_invalid_content_length_fails_closed(monkeypatch, content_length: str) -> None:
+    response = _FakeResponse(content_length=content_length)
+    _install(monkeypatch, response)
+
+    with pytest.raises(SmarketsOrdersAcquisitionError, match="Content-Length is invalid"):
+        acquire_smarkets_orders_payload("secret-token")
+
+
+def test_declared_oversize_content_length_fails_before_body_is_trusted(monkeypatch) -> None:
+    response = _FakeResponse(content_length=8 * 1024 * 1024 + 1)
+    _install(monkeypatch, response)
+
+    with pytest.raises(SmarketsOrdersAcquisitionError, match="byte limit"):
+        acquire_smarkets_orders_payload("secret-token")
+    assert response.requested_read_sizes == []
+
+
+def test_extra_bytes_beyond_declared_content_length_fail_closed(monkeypatch) -> None:
+    payload = b'{"orders":[]}'
+    response = _FakeResponse(payload, content_length=len(payload) - 1)
+    _install(monkeypatch, response)
+
+    with pytest.raises(SmarketsOrdersAcquisitionError, match="exceeds declared Content-Length"):
+        acquire_smarkets_orders_payload("secret-token")
+
+
+def test_duplicate_content_length_headers_fail_closed(monkeypatch) -> None:
+    response = _FakeResponse()
+    response.headers["Content-Length"] = str(len(response.payload))
+    response.headers["Content-Length"] = str(len(response.payload))
+    _install(monkeypatch, response)
+
+    with pytest.raises(SmarketsOrdersAcquisitionError, match="ambiguous Content-Length"):
         acquire_smarkets_orders_payload("secret-token")
 
 

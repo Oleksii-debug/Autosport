@@ -28,7 +28,7 @@ class BetfairTennisOutcomeAuthorityTests(unittest.TestCase):
         event_type_id: str = "2",
         status: str = "OPEN",
         market_type: str = "MATCH_ODDS",
-        selection_ids: tuple[str, ...] = ("player-b", "player-a"),
+        selection_ids: tuple[object, ...] = ("player-b", "player-a"),
     ) -> dict[str, object]:
         return {
             "eventId": "same-provider-event",
@@ -258,6 +258,36 @@ class BetfairTennisOutcomeAuthorityTests(unittest.TestCase):
                 provider_publish_at="2026-09-22T10:00:00Z",
                 observed_at="2026-09-22T10:00:01Z",
             )
+
+    def test_runner_id_wire_type_fails_closed_before_string_coercion(self):
+        for invalid_id in (True, ["player-a"], {"nested": "player-a"}):
+            malformed = self._definition()
+            malformed["runners"] = [{"id": "valid"}, {"id": invalid_id}]
+            with self.subTest(invalid_id=invalid_id):
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "id must be string or integer",
+                ):
+                    assess_betfair_tennis_historical_market_definition_authority(
+                        market_id="m-runner-type",
+                        market_definition=malformed,
+                        provider_publish_at="2026-09-22T10:00:00Z",
+                        observed_at="2026-09-22T10:00:01Z",
+                    )
+
+        mixed_scalar_ids = self._definition(selection_ids=(12, "player-a"))
+        assessment = assess_betfair_tennis_historical_market_definition_authority(
+            market_id="m-scalar-runner-ids",
+            market_definition=mixed_scalar_ids,
+            provider_publish_at="2026-09-22T10:00:00Z",
+            observed_at="2026-09-22T10:00:01Z",
+        )
+        self.assertEqual(
+            assessment.status,
+            OutcomeAuthorityStatus.PROVEN_EXHAUSTIVE,
+        )
+        self.assertIsNotNone(assessment.authority)
+        self.assertEqual(assessment.authority.selection_ids, ("12", "player-a"))
 
     def test_provider_publish_time_cannot_be_backdated(self):
         with self.assertRaisesRegex(

@@ -28,6 +28,7 @@ class BetfairTennisOutcomeAuthorityTests(unittest.TestCase):
         event_type_id: str = "2",
         status: str = "OPEN",
         market_type: str = "MATCH_ODDS",
+        complete: object = True,
         selection_ids: tuple[object, ...] = ("player-b", "player-a"),
     ) -> dict[str, object]:
         return {
@@ -35,6 +36,7 @@ class BetfairTennisOutcomeAuthorityTests(unittest.TestCase):
             "eventTypeId": event_type_id,
             "marketType": market_type,
             "status": status,
+            "complete": complete,
             "runners": [{"id": selection_id} for selection_id in selection_ids],
         }
 
@@ -236,7 +238,23 @@ class BetfairTennisOutcomeAuthorityTests(unittest.TestCase):
         self.assertEqual(too_small.status, OutcomeAuthorityStatus.REFUSED)
         self.assertEqual(
             too_small.refusal_reason,
-            "betfair_market_definition_lacks_authoritative_runner_roster",
+            "betfair_tennis_match_odds_requires_exact_two_runner_roster",
+        )
+
+        too_large = (
+            assess_betfair_tennis_historical_market_definition_authority(
+                market_id="m-large",
+                market_definition=self._definition(
+                    selection_ids=("player-a", "player-b", "player-c")
+                ),
+                provider_publish_at="2026-09-22T10:00:00Z",
+                observed_at="2026-09-22T10:00:01Z",
+            )
+        )
+        self.assertEqual(too_large.status, OutcomeAuthorityStatus.REFUSED)
+        self.assertEqual(
+            too_large.refusal_reason,
+            "betfair_tennis_match_odds_requires_exact_two_runner_roster",
         )
 
         with self.assertRaisesRegex(ValueError, "duplicate selection id"):
@@ -255,6 +273,46 @@ class BetfairTennisOutcomeAuthorityTests(unittest.TestCase):
             assess_betfair_tennis_historical_market_definition_authority(
                 market_id="m-malformed",
                 market_definition=malformed,
+                provider_publish_at="2026-09-22T10:00:00Z",
+                observed_at="2026-09-22T10:00:01Z",
+            )
+
+    def test_tennis_requires_explicit_complete_provider_roster(self):
+        incomplete = assess_betfair_tennis_historical_market_definition_authority(
+            market_id="m-incomplete",
+            market_definition=self._definition(complete=False),
+            provider_publish_at="2026-09-22T10:00:00Z",
+            observed_at="2026-09-22T10:00:01Z",
+        )
+        self.assertEqual(incomplete.status, OutcomeAuthorityStatus.REFUSED)
+        self.assertIsNone(incomplete.authority)
+        self.assertEqual(
+            incomplete.refusal_reason,
+            "betfair_market_definition_runner_roster_is_not_complete",
+        )
+
+        for malformed in (None, 0, 1, "true"):
+            with self.subTest(complete=malformed):
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "marketDefinition.complete must be a boolean",
+                ):
+                    assess_betfair_tennis_historical_market_definition_authority(
+                        market_id="m-malformed-complete",
+                        market_definition=self._definition(complete=malformed),
+                        provider_publish_at="2026-09-22T10:00:00Z",
+                        observed_at="2026-09-22T10:00:01Z",
+                    )
+
+        missing = self._definition()
+        del missing["complete"]
+        with self.assertRaisesRegex(
+            ValueError,
+            "marketDefinition.complete must be a boolean",
+        ):
+            assess_betfair_tennis_historical_market_definition_authority(
+                market_id="m-missing-complete",
+                market_definition=missing,
                 provider_publish_at="2026-09-22T10:00:00Z",
                 observed_at="2026-09-22T10:00:01Z",
             )

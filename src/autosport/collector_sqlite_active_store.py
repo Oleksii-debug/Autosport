@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import os
 import sqlite3
 from datetime import timedelta
 from pathlib import Path
@@ -57,6 +58,55 @@ _MAX_SCHEDULE_EVIDENCE_SLOTS = 1_000_000
 class CollectorDeltaStore(_SQLiteCollectorDeltaStore):
     """Canonical indexed SQLite store with bounded product-compatible durability."""
 
+    @staticmethod
+    def _path_file_identity(path: Path) -> tuple[int, int]:
+        """Return one cross-platform identity for the file currently at path."""
+
+        try:
+            result = os.stat(path, follow_symlinks=True)
+        except OSError as exc:
+            raise ValueError(
+                "canonical collector store file identity is unavailable"
+            ) from exc
+        device = result.st_dev
+        inode = result.st_ino
+        if (
+            type(device) is not int
+            or device < 0
+            or type(inode) is not int
+            or inode <= 0
+        ):
+            raise ValueError(
+                "canonical collector store file identity is unavailable"
+            )
+        return device, inode
+
+    def _connect(self) -> sqlite3.Connection:
+        """Open only the same live SQLite file object captured at initialization.
+
+        Construction-time calls deliberately run before _canonical_file_identity_v1
+        exists. Once initialization has succeeded, every later open checks the path
+        both before and after sqlite3.connect(). The second check closes the ordinary
+        stat -> replace -> connect race: a same-path replacement is rejected before
+        its connection can carry authoritative reads or writes.
+        """
+
+        expected = vars(self).get("_canonical_file_identity_v1")
+        if expected is None:
+            return super()._connect()
+
+        if self._path_file_identity(self.path) != expected:
+            raise ValueError("canonical collector store file identity changed")
+
+        connection = super()._connect()
+        try:
+            if self._path_file_identity(self.path) != expected:
+                raise ValueError("canonical collector store file identity changed")
+            return connection
+        except BaseException:
+            connection.close()
+            raise
+
     def __init__(self, path: str | Path) -> None:
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -75,6 +125,7 @@ class CollectorDeltaStore(_SQLiteCollectorDeltaStore):
         self._activate_wal()
         self._verify_sqlite_schema()
         self._ensure_projection_integrity_guard()
+        self._canonical_file_identity_v1 = self._path_file_identity(self.path)
 
     def _migrate_legacy_json(self) -> None:
         """Delegate migration to the canonical stale-winner-fenced switch.

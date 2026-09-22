@@ -288,11 +288,11 @@ def _validate_github_event(
     base_sha: str,
     candidate_sha: str,
     pr_number: int,
-) -> str:
+) -> tuple[str, str]:
     event_path = os.environ.get("GITHUB_EVENT_PATH")
     repository = os.environ.get("GITHUB_REPOSITORY")
     if os.environ.get("GITHUB_ACTIONS") != "true":
-        return repository or "local-test"
+        return repository or "local-test", "local-test"
     if not event_path or not repository:
         raise ProtectedTreeRunnerError(
             "GitHub Gate-A run lacks authoritative event/repository identity"
@@ -309,6 +309,11 @@ def _validate_github_event(
     if not isinstance(event_repo, dict) or event_repo.get("full_name") != repository:
         raise ProtectedTreeRunnerError(
             "GitHub Gate-A repository identity mismatch"
+        )
+    default_branch = event_repo.get("default_branch")
+    if not isinstance(default_branch, str) or not default_branch.strip():
+        raise ProtectedTreeRunnerError(
+            "GitHub Gate-A repository default branch identity is missing"
         )
     pull_request = event.get("pull_request")
     if not isinstance(pull_request, dict):
@@ -335,13 +340,18 @@ def _validate_github_event(
         raise ProtectedTreeRunnerError(
             "GitHub Gate-A base repository does not match authoritative repository"
         )
-    return repository
+    if base.get("ref") != default_branch:
+        raise ProtectedTreeRunnerError(
+            "GitHub Gate-A PR base must be the repository default branch"
+        )
+    return repository, default_branch
 
 
 def _build_wrapper_evidence(
     *,
     repository: str,
     pr_number: int,
+    base_ref: str,
     base_sha: str,
     candidate_sha: str,
     result: ProtectedTreeGateResult,
@@ -361,6 +371,7 @@ def _build_wrapper_evidence(
         "status": "PASS",
         "repository": repository,
         "pull_request_number": _require_pr_number(pr_number),
+        "base_ref": base_ref,
         "base_sha": _require_git_sha(base_sha, field="base_sha"),
         "candidate_sha": _require_git_sha(candidate_sha, field="candidate_sha"),
         "policy_path": _POLICY_PATH.as_posix(),
@@ -405,7 +416,7 @@ def evaluate(
     base_sha = _require_git_sha(base_sha, field="base_sha")
     candidate_sha = _require_git_sha(candidate_sha, field="candidate_sha")
     pr_number = _require_pr_number(pr_number)
-    repository = _validate_github_event(
+    repository, base_ref = _validate_github_event(
         base_sha=base_sha,
         candidate_sha=candidate_sha,
         pr_number=pr_number,
@@ -429,6 +440,7 @@ def evaluate(
     evidence = _build_wrapper_evidence(
         repository=repository,
         pr_number=pr_number,
+        base_ref=base_ref,
         base_sha=base_sha,
         candidate_sha=candidate_sha,
         result=result,

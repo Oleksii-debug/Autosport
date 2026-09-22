@@ -190,6 +190,7 @@ class ForwardEconomicProtocol:
     risk_unit_currency: Decimal
     maximum_accepted_odds: Decimal
     maximum_drawdown_currency: Decimal
+    maximum_economic_cost_currency: Decimal
     absolute_lambda: Decimal
     paired_lambda: Decimal
     start_sequence: int
@@ -215,6 +216,7 @@ class ForwardEconomicProtocol:
         frozen_at: datetime,
         currency_code: str | None = None,
         denomination_authority_sha256: str | None = None,
+        maximum_economic_cost_currency: Decimal = Decimal(0),
     ) -> None:
         if type(alpha_registry) is not FamilywiseAlphaRegistry:
             raise ForwardEconomicEvidenceError("alpha_registry must be an exact FamilywiseAlphaRegistry")
@@ -248,6 +250,14 @@ class ForwardEconomicProtocol:
         drawdown = _decimal(maximum_drawdown_currency, "maximum_drawdown_currency")
         if drawdown < 0:
             raise ForwardEconomicEvidenceError("maximum_drawdown_currency must be non-negative")
+        maximum_cost = _decimal(
+            maximum_economic_cost_currency,
+            "maximum_economic_cost_currency",
+        )
+        if maximum_cost < 0:
+            raise ForwardEconomicEvidenceError(
+                "maximum_economic_cost_currency must be non-negative"
+            )
         abs_lambda = _positive_decimal(absolute_lambda, "absolute_lambda")
         pair_lambda = _positive_decimal(paired_lambda, "paired_lambda")
         if isinstance(start_sequence, bool) or not isinstance(start_sequence, int) or start_sequence < 0:
@@ -270,6 +280,7 @@ class ForwardEconomicProtocol:
             ("risk_unit_currency", risk_unit),
             ("maximum_accepted_odds", maximum_odds),
             ("maximum_drawdown_currency", drawdown),
+            ("maximum_economic_cost_currency", maximum_cost),
             ("absolute_lambda", abs_lambda),
             ("paired_lambda", pair_lambda),
             ("start_sequence", start_sequence),
@@ -279,7 +290,7 @@ class ForwardEconomicProtocol:
 
     def to_payload(self) -> dict[str, object]:
         return {
-            "schema_version": 3,
+            "schema_version": 4,
             "protocol_id": self.protocol_id,
             "challenger_id": self.challenger_id,
             "champion_id": self.champion_id,
@@ -294,12 +305,16 @@ class ForwardEconomicProtocol:
             "risk_unit_currency": _decimal_text(self.risk_unit_currency),
             "maximum_accepted_odds": _decimal_text(self.maximum_accepted_odds),
             "maximum_drawdown_currency": _decimal_text(self.maximum_drawdown_currency),
+            "maximum_economic_cost_currency": _decimal_text(
+                self.maximum_economic_cost_currency
+            ),
             "absolute_lambda": _decimal_text(self.absolute_lambda),
             "paired_lambda": _decimal_text(self.paired_lambda),
             "start_sequence": self.start_sequence,
             "frozen_at": _instant_text(self.frozen_at),
             "decimal_precision": _DECIMAL_PRECISION,
-            "normalization": "authoritative_net_money_pnl_divided_by_fixed_risk_unit",
+            "normalization": "all_in_net_money_pnl_divided_by_fixed_risk_unit",
+            "economic_cost_support": "frozen_non_negative_cost_bound",
             "absolute_null": "mean_normalized_challenger_money_pnl<=0",
             "paired_null": "mean_normalized_challenger_minus_champion_money_pnl<=0",
         }
@@ -343,6 +358,10 @@ class ResolvedPolicyOutcome:
     settlement_available_at: datetime | None
     currency_code: str | None = None
     denomination_authority_sha256: str | None = None
+    wager_pnl_currency: Decimal | None = None
+    economic_cost_currency: Decimal = Decimal(0)
+    economic_cost_evidence_sha256: str | None = None
+    economic_cost_available_at: datetime | None = None
 
     def __post_init__(self) -> None:
         _text(self.policy_id, "policy_id")
@@ -354,6 +373,44 @@ class ResolvedPolicyOutcome:
         if type(self.side) is not BetSide:
             raise ForwardEconomicEvidenceError("side must be an exact BetSide")
         pnl = _decimal(self.net_pnl_currency, "net_pnl_currency")
+        cost = _decimal(self.economic_cost_currency, "economic_cost_currency")
+        if cost < 0:
+            raise ForwardEconomicEvidenceError(
+                "economic_cost_currency must be non-negative"
+            )
+        if (self.economic_cost_evidence_sha256 is None) != (
+            self.economic_cost_available_at is None
+        ):
+            raise ForwardEconomicEvidenceError(
+                "economic cost evidence and availability must be bound together"
+            )
+        cost_available = None
+        if self.economic_cost_evidence_sha256 is not None:
+            _sha256(
+                self.economic_cost_evidence_sha256,
+                "economic_cost_evidence_sha256",
+            )
+            cost_available = _instant(
+                self.economic_cost_available_at,
+                "economic_cost_available_at",
+            )
+            if cost_available < committed:
+                raise ForwardEconomicEvidenceError(
+                    "economic cost cannot become available before the committed decision"
+                )
+        elif cost != 0:
+            raise ForwardEconomicEvidenceError(
+                "non-zero economic cost requires canonical evidence and availability"
+            )
+        wager_pnl = (
+            +(pnl + cost)
+            if self.wager_pnl_currency is None
+            else _decimal(self.wager_pnl_currency, "wager_pnl_currency")
+        )
+        if self.wager_pnl_currency is not None and pnl != wager_pnl - cost:
+            raise ForwardEconomicEvidenceError(
+                "all-in net P&L must equal wager P&L minus economic cost"
+            )
         if (self.currency_code is None) != (
             self.denomination_authority_sha256 is None
         ):
@@ -369,14 +426,28 @@ class ResolvedPolicyOutcome:
         if self.side is BetSide.NONE:
             if self.accepted_odds is not None or self.accepted_stake is not None:
                 raise ForwardEconomicEvidenceError("NONE cannot carry accepted odds or stake")
-            if self.execution_evidence_sha256 is not None or self.settlement_evidence_sha256 is not None:
-                raise ForwardEconomicEvidenceError("NONE cannot carry execution or settlement evidence")
-            if self.execution_accepted_at is not None or self.settlement_available_at is not None:
+            if (
+                self.execution_evidence_sha256 is not None
+                or self.settlement_evidence_sha256 is not None
+            ):
+                raise ForwardEconomicEvidenceError(
+                    "NONE cannot carry execution or settlement evidence"
+                )
+            if (
+                self.execution_accepted_at is not None
+                or self.settlement_available_at is not None
+            ):
                 raise ForwardEconomicEvidenceError(
                     "NONE cannot carry execution acceptance or settlement availability"
                 )
-            if pnl != 0:
-                raise ForwardEconomicEvidenceError("NONE must have exactly zero money P&L")
+            if wager_pnl != 0:
+                if cost == 0:
+                    raise ForwardEconomicEvidenceError(
+                        "NONE must have exactly zero money P&L"
+                    )
+                raise ForwardEconomicEvidenceError(
+                    "NONE wager P&L must be exactly zero"
+                )
             return
         odds = _positive_decimal(self.accepted_odds, "accepted_odds")
         if odds <= 1:
@@ -400,8 +471,30 @@ class ResolvedPolicyOutcome:
                 low, high = -stake, (odds - Decimal(1)) * stake
             else:
                 low, high = -(odds - Decimal(1)) * stake, stake
-        if pnl < low or pnl > high:
-            raise ForwardEconomicEvidenceError("money P&L is outside accepted side/odds/stake bounds")
+        if wager_pnl < low or wager_pnl > high:
+            raise ForwardEconomicEvidenceError(
+                "wager P&L is outside accepted side/odds/stake bounds"
+            )
+
+    @property
+    def effective_wager_pnl_currency(self) -> Decimal:
+        if self.wager_pnl_currency is None:
+            with localcontext() as context:
+                context.prec = _DECIMAL_PRECISION
+                return +(self.net_pnl_currency + self.economic_cost_currency)
+        return self.wager_pnl_currency
+
+    @property
+    def economic_available_at(self) -> datetime | None:
+        instants = tuple(
+            instant
+            for instant in (
+                self.settlement_available_at,
+                self.economic_cost_available_at,
+            )
+            if instant is not None
+        )
+        return max(instants) if instants else None
 
 
 class EconomicAuthorityResolver(Protocol):
@@ -430,6 +523,16 @@ class ForwardEconomicStep:
     champion_side: BetSide
     challenger_net_pnl_currency: Decimal
     champion_net_pnl_currency: Decimal
+    challenger_wager_pnl_currency: Decimal
+    champion_wager_pnl_currency: Decimal
+    challenger_economic_cost_currency: Decimal
+    champion_economic_cost_currency: Decimal
+    challenger_economic_cost_evidence_sha256: str | None
+    champion_economic_cost_evidence_sha256: str | None
+    challenger_economic_cost_available_at: datetime | None
+    champion_economic_cost_available_at: datetime | None
+    challenger_economic_available_at: datetime | None
+    champion_economic_available_at: datetime | None
     currency_code: str | None
     denomination_authority_sha256: str | None
     challenger_normalized_pnl: Decimal
@@ -459,6 +562,44 @@ class ForwardEconomicStep:
             "champion_side": self.champion_side.value,
             "challenger_net_pnl_currency": _decimal_text(self.challenger_net_pnl_currency),
             "champion_net_pnl_currency": _decimal_text(self.champion_net_pnl_currency),
+            "challenger_wager_pnl_currency": _decimal_text(
+                self.challenger_wager_pnl_currency
+            ),
+            "champion_wager_pnl_currency": _decimal_text(
+                self.champion_wager_pnl_currency
+            ),
+            "challenger_economic_cost_currency": _decimal_text(
+                self.challenger_economic_cost_currency
+            ),
+            "champion_economic_cost_currency": _decimal_text(
+                self.champion_economic_cost_currency
+            ),
+            "challenger_economic_cost_evidence_sha256": (
+                self.challenger_economic_cost_evidence_sha256
+            ),
+            "champion_economic_cost_evidence_sha256": (
+                self.champion_economic_cost_evidence_sha256
+            ),
+            "challenger_economic_cost_available_at": (
+                None
+                if self.challenger_economic_cost_available_at is None
+                else _instant_text(self.challenger_economic_cost_available_at)
+            ),
+            "champion_economic_cost_available_at": (
+                None
+                if self.champion_economic_cost_available_at is None
+                else _instant_text(self.champion_economic_cost_available_at)
+            ),
+            "challenger_economic_available_at": (
+                None
+                if self.challenger_economic_available_at is None
+                else _instant_text(self.challenger_economic_available_at)
+            ),
+            "champion_economic_available_at": (
+                None
+                if self.champion_economic_available_at is None
+                else _instant_text(self.champion_economic_available_at)
+            ),
             "currency_code": self.currency_code,
             "denomination_authority_sha256": self.denomination_authority_sha256,
             "challenger_normalized_pnl": _decimal_text(self.challenger_normalized_pnl),
@@ -653,13 +794,24 @@ class ForwardEconomicEvidenceAccumulator:
         self,
         outcome: ResolvedPolicyOutcome,
     ) -> tuple[Decimal, Decimal, Decimal]:
-        risk = self.protocol.risk_unit_currency
-        if outcome.side is BetSide.NONE:
-            return Decimal(0), Decimal(0), Decimal(0)
-        odds = outcome.accepted_odds
-        stake = outcome.accepted_stake
+        protocol = self.protocol
+        risk = protocol.risk_unit_currency
+        maximum_cost = protocol.maximum_economic_cost_currency
+        cost = outcome.economic_cost_currency
+        if cost > maximum_cost:
+            raise ForwardEconomicEvidenceError(
+                "resolved economic cost exceeds frozen protocol maximum"
+            )
         with localcontext() as context:
             context.prec = _DECIMAL_PRECISION
+            if outcome.side is BetSide.NONE:
+                return (
+                    +(outcome.net_pnl_currency / risk),
+                    +(-maximum_cost / risk),
+                    Decimal(0),
+                )
+            odds = outcome.accepted_odds
+            stake = outcome.accepted_stake
             if outcome.side is BetSide.BACK:
                 exposure = stake
                 low_money = -stake
@@ -672,9 +824,10 @@ class ForwardEconomicEvidenceAccumulator:
                 raise ForwardEconomicEvidenceError(
                     "accepted downside exposure exceeds fixed risk unit"
                 )
+            all_in_low_money = low_money - maximum_cost
             return (
                 +(outcome.net_pnl_currency / risk),
-                +(low_money / risk),
+                +(all_in_low_money / risk),
                 +(high_money / risk),
             )
 
@@ -754,6 +907,24 @@ class ForwardEconomicEvidenceAccumulator:
             champion_side=champion.side,
             challenger_net_pnl_currency=challenger.net_pnl_currency,
             champion_net_pnl_currency=champion.net_pnl_currency,
+            challenger_wager_pnl_currency=challenger.effective_wager_pnl_currency,
+            champion_wager_pnl_currency=champion.effective_wager_pnl_currency,
+            challenger_economic_cost_currency=challenger.economic_cost_currency,
+            champion_economic_cost_currency=champion.economic_cost_currency,
+            challenger_economic_cost_evidence_sha256=(
+                challenger.economic_cost_evidence_sha256
+            ),
+            champion_economic_cost_evidence_sha256=(
+                champion.economic_cost_evidence_sha256
+            ),
+            challenger_economic_cost_available_at=(
+                challenger.economic_cost_available_at
+            ),
+            champion_economic_cost_available_at=(
+                champion.economic_cost_available_at
+            ),
+            challenger_economic_available_at=challenger.economic_available_at,
+            champion_economic_available_at=champion.economic_available_at,
             currency_code=self.protocol.currency_code,
             denomination_authority_sha256=(
                 self.protocol.denomination_authority_sha256
@@ -788,12 +959,12 @@ class ForwardEconomicEvidenceAccumulator:
     def _realized_challenger_drawdown(self) -> tuple[Decimal, Decimal, bool]:
         settlement_groups: dict[datetime, list[Decimal]] = {}
         for step in self._steps:
-            if step.challenger_side is BetSide.NONE:
-                continue
-            available_at = step.challenger_settlement_available_at
+            available_at = step.challenger_economic_available_at
             if available_at is None:
+                if step.challenger_net_pnl_currency == 0:
+                    continue
                 raise ForwardEconomicEvidenceError(
-                    "settled challenger action is missing settlement availability"
+                    "economically material challenger row is missing causal availability"
                 )
             settlement_groups.setdefault(available_at, []).append(
                 step.challenger_net_pnl_currency

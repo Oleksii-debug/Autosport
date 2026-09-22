@@ -9,6 +9,7 @@ from threading import Condition, RLock
 from .matchbook_session_lifecycle import (
     MatchbookSessionLifecycle,
     SessionLifecycleError,
+    SessionReadGenerationTicket,
 )
 
 MATCHBOOK_READ_ONLY_PATHS = frozenset(
@@ -115,7 +116,7 @@ def _default_generation_factory() -> str:
 
 class MatchbookReadOnlySessionTransport:
     """
-    One process-local Matchbook authenticated read session shared by market/account readers.
+    Process-local Matchbook authenticated read session shared by market/account readers.
 
     The raw token never leaves the injected read/logout callbacks and is never serialized.
     Session-generation truth is delegated to MatchbookSessionLifecycle. This class owns only
@@ -157,8 +158,8 @@ class MatchbookReadOnlySessionTransport:
         self._live_session: _LiveSession | None = None
         self._login_in_progress = False
         self._login_flight_id = 0
-        self._last_completed_login_flight_id = 0
-        self._last_login_failure_status: int | None = None
+        self._login_waiters: dict[int, int] = {}
+        self._failed_login_flights: set[int] = set()
 
     @property
     def generation_id(self) -> str | None:
@@ -173,12 +174,11 @@ class MatchbookReadOnlySessionTransport:
 
         while True:
             session = self._ensure_active_session()
-            issued_ns = self._clock()
             try:
                 ticket = self._lifecycle.capture_read_generation(
-                    monotonic_ns=issued_ns
+                    monotonic_ns=self._clock()
                 )
-            except SessionLifecycleError as exc:
+            except SessionLifecycleError:
                 raise MatchbookAuthenticationUnavailable(
                     "Matchbook session is not available for authenticated read"
                 ) from None
@@ -191,26 +191,24 @@ class MatchbookReadOnlySessionTransport:
             try:
                 response = self._read(session.session_token, path)
             except Exception:
+                self._invalidate_generation_after_network_failure(
+                    session.generation_id
+                )
                 raise MatchbookReadUnavailable(
                     "Matchbook read transport failed"
                 ) from None
 
             if not isinstance(response, MatchbookReadResponse):
+                self._invalidate_generation_after_network_failure(
+                    session.generation_id
+                )
                 raise MatchbookReadUnavailable(
                     "Matchbook read transport returned an invalid response type"
                 )
 
             status = response.status_code
             if 200 <= status < 300:
-                try:
-                    self._lifecycle.authorize_read_response_commit(
-                        ticket,
-                        monotonic_ns=self._clock(),
-                    )
-                except SessionLifecycleError:
-                    raise MatchbookStaleGenerationResponse(
-                        "Matchbook response belongs to a stale session generation"
-                    ) from None
+                self._authorize_response_ticket(ticket)
                 return response
 
             if status == 401:
@@ -223,6 +221,10 @@ class MatchbookReadOnlySessionTransport:
                 self._ensure_active_session()
                 continue
 
+            # A non-positive HTTP response still consumes its exact generation ticket.
+            # Retiring it here prevents ticket accumulation while preserving the rule
+            # that no positive provider payload can survive a generation transition.
+            self._authorize_response_ticket(ticket)
             if status == 403:
                 raise MatchbookReadForbidden(
                     "Matchbook endpoint is forbidden for the authenticated account"
@@ -275,9 +277,20 @@ class MatchbookReadOnlySessionTransport:
             self._live_session = None
             self._condition.notify_all()
 
-    def _ensure_active_session(self) -> _LiveSession:
-        waited_for_flight: int | None = None
+    def _authorize_response_ticket(
+        self, ticket: SessionReadGenerationTicket
+    ) -> None:
+        try:
+            self._lifecycle.authorize_read_response_commit(
+                ticket,
+                monotonic_ns=self._clock(),
+            )
+        except SessionLifecycleError:
+            raise MatchbookStaleGenerationResponse(
+                "Matchbook response belongs to a stale session generation"
+            ) from None
 
+    def _ensure_active_session(self) -> _LiveSession:
         while True:
             with self._condition:
                 current = self._live_session
@@ -289,13 +302,25 @@ class MatchbookReadOnlySessionTransport:
                     return current
 
                 if self._login_in_progress:
-                    waited_for_flight = self._login_flight_id
-                    self._condition.wait()
-                    if (
-                        waited_for_flight == self._last_completed_login_flight_id
-                        and self._live_session is None
-                        and self._last_login_failure_status is not None
-                    ):
+                    flight_id = self._login_flight_id
+                    self._login_waiters[flight_id] = (
+                        self._login_waiters.get(flight_id, 0) + 1
+                    )
+                    try:
+                        while (
+                            self._login_in_progress
+                            and self._login_flight_id == flight_id
+                        ):
+                            self._condition.wait()
+                        failed = flight_id in self._failed_login_flights
+                    finally:
+                        remaining = self._login_waiters[flight_id] - 1
+                        if remaining:
+                            self._login_waiters[flight_id] = remaining
+                        else:
+                            self._login_waiters.pop(flight_id, None)
+                            self._failed_login_flights.discard(flight_id)
+                    if failed:
                         raise MatchbookAuthenticationUnavailable(
                             "Matchbook login failed for the shared authentication flight"
                         )
@@ -304,25 +329,24 @@ class MatchbookReadOnlySessionTransport:
                 self._login_in_progress = True
                 self._login_flight_id += 1
                 flight_id = self._login_flight_id
-                self._last_login_failure_status = None
                 break
 
         try:
             response = self._login()
         except Exception:
-            self._finish_login_failure(flight_id, status_code=0)
+            self._finish_login_failure(flight_id)
             raise MatchbookAuthenticationUnavailable(
                 "Matchbook login transport failed"
             ) from None
 
         if not isinstance(response, MatchbookLoginResponse):
-            self._finish_login_failure(flight_id, status_code=0)
+            self._finish_login_failure(flight_id)
             raise MatchbookAuthenticationUnavailable(
                 "Matchbook login transport returned an invalid response type"
             )
 
         if response.status_code != 200:
-            self._finish_login_failure(flight_id, status_code=response.status_code)
+            self._finish_login_failure(flight_id)
             raise MatchbookAuthenticationUnavailable(
                 f"Matchbook login unavailable with HTTP {response.status_code}"
             )
@@ -338,7 +362,7 @@ class MatchbookReadOnlySessionTransport:
                 monotonic_ns=self._clock(),
             )
         except Exception:
-            self._finish_login_failure(flight_id, status_code=0)
+            self._finish_login_failure(flight_id)
             raise MatchbookAuthenticationUnavailable(
                 "Matchbook login could not establish a fresh session generation"
             ) from None
@@ -347,19 +371,17 @@ class MatchbookReadOnlySessionTransport:
         with self._condition:
             self._live_session = live
             self._login_in_progress = False
-            self._last_completed_login_flight_id = flight_id
-            self._last_login_failure_status = None
             self._condition.notify_all()
             return live
 
-    def _finish_login_failure(self, flight_id: int, *, status_code: int) -> None:
+    def _finish_login_failure(self, flight_id: int) -> None:
         with self._condition:
             if self._login_flight_id != flight_id:
                 raise AssertionError("login flight identity changed unexpectedly")
             self._live_session = None
             self._login_in_progress = False
-            self._last_completed_login_flight_id = flight_id
-            self._last_login_failure_status = status_code
+            if self._login_waiters.get(flight_id, 0):
+                self._failed_login_flights.add(flight_id)
             self._condition.notify_all()
 
     def _invalidate_generation_after_401(self, generation_id: str) -> None:
@@ -376,6 +398,25 @@ class MatchbookReadOnlySessionTransport:
             except SessionLifecycleError:
                 # A concurrent lifecycle transition may already have invalidated this
                 # predecessor. Never let stale 401 evidence mutate a successor.
+                pass
+            self._live_session = None
+            self._condition.notify_all()
+
+    def _invalidate_generation_after_network_failure(
+        self, generation_id: str
+    ) -> None:
+        with self._condition:
+            current = self._live_session
+            if current is None or current.generation_id != generation_id:
+                return
+            try:
+                self._lifecycle.record_network_failure(
+                    generation_id=generation_id,
+                    monotonic_ns=self._clock(),
+                )
+            except (SessionLifecycleError, MatchbookSessionTransportError):
+                # Clear local token authority regardless. A subsequent login rotates
+                # the lifecycle generation and invalidates any abandoned tickets.
                 pass
             self._live_session = None
             self._condition.notify_all()

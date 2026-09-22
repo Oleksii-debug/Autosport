@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 from dataclasses import replace
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
+from hashlib import sha256
 import json
 
 import pytest
@@ -80,9 +81,8 @@ def client_for(*responses: bytes) -> tuple[BetfairReadOnlyClient, FakeTransport]
 def scope(**overrides: object) -> ScopeIdentity:
     values: dict[str, object] = {
         "provider": "BETFAIR",
-        "account_id_hash": "acct-hash-a",
-        "currency": "EUR",
-        "as_of_utc": FIXED_NOW.isoformat(),
+        "account_id_hash": sha256(b"acct-a").hexdigest(),
+        "evidence_not_before_utc": FIXED_NOW.isoformat(),
         "include_settled_bets": False,
         "include_bsp_bets": False,
         "net_of_commission": False,
@@ -384,6 +384,7 @@ def test_open_pnl_view_flags_are_bound_to_scope() -> None:
 def test_directly_constructed_dto_cannot_mint_provider_authority() -> None:
     markets = (market("1.open"),)
     forged = BetfairMarketPnlCoverageBatch(
+        sha256(b"acct-a").hexdigest(),
         ("1.open",),
         ("1.open",),
         False,
@@ -402,6 +403,7 @@ def test_directly_constructed_dto_cannot_mint_provider_authority() -> None:
 
     closed_markets = (market("1.closed", status=MarketStatus.CLOSED),)
     forged_closed = BetfairClearedMarketPnlCoveragePage(
+        sha256(b"acct-a").hexdigest(),
         ("1.closed",),
         ("1.closed",),
         0,
@@ -442,7 +444,7 @@ def test_persisted_forged_summary_or_digest_cannot_mint_completeness() -> None:
 
 def test_witness_cannot_be_replayed_into_another_account_scope() -> None:
     markets = (market("1.open"),)
-    original_scope = scope(account_id_hash="acct-hash-a")
+    original_scope = scope(account_id_hash=sha256(b"acct-a").hexdigest())
     witness = build_coverage_witness(
         scope=original_scope,
         markets=markets,
@@ -453,8 +455,24 @@ def test_witness_cannot_be_replayed_into_another_account_scope() -> None:
     with pytest.raises(BetfairPnlCoverageError, match="canonical rebuilt proof"):
         verify_coverage_witness(
             witness=witness,
-            scope=scope(account_id_hash="acct-hash-b"),
+            scope=scope(account_id_hash=sha256(b"acct-b").hexdigest()),
             markets=markets,
+        )
+
+
+def test_old_provider_capture_cannot_be_rebound_to_a_new_freshness_fence() -> None:
+    markets = (market("1.open"),)
+    batch = open_batch(("1.open",))
+    later_scope = scope(
+        evidence_not_before_utc=(FIXED_NOW + timedelta(seconds=1)).isoformat()
+    )
+
+    with pytest.raises(BetfairPnlCoverageError, match="freshness fence"):
+        build_coverage_witness(
+            scope=later_scope,
+            markets=markets,
+            open_batches=(batch,),
+            closed_pages=(),
         )
 
 

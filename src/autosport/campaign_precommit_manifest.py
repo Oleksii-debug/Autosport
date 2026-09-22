@@ -10,10 +10,23 @@ from pathlib import Path
 from typing import Mapping
 
 from .json_integrity import strict_json_loads
+from .monotonic_workspace_authority import (
+    AuthorityPhase,
+    AuthorityRecord,
+    MonotonicWorkspaceAuthority,
+    MonotonicWorkspaceAuthorityError,
+)
 
 
 SCHEMA = "autosport.campaign_precommit_manifest"
 SCHEMA_VERSION = 1
+PUBLICATION_AUTHORITY_DOMAIN = "campaign-precommit-publication"
+PUBLICATION_WITNESS_SCHEMA = "autosport.campaign_precommit_publication_witness"
+PUBLICATION_WITNESS_SCHEMA_VERSION = 1
+RAW_MANIFEST_IS_PROSPECTIVE_AUTHORITY = False
+
+_STRUCTURAL_TX_PREFIX = "campaign-precommit-state-v1|"
+_WITNESS_TX_PREFIX = "campaign-precommit-witness-v1|"
 
 _POSIX_LINK_DIR_FD_SUPPORTED = os.link in os.supports_dir_fd
 _POSIX_UNLINK_DIR_FD_SUPPORTED = os.unlink in os.supports_dir_fd
@@ -93,10 +106,56 @@ def _instant(value: str) -> datetime:
     return datetime.fromisoformat(value.replace("Z", "+00:00"))
 
 
+def _publication_now() -> datetime:
+    """Return the product-observed publication clock in UTC."""
+
+    return datetime.now(timezone.utc)
+
+
 def _publication_deadline_reached(observation_not_before: str) -> bool:
     """Return whether a new canonical publication would no longer be prospective."""
 
-    return datetime.now(timezone.utc) >= _instant(observation_not_before)
+    return _publication_now() >= _instant(observation_not_before)
+
+
+def _publication_now_text() -> str:
+    observed = _publication_now()
+    if observed.tzinfo is None or observed.utcoffset() is None:
+        raise CampaignPrecommitManifestError(
+            "publication clock must return a timezone-aware instant"
+        )
+    return (
+        observed.astimezone(timezone.utc)
+        .isoformat(timespec="microseconds")
+        .replace("+00:00", "Z")
+    )
+
+
+def _publication_observed_instant(value: str) -> datetime:
+    if type(value) is not str:
+        raise CampaignPrecommitManifestError(
+            "publication witness time must be canonical text"
+        )
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise CampaignPrecommitManifestError(
+            "publication witness time must be ISO-8601"
+        ) from exc
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        raise CampaignPrecommitManifestError(
+            "publication witness time must include a timezone"
+        )
+    canonical = (
+        parsed.astimezone(timezone.utc)
+        .isoformat(timespec="microseconds")
+        .replace("+00:00", "Z")
+    )
+    if value != canonical:
+        raise CampaignPrecommitManifestError(
+            "publication witness time must use canonical UTC microsecond form"
+        )
+    return parsed.astimezone(timezone.utc)
 
 
 def _canonical_bytes(value: object) -> bytes:
@@ -965,6 +1024,22 @@ def _digest(value: object) -> str:
 
 
 @dataclass(frozen=True, slots=True)
+class CampaignPrecommitPublicationWitness:
+    """Committed product-owned witness that exact precommit bytes were prospective."""
+
+    campaign_id: str
+    manifest_sha256: str
+    observation_not_before: str
+    post_publish_observed_at: str
+    target_relative_path: str
+    workspace_instance_id: str
+    authority_id: str
+    authority_generation: int
+    authority_record_sha256: str
+    semantic_binding_sha256: str
+
+
+@dataclass(frozen=True, slots=True)
 class CampaignPrecommitManifest:
     """Immutable prospective PAPER-campaign configuration evidence.
 
@@ -1170,8 +1245,12 @@ def write_campaign_precommit_manifest_once(
     provisioned by the canonical workspace/storage authority: this writer will not
     silently create a directory lineage whose crash durability it cannot prove. On
     POSIX, publication is descriptor-relative to one symlink-free parent identity.
-    It intentionally does not claim rollback protection if an attacker can delete
-    and recreate the whole workspace after publication.
+
+    This low-level byte writer is deliberately NOT standalone prospective authority:
+    callers making a prospective claim must use the monotonic publication-witness
+    composition below. A scheduler pause can always occur between a wall-clock check
+    and the filesystem publication primitive, and this function does not claim
+    rollback protection if the whole workspace is deleted and recreated.
     """
 
     if type(manifest) is not CampaignPrecommitManifest:
@@ -1266,3 +1345,539 @@ def write_campaign_precommit_manifest_once(
         return manifest.manifest_sha256
     finally:
         os.close(parent_fd)
+
+
+
+def _publication_target_context(
+    path: str | os.PathLike[str],
+    *,
+    workspace: str | os.PathLike[str],
+) -> tuple[Path, Path, str]:
+    workspace_path = Path(workspace).expanduser()
+    if not workspace_path.is_absolute():
+        raise CampaignPrecommitManifestError(
+            "campaign precommit workspace must be an absolute path"
+        )
+    absolute_workspace = Path(os.path.abspath(workspace_path))
+    target = Path(path).expanduser()
+    if not target.is_absolute():
+        target = absolute_workspace / target
+    absolute_target = Path(os.path.abspath(target))
+    try:
+        relative = absolute_target.relative_to(absolute_workspace)
+    except ValueError as exc:
+        raise CampaignPrecommitManifestError(
+            "campaign precommit target must be inside the protected workspace"
+        ) from exc
+    if relative == Path(".") or absolute_target.name in {"", ".", ".."}:
+        raise CampaignPrecommitManifestError(
+            "campaign precommit target must name one workspace file"
+        )
+    return absolute_workspace, absolute_target, relative.as_posix()
+
+
+def _publication_structural_binding_sha256(
+    manifest: CampaignPrecommitManifest,
+    target_relative_path: str,
+) -> str:
+    return _digest(
+        {
+            "schema": "autosport.campaign_precommit_publication_state",
+            "schema_version": 1,
+            "campaign_id": manifest.campaign_id,
+            "manifest_sha256": manifest.manifest_sha256,
+            "observation_not_before": manifest.observation_not_before,
+            "target_relative_path": target_relative_path,
+        }
+    )
+
+
+def _publication_witness_binding_sha256(
+    manifest: CampaignPrecommitManifest,
+    target_relative_path: str,
+    post_publish_observed_at: str,
+) -> str:
+    observed = _publication_observed_instant(post_publish_observed_at)
+    if observed >= _instant(manifest.observation_not_before):
+        raise CampaignPrecommitManifestError(
+            "publication witness must observe exact manifest bytes before prospective observation"
+        )
+    return _digest(
+        {
+            "schema": PUBLICATION_WITNESS_SCHEMA,
+            "schema_version": PUBLICATION_WITNESS_SCHEMA_VERSION,
+            "campaign_id": manifest.campaign_id,
+            "manifest_sha256": manifest.manifest_sha256,
+            "observation_not_before": manifest.observation_not_before,
+            "post_publish_observed_at": post_publish_observed_at,
+            "target_relative_path": target_relative_path,
+        }
+    )
+
+
+def _publication_structural_tx_id() -> str:
+    return f"{_STRUCTURAL_TX_PREFIX}{uuid.uuid4().hex}"
+
+
+def _publication_witness_tx_id(post_publish_observed_at: str) -> str:
+    _publication_observed_instant(post_publish_observed_at)
+    return (
+        f"{_WITNESS_TX_PREFIX}{post_publish_observed_at}|{uuid.uuid4().hex}"
+    )
+
+
+def _witness_time_from_tx_id(tx_id: str) -> str:
+    if not tx_id.startswith(_WITNESS_TX_PREFIX):
+        raise CampaignPrecommitManifestError(
+            "campaign precommit authority tip is not a publication witness"
+        )
+    suffix = tx_id[len(_WITNESS_TX_PREFIX) :]
+    parts = suffix.split("|")
+    if len(parts) != 2 or not parts[1]:
+        raise CampaignPrecommitManifestError(
+            "campaign precommit publication witness transaction is malformed"
+        )
+    observed = parts[0]
+    _publication_observed_instant(observed)
+    return observed
+
+
+def _local_manifest_digest(path: Path) -> str | None:
+    try:
+        os.lstat(path)
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        raise CampaignPrecommitManifestError(
+            "cannot inspect campaign precommit manifest path"
+        ) from exc
+    return load_campaign_precommit_manifest(path).manifest_sha256
+
+
+def _latest_commit_record(
+    history: tuple[AuthorityRecord, ...],
+) -> AuthorityRecord | None:
+    return next(
+        (
+            record
+            for record in reversed(history)
+            if record.phase is AuthorityPhase.COMMIT
+        ),
+        None,
+    )
+
+
+def _publication_authority(
+    *,
+    workspace: Path,
+    campaign_id: str,
+    workspace_instance_id: str | None,
+    authority_root: str | os.PathLike[str] | None,
+) -> MonotonicWorkspaceAuthority:
+    try:
+        return MonotonicWorkspaceAuthority(
+            workspace=workspace,
+            workspace_instance_id=workspace_instance_id,
+            domain=PUBLICATION_AUTHORITY_DOMAIN,
+            key=campaign_id,
+            authority_root=authority_root,
+        )
+    except MonotonicWorkspaceAuthorityError as exc:
+        raise CampaignPrecommitManifestError(
+            "cannot resolve campaign precommit publication authority"
+        ) from exc
+
+
+def _validate_structural_record(
+    record: AuthorityRecord,
+    *,
+    manifest: CampaignPrecommitManifest,
+    structural_binding_sha256: str,
+) -> None:
+    if (
+        record.intended_state_sha256 != manifest.manifest_sha256
+        or record.semantic_binding_sha256 != structural_binding_sha256
+        or not record.tx_id.startswith(_STRUCTURAL_TX_PREFIX)
+    ):
+        raise CampaignPrecommitManifestError(
+            "campaign precommit structural authority conflicts with manifest"
+        )
+
+
+def _witness_from_record(
+    record: AuthorityRecord,
+    *,
+    manifest: CampaignPrecommitManifest,
+    target_relative_path: str,
+) -> CampaignPrecommitPublicationWitness:
+    if record.phase is not AuthorityPhase.COMMIT:
+        raise CampaignPrecommitManifestError(
+            "campaign precommit publication witness is not committed"
+        )
+    observed_at = _witness_time_from_tx_id(record.tx_id)
+    expected_binding = _publication_witness_binding_sha256(
+        manifest,
+        target_relative_path,
+        observed_at,
+    )
+    if (
+        record.intended_state_sha256 != manifest.manifest_sha256
+        or record.semantic_binding_sha256 != expected_binding
+    ):
+        raise CampaignPrecommitManifestError(
+            "campaign precommit publication witness conflicts with manifest"
+        )
+    return CampaignPrecommitPublicationWitness(
+        campaign_id=manifest.campaign_id,
+        manifest_sha256=manifest.manifest_sha256,
+        observation_not_before=manifest.observation_not_before,
+        post_publish_observed_at=observed_at,
+        target_relative_path=target_relative_path,
+        workspace_instance_id=record.workspace_instance_id,
+        authority_id=record.authority_id,
+        authority_generation=record.generation,
+        authority_record_sha256=record.record_sha256,
+        semantic_binding_sha256=record.semantic_binding_sha256,
+    )
+
+
+def _commit_publication_witness(
+    authority: MonotonicWorkspaceAuthority,
+    *,
+    manifest: CampaignPrecommitManifest,
+    target_relative_path: str,
+    post_publish_observed_at: str,
+) -> CampaignPrecommitPublicationWitness:
+    binding = _publication_witness_binding_sha256(
+        manifest,
+        target_relative_path,
+        post_publish_observed_at,
+    )
+    tx_id = _publication_witness_tx_id(post_publish_observed_at)
+    try:
+        authority.prepare(
+            tx_id=tx_id,
+            observed_state_sha256=manifest.manifest_sha256,
+            intended_state_sha256=manifest.manifest_sha256,
+            semantic_binding_sha256=binding,
+        )
+        record = authority.commit(
+            tx_id=tx_id,
+            observed_state_sha256=manifest.manifest_sha256,
+            semantic_binding_sha256=binding,
+        )
+    except MonotonicWorkspaceAuthorityError as exc:
+        raise CampaignPrecommitManifestError(
+            "cannot commit campaign precommit publication witness"
+        ) from exc
+    return _witness_from_record(
+        record,
+        manifest=manifest,
+        target_relative_path=target_relative_path,
+    )
+
+
+def resolve_campaign_precommit_publication_witness(
+    path: str | os.PathLike[str],
+    *,
+    workspace: str | os.PathLike[str],
+    workspace_instance_id: str | None = None,
+    authority_root: str | os.PathLike[str] | None = None,
+) -> CampaignPrecommitPublicationWitness:
+    """Resolve exact manifest + committed monotonic witness without issuing authority."""
+
+    absolute_workspace, target, relative = _publication_target_context(
+        path,
+        workspace=workspace,
+    )
+    manifest = load_campaign_precommit_manifest(target)
+    authority = _publication_authority(
+        workspace=absolute_workspace,
+        campaign_id=manifest.campaign_id,
+        workspace_instance_id=workspace_instance_id,
+        authority_root=authority_root,
+    )
+    try:
+        history = authority.read_history()
+    except MonotonicWorkspaceAuthorityError as exc:
+        raise CampaignPrecommitManifestError(
+            "cannot read campaign precommit publication authority"
+        ) from exc
+    if history and history[-1].phase is AuthorityPhase.PREPARE:
+        raise CampaignPrecommitManifestError(
+            "campaign precommit publication witness requires recovery"
+        )
+    latest = _latest_commit_record(history)
+    if latest is None:
+        raise CampaignPrecommitManifestError(
+            "campaign precommit manifest has no committed publication witness"
+        )
+    witness = _witness_from_record(
+        latest,
+        manifest=manifest,
+        target_relative_path=relative,
+    )
+    try:
+        recovery = authority.recover(
+            observed_state_sha256=manifest.manifest_sha256,
+        )
+    except MonotonicWorkspaceAuthorityError as exc:
+        raise CampaignPrecommitManifestError(
+            "campaign precommit publication authority does not match local manifest"
+        ) from exc
+    if (
+        recovery.record is None
+        or recovery.record.record_sha256 != witness.authority_record_sha256
+    ):
+        raise CampaignPrecommitManifestError(
+            "campaign precommit publication witness is not the current authority tip"
+        )
+    return witness
+
+
+def publish_campaign_precommit_manifest(
+    path: str | os.PathLike[str],
+    manifest: CampaignPrecommitManifest,
+    *,
+    workspace: str | os.PathLike[str],
+    workspace_instance_id: str | None = None,
+    authority_root: str | os.PathLike[str] | None = None,
+) -> CampaignPrecommitPublicationWitness:
+    """Publish and monotonically witness one prospective campaign precommit.
+
+    Raw manifest bytes are only structural evidence. Prospective authority is issued
+    only after exact bytes are visible, the product clock observes them strictly
+    before observation_not_before, and the existing independent monotonic workspace
+    authority commits a witness carrying that product-observed instant.
+    """
+
+    if type(manifest) is not CampaignPrecommitManifest:
+        raise CampaignPrecommitManifestError(
+            "manifest must be CampaignPrecommitManifest"
+        )
+    absolute_workspace, target, relative = _publication_target_context(
+        path,
+        workspace=workspace,
+    )
+    authority = _publication_authority(
+        workspace=absolute_workspace,
+        campaign_id=manifest.campaign_id,
+        workspace_instance_id=workspace_instance_id,
+        authority_root=authority_root,
+    )
+    structural_binding = _publication_structural_binding_sha256(manifest, relative)
+
+    local_digest = _local_manifest_digest(target)
+    try:
+        history = authority.read_history()
+    except MonotonicWorkspaceAuthorityError as exc:
+        raise CampaignPrecommitManifestError(
+            "cannot read campaign precommit publication authority"
+        ) from exc
+
+    if history and history[-1].phase is AuthorityPhase.PREPARE:
+        pending = history[-1]
+        if pending.tx_id.startswith(_WITNESS_TX_PREFIX):
+            observed_at = _witness_time_from_tx_id(pending.tx_id)
+            expected_binding = _publication_witness_binding_sha256(
+                manifest,
+                relative,
+                observed_at,
+            )
+            if (
+                pending.intended_state_sha256 != manifest.manifest_sha256
+                or pending.semantic_binding_sha256 != expected_binding
+                or local_digest != manifest.manifest_sha256
+            ):
+                raise CampaignPrecommitManifestError(
+                    "pending publication witness conflicts with local manifest"
+                )
+            try:
+                record = authority.commit(
+                    tx_id=pending.tx_id,
+                    observed_state_sha256=manifest.manifest_sha256,
+                    semantic_binding_sha256=expected_binding,
+                )
+            except MonotonicWorkspaceAuthorityError as exc:
+                raise CampaignPrecommitManifestError(
+                    "cannot recover campaign precommit publication witness"
+                ) from exc
+            if load_campaign_precommit_manifest(target).manifest_sha256 != (
+                manifest.manifest_sha256
+            ):
+                raise CampaignPrecommitManifestError(
+                    "campaign precommit changed while recovering publication witness"
+                )
+            return _witness_from_record(
+                record,
+                manifest=manifest,
+                target_relative_path=relative,
+            )
+
+        _validate_structural_record(
+            pending,
+            manifest=manifest,
+            structural_binding_sha256=structural_binding,
+        )
+        if local_digest is None:
+            try:
+                authority.abort(
+                    tx_id=pending.tx_id,
+                    observed_state_sha256=pending.previous_committed_state_sha256,
+                    semantic_binding_sha256=structural_binding,
+                )
+            except MonotonicWorkspaceAuthorityError as exc:
+                raise CampaignPrecommitManifestError(
+                    "cannot abort incomplete campaign precommit publication"
+                ) from exc
+            history = authority.read_history()
+        elif local_digest == manifest.manifest_sha256:
+            loaded = load_campaign_precommit_manifest(target)
+            observed_at = _publication_now_text()
+            try:
+                authority.commit(
+                    tx_id=pending.tx_id,
+                    observed_state_sha256=manifest.manifest_sha256,
+                    semantic_binding_sha256=structural_binding,
+                )
+            except MonotonicWorkspaceAuthorityError as exc:
+                raise CampaignPrecommitManifestError(
+                    "cannot recover campaign precommit structural publication"
+                ) from exc
+            if _publication_observed_instant(observed_at) >= _instant(
+                loaded.observation_not_before
+            ):
+                raise CampaignPrecommitManifestError(
+                    "manifest exists but no prospective publication witness was issued before observation"
+                )
+            return _commit_publication_witness(
+                authority,
+                manifest=loaded,
+                target_relative_path=relative,
+                post_publish_observed_at=observed_at,
+            )
+        else:
+            raise CampaignPrecommitManifestError(
+                "pending campaign precommit authority conflicts with local state"
+            )
+
+    latest = _latest_commit_record(history)
+    if latest is not None:
+        if latest.tx_id.startswith(_WITNESS_TX_PREFIX):
+            if local_digest != manifest.manifest_sha256:
+                raise CampaignPrecommitManifestError(
+                    "committed publication witness does not match local manifest"
+                )
+            witness = _witness_from_record(
+                latest,
+                manifest=manifest,
+                target_relative_path=relative,
+            )
+            try:
+                authority.recover(
+                    observed_state_sha256=manifest.manifest_sha256,
+                )
+            except MonotonicWorkspaceAuthorityError as exc:
+                raise CampaignPrecommitManifestError(
+                    "campaign precommit publication authority is not current"
+                ) from exc
+            return witness
+
+        _validate_structural_record(
+            latest,
+            manifest=manifest,
+            structural_binding_sha256=structural_binding,
+        )
+        if local_digest != manifest.manifest_sha256:
+            raise CampaignPrecommitManifestError(
+                "structural publication authority does not match local manifest"
+            )
+        try:
+            authority.recover(
+                observed_state_sha256=manifest.manifest_sha256,
+            )
+        except MonotonicWorkspaceAuthorityError as exc:
+            raise CampaignPrecommitManifestError(
+                "campaign precommit structural authority is not current"
+            ) from exc
+        observed_at = _publication_now_text()
+        if _publication_observed_instant(observed_at) >= _instant(
+            manifest.observation_not_before
+        ):
+            raise CampaignPrecommitManifestError(
+                "manifest exists but prospective publication was not witnessed before observation"
+            )
+        return _commit_publication_witness(
+            authority,
+            manifest=manifest,
+            target_relative_path=relative,
+            post_publish_observed_at=observed_at,
+        )
+
+    if local_digest is not None:
+        raise CampaignPrecommitManifestError(
+            "existing manifest without monotonic publication history cannot be retroactively qualified"
+        )
+    if _publication_deadline_reached(manifest.observation_not_before):
+        raise CampaignPrecommitManifestError(
+            "first campaign precommit publication must precede prospective observation"
+        )
+
+    tx_id = _publication_structural_tx_id()
+    try:
+        authority.prepare(
+            tx_id=tx_id,
+            observed_state_sha256=None,
+            intended_state_sha256=manifest.manifest_sha256,
+            semantic_binding_sha256=structural_binding,
+        )
+    except MonotonicWorkspaceAuthorityError as exc:
+        raise CampaignPrecommitManifestError(
+            "cannot prepare campaign precommit publication authority"
+        ) from exc
+
+    try:
+        write_campaign_precommit_manifest_once(target, manifest)
+    except BaseException:
+        local_after_failure = _local_manifest_digest(target)
+        if local_after_failure is None:
+            try:
+                authority.abort(
+                    tx_id=tx_id,
+                    observed_state_sha256=None,
+                    semantic_binding_sha256=structural_binding,
+                )
+            except MonotonicWorkspaceAuthorityError:
+                pass
+        raise
+
+    loaded = load_campaign_precommit_manifest(target)
+    if loaded.manifest_sha256 != manifest.manifest_sha256:
+        raise CampaignPrecommitManifestError(
+            "published campaign precommit manifest changed before witnessing"
+        )
+    post_publish_observed_at = _publication_now_text()
+    try:
+        authority.commit(
+            tx_id=tx_id,
+            observed_state_sha256=manifest.manifest_sha256,
+            semantic_binding_sha256=structural_binding,
+        )
+    except MonotonicWorkspaceAuthorityError as exc:
+        raise CampaignPrecommitManifestError(
+            "cannot commit campaign precommit structural publication"
+        ) from exc
+
+    if _publication_observed_instant(post_publish_observed_at) >= _instant(
+        manifest.observation_not_before
+    ):
+        raise CampaignPrecommitManifestError(
+            "manifest was not product-observed before prospective observation; no publication witness issued"
+        )
+
+    return _commit_publication_witness(
+        authority,
+        manifest=loaded,
+        target_relative_path=relative,
+        post_publish_observed_at=post_publish_observed_at,
+    )

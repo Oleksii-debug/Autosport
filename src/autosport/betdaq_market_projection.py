@@ -277,7 +277,6 @@ def project_betdaq_get_prices(
     market_context: Mapping[int, BetdaqMarketContext],
     observed_ts: str,
     sequence: int,
-    cursor: str | None = None,
 ) -> ProviderBatch:
     """Project one fully validated GetPrices scope into canonical top-of-book quotes.
 
@@ -291,9 +290,7 @@ def project_betdaq_get_prices(
         raise TypeError("market_context must be a mapping")
     observed_ts = _timestamp_text(observed_ts, "observed_ts")
     sequence = _validate_sequence(sequence)
-    if cursor is not None and type(cursor) is not str:
-        raise TypeError("cursor must be str or None")
-    if response.return_code != 0:
+    if type(response.return_code) is not int or response.return_code != 0:
         raise BetdaqProjectionError("non-success BETDAQ response cannot be projected")
     if response.unavailable_markets:
         raise BetdaqProjectionError(
@@ -359,7 +356,7 @@ def project_betdaq_get_prices(
     return ProviderBatch(
         source_id=SOURCE_ID,
         quotes=tuple(quotes),
-        cursor=cursor,
+        cursor=None,
     )
 
 

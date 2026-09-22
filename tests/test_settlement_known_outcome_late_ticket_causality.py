@@ -123,8 +123,7 @@ class ContinuousSettlementTicketCausalityTests(unittest.TestCase):
             self.assertIs(after.tickets[ticket.ticket_id].status, TicketStatus.OPEN)
             self.assertEqual(after._lifecycle, lifecycle_before)
 
-
-    def test_mixed_early_and_late_matching_tickets_fail_before_any_settlement(self) -> None:
+    def test_mixed_ticket_batch_fails_before_any_settlement(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             book = PaperBook("100")

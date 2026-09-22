@@ -943,15 +943,17 @@ class PaperRiskPolicy:
         book: PaperBook,
         *,
         realized_loss_window: tuple[datetime, datetime] | None = None,
+        turnover_window: tuple[datetime, datetime] | None = None,
         causal_cutoff: datetime | None = None,
     ) -> _HistoricalRiskMetrics | None:
         """Derive conservative durable risk facts from canonical PaperBook history.
 
-        When a causal realized-loss window is supplied, losses with proven
-        settlement-time provenance are counted only inside that inclusive window.
-        Legacy settlements without time provenance are still counted, because
-        excluding an unknown-time loss could understate risk. Drawdown, turnover
-        and current committed exposure remain whole-history/whole-portfolio facts.
+        When causal realized-loss/turnover windows are supplied, losses with proven
+        settlement-time provenance and durable ticket stakes are counted only inside
+        their respective inclusive windows. Legacy settlements without time provenance
+        remain counted for loss, because excluding unknown-time loss could understate
+        risk. Without a turnover window, turnover remains a whole-history fact.
+        Drawdown and current committed exposure always remain whole-portfolio facts.
         """
 
         try:
@@ -966,6 +968,18 @@ class PaperRiskPolicy:
                     or window_end.tzinfo is None
                     or window_end.utcoffset() is None
                     or window_start > window_end
+                ):
+                    return None
+            if turnover_window is not None:
+                turnover_start, turnover_end = turnover_window
+                if (
+                    not isinstance(turnover_start, datetime)
+                    or not isinstance(turnover_end, datetime)
+                    or turnover_start.tzinfo is None
+                    or turnover_start.utcoffset() is None
+                    or turnover_end.tzinfo is None
+                    or turnover_end.utcoffset() is None
+                    or turnover_start > turnover_end
                 ):
                     return None
             if causal_cutoff is not None and (
@@ -995,7 +1009,19 @@ class PaperRiskPolicy:
                     replay_committed = cls._exact_positive_sum(
                         (replay_committed, ticket.stake)
                     )
-                    turnover = cls._exact_positive_sum((turnover, ticket.stake))
+                    include_turnover = True
+                    if turnover_window is not None:
+                        _, placed_time = _canonical_context_timestamp(
+                            "ticket placed_at", ticket.placed_at
+                        )
+                        turnover_start, turnover_end = turnover_window
+                        include_turnover = (
+                            turnover_start <= placed_time <= turnover_end
+                        )
+                    if include_turnover:
+                        turnover = cls._exact_positive_sum(
+                            (turnover, ticket.stake)
+                        )
                 else:
                     _, payout, replay_balance = PaperBook._settlement_result(
                         ticket,
@@ -1092,6 +1118,7 @@ class PaperRiskPolicy:
         """Return maximum additional losing stake allowed by durable history."""
 
         realized_loss_window: tuple[datetime, datetime] | None = None
+        turnover_window: tuple[datetime, datetime] | None = None
         causal_cutoff: datetime | None = None
         if context is not None and context.proposal_ts is not None:
             try:
@@ -1120,10 +1147,12 @@ class PaperRiskPolicy:
                 except (TypeError, ValueError):
                     return None
                 realized_loss_window = (window_start, window_end)
+                turnover_window = (window_start, window_end)
 
         metrics = cls._historical_risk_metrics(
             book,
             realized_loss_window=realized_loss_window,
+            turnover_window=turnover_window,
             causal_cutoff=causal_cutoff,
         )
         if metrics is None:

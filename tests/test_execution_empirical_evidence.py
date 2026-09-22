@@ -271,7 +271,7 @@ def test_terminal_ack_without_separate_provider_evidence_still_has_attempt_recor
     assert evidence.adverse_odds_delta is None
 
 
-def test_reconciled_not_found_is_terminal_resolved_no_effect_evidence(tmp_path):
+def test_reconciled_not_found_is_unverified_right_censored_evidence(tmp_path):
     ledger = _reconciled_not_found_ledger(tmp_path)
 
     evidence = build_empirical_execution_evidence(
@@ -280,11 +280,14 @@ def test_reconciled_not_found_is_terminal_resolved_no_effect_evidence(tmp_path):
     )
 
     assert evidence.attempt_state == "RECONCILED_NOT_FOUND"
-    assert evidence.terminal is True
-    assert evidence.right_censored is False
-    assert evidence.censor_reason is None
-    assert evidence.censor_cutoff_recorded_at is None
-    assert evidence.censor_cutoff_event_count is None
+    assert evidence.terminal is False
+    assert evidence.right_censored is True
+    assert (
+        evidence.censor_reason
+        == "RECONCILED_NOT_FOUND_UNVERIFIED_ABSENCE_AUTHORITY"
+    )
+    assert evidence.censor_cutoff_recorded_at is not None
+    assert evidence.censor_cutoff_event_count == evidence.source_event_count
     assert evidence.acknowledgement_status is None
     assert evidence.acknowledged_at is None
     assert evidence.external_receipt_id is None
@@ -516,7 +519,12 @@ def test_restart_rebuild_is_byte_identical_for_reconciled_not_found(tmp_path):
 
     assert second.to_dict() == first.to_dict()
     assert second.evidence_sha256 == first.evidence_sha256
-    assert second.terminal is True
+    assert second.terminal is False
+    assert second.right_censored is True
+    assert (
+        second.censor_reason
+        == "RECONCILED_NOT_FOUND_UNVERIFIED_ABSENCE_AUTHORITY"
+    )
     assert second.reconciliation_external_effect_found is False
 
 
@@ -688,8 +696,8 @@ def test_population_aggregate_keeps_complete_funnel_denominator(tmp_path):
         "REJECTED": 1,
         "RECONCILED_NOT_FOUND": 1,
     }
-    assert aggregate.terminal_count == 4
-    assert aggregate.right_censored_count == 3
+    assert aggregate.terminal_count == 3
+    assert aggregate.right_censored_count == 4
     assert aggregate.provider_evidence_count == 3
     assert aggregate.slippage_known_count == 0
     assert aggregate.slippage_unknown_count == 6
@@ -703,7 +711,7 @@ def test_population_aggregate_keeps_complete_funnel_denominator(tmp_path):
         "denominator": 7,
     }
     assert payload["right_censored_rate"] == {
-        "numerator": 3,
+        "numerator": 4,
         "denominator": 7,
     }
     assert payload["provider_evidence_rate"] == {

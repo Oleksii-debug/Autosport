@@ -124,6 +124,20 @@ class ParlayApiSportProviderTests(unittest.TestCase):
         self.assertEqual(quote.sport, "basketball_nba")
         self.assertEqual(quote.metadata["sport_key"], "basketball_nba")
 
+    def test_explicit_null_sport_key_fails_closed_instead_of_inheriting_scope(self) -> None:
+        event = _event()
+        event["sport_key"] = None
+        provider = ParlayApiSportProvider(
+            "basketball_nba",
+            "secret",
+            transport=lambda *_: HttpJsonResponse([event], 200, {}),
+            clock=lambda: "2026-09-21T12:00:01+00:00",
+            sleeper=lambda _: None,
+        )
+
+        with self.assertRaisesRegex(ProviderPayloadError, "sport_key"):
+            provider.read_batch()
+
     def test_sport_key_is_exact_url_safe_identity_not_a_normalized_label(self) -> None:
         invalid = (
             "",

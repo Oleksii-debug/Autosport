@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import gc
 from datetime import datetime
 from decimal import Decimal
 import json
@@ -910,3 +911,115 @@ def test_monotonic_capture_regression_fails_closed(tmp_path, monkeypatch) -> Non
 def test_visibility_horizon_is_fixed_provider_constant() -> None:
     assert timeout_resolution.BETFAIR_TIMEOUT_VISIBILITY_HORIZON_SECONDS == 15
     assert timeout_resolution.BETFAIR_CLEARED_HISTORY_MAX_AGE_DAYS == 90
+
+
+def test_positive_effect_retires_prior_elapsed_visibility_anchor(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    ledger, action, provider_ref, _ = _ledger_with_timeout(tmp_path, monkeypatch)
+    assert provider_ref is not None
+    anchor_key = (id(ledger), "attempt-1")
+    assert (
+        timeout_resolution._timeout_elapsed_visibility_ready(
+            ledger,
+            "attempt-1",
+            1_000_000_000,
+        )
+        is False
+    )
+    assert anchor_key in timeout_resolution._timeout_elapsed_visibility_anchors
+
+    result = _resolve(
+        monkeypatch,
+        ledger,
+        action,
+        provider_ref,
+        _effect("2026-09-21T18:00:16+00:00", provider_ref),
+    )
+
+    assert result.kind is timeout_resolution.BetfairTimeoutResolutionKind.EFFECT_PRESENT
+    assert anchor_key not in timeout_resolution._timeout_elapsed_visibility_anchors
+
+
+def test_outside_history_absence_retires_elapsed_visibility_anchor(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    ledger, action, provider_ref, _ = _ledger_with_timeout(tmp_path, monkeypatch)
+    assert provider_ref is not None
+    anchor_key = (id(ledger), "attempt-1")
+    assert (
+        timeout_resolution._timeout_elapsed_visibility_ready(
+            ledger,
+            "attempt-1",
+            1_000_000_000,
+        )
+        is False
+    )
+    assert anchor_key in timeout_resolution._timeout_elapsed_visibility_anchors
+
+    result = _resolve(
+        monkeypatch,
+        ledger,
+        action,
+        provider_ref,
+        _absence("2026-12-21T18:00:00+00:00", provider_ref),
+    )
+
+    assert (
+        result.kind
+        is timeout_resolution.BetfairTimeoutResolutionKind.INDETERMINATE_OUTSIDE_CLEARED_HISTORY
+    )
+    assert anchor_key not in timeout_resolution._timeout_elapsed_visibility_anchors
+
+
+def test_definitive_absence_anchor_lifetime_follows_live_authority_evidence(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    ledger, action, provider_ref, _ = _ledger_with_timeout(tmp_path, monkeypatch)
+    assert provider_ref is not None
+    _set_timeout_authority_wall_clock(
+        monkeypatch,
+        "2026-09-21T18:00:16+00:00",
+    )
+    ticks = iter([1_000_000_000, 16_000_000_000])
+    monkeypatch.setattr(timeout_resolution, "monotonic_ns", lambda: next(ticks))
+    profile = _profile()
+    anchor_key = (id(ledger), "attempt-1")
+
+    first_capture = _empty_provider_capture(action, provider_ref)
+    first = timeout_resolution.resolve_betfair_timeout_provider_state(
+        ledger,
+        action,
+        profile,
+        attempt_id="attempt-1",
+        expected_profile_sha256=profile.profile_id,
+        readback=first_capture,
+    )
+    assert first.evidence is None
+    assert anchor_key in timeout_resolution._timeout_elapsed_visibility_anchors
+
+    second_capture = _empty_provider_capture(action, provider_ref)
+    second = timeout_resolution.resolve_betfair_timeout_provider_state(
+        ledger,
+        action,
+        profile,
+        attempt_id="attempt-1",
+        expected_profile_sha256=profile.profile_id,
+        readback=second_capture,
+    )
+    assert (
+        second.kind
+        is timeout_resolution.BetfairTimeoutResolutionKind.ABSENT_AFTER_VISIBILITY_HORIZON
+    )
+    assert isinstance(second.evidence, VerifiedProviderAbsenceEvidence)
+    timeout_resolution.assert_betfair_timeout_absence_authoritative(second.evidence)
+    assert anchor_key in timeout_resolution._timeout_elapsed_visibility_anchors
+
+    del second
+    gc.collect()
+
+    assert anchor_key not in timeout_resolution._timeout_elapsed_visibility_anchors
+

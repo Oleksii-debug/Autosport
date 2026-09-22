@@ -785,12 +785,7 @@ def _parse_place_orders_response(
             "placeOrders report market does not match execution action"
         )
     status = result.get("status")
-    if status == "PROCESSED_WITH_ERRORS":
-        raise BetfairPlaceOrdersAmbiguous(
-            "placeOrders PROCESSED_WITH_ERRORS is ambiguous "
-            "for one action-specific instruction"
-        )
-    if status not in {"SUCCESS", "FAILURE"}:
+    if status not in {"SUCCESS", "FAILURE", "PROCESSED_WITH_ERRORS"}:
         raise BetfairPlaceOrdersAmbiguous(
             "placeOrders report has unsupported/nonterminal status"
         )
@@ -886,6 +881,14 @@ def _parse_place_orders_response(
     if instruction_status not in {"SUCCESS", "FAILURE"}:
         raise BetfairPlaceOrdersAmbiguous(
             "placeOrders instruction status is unsupported/nonterminal"
+        )
+    if (
+        status == "PROCESSED_WITH_ERRORS"
+        and instruction_status != "FAILURE"
+    ):
+        raise BetfairPlaceOrdersAmbiguous(
+            "placeOrders PROCESSED_WITH_ERRORS requires "
+            "a failed sole instruction"
         )
     if "sizeMatched" not in item:
         raise BetfairPlaceOrdersAmbiguous(

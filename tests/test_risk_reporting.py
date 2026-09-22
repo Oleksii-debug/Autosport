@@ -60,6 +60,9 @@ class PaperRiskReportingTests(unittest.TestCase):
         self.assertEqual(report.realized_gross_loss, Decimal("0"))
         self.assertEqual(report.turnover, Decimal("0"))
         self.assertEqual(report.current_drawdown_amount, Decimal("0"))
+        self.assertEqual(report.historical_max_drawdown_amount, Decimal("0"))
+        self.assertIsNone(report.historical_max_drawdown_peak_id)
+        self.assertIsNone(report.historical_max_drawdown_trough_id)
         self.assertEqual(report.drawdown_loss_room, Decimal("20.00"))
         self.assertEqual(report.risk_of_ruin_limit, Decimal("0.05"))
         self.assertIsNone(report.risk_of_ruin_upper_bound)
@@ -159,6 +162,145 @@ class PaperRiskReportingTests(unittest.TestCase):
         self.assertEqual(report.drawdown_loss_room, Decimal("-10.00"))
         self.assertEqual(report.portfolio_risk_state_sha256, before_sha256)
         self.assertEqual(after_sha256, before_sha256)
+
+    def test_recovery_does_not_erase_historical_max_drawdown_episode(self) -> None:
+        book = PaperBook("100")
+        loser = book.open_ticket(
+            (self._leg(20),),
+            Decimal("50"),
+            placed_at="2026-09-21T08:00:00+00:00",
+        )
+        book.settle(
+            loser.ticket_id,
+            set(),
+            settled_at="2026-09-21T08:05:00+00:00",
+        )
+        winner = book.open_ticket(
+            (self._leg(21, odds="8"),),
+            Decimal("10"),
+            placed_at="2026-09-21T08:10:00+00:00",
+        )
+        book.settle(
+            winner.ticket_id,
+            {winner.legs[0].quote_key},
+            settled_at="2026-09-21T08:15:00+00:00",
+        )
+
+        report = build_paper_risk_report(book, self._goal())
+
+        self.assertEqual(report.current_equity, Decimal("120"))
+        self.assertEqual(report.peak_equity, Decimal("120"))
+        self.assertEqual(report.current_drawdown_amount, Decimal("0"))
+        self.assertEqual(report.historical_max_drawdown_amount, Decimal("50"))
+        self.assertEqual(
+            report.historical_max_drawdown_peak_id,
+            "paper-initial-bankroll",
+        )
+        self.assertEqual(
+            report.historical_max_drawdown_trough_id,
+            f"paper-lifecycle:1:settle:{loser.ticket_id}",
+        )
+
+    def test_later_larger_episode_uses_new_all_time_high_as_peak_identity(self) -> None:
+        book = PaperBook("100")
+        first_loser = book.open_ticket(
+            (self._leg(30),),
+            Decimal("30"),
+            placed_at="2026-09-21T09:00:00+00:00",
+        )
+        book.settle(
+            first_loser.ticket_id,
+            set(),
+            settled_at="2026-09-21T09:05:00+00:00",
+        )
+        winner = book.open_ticket(
+            (self._leg(31, odds="6"),),
+            Decimal("10"),
+            placed_at="2026-09-21T09:10:00+00:00",
+        )
+        book.settle(
+            winner.ticket_id,
+            {winner.legs[0].quote_key},
+            settled_at="2026-09-21T09:15:00+00:00",
+        )
+        second_loser = book.open_ticket(
+            (self._leg(32),),
+            Decimal("40"),
+            placed_at="2026-09-21T09:20:00+00:00",
+        )
+        book.settle(
+            second_loser.ticket_id,
+            set(),
+            settled_at="2026-09-21T09:25:00+00:00",
+        )
+
+        report = build_paper_risk_report(book, self._goal())
+
+        self.assertEqual(report.current_equity, Decimal("80"))
+        self.assertEqual(report.peak_equity, Decimal("120"))
+        self.assertEqual(report.current_drawdown_amount, Decimal("40"))
+        self.assertEqual(report.historical_max_drawdown_amount, Decimal("40"))
+        self.assertEqual(
+            report.historical_max_drawdown_peak_id,
+            f"paper-lifecycle:3:settle:{winner.ticket_id}",
+        )
+        self.assertEqual(
+            report.historical_max_drawdown_trough_id,
+            f"paper-lifecycle:5:settle:{second_loser.ticket_id}",
+        )
+
+    def test_equal_max_drawdowns_keep_earliest_causal_episode_across_restart(self) -> None:
+        book = PaperBook("100")
+        first_loser = book.open_ticket(
+            (self._leg(40),),
+            Decimal("20"),
+            placed_at="2026-09-21T10:00:00+00:00",
+        )
+        book.settle(
+            first_loser.ticket_id,
+            set(),
+            settled_at="2026-09-21T10:05:00+00:00",
+        )
+        recovery = book.open_ticket(
+            (self._leg(41, odds="3"),),
+            Decimal("10"),
+            placed_at="2026-09-21T10:10:00+00:00",
+        )
+        book.settle(
+            recovery.ticket_id,
+            {recovery.legs[0].quote_key},
+            settled_at="2026-09-21T10:15:00+00:00",
+        )
+        second_loser = book.open_ticket(
+            (self._leg(42),),
+            Decimal("20"),
+            placed_at="2026-09-21T10:20:00+00:00",
+        )
+        book.settle(
+            second_loser.ticket_id,
+            set(),
+            settled_at="2026-09-21T10:25:00+00:00",
+        )
+        goal = self._goal()
+        expected = build_paper_risk_report(book, goal)
+
+        self.assertEqual(expected.historical_max_drawdown_amount, Decimal("20"))
+        self.assertEqual(
+            expected.historical_max_drawdown_peak_id,
+            "paper-initial-bankroll",
+        )
+        self.assertEqual(
+            expected.historical_max_drawdown_trough_id,
+            f"paper-lifecycle:1:settle:{first_loser.ticket_id}",
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "paper-max-drawdown.json"
+            book.save(path)
+            reopened = PaperBook.load(path)
+            actual = build_paper_risk_report(reopened, goal)
+
+        self.assertEqual(actual, expected)
 
     def test_restart_preserves_exact_report_identity_and_values(self) -> None:
         book = PaperBook("100")

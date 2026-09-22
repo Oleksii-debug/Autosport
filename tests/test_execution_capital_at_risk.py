@@ -10,7 +10,7 @@ from autosport.execution_capital_at_risk import (
     ExecutionCapitalAtRiskError,
     ExecutionCapitalAtRiskStale,
     ExecutionCapitalAtRiskUnsupported,
-    _lay_liability,
+    _subtract,
     resolve_execution_capital_at_risk,
 )
 from autosport.real_execution_ledger import (
@@ -129,6 +129,7 @@ def test_unknown_back_keeps_full_requested_capital_contingent(tmp_path) -> None:
     assert evidence.max_plausible_capital_at_risk == Decimal("10")
     assert evidence.execution_authority is False
     assert evidence.capital_release_authority is False
+    assert evidence.residual_capacity_authority is False
     evidence.assert_issued_current(ledger)
 
 
@@ -215,55 +216,6 @@ def test_generic_not_found_does_not_release_contingent_capital(tmp_path) -> None
     assert evidence.confirmed_released_capital == Decimal("0")
     assert evidence.contingent_unknown_capital == Decimal("10")
     assert evidence.max_plausible_capital_at_risk == Decimal("10")
-
-
-def test_lay_confirmed_liability_is_exact_but_partial_remainder_is_unbounded(
-    tmp_path,
-) -> None:
-    ledger, plan = _ledger(
-        tmp_path,
-        _action(side="LAY", odds="4", stake="10"),
-    )
-    _attempt(ledger, plan)
-    _ack(
-        ledger,
-        status=AcknowledgementStatus.PARTIAL,
-        accepted_stake="4",
-        accepted_odds="3.5",
-    )
-
-    evidence = resolve_execution_capital_at_risk(ledger, plan.plan_id)
-    attempt = evidence.attempts[0]
-
-    assert attempt.requested_capital_at_limit == Decimal("30")
-    assert attempt.confirmed_open_capital == Decimal("10")
-    assert attempt.contingent_unknown_capital is None
-    assert attempt.max_plausible_capital_at_risk is None
-    assert evidence.truth is CapitalRiskTruth.UNBOUNDED_CONTINGENT
-    assert evidence.confirmed_open_capital == Decimal("10")
-    assert evidence.contingent_unknown_capital is None
-    assert evidence.max_plausible_capital_at_risk is None
-
-
-def test_fully_accepted_lay_uses_exact_accepted_odds_liability(tmp_path) -> None:
-    ledger, plan = _ledger(
-        tmp_path,
-        _action(side="LAY", odds="4", stake="10"),
-    )
-    _attempt(ledger, plan)
-    _ack(
-        ledger,
-        status=AcknowledgementStatus.ACCEPTED,
-        accepted_stake="10",
-        accepted_odds="3.5",
-    )
-
-    evidence = resolve_execution_capital_at_risk(ledger, plan.plan_id)
-
-    assert evidence.truth is CapitalRiskTruth.CONSERVATIVE_BOUND
-    assert evidence.confirmed_open_capital == Decimal("25")
-    assert evidence.contingent_unknown_capital == Decimal("0")
-    assert evidence.max_plausible_capital_at_risk == Decimal("25")
 
 
 def test_reserved_attempt_has_no_external_effect_capital(tmp_path) -> None:
@@ -363,18 +315,14 @@ def test_exact_arithmetic_and_identity_ignore_ambient_decimal_precision(
 ) -> None:
     ledger, plan = _ledger(
         tmp_path,
-        _action(
-            side="LAY",
-            odds="123456789.123456789",
-            stake="987654321.987654321",
-        ),
+        _action(stake="987654321.987654321"),
     )
     _attempt(ledger, plan)
     _ack(
         ledger,
-        status=AcknowledgementStatus.ACCEPTED,
-        accepted_stake="987654321.987654321",
-        accepted_odds="123456789.123456789",
+        status=AcknowledgementStatus.PARTIAL,
+        accepted_stake="123456789.123456789",
+        accepted_odds="2.25",
     )
 
     with localcontext() as context:
@@ -392,22 +340,25 @@ def test_exact_arithmetic_and_identity_ignore_ambient_decimal_precision(
         )
 
     assert low_precision.confirmed_open_capital == high_precision.confirmed_open_capital
+    assert (
+        low_precision.contingent_unknown_capital
+        == high_precision.contingent_unknown_capital
+    )
     assert low_precision.evidence_sha256 == high_precision.evidence_sha256
 
 
-
-def test_lay_liability_preserves_exact_unit_across_large_exponent_gap() -> None:
-    odds = Decimal("1E+100")
+def test_subtraction_preserves_tiny_residual_across_large_exponent_gap() -> None:
+    tiny = Decimal("1E-100")
     with localcontext() as context:
         context.prec = 5
-        actual = _lay_liability(Decimal("1"), odds)
+        actual = _subtract(Decimal("1"), tiny)
 
     with localcontext() as context:
         context.prec = 120
-        expected = odds - Decimal(1)
+        expected = Decimal("1") - tiny
 
     assert actual == expected
-    assert actual != odds
+    assert actual != Decimal("1")
 
 
 def test_extreme_decimal_scale_fails_closed_instead_of_rounding() -> None:
@@ -415,8 +366,7 @@ def test_extreme_decimal_scale_fails_closed_instead_of_rounding() -> None:
         ExecutionCapitalAtRiskUnsupported,
         match="scale exceeds exact risk-arithmetic bound",
     ):
-        _lay_liability(Decimal("1"), Decimal("1E+5000"))
-
+        _subtract(Decimal("1E+5000"), Decimal("1"))
 
 
 def test_multi_action_plan_aggregates_confirmed_and_unknown_gross_commitment(
@@ -483,5 +433,22 @@ def test_unsupported_side_fails_closed_instead_of_using_stake_as_risk(
     with pytest.raises(
         ExecutionCapitalAtRiskUnsupported,
         match="unsupported execution side",
+    ):
+        resolve_execution_capital_at_risk(ledger, plan.plan_id)
+
+
+
+def test_lay_side_fails_closed_until_canonical_order_economics_is_composed(
+    tmp_path,
+) -> None:
+    ledger, plan = _ledger(
+        tmp_path,
+        _action(side="LAY", odds="4", stake="10"),
+    )
+    _attempt(ledger, plan)
+
+    with pytest.raises(
+        ExecutionCapitalAtRiskUnsupported,
+        match="supports Betfair BACK only",
     ):
         resolve_execution_capital_at_risk(ledger, plan.plan_id)

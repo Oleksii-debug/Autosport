@@ -407,6 +407,14 @@ class ResolvedPolicyOutcome:
             if self.wager_pnl_currency is None
             else _decimal(self.wager_pnl_currency, "wager_pnl_currency")
         )
+        if (
+            cost != 0
+            and self.side is not BetSide.NONE
+            and self.wager_pnl_currency is None
+        ):
+            raise ForwardEconomicEvidenceError(
+                "executed all-in cost requires explicit wager P&L"
+            )
         if self.wager_pnl_currency is not None and pnl != wager_pnl - cost:
             raise ForwardEconomicEvidenceError(
                 "all-in net P&L must equal wager P&L minus economic cost"

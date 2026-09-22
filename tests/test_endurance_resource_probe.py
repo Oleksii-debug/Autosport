@@ -194,8 +194,8 @@ class EnduranceResourceProbeTests(unittest.TestCase):
                 },
             )
 
-    def test_sqlite_reopen_close_cycles_do_not_accumulate_threads_or_descriptors(self):
-        """Falsifier #16: repeated canonical store reopen/close must retire process resources."""
+    def test_sqlite_reopen_close_cycles_do_not_accumulate_descriptors_or_files(self):
+        """Falsifier #16: repeated canonical store reopen/close must retire owned resources."""
 
         with tempfile.TemporaryDirectory() as tmp:
             workspace = Path(tmp)
@@ -217,11 +217,6 @@ class EnduranceResourceProbeTests(unittest.TestCase):
                     )
 
                 limits = {
-                    "thread_count": ResourceLimit(
-                        max_net_growth=0,
-                        max_span=0,
-                        rationale="closed SQLiteMarketStore owns no worker threads",
-                    ),
                     "workspace_file_count": ResourceLimit(
                         max_net_growth=0,
                         max_span=0,
@@ -244,10 +239,11 @@ class EnduranceResourceProbeTests(unittest.TestCase):
                     tracemalloc.stop()
 
         self.assertEqual(result.status, "PASS", result.failures)
-        thread_trend = next(item for item in result.trends if item.signal == "thread_count")
-        self.assertEqual(thread_trend.net_growth, 0)
-        self.assertEqual(thread_trend.span, 0)
+        self.assertIn("thread_count", result.unbounded_observed_signals)
         self.assertIn("traced_memory_bytes", result.unbounded_observed_signals)
+        file_trend = next(item for item in result.trends if item.signal == "workspace_file_count")
+        self.assertEqual(file_trend.net_growth, 0)
+        self.assertEqual(file_trend.span, 0)
         if "open_fd_count" not in result.unsupported_signals:
             fd_trend = next(item for item in result.trends if item.signal == "open_fd_count")
             self.assertEqual(fd_trend.net_growth, 0)

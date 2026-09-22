@@ -30,55 +30,51 @@ class WorkspaceEvidenceHandoff:
     _fixed_evidence_set_complete: bool
 
     def assert_product_issued(self) -> None:
-        expected = _ISSUED_WORKSPACE_HANDOFFS.get(self)
-        if expected is None or expected != _workspace_handoff_state(self):
-            raise OperatorEvidenceHandoffAuthorityError(
-                "workspace evidence handoff was not issued by the canonical verifier adapter"
-            )
+        _assert_workspace_handoff_product_issued(self)
 
     @property
     def status(self) -> Literal["PASS"]:
-        self.assert_product_issued()
+        _assert_workspace_handoff_product_issued(self)
         return self._status
 
     @property
     def manifest_sha256(self) -> str:
-        self.assert_product_issued()
+        _assert_workspace_handoff_product_issued(self)
         return self._manifest_sha256
 
     @property
     def file_count(self) -> int:
-        self.assert_product_issued()
+        _assert_workspace_handoff_product_issued(self)
         return self._file_count
 
     @property
     def run_summary_count(self) -> int:
-        self.assert_product_issued()
+        _assert_workspace_handoff_product_issued(self)
         return self._run_summary_count
 
     @property
     def fixed_evidence_set_complete(self) -> bool:
-        self.assert_product_issued()
+        _assert_workspace_handoff_product_issued(self)
         return self._fixed_evidence_set_complete
 
     @property
     def real_money_execution(self) -> Literal[False]:
-        self.assert_product_issued()
+        _assert_workspace_handoff_product_issued(self)
         return False
 
     @property
     def human_tested(self) -> Literal[False]:
-        self.assert_product_issued()
+        _assert_workspace_handoff_product_issued(self)
         return False
 
     @property
     def nvda_verified(self) -> Literal[False]:
-        self.assert_product_issued()
+        _assert_workspace_handoff_product_issued(self)
         return False
 
     @property
     def whole_product_complete(self) -> Literal[False]:
-        self.assert_product_issued()
+        _assert_workspace_handoff_product_issued(self)
         return False
 
 
@@ -97,60 +93,56 @@ class NvdaEvidenceHandoff:
     _failed_checks: tuple[str, ...]
 
     def assert_product_issued(self) -> None:
-        expected = _ISSUED_NVDA_HANDOFFS.get(self)
-        if expected is None or expected != _nvda_handoff_state(self):
-            raise OperatorEvidenceHandoffAuthorityError(
-                "NVDA evidence handoff was not issued by the canonical verifier adapter"
-            )
+        _assert_nvda_handoff_product_issued(self)
 
     @property
     def status(self) -> Literal["PASS", "FAIL"]:
-        self.assert_product_issued()
+        _assert_nvda_handoff_product_issued(self)
         return self._status
 
     @property
     def package_sha256(self) -> str:
-        self.assert_product_issued()
+        _assert_nvda_handoff_product_issued(self)
         return self._package_sha256
 
     @property
     def source_sha(self) -> str:
-        self.assert_product_issued()
+        _assert_nvda_handoff_product_issued(self)
         return self._source_sha
 
     @property
     def autosport_exe_sha256(self) -> str:
-        self.assert_product_issued()
+        _assert_nvda_handoff_product_issued(self)
         return self._autosport_exe_sha256
 
     @property
     def failed_checks(self) -> tuple[str, ...]:
-        self.assert_product_issued()
+        _assert_nvda_handoff_product_issued(self)
         return self._failed_checks
 
     @property
     def requires_owner_release_decision(self) -> Literal[True]:
-        self.assert_product_issued()
+        _assert_nvda_handoff_product_issued(self)
         return True
 
     @property
     def real_money_execution(self) -> Literal[False]:
-        self.assert_product_issued()
+        _assert_nvda_handoff_product_issued(self)
         return False
 
     @property
     def human_tested(self) -> Literal[False]:
-        self.assert_product_issued()
+        _assert_nvda_handoff_product_issued(self)
         return False
 
     @property
     def nvda_verified(self) -> Literal[False]:
-        self.assert_product_issued()
+        _assert_nvda_handoff_product_issued(self)
         return False
 
     @property
     def whole_product_complete(self) -> Literal[False]:
-        self.assert_product_issued()
+        _assert_nvda_handoff_product_issued(self)
         return False
 
 
@@ -182,6 +174,30 @@ _ISSUED_WORKSPACE_HANDOFFS: WeakKeyDictionary[
 _ISSUED_NVDA_HANDOFFS: WeakKeyDictionary[
     NvdaEvidenceHandoff, tuple[object, ...]
 ] = WeakKeyDictionary()
+
+
+def _assert_workspace_handoff_product_issued(value: object) -> None:
+    if type(value) is not WorkspaceEvidenceHandoff:
+        raise OperatorEvidenceHandoffAuthorityError(
+            "workspace evidence handoff was not issued by the canonical verifier adapter"
+        )
+    expected = _ISSUED_WORKSPACE_HANDOFFS.get(value)
+    if expected is None or expected != _workspace_handoff_state(value):
+        raise OperatorEvidenceHandoffAuthorityError(
+            "workspace evidence handoff was not issued by the canonical verifier adapter"
+        )
+
+
+def _assert_nvda_handoff_product_issued(value: object) -> None:
+    if type(value) is not NvdaEvidenceHandoff:
+        raise OperatorEvidenceHandoffAuthorityError(
+            "NVDA evidence handoff was not issued by the canonical verifier adapter"
+        )
+    expected = _ISSUED_NVDA_HANDOFFS.get(value)
+    if expected is None or expected != _nvda_handoff_state(value):
+        raise OperatorEvidenceHandoffAuthorityError(
+            "NVDA evidence handoff was not issued by the canonical verifier adapter"
+        )
 
 
 def _require_machine_false(payload: dict[str, Any], *fields: str) -> None:

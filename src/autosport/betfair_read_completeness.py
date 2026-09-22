@@ -112,17 +112,20 @@ class BetfairReadCompletenessWitness:
             return False
         return True
 
+    def assert_issued(self) -> None:
+        """Require that this exact witness object came from this observer issuance registry."""
+        with _ISSUED_LOCK:
+            issued = _ISSUED_WITNESSES.get(id(self))
+        if issued != self._fingerprint():
+            raise BetfairReadOnlyError("Betfair completeness witness was not issued by the observer")
+
     def assert_authoritative(self) -> None:
         """Reject degraded, partial, or caller-fabricated completeness claims."""
         if self.completeness is not BetfairObservationCompleteness.COMPLETE_FOR_DECLARED_QUERY_WINDOW:
             raise BetfairReadOnlyError(
                 f"Betfair read is not complete: {self.completeness.value}"
             )
-        with _ISSUED_LOCK:
-            issued = _ISSUED_WITNESSES.get(id(self))
-        if issued != self._fingerprint():
-            raise BetfairReadOnlyError("Betfair completeness witness was not issued by the observer")
-
+        self.assert_issued()
     def assert_authoritative_for(self, *, venue_id: str, account_id: str) -> None:
         """Require positive completeness for the exact configured client scope."""
         self.assert_authoritative()

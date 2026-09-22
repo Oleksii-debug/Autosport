@@ -197,6 +197,77 @@ class ChampionEligibilityDecision:
         return {"decision_id": self.decision_id, **self._payload_without_id()}
 
     @classmethod
+    def from_payload(cls, payload: Mapping[str, Any]) -> "ChampionEligibilityDecision":
+        """Rebuild one durable decision without weakening its canonical identity."""
+
+        expected_fields = {
+            "decision_id",
+            "schema_version",
+            "status",
+            "canonical_strategy_id",
+            "strategy_version_id",
+            "model_version_id",
+            "environment_sha256",
+            "protocol_id",
+            "config_sha256",
+            "sport",
+            "league",
+            "regime",
+            "finding_ids",
+            "finding_record_sha256s",
+            "window_start",
+            "window_end",
+            "evaluated_at",
+            "valid_until",
+            "minimum_samples",
+            "minimum_effective_sample_size",
+            "effective_sample_size",
+            "degraded_streak",
+            "recovery_streak",
+            "admissible_actions",
+            "research_trigger_id",
+            "reason",
+        }
+        if type(payload) is not dict or set(payload) != expected_fields:
+            raise ChampionEligibilityError("eligibility decision payload fields mismatch")
+        if type(payload["schema_version"]) is not int or payload["schema_version"] != SCHEMA_VERSION:
+            raise ChampionEligibilityError("eligibility decision schema version mismatch")
+        for name in ("finding_ids", "finding_record_sha256s", "admissible_actions"):
+            if type(payload[name]) is not list:
+                raise ChampionEligibilityError(f"{name} must be a list in durable payload")
+        try:
+            status = ChampionEligibilityStatus(_text(payload["status"], "status"))
+        except ValueError as exc:
+            raise ChampionEligibilityError("eligibility decision status is invalid") from exc
+        return cls(
+            status=status,
+            canonical_strategy_id=payload["canonical_strategy_id"],
+            strategy_version_id=payload["strategy_version_id"],
+            model_version_id=payload["model_version_id"],
+            environment_sha256=payload["environment_sha256"],
+            protocol_id=payload["protocol_id"],
+            config_sha256=payload["config_sha256"],
+            sport=payload["sport"],
+            league=payload["league"],
+            regime=payload["regime"],
+            finding_ids=tuple(payload["finding_ids"]),
+            finding_record_sha256s=tuple(payload["finding_record_sha256s"]),
+            window_start=payload["window_start"],
+            window_end=payload["window_end"],
+            evaluated_at=payload["evaluated_at"],
+            valid_until=payload["valid_until"],
+            minimum_samples=payload["minimum_samples"],
+            minimum_effective_sample_size=payload["minimum_effective_sample_size"],
+            effective_sample_size=payload["effective_sample_size"],
+            degraded_streak=payload["degraded_streak"],
+            recovery_streak=payload["recovery_streak"],
+            admissible_actions=tuple(payload["admissible_actions"]),
+            research_trigger_id=payload["research_trigger_id"],
+            reason=payload["reason"],
+            decision_id=payload["decision_id"],
+        )
+
+    @classmethod
     def from_findings(
         cls,
         registry: ScientificRegistry,
@@ -561,3 +632,82 @@ def validate_activation_eligibility(
             raise ChampionEligibilityError("eligibility drift finding binding is stale or tampered")
         if _instant(finding.available_at, "DriftFinding.available_at") > cutoff:
             raise ChampionEligibilityError("eligibility references future drift evidence")
+
+
+def require_current_activation_eligibility(
+    registry: ScientificRegistry,
+    *,
+    as_of: str,
+    canonical_strategy_id: str,
+    expected_strategy_version_id: str,
+    expected_model_version_id: str,
+    expected_environment_sha256: str,
+    expected_protocol_id: str,
+    expected_config_sha256: str,
+    expected_sport: str,
+    expected_league: str,
+    expected_regime: str | None,
+    admissible_actions: frozenset[str],
+) -> ChampionEligibilityDecision:
+    """Resolve the latest causal scope-bound eligibility and validate it fail-closed."""
+
+    if not isinstance(registry, ScientificRegistry):
+        raise TypeError("registry must be ScientificRegistry")
+    strategy_key = _text(canonical_strategy_id, "canonical_strategy_id")
+    strategy_version_id = _text(expected_strategy_version_id, "expected_strategy_version_id")
+    model_version_id = _text(expected_model_version_id, "expected_model_version_id")
+    sport = _text(expected_sport, "expected_sport")
+    league = _text(expected_league, "expected_league")
+    regime = None if expected_regime is None else _text(expected_regime, "expected_regime")
+
+    candidates = tuple(
+        entry
+        for entry in registry.causal_records("ChampionEligibilityDecision", as_of=as_of)
+        if entry.payload.get("canonical_strategy_id") == strategy_key
+        and entry.payload.get("strategy_version_id") == strategy_version_id
+        and entry.payload.get("model_version_id") == model_version_id
+        and entry.payload.get("sport") == sport
+        and entry.payload.get("league") == league
+        and (regime is None or entry.payload.get("regime") == regime)
+    )
+    if not candidates:
+        raise ChampionEligibilityError("current champion eligibility evidence is missing")
+
+    latest_available = max(
+        _instant(entry.available_at, "ChampionEligibilityDecision.available_at")
+        for entry in candidates
+    )
+    latest = tuple(
+        entry
+        for entry in candidates
+        if _instant(entry.available_at, "ChampionEligibilityDecision.available_at")
+        == latest_available
+    )
+    if len(latest) != 1:
+        raise ChampionEligibilityError("current champion eligibility evidence is ambiguous")
+
+    entry = latest[0]
+    try:
+        decision = ChampionEligibilityDecision.from_payload(entry.payload)
+    except (ChampionEligibilityError, TypeError, ValueError) as exc:
+        raise ChampionEligibilityError("current champion eligibility evidence is invalid") from exc
+    if decision.record_id != entry.record_id:
+        raise ChampionEligibilityError("eligibility decision registry identity mismatch")
+    if _instant(decision.available_at, "decision.available_at") != _instant(
+        entry.available_at, "entry.available_at"
+    ):
+        raise ChampionEligibilityError("eligibility decision availability mismatch")
+
+    validate_activation_eligibility(
+        registry,
+        decision,
+        as_of=as_of,
+        canonical_strategy_id=strategy_key,
+        expected_strategy_version_id=strategy_version_id,
+        expected_model_version_id=model_version_id,
+        expected_environment_sha256=expected_environment_sha256,
+        expected_protocol_id=expected_protocol_id,
+        expected_config_sha256=expected_config_sha256,
+        admissible_actions=admissible_actions,
+    )
+    return decision

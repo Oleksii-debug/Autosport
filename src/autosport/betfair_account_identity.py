@@ -153,15 +153,14 @@ def _make_account_identity_authority():
     context_record_type = _ClientContextRecord
     issued_record_type = _IssuedIdentityRecord
     identity_error_type = BetfairAccountIdentityError
+    readonly_error_type = BetfairReadOnlyError
     personal_mode = BetfairAccountIdentityMode.PERSONAL_DEVELOPER
     venue_id = VENUE_ID
     identity_scope = IDENTITY_SCOPE
     identity_schema = IDENTITY_SCHEMA
     identity_schema_version = IDENTITY_SCHEMA_VERSION
     context_prefix = _CONTEXT_PREFIX
-    validate_currency = _currency_code
-    validate_sha256 = _sha256_hex
-    validate_timestamp = _canonical_timestamp
+    readonly_module = _readonly_module
     json_dumps = json.dumps
     sha256_fn = sha256
     hmac_digest = hmac.digest
@@ -181,6 +180,35 @@ def _make_account_identity_authority():
     canonical_client_origins: WeakKeyDictionary = WeakKeyDictionary()
     client_contexts: dict[int, _ClientContextRecord] = {}
     issued: dict[int, _IssuedIdentityRecord] = {}
+
+    def validate_sha256(value: str, field: str) -> str:
+        if (
+            not isinstance(value, str)
+            or len(value) != 64
+            or any(character not in "0123456789abcdef" for character in value)
+        ):
+            raise identity_error_type(f"{field} must be lowercase SHA-256 hex")
+        return value
+
+    def validate_currency(value: str) -> str:
+        if (
+            not isinstance(value, str)
+            or len(value) != 3
+            or not value.isascii()
+            or not value.isalpha()
+            or value != value.upper()
+        ):
+            raise identity_error_type(
+                "account currency_code must be three-letter uppercase ASCII"
+            )
+        return value
+
+    def validate_timestamp(value: str) -> str:
+        if not isinstance(value, str) or not value or value != value.strip():
+            raise identity_error_type(
+                "account observed_at must be canonical timestamp text"
+            )
+        return value
 
     def credential_binding(credentials: BetfairSessionCredentials) -> bytes:
         if type(credentials) is not credentials_type:
@@ -226,14 +254,14 @@ def _make_account_identity_authority():
     def client_class_dispatch_is_current() -> bool:
         return (
             client_type.__init__ is canonical_client_init
-            and BetfairReadOnlyClient.read_account_details
+            and client_type.read_account_details
             is canonical_read_account_details
             and client_type._rpc is canonical_rpc
-            and BetfairReadOnlyClient._next_request_id
+            and client_type._next_request_id
             is canonical_next_request_id
             and client_type._observed_at is canonical_observed_at
             and transport_type.post is canonical_network_post
-            and _readonly_module.urlopen is canonical_urlopen
+            and readonly_module.urlopen is canonical_urlopen
         )
 
     def client_dispatch_is_current(client: BetfairReadOnlyClient) -> bool:
@@ -284,7 +312,7 @@ def _make_account_identity_authority():
                 origin.credential_binding,
                 credential_binding(client._credentials),
             )
-        except (AttributeError, TypeError, BetfairAccountIdentityError):
+        except (AttributeError, TypeError, identity_error_type):
             return False
 
     def context_is_current(
@@ -397,7 +425,7 @@ def _make_account_identity_authority():
             raise identity_error_type(
                 "canonical Betfair client factory produced invalid origin"
             )
-        origin = _CanonicalClientOrigin(
+        origin = origin_type(
             client._transport,
             client._clock,
             client._credentials,
@@ -430,7 +458,7 @@ def _make_account_identity_authority():
             # class identities and instance-shadow absence are fenced above and
             # rechecked after acquisition.
             details = canonical_read_account_details(client)
-        except BetfairReadOnlyError as exc:
+        except readonly_error_type as exc:
             raise identity_error_type(
                 "authenticated Betfair account-details acquisition failed"
             ) from exc

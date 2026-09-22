@@ -87,6 +87,26 @@ jobs:
           "AUTOSPORT_PACKAGED_EXE=$packagedExe" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           "AUTOSPORT_PACKAGED_DATA_EXE=$packagedDataExe" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           "AUTOSPORT_QUALIFIED_PACKAGE_SHA256=$packageSha" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+      - name: Qualify packaged paths with spaces and Cyrillic
+        shell: pwsh
+        run: |
+          $matrixOutput = Join-Path $PWD 'dist/path-matrix'
+          python scripts/test_packaged_path_matrix.py `
+            --artifact-root $env:AUTOSPORT_PACKAGED_ROOT `
+            --executable-relative-path 'Autosport-Data.exe' `
+            --output-dir $matrixOutput `
+            --mode exit-zero `
+            --argument 'repair-workspace' `
+            --argument=--workspace `
+            --argument '{WORKSPACE_ROOT}'
+          if ($LASTEXITCODE -ne 0) { throw "Packaged path matrix exited $LASTEXITCODE" }
+          $matrixReport = Join-Path $matrixOutput 'path-matrix-report.json'
+          if (-not (Test-Path -LiteralPath $matrixReport -PathType Leaf)) { throw 'Packaged path matrix did not publish its JSON report' }
+          $matrixEvidence = Get-Content -LiteralPath $matrixReport -Raw -Encoding utf8 | ConvertFrom-Json
+          if ([string]$matrixEvidence.matrix_status -ne 'PASS') { throw "Packaged path matrix status is $($matrixEvidence.matrix_status)" }
+          if ($matrixEvidence.real_money_execution -ne $false -or $matrixEvidence.human_tested -ne $false -or $matrixEvidence.nvda_verified -ne $false -or $matrixEvidence.whole_product_complete -ne $false) {
+            throw 'Packaged path matrix attempted to promote protected truth flags'
+          }
       - name: Execute packaged NVDA evidence contract
         shell: pwsh
         run: ./scripts/nvda_evidence_package_smoke.ps1
@@ -246,6 +266,7 @@ jobs:
             dist/restart-recovery-audit.json
             dist/research-demo-audit.json
             dist/repair-workspace-package-smoke.json
+            dist/path-matrix/path-matrix-report.json
             dist/walk-forward-package-smoke.json
             dist/walk-forward-package-smoke-dataset
             dist/walk-forward-package-smoke-report.json

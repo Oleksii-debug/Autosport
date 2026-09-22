@@ -8,6 +8,7 @@ mint production timing evidence.
 """
 from __future__ import annotations
 
+from contextvars import ContextVar
 from dataclasses import dataclass, field
 from enum import Enum
 from hashlib import sha256
@@ -19,8 +20,7 @@ SCHEMA_VERSION = 1
 TIMING_SCOPE = "transport_round_trip"
 PRODUCTION_CLOCK_SOURCE = "PROCESS_PERF_COUNTER_NS"
 TEST_CLOCK_SOURCE = "INJECTED_TEST_CLOCK"
-MAX_ELAPSED_NS = (1 << 63) - 1
-
+MAX_ELAPSED_NS = (1 << 63) - 1\n\n_WITNESS_ISSUANCE: ContextVar[bool] = ContextVar(\n    "autosport_transport_timing_witness_issuance",\n    default=False,\n)\n
 
 class TransportTimingEvidenceError(RuntimeError):
     """Transport timing evidence is malformed or cannot be measured safely."""
@@ -99,9 +99,7 @@ class TransportRoundTripWitness:
     external_effect_proven: bool = False
     evidence_sha256: str = field(init=False)
 
-    def __post_init__(self) -> None:
-        if type(self.schema_version) is not int or self.schema_version != SCHEMA_VERSION:
-            raise TransportTimingEvidenceError(
+    def __post_init__(self) -> None:\n        if not _WITNESS_ISSUANCE.get():\n            raise TransportTimingEvidenceError(\n                "transport timing witness must be product-issued"\n            )\n        if type(self.schema_version) is not int or self.schema_version != SCHEMA_VERSION:\n            raise TransportTimingEvidenceError(
                 f"schema_version must be exactly {SCHEMA_VERSION}"
             )
         for name in ("attempt_id", "action_id", "provider_id", "account_id"):
@@ -182,12 +180,17 @@ class TransportRoundTripWitness:
         return payload
 
 
+
 class MeasuredTransportFailure(TransportTimingEvidenceError):
-    """The transport call failed after a truthful local duration was measured."""
+    """Compatibility wrapper retained for pre-envelope imports only."""
 
     def __init__(self, message: str, witness: TransportRoundTripWitness) -> None:
         super().__init__(message)
         self.witness = witness
+
+
+class _InvalidTransportResponse(TypeError):
+    """The wrapped transport returned something other than exact bytes."""
 
 
 def _sample(clock: Callable[[], int], name: str) -> int:
@@ -219,23 +222,151 @@ def _witness(
     response_sha256: str | None,
     production_clock: bool,
 ) -> TransportRoundTripWitness:
-    return TransportRoundTripWitness(
-        attempt_id=attempt_id,
-        action_id=action_id,
-        provider_id=provider_id,
-        account_id=account_id,
-        request_sha256=request_sha256,
-        outcome=outcome,
-        elapsed_ns=elapsed_ns,
-        response_sha256=response_sha256,
-        clock_source=(
-            PRODUCTION_CLOCK_SOURCE if production_clock else TEST_CLOCK_SOURCE
-        ),
-        clock_is_product_default=production_clock,
-    )
+    issuance = _WITNESS_ISSUANCE.set(True)
+    try:
+        return TransportRoundTripWitness(
+            attempt_id=attempt_id,
+            action_id=action_id,
+            provider_id=provider_id,
+            account_id=account_id,
+            request_sha256=request_sha256,
+            outcome=outcome,
+            elapsed_ns=elapsed_ns,
+            response_sha256=response_sha256,
+            clock_source=(
+                PRODUCTION_CLOCK_SOURCE if production_clock else TEST_CLOCK_SOURCE
+            ),
+            clock_is_product_default=production_clock,
+        )
+    finally:
+        _WITNESS_ISSUANCE.reset(issuance)
 
 
-def measure_transport_round_trip(
+def _timing_reason(exc: TransportTimingEvidenceError) -> str:
+    message = str(exc)
+    if "clock sample failed" in message:
+        return "END_CLOCK_SAMPLE_FAILED"
+    if "non-negative int" in message:
+        return "END_CLOCK_INVALID"
+    if "moved backwards" in message:
+        return "CLOCK_MOVED_BACKWARDS"
+    if "exceeds int64" in message:
+        return "DURATION_OVERFLOW"
+    return "TIMING_EVIDENCE_UNAVAILABLE"
+
+
+@dataclass(frozen=True, slots=True)
+class TransportRoundTripMeasurement:
+    """Transport truth plus independent optional timing evidence."""
+
+    response: bytes | None
+    transport_error: Exception | None
+    witness: TransportRoundTripWitness | None
+    timing_unavailable_reason: str | None
+
+    def __post_init__(self) -> None:
+        if (self.response is None) == (self.transport_error is None):
+            raise TransportTimingEvidenceError(
+                "measurement requires exactly one transport response or error"
+            )
+        if self.response is not None and type(self.response) is not bytes:
+            raise TransportTimingEvidenceError(
+                "measurement response must be exact bytes"
+            )
+        if self.transport_error is not None and not isinstance(
+            self.transport_error, Exception
+        ):
+            raise TransportTimingEvidenceError(
+                "transport_error must be an Exception"
+            )
+        if self.witness is not None and not isinstance(
+            self.witness, TransportRoundTripWitness
+        ):
+            raise TransportTimingEvidenceError(
+                "witness must be TransportRoundTripWitness or None"
+            )
+        if self.timing_unavailable_reason is not None:
+            _text(self.timing_unavailable_reason, "timing_unavailable_reason")
+        if (self.witness is None) == (self.timing_unavailable_reason is None):
+            raise TransportTimingEvidenceError(
+                "measurement requires exactly one timing witness or unavailable reason"
+            )
+
+        if self.response is not None and self.witness is not None:
+            if self.witness.outcome is not TransportRoundTripOutcome.RETURNED:
+                raise TransportTimingEvidenceError(
+                    "returned transport bytes require RETURNED timing outcome"
+                )
+            if self.witness.response_sha256 != sha256(self.response).hexdigest():
+                raise TransportTimingEvidenceError(
+                    "timing witness response digest does not match transport bytes"
+                )
+
+        if self.transport_error is not None and self.witness is not None:
+            expected = (
+                TransportRoundTripOutcome.TIMEOUT
+                if isinstance(self.transport_error, TimeoutError)
+                else (
+                    TransportRoundTripOutcome.INVALID_RESPONSE
+                    if isinstance(self.transport_error, _InvalidTransportResponse)
+                    else TransportRoundTripOutcome.TRANSPORT_ERROR
+                )
+            )
+            if self.witness.outcome is not expected:
+                raise TransportTimingEvidenceError(
+                    "timing witness outcome does not match transport outcome"
+                )
+
+    @property
+    def timing_available(self) -> bool:
+        return self.witness is not None
+
+    def unwrap(self) -> bytes:
+        if self.transport_error is not None:
+            raise self.transport_error
+        assert self.response is not None
+        return self.response
+
+    def __iter__(self):
+        yield self.unwrap()
+        yield self.witness
+
+
+def _finish_timing(
+    *,
+    clock: Callable[[], int],
+    start_ns: int,
+    attempt_id: str,
+    action_id: str,
+    provider_id: str,
+    account_id: str,
+    request_sha256: str,
+    outcome: TransportRoundTripOutcome,
+    response_sha256: str | None,
+    production_clock: bool,
+) -> tuple[TransportRoundTripWitness | None, str | None]:
+    try:
+        end_ns = _sample(clock, "transport_end_ns")
+        elapsed_ns = _elapsed(start_ns, end_ns)
+        return (
+            _witness(
+                attempt_id=attempt_id,
+                action_id=action_id,
+                provider_id=provider_id,
+                account_id=account_id,
+                request_sha256=request_sha256,
+                outcome=outcome,
+                elapsed_ns=elapsed_ns,
+                response_sha256=response_sha256,
+                production_clock=production_clock,
+            ),
+            None,
+        )
+    except TransportTimingEvidenceError as exc:
+        return None, _timing_reason(exc)
+
+
+def _measure_transport_round_trip_impl(
     *,
     attempt_id: str,
     action_id: str,
@@ -243,18 +374,9 @@ def measure_transport_round_trip(
     account_id: str,
     request_body: bytes,
     operation: Callable[[], bytes],
-    monotonic_ns: Callable[[], int] | None = None,
-) -> tuple[bytes, TransportRoundTripWitness]:
-    """Measure one synchronous local transport call exactly once.
-
-    The default clock is product-owned ``time.perf_counter_ns`` and yields a
-    product-default-clock witness. Passing ``monotonic_ns`` is intentionally
-    marked as an injected test clock. Neither case proves that the caller is the
-    canonical provider transport; a later integration authority must bind that
-    separately. On timeout/transport failure, :class:`MeasuredTransportFailure`
-    carries the measured witness while the original exception remains chained.
-    """
-
+    monotonic_ns: Callable[[], int] | None,
+    product_clock: Callable[[], int],
+) -> TransportRoundTripMeasurement:
     for name, value in (
         ("attempt_id", attempt_id),
         ("action_id", action_id),
@@ -271,67 +393,111 @@ def measure_transport_round_trip(
 
     request_sha256 = sha256(request_body).hexdigest()
     production_clock = monotonic_ns is None
-    clock = time.perf_counter_ns if production_clock else monotonic_ns
+    clock = product_clock if production_clock else monotonic_ns
     assert clock is not None
 
     start_ns = _sample(clock, "transport_start_ns")
+
     try:
         response = operation()
     except Exception as exc:
-        try:
-            end_ns = _sample(clock, "transport_end_ns")
-            elapsed_ns = _elapsed(start_ns, end_ns)
-            outcome = (
-                TransportRoundTripOutcome.TIMEOUT
-                if isinstance(exc, TimeoutError)
-                else TransportRoundTripOutcome.TRANSPORT_ERROR
-            )
-            witness = _witness(
-                attempt_id=attempt_id,
-                action_id=action_id,
-                provider_id=provider_id,
-                account_id=account_id,
-                request_sha256=request_sha256,
-                outcome=outcome,
-                elapsed_ns=elapsed_ns,
-                response_sha256=None,
-                production_clock=production_clock,
-            )
-        except TransportTimingEvidenceError as timing_exc:
-            raise timing_exc from exc
-        raise MeasuredTransportFailure(
-            "transport failed after local round-trip duration was measured",
-            witness,
-        ) from exc
+        outcome = (
+            TransportRoundTripOutcome.TIMEOUT
+            if isinstance(exc, TimeoutError)
+            else TransportRoundTripOutcome.TRANSPORT_ERROR
+        )
+        witness, timing_reason = _finish_timing(
+            clock=clock,
+            start_ns=start_ns,
+            attempt_id=attempt_id,
+            action_id=action_id,
+            provider_id=provider_id,
+            account_id=account_id,
+            request_sha256=request_sha256,
+            outcome=outcome,
+            response_sha256=None,
+            production_clock=production_clock,
+        )
+        return TransportRoundTripMeasurement(
+            response=None,
+            transport_error=exc,
+            witness=witness,
+            timing_unavailable_reason=timing_reason,
+        )
 
-    end_ns = _sample(clock, "transport_end_ns")
-    elapsed_ns = _elapsed(start_ns, end_ns)
     if type(response) is not bytes:
-        witness = _witness(
+        invalid = _InvalidTransportResponse(
+            "transport returned a non-bytes response"
+        )
+        witness, timing_reason = _finish_timing(
+            clock=clock,
+            start_ns=start_ns,
             attempt_id=attempt_id,
             action_id=action_id,
             provider_id=provider_id,
             account_id=account_id,
             request_sha256=request_sha256,
             outcome=TransportRoundTripOutcome.INVALID_RESPONSE,
-            elapsed_ns=elapsed_ns,
             response_sha256=None,
             production_clock=production_clock,
         )
-        raise MeasuredTransportFailure(
-            "transport returned a non-bytes response",
-            witness,
+        return TransportRoundTripMeasurement(
+            response=None,
+            transport_error=invalid,
+            witness=witness,
+            timing_unavailable_reason=timing_reason,
         )
 
-    witness = _witness(
+    witness, timing_reason = _finish_timing(
+        clock=clock,
+        start_ns=start_ns,
         attempt_id=attempt_id,
         action_id=action_id,
         provider_id=provider_id,
         account_id=account_id,
         request_sha256=request_sha256,
         outcome=TransportRoundTripOutcome.RETURNED,
-        elapsed_ns=elapsed_ns,
         response_sha256=sha256(response).hexdigest(),
         production_clock=production_clock,
     )
-    return response, witness
+    return TransportRoundTripMeasurement(
+        response=response,
+        transport_error=None,
+        witness=witness,
+        timing_unavailable_reason=timing_reason,
+    )
+
+
+def _bind_product_clock(
+    product_clock: Callable[[], int],
+) -> Callable[..., TransportRoundTripMeasurement]:
+    """Capture the production clock so later module time rebinding cannot forge it."""
+
+    def measured(
+        *,
+        attempt_id: str,
+        action_id: str,
+        provider_id: str,
+        account_id: str,
+        request_body: bytes,
+        operation: Callable[[], bytes],
+        monotonic_ns: Callable[[], int] | None = None,
+    ) -> TransportRoundTripMeasurement:
+        return _measure_transport_round_trip_impl(
+            attempt_id=attempt_id,
+            action_id=action_id,
+            provider_id=provider_id,
+            account_id=account_id,
+            request_body=request_body,
+            operation=operation,
+            monotonic_ns=monotonic_ns,
+            product_clock=product_clock,
+        )
+
+    measured.__name__ = "measure_transport_round_trip"
+    measured.__qualname__ = "measure_transport_round_trip"
+    return measured
+
+
+measure_transport_round_trip = _bind_product_clock(time.perf_counter_ns)
+del _bind_product_clock

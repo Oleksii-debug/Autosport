@@ -157,6 +157,45 @@ def test_location_and_reason_are_not_durable(monkeypatch):
         assert value not in durable
 
 
+def test_durable_decision_hash_does_not_fingerprint_location(monkeypatch):
+    responses = iter(
+        (
+            response(
+                payload(
+                    True,
+                    country="US",
+                    state="NJ",
+                    city="A",
+                    reason="first",
+                )
+            ),
+            response(
+                payload(
+                    True,
+                    country="CA",
+                    state="ON",
+                    city="B",
+                    reason="second",
+                )
+            ),
+        )
+    )
+    monkeypatch.setattr(
+        UrllibProphetXGeolocationTransport,
+        "post",
+        lambda self, endpoint, *, body, timeout_seconds: next(responses),
+    )
+    first = ProphetXGeolocationClient(clock=lambda: NOW).check(
+        action(),
+        "203.0.113.9",
+    )
+    second = ProphetXGeolocationClient(clock=lambda: NOW).check(
+        action(),
+        "203.0.113.9",
+    )
+    assert first.source_payload_sha256 == second.source_payload_sha256
+
+
 @pytest.mark.parametrize(
     "bad",
     [

@@ -7,6 +7,7 @@ import json
 
 import pytest
 
+import autosport.betfair_live_capital_at_risk as live_risk
 from autosport.betfair_account_readonly import (
     BetfairReadOnlyClient,
     BetfairSessionCredentials,
@@ -31,6 +32,15 @@ from autosport.supervised_execution import (
     ProfileBinding,
     _bound_binding_sha256,
 )
+
+
+@pytest.fixture(autouse=True)
+def _stable_live_risk_clock(monkeypatch):
+    monkeypatch.setattr(
+        live_risk,
+        "_utc_now",
+        lambda: datetime(2026, 9, 22, 0, 0, 20, tzinfo=timezone.utc),
+    )
 
 
 class _Transport:
@@ -242,6 +252,7 @@ def test_partial_ack_uses_matched_plus_remaining_not_matched_only(tmp_path):
     assert evidence.capital_at_risk != Decimal("2")
     assert evidence.execution_authority is False
     assert evidence.readback_observed_at == "2026-09-22T00:00:00+00:00"
+    assert evidence.provider_row_observed_at == "2026-09-22T00:00:00+00:00"
     assert len(evidence.readback_request_scope_sha256) == 64
     evidence.assert_authoritative()
 
@@ -254,6 +265,83 @@ def test_current_order_releases_only_provider_proven_dead_remainder(tmp_path):
         _capture(ref, current=[_current(ref, matched=2, remaining=1)]),
     )
     assert evidence.capital_at_risk == Decimal("3")
+
+
+def test_stale_current_order_cannot_issue_exact_live_risk(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        live_risk,
+        "_utc_now",
+        lambda: datetime(2026, 9, 22, 0, 0, 31, tzinfo=timezone.utc),
+    )
+    ledger, bound, ref = _context(tmp_path, "PARTIAL")
+    evidence = _resolve(
+        ledger,
+        bound,
+        _capture(ref, current=[_current(ref, matched=2, remaining=3)]),
+    )
+    assert evidence.truth is BetfairLiveCapitalAtRiskTruth.UNKNOWN
+    assert evidence.reason is BetfairLiveCapitalAtRiskReason.CURRENT_ORDER_NOT_CURRENT
+    assert evidence.capital_at_risk is None
+    assert evidence.provider_row_observed_at == "2026-09-22T00:00:00+00:00"
+
+
+def test_future_current_order_cannot_issue_exact_live_risk(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        live_risk,
+        "_utc_now",
+        lambda: datetime(2026, 9, 21, 23, 59, 58, tzinfo=timezone.utc),
+    )
+    ledger, bound, ref = _context(tmp_path, "PARTIAL")
+    evidence = _resolve(
+        ledger,
+        bound,
+        _capture(ref, current=[_current(ref, matched=2, remaining=3)]),
+    )
+    assert evidence.truth is BetfairLiveCapitalAtRiskTruth.UNKNOWN
+    assert evidence.reason is BetfairLiveCapitalAtRiskReason.CURRENT_ORDER_NOT_CURRENT
+    assert evidence.capital_at_risk is None
+
+
+@pytest.mark.parametrize(
+    "checked_at",
+    [
+        datetime(2026, 9, 22, 0, 0, 30, tzinfo=timezone.utc),
+        datetime(2026, 9, 21, 23, 59, 59, tzinfo=timezone.utc),
+    ],
+)
+def test_current_order_freshness_boundaries_remain_exact(
+    tmp_path, monkeypatch, checked_at
+):
+    monkeypatch.setattr(live_risk, "_utc_now", lambda: checked_at)
+    ledger, bound, ref = _context(tmp_path, "PARTIAL")
+    evidence = _resolve(
+        ledger,
+        bound,
+        _capture(ref, current=[_current(ref, matched=2, remaining=3)]),
+    )
+    assert evidence.truth is BetfairLiveCapitalAtRiskTruth.EXACT
+    assert evidence.reason is BetfairLiveCapitalAtRiskReason.CURRENT_ORDER
+    evidence.assert_authoritative()
+
+
+def test_exact_current_order_authority_expires_at_use(tmp_path, monkeypatch):
+    ledger, bound, ref = _context(tmp_path, "PARTIAL")
+    evidence = _resolve(
+        ledger,
+        bound,
+        _capture(ref, current=[_current(ref, matched=2, remaining=3)]),
+    )
+    evidence.assert_authoritative()
+    monkeypatch.setattr(
+        live_risk,
+        "_utc_now",
+        lambda: datetime(2026, 9, 22, 0, 0, 31, tzinfo=timezone.utc),
+    )
+    with pytest.raises(
+        BetfairLiveCapitalAtRiskError,
+        match="current-order evidence is no longer current",
+    ):
+        evidence.assert_authoritative()
 
 
 @pytest.mark.parametrize("state", ["SUBMITTED", "UNKNOWN"])

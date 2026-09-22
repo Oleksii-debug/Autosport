@@ -162,11 +162,15 @@ def test_spawned_processes_share_one_sqlite_sequence(tmp_path: Path) -> None:
     for process in processes:
         process.start()
 
-    results = [output.get(timeout=45) for _ in processes]
     for process in processes:
         process.join(timeout=45)
+        if process.is_alive():
+            process.terminate()
+            process.join(timeout=10)
+            pytest.fail("spawned sequence allocator process did not terminate")
         assert process.exitcode == 0
 
+    results = [output.get(timeout=5) for _ in processes]
     assert all(result[0] == "ok" for result in results), results
     values = [value for result in results for value in result[1]]
     assert sorted(values) == list(range(1, 25))
@@ -208,7 +212,7 @@ def test_noncanonical_authority_identity_is_rejected(
         )
 
 
-@pytest.mark.parametrize("value", [True, False, None, 1, "true"])
+@pytest.mark.parametrize("value", [None, 0, 1, "true"])
 def test_create_mode_must_be_explicit_bool(tmp_path: Path, value: object) -> None:
     with pytest.raises(TypeError, match="create"):
         SQLiteProviderSequenceAuthority(

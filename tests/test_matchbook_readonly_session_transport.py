@@ -18,6 +18,7 @@ from autosport.matchbook_readonly_session_transport import (
 )
 from autosport.matchbook_session_lifecycle import (
     MatchbookSessionLifecycle,
+    SessionLifecycleError,
     SessionState,
 )
 from autosport.providers import ProviderUnavailableError
@@ -531,7 +532,7 @@ def test_unconfigured_logout_is_fail_closed_without_changing_session() -> None:
     )
     assert transport.read(path="/edge/rest/events").payload == "token-1"
 
-    with pytest.raises(MatchbookSessionTransportError, match="not configured"):
+    with pytest.raises(ValueError, match="not configured"):
         transport.logout()
 
     assert login is not None and login.calls == 1
@@ -563,7 +564,7 @@ def test_response_commit_clock_failure_drops_token_authority_and_rotates_on_retr
         generation_factory=GenerationFactory(),
     )
 
-    with pytest.raises(MatchbookSessionTransportError, match="clock failed"):
+    with pytest.raises(SessionLifecycleError, match="clock failed"):
         transport.read(path="/edge/rest/events")
 
     assert transport.generation_id is None
@@ -605,10 +606,7 @@ def test_confirmed_logout_clock_failure_still_clears_local_token_authority() -> 
     )
     assert transport.read(path="/edge/rest/events").payload == "token-1"
 
-    with pytest.raises(
-        MatchbookSessionTransportError,
-        match="could not be committed",
-    ):
+    with pytest.raises(SessionLifecycleError, match="clock failed"):
         transport.logout()
 
     assert logged_out == ["token-1"]
@@ -663,9 +661,10 @@ def test_logout_while_read_is_inflight_fences_late_predecessor_response() -> Non
     assert isinstance(errors[0], MatchbookStaleGenerationResponse)
 
 
-def test_transport_failures_reuse_canonical_provider_unavailability_boundary() -> None:
+def test_failure_taxonomy_reuses_canonical_provider_and_lifecycle_boundaries() -> None:
     assert issubclass(MatchbookSessionTransportError, ProviderUnavailableError)
     assert issubclass(MatchbookAuthenticationUnavailable, ProviderUnavailableError)
     assert issubclass(MatchbookReadUnavailable, ProviderUnavailableError)
     assert issubclass(MatchbookReadForbidden, ProviderUnavailableError)
-    assert issubclass(MatchbookStaleGenerationResponse, ProviderUnavailableError)
+    assert issubclass(MatchbookStaleGenerationResponse, SessionLifecycleError)
+    assert not issubclass(MatchbookStaleGenerationResponse, ProviderUnavailableError)

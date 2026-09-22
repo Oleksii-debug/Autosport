@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sys
+from pathlib import Path
 
 
 _MACHINE_MODE_ARITY = {
@@ -31,6 +32,49 @@ def _show_workspace_configuration_error(detail: str) -> None:
     ctypes.windll.user32.MessageBoxW(None, message, title, 0x00000010)
 
 
+def _probe_workspace_writable(workspace: Path) -> None:
+    """Fail before GUI construction when durable workspace storage is not writable."""
+
+    import tempfile
+
+    workspace.mkdir(parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile(
+        mode="wb",
+        dir=workspace,
+        prefix=".autosport-write-probe-",
+        suffix=".tmp",
+        delete=True,
+    ) as probe:
+        probe.write(b"autosport workspace write probe\n")
+        probe.flush()
+
+
+def _workspace_access_error_message(workspace: Path, exc: OSError) -> str:
+    detail = " ".join(str(exc).splitlines()).strip() or "невідома помилка файлової системи"
+    return (
+        "Автоспорт не може підготувати workspace для запису.\n\n"
+        f"Workspace: {workspace}\n"
+        f"Помилка: {type(exc).__name__}: {detail}\n\n"
+        "Вкажіть AUTOSPORT_WORKSPACE як абсолютний шлях до папки вашого користувача, "
+        "доступної для запису, і перезапустіть Автоспорт. "
+        "Права адміністратора не потрібні. Economic і live state не змінено."
+    )
+
+
+def _show_workspace_access_error(workspace: Path, exc: OSError) -> None:
+    """Show an actionable native error when first-run durable storage cannot open."""
+
+    import ctypes
+
+    title = "Автоспорт — workspace недоступний для запису"
+    ctypes.windll.user32.MessageBoxW(
+        None,
+        _workspace_access_error_message(workspace, exc),
+        title,
+        0x00000010,
+    )
+
+
 def _run_interactive_gui() -> int:
     # Validate durable workspace identity before importing/constructing the GUI.
     # `default_workspace()` remains the canonical path resolver. This packaged
@@ -47,6 +91,12 @@ def _run_interactive_gui() -> int:
             )
     except ValueError as exc:
         _show_workspace_configuration_error(str(exc))
+        return 2
+
+    try:
+        _probe_workspace_writable(workspace)
+    except OSError as exc:
+        _show_workspace_access_error(workspace, exc)
         return 2
 
     from autosport.windows_gui import main as gui_main

@@ -29,9 +29,9 @@ class MatchbookOfferEditFailureReason(str, Enum):
 
 
 class MatchbookOfferEditTruth(str, Enum):
-    PENDING_DELAY = "pending_delay"
-    APPLIED_OBSERVED = "applied_observed"
-    FAILED_OBSERVED = "failed_observed"
+    PENDING_DELAY_ASSERTION = "pending_delay_assertion"
+    APPLIED_ASSERTION_UNVERIFIED = "applied_assertion_unverified"
+    FAILED_ASSERTION_UNVERIFIED = "failed_assertion_unverified"
 
 
 class MatchbookOfferEditRetryDisposition(str, Enum):
@@ -197,10 +197,10 @@ class MatchbookOfferEditReadback:
     @property
     def truth(self) -> MatchbookOfferEditTruth:
         if self.status is MatchbookOfferEditStatus.DELAYED:
-            return MatchbookOfferEditTruth.PENDING_DELAY
+            return MatchbookOfferEditTruth.PENDING_DELAY_ASSERTION
         if self.status is MatchbookOfferEditStatus.APPLIED:
-            return MatchbookOfferEditTruth.APPLIED_OBSERVED
-        return MatchbookOfferEditTruth.FAILED_OBSERVED
+            return MatchbookOfferEditTruth.APPLIED_ASSERTION_UNVERIFIED
+        return MatchbookOfferEditTruth.FAILED_ASSERTION_UNVERIFIED
 
     @property
     def provider_write_authority(self) -> bool:
@@ -213,6 +213,18 @@ class MatchbookOfferEditReadback:
     @property
     def retry_authority(self) -> bool:
         return False
+
+    @property
+    def provider_origin_verified(self) -> bool:
+        """Detached readback shape/hash does not prove authenticated provider origin."""
+
+        return False
+
+    @property
+    def scoped_identity(self) -> tuple[str, int, int]:
+        """Exact provider resource identity documented by the offer-edit path."""
+
+        return (self.account_context_id, self.offer_id, self.offer_edit_id)
 
     def fingerprint(self) -> str:
         payload = {
@@ -269,18 +281,19 @@ def retry_disposition(
     if readback is not None and type(readback) is not MatchbookOfferEditReadback:
         raise MatchbookOfferEditReconciliationError("invalid edit readback")
 
-    if readback is None:
-        return MatchbookOfferEditRetryDisposition.RECONCILE_BEFORE_ANY_NEW_EDIT
-    if readback.status is MatchbookOfferEditStatus.DELAYED:
-        return MatchbookOfferEditRetryDisposition.WAIT_FOR_DELAYED_EDIT
-    return MatchbookOfferEditRetryDisposition.DO_NOT_REPEAT_SAME_EDIT
+    # MatchbookOfferEditReadback is deliberately assertion-only.  Its fields,
+    # including raw_response_sha256, are caller-constructible and therefore
+    # cannot alter retry/operator routing without a separate provider-origin
+    # authority.  This kernel has no such trust root, so every detached
+    # readback remains reconcile-before-new-edit.
+    return MatchbookOfferEditRetryDisposition.RECONCILE_BEFORE_ANY_NEW_EDIT
 
 
 def reconcile_offer_edit_replay(
     observations: Iterable[MatchbookOfferEditReadback],
-) -> dict[int, MatchbookOfferEditReadback]:
-    """Replay provider edit readbacks without inventing correction or retry authority."""
-    latest: dict[int, MatchbookOfferEditReadback] = {}
+) -> dict[tuple[str, int, int], MatchbookOfferEditReadback]:
+    """Replay assertion history within exact account + offer + edit resource identity."""
+    latest: dict[tuple[str, int, int], MatchbookOfferEditReadback] = {}
     terminal = {MatchbookOfferEditStatus.APPLIED, MatchbookOfferEditStatus.FAILED}
 
     for item in observations:
@@ -288,19 +301,11 @@ def reconcile_offer_edit_replay(
             raise MatchbookOfferEditReconciliationError(
                 "invalid edit replay observation"
             )
-        prior = latest.get(item.offer_edit_id)
+        key = item.scoped_identity
+        prior = latest.get(key)
         if prior is None:
-            latest[item.offer_edit_id] = item
+            latest[key] = item
             continue
-
-        if item.account_context_id != prior.account_context_id:
-            raise MatchbookOfferEditReconciliationError(
-                "offer edit replay crossed account context"
-            )
-        if item.offer_id != prior.offer_id:
-            raise MatchbookOfferEditReconciliationError(
-                "offer edit replay crossed offer identity"
-            )
 
         old_time = _aware_utc(prior.captured_at, "captured_at")
         new_time = _aware_utc(item.captured_at, "captured_at")
@@ -348,6 +353,6 @@ def reconcile_offer_edit_replay(
                     "terminal offer edit delay evidence changed"
                 )
 
-        latest[item.offer_edit_id] = item
+        latest[key] = item
 
     return latest

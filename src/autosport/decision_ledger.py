@@ -13,6 +13,7 @@ from typing import Any
 
 from .causal_integrity import contains_forbidden_future_key
 from .domain import utc_now_iso
+from .integrity import durable_path_lock
 from .economic_goal import EconomicGoalContract
 from .economic_goal_provenance import (
     EconomicGoalProvenance,
@@ -412,6 +413,16 @@ class JsonlDecisionLedger:
             raise DecisionLedgerIntegrityError(
                 f"Decision Ledger payload contains future-result fields{location}"
             )
+        material_action_id = payload.get(MATERIAL_ACTION_ID_PAYLOAD_KEY)
+        if material_action_id is not None:
+            if not isinstance(material_action_id, str) or not material_action_id.strip():
+                raise DecisionLedgerIntegrityError(
+                    f"Decision Ledger material_action_id is invalid{location}"
+                )
+            if record.get("decision_kind") != ECONOMIC_DECISION_KIND:
+                raise DecisionLedgerIntegrityError(
+                    f"Decision Ledger material_action_id is attached to a non-economic decision{location}"
+                )
         if (
             "decision_kind" in record
             and ECONOMIC_GOAL_PROVENANCE_PAYLOAD_KEY not in payload
@@ -448,10 +459,25 @@ class JsonlDecisionLedger:
             sort_keys=True,
             allow_nan=False,
         )
-        with self.path.open("a", encoding="utf-8", newline="\n") as handle:
-            handle.write(envelope + "\n")
-            handle.flush()
-            os.fsync(handle.fileno())
+        candidate_action_id = payload["payload"].get(MATERIAL_ACTION_ID_PAYLOAD_KEY)
+        with durable_path_lock(self.path):
+            try:
+                existing = self.path.read_bytes()
+            except FileNotFoundError:
+                existing = b""
+            except OSError as exc:
+                raise DecisionLedgerIntegrityError(
+                    "Decision Ledger file is unreadable before append"
+                ) from exc
+            self._verify_bytes(
+                existing,
+                reserved_decision_id=payload["decision_id"],
+                reserved_material_action_id=candidate_action_id,
+            )
+            with self.path.open("a", encoding="utf-8", newline="\n") as handle:
+                handle.write(envelope + "\n")
+                handle.flush()
+                os.fsync(handle.fileno())
         return digest
 
     def append(self, record: DecisionRecord) -> str:
@@ -493,7 +519,13 @@ class JsonlDecisionLedger:
         )
 
     @classmethod
-    def _verify_bytes(cls, raw: bytes) -> int:
+    def _verify_bytes(
+        cls,
+        raw: bytes,
+        *,
+        reserved_decision_id: str | None = None,
+        reserved_material_action_id: str | None = None,
+    ) -> int:
         if not raw:
             return 0
         if not raw.endswith(b"\n"):
@@ -515,6 +547,7 @@ class JsonlDecisionLedger:
             )
 
         seen_decision_ids: set[str] = set()
+        seen_material_action_ids: set[str] = set()
         line_count = 0
         for line_number, line in enumerate(lines[:-1], start=1):
             if not line:
@@ -569,8 +602,26 @@ class JsonlDecisionLedger:
                     f"Decision Ledger contains duplicate decision_id at line {line_number}"
                 )
             seen_decision_ids.add(decision_id)
+            material_action_id = record["payload"].get(MATERIAL_ACTION_ID_PAYLOAD_KEY)
+            if material_action_id is not None:
+                if material_action_id in seen_material_action_ids:
+                    raise DecisionLedgerIntegrityError(
+                        f"Decision Ledger contains duplicate material_action_id at line {line_number}"
+                    )
+                seen_material_action_ids.add(material_action_id)
             line_count += 1
 
+        if reserved_decision_id is not None and reserved_decision_id in seen_decision_ids:
+            raise DecisionLedgerIntegrityError(
+                "Decision Ledger already contains decision_id"
+            )
+        if (
+            reserved_material_action_id is not None
+            and reserved_material_action_id in seen_material_action_ids
+        ):
+            raise DecisionLedgerIntegrityError(
+                "Decision Ledger already contains material_action_id"
+            )
         return line_count
 
     def verified_snapshot(self) -> VerifiedDecisionLedgerSnapshot:

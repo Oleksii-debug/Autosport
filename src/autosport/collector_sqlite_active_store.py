@@ -336,6 +336,100 @@ class CollectorDeltaStore(_SQLiteCollectorDeltaStore):
         finally:
             connection.close()
 
+    def _append_batch_with_runtime_stream_epoch(
+        self,
+        deltas: tuple[CollectorDelta, ...],
+        *,
+        activated_at: str,
+    ) -> tuple[bool, ...]:
+        """Atomically admit one bounded delta batch and its active-epoch authority."""
+
+        if not isinstance(deltas, tuple):
+            raise TypeError("deltas must be a tuple")
+        _instant(activated_at, "activated_at")
+        if not deltas:
+            return ()
+
+        source_id: str | None = None
+        stream_epoch: str | None = None
+        for delta in deltas:
+            if not isinstance(delta, CollectorDelta):
+                raise TypeError("deltas must contain CollectorDelta values")
+            delta.validate()
+            if source_id is None:
+                source_id = delta.source_id
+                stream_epoch = delta.stream_epoch
+            elif delta.source_id != source_id or delta.stream_epoch != stream_epoch:
+                raise ValueError(
+                    "runtime collector batch must use one source_id and stream_epoch"
+                )
+
+        assert source_id is not None
+        assert stream_epoch is not None
+        connection = self._connect()
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            changed_results: list[bool] = []
+            any_changed = False
+            for delta in deltas:
+                changed = self._append_connection(connection, delta)
+                changed_results.append(changed)
+                any_changed = any_changed or changed
+            if any_changed:
+                self._write({"schema_version": self.schema_version})
+
+            activation_evidence = any_changed
+            if not activation_evidence:
+                latest = connection.execute(
+                    "SELECT delta_id, stream_epoch FROM collector_deltas "
+                    "WHERE source_id=? ORDER BY commit_seq DESC LIMIT 1",
+                    (source_id,),
+                ).fetchone()
+                batch_delta_ids = {delta.delta_id for delta in deltas}
+                activation_evidence = (
+                    latest is not None
+                    and latest["delta_id"] in batch_delta_ids
+                    and latest["stream_epoch"] == stream_epoch
+                )
+
+            if activation_evidence:
+                current = connection.execute(
+                    "SELECT generation, stream_epoch FROM collector_epoch_activations_v1 "
+                    "WHERE source_id=? ORDER BY generation DESC LIMIT 1",
+                    (source_id,),
+                ).fetchone()
+                if current is None or current["stream_epoch"] != stream_epoch:
+                    generation = 1 if current is None else int(current["generation"]) + 1
+                    connection.execute(
+                        "INSERT INTO collector_epoch_activations_v1("
+                        "source_id, generation, stream_epoch, activated_at"
+                        ") VALUES(?,?,?,?)",
+                        (
+                            source_id,
+                            generation,
+                            stream_epoch,
+                            activated_at,
+                        ),
+                    )
+            connection.commit()
+            return tuple(changed_results)
+        except sqlite3.IntegrityError as exc:
+            if connection.in_transaction:
+                connection.rollback()
+            raise DeltaConflictError(
+                "collector delta violates durable identity constraints"
+            ) from exc
+        except sqlite3.DatabaseError as exc:
+            if connection.in_transaction:
+                connection.rollback()
+            raise ValueError("invalid causal collector store") from exc
+        except Exception:
+            if connection.in_transaction:
+                connection.rollback()
+            raise
+        finally:
+            connection.close()
+
     @classmethod
     def _delta_by_id(
         cls,

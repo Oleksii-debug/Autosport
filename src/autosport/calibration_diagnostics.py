@@ -31,6 +31,167 @@ class CalibrationDependenceAssumption(str, Enum):
     INDEPENDENT_BERNOULLI = "independent-bernoulli-v1"
 
 
+@dataclass(frozen=True, slots=True)
+class CalibrationPopulationEntry:
+    """One exact forecast in the declared calibration eligibility population."""
+
+    forecast_id: str
+    forecast_sha256: str
+    selected: bool
+
+    def __post_init__(self) -> None:
+        if type(self.forecast_id) is not str or not self.forecast_id.strip():
+            raise ValueError("population forecast_id must be a non-empty string")
+        if (
+            type(self.forecast_sha256) is not str
+            or len(self.forecast_sha256) != 64
+            or any(character not in "0123456789abcdef" for character in self.forecast_sha256)
+        ):
+            raise ValueError("population forecast_sha256 must be a canonical SHA-256 digest")
+        if type(self.selected) is not bool:
+            raise ValueError("population selected flag must be a bool")
+
+    def to_payload(self) -> dict[str, object]:
+        return {
+            "forecast_id": self.forecast_id,
+            "forecast_sha256": self.forecast_sha256,
+            "selected": self.selected,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class CalibrationPopulationManifest:
+    """Exact declared denominator/selection identity for calibration diagnostics.
+
+    This binds what population was declared and which forecasts were selected.
+    It does not by itself prove durable pre-outcome issuance; callers that need
+    promotion authority must compose it with the canonical scientific
+    precommit/holdout authority. Calibration diagnostics remain non-promotional.
+    """
+
+    window_id: str
+    source_snapshot_sha256: str
+    selection_policy_sha256: str
+    entries: tuple[CalibrationPopulationEntry, ...]
+
+    def __post_init__(self) -> None:
+        if type(self.window_id) is not str or not self.window_id.strip():
+            raise ValueError("population window_id required")
+        for field_name, digest in (
+            ("source_snapshot_sha256", self.source_snapshot_sha256),
+            ("selection_policy_sha256", self.selection_policy_sha256),
+        ):
+            if (
+                type(digest) is not str
+                or len(digest) != 64
+                or any(character not in "0123456789abcdef" for character in digest)
+            ):
+                raise ValueError(f"{field_name} must be a canonical SHA-256 digest")
+        if type(self.entries) is not tuple:
+            raise ValueError("population entries must be a tuple")
+        if any(type(entry) is not CalibrationPopulationEntry for entry in self.entries):
+            raise ValueError("population entries must be exact CalibrationPopulationEntry values")
+        ids = tuple(entry.forecast_id for entry in self.entries)
+        if len(set(ids)) != len(ids):
+            raise ValueError("population manifest contains duplicate forecast_id values")
+
+    @property
+    def manifest_sha256(self) -> str:
+        return _digest(self.to_payload(include_identity=False))
+
+    def to_payload(self, *, include_identity: bool = True) -> dict[str, object]:
+        payload: dict[str, object] = {
+            "schema_version": 1,
+            "kind": "autosport-calibration-population-manifest",
+            "window_id": self.window_id,
+            "source_snapshot_sha256": self.source_snapshot_sha256,
+            "selection_policy_sha256": self.selection_policy_sha256,
+            "entries": [
+                entry.to_payload()
+                for entry in sorted(self.entries, key=lambda value: value.forecast_id)
+            ],
+        }
+        if include_identity:
+            payload["manifest_sha256"] = self.manifest_sha256
+        return payload
+
+
+@dataclass(frozen=True, slots=True)
+class CalibrationCoverage:
+    """Denominator/selection/resolution accounting independent of score availability."""
+
+    population_manifest_sha256: str
+    eligible_count: int
+    selected_count: int
+    forecasted_count: int
+    resolved_count: int
+    pending_outcome_count: int
+    missing_forecast_count: int
+    missing_selected_count: int
+    selection_coverage: float
+    forecast_coverage: float
+    resolution_coverage: float
+
+    def __post_init__(self) -> None:
+        if (
+            type(self.population_manifest_sha256) is not str
+            or len(self.population_manifest_sha256) != 64
+            or any(
+                character not in "0123456789abcdef"
+                for character in self.population_manifest_sha256
+            )
+        ):
+            raise ValueError("population_manifest_sha256 must be a canonical SHA-256 digest")
+        integer_fields = (
+            self.eligible_count,
+            self.selected_count,
+            self.forecasted_count,
+            self.resolved_count,
+            self.pending_outcome_count,
+            self.missing_forecast_count,
+            self.missing_selected_count,
+        )
+        if any(type(value) is not int or value < 0 for value in integer_fields):
+            raise ValueError("coverage counts must be non-negative integers")
+        if self.selected_count > self.eligible_count:
+            raise ValueError("selected_count cannot exceed eligible_count")
+        if self.forecasted_count + self.missing_forecast_count != self.eligible_count:
+            raise ValueError("forecasted + missing must equal eligible population")
+        if self.missing_selected_count > self.missing_forecast_count:
+            raise ValueError("missing_selected_count cannot exceed missing_forecast_count")
+        if (
+            self.resolved_count
+            + self.pending_outcome_count
+            + self.missing_selected_count
+            != self.selected_count
+        ):
+            raise ValueError("selected population must resolve to resolved/pending/missing states")
+        ratios = (
+            self.selection_coverage,
+            self.forecast_coverage,
+            self.resolution_coverage,
+        )
+        if any(type(value) is not float or not math.isfinite(value) for value in ratios):
+            raise ValueError("coverage ratios must be finite floats")
+        if any(not 0.0 <= value <= 1.0 for value in ratios):
+            raise ValueError("coverage ratios must be inside 0..1")
+
+    def to_payload(self) -> dict[str, object]:
+        return {
+            "population_manifest_sha256": self.population_manifest_sha256,
+            "eligible_count": self.eligible_count,
+            "selected_count": self.selected_count,
+            "forecasted_count": self.forecasted_count,
+            "resolved_count": self.resolved_count,
+            "pending_outcome_count": self.pending_outcome_count,
+            "missing_forecast_count": self.missing_forecast_count,
+            "missing_selected_count": self.missing_selected_count,
+            "selection_coverage": _canonical_float(self.selection_coverage),
+            "forecast_coverage": _canonical_float(self.forecast_coverage),
+            "resolution_coverage": _canonical_float(self.resolution_coverage),
+        }
+
+
 def _canonical_float(value: float) -> str:
     if not math.isfinite(value):
         raise ValueError("diagnostic values must be finite")
@@ -149,6 +310,8 @@ class CalibrationDiagnostics:
     dependence_assumption: CalibrationDependenceAssumption
     raw_sample_count: int
     effective_sample_count: int
+    population_manifest_sha256: str
+    coverage: CalibrationCoverage
     brier_score: MetricUncertainty
     log_loss: MetricUncertainty
     expected_calibration_error: MetricUncertainty
@@ -188,6 +351,7 @@ class CalibrationDiagnostics:
         for field_name, digest in (
             ("cohort_sha256", self.cohort_sha256),
             ("config_sha256", self.config_sha256),
+            ("population_manifest_sha256", self.population_manifest_sha256),
         ):
             if (
                 type(digest) is not str
@@ -195,6 +359,19 @@ class CalibrationDiagnostics:
                 or any(character not in "0123456789abcdef" for character in digest)
             ):
                 raise ValueError(f"{field_name} must be a canonical SHA-256 digest")
+        if type(self.coverage) is not CalibrationCoverage:
+            raise ValueError("coverage must be exact CalibrationCoverage")
+        if self.coverage.population_manifest_sha256 != self.population_manifest_sha256:
+            raise ValueError("coverage population manifest identity mismatch")
+        if (
+            self.coverage.resolved_count != self.count
+            or self.coverage.selected_count != self.count
+            or self.coverage.pending_outcome_count != 0
+            or self.coverage.missing_forecast_count != 0
+        ):
+            raise ValueError(
+                "scored diagnostics require a complete selected population with no missing forecasts"
+            )
         if type(self.calibration) is not tuple or not self.calibration:
             raise ValueError("at least one non-empty calibration bin required")
         if sum(item.count for item in self.calibration) != self.count:
@@ -223,6 +400,8 @@ class CalibrationDiagnostics:
             "dependence_screen_method": _DEPENDENCE_SCREEN_METHOD,
             "raw_sample_count": self.raw_sample_count,
             "effective_sample_count": self.effective_sample_count,
+            "population_manifest_sha256": self.population_manifest_sha256,
+            "coverage": self.coverage.to_payload(),
             "brier_score": self.brier_score.to_payload(),
             "log_loss": self.log_loss.to_payload(),
             "expected_calibration_error": self.expected_calibration_error.to_payload(),
@@ -292,6 +471,170 @@ def _distance_to_interval(point: float, lower: float, upper: float) -> float:
     return min(abs(point - lower), abs(point - upper))
 
 
+def _resolve_population_coverage(
+    record_values: tuple[ForecastRecord, ...],
+    outcome_values: tuple[ForecastOutcomeFact, ...],
+    window: TemporalEvaluationWindow,
+    population_manifest: CalibrationPopulationManifest,
+) -> tuple[
+    CalibrationCoverage,
+    tuple[ForecastRecord, ...],
+    dict[str, ForecastOutcomeFact],
+    tuple[str, ...],
+    tuple[str, ...],
+    tuple[str, ...],
+]:
+    if type(population_manifest) is not CalibrationPopulationManifest:
+        raise ValueError(
+            "population_manifest must be an exact CalibrationPopulationManifest"
+        )
+    if population_manifest.window_id != window.window_id:
+        raise ValueError("population manifest window_id mismatch")
+
+    in_window = tuple(
+        sorted(
+            (record for record in record_values if window.contains(record.generated_at)),
+            key=lambda record: record.forecast_id,
+        )
+    )
+    records_by_id: dict[str, ForecastRecord] = {}
+    for record in in_window:
+        if record.forecast_id in records_by_id:
+            raise ValueError(f"duplicate forecast_id: {record.forecast_id}")
+        records_by_id[record.forecast_id] = record
+
+    entries_by_id = {
+        entry.forecast_id: entry
+        for entry in population_manifest.entries
+    }
+    unexpected_records = tuple(
+        sorted(set(records_by_id).difference(entries_by_id))
+    )
+    if unexpected_records:
+        raise ValueError(
+            "forecast records outside declared population manifest: "
+            + ", ".join(unexpected_records)
+        )
+
+    missing_forecasts = tuple(
+        sorted(set(entries_by_id).difference(records_by_id))
+    )
+    for forecast_id in sorted(set(entries_by_id).intersection(records_by_id)):
+        if (
+            records_by_id[forecast_id].canonical_hash
+            != entries_by_id[forecast_id].forecast_sha256
+        ):
+            raise ValueError(
+                f"population manifest forecast hash mismatch: {forecast_id}"
+            )
+
+    outcome_by_id: dict[str, ForecastOutcomeFact] = {}
+    for fact in outcome_values:
+        if fact.forecast_id in outcome_by_id:
+            raise ValueError(f"duplicate outcome fact for forecast: {fact.forecast_id}")
+        if fact.forecast_id not in entries_by_id:
+            raise ValueError(
+                f"outcome fact outside declared population manifest: {fact.forecast_id}"
+            )
+        outcome_by_id[fact.forecast_id] = fact
+
+    selected_ids = tuple(
+        sorted(
+            entry.forecast_id
+            for entry in population_manifest.entries
+            if entry.selected
+        )
+    )
+    selected = tuple(
+        records_by_id[forecast_id]
+        for forecast_id in selected_ids
+        if forecast_id in records_by_id
+    )
+    missing_selected = tuple(
+        forecast_id for forecast_id in selected_ids if forecast_id not in records_by_id
+    )
+
+    evaluation_end = parse_iso_timestamp(window.evaluation_end_ts)
+    pending_outcomes: list[str] = []
+    late_outcomes: list[str] = []
+    resolved_count = 0
+    for record in selected:
+        fact = outcome_by_id.get(record.forecast_id)
+        if fact is None:
+            pending_outcomes.append(record.forecast_id)
+            continue
+        revealed_at = parse_iso_timestamp(fact.revealed_at)
+        if revealed_at > evaluation_end:
+            late_outcomes.append(record.forecast_id)
+            continue
+        if revealed_at <= parse_iso_timestamp(record.generated_at):
+            raise ValueError(
+                f"outcome reveal must be after forecast generation: {record.forecast_id}"
+            )
+        resolved_count += 1
+
+    eligible_count = len(population_manifest.entries)
+    selected_count = len(selected_ids)
+    forecasted_count = eligible_count - len(missing_forecasts)
+    pending_count = len(pending_outcomes) + len(late_outcomes)
+    selection_coverage = (
+        selected_count / eligible_count if eligible_count else 0.0
+    )
+    forecast_coverage = (
+        forecasted_count / eligible_count if eligible_count else 0.0
+    )
+    resolution_coverage = (
+        resolved_count / selected_count if selected_count else 0.0
+    )
+    coverage = CalibrationCoverage(
+        population_manifest_sha256=population_manifest.manifest_sha256,
+        eligible_count=eligible_count,
+        selected_count=selected_count,
+        forecasted_count=forecasted_count,
+        resolved_count=resolved_count,
+        pending_outcome_count=pending_count,
+        missing_forecast_count=len(missing_forecasts),
+        missing_selected_count=len(missing_selected),
+        selection_coverage=float(selection_coverage),
+        forecast_coverage=float(forecast_coverage),
+        resolution_coverage=float(resolution_coverage),
+    )
+    return (
+        coverage,
+        selected,
+        outcome_by_id,
+        missing_forecasts,
+        tuple(sorted(pending_outcomes)),
+        tuple(sorted(late_outcomes)),
+    )
+
+
+def evaluate_calibration_coverage(
+    records: Iterable[ForecastRecord],
+    outcomes: Iterable[ForecastOutcomeFact],
+    window: TemporalEvaluationWindow,
+    *,
+    population_manifest: CalibrationPopulationManifest,
+) -> CalibrationCoverage:
+    """Resolve denominator/selection/outcome coverage without fabricating scores."""
+
+    if type(window) is not TemporalEvaluationWindow:
+        raise ValueError("window must be an exact TemporalEvaluationWindow")
+    record_values = tuple(records)
+    outcome_values = tuple(outcomes)
+    if any(type(record) is not ForecastRecord for record in record_values):
+        raise ValueError("records must contain exact ForecastRecord values")
+    if any(type(fact) is not ForecastOutcomeFact for fact in outcome_values):
+        raise ValueError("outcomes must contain exact ForecastOutcomeFact values")
+    coverage, *_ = _resolve_population_coverage(
+        record_values,
+        outcome_values,
+        window,
+        population_manifest,
+    )
+    return coverage
+
+
 def evaluate_calibration_diagnostics(
     records: Iterable[ForecastRecord],
     outcomes: Iterable[ForecastOutcomeFact],
@@ -300,6 +643,7 @@ def evaluate_calibration_diagnostics(
     bins: int = 10,
     confidence_level: float = 0.95,
     dependence_assumption: CalibrationDependenceAssumption | None = None,
+    population_manifest: CalibrationPopulationManifest,
 ) -> CalibrationDiagnostics:
     """Build bounded calibration uncertainty evidence for one complete temporal cohort.
 
@@ -329,46 +673,33 @@ def evaluate_calibration_diagnostics(
     if any(type(fact) is not ForecastOutcomeFact for fact in outcome_values):
         raise ValueError("outcomes must contain exact ForecastOutcomeFact values")
 
-    selected = tuple(
-        sorted(
-            (record for record in record_values if window.contains(record.generated_at)),
-            key=lambda record: record.forecast_id,
+    (
+        coverage,
+        selected,
+        outcome_by_id,
+        missing_forecasts,
+        pending_outcomes,
+        late_outcomes,
+    ) = _resolve_population_coverage(
+        record_values,
+        outcome_values,
+        window,
+        population_manifest,
+    )
+    if missing_forecasts:
+        raise ValueError(
+            "population manifest requires forecast records missing from evaluation input: "
+            + ", ".join(missing_forecasts)
         )
-    )
     if not selected:
-        raise ValueError("no forecasts in evaluation window")
-
-    selected_by_id: dict[str, ForecastRecord] = {}
-    for record in selected:
-        if record.forecast_id in selected_by_id:
-            raise ValueError(f"duplicate forecast_id: {record.forecast_id}")
-        selected_by_id[record.forecast_id] = record
-
-    outcome_by_id: dict[str, ForecastOutcomeFact] = {}
-    for fact in outcome_values:
-        if fact.forecast_id in outcome_by_id:
-            raise ValueError(f"duplicate outcome fact for forecast: {fact.forecast_id}")
-        outcome_by_id[fact.forecast_id] = fact
-
-    missing = sorted(
-        forecast_id
-        for forecast_id in selected_by_id
-        if forecast_id not in outcome_by_id
-    )
-    if missing:
+        raise ValueError(
+            "population manifest selected no forecasts; coverage is valid but scores are unavailable"
+        )
+    if pending_outcomes:
         raise ValueError(
             "complete calibration cohort required; missing outcome facts for: "
-            + ", ".join(missing)
+            + ", ".join(pending_outcomes)
         )
-
-    evaluation_end = parse_iso_timestamp(window.evaluation_end_ts)
-    late_outcomes = sorted(
-        record.forecast_id
-        for record in selected
-        if parse_iso_timestamp(
-            outcome_by_id[record.forecast_id].revealed_at
-        ) > evaluation_end
-    )
     if late_outcomes:
         raise ValueError(
             "calibration outcome facts revealed after evaluation cutoff: "
@@ -449,6 +780,9 @@ def evaluate_calibration_diagnostics(
         },
         "bins": bins,
         "confidence_level": _canonical_float(confidence_level),
+        "population_manifest_sha256": population_manifest.manifest_sha256,
+        "selection_policy_sha256": population_manifest.selection_policy_sha256,
+        "source_snapshot_sha256": population_manifest.source_snapshot_sha256,
         "dependence_assumption": resolved_dependence.value,
         "dependence_screen_method": _DEPENDENCE_SCREEN_METHOD,
         "brier_interval_method": _BRIER_INTERVAL_METHOD,
@@ -556,6 +890,8 @@ def evaluate_calibration_diagnostics(
         dependence_assumption=resolved_dependence,
         raw_sample_count=summary.count,
         effective_sample_count=summary.count,
+        population_manifest_sha256=population_manifest.manifest_sha256,
+        coverage=coverage,
         brier_score=brier,
         log_loss=log_loss,
         expected_calibration_error=ece,

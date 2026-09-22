@@ -39,6 +39,7 @@ class _Transport:
         self.settled_date = "2026-09-21T19:00:00+00:00"
         self.cleared_event_id = "event-1"
         self.customer_order_ref: str | None = None
+        self.extra_exact_ref_selection_id: int | None = None
 
     def post(self, url: str, *, headers, body: bytes, timeout_seconds: float) -> bytes:
         request = json.loads(body.decode("utf-8"))
@@ -65,6 +66,21 @@ class _Transport:
                     "profit": self.profit,
                     "customerOrderRef": self.customer_order_ref,
                 })
+                if self.extra_exact_ref_selection_id is not None:
+                    rows.append({
+                        "betId": "bet-conflict",
+                        "marketId": "1.234",
+                        "eventId": self.cleared_event_id,
+                        "selectionId": self.extra_exact_ref_selection_id,
+                        "side": "BACK",
+                        "placedDate": "2026-09-21T18:00:00+00:00",
+                        "settledDate": self.settled_date,
+                        "priceRequested": 2,
+                        "priceMatched": 2,
+                        "sizeSettled": 5,
+                        "profit": self.profit,
+                        "customerOrderRef": self.customer_order_ref,
+                    })
             result = {"clearedOrders": rows, "moreAvailable": False}
         else:  # pragma: no cover
             raise AssertionError(method)
@@ -221,6 +237,56 @@ def test_matching_cleared_row_with_contradictory_event_fails_closed(tmp_path) ->
     assert matching_order.event_id == "event-other"
 
     with pytest.raises(BetfairSettlementRevisionError, match="cleared row event mismatch"):
+        _ingest(store, ledger, plan, action, capture)
+
+    assert store.revisions == ()
+
+
+def test_failed_reload_never_exposes_validated_prefix_as_current_truth(tmp_path) -> None:
+    transport = _Transport()
+    ledger, plan, action, client, provider_ref = _accepted_context(tmp_path, transport)
+    path = tmp_path / "settlement.jsonl"
+    store = BetfairSettlementRevisionStore(path)
+
+    first = _ingest(store, ledger, plan, action, _capture(client, provider_ref)).revision
+    transport.provider_status = "VOIDED"
+    transport.profit = 0
+    transport.settled_date = "2026-09-21T19:30:00+00:00"
+    second = _ingest(store, ledger, plan, action, _capture(client, provider_ref)).revision
+    assert store.revisions == (first, second)
+
+    lines = path.read_text(encoding="utf-8").splitlines()
+    assert len(lines) == 2
+    corrupted = json.loads(lines[1])
+    corrupted["revision"]["provider_profit"] = "999"
+    path.write_text(lines[0] + "\n" + json.dumps(corrupted, separators=(",", ":")) + "\n", encoding="utf-8")
+
+    with pytest.raises(BetfairSettlementRevisionError, match="digest mismatch"):
+        store._reload()
+
+    assert store.revisions == (first, second)
+    assert store.current("betfair", "acct-1", "bet-777") == second
+    assert store.as_of("betfair", "acct-1", "bet-777", first.available_at) == first
+
+
+def test_exact_provider_ref_with_contradictory_selection_fails_closed(tmp_path) -> None:
+    transport = _Transport()
+    ledger, plan, action, client, provider_ref = _accepted_context(tmp_path, transport)
+    store = BetfairSettlementRevisionStore(tmp_path / "settlement.jsonl")
+    transport.extra_exact_ref_selection_id = 11
+
+    capture = _capture(client, provider_ref)
+    assert sum(
+        order.customer_order_ref == provider_ref
+        for _status, pages in capture.cleared_pages_by_status
+        for page in pages
+        for order in page.orders
+    ) == 2
+
+    with pytest.raises(
+        BetfairSettlementRevisionError,
+        match="provider order reference identity mismatch",
+    ):
         _ingest(store, ledger, plan, action, capture)
 
     assert store.revisions == ()

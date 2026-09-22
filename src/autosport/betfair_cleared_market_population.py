@@ -126,12 +126,17 @@ class ClearedMarketRollupWitness:
     response_sha256: str
     observed_at: str
 
-    def payload(self) -> dict[str, object]:
+    def semantic_payload(self) -> dict[str, object]:
         return {
             "bet_count": self.bet_count,
             "profit": _decimal_text(self.profit),
             "commission": _decimal_text(self.commission),
             "settled_date": self.settled_date,
+        }
+
+    def payload(self) -> dict[str, object]:
+        return {
+            **self.semantic_payload(),
             "response_sha256": self.response_sha256,
             "observed_at": self.observed_at,
         }
@@ -479,7 +484,7 @@ class BetfairClearedMarketPopulationAuthority:
                 "schema_version": 2,
                 "request_scope_sha256": request_scope_sha256,
                 "rows": [row.payload() for row in first_rows],
-                "market_rollup": market_rollup_witness.payload(),
+                "market_rollup": market_rollup_witness.semantic_payload(),
             }
         )
         evidence_sha256 = _digest(
@@ -927,7 +932,7 @@ def _validate_population(value: BetfairClearedMarketPopulation) -> None:
             "schema_version": 2,
             "request_scope_sha256": value.request_scope_sha256,
             "rows": [row.payload() for row in value.rows],
-            "market_rollup": value.market_rollup_witness.payload(),
+            "market_rollup": value.market_rollup_witness.semantic_payload(),
         }
     )
     if expected_population != value.population_sha256:

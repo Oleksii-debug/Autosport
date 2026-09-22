@@ -1183,3 +1183,26 @@ def test_provider_verifier_rejects_readback_origin_method_rebind(
             expected_provider_order_ref=provider_ref,
         )
 
+def test_timeout_authority_rejects_durable_provider_ref_method_rebind(
+    tmp_path, monkeypatch
+) -> None:
+    ledger, action, _, _ = _ledger_with_timeout(tmp_path, monkeypatch)
+
+    monkeypatch.setattr(
+        RealExecutionLedger,
+        "provider_order_reference",
+        lambda self, *, attempt_id, provider_id: "f" * 32,
+    )
+    with pytest.raises(
+        timeout_resolution.BetfairTimeoutResolutionError,
+        match="timeout ledger authority method changed: provider_order_reference",
+    ):
+        timeout_resolution.resolve_betfair_timeout_provider_state(
+            ledger,
+            action,
+            object(),
+            attempt_id="attempt-1",
+            expected_profile_sha256="a" * 64,
+            readback=object(),
+        )
+

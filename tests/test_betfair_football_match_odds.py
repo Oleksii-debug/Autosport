@@ -1,10 +1,15 @@
 from __future__ import annotations
 
+import hashlib
+import inspect
+
 import pytest
 
 from autosport.betfair_football_match_odds import (
     BetfairFootballRulesAuthority,
     assess_betfair_football_prematch_match_odds_authority,
+    capture_betfair_football_rules_evidence,
+    validate_betfair_football_rules_authority,
     verify_betfair_football_rules_evidence,
 )
 from autosport.market_outcomes import OutcomeAuthorityStatus, SettlementSemantics
@@ -27,14 +32,42 @@ RULES_RETRIEVED_AT = "2026-09-21T17:40:00+00:00"
 OBSERVED_AT = "2026-09-21T17:45:00+00:00"
 
 
-def _rules_authority() -> BetfairFootballRulesAuthority:
-    return verify_betfair_football_rules_evidence(
-        exchange_rules_url=EXCHANGE_RULES_URL,
-        exchange_rules_text=EXCHANGE_RULES,
-        football_rules_url=FOOTBALL_RULES_URL,
-        football_rules_text=FOOTBALL_RULES,
-        retrieved_at=RULES_RETRIEVED_AT,
+def _register_test_rules_authority(
+    *,
+    retrieved_at: str = RULES_RETRIEVED_AT,
+) -> BetfairFootballRulesAuthority:
+    """Create a deterministic fixture without exposing a production injection API.
+
+    Production capture accepts no URL/text/transport/clock injection.  Tests use the
+    same private-closure pattern as the repository's provider billing authority tests:
+    private reflection is outside the supported caller surface and only registers a
+    structurally exact fixture for deterministic downstream qualification.
+    """
+
+    source = BetfairFootballRulesAuthority(
+        exchange_rules_url=EXCHANGE_RULES_URL.rstrip("/"),
+        football_rules_url=FOOTBALL_RULES_URL.rstrip("/"),
+        exchange_rules_sha256=hashlib.sha256(EXCHANGE_RULES.encode("utf-8")).hexdigest(),
+        football_rules_sha256=hashlib.sha256(FOOTBALL_RULES.encode("utf-8")).hexdigest(),
+        retrieved_at=retrieved_at,
+        profile_id="betfair-football-match-odds-rule-evidence-v1",
     )
+    closure = capture_betfair_football_rules_evidence.__closure__
+    assert closure is not None
+    cells = {
+        name: cell.cell_contents
+        for name, cell in zip(
+            capture_betfair_football_rules_evidence.__code__.co_freevars,
+            closure,
+            strict=True,
+        )
+    }
+    register = cells["register"]
+    return register(source)
+
+
+def _rules_authority() -> BetfairFootballRulesAuthority:
+    return _register_test_rules_authority()
 
 
 def _description() -> dict[str, object]:
@@ -110,39 +143,59 @@ def test_exact_prematch_match_odds_produces_only_three_winners_plus_all_void() -
     )
 
 
-def test_rule_authority_cannot_be_minted_from_caller_supplied_hashes() -> None:
-    with pytest.raises(TypeError, match="verified raw rule evidence"):
+def test_caller_constructed_rule_dto_is_not_positive_provider_authority() -> None:
+    caller_built = BetfairFootballRulesAuthority(
+        exchange_rules_url=EXCHANGE_RULES_URL.rstrip("/"),
+        football_rules_url=FOOTBALL_RULES_URL.rstrip("/"),
+        exchange_rules_sha256="0" * 64,
+        football_rules_sha256="1" * 64,
+        retrieved_at=RULES_RETRIEVED_AT,
+        profile_id="betfair-football-match-odds-rule-evidence-v1",
+    )
+
+    with pytest.raises(ValueError, match="issued by canonical provider capture"):
+        validate_betfair_football_rules_authority(caller_built)
+    with pytest.raises(ValueError, match="issued by canonical provider capture"):
+        _assess(rules_authority=caller_built)
+
+
+def test_rule_authority_dto_requires_canonical_official_urls() -> None:
+    with pytest.raises(ValueError, match="canonical Betfair support authority URL"):
         BetfairFootballRulesAuthority(
-            exchange_rules_url=EXCHANGE_RULES_URL.rstrip("/"),
+            exchange_rules_url="https://example.invalid/rules",
             football_rules_url=FOOTBALL_RULES_URL.rstrip("/"),
             exchange_rules_sha256="0" * 64,
             football_rules_sha256="1" * 64,
             retrieved_at=RULES_RETRIEVED_AT,
             profile_id="betfair-football-match-odds-rule-evidence-v1",
-            _verification_token=object(),
         )
 
 
-def test_rule_authority_requires_canonical_official_urls() -> None:
-    with pytest.raises(ValueError, match="canonical Betfair support authority URL"):
-        verify_betfair_football_rules_evidence(
-            exchange_rules_url="https://example.invalid/rules",
-            exchange_rules_text=EXCHANGE_RULES,
-            football_rules_url=FOOTBALL_RULES_URL,
-            football_rules_text=FOOTBALL_RULES,
-            retrieved_at=RULES_RETRIEVED_AT,
-        )
+def test_caller_supplied_rule_text_cannot_mint_provider_rule_authority() -> None:
+    fabricated_exchange_rules = (
+        "Caller-authored text says the market information shall prevail. "
+        "Markets will be settled as set out in the market information."
+    )
+    fabricated_football_rules = (
+        "Caller-authored material event text says the match will be declared void. "
+        "All bets matched on the affected markets will be void."
+    )
 
-
-def test_rule_authority_requires_reviewed_semantic_anchors() -> None:
-    with pytest.raises(ValueError, match="reviewed settlement-rule anchors"):
+    with pytest.raises(TypeError, match="caller-supplied rule text cannot mint"):
         verify_betfair_football_rules_evidence(
             exchange_rules_url=EXCHANGE_RULES_URL,
-            exchange_rules_text="unrelated page body",
+            exchange_rules_text=fabricated_exchange_rules,
             football_rules_url=FOOTBALL_RULES_URL,
-            football_rules_text=FOOTBALL_RULES,
+            football_rules_text=fabricated_football_rules,
             retrieved_at=RULES_RETRIEVED_AT,
         )
+
+
+def test_product_rule_capture_exposes_no_url_text_transport_or_clock_injection() -> None:
+    signature = inspect.signature(capture_betfair_football_rules_evidence)
+    assert tuple(signature.parameters) == ("timeout_seconds",)
+    parameter = signature.parameters["timeout_seconds"]
+    assert parameter.kind is inspect.Parameter.KEYWORD_ONLY
 
 
 def test_market_version_and_raw_market_rules_change_authority_identity() -> None:
@@ -191,6 +244,50 @@ def test_live_shape_mutations_fail_closed(field: str, value: object, reason: str
     assert assessment.status is OutcomeAuthorityStatus.REFUSED
     assert assessment.authority is None
     assert assessment.refusal_reason == reason
+
+
+
+
+@pytest.mark.parametrize(
+    ("field", "alias"),
+    [
+        ("inplay", 0),
+        ("complete", 1),
+        ("numberOfWinners", True),
+        ("numberOfRunners", 3.0),
+        ("numberOfActiveRunners", 3.0),
+        ("runnersVoidable", 0),
+        ("betDelay", False),
+    ],
+)
+def test_json_scalar_type_aliases_cannot_impersonate_provider_shape(
+    field: str,
+    alias: object,
+) -> None:
+    book = _book()
+    book[field] = alias
+
+    assessment = _assess(book=book)
+
+    assert assessment.status is OutcomeAuthorityStatus.REFUSED
+    assert assessment.authority is None
+    assert assessment.refusal_reason == f"betfair_live_shape_{field}_not_exact"
+
+
+@pytest.mark.parametrize("selection_id", ["30", 30.0, True, False, 0, -1])
+def test_runner_selection_id_requires_positive_exact_provider_integer(
+    selection_id: object,
+) -> None:
+    book = _book()
+    runners = list(book["runners"])
+    runners[0] = {"selectionId": selection_id, "status": "ACTIVE"}
+    book["runners"] = runners
+
+    assessment = _assess(book=book)
+
+    assert assessment.status is OutcomeAuthorityStatus.REFUSED
+    assert assessment.authority is None
+    assert assessment.refusal_reason == "betfair_live_runner_identity_not_exact"
 
 
 def test_missing_bet_delay_is_not_admitted_as_prematch_exact() -> None:
@@ -263,12 +360,8 @@ def test_nonfootball_wrong_family_market_mismatch_and_missing_version_fail_close
 
 
 def test_rules_authority_must_precede_market_observation() -> None:
-    future_rules = verify_betfair_football_rules_evidence(
-        exchange_rules_url=EXCHANGE_RULES_URL,
-        exchange_rules_text=EXCHANGE_RULES,
-        football_rules_url=FOOTBALL_RULES_URL,
-        football_rules_text=FOOTBALL_RULES,
-        retrieved_at="2026-09-21T17:46:00+00:00",
+    future_rules = _register_test_rules_authority(
+        retrieved_at="2026-09-21T17:46:00+00:00"
     )
 
     with pytest.raises(ValueError, match="causally available"):

@@ -85,6 +85,14 @@ def _payload_text(values: Iterable[object]) -> str:
     return " ".join(parts)
 
 
+def _availability_instant(entry: RegistryEntry) -> datetime:
+    """Return one canonical registry availability timestamp as a UTC instant."""
+
+    return datetime.fromisoformat(
+        entry.available_at.replace("Z", "+00:00")
+    ).astimezone(timezone.utc)
+
+
 def _entries_by_id(
     registry: ScientificRegistry,
     record_type: str,
@@ -268,6 +276,10 @@ def search_negative_results(
                 raise NegativeResultRetrievalError(
                     f"{post_context} does not causally follow {context}"
                 )
+            if _availability_instant(postmortem) < _availability_instant(experiment):
+                raise NegativeResultRetrievalError(
+                    f"{post_context} availability precedes {context}"
+                )
             if postmortem.payload.get("classification") != outcome.value:
                 raise NegativeResultRetrievalError(
                     f"{post_context} classification conflicts with experiment outcome"
@@ -361,9 +373,7 @@ def search_negative_results(
         )
         evidence_available_at = max(
             evidence_entries,
-            key=lambda entry: datetime.fromisoformat(
-                entry.available_at.replace("Z", "+00:00")
-            ).astimezone(timezone.utc),
+            key=_availability_instant,
         ).available_at
 
         hits.append(

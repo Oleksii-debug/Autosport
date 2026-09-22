@@ -619,3 +619,44 @@ def test_confirmed_logout_clock_failure_still_clears_local_token_authority() -> 
     assert login.calls == 2
     assert transport.generation_id == "gen-2"
     assert lifecycle.state is SessionState.ACTIVE
+
+
+def test_logout_while_read_is_inflight_fences_late_predecessor_response() -> None:
+    login = LoginFactory()
+    read_started = Event()
+    release_read = Event()
+
+    def read(token: str, path: str) -> MatchbookReadResponse:
+        if path == "/edge/rest/account/positions":
+            read_started.set()
+            assert release_read.wait(timeout=2.0)
+            return MatchbookReadResponse(200, "late-predecessor")
+        return MatchbookReadResponse(200, "warm")
+
+    transport, lifecycle, _, _ = build_transport(
+        read=read,
+        login=login,
+        logout=lambda token: 200,
+    )
+    assert transport.read(path="/edge/rest/events").payload == "warm"
+
+    results: list[object] = []
+    errors: list[BaseException] = []
+    inflight = run_in_thread(
+        lambda: transport.read(path="/edge/rest/account/positions"),
+        results=results,
+        errors=errors,
+    )
+    assert read_started.wait(timeout=1.0)
+
+    transport.logout()
+    assert transport.generation_id is None
+    assert lifecycle.state is SessionState.EXPIRED
+
+    release_read.set()
+    inflight.join(timeout=2.0)
+
+    assert inflight.is_alive() is False
+    assert results == []
+    assert len(errors) == 1
+    assert isinstance(errors[0], MatchbookStaleGenerationResponse)

@@ -21,7 +21,6 @@ from weakref import ReferenceType, ref
 from .betfair_account_identity import (
     BetfairAccountIdentityError,
     BetfairAuthenticatedAccountIdentity,
-    build_betfair_authenticated_client,
     is_authoritative_betfair_account_identity,
     resolve_betfair_authenticated_account_identity,
 )
@@ -31,7 +30,6 @@ from .betfair_account_readonly import (
     BetfairAccountFundsObservation,
     BetfairReadOnlyClient,
     BetfairReadOnlyError,
-    BetfairSessionCredentials,
 )
 
 
@@ -171,27 +169,21 @@ def _remember_issued(
 
 
 def evaluate_betfair_account_funds(
-    credentials: BetfairSessionCredentials,
+    client: BetfairReadOnlyClient,
     required_liability: Decimal,
     *,
     required_currency_code: str,
-    timeout_seconds: float = 10.0,
 ) -> BetfairAccountFundsPrecheck:
-    """Acquire current provider evidence and issue one process-local precheck result."""
+    """Issue funds evidence for one exact product-owned K07 client/session context."""
 
-    if type(credentials) is not BetfairSessionCredentials:
-        raise TypeError("credentials must be BetfairSessionCredentials")
+    if type(client) is not BetfairReadOnlyClient:
+        raise TypeError("client must be an exact canonical BetfairReadOnlyClient")
     _nonnegative_decimal(required_liability, "required_liability")
     required_currency_code = _currency_code(
         required_currency_code, "required_currency_code"
     )
 
     try:
-        client = build_betfair_authenticated_client(
-            credentials,
-            timeout_seconds=timeout_seconds,
-            account_label="funds-precheck",
-        )
         identity = resolve_betfair_authenticated_account_identity(client)
         funds = client.read_account_funds()
         if not is_authoritative_betfair_account_identity(identity, client=client):

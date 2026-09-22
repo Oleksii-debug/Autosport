@@ -8,12 +8,14 @@ import pytest
 from autosport.execution_empirical_evidence import (
     EmpiricalExecutionEvidenceError,
     EmpiricalExecutionEvidenceUnavailable,
+    EmpiricalExecutionPopulationEvidence,
     SLIPPAGE_STATUS_KNOWN,
     SLIPPAGE_STATUS_NOT_APPLICABLE,
     SLIPPAGE_STATUS_UNKNOWN,
     TIMING_REASON_NO_MONOTONIC_WITNESS,
     TIMING_STATUS_UNKNOWN,
     build_empirical_execution_evidence,
+    build_empirical_execution_population_evidence,
 )
 from autosport.real_execution_ledger import (
     AcknowledgementStatus,
@@ -566,10 +568,6 @@ def test_tampered_ledger_fails_before_empirical_projection(tmp_path):
             attempt_id="attempt-1",
         )
 
-from autosport.execution_empirical_evidence import (
-    EmpiricalExecutionPopulationEvidence,
-    build_empirical_execution_population_evidence,
-)
 
 
 def _population_ledger(tmp_path) -> RealExecutionLedger:
@@ -757,19 +755,22 @@ def test_population_aggregate_rejects_noncanonical_protocol_digest(tmp_path):
         )
 
 
-def test_population_direct_construction_rejects_duplicate_attempt_sample(tmp_path):
+def test_population_evidence_cannot_be_caller_constructed_or_subset_with_replace(
+    tmp_path,
+):
     aggregate = build_empirical_execution_population_evidence(
         _population_ledger(tmp_path),
         evaluation_protocol_sha256="d" * 64,
     )
-    first = aggregate.samples[0]
 
-    with pytest.raises(
-        EmpiricalExecutionEvidenceError,
-        match="duplicate an attempt",
-    ):
-        replace(
-            aggregate,
-            samples=(first, first),
+    with pytest.raises(TypeError):
+        EmpiricalExecutionPopulationEvidence(
+            source_ledger_sha256=aggregate.source_ledger_sha256,
+            source_event_count=aggregate.source_event_count,
+            evaluation_protocol_sha256=aggregate.evaluation_protocol_sha256,
+            samples=aggregate.samples[:1],
         )
+
+    with pytest.raises(TypeError):
+        replace(aggregate, samples=aggregate.samples[:1])
 

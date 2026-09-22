@@ -31,7 +31,11 @@ def test_emergency_stop_has_unique_packaged_uia_identity_and_all_machine_gates()
     external_audit = (
         Path(__file__).resolve().parents[1] / "scripts" / "external_uia_audit.ps1"
     ).read_text(encoding="utf-8")
-    assert "key = 'emergency_stop'; automation_id = '209'" in external_audit
-    assert "required_pattern = 'Invoke'" in external_audit
-    assert "expected_control_type = 'ControlType.Button'" in external_audit
-    assert "require_external_focus = $true" in external_audit
+    emergency_spec = (
+        "[ordered]@{ key = 'emergency_stop'; automation_id = '209'; "
+        "name = 'Аварійний STOP виконання / Emergency execution STOP (Ctrl+Shift+S)'; "
+        "required_pattern = 'Invoke'; require_external_focus = $true; "
+        "expected_control_type = 'ControlType.Button'; require_named_rows = $false }"
+    )
+    assert emergency_spec in external_audit
+    assert external_audit.count("automation_id = '209'") == 1

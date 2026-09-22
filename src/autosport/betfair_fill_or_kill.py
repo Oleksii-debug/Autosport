@@ -332,7 +332,7 @@ class BetfairFillOrKillStructuralEvidence:
     matched_vwap: Decimal
     unmatched_remainder: Decimal
     unmatched_remainder_terminal_by_fok_contract: bool
-    aggregate_vwap_limit_satisfied: bool
+    aggregate_vwap_limit_satisfied: bool | None
     per_fragment_price_floor_proven: bool = False
     provider_origin_verified: bool = False
     grants_execution_authority: bool = False
@@ -393,7 +393,10 @@ def inspect_betfair_fill_or_kill_lifecycle(
 
     if report.size_matched == 0:
         outcome = FillOrKillStructuralOutcome.KILLED_ZERO
-        aggregate_vwap_satisfied = True
+        # No matched volume means there is no matched VWAP to compare with the
+        # FOK price floor.  Preserve this as not-applicable/unknown rather than
+        # minting positive price-quality evidence from a lapsed zero-fill order.
+        aggregate_vwap_satisfied = None
     else:
         if report.average_price_matched < request.limit_price:
             raise BetfairFillOrKillError(

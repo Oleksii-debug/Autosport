@@ -856,6 +856,7 @@ def _parse_place_orders_response(
             and echoed.get("orderType") == "LIMIT"
             and handicap_matches
             and limit.get("persistenceType") == "LAPSE"
+            and set(limit) == {"size", "price", "persistenceType"}
             and _provider_response_decimal(
                 limit.get("price"),
                 "echoed price",

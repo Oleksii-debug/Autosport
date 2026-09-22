@@ -479,6 +479,42 @@ def test_response_echo_rejects_handicap_or_persistence_drift(
     ):
         _parse(payload, action)
 
+@pytest.mark.parametrize(
+    ("field", "value"),
+    (
+        ("timeInForce", "FILL_OR_KILL"),
+        ("minFillSize", 5.0),
+        ("betTargetType", "BACKERS_PROFIT"),
+        ("betTargetSize", 5.0),
+    ),
+)
+def test_response_echo_rejects_unsubmitted_limit_order_semantics(
+    field: str,
+    value: object,
+) -> None:
+    action = _action()
+    decoded = json.loads(
+        _payload(
+            action,
+            execution_status="SUCCESS",
+            instruction_status="SUCCESS",
+            include_size_matched=True,
+            size_matched=5,
+            average_price_matched=2,
+            bet_id="bet-semantic-drift",
+        ).decode("utf-8")
+    )
+    decoded["result"]["instructionReports"][0]["instruction"]["limitOrder"][
+        field
+    ] = value
+
+    with pytest.raises(
+        BetfairPlaceOrdersAmbiguous,
+        match="does not bind exact action",
+    ):
+        _parse(json.dumps(decoded).encode("utf-8"), action)
+
+
 @pytest.mark.parametrize("response_id", (True, 1.5, "1"))
 def test_response_id_rejects_coercible_non_integer_wire_identity(
     response_id: object,

@@ -1,15 +1,15 @@
 """Fail-closed provider maximum order-size / liability evidence.
 
-This module owns only the provider-origin maximum monetary order constraint for one
-exact scope. It does not own balances, owner RiskPolicy, market liquidity,
-minimum-stake rules, payout caps, capital reservation, provider writes, or
-execution/reconciliation.
+This module owns only the shape and deterministic arithmetic for one scoped maximum
+monetary order constraint. It does not own balances, owner RiskPolicy, market
+liquidity, minimum-stake rules, payout caps, capital reservation, provider writes,
+or execution/reconciliation.
 
-Positive evidence is an in-process capability: the canonical verifier seals exact
-object identity plus an immutable payload fingerprint. Copying/reconstructing a
-record cannot preserve authority. This is a trusted-process API-misuse fence, not
-cryptographic proof of a remote provider; provider-specific acquisition must still
-bind the source bytes/receipt supplied to the verifier.
+Caller-constructible evidence may be structurally sealed in-process so scope,
+expiry, typed maximum semantics, action binding, and copy/restart misuse are
+checked deterministically. That structural seal is deliberately NOT provider-origin
+proof. Until an independent product-owned authenticated acquisition/rule authority
+is composed, this module cannot issue positive provider support.
 """
 from __future__ import annotations
 
@@ -101,7 +101,8 @@ class ProviderMaximumOrderLimitEvidence:
         if self.action_binding_sha256 is not None:
             _sha256(self.action_binding_sha256, "action_binding_sha256")
         if (
-            self.source_kind is ProviderMaximumOrderLimitSourceKind.AUTHENTICATED_ACTION_QUOTE
+            self.source_kind
+            is ProviderMaximumOrderLimitSourceKind.AUTHENTICATED_ACTION_QUOTE
             and self.action_binding_sha256 is None
         ):
             raise ProviderMaximumOrderLimitError(
@@ -119,6 +120,13 @@ class ProviderMaximumOrderLimitEvidence:
 
 @dataclass(frozen=True, slots=True)
 class ProviderMaximumOrderLimitAssessment:
+    """Numerical comparison over one structurally sealed caller-supplied maximum.
+
+    state is arithmetic only. The hard-false authority properties prevent a
+    caller-selected maximum/source hash from becoming provider-origin admission
+    support.
+    """
+
     state: ProviderMaximumOrderLimitState
     requested_amount: Decimal
     maximum_amount: Decimal
@@ -140,11 +148,19 @@ class ProviderMaximumOrderLimitAssessment:
                 "maximum-order assessment never grants execution authority"
             )
 
+    @property
+    def provider_origin_proven(self) -> bool:
+        return False
 
-def _install_authority() -> None:
-    issued: dict[int, tuple[ProviderMaximumOrderLimitEvidence, str]] = {}
+    @property
+    def supports_requested_amount(self) -> bool:
+        return False
 
-    def verify_provider_maximum_order_limit_evidence(
+
+def _install_structural_authority() -> None:
+    sealed: dict[int, tuple[ProviderMaximumOrderLimitEvidence, str]] = {}
+
+    def _validate_scope_and_time(
         evidence: ProviderMaximumOrderLimitEvidence,
         *,
         as_of: datetime,
@@ -159,8 +175,8 @@ def _install_authority() -> None:
         order_family: str,
         currency: str,
         limit_kind: ProviderMaximumOrderLimitKind,
-        action_binding_sha256: str | None = None,
-    ) -> ProviderMaximumOrderLimitEvidence:
+        action_binding_sha256: str | None,
+    ) -> str:
         if type(evidence) is not ProviderMaximumOrderLimitEvidence:
             raise ProviderMaximumOrderLimitError(
                 "evidence must be exact ProviderMaximumOrderLimitEvidence"
@@ -198,9 +214,98 @@ def _install_authority() -> None:
             raise ProviderMaximumOrderLimitError("provider limit evidence is future")
         if current >= valid_until:
             raise ProviderMaximumOrderLimitError("provider limit evidence is expired")
-        fingerprint = _fingerprint(evidence)
-        issued[id(evidence)] = (evidence, fingerprint)
+        return _fingerprint(evidence)
+
+    def seal_provider_maximum_order_limit_structure(
+        evidence: ProviderMaximumOrderLimitEvidence,
+        *,
+        as_of: datetime,
+        provider_id: str,
+        account_id: str,
+        adapter_id: str,
+        jurisdiction: str,
+        event_id: str,
+        market_id: str,
+        selection_id: str,
+        side: str,
+        order_family: str,
+        currency: str,
+        limit_kind: ProviderMaximumOrderLimitKind,
+        action_binding_sha256: str | None = None,
+    ) -> ProviderMaximumOrderLimitEvidence:
+        fingerprint = _validate_scope_and_time(
+            evidence,
+            as_of=as_of,
+            provider_id=provider_id,
+            account_id=account_id,
+            adapter_id=adapter_id,
+            jurisdiction=jurisdiction,
+            event_id=event_id,
+            market_id=market_id,
+            selection_id=selection_id,
+            side=side,
+            order_family=order_family,
+            currency=currency,
+            limit_kind=limit_kind,
+            action_binding_sha256=action_binding_sha256,
+        )
+        sealed[id(evidence)] = (evidence, fingerprint)
         return evidence
+
+    def assert_provider_maximum_order_limit_structure_sealed(
+        evidence: ProviderMaximumOrderLimitEvidence,
+    ) -> None:
+        if type(evidence) is not ProviderMaximumOrderLimitEvidence:
+            raise ProviderMaximumOrderLimitError(
+                "evidence must be exact ProviderMaximumOrderLimitEvidence"
+            )
+        record = sealed.get(id(evidence))
+        if record is None or record[0] is not evidence:
+            raise ProviderMaximumOrderLimitError(
+                "provider maximum-order evidence lacks structural seal"
+            )
+        if record[1] != _fingerprint(evidence):
+            raise ProviderMaximumOrderLimitError(
+                "provider maximum-order evidence changed after structural sealing"
+            )
+
+    def verify_provider_maximum_order_limit_evidence(
+        evidence: ProviderMaximumOrderLimitEvidence,
+        *,
+        as_of: datetime,
+        provider_id: str,
+        account_id: str,
+        adapter_id: str,
+        jurisdiction: str,
+        event_id: str,
+        market_id: str,
+        selection_id: str,
+        side: str,
+        order_family: str,
+        currency: str,
+        limit_kind: ProviderMaximumOrderLimitKind,
+        action_binding_sha256: str | None = None,
+    ) -> ProviderMaximumOrderLimitEvidence:
+        _validate_scope_and_time(
+            evidence,
+            as_of=as_of,
+            provider_id=provider_id,
+            account_id=account_id,
+            adapter_id=adapter_id,
+            jurisdiction=jurisdiction,
+            event_id=event_id,
+            market_id=market_id,
+            selection_id=selection_id,
+            side=side,
+            order_family=order_family,
+            currency=currency,
+            limit_kind=limit_kind,
+            action_binding_sha256=action_binding_sha256,
+        )
+        raise ProviderMaximumOrderLimitError(
+            "provider-origin verification requires independent product-owned "
+            "acquisition or rule authority"
+        )
 
     def assert_provider_maximum_order_limit_evidence_authoritative(
         evidence: ProviderMaximumOrderLimitEvidence,
@@ -209,16 +314,16 @@ def _install_authority() -> None:
             raise ProviderMaximumOrderLimitError(
                 "evidence must be exact ProviderMaximumOrderLimitEvidence"
             )
-        record = issued.get(id(evidence))
-        if record is None or record[0] is not evidence:
-            raise ProviderMaximumOrderLimitError(
-                "provider maximum-order evidence lacks canonical verification authority"
-            )
-        if record[1] != _fingerprint(evidence):
-            raise ProviderMaximumOrderLimitError(
-                "provider maximum-order evidence changed after verification"
-            )
+        raise ProviderMaximumOrderLimitError(
+            "provider maximum-order origin authority is not proven"
+        )
 
+    globals()[
+        "seal_provider_maximum_order_limit_structure"
+    ] = seal_provider_maximum_order_limit_structure
+    globals()[
+        "assert_provider_maximum_order_limit_structure_sealed"
+    ] = assert_provider_maximum_order_limit_structure_sealed
     globals()[
         "verify_provider_maximum_order_limit_evidence"
     ] = verify_provider_maximum_order_limit_evidence
@@ -227,8 +332,8 @@ def _install_authority() -> None:
     ] = assert_provider_maximum_order_limit_evidence_authoritative
 
 
-_install_authority()
-del _install_authority
+_install_structural_authority()
+del _install_structural_authority
 
 
 def assess_provider_maximum_order_limit(
@@ -236,13 +341,15 @@ def assess_provider_maximum_order_limit(
     evidence: ProviderMaximumOrderLimitEvidence,
     requested_amount: Decimal,
 ) -> ProviderMaximumOrderLimitAssessment:
-    """Compare one exact requested quantity to one canonically verified provider maximum.
+    """Compare a request to a structurally sealed, non-authoritative maximum.
 
-    This result proves only the provider-maximum axis. It says nothing about owner
-    limits, funds, liquidity, minimum size, payout caps, fill, acceptance, or execution.
+    The numerical state is useful for deterministic diagnostics/composition, but
+    this isolated generic contract cannot prove the remote provider imposed the
+    supplied maximum. provider_origin_proven and supports_requested_amount
+    therefore remain hard false.
     """
 
-    assert_provider_maximum_order_limit_evidence_authoritative(evidence)
+    assert_provider_maximum_order_limit_structure_sealed(evidence)
     requested = _positive_decimal(requested_amount, "requested_amount")
     maximum = evidence.maximum_amount
     if requested > maximum:
@@ -251,14 +358,14 @@ def assess_provider_maximum_order_limit(
             requested_amount=requested,
             maximum_amount=maximum,
             evidence_sha256=evidence.evidence_sha256,
-            reason="requested_amount_exceeds_verified_provider_maximum",
+            reason="requested_amount_exceeds_structural_maximum_only",
         )
     return ProviderMaximumOrderLimitAssessment(
         state=ProviderMaximumOrderLimitState.WITHIN_LIMIT,
         requested_amount=requested,
         maximum_amount=maximum,
         evidence_sha256=evidence.evidence_sha256,
-        reason="requested_amount_within_verified_provider_maximum",
+        reason="requested_amount_within_structural_maximum_only",
     )
 
 

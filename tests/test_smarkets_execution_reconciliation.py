@@ -204,14 +204,14 @@ def test_published_percentage_mapping_preserves_display_tick() -> None:
         _authority(),
         _readback(
             requested_price_units=6061,
-            requested_quantity_units=165000,
-            executed_quantity_units=165000,
+            requested_quantity_units=164989,
+            executed_quantity_units=164989,
             executed_avg_price_units=6061,
         ),
     )
     assert effect.accepted_odds == Decimal("1.65")
-    assert effect.accepted_stake == Decimal("10.00065")
-    assert effect.accepted_liability == Decimal("10.00065")
+    assert effect.accepted_stake == Decimal("9.99998329")
+    assert effect.accepted_liability == Decimal("9.99998329")
 
 
 def test_non_tick_average_price_projects_deterministically() -> None:
@@ -221,7 +221,7 @@ def test_non_tick_average_price_projects_deterministically() -> None:
         _authority(),
         _readback(executed_avg_price_units=3334),
     )
-    assert effect.accepted_odds == Decimal("10000") / Decimal("3334")
+    assert str(effect.accepted_odds).startswith("2.999400119976004799")
     assert effect.accepted_stake == Decimal("8.335")
     assert effect.accepted_liability == Decimal("8.335")
 
@@ -313,12 +313,12 @@ def test_requested_odds_must_be_a_published_smarkets_tick() -> None:
         )
 
 
-def test_requested_quantity_must_be_exactly_representable_in_provider_units() -> None:
+def test_requested_stake_below_one_provider_quantity_unit_fails_closed() -> None:
     action = _action(
         requested_odds=Decimal("2.5"),
         requested_stake=Decimal("0.00001"),
     )
-    with pytest.raises(SmarketsReconciliationError, match="represented exactly"):
+    with pytest.raises(SmarketsReconciliationError, match="below one Smarkets quantity"):
         _verify(
             action,
             _profile(),

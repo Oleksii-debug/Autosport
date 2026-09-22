@@ -644,7 +644,7 @@ class AutosportWebController:
 
     def _action_replay_run(self, payload: Mapping[str, Any]) -> dict[str, Any]:
         if self._busy():
-            return self._fail(text("ui.status.replay.replay_busy"))
+            return self._fail(text("ui.status.replay.already_busy"))
         if self.dataset_path is None:
             return self._fail(text("ui.info.replay.dataset_required"))
         try:

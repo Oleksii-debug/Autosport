@@ -200,6 +200,43 @@ def test_serialized_restart_does_not_restore_provider_origin():
     )
 
 
+def test_caller_constructed_readback_cannot_enter_authoritative_replay():
+    forged = offer(
+        4243,
+        status=MatchbookOfferStatus.MATCHED,
+        matched="10",
+        remaining="0",
+        raw="e" * 64,
+    )
+    with pytest.raises(
+        MatchbookOfferReconciliationError,
+        match="provider origin",
+    ):
+        reconcile_replay((forged,))
+
+    issued = offer(
+        4243,
+        status=MatchbookOfferStatus.MATCHED,
+        matched="10",
+        remaining="0",
+        raw="e" * 64,
+        issued=True,
+    )
+    assert reconcile_replay((issued,)) == {4243: issued}
+
+
+def test_detached_copy_cannot_regain_authoritative_replay_origin():
+    issued = offer(4244, issued=True)
+    detached = replace(issued)
+    assert issued.provider_origin_authoritative
+    assert not detached.provider_origin_authoritative
+    with pytest.raises(
+        MatchbookOfferReconciliationError,
+        match="provider origin",
+    ):
+        reconcile_replay((detached,))
+
+
 def test_aggregated_ids_are_not_singular_identity():
     with pytest.raises(MatchbookOfferReconciliationError, match="aggregated"):
         reject_aggregated_offer_identity(offer_id=None, offer_ids=(1, 2))
@@ -234,15 +271,23 @@ def test_cross_page_duplicate_fails_closed():
 
 
 def test_replay_idempotence_and_same_time_conflict():
-    x = offer(1)
+    x = offer(1, issued=True)
     assert reconcile_replay((x, x)) == {1: x}
     with pytest.raises(MatchbookOfferReconciliationError, match="same-time"):
         reconcile_replay((x, offer(1, status=MatchbookOfferStatus.EDITED, raw=B)))
 
 
 def test_replay_preserves_matched_prefix_on_cancel():
-    partial = offer(1, matched="4", remaining="6")
-    cancelled = offer(1, status=MatchbookOfferStatus.CANCELLED, matched="4", remaining="0", at=T0 + timedelta(seconds=1), raw=B)
+    partial = offer(1, matched="4", remaining="6", issued=True)
+    cancelled = offer(
+        1,
+        status=MatchbookOfferStatus.CANCELLED,
+        matched="4",
+        remaining="0",
+        at=T0 + timedelta(seconds=1),
+        raw=B,
+        issued=True,
+    )
     latest = reconcile_replay((partial, cancelled))[1]
     assert latest.truth is MatchbookOfferTruth.TERMINAL_PARTIAL_MATCH
     assert latest.matched_stake == Decimal("4")

@@ -206,6 +206,45 @@ def test_stale_generation_timestamp_cannot_clock_fault_current_generation(
     assert lifecycle.is_active is True
 
 
+@pytest.mark.parametrize("operation", ["get_session", "network_failure", "logout"])
+@pytest.mark.parametrize("evidence_second", [19, 21])
+def test_terminal_generation_evidence_cannot_mutate_clock_or_expired_snapshot(
+    operation: str,
+    evidence_second: int,
+) -> None:
+    lifecycle = active()
+    lifecycle.record_get_session_result(
+        generation_id="gen-1", http_status=401, monotonic_ns=ns(20)
+    )
+    before = lifecycle.audit_snapshot()
+
+    with pytest.raises(
+        SessionLifecycleError,
+        match="terminal session generation evidence cannot mutate lifecycle",
+    ):
+        if operation == "get_session":
+            lifecycle.record_get_session_result(
+                generation_id="gen-1",
+                http_status=200,
+                monotonic_ns=ns(evidence_second),
+            )
+        elif operation == "network_failure":
+            lifecycle.record_network_failure(
+                generation_id="gen-1",
+                monotonic_ns=ns(evidence_second),
+            )
+        else:
+            lifecycle.record_logout_200(
+                generation_id="gen-1",
+                monotonic_ns=ns(evidence_second),
+            )
+
+    assert lifecycle.audit_snapshot() == before
+    assert lifecycle.state is SessionState.EXPIRED
+    assert lifecycle.is_active is False
+    assert lifecycle.restart_requires_reauth is False
+
+
 def test_approximate_six_hour_lifetime_is_only_a_refresh_hint() -> None:
     lifecycle = MatchbookSessionLifecycle()
     lifecycle.record_login_200(generation_id="gen-1", monotonic_ns=0)

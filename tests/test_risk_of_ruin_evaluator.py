@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import json
-import shutil
 from dataclasses import fields, replace
 from decimal import Decimal
 from pathlib import Path
@@ -208,71 +206,83 @@ def test_direct_evaluation_object_is_not_product_issued(tmp_path: Path) -> None:
     assert evaluator.verify(direct) is False
 
 
-def test_issue_is_idempotent_and_restart_resolves(tmp_path: Path) -> None:
+def test_caller_request_cannot_mint_product_issued_authority(
+    tmp_path: Path,
+) -> None:
     evaluator = _evaluator(tmp_path)
     request = _request(planned=10)
 
-    first = evaluator.issue(request)
-    second = evaluator.issue(request)
+    with pytest.raises(
+        RiskOfRuinIssuanceError,
+        match="canonical product-owned",
+    ):
+        evaluator.issue(request)
 
-    assert second == first
-    assert first.real_money_execution_authority is False
-
-    restarted = ProductRiskOfRuinEvaluator(
-        workspace=evaluator.workspace,
-        authority_root=evaluator.authority.authority_root,
-    )
-    resolved = restarted.resolve(first.result_id)
-
-    assert resolved == first
-    assert restarted.verify(first) is True
-    assert IssuedRiskOfRuinResult.from_payload(first.canonical_payload()) == first
+    assert not evaluator.journal_path.exists()
 
 
-def test_tampered_journal_fails_closed(tmp_path: Path) -> None:
-    evaluator = _evaluator(tmp_path)
-    issued = evaluator.issue(_request(planned=10))
-
-    payload = json.loads(evaluator.journal_path.read_text(encoding="utf-8"))
-    payload["records"][0]["result"]["upper_bound"] = "0"
-    evaluator.journal_path.write_text(
-        json.dumps(payload, ensure_ascii=False, sort_keys=True) + "\n",
-        encoding="utf-8",
-    )
-
-    restarted = ProductRiskOfRuinEvaluator(
-        workspace=evaluator.workspace,
-        authority_root=evaluator.authority.authority_root,
-    )
-    with pytest.raises(RiskOfRuinIssuanceError):
-        restarted.resolve(issued.result_id)
-
-
-def test_deleted_journal_after_issue_fails_closed(tmp_path: Path) -> None:
-    evaluator = _evaluator(tmp_path)
-    issued = evaluator.issue(_request(planned=10))
-    evaluator.journal_path.unlink()
-
-    restarted = ProductRiskOfRuinEvaluator(
-        workspace=evaluator.workspace,
-        authority_root=evaluator.authority.authority_root,
-    )
-    with pytest.raises(RiskOfRuinIssuanceError, match="stale, copied, deleted or unproven"):
-        restarted.resolve(issued.result_id)
-
-
-def test_copied_journal_does_not_mint_authority_in_another_workspace(
+def test_repeated_source_evidence_cannot_be_relabelled_as_independent_authority(
     tmp_path: Path,
 ) -> None:
-    source = _evaluator(tmp_path, "source")
-    issued = source.issue(_request(planned=10))
-
-    foreign = _evaluator(tmp_path, "foreign")
-    shutil.copy2(source.journal_path, foreign.journal_path)
-
-    restarted_foreign = ProductRiskOfRuinEvaluator(
-        workspace=foreign.workspace,
-        authority_root=foreign.authority.authority_root,
+    observations = tuple(_observation(index) for index in range(100))
+    observations = tuple(
+        replace(item, source_evidence_sha256=SHA_A)
+        for item in observations
     )
+    request = _request(observations=observations, planned=100)
+    evaluator = _evaluator(tmp_path)
+
+    assert request.planned_independent_units == 100
     with pytest.raises(RiskOfRuinIssuanceError):
-        restarted_foreign.resolve(issued.result_id)
+        evaluator.issue(request)
+
+
+@pytest.mark.parametrize(
+    ("field", "replacement"),
+    [
+        ("independent_units", True),
+        ("independent_units", "10"),
+        ("ruin_count", False),
+        ("ruin_count", "0"),
+        ("confidence_level", 0.95),
+        ("confidence_level", "0.950"),
+        ("ruin_threshold", 0),
+        ("upper_bound", 0.1),
+    ],
+)
+def test_durable_result_parser_rejects_json_type_coercion(
+    tmp_path: Path,
+    field: str,
+    replacement: object,
+) -> None:
+    evaluator = _evaluator(tmp_path)
+    request = _request(planned=10)
+    direct = evaluate_risk_of_ruin(
+        request,
+        workspace_instance_id=evaluator.authority.workspace_instance_id,
+        issued_at="2026-01-04T00:00:00+00:00",
+        source_sha256=SHA_F,
+    )
+    payload = direct.canonical_payload()
+    payload[field] = replacement
+
+    with pytest.raises(RiskOfRuinIssuanceError):
+        IssuedRiskOfRuinResult.from_payload(payload)
+
+
+def test_durable_result_parser_rejects_noncanonical_stake_text(
+    tmp_path: Path,
+) -> None:
+    evaluator = _evaluator(tmp_path)
+    request = _request(planned=10)
+    direct = evaluate_risk_of_ruin(
+        request,
+        workspace_instance_id=evaluator.authority.workspace_instance_id,
+        issued_at="2026-01-04T00:00:00+00:00",
+        source_sha256=SHA_F,
+    )
+    payload = direct.canonical_payload()
+    payload["evaluated_stakes"] = ["1.0"]
+
+    with pytest.raises(RiskOfRuinIssuanceError):
+        IssuedRiskOfRuinResult.from_payload(payload)

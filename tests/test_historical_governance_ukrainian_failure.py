@@ -2,7 +2,7 @@ from autosport.historical_governance import bundle_corpus_main, corpus_main
 
 
 _UKRAINIAN_FAILURE = (
-    "Не вдалося перевірити права або строки зберігання для історичного корпусу. "
+    "Не вдалося завершити операцію з історичним корпусом. "
     "Операцію безпечно зупинено."
 )
 

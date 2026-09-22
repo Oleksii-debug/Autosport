@@ -15,6 +15,7 @@ class MarketMirrorAliasingTests(unittest.TestCase):
             selection_id="selection-1",
             decimal_odds=Decimal("2.00"),
             observed_ts="2026-09-16T19:00:00+00:00",
+            ingest_ts="2026-09-16T19:00:00+00:00",
             source_id="provider-a",
             sequence=1,
             metadata={"nested": {"state": "original"}},

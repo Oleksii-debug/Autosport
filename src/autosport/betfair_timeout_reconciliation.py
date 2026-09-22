@@ -221,19 +221,6 @@ def _timeout_elapsed_visibility_ready(
         return capture_started_monotonic_ns - anchor_ns >= required_ns
 
 
-def _retire_timeout_elapsed_visibility_anchor(
-    ledger: RealExecutionLedger,
-    attempt_id: str,
-) -> None:
-    """Release one process-local elapsed-time anchor after its authority is terminal."""
-
-    key = (id(ledger), attempt_id)
-    with _timeout_elapsed_visibility_lock:
-        record = _timeout_elapsed_visibility_anchors.get(key)
-        if record is not None and record[0]() is ledger:
-            _timeout_elapsed_visibility_anchors.pop(key, None)
-
-
 def _absence_capture_page_times(
     readback: BetfairExecutionReadbackEnvelope,
 ) -> list[str]:
@@ -443,7 +430,6 @@ def resolve_betfair_timeout_provider_state(
     deadline_raw = deadline.isoformat()
 
     if isinstance(evidence, VerifiedProviderEffectEvidence):
-        _retire_timeout_elapsed_visibility_anchor(ledger, attempt_id)
         return BetfairTimeoutResolution(
             BetfairTimeoutResolutionKind.EFFECT_PRESENT,
             timeout_boundary_at,
@@ -504,7 +490,6 @@ def resolve_betfair_timeout_provider_state(
         or observed >= cleared_history_deadline
         or capture_ceiling >= cleared_history_deadline
     ):
-        _retire_timeout_elapsed_visibility_anchor(ledger, attempt_id)
         return BetfairTimeoutResolution(
             BetfairTimeoutResolutionKind.INDETERMINATE_OUTSIDE_CLEARED_HISTORY,
             timeout_boundary_at,
@@ -531,15 +516,7 @@ def resolve_betfair_timeout_provider_state(
 # semantics; if a ledger attempt has a durable ref, downstream exact-ref validation
 # rejects such unbound evidence before a transition.
 def _install_betfair_timeout_absence_authority() -> None:
-    issued: dict[
-        int,
-        tuple[
-            object,
-            tuple[int, str],
-            object,
-        ],
-    ] = {}
-    issued_lock = threading.RLock()
+    issued: dict[int, object] = {}
     raw_resolve = resolve_betfair_timeout_provider_state
 
     def authoritative_resolve(
@@ -565,44 +542,11 @@ def _install_betfair_timeout_absence_authority() -> None:
             and isinstance(evidence, VerifiedProviderAbsenceEvidence)
         ):
             evidence_key = id(evidence)
-            anchor_key = (id(ledger), attempt_id)
-            ledger_weakref = ref(ledger)
 
-            def forget(
-                _weakref: object,
-                *,
-                key: int = evidence_key,
-                elapsed_anchor_key: tuple[int, str] = anchor_key,
-                elapsed_ledger_ref: object = ledger_weakref,
-                elapsed_attempt_id: str = attempt_id,
-            ) -> None:
-                with issued_lock:
-                    issued.pop(key, None)
-                    current_ledger = elapsed_ledger_ref()
-                    if current_ledger is None:
-                        return
-                    if any(
-                        live_anchor_key == elapsed_anchor_key
-                        and live_ledger_ref() is current_ledger
-                        and live_evidence_ref() is not None
-                        for (
-                            live_evidence_ref,
-                            live_anchor_key,
-                            live_ledger_ref,
-                        ) in issued.values()
-                    ):
-                        return
-                    _retire_timeout_elapsed_visibility_anchor(
-                        current_ledger,
-                        elapsed_attempt_id,
-                    )
+            def forget(_weakref: object, *, key: int = evidence_key) -> None:
+                issued.pop(key, None)
 
-            with issued_lock:
-                issued[evidence_key] = (
-                    ref(evidence, forget),
-                    anchor_key,
-                    ledger_weakref,
-                )
+            issued[evidence_key] = ref(evidence, forget)
         return result
 
     def assert_betfair_timeout_absence_authoritative(
@@ -614,17 +558,17 @@ def _install_betfair_timeout_absence_authority() -> None:
             )
         if evidence.provider_order_ref is None:
             return
-        with issued_lock:
-            record = issued.get(id(evidence))
-            if record is None or record[0]() is not evidence:
-                raise BetfairTimeoutResolutionError(
-                    "provider absence did not pass durable Betfair timeout visibility authority"
-                )
+        record = issued.get(id(evidence))
+        if record is None or record() is not evidence:
+            raise BetfairTimeoutResolutionError(
+                "provider absence did not pass durable Betfair timeout visibility authority"
+            )
 
     globals()["resolve_betfair_timeout_provider_state"] = authoritative_resolve
     globals()[
         "assert_betfair_timeout_absence_authoritative"
     ] = assert_betfair_timeout_absence_authoritative
+
 
 _install_betfair_timeout_absence_authority()
 del _install_betfair_timeout_absence_authority

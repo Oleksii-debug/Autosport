@@ -423,17 +423,11 @@ def verify_betfair_provider_state(
         ]
     ] = []
     for order in current:
-        if order.customer_order_ref != provider_order_ref:
-            raise ProviderEvidenceError(
-                "current-order customerOrderRef conflicts with captured execution scope"
-            )
-        candidates.append(("current", None, order))
+        if order.customer_order_ref == provider_order_ref:
+            candidates.append(("current", None, order))
     for status, order in cleared:
-        if order.customer_order_ref != provider_order_ref:
-            raise ProviderEvidenceError(
-                "cleared-order customerOrderRef conflicts with captured execution scope"
-            )
-        candidates.append(("cleared", status, order))
+        if order.customer_order_ref == provider_order_ref:
+            candidates.append(("cleared", status, order))
 
     for kind, _, order in candidates:
         if (

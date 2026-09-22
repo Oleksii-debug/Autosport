@@ -66,7 +66,7 @@ class MatchbookLoginResponse:
 @dataclass(frozen=True, slots=True)
 class MatchbookReadResponse:
     status_code: int
-    payload: object = None
+    payload: object = field(default=None, repr=False)
 
     def __post_init__(self) -> None:
         _validate_status(self.status_code)
@@ -75,7 +75,7 @@ class MatchbookReadResponse:
 @dataclass(frozen=True, slots=True)
 class MatchbookCommittedRead:
     status_code: int
-    payload: object
+    payload: object = field(repr=False)
     generation_id: str
 
     def __post_init__(self) -> None:

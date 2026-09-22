@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from decimal import Decimal
 from hashlib import sha256
+from urllib.error import HTTPError
 
 import pytest
 
@@ -15,6 +16,7 @@ from autosport.prophetx_account_readonly import (
     ProphetXReadOnlyClient,
     ProphetXReadOnlyError,
     ProphetXSessionToken,
+    UrllibProphetXHttpTransport,
 )
 
 
@@ -333,6 +335,60 @@ def test_clock_must_be_timezone_aware():
         match="timezone-aware",
     ):
         client.read_wallet()
+
+
+@pytest.mark.parametrize(
+    "token",
+    [
+        "abc def",
+        "abc\\tdef",
+        "abc\\r\\nX-Injected: yes",
+        "abc\\x7fdef",
+    ],
+)
+def test_session_token_rejects_whitespace_and_header_control_characters(token: str):
+    with pytest.raises(
+        ProphetXReadOnlyError,
+        match="whitespace or control characters",
+    ):
+        ProphetXSessionToken(token)
+
+
+def test_default_transport_closes_http_error_response_before_failing_closed():
+    class CloseTrackingBody:
+        def __init__(self) -> None:
+            self.closed = False
+
+        def close(self) -> None:
+            self.closed = True
+
+    body = CloseTrackingBody()
+    error = HTTPError(
+        BALANCE_URL,
+        401,
+        "Unauthorized",
+        {},
+        body,
+    )
+
+    class FailingOpener:
+        def open(self, request, timeout):
+            raise error
+
+    transport = UrllibProphetXHttpTransport()
+    transport._opener = FailingOpener()  # type: ignore[assignment]
+
+    with pytest.raises(
+        ProphetXReadOnlyError,
+        match="status 401",
+    ):
+        transport.get(
+            BALANCE_URL,
+            headers={},
+            timeout_seconds=1.0,
+        )
+
+    assert body.closed is True
 
 
 def test_blank_session_token_is_rejected():

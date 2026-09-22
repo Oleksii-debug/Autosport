@@ -462,6 +462,7 @@ class ForwardEconomicEvidenceSummary:
     paired_threshold_crossed: bool
     minimum_events_satisfied: bool
     drawdown_guard_passed: bool
+    positive_authority_verified: bool
     scientific_promotion_gate_passed: bool
     evidence_sha256: str
     promotion_authority: bool = False
@@ -483,6 +484,7 @@ class ForwardEconomicEvidenceSummary:
             "paired_threshold_crossed": self.paired_threshold_crossed,
             "minimum_events_satisfied": self.minimum_events_satisfied,
             "drawdown_guard_passed": self.drawdown_guard_passed,
+            "positive_authority_verified": self.positive_authority_verified,
             "scientific_promotion_gate_passed": self.scientific_promotion_gate_passed,
             "evidence_sha256": self.evidence_sha256,
             "promotion_authority": self.promotion_authority,
@@ -747,6 +749,16 @@ class ForwardEconomicEvidenceAccumulator:
             chronology_unambiguous
             and realized_max_drawdown <= protocol.maximum_drawdown_currency
         )
+
+        # The current resolver Protocol is only a structural integration seam:
+        # any caller can implement it and repeat authority_binding_sha256.
+        # Preserve such rows for audit/statistical diagnostics, but never let
+        # them become positive scientific promotion evidence. This must become
+        # True only after a product-owned resolver re-derives the exact
+        # decision -> accepted execution -> terminal settlement -> net-PnL
+        # chain from canonical durable/provider authorities.
+        positive_authority_verified = False
+
         evidence_payload = {
             "schema_version": 1,
             "protocol_sha256": self._protocol_sha256,
@@ -768,8 +780,10 @@ class ForwardEconomicEvidenceAccumulator:
             paired_threshold_crossed=paired_crossed,
             minimum_events_satisfied=minimum_events_satisfied,
             drawdown_guard_passed=drawdown_passed,
+            positive_authority_verified=positive_authority_verified,
             scientific_promotion_gate_passed=(
-                minimum_events_satisfied
+                positive_authority_verified
+                and minimum_events_satisfied
                 and absolute_crossed
                 and paired_crossed
                 and drawdown_passed

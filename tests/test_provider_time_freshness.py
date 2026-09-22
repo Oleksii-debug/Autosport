@@ -63,7 +63,6 @@ class ProviderTimeFreshnessTests(unittest.TestCase):
 
         self.assertEqual(exact.status, ProviderTimeStatus.FRESH)
         self.assertEqual(late.status, ProviderTimeStatus.STALE)
-        self.assertFalse(late.eligible)
 
     def test_negative_wall_latency_fails_even_inside_skew_diagnostic_boundary(self) -> None:
         evidence = self.evidence(

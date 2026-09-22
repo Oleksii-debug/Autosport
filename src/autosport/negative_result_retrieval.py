@@ -10,6 +10,7 @@ from __future__ import annotations
 import re
 import unicodedata
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import Iterable, Mapping
 
 from .scientific_registry import (
@@ -334,16 +335,19 @@ def search_negative_results(
         if not matched_terms:
             continue
 
-        evidence_available_at = max(
-            entry.available_at
-            for entry in (
-                experiment,
-                protocol,
-                hypothesis,
-                question,
-                *matching_postmortems,
-            )
+        evidence_entries = (
+            experiment,
+            protocol,
+            hypothesis,
+            question,
+            *matching_postmortems,
         )
+        evidence_available_at = max(
+            evidence_entries,
+            key=lambda entry: datetime.fromisoformat(
+                entry.available_at.replace("Z", "+00:00")
+            ).astimezone(timezone.utc),
+        ).available_at
 
         hits.append(
             NegativeResultHit(

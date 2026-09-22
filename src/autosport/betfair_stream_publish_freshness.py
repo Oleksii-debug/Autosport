@@ -26,6 +26,7 @@ SCHEMA_VERSION = "betfair-stream-publish-freshness-v1"
 
 class BetfairStreamFreshnessVerdict(str, Enum):
     FRESH_PROVIDER_PUBLISH = "fresh_provider_publish"
+    AUTH_CONTEXT_UNPROVEN = "auth_context_unproven"
     STALE = "stale"
     FUTURE = "future"
     UNKNOWN = "unknown"
@@ -33,32 +34,47 @@ class BetfairStreamFreshnessVerdict(str, Enum):
 
 @dataclass(frozen=True, slots=True)
 class BetfairStreamSubscriptionContext:
-    """Exact subscription plus upstream product-issued auth/capability identity."""
+    """Subscription correlation only; not authenticated acquisition authority.
 
-    authenticated_context_id: str
+    upstream_context_sha256 is a secret-free correlation digest supplied by the
+    upstream composition layer. This projection cannot prove that digest originated
+    from an authenticated Betfair transport, so it never makes freshness
+    decision-eligible by itself.
+    """
+
+    upstream_context_sha256: str
     subscription_id: str
+    provider_request_id: int
     subscription_generation: int
     criteria_sha256: str
-    heartbeat_ms: int
-    conflate_ms: int
+    requested_heartbeat_ms: int
+    requested_conflate_ms: int
     provider_id: str = BETFAIR_PROVIDER_ID
     source_id: str = BETFAIR_STREAM_SOURCE_ID
 
     def __post_init__(self) -> None:
-        for name in ("authenticated_context_id", "subscription_id", "provider_id", "source_id"):
+        for name in ("subscription_id", "provider_id", "source_id"):
             _text(getattr(self, name), name)
+        if not _is_sha256(self.upstream_context_sha256):
+            raise ValueError("upstream_context_sha256 must be a lowercase SHA-256 hex digest")
         if self.provider_id != BETFAIR_PROVIDER_ID:
             raise ValueError("provider_id must be canonical Betfair provider")
         if self.source_id != BETFAIR_STREAM_SOURCE_ID:
             raise ValueError("source_id must be canonical Betfair stream source")
+        if (
+            type(self.provider_request_id) is not int
+            or self.provider_request_id < 0
+            or self.provider_request_id > 2_147_483_647
+        ):
+            raise ValueError("provider_request_id must be a non-negative signed 32-bit integer")
         if type(self.subscription_generation) is not int or self.subscription_generation < 0:
             raise ValueError("subscription_generation must be a non-negative integer")
         if not _is_sha256(self.criteria_sha256):
             raise ValueError("criteria_sha256 must be a lowercase SHA-256 hex digest")
-        if type(self.heartbeat_ms) is not int or self.heartbeat_ms <= 0:
-            raise ValueError("heartbeat_ms must be a positive integer")
-        if type(self.conflate_ms) is not int or self.conflate_ms < 0:
-            raise ValueError("conflate_ms must be a non-negative integer")
+        if type(self.requested_heartbeat_ms) is not int or self.requested_heartbeat_ms <= 0:
+            raise ValueError("requested_heartbeat_ms must be a positive integer")
+        if type(self.requested_conflate_ms) is not int or self.requested_conflate_ms < 0:
+            raise ValueError("requested_conflate_ms must be a non-negative integer")
 
     @property
     def context_id(self) -> str:
@@ -92,9 +108,14 @@ class BetfairStreamPublicationEvidence:
     quote: BetfairQuoteState
     context_id: str
     subscription_id: str
+    provider_request_id: int
     subscription_generation: int
     criteria_sha256: str
-    authenticated_context_id: str
+    upstream_context_sha256: str
+    requested_heartbeat_ms: int
+    requested_conflate_ms: int
+    provider_heartbeat_ms: int | None
+    provider_conflate_ms: int | None
     frame_sha256: str
     frame_kind: BetfairFrameKind
     provider_health: BetfairProviderStreamHealth
@@ -115,14 +136,34 @@ class BetfairStreamPublicationEvidence:
             raise TypeError("provider_health must be canonical BetfairProviderStreamHealth")
         if type(self.conflated) is not bool:
             raise TypeError("conflated must be bool")
-        for name in ("context_id", "subscription_id", "authenticated_context_id", "evidence_id"):
+        for name in ("context_id", "subscription_id", "evidence_id"):
             _text(getattr(self, name), name)
         if not _is_sha256(self.criteria_sha256):
             raise ValueError("criteria_sha256 must be a lowercase SHA-256 hex digest")
+        if not _is_sha256(self.upstream_context_sha256):
+            raise ValueError("upstream_context_sha256 must be a lowercase SHA-256 hex digest")
         if not _is_sha256(self.frame_sha256):
             raise ValueError("frame_sha256 must be a lowercase SHA-256 hex digest")
+        if (
+            type(self.provider_request_id) is not int
+            or self.provider_request_id < 0
+            or self.provider_request_id > 2_147_483_647
+        ):
+            raise ValueError("provider_request_id must be a non-negative signed 32-bit integer")
         if type(self.subscription_generation) is not int or self.subscription_generation < 0:
             raise ValueError("subscription_generation must be non-negative")
+        if type(self.requested_heartbeat_ms) is not int or self.requested_heartbeat_ms <= 0:
+            raise ValueError("requested_heartbeat_ms must be positive")
+        if type(self.requested_conflate_ms) is not int or self.requested_conflate_ms < 0:
+            raise ValueError("requested_conflate_ms must be non-negative")
+        if self.provider_heartbeat_ms is not None and (
+            type(self.provider_heartbeat_ms) is not int or self.provider_heartbeat_ms <= 0
+        ):
+            raise ValueError("provider_heartbeat_ms must be null or positive")
+        if self.provider_conflate_ms is not None and (
+            type(self.provider_conflate_ms) is not int or self.provider_conflate_ms < 0
+        ):
+            raise ValueError("provider_conflate_ms must be null or non-negative")
         _validate_local_times(self.publish_time_ms, self.received_time_ms, self.ingested_time_ms)
         for name in ("cursor_initial_clk", "cursor_clk"):
             value = getattr(self, name)
@@ -143,7 +184,11 @@ class BetfairStreamFreshnessDecision:
 
     @property
     def decision_eligible(self) -> bool:
-        return self.verdict is BetfairStreamFreshnessVerdict.FRESH_PROVIDER_PUBLISH
+        # This module proves provider-publish structure/timing only. Until a separate
+        # product-owned authenticated stream-acquisition witness is composed and
+        # re-resolved, no public DTO produced or constructed here can authorize a
+        # decision merely by carrying a fresh-looking verdict.
+        return False
 
 
 class _BetfairStreamPublishFreshnessTracker:
@@ -154,18 +199,24 @@ class _BetfairStreamPublishFreshnessTracker:
         self.records: dict[BetfairQuoteIdentity, BetfairStreamPublicationEvidence] = {}
         self.restart_quarantine: set[BetfairQuoteIdentity] = set()
         self.last_publish_time_ms: int | None = None
+        self.provider_heartbeat_ms: int | None = None
+        self.provider_conflate_ms: int | None = None
 
     def replace_subscription(self, context: BetfairStreamSubscriptionContext) -> None:
         if type(context) is not BetfairStreamSubscriptionContext:
             raise TypeError("context must be BetfairStreamSubscriptionContext")
-        if context.authenticated_context_id != self.context.authenticated_context_id:
-            raise ValueError("authenticated provider context replacement requires a new runtime")
+        if context.upstream_context_sha256 != self.context.upstream_context_sha256:
+            raise ValueError("upstream correlation context replacement requires a new runtime")
         if context.subscription_generation <= self.context.subscription_generation:
             raise ValueError("replacement subscription generation must strictly advance")
+        if context.provider_request_id == self.context.provider_request_id:
+            raise ValueError("replacement subscription must use a new provider request id")
         self.context = context
         self.records.clear()
         self.restart_quarantine.clear()
         self.last_publish_time_ms = None
+        self.provider_heartbeat_ms = None
+        self.provider_conflate_ms = None
 
     def observe(
         self,
@@ -185,12 +236,27 @@ class _BetfairStreamPublishFreshnessTracker:
             raise TypeError("result.provider_health must be canonical BetfairProviderStreamHealth")
         if type(result.conflated) is not bool:
             raise TypeError("result.conflated must be bool")
+        if result.request_id != self.context.provider_request_id:
+            raise ValueError("provider request id does not match active subscription")
         if not _is_sha256(frame_sha256):
             raise ValueError("frame_sha256 must be the canonical frame digest")
         _validate_local_times(result.publish_time_ms, received_time_ms, ingested_time_ms)
         if self.last_publish_time_ms is not None and result.publish_time_ms < self.last_publish_time_ms:
             raise ValueError("provider publish time regressed")
         self.last_publish_time_ms = result.publish_time_ms
+
+        prior_timing = (self.provider_heartbeat_ms, self.provider_conflate_ms)
+        if result.heartbeat_ms is not None:
+            self.provider_heartbeat_ms = result.heartbeat_ms
+        if result.conflate_ms is not None:
+            self.provider_conflate_ms = result.conflate_ms
+        current_timing = (self.provider_heartbeat_ms, self.provider_conflate_ms)
+        if self.records and current_timing != prior_timing:
+            # A changed/first-observed server timing contract invalidates prior
+            # per-datum timing authority. Require a fresh quote under the new
+            # provider-reported configuration instead of laundering old age.
+            self.records.clear()
+            self.restart_quarantine.clear()
 
         changed = _changed(result.changed)
         removed = _removed(result.removed)
@@ -224,7 +290,16 @@ class _BetfairStreamPublishFreshnessTracker:
 
         issued = []
         for quote in changed:
-            record = _record(self.context, result, quote, frame_sha256, received_time_ms, ingested_time_ms)
+            record = _record(
+                self.context,
+                result,
+                quote,
+                frame_sha256,
+                received_time_ms,
+                ingested_time_ms,
+                provider_heartbeat_ms=self.provider_heartbeat_ms,
+                provider_conflate_ms=self.provider_conflate_ms,
+            )
             self.records[quote.identity] = record
             self.restart_quarantine.discard(quote.identity)
             issued.append(record)
@@ -252,8 +327,15 @@ class _BetfairStreamPublishFreshnessTracker:
             return _unknown("publication belongs to a replaced subscription", policy, record)
         if record.provider_health is not BetfairProviderStreamHealth.UP_TO_DATE or record.conflated:
             return _unknown("publication is not exact healthy provider-publish evidence", policy, record)
-        if self.context.conflate_ms > policy.max_age_ms:
-            return _unknown("configured conflation exceeds the allowed freshness window", policy, record)
+        if self.provider_heartbeat_ms is None or self.provider_conflate_ms is None:
+            return _unknown("provider-reported stream timing is unavailable", policy, record)
+        if (
+            record.provider_heartbeat_ms != self.provider_heartbeat_ms
+            or record.provider_conflate_ms != self.provider_conflate_ms
+        ):
+            return _unknown("provider stream timing changed after this publication", policy, record)
+        if self.provider_conflate_ms > policy.max_age_ms:
+            return _unknown("provider-reported conflation exceeds the allowed freshness window", policy, record)
         if record.received_time_ms > record.ingested_time_ms or record.ingested_time_ms > as_of_ms:
             return _unknown("publication was not causally available by decision time", policy, record)
         if record.publish_time_ms > record.received_time_ms + policy.max_future_skew_ms:
@@ -264,8 +346,8 @@ class _BetfairStreamPublishFreshnessTracker:
         if age > policy.max_age_ms:
             return _decision(BetfairStreamFreshnessVerdict.STALE, "provider publication exceeds max_age_ms", policy, record, age)
         return _decision(
-            BetfairStreamFreshnessVerdict.FRESH_PROVIDER_PUBLISH,
-            "exact datum is fresh at the Betfair provider-publish boundary",
+            BetfairStreamFreshnessVerdict.AUTH_CONTEXT_UNPROVEN,
+            "provider publication is structurally fresh but authenticated stream acquisition is unproven",
             policy,
             record,
             age,
@@ -300,7 +382,10 @@ class _BetfairStreamPublishFreshnessTracker:
                 record.context_id != context.context_id
                 or record.subscription_generation != context.subscription_generation
                 or record.criteria_sha256 != context.criteria_sha256
-                or record.authenticated_context_id != context.authenticated_context_id
+                or record.upstream_context_sha256 != context.upstream_context_sha256
+                or record.provider_request_id != context.provider_request_id
+                or record.requested_heartbeat_ms != context.requested_heartbeat_ms
+                or record.requested_conflate_ms != context.requested_conflate_ms
             ):
                 raise ValueError("publication record does not belong to active context")
             if record.quote.identity in tracker.records:
@@ -317,11 +402,13 @@ class _BetfairStreamPublishFreshnessTracker:
 
 
 class BetfairStreamPublishFreshnessRuntime:
-    """Raw authenticated stream message -> canonical #858 codec/state -> freshness.
+    """Raw stream-shaped message -> canonical #858 codec/state -> freshness projection.
 
-    No public mutation API accepts decoded frames, apply results, caller freshness
-    booleans or caller-supplied ``pt``. Authentication provenance itself remains
-    upstream; its product-owned identity is bound into ``context`` and every receipt.
+    The raw public seam is intentionally assertion-only for authentication: it can
+    prove canonical message semantics, provider request correlation and timing, but
+    not that bytes/timestamps came from the authenticated network transport. Hence
+    this layer remains non-decision-eligible until upstream acquisition authority is
+    composed elsewhere.
     """
 
     def __init__(self, context: BetfairStreamSubscriptionContext) -> None:
@@ -348,6 +435,12 @@ class BetfairStreamPublishFreshnessRuntime:
         if type(raw_message) is not dict:
             raise TypeError("raw_message must be a dict from the authenticated stream transport")
         frame = decode_market_change_message(raw_message)
+        # Correlation must be checked before mutating canonical market state. A late
+        # message from a retired subscription must have zero state/evidence effect.
+        if frame.request_id is None:
+            raise ValueError("Betfair market-change message lacks provider request id")
+        if frame.request_id != self.context.provider_request_id:
+            raise ValueError("Betfair market-change message belongs to another subscription")
         result = self._state.apply(frame)
         return self._tracker.observe(
             result,
@@ -411,12 +504,13 @@ def _validate_local_times(publish: object, received: object, ingested: object) -
 def _context_payload(context: BetfairStreamSubscriptionContext, *, include_id: bool) -> dict[str, object]:
     payload: dict[str, object] = {
         "version": SCHEMA_VERSION,
-        "authenticated_context_id": context.authenticated_context_id,
+        "upstream_context_sha256": context.upstream_context_sha256,
         "subscription_id": context.subscription_id,
+        "provider_request_id": context.provider_request_id,
         "subscription_generation": context.subscription_generation,
         "criteria_sha256": context.criteria_sha256,
-        "heartbeat_ms": context.heartbeat_ms,
-        "conflate_ms": context.conflate_ms,
+        "requested_heartbeat_ms": context.requested_heartbeat_ms,
+        "requested_conflate_ms": context.requested_conflate_ms,
         "provider_id": context.provider_id,
         "source_id": context.source_id,
     }
@@ -429,12 +523,13 @@ def _context_from_payload(raw: object) -> BetfairStreamSubscriptionContext:
     if type(raw) is not dict or raw.get("version") != SCHEMA_VERSION:
         raise ValueError("invalid subscription context payload")
     context = BetfairStreamSubscriptionContext(
-        authenticated_context_id=raw.get("authenticated_context_id"),
+        upstream_context_sha256=raw.get("upstream_context_sha256"),
         subscription_id=raw.get("subscription_id"),
+        provider_request_id=raw.get("provider_request_id"),
         subscription_generation=raw.get("subscription_generation"),
         criteria_sha256=raw.get("criteria_sha256"),
-        heartbeat_ms=raw.get("heartbeat_ms"),
-        conflate_ms=raw.get("conflate_ms"),
+        requested_heartbeat_ms=raw.get("requested_heartbeat_ms"),
+        requested_conflate_ms=raw.get("requested_conflate_ms"),
         provider_id=raw.get("provider_id"),
         source_id=raw.get("source_id"),
     )
@@ -468,9 +563,14 @@ def _evidence_payload(record: BetfairStreamPublicationEvidence, *, include_id: b
         "quote": _quote_payload(record.quote),
         "context_id": record.context_id,
         "subscription_id": record.subscription_id,
+        "provider_request_id": record.provider_request_id,
         "subscription_generation": record.subscription_generation,
         "criteria_sha256": record.criteria_sha256,
-        "authenticated_context_id": record.authenticated_context_id,
+        "upstream_context_sha256": record.upstream_context_sha256,
+        "requested_heartbeat_ms": record.requested_heartbeat_ms,
+        "requested_conflate_ms": record.requested_conflate_ms,
+        "provider_heartbeat_ms": record.provider_heartbeat_ms,
+        "provider_conflate_ms": record.provider_conflate_ms,
         "frame_sha256": record.frame_sha256,
         "frame_kind": record.frame_kind.value,
         "provider_health": record.provider_health.value,
@@ -493,15 +593,23 @@ def _record(
     frame_sha256: str,
     received_time_ms: int,
     ingested_time_ms: int,
+    *,
+    provider_heartbeat_ms: int | None,
+    provider_conflate_ms: int | None,
 ) -> BetfairStreamPublicationEvidence:
     cursor = result.cursor
     kwargs = dict(
         quote=quote,
         context_id=context.context_id,
         subscription_id=context.subscription_id,
+        provider_request_id=context.provider_request_id,
         subscription_generation=context.subscription_generation,
         criteria_sha256=context.criteria_sha256,
-        authenticated_context_id=context.authenticated_context_id,
+        upstream_context_sha256=context.upstream_context_sha256,
+        requested_heartbeat_ms=context.requested_heartbeat_ms,
+        requested_conflate_ms=context.requested_conflate_ms,
+        provider_heartbeat_ms=provider_heartbeat_ms,
+        provider_conflate_ms=provider_conflate_ms,
         frame_sha256=frame_sha256,
         frame_kind=result.frame_kind,
         provider_health=result.provider_health,
@@ -517,9 +625,14 @@ def _record(
         "quote": _quote_payload(quote),
         "context_id": context.context_id,
         "subscription_id": context.subscription_id,
+        "provider_request_id": context.provider_request_id,
         "subscription_generation": context.subscription_generation,
         "criteria_sha256": context.criteria_sha256,
-        "authenticated_context_id": context.authenticated_context_id,
+        "upstream_context_sha256": context.upstream_context_sha256,
+        "requested_heartbeat_ms": context.requested_heartbeat_ms,
+        "requested_conflate_ms": context.requested_conflate_ms,
+        "provider_heartbeat_ms": provider_heartbeat_ms,
+        "provider_conflate_ms": provider_conflate_ms,
         "frame_sha256": frame_sha256,
         "frame_kind": result.frame_kind.value,
         "provider_health": result.provider_health.value,
@@ -584,9 +697,14 @@ def _evidence_from_payload(raw: object) -> BetfairStreamPublicationEvidence:
             quote=_quote_from_payload(raw.get("quote")),
             context_id=raw.get("context_id"),
             subscription_id=raw.get("subscription_id"),
+            provider_request_id=raw.get("provider_request_id"),
             subscription_generation=raw.get("subscription_generation"),
             criteria_sha256=raw.get("criteria_sha256"),
-            authenticated_context_id=raw.get("authenticated_context_id"),
+            upstream_context_sha256=raw.get("upstream_context_sha256"),
+            requested_heartbeat_ms=raw.get("requested_heartbeat_ms"),
+            requested_conflate_ms=raw.get("requested_conflate_ms"),
+            provider_heartbeat_ms=raw.get("provider_heartbeat_ms"),
+            provider_conflate_ms=raw.get("provider_conflate_ms"),
             frame_sha256=raw.get("frame_sha256"),
             frame_kind=BetfairFrameKind(raw.get("frame_kind")),
             provider_health=BetfairProviderStreamHealth(raw.get("provider_health")),

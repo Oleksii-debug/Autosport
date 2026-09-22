@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+import os
 import sqlite3
 from pathlib import Path
 
@@ -68,8 +69,9 @@ class SQLiteProviderSequenceAuthority:
         if self.path.exists() and self.path.is_dir():
             raise ValueError("provider sequence authority path must be a file")
 
-        if create:
-            self._initialize_or_validate()
+        existed_before = self.path.exists()
+        if create and not existed_before:
+            self._initialize_new()
         else:
             self._validate_existing()
 
@@ -141,7 +143,24 @@ class SQLiteProviderSequenceAuthority:
         finally:
             connection.close()
 
-    def _initialize_or_validate(self) -> None:
+    def _initialize_new(self) -> None:
+        try:
+            descriptor = os.open(
+                self.path,
+                os.O_CREAT | os.O_EXCL | os.O_RDWR,
+                0o600,
+            )
+        except FileExistsError as exc:
+            raise ProviderSequenceAuthorityError(
+                "provider sequence authority appeared during exclusive creation"
+            ) from exc
+        except OSError as exc:
+            raise ProviderSequenceAuthorityError(
+                "provider sequence authority file cannot be created"
+            ) from exc
+        else:
+            os.close(descriptor)
+
         try:
             connection = sqlite3.connect(
                 self.path,
@@ -150,7 +169,7 @@ class SQLiteProviderSequenceAuthority:
             )
         except sqlite3.Error as exc:
             raise ProviderSequenceAuthorityError(
-                "provider sequence SQLite authority cannot be created"
+                "provider sequence SQLite authority cannot be initialized"
             ) from exc
 
         try:
@@ -180,18 +199,38 @@ class SQLiteProviderSequenceAuthority:
                    )"""
             )
 
+            self._validate_table_info(
+                connection,
+                "provider_sequence_meta_v1",
+                (
+                    (0, "singleton", "INTEGER", 1, None, 1),
+                    (1, "schema_version", "INTEGER", 1, None, 0),
+                    (2, "authority_id", "TEXT", 1, None, 0),
+                ),
+            )
+            self._validate_table_info(
+                connection,
+                "provider_sequences_v1",
+                (
+                    (0, "source_id", "TEXT", 1, None, 1),
+                    (1, "last_sequence", "INTEGER", 1, None, 0),
+                ),
+            )
             meta_rows = connection.execute(
                 """SELECT singleton,schema_version,authority_id
                    FROM provider_sequence_meta_v1
                    ORDER BY singleton"""
             ).fetchall()
-            if not meta_rows:
-                connection.execute(
-                    """INSERT INTO provider_sequence_meta_v1
-                       (singleton,schema_version,authority_id)
-                       VALUES (1,?,?)""",
-                    (_SCHEMA_VERSION, self.authority_id),
+            if meta_rows:
+                raise ProviderSequenceAuthorityError(
+                    "new provider sequence authority unexpectedly contains metadata"
                 )
+            connection.execute(
+                """INSERT INTO provider_sequence_meta_v1
+                   (singleton,schema_version,authority_id)
+                   VALUES (1,?,?)""",
+                (_SCHEMA_VERSION, self.authority_id),
+            )
             connection.commit()
         except ProviderSequenceAuthorityError:
             self._rollback_quietly(connection)

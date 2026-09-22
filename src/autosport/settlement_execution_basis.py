@@ -24,9 +24,6 @@ _REAL_EXECUTION_LEDGER_CLASS_SURFACE = dict(RealExecutionLedger.__dict__)
 _REAL_EXECUTION_LEDGER_VERIFIED_SNAPSHOT = (
     _REAL_EXECUTION_LEDGER_CLASS_SURFACE["verified_snapshot"]
 )
-_REAL_EXECUTION_LEDGER_INSTANCE_FIELDS = frozenset(
-    {"path", "_lock_path", "_thread_lock", "_path_durable"}
-)
 
 
 class SettlementExecutionBasisError(RuntimeError):
@@ -47,7 +44,7 @@ def _canonical_verified_snapshot(
         raise SettlementExecutionBasisError(
             "execution ledger instance authority is unavailable"
         ) from exc
-    if set(instance_state) != _REAL_EXECUTION_LEDGER_INSTANCE_FIELDS:
+    if set(instance_state).intersection(_REAL_EXECUTION_LEDGER_CLASS_SURFACE):
         raise SettlementExecutionBasisError(
             "execution ledger instance read authority was rebound"
         )

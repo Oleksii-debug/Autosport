@@ -142,7 +142,11 @@ class ProceduralSkillMemoryVersion:
         _text(self.skill_version, "skill_version")
         _sha256(self.procedure_sha256, "procedure_sha256")
         _sha256(self.contract_sha256, "contract_sha256")
-        _instant(self.available_at, "available_at")
+        object.__setattr__(
+            self,
+            "available_at",
+            _instant(self.available_at, "available_at"),
+        )
         _sorted_unique_texts(self.validity_domain, "validity_domain")
         _sorted_unique_texts(self.learned_from, "learned_from")
         _provenance(self.provenance)

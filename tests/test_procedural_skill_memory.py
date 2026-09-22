@@ -91,6 +91,22 @@ def test_initialize_publish_restart_and_causal_as_of(tmp_path):
     assert restarted.state_sha256 == memory.state_sha256
 
 
+def test_available_at_is_canonical_before_persistence_and_stable_after_restart(tmp_path):
+    path = tmp_path / "procedural-memory.json"
+    memory = ProceduralSkillMemory.initialize(path)
+    version = _version(available_at="2026-09-22T12:00:00+02:00")
+
+    assert version.available_at == "2026-09-22T10:00:00Z"
+    memory.publish(version)
+
+    restarted = ProceduralSkillMemory(path)
+    assert restarted.all_versions() == (version,)
+    assert restarted.as_of(
+        skill_key=version.skill_key,
+        as_of="2026-09-22T10:00:00Z",
+    ) == version
+
+
 def test_successor_is_immutable_versioned_and_latest_as_of(tmp_path):
     memory = ProceduralSkillMemory.initialize(tmp_path / "memory.json")
     first = _version()

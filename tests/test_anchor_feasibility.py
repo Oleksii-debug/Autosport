@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, getcontext
 
@@ -108,6 +109,27 @@ def test_complete_fourteen_day_review_can_only_continue_evidence() -> None:
     assert report.execution_authority is False
     assert report.external_validity_authority is False
     assert report.real_money_authority is False
+
+
+@pytest.mark.parametrize(
+    "field_name",
+    [
+        "ranking_authority",
+        "winner_authority",
+        "promotion_authority",
+        "execution_authority",
+        "external_validity_authority",
+        "real_money_authority",
+    ],
+)
+def test_public_report_constructor_cannot_mint_downstream_authority(
+    field_name: str,
+) -> None:
+    report = evaluate([obs(1, AcquisitionState.ZERO_RESULT)])
+    with pytest.raises(AnchorFeasibilityError, match="cannot grant downstream authority"):
+        replace(report, **{field_name: True})
+    with pytest.raises(AnchorFeasibilityError, match="cannot grant downstream authority"):
+        replace(report, **{field_name: 1})
 
 
 def test_pending_blocks_terminal_coverage_even_after_window_end() -> None:

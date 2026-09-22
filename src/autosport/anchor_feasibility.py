@@ -171,6 +171,20 @@ class AnchorFeasibilityReport:
     external_validity_authority: bool = False
     real_money_authority: bool = False
 
+    def __post_init__(self) -> None:
+        authority_values = (
+            self.ranking_authority,
+            self.winner_authority,
+            self.promotion_authority,
+            self.execution_authority,
+            self.external_validity_authority,
+            self.real_money_authority,
+        )
+        if any(value is not False for value in authority_values):
+            raise AnchorFeasibilityError(
+                "anchor feasibility reports cannot grant downstream authority"
+            )
+
 
 def evaluate_anchor_feasibility(
     *,

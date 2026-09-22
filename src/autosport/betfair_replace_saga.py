@@ -863,7 +863,10 @@ class BetfairReplaceSagaStore:
         self.path.parent.mkdir(parents=True, exist_ok=True)
 
     def _absolute_path(self) -> Path:
-        return Path(os.path.realpath(os.path.abspath(os.fspath(self.path))))
+        # Preserve lexical path identity. MonotonicWorkspaceAuthority deliberately
+        # reserves lexical workspace locations so symlink/junction retargeting
+        # cannot silently select a fresh ancestry.
+        return Path(os.path.abspath(os.fspath(self.path)))
 
     def _monotonic_path_identity(self) -> str:
         return os.path.normcase(self._absolute_path().name)

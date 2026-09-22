@@ -59,6 +59,7 @@ class ProjectionIdentity:
 
     projection: OfferProjection
     virtualise: bool
+    rollover_stakes: bool
     rollup_settings: tuple[tuple[str, str], ...]
     depth: int | None = None
 
@@ -67,6 +68,12 @@ class ProjectionIdentity:
             raise TypeError("projection must be OfferProjection")
         if not isinstance(self.virtualise, bool):
             raise TypeError("virtualise must be bool")
+        if not isinstance(self.rollover_stakes, bool):
+            raise TypeError("rollover_stakes must be bool")
+        if self.rollover_stakes:
+            raise ValueError(
+                "rollover_stakes=true is unsupported for independent level aggregation"
+            )
         if self.projection is OfferProjection.EX_BEST_OFFERS:
             if not isinstance(self.depth, int) or isinstance(self.depth, bool) or self.depth <= 0:
                 raise ValueError("EX_BEST_OFFERS requires a positive integer depth")

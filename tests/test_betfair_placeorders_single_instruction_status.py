@@ -3,11 +3,10 @@ from __future__ import annotations
 import json
 from decimal import Decimal
 
-import pytest
-
 from autosport.betfair_supervised_execution import (
-    BetfairPlaceOrdersAmbiguous,
+    PlaceOrdersOutcome,
     _parse_place_orders_response,
+    _report_outcome,
 )
 from autosport.real_execution_ledger import ExecutionAction
 
@@ -29,7 +28,7 @@ def _action() -> ExecutionAction:
     )
 
 
-def test_single_instruction_processed_with_errors_is_ambiguous() -> None:
+def test_single_instruction_processed_with_errors_uses_failure_instruction_truth() -> None:
     action = _action()
     payload = json.dumps(
         {
@@ -61,12 +60,20 @@ def test_single_instruction_processed_with_errors_is_ambiguous() -> None:
         }
     ).encode("utf-8")
 
-    with pytest.raises(BetfairPlaceOrdersAmbiguous, match="PROCESSED_WITH_ERRORS"):
-        _parse_place_orders_response(
-            payload,
-            request_id=1,
-            request_sha256="a" * 64,
-            action=action,
-            provider_order_ref="b" * 32,
-            observed_at="2026-09-21T19:00:00+00:00",
-        )
+    report = _parse_place_orders_response(
+        payload,
+        request_id=1,
+        request_sha256="a" * 64,
+        action=action,
+        provider_order_ref="b" * 32,
+        observed_at="2026-09-21T19:00:00+00:00",
+    )
+
+    assert report.status == "PROCESSED_WITH_ERRORS"
+    assert report.instruction.status == "FAILURE"
+    # PROCESSED_WITH_ERRORS is a legal request-level status even when all
+    # instructions fail. This fixture intentionally lacks the exact terminal
+    # rejection proof (provider betId + execution-complete disposition and
+    # matching top-level/instruction error contract), so it must remain
+    # UNKNOWN/readback-required rather than becoming a synthetic rejection.
+    assert _report_outcome(report, action) is PlaceOrdersOutcome.UNKNOWN

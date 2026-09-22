@@ -878,18 +878,14 @@ def _derive_state_and_exposure(
                     ),
                 )
             if absent:
+                # Current-order disappearance proves only that the bet is no longer
+                # present in this scoped current-order read.  An opaque digest of a
+                # separate final/cleared artifact cannot prove *why* it disappeared:
+                # cancellation, further matching, lapse and void are economically
+                # different terminal outcomes.  Until structured final evidence is
+                # bound into this contract, keep the saga unresolved even when the
+                # current scope is complete and a final_evidence_sha256 is present.
                 executable.discard(intent.bet_id)
-                if reconciliation.scope_complete and reconciliation.final_evidence_sha256:
-                    return (
-                        CancelSagaState.CANCEL_RECONCILED,
-                        CancelExposureView(
-                            tuple(sorted(matched)),
-                            tuple(sorted(executable)),
-                            tuple(sorted(cancelled)),
-                            (),
-                            True,
-                        ),
-                    )
                 unresolved.add(intent.bet_id)
             elif matching:
                 current = matching[0]

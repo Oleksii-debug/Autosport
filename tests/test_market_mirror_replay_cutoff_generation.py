@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
+import sqlite3
 import tempfile
 import unittest
 
@@ -179,6 +180,77 @@ class MarketMirrorReplayCutoffGenerationTests(unittest.TestCase):
                 self.assertEqual(later.events[0].decimal_odds, Decimal("3.00"))
             finally:
                 store.close()
+
+    def test_pre_v1_history_migrates_to_generation_zero_only(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "market.db"
+            original = SQLiteMarketStore(path)
+            try:
+                original.append(
+                    self.event(
+                        sequence=1,
+                        odds="2.00",
+                        observed_ts="2026-09-16T19:00:00+00:00",
+                    )
+                )
+            finally:
+                original.close()
+
+            # Simulate the exact pre-v1 durable shape by removing only the new
+            # causal companion objects while retaining canonical history/current.
+            raw = sqlite3.connect(path)
+            try:
+                raw.execute("DROP TABLE market_replay_cutoffs")
+                raw.execute("DROP TABLE market_event_commit_order")
+                raw.commit()
+            finally:
+                raw.close()
+
+            migrated = SQLiteMarketStore(path)
+            try:
+                legacy_rows = migrated.connection.execute(
+                    "SELECT append_generation FROM market_event_commit_order"
+                ).fetchall()
+                self.assertEqual(legacy_rows, [(0,)])
+
+                migrated.append(
+                    self.event(
+                        sequence=2,
+                        odds="2.20",
+                        observed_ts="2026-09-16T19:00:02+00:00",
+                    )
+                )
+                generations = migrated.connection.execute(
+                    "SELECT append_generation FROM market_event_commit_order "
+                    "ORDER BY append_generation, dedupe_key"
+                ).fetchall()
+                self.assertEqual(generations, [(0,), (1,)])
+
+                index_terms = migrated.connection.execute(
+                    'PRAGMA index_xinfo("idx_market_event_commit_generation")'
+                ).fetchall()
+                key_terms = tuple(
+                    row[2] for row in index_terms if len(row) >= 6 and row[5] == 1
+                )
+                self.assertEqual(key_terms, ("append_generation",))
+            finally:
+                migrated.close()
+
+    def test_partial_causal_schema_fails_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "market.db"
+            store = SQLiteMarketStore(path)
+            store.close()
+
+            raw = sqlite3.connect(path)
+            try:
+                raw.execute("DROP TABLE market_replay_cutoffs")
+                raw.commit()
+            finally:
+                raw.close()
+
+            with self.assertRaises(ValueError):
+                SQLiteMarketStore(path)
 
     def test_missing_commit_generation_fails_closed(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

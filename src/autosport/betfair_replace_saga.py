@@ -18,7 +18,7 @@ import json
 import math
 import os
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 from enum import StrEnum
@@ -472,9 +472,38 @@ class ReplaceExposureTruth:
     unresolved_original_bet_ids: tuple[str, ...]
     unresolved_replacement_bet_ids_for: tuple[str, ...]
     request_sha256: str
-    provider_verified: bool = False
-    execution_admission_eligible: bool = False
-    real_money_authorized: bool = False
+    provider_verified: bool = field(default=False, init=False)
+    execution_admission_eligible: bool = field(default=False, init=False)
+    real_money_authorized: bool = field(default=False, init=False)
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "saga_id", _text(self.saga_id, "saga_id"))
+        if type(self.state) is not ReplaceSagaState:
+            raise ValueError("state must be ReplaceSagaState")
+        tuple_fields = (
+            "known_not_executable_original_bet_ids",
+            "known_executable_original_bet_ids",
+            "known_replacement_bet_ids",
+            "unresolved_original_bet_ids",
+            "unresolved_replacement_bet_ids_for",
+        )
+        for name in tuple_fields:
+            value = getattr(self, name)
+            if type(value) is not tuple or not all(type(item) is str for item in value):
+                raise ValueError(f"{name} must be a tuple of canonical text values")
+            canonical = tuple(_text(item, name) for item in value)
+            if len(set(canonical)) != len(canonical):
+                raise ValueError(f"{name} must not contain duplicates")
+            object.__setattr__(self, name, canonical)
+        if set(self.known_not_executable_original_bet_ids) & set(
+            self.known_executable_original_bet_ids
+        ):
+            raise ValueError("original bet cannot be both executable and not executable")
+        object.__setattr__(
+            self,
+            "request_sha256",
+            _sha256(self.request_sha256, "request_sha256"),
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -493,6 +522,7 @@ class _Facts:
     unknown_at: str | None
     provider: ReplaceProviderEvidence | None
     reconciliation: ReplaceReconciliationEvidence | None
+    conflict_observed: bool
 
 
 def _intent_from_dict(value: object) -> ReplaceIntent:
@@ -681,7 +711,11 @@ def _derive_state_and_exposure(intent: ReplaceIntent, facts: _Facts) -> tuple[Re
     known_new: dict[str, str] = {}
     unresolved_original: set[str] = set(originals)
     unresolved_replacement: set[str] = set(originals)
-    conflict = False
+    # Conflict is a durable high-water safety incident. A later ordinary
+    # reconciliation may refine the current exposure, but cannot retroactively
+    # erase an already-observed impossible order/linkage state. This module has
+    # no conflict-resolution authority, so such a conflict remains sticky.
+    conflict = facts.conflict_observed
 
     if provider is not None:
         for result in provider.results:
@@ -760,20 +794,17 @@ def _derive_state_and_exposure(intent: ReplaceIntent, facts: _Facts) -> tuple[Re
 
     if conflict:
         state = ReplaceSagaState.CONFLICT
-    elif all_original_not_executable and all_replacements_known:
-        state = ReplaceSagaState.REPLACED
-    elif provider is not None and all_original_not_executable and all(
-        item.place_status is ReplacePhaseStatus.FAILURE for item in provider.results
-    ):
-        state = ReplaceSagaState.REPLACE_CANCELLED_WITHOUT_REPLACEMENT
-    elif provider is not None and all_original_not_executable and all(
-        item.place_status is not ReplacePhaseStatus.SUCCESS for item in provider.results
-    ) and not any_unknown_provider:
+    elif all_original_not_executable and not all_replacements_known:
+        # Caller-carried provider/readback DTOs are observations, not product-
+        # issued provider truth. They may conservatively establish that an old
+        # order is no longer executable, but cannot prove terminal replacement
+        # failure or suppress required readback.
         state = ReplaceSagaState.CANCEL_CONFIRMED
-    elif any_unknown_provider or facts.unknown_at is not None or unresolved_replacement or unresolved_original:
-        state = ReplaceSagaState.UNKNOWN_PARTIAL
     else:
-        state = ReplaceSagaState.REPLACE_REJECTED_OR_CHANGED
+        # Until this saga consumes a canonical product-owned provider/readback
+        # evidence capability, even apparently complete positive observations
+        # remain nonterminal and require reconciliation.
+        state = ReplaceSagaState.UNKNOWN_PARTIAL
 
     exposure = ReplaceExposureTruth(
         saga_id=intent.saga_id,
@@ -954,21 +985,86 @@ class BetfairReplaceSagaStore:
         saga_events = BetfairReplaceSagaStore._saga_events(events, saga_id)
         submitted = [event for event in saga_events if event["event_type"] == EventType.SUBMITTED.value]
         unknown = [event for event in saga_events if event["event_type"] == EventType.UNKNOWN.value]
-        provider = [event for event in saga_events if event["event_type"] == EventType.PROVIDER_RESULT.value]
-        reconciliation = [event for event in saga_events if event["event_type"] == EventType.RECONCILIATION.value]
+        provider_events = [
+            event
+            for event in saga_events
+            if event["event_type"] == EventType.PROVIDER_RESULT.value
+        ]
+        reconciliation_events = [
+            event
+            for event in saga_events
+            if event["event_type"] == EventType.RECONCILIATION.value
+        ]
+        provider = (
+            _provider_evidence_from_dict(provider_events[0]["payload"]["evidence"])
+            if provider_events
+            else None
+        )
+        reconciliations = [
+            _reconciliation_from_dict(event["payload"]["evidence"])
+            for event in reconciliation_events
+        ]
+
+        conflict_observed = False
+        if provider is not None:
+            placed = [item.place_status for item in provider.results]
+            if (
+                ReplacePhaseStatus.SUCCESS in placed
+                and ReplacePhaseStatus.FAILURE in placed
+            ):
+                conflict_observed = True
+            if any(
+                item.cancel_status is ReplacePhaseStatus.FAILURE
+                and item.place_status is ReplacePhaseStatus.SUCCESS
+                for item in provider.results
+            ):
+                conflict_observed = True
+
+        prior_new_by_original: dict[str, str] = {}
+        provider_by_id = (
+            {item.bet_id: item for item in provider.results}
+            if provider is not None
+            else {}
+        )
+        for evidence in reconciliations:
+            for item in evidence.results:
+                if (
+                    item.original_state is OriginalOrderState.EXECUTABLE
+                    and item.new_bet_id is not None
+                ):
+                    conflict_observed = True
+                if item.new_bet_id is not None:
+                    prior_new = prior_new_by_original.get(item.bet_id)
+                    if prior_new is not None and prior_new != item.new_bet_id:
+                        conflict_observed = True
+                    prior_new_by_original[item.bet_id] = item.new_bet_id
+
+                provider_item = provider_by_id.get(item.bet_id)
+                if provider_item is None:
+                    continue
+                if (
+                    provider_item.place_status is ReplacePhaseStatus.FAILURE
+                    and item.new_bet_id is not None
+                ):
+                    conflict_observed = True
+                if (
+                    provider_item.place_status is ReplacePhaseStatus.SUCCESS
+                    and item.new_bet_id is not None
+                    and provider_item.new_bet_id != item.new_bet_id
+                ):
+                    conflict_observed = True
+                if (
+                    provider_item.cancel_status is ReplacePhaseStatus.SUCCESS
+                    and item.original_state is OriginalOrderState.EXECUTABLE
+                ):
+                    conflict_observed = True
+
         return _Facts(
             submitted_at=submitted[0]["payload"]["submitted_at"] if submitted else None,
             unknown_at=unknown[0]["payload"]["observed_at"] if unknown else None,
-            provider=(
-                _provider_evidence_from_dict(provider[0]["payload"]["evidence"])
-                if provider
-                else None
-            ),
-            reconciliation=(
-                _reconciliation_from_dict(reconciliation[-1]["payload"]["evidence"])
-                if reconciliation
-                else None
-            ),
+            provider=provider,
+            reconciliation=reconciliations[-1] if reconciliations else None,
+            conflict_observed=conflict_observed,
         )
 
     @classmethod
@@ -1019,9 +1115,14 @@ class BetfairReplaceSagaStore:
                     observed = _timestamp(event["payload"]["observed_at"], "observed_at")
                 except ValueError as exc:
                     raise BetfairReplaceSagaIntegrityError("replace UNKNOWN payload invalid") from exc
-                boundary = submitted_at or intent.prepared_at
-                if _time(observed) < _time(boundary):
-                    raise BetfairReplaceSagaIntegrityError("replace UNKNOWN precedes causal boundary")
+                if submitted_at is None:
+                    raise BetfairReplaceSagaIntegrityError(
+                        "replace UNKNOWN requires prior SUBMITTED boundary"
+                    )
+                if _time(observed) < _time(submitted_at):
+                    raise BetfairReplaceSagaIntegrityError(
+                        "replace UNKNOWN precedes causal boundary"
+                    )
             provider_events = [e for e in saga_events if e["event_type"] == EventType.PROVIDER_RESULT.value]
             if len(provider_events) > 1:
                 raise BetfairReplaceSagaIntegrityError("replace saga has multiple PROVIDER_RESULT events")
@@ -1032,9 +1133,14 @@ class BetfairReplaceSagaStore:
                 evidence = _provider_evidence_from_dict(event["payload"]["evidence"])
                 if not _same_id_set(intent, evidence.results, attr="bet_id"):
                     raise BetfairReplaceSagaIntegrityError("provider result does not cover exact prepared bet ids")
-                boundary = submitted_at or intent.prepared_at
-                if _time(evidence.observed_at) < _time(boundary):
-                    raise BetfairReplaceSagaIntegrityError("provider result precedes replace causal boundary")
+                if submitted_at is None:
+                    raise BetfairReplaceSagaIntegrityError(
+                        "provider result requires prior SUBMITTED boundary"
+                    )
+                if _time(evidence.observed_at) < _time(submitted_at):
+                    raise BetfairReplaceSagaIntegrityError(
+                        "provider result precedes replace causal boundary"
+                    )
             reconciliation_events = [e for e in saga_events if e["event_type"] == EventType.RECONCILIATION.value]
             seen_evidence: dict[str, dict[str, object]] = {}
             for event in reconciliation_events:
@@ -1043,8 +1149,11 @@ class BetfairReplaceSagaStore:
                 evidence = _reconciliation_from_dict(event["payload"]["evidence"])
                 if not _same_id_set(intent, evidence.results, attr="bet_id"):
                     raise BetfairReplaceSagaIntegrityError("reconciliation does not cover exact prepared bet ids")
-                boundary = submitted_at or intent.prepared_at
-                if _time(evidence.observed_at) <= _time(boundary):
+                if submitted_at is None:
+                    raise BetfairReplaceSagaIntegrityError(
+                        "reconciliation requires prior SUBMITTED boundary"
+                    )
+                if _time(evidence.observed_at) <= _time(submitted_at):
                     raise BetfairReplaceSagaIntegrityError(
                         "reconciliation must be newer than replace external boundary"
                     )
@@ -1105,9 +1214,14 @@ class BetfairReplaceSagaStore:
                 raise BetfairReplaceSagaStateError(
                     "provider result is already durable; ambiguity cannot replace it"
                 )
-            boundary = facts.submitted_at or intent.prepared_at
-            if _time(canonical_time) < _time(boundary):
-                raise BetfairReplaceSagaStateError("UNKNOWN precedes replace causal boundary")
+            if facts.submitted_at is None:
+                raise BetfairReplaceSagaStateError(
+                    "UNKNOWN requires durable SUBMITTED boundary"
+                )
+            if _time(canonical_time) < _time(facts.submitted_at):
+                raise BetfairReplaceSagaStateError(
+                    "UNKNOWN precedes replace causal boundary"
+                )
             payload = {"reason": reason_text, "observed_at": canonical_time}
             existing = [e for e in self._saga_events(events, saga) if e["event_type"] == EventType.UNKNOWN.value]
             if existing:
@@ -1160,8 +1274,11 @@ class BetfairReplaceSagaStore:
             events = self._events()
             intent = self._intent_from_events(events, saga)
             facts = self._facts(events, saga)
-            boundary = facts.submitted_at or intent.prepared_at
-            if _time(evidence.observed_at) <= _time(boundary):
+            if facts.submitted_at is None:
+                raise BetfairReplaceSagaStateError(
+                    "reconciliation requires durable SUBMITTED boundary"
+                )
+            if _time(evidence.observed_at) <= _time(facts.submitted_at):
                 raise BetfairReplaceSagaStateError(
                     "reconciliation must be newer than replace external boundary"
                 )

@@ -120,7 +120,7 @@ def _allocation(
     )
 
 
-def test_fresh_exact_account_balance_can_only_prove_unreserved_snapshot_sufficiency() -> None:
+def test_fresh_balance_coverage_is_descriptive_until_cash_requirement_is_authoritative() -> None:
     report = assess_provider_funds(
         (_allocation("leg-1"),),
         (_snapshot(venue_id="A", account_id="acct-a", amount="100"),),
@@ -129,10 +129,12 @@ def test_fresh_exact_account_balance_can_only_prove_unreserved_snapshot_sufficie
     )
 
     assessment = report.assessments[0]
-    assert assessment.state is ProviderFundsState.SNAPSHOT_SUFFICIENT_BUT_UNRESERVED
+    assert assessment.state is ProviderFundsState.UNKNOWN
     assert assessment.available_balance == Decimal("100")
     assert assessment.requested_amount == Decimal("50")
-    assert report.all_snapshot_sufficient is True
+    assert assessment.balance_covers_supplied_cash_assertion is True
+    assert report.all_balances_cover_supplied_cash_assertions is True
+    assert report.all_snapshot_sufficient is False
     report.assert_authoritative_projection()
     assert report.funds_reserved is False
     assert report.transfer_authorized is False
@@ -162,6 +164,7 @@ def test_rich_other_account_cannot_fund_target_account() -> None:
     assert assessment.venue_id == "A"
     assert assessment.state is ProviderFundsState.INSUFFICIENT
     assert assessment.available_balance == Decimal("10")
+    assert assessment.balance_covers_supplied_cash_assertion is False
     assert report.all_snapshot_sufficient is False
 
 
@@ -191,6 +194,7 @@ def test_missing_required_account_snapshot_is_unknown() -> None:
 
     assert report.assessments[0].state is ProviderFundsState.UNKNOWN
     assert report.assessments[0].available_balance is None
+    assert report.all_balances_cover_supplied_cash_assertions is False
 
 
 def test_snapshot_without_complete_balance_read_is_unknown_not_zero() -> None:
@@ -336,8 +340,10 @@ def test_report_identity_is_deterministic_across_allocation_input_order() -> Non
 
     assert first == second
     assert first.report_sha256 == second.report_sha256
-    assert first.all_snapshot_sufficient is True
-    assert second.all_snapshot_sufficient is True
+    assert first.all_snapshot_sufficient is False
+    assert second.all_snapshot_sufficient is False
+    assert first.all_balances_cover_supplied_cash_assertions is True
+    assert second.all_balances_cover_supplied_cash_assertions is True
 
 
 def test_snapshot_subclass_is_rejected_as_positive_authority() -> None:
@@ -383,11 +389,9 @@ def test_provider_currency_contract_accepts_non_iso_provider_code() -> None:
         max_balance_age_seconds=Decimal("10"),
     )
 
-    assert (
-        report.assessments[0].state
-        is ProviderFundsState.SNAPSHOT_SUFFICIENT_BUT_UNRESERVED
-    )
+    assert report.assessments[0].state is ProviderFundsState.UNKNOWN
     assert report.assessments[0].currency == "USDT"
+    assert report.all_balances_cover_supplied_cash_assertions is True
 
 
 def test_report_identity_binds_allocation_ids_not_only_account_aggregate() -> None:
@@ -415,21 +419,29 @@ def test_report_identity_binds_allocation_ids_not_only_account_aggregate() -> No
 
 
 def test_direct_positive_report_construction_cannot_mint_projection_authority() -> None:
-    canonical = assess_provider_funds(
-        (_allocation("leg-1"),),
-        (_snapshot(venue_id="A", account_id="acct-a", amount="100"),),
+    allocation = _allocation("leg-1", amount="50")
+    forged_assessment = ProviderFundsAssessment(
+        venue_id="A",
+        account_id="acct-a",
+        adapter_id="adapter",
+        currency="EUR",
+        requested_amount=Decimal("50"),
+        state=ProviderFundsState.SNAPSHOT_SUFFICIENT_BUT_UNRESERVED,
+        reason="caller-forged positive state",
+        available_balance=Decimal("100"),
+        balance_observation_id="obs",
+        balance_source_payload_sha256=_HASH,
+        balance_observed_at=_T1,
+    )
+    forged = ProviderFundsFeasibilityReport(
         decision_ts=_T2,
         max_balance_age_seconds=Decimal("10"),
-    )
-
-    forged = ProviderFundsFeasibilityReport(
-        decision_ts=canonical.decision_ts,
-        max_balance_age_seconds=canonical.max_balance_age_seconds,
-        allocations=canonical.allocations,
-        assessments=canonical.assessments,
+        allocations=(allocation,),
+        assessments=(forged_assessment,),
     )
 
     assert forged.all_snapshot_sufficient is False
+    assert forged.all_balances_cover_supplied_cash_assertions is False
     with pytest.raises(
         ProviderFundsFeasibilityError,
         match="not issued by canonical evaluator",
@@ -437,18 +449,19 @@ def test_direct_positive_report_construction_cannot_mint_projection_authority() 
         forged.assert_authoritative_projection()
 
 
-def test_dataclass_replace_loses_positive_projection_authority() -> None:
+def test_dataclass_replace_loses_projection_authority() -> None:
     canonical = assess_provider_funds(
         (_allocation("leg-1"),),
         (_snapshot(venue_id="A", account_id="acct-a", amount="100"),),
         decision_ts=_T2,
         max_balance_age_seconds=Decimal("10"),
     )
+    assert canonical.all_balances_cover_supplied_cash_assertions is True
 
     copied = replace(canonical)
 
     assert copied == canonical
-    assert copied.all_snapshot_sufficient is False
+    assert copied.all_balances_cover_supplied_cash_assertions is False
     with pytest.raises(ProviderFundsFeasibilityError):
         copied.assert_authoritative_projection()
 
@@ -517,18 +530,19 @@ def test_assessment_state_must_match_available_balance_arithmetic() -> None:
         )
 
 
-def test_mutating_issued_report_payload_revokes_positive_authority() -> None:
+def test_mutating_issued_report_payload_revokes_projection_authority() -> None:
     report = assess_provider_funds(
         (_allocation("leg-1"),),
         (_snapshot(venue_id="A", account_id="acct-a", amount="100"),),
         decision_ts=_T2,
         max_balance_age_seconds=Decimal("10"),
     )
-    assert report.all_snapshot_sufficient is True
+    assert report.all_balances_cover_supplied_cash_assertions is True
+    report.assert_authoritative_projection()
 
     object.__setattr__(report.assessments[0], "reason", "mutated after issuance")
 
-    assert report.all_snapshot_sufficient is False
+    assert report.all_balances_cover_supplied_cash_assertions is False
     with pytest.raises(ProviderFundsFeasibilityError):
         report.assert_authoritative_projection()
 

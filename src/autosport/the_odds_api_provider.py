@@ -15,8 +15,8 @@ from datetime import datetime
 from decimal import Decimal, InvalidOperation
 from typing import Any, Callable
 from urllib.error import HTTPError, URLError
-from urllib.parse import urlencode
-from urllib.request import Request, urlopen
+from urllib.parse import urlencode, urlsplit
+from urllib.request import HTTPRedirectHandler, Request, build_opener
 
 from .domain import MarketType, utc_now_iso
 from .providers import ProviderBatch, ProviderQuote, ProviderUnavailableError
@@ -44,6 +44,7 @@ class HttpJsonResponse:
     payload: Any
     status_code: int
     headers: Mapping[str, str]
+    final_url: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -57,6 +58,8 @@ class TheOddsApiRequestEvidence:
     include_sids: bool
     include_bet_limits: bool
     observed_at: str
+    provider_origin_verified: bool
+    receipt_clock_verified: bool
     requested_snapshot_at: str | None = None
     actual_snapshot_at: str | None = None
     quota_remaining: int | None = None
@@ -79,6 +82,8 @@ class TheOddsApiRequestEvidence:
             "include_sids": self.include_sids,
             "markets": list(self.markets),
             "odds_format": "decimal",
+            "provider_origin_verified": self.provider_origin_verified,
+            "receipt_clock_verified": self.receipt_clock_verified,
             "regions": list(self.regions),
             "requested_snapshot_at": self.requested_snapshot_at,
             "scope_precedence": self.effective_bookmaker_scope,
@@ -106,6 +111,8 @@ class TheOddsApiRequestEvidence:
             "include_sids": self.include_sids,
             "include_bet_limits": self.include_bet_limits,
             "observed_at": self.observed_at,
+            "provider_origin_verified": self.provider_origin_verified,
+            "receipt_clock_verified": self.receipt_clock_verified,
             "requested_snapshot_at": self.requested_snapshot_at,
             "actual_snapshot_at": self.actual_snapshot_at,
             "request_fingerprint": self.request_fingerprint,
@@ -163,7 +170,29 @@ def _decode_provider_json(raw: bytes) -> Any:
         raise TheOddsApiPayloadError("provider returned invalid JSON") from exc
 
 
+class _RejectRedirects(HTTPRedirectHandler):
+    """Reject redirects before a credential-bearing second HTTP hop."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):  # noqa: ANN001
+        del req, fp, code, msg, headers, newurl
+        return None
+
+
+def _canonical_provider_url(url: str) -> None:
+    parts = urlsplit(url)
+    if (
+        parts.scheme != "https"
+        or parts.netloc != "api.the-odds-api.com"
+        or not parts.path.startswith("/v4/")
+        or parts.fragment
+    ):
+        raise TheOddsApiTransportError(
+            "The Odds API transport received a non-canonical provider URL"
+        )
+
+
 def _default_transport(url: str, timeout: float) -> HttpJsonResponse:
+    _canonical_provider_url(url)
     request = Request(
         url,
         headers={
@@ -172,22 +201,34 @@ def _default_transport(url: str, timeout: float) -> HttpJsonResponse:
         },
         method="GET",
     )
+    http_status: int | None = None
+    transport_failed = False
+    opener = build_opener(_RejectRedirects())
     try:
-        with urlopen(
-            request, timeout=timeout
-        ) as response:  # nosec B310 - adapter pins the canonical HTTPS provider origin
+        with opener.open(request, timeout=timeout) as response:
+            final_url = str(response.geturl())
+            if final_url != url:
+                raise TheOddsApiTransportError(
+                    "The Odds API final URL does not match the canonical request URL"
+                )
             return HttpJsonResponse(
                 payload=_decode_provider_json(response.read()),
                 status_code=int(response.status),
                 headers=dict(response.headers.items()),
+                final_url=final_url,
             )
     except HTTPError as exc:
-        raise TheOddsApiTransportError(
-            f"The Odds API HTTP {exc.code}", int(exc.code)
-        ) from exc
-    except URLError as exc:
-        raise TheOddsApiTransportError("The Odds API transport unavailable") from exc
+        http_status = int(exc.code)
+    except (URLError, TimeoutError, OSError):
+        transport_failed = True
 
+    if http_status is not None:
+        raise TheOddsApiTransportError(
+            f"The Odds API HTTP {http_status}", http_status
+        )
+    if transport_failed:
+        raise TheOddsApiTransportError("The Odds API transport unavailable")
+    raise AssertionError("unreachable transport outcome")
 
 def _plain_text(value: object, field: str) -> str:
     if type(value) is not str or not value or value != value.strip():
@@ -403,6 +444,8 @@ class TheOddsApiProvider:
         self.timeout_seconds = float(timeout_seconds)
         self.transport = transport
         self.clock = clock
+        self._provider_origin_verified = transport is _default_transport
+        self._receipt_clock_verified = clock is utc_now_iso
         self.source_id = f"the-odds-api:{self.sport}"
         self._pending_quotes: tuple[ProviderQuote, ...] = ()
         self._pending_offset = 0
@@ -453,7 +496,7 @@ class TheOddsApiProvider:
         end = min(start + max_items, len(self._pending_quotes))
         quotes = self._pending_quotes[start:end]
         self._pending_offset = end
-        flags = ["DYNAMIC_COVERAGE"]
+        flags = ["DYNAMIC_COVERAGE", *self._provenance_quality_flags()]
         if not quotes and not self._pending_quotes:
             flags.append("EMPTY_RESPONSE")
         if self._pending_offset < len(self._pending_quotes):
@@ -529,7 +572,11 @@ class TheOddsApiProvider:
             raise TheOddsApiPayloadError(
                 "historical snapshot exceeds max_items; refusing partial evidence"
             )
-        flags = ["DYNAMIC_COVERAGE", "HISTORICAL_SNAPSHOT"]
+        flags = [
+            "DYNAMIC_COVERAGE",
+            "HISTORICAL_SNAPSHOT",
+            *self._provenance_quality_flags(),
+        ]
         if not quotes:
             flags.append("EMPTY_RESPONSE")
         batch = ProviderBatch(
@@ -561,7 +608,19 @@ class TheOddsApiProvider:
             raise TheOddsApiTransportError(
                 f"The Odds API HTTP {response.status_code}", response.status_code
             )
+        if self._provider_origin_verified and response.final_url != url:
+            raise TheOddsApiTransportError(
+                "The Odds API product transport did not bind the exact final URL"
+            )
         return response
+
+    def _provenance_quality_flags(self) -> tuple[str, ...]:
+        flags: list[str] = []
+        if not self._provider_origin_verified:
+            flags.append("UNVERIFIED_PROVIDER_ORIGIN")
+        if not self._receipt_clock_verified:
+            flags.append("UNVERIFIED_RECEIPT_CLOCK")
+        return tuple(flags)
 
     def _current_url(self) -> str:
         return f"{self.base_url}/v4/sports/{self.sport}/odds?{urlencode(self._query_items())}"
@@ -610,6 +669,8 @@ class TheOddsApiProvider:
             include_sids=self.include_sids,
             include_bet_limits=self.include_bet_limits,
             observed_at=observed_at,
+            provider_origin_verified=self._provider_origin_verified,
+            receipt_clock_verified=self._receipt_clock_verified,
             requested_snapshot_at=requested_snapshot_at,
             actual_snapshot_at=actual_snapshot_at,
             quota_remaining=_quota_header(headers, "x-requests-remaining"),

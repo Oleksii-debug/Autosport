@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Final
 
 
-_LEASE_DOMAIN: Final[bytes] = b"AUTOSPORT_WINDOWS_SINGLE_INSTANCE_LEASE_V1\\x00"
+_LEASE_DOMAIN: Final[bytes] = b"AUTOSPORT_WINDOWS_SINGLE_INSTANCE_LEASE_V1\x00"
 _MAX_USER_SCOPE_UTF8: Final[int] = 512
 
 _ERROR_SHARING_VIOLATION: Final[int] = 32

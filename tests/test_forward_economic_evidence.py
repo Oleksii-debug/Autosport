@@ -36,6 +36,40 @@ def registry(*, alpha: str = "0.2", total: str = "0.2") -> FamilywiseAlphaRegist
     )
 
 
+def test_familywise_alpha_registry_accepts_exact_budget_boundary() -> None:
+    allocation = Decimal("0.35")
+    value = FamilywiseAlphaRegistry(
+        family_id="forward-family-exact-boundary",
+        total_alpha=Decimal("0.7"),
+        allocations=(
+            AlphaAllocation("challenger-a", allocation),
+            AlphaAllocation("challenger-b", allocation),
+        ),
+        sealed_at=T0,
+    )
+
+    assert value.total_alpha == Decimal("0.7")
+    assert tuple(item.alpha for item in value.allocations) == (allocation, allocation)
+
+
+def test_familywise_alpha_registry_rejects_subcontext_overallocation() -> None:
+    allocation = Decimal("0.35" + "0" * 79 + "6")
+
+    with pytest.raises(
+        ForwardEconomicEvidenceError,
+        match="familywise alpha allocations exceed total_alpha",
+    ):
+        FamilywiseAlphaRegistry(
+            family_id="forward-family-subcontext-overallocation",
+            total_alpha=Decimal("0.7"),
+            allocations=(
+                AlphaAllocation("challenger-a", allocation),
+                AlphaAllocation("challenger-b", allocation),
+            ),
+            sealed_at=T0,
+        )
+
+
 def protocol(**overrides) -> ForwardEconomicProtocol:
     values = dict(
         protocol_id="forward-protocol-1",

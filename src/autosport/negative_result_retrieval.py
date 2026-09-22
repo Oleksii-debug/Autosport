@@ -334,11 +334,22 @@ def search_negative_results(
         if not matched_terms:
             continue
 
+        evidence_available_at = max(
+            entry.available_at
+            for entry in (
+                experiment,
+                protocol,
+                hypothesis,
+                question,
+                *matching_postmortems,
+            )
+        )
+
         hits.append(
             NegativeResultHit(
                 experiment_id=experiment.record_id,
                 outcome=outcome,
-                available_at=experiment.available_at,
+                available_at=evidence_available_at,
                 experiment_record_sha256=experiment.record_sha256,
                 experiment_fingerprint=experiment_fingerprint,
                 research_protocol_id=protocol.record_id,

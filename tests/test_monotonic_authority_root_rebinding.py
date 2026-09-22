@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 
+import autosport.monotonic_workspace_binding as workspace_binding
 from autosport.monotonic_workspace_authority import (
     MonotonicAuthorityConfigurationError,
     MonotonicAuthorityIntegrityError,
@@ -17,6 +18,19 @@ def _sha(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
+def test_native_machine_state_base_ignores_process_path_environment(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    first = workspace_binding._native_machine_state_base()
+
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "redirected-localappdata"))
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "redirected-xdg-state"))
+    monkeypatch.setenv("HOME", str(tmp_path / "redirected-home"))
+
+    assert workspace_binding._native_machine_state_base() == first
+
+
 def test_workspace_binding_rollback_cannot_redirect_surviving_authority_root(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -24,8 +38,14 @@ def test_workspace_binding_rollback_cannot_redirect_surviving_authority_root(
     # Isolate the machine-stable pre-selection registry from the runner's real
     # application state while keeping it physically separate from M1 and M2.
     machine_state_home = tmp_path / "stable-machine-state"
-    monkeypatch.setenv("LOCALAPPDATA", str(machine_state_home))
-    monkeypatch.setenv("XDG_STATE_HOME", str(machine_state_home))
+    monkeypatch.setattr(
+        workspace_binding,
+        "_native_machine_state_base",
+        lambda: machine_state_home,
+    )
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "process-state-s1"))
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "process-state-s1"))
+    monkeypatch.setenv("HOME", str(tmp_path / "process-home-s1"))
 
     workspace = tmp_path / "workspace"
     workspace.mkdir()
@@ -61,6 +81,12 @@ def test_workspace_binding_rollback_cannot_redirect_surviving_authority_root(
     shutil.rmtree(workspace / ".autosport")
     root_m2 = tmp_path / "machine-root-m2"
     root_m2.mkdir()
+    # Redirect every process path environment variable consumed by the previous
+    # implementation. The private native account-state selector remains S1, so
+    # the surviving S1/M1 receipt must still fence fresh M2.
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "process-state-s2"))
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "process-state-s2"))
+    monkeypatch.setenv("HOME", str(tmp_path / "process-home-s2"))
 
     with pytest.raises(
         MonotonicAuthorityConfigurationError,

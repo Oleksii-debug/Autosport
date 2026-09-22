@@ -5,7 +5,7 @@ import random
 import pytest
 
 from autosport.matchbook_api_group_authority import (
-    ApiGroup,
+    MatchbookApiGroup,
     AmbiguousEndpointAuthority,
     DEFAULT_ENDPOINT_GROUP_REGISTRY,
     DEFAULT_ENDPOINT_SPECS,
@@ -23,24 +23,24 @@ def classify(method: str, path: str):
 @pytest.mark.parametrize(
     ("method", "path", "group", "operation_id"),
     [
-        ("POST", "/bpapi/rest/security/session", ApiGroup.SECURITY, "matchbook.security.login"),
-        ("DELETE", "/bpapi/rest/security/session", ApiGroup.SECURITY, "matchbook.security.logout"),
-        ("GET", "/edge/rest/account", ApiGroup.ACCOUNT, "matchbook.account.get"),
-        ("GET", "/edge/rest/account/balance", ApiGroup.ACCOUNT, "matchbook.account.balance"),
-        ("GET", "/edge/rest/account/sports", ApiGroup.ACCOUNT, "matchbook.account.sports"),
-        ("GET", "/edge/rest/navigation", ApiGroup.NAVIGATION, "matchbook.navigation.get"),
-        ("GET", "/edge/rest/events", ApiGroup.EVENTS, "matchbook.events.list"),
-        ("GET", "/edge/rest/events/123", ApiGroup.EVENTS, "matchbook.events.get"),
-        ("GET", "/edge/rest/events/123/markets", ApiGroup.EVENTS, "matchbook.markets.list"),
-        ("GET", "/edge/rest/events/123/markets/456/runners", ApiGroup.EVENTS, "matchbook.runners.list"),
-        ("GET", "/edge/rest/events/123/markets/456/runners/789/prices", ApiGroup.EVENTS, "matchbook.prices.get"),
-        ("GET", "/edge/rest/v2/offers", ApiGroup.BETTING_READ, "matchbook.offers.list_unsettled"),
-        ("GET", "/edge/rest/v2/offers/987", ApiGroup.BETTING_READ, "matchbook.offers.get_unsettled"),
-        ("POST", "/edge/rest/v2/offers", ApiGroup.BETTING_WRITE, "matchbook.offers.submit"),
-        ("GET", "/edge/rest/reports/v2/bets/current", ApiGroup.REPORTS, "matchbook.reports.current_bets"),
-        ("GET", "/edge/rest/reports/v2/bets/settled", ApiGroup.REPORTS, "matchbook.reports.settled_bets"),
-        ("GET", "/edge/rest/reports/v2/offers/current", ApiGroup.REPORTS, "matchbook.reports.current_offers"),
-        ("GET", "/edge/rest/reports/v1/transactions", ApiGroup.REPORTS, "matchbook.reports.wallet_transactions"),
+        ("POST", "/bpapi/rest/security/session", MatchbookApiGroup.SECURITY, "matchbook.security.login"),
+        ("DELETE", "/bpapi/rest/security/session", MatchbookApiGroup.SECURITY, "matchbook.security.logout"),
+        ("GET", "/edge/rest/account", MatchbookApiGroup.ACCOUNT, "matchbook.account.get"),
+        ("GET", "/edge/rest/account/balance", MatchbookApiGroup.ACCOUNT, "matchbook.account.balance"),
+        ("GET", "/edge/rest/account/sports", MatchbookApiGroup.ACCOUNT, "matchbook.account.sports"),
+        ("GET", "/edge/rest/navigation", MatchbookApiGroup.NAVIGATION, "matchbook.navigation.get"),
+        ("GET", "/edge/rest/events", MatchbookApiGroup.EVENTS, "matchbook.events.list"),
+        ("GET", "/edge/rest/events/123", MatchbookApiGroup.EVENTS, "matchbook.events.get"),
+        ("GET", "/edge/rest/events/123/markets", MatchbookApiGroup.EVENTS, "matchbook.markets.list"),
+        ("GET", "/edge/rest/events/123/markets/456/runners", MatchbookApiGroup.EVENTS, "matchbook.runners.list"),
+        ("GET", "/edge/rest/events/123/markets/456/runners/789/prices", MatchbookApiGroup.EVENTS, "matchbook.prices.get"),
+        ("GET", "/edge/rest/v2/offers", MatchbookApiGroup.BETTING_READ, "matchbook.offers.list_unsettled"),
+        ("GET", "/edge/rest/v2/offers/987", MatchbookApiGroup.BETTING_READ, "matchbook.offers.get_unsettled"),
+        ("POST", "/edge/rest/v2/offers", MatchbookApiGroup.BETTING_WRITE, "matchbook.offers.submit"),
+        ("GET", "/edge/rest/reports/v2/bets/current", MatchbookApiGroup.REPORTS, "matchbook.reports.current_bets"),
+        ("GET", "/edge/rest/reports/v2/bets/settled", MatchbookApiGroup.REPORTS, "matchbook.reports.settled_bets"),
+        ("GET", "/edge/rest/reports/v2/offers/current", MatchbookApiGroup.REPORTS, "matchbook.reports.current_offers"),
+        ("GET", "/edge/rest/reports/v1/transactions", MatchbookApiGroup.REPORTS, "matchbook.reports.wallet_transactions"),
     ],
 )
 def test_documented_endpoint_classification(method, path, group, operation_id):
@@ -53,8 +53,8 @@ def test_documented_endpoint_classification(method, path, group, operation_id):
 def test_same_concrete_path_can_have_different_documented_group_by_method():
     read = classify("GET", "/edge/rest/v2/offers")
     write = classify("POST", "/edge/rest/v2/offers")
-    assert read.group is ApiGroup.BETTING_READ
-    assert write.group is ApiGroup.BETTING_WRITE
+    assert read.group is MatchbookApiGroup.BETTING_READ
+    assert write.group is MatchbookApiGroup.BETTING_WRITE
 
 
 @pytest.mark.parametrize(
@@ -103,7 +103,7 @@ def test_registry_fingerprint_changes_if_documented_group_changes():
         original.operation_id,
         original.method,
         original.path_template,
-        ApiGroup.ACCOUNT,
+        MatchbookApiGroup.ACCOUNT,
         original.source_url,
         original.evidence_as_of,
     )
@@ -112,32 +112,32 @@ def test_registry_fingerprint_changes_if_documented_group_changes():
 
 
 def test_registry_rejects_duplicate_operation_id():
-    a = EndpointSpec("same", "GET", "/a", ApiGroup.EVENTS, "https://developers.matchbook.com/reference/a")
-    b = EndpointSpec("same", "POST", "/b", ApiGroup.EVENTS, "https://developers.matchbook.com/reference/b")
+    a = EndpointSpec("same", "GET", "/a", MatchbookApiGroup.EVENTS, "https://developers.matchbook.com/reference/a")
+    b = EndpointSpec("same", "POST", "/b", MatchbookApiGroup.EVENTS, "https://developers.matchbook.com/reference/b")
     with pytest.raises(AmbiguousEndpointAuthority, match="operation_id"):
         EndpointGroupRegistry((a, b))
 
 
 def test_registry_rejects_exact_duplicate_route():
-    a = EndpointSpec("a", "GET", "/x/{id}", ApiGroup.EVENTS, "https://developers.matchbook.com/reference/a")
-    b = EndpointSpec("b", "GET", "/x/{other}", ApiGroup.REPORTS, "https://developers.matchbook.com/reference/b")
+    a = EndpointSpec("a", "GET", "/x/{id}", MatchbookApiGroup.EVENTS, "https://developers.matchbook.com/reference/a")
+    b = EndpointSpec("b", "GET", "/x/{other}", MatchbookApiGroup.REPORTS, "https://developers.matchbook.com/reference/b")
     with pytest.raises(AmbiguousEndpointAuthority, match="overlapping"):
         EndpointGroupRegistry((a, b))
 
 
 def test_registry_rejects_literal_parameter_overlap():
-    a = EndpointSpec("a", "GET", "/x/current", ApiGroup.EVENTS, "https://developers.matchbook.com/reference/a")
-    b = EndpointSpec("b", "GET", "/x/{id}", ApiGroup.REPORTS, "https://developers.matchbook.com/reference/b")
+    a = EndpointSpec("a", "GET", "/x/current", MatchbookApiGroup.EVENTS, "https://developers.matchbook.com/reference/a")
+    b = EndpointSpec("b", "GET", "/x/{id}", MatchbookApiGroup.REPORTS, "https://developers.matchbook.com/reference/b")
     with pytest.raises(AmbiguousEndpointAuthority, match="overlapping"):
         EndpointGroupRegistry((a, b))
 
 
 def test_registry_allows_same_shape_for_different_methods():
-    a = EndpointSpec("a", "GET", "/x/{id}", ApiGroup.BETTING_READ, "https://developers.matchbook.com/reference/a")
-    b = EndpointSpec("b", "DELETE", "/x/{id}", ApiGroup.BETTING_WRITE, "https://developers.matchbook.com/reference/b")
+    a = EndpointSpec("a", "GET", "/x/{id}", MatchbookApiGroup.BETTING_READ, "https://developers.matchbook.com/reference/a")
+    b = EndpointSpec("b", "DELETE", "/x/{id}", MatchbookApiGroup.BETTING_WRITE, "https://developers.matchbook.com/reference/b")
     registry = EndpointGroupRegistry((a, b))
-    assert registry.classify(method="GET", path="/x/1").group is ApiGroup.BETTING_READ
-    assert registry.classify(method="DELETE", path="/x/1").group is ApiGroup.BETTING_WRITE
+    assert registry.classify(method="GET", path="/x/1").group is MatchbookApiGroup.BETTING_READ
+    assert registry.classify(method="DELETE", path="/x/1").group is MatchbookApiGroup.BETTING_WRITE
 
 
 @pytest.mark.parametrize(
@@ -146,17 +146,17 @@ def test_registry_allows_same_shape_for_different_methods():
 )
 def test_invalid_template_is_rejected(template):
     with pytest.raises(InvalidEndpointEvidence):
-        EndpointSpec("x", "GET", template, ApiGroup.EVENTS, "https://developers.matchbook.com/reference/x")
+        EndpointSpec("x", "GET", template, MatchbookApiGroup.EVENTS, "https://developers.matchbook.com/reference/x")
 
 
 def test_non_official_source_url_rejected():
     with pytest.raises(InvalidEndpointEvidence, match="official"):
-        EndpointSpec("x", "GET", "/x", ApiGroup.EVENTS, "https://example.com/x")
+        EndpointSpec("x", "GET", "/x", MatchbookApiGroup.EVENTS, "https://example.com/x")
 
 
 def test_evidence_date_is_exact_iso_date():
     with pytest.raises(InvalidEndpointEvidence, match="YYYY-MM-DD"):
-        EndpointSpec("x", "GET", "/x", ApiGroup.EVENTS, "https://developers.matchbook.com/reference/x", "22-09-2026")
+        EndpointSpec("x", "GET", "/x", MatchbookApiGroup.EVENTS, "https://developers.matchbook.com/reference/x", "22-09-2026")
 
 
 def test_receipt_binds_documented_source_and_template():
@@ -168,7 +168,7 @@ def test_receipt_binds_documented_source_and_template():
 
 def test_betting_read_classification_does_not_claim_numeric_limit():
     receipt = classify("GET", "/edge/rest/v2/offers")
-    assert receipt.group is ApiGroup.BETTING_READ
+    assert receipt.group is MatchbookApiGroup.BETTING_READ
     assert not hasattr(receipt, "requests_per_minute")
 
 
@@ -183,7 +183,7 @@ def test_50000_parameterized_known_routes_remain_deterministic():
             f"/edge/rest/events/{event}/markets/{market}/runners/{runner}/prices",
         )
         assert receipt.operation_id == "matchbook.prices.get"
-        assert receipt.group is ApiGroup.EVENTS
+        assert receipt.group is MatchbookApiGroup.EVENTS
 
 
 def test_20000_malformed_route_mutations_fail_closed():

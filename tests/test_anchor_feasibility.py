@@ -10,6 +10,7 @@ from autosport.anchor_feasibility import (
     AnchorFeasibilityError,
     AnchorObservation,
     AnchorScope,
+    AnchorWindowClosure,
     FeasibilityDisposition,
     evaluate_anchor_feasibility,
 )
@@ -24,6 +25,7 @@ SCOPE = AnchorScope(
     currency="EUR",
 )
 SHA_A = "a" * 64
+SHA_B = "b" * 64
 
 
 def obs(
@@ -58,12 +60,25 @@ def obs(
 
 
 def evaluate(rows, *, end_days: int = 14, review_days: int = 15):
+    rows = tuple(rows)
+    window_end = BASE + timedelta(days=end_days)
+    closure = AnchorWindowClosure(
+        scope=SCOPE,
+        window_start=BASE,
+        window_end=window_end,
+        first_sequence=1,
+        last_sequence=rows[-1].sequence,
+        closed_at=window_end,
+        source_universe_sha256=SHA_B,
+        closure_evidence_sha256=SHA_A,
+    )
     return evaluate_anchor_feasibility(
         scope=SCOPE,
         window_start=BASE,
-        window_end=BASE + timedelta(days=end_days),
+        window_end=window_end,
         review_as_of=BASE + timedelta(days=review_days),
         observations=rows,
+        window_closure=closure,
     )
 
 
@@ -336,3 +351,86 @@ def test_evidence_identity_changes_on_scope_even_with_same_rows() -> None:
     )
     base_report = evaluate([obs(1, AcquisitionState.ZERO_RESULT)])
     assert other_report.evidence_sha256 != base_report.evidence_sha256
+
+def test_future_observation_after_review_as_of_fails_closed() -> None:
+    future_row = obs(
+        1,
+        AcquisitionState.ZERO_RESULT,
+        hour=10 * 24,
+    )
+    with pytest.raises(AnchorFeasibilityError, match="review_as_of"):
+        evaluate_anchor_feasibility(
+            scope=SCOPE,
+            window_start=BASE,
+            window_end=BASE + timedelta(days=14),
+            review_as_of=BASE + timedelta(days=7),
+            observations=[future_row],
+        )
+
+
+def test_fixed_fourteen_day_horizon_cannot_be_relaxed() -> None:
+    with pytest.raises(AnchorFeasibilityError, match="fixed at 14"):
+        evaluate_anchor_feasibility(
+            scope=SCOPE,
+            window_start=BASE,
+            window_end=BASE + timedelta(days=1),
+            review_as_of=BASE + timedelta(days=2),
+            observations=[obs(1, AcquisitionState.ZERO_RESULT)],
+            minimum_review_days=Decimal("0"),
+        )
+
+
+def test_missing_window_closure_cannot_prove_terminal_coverage() -> None:
+    report = evaluate_anchor_feasibility(
+        scope=SCOPE,
+        window_start=BASE,
+        window_end=BASE + timedelta(days=14),
+        review_as_of=BASE + timedelta(days=15),
+        observations=[obs(1, AcquisitionState.ZERO_RESULT)],
+    )
+    assert report.terminal_coverage_complete is False
+    assert report.disposition is FeasibilityDisposition.INCOMPLETE
+
+
+def test_window_closure_must_bind_exact_sequence_and_be_causally_available() -> None:
+    row = obs(1, AcquisitionState.ZERO_RESULT)
+    wrong_sequence = AnchorWindowClosure(
+        scope=SCOPE,
+        window_start=BASE,
+        window_end=BASE + timedelta(days=14),
+        first_sequence=1,
+        last_sequence=2,
+        closed_at=BASE + timedelta(days=14),
+        source_universe_sha256=SHA_B,
+        closure_evidence_sha256=SHA_A,
+    )
+    with pytest.raises(AnchorFeasibilityError, match="sequence range"):
+        evaluate_anchor_feasibility(
+            scope=SCOPE,
+            window_start=BASE,
+            window_end=BASE + timedelta(days=14),
+            review_as_of=BASE + timedelta(days=15),
+            observations=[row],
+            window_closure=wrong_sequence,
+        )
+
+    future_closure = AnchorWindowClosure(
+        scope=SCOPE,
+        window_start=BASE,
+        window_end=BASE + timedelta(days=14),
+        first_sequence=1,
+        last_sequence=1,
+        closed_at=BASE + timedelta(days=16),
+        source_universe_sha256=SHA_B,
+        closure_evidence_sha256=SHA_A,
+    )
+    with pytest.raises(AnchorFeasibilityError, match="not causally available"):
+        evaluate_anchor_feasibility(
+            scope=SCOPE,
+            window_start=BASE,
+            window_end=BASE + timedelta(days=14),
+            review_as_of=BASE + timedelta(days=15),
+            observations=[row],
+            window_closure=future_closure,
+        )
+

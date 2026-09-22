@@ -81,21 +81,27 @@ def _sha256(value: object, name: str) -> str:
     return text
 
 
-def _positive_decimal(value: object, name: str) -> Decimal:
+def _decimal_input(value: object, name: str) -> Decimal:
+    if isinstance(value, bool) or not isinstance(value, (Decimal, str, int)):
+        raise SmarketsReconciliationError(
+            f"{name} must be Decimal, decimal string, or non-boolean int"
+        )
     try:
         parsed = value if isinstance(value, Decimal) else Decimal(str(value))
     except (InvalidOperation, ValueError) as exc:
         raise SmarketsReconciliationError(f"{name} must be a finite Decimal") from exc
+    return parsed
+
+
+def _positive_decimal(value: object, name: str) -> Decimal:
+    parsed = _decimal_input(value, name)
     if not parsed.is_finite() or parsed <= 0:
         raise SmarketsReconciliationError(f"{name} must be finite and > 0")
     return parsed
 
 
 def _nonnegative_decimal(value: object, name: str) -> Decimal:
-    try:
-        parsed = value if isinstance(value, Decimal) else Decimal(str(value))
-    except (InvalidOperation, ValueError) as exc:
-        raise SmarketsReconciliationError(f"{name} must be a finite Decimal") from exc
+    parsed = _decimal_input(value, name)
     if not parsed.is_finite() or parsed < 0:
         raise SmarketsReconciliationError(f"{name} must be finite and >= 0")
     return parsed
@@ -347,6 +353,8 @@ def verify_smarkets_order_readback(
     profile: BookmakerCapabilityProfile,
     authority: SmarketsExecutionAuthority,
     readback: SmarketsOrderReadback,
+    *,
+    expected_provider_order_id: str,
 ) -> VerifiedSmarketsOrderEffect:
     """Promote provider readback to bounded canonical acknowledgement evidence."""
 
@@ -360,10 +368,17 @@ def verify_smarkets_order_readback(
         raise SmarketsReconciliationError("authority must be SmarketsExecutionAuthority")
     if type(readback) is not SmarketsOrderReadback:
         raise SmarketsReconciliationError("readback must be SmarketsOrderReadback")
+    expected_order_id = _text(
+        expected_provider_order_id, "expected_provider_order_id"
+    )
     if profile.venue_id != action.bookmaker_id:
         raise SmarketsReconciliationError("bookmaker profile does not match action")
     if profile.venue_id.lower() != "smarkets":
         raise SmarketsReconciliationError("profile venue is not Smarkets")
+    if profile.adapter_id != ADAPTER_ID or profile.adapter_version != ADAPTER_VERSION:
+        raise SmarketsReconciliationError(
+            "profile adapter identity is not this Smarkets official API adapter"
+        )
     if profile.account_id != action.account_id or profile.account_id != readback.account_id:
         raise SmarketsReconciliationError("Smarkets account identity mismatch")
     for capability in (BookmakerCapability.PLACE_BET, BookmakerCapability.BET_READBACK):
@@ -373,6 +388,10 @@ def verify_smarkets_order_readback(
             )
 
     authority.assert_action_scope(action, as_of=readback.observed_at)
+    if readback.provider_order_id != expected_order_id:
+        raise SmarketsReconciliationError(
+            "provider readback order id does not match durable submission identity"
+        )
     if (
         readback.event_id != action.event_id
         or readback.market_id != action.market_id

@@ -24,6 +24,7 @@ from autosport.smarkets_execution_reconciliation import (
     SmarketsReconciliationError,
     SmarketsReconciliationJournal,
     SmarketsReconciliationPending,
+    _assess_smarkets_order_readback_structure,
     verify_smarkets_order_readback,
 )
 
@@ -120,13 +121,27 @@ def _verify(
     *,
     expected_reference_id: str = "reference-1",
 ):
-    return verify_smarkets_order_readback(
+    return _assess_smarkets_order_readback_structure(
         action,
         profile,
         authority,
         readback,
         expected_reference_id=expected_reference_id,
     )
+
+
+def test_public_verifier_rejects_caller_only_approval_and_readback() -> None:
+    with pytest.raises(
+        SmarketsReconciliationPending,
+        match="product-owned approval.*authenticated account/session-bound provider evidence",
+    ):
+        verify_smarkets_order_readback(
+            _action(),
+            _profile(),
+            _authority(),
+            _readback(),
+            expected_reference_id="reference-1",
+        )
 
 
 def test_full_fill_uses_provider_quantity_not_stake_as_completion_truth() -> None:

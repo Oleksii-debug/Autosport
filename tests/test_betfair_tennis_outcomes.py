@@ -1,0 +1,227 @@
+from __future__ import annotations
+
+import unittest
+
+from autosport.betfair_tennis_outcomes import (
+    assess_betfair_tennis_historical_market_definition_authority,
+)
+from autosport.market_outcomes import (
+    MarketSettlementOutcomeAuthority,
+    OutcomeAuthorityStatus,
+    SettlementResult,
+    assess_betfair_historical_market_definition_authority,
+)
+
+
+class BetfairTennisOutcomeAuthorityTests(unittest.TestCase):
+    @staticmethod
+    def _definition(
+        *,
+        event_type_id: str = "2",
+        status: str = "OPEN",
+        market_type: str = "MATCH_ODDS",
+        selection_ids: tuple[str, ...] = ("player-b", "player-a"),
+    ) -> dict[str, object]:
+        return {
+            "eventId": "same-provider-event",
+            "eventTypeId": event_type_id,
+            "marketType": market_type,
+            "status": status,
+            "runners": [{"id": selection_id} for selection_id in selection_ids],
+        }
+
+    def _tennis(self):
+        assessment = assess_betfair_tennis_historical_market_definition_authority(
+            market_id="same-provider-market",
+            market_definition=self._definition(),
+            provider_publish_at="2026-09-22T10:00:00Z",
+            observed_at="2026-09-22T10:00:01Z",
+        )
+        self.assertEqual(
+            assessment.status,
+            OutcomeAuthorityStatus.PROVEN_EXHAUSTIVE,
+        )
+        self.assertIsNotNone(assessment.authority)
+        return assessment.authority
+
+    def _table_tennis(self):
+        assessment = assess_betfair_historical_market_definition_authority(
+            market_id="same-provider-market",
+            market_definition=self._definition(event_type_id="2593174"),
+            provider_publish_at="2026-09-22T10:00:00Z",
+            observed_at="2026-09-22T10:00:01Z",
+        )
+        self.assertEqual(
+            assessment.status,
+            OutcomeAuthorityStatus.PROVEN_EXHAUSTIVE,
+        )
+        self.assertIsNotNone(assessment.authority)
+        return assessment.authority
+
+    def test_tennis_authority_is_provider_and_sport_bound(self):
+        tennis = self._tennis()
+        table_tennis = self._table_tennis()
+
+        self.assertEqual(tennis.identity.sport, "tennis")
+        self.assertEqual(tennis.selection_ids, ("player-a", "player-b"))
+        self.assertEqual(tennis.terminal_state_count, 9)
+        self.assertFalse(tennis.terminal_space_exact)
+        self.assertTrue(
+            tennis.source_revision.startswith(
+                "betfair-tennis-market-definition:"
+            )
+        )
+
+        self.assertNotEqual(
+            tennis.identity.quote_key("player-a"),
+            table_tennis.identity.quote_key("player-a"),
+        )
+        self.assertNotEqual(
+            tennis.settlement_rules_sha256,
+            table_tennis.settlement_rules_sha256,
+        )
+        self.assertNotEqual(
+            tennis.verification_protocol_sha256,
+            table_tennis.verification_protocol_sha256,
+        )
+
+    def test_tennis_terminal_cover_preserves_each_runner_as_a_selection(self):
+        tennis = self._tennis()
+        player_a_wins = next(
+            state
+            for state in tennis.terminal_states
+            if dict(state.settlements)
+            == {
+                "player-a": SettlementResult.WIN,
+                "player-b": SettlementResult.LOSS,
+            }
+        )
+
+        settlement = tennis.settlement_by_quote(player_a_wins)
+
+        self.assertEqual(
+            settlement[tennis.identity.quote_key("player-a")],
+            "win",
+        )
+        self.assertEqual(
+            settlement[tennis.identity.quote_key("player-b")],
+            "loss",
+        )
+
+    def test_wrong_sport_market_or_status_fail_closed(self):
+        wrong_sport = (
+            assess_betfair_tennis_historical_market_definition_authority(
+                market_id="m-1",
+                market_definition=self._definition(event_type_id="1"),
+                provider_publish_at="2026-09-22T10:00:00Z",
+                observed_at="2026-09-22T10:00:01Z",
+            )
+        )
+        self.assertEqual(wrong_sport.status, OutcomeAuthorityStatus.REFUSED)
+        self.assertEqual(
+            wrong_sport.refusal_reason,
+            "betfair_event_type_has_no_verified_tennis_roster_protocol",
+        )
+
+        wrong_market = (
+            assess_betfair_tennis_historical_market_definition_authority(
+                market_id="m-2",
+                market_definition=self._definition(market_type="SET_WINNER"),
+                provider_publish_at="2026-09-22T10:00:00Z",
+                observed_at="2026-09-22T10:00:01Z",
+            )
+        )
+        self.assertEqual(wrong_market.status, OutcomeAuthorityStatus.REFUSED)
+        self.assertEqual(
+            wrong_market.refusal_reason,
+            "market_type_has_no_supported_terminal_settlement_semantics",
+        )
+
+        closed = assess_betfair_tennis_historical_market_definition_authority(
+            market_id="m-3",
+            market_definition=self._definition(status="CLOSED"),
+            provider_publish_at="2026-09-22T10:00:00Z",
+            observed_at="2026-09-22T10:00:01Z",
+        )
+        self.assertEqual(closed.status, OutcomeAuthorityStatus.REFUSED)
+        self.assertEqual(
+            closed.refusal_reason,
+            "betfair_market_definition_is_not_open_at_roster_revision",
+        )
+
+    def test_malformed_or_duplicate_roster_fails_closed(self):
+        too_small = (
+            assess_betfair_tennis_historical_market_definition_authority(
+                market_id="m-small",
+                market_definition=self._definition(
+                    selection_ids=("only-runner",)
+                ),
+                provider_publish_at="2026-09-22T10:00:00Z",
+                observed_at="2026-09-22T10:00:01Z",
+            )
+        )
+        self.assertEqual(too_small.status, OutcomeAuthorityStatus.REFUSED)
+        self.assertEqual(
+            too_small.refusal_reason,
+            "betfair_market_definition_lacks_authoritative_runner_roster",
+        )
+
+        with self.assertRaisesRegex(ValueError, "duplicate selection id"):
+            assess_betfair_tennis_historical_market_definition_authority(
+                market_id="m-duplicate",
+                market_definition=self._definition(
+                    selection_ids=("same", "same")
+                ),
+                provider_publish_at="2026-09-22T10:00:00Z",
+                observed_at="2026-09-22T10:00:01Z",
+            )
+
+        malformed = self._definition()
+        malformed["runners"] = [{"id": "ok"}, {}]
+        with self.assertRaisesRegex(ValueError, "requires id"):
+            assess_betfair_tennis_historical_market_definition_authority(
+                market_id="m-malformed",
+                market_definition=malformed,
+                provider_publish_at="2026-09-22T10:00:00Z",
+                observed_at="2026-09-22T10:00:01Z",
+            )
+
+    def test_provider_publish_time_cannot_be_backdated(self):
+        with self.assertRaisesRegex(
+            ValueError,
+            "provider_publish_at must not be after observed_at",
+        ):
+            assess_betfair_tennis_historical_market_definition_authority(
+                market_id="m-time",
+                market_definition=self._definition(),
+                provider_publish_at="2026-09-22T10:00:02Z",
+                observed_at="2026-09-22T10:00:01Z",
+            )
+
+    def test_durable_readback_requires_fresh_same_sport_source_reverification(self):
+        tennis = self._tennis()
+        raw = tennis.to_dict()
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "requires separately verified source authority",
+        ):
+            MarketSettlementOutcomeAuthority.from_dict(raw)
+
+        table_tennis = self._table_tennis()
+        with self.assertRaisesRegex(ValueError, "hash mismatch"):
+            MarketSettlementOutcomeAuthority.from_dict(
+                raw,
+                verified_authority=table_tennis,
+            )
+
+        restored = MarketSettlementOutcomeAuthority.from_dict(
+            raw,
+            verified_authority=self._tennis(),
+        )
+        self.assertEqual(restored, tennis)
+        self.assertEqual(restored.authority_sha256, tennis.authority_sha256)
+
+
+if __name__ == "__main__":
+    unittest.main()

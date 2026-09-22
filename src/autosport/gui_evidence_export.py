@@ -130,6 +130,14 @@ class OneShotEvidenceExportWorker:
                 raise
             cancelled.set()
             start_gate.set()
+            # Thread.start() can create the OS helper and still raise to its
+            # caller.  Once that happens, releasing the single-flight slot before
+            # the cancelled helper exits would permit an overlapping retry.  A
+            # successfully started CPython Thread has a non-None ident before
+            # start() returns; join that helper deterministically before ownership
+            # is released.  A true pre-start failure has no helper to join.
+            if thread.ident is not None:
+                thread.join()
             self._release_unstarted_slot()
             if isinstance(exc, Exception):
                 return False

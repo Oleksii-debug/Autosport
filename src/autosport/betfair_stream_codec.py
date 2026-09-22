@@ -31,6 +31,31 @@ def _int(value: object, field: str, *, minimum: int = 0) -> int:
     return value
 
 
+def _optional_int32(value: object, field: str) -> int | None:
+    if value is None:
+        return None
+    if type(value) is not int or value < -(2**31) or value > (2**31 - 1):
+        raise ValueError(f"{field} must be a signed int32 or null")
+    return value
+
+
+def _optional_stream_interval(
+    value: object,
+    field: str,
+    *,
+    minimum: int = 0,
+    maximum: int | None = None,
+) -> int | None:
+    if value is None:
+        return None
+    parsed = _int(value, field, minimum=minimum)
+    if maximum is not None and parsed > maximum:
+        raise ValueError(
+            f"{field} must be an integer between {minimum} and {maximum}"
+        )
+    return parsed
+
+
 def _decimal(value: object, field: str, *, minimum: Decimal | None = None) -> Decimal:
     if isinstance(value, bool):
         raise ValueError(f"{field} must be a finite decimal")
@@ -71,47 +96,201 @@ class BetfairCrlfJsonDecoder:
             raise ValueError("max_frame_bytes must be a positive integer")
         self._max = max_frame_bytes
         self._buffer = bytearray()
+        self._failed = False
+
+    def _require_usable(self) -> None:
+        if self._failed:
+            raise ValueError(
+                "Betfair stream decoder failed; reconnect with a new decoder"
+            )
 
     def feed(self, chunk: bytes) -> tuple[dict[str, Any], ...]:
         if type(chunk) is not bytes:
             raise TypeError("chunk must be bytes")
+        self._require_usable()
         if not chunk:
             return ()
-        self._buffer.extend(chunk)
-        if len(self._buffer) > self._max and b"\r\n" not in self._buffer:
-            raise ValueError("Betfair stream frame exceeds configured maximum size")
-        decoded: list[dict[str, Any]] = []
-        while True:
-            end = self._buffer.find(b"\r\n")
-            if end < 0:
-                break
-            frame = bytes(self._buffer[:end])
-            del self._buffer[: end + 2]
-            if not frame:
-                raise ValueError("empty Betfair stream frame is not allowed")
-            if len(frame) > self._max:
+        try:
+            self._buffer.extend(chunk)
+            if len(self._buffer) > self._max and b"\r\n" not in self._buffer:
                 raise ValueError("Betfair stream frame exceeds configured maximum size")
-            if b"\n" in frame or b"\r" in frame:
-                raise ValueError("Betfair stream frames must use CRLF delimiters")
-            try:
-                text = frame.decode("utf-8", errors="strict")
-                raw = json.loads(
-                    text,
-                    parse_constant=_reject_constant,
-                    object_pairs_hook=_strict_object,
-                )
-            except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
-                raise ValueError("Betfair stream frame must be strict UTF-8 JSON") from exc
-            if type(raw) is not dict:
-                raise ValueError("Betfair stream frame must contain a JSON object")
-            decoded.append(raw)
-        if len(self._buffer) > self._max:
-            raise ValueError("Betfair stream frame exceeds configured maximum size")
-        return tuple(decoded)
+            decoded: list[dict[str, Any]] = []
+            while True:
+                end = self._buffer.find(b"\r\n")
+                if end < 0:
+                    break
+                frame = bytes(self._buffer[:end])
+                del self._buffer[: end + 2]
+                if not frame:
+                    raise ValueError("empty Betfair stream frame is not allowed")
+                if len(frame) > self._max:
+                    raise ValueError("Betfair stream frame exceeds configured maximum size")
+                if b"\n" in frame or b"\r" in frame:
+                    raise ValueError("Betfair stream frames must use CRLF delimiters")
+                try:
+                    text = frame.decode("utf-8", errors="strict")
+                    raw = json.loads(
+                        text,
+                        parse_constant=_reject_constant,
+                        object_pairs_hook=_strict_object,
+                    )
+                except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
+                    raise ValueError(
+                        "Betfair stream frame must be strict UTF-8 JSON"
+                    ) from exc
+                if type(raw) is not dict:
+                    raise ValueError("Betfair stream frame must contain a JSON object")
+                decoded.append(raw)
+            if len(self._buffer) > self._max:
+                raise ValueError("Betfair stream frame exceeds configured maximum size")
+            return tuple(decoded)
+        except ValueError:
+            self._failed = True
+            raise
 
     def finish(self) -> None:
+        self._require_usable()
         if self._buffer:
+            self._failed = True
             raise ValueError("truncated Betfair stream frame without CRLF terminator")
+
+@dataclass(frozen=True, slots=True)
+class BetfairSegmentBudget:
+    """Finite in-memory bounds for one segmented market ChangeMessage."""
+
+    max_segments: int
+    max_canonical_bytes: int
+
+    def __post_init__(self) -> None:
+        _int(self.max_segments, "max_segments", minimum=1)
+        _int(self.max_canonical_bytes, "max_canonical_bytes", minimum=1)
+
+
+class BetfairMarketChangeSegmentReassembler:
+    """Reassemble Betfair market segments atomically before typed decoding.
+
+    Betfair's reference clients accumulate each segment's market-change items and,
+    on SEG_END, publish the final segment metadata with the accumulated item list.
+    Any sequencing/budget failure poisons this instance so callers must reconnect
+    and start with a fresh reassembler instead of guessing at a partial image.
+    """
+
+    _SEGMENT_TYPES = frozenset({"SEG_START", "SEG", "SEG_END"})
+
+    def __init__(self, *, budget: BetfairSegmentBudget) -> None:
+        if type(budget) is not BetfairSegmentBudget:
+            raise TypeError("budget must be BetfairSegmentBudget")
+        self._budget = budget
+        self._items: list[object] | None = None
+        self._segment_count = 0
+        self._canonical_bytes = 0
+        self._failed = False
+
+    @property
+    def pending_segments(self) -> int:
+        return self._segment_count
+
+    @property
+    def pending_canonical_bytes(self) -> int:
+        return self._canonical_bytes
+
+    @property
+    def failed(self) -> bool:
+        return self._failed
+
+    def _clear_pending(self) -> None:
+        self._items = None
+        self._segment_count = 0
+        self._canonical_bytes = 0
+
+    def _fail(self, message: str) -> None:
+        self._clear_pending()
+        self._failed = True
+        raise ValueError(message)
+
+    def _require_usable(self) -> None:
+        if self._failed:
+            raise ValueError(
+                "Betfair segment reassembler failed; reconnect with a new reassembler"
+            )
+
+    @staticmethod
+    def _sealed_copy(raw: dict[str, Any]) -> tuple[dict[str, Any], int]:
+        try:
+            payload = json.dumps(
+                raw,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+                allow_nan=False,
+            ).encode("utf-8")
+            sealed = json.loads(
+                payload.decode("utf-8"),
+                parse_constant=_reject_constant,
+                object_pairs_hook=_strict_object,
+            )
+        except (TypeError, ValueError, UnicodeError, json.JSONDecodeError) as exc:
+            raise ValueError(
+                "Betfair segment must contain canonical JSON-compatible values"
+            ) from exc
+        if type(sealed) is not dict:
+            raise ValueError("Betfair segment must contain a JSON object")
+        return sealed, len(payload)
+
+    def push(self, raw: dict[str, Any]) -> dict[str, Any] | None:
+        if type(raw) is not dict:
+            raise TypeError("raw must be a dict")
+        self._require_usable()
+
+        segment_type = raw.get("segmentType")
+        if segment_type is None:
+            if self._items is not None:
+                self._fail(
+                    "non-segmented message arrived before segmented message completed"
+                )
+            return raw
+        if type(segment_type) is not str or segment_type not in self._SEGMENT_TYPES:
+            self._fail(f"unsupported Betfair segment type {segment_type!r}")
+        if raw.get("op") != "mcm":
+            self._fail("market segment reassembler only accepts op='mcm'")
+
+        if segment_type == "SEG_START":
+            if self._items is not None:
+                self._fail("SEG_START arrived before prior segmented message completed")
+            self._items = []
+            self._segment_count = 0
+            self._canonical_bytes = 0
+        elif self._items is None:
+            self._fail(f"{segment_type} arrived without SEG_START")
+
+        try:
+            sealed, encoded_size = self._sealed_copy(raw)
+        except ValueError as exc:
+            self._fail(str(exc))
+        items = sealed.get("mc", [])
+        if type(items) is not list:
+            self._fail("segmented market mc must be a list")
+
+        next_count = self._segment_count + 1
+        next_bytes = self._canonical_bytes + encoded_size
+        if next_count > self._budget.max_segments:
+            self._fail("Betfair segmented message exceeds max_segments budget")
+        if next_bytes > self._budget.max_canonical_bytes:
+            self._fail("Betfair segmented message exceeds max_canonical_bytes budget")
+
+        assert self._items is not None
+        self._items.extend(items)
+        self._segment_count = next_count
+        self._canonical_bytes = next_bytes
+
+        if segment_type != "SEG_END":
+            return None
+
+        completed = sealed
+        completed.pop("segmentType", None)
+        completed["mc"] = self._items
+        self._clear_pending()
+        return completed
 
 
 class BetfairQuoteSide(str, Enum):
@@ -204,6 +383,7 @@ class BetfairMarketChange:
     market_id: str
     image: bool
     runner_changes: tuple[BetfairRunnerChange, ...]
+    conflated: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -216,6 +396,9 @@ class BetfairMarketChangeFrame:
     provider_health: BetfairProviderStreamHealth
     market_changes: tuple[BetfairMarketChange, ...]
     frame_sha256: str
+    conflate_ms: int | None = None
+    heartbeat_ms: int | None = None
+    request_id: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -242,6 +425,9 @@ class BetfairStreamApplyResult:
     changed: tuple[BetfairQuoteState, ...]
     removed: tuple[BetfairQuoteIdentity, ...]
     image_replaced_markets: tuple[str, ...]
+    conflate_ms: int | None = None
+    heartbeat_ms: int | None = None
+    request_id: int | None = None
 
 
 def _frame_hash(raw: dict[str, Any]) -> str:
@@ -323,6 +509,11 @@ def _market(raw: object) -> BetfairMarketChange:
     image = raw.get("img", False)
     if type(image) is not bool:
         raise ValueError("market.img must be bool")
+    conflated = raw.get("con", False)
+    if conflated is None:
+        conflated = False
+    elif type(conflated) is not bool:
+        raise ValueError("market.con must be bool or null")
     runners_raw = raw.get("rc", [])
     if type(runners_raw) is not list:
         raise ValueError("market.rc must be a list")
@@ -330,7 +521,7 @@ def _market(raw: object) -> BetfairMarketChange:
     identities = [(item.selection_id, item.handicap) for item in runners]
     if len(set(identities)) != len(identities):
         raise ValueError("market.rc contains duplicate selection_id/handicap identity")
-    return BetfairMarketChange(market_id, image, runners)
+    return BetfairMarketChange(market_id, image, runners, conflated)
 
 
 def decode_market_change_message(raw: dict[str, Any]) -> BetfairMarketChangeFrame:
@@ -357,16 +548,22 @@ def decode_market_change_message(raw: dict[str, Any]) -> BetfairMarketChangeFram
     pt = _int(raw.get("pt"), "pt")
     initial = _clock(raw.get("initialClk"), "initialClk")
     clk = _clock(raw.get("clk"), "clk")
-    conflated = raw.get("con", False)
-    if type(conflated) is not bool:
-        raise ValueError("con must be bool")
     provider_health = _provider_stream_health(raw.get("status"))
+    request_id = _optional_int32(raw.get("id"), "id")
+    conflate_ms = _optional_stream_interval(raw.get("conflateMs"), "conflateMs")
+    heartbeat_ms = _optional_stream_interval(
+        raw.get("heartbeatMs"),
+        "heartbeatMs",
+        minimum=500,
+        maximum=30000,
+    )
     mc_raw = raw.get("mc", [])
     if type(mc_raw) is not list:
         raise ValueError("mc must be a list")
     if kind is BetfairFrameKind.HEARTBEAT and mc_raw:
         raise ValueError("heartbeat must not contain market changes")
     changes = tuple(_market(item) for item in mc_raw)
+    conflated = any(item.conflated for item in changes)
     ids = [item.market_id for item in changes]
     if len(set(ids)) != len(ids):
         raise ValueError("frame contains duplicate market ids")
@@ -378,7 +575,17 @@ def decode_market_change_message(raw: dict[str, Any]) -> BetfairMarketChangeFram
     elif clk is None:
         raise ValueError(f"{kind.value} requires clk")
     return BetfairMarketChangeFrame(
-        kind, initial, clk, pt, conflated, provider_health, changes, _frame_hash(raw)
+        kind,
+        initial,
+        clk,
+        pt,
+        conflated,
+        provider_health,
+        changes,
+        _frame_hash(raw),
+        conflate_ms,
+        heartbeat_ms,
+        request_id,
     )
 
 
@@ -503,6 +710,9 @@ class BetfairMarketStreamState:
                     (),
                     (),
                     (),
+                    frame.conflate_ms,
+                    frame.heartbeat_ms,
+                    frame.request_id,
                 )
             raise ValueError("same Betfair clk arrived with different frame content")
 
@@ -525,6 +735,9 @@ class BetfairMarketStreamState:
                 (),
                 (),
                 (),
+                frame.conflate_ms,
+                frame.heartbeat_ms,
+                frame.request_id,
             )
 
         reset_removed: list[BetfairQuoteIdentity] = []
@@ -579,4 +792,7 @@ class BetfairMarketStreamState:
             tuple(changed),
             tuple(dict.fromkeys(removed)),
             tuple(images),
+            frame.conflate_ms,
+            frame.heartbeat_ms,
+            frame.request_id,
         )

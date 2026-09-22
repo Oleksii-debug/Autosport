@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import importlib.abc
 import importlib.machinery
+import inspect
 import sys
 import threading
 
@@ -28,6 +29,37 @@ from .workspace_lock import WorkspaceEconomicLock as _WorkspaceEconomicLock
 
 
 _PROCESS_SOURCE_PUBLICATION_LOCK = threading.RLock()
+
+
+def _source_feature_materializer_init_guard(
+    self,
+    lineage_authority,
+    *,
+    collector_store,
+    _issuance_capability=None,
+    _source_service=None,
+):
+    """Reject direct caller injection of the private writer-only constructor state."""
+
+    if _issuance_capability is not None or _source_service is not None:
+        frame = inspect.currentframe()
+        caller = None if frame is None else frame.f_back
+        factory = source_authority._materializer_from_headless_collector_service
+        if caller is None or caller.f_code is not factory.__code__:
+            raise evidence.PointInTimeEvidenceError(
+                "source feature writer constructor state may only be issued by "
+                "the canonical source runtime factory"
+            )
+    original = getattr(
+        type(self), "_autosport_source_feature_original_materializer_init_v1"
+    )
+    return original(
+        self,
+        lineage_authority,
+        collector_store=collector_store,
+        _issuance_capability=_issuance_capability,
+        _source_service=_source_service,
+    )
 
 
 def _source_feature_materializer(
@@ -76,6 +108,16 @@ def _install_source_runtime_surface() -> None:
     # The writer capability is issued only by the canonical source runtime.  Keep
     # collector_service.py itself untouched so unrelated collector repair lineages
     # can reconverge independently.
+    materializer_type = source_authority.SourceFeatureArtifactMaterializer
+    if not hasattr(
+        materializer_type,
+        "_autosport_source_feature_original_materializer_init_v1",
+    ):
+        materializer_type._autosport_source_feature_original_materializer_init_v1 = (
+            materializer_type.__init__
+        )
+    materializer_type.__init__ = _source_feature_materializer_init_guard
+
     collector_service_module.HeadlessCollectorService.source_feature_materializer = (
         _source_feature_materializer
     )

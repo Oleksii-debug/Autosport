@@ -17,7 +17,8 @@ PRODUCT_CLI_UK_UA = MappingProxyType(
         "product.cli.usage_prefix": "використання: ",
         "product.cli.options_heading": "Параметри:",
         "product.cli.workspace.help": (
-            "Робочий каталог канонічного продукту. За замовчуванням: .autosport-product."
+            "Робочий каталог канонічного продукту. Якщо не вказано, використовується "
+            "канонічний каталог даних користувача Autosport."
         ),
         "product.cli.source_factory.help": (
             "Зовнішня фабрика джерела продукту у форматі module:function."

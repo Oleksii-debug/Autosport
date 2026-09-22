@@ -16,6 +16,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Final
 
+from .champion_eligibility import (
+    ChampionEligibilityError,
+    require_current_activation_eligibility,
+)
 from .champion_policy import POLICY_ARTIFACT_KIND
 from .dataset_snapshot_lineage import DatasetSnapshotLineageAuthority
 from .integrity import atomic_write_json
@@ -896,6 +900,35 @@ def validate_activation_binding(
     requested = frozenset(_text(x, "admissible action") for x in admissible_actions)
     if not requested or tuple(sorted(requested)) != binding.admissible_actions:
         raise PolicyDeploymentError("activation admissible-action binding mismatch")
+
+    candidate_model_version_id = dpayload.get("candidate_model_version_id")
+    if candidate_model_version_id is not None:
+        if type(candidate_model_version_id) is not str or not candidate_model_version_id:
+            raise PolicyDeploymentError("promotion candidate model identity is invalid")
+        if epayload.get("candidate_model_version_id") != candidate_model_version_id:
+            raise PolicyDeploymentError(
+                "promotion evidence model identity does not match promotion decision"
+            )
+        try:
+            require_current_activation_eligibility(
+                registry,
+                as_of=binding.activation_at,
+                canonical_strategy_id=strategy_key,
+                expected_strategy_version_id=policy.policy_id,
+                expected_model_version_id=candidate_model_version_id,
+                expected_environment_sha256=deployment_identity.environment_id,
+                expected_protocol_id=policy.protocol_id,
+                expected_config_sha256=policy.config_sha256,
+                expected_sport=scope.sport_domain,
+                expected_league=scope.competition_scope,
+                expected_regime=None,
+                admissible_actions=requested,
+            )
+        except ChampionEligibilityError as exc:
+            raise PolicyDeploymentError(
+                "current champion eligibility does not authorize deployment"
+            ) from exc
+
     policy_actions = frozenset(item.action_type for item in policy.estimates)
     if not requested.issubset(policy_actions):
         raise PolicyDeploymentError("deployment actions widen policy action universe")

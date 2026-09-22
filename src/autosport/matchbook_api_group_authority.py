@@ -37,7 +37,7 @@ class MatchbookApiGroup(str, Enum):
 
 EVIDENCE_AS_OF = "2026-09-22"
 _METHOD_RE = re.compile(r"^[A-Z]+$")
-_PLACEHOLDER_RE = re.compile(r"^\\{([a-z][a-z0-9_]*)\\}$")
+_PLACEHOLDER_RE = re.compile(r"^\{([a-z][a-z0-9_]*)\}$")
 
 
 def _text(value: Any, *, field: str) -> str:
@@ -106,7 +106,7 @@ def _template_matches(template: str, concrete: str) -> bool:
         return False
     for exp, got in zip(expected, actual):
         if _is_placeholder(exp):
-            # IDs are opaque path-segment identities here. Parsing/provider
+            # IDs are opaque path-segment identities here.  Parsing/provider
             # type validation remains the endpoint adapter's authority.
             if not got:
                 return False
@@ -142,7 +142,7 @@ class EndpointSpec:
         if not source.startswith("https://developers.matchbook.com/"):
             raise InvalidEndpointEvidence("source_url must be an official Matchbook developer URL")
         as_of = _text(self.evidence_as_of, field="evidence_as_of")
-        if not re.fullmatch(r"\\d{4}-\\d{2}-\\d{2}", as_of):
+        if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", as_of):
             raise InvalidEndpointEvidence("evidence_as_of must be YYYY-MM-DD")
 
     def canonical_record(self) -> dict[str, str]:

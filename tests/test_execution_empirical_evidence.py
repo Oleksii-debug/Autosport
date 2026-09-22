@@ -161,7 +161,7 @@ def test_terminal_accepted_record_keeps_provider_correlation_but_slippage_unknow
     evidence = _accepted_evidence(tmp_path)
 
     assert evidence.attempt_state == "ACCEPTED"
-    assert evidence.terminal is True
+    assert evidence.ledger_terminal is True
     assert evidence.provider_outcome_verified is False
     assert (
         evidence.provider_outcome_verification_reason
@@ -199,7 +199,7 @@ def test_submitted_attempt_is_retained_as_right_censored_evidence(tmp_path):
     )
 
     assert evidence.attempt_state == "SUBMITTED"
-    assert evidence.terminal is False
+    assert evidence.ledger_terminal is False
     assert evidence.provider_outcome_verified is False
     assert (
         evidence.provider_outcome_verification_reason
@@ -289,7 +289,7 @@ def test_terminal_ack_without_separate_provider_evidence_still_has_attempt_recor
     )
 
     assert evidence.attempt_state == "ACCEPTED"
-    assert evidence.terminal is True
+    assert evidence.ledger_terminal is True
     assert evidence.provider_evidence_id is None
     assert evidence.provider_outcome_verified is False
     assert (
@@ -310,7 +310,7 @@ def test_reconciled_not_found_is_unverified_right_censored_evidence(tmp_path):
     )
 
     assert evidence.attempt_state == "RECONCILED_NOT_FOUND"
-    assert evidence.terminal is False
+    assert evidence.ledger_terminal is False
     assert evidence.provider_outcome_verified is False
     assert (
         evidence.provider_outcome_verification_reason
@@ -399,7 +399,7 @@ def test_partial_acceptance_keeps_unproven_slippage_unknown(tmp_path):
     )
 
     assert evidence.attempt_state == "PARTIAL"
-    assert evidence.terminal is True
+    assert evidence.ledger_terminal is True
     assert evidence.provider_outcome_verified is False
     assert (
         evidence.provider_outcome_verification_reason
@@ -430,7 +430,7 @@ def test_rejected_attempt_is_not_a_fake_zero_slippage_sample(tmp_path):
     )
 
     assert evidence.attempt_state == "REJECTED"
-    assert evidence.terminal is True
+    assert evidence.ledger_terminal is True
     assert evidence.provider_outcome_verified is False
     assert (
         evidence.provider_outcome_verification_reason
@@ -585,7 +585,7 @@ def test_restart_rebuild_is_byte_identical_for_reconciled_not_found(tmp_path):
 
     assert second.to_dict() == first.to_dict()
     assert second.evidence_sha256 == first.evidence_sha256
-    assert second.terminal is False
+    assert second.ledger_terminal is False
     assert second.right_censored is True
     assert (
         second.censor_reason
@@ -762,7 +762,7 @@ def test_population_aggregate_keeps_complete_funnel_denominator(tmp_path):
         "REJECTED": 1,
         "RECONCILED_NOT_FOUND": 1,
     }
-    assert aggregate.terminal_count == 3
+    assert aggregate.ledger_terminal_count == 3
     assert aggregate.provider_verified_terminal_count == 0
     assert aggregate.unverified_ledger_terminal_count == 3
     assert aggregate.right_censored_count == 4

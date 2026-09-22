@@ -12,8 +12,8 @@ from urllib.parse import urlsplit
 
 _SCHEMA_VERSION = 1
 _HEX = frozenset("0123456789abcdef")
-_PROVIDER_RE = re.compile(r"[a-z0-9]+(?:[._-][a-z0-9]+)*\\Z", re.ASCII)
-_REFERENCE_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}\\Z", re.ASCII)
+_PROVIDER_RE = re.compile(r"[a-z0-9]+(?:[._-][a-z0-9]+)*\Z", re.ASCII)
+_REFERENCE_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}\Z", re.ASCII)
 
 
 class ProviderUsePolicyError(ValueError):

@@ -54,6 +54,7 @@ def test_live_registry_adapter_uses_read_only_open_and_returns_reg_sz() -> None:
     fake.HKEY_LOCAL_MACHINE = object()
     fake.HKEY_CURRENT_USER = object()
     fake.KEY_READ = 0x20019
+    fake.KEY_WOW64_32KEY = 0x0200
     fake.REG_SZ = 1
     key = _FakeRegistryKey()
     calls: list[tuple[object, str, int, int]] = []
@@ -70,13 +71,22 @@ def test_live_registry_adapter_uses_read_only_open_and_returns_reg_sz() -> None:
     fake.OpenKey = open_key
     fake.QueryValueEx = query_value_ex
     with patch.dict(sys.modules, {"winreg": fake}):
-        result = _read_registry_pv("HKLM", WEBVIEW2_HKLM_64_SUBKEY)
+        result = _read_registry_pv(
+            "HKLM",
+            WEBVIEW2_HKLM_64_SUBKEY,
+            wow64_32_view=True,
+        )
 
     assert result == RegistryRead(
         True, True, value="153.0.4234.32", value_type=fake.REG_SZ
     )
     assert calls == [
-        (fake.HKEY_LOCAL_MACHINE, WEBVIEW2_HKLM_64_SUBKEY, 0, fake.KEY_READ)
+        (
+            fake.HKEY_LOCAL_MACHINE,
+            WEBVIEW2_HKLM_64_SUBKEY,
+            0,
+            fake.KEY_READ | fake.KEY_WOW64_32KEY,
+        )
     ]
 
 
@@ -131,18 +141,18 @@ def test_guid_matches_documented_evergreen_runtime_client() -> None:
     assert WEBVIEW2_CLIENT_GUID == "{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}"
 
 
-def test_64_bit_machine_uses_wow6432node_hklm_and_hkcu() -> None:
+def test_64_bit_machine_uses_logical_hklm_with_32bit_registry_view() -> None:
     assert _registry_targets(windows_64bit=True) == (
-        ("HKLM", WEBVIEW2_HKLM_64_SUBKEY),
-        ("HKCU", WEBVIEW2_HKCU_SUBKEY),
+        ("HKLM", WEBVIEW2_HKLM_64_SUBKEY, True),
+        ("HKCU", WEBVIEW2_HKCU_SUBKEY, False),
     )
-    assert "WOW6432Node" in WEBVIEW2_HKLM_64_SUBKEY
+    assert "WOW6432Node" not in WEBVIEW2_HKLM_64_SUBKEY
 
 
 def test_32_bit_machine_uses_native_hklm_and_hkcu() -> None:
     assert _registry_targets(windows_64bit=False) == (
-        ("HKLM", WEBVIEW2_HKLM_32_SUBKEY),
-        ("HKCU", WEBVIEW2_HKCU_SUBKEY),
+        ("HKLM", WEBVIEW2_HKLM_32_SUBKEY, False),
+        ("HKCU", WEBVIEW2_HKCU_SUBKEY, False),
     )
     assert "WOW6432Node" not in WEBVIEW2_HKLM_32_SUBKEY
 
@@ -208,6 +218,35 @@ def test_registry_read_error_fails_closed_when_no_valid_registration_exists() ->
     )
     assert result.status is WebView2RuntimeStatus.INVALID_REGISTRATION
     assert result.observations[0].status is RegistryObservationStatus.ERROR
+
+
+def test_machine_read_error_blocks_later_user_valid_registration() -> None:
+    result = evaluate_webview2_registry_reads(
+        _reads(
+            RegistryRead(False, False, error_type="PermissionError"),
+            _valid("200.0.0.0"),
+        ),
+        windows_64bit=True,
+        reg_sz_type=REG_SZ,
+        minimum_version="150.0.0.0",
+    )
+    assert result.status is WebView2RuntimeStatus.INVALID_REGISTRATION
+    assert result.selected_version is None
+    assert result.observations[1].status is RegistryObservationStatus.VALID
+
+
+def test_later_user_read_error_does_not_override_selected_machine_runtime() -> None:
+    result = evaluate_webview2_registry_reads(
+        _reads(
+            _valid("153.0.4234.32"),
+            RegistryRead(False, False, error_type="PermissionError"),
+        ),
+        windows_64bit=True,
+        reg_sz_type=REG_SZ,
+        minimum_version="150.0.0.0",
+    )
+    assert result.status is WebView2RuntimeStatus.AVAILABLE
+    assert result.selected_version == "153.0.4234.32"
 
 
 def test_valid_hklm_registration_is_available() -> None:
@@ -384,6 +423,56 @@ def test_64bit_detection_honors_processor_architew6432() -> None:
         clear=True,
     ):
         assert _is_64bit_windows() is True
+
+
+def test_32bit_process_on_64bit_windows_uses_wow64_32_registry_view() -> None:
+    fake = types.ModuleType("winreg")
+    fake.HKEY_LOCAL_MACHINE = object()
+    fake.HKEY_CURRENT_USER = object()
+    fake.KEY_READ = 0x20019
+    fake.KEY_WOW64_32KEY = 0x0200
+    fake.REG_SZ = 1
+    calls: list[tuple[object, str, int, int]] = []
+
+    def open_key(root, subkey, reserved, access):
+        calls.append((root, subkey, reserved, access))
+        raise FileNotFoundError("not present")
+
+    fake.OpenKey = open_key
+    fake.QueryValueEx = lambda *_args: (_ for _ in ()).throw(
+        AssertionError("unreachable")
+    )
+
+    with (
+        patch.object(sys, "platform", "win32"),
+        patch.dict(
+            "os.environ",
+            {
+                "PROCESSOR_ARCHITEW6432": "AMD64",
+                "PROCESSOR_ARCHITECTURE": "x86",
+            },
+            clear=True,
+        ),
+        patch.dict(sys.modules, {"winreg": fake}),
+    ):
+        result = probe_webview2_runtime()
+
+    assert result.windows_64bit is True
+    assert result.status is WebView2RuntimeStatus.MISSING
+    assert calls == [
+        (
+            fake.HKEY_LOCAL_MACHINE,
+            WEBVIEW2_HKLM_64_SUBKEY,
+            0,
+            fake.KEY_READ | fake.KEY_WOW64_32KEY,
+        ),
+        (
+            fake.HKEY_CURRENT_USER,
+            WEBVIEW2_HKCU_SUBKEY,
+            0,
+            fake.KEY_READ,
+        ),
+    ]
 
 
 def test_cli_returns_nonzero_on_unsupported_platform_and_emits_json(capsys) -> None:

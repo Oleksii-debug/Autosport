@@ -386,6 +386,10 @@ def evaluate_pipeline_ablation(protocol: AblationProtocol, observations: Sequenc
     missing = tuple(key for key in expected if key not in by_enabled)
     complete = not missing and all(by_enabled[key].metric_value is not None for key in expected)
     ordered = tuple(by_enabled[key] for key in sorted(by_enabled, key=lambda key: tuple(item.value for item in key)))
+    if complete and len({by_enabled[key].eligible_count for key in expected}) != 1:
+        raise ValueError(
+            "complete factorial requires one eligible universe denominator across all arms"
+        )
     if not complete:
         evidence = tuple(sorted(item.evidence_sha256 for item in ordered))
         findings = tuple(ComponentFinding(component, IdentifiabilityTier.NOT_IDENTIFIABLE, None, None, None,

@@ -229,7 +229,7 @@ def test_reserved_attempt_has_no_external_effect_capital(tmp_path) -> None:
     assert evidence.max_plausible_capital_at_risk == Decimal("0")
 
 
-def test_distinct_unresolved_attempts_remain_distinct_possible_effects(tmp_path) -> None:
+def test_retry_after_generic_not_found_keeps_both_possible_effects(tmp_path) -> None:
     ledger, plan = _ledger(tmp_path, _action(stake="10"))
     _attempt(ledger, plan, attempt_id="attempt-1")
     ledger.mark_unknown(
@@ -237,11 +237,23 @@ def test_distinct_unresolved_attempts_remain_distinct_possible_effects(tmp_path)
         reason="transport_timeout",
         observed_at=UNKNOWN_AT,
     )
+    ledger.reconcile_not_found(
+        ReconciliationSnapshot(
+            attempt_id="attempt-1",
+            evidence_id="generic-not-found-before-retry",
+            observed_at=RECONCILED_AT,
+            external_effect_found=False,
+            source="generic-readback",
+        )
+    )
+    # The canonical ledger now permits a retry. This risk layer intentionally
+    # does not equate that generic not-found fact with provider-origin capital
+    # release, so the prior physical attempt remains a possible effect here.
     _attempt(ledger, plan, attempt_id="attempt-2")
     ledger.mark_unknown(
         "attempt-2",
         reason="transport_timeout",
-        observed_at=UNKNOWN_AT,
+        observed_at=ACKNOWLEDGED_AT,
     )
 
     evidence = resolve_execution_capital_at_risk(ledger, plan.plan_id)

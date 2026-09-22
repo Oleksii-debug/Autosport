@@ -611,6 +611,13 @@ class ForwardEconomicEvidenceAccumulator:
             raise ForwardEconomicEvidenceError(
                 "observation universe does not match the frozen universe commitment"
             )
+        if any(
+            step.universe_event_sha256 == observation.universe_event_sha256
+            for step in self._steps
+        ):
+            raise ForwardEconomicEvidenceError(
+                "frozen universe member cannot be counted more than once"
+            )
         self._resolver_authority_sha256(resolver)
 
         challenger = self._resolve_exact(

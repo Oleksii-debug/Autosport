@@ -255,6 +255,36 @@ def test_dataset_outcomes_must_be_revealed_by_evaluation_time(tmp_path) -> None:
     assert "outcomes were not causally available at evaluation time" in decision.reason
 
 
+def test_rebound_registry_read_dispatch_cannot_retarget_captured_snapshot(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    registry = _registry(tmp_path)
+    policy = _policy(registry.path)
+    book = PaperBook("100")
+    context = _context(1)
+    evidence = replace(
+        _single_evidence(policy, book, context),
+        evidence_id="rebound-read-dispatch",
+    )
+    _issue(registry, evidence, kind="single")
+
+    monkeypatch.setattr(
+        ScientificRegistry,
+        "_read",
+        lambda self: {"schema_version": 1, "records": []},
+    )
+
+    decision = policy.evaluate(
+        book,
+        Decimal("1"),
+        context=replace(context, risk_of_ruin_evidence=evidence),
+    )
+
+    assert not decision.allowed
+    assert "lacks canonical product-issued evaluator authority" in decision.reason
+
+
 def test_rebound_registry_get_fails_closed_before_authority_use(tmp_path, monkeypatch) -> None:
     registry = _registry(tmp_path)
     policy = _policy(registry.path)

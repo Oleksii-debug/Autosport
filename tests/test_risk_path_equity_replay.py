@@ -291,3 +291,57 @@ def test_base_open_ticket_settlement_does_not_double_debit_stake(tmp_path) -> No
     assert replay.final_balance == Decimal("120")
     assert len(replay.transitions) == 1
     assert replay.transitions[0].action == "settle"
+
+@pytest.mark.parametrize(
+    "bankroll",
+    ("1E+100000000", "1E-100000000"),
+)
+def test_replay_rejects_exponent_sized_fixed_point_evidence(
+    tmp_path,
+    bankroll: str,
+) -> None:
+    book = PaperBook(bankroll)
+    snapshot = _snapshot(book, tmp_path / "huge-exponent.json")
+
+    with pytest.raises(
+        RiskPathEquityReplayError,
+        match="fixed-point representation exceeds supported evidence size",
+    ):
+        replay_paper_book_equity_path(
+            snapshot,
+            snapshot,
+            expected_changed_ticket_ids=frozenset(),
+        )
+
+
+def test_replay_rejects_huge_scale_zero_before_fixed_point_materialization(
+    tmp_path,
+) -> None:
+    book = PaperBook("1")
+    book.open_ticket(
+        [_leg()],
+        Decimal("1"),
+        placed_at="2026-01-01T10:00:00+00:00",
+    )
+    snapshot = _snapshot(book, tmp_path / "zero-balance.json")
+    assert b'"balance": "0"' in snapshot
+    scaled_zero_snapshot = snapshot.replace(
+        b'"balance": "0"',
+        b'"balance": "0E-100000000"',
+        1,
+    )
+
+    # Decimal equality keeps this a semantically valid PaperBook snapshot:
+    # lifecycle replay reaches numeric zero. The risk evidence renderer must
+    # nevertheless reject its enormous fixed-point scale before allocation.
+    PaperBook.load_bytes(scaled_zero_snapshot)
+    with pytest.raises(
+        RiskPathEquityReplayError,
+        match="fixed-point representation exceeds supported evidence size",
+    ):
+        replay_paper_book_equity_path(
+            scaled_zero_snapshot,
+            scaled_zero_snapshot,
+            expected_changed_ticket_ids=frozenset(),
+        )
+

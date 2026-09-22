@@ -48,6 +48,13 @@ COVERAGE_HEADERS = {
 
 
 class ParlayApiObservationCausalityTests(unittest.TestCase):
+    def test_default_transport_rejects_caller_clock_override(self) -> None:
+        with self.assertRaisesRegex(ValueError, "clock override requires a custom transport"):
+            ParlayApiTableTennisProvider(
+                "dummy-key",
+                clock=lambda: "2000-01-01T00:00:00+00:00",
+            )
+
     def test_live_observation_clock_is_sampled_after_successful_transport(self) -> None:
         response_returned = False
         clock_calls = 0

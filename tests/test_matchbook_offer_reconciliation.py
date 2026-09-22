@@ -26,7 +26,14 @@ def test_delayed_is_pending_and_non_authoritative():
     x = offer(status=MatchbookOfferStatus.DELAYED)
     assert x.truth is MatchbookOfferTruth.DELAYED_PENDING
     assert not x.settlement_authority and not x.provider_write_authority
-    assert retry_disposition(observed_offer=x) is MatchbookRetryDisposition.DO_NOT_RETRY_ALREADY_OBSERVED
+    assert (
+        retry_disposition(
+            observed_offer=x,
+            expected_account_context_id=x.account_context_id,
+            expected_offer_id=x.offer_id,
+        )
+        is MatchbookRetryDisposition.DO_NOT_RETRY_ALREADY_OBSERVED
+    )
 
 
 def test_delayed_cannot_forge_matched_exposure():
@@ -66,6 +73,39 @@ def test_http_never_mints_blind_retry_authority(code):
 
 def test_transport_exception_requires_reconciliation():
     assert retry_disposition(transport_exception=True) is MatchbookRetryDisposition.RECONCILE_BEFORE_RETRY
+
+
+def test_observed_offer_requires_exact_submit_attempt_binding():
+    x = offer(17)
+
+    assert (
+        retry_disposition(observed_offer=x)
+        is MatchbookRetryDisposition.RECONCILE_BEFORE_RETRY
+    )
+    assert (
+        retry_disposition(
+            observed_offer=x,
+            expected_account_context_id="other-account",
+            expected_offer_id=17,
+        )
+        is MatchbookRetryDisposition.RECONCILE_BEFORE_RETRY
+    )
+    assert (
+        retry_disposition(
+            observed_offer=x,
+            expected_account_context_id=x.account_context_id,
+            expected_offer_id=18,
+        )
+        is MatchbookRetryDisposition.RECONCILE_BEFORE_RETRY
+    )
+    assert (
+        retry_disposition(
+            observed_offer=x,
+            expected_account_context_id=x.account_context_id,
+            expected_offer_id=17,
+        )
+        is MatchbookRetryDisposition.DO_NOT_RETRY_ALREADY_OBSERVED
+    )
 
 
 def test_aggregated_ids_are_not_singular_identity():

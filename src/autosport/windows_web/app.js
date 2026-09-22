@@ -44,6 +44,17 @@
     }
   }
 
+  function renderSingleColumnTable(body, values) {
+    body.replaceChildren();
+    for (const value of values || []) {
+      const row = document.createElement("tr");
+      const cell = document.createElement("td");
+      cell.textContent = String(value);
+      row.appendChild(cell);
+      body.appendChild(row);
+    }
+  }
+
   function setSelectOptions(node, options, valueKey = "id", labelKey = "label") {
     const current = node.value;
     node.replaceChildren();
@@ -106,8 +117,8 @@
       focusResult(result);
       await refreshState();
       return result;
-    } catch (error) {
-      announce("Помилка bridge: " + String(error), true);
+    } catch (_error) {
+      announce("Помилка зв’язку з Python bridge. Перевірте стан і повторіть дію.", true);
       return null;
     }
   }
@@ -139,7 +150,7 @@
     byId(104).value = state.live_mode;
     byId("live-status").textContent = state.live_status || "";
     renderList(byId(203), state.live_quotes);
-    renderList(byId(201), state.tickets);
+    renderSingleColumnTable(byId("tickets-table-body"), state.tickets);
     renderList(byId(204), state.evaluation);
     byId(202).value = (state.log || []).join("\n");
 
@@ -166,6 +177,11 @@
     byId("manual-status").textContent = state.manual.status || "";
     byId(334).value = state.manual.result || "";
 
+    const productRuntime = state.product_runtime || {};
+    byId("product-runtime-status").value = productRuntime.status || "Тривала PAPER-робота не запущена.";
+    byId("product-runtime-start").disabled = productRuntime.can_start !== true;
+    byId("product-runtime-stop").disabled = productRuntime.can_stop !== true;
+
     const busy = state.busy && Object.values(state.busy).some(Boolean);
     [101, 102, 103, 104, 105, 106, 107, 108, 109].forEach((id) => {
       byId(id).disabled = Boolean(busy);
@@ -181,8 +197,8 @@
   async function refreshState() {
     try {
       renderState(await apiState());
-    } catch (error) {
-      announce(String(error), true);
+    } catch (_error) {
+      announce("Не вдалося оновити стан продукту через Python bridge.", true);
     }
   }
 
@@ -224,6 +240,12 @@
   byId(108).addEventListener("click", () => dispatch("recovery.run"));
   byId(109).addEventListener("click", () => {
     dispatch("evidence.export", { path: byId("evidence-path").value });
+  });
+  byId("product-runtime-start").addEventListener("click", () => {
+    dispatch("product_runtime.start");
+  });
+  byId("product-runtime-stop").addEventListener("click", () => {
+    dispatch("product_runtime.stop");
   });
 
   byId(301).addEventListener("change", () => {

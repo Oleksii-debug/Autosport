@@ -279,7 +279,8 @@ function Get-AutosportProducerPackageIdentity {
     if ($buildInfo.real_money_execution -ne $false -or
         $buildInfo.human_tested -ne $false -or
         $buildInfo.nvda_verified -ne $false -or
-        $buildInfo.v1_ready -ne $false) {
+        $buildInfo.v1_ready -ne $false -or
+        $buildInfo.whole_product_complete -ne $false) {
       throw 'Producer-bound BUILD_INFO violated prehuman truth labels'
     }
 

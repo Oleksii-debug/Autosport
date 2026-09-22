@@ -376,6 +376,7 @@ class ProductPaperDecisionCycle:
             bounds=self.bounds,
             clock=self.clock,
             observation_runner=self._no_provider_observation,
+            commit_fence=self.runtime.decision_commit_fence,
         )
         try:
             for decision_input in self.inputs:

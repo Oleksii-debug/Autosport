@@ -692,13 +692,61 @@ class ForwardEconomicEvidenceAccumulator:
         self._challenger_max_drawdown = new_max_drawdown
         return deepcopy(step)
 
+    def _realized_challenger_drawdown(self) -> tuple[Decimal, Decimal, bool]:
+        settlement_groups: dict[datetime, list[Decimal]] = {}
+        for step in self._steps:
+            if step.challenger_side is BetSide.NONE:
+                continue
+            available_at = step.challenger_settlement_available_at
+            if available_at is None:
+                raise ForwardEconomicEvidenceError(
+                    "settled challenger action is missing settlement availability"
+                )
+            settlement_groups.setdefault(available_at, []).append(
+                step.challenger_net_pnl_currency
+            )
+
+        total = Decimal(0)
+        peak = Decimal(0)
+        maximum_drawdown = Decimal(0)
+        chronology_unambiguous = True
+        with localcontext() as context:
+            context.prec = _DECIMAL_PRECISION
+            for available_at in sorted(settlement_groups):
+                pnls = settlement_groups[available_at]
+                positive = [pnl for pnl in pnls if pnl > 0]
+                zero = [pnl for pnl in pnls if pnl == 0]
+                negative = [pnl for pnl in pnls if pnl < 0]
+                if positive and negative:
+                    chronology_unambiguous = False
+
+                # Simultaneous mixed-sign settlements have no authoritative
+                # intra-instant order. Positive-before-negative is the
+                # conservative drawdown envelope, while the gate remains
+                # fail-closed because the exact chronology is ambiguous.
+                for pnl in (*positive, *zero, *negative):
+                    total = +(total + pnl)
+                    peak = max(peak, total)
+                    maximum_drawdown = max(
+                        maximum_drawdown,
+                        +(peak - total),
+                    )
+
+        return peak, maximum_drawdown, chronology_unambiguous
+
     def summary(self) -> ForwardEconomicEvidenceSummary:
         protocol = self._validated_protocol()
         threshold = _log_threshold(protocol.challenger_alpha)
         minimum_events_satisfied = len(self._steps) >= protocol.minimum_events
         absolute_crossed = self._absolute_log_e >= threshold
         paired_crossed = self._paired_log_e >= threshold
-        drawdown_passed = self._challenger_max_drawdown <= protocol.maximum_drawdown_currency
+        realized_peak, realized_max_drawdown, chronology_unambiguous = (
+            self._realized_challenger_drawdown()
+        )
+        drawdown_passed = (
+            chronology_unambiguous
+            and realized_max_drawdown <= protocol.maximum_drawdown_currency
+        )
         evidence_payload = {
             "schema_version": 1,
             "protocol_sha256": self._protocol_sha256,
@@ -711,8 +759,8 @@ class ForwardEconomicEvidenceAccumulator:
             next_sequence=self.next_sequence,
             challenger_total_pnl_currency=self._challenger_total,
             champion_total_pnl_currency=self._champion_total,
-            challenger_peak_pnl_currency=self._challenger_peak,
-            challenger_max_drawdown_currency=self._challenger_max_drawdown,
+            challenger_peak_pnl_currency=realized_peak,
+            challenger_max_drawdown_currency=realized_max_drawdown,
             absolute_log_e=self._absolute_log_e,
             paired_log_e=self._paired_log_e,
             log_threshold=threshold,

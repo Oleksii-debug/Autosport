@@ -79,7 +79,7 @@ def test_exact_bound_snapshot_is_usable() -> None:
         current_market_info_sha256=_INFO,
     )
 
-    assert assessment.disposition is RulesetDisposition.USE_BOUND_SNAPSHOT
+    assert assessment.disposition is RulesetDisposition.BOUND_SNAPSHOT_STRUCTURALLY_VALID
     assert assessment.latest_signal is LatestRulesetSignal.SAME_AS_BOUND
     assert assessment.bound_treatment_code == "synthetic.void"
 
@@ -96,7 +96,7 @@ def test_changed_latest_never_replaces_bound_treatment() -> None:
         current_market_info_sha256=_INFO,
     )
 
-    assert assessment.disposition is RulesetDisposition.USE_BOUND_SNAPSHOT
+    assert assessment.disposition is RulesetDisposition.BOUND_SNAPSHOT_STRUCTURALLY_VALID
     assert assessment.latest_signal is LatestRulesetSignal.LATEST_DIFFERS
     assert assessment.bound_treatment_code == "synthetic.void"
     assert assessment.latest_rulebook_id == latest.rulebook_id
@@ -112,7 +112,7 @@ def test_missing_latest_is_explicit_but_does_not_replace_bound_snapshot() -> Non
         current_market_info_sha256=_INFO,
     )
 
-    assert assessment.disposition is RulesetDisposition.USE_BOUND_SNAPSHOT
+    assert assessment.disposition is RulesetDisposition.BOUND_SNAPSHOT_STRUCTURALLY_VALID
     assert assessment.latest_signal is LatestRulesetSignal.LATEST_UNKNOWN
     assert assessment.bound_treatment_code == "synthetic.void"
 
@@ -133,7 +133,7 @@ def test_unrelated_latest_is_diagnostic_only() -> None:
         current_market_info_sha256=_INFO,
     )
 
-    assert assessment.disposition is RulesetDisposition.USE_BOUND_SNAPSHOT
+    assert assessment.disposition is RulesetDisposition.BOUND_SNAPSHOT_STRUCTURALLY_VALID
     assert assessment.latest_signal is LatestRulesetSignal.LATEST_UNRELATED
     assert assessment.bound_treatment_code == "synthetic.void"
 

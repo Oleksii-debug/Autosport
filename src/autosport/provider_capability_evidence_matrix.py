@@ -256,11 +256,12 @@ def issue_provider_capability_evidence(
 ) -> ProviderCapabilityEvidence:
     """Issue one exact in-process evidence object after structural validation.
 
-    Positive facts are accepted by a matrix only by exact object identity through this
-    product factory. Reconstructing/copying the dataclass, even with identical bytes and
-    digest, does not recreate issuance authority. A restarted process must re-resolve and
-    re-issue evidence from its canonical upstream authority; restart time alone cannot
-    renew freshness.
+    Non-write positive facts are accepted by a matrix only by exact object identity
+    through this product factory. Current write-capability authority is deliberately
+    not generically issuable: WRITE_PERMISSION_PROVEN and write-capability
+    OBSERVED_OPERATIONAL require a future provider-specific sealed upstream verifier.
+    Reconstructing/copying a dataclass does not recreate issuance authority, and restart
+    time alone cannot renew freshness.
     """
 
     fact = ProviderCapabilityEvidence(

@@ -79,4 +79,4 @@ def test_recovery_worker_raw_secret_diagnostic_never_reaches_operator_surfaces(
         assert forbidden not in rendered
 
     assert "Відновлення" in rendered or "відновлення" in rendered
-    assert "sha256=" in rendered
+    assert "RECOVERY_WORKER_FAILURE" in rendered

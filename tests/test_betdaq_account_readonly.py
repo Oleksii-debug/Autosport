@@ -3,11 +3,13 @@ from decimal import Decimal
 
 import pytest
 
+import autosport.betdaq_account_readonly as betdaq_account_module
 from autosport.betdaq_account_readonly import (
     ADAPTER_ID,
     BetdaqAccountReadOnlyClient,
     BetdaqAccountReadOnlyError,
     BetdaqCredentials,
+    UrllibBetdaqSoapTransport,
 )
 from autosport.bookmaker_capability import (
     BookmakerCapability,
@@ -34,6 +36,35 @@ class QueueTransport:
         return result
 
 
+class _FakeHttpResponse:
+    def __init__(self, payload):
+        self.payload = payload
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, traceback):
+        return False
+
+    def read(self):
+        return self.payload
+
+
+class QueueUrlopen:
+    def __init__(self, *results):
+        self.results = list(results)
+        self.calls = []
+
+    def __call__(self, request, *, timeout):
+        self.calls.append((request, timeout))
+        if not self.results:
+            raise AssertionError("unexpected urlopen call")
+        result = self.results.pop(0)
+        if isinstance(result, BaseException):
+            raise result
+        return _FakeHttpResponse(result)
+
+
 def clock():
     return datetime(2026, 9, 22, 14, 30, tzinfo=timezone.utc)
 
@@ -48,6 +79,18 @@ def client(*results, credentials=None, account_id="acct"):
         account_id=account_id,
     )
     return value, transport
+
+
+def canonical_client(monkeypatch, *results, credentials=None, account_id="acct"):
+    opener = QueueUrlopen(*results)
+    monkeypatch.setattr(betdaq_account_module, "urlopen", opener)
+    credentials = credentials or BetdaqCredentials("alice", "p@ss", "app-id")
+    value = BetdaqAccountReadOnlyClient(
+        credentials,
+        clock=clock,
+        account_id=account_id,
+    )
+    return value, opener
 
 
 def soap(method, result_attributes="", inner="", return_status_code="0"):
@@ -126,22 +169,56 @@ def test_credentials_and_client_repr_do_not_expose_secure_values():
     assert "secret" not in repr(c)
 
 
-def test_canonical_account_scope_ignores_caller_label_for_same_auth_context():
-    first_credentials = BetdaqCredentials("alice", "p@ss", "app-id")
-    second_credentials = BetdaqCredentials("alice", "p@ss", "app-id")
-    first, _ = client(
-        balance(),
-        credentials=first_credentials,
-        account_id="caller-label-a",
-    )
-    second, _ = client(
-        balance(),
-        credentials=second_credentials,
-        account_id="caller-label-b",
+def test_injected_transport_cannot_publish_canonical_account_evidence():
+    value, transport = client(balance())
+
+    with pytest.raises(
+        BetdaqAccountReadOnlyError,
+        match="requires product-owned HTTPS transport",
+    ):
+        value.read_account_evidence(
+            frozenset({BookmakerCapability.BALANCE_READ})
+        )
+
+    assert transport.calls == []
+
+
+def test_shadowed_builtin_transport_cannot_publish_canonical_account_evidence():
+    transport = UrllibBetdaqSoapTransport()
+    transport.post = lambda *args, **kwargs: balance()
+    value = BetdaqAccountReadOnlyClient(
+        BetdaqCredentials("alice", "p@ss", "app-id"),
+        transport=transport,
+        clock=clock,
     )
 
+    with pytest.raises(
+        BetdaqAccountReadOnlyError,
+        match="transport was replaced or shadowed",
+    ):
+        value.read_account_evidence(
+            frozenset({BookmakerCapability.BALANCE_READ})
+        )
+
+
+def test_canonical_account_scope_ignores_caller_label_for_same_auth_context(
+    monkeypatch,
+):
     requested = frozenset({BookmakerCapability.BALANCE_READ})
+    first, _ = canonical_client(
+        monkeypatch,
+        balance(),
+        credentials=BetdaqCredentials("alice", "p@ss", "app-id"),
+        account_id="caller-label-a",
+    )
     first_evidence = first.read_account_evidence(requested)
+
+    second, _ = canonical_client(
+        monkeypatch,
+        balance(),
+        credentials=BetdaqCredentials("alice", "p@ss", "app-id"),
+        account_id="caller-label-b",
+    )
     second_evidence = second.read_account_evidence(requested)
 
     first_scope = first_evidence.snapshot.profile.account_id
@@ -158,20 +235,24 @@ def test_canonical_account_scope_ignores_caller_label_for_same_auth_context():
     )
 
 
-def test_distinct_auth_contexts_cannot_collapse_under_same_caller_label():
-    first, _ = client(
+def test_distinct_auth_contexts_cannot_collapse_under_same_caller_label(
+    monkeypatch,
+):
+    requested = frozenset({BookmakerCapability.BALANCE_READ})
+    first, _ = canonical_client(
+        monkeypatch,
         balance(),
         credentials=BetdaqCredentials("alice-a", "p@ss-a", "app-a"),
         account_id="same-caller-label",
     )
-    second, _ = client(
+    first_evidence = first.read_account_evidence(requested)
+
+    second, _ = canonical_client(
+        monkeypatch,
         balance(),
         credentials=BetdaqCredentials("alice-b", "p@ss-b", "app-b"),
         account_id="same-caller-label",
     )
-
-    requested = frozenset({BookmakerCapability.BALANCE_READ})
-    first_evidence = first.read_account_evidence(requested)
     second_evidence = second.read_account_evidence(requested)
 
     assert first_evidence.snapshot.profile.account_id != (
@@ -182,9 +263,12 @@ def test_distinct_auth_contexts_cannot_collapse_under_same_caller_label():
     )
 
 
-def test_public_account_context_and_snapshot_identity_never_expose_credentials():
+def test_public_account_context_and_snapshot_identity_never_expose_credentials(
+    monkeypatch,
+):
     credentials = BetdaqCredentials("secret-user", "secret-pass", "secret-app")
-    value, _ = client(
+    value, _ = canonical_client(
+        monkeypatch,
         balance(),
         credentials=credentials,
         account_id="friendly-label",
@@ -206,29 +290,26 @@ def test_public_account_context_and_snapshot_identity_never_expose_credentials()
     assert "friendly-label" not in evidence.snapshot.profile.account_id
 
 
-def test_credential_rotation_during_snapshot_fails_before_canonical_publication():
+def test_credential_rotation_during_snapshot_fails_before_canonical_publication(
+    monkeypatch,
+):
     credentials = BetdaqCredentials("alice", "before-pass", "app-id")
 
-    class MutatingCredentialTransport(QueueTransport):
-        def post(self, url, *, headers, body, timeout_seconds):
-            payload = super().post(
-                url,
-                headers=headers,
-                body=body,
-                timeout_seconds=timeout_seconds,
-            )
+    class MutatingQueueUrlopen(QueueUrlopen):
+        def __call__(self, request, *, timeout):
+            response = super().__call__(request, timeout=timeout)
             if len(self.calls) == 1:
                 object.__setattr__(credentials, "password", "after-pass")
-            return payload
+            return response
 
-    transport = MutatingCredentialTransport(
+    opener = MutatingQueueUrlopen(
         balance(),
         bootstrap(0),
         changed(),
     )
+    monkeypatch.setattr(betdaq_account_module, "urlopen", opener)
     value = BetdaqAccountReadOnlyClient(
         credentials,
-        transport=transport,
         clock=clock,
         account_id="caller-label",
     )
@@ -519,8 +600,8 @@ def test_invalid_economic_decimal_fails_before_publication(replacement):
         c.read_complete_current_orders()
 
 
-def test_canonical_snapshot_includes_balance_and_complete_nonterminal_positions():
-    c, _ = client(
+def test_canonical_snapshot_includes_balance_and_complete_nonterminal_positions(monkeypatch):
+    c, _ = canonical_client(monkeypatch,
         balance(),
         bootstrap(
             4,
@@ -559,8 +640,8 @@ def test_canonical_snapshot_includes_balance_and_complete_nonterminal_positions(
     assert snapshot.open_positions[0].provider_side == "BACK"
 
 
-def test_partially_matched_order_preserves_live_unmatched_remainder_without_false_single_odds():
-    c, _ = client(
+def test_partially_matched_order_preserves_live_unmatched_remainder_without_false_single_odds(monkeypatch):
+    c, _ = canonical_client(monkeypatch,
         balance(),
         bootstrap(
             1,
@@ -591,8 +672,8 @@ def test_partially_matched_order_preserves_live_unmatched_remainder_without_fals
     assert position.decimal_odds is None
 
 
-def test_active_order_amount_sum_is_exact_beyond_ambient_decimal_context_precision():
-    c, _ = client(
+def test_active_order_amount_sum_is_exact_beyond_ambient_decimal_context_precision(monkeypatch):
+    c, _ = canonical_client(monkeypatch,
         balance(),
         bootstrap(
             1,
@@ -617,8 +698,8 @@ def test_active_order_amount_sum_is_exact_beyond_ambient_decimal_context_precisi
     assert position.decimal_odds is None
 
 
-def test_cancelled_unmatched_only_order_is_not_laundered_into_open_position():
-    c, _ = client(
+def test_cancelled_unmatched_only_order_is_not_laundered_into_open_position(monkeypatch):
+    c, _ = canonical_client(monkeypatch,
         balance(),
         bootstrap(1, order("1", 1, status=3, unmatched="5", matched="0")),
         changed(),
@@ -630,8 +711,8 @@ def test_cancelled_unmatched_only_order_is_not_laundered_into_open_position():
     assert snapshot.settled_positions == ()
 
 
-def test_settled_and_void_raw_evidence_are_preserved_but_not_misreported_as_complete_settled_history():
-    c, _ = client(
+def test_settled_and_void_raw_evidence_are_preserved_but_not_misreported_as_complete_settled_history(monkeypatch):
+    c, _ = canonical_client(monkeypatch,
         balance(),
         bootstrap(
             2,

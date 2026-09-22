@@ -60,12 +60,18 @@ class ResourceLimit:
 
     max_net_growth: int
     max_span: int
+    rationale: str
 
     def __post_init__(self) -> None:
         if type(self.max_net_growth) is not int or self.max_net_growth < 0:
             raise ValueError("max_net_growth must be a non-negative integer")
         if type(self.max_span) is not int or self.max_span < 0:
             raise ValueError("max_span must be a non-negative integer")
+        if not self.rationale or self.rationale != self.rationale.strip():
+            raise ValueError("rationale must be a non-empty trimmed string")
+
+    def to_dict(self) -> dict[str, object]:
+        return asdict(self)
 
 
 @dataclass(frozen=True, slots=True)
@@ -92,6 +98,8 @@ class ResourceQualification:
     warmup_samples: int
     failures: tuple[str, ...]
     unsupported_signals: tuple[str, ...]
+    unbounded_observed_signals: tuple[str, ...]
+    declared_limits: tuple[tuple[str, ResourceLimit], ...]
     trends: tuple[ResourceTrend, ...]
 
     def to_dict(self) -> dict[str, object]:
@@ -100,6 +108,10 @@ class ResourceQualification:
             "warmup_samples": self.warmup_samples,
             "failures": list(self.failures),
             "unsupported_signals": list(self.unsupported_signals),
+            "unbounded_observed_signals": list(self.unbounded_observed_signals),
+            "declared_limits": {
+                signal: limit.to_dict() for signal, limit in self.declared_limits
+            },
             "trends": [trend.to_dict() for trend in self.trends],
         }
 
@@ -199,8 +211,9 @@ def qualify_resource_samples(
 
     A caller must declare at least one bound before this function can return PASS. Signals
     that are unavailable on the current platform remain UNKNOWN and fail closed when the
-    caller requires a bound for them. This prevents a single peak/absolute value from
-    being promoted into leak-free endurance evidence.
+    caller requires a bound for them. Observed-but-unbounded signals and the exact declared
+    limits/rationales are included in the result so a partial qualification cannot be
+    misread as a whole-process leak-free claim.
     """
 
     if type(warmup_samples) is not int or warmup_samples < 0:
@@ -225,6 +238,7 @@ def qualify_resource_samples(
     trends: list[ResourceTrend] = []
     failures: list[str] = []
     unsupported: list[str] = []
+    unbounded: list[str] = []
 
     for signal in sorted(_SUPPORTED_SIGNALS):
         observed = _trend(signal, window)
@@ -236,6 +250,7 @@ def qualify_resource_samples(
         trends.append(observed)
         limit = limits.get(signal)
         if limit is None:
+            unbounded.append(signal)
             continue
         if observed.net_growth > limit.max_net_growth:
             failures.append(
@@ -256,5 +271,7 @@ def qualify_resource_samples(
         warmup_samples=warmup_samples,
         failures=tuple(failures),
         unsupported_signals=tuple(unsupported),
+        unbounded_observed_signals=tuple(unbounded),
+        declared_limits=tuple(sorted(limits.items())),
         trends=tuple(trends),
     )

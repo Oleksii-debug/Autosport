@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import sys
 import tempfile
 import tracemalloc
@@ -45,6 +46,8 @@ class EnduranceResourceProbeTests(unittest.TestCase):
 
         self.assertEqual(result.status, "UNQUALIFIED")
         self.assertEqual(result.failures, ())
+        self.assertEqual(result.declared_limits, ())
+        self.assertIn("thread_count", result.unbounded_observed_signals)
         self.assertTrue(any(item.signal == "thread_count" for item in result.trends))
 
     def test_stable_post_warmup_plateau_passes_declared_bounds(self):
@@ -60,9 +63,21 @@ class EnduranceResourceProbeTests(unittest.TestCase):
             samples,
             warmup_samples=1,
             limits={
-                "traced_memory_bytes": ResourceLimit(max_net_growth=4, max_span=4),
-                "thread_count": ResourceLimit(max_net_growth=0, max_span=0),
-                "open_fd_count": ResourceLimit(max_net_growth=0, max_span=0),
+                "traced_memory_bytes": ResourceLimit(
+                    max_net_growth=4,
+                    max_span=4,
+                    rationale="synthetic post-warmup memory plateau",
+                ),
+                "thread_count": ResourceLimit(
+                    max_net_growth=0,
+                    max_span=0,
+                    rationale="synthetic worker inventory is fixed",
+                ),
+                "open_fd_count": ResourceLimit(
+                    max_net_growth=0,
+                    max_span=0,
+                    rationale="synthetic descriptor inventory is fixed",
+                ),
             },
         )
 
@@ -71,6 +86,13 @@ class EnduranceResourceProbeTests(unittest.TestCase):
         self.assertEqual(memory.net_growth, 0)
         self.assertEqual(memory.span, 2)
         self.assertEqual(memory.slope_per_work_unit, "0")
+        payload = result.to_dict()
+        self.assertEqual(
+            payload["declared_limits"]["traced_memory_bytes"]["rationale"],
+            "synthetic post-warmup memory plateau",
+        )
+        self.assertIn("workspace_bytes", payload["unbounded_observed_signals"])
+        json.dumps(payload)
 
     def test_monotonic_growth_fails_explicit_memory_envelope(self):
         samples = [
@@ -83,7 +105,13 @@ class EnduranceResourceProbeTests(unittest.TestCase):
         result = qualify_resource_samples(
             samples,
             warmup_samples=0,
-            limits={"traced_memory_bytes": ResourceLimit(max_net_growth=40, max_span=60)},
+            limits={
+                "traced_memory_bytes": ResourceLimit(
+                    max_net_growth=40,
+                    max_span=60,
+                    rationale="synthetic leak falsifier must stay inside a bounded envelope",
+                )
+            },
         )
 
         self.assertEqual(result.status, "FAIL")
@@ -104,7 +132,13 @@ class EnduranceResourceProbeTests(unittest.TestCase):
         result = qualify_resource_samples(
             samples,
             warmup_samples=0,
-            limits={"open_fd_count": ResourceLimit(max_net_growth=0, max_span=0)},
+            limits={
+                "open_fd_count": ResourceLimit(
+                    max_net_growth=0,
+                    max_span=0,
+                    rationale="this synthetic contract requires descriptor evidence",
+                )
+            },
         )
 
         self.assertEqual(result.status, "FAIL")
@@ -114,13 +148,25 @@ class EnduranceResourceProbeTests(unittest.TestCase):
             result.failures,
         )
 
+    def test_limits_require_a_nonempty_rationale(self):
+        with self.assertRaisesRegex(ValueError, "rationale must be a non-empty trimmed string"):
+            ResourceLimit(max_net_growth=0, max_span=0, rationale="")
+        with self.assertRaisesRegex(ValueError, "rationale must be a non-empty trimmed string"):
+            ResourceLimit(max_net_growth=0, max_span=0, rationale=" padded ")
+
     def test_work_units_and_checkpoints_are_strictly_ordered(self):
         duplicate_checkpoint = [self._sample(0), self._sample(0)]
         with self.assertRaisesRegex(ValueError, "checkpoints must be unique"):
             qualify_resource_samples(
                 duplicate_checkpoint,
                 warmup_samples=0,
-                limits={"thread_count": ResourceLimit(0, 0)},
+                limits={
+                    "thread_count": ResourceLimit(
+                        0,
+                        0,
+                        "synthetic fixed thread inventory",
+                    )
+                },
             )
 
         non_advancing = [
@@ -139,7 +185,13 @@ class EnduranceResourceProbeTests(unittest.TestCase):
             qualify_resource_samples(
                 non_advancing,
                 warmup_samples=0,
-                limits={"thread_count": ResourceLimit(0, 0)},
+                limits={
+                    "thread_count": ResourceLimit(
+                        0,
+                        0,
+                        "synthetic fixed thread inventory",
+                    )
+                },
             )
 
     def test_sqlite_reopen_close_cycles_do_not_accumulate_threads_or_descriptors(self):
@@ -165,11 +217,26 @@ class EnduranceResourceProbeTests(unittest.TestCase):
                     )
 
                 limits = {
-                    "thread_count": ResourceLimit(max_net_growth=0, max_span=0),
-                    "workspace_file_count": ResourceLimit(max_net_growth=0, max_span=0),
+                    "thread_count": ResourceLimit(
+                        max_net_growth=0,
+                        max_span=0,
+                        rationale="closed SQLiteMarketStore owns no worker threads",
+                    ),
+                    "workspace_file_count": ResourceLimit(
+                        max_net_growth=0,
+                        max_span=0,
+                        rationale="steady closed-store cycles must not accumulate sidecar files",
+                    ),
                 }
                 if all(sample.open_fd_count is not None for sample in samples):
-                    limits["open_fd_count"] = ResourceLimit(max_net_growth=1, max_span=1)
+                    limits["open_fd_count"] = ResourceLimit(
+                        max_net_growth=0,
+                        max_span=1,
+                        rationale=(
+                            "the /proc probe may observe one descriptor of measurement jitter, "
+                            "but a closed store must return to the post-warmup descriptor baseline"
+                        ),
+                    )
 
                 result = qualify_resource_samples(samples, warmup_samples=2, limits=limits)
             finally:
@@ -180,9 +247,10 @@ class EnduranceResourceProbeTests(unittest.TestCase):
         thread_trend = next(item for item in result.trends if item.signal == "thread_count")
         self.assertEqual(thread_trend.net_growth, 0)
         self.assertEqual(thread_trend.span, 0)
+        self.assertIn("traced_memory_bytes", result.unbounded_observed_signals)
         if "open_fd_count" not in result.unsupported_signals:
             fd_trend = next(item for item in result.trends if item.signal == "open_fd_count")
-            self.assertLessEqual(fd_trend.net_growth, 1)
+            self.assertEqual(fd_trend.net_growth, 0)
             self.assertLessEqual(fd_trend.span, 1)
 
 

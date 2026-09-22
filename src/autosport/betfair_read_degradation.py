@@ -96,9 +96,7 @@ _ACCOUNT_ERROR_ACTIONS: dict[str, ReadRecoveryAction] = {
 }
 
 
-def _error_actions_for(operation: str) -> dict[str, ReadRecoveryAction]:
-    if operation == "listCompetitions":
-        return _LIST_COMPETITIONS_ERROR_ACTIONS
+def _family_error_actions_for(operation: str) -> dict[str, ReadRecoveryAction]:
     if operation in _BETTING_READ_ONLY_OPERATIONS:
         return _BETTING_ERROR_ACTIONS
     if operation in _ACCOUNT_READ_ONLY_OPERATIONS:
@@ -106,6 +104,12 @@ def _error_actions_for(operation: str) -> dict[str, ReadRecoveryAction]:
     raise BetfairReadDegradationError(
         "operation must be a supported read-only Betfair operation"
     )
+
+
+def _error_actions_for(operation: str) -> dict[str, ReadRecoveryAction]:
+    if operation == "listCompetitions":
+        return _LIST_COMPETITIONS_ERROR_ACTIONS
+    return _family_error_actions_for(operation)
 
 
 @dataclass(frozen=True, slots=True)
@@ -151,6 +155,10 @@ class BetfairReadDegradation:
 
     @property
     def documented_for_api_family(self) -> bool:
+        return self.error_code in _family_error_actions_for(self.operation)
+
+    @property
+    def documented_for_operation(self) -> bool:
         return self.error_code in _error_actions_for(self.operation)
 
     @property
@@ -188,6 +196,7 @@ class BetfairReadDegradation:
             "error_code": self.error_code,
             "request_uuid": self.request_uuid,
             "documented_for_api_family": self.documented_for_api_family,
+            "documented_for_operation": self.documented_for_operation,
             "action": self.action.value,
             "automatic_repeat_allowed": self.automatic_repeat_allowed,
             "requires_new_session": self.requires_new_session,

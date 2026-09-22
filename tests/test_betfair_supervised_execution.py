@@ -1351,6 +1351,7 @@ def test_unmatched_success_preserves_known_order_until_readback() -> None:
                 matched="0",
                 average="0",
                 bet_id="bet-unmatched",
+                order_status="EXECUTABLE",
             )
         )
         client = _enabled_client(profile, transport, store=goal_store)
@@ -1369,6 +1370,44 @@ def test_unmatched_success_preserves_known_order_until_readback() -> None:
         assert result.outcome is PlaceOrdersOutcome.PLACED_UNMATCHED
         assert result.attempt_state is AttemptState.UNKNOWN
         assert result.external_receipt_id == "bet-unmatched"
+        assert result.evidence_id is not None
+        assert not ledger.can_retry_action(
+            plan_id=bound.execution_plan.plan_id,
+            action_id=action.action_id,
+        )
+
+
+@pytest.mark.parametrize("order_status", (None, "EXECUTION_COMPLETE"))
+def test_zero_match_without_live_remainder_proof_stays_unknown_until_readback(
+    order_status: str | None,
+) -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        profile, bound, approval, ledger, action, goal_store = _prepared(tmp)
+        transport = _Transport(
+            lambda request: _response(
+                request,
+                matched="0",
+                average="0",
+                bet_id="bet-zero-match",
+                order_status=order_status,
+            )
+        )
+        client = _enabled_client(profile, transport, store=goal_store)
+
+        result = execute_betfair_supervised_action(
+            ledger,
+            bound,
+            approval,
+            action_id=action.action_id,
+            attempt_id="attempt-zero-match-nonlive-status",
+            profile=profile,
+            client=client,
+            clock=lambda: SUBMITTED_AT,
+        )
+
+        assert result.outcome is PlaceOrdersOutcome.UNKNOWN
+        assert result.attempt_state is AttemptState.UNKNOWN
+        assert result.external_receipt_id == "bet-zero-match"
         assert result.evidence_id is not None
         assert not ledger.can_retry_action(
             plan_id=bound.execution_plan.plan_id,

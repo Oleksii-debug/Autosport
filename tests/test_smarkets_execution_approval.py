@@ -165,12 +165,12 @@ def _confirmed(
         decision_sha256=decision_sha256 or bound.execution_plan.fingerprint,
         approval_evidence_sha256=approval_evidence_sha256 or approval.evidence_sha256,
         risk_evidence_sha256="7" * 64,
-        review_payload={
-            "execution_plan_id": bound.execution_plan.plan_id,
-            "action_id": action.action_id,
-            "requested_odds": str(action.requested_odds),
-            "requested_stake": str(action.requested_stake),
-        },
+        review_payload=sut.smarkets_execution_review_payload(
+            bound,
+            approval,
+            action_id=action.action_id,
+            risk_evidence_sha256="7" * 64,
+        ),
         ttl_seconds=ttl_seconds,
     )
     receipt = authority.confirm_review(
@@ -273,6 +273,57 @@ def test_wrong_durable_decision_digest_fails_before_receipt_consumption(
     )
     assert audit.receipt.consumed_at is None
     assert audit.receipt.consumed_by is None
+
+
+def test_misleading_operator_review_payload_fails_before_receipt_consumption(
+    tmp_path, monkeypatch
+):
+    authority = SupervisedConfirmationAuthority(
+        tmp_path / "supervised-confirmation.jsonl",
+        clock=FakeClock(),
+    )
+    approval = _approval()
+    bound = _bound(approval)
+    action = bound.execution_plan.actions[0]
+    review = authority.prepare_review(
+        review_id="review-1",
+        decision_id=bound.execution_plan.decision_id,
+        bookmaker_id=action.bookmaker_id,
+        account_id=action.account_id,
+        decision_sha256=bound.execution_plan.fingerprint,
+        approval_evidence_sha256=approval.evidence_sha256,
+        risk_evidence_sha256="7" * 64,
+        review_payload={
+            "execution_plan_id": bound.execution_plan.plan_id,
+            "action_id": action.action_id,
+            "requested_stake": "0.01",
+            "display": "misleading operator surface",
+        },
+        ttl_seconds=120,
+    )
+    receipt = authority.confirm_review(
+        review_id=review.review_id,
+        expected_review_sha256=review.review_sha256,
+    )
+    _patch_authority(monkeypatch, authority)
+
+    with pytest.raises(
+        sut.SmarketsExecutionApprovalError,
+        match="review payload does not match canonical",
+    ):
+        sut.consume_smarkets_execution_approval(
+            bound,
+            approval,
+            action_id=action.action_id,
+            receipt_id=receipt.receipt_id,
+            expected_review_sha256=review.review_sha256,
+        )
+
+    assert authority.resolve_receipt_binding(
+        receipt_id=receipt.receipt_id,
+        expected_review_sha256=review.review_sha256,
+        require_unconsumed=False,
+    ).receipt.consumed_at is None
 
 
 def test_wrong_durable_approval_evidence_fails_before_receipt_consumption(

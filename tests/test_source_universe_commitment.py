@@ -227,6 +227,7 @@ class SourceUniverseCommitmentTests(unittest.TestCase):
 
             commitment = build_source_universe_commitment(
                 store,
+                expected_store_path=store.path,
                 source_id="source-x",
                 start_cycle_seq=1,
                 end_cycle_seq=1,
@@ -248,6 +249,7 @@ class SourceUniverseCommitmentTests(unittest.TestCase):
             )
             commitment = build_source_universe_commitment(
                 store,
+                expected_store_path=store.path,
                 source_id="source-x",
                 start_cycle_seq=1,
                 end_cycle_seq=1,
@@ -335,6 +337,7 @@ class SourceUniverseCommitmentTests(unittest.TestCase):
             ):
                 build_source_universe_commitment(
                     store,
+                    expected_store_path=store.path,
                     source_id="source-x",
                     start_cycle_seq=1,
                     end_cycle_seq=2,
@@ -359,6 +362,7 @@ class SourceUniverseCommitmentTests(unittest.TestCase):
             with self.assertRaisesRegex(TypeError, "exact canonical CollectorDeltaStore"):
                 build_source_universe_commitment(
                     store,
+                    expected_store_path=store.path,
                     source_id="source-x",
                     start_cycle_seq=1,
                     end_cycle_seq=1,
@@ -387,6 +391,7 @@ class SourceUniverseCommitmentTests(unittest.TestCase):
             with self.assertRaisesRegex(TypeError, "instance-rebound"):
                 build_source_universe_commitment(
                     store,
+                    expected_store_path=store.path,
                     source_id="source-x",
                     start_cycle_seq=1,
                     end_cycle_seq=1,
@@ -411,10 +416,54 @@ class SourceUniverseCommitmentTests(unittest.TestCase):
                 with self.assertRaisesRegex(TypeError, "instance-rebound"):
                     build_source_universe_commitment(
                         store,
+                        expected_store_path=store.path,
                         source_id="source-x",
                         start_cycle_seq=1,
                         end_cycle_seq=1,
                     )
+
+    def test_product_expected_store_path_rejects_decoy_database_rebind(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            canonical_path = Path(tmp) / "canonical.db"
+            decoy_path = Path(tmp) / "decoy.db"
+            store = CollectorDeltaStore(canonical_path)
+            _finish_zero_result_cycle(store, sequence=1)
+
+            candidate = build_source_universe_commitment(
+                store,
+                expected_store_path=canonical_path,
+                source_id="source-x",
+                start_cycle_seq=1,
+                end_cycle_seq=1,
+            )
+            decoy = CollectorDeltaStore(decoy_path)
+            _finish_zero_result_cycle(decoy, sequence=1)
+            store.path = decoy_path
+
+            with self.assertRaisesRegex(
+                SourceUniverseCommitmentError,
+                "does not match product-expected authority path",
+            ):
+                build_source_universe_commitment(
+                    store,
+                    expected_store_path=canonical_path,
+                    source_id="source-x",
+                    start_cycle_seq=1,
+                    end_cycle_seq=1,
+                )
+            with self.assertRaisesRegex(
+                SourceUniverseCommitmentError,
+                "does not match product-expected authority path",
+            ):
+                verify_source_universe_commitment(
+                    store,
+                    candidate,
+                    expected_store_path=canonical_path,
+                    expected_source_id="source-x",
+                    expected_start_cycle_seq=1,
+                    expected_end_cycle_seq=1,
+                )
+
 
     def test_verifier_accepts_canonical_candidate_and_returns_rebuilt_projection(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -422,6 +471,7 @@ class SourceUniverseCommitmentTests(unittest.TestCase):
             _finish_zero_result_cycle(store, sequence=1)
             candidate = build_source_universe_commitment(
                 store,
+                expected_store_path=store.path,
                 source_id="source-x",
                 start_cycle_seq=1,
                 end_cycle_seq=1,
@@ -429,6 +479,7 @@ class SourceUniverseCommitmentTests(unittest.TestCase):
 
             verified = verify_source_universe_commitment(
                 store,
+                expected_store_path=store.path,
                 candidate,
                 expected_source_id="source-x",
                 expected_start_cycle_seq=1,
@@ -449,6 +500,7 @@ class SourceUniverseCommitmentTests(unittest.TestCase):
             )
             canonical = build_source_universe_commitment(
                 store,
+                expected_store_path=store.path,
                 source_id="source-x",
                 start_cycle_seq=1,
                 end_cycle_seq=1,
@@ -465,6 +517,7 @@ class SourceUniverseCommitmentTests(unittest.TestCase):
             ):
                 verify_source_universe_commitment(
                     store,
+                    expected_store_path=store.path,
                     forged,
                     expected_source_id="source-x",
                     expected_start_cycle_seq=1,
@@ -482,6 +535,7 @@ class SourceUniverseCommitmentTests(unittest.TestCase):
             )
             stale = build_source_universe_commitment(
                 store,
+                expected_store_path=store.path,
                 source_id="source-x",
                 start_cycle_seq=1,
                 end_cycle_seq=1,
@@ -505,6 +559,7 @@ class SourceUniverseCommitmentTests(unittest.TestCase):
             ):
                 verify_source_universe_commitment(
                     store,
+                    expected_store_path=store.path,
                     stale,
                     expected_source_id="source-x",
                     expected_start_cycle_seq=1,
@@ -518,6 +573,7 @@ class SourceUniverseCommitmentTests(unittest.TestCase):
             _finish_zero_result_cycle(store, sequence=2)
             favorable_smaller_window = build_source_universe_commitment(
                 store,
+                expected_store_path=store.path,
                 source_id="source-x",
                 start_cycle_seq=1,
                 end_cycle_seq=1,
@@ -530,6 +586,7 @@ class SourceUniverseCommitmentTests(unittest.TestCase):
             ):
                 verify_source_universe_commitment(
                     store,
+                    expected_store_path=store.path,
                     favorable_smaller_window,
                     expected_source_id="source-x",
                     expected_start_cycle_seq=1,

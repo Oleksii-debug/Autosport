@@ -503,6 +503,57 @@ class BoundedMirrorInvalidationBufferTests(unittest.TestCase):
             finally:
                 store.close()
 
+    def test_registration_refreshes_if_mirror_advances_before_publication(self) -> None:
+        mirror = MarketMirror()
+        runtime = BoundedMirrorInvalidationBuffer(mirror)
+        runtime.accept_persisted(
+            self.event(source_id="provider-a", selection="selection-a", sequence=1)
+        )
+        dependencies = FocusedMirrorDependencyIndex(mirror)
+
+        real_view = mirror.view
+        injected = False
+
+        def advance_after_initial_capture(*args, **kwargs):
+            nonlocal injected
+            captured = real_view(*args, **kwargs)
+            if not injected:
+                injected = True
+                runtime.accept_persisted(
+                    self.event(
+                        source_id="provider-a",
+                        selection="selection-b",
+                        sequence=1,
+                        odds="2.10",
+                    )
+                )
+            return captured
+
+        with patch.object(mirror, "view", side_effect=advance_after_initial_capture):
+            dependencies.register(
+                "decision",
+                source_ids="provider-a",
+                event_ids="event-1",
+                market_ids="market-1",
+            )
+
+        self.assertEqual(
+            dependencies.matching_keys("decision"),
+            (
+                ("provider-a", "event-1|market-1|selection-a"),
+                ("provider-a", "event-1|market-1|selection-b"),
+            ),
+        )
+        view = dependencies.incremental_decision_view(
+            "decision",
+            as_of=datetime(2026, 9, 16, 19, 0, 10, tzinfo=timezone.utc),
+            max_age=timedelta(minutes=1),
+        )
+        self.assertEqual(
+            [event.selection_id for event in view.events],
+            ["selection-a", "selection-b"],
+        )
+
     def test_focused_dependency_registration_is_explicit_and_non_overwriting(self) -> None:
         mirror = MarketMirror()
         dependencies = FocusedMirrorDependencyIndex(mirror)

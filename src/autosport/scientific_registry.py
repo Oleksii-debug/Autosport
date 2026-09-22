@@ -38,6 +38,7 @@ _RECORD_TYPES = frozenset(
         "CounterfactualQualification",
         "CounterfactualSourceEvidence",
         "ChampionEligibilityDecision",
+        "AblationAuthorityEvidence",
     }
 )
 
@@ -188,6 +189,13 @@ class PromotionAction(StrEnum):
 
 class RetestCondition(StrEnum):
     NEW_EVALUATION_BUNDLE = "NEW_EVALUATION_BUNDLE"
+
+
+class AblationAuthorityKind(StrEnum):
+    FACTUAL_MECHANICAL = "FACTUAL_MECHANICAL"
+    FROZEN_REPLAY_COUNTERFACTUAL = "FROZEN_REPLAY_COUNTERFACTUAL"
+    SIMULATED_COUNTERFACTUAL = "SIMULATED_COUNTERFACTUAL"
+    FORWARD_RANDOMIZED_OR_PAIRED = "FORWARD_RANDOMIZED_OR_PAIRED"
 
 
 class ScientificRecord(Protocol):
@@ -535,6 +543,122 @@ class ScientificEvidenceRef:
             "record_type": self.record_type,
             "record_id": self.record_id,
             "record_sha256": self.record_sha256.lower(),
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class AblationAuthorityEvidence:
+    """Durable scientific binding for one ablation observation.
+
+    This is registry evidence, not product issuance.  A caller-selected registry can
+    persist valid scientific evidence but cannot by itself prove that the running
+    product issued or consumed that evidence.
+    """
+
+    ablation_authority_id: str
+    authority_kind: AblationAuthorityKind
+    research_protocol_id: str
+    protocol_sha256: str
+    research_protocol_record_sha256: str
+    scope_id: str
+    dataset_snapshot_id: str
+    dataset_manifest_sha256: str
+    dataset_snapshot_record_sha256: str
+    confirmation_trial_family_id: str
+    holdout_access_sha256: str
+    causal_cutoff: str
+    observation_evidence: ScientificEvidenceRef
+    supporting_evidence: tuple[ScientificEvidenceRef, ...]
+    created_at: str
+    execution_receipt_sha256: str | None = None
+    assumptions: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        for name in (
+            "ablation_authority_id",
+            "research_protocol_id",
+            "scope_id",
+            "dataset_snapshot_id",
+            "confirmation_trial_family_id",
+        ):
+            _text(getattr(self, name), name)
+        if type(self.authority_kind) is not AblationAuthorityKind:
+            raise ValueError("authority_kind must be an AblationAuthorityKind")
+        for name in (
+            "protocol_sha256",
+            "research_protocol_record_sha256",
+            "dataset_manifest_sha256",
+            "dataset_snapshot_record_sha256",
+            "holdout_access_sha256",
+        ):
+            _sha256(getattr(self, name), name)
+        _iso(self.causal_cutoff, "causal_cutoff")
+        _iso(self.created_at, "created_at")
+        if type(self.observation_evidence) is not ScientificEvidenceRef:
+            raise ValueError("observation_evidence must be a ScientificEvidenceRef")
+        if self.observation_evidence.record_type == "AblationAuthorityEvidence":
+            raise ValueError("ablation authority cannot use another ablation authority as observation evidence")
+        if type(self.supporting_evidence) is not tuple or any(
+            type(value) is not ScientificEvidenceRef for value in self.supporting_evidence
+        ):
+            raise ValueError("supporting_evidence must be a tuple of ScientificEvidenceRef values")
+        refs = (self.observation_evidence,) + self.supporting_evidence
+        if any(value.record_type == "AblationAuthorityEvidence" for value in refs):
+            raise ValueError("ablation authority evidence cannot recursively reference ablation authority")
+        ref_keys = tuple(
+            (value.record_type, value.record_id, value.record_sha256.lower())
+            for value in refs
+        )
+        if len(ref_keys) != len(set(ref_keys)):
+            raise ValueError("ablation authority evidence references must be unique")
+        if self.execution_receipt_sha256 is not None:
+            _sha256(self.execution_receipt_sha256, "execution_receipt_sha256")
+        if type(self.assumptions) is not tuple:
+            raise ValueError("assumptions must be a tuple")
+        assumptions = _text_tuple(self.assumptions, "assumptions", allow_empty=True)
+        if assumptions != tuple(sorted(assumptions)):
+            raise ValueError("assumptions must be sorted canonically")
+        if self.authority_kind is AblationAuthorityKind.SIMULATED_COUNTERFACTUAL:
+            if not assumptions:
+                raise ValueError("simulated ablation authority requires explicit assumptions")
+        elif assumptions:
+            raise ValueError("non-simulated ablation authority cannot carry simulator assumptions")
+
+    @property
+    def record_type(self) -> str:
+        return "AblationAuthorityEvidence"
+
+    @property
+    def record_id(self) -> str:
+        return self.ablation_authority_id
+
+    @property
+    def available_at(self) -> str:
+        return self.created_at
+
+    def to_payload(self) -> dict[str, Any]:
+        return {
+            "ablation_authority_id": self.ablation_authority_id,
+            "authority_kind": self.authority_kind.value,
+            "research_protocol_id": self.research_protocol_id,
+            "protocol_sha256": self.protocol_sha256.lower(),
+            "research_protocol_record_sha256": self.research_protocol_record_sha256.lower(),
+            "scope_id": self.scope_id,
+            "dataset_snapshot_id": self.dataset_snapshot_id,
+            "dataset_manifest_sha256": self.dataset_manifest_sha256.lower(),
+            "dataset_snapshot_record_sha256": self.dataset_snapshot_record_sha256.lower(),
+            "confirmation_trial_family_id": self.confirmation_trial_family_id,
+            "holdout_access_sha256": self.holdout_access_sha256.lower(),
+            "causal_cutoff": self.causal_cutoff,
+            "observation_evidence": self.observation_evidence.to_payload(),
+            "supporting_evidence": [value.to_payload() for value in self.supporting_evidence],
+            "execution_receipt_sha256": (
+                None
+                if self.execution_receipt_sha256 is None
+                else self.execution_receipt_sha256.lower()
+            ),
+            "assumptions": list(self.assumptions),
+            "created_at": self.created_at,
         }
 
 
@@ -1064,6 +1188,8 @@ class ScientificRegistry:
         for raw_entry in records:
             if raw_entry["record_type"] == "PromotionDecision":
                 self._validate_persisted_promotion_decision(records, raw_entry)
+            if raw_entry["record_type"] == "AblationAuthorityEvidence":
+                self._validate_ablation_authority_causal_inputs(records, raw_entry)
         return state
 
     @staticmethod
@@ -1085,6 +1211,192 @@ class ScientificRegistry:
                             "payload": raw_entry["payload"]})
         if _sha256(raw_entry["record_sha256"], "record_sha256") != expected:
             raise ValueError("scientific registry record digest mismatch")
+
+    @staticmethod
+    def _ablation_authority_from_payload(payload: object) -> AblationAuthorityEvidence:
+        expected_fields = {
+            "ablation_authority_id",
+            "authority_kind",
+            "research_protocol_id",
+            "protocol_sha256",
+            "research_protocol_record_sha256",
+            "scope_id",
+            "dataset_snapshot_id",
+            "dataset_manifest_sha256",
+            "dataset_snapshot_record_sha256",
+            "confirmation_trial_family_id",
+            "holdout_access_sha256",
+            "causal_cutoff",
+            "observation_evidence",
+            "supporting_evidence",
+            "execution_receipt_sha256",
+            "assumptions",
+            "created_at",
+        }
+        if type(payload) is not dict or set(payload) != expected_fields:
+            raise ValueError("persisted ablation authority payload fields mismatch")
+
+        def evidence_ref(value: object, field: str) -> ScientificEvidenceRef:
+            if type(value) is not dict or set(value) != {
+                "record_type",
+                "record_id",
+                "record_sha256",
+            }:
+                raise ValueError(f"{field} fields mismatch")
+            return ScientificEvidenceRef(
+                value["record_type"],
+                value["record_id"],
+                value["record_sha256"],
+            )
+
+        supporting = payload["supporting_evidence"]
+        assumptions = payload["assumptions"]
+        if type(supporting) is not list:
+            raise ValueError("persisted supporting_evidence must be a list")
+        if type(assumptions) is not list:
+            raise ValueError("persisted assumptions must be a list")
+        try:
+            return AblationAuthorityEvidence(
+                ablation_authority_id=payload["ablation_authority_id"],
+                authority_kind=AblationAuthorityKind(payload["authority_kind"]),
+                research_protocol_id=payload["research_protocol_id"],
+                protocol_sha256=payload["protocol_sha256"],
+                research_protocol_record_sha256=payload[
+                    "research_protocol_record_sha256"
+                ],
+                scope_id=payload["scope_id"],
+                dataset_snapshot_id=payload["dataset_snapshot_id"],
+                dataset_manifest_sha256=payload["dataset_manifest_sha256"],
+                dataset_snapshot_record_sha256=payload[
+                    "dataset_snapshot_record_sha256"
+                ],
+                confirmation_trial_family_id=payload[
+                    "confirmation_trial_family_id"
+                ],
+                holdout_access_sha256=payload["holdout_access_sha256"],
+                causal_cutoff=payload["causal_cutoff"],
+                observation_evidence=evidence_ref(
+                    payload["observation_evidence"], "observation_evidence"
+                ),
+                supporting_evidence=tuple(
+                    evidence_ref(value, "supporting_evidence")
+                    for value in supporting
+                ),
+                execution_receipt_sha256=payload["execution_receipt_sha256"],
+                assumptions=tuple(assumptions),
+                created_at=payload["created_at"],
+            )
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ValueError("persisted ablation authority is not canonical") from exc
+
+    @staticmethod
+    def _validate_ablation_authority_causal_inputs(
+        records: list[dict[str, Any]],
+        entry: Mapping[str, Any],
+    ) -> None:
+        if entry.get("record_type") != "AblationAuthorityEvidence":
+            raise ValueError(
+                "ablation authority validation requires AblationAuthorityEvidence"
+            )
+        authority = ScientificRegistry._ablation_authority_from_payload(
+            entry.get("payload")
+        )
+        if (
+            entry.get("record_id") != authority.record_id
+            or entry.get("available_at") != authority.available_at
+            or ScientificRegistry._entry(authority) != entry
+        ):
+            raise ValueError(
+                "persisted ablation authority envelope does not match canonical payload"
+            )
+
+        by_key = {
+            (raw["record_type"], raw["record_id"]): (index, raw)
+            for index, raw in enumerate(records)
+        }
+        current = by_key.get(("AblationAuthorityEvidence", authority.record_id))
+        authority_index = len(records) if current is None else current[0]
+        authority_at = _instant(authority.created_at, "AblationAuthorityEvidence.created_at")
+
+        def require(
+            record_type: str,
+            record_id: str,
+            record_sha256: str,
+            field: str,
+        ) -> Mapping[str, Any]:
+            resolved = by_key.get((record_type, record_id))
+            if resolved is None:
+                raise ValueError(f"ablation authority references missing {field}")
+            index, raw = resolved
+            if index >= authority_index:
+                raise ValueError(
+                    f"ablation authority {field} must be durably recorded first"
+                )
+            if raw["record_sha256"] != _sha256(record_sha256, f"{field}.record_sha256"):
+                raise ValueError(f"ablation authority {field} digest mismatch")
+            if _instant(raw["available_at"], f"{field}.available_at") > authority_at:
+                raise ValueError(f"ablation authority {field} was not causally available")
+            reveal = raw["payload"].get("outcome_reveal_after")
+            if (
+                isinstance(reveal, str)
+                and _instant(reveal, f"{field}.outcome_reveal_after") > authority_at
+            ):
+                raise ValueError(f"ablation authority {field} outcome was not revealed")
+            return raw
+
+        protocol = require(
+            "ResearchProtocol",
+            authority.research_protocol_id,
+            authority.research_protocol_record_sha256,
+            "research protocol",
+        )
+        dataset = require(
+            "DatasetSnapshot",
+            authority.dataset_snapshot_id,
+            authority.dataset_snapshot_record_sha256,
+            "dataset snapshot",
+        )
+        protocol_payload = protocol["payload"]
+        dataset_payload = dataset["payload"]
+        if protocol_payload.get("protocol_sha256") != authority.protocol_sha256.lower():
+            raise ValueError("ablation authority protocol digest mismatch")
+        if (
+            protocol_payload.get("dataset_manifest_sha256")
+            != authority.dataset_manifest_sha256.lower()
+        ):
+            raise ValueError("ablation authority protocol dataset manifest mismatch")
+        if (
+            dataset_payload.get("manifest_sha256")
+            != authority.dataset_manifest_sha256.lower()
+        ):
+            raise ValueError("ablation authority dataset manifest mismatch")
+        binding = protocol_payload.get("binding")
+        if type(binding) is not dict:
+            raise ValueError("ablation authority research protocol binding is invalid")
+        if binding.get("causal_cutoff") != authority.causal_cutoff:
+            raise ValueError("ablation authority protocol causal cutoff mismatch")
+        if dataset_payload.get("causal_cutoff") != authority.causal_cutoff:
+            raise ValueError("ablation authority dataset causal cutoff mismatch")
+        expected_holdout = promotion_holdout_access_id(
+            research_protocol_id=authority.research_protocol_id,
+            dataset_manifest_sha256=authority.dataset_manifest_sha256,
+            source_identity=dataset_payload.get("source_identity"),
+            license_identity=dataset_payload.get("license_identity"),
+            confirmation_trial_family_id=authority.confirmation_trial_family_id,
+        )
+        if expected_holdout != authority.holdout_access_sha256.lower():
+            raise ValueError("ablation authority holdout identity mismatch")
+
+        evidence_refs = (authority.observation_evidence,) + authority.supporting_evidence
+        for index, ref in enumerate(evidence_refs):
+            if ref.record_type == "AblationAuthorityEvidence":
+                raise ValueError("ablation authority cannot recursively source itself")
+            require(
+                ref.record_type,
+                ref.record_id,
+                ref.record_sha256,
+                "observation evidence" if index == 0 else f"supporting evidence {index}",
+            )
 
     @staticmethod
     def _validate_persisted_promotion_decision(
@@ -1242,7 +1554,20 @@ class ScientificRegistry:
     def append(self, record: ScientificRecord, *, allow_repeat_experiment: bool = False) -> str:
         if record.record_type == "PromotionDecision":
             raise PromotionEvidenceError("promotion decisions must be recorded through record_promotion")
+        if record.record_type == "AblationAuthorityEvidence":
+            raise ValueError(
+                "ablation authority evidence must be recorded through record_ablation_authority"
+            )
         return self._append(record, allow_repeat_experiment=allow_repeat_experiment)
+
+    def record_ablation_authority(self, record: AblationAuthorityEvidence) -> str:
+        if type(record) is not AblationAuthorityEvidence:
+            raise TypeError("record must be AblationAuthorityEvidence")
+        entry = self._entry(record)
+        with WorkspaceEconomicLock(self.path.parent):
+            state = self._read()
+            self._validate_ablation_authority_causal_inputs(state["records"], entry)
+            return self._append_entry_locked(state, entry)
 
     def _append(self, record: ScientificRecord, *, allow_repeat_experiment: bool = False) -> str:
         entry = self._entry(record)

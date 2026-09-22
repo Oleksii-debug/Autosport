@@ -276,13 +276,13 @@ _REQUIRED_ARGUMENTS_RE = re.compile(
     r"^the following arguments are required: (?P<arguments>.+)$"
 )
 _INVALID_NUMBER_RE = re.compile(
-    r"^argument (?P<option>--?[^\\s:]+): invalid (?:int|float) value: (?P<value>.+)$"
+    r"^argument (?P<option>--?[^ :]+): invalid (?:int|float) value: (?P<value>.+)$"
 )
 _UNRECOGNIZED_ARGUMENTS_RE = re.compile(
     r"^unrecognized arguments: (?P<arguments>.+)$"
 )
 _MISSING_OPTION_VALUE_RE = re.compile(
-    r"^argument (?P<option>--?[^\\s:]+): expected one argument$"
+    r"^argument (?P<option>--?[^ :]+): expected one argument$"
 )
 
 

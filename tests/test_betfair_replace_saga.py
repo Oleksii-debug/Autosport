@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 from decimal import Decimal
 
@@ -505,3 +506,85 @@ def test_conflict_high_water_survives_later_clean_reconciliation_and_restart(tmp
         restarted.retry_disposition
         is ReplaceRetryDisposition.CONFLICT_REQUIRES_OPERATOR
     )
+
+
+
+def _rewrite_with_event_order(store, event_types):
+    envelopes = [
+        json.loads(line)
+        for line in store.path.read_text(encoding="utf-8").splitlines()
+    ]
+    events = [envelope["event"] for envelope in envelopes]
+    remaining = list(events)
+    ordered = []
+    for event_type in event_types:
+        for index, event in enumerate(remaining):
+            if event["event_type"] == event_type:
+                ordered.append(remaining.pop(index))
+                break
+        else:
+            raise AssertionError(f"missing event type {event_type}")
+    assert not remaining
+
+    previous = "0" * 64
+    lines = []
+    for original in ordered:
+        event = dict(original)
+        event["prev_sha256"] = previous
+        event_text = json.dumps(
+            event,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        )
+        digest = hashlib.sha256(event_text.encode("utf-8")).hexdigest()
+        envelope_text = json.dumps(
+            {"event": event, "sha256": digest},
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        )
+        lines.append(envelope_text)
+        previous = digest
+    store.path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+@pytest.mark.parametrize(
+    ("evidence_kind", "event_order"),
+    (
+        ("UNKNOWN", ("PREPARED", "UNKNOWN", "SUBMITTED")),
+        ("PROVIDER_RESULT", ("PREPARED", "PROVIDER_RESULT", "SUBMITTED")),
+        (
+            "RECONCILIATION",
+            ("PREPARED", "RECONCILIATION", "SUBMITTED", "UNKNOWN"),
+        ),
+    ),
+)
+def test_persisted_post_boundary_evidence_must_follow_submitted_in_journal_order(
+    tmp_path,
+    evidence_kind,
+    event_order,
+):
+    store = submitted_store(tmp_path)
+    if evidence_kind == "UNKNOWN":
+        store.mark_unknown(
+            "replace-saga-1",
+            reason="response lost",
+            observed_at=OBSERVED,
+        )
+    elif evidence_kind == "PROVIDER_RESULT":
+        store.record_provider_result("replace-saga-1", provider_evidence())
+    else:
+        store.mark_unknown(
+            "replace-saga-1",
+            reason="response lost",
+            observed_at=OBSERVED,
+        )
+        store.record_reconciliation("replace-saga-1", reconciliation())
+
+    _rewrite_with_event_order(store, event_order)
+
+    with pytest.raises(BetfairReplaceSagaIntegrityError, match="follow SUBMITTED"):
+        BetfairReplaceSagaStore(store.path).verify_integrity()

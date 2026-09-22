@@ -88,8 +88,7 @@ class MultiSportProductSourceTests(unittest.TestCase):
             ).hexdigest()
             self.assertEqual(
                 source.state_dir,
-                Path(directory)
-                / "workspace"
+                (Path(directory) / "workspace").expanduser().resolve(strict=False)
                 / ".autosport"
                 / "product-sources"
                 / namespace,

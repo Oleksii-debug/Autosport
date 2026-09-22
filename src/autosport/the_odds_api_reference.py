@@ -116,9 +116,11 @@ def _default_transport(
         raise TheOddsApiTransportError(
             f"The Odds API HTTP {int(exc.code)}",
             status_code=int(exc.code),
-        ) from exc
-    except (URLError, TimeoutError, OSError) as exc:
-        raise TheOddsApiTransportError("The Odds API transport unavailable") from exc
+        ) from None
+    except (URLError, TimeoutError, OSError):
+        raise TheOddsApiTransportError(
+            "The Odds API transport unavailable"
+        ) from None
 
 
 def _api_key(value: object) -> str:

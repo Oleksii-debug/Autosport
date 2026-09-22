@@ -49,6 +49,7 @@ class ScenarioResult:
     argument_count: int
     argument_sha256: str
     status: str
+    output_captured: bool
     error_type: str | None
 
 
@@ -150,6 +151,7 @@ def probe_process(
     mode: str,
     startup_seconds: float,
     timeout_seconds: float,
+    capture_output: bool,
 ) -> tuple[bool, bool, int | None, float, str, str | None]:
     if mode not in {"persistent", "exit-zero"}:
         raise MatrixError(f"unsupported probe mode: {mode}")
@@ -160,36 +162,40 @@ def probe_process(
     exit_code: int | None = None
     status = "FAIL"
     error_type: str | None = None
-    stdout_path.parent.mkdir(parents=True, exist_ok=True)
+    log_handle = None
     try:
-        with stdout_path.open("wb") as log:
-            process = subprocess.Popen(
-                list(command),
-                cwd=str(cwd),
-                stdin=subprocess.DEVNULL,
-                stdout=log,
-                stderr=subprocess.STDOUT,
-                shell=False,
-                env=os.environ.copy(),
-            )
-            launched = True
-            if mode == "persistent":
-                deadline = time.monotonic() + startup_seconds
-                while time.monotonic() < deadline:
-                    exit_code = process.poll()
-                    if exit_code is not None:
-                        return launched, False, exit_code, time.monotonic() - started_at, "FAIL_EARLY_EXIT", None
-                    time.sleep(min(0.1, max(0.0, deadline - time.monotonic())))
-                stable = process.poll() is None
-                status = "PASS" if stable else "FAIL_EARLY_EXIT"
+        stdout_target = subprocess.DEVNULL
+        if capture_output:
+            stdout_path.parent.mkdir(parents=True, exist_ok=True)
+            log_handle = stdout_path.open("wb")
+            stdout_target = log_handle
+        process = subprocess.Popen(
+            list(command),
+            cwd=str(cwd),
+            stdin=subprocess.DEVNULL,
+            stdout=stdout_target,
+            stderr=subprocess.STDOUT,
+            shell=False,
+            env=os.environ.copy(),
+        )
+        launched = True
+        if mode == "persistent":
+            deadline = time.monotonic() + startup_seconds
+            while time.monotonic() < deadline:
+                exit_code = process.poll()
+                if exit_code is not None:
+                    return launched, False, exit_code, time.monotonic() - started_at, "FAIL_EARLY_EXIT", None
+                time.sleep(min(0.1, max(0.0, deadline - time.monotonic())))
+            stable = process.poll() is None
+            status = "PASS" if stable else "FAIL_EARLY_EXIT"
+        else:
+            try:
+                exit_code = process.wait(timeout=timeout_seconds)
+            except subprocess.TimeoutExpired:
+                status = "FAIL_TIMEOUT"
             else:
-                try:
-                    exit_code = process.wait(timeout=timeout_seconds)
-                except subprocess.TimeoutExpired:
-                    status = "FAIL_TIMEOUT"
-                else:
-                    stable = exit_code == 0
-                    status = "PASS" if stable else "FAIL_NONZERO_EXIT"
+                stable = exit_code == 0
+                status = "PASS" if stable else "FAIL_NONZERO_EXIT"
     except Exception as exc:
         error_type = type(exc).__name__
         status = "FAIL_LAUNCH"
@@ -203,6 +209,8 @@ def probe_process(
                 process.wait(timeout=5)
         if process is not None and exit_code is None:
             exit_code = process.poll()
+        if log_handle is not None:
+            log_handle.close()
     return launched, stable, exit_code, time.monotonic() - started_at, status, error_type
 
 
@@ -227,6 +235,7 @@ def run_matrix(
     startup_seconds: float,
     timeout_seconds: float,
     keep_copies: bool,
+    capture_output: bool = False,
 ) -> MatrixReport:
     artifact_root = artifact_root.resolve(strict=True)
     output_dir = output_dir.resolve()
@@ -273,6 +282,7 @@ def run_matrix(
                 mode=mode,
                 startup_seconds=startup_seconds,
                 timeout_seconds=timeout_seconds,
+                capture_output=capture_output,
             )
         except Exception as exc:
             error_type = type(exc).__name__
@@ -291,6 +301,7 @@ def run_matrix(
                 argument_count=len(rendered_args),
                 argument_sha256=_canonical_json_sha(list(rendered_args)),
                 status=status,
+                output_captured=capture_output,
                 error_type=error_type,
             )
         )
@@ -326,6 +337,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--startup-seconds", type=float, default=5.0)
     parser.add_argument("--timeout-seconds", type=float, default=30.0)
     parser.add_argument("--keep-copies", action="store_true")
+    parser.add_argument("--capture-output", action="store_true", help="Opt in to persisting candidate stdout/stderr logs. Disabled by default to reduce accidental sensitive-output retention.")
     return parser
 
 
@@ -342,6 +354,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             startup_seconds=args.startup_seconds,
             timeout_seconds=args.timeout_seconds,
             keep_copies=args.keep_copies,
+            capture_output=args.capture_output,
         )
     except Exception as exc:
         print(f"ERROR {type(exc).__name__}", file=sys.stderr)

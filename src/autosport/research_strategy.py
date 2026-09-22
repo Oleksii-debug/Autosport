@@ -99,6 +99,7 @@ def _stable_event_projection(event: MarketEvent) -> dict[str, Any]:
         "decimal_odds": str(event.decimal_odds),
         "observed_ts": event.observed_ts,
         "source_id": event.source_id,
+        "sport": event.sport,
         "sequence": event.sequence,
         "market_type": event.market_type.value,
         "status": event.status,

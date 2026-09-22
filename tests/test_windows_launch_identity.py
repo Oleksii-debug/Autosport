@@ -90,6 +90,24 @@ def test_manifest_extra_field_is_rejected(tmp_path: Path):
         )
 
 
+def test_manifest_duplicate_key_is_rejected(tmp_path: Path):
+    _, raw, _, _ = _manifest(tmp_path)
+    duplicated = raw.decode("utf-8").replace(
+        '"generation":7,',
+        '"generation":7,"generation":8,',
+        1,
+    ).encode("utf-8")
+    assert duplicated != raw
+
+    with pytest.raises(LaunchIdentityError, match="duplicate JSON key: generation"):
+        resolve_active_generation(
+            manifest_bytes=duplicated,
+            expected_manifest_sha256=hashlib.sha256(duplicated).hexdigest(),
+            install_root=tmp_path,
+            expected_user_scope="user-A",
+        )
+
+
 def test_generation_bool_is_not_accepted_as_integer(tmp_path: Path):
     payload, _, _, _ = _manifest(tmp_path)
     payload["generation"] = True

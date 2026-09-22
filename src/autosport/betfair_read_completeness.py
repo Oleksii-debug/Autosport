@@ -66,8 +66,10 @@ class BetfairReadCompletenessWitness:
             raise BetfairReadOnlyError("completeness witness adapter identity mismatch")
         _sha(self.query_sha256, "query_sha256")
         _sha(self.attempt_id, "attempt_id")
-        _time(self.started_at, "started_at")
-        _time(self.finished_at, "finished_at")
+        started = _time(self.started_at, "started_at").astimezone(timezone.utc)
+        finished = _time(self.finished_at, "finished_at").astimezone(timezone.utc)
+        if finished < started:
+            raise BetfairReadOnlyError("finished_at must not precede started_at")
         if not isinstance(self.completeness, BetfairObservationCompleteness):
             raise BetfairReadOnlyError("completeness must be canonical")
         if not isinstance(self.pages, tuple):

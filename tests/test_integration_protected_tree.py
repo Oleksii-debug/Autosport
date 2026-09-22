@@ -142,6 +142,24 @@ class ProtectedTreeGateTests(unittest.TestCase):
         ):
             self.verify(manifest=tuple(bad))
 
+    def test_empty_protected_policy_rejected(self):
+        with self.assertRaisesRegex(
+            ProtectedTreeGateError,
+            "must protect at least one",
+        ):
+            TrustedProtectedTreePolicy(protected_paths=())
+
+    def test_nonempty_prefix_that_selects_nothing_rejected(self):
+        policy = TrustedProtectedTreePolicy(
+            protected_paths=(),
+            protected_prefixes=("missing/",),
+        )
+        with self.assertRaisesRegex(
+            ProtectedTreeGateError,
+            "selects no paths",
+        ):
+            self.verify(policy=policy, manifest=())
+
     def test_immutable_policy_cannot_be_allowlisted(self):
         with self.assertRaisesRegex(ProtectedTreeGateError, "immutable policy"):
             TrustedProtectedTreePolicy(

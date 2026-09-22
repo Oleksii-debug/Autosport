@@ -1070,6 +1070,67 @@ def test_champion_history_orders_mixed_timezone_offsets_by_instant(tmp_path):
     assert registry.champion_strategy(as_of="2026-01-03T23:30:00+00:00") == "strategy-1"
     assert registry.champion_strategy(as_of="2026-01-04T01:00:00+00:00") == "strategy-1"
 
+@pytest.mark.parametrize(
+    "rule_text",
+    [
+        (
+            '{"kind":"autosport-promotion-rule-v1","primary_metric":"roi",'
+            '"primary_metric":"roi","minimum_improvement":0.05,'
+            '"minimum_effective_sample_size":3,"protective_metric_maxima":[],'
+            '"metric_direction":"lower_is_better"}'
+        ),
+        (
+            '{"kind":"autosport-promotion-rule-v1","primary_metric":"roi",'
+            '"minimum_improvement":0.05,"minimum_effective_sample_size":3,'
+            '"protective_metric_maxima":[NaN],'
+            '"metric_direction":"lower_is_better"}'
+        ),
+    ],
+)
+def test_promotion_rejects_noncanonical_frozen_rule_json(tmp_path, rule_text):
+    registry = ScientificRegistry.initialize_pristine(
+        tmp_path / "scientific_registry.json"
+    )
+    foundation = _foundation_with_binding(
+        registry,
+        promotion_rule=rule_text,
+        effective_sample_size=3,
+    )
+    registry.append(_experiment(outcome=ResearchOutcome.POSITIVE))
+    evidence = _promotion_evidence(
+        experiment_id="experiment-1",
+        strategy_id="strategy-1",
+        model_id="model-1",
+        bundle_id="eval-1",
+        dataset_id="dataset-1",
+        protocol_id="protocol-1",
+        bundle_sha=foundation["bundle"].bundle_sha256,
+        evidence_id="noncanonical-frozen-rule",
+        practical="0.1",
+        interval_low="0.1",
+        interval_high="0.15",
+        effective_n=3,
+        minimum_n=3,
+        rollback_identity="NONE",
+    )
+    registry.append(evidence)
+    decision = PromotionDecision(
+        "promotion-noncanonical-frozen-rule",
+        PromotionAction.PROMOTE,
+        "strategy-1",
+        "protocol-1",
+        foundation["protocol"].protocol_sha256,
+        "eval-1",
+        foundation["bundle"].bundle_sha256,
+        T3,
+        candidate_model_version_id="model-1",
+        promotion_evidence_id=evidence.promotion_evidence_id,
+    )
+
+    with pytest.raises(PromotionEvidenceError, match="canonical JSON"):
+        registry.record_promotion(decision)
+
+
 def test_promotion_rejects_positive_but_below_frozen_minimum_improvement(tmp_path):
     registry = ScientificRegistry.initialize_pristine(tmp_path / "scientific_registry.json")
     rule_text = _frozen_promotion_rule_text(minimum_improvement=0.05, minimum_effective_sample_size=3)

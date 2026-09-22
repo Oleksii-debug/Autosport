@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import json
 
 import pytest
@@ -261,6 +261,55 @@ def test_query_scope_changes_completeness_identity() -> None:
     assert right_result.witness.authoritative
 
 
+
+
+def test_complete_witness_rejects_finished_before_started() -> None:
+    with pytest.raises(BetfairReadOnlyError, match="finished_at"):
+        BetfairReadCompletenessWitness(
+            operation="listCurrentOrders",
+            completeness=BetfairObservationCompleteness.COMPLETE_FOR_DECLARED_QUERY_WINDOW,
+            venue_id="betfair",
+            account_id="acct-1",
+            adapter_id="betfair-exchange-jsonrpc-readonly",
+            adapter_version="1",
+            query_sha256="a" * 64,
+            attempt_id="b" * 64,
+            started_at=NOW.isoformat(),
+            finished_at=(NOW - timedelta(microseconds=1)).isoformat(),
+            pages=((0, 1000, False, "c" * 64),),
+            rows_observed=0,
+        )
+
+
+def test_observer_clock_regression_cannot_issue_authoritative_complete_witness() -> None:
+    clock_values = iter((NOW, NOW - timedelta(seconds=1)))
+    observer = BetfairReadCompletenessObserver(
+        _client(_rpc({"currentOrders": [], "moreAvailable": False}, 1)),
+        clock=lambda: next(clock_values),
+    )
+
+    with pytest.raises(BetfairReadOnlyError, match="finished_at"):
+        observer.read_current_orders(page_size=10)
+
+
+def test_zero_duration_complete_interval_remains_structurally_valid() -> None:
+    witness = BetfairReadCompletenessWitness(
+        operation="listCurrentOrders",
+        completeness=BetfairObservationCompleteness.COMPLETE_FOR_DECLARED_QUERY_WINDOW,
+        venue_id="betfair",
+        account_id="acct-1",
+        adapter_id="betfair-exchange-jsonrpc-readonly",
+        adapter_version="1",
+        query_sha256="a" * 64,
+        attempt_id="b" * 64,
+        started_at=NOW.isoformat(),
+        finished_at=NOW.isoformat(),
+        pages=((0, 1000, False, "c" * 64),),
+        rows_observed=0,
+    )
+
+    assert witness.started_at == witness.finished_at
+    assert witness.authoritative is False
 
 def test_identical_empty_reads_are_bound_to_distinct_configured_accounts() -> None:
     payload = _rpc({"currentOrders": [], "moreAvailable": False}, 1)

@@ -168,6 +168,8 @@ def _resolve(
     evidence,
     *,
     absence_floor: str | None = None,
+    absence_ceiling: str | None = None,
+    capture_started_at: str | None = None,
 ):
     calls = []
 
@@ -183,8 +185,13 @@ def _resolve(
     )
     monkeypatch.setattr(
         timeout_resolution,
+        "_absence_capture_ceiling",
+        lambda readback: absence_ceiling or evidence.observed_at,
+    )
+    monkeypatch.setattr(
+        timeout_resolution,
         "_betfair_readback_capture_started_at",
-        lambda readback: evidence.observed_at,
+        lambda readback: capture_started_at or evidence.observed_at,
     )
     result = timeout_resolution.resolve_betfair_timeout_provider_state(
         ledger,
@@ -301,6 +308,73 @@ def test_capture_started_before_deadline_cannot_become_absence_when_last_rpc_fin
     assert result.evidence is None
     with pytest.raises(timeout_resolution.BetfairTimeoutResolutionError):
         timeout_resolution.assert_betfair_timeout_absence_authoritative(evidence)
+
+
+def test_complete_empty_inside_cleared_history_window_can_issue_absence(
+    tmp_path, monkeypatch
+) -> None:
+    ledger, action, provider_ref, _ = _ledger_with_timeout(tmp_path, monkeypatch)
+    assert provider_ref is not None
+    evidence = _absence("2026-12-19T18:00:00+00:00", provider_ref)
+
+    result = _resolve(monkeypatch, ledger, action, provider_ref, evidence)
+
+    assert result.kind is timeout_resolution.BetfairTimeoutResolutionKind.ABSENT_AFTER_VISIBILITY_HORIZON
+    assert result.definitive is True
+    assert result.evidence is evidence
+    timeout_resolution.assert_betfair_timeout_absence_authoritative(evidence)
+
+
+def test_complete_empty_exactly_at_cleared_history_boundary_fails_closed(
+    tmp_path, monkeypatch
+) -> None:
+    ledger, action, provider_ref, _ = _ledger_with_timeout(tmp_path, monkeypatch)
+    assert provider_ref is not None
+    evidence = _absence("2026-12-20T18:00:00+00:00", provider_ref)
+
+    result = _resolve(monkeypatch, ledger, action, provider_ref, evidence)
+
+    assert result.kind is timeout_resolution.BetfairTimeoutResolutionKind.INDETERMINATE_OUTSIDE_CLEARED_HISTORY
+    assert result.definitive is False
+    assert result.evidence is None
+    with pytest.raises(
+        timeout_resolution.BetfairTimeoutResolutionError,
+        match="did not pass durable Betfair timeout visibility authority",
+    ):
+        timeout_resolution.assert_betfair_timeout_absence_authoritative(evidence)
+
+
+def test_complete_empty_after_cleared_history_window_stays_indeterminate_on_reread(
+    tmp_path, monkeypatch
+) -> None:
+    ledger, action, provider_ref, _ = _ledger_with_timeout(tmp_path, monkeypatch)
+    assert provider_ref is not None
+
+    first = _absence("2026-12-21T18:00:00+00:00", provider_ref)
+    second = _absence("2026-12-22T18:00:00+00:00", provider_ref)
+    first_result = _resolve(monkeypatch, ledger, action, provider_ref, first)
+    second_result = _resolve(monkeypatch, ledger, action, provider_ref, second)
+
+    assert first_result.kind is timeout_resolution.BetfairTimeoutResolutionKind.INDETERMINATE_OUTSIDE_CLEARED_HISTORY
+    assert second_result.kind is timeout_resolution.BetfairTimeoutResolutionKind.INDETERMINATE_OUTSIDE_CLEARED_HISTORY
+    assert first_result.evidence is None
+    assert second_result.evidence is None
+    assert first_result.definitive is False
+    assert second_result.definitive is False
+
+
+def test_provider_effect_still_wins_after_cleared_history_window(
+    tmp_path, monkeypatch
+) -> None:
+    ledger, action, provider_ref, _ = _ledger_with_timeout(tmp_path, monkeypatch)
+    assert provider_ref is not None
+    evidence = _effect("2026-12-21T18:00:00+00:00", provider_ref)
+
+    result = _resolve(monkeypatch, ledger, action, provider_ref, evidence)
+
+    assert result.kind is timeout_resolution.BetfairTimeoutResolutionKind.EFFECT_PRESENT
+    assert result.definitive is True
+    assert result.evidence is evidence
 
 
 def test_direct_generic_bound_absence_is_not_timeout_authoritative(
@@ -464,3 +538,4 @@ def test_missing_durable_provider_ref_cannot_mint_timeout_authority(
 
 def test_visibility_horizon_is_fixed_provider_constant() -> None:
     assert timeout_resolution.BETFAIR_TIMEOUT_VISIBILITY_HORIZON_SECONDS == 15
+    assert timeout_resolution.BETFAIR_CLEARED_HISTORY_MAX_AGE_DAYS == 90

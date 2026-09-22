@@ -261,6 +261,120 @@ def _empty_provider_capture(
     )
 
 
+def _foreign_ref_provider_capture(
+    action: ExecutionAction,
+    provider_ref: str,
+    *,
+    surface: str,
+):
+    foreign_ref = "f" * 32
+    assert foreign_ref != provider_ref
+    current_orders: list[dict[str, object]] = []
+    cleared_by_status: dict[str, list[dict[str, object]]] = {
+        "SETTLED": [],
+        "VOIDED": [],
+        "LAPSED": [],
+        "CANCELLED": [],
+    }
+    if surface == "current":
+        current_orders.append(
+            {
+                "betId": "bet-foreign-current",
+                "marketId": action.market_id,
+                "selectionId": int(action.selection_id),
+                "side": action.side,
+                "status": "EXECUTABLE",
+                "placedDate": "2026-09-21T18:00:01+00:00",
+                "priceSize": {"price": 2.0, "size": 10.0},
+                "averagePriceMatched": 0,
+                "sizeMatched": 0,
+                "sizeRemaining": 10.0,
+                "customerOrderRef": foreign_ref,
+            }
+        )
+    elif surface == "cleared":
+        cleared_by_status["SETTLED"].append(
+            {
+                "betId": "bet-foreign-cleared",
+                "marketId": action.market_id,
+                "selectionId": int(action.selection_id),
+                "side": action.side,
+                "placedDate": "2026-09-21T18:00:01+00:00",
+                "settledDate": "2026-09-21T18:00:02+00:00",
+                "priceRequested": 2.0,
+                "priceMatched": 2.0,
+                "sizeSettled": 10.0,
+                "profit": 10.0,
+                "customerOrderRef": foreign_ref,
+                "eventId": action.event_id,
+            }
+        )
+    else:  # pragma: no cover - parameterization below is exhaustive.
+        raise AssertionError(f"unsupported surface {surface}")
+
+    responses = [
+        _rpc_result(
+            [{"marketId": action.market_id, "event": {"id": action.event_id}}],
+            1,
+        ),
+        _rpc_result(
+            {"currentOrders": current_orders, "moreAvailable": False},
+            2,
+        ),
+    ]
+    for request_id, status in enumerate(
+        ("SETTLED", "VOIDED", "LAPSED", "CANCELLED"),
+        start=3,
+    ):
+        responses.append(
+            _rpc_result(
+                {
+                    "clearedOrders": cleared_by_status[status],
+                    "moreAvailable": False,
+                },
+                request_id,
+            )
+        )
+    client = BetfairReadOnlyClient(
+        BetfairSessionCredentials("app-secret", "session-secret"),
+        transport=_ReadbackTransport(responses),
+        clock=lambda: datetime.fromisoformat("2026-09-21T18:00:16+00:00"),
+        venue_id="betfair",
+        account_id="acct-1",
+    )
+    return client.read_execution_readback(
+        action_id=action.action_id,
+        market_id=action.market_id,
+        provider_order_ref=provider_ref,
+    )
+
+
+@pytest.mark.parametrize("surface", ("current", "cleared"))
+def test_foreign_returned_customer_order_ref_cannot_become_absence(
+    surface: str,
+) -> None:
+    action = _action()
+    profile = _profile()
+    provider_ref = "a" * 32
+    capture = _foreign_ref_provider_capture(
+        action,
+        provider_ref,
+        surface=surface,
+    )
+
+    with pytest.raises(
+        ProviderEvidenceError,
+        match=rf"{surface}-order customerOrderRef conflicts with captured execution scope",
+    ):
+        provider_evidence.verify_betfair_provider_state(
+            action,
+            profile,
+            expected_profile_sha256=profile.profile_id,
+            readback=capture,
+            expected_provider_order_ref=provider_ref,
+        )
+
+
 def test_complete_empty_before_visibility_horizon_stays_indeterminate(
     tmp_path, monkeypatch
 ) -> None:

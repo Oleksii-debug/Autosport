@@ -73,6 +73,21 @@ def test_prehuman_build_info_requires_v1_ready_false_across_release_consumers() 
     assert "$buildInfo.v1_ready -ne $false" in workflow
 
 
+def test_prehuman_build_info_requires_whole_product_complete_false_across_release_consumers() -> None:
+    builder = (ROOT / "scripts" / "build_windows.ps1").read_text(encoding="utf-8")
+    authority = (ROOT / "scripts" / "packaged_executable_authority.ps1").read_text(
+        encoding="utf-8"
+    )
+    workflow = (ROOT / ".github" / "workflows" / "windows-build.yml").read_text(
+        encoding="utf-8"
+    )
+
+    assert "Machine build must not claim WHOLE_PRODUCT_COMPLETE" in builder
+    assert "whole_product_complete = $false" in builder
+    assert "$buildInfo.whole_product_complete -ne $false" in authority
+    assert "$buildInfo.whole_product_complete -ne $false" in workflow
+
+
 @pytest.mark.skipif(shutil.which("pwsh") is None, reason="PowerShell is Windows-CI coverage")
 def test_windows_candidate_skip_transform_executes_fail_closed() -> None:
     helper = ROOT / "scripts" / "windows_build_skip_gate.ps1"

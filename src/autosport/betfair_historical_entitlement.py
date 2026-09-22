@@ -324,7 +324,6 @@ class BetfairHistoricalEntitlementClient:
         client: BetfairReadOnlyClient,
         account_identity: BetfairAuthenticatedAccountIdentity,
         *,
-        transport: UrllibBetfairHistoricalTransport | None = None,
         timeout_seconds: float = 30.0,
         clock: Callable[[], datetime] | None = None,
     ) -> None:
@@ -341,11 +340,8 @@ class BetfairHistoricalEntitlementClient:
             raise BetfairHistoricalEntitlementError(
                 "historical provenance requires current K07 authenticated context"
             ) from exc
-        self._transport = transport or UrllibBetfairHistoricalTransport()
-        if type(self._transport) is not UrllibBetfairHistoricalTransport:
-            raise BetfairHistoricalEntitlementError(
-                "positive historical provenance requires canonical urllib transport"
-            )
+        self._transport = UrllibBetfairHistoricalTransport()
+        self._transport_origin = self._transport
         if (
             not isinstance(timeout_seconds, (int, float))
             or isinstance(timeout_seconds, bool)
@@ -485,6 +481,13 @@ class BetfairHistoricalEntitlementClient:
             ) from exc
 
     def _require_context(self) -> None:
+        if (
+            type(self._transport) is not UrllibBetfairHistoricalTransport
+            or self._transport is not self._transport_origin
+        ):
+            raise BetfairHistoricalEntitlementError(
+                "historical transport origin is no longer canonical"
+            )
         try:
             require_authoritative_betfair_account_identity(
                 self._identity, client=self._client

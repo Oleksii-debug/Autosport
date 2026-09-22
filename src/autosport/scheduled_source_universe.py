@@ -455,6 +455,7 @@ def resolve_scheduled_source_universe(
         "observation_ledger_complete": verified_source.observation_ledger_complete,
         "scheduled_provider_observation_complete": (
             verified_source.provider_observation_complete
+            and computed_late_count == 0
         ),
         "external_provider_universe_complete": False,
         "promotion_ready": False,

@@ -4,6 +4,7 @@ import argparse
 import hashlib
 import json
 import os
+import tempfile
 from dataclasses import dataclass, replace
 from datetime import datetime
 from pathlib import Path
@@ -255,17 +256,46 @@ def _parse_timestamp(value: str, *, field: str) -> datetime:
 
 def _atomic_write_jsonl(path: Path, rows: Iterable[dict[str, Any]]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_name(path.name + ".tmp")
+    descriptor: int | None = None
+    temporary: Path | None = None
     try:
-        with temporary.open("w", encoding="utf-8", newline="\n") as handle:
+        descriptor, temporary_name = tempfile.mkstemp(
+            prefix=f".{path.name}.",
+            suffix=".tmp",
+            dir=str(path.parent),
+        )
+        temporary = Path(temporary_name)
+        try:
+            handle = os.fdopen(descriptor, "w", encoding="utf-8", newline="\n")
+        except BaseException:
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
+            descriptor = None
+            raise
+        descriptor = None
+
+        with handle:
             for row in rows:
                 handle.write(json.dumps(row, ensure_ascii=False, sort_keys=True, separators=(",", ":")))
                 handle.write("\n")
             handle.flush()
-        temporary.replace(path)
+            os.fsync(handle.fileno())
+
+        os.replace(temporary, path)
+        temporary = None
     finally:
-        if temporary.exists():
-            temporary.unlink()
+        if descriptor is not None:
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
+        if temporary is not None:
+            try:
+                temporary.unlink()
+            except FileNotFoundError:
+                pass
 
 
 def _sha256(path: Path) -> str:

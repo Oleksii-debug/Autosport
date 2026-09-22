@@ -160,7 +160,9 @@ def _exact_nonnegative_difference(total: Decimal, part: Decimal) -> Decimal:
         raise BetfairFillOrKillError(
             "exact FOK remainder arithmetic produced a nonpositive remainder"
         )
-    remainder_digits = tuple(int(character) for character in str(remainder_coefficient))
+    remainder_digits = tuple(
+        int(character) for character in str(remainder_coefficient)
+    )
     return Decimal((0, remainder_digits, common_exponent))
 
 

@@ -38,6 +38,19 @@ LEDGER_TIMEOUT_BOUNDARY = "2026-09-21T18:00:00+00:00"
 UNKNOWN_OBSERVED_AT = "2026-09-21T17:59:57+00:00"
 
 
+def test_timeout_absence_registrar_rejects_foreign_callable_origin() -> None:
+    def foreign_timeout_assertion(_evidence: object) -> None:
+        return None
+
+    with pytest.raises(
+        ProviderEvidenceError,
+        match="timeout absence authority assertion origin is not canonical",
+    ):
+        provider_evidence._register_betfair_timeout_absence_authority_assertion(
+            foreign_timeout_assertion
+        )
+
+
 def _action() -> ExecutionAction:
     return ExecutionAction(
         action_id="action-1",

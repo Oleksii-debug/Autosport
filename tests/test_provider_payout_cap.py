@@ -365,3 +365,19 @@ def test_zero_candidate_is_valid_structural_amount_but_not_execution_proof() -> 
 def test_execution_authority_cannot_be_set_by_caller() -> None:
     with pytest.raises(ProviderPayoutCapError, match="never grants"):
         _evidence(execution_authority=True)
+
+
+def test_evidence_digest_is_independent_of_ambient_decimal_context() -> None:
+    with localcontext() as context:
+        context.prec = 4
+        low_precision = _evidence(
+            maximum_amount=Decimal("123456789.1234500"),
+        ).evidence_sha256
+
+    with localcontext() as context:
+        context.prec = 50
+        high_precision = _evidence(
+            maximum_amount=Decimal("123456789.1234500"),
+        ).evidence_sha256
+
+    assert low_precision == high_precision

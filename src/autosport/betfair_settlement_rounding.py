@@ -56,6 +56,41 @@ class BetfairOrdinarySettlementProjection:
     execution_authorized: bool = field(default=False, init=False)
     real_money_execution: bool = field(default=False, init=False)
 
+    def __post_init__(self) -> None:
+        gross = _require_decimal("gross_unrounded", self.gross_unrounded)
+        rate = _require_decimal("commission_rate", self.commission_rate, non_negative=True)
+        if rate > 1:
+            raise BetfairSettlementRoundingError("commission_rate must be <= 1")
+        _require_decimal("gross_posted_model", self.gross_posted_model)
+        _require_decimal("commission_posted_model", self.commission_posted_model, non_negative=True)
+        _require_decimal("net_posted_model", self.net_posted_model)
+        _require_decimal("continuous_net", self.continuous_net)
+        _require_decimal("absolute_model_delta", self.absolute_model_delta, non_negative=True)
+
+        gross_cents, expected_gross = _round_half_up_to_cents(gross)
+        commission_base = expected_gross if expected_gross > 0 else Decimal("0")
+        commission_cents, expected_commission = _round_half_up_to_cents(
+            _exact_mul(rate, commission_base)
+        )
+        expected_net = _cents_to_decimal(gross_cents - commission_cents)
+        expected_continuous = continuous_after_commission(gross, rate)
+        expected_delta = _exact_sub(expected_net, expected_continuous)
+        if expected_delta < 0:
+            expected_delta = -expected_delta
+
+        if self.gross_posted_model != expected_gross:
+            raise BetfairSettlementRoundingError("gross_posted_model does not match model")
+        if self.commission_posted_model != expected_commission:
+            raise BetfairSettlementRoundingError("commission_posted_model does not match model")
+        if self.net_posted_model != expected_net:
+            raise BetfairSettlementRoundingError("net_posted_model does not match model")
+        if self.continuous_net != expected_continuous:
+            raise BetfairSettlementRoundingError("continuous_net does not match model")
+        if self.absolute_model_delta != expected_delta:
+            raise BetfairSettlementRoundingError("absolute_model_delta does not match model")
+        if not expected_delta < self.model_error_bound_exclusive:
+            raise BetfairSettlementRoundingError("two-stage rounding invariant violated")
+
 
 @dataclass(frozen=True, slots=True)
 class MonetaryUncertaintyInterval:
@@ -66,6 +101,16 @@ class MonetaryUncertaintyInterval:
     provider_posted_exact: bool = field(default=False, init=False)
     execution_authorized: bool = field(default=False, init=False)
     real_money_execution: bool = field(default=False, init=False)
+
+    def __post_init__(self) -> None:
+        center = _require_decimal("center", self.center)
+        epsilon = _require_decimal("epsilon", self.epsilon, non_negative=True)
+        lower = _require_decimal("lower", self.lower)
+        upper = _require_decimal("upper", self.upper)
+        if lower != _exact_sub(center, epsilon):
+            raise BetfairSettlementRoundingError("lower does not match center - epsilon")
+        if upper != _exact_add(center, epsilon):
+            raise BetfairSettlementRoundingError("upper does not match center + epsilon")
 
 
 def _require_decimal(name: str, value: Decimal, *, non_negative: bool = False) -> Decimal:

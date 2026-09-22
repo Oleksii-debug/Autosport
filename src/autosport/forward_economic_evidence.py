@@ -504,6 +504,10 @@ class ResolvedPolicyOutcome:
         )
         return max(instants) if instants else None
 
+    @property
+    def economic_cost_complete(self) -> bool:
+        return self.economic_cost_evidence_sha256 is not None
+
 
 class EconomicAuthorityResolver(Protocol):
     """Integration seam: product code resolves canonical execution+settlement truth."""
@@ -537,6 +541,8 @@ class ForwardEconomicStep:
     champion_economic_cost_currency: Decimal
     challenger_economic_cost_evidence_sha256: str | None
     champion_economic_cost_evidence_sha256: str | None
+    challenger_economic_cost_complete: bool
+    champion_economic_cost_complete: bool
     challenger_economic_cost_available_at: datetime | None
     champion_economic_cost_available_at: datetime | None
     challenger_economic_available_at: datetime | None
@@ -588,6 +594,10 @@ class ForwardEconomicStep:
             "champion_economic_cost_evidence_sha256": (
                 self.champion_economic_cost_evidence_sha256
             ),
+            "challenger_economic_cost_complete": (
+                self.challenger_economic_cost_complete
+            ),
+            "champion_economic_cost_complete": self.champion_economic_cost_complete,
             "challenger_economic_cost_available_at": (
                 None
                 if self.challenger_economic_cost_available_at is None
@@ -651,6 +661,7 @@ class ForwardEconomicEvidenceSummary:
     currency_code: str | None
     denomination_authority_sha256: str | None
     denomination_bound: bool
+    all_in_economics_complete: bool
     observed_events: int
     next_sequence: int
     challenger_total_pnl_currency: Decimal
@@ -676,6 +687,7 @@ class ForwardEconomicEvidenceSummary:
             "currency_code": self.currency_code,
             "denomination_authority_sha256": self.denomination_authority_sha256,
             "denomination_bound": self.denomination_bound,
+            "all_in_economics_complete": self.all_in_economics_complete,
             "observed_events": self.observed_events,
             "next_sequence": self.next_sequence,
             "challenger_total_pnl_currency": _decimal_text(self.challenger_total_pnl_currency),
@@ -925,6 +937,8 @@ class ForwardEconomicEvidenceAccumulator:
             champion_economic_cost_evidence_sha256=(
                 champion.economic_cost_evidence_sha256
             ),
+            challenger_economic_cost_complete=challenger.economic_cost_complete,
+            champion_economic_cost_complete=champion.economic_cost_complete,
             challenger_economic_cost_available_at=(
                 challenger.economic_cost_available_at
             ),
@@ -1049,6 +1063,11 @@ class ForwardEconomicEvidenceAccumulator:
             protocol.currency_code is not None
             and protocol.denomination_authority_sha256 is not None
         )
+        all_in_economics_complete = bool(self._steps) and all(
+            step.challenger_economic_cost_complete
+            and step.champion_economic_cost_complete
+            for step in self._steps
+        )
 
         evidence_payload = {
             "schema_version": 1,
@@ -1061,6 +1080,7 @@ class ForwardEconomicEvidenceAccumulator:
             currency_code=protocol.currency_code,
             denomination_authority_sha256=protocol.denomination_authority_sha256,
             denomination_bound=denomination_bound,
+            all_in_economics_complete=all_in_economics_complete,
             observed_events=len(self._steps),
             next_sequence=self.next_sequence,
             challenger_total_pnl_currency=self._challenger_total,
@@ -1078,6 +1098,7 @@ class ForwardEconomicEvidenceAccumulator:
             scientific_promotion_gate_passed=(
                 positive_authority_verified
                 and denomination_bound
+                and all_in_economics_complete
                 and minimum_events_satisfied
                 and absolute_crossed
                 and paired_crossed

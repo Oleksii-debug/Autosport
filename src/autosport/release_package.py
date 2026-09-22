@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import shutil
 import struct
 import tempfile
@@ -41,6 +42,22 @@ _ZIP_VOLUME = 0
 _ZIP_UTF8_FLAG = 0x800
 _ZIP_LOCAL_HEADER = struct.Struct("<IHHHHHIIIHH")
 _ZIP_LOCAL_HEADER_SIGNATURE = 0x04034B50
+_SECRET_ASSIGNMENT_PATTERN = re.compile(
+    rb"""(?ix)
+    (?:api[_-]?key|api[_-]?secret|access[_-]?token|refresh[_-]?token|
+       client[_-]?secret|session[_-]?token|password|passwd|authorization)
+    \s*[:=]\s*
+    (?:
+        ["']([^"'\r\n]{24,4096})["']
+        |
+        ([A-Za-z0-9][A-Za-z0-9._~+/=@:-]{23,4095})
+    )
+    """
+)
+_PRIVATE_KEY_PATTERN = re.compile(
+    rb"-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----",
+    re.IGNORECASE,
+)
 
 
 class _DuplicateJsonKeyError(ValueError):
@@ -164,6 +181,37 @@ def _write_canonical_zip(package_zip: Path, members: dict[str, bytes]) -> str:
         finally:
             if publication.exists():
                 publication.unlink()
+
+
+def _require_no_packaged_secret_content(relative: str, payload: bytes) -> None:
+    """Reject credential-shaped payload content at the canonical release boundary."""
+
+    if relative == "Autosport.exe":
+        return
+
+    if _PRIVATE_KEY_PATTERN.search(payload):
+        raise ValueError(
+            f"release package contains secret or credential content: {relative}"
+        )
+
+    for match in _SECRET_ASSIGNMENT_PATTERN.finditer(payload):
+        value = next(
+            (group for group in match.groups() if group is not None),
+            b"",
+        ).strip()
+        if not value:
+            continue
+        # Environment-variable references are configuration instructions, not
+        # embedded credentials. Concrete long assignments remain fail-closed.
+        if (
+            value.startswith(b"${") and value.endswith(b"}")
+        ) or (
+            value.startswith(b"%") and value.endswith(b"%")
+        ):
+            continue
+        raise ValueError(
+            f"release package contains secret or credential content: {relative}"
+        )
 
 
 def _require_canonical_zip_metadata(
@@ -531,6 +579,8 @@ def verify_windows_package(
             names = [item.filename for item in infos]
             if len(names) != len(set(names)):
                 raise ValueError("release package contains duplicate member names")
+            _require_canonical_zip_metadata(infos, archive_comment)
+            _require_canonical_zip_local_headers(snapshot, infos)
             members: dict[str, bytes] = {}
             windows_keys: dict[str, str] = {}
             for name in names:
@@ -542,8 +592,9 @@ def verify_windows_package(
                         f"{previous} vs {name}"
                     )
                 windows_keys[windows_key] = name
-                members[relative] = archive.read(name)
-            _require_canonical_zip_local_headers(snapshot, infos)
+                payload = archive.read(name)
+                _require_no_packaged_secret_content(relative, payload)
+                members[relative] = payload
 
     required = {
         "Autosport.exe",
@@ -666,8 +717,6 @@ def verify_windows_package(
     ).encode("utf-8")
     if members["SHA256SUMS.txt"] != canonical_sums:
         raise ValueError("SHA256SUMS.txt is not in canonical sorted representation")
-    _require_canonical_zip_metadata(infos, archive_comment)
-
     return {
         "status": "PASS",
         "source_sha": expected_source_sha,

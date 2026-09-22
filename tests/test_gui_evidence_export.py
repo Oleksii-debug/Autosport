@@ -115,6 +115,75 @@ def test_export_worker_rejects_overlap_until_terminal_message_is_polled(
     assert worker.busy is False
 
 
+def test_partial_thread_start_is_joined_before_worker_slot_is_released(
+    monkeypatch, tmp_path: Path
+) -> None:
+    real_thread_class = threading.Thread
+    created: list[object] = []
+    export_calls: list[tuple[Path, Path]] = []
+
+    class PartialStartThread:
+        def __init__(self, *, target, args, name, daemon):
+            self._target = target
+            self._args = args
+            self._name = name
+            self._daemon = daemon
+            self._inner = None
+            self.join_called = False
+            created.append(self)
+
+        @property
+        def ident(self):
+            return None if self._inner is None else self._inner.ident
+
+        def start(self):
+            self._inner = real_thread_class(
+                target=self._target,
+                args=self._args,
+                name=self._name,
+                daemon=self._daemon,
+            )
+            self._inner.start()
+            raise OSError("partial Thread.start failure")
+
+        def join(self, timeout=None):
+            self.join_called = True
+            assert self._inner is not None
+            self._inner.join(timeout)
+
+        def is_alive(self):
+            return self._inner is not None and self._inner.is_alive()
+
+    def fake_export(workspace, output):
+        export_calls.append((Path(workspace), Path(output)))
+        return {"schema": "test"}
+
+    worker = OneShotEvidenceExportWorker()
+    monkeypatch.setattr(gui_export, "export_evidence_manifest", fake_export)
+    monkeypatch.setattr(gui_export.threading, "Thread", PartialStartThread)
+
+    first_output = tmp_path / "first.json"
+    assert worker.start(tmp_path, first_output) is False
+    assert len(created) == 1
+    partial = created[0]
+    assert partial.join_called is True
+    assert partial.is_alive() is False
+    assert worker.busy is False
+    assert worker._thread is None
+    assert export_calls == []
+
+    # A retry is admitted only after the cancelled helper is known to be gone.
+    monkeypatch.setattr(gui_export.threading, "Thread", real_thread_class)
+    second_output = tmp_path / "second.json"
+    assert worker.start(tmp_path, second_output) is True
+    _join_worker(worker)
+    message = worker.poll()
+    assert message is not None
+    assert message.output == second_output
+    assert message.error is None
+    assert export_calls == [(tmp_path, second_output)]
+
+
 def test_destination_preflight_accepts_safe_ancestor_destination(tmp_path: Path) -> None:
     workspace = tmp_path / "workspace"
     workspace.mkdir()

@@ -437,8 +437,8 @@ class TheOddsApiProvider:
         if type(max_items) is not int or max_items <= 0:
             raise ValueError("max_items must be a positive non-boolean integer")
         if self._pending_offset >= len(self._pending_quotes):
-            observed_at = _timestamp(self.clock(), "observed_at")
             response = self._request(self._current_url())
+            observed_at = _timestamp(self.clock(), "observed_at")
             evidence = self._request_evidence(
                 "current", observed_at, response.headers
             )
@@ -477,12 +477,12 @@ class TheOddsApiProvider:
         if type(max_items) is not int or max_items <= 0:
             raise ValueError("max_items must be a positive non-boolean integer")
         requested_at = _timestamp(requested_at, "requested_at")
+        response = self._request(self._historical_url(requested_at))
         observed_at = _timestamp(self.clock(), "observed_at")
         if _datetime(requested_at) > _datetime(observed_at):
             raise TheOddsApiPayloadError(
                 "historical requested_at cannot be later than local receipt time"
             )
-        response = self._request(self._historical_url(requested_at))
         payload = response.payload
         if not isinstance(payload, dict):
             raise TheOddsApiPayloadError("historical response must be an object")

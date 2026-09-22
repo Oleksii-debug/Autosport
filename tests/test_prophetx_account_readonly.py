@@ -325,6 +325,50 @@ def test_secrets_are_redacted_from_reprs_and_not_persisted_in_snapshot():
     assert "session-secret" not in snapshot.profile.source_ref
 
 
+def test_product_observation_clock_is_not_read_until_payload_is_accepted():
+    calls: list[str] = []
+
+    def clock() -> datetime:
+        calls.append("clock")
+        return FIXED_NOW
+
+    client = ProphetXReadOnlyClient(
+        ProphetXSessionToken("session-secret"),
+        transport=FakeTransport([http_response(b"not-json")]),
+        clock=clock,
+    )
+
+    with pytest.raises(
+        ProphetXReadOnlyError,
+        match="valid UTF-8 JSON",
+    ):
+        client.read_wallet()
+
+    assert calls == []
+
+
+@pytest.mark.parametrize(
+    "timeout",
+    [
+        float("nan"),
+        float("inf"),
+        float("-inf"),
+        0.0,
+        -1.0,
+    ],
+)
+def test_timeout_must_be_positive_and_finite(timeout: float):
+    with pytest.raises(
+        ValueError,
+        match="positive and finite",
+    ):
+        ProphetXReadOnlyClient(
+            ProphetXSessionToken("session-secret"),
+            transport=FakeTransport([]),
+            timeout_seconds=timeout,
+        )
+
+
 def test_clock_must_be_timezone_aware():
     client = ProphetXReadOnlyClient(
         ProphetXSessionToken("session-secret"),

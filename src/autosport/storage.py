@@ -4,12 +4,19 @@ import hashlib
 import json
 import re
 import sqlite3
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from threading import RLock
 from typing import Final, Iterable
 
 from .domain import MarketEvent
+from .monotonic_workspace_authority import (
+    AuthorityPhase,
+    MonotonicAuthorityRecoveryRequiredError,
+    MonotonicAuthorityRollbackError,
+    MonotonicWorkspaceAuthority,
+)
 
 
 _HISTORY_COLUMNS = (
@@ -85,6 +92,11 @@ _FORBIDDEN_TABLE_SQL = re.compile(
 _SQLITE_INTEGER_MIN = -(2**63)
 _SQLITE_INTEGER_MAX = 2**63 - 1
 _REPLAY_CUTOFF_DOMAIN = "autosport.market-replay-cutoff.v1"
+_REPLAY_CUTOFF_MACHINE_DOMAIN: Final = "data.market-replay-causal-cutoff.v1"
+_REPLAY_CUTOFF_MACHINE_KEY_PREFIX: Final = "sqlite-market-store-replay-cutoff:"
+_REPLAY_CUTOFF_STATE_SCHEMA: Final = "autosport.market-replay-cutoff.machine-state.v1"
+_REPLAY_CUTOFF_CORPUS_SCHEMA: Final = "autosport.market-replay-cutoff.corpus.v1"
+_REPLAY_CUTOFF_BINDING_SCHEMA: Final = "autosport.market-replay-cutoff.issuance-binding.v1"
 _COMMIT_ORDER_IMMUTABILITY_TRIGGERS: Final = {
     "market_event_commit_order_no_delete": """CREATE TRIGGER market_event_commit_order_no_delete
 BEFORE DELETE ON market_event_commit_order
@@ -132,6 +144,41 @@ def _canonical_replay_cutoff(value: str) -> str:
 def _replay_cutoff_id(canonical_as_of: str) -> str:
     payload = f"{_REPLAY_CUTOFF_DOMAIN}\0{canonical_as_of}".encode("utf-8")
     return hashlib.sha256(payload).hexdigest()
+
+
+def _canonical_sha256(payload: object) -> str:
+    return hashlib.sha256(_canonical_json(payload).encode("utf-8")).hexdigest()
+
+
+def _replay_cutoff_state_sha256(
+    rows: tuple[tuple[str, str, int], ...],
+) -> str | None:
+    if not rows:
+        return None
+    return _canonical_sha256(
+        {
+            "schema": _REPLAY_CUTOFF_STATE_SCHEMA,
+            "cutoffs": [list(row) for row in rows],
+        }
+    )
+
+
+def _replay_cutoff_binding_sha256(
+    *,
+    cutoff_id: str,
+    canonical_as_of: str,
+    max_append_generation: int,
+    corpus_sha256: str,
+) -> str:
+    return _canonical_sha256(
+        {
+            "schema": _REPLAY_CUTOFF_BINDING_SCHEMA,
+            "cutoff_id": cutoff_id,
+            "as_of": canonical_as_of,
+            "max_append_generation": max_append_generation,
+            "corpus_sha256": corpus_sha256,
+        }
+    )
 
 
 def _event_order_key(event: MarketEvent) -> tuple[datetime, int, str]:
@@ -833,6 +880,112 @@ class SQLiteMarketStore:
             raise OverflowError("market event append generation exhausted")
         return row[0] + 1
 
+    def _replay_cutoff_authority(self) -> MonotonicWorkspaceAuthority:
+        database_path = self.path.absolute()
+        return MonotonicWorkspaceAuthority(
+            workspace=database_path.parent,
+            domain=_REPLAY_CUTOFF_MACHINE_DOMAIN,
+            key=f"{_REPLAY_CUTOFF_MACHINE_KEY_PREFIX}{database_path.name}",
+        )
+
+    def _validated_replay_cutoff_rows(self) -> tuple[tuple[str, str, int], ...]:
+        latest_row = self.connection.execute(
+            """SELECT COALESCE(MAX(append_generation), 0)
+               FROM market_event_commit_order"""
+        ).fetchone()
+        if latest_row is None or type(latest_row[0]) is not int or latest_row[0] < 0:
+            raise ValueError("cannot validate causal replay cutoff generation")
+        latest_generation = latest_row[0]
+
+        raw_rows = self.connection.execute(
+            """SELECT cutoff_id, as_of, max_append_generation
+               FROM market_replay_cutoffs
+               ORDER BY cutoff_id"""
+        ).fetchall()
+        rows: list[tuple[str, str, int]] = []
+        for cutoff_id, stored_as_of, max_generation in raw_rows:
+            if (
+                type(cutoff_id) is not str
+                or type(stored_as_of) is not str
+                or type(max_generation) is not int
+                or max_generation < 0
+                or max_generation > latest_generation
+            ):
+                raise ValueError("causal replay cutoff authority is invalid")
+            canonical_as_of = _canonical_replay_cutoff(stored_as_of)
+            if (
+                stored_as_of != canonical_as_of
+                or cutoff_id != _replay_cutoff_id(canonical_as_of)
+            ):
+                raise ValueError("causal replay cutoff authority is invalid")
+            rows.append((cutoff_id, canonical_as_of, max_generation))
+        return tuple(rows)
+
+    def _frozen_replay_corpus_sha256(self, max_generation: int) -> str:
+        if type(max_generation) is not int or max_generation < 0:
+            raise ValueError("max_generation must be a non-negative int")
+        rows = self.connection.execute(
+            """SELECT c.append_generation, m.dedupe_key, m.payload_json
+               FROM market_event_commit_order AS c
+               JOIN market_events AS m ON m.dedupe_key = c.dedupe_key
+               WHERE c.append_generation <= ?
+               ORDER BY c.append_generation, m.dedupe_key""",
+            (max_generation,),
+        ).fetchall()
+        encoded_rows: list[list[object]] = []
+        for generation, dedupe_key, payload_json in rows:
+            if (
+                type(generation) is not int
+                or generation < 0
+                or type(dedupe_key) is not str
+                or type(payload_json) is not str
+            ):
+                raise ValueError("causal replay corpus authority is invalid")
+            encoded_rows.append([generation, dedupe_key, payload_json])
+        return _canonical_sha256(
+            {
+                "schema": _REPLAY_CUTOFF_CORPUS_SCHEMA,
+                "max_append_generation": max_generation,
+                "rows": encoded_rows,
+            }
+        )
+
+    @staticmethod
+    def _recover_replay_cutoff_authority(
+        authority: MonotonicWorkspaceAuthority,
+        observed_state_sha256: str | None,
+    ) -> None:
+        try:
+            authority.recover(observed_state_sha256=observed_state_sha256)
+            return
+        except MonotonicAuthorityRecoveryRequiredError:
+            history = authority.read_history()
+            if not history or history[-1].phase is not AuthorityPhase.PREPARE:
+                raise
+            pending = history[-1]
+            authority.recover(
+                observed_state_sha256=observed_state_sha256,
+                tx_id=pending.tx_id,
+                semantic_binding_sha256=pending.semantic_binding_sha256,
+            )
+
+    @staticmethod
+    def _require_independent_cutoff_issuance(
+        authority: MonotonicWorkspaceAuthority,
+        *,
+        expected_binding_sha256: str,
+    ) -> None:
+        matches = tuple(
+            record
+            for record in authority.read_history()
+            if record.phase is AuthorityPhase.COMMIT
+            and record.semantic_binding_sha256 == expected_binding_sha256
+        )
+        if len(matches) != 1:
+            raise MonotonicAuthorityRollbackError(
+                "causal replay cutoff lacks unique independent product issuance authority"
+            )
+
     def _rebuild_current_quotes(self) -> None:
         """Repair provider-aware current projection from one write-locked history snapshot."""
         latest: dict[tuple[str, str], tuple[tuple[int, str], MarketEvent]] = {}
@@ -1007,39 +1160,65 @@ class SQLiteMarketStore:
         return sorted(events, key=_event_order_key)
 
     def replay_events_at_frozen_cutoff(self, *, as_of: str) -> list[MarketEvent]:
-        """Return the exact durable history generation first frozen for as_of.
+        """Return the exact independently issued durable history cutoff for as_of.
 
-        The first read of a causal cutoff atomically binds that normalized UTC
-        decision instant to the store's current product-owned append generation.
-        Later appends can be audited through events() and can appear under a
-        newly issued later cutoff, but they cannot rewrite this already-issued
-        cutoff even when their event-carried clocks are backdated.
+        SQLite remains the canonical event/history store, but a cutoff row is accepted
+        only when the existing machine-state MonotonicWorkspaceAuthority proves that
+        product issuance. The immutable semantic binding also seals the exact frozen
+        event corpus, so coherent same-database DDL rewrites cannot silently change
+        membership after the cutoff was issued.
         """
 
         canonical_as_of = _canonical_replay_cutoff(as_of)
         cutoff_id = _replay_cutoff_id(canonical_as_of)
         with self._connection_lock:
-            current_row = self.connection.execute(
-                """SELECT as_of, max_append_generation
-                   FROM market_replay_cutoffs
-                   WHERE cutoff_id=?""",
-                (cutoff_id,),
-            ).fetchone()
+            self._validate_causal_replay_state()
+            cutoff_rows = self._validated_replay_cutoff_rows()
+            observed_state_sha256 = _replay_cutoff_state_sha256(cutoff_rows)
+            authority = self._replay_cutoff_authority()
+            self._recover_replay_cutoff_authority(
+                authority,
+                observed_state_sha256,
+            )
+
+            current_row = next(
+                (
+                    (stored_as_of, max_generation)
+                    for stored_cutoff_id, stored_as_of, max_generation in cutoff_rows
+                    if stored_cutoff_id == cutoff_id
+                ),
+                None,
+            )
 
             if current_row is None:
-                # Serialize only cutoff issuance against canonical appends. The
-                # potentially large replay scan happens after this write
-                # transaction commits, so forward collection is not blocked by
-                # history decoding.
+                # Serialize issuance with canonical appends. The external PREPARE is
+                # written while the SQLite writer transaction owns the exact prior
+                # cutoff-table state; SQLite is then committed before the external
+                # COMMIT. A crash in between is recovered from the prepared record and
+                # the exact observed cutoff-table digest on the next call.
+                prepared: tuple[
+                    str,
+                    str,
+                    str | None,
+                    str,
+                ] | None = None
                 self.connection.execute("BEGIN IMMEDIATE")
                 try:
                     self._validate_causal_replay_state()
-                    current_row = self.connection.execute(
-                        """SELECT as_of, max_append_generation
-                           FROM market_replay_cutoffs
-                           WHERE cutoff_id=?""",
-                        (cutoff_id,),
-                    ).fetchone()
+                    cutoff_rows = self._validated_replay_cutoff_rows()
+                    observed_state_sha256 = _replay_cutoff_state_sha256(cutoff_rows)
+                    self._recover_replay_cutoff_authority(
+                        authority,
+                        observed_state_sha256,
+                    )
+                    current_row = next(
+                        (
+                            (stored_as_of, max_generation)
+                            for stored_cutoff_id, stored_as_of, max_generation in cutoff_rows
+                            if stored_cutoff_id == cutoff_id
+                        ),
+                        None,
+                    )
                     if current_row is None:
                         generation_row = self.connection.execute(
                             """SELECT COALESCE(MAX(append_generation), 0)
@@ -1053,43 +1232,113 @@ class SQLiteMarketStore:
                             raise ValueError(
                                 "cannot freeze causal replay append generation"
                             )
-                        current_row = (canonical_as_of, generation_row[0])
+                        max_generation = generation_row[0]
+                        current_row = (canonical_as_of, max_generation)
+                        corpus_sha256 = self._frozen_replay_corpus_sha256(
+                            max_generation
+                        )
+                        binding_sha256 = _replay_cutoff_binding_sha256(
+                            cutoff_id=cutoff_id,
+                            canonical_as_of=canonical_as_of,
+                            max_append_generation=max_generation,
+                            corpus_sha256=corpus_sha256,
+                        )
+                        intended_rows = tuple(
+                            sorted(
+                                (
+                                    *cutoff_rows,
+                                    (cutoff_id, canonical_as_of, max_generation),
+                                ),
+                                key=lambda row: row[0],
+                            )
+                        )
+                        intended_state_sha256 = _replay_cutoff_state_sha256(
+                            intended_rows
+                        )
+                        if intended_state_sha256 is None:
+                            raise RuntimeError(
+                                "non-empty causal replay cutoff state has no digest"
+                            )
+                        tx_id = f"{cutoff_id[:32]}-{uuid.uuid4().hex}"
+                        authority.prepare(
+                            tx_id=tx_id,
+                            observed_state_sha256=observed_state_sha256,
+                            intended_state_sha256=intended_state_sha256,
+                            semantic_binding_sha256=binding_sha256,
+                        )
+                        prepared = (
+                            tx_id,
+                            binding_sha256,
+                            observed_state_sha256,
+                            intended_state_sha256,
+                        )
                         self.connection.execute(
                             """INSERT INTO market_replay_cutoffs
                                (cutoff_id, as_of, max_append_generation)
                                VALUES (?, ?, ?)""",
-                            (cutoff_id, canonical_as_of, generation_row[0]),
+                            (cutoff_id, canonical_as_of, max_generation),
                         )
-                except Exception:
-                    self.connection.rollback()
-                    raise
-                else:
                     self.connection.commit()
-            else:
-                self._validate_causal_replay_state()
+                except Exception as exc:
+                    self.connection.rollback()
+                    if prepared is not None:
+                        tx_id, binding_sha256, previous_state_sha256, _ = prepared
+                        try:
+                            authority.abort(
+                                tx_id=tx_id,
+                                observed_state_sha256=previous_state_sha256,
+                                semantic_binding_sha256=binding_sha256,
+                            )
+                        except Exception as abort_error:
+                            exc.add_note(
+                                "independent cutoff-authority PREPARE could not be "
+                                f"aborted cleanly: {type(abort_error).__name__}: {abort_error}"
+                            )
+                    raise
 
+                if prepared is not None:
+                    tx_id, binding_sha256, _, intended_state_sha256 = prepared
+                    authority.commit(
+                        tx_id=tx_id,
+                        observed_state_sha256=intended_state_sha256,
+                        semantic_binding_sha256=binding_sha256,
+                    )
+
+            # Re-read and independently prove the exact durable state after issuance
+            # or recovery. A caller-inserted row with no machine-state ancestry fails
+            # here even when its SQLite schema/id/generation are individually valid.
+            self._validate_causal_replay_state()
+            cutoff_rows = self._validated_replay_cutoff_rows()
+            observed_state_sha256 = _replay_cutoff_state_sha256(cutoff_rows)
+            self._recover_replay_cutoff_authority(
+                authority,
+                observed_state_sha256,
+            )
+            current_row = next(
+                (
+                    (stored_as_of, max_generation)
+                    for stored_cutoff_id, stored_as_of, max_generation in cutoff_rows
+                    if stored_cutoff_id == cutoff_id
+                ),
+                None,
+            )
             if current_row is None:
                 raise RuntimeError("causal replay cutoff issuance disappeared")
+
             stored_as_of, max_generation = current_row
-            if (
-                stored_as_of != canonical_as_of
-                or type(max_generation) is not int
-                or max_generation < 0
-                or cutoff_id != _replay_cutoff_id(str(stored_as_of))
-            ):
+            if stored_as_of != canonical_as_of:
                 raise ValueError("causal replay cutoff authority is invalid")
-            latest_row = self.connection.execute(
-                """SELECT COALESCE(MAX(append_generation), 0)
-                   FROM market_event_commit_order"""
-            ).fetchone()
-            if (
-                latest_row is None
-                or type(latest_row[0]) is not int
-                or max_generation > latest_row[0]
-            ):
-                raise ValueError(
-                    "causal replay cutoff references unavailable generation"
-                )
+            corpus_sha256 = self._frozen_replay_corpus_sha256(max_generation)
+            expected_binding_sha256 = _replay_cutoff_binding_sha256(
+                cutoff_id=cutoff_id,
+                canonical_as_of=canonical_as_of,
+                max_append_generation=max_generation,
+                corpus_sha256=corpus_sha256,
+            )
+            self._require_independent_cutoff_issuance(
+                authority,
+                expected_binding_sha256=expected_binding_sha256,
+            )
 
             qualified_columns = ",".join(
                 f"m.{column}" for column in _HISTORY_COLUMNS

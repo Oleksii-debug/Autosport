@@ -337,12 +337,12 @@ class AutosportApp(tk.Tk):
         strategy_id = strategy_id_from_display(self.strategy_text.get())
         spec = strategy_spec(strategy_id)
         if not spec.requires_research_plan:
+            self.status.set(
+                text("ui.status.research_plan.not_required_short", strategy_id=strategy_id)
+            )
             messagebox.showinfo(
                 text("ui.dialog.title"),
                 text("ui.info.research_plan.not_supported", strategy_id=strategy_id),
-            )
-            self.status.set(
-                text("ui.status.research_plan.not_required_short", strategy_id=strategy_id)
             )
             return
         selected = filedialog.askopenfilename(

@@ -52,7 +52,7 @@ _ALLOWED_ACCOUNT_CAPABILITIES = frozenset(
         BookmakerCapability.SETTLED_POSITIONS_READ,
     }
 )
-_SCHEMA_VERSION = 1
+_SCHEMA_VERSION = 2
 _INTEGRATION_SOURCE_REF = "autosport://betfair-account-readonly/official-api-v1"
 
 
@@ -148,6 +148,7 @@ def _load_json_object(text: str, field: str) -> dict[str, object]:
 @dataclass(frozen=True, slots=True)
 class AccountSnapshotAcquisitionReceipt:
     acquisition_id: str
+    acquisition_request_id_sha256: str
     source_observation_id: str
     venue_id: str
     account_id: str
@@ -170,6 +171,7 @@ class AccountSnapshotAcquisitionReceipt:
     def __post_init__(self) -> None:
         for field in (
             "acquisition_id",
+            "acquisition_request_id_sha256",
             "source_observation_id",
             "integration_evidence_id",
             "snapshot_sha256",
@@ -377,11 +379,14 @@ class _AccountSnapshotStore:
             connection.executescript(
                 """
                 CREATE TABLE IF NOT EXISTS account_snapshot_acquisitions (
-                    source_observation_id TEXT PRIMARY KEY,
+                    acquisition_request_id_sha256 TEXT PRIMARY KEY,
+                    source_observation_id TEXT NOT NULL,
                     acquisition_id TEXT NOT NULL UNIQUE,
                     record_json TEXT NOT NULL,
                     record_sha256 TEXT NOT NULL
                 );
+                CREATE INDEX IF NOT EXISTS account_snapshot_acquisitions_source_observation
+                ON account_snapshot_acquisitions(source_observation_id);
                 CREATE TRIGGER IF NOT EXISTS account_snapshot_acquisitions_no_update
                 BEFORE UPDATE ON account_snapshot_acquisitions
                 BEGIN
@@ -400,6 +405,8 @@ class _AccountSnapshotStore:
         snapshot: BookmakerAccountSnapshot,
         integration: BookmakerIntegrationEvidence,
         requested_capabilities: frozenset[BookmakerCapability],
+        *,
+        acquisition_request_id_sha256: str,
     ) -> AuthoritativeAccountSnapshot:
         if type(snapshot) is not BookmakerAccountSnapshot:
             raise AccountSnapshotAcquisitionError(
@@ -410,6 +417,10 @@ class _AccountSnapshotStore:
                 "integration must be exact BookmakerIntegrationEvidence"
             )
         integration.verify_profile(snapshot.profile)
+        acquisition_request_id_sha256 = _sha256_hex(
+            acquisition_request_id_sha256,
+            "acquisition_request_id_sha256",
+        )
 
         requested = tuple(sorted(capability.value for capability in requested_capabilities))
         snapshot_payload = _snapshot_payload(snapshot, include_local_times=True)
@@ -431,6 +442,7 @@ class _AccountSnapshotStore:
         )
         base_record: dict[str, object] = {
             "schema_version": _SCHEMA_VERSION,
+            "acquisition_request_id_sha256": acquisition_request_id_sha256,
             "source_observation_id": source_observation_id,
             "venue_id": snapshot.profile.venue_id,
             "account_id": snapshot.profile.account_id,
@@ -461,27 +473,39 @@ class _AccountSnapshotStore:
             connection.execute("BEGIN IMMEDIATE")
             existing = connection.execute(
                 """
-                SELECT source_observation_id, acquisition_id, record_json, record_sha256
+                SELECT acquisition_request_id_sha256, source_observation_id,
+                       acquisition_id, record_json, record_sha256
                 FROM account_snapshot_acquisitions
-                WHERE source_observation_id = ?
+                WHERE acquisition_request_id_sha256 = ?
                 """,
-                (source_observation_id,),
+                (acquisition_request_id_sha256,),
             ).fetchone()
             if existing is not None:
                 resolved = self._decode_row(existing)
-                if resolved.receipt.snapshot_content_sha256 != snapshot_content_sha256:
+                if (
+                    resolved.receipt.source_observation_id != source_observation_id
+                    or resolved.receipt.snapshot_sha256 != snapshot_sha256
+                    or resolved.receipt.snapshot_content_sha256 != snapshot_content_sha256
+                ):
                     raise AccountSnapshotAcquisitionError(
-                        "conflicting content for the same provider source observation"
+                        "same acquisition request id produced conflicting provider evidence"
                     )
                 return resolved
 
             connection.execute(
                 """
                 INSERT INTO account_snapshot_acquisitions
-                    (source_observation_id, acquisition_id, record_json, record_sha256)
-                VALUES (?, ?, ?, ?)
+                    (
+                        acquisition_request_id_sha256,
+                        source_observation_id,
+                        acquisition_id,
+                        record_json,
+                        record_sha256
+                    )
+                VALUES (?, ?, ?, ?, ?)
                 """,
                 (
+                    acquisition_request_id_sha256,
                     source_observation_id,
                     acquisition_id,
                     record_json,
@@ -495,7 +519,8 @@ class _AccountSnapshotStore:
         with self._connect() as connection:
             row = connection.execute(
                 """
-                SELECT source_observation_id, acquisition_id, record_json, record_sha256
+                SELECT acquisition_request_id_sha256, source_observation_id,
+                       acquisition_id, record_json, record_sha256
                 FROM account_snapshot_acquisitions
                 WHERE acquisition_id = ?
                 """,
@@ -507,17 +532,50 @@ class _AccountSnapshotStore:
             )
         return self._decode_row(row)
 
+    def resolve_request(
+        self,
+        acquisition_request_id_sha256: str,
+    ) -> AuthoritativeAccountSnapshot | None:
+        acquisition_request_id_sha256 = _sha256_hex(
+            acquisition_request_id_sha256,
+            "acquisition_request_id_sha256",
+        )
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT acquisition_request_id_sha256, source_observation_id,
+                       acquisition_id, record_json, record_sha256
+                FROM account_snapshot_acquisitions
+                WHERE acquisition_request_id_sha256 = ?
+                """,
+                (acquisition_request_id_sha256,),
+            ).fetchone()
+        if row is None:
+            return None
+        return self._decode_row(row)
+
     def _decode_row(self, row: tuple[object, ...]) -> AuthoritativeAccountSnapshot:
-        if len(row) != 4 or any(type(value) is not str for value in row):
+        if len(row) != 5 or any(type(value) is not str for value in row):
             raise AccountSnapshotAcquisitionError(
                 "durable account snapshot acquisition row has invalid storage types"
             )
-        source_observation_id, acquisition_id, record_json, record_sha256 = row
+        (
+            acquisition_request_id_sha256,
+            source_observation_id,
+            acquisition_id,
+            record_json,
+            record_sha256,
+        ) = row
+        assert isinstance(acquisition_request_id_sha256, str)
         assert isinstance(source_observation_id, str)
         assert isinstance(acquisition_id, str)
         assert isinstance(record_json, str)
         assert isinstance(record_sha256, str)
 
+        _sha256_hex(
+            acquisition_request_id_sha256,
+            "acquisition_request_id_sha256",
+        )
         _sha256_hex(source_observation_id, "source_observation_id")
         _sha256_hex(acquisition_id, "acquisition_id")
         _sha256_hex(record_sha256, "record_sha256")
@@ -529,6 +587,7 @@ class _AccountSnapshotStore:
         record = _load_json_object(record_json, "record_json")
         expected_keys = {
             "schema_version",
+            "acquisition_request_id_sha256",
             "source_observation_id",
             "acquisition_id",
             "venue_id",
@@ -550,9 +609,19 @@ class _AccountSnapshotStore:
             "grants_settlement_authority",
         }
         _exact_keys(record, expected_keys, "record_json")
-        if type(record["schema_version"]) is not int or record["schema_version"] != 1:
+        if (
+            type(record["schema_version"]) is not int
+            or record["schema_version"] != _SCHEMA_VERSION
+        ):
             raise AccountSnapshotAcquisitionError(
-                "durable acquisition schema_version must be exactly 1"
+                "durable acquisition schema_version mismatch"
+            )
+        if (
+            record["acquisition_request_id_sha256"]
+            != acquisition_request_id_sha256
+        ):
+            raise AccountSnapshotAcquisitionError(
+                "durable acquisition request id column mismatch"
             )
         if record["source_observation_id"] != source_observation_id:
             raise AccountSnapshotAcquisitionError(
@@ -665,6 +734,7 @@ class _AccountSnapshotStore:
 
         receipt = AccountSnapshotAcquisitionReceipt(
             acquisition_id=acquisition_id,
+            acquisition_request_id_sha256=acquisition_request_id_sha256,
             source_observation_id=source_observation_id,
             venue_id=_text(record["venue_id"], "venue_id"),
             account_id=_text(record["account_id"], "account_id"),
@@ -1057,6 +1127,7 @@ def _install_account_snapshot_acquisition_authority() -> None:
     raw_read = BetfairAccountSnapshotAcquirer._read_provider_snapshot
     raw_record = _AccountSnapshotStore.record
     raw_resolve = _AccountSnapshotStore.resolve
+    raw_resolve_request = _AccountSnapshotStore.resolve_request
     canonical_snapshot_read = BetfairReadOnlyClient.read_account_snapshot
 
     def state(
@@ -1098,8 +1169,42 @@ def _install_account_snapshot_acquisition_authority() -> None:
     def acquire(
         self: BetfairAccountSnapshotAcquirer,
         requested_capabilities: frozenset[BookmakerCapability],
+        *,
+        acquisition_id: str,
     ) -> AuthoritativeAccountSnapshot:
         store, client = state(self)
+        acquisition_id = _text(acquisition_id, "acquisition_id")
+        acquisition_request_id_sha256 = _canonical_sha256(
+            {
+                "schema": "autosport.account-snapshot-acquisition-request",
+                "schema_version": 1,
+                "acquisition_id": acquisition_id,
+            }
+        )
+
+        existing = raw_resolve_request(
+            store,
+            acquisition_request_id_sha256,
+        )
+        if existing is not None:
+            expected_requested = tuple(
+                sorted(
+                    capability.value
+                    for capability in requested_capabilities
+                )
+            )
+            if (
+                existing.receipt.venue_id != getattr(client, "_venue_id", None)
+                or existing.receipt.account_id != getattr(client, "_account_id", None)
+                or existing.receipt.adapter_id != ADAPTER_ID
+                or existing.receipt.adapter_version != ADAPTER_VERSION
+                or existing.receipt.requested_capabilities != expected_requested
+            ):
+                raise AccountSnapshotAcquisitionError(
+                    "acquisition_id cannot be reused for another provider/account/capability scope"
+                )
+            return existing
+
         snapshot, integration = raw_read(
             self,
             client,
@@ -1111,6 +1216,7 @@ def _install_account_snapshot_acquisition_authority() -> None:
             snapshot,
             integration,
             requested_capabilities,
+            acquisition_request_id_sha256=acquisition_request_id_sha256,
         )
 
     def resolve(
@@ -1152,6 +1258,7 @@ def _install_account_snapshot_acquisition_authority() -> None:
     BetfairAccountSnapshotAcquirer.verify = verify
     delattr(BetfairAccountSnapshotAcquirer, "_read_provider_snapshot")
     delattr(_AccountSnapshotStore, "record")
+    delattr(_AccountSnapshotStore, "resolve_request")
 
 
 _install_account_snapshot_acquisition_authority()

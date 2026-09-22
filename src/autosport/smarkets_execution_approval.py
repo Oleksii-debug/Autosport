@@ -96,7 +96,7 @@ def _digest(value: object) -> str:
 def _domain_digest(domain: str, value: object) -> str:
     return hashlib.sha256(
         domain.encode("utf-8")
-        + b"\\0"
+        + bytes((0,))
         + json.dumps(
             value,
             ensure_ascii=False,

@@ -99,7 +99,12 @@ class MarketBookTransport:
         ).encode("utf-8")
 
 
-def _bound(decision_at: datetime = NOW) -> BoundSupervisedExecutionPlan:
+def _bound(
+    decision_at: datetime = NOW,
+    *,
+    requested_odds: Decimal = Decimal("2.00"),
+    requested_stake: Decimal = Decimal("12"),
+) -> BoundSupervisedExecutionPlan:
     quote_at = decision_at - timedelta(seconds=1)
     expires_at = decision_at + timedelta(seconds=5)
     action = ExecutionAction(
@@ -110,8 +115,8 @@ def _bound(decision_at: datetime = NOW) -> BoundSupervisedExecutionPlan:
         market_id="1.234",
         selection_id="42",
         side="BACK",
-        requested_odds=Decimal("2.00"),
-        requested_stake=Decimal("12"),
+        requested_odds=requested_odds,
+        requested_stake=requested_stake,
         quote_id="quote-1",
         quote_observed_at=quote_at.isoformat(),
         expires_at=expires_at.isoformat(),
@@ -250,6 +255,66 @@ def test_authenticated_market_book_receipt_cannot_bypass_provider_limit_authorit
     assert len(result.evidence_digest) == 64
     assert len(result.liquidity_overlap_key) == 64
     assert transport.calls
+
+
+def test_unknown_market_price_ladder_cannot_mint_positive_admissibility() -> None:
+    transport = MarketBookTransport(
+        back_sizes=(("2.02", "100"), ("2.00", "100")),
+    )
+    receipt, canonical_source = _synthetic_authoritative_receipt(transport)
+    decision_at = datetime.now(timezone.utc)
+    bound = _bound(
+        decision_at,
+        requested_odds=Decimal("2.01"),
+        requested_stake=Decimal("12"),
+    )
+
+    with tempfile.TemporaryDirectory() as tmp:
+        result = assess_authoritative_betfair_execution_feasibility(
+            _reserved_ledger(tmp, bound),
+            bound,
+            receipt,
+            action_id=ACTION_ID,
+            decision_at=decision_at,
+            max_snapshot_age=timedelta(seconds=2),
+        )
+
+    # 2.01 is not a valid CLASSIC tick above 2.00, but other market ladders
+    # differ. Without canonical MarketDescription/price-ladder evidence the
+    # product cannot positively prove this LIMIT price admissible.
+    assert result.state is FeasibilityState.UNKNOWN_UNPROVEN
+    assert result.sufficient is False
+    assert result.displayed_acceptable_depth == Decimal("100")
+    assert "LIMIT_AUTHORITY_REJECTED" in result.reasons
+
+
+def test_unknown_currency_jurisdiction_minimum_rule_cannot_mint_positive_admissibility() -> None:
+    transport = MarketBookTransport(back_sizes=(("10.00", "100"),))
+    receipt, canonical_source = _synthetic_authoritative_receipt(transport)
+    decision_at = datetime.now(timezone.utc)
+    bound = _bound(
+        decision_at,
+        requested_odds=Decimal("10.00"),
+        requested_stake=Decimal("0.50"),
+    )
+
+    with tempfile.TemporaryDirectory() as tmp:
+        result = assess_authoritative_betfair_execution_feasibility(
+            _reserved_ledger(tmp, bound),
+            bound,
+            receipt,
+            action_id=ACTION_ID,
+            decision_at=decision_at,
+            max_snapshot_age=timedelta(seconds=2),
+        )
+
+    # Minimum stake / minimum payout rules depend on authenticated account
+    # currency and jurisdiction. Profile identity cannot substitute for that
+    # versioned provider rule evidence.
+    assert result.state is FeasibilityState.UNKNOWN_UNPROVEN
+    assert result.sufficient is False
+    assert result.displayed_acceptable_depth == Decimal("100")
+    assert "LIMIT_AUTHORITY_REJECTED" in result.reasons
 
 def test_forged_structurally_equal_receipt_cannot_issue_positive_truth() -> None:
     receipt, canonical_source = _synthetic_authoritative_receipt(

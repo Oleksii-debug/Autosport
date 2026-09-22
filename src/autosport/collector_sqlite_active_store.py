@@ -200,6 +200,8 @@ class CollectorDeltaStore(_SQLiteCollectorDeltaStore):
                 "stream_epoch TEXT NOT NULL,"
                 "anchor_at TEXT NOT NULL,"
                 "interval_seconds TEXT NOT NULL,"
+                "evaluation_start_slot_ordinal INTEGER,"
+                "evaluation_end_slot_ordinal INTEGER,"
                 "PRIMARY KEY(source_id, run_id))"
             )
             schedule_columns = {
@@ -216,6 +218,17 @@ class CollectorDeltaStore(_SQLiteCollectorDeltaStore):
                     "ALTER TABLE collector_schedules_v1 "
                     "ADD COLUMN stream_epoch TEXT"
                 )
+            for column_name in (
+                "evaluation_start_slot_ordinal",
+                "evaluation_end_slot_ordinal",
+            ):
+                if column_name not in schedule_columns:
+                    # Historical schedules remain explicitly unbounded for scientific
+                    # resolution. The immutable row cannot be upgraded post-outcome.
+                    connection.execute(
+                        "ALTER TABLE collector_schedules_v1 "
+                        f"ADD COLUMN {column_name} INTEGER"
+                    )
             connection.execute(
                 "CREATE TABLE IF NOT EXISTS collector_schedule_slots_v1 ("
                 "source_id TEXT NOT NULL,"
@@ -366,6 +379,37 @@ class CollectorDeltaStore(_SQLiteCollectorDeltaStore):
             raise ValueError("schedule interval_seconds must be positive and finite")
         return repr(float(value))
 
+    @staticmethod
+    def _schedule_evaluation_window(
+        start_slot_ordinal: object,
+        end_slot_ordinal: object,
+    ) -> tuple[int | None, int | None]:
+        if start_slot_ordinal is None and end_slot_ordinal is None:
+            return None, None
+        if start_slot_ordinal is None or end_slot_ordinal is None:
+            raise ValueError(
+                "collector schedule evaluation window must bind both start and end"
+            )
+        for name, value in (
+            ("evaluation_start_slot_ordinal", start_slot_ordinal),
+            ("evaluation_end_slot_ordinal", end_slot_ordinal),
+        ):
+            if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+                raise ValueError(f"{name} must be a non-negative integer")
+        if end_slot_ordinal < start_slot_ordinal:
+            raise ValueError(
+                "evaluation_end_slot_ordinal cannot precede "
+                "evaluation_start_slot_ordinal"
+            )
+        if (
+            end_slot_ordinal - start_slot_ordinal + 1
+            > _MAX_SCHEDULE_EVIDENCE_SLOTS
+        ):
+            raise ValueError(
+                "collector schedule evaluation window exceeds bounded slot limit"
+            )
+        return start_slot_ordinal, end_slot_ordinal
+
     @classmethod
     def _collector_schedule_id(
         cls,
@@ -375,16 +419,20 @@ class CollectorDeltaStore(_SQLiteCollectorDeltaStore):
         stream_epoch: str,
         anchor_at: str,
         interval_seconds: str,
+        evaluation_start_slot_ordinal: int | None,
+        evaluation_end_slot_ordinal: int | None,
     ) -> str:
         payload = cls._cycle_terminal_payload_json(
             {
-                "schema_version": 2,
+                "schema_version": 3,
                 "policy": _SCHEDULE_POLICY,
                 "source_id": source_id,
                 "run_id": run_id,
                 "stream_epoch": stream_epoch,
                 "anchor_at": anchor_at,
                 "interval_seconds": interval_seconds,
+                "evaluation_start_slot_ordinal": evaluation_start_slot_ordinal,
+                "evaluation_end_slot_ordinal": evaluation_end_slot_ordinal,
             }
         )
         return hashlib.sha256(payload.encode("utf-8")).hexdigest()
@@ -416,6 +464,8 @@ class CollectorDeltaStore(_SQLiteCollectorDeltaStore):
         stream_epoch: str,
         anchor_at: str,
         interval_seconds: float,
+        evaluation_start_slot_ordinal: int | None = None,
+        evaluation_end_slot_ordinal: int | None = None,
     ) -> dict[str, object]:
         """Create or re-resolve one immutable prospective schedule for a durable run."""
 
@@ -424,19 +474,26 @@ class CollectorDeltaStore(_SQLiteCollectorDeltaStore):
         stream_epoch = _text(stream_epoch, "stream_epoch")
         canonical_anchor = _instant(anchor_at, "anchor_at").isoformat()
         interval_text = self._schedule_interval_text(interval_seconds)
+        evaluation_start, evaluation_end = self._schedule_evaluation_window(
+            evaluation_start_slot_ordinal,
+            evaluation_end_slot_ordinal,
+        )
         candidate_id = self._collector_schedule_id(
             source_id=source_id,
             run_id=run_id,
             stream_epoch=stream_epoch,
             anchor_at=canonical_anchor,
             interval_seconds=interval_text,
+            evaluation_start_slot_ordinal=evaluation_start,
+            evaluation_end_slot_ordinal=evaluation_end,
         )
 
         connection = self._connect()
         try:
             connection.execute("BEGIN IMMEDIATE")
             row = connection.execute(
-                "SELECT schedule_id, policy, stream_epoch, anchor_at, interval_seconds "
+                "SELECT schedule_id, policy, stream_epoch, anchor_at, interval_seconds, "
+                "evaluation_start_slot_ordinal, evaluation_end_slot_ordinal "
                 "FROM collector_schedules_v1 WHERE source_id=? AND run_id=?",
                 (source_id, run_id),
             ).fetchone()
@@ -444,8 +501,9 @@ class CollectorDeltaStore(_SQLiteCollectorDeltaStore):
                 connection.execute(
                     "INSERT INTO collector_schedules_v1("
                     "source_id, run_id, schedule_id, policy, stream_epoch, "
-                    "anchor_at, interval_seconds"
-                    ") VALUES(?,?,?,?,?,?,?)",
+                    "anchor_at, interval_seconds, evaluation_start_slot_ordinal, "
+                    "evaluation_end_slot_ordinal"
+                    ") VALUES(?,?,?,?,?,?,?,?,?)",
                     (
                         source_id,
                         run_id,
@@ -454,12 +512,16 @@ class CollectorDeltaStore(_SQLiteCollectorDeltaStore):
                         stream_epoch,
                         canonical_anchor,
                         interval_text,
+                        evaluation_start,
+                        evaluation_end,
                     ),
                 )
                 schedule_id = candidate_id
                 stored_epoch = stream_epoch
                 stored_anchor = canonical_anchor
                 stored_interval = interval_text
+                stored_evaluation_start = evaluation_start
+                stored_evaluation_end = evaluation_end
             else:
                 if row["stream_epoch"] is None:
                     raise ValueError(
@@ -470,12 +532,21 @@ class CollectorDeltaStore(_SQLiteCollectorDeltaStore):
                 stored_interval = self._schedule_interval_text(
                     float(row["interval_seconds"])
                 )
+                (
+                    stored_evaluation_start,
+                    stored_evaluation_end,
+                ) = self._schedule_evaluation_window(
+                    row["evaluation_start_slot_ordinal"],
+                    row["evaluation_end_slot_ordinal"],
+                )
                 expected_id = self._collector_schedule_id(
                     source_id=source_id,
                     run_id=run_id,
                     stream_epoch=stored_epoch,
                     anchor_at=stored_anchor,
                     interval_seconds=stored_interval,
+                    evaluation_start_slot_ordinal=stored_evaluation_start,
+                    evaluation_end_slot_ordinal=stored_evaluation_end,
                 )
                 if (
                     row["policy"] != _SCHEDULE_POLICY
@@ -483,6 +554,10 @@ class CollectorDeltaStore(_SQLiteCollectorDeltaStore):
                     or row["stream_epoch"] != stored_epoch
                     or row["anchor_at"] != stored_anchor
                     or row["interval_seconds"] != stored_interval
+                    or row["evaluation_start_slot_ordinal"]
+                    != stored_evaluation_start
+                    or row["evaluation_end_slot_ordinal"]
+                    != stored_evaluation_end
                 ):
                     raise ValueError("collector schedule identity is corrupt")
                 if stored_epoch != stream_epoch:
@@ -493,10 +568,18 @@ class CollectorDeltaStore(_SQLiteCollectorDeltaStore):
                     raise ValueError(
                         "collector schedule interval cannot change within a durable run"
                     )
+                if (
+                    stored_evaluation_start,
+                    stored_evaluation_end,
+                ) != (evaluation_start, evaluation_end):
+                    raise ValueError(
+                        "collector schedule evaluation window cannot change "
+                        "within a durable run"
+                    )
                 schedule_id = row["schedule_id"]
             connection.commit()
             return {
-                "schema_version": 2,
+                "schema_version": 3,
                 "schedule_id": schedule_id,
                 "policy": _SCHEDULE_POLICY,
                 "source_id": source_id,
@@ -504,6 +587,8 @@ class CollectorDeltaStore(_SQLiteCollectorDeltaStore):
                 "stream_epoch": stored_epoch,
                 "anchor_at": stored_anchor,
                 "interval_seconds": stored_interval,
+                "evaluation_start_slot_ordinal": stored_evaluation_start,
+                "evaluation_end_slot_ordinal": stored_evaluation_end,
             }
         except sqlite3.DatabaseError as exc:
             if connection.in_transaction:
@@ -529,7 +614,8 @@ class CollectorDeltaStore(_SQLiteCollectorDeltaStore):
         connection = self._connect()
         try:
             schedule = connection.execute(
-                "SELECT schedule_id, policy, stream_epoch, anchor_at, interval_seconds "
+                "SELECT schedule_id, policy, stream_epoch, anchor_at, interval_seconds, "
+                "evaluation_start_slot_ordinal, evaluation_end_slot_ordinal "
                 "FROM collector_schedules_v1 WHERE source_id=? AND run_id=?",
                 (source_id, run_id),
             ).fetchone()
@@ -548,6 +634,12 @@ class CollectorDeltaStore(_SQLiteCollectorDeltaStore):
                 stream_epoch=stream_epoch,
                 anchor_at=schedule["anchor_at"],
                 interval_seconds=schedule["interval_seconds"],
+                evaluation_start_slot_ordinal=schedule[
+                    "evaluation_start_slot_ordinal"
+                ],
+                evaluation_end_slot_ordinal=schedule[
+                    "evaluation_end_slot_ordinal"
+                ],
             )
             if schedule["schedule_id"] != expected_id:
                 raise ValueError("collector schedule identity digest mismatch")
@@ -601,7 +693,8 @@ class CollectorDeltaStore(_SQLiteCollectorDeltaStore):
         try:
             connection.execute("BEGIN IMMEDIATE")
             schedule = connection.execute(
-                "SELECT schedule_id, policy, stream_epoch, anchor_at, interval_seconds "
+                "SELECT schedule_id, policy, stream_epoch, anchor_at, interval_seconds, "
+                "evaluation_start_slot_ordinal, evaluation_end_slot_ordinal "
                 "FROM collector_schedules_v1 WHERE source_id=? AND run_id=?",
                 (source_id, run_id),
             ).fetchone()
@@ -622,6 +715,12 @@ class CollectorDeltaStore(_SQLiteCollectorDeltaStore):
                 stream_epoch=frozen_epoch,
                 anchor_at=schedule["anchor_at"],
                 interval_seconds=schedule["interval_seconds"],
+                evaluation_start_slot_ordinal=schedule[
+                    "evaluation_start_slot_ordinal"
+                ],
+                evaluation_end_slot_ordinal=schedule[
+                    "evaluation_end_slot_ordinal"
+                ],
             )
             if schedule["schedule_id"] != expected_id:
                 raise ValueError("collector schedule identity digest mismatch")
@@ -754,7 +853,8 @@ class CollectorDeltaStore(_SQLiteCollectorDeltaStore):
         connection = self._connect()
         try:
             schedule = connection.execute(
-                "SELECT schedule_id, policy, stream_epoch, anchor_at, interval_seconds "
+                "SELECT schedule_id, policy, stream_epoch, anchor_at, interval_seconds, "
+                "evaluation_start_slot_ordinal, evaluation_end_slot_ordinal "
                 "FROM collector_schedules_v1 WHERE source_id=? AND run_id=?",
                 (source_id, run_id),
             ).fetchone()
@@ -771,6 +871,12 @@ class CollectorDeltaStore(_SQLiteCollectorDeltaStore):
                 stream_epoch=frozen_epoch,
                 anchor_at=schedule["anchor_at"],
                 interval_seconds=schedule["interval_seconds"],
+                evaluation_start_slot_ordinal=schedule[
+                    "evaluation_start_slot_ordinal"
+                ],
+                evaluation_end_slot_ordinal=schedule[
+                    "evaluation_end_slot_ordinal"
+                ],
             )
             if schedule["schedule_id"] != expected_id:
                 raise ValueError("collector schedule identity digest mismatch")
@@ -855,8 +961,15 @@ class CollectorDeltaStore(_SQLiteCollectorDeltaStore):
                     }
                 )
 
+            (
+                evaluation_start,
+                evaluation_end,
+            ) = self._schedule_evaluation_window(
+                schedule["evaluation_start_slot_ordinal"],
+                schedule["evaluation_end_slot_ordinal"],
+            )
             commitment_payload = {
-                "schema_version": 2,
+                "schema_version": 3,
                 "schedule_id": schedule["schedule_id"],
                 "policy": schedule["policy"],
                 "source_id": source_id,
@@ -864,6 +977,8 @@ class CollectorDeltaStore(_SQLiteCollectorDeltaStore):
                 "stream_epoch": frozen_epoch,
                 "anchor_at": schedule["anchor_at"],
                 "interval_seconds": schedule["interval_seconds"],
+                "evaluation_start_slot_ordinal": evaluation_start,
+                "evaluation_end_slot_ordinal": evaluation_end,
                 "start_slot_ordinal": start_slot_ordinal,
                 "end_slot_ordinal": end_slot_ordinal,
                 "expected_slot_count": expected_count,

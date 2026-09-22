@@ -85,6 +85,18 @@ _FORBIDDEN_TABLE_SQL = re.compile(
 _SQLITE_INTEGER_MIN = -(2**63)
 _SQLITE_INTEGER_MAX = 2**63 - 1
 _REPLAY_CUTOFF_DOMAIN = "autosport.market-replay-cutoff.v1"
+_COMMIT_ORDER_IMMUTABILITY_TRIGGERS: Final = {
+    "market_event_commit_order_no_delete": """CREATE TRIGGER market_event_commit_order_no_delete
+BEFORE DELETE ON market_event_commit_order
+BEGIN
+    SELECT RAISE(ABORT, 'market event append-generation rows are immutable');
+END""",
+    "market_event_commit_order_no_update": """CREATE TRIGGER market_event_commit_order_no_update
+BEFORE UPDATE ON market_event_commit_order
+BEGIN
+    SELECT RAISE(ABORT, 'market event append-generation rows are immutable');
+END""",
+}
 _REPLAY_CUTOFF_IMMUTABILITY_TRIGGERS: Final = {
     "market_replay_cutoffs_no_delete": """CREATE TRIGGER market_replay_cutoffs_no_delete
 BEFORE DELETE ON market_replay_cutoffs
@@ -429,7 +441,21 @@ def _validate_table_shape(
         "WHERE type='trigger' AND tbl_name=? ORDER BY name",
         (table_name,),
     ).fetchall()
-    if table_name == "market_replay_cutoffs":
+    if table_name == "market_event_commit_order":
+        expected_triggers = tuple(
+            sorted(_COMMIT_ORDER_IMMUTABILITY_TRIGGERS.items())
+        )
+        actual_triggers = tuple(
+            (name, sql)
+            for name, sql in triggers
+            if isinstance(name, str) and isinstance(sql, str)
+        )
+        if actual_triggers != expected_triggers:
+            raise ValueError(
+                "market_event_commit_order schema is not canonical: "
+                "immutable append-generation triggers mismatch"
+            )
+    elif table_name == "market_replay_cutoffs":
         expected_triggers = tuple(sorted(_REPLAY_CUTOFF_IMMUTABILITY_TRIGGERS.items()))
         actual_triggers = tuple(
             (name, sql)
@@ -695,6 +721,8 @@ class SQLiteMarketStore:
                 )"""
             )
             if initialize_causal_replay:
+                for trigger_sql in _COMMIT_ORDER_IMMUTABILITY_TRIGGERS.values():
+                    self.connection.execute(trigger_sql)
                 for trigger_sql in _REPLAY_CUTOFF_IMMUTABILITY_TRIGGERS.values():
                     self.connection.execute(trigger_sql)
             self.connection.execute(

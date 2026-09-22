@@ -669,7 +669,14 @@ def _install_price_ladder_authority() -> None:
         self: BetfairPriceLadderAuthority,
         market_id: str,
     ) -> BetfairPriceLadderObservation:
-        observation = raw_acquire(self, market_id)
+        market = _required_text(market_id, "market_id")
+        # A refresh attempt is itself evidence that the caller needs a current
+        # definition. Revoke the prior current witness before provider I/O so
+        # any failure leaves historical evidence auditable but non-consumable.
+        with issuance_lock:
+            latest_by_market.pop((id(self), market), None)
+
+        observation = raw_acquire(self, market)
         observation_id = id(observation)
 
         def forget_observation(

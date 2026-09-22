@@ -149,7 +149,7 @@ class MatchbookOfferEditIntent:
 
 @dataclass(frozen=True, slots=True)
 class MatchbookOfferEditReadback:
-    """Provider GET readback for one exact offer_id + offer_edit_id."""
+    """Detached offer-edit readback assertion; not provider-origin authority."""
 
     account_context_id: str
     offer_id: int

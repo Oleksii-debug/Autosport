@@ -363,9 +363,14 @@ def evaluate_pipeline_ablation(protocol: AblationProtocol, observations: Sequenc
         raise ValueError("ablation evaluation requires a canonical protocol and observations")
     allowed, by_enabled = frozenset(protocol.components), {}
     as_of = _instant(protocol.evaluation_as_of, "evaluation_as_of")
+    frozen_eligible_count: int | None = None
     for item in observations:
         if not isinstance(item, AblationObservation):
             raise TypeError("observations must contain AblationObservation values")
+        if frozen_eligible_count is None:
+            frozen_eligible_count = item.eligible_count
+        elif item.eligible_count != frozen_eligible_count:
+            raise ValueError("all ablation arms must share one frozen eligible cohort/universe denominator")
         if not set(item.enabled_components) <= allowed or item.enabled_components in by_enabled:
             raise ValueError("observation coalition is outside protocol or duplicated")
         if _instant(item.evidence_available_at, "evidence_available_at") > as_of:

@@ -72,7 +72,6 @@ class _Execution:
 
 class _StopWinsThenCommitLoop:
     runtime: _Runtime | None = None
-    book_bytes_when_stop_won: bytes | None = None
 
     def __init__(self, workspace, **kwargs) -> None:
         self.workspace = Path(workspace)
@@ -87,7 +86,6 @@ class _StopWinsThenCommitLoop:
         assert runtime is not None
 
         paper_book_path = self.kwargs["paper_execution"].paper_book_path
-        type(self).book_bytes_when_stop_won = paper_book_path.read_bytes()
 
         # Deterministic lifecycle race: STOP has become canonical/durable-visible
         # before any simulated economic commit below.
@@ -144,9 +142,11 @@ def test_runtime_stop_winning_before_commit_prevents_economic_mutation(
         ),
     )
 
+    PaperBook("100").save(tmp_path / "paper_book.json")
+    book_before_stop_race = (tmp_path / "paper_book.json").read_bytes()
+
     runtime = _Runtime(tmp_path)
     _StopWinsThenCommitLoop.runtime = runtime
-    _StopWinsThenCommitLoop.book_bytes_when_stop_won = None
 
     cycle = ProductPaperDecisionCycle(
         runtime,
@@ -171,11 +171,8 @@ def test_runtime_stop_winning_before_commit_prevents_economic_mutation(
     ):
         cycle._run_decision_cycle()
 
-    before_stop = _StopWinsThenCommitLoop.book_bytes_when_stop_won
-    assert before_stop is not None
-
     # STOP won before the simulated commit boundary.  Post-mutation detection is
     # not enough: no new durable decision/execution/book effect may survive.
     assert not (tmp_path / "decisions.jsonl").exists()
     assert not (tmp_path / "paper-execution.jsonl").exists()
-    assert (tmp_path / "paper_book.json").read_bytes() == before_stop
+    assert (tmp_path / "paper_book.json").read_bytes() == book_before_stop_race

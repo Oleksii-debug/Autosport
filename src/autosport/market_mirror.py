@@ -399,9 +399,10 @@ class MarketMirror:
     ) -> MirrorSnapshot:
         """Reconstruct exactly the decision-visible mirror state at as_of.
 
-        Replay is read-only over canonical append-only history. The first read of
-        an exact normalized as_of also freezes the store's product-owned append
-        generation; later appends therefore cannot rewrite that already-issued cutoff,
+        Replay never mutates canonical market history/current projection. The first
+        read of an exact normalized as_of durably issues a causal cutoff by freezing
+        the store's product-owned append generation; later appends therefore cannot
+        rewrite that already-issued cutoff,
         even when they carry backdated local clocks. Events whose local observation or
         ingestion/receipt instant is after as_of are still excluded. Malformed causal
         clocks fail closed. The reconstructed mirror then applies the same canonical

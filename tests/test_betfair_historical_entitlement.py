@@ -176,7 +176,20 @@ def test_full_provider_purchase_listing_and_download_binding(
     assert evidence.listing_sha256 == listing.listing_sha256
     assert evidence.raw_sha256 == sha256(RAW_A).hexdigest()
     assert evidence.byte_length == len(RAW_A)
-    assert historical.require_authoritative_download(evidence, raw) is evidence
+    assert snapshot.provider_acquisition_verified is False
+    assert listing.provider_acquisition_verified is False
+    assert evidence.provider_acquisition_verified is False
+    assert snapshot.usage_rights_verified is False
+    assert listing.usage_rights_verified is False
+    assert evidence.usage_rights_verified is False
+    assert snapshot.rights_revalidation_required is True
+    assert listing.rights_revalidation_required is True
+    assert evidence.rights_revalidation_required is True
+    with pytest.raises(
+        BetfairHistoricalEntitlementError,
+        match="provider acquisition provenance is not mechanically proven",
+    ):
+        historical.require_authoritative_download(evidence, raw)
 
 
 def test_caller_constructed_snapshot_cannot_authorize_listing(
@@ -275,6 +288,25 @@ def test_commercial_approved_cannot_be_minted_by_this_authority(
             terms_reference=snapshot.terms_reference,
             terms_as_of=snapshot.terms_as_of,
         )
+
+
+def test_dated_terms_reference_cannot_mint_current_usage_rights(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _, historical, snapshot, listing, evidence, raw = _acquire(monkeypatch)
+
+    assert snapshot.usage_scope == "PERSONAL_NONCOMMERCIAL"
+    assert snapshot.terms_as_of == "2026-09-22"
+    assert snapshot.usage_rights_verified is False
+    assert snapshot.rights_revalidation_required is True
+    assert listing.usage_rights_verified is False
+    assert evidence.usage_rights_verified is False
+
+    with pytest.raises(
+        BetfairHistoricalEntitlementError,
+        match="provider acquisition provenance is not mechanically proven",
+    ):
+        historical.require_authoritative_download(evidence, raw)
 
 
 def test_filter_must_be_covered_for_every_requested_month(

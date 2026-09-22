@@ -35,6 +35,7 @@ from .supervised_execution import (
 
 
 _CONFIRMATION_FILENAME: Final = "supervised-confirmation.jsonl"
+_SUPERVISED_REVIEW_PAYLOAD_DOMAIN: Final = "autosport.supervised-review-payload.v1"
 _WITNESS_SEAL: Final = object()
 
 
@@ -92,6 +93,20 @@ def _digest(value: object) -> str:
     return hashlib.sha256(raw).hexdigest()
 
 
+def _domain_digest(domain: str, value: object) -> str:
+    return hashlib.sha256(
+        domain.encode("utf-8")
+        + b"\\0"
+        + json.dumps(
+            value,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        ).encode("utf-8")
+    ).hexdigest()
+
+
 def _consumer_key(
     bound: BoundSupervisedExecutionPlan,
     action: ExecutionAction,
@@ -135,6 +150,45 @@ def _require_bound_action(
             "SupervisedApproval does not bind the exact supervised execution plan"
         )
     return action
+
+
+def _review_payload(
+    bound: BoundSupervisedExecutionPlan,
+    approval: SupervisedApproval,
+    action: ExecutionAction,
+    risk_evidence_sha256: str,
+) -> dict[str, object]:
+    risk_evidence_sha256 = _sha256(
+        risk_evidence_sha256, "risk_evidence_sha256"
+    )
+    return {
+        "schema": "autosport.smarkets_execution_review",
+        "schema_version": 1,
+        "execution_plan_id": bound.execution_plan.plan_id,
+        "execution_plan_sha256": bound.execution_plan.fingerprint,
+        "decision_id": bound.execution_plan.decision_id,
+        "portfolio_plan_sha256": bound.portfolio_plan_sha256,
+        "economic_goal_contract_sha256": bound.economic_goal_contract_sha256,
+        "intent_id": bound.intent_id,
+        "intent_sha256": bound.intent_sha256,
+        "approval_fingerprint": approval.fingerprint,
+        "approval_evidence_sha256": approval.evidence_sha256,
+        "risk_evidence_sha256": risk_evidence_sha256,
+        "action": action.to_dict(),
+    }
+
+
+def smarkets_execution_review_payload(
+    bound: BoundSupervisedExecutionPlan,
+    approval: SupervisedApproval,
+    *,
+    action_id: str,
+    risk_evidence_sha256: str,
+) -> dict[str, object]:
+    """Build the exact operator-visible payload this approval boundary accepts."""
+
+    action = _require_bound_action(bound, approval, action_id)
+    return _review_payload(bound, approval, action, risk_evidence_sha256)
 
 
 def _require_confirmation_binding(
@@ -181,6 +235,19 @@ def _require_confirmation_binding(
     if review.approval_evidence_sha256 != approval.evidence_sha256:
         raise SmarketsExecutionApprovalError(
             "operator confirmation approval evidence does not match SupervisedApproval"
+        )
+    expected_review_payload_sha256 = _domain_digest(
+        _SUPERVISED_REVIEW_PAYLOAD_DOMAIN,
+        _review_payload(
+            bound,
+            approval,
+            action,
+            review.risk_evidence_sha256,
+        ),
+    )
+    if review.review_payload_sha256 != expected_review_payload_sha256:
+        raise SmarketsExecutionApprovalError(
+            "operator confirmation review payload does not match canonical Smarkets execution review"
         )
     try:
         approval.require_active(review.reviewed_at)

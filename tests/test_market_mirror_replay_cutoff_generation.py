@@ -181,6 +181,41 @@ class MarketMirrorReplayCutoffGenerationTests(unittest.TestCase):
             finally:
                 store.close()
 
+    def test_second_store_append_cannot_rewrite_first_store_cutoff(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "market.db"
+            first = SQLiteMarketStore(path)
+            second = SQLiteMarketStore(path)
+            try:
+                first.append(
+                    self.event(
+                        sequence=1,
+                        odds="2.00",
+                        observed_ts="2026-09-16T19:00:00+00:00",
+                    )
+                )
+                expected = self.semantic_events(self.replay(first))
+
+                second.append(
+                    self.event(
+                        sequence=2,
+                        odds="6.66",
+                        observed_ts="2026-09-16T18:59:56+00:00",
+                        ingest_ts="2026-09-16T18:59:56+00:00",
+                    )
+                )
+
+                self.assertEqual(self.semantic_events(self.replay(first)), expected)
+                self.assertEqual(len(first.events()), 2)
+                generations = first.connection.execute(
+                    "SELECT append_generation FROM market_event_commit_order "
+                    "ORDER BY append_generation"
+                ).fetchall()
+                self.assertEqual(generations, [(1,), (2,)])
+            finally:
+                second.close()
+                first.close()
+
     def test_pre_v1_history_migrates_to_generation_zero_only(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "market.db"

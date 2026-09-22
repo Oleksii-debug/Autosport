@@ -30,6 +30,9 @@ store, economic classifier, allocation authority, or durable cost record.
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from hashlib import sha256
+import hmac
+from secrets import token_bytes
 import urllib.request as _urllib_request
 
 from . import betfair_account_readonly as _readonly
@@ -140,13 +143,16 @@ def _build_observation_authority():
     error_cls = BetfairProviderBillingInputsAuthorityError
     get_attr = object.__getattribute__
     object_new = object.__new__
+    hmac_new = hmac.new
+    compare_digest = hmac.compare_digest
+    hash_ctor = sha256
+    session_binding_key = token_bytes(32)
 
-    # Strongly retaining the issued object prevents id reuse while its issuance is
-    # authoritative. The stored projection detects object.__setattr__ tampering.
-    issued: dict[
-        int,
-        tuple[object, tuple[object, ...], BetfairSessionCredentials],
-    ] = {}
+    # Strongly retaining the issued observation prevents id reuse while its issuance
+    # is authoritative.  The third tuple element is a process-local HMAC binding of
+    # the authenticated credential values; raw credentials are deliberately not
+    # retained by the issuance registry or exported into evidence.
+    issued: dict[int, tuple[object, tuple[object, ...], bytes]] = {}
 
     def assert_executable_authority() -> None:
         """Fail fast on known executable drift inside the trusted-process boundary."""
@@ -227,28 +233,38 @@ def _build_observation_authority():
                 "provider billing observation failed canonical validation"
             ) from exc
 
-    def register(
-        source: object,
-        session_capability: BetfairSessionCredentials,
-    ):
+    def session_binding(credentials: BetfairSessionCredentials) -> bytes:
+        if type(credentials) is not credentials_cls:
+            raise error_cls(
+                "provider billing session capability must be exact canonical credentials"
+            )
+        application_key = credentials.application_key.encode("utf-8")
+        session_token = credentials.session_token.encode("utf-8")
+        payload = (
+            b"autosport.betfair.provider-billing-session-v1\x00"
+            + len(application_key).to_bytes(8, "big")
+            + application_key
+            + len(session_token).to_bytes(8, "big")
+            + session_token
+        )
+        return hmac_new(session_binding_key, payload, hash_ctor).digest()
+
+    def register(source: object, binding: bytes):
         if type(source) is not source_cls:
             raise error_cls(
                 "canonical provider billing read returned unexpected observation type"
             )
-        if type(session_capability) is not credentials_cls:
-            raise error_cls(
-                "provider billing session capability must be exact canonical credentials"
-            )
+        if type(binding) is not bytes or len(binding) != hash_ctor().digest_size:
+            raise error_cls("provider billing session binding is invalid")
         # Re-run the closure-backed canonical structural/digest validator before the
-        # observation enters the private issuance relation.  The exact credentials
-        # object is retained only inside this closure as an ephemeral authenticated-
-        # session capability; credential values are never copied into provider
-        # observations or exported evidence.
+        # observation enters the private issuance relation.  Only an authority-keyed
+        # opaque session binding is retained; raw credentials/session tokens are not
+        # stored in the registry and the binding never enters durable evidence.
         validate_structure(source)
         issued[id(source)] = (
             source,
             projection(source),
-            session_capability,
+            binding,
         )
         return source
 
@@ -318,7 +334,7 @@ def _build_observation_authority():
         # A persistent executable/global-opener rebind that occurs during provider
         # I/O cannot be legitimized merely because the returned JSON is valid.
         assert_executable_authority()
-        return register(source, credentials)
+        return register(source, session_binding(credentials))
 
     def validate(source: object):
         """Return only an exact, untampered observation issued by ``read`` above."""
@@ -355,14 +371,14 @@ def _build_observation_authority():
         if type(pages) is not tuple or not pages:
             raise TypeError("pages must be a non-empty exact tuple")
 
-        session_capability: BetfairSessionCredentials | None = None
+        traversal_binding: bytes | None = None
         for source in pages:
             current = validate(source)
             registered = issued[id(current)]
-            current_capability = registered[2]
-            if session_capability is None:
-                session_capability = current_capability
-            elif current_capability is not session_capability:
+            current_binding = registered[2]
+            if traversal_binding is None:
+                traversal_binding = current_binding
+            elif not compare_digest(current_binding, traversal_binding):
                 raise error_cls(
                     "provider billing traversal pages must share one "
                     "authenticated session capability"

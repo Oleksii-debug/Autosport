@@ -252,7 +252,7 @@ _IDENTITY_FIELDS: Final = (
 
 @dataclass(frozen=True, slots=True)
 class RestartIdentityVerification:
-    """Machine-verifiable restart-identity result; not execution authority."""
+    """Coherent restart-identity diagnostic; never standalone deployment authority."""
 
     expected_fingerprint_sha256: str
     observed_fingerprint_sha256: str
@@ -260,6 +260,42 @@ class RestartIdentityVerification:
     observed_restart_sequence: int
     accepted: bool
     reasons: tuple[str, ...]
+
+    def __post_init__(self) -> None:
+        _canonical_sha256(
+            "expected_fingerprint_sha256",
+            self.expected_fingerprint_sha256,
+        )
+        _canonical_sha256(
+            "observed_fingerprint_sha256",
+            self.observed_fingerprint_sha256,
+        )
+        _positive_int("expected_restart_sequence", self.expected_restart_sequence)
+        _nonnegative_int("observed_restart_sequence", self.observed_restart_sequence)
+        if type(self.accepted) is not bool:
+            raise DeploymentIdentityError("accepted must be a JSON boolean")
+        if type(self.reasons) is not tuple:
+            raise DeploymentIdentityError("reasons must be a tuple")
+        reasons = tuple(
+            _canonical_text("reason", reason, maximum_bytes=160)
+            for reason in self.reasons
+        )
+        if reasons != tuple(dict.fromkeys(reasons)):
+            raise DeploymentIdentityError("reasons must be unique")
+
+        if self.accepted:
+            if reasons:
+                raise DeploymentIdentityError(
+                    "accepted restart verification must not contain rejection reasons"
+                )
+            if self.observed_restart_sequence != self.expected_restart_sequence:
+                raise DeploymentIdentityError(
+                    "accepted restart verification requires the expected sequence"
+                )
+        elif not reasons:
+            raise DeploymentIdentityError(
+                "rejected restart verification requires at least one reason"
+            )
 
 
 def verify_restart_identity(

@@ -15,7 +15,7 @@ from threading import Lock
 from types import MappingProxyType
 from typing import Callable, Mapping, Protocol, Sequence
 from urllib.error import HTTPError, URLError
-from urllib.request import Request, urlopen
+from urllib.request import HTTPRedirectHandler, Request, build_opener
 from weakref import ref
 
 ACCOUNT_JSON_RPC_ENDPOINT = "https://api.betfair.com/exchange/account/json-rpc/v1"
@@ -58,16 +58,24 @@ class BetfairHttpTransport(Protocol):
     def post(self, url: str, *, headers: Mapping[str, str], body: bytes, timeout_seconds: float) -> bytes: ...
 
 
+class _RejectAuthenticatedRedirects(HTTPRedirectHandler):
+    """Never forward provider credentials to an HTTP redirect target."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
 class UrllibBetfairHttpTransport:
     def __init__(self, *, max_response_bytes: int = 8 * 1024 * 1024) -> None:
         if not isinstance(max_response_bytes, int) or isinstance(max_response_bytes, bool) or max_response_bytes <= 0:
             raise ValueError("max_response_bytes must be a positive integer")
         self._max_response_bytes = max_response_bytes
+        self._opener = build_opener(_RejectAuthenticatedRedirects())
 
     def post(self, url: str, *, headers: Mapping[str, str], body: bytes, timeout_seconds: float) -> bytes:
         request = Request(url, data=body, headers=dict(headers), method="POST")
         try:
-            with urlopen(request, timeout=timeout_seconds) as response:
+            with self._opener.open(request, timeout=timeout_seconds) as response:
                 payload = response.read(self._max_response_bytes + 1)
         except HTTPError as exc:
             raise BetfairReadOnlyError(f"Betfair HTTP request failed with status {exc.code}") from None

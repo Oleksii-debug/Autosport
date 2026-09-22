@@ -273,6 +273,18 @@ def test_context_must_exactly_cover_response_market_scope(
         )
 
 
+def test_invalid_market_evidence_fails_closed_without_attribute_leak() -> None:
+    response = _response(markets=(object(),))  # type: ignore[arg-type]
+
+    with pytest.raises(BetdaqProjectionError, match="invalid market evidence"):
+        project_betdaq_get_prices(
+            response=response,
+            market_context={},
+            observed_ts=OBSERVED_TS,
+            sequence=107,
+        )
+
+
 def test_zero_top_liquidity_cannot_be_published_as_available_quote() -> None:
     selection = _selection(
         for_levels=(

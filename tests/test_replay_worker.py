@@ -83,16 +83,27 @@ class ReplayWorkerTests(unittest.TestCase):
     def test_worker_partial_thread_start_exception_cancels_task_and_publishes_one_error(self):
         worker = OneShotReplayWorker()
         original_start = threading.Thread.start
+        original_join = threading.Thread.join
         task_ran = threading.Event()
+        joined_threads = []
 
         def start_then_fail(thread) -> None:
             original_start(thread)
             raise OSError("late start failure")
 
-        with patch.object(threading.Thread, "start", new=start_then_fail):
+        def join_probe(thread, timeout=None) -> None:
+            joined_threads.append(thread)
+            original_join(thread, timeout)
+
+        with (
+            patch.object(threading.Thread, "start", new=start_then_fail),
+            patch.object(threading.Thread, "join", new=join_probe),
+        ):
             self.assertTrue(worker.start(lambda: task_ran.set()))
 
         self.assertFalse(task_ran.wait(0.1))
+        self.assertEqual(len(joined_threads), 1)
+        self.assertFalse(joined_threads[0].is_alive())
         self.assertTrue(worker.busy)
         self.assertIsNone(worker._thread)
         self.assertFalse(worker.start(lambda: self.fail("retry must wait for poll")))
@@ -112,17 +123,28 @@ class ReplayWorkerTests(unittest.TestCase):
     def test_worker_partial_thread_start_baseexception_cancels_task_before_reraise(self):
         worker = OneShotReplayWorker()
         original_start = threading.Thread.start
+        original_join = threading.Thread.join
         task_ran = threading.Event()
+        joined_threads = []
 
         def start_then_interrupt(thread) -> None:
             original_start(thread)
             raise KeyboardInterrupt("late start interrupt")
 
-        with patch.object(threading.Thread, "start", new=start_then_interrupt):
+        def join_probe(thread, timeout=None) -> None:
+            joined_threads.append(thread)
+            original_join(thread, timeout)
+
+        with (
+            patch.object(threading.Thread, "start", new=start_then_interrupt),
+            patch.object(threading.Thread, "join", new=join_probe),
+        ):
             with self.assertRaisesRegex(KeyboardInterrupt, "late start interrupt"):
                 worker.start(lambda: task_ran.set())
 
         self.assertFalse(task_ran.wait(0.1))
+        self.assertEqual(len(joined_threads), 1)
+        self.assertFalse(joined_threads[0].is_alive())
         self.assertFalse(worker.busy)
         self.assertIsNone(worker._thread)
         self.assertIsNone(worker.poll())

@@ -418,9 +418,9 @@ class BetfairInstructionReport:
                 raise BetfairSupervisedExecutionError(
                     "failed instruction requires provider error_code"
                 )
-            if self.size_matched != 0:
+            if self.size_matched != 0 or self.average_price_matched != 0:
                 raise BetfairSupervisedExecutionError(
-                    "failed instruction cannot claim a matched stake"
+                    "failed instruction cannot claim matched economics"
                 )
         elif self.error_code is not None:
             raise BetfairSupervisedExecutionError(
@@ -990,6 +990,7 @@ def _report_outcome(
             instruction.bet_id is None
             or report.error_code != "BET_ACTION_ERROR"
             or instruction.error_code != "BET_TAKEN_OR_LAPSED"
+            or instruction.order_status != "EXECUTION_COMPLETE"
         ):
             return PlaceOrdersOutcome.UNKNOWN
         return PlaceOrdersOutcome.REJECTED

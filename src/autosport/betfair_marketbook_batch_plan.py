@@ -150,7 +150,40 @@ class MarketBookReadPlan:
             raise MarketBookBatchPlanError("unsupported order_projection")
         if match is not None and match not in _MATCH:
             raise MarketBookBatchPlanError("unsupported match_projection")
+
+        include_overall_position = _bool(
+            self.include_overall_position,
+            "include_overall_position",
+        )
+        partition_matched_by_strategy_ref = _bool(
+            self.partition_matched_by_strategy_ref,
+            "partition_matched_by_strategy_ref",
+        )
+        customer_strategy_refs = _tokens(
+            self.customer_strategy_refs,
+            "customer_strategy_refs",
+        )
+        matched_since = _token(self.matched_since, "matched_since")
         bet_ids = _tokens(self.bet_ids, "bet_ids")
+        if order is None:
+            order_only_fields_present = (
+                match is not None
+                or include_overall_position is not None
+                or partition_matched_by_strategy_ref is not None
+                or bool(customer_strategy_refs)
+                or matched_since is not None
+                or bool(bet_ids)
+            )
+            if order_only_fields_present:
+                raise MarketBookBatchPlanError(
+                    "order-only fields require order_projection"
+                )
+        else:
+            if include_overall_position is None:
+                include_overall_position = True
+            if partition_matched_by_strategy_ref is None:
+                partition_matched_by_strategy_ref = False
+
         if len(bet_ids) >= MAX_COMBINED_IDENTIFIERS:
             raise MarketBookBatchPlanError(
                 "bet_ids leave no identifier capacity for a listMarketBook market_id"
@@ -164,12 +197,10 @@ class MarketBookReadPlan:
             "rollover_stakes": rollover_stakes,
             "order_projection": order,
             "match_projection": match,
-            "include_overall_position": _bool(self.include_overall_position, "include_overall_position"),
-            "partition_matched_by_strategy_ref": _bool(
-                self.partition_matched_by_strategy_ref, "partition_matched_by_strategy_ref"
-            ),
-            "customer_strategy_refs": _tokens(self.customer_strategy_refs, "customer_strategy_refs"),
-            "matched_since": _token(self.matched_since, "matched_since"),
+            "include_overall_position": include_overall_position,
+            "partition_matched_by_strategy_ref": partition_matched_by_strategy_ref,
+            "customer_strategy_refs": customer_strategy_refs,
+            "matched_since": matched_since,
             "bet_ids": bet_ids,
             "currency_code": _token(self.currency_code, "currency_code"),
             "locale": _token(self.locale, "locale"),

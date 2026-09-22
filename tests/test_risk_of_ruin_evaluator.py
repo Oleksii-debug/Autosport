@@ -1,7 +1,14 @@
 from __future__ import annotations
 
 from dataclasses import fields, replace
-from decimal import Decimal
+from decimal import (
+    Decimal,
+    Inexact,
+    ROUND_FLOOR,
+    Rounded,
+    Underflow,
+    localcontext,
+)
 from fractions import Fraction
 import hashlib
 from math import comb
@@ -200,6 +207,47 @@ def test_clopper_pearson_returned_endpoint_is_outward_conservative(
         "returned Clopper-Pearson endpoint rounded below the exact upper root; "
         f"exact CDF(U)-alpha={exact_cdf - alpha}"
     )
+
+
+def test_clopper_pearson_isolated_from_ambient_decimal_context() -> None:
+    baseline = clopper_pearson_upper_bound(
+        ruin_count=150,
+        independent_units=300,
+        confidence_level=Decimal("0.95"),
+    )
+
+    with localcontext() as hostile:
+        hostile.Emin = 0
+        hostile.Emax = 9
+        hostile.rounding = ROUND_FLOOR
+        altered = clopper_pearson_upper_bound(
+            ruin_count=150,
+            independent_units=300,
+            confidence_level=Decimal("0.95"),
+        )
+
+    assert altered == baseline
+    exact_cdf = _exact_binomial_cdf(
+        successes_at_most=150,
+        trials=300,
+        probability=Fraction(altered),
+    )
+    assert exact_cdf <= Fraction(1, 20)
+
+    with localcontext() as hostile:
+        hostile.Emin = 0
+        hostile.Emax = 9
+        hostile.rounding = ROUND_FLOOR
+        hostile.traps[Inexact] = True
+        hostile.traps[Rounded] = True
+        hostile.traps[Underflow] = True
+        trapped = clopper_pearson_upper_bound(
+            ruin_count=150,
+            independent_units=300,
+            confidence_level=Decimal("0.95"),
+        )
+
+    assert trapped == baseline
 
 
 def test_zero_events_never_become_zero_risk() -> None:

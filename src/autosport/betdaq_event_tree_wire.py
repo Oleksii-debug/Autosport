@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal
+import re
 import xml.etree.ElementTree as ET
 
 from .betdaq_readonly_market_wire import (
@@ -30,6 +31,9 @@ from .betdaq_readonly_market_wire import (
 
 _MAX_TREE_DEPTH = 64
 _MAX_TREE_ITEMS = 100_000
+_XSD_DECIMAL_LEXICAL_RE = re.compile(
+    r"[+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)\Z"
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -190,6 +194,11 @@ def _parse_market(
         _required_attr(element, "StartTime"),
         "market StartTime",
     )
+    place_payout_text = _required_attr(element, "PlacePayout")
+    if _XSD_DECIMAL_LEXICAL_RE.fullmatch(place_payout_text) is None:
+        raise BetdaqSoapProtocolError(
+            "market PlacePayout must use XML Schema decimal lexical form"
+        )
     market = BetdaqDiscoveryMarket(
         market_id=market_id,
         name=_safe_text(_required_attr(element, "Name"), "market Name"),
@@ -252,7 +261,7 @@ def _parse_market(
             "market RaceGrade",
         ),
         place_payout=_decimal(
-            _required_attr(element, "PlacePayout"),
+            place_payout_text,
             "market PlacePayout",
             nonnegative=True,
         ),

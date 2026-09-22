@@ -79,6 +79,10 @@ def _parse_return_status(
 
     status = statuses[0]
     _reject_unknown_attributes(status, _RETURN_STATUS_ATTRIBUTES, "ReturnStatus")
+    if list(status) or (status.text and status.text.strip()):
+        raise BetdaqSoapProtocolError(
+            "ReturnStatus must not contain child content"
+        )
     code = _integer(_required_attr(status, "Code"), "ReturnStatus Code")
     description = _safe_text(
         _required_attr(status, "Description"),

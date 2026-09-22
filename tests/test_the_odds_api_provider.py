@@ -1,3 +1,4 @@
+import hashlib
 import unittest
 from decimal import Decimal
 from urllib.error import HTTPError
@@ -477,6 +478,78 @@ class TheOddsApiProviderTests(unittest.TestCase):
                 sport="soccer_epl",
                 timeout_seconds=float("inf"),
             )
+
+    def test_default_transport_binds_exact_response_digest_into_evidence(self):
+        raw_body = (
+            b'[{"id":"0123456789abcdef0123456789abcdef",'
+            b'"sport_key":"soccer_epl","commence_time":"2026-09-22T15:00:00Z",'
+            b'"bookmakers":[{"key":"book-a","sid":"event-77","markets":[{'
+            b'"key":"h2h","last_update":"2026-09-22T13:50:00Z",'
+            b'"sid":"market-88","outcomes":[{"name":"Alpha","price":2.10,'
+            b'"sid":"outcome-99"}]}]}]}]'
+        )
+
+        class FakeResponse:
+            status = 200
+            headers = {}
+
+            def __init__(self, final_url):
+                self.final_url = final_url
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, traceback):
+                return False
+
+            def read(self):
+                return raw_body
+
+            def geturl(self):
+                return self.final_url
+
+        class FakeOpener:
+            def open(self, request, timeout):
+                return FakeResponse(request.full_url)
+
+        provider = TheOddsApiProvider(
+            "secret",
+            sport="soccer_epl",
+            clock=lambda: "2026-09-22T14:00:00+00:00",
+        )
+        with patch.object(
+            odds_api_module,
+            "build_opener",
+            lambda *_: FakeOpener(),
+        ):
+            batch = provider.read_batch()
+
+        expected = hashlib.sha256(raw_body).hexdigest()
+        request = batch.quotes[0].metadata["request"]
+        self.assertTrue(request["provider_origin_verified"])
+        self.assertFalse(request["receipt_clock_verified"])
+        self.assertEqual(request["response_sha256"], expected)
+        self.assertEqual(batch.cursor, expected)
+        self.assertEqual(batch.quotes[0].decimal_odds, Decimal("2.10"))
+
+    def test_provider_origin_verified_response_without_digest_fails_closed(self):
+        provider = TheOddsApiProvider(
+            "secret",
+            sport="soccer_epl",
+            clock=lambda: "2026-09-22T14:00:00+00:00",
+        )
+        provider.transport = lambda url, timeout: HttpJsonResponse(
+            [event()],
+            200,
+            {},
+            final_url=url,
+        )
+
+        with self.assertRaisesRegex(
+            TheOddsApiPayloadError,
+            "requires exact response SHA-256",
+        ):
+            provider.read_batch()
 
     def test_response_rejects_event_outside_explicit_event_ids_scope(self):
         provider = TheOddsApiProvider(

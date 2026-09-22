@@ -279,6 +279,12 @@ def test_structural_result_cannot_be_minted_by_direct_construction() -> None:
         NvdaHumanAcceptanceStructuralResult(transcript_sha256="c" * 64)
 
 
+def test_structural_result_cannot_be_subclassed_to_bypass_issuer() -> None:
+    with pytest.raises(TypeError, match="may not be subclassed"):
+        class ForgedStructuralResult(NvdaHumanAcceptanceStructuralResult):
+            pass
+
+
 def test_custom_container_types_do_not_cross_canonical_boundary() -> None:
     transcript = _valid_transcript()
     with pytest.raises(NvdaHumanAcceptanceError):

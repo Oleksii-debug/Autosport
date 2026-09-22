@@ -496,3 +496,72 @@ def test_sequential_look_timestamps_cannot_move_backwards(tmp_path) -> None:
                 observed_at="2026-09-20T03:04:00Z",
             )
         )
+
+
+def test_decimal_evidence_rejects_attacker_sized_exponent_before_rendering() -> None:
+    with pytest.raises(ValueError, match="exponent exceeds evidence limit"):
+        _plan(spends=(Decimal("1E-1000000"),))
+
+
+def test_decimal_evidence_rejects_attacker_sized_coefficient() -> None:
+    oversized = Decimal("0." + ("1" * 5000))
+    with pytest.raises(ValueError, match="coefficient exceeds evidence limit"):
+        _plan(spends=(oversized,))
+
+
+def test_equivalent_decimal_encodings_keep_existing_plan_identity() -> None:
+    canonical = _plan(spends=(Decimal("0.005"), Decimal("0.0050")))
+    equivalent = _plan(spends=(Decimal("5E-3"), Decimal("50E-4")))
+    assert canonical.plan_sha256 == equivalent.plan_sha256
+    assert canonical.to_payload()["look_alpha_spend"] == ["0.005", "0.005"]
+    assert equivalent.to_payload()["look_alpha_spend"] == ["0.005", "0.005"]
+
+
+def test_signed_and_quantized_zero_have_one_evidence_identity() -> None:
+    plan = _plan()
+    member = plan.members[0]
+    negative_zero = _look(plan, member, index=1, p="-0.000", bundle_char="6")
+    plain_zero = _look(plan, member, index=1, p="0", bundle_char="6")
+    assert negative_zero.evidence_sha256 == plain_zero.evidence_sha256
+    assert negative_zero.to_payload()["observed_p_value"] == "0"
+    assert plain_zero.to_payload()["observed_p_value"] == "0"
+
+
+def test_long_exact_decimal_identity_is_context_independent() -> None:
+    precise = Decimal("0.004999999999999999999999999999999999999999")
+    with localcontext() as ctx:
+        ctx.prec = 6
+        low = _plan(spends=(precise,)).plan_sha256
+    with localcontext() as ctx:
+        ctx.prec = 80
+        high = _plan(spends=(precise,)).plan_sha256
+    assert low == high
+
+
+def test_long_exact_p_value_survives_restart_without_context_rounding(tmp_path) -> None:
+    path = tmp_path / "multiplicity.json"
+    plan = _plan(spends=(Decimal("0.005"), Decimal("0.005")))
+    member = plan.members[0]
+    p_value = "0.004999999999999999999999999999999999999999"
+
+    with localcontext() as ctx:
+        ctx.prec = 6
+        store = SequentialMultiplicityEvidenceStore.initialize_pristine(path, plan)
+        first = store.append(_look(plan, member, index=1, p=p_value, bundle_char="5"))
+        first_digest = first.evidence.evidence_sha256
+        assert first.decision is SequentialDecision.REJECT_NULL
+
+    with localcontext() as ctx:
+        ctx.prec = 80
+        reopened = SequentialMultiplicityEvidenceStore(path)
+        persisted = reopened.assessments(member.member_authority_id)
+        assert len(persisted) == 1
+        assert persisted[0].evidence.evidence_sha256 == first_digest
+        assert persisted[0].evidence.to_payload()["observed_p_value"] == p_value
+
+
+def test_extreme_quantized_zero_is_canonical_without_expansion() -> None:
+    plan = _plan()
+    member = plan.members[0]
+    evidence = _look(plan, member, index=1, p="0E-1000000", bundle_char="4")
+    assert evidence.to_payload()["observed_p_value"] == "0"

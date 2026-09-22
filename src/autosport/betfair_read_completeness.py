@@ -253,8 +253,8 @@ class BetfairReadCompletenessObserver:
         *,
         clock: Callable[[], datetime] | None = None,
     ) -> None:
-        if not isinstance(client, BetfairReadOnlyClient):
-            raise TypeError("client must be BetfairReadOnlyClient")
+        if type(client) is not BetfairReadOnlyClient:
+            raise TypeError("client must be exact BetfairReadOnlyClient")
         self._client = client
         self._clock = clock or (lambda: datetime.now(timezone.utc))
         self._attempt_lock = Lock()

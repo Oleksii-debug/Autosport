@@ -8,6 +8,7 @@ protection is delegated to the existing independent ``MonotonicWorkspaceAuthorit
 from __future__ import annotations
 
 import hashlib
+from contextlib import contextmanager
 import json
 import os
 import stat
@@ -16,7 +17,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
-from typing import Callable, Final, Protocol
+from typing import Callable, Final, Iterator, Protocol
 
 from .json_integrity import strict_json_loads
 from .monotonic_workspace_authority import MonotonicWorkspaceAuthority
@@ -58,6 +59,10 @@ class EmergencyStopIntegrityError(EmergencyStopError):
 
 class EmergencyStopTransitionError(EmergencyStopError):
     """A requested STOP transition is invalid or insufficiently authorized."""
+
+
+class EmergencyStopVetoError(EmergencyStopError):
+    """The durable STOP gate vetoed a money-moving admission boundary."""
 
 
 class EmergencyStopState(str, Enum):
@@ -528,6 +533,58 @@ class EmergencyStopLatch:
                 "authority is required"
             ),
         )
+
+    @contextmanager
+    def admission_fence(
+        self, action_class: EmergencyActionClass
+    ) -> Iterator[EmergencyStopDecision]:
+        """Hold the canonical workspace lock across one exposure-creating effect seam.
+
+        This is the integration boundary for provider writes that create or increase
+        exposure.  The STOP decision and downstream effect must share this context so
+        an ENGAGE transition cannot commit between admission and transport.  Passing
+        this fence never grants execution authority; all other execution/risk/provider
+        gates remain mandatory.
+        """
+
+        if action_class not in {
+            EmergencyActionClass.NEW_EXPOSURE,
+            EmergencyActionClass.INCREASE_EXPOSURE,
+        }:
+            raise ValueError(
+                "admission_fence is only for new or increased exposure"
+            )
+        try:
+            with WorkspaceEconomicLock(self.workspace):
+                loaded = self._read_current_locked()
+                if loaded is None:
+                    raise EmergencyStopVetoError(
+                        "STOP state has not been durably initialized"
+                    )
+                state = loaded.snapshot.state
+                if state is EmergencyStopState.ENGAGED:
+                    raise EmergencyStopVetoError(
+                        "durable emergency STOP vetoes new or increased exposure"
+                    )
+                decision = EmergencyStopDecision(
+                    action_class=action_class,
+                    stop_state=state,
+                    stop_veto=False,
+                    may_proceed_past_stop_gate=True,
+                    requires_separate_authority=True,
+                    grants_execution_authority=False,
+                    detail=(
+                        "STOP veto is cleared; separate canonical execution "
+                        "authority remains required"
+                    ),
+                )
+                yield decision
+        except EmergencyStopVetoError:
+            raise
+        except Exception as exc:
+            raise EmergencyStopVetoError(
+                "STOP state is unproven at provider-write admission boundary"
+            ) from exc
 
     def inspect(self) -> EmergencyStopSnapshot | None:
         loaded = self._read_current()

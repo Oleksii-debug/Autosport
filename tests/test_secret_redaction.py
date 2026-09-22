@@ -522,5 +522,103 @@ class SecretRedactionTests(unittest.TestCase):
         self.assertEqual(rendered, "BaseException: token=" + REDACTED)
 
 
+    def test_nested_wrapper_cannot_swallow_sensitive_pair(self) -> None:
+        secret = "wrapped-secret-804"
+        cases = (
+            ("detail=api_key=" + secret, "detail=api_key=" + REDACTED),
+            (
+                "message=session_token=" + secret,
+                "message=session_token=" + REDACTED,
+            ),
+            (
+                'detail="api_key=' + secret + '"',
+                'detail="api_key=' + REDACTED + '"',
+            ),
+            (
+                '{"detail":"api_key=' + secret + '"}',
+                '{"detail":"api_key=' + REDACTED + '"}',
+            ),
+            ("payload=password=" + secret, "payload=password=" + REDACTED),
+            (
+                "meta=client_secret=" + secret,
+                "meta=client_secret=" + REDACTED,
+            ),
+            (
+                "detail=access_token=" + secret,
+                "detail=access_token=" + REDACTED,
+            ),
+            (
+                "outer=AUTOSPORT_PARLAYAPI_KEY=" + secret,
+                "outer=AUTOSPORT_PARLAYAPI_KEY=" + REDACTED,
+            ),
+        )
+
+        for source, expected in cases:
+            with self.subTest(source=source):
+                redacted = redact_operator_text(source)
+                self.assertEqual(redacted, expected)
+                self.assertNotIn(secret, redacted)
+
+    def test_cookie_headers_redact_entire_line_and_preserve_next_line(self) -> None:
+        secret = "cookie-secret-804"
+        cases = (
+            (
+                "Cookie: session_token=" + secret,
+                "Cookie: " + REDACTED,
+            ),
+            (
+                "Set-Cookie: sid=" + secret + "; HttpOnly; Secure",
+                "Set-Cookie: " + REDACTED,
+            ),
+        )
+
+        for header, expected_header in cases:
+            with self.subTest(header=header):
+                source = header + "\nmarket=winner region=eu"
+                redacted = redact_operator_text(source)
+                self.assertEqual(
+                    redacted,
+                    expected_header + "\nmarket=winner region=eu",
+                )
+                self.assertNotIn(secret, redacted)
+                self.assertIn("market=winner region=eu", redacted)
+
+    def test_cookie_keys_are_sensitive_only_at_exact_structured_key(self) -> None:
+        self.assertTrue(is_sensitive_key("Cookie"))
+        self.assertTrue(is_sensitive_key("Set-Cookie"))
+        self.assertFalse(is_sensitive_key("my_cookie"))
+
+        redacted = redact_operator_value(
+            {
+                "Cookie": "sid=cookie-structured-secret",
+                "Set-Cookie": "sid=set-cookie-structured-secret",
+                "my_cookie": "ordinary-setting",
+            }
+        )
+
+        self.assertEqual(redacted["Cookie"], REDACTED)
+        self.assertEqual(redacted["Set-Cookie"], REDACTED)
+        self.assertEqual(redacted["my_cookie"], "ordinary-setting")
+
+    def test_safe_exception_text_redacts_nested_pair_and_cookie_header(self) -> None:
+        nested_secret = "nested-exception-secret-804"
+        cookie_secret = "cookie-exception-secret-804"
+        rendered = safe_exception_text(
+            RuntimeError(
+                "detail=api_key="
+                + nested_secret
+                + "\nCookie: sid="
+                + cookie_secret
+                + "\nmarket=winner"
+            )
+        )
+
+        self.assertNotIn(nested_secret, rendered)
+        self.assertNotIn(cookie_secret, rendered)
+        self.assertIn("detail=api_key=" + REDACTED, rendered)
+        self.assertIn("Cookie: " + REDACTED, rendered)
+        self.assertIn("market=winner", rendered)
+
+
 if __name__ == "__main__":
     unittest.main()

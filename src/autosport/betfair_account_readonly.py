@@ -69,7 +69,7 @@ class UrllibBetfairHttpTransport:
     def post(self, url: str, *, headers: Mapping[str, str], body: bytes, timeout_seconds: float) -> bytes:
         request = Request(url, data=body, headers=dict(headers), method="POST")
         try:
-            with urlopen(request, timeout=timeout_seconds) as response:
+            with _CANONICAL_URLLIB_OPEN(request, timeout=timeout_seconds) as response:
                 payload = response.read(self._max_response_bytes + 1)
         except HTTPError as exc:
             raise BetfairReadOnlyError(f"Betfair HTTP request failed with status {exc.code}") from None
@@ -84,6 +84,7 @@ def _system_utc_now() -> datetime:
     return datetime.now(timezone.utc)
 
 
+_CANONICAL_URLLIB_OPEN = urlopen
 _CANONICAL_URLLIB_POST = UrllibBetfairHttpTransport.post
 _CANONICAL_MARKET_BOOK_CLOCK = _system_utc_now
 
@@ -226,7 +227,10 @@ def _market_book_source_origin_authoritative(source: object) -> bool:
         return False
     if "post" in vars(transport):
         return False
-    return type(transport).post is _CANONICAL_URLLIB_POST
+    return (
+        type(transport).post is _CANONICAL_URLLIB_POST
+        and urlopen is _CANONICAL_URLLIB_OPEN
+    )
 
 
 def _issue_market_book_depth(

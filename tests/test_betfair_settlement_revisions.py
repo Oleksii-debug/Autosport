@@ -46,7 +46,11 @@ class _Transport:
         self.provider_status = "SETTLED"
         self.profit = 4
         self.settled_date = "2026-09-21T19:00:00+00:00"
+        self.catalog_event_id = "event-1"
         self.cleared_event_id = "event-1"
+        self.cleared_market_id = "1.234"
+        self.cleared_selection_id = 10
+        self.cleared_side = "BACK"
         self.customer_order_ref: str | None = None
         self.extra_exact_ref_selection_id: int | None = None
 
@@ -55,7 +59,11 @@ class _Transport:
         method = request["method"]
         request_id = request["id"]
         if method.endswith("listMarketCatalogue"):
-            result = [{"marketId": "1.234", "event": {"id": "event-1"}}]
+            requested_market_id = request["params"]["filter"]["marketIds"][0]
+            result = [{
+                "marketId": requested_market_id,
+                "event": {"id": self.catalog_event_id},
+            }]
         elif method.endswith("listCurrentOrders"):
             result = {"currentOrders": [], "moreAvailable": False}
         elif method.endswith("listClearedOrders"):
@@ -63,10 +71,10 @@ class _Transport:
             if request["params"]["betStatus"] == self.provider_status:
                 rows.append({
                     "betId": "bet-777",
-                    "marketId": "1.234",
+                    "marketId": self.cleared_market_id,
                     "eventId": self.cleared_event_id,
-                    "selectionId": 10,
-                    "side": "BACK",
+                    "selectionId": self.cleared_selection_id,
+                    "side": self.cleared_side,
                     "placedDate": "2026-09-21T18:00:00+00:00",
                     "settledDate": self.settled_date,
                     "priceRequested": 2,
@@ -78,10 +86,10 @@ class _Transport:
                 if self.extra_exact_ref_selection_id is not None:
                     rows.append({
                         "betId": "bet-conflict",
-                        "marketId": "1.234",
+                        "marketId": self.cleared_market_id,
                         "eventId": self.cleared_event_id,
                         "selectionId": self.extra_exact_ref_selection_id,
-                        "side": "BACK",
+                        "side": self.cleared_side,
                         "placedDate": "2026-09-21T18:00:00+00:00",
                         "settledDate": self.settled_date,
                         "priceRequested": 2,
@@ -226,6 +234,42 @@ def test_forged_or_mismatched_capture_fails_closed(tmp_path) -> None:
     forged = replace(capture, evidence_sha256="0" * 64)
     with pytest.raises(BetfairSettlementRevisionError, match="not canonical adapter-issued"):
         _ingest(store, ledger, plan, action, forged)
+
+
+def test_caller_action_cannot_substitute_durable_plan_identity(tmp_path) -> None:
+    transport = _Transport()
+    ledger, plan, action, client, provider_ref = _accepted_context(tmp_path, transport)
+    store = BetfairSettlementRevisionStore(tmp_path / "settlement.jsonl")
+    forged = replace(
+        action,
+        event_id="event-forged",
+        market_id="9.999",
+        selection_id="11",
+        side="LAY",
+        quote_id="quote-forged",
+        requested_odds=Decimal("3.25"),
+        requested_stake=Decimal("7"),
+    )
+    transport.catalog_event_id = forged.event_id
+    transport.cleared_event_id = forged.event_id
+    transport.cleared_market_id = forged.market_id
+    transport.cleared_selection_id = int(forged.selection_id)
+    transport.cleared_side = forged.side
+
+    capture = client.read_execution_readback(
+        action_id=forged.action_id,
+        market_id=forged.market_id,
+        provider_order_ref=provider_ref,
+    )
+    capture.assert_authoritative()
+
+    with pytest.raises(
+        BetfairSettlementRevisionError,
+        match="differs from durable execution plan",
+    ):
+        _ingest(store, ledger, plan, forged, capture)
+
+    assert store.revisions == ()
 
 
 def test_matching_cleared_row_with_contradictory_event_fails_closed(tmp_path) -> None:

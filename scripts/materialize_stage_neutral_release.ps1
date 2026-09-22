@@ -7,26 +7,57 @@ $ErrorActionPreference = 'Stop'
 if ([string]::IsNullOrWhiteSpace($SourceSha)) {
     throw 'Stage-neutral release materialization requires an exact source SHA via -SourceSha or AUTOSPORT_SOURCE_SHA.'
 }
+if ($SourceSha -notmatch '^[0-9a-f]{40}$') {
+    throw 'Stage-neutral release materialization requires a canonical 40-character lowercase Git SHA.'
+}
 
 $repoRoot = Split-Path -Parent $PSScriptRoot
+$sourceRoot = Join-Path $repoRoot 'src'
 $distRoot = Join-Path $repoRoot 'dist'
 $legacyPackage = Join-Path $distRoot 'Autosport-V1-windows-x64.zip'
 $stageNeutralPackage = Join-Path $distRoot 'Autosport-windows-x64.zip'
 $evidencePath = Join-Path $distRoot 'stage-neutral-release-verification.json'
 
+if (-not (Test-Path -LiteralPath $sourceRoot -PathType Container)) {
+    throw "Autosport source root is missing: $sourceRoot"
+}
 if (-not (Test-Path -LiteralPath $legacyPackage -PathType Leaf)) {
     throw "Canonical legacy release package is missing: $legacyPackage"
 }
 
+$pythonCommands = @(Get-Command python -CommandType Application -ErrorAction Stop)
+if ($pythonCommands.Count -lt 1) {
+    throw 'Unable to resolve Python application for stage-neutral release materialization.'
+}
+$pythonExecutable = [string]$pythonCommands[0].Source
+if ([string]::IsNullOrWhiteSpace($pythonExecutable)) {
+    throw 'Resolved Python application has an empty source path.'
+}
+
 New-Item -ItemType Directory -Path $distRoot -Force | Out-Null
 
-& python -m autosport.stage_neutral_release `
-    --input $legacyPackage `
-    --output $stageNeutralPackage `
-    --source-sha $SourceSha `
-    --evidence $evidencePath
-if ($LASTEXITCODE -ne 0) {
-    throw "Stage-neutral release repack exited with code $LASTEXITCODE"
+$previousPythonPath = $env:PYTHONPATH
+try {
+    if ([string]::IsNullOrWhiteSpace($previousPythonPath)) {
+        $env:PYTHONPATH = $sourceRoot
+    } else {
+        $env:PYTHONPATH = "$sourceRoot;$previousPythonPath"
+    }
+
+    & $pythonExecutable -m autosport.stage_neutral_release `
+        --input $legacyPackage `
+        --output $stageNeutralPackage `
+        --source-sha $SourceSha `
+        --evidence $evidencePath
+    if ($LASTEXITCODE -ne 0) {
+        throw "Stage-neutral release repack exited with code $LASTEXITCODE"
+    }
+} finally {
+    if ($null -eq $previousPythonPath) {
+        Remove-Item Env:PYTHONPATH -ErrorAction SilentlyContinue
+    } else {
+        $env:PYTHONPATH = $previousPythonPath
+    }
 }
 
 foreach ($required in @($stageNeutralPackage, $evidencePath)) {

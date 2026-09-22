@@ -432,7 +432,7 @@ def test_unsupported_side_fails_closed_instead_of_using_stake_as_risk(
 
     with pytest.raises(
         ExecutionCapitalAtRiskUnsupported,
-        match="unsupported execution side",
+        match="supports Betfair BACK only",
     ):
         resolve_execution_capital_at_risk(ledger, plan.plan_id)
 

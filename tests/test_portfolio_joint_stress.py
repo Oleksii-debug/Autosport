@@ -602,5 +602,9 @@ def test_result_extrema_cannot_be_rewritten_via_dataclass_replace() -> None:
     result = evaluate_joint_stress(tickets=tickets, protocol=protocol(tickets=tickets))
 
     with pytest.raises(ValueError, match="extrema must exactly match"):
-        replace(result, worst_observed_profit=Decimal("0"))
+        replace(
+            result,
+            worst_observed_profit=Decimal("-9"),
+            best_observed_profit=Decimal("-9"),
+        )
 

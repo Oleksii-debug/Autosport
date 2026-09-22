@@ -838,11 +838,70 @@ class DesktopDeltaConsumer:
                 "apply_health must be included inside the durable apply_event boundary"
             )
 
+    def _causally_blocked_delta_ids(
+        self,
+        *,
+        available: tuple[CollectorDelta, ...],
+        as_of: datetime,
+    ) -> set[str]:
+        """Return visible rows that follow a durably committed but not-yet-visible row.
+
+        Collector commit order is the transport order.  A later row may become
+        desktop-available before an earlier committed row because availability is
+        causal evidence, not a delivery-sequence shortcut.  Such a row can remain
+        durably staged in CollectorDeltaStore, but applying/acknowledging it would
+        advance desktop state across evidence the desktop could not yet have known.
+
+        Revisions participate in the same committed transport stream.  A revision
+        committed after a later cursor therefore cannot retroactively block that
+        earlier commit, while a revision committed before a later row must become
+        causally visible before that later row is applied.
+        """
+
+        source_ids = {delta.source_id for delta in available}
+        blocked: set[str] = set()
+        page_size = 1000
+
+        for source_id in source_ids:
+            after_delta_id: str | None = None
+            hidden_epoch_rows: set[str] = set()
+
+            while True:
+                page = self.collector.deltas_after_commit(
+                    source_id=source_id,
+                    after_delta_id=after_delta_id,
+                    max_items=page_size,
+                )
+                if not page:
+                    break
+
+                for committed in page:
+                    if _instant(
+                        committed.desktop_available_at,
+                        "desktop_available_at",
+                    ) > as_of:
+                        hidden_epoch_rows.add(committed.stream_epoch)
+                        continue
+                    if committed.stream_epoch in hidden_epoch_rows:
+                        blocked.add(committed.delta_id)
+
+                after_delta_id = page[-1].delta_id
+                if len(page) < page_size:
+                    break
+
+        return blocked
+
     def drain(self, *, as_of: str, view: CausalView = CausalView.AS_KNOWN_AT_DECISION) -> tuple[str, ...]:
         now = _instant(as_of, "as_of")
         available = self.collector.deltas_available_through(as_of=as_of, view=view)
+        causally_blocked = self._causally_blocked_delta_ids(
+            available=available,
+            as_of=now,
+        )
         delivered: list[str] = []
         for delta in available:
+            if delta.delta_id in causally_blocked:
+                continue
             if delta.gap_state is GapState.DETECTED:
                 recovered = any(
                     item.gap_state is GapState.RECOVERED

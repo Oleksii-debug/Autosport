@@ -189,6 +189,17 @@ def bind_challenger_artifact(
         raise TypeError("supervisor must be ResearchSupervisor")
     if not isinstance(registry, ScientificRegistry):
         raise TypeError("registry must be ScientificRegistry")
+    try:
+        supervisor_registry_path = supervisor.scientific_registry.path.resolve(strict=True)
+        registry_path = registry.path.resolve(strict=True)
+    except (OSError, RuntimeError) as exc:
+        raise ClosedLoopBindingError(
+            "scientific registry authority path cannot be resolved"
+        ) from exc
+    if registry_path != supervisor_registry_path:
+        raise ClosedLoopBindingError(
+            "ScientificRegistry does not match ResearchSupervisor authority"
+        )
     if not isinstance(spec, FactoryCandidateSpec):
         raise TypeError("spec must be FactoryCandidateSpec")
     if not isinstance(staged, StagedFactoryEvaluation):

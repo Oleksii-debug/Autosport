@@ -4,6 +4,7 @@ import bz2
 import gzip
 import hashlib
 import json
+import math
 from dataclasses import dataclass
 from enum import Enum
 from typing import Any, Iterable
@@ -78,6 +79,20 @@ def _constant(value: str) -> None:
     raise BetfairHistoricalReplayError(f"non-finite JSON number: {value}")
 
 
+def _require_finite_json_numbers(value: Any) -> None:
+    if isinstance(value, float):
+        if not math.isfinite(value):
+            raise BetfairHistoricalReplayError("non-finite JSON number")
+        return
+    if isinstance(value, dict):
+        for child in value.values():
+            _require_finite_json_numbers(child)
+        return
+    if isinstance(value, list):
+        for child in value:
+            _require_finite_json_numbers(child)
+
+
 def _payload(line: bytes, line_number: int) -> dict[str, Any]:
     try:
         text = line.decode("utf-8")
@@ -89,6 +104,7 @@ def _payload(line: bytes, line_number: int) -> dict[str, Any]:
         raise BetfairHistoricalReplayError(f"line {line_number} is not JSON") from exc
     if not isinstance(value, dict):
         raise BetfairHistoricalReplayError(f"line {line_number} must be a JSON object")
+    _require_finite_json_numbers(value)
     return value
 
 
@@ -281,7 +297,18 @@ def replay_betfair_historical_until(
             break
 
         ordinal = candidate
-        canonical = json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        try:
+            canonical = json.dumps(
+                value,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+                allow_nan=False,
+            )
+        except ValueError as exc:
+            raise BetfairHistoricalReplayError(
+                f"non-finite JSON number at source ordinal {candidate}"
+            ) from exc
         line_sha = _sha(line)
         payload_sha = _sha(canonical.encode())
         state = _advance(state, ordinal, pt, line_sha, payload_sha)

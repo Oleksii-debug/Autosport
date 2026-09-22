@@ -70,12 +70,48 @@ def test_response_shaping_request_fields_are_hash_bound():
         plan(3, ("EX_BEST_OFFERS",), best_prices_depth=3, virtualise=True),
         plan(3, ("EX_BEST_OFFERS",), best_prices_depth=3, rollover_stakes=True),
         plan(3, ("EX_BEST_OFFERS",), best_prices_depth=3, order_projection="EXECUTABLE"),
-        plan(3, ("EX_BEST_OFFERS",), best_prices_depth=3, match_projection="NO_ROLLUP"),
-        plan(3, ("EX_BEST_OFFERS",), best_prices_depth=3, include_overall_position=True),
-        plan(3, ("EX_BEST_OFFERS",), best_prices_depth=3, partition_matched_by_strategy_ref=True),
-        plan(3, ("EX_BEST_OFFERS",), best_prices_depth=3, customer_strategy_refs=("s1",)),
-        plan(3, ("EX_BEST_OFFERS",), best_prices_depth=3, matched_since="2026-09-22T00:00:00Z"),
-        plan(3, ("EX_BEST_OFFERS",), best_prices_depth=3, bet_ids=("bet-1",)),
+        plan(
+            3,
+            ("EX_BEST_OFFERS",),
+            best_prices_depth=3,
+            order_projection="ALL",
+            match_projection="NO_ROLLUP",
+        ),
+        plan(
+            3,
+            ("EX_BEST_OFFERS",),
+            best_prices_depth=3,
+            order_projection="ALL",
+            include_overall_position=True,
+        ),
+        plan(
+            3,
+            ("EX_BEST_OFFERS",),
+            best_prices_depth=3,
+            order_projection="ALL",
+            partition_matched_by_strategy_ref=True,
+        ),
+        plan(
+            3,
+            ("EX_BEST_OFFERS",),
+            best_prices_depth=3,
+            order_projection="ALL",
+            customer_strategy_refs=("s1",),
+        ),
+        plan(
+            3,
+            ("EX_BEST_OFFERS",),
+            best_prices_depth=3,
+            order_projection="ALL",
+            matched_since="2026-09-22T00:00:00Z",
+        ),
+        plan(
+            3,
+            ("EX_BEST_OFFERS",),
+            best_prices_depth=3,
+            order_projection="ALL",
+            bet_ids=("bet-1",),
+        ),
         plan(3, ("EX_BEST_OFFERS",), best_prices_depth=3, currency_code="EUR"),
         plan(3, ("EX_BEST_OFFERS",), best_prices_depth=3, locale="en"),
         plan(3, ("EX_BEST_OFFERS",), best_prices_depth=3, rollup_model="STAKE", rollup_limit=5),
@@ -113,13 +149,56 @@ def test_order_and_match_projection_unknown_values_fail_closed():
         plan(1, match_projection="RAW")
 
 
+@pytest.mark.parametrize(
+    "order_only_kwargs",
+    (
+        {"match_projection": "NO_ROLLUP"},
+        {"include_overall_position": True},
+        {"include_overall_position": False},
+        {"partition_matched_by_strategy_ref": True},
+        {"partition_matched_by_strategy_ref": False},
+        {"customer_strategy_refs": ("strategy-a",)},
+        {"matched_since": "2026-09-22T00:00:00Z"},
+        {"bet_ids": ("bet-1",)},
+    ),
+)
+def test_order_only_fields_require_order_projection(order_only_kwargs):
+    with pytest.raises(
+        MarketBookBatchPlanError,
+        match="order-only fields require order_projection",
+    ):
+        plan(1, **order_only_kwargs)
+
+
+def test_order_projection_normalizes_provider_boolean_defaults():
+    omitted = plan(2, order_projection="EXECUTABLE")
+    explicit = plan(
+        2,
+        order_projection="EXECUTABLE",
+        include_overall_position=True,
+        partition_matched_by_strategy_ref=False,
+        customer_strategy_refs=(),
+    )
+
+    assert omitted.include_overall_position is True
+    assert omitted.partition_matched_by_strategy_ref is False
+    assert omitted.customer_strategy_refs == ()
+    assert omitted.request_contract_id == explicit.request_contract_id
+    assert omitted.plan_id == explicit.plan_id
+
+
 def test_combined_identifier_limit_can_be_stricter_than_weight_budget():
     bet_ids = tuple(f"bet-{index:03d}" for index in range(240))
-    p = plan(21, (), bet_ids=bet_ids)
+    p = plan(21, (), order_projection="ALL", bet_ids=bet_ids)
     assert sizes(p) == [10, 10, 1]
     assert all(batch.combined_identifier_count <= 250 for batch in p.batches)
     with pytest.raises(MarketBookBatchPlanError, match="no identifier capacity"):
-        plan(1, (), bet_ids=tuple(f"bet-{index:03d}" for index in range(250)))
+        plan(
+            1,
+            (),
+            order_projection="ALL",
+            bet_ids=tuple(f"bet-{index:03d}" for index in range(250)),
+        )
 
 
 def test_round_trip_is_restart_stable_and_tamper_evident():

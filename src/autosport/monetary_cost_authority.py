@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 from enum import StrEnum
 import hashlib
+import heapq
 import json
 import os
 from pathlib import Path
@@ -241,10 +242,8 @@ class SharedAllocationSnapshot:
             _amount(share, "allocation share")
             if share <= 0:
                 raise MonetaryAuthorityError("allocation shares must be positive")
-        if (
-            not self.shares
-            or _exact_decimal_sum(tuple(share for _, share in self.shares))
-            != Decimal("1")
+        if not _exact_decimal_sum_is_one(
+            tuple(share for _, share in self.shares)
         ):
             raise MonetaryAuthorityError(
                 "allocation shares must conserve exactly one source amount"
@@ -877,42 +876,53 @@ def _amount(value: Decimal, label: str) -> None:
         )
 
 
-def _exact_decimal_sum(values: tuple[Decimal, ...]) -> Decimal:
-    """Add finite non-negative Decimals without consulting ambient context."""
-    if not values:
-        return Decimal("0")
+def _exact_decimal_sum_is_one(values: tuple[Decimal, ...]) -> bool:
+    """Test exact positive-Decimal conservation without exponent-gap expansion.
 
-    parts: list[tuple[int, int]] = []
-    common_exponent: int | None = None
+    Decimal coefficient digits are accumulated into sparse base-10 columns and
+    normalized only across occupied columns plus actual carry positions. Runtime and
+    memory therefore scale with stored coefficient digits/carries, not with the
+    numeric distance between exponents.
+    """
+    if not values:
+        return False
+
+    columns: dict[int, int] = {}
+    pending: list[int] = []
+
+    def add_column(power: int, amount: int) -> None:
+        existing = columns.get(power)
+        if existing is None:
+            columns[power] = amount
+            heapq.heappush(pending, power)
+        else:
+            columns[power] = existing + amount
+
     for value in values:
         _amount(value, "exact sum value")
         decimal_tuple = value.as_tuple()
-        coefficient = 0
-        for digit in decimal_tuple.digits:
-            coefficient = (coefficient * 10) + digit
         exponent = int(decimal_tuple.exponent)
-        parts.append((coefficient, exponent))
-        if common_exponent is None or exponent < common_exponent:
-            common_exponent = exponent
+        width = len(decimal_tuple.digits)
+        for index, digit in enumerate(decimal_tuple.digits):
+            if digit:
+                add_column(exponent + width - 1 - index, digit)
 
-    assert common_exponent is not None
-    total = sum(
-        coefficient * (10 ** (exponent - common_exponent))
-        for coefficient, exponent in parts
-    )
-    if total == 0:
-        return Decimal("0")
+    saw_unit = False
+    while pending:
+        power = heapq.heappop(pending)
+        total = columns.pop(power)
+        digit = total % 10
+        carry = total // 10
 
-    digits = str(total)
-    if common_exponent >= 0:
-        return Decimal(digits + ("0" * common_exponent))
-    places = -common_exponent
-    if len(digits) > places:
-        text = digits[:-places] + "." + digits[-places:]
-    else:
-        text = "0." + ("0" * (places - len(digits))) + digits
-    return Decimal(text)
+        if digit:
+            if power != 0 or digit != 1 or saw_unit:
+                return False
+            saw_unit = True
 
+        if carry:
+            add_column(power + 1, carry)
+
+    return saw_unit
 
 def _sorted_text(values: tuple[str, ...], label: str) -> None:
     for value in values:

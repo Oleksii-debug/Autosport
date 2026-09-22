@@ -144,6 +144,31 @@ def test_later_canonical_drift_invalidates_old_eligible_decision_without_future_
         )
 
 
+def test_historical_same_scope_drift_does_not_block_later_recovered_decision(
+    tmp_path,
+) -> None:
+    registry, findings, windows = _scoped_history(
+        tmp_path,
+        values_sequence=(("3", "4"), ("3", "4"), ("1", "2"), ("1", "2")),
+    )
+    recovered = _scoped_decision(registry, findings[2:], windows[2:])
+    assert recovered.status is ChampionEligibilityStatus.ELIGIBLE
+    persist_eligibility_decision(registry, recovered)
+
+    validate_activation_eligibility(
+        registry,
+        recovered,
+        as_of="2026-02-17T12:00:00Z",
+        canonical_strategy_id="strategy-context",
+        expected_strategy_version_id="strategy-1",
+        expected_model_version_id="model-1",
+        expected_environment_sha256=ENV,
+        expected_protocol_id="protocol-1",
+        expected_config_sha256=CONFIG,
+        admissible_actions=frozenset({"WAIT"}),
+    )
+
+
 def test_decision_subclass_cannot_cross_authority_boundary(tmp_path) -> None:
     registry, decision = _eligible_scoped_decision(tmp_path)
 

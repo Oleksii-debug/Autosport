@@ -249,6 +249,8 @@ def _derive_from_verified_pages(
     offsets: list[int] = []
     page_hashes: list[str] = []
     rows: list[dict[str, object]] = []
+    previous_item_date: datetime | None = None
+    chronology_direction = 0
 
     for index, source in enumerate(pages):
         _components(source)
@@ -286,6 +288,23 @@ def _derive_from_verified_pages(
             )
         offsets.append(page.from_record)
         page_hashes.append(source.evidence_sha256)
+        for row in page.items:
+            item_date = _timestamp(row.item_date, "statement item_date")
+            if previous_item_date is not None:
+                if item_date > previous_item_date:
+                    step = 1
+                elif item_date < previous_item_date:
+                    step = -1
+                else:
+                    step = 0
+                if step:
+                    if chronology_direction == 0:
+                        chronology_direction = step
+                    elif step != chronology_direction:
+                        raise BetfairStatementCompletenessError(
+                            "statement items are not chronologically ordered"
+                        )
+            previous_item_date = item_date
         rows.extend(
             {
                 "ref_id": row.ref_id,

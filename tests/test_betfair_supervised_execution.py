@@ -1116,6 +1116,71 @@ def test_failure_with_executable_order_state_is_unknown_not_rejected() -> None:
         )
 
 
+def test_submitted_attempt_reentry_never_resubmits_placeorders() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        profile, bound, approval, ledger, action, goal_store = _prepared(tmp)
+        attempt_id = "attempt-crash-after-submitted"
+
+        begin_supervised_attempt(
+            ledger,
+            bound,
+            approval,
+            action_id=action.action_id,
+            attempt_id=attempt_id,
+        )
+        provider_ref = ledger.bind_provider_order_reference(
+            attempt_id=attempt_id,
+            provider_id=action.bookmaker_id,
+        )
+        ledger.mark_submitted(
+            attempt_id,
+            submitted_at=SUBMITTED_AT,
+        )
+        assert ledger.attempt_state(attempt_id) is AttemptState.SUBMITTED
+
+        transport = _Transport(
+            lambda request: _response(
+                request,
+                matched=action.requested_stake,
+                average=action.requested_odds,
+            )
+        )
+        client = _enabled_client(
+            profile,
+            transport,
+            store=goal_store,
+            observed_at=READBACK_AT,
+        )
+
+        result = execute_betfair_supervised_action(
+            ledger,
+            bound,
+            approval,
+            action_id=action.action_id,
+            attempt_id=attempt_id,
+            profile=profile,
+            client=client,
+            clock=lambda: READBACK_AT,
+        )
+
+        assert transport.calls == []
+        assert result.outcome is PlaceOrdersOutcome.UNKNOWN
+        assert result.attempt_state is AttemptState.UNKNOWN
+        assert result.evidence_id is None
+        assert result.external_receipt_id is None
+        assert (
+            ledger.provider_order_reference(
+                attempt_id=attempt_id,
+                provider_id=action.bookmaker_id,
+            )
+            == provider_ref
+        )
+        assert not ledger.can_retry_action(
+            plan_id=bound.execution_plan.plan_id,
+            action_id=action.action_id,
+        )
+
+
 def test_transport_timeout_becomes_unknown_and_blocks_retry_after_restart(
     monkeypatch,
 ) -> None:

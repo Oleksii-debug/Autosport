@@ -3,7 +3,7 @@ from __future__ import annotations
 import hashlib
 import itertools
 import json
-from dataclasses import dataclass, field
+from dataclasses import InitVar, dataclass
 from datetime import datetime, timezone
 from enum import Enum
 
@@ -228,10 +228,12 @@ class MarketSettlementOutcomeAuthority:
     roster_provenance_sha256: str
     settlement_rules_sha256: str
     verification_protocol_sha256: str
-    _verification_token: object = field(repr=False, compare=False)
+    # Init-only on purpose: an issued authority must not retain the capability
+    # needed to mint a modified authority via dataclasses.replace().
+    _verification_token: InitVar[object]
 
-    def __post_init__(self) -> None:
-        if self._verification_token is not _VERIFIED_AUTHORITY_TOKEN:
+    def __post_init__(self, _verification_token: object) -> None:
+        if _verification_token is not _VERIFIED_AUTHORITY_TOKEN:
             raise TypeError(
                 "MarketSettlementOutcomeAuthority must come from verified evidence"
             )

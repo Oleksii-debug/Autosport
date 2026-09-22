@@ -408,6 +408,7 @@ _UK_UA = MappingProxyType(
         ),
         "ui.evaluation.truth": "Істина | лише паперова симуляція; це оцінювання не є доказом майбутньої прибутковості.",
         "ui.ticket.row": "{status} | ставка {stake} | коефіцієнт {odds} | виплата {payout} | {legs}",
+        "ui.ticket.leg": "спорт {sport}; {event_id}/{market_id}/{selection_id}@{odds}",
         "ui.ticket.empty": "Паперові квитки ще відсутні.",
         "ui.ticket.status.open": "відкрито",
         "ui.ticket.status.won": "виграно",
@@ -428,7 +429,7 @@ _UK_UA = MappingProxyType(
             "відхилено={rejected}; поточних={current}; прапорці якості={quality_flags}."
         ),
         "ui.observation.quote": (
-            "{event_id} | {market_type} | {market_id} | {selection_id} | коефіцієнт {odds} | час джерела {source_time}"
+            "спорт {sport} | {event_id} | {market_type} | {market_id} | {selection_id} | коефіцієнт {odds} | час джерела {source_time}"
         ),
         "ui.observation.unknown_time": "невідомий",
         "ui.observation.empty": "Поточні котирування ще відсутні.",

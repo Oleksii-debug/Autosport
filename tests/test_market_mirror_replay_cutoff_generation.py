@@ -428,7 +428,62 @@ class MarketMirrorReplayCutoffGenerationTests(unittest.TestCase):
             finally:
                 store.close()
 
-    def test_cutoff_generation_tamper_fails_closed(self) -> None:
+    def test_valid_range_cutoff_rollback_is_rejected_and_survives_restart(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "market.db"
+            store = SQLiteMarketStore(path)
+            try:
+                store.append(
+                    self.event(
+                        sequence=1,
+                        odds="2.00",
+                        observed_ts="2026-09-16T19:00:00+00:00",
+                    )
+                )
+                store.append(
+                    self.event(
+                        sequence=2,
+                        odds="2.10",
+                        observed_ts="2026-09-16T19:00:00.500000+00:00",
+                    )
+                )
+                expected = self.semantic_events(self.replay(store))
+                self.assertEqual(
+                    store.connection.execute(
+                        "SELECT max_append_generation FROM market_replay_cutoffs"
+                    ).fetchone(),
+                    (2,),
+                )
+
+                with self.assertRaisesRegex(
+                    sqlite3.IntegrityError,
+                    "market replay cutoff rows are immutable",
+                ):
+                    store.connection.execute(
+                        "UPDATE market_replay_cutoffs "
+                        "SET max_append_generation=1"
+                    )
+                store.connection.rollback()
+
+                self.assertEqual(
+                    store.connection.execute(
+                        "SELECT max_append_generation FROM market_replay_cutoffs"
+                    ).fetchone(),
+                    (2,),
+                )
+            finally:
+                store.close()
+
+            reopened = SQLiteMarketStore(path)
+            try:
+                self.assertEqual(
+                    self.semantic_events(self.replay(reopened)),
+                    expected,
+                )
+            finally:
+                reopened.close()
+
+    def test_issued_cutoff_delete_is_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             store = SQLiteMarketStore(Path(directory) / "market.db")
             try:
@@ -439,17 +494,59 @@ class MarketMirrorReplayCutoffGenerationTests(unittest.TestCase):
                         observed_ts="2026-09-16T19:00:00+00:00",
                     )
                 )
+                expected = self.semantic_events(self.replay(store))
+
+                with self.assertRaisesRegex(
+                    sqlite3.IntegrityError,
+                    "market replay cutoff rows are immutable",
+                ):
+                    store.connection.execute("DELETE FROM market_replay_cutoffs")
+                store.connection.rollback()
+
+                self.assertEqual(
+                    store.connection.execute(
+                        "SELECT COUNT(*) FROM market_replay_cutoffs"
+                    ).fetchone(),
+                    (1,),
+                )
+                self.assertEqual(
+                    self.semantic_events(self.replay(store)),
+                    expected,
+                )
+            finally:
+                store.close()
+
+    def test_missing_cutoff_immutability_trigger_fails_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "market.db"
+            store = SQLiteMarketStore(path)
+            try:
+                store.append(
+                    self.event(
+                        sequence=1,
+                        odds="2.00",
+                        observed_ts="2026-09-16T19:00:00+00:00",
+                    )
+                )
                 self.replay(store)
                 store.connection.execute(
-                    "UPDATE market_replay_cutoffs "
-                    "SET max_append_generation=max_append_generation+100"
+                    "DROP TRIGGER market_replay_cutoffs_no_update"
                 )
                 store.connection.commit()
 
-                with self.assertRaises(ValueError):
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "immutable cutoff triggers mismatch",
+                ):
                     self.replay(store)
             finally:
                 store.close()
+
+            with self.assertRaisesRegex(
+                ValueError,
+                "immutable cutoff triggers mismatch",
+            ):
+                SQLiteMarketStore(path)
 
 
 if __name__ == "__main__":

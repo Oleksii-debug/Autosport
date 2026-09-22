@@ -28,7 +28,7 @@ class _ReadFailureOpener:
 
 
 class _OpenTimeoutOpener:
-    def open(self, *_args: object, **_kwargs: object):
+    def open(self, *_args: object, **_kwargs: object) -> _ReadFailureResponse:
         raise TimeoutError("sensitive low-level timeout detail")
 
 

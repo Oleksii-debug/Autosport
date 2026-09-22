@@ -577,6 +577,83 @@ class TheOddsApiProviderTests(unittest.TestCase):
         self.assertEqual(batch.cursor, expected)
         self.assertEqual(batch.quotes[0].decimal_odds, Decimal("2.10"))
 
+    def test_pending_current_pages_keep_snapshot_local_provenance(self):
+        raw_body = (
+            b'[{"id":"0123456789abcdef0123456789abcdef",'
+            b'"sport_key":"soccer_epl","commence_time":"2026-09-22T15:00:00Z",'
+            b'"bookmakers":[{"key":"book-a","sid":"event-77","markets":[{'
+            b'"key":"h2h","last_update":"2026-09-22T13:50:00Z",'
+            b'"sid":"market-88","outcomes":['
+            b'{"name":"Alpha","price":2.10,"sid":"outcome-99"},'
+            b'{"name":"Beta","price":1.80,"sid":"outcome-100"}]}]}]}]'
+        )
+
+        class FakeResponse:
+            status = 200
+            headers = {}
+
+            def __init__(self, final_url):
+                self.final_url = final_url
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, traceback):
+                return False
+
+            def read(self, size=-1):
+                return raw_body
+
+            def geturl(self):
+                return self.final_url
+
+        class FakeOpener:
+            def open(self, request, timeout):
+                return FakeResponse(request.full_url)
+
+        provider = TheOddsApiProvider(
+            "secret",
+            sport="soccer_epl",
+            max_market_age_seconds=None,
+        )
+        with patch.object(
+            odds_api_module,
+            "build_opener",
+            lambda *_: FakeOpener(),
+        ):
+            first = provider.read_batch(max_items=1)
+
+        self.assertIn("TRUNCATED_BATCH", first.quality_flags)
+        self.assertNotIn("UNVERIFIED_PROVIDER_ORIGIN", first.quality_flags)
+        self.assertNotIn("UNVERIFIED_RECEIPT_CLOCK", first.quality_flags)
+
+        historical_payload = {
+            "timestamp": "2026-09-22T12:40:00Z",
+            "previous_timestamp": None,
+            "next_timestamp": None,
+            "data": [
+                event(
+                    market_last_update="2026-09-22T12:39:00Z",
+                )
+            ],
+        }
+        provider.transport = lambda *_: HttpJsonResponse(
+            historical_payload,
+            200,
+            {},
+        )
+        provider.clock = lambda: "2026-09-22T14:00:00+00:00"
+        historical = provider.read_historical_snapshot("2026-09-22T12:42:00Z")
+        self.assertIn(
+            "UNVERIFIED_PROVIDER_ORIGIN",
+            historical.batch.quality_flags,
+        )
+
+        second = provider.read_batch(max_items=1)
+        self.assertNotIn("TRUNCATED_BATCH", second.quality_flags)
+        self.assertNotIn("UNVERIFIED_PROVIDER_ORIGIN", second.quality_flags)
+        self.assertNotIn("UNVERIFIED_RECEIPT_CLOCK", second.quality_flags)
+
     def test_post_construction_seam_swap_cannot_retain_verified_authority(self):
         digest = "a" * 64
         provider = TheOddsApiProvider(

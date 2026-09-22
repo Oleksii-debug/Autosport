@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from decimal import Decimal, localcontext
 from enum import StrEnum
 from typing import Any
+from weakref import ReferenceType, ref
 
 from .evaluation_universe import (
     CanonicalPaperExecutionResolver,
@@ -65,7 +66,7 @@ def _digest(value: object) -> str:
     return hashlib.sha256(_canonical(value).encode("utf-8")).hexdigest()
 
 
-@dataclass(frozen=True, slots=True, init=False)
+@dataclass(frozen=True, slots=True, init=False, weakref_slot=True)
 class PaperExecutionQualitySample:
     """Derived PAPER-only execution-quality sample.
 
@@ -278,7 +279,7 @@ class PaperExecutionQualitySample:
         return payload
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True, slots=True, weakref_slot=True)
 class PaperExecutionQualityReport:
     """Complete frozen-denominator report over canonical PAPER outcomes."""
 
@@ -561,7 +562,7 @@ def _project_paper_attempt(
     )
 
 
-def build_paper_execution_quality_report(
+def _build_paper_execution_quality_report_unissued(
     ledger: EvaluationUniverseLedger,
 ) -> PaperExecutionQualityReport:
     """Project canonical PAPER outcomes over the entire frozen denominator.
@@ -637,10 +638,106 @@ def build_paper_execution_quality_report(
     )
 
 
+@dataclass(frozen=True, slots=True)
+class _IssuedQualityRecord:
+    value_ref: ReferenceType[object]
+    digest: str
+
+
+def _build_quality_issuance_boundary():
+    """Bind positive quality evidence to canonical projector issuance.
+
+    The registry is deliberately process-local. After restart callers rebuild the
+    deterministic report from the durable canonical EvaluationUniverse/PAPER
+    evidence instead of deserializing DTOs into authority.
+    """
+
+    sample_cls = PaperExecutionQualitySample
+    report_cls = PaperExecutionQualityReport
+    unissued_builder = _build_paper_execution_quality_report_unissued
+    issued_samples: dict[int, _IssuedQualityRecord] = {}
+    issued_reports: dict[int, _IssuedQualityRecord] = {}
+
+    def register(
+        registry: dict[int, _IssuedQualityRecord],
+        value: object,
+        digest: str,
+    ) -> None:
+        identity = id(value)
+
+        def discard(dead_ref: ReferenceType[object]) -> None:
+            current = registry.get(identity)
+            if current is not None and current.value_ref is dead_ref:
+                registry.pop(identity, None)
+
+        value_ref = ref(value, discard)
+        registry[identity] = _IssuedQualityRecord(value_ref, digest)
+
+    def build(
+        ledger: EvaluationUniverseLedger,
+    ) -> PaperExecutionQualityReport:
+        report = unissued_builder(ledger)
+        for sample in report.samples:
+            register(issued_samples, sample, sample.sample_sha256)
+        register(issued_reports, report, report.report_sha256)
+        return report
+
+    def validate_sample(
+        value: object,
+    ) -> PaperExecutionQualitySample:
+        if type(value) is not sample_cls:
+            raise ExecutionQualityEvidenceError(
+                "quality sample must use exact canonical type"
+            )
+        value._validate()
+        record = issued_samples.get(id(value))
+        if (
+            record is None
+            or record.value_ref() is not value
+            or record.digest != value.sample_sha256
+        ):
+            raise ExecutionQualityEvidenceError(
+                "quality sample must be product-issued from canonical evidence"
+            )
+        return value
+
+    def validate_report(
+        value: object,
+    ) -> PaperExecutionQualityReport:
+        if type(value) is not report_cls:
+            raise ExecutionQualityEvidenceError(
+                "quality report must use exact canonical type"
+            )
+        value._validate()
+        for sample in value.samples:
+            validate_sample(sample)
+        record = issued_reports.get(id(value))
+        if (
+            record is None
+            or record.value_ref() is not value
+            or record.digest != value.report_sha256
+        ):
+            raise ExecutionQualityEvidenceError(
+                "quality report must be product-issued from canonical evidence"
+            )
+        return value
+
+    return build, validate_sample, validate_report
+
+
+(
+    build_paper_execution_quality_report,
+    validate_paper_execution_quality_sample,
+    validate_paper_execution_quality_report,
+) = _build_quality_issuance_boundary()
+
+
 __all__ = [
     "ExecutionQualityEvidenceClass",
     "ExecutionQualityEvidenceError",
     "PaperExecutionQualityReport",
     "PaperExecutionQualitySample",
     "build_paper_execution_quality_report",
+    "validate_paper_execution_quality_report",
+    "validate_paper_execution_quality_sample",
 ]

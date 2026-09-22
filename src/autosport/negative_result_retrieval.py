@@ -233,6 +233,23 @@ def search_negative_results(
                 f"{context} has inconsistent question/hypothesis lineage"
             )
 
+        causal_lineage = (
+            ("ResearchQuestion", question.record_id, "Hypothesis", hypothesis.record_id),
+            ("Hypothesis", hypothesis.record_id, "ResearchProtocol", protocol.record_id),
+            ("ResearchProtocol", protocol.record_id, "Experiment", experiment.record_id),
+        )
+        for earlier_type, earlier_id, later_type, later_id in causal_lineage:
+            if not registry.causal_precedes(
+                earlier_type,
+                earlier_id,
+                later_type,
+                later_id,
+            ):
+                raise NegativeResultRetrievalError(
+                    f"{context} lineage does not causally precede experiment: "
+                    f"{earlier_type}:{earlier_id} -> {later_type}:{later_id}"
+                )
+
         matching_postmortems = tuple(
             sorted(
                 postmortems_by_experiment.get(experiment.record_id, ()),

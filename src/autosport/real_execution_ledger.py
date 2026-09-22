@@ -292,7 +292,7 @@ class ExternalReceiptIdentity:
 @dataclass(frozen=True, slots=True)
 class ExternalAcknowledgement:
     attempt_id: str
-    external_receipt_id: str
+    external_receipt_id: str | None
     status: AcknowledgementStatus
     acknowledged_at: str
     accepted_odds: Decimal | str | int | None = None
@@ -301,10 +301,16 @@ class ExternalAcknowledgement:
 
     def __post_init__(self) -> None:
         _text(self.attempt_id, "attempt_id")
-        _text(self.external_receipt_id, "external_receipt_id")
         _timestamp(self.acknowledged_at, "acknowledged_at")
         if not isinstance(self.status, AcknowledgementStatus):
             raise ValueError("status must be AcknowledgementStatus")
+        if self.status in {
+            AcknowledgementStatus.ACCEPTED,
+            AcknowledgementStatus.PARTIAL,
+        }:
+            _text(self.external_receipt_id, "external_receipt_id")
+        elif self.external_receipt_id is not None:
+            _text(self.external_receipt_id, "external_receipt_id")
         if self.reconciliation_evidence_id is not None:
             _text(self.reconciliation_evidence_id, "reconciliation_evidence_id")
         if self.status in {
@@ -852,14 +858,17 @@ class RealExecutionLedger:
         cls,
         events: list[dict[str, Any]],
         event: dict[str, Any],
-    ) -> ExternalReceiptIdentity:
+    ) -> ExternalReceiptIdentity | None:
+        external_receipt_id = event["payload"].get("external_receipt_id")
+        if external_receipt_id is None:
+            return None
         _, action = cls._action_payload(
             events, event["plan_id"], event["action_id"]
         )
         return ExternalReceiptIdentity(
             bookmaker_id=action["bookmaker_id"],
             account_id=action["account_id"],
-            external_receipt_id=event["payload"]["external_receipt_id"],
+            external_receipt_id=external_receipt_id,
         )
 
     @classmethod
@@ -874,6 +883,8 @@ class RealExecutionLedger:
             }:
                 continue
             identity = cls._receipt_identity(events, event)
+            if identity is None:
+                continue
             attempt = event["attempt_id"]
             if identity in owners and owners[identity] != attempt:
                 raise ExecutionLedgerIntegrityError(
@@ -2441,11 +2452,12 @@ class RealExecutionLedger:
                 "payload": payload,
             }
             identity = self._receipt_identity(events, probe_event)
-            prior = self._receipt_owners(events).get(identity)
-            if prior is not None and prior != acknowledgement.attempt_id:
-                raise ExecutionIdentityConflict(
-                    "provider/account external receipt already belongs to another attempt"
-                )
+            if identity is not None:
+                prior = self._receipt_owners(events).get(identity)
+                if prior is not None and prior != acknowledgement.attempt_id:
+                    raise ExecutionIdentityConflict(
+                        "provider/account external receipt already belongs to another attempt"
+                    )
             self._append(
                 EventType.EXTERNAL_ACKNOWLEDGEMENT,
                 first["plan_id"],

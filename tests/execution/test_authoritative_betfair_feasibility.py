@@ -4,6 +4,7 @@ from decimal import Decimal
 import json
 from pathlib import Path
 import tempfile
+import urllib.request as urllib_request
 
 import pytest
 
@@ -185,32 +186,58 @@ def _canonical_client() -> BetfairReadOnlyClient:
     )
 
 
+class _BytesResponse:
+    def __init__(self, payload: bytes) -> None:
+        self._payload = payload
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb) -> bool:
+        return False
+
+    def read(self, amount: int = -1) -> bytes:
+        return self._payload if amount < 0 else self._payload[:amount]
+
+
+class _CanonicalUrlOpenerHarness:
+    def __init__(self, transport: MarketBookTransport) -> None:
+        self._transport = transport
+
+    def open(self, request, data=None, timeout=None):
+        header_items = {key.lower(): value for key, value in request.header_items()}
+        payload = self._transport.post(
+            request.full_url,
+            headers={
+                "X-Application": header_items["x-application"],
+                "X-Authentication": header_items["x-authentication"],
+                "Content-Type": header_items["content-type"],
+            },
+            body=request.data or b"",
+            timeout_seconds=float(timeout),
+        )
+        return _BytesResponse(payload)
+
+
 def _synthetic_authoritative_receipt(
     transport: MarketBookTransport,
-    *,
-    observed_at: datetime | None = None,
 ) -> tuple[object, BetfairReadOnlyClient]:
-    """Unit-test the resolver with a receipt issued under the production origin seal.
+    """Exercise the canonical MarketBook read path without external network IO.
 
-    Parsing is exercised through an injected non-authoritative transport; the private
-    issuance seam then models the point after successful canonical provider I/O.
-    Production callers cannot obtain positive authority from that injected transport.
+    The production module's captured urlopen function, default transport/method and
+    product clock remain unchanged. Only urllib's test-process opener is temporarily
+    replaced below that captured function, so authority still originates from
+    BetfairReadOnlyClient.read_market_book_depth rather than a callable mint seam.
     """
-    observed = observed_at or datetime.now(timezone.utc)
-    parsing_client = BetfairReadOnlyClient(
-        BetfairSessionCredentials("app-key", "session-token"),
-        transport=transport,
-        clock=lambda: observed,
-        venue_id="betfair",
-        account_id="acct-1",
-    )
-    receipt = parsing_client.read_market_book_depth("1.234", 42)
-    canonical_source = _canonical_client()
-    betfair_account_readonly._issue_market_book_depth(
-        receipt,
-        source=canonical_source,
-    )
+    original_opener = urllib_request._opener
+    try:
+        urllib_request._opener = _CanonicalUrlOpenerHarness(transport)
+        canonical_source = _canonical_client()
+        receipt = canonical_source.read_market_book_depth("1.234", 42)
+    finally:
+        urllib_request._opener = original_opener
     return receipt, canonical_source
+
 
 def _client(transport: MarketBookTransport) -> BetfairReadOnlyClient:
     return BetfairReadOnlyClient(
@@ -229,15 +256,10 @@ def _reserved_ledger(tmp: str, bound: BoundSupervisedExecutionPlan) -> RealExecu
 
 
 def test_authentic_market_book_receipt_before_bound_quote_fails_closed() -> None:
-    decision_at = datetime.now(timezone.utc)
+    receipt, canonical_source = _synthetic_authoritative_receipt(MarketBookTransport())
+    observed_at = datetime.fromisoformat(receipt.evidence.observed_at)
+    decision_at = observed_at + timedelta(seconds=2)
     bound = _bound(decision_at)
-    action_quote_observed_at = datetime.fromisoformat(
-        bound.action_for(ACTION_ID).quote_observed_at
-    )
-    receipt, canonical_source = _synthetic_authoritative_receipt(
-        MarketBookTransport(),
-        observed_at=action_quote_observed_at - timedelta(milliseconds=1),
-    )
 
     with tempfile.TemporaryDirectory() as tmp:
         with pytest.raises(
@@ -250,9 +272,8 @@ def test_authentic_market_book_receipt_before_bound_quote_fails_closed() -> None
                 receipt,
                 action_id=ACTION_ID,
                 decision_at=decision_at,
-                max_snapshot_age=timedelta(seconds=2),
+                max_snapshot_age=timedelta(seconds=3),
             )
-
 
 def test_authenticated_market_book_receipt_cannot_bypass_provider_limit_authority() -> None:
     transport = MarketBookTransport()
@@ -478,9 +499,7 @@ def test_post_construction_io_origin_swap_cannot_mint_positive_authority(
     mutated_field: str,
 ) -> None:
     transport = MarketBookTransport()
-    receipt = _client(transport).read_market_book_depth("1.234", 42)
-    client = _canonical_client()
-    betfair_account_readonly._issue_market_book_depth(receipt, source=client)
+    receipt, client = _synthetic_authoritative_receipt(transport)
     if mutated_field == "transport":
         client._transport = transport
     else:
@@ -532,3 +551,8 @@ def test_module_urlopen_swap_invalidates_canonical_provider_origin(
                 max_snapshot_age=timedelta(seconds=2),
             )
 
+
+
+def test_market_book_authority_exposes_no_callable_mint_or_writable_registry() -> None:
+    assert not hasattr(betfair_account_readonly, "_issue_market_book_depth")
+    assert not hasattr(betfair_account_readonly, "_MARKET_BOOK_DEPTH_ISSUED")

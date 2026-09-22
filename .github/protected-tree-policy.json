@@ -1,0 +1,21 @@
+{
+  "schema_version": 1,
+  "protected_paths": [
+    ".gitattributes",
+    ".github/protected-tree-policy.json",
+    "pyproject.toml",
+    "scripts/verify_protected_tree_gate.py",
+    "scripts/verify_source_checkout.py",
+    "src/autosport/integration_protected_tree.py",
+    "tests/test_integration_protected_tree.py",
+    "tests/test_protected_tree_gate_runner.py"
+  ],
+  "protected_prefixes": [
+    ".github/workflows/"
+  ],
+  "content_change_allowlist": [],
+  "immutable_policy_paths": [
+    ".github/protected-tree-policy.json",
+    "scripts/verify_protected_tree_gate.py"
+  ]
+}

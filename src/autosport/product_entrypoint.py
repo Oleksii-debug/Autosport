@@ -4,6 +4,7 @@ import argparse
 import json
 import math
 import signal
+import threading
 import time
 from dataclasses import asdict
 from pathlib import Path
@@ -28,9 +29,15 @@ class ProductRuntimeError(ProductEntrypointError):
 class _SignalStopRequest:
     def __init__(self) -> None:
         self.signal_number: int | None = None
+        self._event = threading.Event()
 
     def handle(self, signum: int, _frame: object) -> None:
         self.signal_number = signum
+        self._event.set()
+
+    def wait(self, timeout: float) -> bool:
+        """Wait for a stop request, returning early when a signal handler fires."""
+        return self._event.wait(timeout)
 
     @property
     def requested(self) -> bool:
@@ -227,7 +234,10 @@ def run_product(
                     value=runtime.stop(stop_request.reason),
                 )
                 break
-            sleep(float(poll_seconds))
+            if install_signal_handlers and sleep is time.sleep:
+                stop_request.wait(float(poll_seconds))
+            else:
+                sleep(float(poll_seconds))
         return stop_request.exit_code
     except Exception as exc:
         if started:

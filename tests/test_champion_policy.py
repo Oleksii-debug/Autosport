@@ -512,3 +512,65 @@ def test_champion_activation_rejects_future_promotion_evidence(
 
     with pytest.raises(ChampionPolicyError, match=message):
         _load_real_registry(registry, store)
+
+def test_champion_activation_rejects_simulated_reward_ancestry(tmp_path):
+    """SIMULATED generic-learning rewards must not gain champion activation authority."""
+
+    predecessor = BanditPolicyState.initial(
+        environment_id=ENVIRONMENT_ID,
+        protocol_id=PROTOCOL_ID,
+        config_sha256=CONFIG_SHA256,
+        seed=17,
+        action_types=frozenset({"PAPER_PROPOSAL", "WAIT"}),
+    )
+    action = Action(
+        environment_id=ENVIRONMENT_ID,
+        observation_id="1" * 64,
+        action_type="WAIT",
+        decided_at="2026-09-19T13:00:00Z",
+    )
+    reward = RewardEvidence(
+        environment_id=ENVIRONMENT_ID,
+        action_id=action.action_id,
+        outcome_id="2" * 64,
+        reward=Decimal("1000000"),
+        available_at="2026-09-19T13:05:00Z",
+        truth=EvidenceTruth.SIMULATED,
+        evidence=(("counterfactual", "synthetic-wait-reward"),),
+        simulation_model_id="adversarial-reward-simulator-v1",
+    )
+    transition = Transition(
+        environment_id=ENVIRONMENT_ID,
+        episode_id="3" * 64,
+        step_index=1,
+        observation_id=action.observation_id,
+        action_id=action.action_id,
+        outcome_id=reward.outcome_id,
+        reward_id=reward.reward_id,
+        decision_at=action.decided_at,
+        resolved_at=reward.available_at,
+    )
+    simulated_successor, update_evidence = predecessor.update(
+        action=action,
+        reward=reward,
+        transition=transition,
+    )
+
+    assert update_evidence.reward_truth is EvidenceTruth.SIMULATED
+    assert simulated_successor.choose(
+        admissible_actions=frozenset({"PAPER_PROPOSAL", "WAIT"})
+    ) == "WAIT"
+
+    registry = _write_minimal_promoted_registry(
+        tmp_path / "registry.json",
+        simulated_successor,
+    )
+    store = FactoryArtifactStore(tmp_path / "artifacts")
+    persist_policy_state(store, simulated_successor)
+
+    with pytest.raises(
+        ChampionPolicyError,
+        match="simulated|reward truth|update authority|ancestry",
+    ):
+        _load_real_registry(registry, store)
+

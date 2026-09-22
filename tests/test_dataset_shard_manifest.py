@@ -7,23 +7,29 @@ from pathlib import Path
 
 import pytest
 
-# Focused local harness: production CI imports the real canonical lineage module.
-# This stub reproduces only the public membership-manifest function needed by the
-# stateless shard verifier, so the new source can be adversarially tested offline.
-stub = types.ModuleType("autosport.dataset_snapshot_lineage")
+# Focused handoff packets may omit the pre-existing lineage module. In the real
+# repository it must be imported normally so this test never replaces canonical
+# production code in sys.modules or changes later test behavior.
+try:
+    import autosport.dataset_snapshot_lineage  # noqa: F401
+except ModuleNotFoundError as exc:
+    if exc.name != "autosport.dataset_snapshot_lineage":
+        raise
+    stub = types.ModuleType("autosport.dataset_snapshot_lineage")
 
-def _membership_manifest_sha256(members: tuple[str, ...]) -> str:
-    import json
-    payload = {
-        "kind": "autosport-dataset-membership-manifest-v1",
-        "schema_version": 1,
-        "member_sha256": list(members),
-    }
-    raw = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
-    return hashlib.sha256(raw).hexdigest()
+    def _membership_manifest_sha256(members: tuple[str, ...]) -> str:
+        import json
 
-stub.membership_manifest_sha256 = _membership_manifest_sha256
-sys.modules.setdefault("autosport.dataset_snapshot_lineage", stub)
+        payload = {
+            "kind": "autosport-dataset-membership-manifest-v1",
+            "schema_version": 1,
+            "member_sha256": list(members),
+        }
+        raw = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+        return hashlib.sha256(raw).hexdigest()
+
+    stub.membership_manifest_sha256 = _membership_manifest_sha256
+    sys.modules["autosport.dataset_snapshot_lineage"] = stub
 
 from autosport.dataset_shard_manifest import (  # noqa: E402
     DatasetShardDescriptor,

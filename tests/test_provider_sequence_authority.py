@@ -367,3 +367,31 @@ def test_create_true_cannot_rebind_existing_different_authority(tmp_path: Path) 
         _authority(path, create=True, authority_id="authority-b")
 
     assert original(SOURCE_ID) == 2
+
+def test_journal_mode_drift_fails_closed_on_reopen_and_allocation(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "provider-sequence.db"
+    authority = _authority(path, create=True)
+    assert authority(SOURCE_ID) == 1
+
+    connection = sqlite3.connect(path, isolation_level=None)
+    changed = connection.execute("PRAGMA journal_mode=DELETE").fetchone()
+    connection.close()
+    assert changed is not None
+    assert str(changed[0]).lower() == "delete"
+
+    with pytest.raises(ProviderSequenceAuthorityError, match="WAL"):
+        _authority(path, create=False)
+
+    with pytest.raises(ProviderSequenceAuthorityError, match="WAL"):
+        authority(SOURCE_ID)
+
+    connection = sqlite3.connect(path)
+    row = connection.execute(
+        "SELECT last_sequence FROM provider_sequences_v1 WHERE source_id=?",
+        (SOURCE_ID,),
+    ).fetchone()
+    connection.close()
+    assert row == (1,)
+

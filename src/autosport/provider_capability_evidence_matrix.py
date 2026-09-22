@@ -12,6 +12,7 @@ from enum import Enum
 from hashlib import sha256
 import json
 from typing import Iterable
+from weakref import WeakValueDictionary
 
 from .bookmaker_capability import (
     BookmakerCapability,
@@ -101,7 +102,7 @@ def _scope(values: object, field: str) -> tuple[str, ...]:
     return normalized
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True, slots=True, weakref_slot=True)
 class ProviderCapabilityEvidence:
     capability: BookmakerCapability
     profile_state: BookmakerCapabilityState
@@ -222,6 +223,57 @@ class ProviderCapabilityEvidence:
         }
 
 
+_ISSUED_EVIDENCE: WeakValueDictionary[int, ProviderCapabilityEvidence] = WeakValueDictionary()
+
+
+def issue_provider_capability_evidence(
+    *,
+    capability: BookmakerCapability,
+    profile_state: BookmakerCapabilityState,
+    grade: ProviderCapabilityTruthGrade,
+    profile_id: str,
+    integration_evidence_id: str,
+    observed_at: str | None = None,
+    expires_at: str | None = None,
+    evidence_ref: str | None = None,
+    evidence_sha256: str | None = None,
+    endpoint_operation: str | None = None,
+    sport_scope: tuple[str, ...] = (),
+    market_scope: tuple[str, ...] = (),
+    quality_constraint: str | None = None,
+) -> ProviderCapabilityEvidence:
+    """Issue one exact in-process evidence object after structural validation.
+
+    Positive facts are accepted by a matrix only by exact object identity through this
+    product factory. Reconstructing/copying the dataclass, even with identical bytes and
+    digest, does not recreate issuance authority. A restarted process must re-resolve and
+    re-issue evidence from its canonical upstream authority; restart time alone cannot
+    renew freshness.
+    """
+
+    fact = ProviderCapabilityEvidence(
+        capability=capability,
+        profile_state=profile_state,
+        grade=grade,
+        profile_id=profile_id,
+        integration_evidence_id=integration_evidence_id,
+        observed_at=observed_at,
+        expires_at=expires_at,
+        evidence_ref=evidence_ref,
+        evidence_sha256=evidence_sha256,
+        endpoint_operation=endpoint_operation,
+        sport_scope=sport_scope,
+        market_scope=market_scope,
+        quality_constraint=quality_constraint,
+    )
+    _ISSUED_EVIDENCE[id(fact)] = fact
+    return fact
+
+
+def _is_product_issued(fact: ProviderCapabilityEvidence) -> bool:
+    return _ISSUED_EVIDENCE.get(id(fact)) is fact
+
+
 @dataclass(frozen=True, slots=True)
 class ProviderCapabilityEvidenceMatrix:
     profile: BookmakerCapabilityProfile
@@ -271,6 +323,13 @@ class ProviderCapabilityEvidenceMatrix:
         for fact in self.facts:
             if type(fact) is not ProviderCapabilityEvidence:
                 raise ProviderCapabilityEvidenceMatrixError("facts must be exact evidence")
+            if (
+                fact.grade is not ProviderCapabilityTruthGrade.UNKNOWN_UNPROVEN
+                and not _is_product_issued(fact)
+            ):
+                raise ProviderCapabilityEvidenceMatrixError(
+                    "positive capability evidence must be product-issued exact object"
+                )
             if fact.profile_id != self.profile.profile_id:
                 raise ProviderCapabilityEvidenceMatrixError("fact profile binding mismatch")
             if fact.integration_evidence_id != self.integration.evidence_id:

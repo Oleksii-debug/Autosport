@@ -31,8 +31,7 @@ class ExecutionCapitalAtRiskStale(ExecutionCapitalAtRiskError):
 
 
 class CapitalRiskTruth(str, Enum):
-    EXACT = "EXACT"
-    UNBOUNDED_CONTINGENT = "UNBOUNDED_CONTINGENT"
+    CONSERVATIVE_BOUND = "CONSERVATIVE_BOUND"
 
 
 @dataclass(frozen=True, slots=True)
@@ -50,17 +49,12 @@ class AttemptCapitalAtRisk:
     requested_odds: Decimal
     requested_capital_at_limit: Decimal
     confirmed_open_capital: Decimal
-    contingent_unknown_capital: Decimal | None
+    contingent_unknown_capital: Decimal
     confirmed_released_capital: Decimal
-    max_plausible_capital_at_risk: Decimal | None
+    max_plausible_capital_at_risk: Decimal
 
     @property
     def truth(self) -> CapitalRiskTruth:
-        if (
-            self.contingent_unknown_capital is None
-            or self.max_plausible_capital_at_risk is None
-        ):
-            return CapitalRiskTruth.UNBOUNDED_CONTINGENT
         return CapitalRiskTruth.CONSERVATIVE_BOUND
 
 
@@ -79,20 +73,16 @@ class ExecutionCapitalAtRiskEvidence:
     plan_stale: bool
     attempts: tuple[AttemptCapitalAtRisk, ...]
     confirmed_open_capital: Decimal
-    contingent_unknown_capital: Decimal | None
+    contingent_unknown_capital: Decimal
     confirmed_released_capital: Decimal
-    max_plausible_capital_at_risk: Decimal | None
+    max_plausible_capital_at_risk: Decimal
     evidence_sha256: str
     execution_authority: bool = False
     capital_release_authority: bool = False
+    residual_capacity_authority: bool = False
 
     @property
     def truth(self) -> CapitalRiskTruth:
-        if (
-            self.contingent_unknown_capital is None
-            or self.max_plausible_capital_at_risk is None
-        ):
-            return CapitalRiskTruth.UNBOUNDED_CONTINGENT
         return CapitalRiskTruth.CONSERVATIVE_BOUND
 
     def assert_issued_current(self, ledger: RealExecutionLedger) -> None:
@@ -183,70 +173,18 @@ def _add_precision(*values: Decimal) -> int:
     return _bounded_precision(max(aligned_widths) + 2)
 
 
-def _multiply_precision(left: Decimal, right: Decimal) -> int:
-    required = (
-        max(1, len(left.as_tuple().digits))
-        + max(1, len(right.as_tuple().digits))
-        + 2
-    )
-    return _bounded_precision(required)
-
-
-def _add(left: Decimal, right: Decimal) -> Decimal:
-    with localcontext() as context:
-        context.prec = _add_precision(left, right)
-        return left + right
-
-
-def _subtract(left: Decimal, right: Decimal) -> Decimal:
-    with localcontext() as context:
-        context.prec = _add_precision(left, right)
-        return left - right
-
-
-def _subtract_nonnegative(left: Decimal, right: Decimal) -> Decimal:
-    result = _subtract(left, right)
-    if result < 0:
-        return Decimal(0)
-    return result
-
-
-def _multiply(left: Decimal, right: Decimal) -> Decimal:
-    with localcontext() as context:
-        context.prec = _multiply_precision(left, right)
-        return left * right
-
-
-def _lay_liability(stake: Decimal, odds: Decimal) -> Decimal:
-    price_minus_one = _subtract(odds, Decimal(1))
-    if price_minus_one <= 0:
-        raise ExecutionCapitalAtRiskUnsupported(
-            "LAY odds must be greater than one"
-        )
-    return _multiply(stake, price_minus_one)
-
-
-def _capital_at_terms(side: str, stake: Decimal, odds: Decimal) -> Decimal:
-    if side == "BACK":
-        return stake
-    if side == "LAY":
-        return _lay_liability(stake, odds)
-    raise ExecutionCapitalAtRiskUnsupported(
-        f"unsupported execution side for monetary liability: {side!r}"
-    )
-
-
 def _requested_limit_capital(attempt: ExecutionAttemptReadView) -> Decimal:
     action = attempt.action
     if action.bookmaker_id != "betfair":
         raise ExecutionCapitalAtRiskUnsupported(
             "generic provider stake is not a universal capital-at-risk unit"
         )
-    return _capital_at_terms(
-        action.side,
-        action.requested_stake,
-        action.requested_odds,
-    )
+    if action.side != "BACK":
+        raise ExecutionCapitalAtRiskUnsupported(
+            "this conservative floor supports Betfair BACK only; "
+            "provider-specific liability must come from canonical order economics"
+        )
+    return action.requested_stake
 
 
 def _accepted_capital(attempt: ExecutionAttemptReadView) -> Decimal:
@@ -269,11 +207,11 @@ def _accepted_capital(attempt: ExecutionAttemptReadView) -> Decimal:
         raise ExecutionCapitalAtRiskError(
             "accepted/PARTIAL acknowledgement lacks exact stake/odds"
         )
-    return _capital_at_terms(
-        attempt.action.side,
-        acknowledgement.accepted_stake,
-        acknowledgement.accepted_odds,
-    )
+    if attempt.action.side != "BACK":
+        raise ExecutionCapitalAtRiskUnsupported(
+            "accepted provider liability is unsupported outside Betfair BACK"
+        )
+    return acknowledgement.accepted_stake
 
 
 def _attempt_risk(attempt: ExecutionAttemptReadView) -> AttemptCapitalAtRisk:
@@ -283,53 +221,33 @@ def _attempt_risk(attempt: ExecutionAttemptReadView) -> AttemptCapitalAtRisk:
 
     if attempt.state is AttemptState.RESERVED:
         confirmed = zero
-        contingent: Decimal | None = zero
-        maximum: Decimal | None = zero
+        contingent = zero
+        maximum = zero
     elif attempt.state in {AttemptState.SUBMITTED, AttemptState.UNKNOWN}:
         confirmed = zero
-        # BACK liability is stake regardless of matched price. For a generic LAY
-        # attempt the durable ledger does not prove the provider order type/price
-        # fence, so requested-price liability is not treated as an upper bound.
-        if action.side == "BACK":
-            contingent = requested
-            maximum = requested
-        else:
-            contingent = None
-            maximum = None
+        # For the supported BACK seam, monetary commitment equals stake and is
+        # independent of matched odds. UNKNOWN retains the full requested stake.
+        contingent = requested
+        maximum = requested
     elif attempt.state in {AttemptState.ACCEPTED, AttemptState.PARTIAL}:
         confirmed = _accepted_capital(attempt)
         acknowledgement = attempt.acknowledgement
         assert acknowledgement is not None
         assert acknowledgement.accepted_stake is not None
-        unresolved_stake = _subtract_nonnegative(
+        contingent = _subtract_nonnegative(
             action.requested_stake,
             acknowledgement.accepted_stake,
         )
-        if unresolved_stake == 0:
-            contingent = zero
-            maximum = confirmed
-        elif action.side == "BACK":
-            contingent = unresolved_stake
-            maximum = _add(confirmed, contingent)
-        else:
-            # Confirmed LAY liability is exact from accepted odds/stake, but a
-            # generic ledger snapshot alone does not prove a bound for a still
-            # unresolved LAY remainder. Provider readback must close this.
-            contingent = None
-            maximum = None
+        maximum = _add(confirmed, contingent)
     elif attempt.state in {
         AttemptState.REJECTED,
         AttemptState.RECONCILED_NOT_FOUND,
     }:
         confirmed = zero
-        # These are durable facts but not provider-origin release authority.
-        # Retain the full possible effect rather than freeing capital.
-        if action.side == "BACK":
-            contingent = requested
-            maximum = requested
-        else:
-            contingent = None
-            maximum = None
+        # These are durable ledger facts, not provider-origin release authority.
+        # Retain the full possible BACK effect rather than freeing capital.
+        contingent = requested
+        maximum = requested
     else:  # pragma: no cover - protects future enum widening
         raise ExecutionCapitalAtRiskUnsupported(
             f"unsupported durable attempt state: {attempt.state!r}"
@@ -355,12 +273,9 @@ def _attempt_risk(attempt: ExecutionAttemptReadView) -> AttemptCapitalAtRisk:
     )
 
 
-def _sum_known(values: tuple[Decimal | None, ...]) -> Decimal | None:
-    if any(value is None for value in values):
-        return None
+def _sum_capital(values: tuple[Decimal, ...]) -> Decimal:
     total = Decimal(0)
     for value in values:
-        assert value is not None
         total = _add(total, value)
     return total
 
@@ -384,18 +299,14 @@ def _attempt_payload(value: AttemptCapitalAtRisk) -> dict[str, Any]:
         "confirmed_open_capital": _decimal_text(
             value.confirmed_open_capital
         ),
-        "contingent_unknown_capital": (
-            None
-            if value.contingent_unknown_capital is None
-            else _decimal_text(value.contingent_unknown_capital)
+        "contingent_unknown_capital": _decimal_text(
+            value.contingent_unknown_capital
         ),
         "confirmed_released_capital": _decimal_text(
             value.confirmed_released_capital
         ),
-        "max_plausible_capital_at_risk": (
-            None
-            if value.max_plausible_capital_at_risk is None
-            else _decimal_text(value.max_plausible_capital_at_risk)
+        "max_plausible_capital_at_risk": _decimal_text(
+            value.max_plausible_capital_at_risk
         ),
     }
 
@@ -411,21 +322,18 @@ def _evidence_payload(value: ExecutionCapitalAtRiskEvidence) -> dict[str, Any]:
         "plan_stale": value.plan_stale,
         "attempts": [_attempt_payload(item) for item in value.attempts],
         "confirmed_open_capital": _decimal_text(value.confirmed_open_capital),
-        "contingent_unknown_capital": (
-            None
-            if value.contingent_unknown_capital is None
-            else _decimal_text(value.contingent_unknown_capital)
+        "contingent_unknown_capital": _decimal_text(
+            value.contingent_unknown_capital
         ),
         "confirmed_released_capital": _decimal_text(
             value.confirmed_released_capital
         ),
-        "max_plausible_capital_at_risk": (
-            None
-            if value.max_plausible_capital_at_risk is None
-            else _decimal_text(value.max_plausible_capital_at_risk)
+        "max_plausible_capital_at_risk": _decimal_text(
+            value.max_plausible_capital_at_risk
         ),
         "execution_authority": value.execution_authority,
         "capital_release_authority": value.capital_release_authority,
+        "residual_capacity_authority": value.residual_capacity_authority,
     }
 
 
@@ -468,15 +376,14 @@ def resolve_execution_capital_at_risk(
     view: VerifiedExecutionPlanView = _VERIFIED_EXECUTION_VIEW(ledger, plan_id)
     attempts = tuple(_attempt_risk(item) for item in view.attempts)
 
-    confirmed = _sum_known(
+    confirmed = _sum_capital(
         tuple(item.confirmed_open_capital for item in attempts)
     )
-    assert confirmed is not None
-    contingent = _sum_known(
+    contingent = _sum_capital(
         tuple(item.contingent_unknown_capital for item in attempts)
     )
     released = Decimal(0)
-    maximum = _sum_known(
+    maximum = _sum_capital(
         tuple(item.max_plausible_capital_at_risk for item in attempts)
     )
 

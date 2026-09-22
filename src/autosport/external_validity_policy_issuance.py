@@ -114,6 +114,9 @@ _REGISTRY_GET = _REGISTRY_TYPE.get
 _REGISTRY_APPEND = _REGISTRY_TYPE.append
 _REGISTRY_READ = _REGISTRY_TYPE._read
 _REGISTRY_VALIDATE_ENTRY = _REGISTRY_TYPE._validate_entry
+_REGISTRY_ENTRY = _REGISTRY_TYPE._entry
+_REGISTRY_PRIVATE_APPEND = _REGISTRY_TYPE._append
+_REGISTRY_APPEND_ENTRY_LOCKED = _REGISTRY_TYPE._append_entry_locked
 _STORE_READ = _STORE_TYPE.read
 _STORE_SHA256 = _STORE_TYPE.sha256
 _STORE_MATERIALIZE = _STORE_TYPE.materialize
@@ -121,6 +124,14 @@ _STORE_RECEIPT = _STORE_TYPE.materialization_receipt
 _STORE_STABLE_SNAPSHOT = _STORE_TYPE._stable_snapshot
 _STORE_DECODE_SNAPSHOT = _STORE_TYPE._decode_snapshot
 _STORE_PATH = _STORE_TYPE._path
+_STORE_FILENAME = _STORE_TYPE._filename
+_STORE_WRITE = _STORE_TYPE.write
+_STORE_RECORD_MATERIALIZATION = _STORE_TYPE.record_materialization
+_STORE_READ_MATERIALIZATION_LEDGER = _STORE_TYPE._read_materialization_ledger
+_STORE_MATERIALIZATION_DIGEST = _STORE_TYPE._materialization_digest
+_STORE_MATERIALIZATION_LEDGER_PATH = _STORE_TYPE._materialization_ledger_path
+_STORE_BASE_TYPE = _STORE_TYPE.__mro__[1]
+_STORE_BASE_WRITE = _STORE_BASE_TYPE.write
 
 
 def _text(value: object, field: str) -> str:
@@ -211,6 +222,9 @@ def _require_registry(registry: object) -> ScientificRegistry:
         or _REGISTRY_TYPE.append is not _REGISTRY_APPEND
         or _REGISTRY_TYPE._read is not _REGISTRY_READ
         or _REGISTRY_TYPE._validate_entry is not _REGISTRY_VALIDATE_ENTRY
+        or _REGISTRY_TYPE._entry is not _REGISTRY_ENTRY
+        or _REGISTRY_TYPE._append is not _REGISTRY_PRIVATE_APPEND
+        or _REGISTRY_TYPE._append_entry_locked is not _REGISTRY_APPEND_ENTRY_LOCKED
     ):
         raise ProductPolicyEvaluationIssuanceError(
             "ScientificRegistry executable authority was rebound"
@@ -235,6 +249,16 @@ def _require_store(store: object) -> FactoryArtifactStore:
         or _STORE_TYPE._stable_snapshot is not _STORE_STABLE_SNAPSHOT
         or _STORE_TYPE._decode_snapshot is not _STORE_DECODE_SNAPSHOT
         or _STORE_TYPE._path is not _STORE_PATH
+        or _STORE_TYPE._filename is not _STORE_FILENAME
+        or _STORE_TYPE.write is not _STORE_WRITE
+        or _STORE_TYPE.record_materialization is not _STORE_RECORD_MATERIALIZATION
+        or _STORE_TYPE._read_materialization_ledger
+        is not _STORE_READ_MATERIALIZATION_LEDGER
+        or _STORE_TYPE._materialization_digest is not _STORE_MATERIALIZATION_DIGEST
+        or _STORE_TYPE._materialization_ledger_path
+        is not _STORE_MATERIALIZATION_LEDGER_PATH
+        or _STORE_TYPE.__mro__[1] is not _STORE_BASE_TYPE
+        or _STORE_BASE_TYPE.write is not _STORE_BASE_WRITE
     ):
         raise ProductPolicyEvaluationIssuanceError(
             "FactoryArtifactStore executable authority was rebound"

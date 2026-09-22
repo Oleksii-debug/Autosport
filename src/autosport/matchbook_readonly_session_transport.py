@@ -405,6 +405,10 @@ class MatchbookReadOnlySessionTransport:
             generation_id = self._generation_factory()
             if not isinstance(generation_id, str):
                 raise TypeError("generation factory must return str")
+            if generation_id == token:
+                raise ValueError(
+                    "session generation identity must be independent from raw token"
+                )
             self._lifecycle.record_login_200(
                 generation_id=generation_id,
                 monotonic_ns=self._clock(),

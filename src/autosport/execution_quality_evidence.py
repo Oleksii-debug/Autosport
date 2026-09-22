@@ -43,8 +43,47 @@ class ExecutionQualityEvidenceError(ValueError):
 def _decimal_text(value: Decimal) -> str:
     if not isinstance(value, Decimal) or not value.is_finite():
         raise ExecutionQualityEvidenceError("quality Decimal must be finite")
-    text = format(value.normalize(), "f")
+    # Decimal.normalize() applies the ambient Decimal context and can therefore
+    # round authority-bearing odds/stakes before hashing. Formatting without a
+    # precision is exact; trimming only insignificant fractional zeros is
+    # context-independent and preserves the existing canonical text shape.
+    text = format(value, "f")
     return text.rstrip("0").rstrip(".") if "." in text else text
+
+
+def _exact_decimal_subtract(left: Decimal, right: Decimal) -> Decimal:
+    """Subtract finite Decimals without consulting the ambient Decimal context."""
+
+    if (
+        not isinstance(left, Decimal)
+        or not isinstance(right, Decimal)
+        or not left.is_finite()
+        or not right.is_finite()
+    ):
+        raise ExecutionQualityEvidenceError(
+            "quality Decimal arithmetic requires finite Decimal operands"
+        )
+
+    left_tuple = left.as_tuple()
+    right_tuple = right.as_tuple()
+    common_exponent = min(left_tuple.exponent, right_tuple.exponent)
+
+    def scaled_coefficient(value_tuple: object) -> int:
+        coefficient = 0
+        for digit in value_tuple.digits:
+            coefficient = coefficient * 10 + digit
+        if value_tuple.sign:
+            coefficient = -coefficient
+        return coefficient * (10 ** (value_tuple.exponent - common_exponent))
+
+    difference = scaled_coefficient(left_tuple) - scaled_coefficient(right_tuple)
+    sign = 1 if difference < 0 else 0
+    digits = (
+        tuple(int(character) for character in str(abs(difference)))
+        if difference
+        else (0,)
+    )
+    return Decimal((sign, digits, common_exponent))
 
 
 def _canonical(value: object) -> str:
@@ -510,8 +549,15 @@ def _project_paper_attempt(
         in {PaperAttemptOutcome.ACCEPTED, PaperAttemptOutcome.PARTIAL}
     ):
         assert attempt.execution_odds is not None
-        signed_price_delta = attempt.execution_odds - attempt.decision_odds
-        adverse_slippage = max(-signed_price_delta, Decimal("0"))
+        signed_price_delta = _exact_decimal_subtract(
+            attempt.execution_odds,
+            attempt.decision_odds,
+        )
+        adverse_slippage = (
+            signed_price_delta.copy_negate()
+            if signed_price_delta < 0
+            else Decimal("0")
+        )
 
     completion_numerator: Decimal | None
     if attempt.outcome in {

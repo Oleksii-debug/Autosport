@@ -630,7 +630,10 @@ class ContinuousEventLifecycle:
     ) -> None:
         if not isinstance(store, SQLiteMarketStore):
             raise TypeError("store must be SQLiteMarketStore")
-        if not isinstance(required_history, timedelta) or required_history < timedelta(0):
+        if (
+            not isinstance(required_history, timedelta)
+            or required_history < timedelta(0)
+        ):
             raise ValueError("required_history must be a non-negative timedelta")
 
     @staticmethod
@@ -687,7 +690,11 @@ class ContinuousEventLifecycle:
             settlement_visible = (
                 record.settlement_ref is not None
                 and record.settlement_discovered_at is not None
-                and _instant(record.settlement_discovered_at, "settlement_discovered_at") <= cutoff
+                and _instant(
+                    record.settlement_discovered_at,
+                    "settlement_discovered_at",
+                )
+                <= cutoff
             )
             detail = (
                 "completed with settlement provenance reference; outcome authority is external"

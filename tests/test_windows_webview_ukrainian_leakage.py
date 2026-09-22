@@ -57,7 +57,7 @@ def _static_operator_copy() -> str:
 def _product_runtime_projection_literals() -> str:
     tree = ast.parse(_SHELL_PATH.read_text(encoding="utf-8"))
     poll_workers = next(
-        node
+        child
         for node in tree.body
         if isinstance(node, ast.ClassDef) and node.name == "AutosportWebController"
         for child in node.body

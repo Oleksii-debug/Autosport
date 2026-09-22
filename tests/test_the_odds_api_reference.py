@@ -399,3 +399,29 @@ def test_only_public_provider_operation_is_read_batch() -> None:
         if not name.startswith("_")
     }
     assert public == {"read_batch"}
+
+
+def test_unrequested_market_in_provider_response_fails_closed() -> None:
+    payload = event_payload()
+    payload[0]["bookmakers"][0]["markets"].append(
+        {
+            "key": "totals",
+            "last_update": "2026-09-22T01:58:50Z",
+            "outcomes": [
+                {"name": "Over", "price": Decimal("1.90"), "point": Decimal("210.5")},
+                {"name": "Under", "price": Decimal("1.90"), "point": Decimal("210.5")},
+            ],
+        }
+    )
+    with pytest.raises(TheOddsApiPayloadError, match="market outside requested scope"):
+        current_provider(lambda *_: response(payload)).read_batch()
+
+
+def test_unrequested_bookmaker_in_explicit_bookmaker_scope_fails_closed() -> None:
+    payload = event_payload()
+    extra = deepcopy(payload[0]["bookmakers"][0])
+    extra["key"] = "fanduel"
+    extra["title"] = "FanDuel"
+    payload[0]["bookmakers"].append(extra)
+    with pytest.raises(TheOddsApiPayloadError, match="bookmaker outside requested scope"):
+        current_provider(lambda *_: response(payload)).read_batch()

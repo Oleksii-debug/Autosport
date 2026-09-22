@@ -115,6 +115,55 @@ def _decimal_text(value: Decimal) -> str:
     return "0" if text in {"-0", ""} else text
 
 
+def _decimal_digits_to_int(digits: tuple[int, ...]) -> int:
+    coefficient = 0
+    for digit in digits:
+        coefficient = coefficient * 10 + digit
+    return coefficient
+
+
+def _exact_nonnegative_difference(total: Decimal, part: Decimal) -> Decimal:
+    """Subtract two bounded nonnegative Decimals without ambient-context rounding."""
+
+    if (
+        type(total) is not Decimal
+        or type(part) is not Decimal
+        or not total.is_finite()
+        or not part.is_finite()
+        or total < 0
+        or part < 0
+        or part > total
+    ):
+        raise BetfairFillOrKillError(
+            "exact FOK remainder requires finite nonnegative Decimal operands"
+        )
+    if part.is_zero():
+        return total
+    if part == total:
+        return Decimal("0")
+
+    total_tuple = total.as_tuple()
+    part_tuple = part.as_tuple()
+    if type(total_tuple.exponent) is not int or type(part_tuple.exponent) is not int:
+        raise BetfairFillOrKillError(
+            "exact FOK remainder requires integer Decimal exponents"
+        )
+    common_exponent = min(total_tuple.exponent, part_tuple.exponent)
+    total_coefficient = _decimal_digits_to_int(total_tuple.digits) * (
+        10 ** (total_tuple.exponent - common_exponent)
+    )
+    part_coefficient = _decimal_digits_to_int(part_tuple.digits) * (
+        10 ** (part_tuple.exponent - common_exponent)
+    )
+    remainder_coefficient = total_coefficient - part_coefficient
+    if remainder_coefficient <= 0:
+        raise BetfairFillOrKillError(
+            "exact FOK remainder arithmetic produced a nonpositive remainder"
+        )
+    remainder_digits = tuple(int(character) for character in str(remainder_coefficient))
+    return Decimal((0, remainder_digits, common_exponent))
+
+
 def _positive_selection(value: object) -> str:
     raw = _text(value, "selection_id")
     if not raw.isascii() or not raw.isdigit() or raw.startswith("0"):
@@ -366,7 +415,10 @@ def inspect_betfair_fill_or_kill_lifecycle(
                 else FillOrKillStructuralOutcome.MINIMUM_MATCHED_REMAINDER_CANCELLED
             )
 
-    remainder = request.requested_size - report.size_matched
+    remainder = _exact_nonnegative_difference(
+        request.requested_size,
+        report.size_matched,
+    )
     return BetfairFillOrKillStructuralEvidence(
         request_projection_sha256=request.request_projection_sha256,
         response_sha256=report.response_sha256,

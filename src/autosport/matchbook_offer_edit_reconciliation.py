@@ -243,46 +243,6 @@ class MatchbookOfferEditReadback:
         return hashlib.sha256(encoded).hexdigest()
 
 
-@dataclass(frozen=True, slots=True)
-class MatchbookOfferEditEvidence:
-    """Binds one request intent to a provider-known edit identity and readback."""
-
-    intent: MatchbookOfferEditIntent
-    readback: MatchbookOfferEditReadback
-
-    def __post_init__(self) -> None:
-        if type(self.intent) is not MatchbookOfferEditIntent:
-            raise MatchbookOfferEditReconciliationError("invalid edit intent")
-        if type(self.readback) is not MatchbookOfferEditReadback:
-            raise MatchbookOfferEditReconciliationError("invalid edit readback")
-        if self.intent.account_context_id != self.readback.account_context_id:
-            raise MatchbookOfferEditReconciliationError(
-                "edit evidence crossed account context"
-            )
-        if self.intent.offer_id != self.readback.offer_id:
-            raise MatchbookOfferEditReconciliationError(
-                "edit evidence crossed offer identity"
-            )
-        if _aware_utc(self.readback.captured_at, "captured_at") < _aware_utc(
-            self.intent.requested_at, "requested_at"
-        ):
-            raise MatchbookOfferEditReconciliationError(
-                "edit readback predates request intent"
-            )
-
-    @property
-    def provider_write_authority(self) -> bool:
-        return False
-
-    @property
-    def edited_terms_are_observed_applied(self) -> bool:
-        return self.readback.status is MatchbookOfferEditStatus.APPLIED
-
-    @property
-    def edited_terms_are_pending(self) -> bool:
-        return self.readback.status is MatchbookOfferEditStatus.DELAYED
-
-
 def identity_disposition(*, offer_edit_id: object | None) -> MatchbookOfferEditIdentityDisposition:
     """Collection/search similarity is never a substitute for an exact provider edit id."""
     if offer_edit_id is None:

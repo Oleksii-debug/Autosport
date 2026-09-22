@@ -90,6 +90,51 @@ class ParlayApiWireDecimalExactnessTests(unittest.TestCase):
             "book-a:spreads:1.500000000000000001",
         )
 
+    def test_scale_equivalent_lines_share_numeric_market_identity(self) -> None:
+        template = b"""[
+          {
+            "id":"tt-line-scale",
+            "sport_key":"table_tennis",
+            "bookmakers":[
+              {
+                "key":"book-a",
+                "last_update":"2026-09-22T10:00:00Z",
+                "markets":[
+                  {
+                    "key":"spreads",
+                    "last_update":"2026-09-22T10:00:01Z",
+                    "outcomes":[
+                      {"name":"A","price":2.25,"point":POINT_TOKEN}
+                    ]
+                  }
+                ]
+              }
+            ]
+          }
+        ]"""
+
+        def quote_for(point_token: bytes):
+            raw = template.replace(b"POINT_TOKEN", point_token)
+            opener = _FakeOpener(lambda _url, _timeout: _FakeResponse(raw))
+            with patch("autosport.parlayapi_provider.build_opener", return_value=opener):
+                provider = ParlayApiTableTennisProvider(
+                    "dummy-key",
+                    clock=lambda: "2026-09-22T10:00:03+00:00",
+                )
+                batch = provider.read_batch()
+            self.assertEqual(len(batch.quotes), 1)
+            return batch.quotes[0]
+
+        compact = quote_for(b"-1.5")
+        scaled = quote_for(b"-1.50")
+        exponent = quote_for(b"-15e-1")
+
+        self.assertEqual(compact.provider_market_id, "book-a:spreads:1.5")
+        self.assertEqual(scaled.provider_market_id, compact.provider_market_id)
+        self.assertEqual(exponent.provider_market_id, compact.provider_market_id)
+        self.assertEqual(scaled.metadata["line"], "-1.50")
+
+
     def test_historical_transport_keeps_existing_canonical_json_hash_path(self) -> None:
         coverage_raw = b"""{
           "sport_key":"table_tennis",

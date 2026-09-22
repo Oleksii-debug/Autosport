@@ -781,6 +781,44 @@ class BetfairReadOnlyClient:
             provider_order_ref,
         )
 
+    def _read_all_current_orders_with_evidence(self, *, page_size: int = 1000, max_pages: int = 100) -> tuple[tuple[BetfairCurrentOrderObservation, ...], tuple[BetfairEvidence, ...]]:
+        _positive_int(max_pages, "max_pages")
+        _page_bounds(0, page_size)
+        offset, result, seen, page_evidence = 0, [], set(), []
+        for _ in range(max_pages):
+            page = self.read_current_orders_page(from_record=offset, record_count=page_size)
+            page_evidence.append(page.evidence)
+            _extend_unique(result, seen, page.orders, "currentOrders")
+            if not page.more_available:
+                return tuple(result), tuple(page_evidence)
+            if not page.orders:
+                raise BetfairReadOnlyError("currentOrders reported moreAvailable with an empty page")
+            offset += len(page.orders)
+        raise BetfairReadOnlyError("currentOrders pagination exceeded max_pages while more data remained")
+
+    def read_all_current_orders(self, *, page_size: int = 1000, max_pages: int = 100) -> tuple[BetfairCurrentOrderObservation, ...]:
+        orders, _ = self._read_all_current_orders_with_evidence(page_size=page_size, max_pages=max_pages)
+        return orders
+
+    def _read_all_cleared_orders_with_evidence(self, *, settled_from: str | None = None, page_size: int = 1000, max_pages: int = 100) -> tuple[tuple[BetfairClearedOrderObservation, ...], tuple[BetfairEvidence, ...]]:
+        _positive_int(max_pages, "max_pages")
+        _page_bounds(0, page_size)
+        offset, result, seen, page_evidence = 0, [], set(), []
+        for _ in range(max_pages):
+            page = self.read_cleared_orders_page(from_record=offset, record_count=page_size, settled_from=settled_from)
+            page_evidence.append(page.evidence)
+            _extend_unique(result, seen, page.orders, "clearedOrders")
+            if not page.more_available:
+                return tuple(result), tuple(page_evidence)
+            if not page.orders:
+                raise BetfairReadOnlyError("clearedOrders reported moreAvailable with an empty page")
+            offset += len(page.orders)
+        raise BetfairReadOnlyError("clearedOrders pagination exceeded max_pages while more data remained")
+
+    def read_all_cleared_orders(self, *, settled_from: str | None = None, page_size: int = 1000, max_pages: int = 100) -> tuple[BetfairClearedOrderObservation, ...]:
+        orders, _ = self._read_all_cleared_orders_with_evidence(settled_from=settled_from, page_size=page_size, max_pages=max_pages)
+        return orders
+
     def read_account_snapshot(self, requested_capabilities: frozenset) -> object:
         from .bookmaker_capability import (
             BookmakerAccountSnapshot,

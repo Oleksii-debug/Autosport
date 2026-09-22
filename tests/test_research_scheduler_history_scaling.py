@@ -342,6 +342,55 @@ def test_self_consistent_history_truncation_fails_closed_against_state_anchor() 
             ResearchScheduler(scheduler.path, _UnusedSink())
 
 
+def test_db_ahead_of_state_recovers_only_matching_completed_hot_suffix() -> None:
+    with tempfile.TemporaryDirectory() as directory:
+        scheduler = _scheduler_with_history(Path(directory), _SMALL_HISTORY)
+        schedule = _schedule()
+        occurrence_id, occurrence = _accepted_occurrence(
+            schedule,
+            index=_SMALL_HISTORY,
+        )
+
+        persisted = json.loads(scheduler.path.read_text(encoding="utf-8"))
+        persisted["occurrences"][occurrence_id] = occurrence
+        persisted["state_version"] += 1
+        body = {
+            key: value
+            for key, value in persisted.items()
+            if key != "state_sha256"
+        }
+        persisted["state_sha256"] = research_scheduler._digest(body)
+        scheduler.path.write_text(
+            json.dumps(persisted, sort_keys=True),
+            encoding="utf-8",
+        )
+
+        interrupted_state = scheduler._read()
+        scheduler._append_cold_history_locked(
+            interrupted_state,
+            [
+                (
+                    research_scheduler._COLD_HISTORY_OCCURRENCE,
+                    occurrence_id,
+                    occurrence,
+                )
+            ],
+        )
+        on_disk_before_restart = json.loads(
+            scheduler.path.read_text(encoding="utf-8")
+        )
+        assert on_disk_before_restart["cold_history_count"] == _SMALL_HISTORY
+        assert occurrence_id in on_disk_before_restart["occurrences"]
+
+        recovered = ResearchScheduler(scheduler.path, _UnusedSink())
+        hot = json.loads(recovered.path.read_text(encoding="utf-8"))
+        assert hot["cold_history_count"] == _SMALL_HISTORY + 1
+        assert hot["occurrences"] == {}
+        snapshot = recovered.snapshot()
+        assert len(snapshot["occurrences"]) == _SMALL_HISTORY + 1
+        assert snapshot["occurrences"][occurrence_id] == occurrence
+
+
 def test_accepted_curriculum_history_is_cold_but_snapshot_visible() -> None:
     with tempfile.TemporaryDirectory() as directory:
         scheduler = _scheduler_with_curriculum_history(

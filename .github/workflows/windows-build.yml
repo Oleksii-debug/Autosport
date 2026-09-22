@@ -5,6 +5,7 @@ on:
   push:
     branches: [main]
   pull_request:
+    types: [opened, synchronize, reopened, ready_for_review, converted_to_draft]
     paths:
       - 'src/**'
       - 'tests/**'
@@ -24,6 +25,10 @@ concurrency:
 
 jobs:
   build:
+    # Build the expensive Windows candidate only for an integration-capable PR.
+    # ready_for_review starts the full gate; converted_to_draft lets concurrency
+    # displace an in-flight build when the PR returns to work-in-progress.
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     runs-on: windows-latest
     env:
       AUTOSPORT_SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}

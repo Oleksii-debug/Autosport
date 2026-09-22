@@ -208,6 +208,44 @@ def test_policy_loader_rejects_eligibility_cutoff_without_decision(tmp_path):
         )
 
 
+def test_policy_loader_rejects_eligibility_cutoff_before_policy_authority(tmp_path):
+    identity = EnvironmentIdentity(
+        "lawful-provider:paper",
+        "champion-agent-config-v1",
+        "paper-evidence-v1",
+        PROTOCOL_ID,
+        T4,
+        17,
+    )
+    _, champion = _learned_champion(identity)
+    registry = ScientificRegistry.initialize_pristine(tmp_path / "registry.json")
+    store = FactoryArtifactStore(tmp_path / "artifacts")
+    persist_policy_state(store, champion)
+    decision = _eligibility_decision(identity, champion)
+    authority = _patched_authority(champion)
+
+    with authority[0], authority[1], authority[2], patch(
+        "autosport.champion_policy.validate_activation_eligibility"
+    ) as validator, pytest.raises(
+        ChampionPolicyError,
+        match="eligibility_as_of must not predate policy authority as_of",
+    ):
+        load_champion_policy(
+            registry,
+            store,
+            as_of=T4,
+            canonical_strategy_id=STRATEGY_ID,
+            environment_id=identity.environment_id,
+            protocol_id=PROTOCOL_ID,
+            config_sha256=CONFIG_SHA256,
+            admissible_actions=frozenset({"WAIT"}),
+            eligibility_decision=decision,
+            eligibility_as_of=T2,
+        )
+
+    validator.assert_not_called()
+
+
 def test_cross_session_start_fails_closed_without_current_eligibility(tmp_path):
     (
         training,

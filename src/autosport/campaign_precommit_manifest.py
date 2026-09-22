@@ -465,6 +465,15 @@ def _open_bound_windows_parent_directory(
         wintypes.ULONG,
     )
     nt_create_file.restype = wintypes.LONG
+    nt_set_information_file = ntdll.NtSetInformationFile
+    nt_set_information_file.argtypes = (
+        wintypes.HANDLE,
+        ctypes.POINTER(IoStatusBlock),
+        wintypes.LPVOID,
+        wintypes.ULONG,
+        ctypes.c_int,
+    )
+    nt_set_information_file.restype = wintypes.LONG
     rtl_status_to_dos_error = ntdll.RtlNtStatusToDosError
     rtl_status_to_dos_error.argtypes = (wintypes.LONG,)
     rtl_status_to_dos_error.restype = wintypes.ULONG
@@ -886,7 +895,7 @@ def _publish_bound_windows_file_once(
     file_non_directory_file = 0x00000040
     file_open_reparse_point = 0x00200000
     obj_case_insensitive = 0x00000040
-    file_rename_info_class = 3
+    file_rename_information_class = 10
     file_disposition_info_class = 4
     error_file_exists = 80
     error_already_exists = 183
@@ -963,13 +972,16 @@ def _publish_bound_windows_file_once(
             raise CampaignPrecommitManifestError(
                 "first campaign precommit publication must precede prospective observation"
             )
-        if not set_file_information(
+        rename_io_status = IoStatusBlock()
+        rename_status = nt_set_information_file(
             handle,
-            file_rename_info_class,
+            ctypes.byref(rename_io_status),
             ctypes.byref(rename_info),
             ctypes.sizeof(rename_info),
-        ):
-            error_code = ctypes.get_last_error()
+            file_rename_information_class,
+        )
+        if rename_status < 0:
+            error_code = int(rtl_status_to_dos_error(rename_status))
             if error_code in {error_file_exists, error_already_exists}:
                 collision = True
             else:

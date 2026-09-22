@@ -10,6 +10,7 @@ from typing import Any, Mapping
 
 _SCHEMA_VERSION = 1
 _CURRENT_BETS_ENDPOINT = "/edge/rest/reports/v2/bets/current"
+_INT32_MAX = (1 << 31) - 1
 _HEX = frozenset("0123456789abcdef")
 
 
@@ -66,16 +67,18 @@ def _utc(value: object, name: str) -> str:
 
 
 def _non_negative_int(value: object, name: str) -> int:
-    if type(value) is not int or value < 0:
+    if type(value) is not int or value < 0 or value > _INT32_MAX:
         raise MatchbookCurrentBetEvidenceError(
-            f"{name} must be a non-negative integer"
+            f"{name} must be a non-negative signed int32"
         )
     return value
 
 
 def _positive_int(value: object, name: str) -> int:
-    if type(value) is not int or value <= 0:
-        raise MatchbookCurrentBetEvidenceError(f"{name} must be a positive integer")
+    if type(value) is not int or value <= 0 or value > _INT32_MAX:
+        raise MatchbookCurrentBetEvidenceError(
+            f"{name} must be a positive signed int32"
+        )
     return value
 
 

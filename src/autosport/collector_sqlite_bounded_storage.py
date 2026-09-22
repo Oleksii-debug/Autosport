@@ -186,6 +186,7 @@ def install_collector_storage_budget(store_cls: type[Any]) -> None:
     original_append_connection = store_cls._append_connection
     original_append = store_cls.append
     original_runtime_append = getattr(store_cls, "_append_with_runtime_stream_epoch", None)
+    original_runtime_batch = getattr(store_cls, "_append_batch_with_runtime_stream_epoch", None)
 
     def bounded_connect_path(path: Path) -> sqlite3.Connection:
         """Constrain every construction-time SQLite connection before any writes."""
@@ -349,6 +350,23 @@ def install_collector_storage_budget(store_cls: type[Any]) -> None:
                 ) from exc
             raise
 
+    def bounded_runtime_batch(
+        self: Any,
+        *args: Any,
+        **kwargs: Any,
+    ) -> tuple[bool, ...]:
+        assert original_runtime_batch is not None
+        try:
+            return original_runtime_batch(self, *args, **kwargs)
+        except Exception as exc:
+            if _sqlite_full_in_chain(exc):
+                raise CollectorStorageBackpressureError(
+                    "RETENTION_REQUIRED: collector SQLite page budget is exhausted; "
+                    "run explicit pin-aware compaction within the durable max_bytes, "
+                    "then retry"
+                ) from exc
+            raise
+
     def configured_max_bytes(self: Any) -> int | None:
         return getattr(self, "_collector_max_bytes_v1", None)
 
@@ -360,5 +378,7 @@ def install_collector_storage_budget(store_cls: type[Any]) -> None:
     store_cls.append = bounded_append
     if original_runtime_append is not None:
         store_cls._append_with_runtime_stream_epoch = bounded_runtime_append
+    if original_runtime_batch is not None:
+        store_cls._append_batch_with_runtime_stream_epoch = bounded_runtime_batch
     store_cls.configured_max_bytes = property(configured_max_bytes)
     store_cls._collector_storage_budget_v1_installed = True

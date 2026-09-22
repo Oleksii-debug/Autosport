@@ -596,6 +596,21 @@ def test_curriculum_wake_freezes_population_and_dispatches_once(tmp_path):
     assert again.action is TickAction.IDLE
     assert len(supervisor.list_runs()) == 1
 
+    with pytest.raises(ResearchSchedulerError, match="curriculum wake identity conflict"):
+        reopened.queue_curriculum_wake(
+            curriculum,
+            candidates,
+            purpose=CurriculumPurpose.CURRICULUM,
+            selector_policy_version="night-v1",
+            as_of="2026-09-19T03:20:00Z",
+            seed=17,
+            budget_units=2,
+            max_concurrency=1,
+            active_concurrency=0,
+            remaining_budget_units=8,
+        )
+    assert len(supervisor.list_runs()) == 1
+
 
 def test_curriculum_wake_rejects_changed_population_before_dispatch(tmp_path):
     _, supervisor, curriculum = _workspace(tmp_path, max_budget_units=8)

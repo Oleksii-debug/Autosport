@@ -359,3 +359,131 @@ def test_capability_profile_cannot_be_minted_after_action_time() -> None:
     )
     with pytest.raises(SmarketsReconciliationError, match="capability profile"):
         _verify(_action(), late_profile, _authority(), _readback())
+
+
+def test_journal_rejects_matched_stake_regression(tmp_path: Path) -> None:
+    path = tmp_path / "smarkets-reconciliation.jsonl"
+    journal = SmarketsReconciliationJournal(path)
+    first = _verify(
+        _action(),
+        _profile(),
+        _authority(),
+        _readback(
+            matched_quantity=Decimal("4"),
+            average_matched_price=Decimal("2.49"),
+            state=SmarketsOrderState.PARTIAL,
+            observed_at="2026-09-22T12:15:00+00:00",
+        ),
+    )
+    journal.append(first)
+    regressed = _verify(
+        _action(),
+        _profile(),
+        _authority(),
+        _readback(
+            matched_quantity=Decimal("3"),
+            average_matched_price=Decimal("2.49"),
+            state=SmarketsOrderState.PARTIAL,
+            observed_at="2026-09-22T12:16:00+00:00",
+            source_payload_sha256="d" * 64,
+        ),
+    )
+    with pytest.raises(SmarketsReconciliationError, match="stake regressed"):
+        journal.append(regressed)
+
+
+def test_journal_rejects_average_price_rewrite_without_new_fill(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "smarkets-reconciliation.jsonl"
+    journal = SmarketsReconciliationJournal(path)
+    journal.append(
+        _verify(
+            _action(),
+            _profile(),
+            _authority(),
+            _readback(
+                matched_quantity=Decimal("4"),
+                average_matched_price=Decimal("2.49"),
+                state=SmarketsOrderState.PARTIAL,
+            ),
+        )
+    )
+    rewritten = _verify(
+        _action(),
+        _profile(),
+        _authority(),
+        _readback(
+            matched_quantity=Decimal("4"),
+            average_matched_price=Decimal("2.47"),
+            state=SmarketsOrderState.PARTIAL,
+            observed_at="2026-09-22T12:16:00+00:00",
+            source_payload_sha256="d" * 64,
+        ),
+    )
+    with pytest.raises(SmarketsReconciliationError, match="without a new fill"):
+        journal.append(rewritten)
+
+
+def test_journal_allows_causal_partial_to_full_progression(tmp_path: Path) -> None:
+    path = tmp_path / "smarkets-reconciliation.jsonl"
+    journal = SmarketsReconciliationJournal(path)
+    partial = _verify(
+        _action(),
+        _profile(),
+        _authority(),
+        _readback(
+            matched_quantity=Decimal("4"),
+            average_matched_price=Decimal("2.49"),
+            state=SmarketsOrderState.PARTIAL,
+        ),
+    )
+    full = _verify(
+        _action(),
+        _profile(),
+        _authority(),
+        _readback(
+            matched_quantity=Decimal("10"),
+            average_matched_price=Decimal("2.48"),
+            state=SmarketsOrderState.FILLED,
+            observed_at="2026-09-22T12:16:00+00:00",
+            source_payload_sha256="d" * 64,
+        ),
+    )
+    journal.append(partial)
+    journal.append(full)
+    records = SmarketsReconciliationJournal(path).verify()
+    assert [row["status"] for row in records] == ["PARTIAL", "ACCEPTED"]
+    assert [row["accepted_stake"] for row in records] == ["4", "10"]
+
+
+def test_journal_rejects_readback_time_regression(tmp_path: Path) -> None:
+    path = tmp_path / "smarkets-reconciliation.jsonl"
+    journal = SmarketsReconciliationJournal(path)
+    journal.append(
+        _verify(
+            _action(),
+            _profile(),
+            _authority(),
+            _readback(
+                matched_quantity=Decimal("4"),
+                average_matched_price=Decimal("2.49"),
+                state=SmarketsOrderState.PARTIAL,
+                observed_at="2026-09-22T12:17:00+00:00",
+            ),
+        )
+    )
+    older = _verify(
+        _action(),
+        _profile(),
+        _authority(),
+        _readback(
+            matched_quantity=Decimal("5"),
+            average_matched_price=Decimal("2.48"),
+            state=SmarketsOrderState.PARTIAL,
+            observed_at="2026-09-22T12:16:00+00:00",
+            source_payload_sha256="d" * 64,
+        ),
+    )
+    with pytest.raises(SmarketsReconciliationError, match="time regressed"):
+        journal.append(older)

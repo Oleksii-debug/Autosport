@@ -304,6 +304,40 @@ def _phase_one(tmp_path):
         at=T7,
     )
 
+    supervisor_snapshot = supervisor.status(origin.run_id)
+    assert dict(supervisor_snapshot.bindings)["strategy_version_id"] == staged.strategy_version_id
+
+    alternate_spec = replace(
+        spec,
+        experiment_id="experiment-closed-loop-v1",
+        model_version_id="model-closed-loop-v1",
+        strategy_version_id="strategy-closed-loop-v1",
+        evaluation_bundle_id="eval-closed-loop-v1",
+        promotion_decision_id="promotion-closed-loop-v1",
+    )
+    alternate_stage = replace(
+        staged,
+        experiment_id=alternate_spec.experiment_id,
+        model_version_id=alternate_spec.model_version_id,
+        strategy_version_id=alternate_spec.strategy_version_id,
+        evaluation_bundle_id=alternate_spec.evaluation_bundle_id,
+        promotion_decision_id=alternate_spec.promotion_decision_id,
+    )
+    with pytest.raises(
+        ClosedLoopBindingError,
+        match="ResearchSupervisor factory binding mismatch",
+    ):
+        bind_challenger_artifact(
+            runtime=AgentLoopRuntime(runtime.path),
+            curriculum=curriculum,
+            selection=selection,
+            replay_binding=replay_binding,
+            supervisor=supervisor,
+            registry=registry,
+            spec=alternate_spec,
+            staged=alternate_stage,
+        )
+
     shadow_registry_path = tmp_path / "shadow-scientific-registry.json"
     shadow_registry_path.write_bytes(registry.path.read_bytes())
     shadow_registry = ScientificRegistry(shadow_registry_path)

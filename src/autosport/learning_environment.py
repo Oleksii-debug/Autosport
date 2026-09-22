@@ -107,6 +107,16 @@ def _canonical_decimal(name: str, value: object) -> Decimal:
     return value
 
 
+def _canonical_decimal_text(name: str, value: object) -> str:
+    """Return context-independent identity text for one exact Decimal value."""
+
+    decimal_value = _canonical_decimal(name, value)
+    if decimal_value == 0:
+        return "0"
+    text = format(decimal_value, "f")
+    return text.rstrip("0").rstrip(".") if "." in text else text
+
+
 def _stable_hash(payload: object) -> str:
     try:
         raw = json.dumps(
@@ -300,7 +310,7 @@ class RewardEvidence:
                 "environment_id": self.environment_id,
                 "action_id": self.action_id,
                 "outcome_id": self.outcome_id,
-                "reward": str(self.reward),
+                "reward": _canonical_decimal_text("reward", self.reward),
                 "available_at": _timestamp_identity("reward available_at", self.available_at),
                 "truth": self.truth.value,
                 "evidence": _metadata_payload(self.evidence),

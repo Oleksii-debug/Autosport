@@ -195,6 +195,8 @@ class RewardCorrectionReceipt:
             raise RewardCorrectionError("generation must be a positive integer")
         if type(self.invalidated_artifacts) is not tuple:
             raise RewardCorrectionError("invalidated_artifacts must be a tuple")
+        if any(not isinstance(item, EvidenceRef) for item in self.invalidated_artifacts):
+            raise RewardCorrectionError("invalidated_artifacts must contain EvidenceRef values")
         if self.invalidated_artifacts != tuple(sorted(self.invalidated_artifacts)):
             raise RewardCorrectionError("invalidated_artifacts must be sorted")
 
@@ -331,6 +333,7 @@ class RewardCorrectionLedger:
                 ).fetchone()
                 if row is not None and row["evidence_sha256"] != dependency.evidence_sha256:
                     raise RewardCorrectionError("dependency digest conflicts with registered artifact")
+            self._assert_graph_acyclic((*self._nodes(), node))
             self._connection.execute(
                 "INSERT INTO artifacts VALUES (?,?,?,?,?)",
                 (node.artifact.authority_family, node.artifact.evidence_id,
@@ -410,6 +413,7 @@ class RewardCorrectionLedger:
             if triggers != _EXPECTED_TRIGGERS:
                 raise RewardCorrectionError("reward correction immutability triggers mismatch")
             nodes = self._nodes()
+            self._assert_graph_acyclic(nodes)
             registered = {(n.artifact.authority_family, n.artifact.evidence_id): n.artifact for n in nodes}
             for node in nodes:
                 row = self._connection.execute(
@@ -424,9 +428,15 @@ class RewardCorrectionLedger:
                         raise RewardCorrectionError("registered dependency digest mismatch")
             previous: dict[tuple[str, str], RewardCorrectionAssertion] = {}
             for row in self._connection.execute(
-                "SELECT payload_json FROM corrections ORDER BY action_id,transition_id,generation"
+                "SELECT correction_id,action_id,transition_id,generation,payload_json "
+                "FROM corrections ORDER BY action_id,transition_id,generation"
             ).fetchall():
                 current = _correction_from_json(row["payload_json"])
+                if (row["correction_id"] != current.correction_id
+                        or row["action_id"] != current.action_id
+                        or row["transition_id"] != current.transition_id
+                        or row["generation"] != current.generation):
+                    raise RewardCorrectionError("correction row metadata does not match canonical payload")
                 key = (current.action_id, current.transition_id)
                 prior = previous.get(key)
                 if prior is None:
@@ -440,6 +450,12 @@ class RewardCorrectionLedger:
                 if self._invalidated(current.correction_id) != self._derive_invalidation(current.superseded_reward):
                     raise RewardCorrectionError("correction invalidation closure mismatch")
                 previous[key] = current
+            orphan = self._connection.execute(
+                "SELECT 1 FROM invalidations i LEFT JOIN corrections c "
+                "ON c.correction_id=i.correction_id WHERE c.correction_id IS NULL LIMIT 1"
+            ).fetchone()
+            if orphan is not None:
+                raise RewardCorrectionError("orphan correction invalidation evidence")
         except sqlite3.Error as exc:
             raise RewardCorrectionError("reward correction ledger is unreadable") from exc
 
@@ -462,6 +478,27 @@ class RewardCorrectionLedger:
         return tuple(_artifact_from_json(row["payload_json"]) for row in self._connection.execute(
             "SELECT payload_json FROM artifacts ORDER BY authority_family,evidence_id"
         ).fetchall())
+
+    @staticmethod
+    def _assert_graph_acyclic(nodes: tuple[DependencyArtifact, ...]) -> None:
+        graph = {node.artifact: node.dependencies for node in nodes}
+        visiting: set[EvidenceRef] = set()
+        visited: set[EvidenceRef] = set()
+
+        def visit(current: EvidenceRef) -> None:
+            if current in visiting:
+                raise RewardCorrectionError("dependency graph must be acyclic")
+            if current in visited:
+                return
+            visiting.add(current)
+            for dependency in graph.get(current, ()):
+                if dependency in graph:
+                    visit(dependency)
+            visiting.remove(current)
+            visited.add(current)
+
+        for artifact in graph:
+            visit(artifact)
 
     def _derive_invalidation(self, root: EvidenceRef) -> tuple[EvidenceRef, ...]:
         reverse: dict[EvidenceRef, list[EvidenceRef]] = {}

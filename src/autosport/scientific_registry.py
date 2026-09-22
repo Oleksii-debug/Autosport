@@ -138,8 +138,12 @@ def promotion_holdout_access_id(
 def _frozen_promotion_rule_payload(value: object) -> dict[str, Any]:
     text = _text(value, "binding.promotion_rule")
     try:
-        payload = json.loads(text)
-    except json.JSONDecodeError as exc:
+        payload = json.loads(
+            text,
+            object_pairs_hook=_reject_duplicate_keys,
+            parse_constant=_reject_nonfinite,
+        )
+    except (json.JSONDecodeError, ValueError) as exc:
         raise PromotionEvidenceError("frozen promotion rule is not canonical JSON") from exc
     if type(payload) is not dict or payload.get("kind") != "autosport-promotion-rule-v1":
         raise PromotionEvidenceError("frozen promotion rule kind is unsupported")

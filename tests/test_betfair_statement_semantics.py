@@ -12,7 +12,9 @@ from autosport.betfair_provider_billing_inputs import (
 )
 from autosport.betfair_statement_semantics import (
     BetfairStatementSemanticError,
+    assert_betfair_statement_semantic_authoritative,
     classify_betfair_statement_item,
+    verify_betfair_statement_semantic_evidence,
 )
 
 
@@ -297,6 +299,101 @@ def test_semantic_evidence_cannot_be_relabelled_without_digest_change() -> None:
 
     with pytest.raises(
         BetfairStatementSemanticError,
-        match="semantic evidence digest mismatch",
+        match="canonical classification",
     ):
         replace(evidence, economic_effect="UNKNOWN")
+
+
+
+def _semantic_digest_for_test(
+    evidence,
+    *,
+    win_lose: str,
+    classification_state: str,
+    economic_effect: str,
+    commission_reversal: bool = False,
+) -> str:
+    return _canonical_sha256(
+        {
+            "schema": "autosport.betfair_statement_row_semantics",
+            "schema_version": 1,
+            "row": {
+                "ref_id": evidence.row_ref_id,
+                "item_date": evidence.row_item_date,
+                "amount": str(evidence.row_amount),
+                "balance": str(evidence.row_balance),
+                "item_class": evidence.row_item_class,
+                "item_class_data_sha256": evidence.row_item_class_data_sha256,
+            },
+            "transaction_type": evidence.transaction_type,
+            "win_lose": win_lose,
+            "classification_state": classification_state,
+            "economic_effect": economic_effect,
+            "commission_reversal": commission_reversal,
+        }
+    )
+
+
+def test_classifier_issued_object_has_process_local_semantic_authority() -> None:
+    raw = _raw("ACCOUNT_CREDIT", "RESULT_WON")
+    evidence = classify_betfair_statement_item(_row(raw), raw)
+
+    assert_betfair_statement_semantic_authoritative(evidence)
+
+
+def test_copy_equal_semantic_dto_does_not_inherit_process_local_authority() -> None:
+    raw = _raw("ACCOUNT_CREDIT", "RESULT_WON")
+    evidence = classify_betfair_statement_item(_row(raw), raw)
+    copied = replace(evidence)
+
+    assert copied == evidence
+    with pytest.raises(
+        BetfairStatementSemanticError,
+        match="lacks canonical classifier issuance",
+    ):
+        assert_betfair_statement_semantic_authoritative(copied)
+
+
+def test_copy_equal_semantics_can_be_freshly_rederived_from_exact_raw_row() -> None:
+    raw = _raw("ACCOUNT_CREDIT", "RESULT_WON")
+    row = _row(raw)
+    evidence = classify_betfair_statement_item(row, raw)
+    copied = replace(evidence)
+
+    assert verify_betfair_statement_semantic_evidence(
+        row=row,
+        item_class_data=raw,
+        evidence=copied,
+    )
+
+
+def test_consistent_rehashed_relabel_is_not_authoritative_and_fails_reresolution() -> None:
+    raw = _raw("ACCOUNT_CREDIT", "RESULT_WON")
+    row = _row(raw)
+    evidence = classify_betfair_statement_item(row, raw)
+    forged = replace(
+        evidence,
+        win_lose="RESULT_ERR",
+        classification_state="RESTATED_ERROR_LABEL",
+        economic_effect="NO_NEW_BALANCE_EFFECT",
+        evidence_sha256=_semantic_digest_for_test(
+            evidence,
+            win_lose="RESULT_ERR",
+            classification_state="RESTATED_ERROR_LABEL",
+            economic_effect="NO_NEW_BALANCE_EFFECT",
+        ),
+    )
+
+    # The DTO is internally coherent, but it is not a product-issued
+    # interpretation of the bound raw itemClassData.
+    assert forged.evidence_sha256 != evidence.evidence_sha256
+    with pytest.raises(
+        BetfairStatementSemanticError,
+        match="lacks canonical classifier issuance",
+    ):
+        assert_betfair_statement_semantic_authoritative(forged)
+    assert not verify_betfair_statement_semantic_evidence(
+        row=row,
+        item_class_data=raw,
+        evidence=forged,
+    )

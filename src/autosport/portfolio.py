@@ -46,7 +46,9 @@ def _portfolio_arithmetic_error(exc: DecimalException) -> ValueError:
     )
 
 
-def _analysis_ticket_fingerprint(\n    ticket: PaperTicket,\n) -> tuple[str, Decimal, tuple[TicketLeg, ...], str, TicketStatus]:
+def _analysis_ticket_fingerprint(
+    ticket: PaperTicket,
+) -> tuple[str, Decimal, tuple[TicketLeg, ...], str, TicketStatus]:
     """Return exactly the mutable ticket fields consumed by scenario analysis."""
 
     return (

@@ -166,7 +166,8 @@ def _review_payload(
         "schema_version": 1,
         "execution_plan_id": bound.execution_plan.plan_id,
         "execution_plan_sha256": bound.execution_plan.fingerprint,
-        "decision_id": bound.execution_plan.decision_id,
+        "execution_decision_id": bound.execution_plan.plan_id,
+        "upstream_decision_id": bound.execution_plan.decision_id,
         "portfolio_plan_sha256": bound.portfolio_plan_sha256,
         "economic_goal_contract_sha256": bound.economic_goal_contract_sha256,
         "intent_id": bound.intent_id,
@@ -207,9 +208,9 @@ def _require_confirmation_binding(
     plan = bound.execution_plan
     expected_decision_sha256 = plan.fingerprint
 
-    if review.decision_id != plan.decision_id:
+    if review.decision_id != plan.plan_id:
         raise SmarketsExecutionApprovalError(
-            "operator confirmation decision_id does not match execution plan"
+            "operator confirmation decision_id does not match exact execution plan identity"
         )
     if review.decision_sha256 != expected_decision_sha256:
         raise SmarketsExecutionApprovalError(

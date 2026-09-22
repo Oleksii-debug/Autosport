@@ -275,10 +275,11 @@ def _install_live_loop_guard() -> None:
                 )
             except PaperExecutionAdoptionError as exc:
                 raise live.LiveDecisionProgressError(str(exc)) from exc
-            if (
-                pre_action_book is not None
-                and not loop._same_book_state(loop.book, pre_action_book)
-            ):
+            if pre_action_book is None:
+                raise live.LiveDecisionProgressError(
+                    "append-pending recovery is missing durable pre-action PaperBook witness"
+                )
+            if not loop._same_book_state(loop.book, pre_action_book):
                 raise live.LiveDecisionProgressError(
                     "append-pending PaperBook changed without exact execution authority"
                 )

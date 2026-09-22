@@ -93,15 +93,23 @@ def _probe_workspace_writable(workspace: Path) -> None:
 
 
 def _workspace_access_error_message(workspace: Path, exc: OSError) -> str:
-    detail = " ".join(str(exc).splitlines()).strip() or "невідома помилка файлової системи"
-    return (
+    from autosport.secret_redaction import redact_operator_text, safe_exception_text
+
+    safe_error = " ".join(
+        safe_exception_text(
+            exc,
+            unavailable_detail="невідома помилка файлової системи",
+        ).splitlines()
+    ).strip()
+    message = (
         "Автоспорт не може підготувати workspace для запису.\n\n"
         f"Workspace: {workspace}\n"
-        f"Помилка: {type(exc).__name__}: {detail}\n\n"
+        f"Помилка: {safe_error}\n\n"
         "Вкажіть AUTOSPORT_WORKSPACE як абсолютний шлях до папки вашого користувача, "
         "доступної для запису, і перезапустіть Автоспорт. "
         "Права адміністратора не потрібні. Economic і live state не змінено."
     )
+    return redact_operator_text(message)
 
 
 def _show_workspace_access_error(workspace: Path, exc: OSError) -> None:

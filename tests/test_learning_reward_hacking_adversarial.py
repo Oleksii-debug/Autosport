@@ -1,4 +1,4 @@
-from decimal import Decimal
+from decimal import Decimal, ROUND_DOWN, ROUND_UP, localcontext
 
 import pytest
 
@@ -125,6 +125,55 @@ def test_alias_replay_cannot_amplify_an_already_applied_action() -> None:
             transition=alias_transition,
         )
 
+
+
+
+def test_common_integer_reward_sum_keeps_fixed_canonical_text() -> None:
+    fixed = ActionEstimate(
+        action_type="WAIT",
+        observations=1,
+        reward_sum=Decimal("1000.000"),
+    )
+    scientific_alias = ActionEstimate(
+        action_type="WAIT",
+        observations=1,
+        reward_sum=Decimal("1E+3"),
+    )
+
+    assert fixed.to_payload() == scientific_alias.to_payload()
+    assert fixed.to_payload()["reward_sum"] == "1000"
+
+
+def test_reward_and_policy_identity_ignore_ambient_decimal_context() -> None:
+    with localcontext() as context:
+        context.prec = 3
+        context.rounding = ROUND_DOWN
+        low_action, low_reward, low_transition = _causal_reward(
+            "123456789.123456789000"
+        )
+        low_successor, low_update = _initial_policy().update(
+            action=low_action,
+            reward=low_reward,
+            transition=low_transition,
+        )
+
+    with localcontext() as context:
+        context.prec = 80
+        context.rounding = ROUND_UP
+        high_action, high_reward, high_transition = _causal_reward(
+            "123456789.123456789"
+        )
+        high_successor, high_update = _initial_policy().update(
+            action=high_action,
+            reward=high_reward,
+            transition=high_transition,
+        )
+
+    assert low_reward.reward_id == high_reward.reward_id
+    assert low_transition.transition_id == high_transition.transition_id
+    assert low_successor == high_successor
+    assert low_successor.policy_id == high_successor.policy_id
+    assert low_update.update_id == high_update.update_id
 
 
 def test_canonical_reward_sum_identity_stays_compact_for_large_exponents() -> None:

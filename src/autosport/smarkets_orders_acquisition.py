@@ -9,6 +9,7 @@ witness to an existing canonical execution action and product-owned approval.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 from hashlib import sha256
 from http.client import IncompleteRead
@@ -207,6 +208,19 @@ def _read_complete_body(response: object) -> bytes:
     return raw
 
 
+def _utc_now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def _product_received_at() -> str:
+    value = _utc_now()
+    if not isinstance(value, datetime) or value.tzinfo is None or value.utcoffset() is None:
+        raise SmarketsOrdersAcquisitionError(
+            "product receipt clock must return a timezone-aware datetime"
+        )
+    return value.astimezone(timezone.utc).isoformat()
+
+
 def _open_orders_request(request: Request, timeout: float):
     """Internal HTTPS authority boundary; tests patch this private seam only."""
     context = ssl.create_default_context()
@@ -225,6 +239,7 @@ class SmarketsOrdersPayloadWitness:
     endpoint: str
     http_status: int
     provider_date: str
+    received_at: str
     content_type: str
     payload_sha256: str
     payload_size: int
@@ -236,6 +251,7 @@ class SmarketsOrdersPayloadWitness:
         endpoint: str,
         http_status: int,
         provider_date: str,
+        received_at: str,
         content_type: str,
         payload_sha256: str,
         payload_size: int,
@@ -249,6 +265,7 @@ class SmarketsOrdersPayloadWitness:
         object.__setattr__(self, "endpoint", endpoint)
         object.__setattr__(self, "http_status", http_status)
         object.__setattr__(self, "provider_date", provider_date)
+        object.__setattr__(self, "received_at", received_at)
         object.__setattr__(self, "content_type", content_type)
         object.__setattr__(self, "payload_sha256", payload_sha256)
         object.__setattr__(self, "payload_size", payload_size)
@@ -334,11 +351,13 @@ def acquire_smarkets_orders_payload(
         raise SmarketsOrdersAcquisitionError("Smarkets orders payload is empty")
 
     _strict_json(raw)
+    received_at = _product_received_at()
     digest = sha256(raw).hexdigest()
     return SmarketsOrdersPayloadWitness(
         endpoint=SMARKETS_ORDERS_ENDPOINT,
         http_status=200,
         provider_date=provider_date,
+        received_at=received_at,
         content_type=content_type,
         payload_sha256=digest,
         payload_size=len(raw),

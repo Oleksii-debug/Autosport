@@ -1,12 +1,16 @@
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import pytest
 
 from autosport.external_validity_policy_issuance import (
     ProductPolicyEvaluationIssuanceError,
     _registry_get,
+    _store_read,
 )
 from autosport.scientific_registry import ScientificRegistry
+from autosport.strategy_model_factory import FactoryArtifactStore
 
 
 def test_product_issuer_rejects_scientific_registry_class_read_rebind(
@@ -32,3 +36,34 @@ def test_product_issuer_rejects_scientific_registry_class_read_rebind(
         _registry_get(registry, "DatasetSnapshot", "caller-forged-dataset")
 
     assert forged_read_called is False
+
+
+def test_product_issuer_rejects_factory_store_snapshot_reader_rebind(
+    tmp_path,
+    monkeypatch,
+):
+    store = FactoryArtifactStore(tmp_path / "factory-artifacts")
+    forged_snapshot_called = False
+
+    def forged_snapshot(self, kind, identity):
+        nonlocal forged_snapshot_called
+        forged_snapshot_called = True
+        return SimpleNamespace(
+            payload=b'{"kind":"caller-forged-evaluation"}',
+            sha256="a" * 64,
+        )
+
+    monkeypatch.setattr(FactoryArtifactStore, "_stable_snapshot", forged_snapshot)
+
+    with pytest.raises(
+        ProductPolicyEvaluationIssuanceError,
+        match="FactoryArtifactStore executable authority was rebound",
+    ):
+        _store_read(
+            store,
+            "evaluation",
+            "caller-forged-evaluation",
+            expected_sha256="a" * 64,
+        )
+
+    assert forged_snapshot_called is False

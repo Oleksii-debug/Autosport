@@ -143,6 +143,23 @@ class OperatorStatusAnnouncementBroker:
         "message", "occurred_at", "published_at", "superseded_by",
         "acknowledged_at", "record_sha256",
     )
+    _EVENT_SCHEMA = (
+        ("sequence", "INTEGER", 0, 1),
+        ("event_id", "TEXT", 1, 0),
+        ("idempotency_key", "TEXT", 1, 0),
+        ("priority", "TEXT", 1, 0),
+        ("coalesce_key", "TEXT", 0, 0),
+        ("message", "TEXT", 1, 0),
+        ("occurred_at", "TEXT", 1, 0),
+        ("published_at", "TEXT", 1, 0),
+        ("superseded_by", "TEXT", 0, 0),
+        ("acknowledged_at", "TEXT", 0, 0),
+        ("record_sha256", "TEXT", 1, 0),
+    )
+    _METADATA_SCHEMA = (
+        ("key", "TEXT", 0, 1),
+        ("value", "TEXT", 1, 0),
+    )
 
     def __init__(
         self,
@@ -167,6 +184,11 @@ class OperatorStatusAnnouncementBroker:
             self._db.execute("PRAGMA foreign_keys=ON")
             self._init_schema()
             self.verify_integrity()
+        except OperatorStatusIntegrityError:
+            db = getattr(self, "_db", None)
+            if db is not None:
+                db.close()
+            raise
         except (sqlite3.DatabaseError, OSError) as exc:
             db = getattr(self, "_db", None)
             if db is not None:
@@ -218,9 +240,16 @@ class OperatorStatusAnnouncementBroker:
         metadata = self._db.execute("SELECT key,value FROM metadata ORDER BY key").fetchall()
         if metadata != [("schema_version", SCHEMA_VERSION)]:
             raise OperatorStatusIntegrityError("operator announcement schema version mismatch")
-        columns = tuple(row[1] for row in self._db.execute("PRAGMA table_info(events)"))
-        if columns != self._COLUMNS:
-            raise OperatorStatusIntegrityError("operator announcement event schema mismatch")
+        event_schema = tuple(
+            (row[1], str(row[2]).upper(), row[3], row[5])
+            for row in self._db.execute("PRAGMA table_info(events)")
+        )
+        metadata_schema = tuple(
+            (row[1], str(row[2]).upper(), row[3], row[5])
+            for row in self._db.execute("PRAGMA table_info(metadata)")
+        )
+        if event_schema != self._EVENT_SCHEMA or metadata_schema != self._METADATA_SCHEMA:
+            raise OperatorStatusIntegrityError("operator announcement schema mismatch")
 
     def _now(self) -> datetime:
         return _utc(self._clock(), "clock result")

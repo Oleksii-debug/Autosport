@@ -146,6 +146,145 @@ class BetfairCrlfJsonDecoder:
             self._failed = True
             raise ValueError("truncated Betfair stream frame without CRLF terminator")
 
+@dataclass(frozen=True, slots=True)
+class BetfairSegmentBudget:
+    """Finite in-memory bounds for one segmented market ChangeMessage."""
+
+    max_segments: int
+    max_canonical_bytes: int
+
+    def __post_init__(self) -> None:
+        _int(self.max_segments, "max_segments", minimum=1)
+        _int(self.max_canonical_bytes, "max_canonical_bytes", minimum=1)
+
+
+class BetfairMarketChangeSegmentReassembler:
+    """Reassemble Betfair market segments atomically before typed decoding.
+
+    Betfair's reference clients accumulate each segment's market-change items and,
+    on SEG_END, publish the final segment metadata with the accumulated item list.
+    Any sequencing/budget failure poisons this instance so callers must reconnect
+    and start with a fresh reassembler instead of guessing at a partial image.
+    """
+
+    _SEGMENT_TYPES = frozenset({"SEG_START", "SEG", "SEG_END"})
+
+    def __init__(self, *, budget: BetfairSegmentBudget) -> None:
+        if type(budget) is not BetfairSegmentBudget:
+            raise TypeError("budget must be BetfairSegmentBudget")
+        self._budget = budget
+        self._items: list[object] | None = None
+        self._segment_count = 0
+        self._canonical_bytes = 0
+        self._failed = False
+
+    @property
+    def pending_segments(self) -> int:
+        return self._segment_count
+
+    @property
+    def pending_canonical_bytes(self) -> int:
+        return self._canonical_bytes
+
+    @property
+    def failed(self) -> bool:
+        return self._failed
+
+    def _clear_pending(self) -> None:
+        self._items = None
+        self._segment_count = 0
+        self._canonical_bytes = 0
+
+    def _fail(self, message: str) -> None:
+        self._clear_pending()
+        self._failed = True
+        raise ValueError(message)
+
+    def _require_usable(self) -> None:
+        if self._failed:
+            raise ValueError(
+                "Betfair segment reassembler failed; reconnect with a new reassembler"
+            )
+
+    @staticmethod
+    def _sealed_copy(raw: dict[str, Any]) -> tuple[dict[str, Any], int]:
+        try:
+            payload = json.dumps(
+                raw,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+                allow_nan=False,
+            ).encode("utf-8")
+            sealed = json.loads(
+                payload.decode("utf-8"),
+                parse_constant=_reject_constant,
+                object_pairs_hook=_strict_object,
+            )
+        except (TypeError, ValueError, UnicodeError, json.JSONDecodeError) as exc:
+            raise ValueError(
+                "Betfair segment must contain canonical JSON-compatible values"
+            ) from exc
+        if type(sealed) is not dict:
+            raise ValueError("Betfair segment must contain a JSON object")
+        return sealed, len(payload)
+
+    def push(self, raw: dict[str, Any]) -> dict[str, Any] | None:
+        if type(raw) is not dict:
+            raise TypeError("raw must be a dict")
+        self._require_usable()
+
+        segment_type = raw.get("segmentType")
+        if segment_type is None:
+            if self._items is not None:
+                self._fail(
+                    "non-segmented message arrived before segmented message completed"
+                )
+            return raw
+        if type(segment_type) is not str or segment_type not in self._SEGMENT_TYPES:
+            self._fail(f"unsupported Betfair segment type {segment_type!r}")
+        if raw.get("op") != "mcm":
+            self._fail("market segment reassembler only accepts op='mcm'")
+
+        if segment_type == "SEG_START":
+            if self._items is not None:
+                self._fail("SEG_START arrived before prior segmented message completed")
+            self._items = []
+            self._segment_count = 0
+            self._canonical_bytes = 0
+        elif self._items is None:
+            self._fail(f"{segment_type} arrived without SEG_START")
+
+        try:
+            sealed, encoded_size = self._sealed_copy(raw)
+        except ValueError as exc:
+            self._fail(str(exc))
+        items = sealed.get("mc", [])
+        if type(items) is not list:
+            self._fail("segmented market mc must be a list")
+
+        next_count = self._segment_count + 1
+        next_bytes = self._canonical_bytes + encoded_size
+        if next_count > self._budget.max_segments:
+            self._fail("Betfair segmented message exceeds max_segments budget")
+        if next_bytes > self._budget.max_canonical_bytes:
+            self._fail("Betfair segmented message exceeds max_canonical_bytes budget")
+
+        assert self._items is not None
+        self._items.extend(items)
+        self._segment_count = next_count
+        self._canonical_bytes = next_bytes
+
+        if segment_type != "SEG_END":
+            return None
+
+        completed = sealed
+        completed.pop("segmentType", None)
+        completed["mc"] = self._items
+        self._clear_pending()
+        return completed
+
+
 class BetfairQuoteSide(str, Enum):
     BACK = "back"
     LAY = "lay"

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from decimal import Decimal
 from types import SimpleNamespace
 
@@ -120,6 +121,48 @@ _RUNTIME_RECOVERY_KEYS = {
     "ui.status.replay.reopen_blocked",
     "ui.status.close.recovery_busy",
 }
+
+_LANGUAGE_NEUTRAL_CRITICAL_UI_KEYS = {
+    "ui.speed.10x",
+    "ui.speed.100x",
+    "ui.speed.1000x",
+}
+_UKRAINIAN_PRODUCT_CONTEXT_RE = re.compile(r"[А-Яа-яІіЇїЄєҐґ]")
+
+
+def _has_ukrainian_product_context(value: str) -> bool:
+    return bool(_UKRAINIAN_PRODUCT_CONTEXT_RE.search(value))
+
+
+def test_critical_catalog_entries_fail_closed_on_english_or_key_fallback() -> None:
+    current = catalog(DEFAULT_LOCALE)
+    require_keys(_CRITICAL_UI_KEYS)
+
+    for key in sorted(_CRITICAL_UI_KEYS):
+        rendered = current[key]
+        assert isinstance(rendered, str), key
+        assert rendered.strip(), key
+        assert rendered.strip() != key, key
+        if key not in _LANGUAGE_NEUTRAL_CRITICAL_UI_KEYS:
+            assert _has_ukrainian_product_context(rendered), (
+                f"critical product/UIA text lacks Ukrainian context: {key}={rendered!r}"
+            )
+
+
+def test_ukrainian_context_guard_allows_canonical_technical_tokens() -> None:
+    for rendered in (
+        "Betfair API доступний",
+        "UTC і SHA-256 перевірені",
+        r"Шлях C:\Autosport\state доступний",
+    ):
+        assert _has_ukrainian_product_context(rendered)
+
+    for rendered in ("10×", "100×", "1000×"):
+        assert not _UKRAINIAN_PRODUCT_CONTEXT_RE.search(rendered)
+
+    assert not _has_ukrainian_product_context("Start replay")
+    assert not _has_ukrainian_product_context("ui.button.run_replay")
+    assert not _has_ukrainian_product_context("   ")
 
 
 def test_catalog_is_versioned_ukrainian_default_and_fails_closed() -> None:

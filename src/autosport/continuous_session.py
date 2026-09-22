@@ -909,7 +909,21 @@ class ContinuousSessionCoordinator:
                     "settlement evidence reference does not match lifecycle evidence"
                 )
             resolution.validate(as_of=as_of)
-            resolutions.append(resolution)
+            (snapshot,) = self._settlement_handoff_snapshot(
+                (resolution,),
+                as_of=as_of,
+            )
+            # The detached object, not the authority-owned object, is the final
+            # lifecycle-bound truth crossing into session economics.
+            if snapshot.event_identity != record.identity:
+                raise ContinuousSessionError(
+                    "settlement snapshot event identity does not match lifecycle identity"
+                )
+            if snapshot.settlement_ref != record.settlement_ref:
+                raise ContinuousSessionError(
+                    "settlement snapshot reference does not match lifecycle evidence"
+                )
+            resolutions.append(snapshot)
         return tuple(resolutions)
 
     def _load_book(self) -> PaperBook:
@@ -920,6 +934,8 @@ class ContinuousSessionCoordinator:
     @staticmethod
     def _settlement_handoff_snapshot(
         resolutions: tuple[SettlementResolution, ...],
+        *,
+        as_of: str | None = None,
     ) -> tuple[SettlementResolution, ...]:
         """Detach one exact validated settlement snapshot from caller-owned state."""
 
@@ -929,7 +945,8 @@ class ContinuousSessionCoordinator:
                 raise TypeError(
                     "resolutions must contain SettlementResolution values"
                 )
-            resolution.validate(as_of=resolution.available_at)
+            validation_cutoff = resolution.available_at if as_of is None else as_of
+            resolution.validate(as_of=validation_cutoff)
             outcomes = resolution.quote_outcomes
             if not isinstance(outcomes, _ValidatedQuoteOutcomes):
                 raise ContinuousSessionError(
@@ -952,7 +969,7 @@ class ContinuousSessionCoordinator:
                 evidence_sha256=resolution.evidence_sha256,
                 available_at=resolution.available_at,
             )
-            snapshot.validate(as_of=snapshot.available_at)
+            snapshot.validate(as_of=validation_cutoff)
             snapshot_outcomes = snapshot.quote_outcomes
             if (
                 not isinstance(snapshot_outcomes, _ValidatedQuoteOutcomes)
@@ -1103,7 +1120,10 @@ class ContinuousSessionCoordinator:
             # From this point onward, durable/economic truth uses only a private
             # detached snapshot.  The outcome authority may retain and mutate the
             # object it returned without rewriting this cycle's validated result.
-            resolutions = self._settlement_handoff_snapshot(authority_resolutions)
+            resolutions = self._settlement_handoff_snapshot(
+                authority_resolutions,
+                as_of=now,
+            )
             self._state.validate_settlement_evidence(
                 settlement_evidence=resolutions
             )
@@ -1111,7 +1131,10 @@ class ContinuousSessionCoordinator:
             if self.settlement_learning_handoff is not None:
                 # Learning gets a separate copy so callback mutation cannot affect
                 # settlement or the durable receipt published by this cycle.
-                handoff_resolutions = self._settlement_handoff_snapshot(resolutions)
+                handoff_resolutions = self._settlement_handoff_snapshot(
+                    resolutions,
+                    as_of=now,
+                )
                 prepare = getattr(
                     self.settlement_learning_handoff,
                     "prepare_settlement",

@@ -575,3 +575,47 @@ def test_response_commit_clock_failure_drops_token_authority_and_rotates_on_retr
     assert transport.generation_id == "gen-2"
     assert lifecycle.state is SessionState.ACTIVE
     assert lifecycle._issued_read_tickets == {}
+
+
+def test_confirmed_logout_clock_failure_still_clears_local_token_authority() -> None:
+    login = LoginFactory()
+    logged_out: list[str] = []
+
+    class FailFourthClock:
+        def __init__(self) -> None:
+            self.calls = 0
+            self.fail = True
+
+        def __call__(self) -> int:
+            self.calls += 1
+            if self.fail and self.calls == 4:
+                raise RuntimeError("clock unavailable during logout")
+            return 200 + self.calls
+
+    clock = FailFourthClock()
+    lifecycle = MatchbookSessionLifecycle()
+    transport = MatchbookReadOnlySessionTransport(
+        lifecycle=lifecycle,
+        login=login,
+        read=lambda token, path: MatchbookReadResponse(200, token),
+        logout=lambda token: logged_out.append(token) or 200,
+        clock_ns=clock,
+        generation_factory=GenerationFactory(),
+    )
+    assert transport.read(path="/edge/rest/events").payload == "token-1"
+
+    with pytest.raises(
+        MatchbookSessionTransportError,
+        match="could not be committed",
+    ):
+        transport.logout()
+
+    assert logged_out == ["token-1"]
+    assert transport.generation_id is None
+    assert lifecycle.state is SessionState.ACTIVE
+
+    clock.fail = False
+    assert transport.read(path="/edge/rest/events").payload == "token-2"
+    assert login.calls == 2
+    assert transport.generation_id == "gen-2"
+    assert lifecycle.state is SessionState.ACTIVE

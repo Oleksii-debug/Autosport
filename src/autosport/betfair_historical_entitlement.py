@@ -2,7 +2,10 @@
 
 Consumes the canonical K07 authenticated session context and records the exact
 GetMyData purchase snapshot, DownloadListOfFiles result, and DownloadFile bytes.
-This authority is PERSONAL_NONCOMMERCIAL only.  It does not prove stable
+The captured values preserve purchase/list/file structure and exact byte identities,
+but this lineage does not mechanically prove provider acquisition origin or current
+usage rights.  PERSONAL_NONCOMMERCIAL is a dated reference classification only;
+rights must be revalidated by a separate authority.  This module does not prove stable
 cross-session account identity, commercial/redistribution rights, live freshness,
 execution, settlement, or real-money truth.
 """
@@ -93,6 +96,20 @@ class HistoricalEntitlementSnapshot:
             raise BetfairHistoricalEntitlementError("terms provenance is product-owned")
 
     @property
+    def provider_acquisition_verified(self) -> bool:
+        """Current transport evidence is structural, not executable-origin proof."""
+        return False
+
+    @property
+    def usage_rights_verified(self) -> bool:
+        """Dated Terms metadata is not a current lawful-use decision."""
+        return False
+
+    @property
+    def rights_revalidation_required(self) -> bool:
+        return True
+
+    @property
     def snapshot_sha256(self) -> str:
         return _digest(
             {
@@ -108,6 +125,9 @@ class HistoricalEntitlementSnapshot:
                 "redistributable": False,
                 "terms_reference": TERMS_REFERENCE,
                 "terms_as_of": TERMS_AS_OF,
+                "provider_acquisition_verified": False,
+                "usage_rights_verified": False,
+                "rights_revalidation_required": True,
             }
         )
 
@@ -206,6 +226,18 @@ class HistoricalFileListing:
             _path(path)
 
     @property
+    def provider_acquisition_verified(self) -> bool:
+        return False
+
+    @property
+    def usage_rights_verified(self) -> bool:
+        return False
+
+    @property
+    def rights_revalidation_required(self) -> bool:
+        return True
+
+    @property
     def listing_sha256(self) -> str:
         return _digest(
             {
@@ -217,6 +249,9 @@ class HistoricalFileListing:
                 "observed_at": self.observed_at,
                 "response_sha256": self.response_sha256,
                 "provider_paths": list(self.provider_paths),
+                "provider_acquisition_verified": False,
+                "usage_rights_verified": False,
+                "rights_revalidation_required": True,
             }
         )
 
@@ -241,6 +276,18 @@ class HistoricalDownloadedFile:
         _uint(self.byte_length, "byte_length")
 
     @property
+    def provider_acquisition_verified(self) -> bool:
+        return False
+
+    @property
+    def usage_rights_verified(self) -> bool:
+        return False
+
+    @property
+    def rights_revalidation_required(self) -> bool:
+        return True
+
+    @property
     def file_identity_sha256(self) -> str:
         return _digest(
             {
@@ -253,6 +300,9 @@ class HistoricalDownloadedFile:
                 "retrieved_at": self.retrieved_at,
                 "raw_sha256": self.raw_sha256,
                 "byte_length": self.byte_length,
+                "provider_acquisition_verified": False,
+                "usage_rights_verified": False,
+                "rights_revalidation_required": True,
             }
         )
 
@@ -458,7 +508,18 @@ class BetfairHistoricalEntitlementClient:
             or sha256(raw_bytes).hexdigest() != evidence.raw_sha256
         ):
             raise BetfairHistoricalEntitlementError(
-                "download bytes do not match exact provider acquisition evidence"
+                "download bytes do not match exact captured file evidence"
+            )
+        if not evidence.provider_acquisition_verified:
+            raise BetfairHistoricalEntitlementError(
+                "provider acquisition provenance is not mechanically proven"
+            )
+        if (
+            not evidence.usage_rights_verified
+            or evidence.rights_revalidation_required
+        ):
+            raise BetfairHistoricalEntitlementError(
+                "current usage rights require separate revalidation"
             )
         return evidence
 

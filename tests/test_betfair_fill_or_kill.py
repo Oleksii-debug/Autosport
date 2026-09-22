@@ -193,6 +193,29 @@ class BetfairFillOrKillTests(unittest.TestCase):
         with self.assertRaisesRegex(BetfairFillOrKillError, "positive integer text"):
             self._request(selection_id="00123")
 
+    def test_extreme_decimal_exponents_fail_before_fixed_point_materialization(self):
+        for field, value in (
+            ("requested_size", Decimal("1E+1000000")),
+            ("requested_size", Decimal("1E-1000000")),
+            ("requested_size", Decimal("0E-1000000")),
+        ):
+            with self.subTest(field=field, value=str(value)), self.assertRaisesRegex(
+                BetfairFillOrKillError,
+                "fixed-point representation exceeds resource bound",
+            ):
+                self._request(**{field: value})
+
+        request = self._request()
+        for field, value in (
+            ("size_matched", Decimal("0E-1000000")),
+            ("average_price_matched", Decimal("1E+1000000")),
+        ):
+            with self.subTest(field=field, value=str(value)), self.assertRaisesRegex(
+                BetfairFillOrKillError,
+                "fixed-point representation exceeds resource bound",
+            ):
+                self._report(request, **{field: value})
+
     def test_structural_evidence_is_deterministic(self):
         request = self._request(min_fill_size="3")
         report = self._report(

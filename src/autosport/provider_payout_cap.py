@@ -20,6 +20,7 @@ from decimal import Decimal
 from enum import Enum
 from hashlib import sha256
 import json
+from weakref import ref
 
 
 class ProviderPayoutCapError(ValueError):

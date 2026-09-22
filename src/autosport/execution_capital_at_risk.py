@@ -173,6 +173,25 @@ def _add_precision(*values: Decimal) -> int:
     return _bounded_precision(max(aligned_widths) + 2)
 
 
+def _add(left: Decimal, right: Decimal) -> Decimal:
+    with localcontext() as context:
+        context.prec = _add_precision(left, right)
+        return left + right
+
+
+def _subtract(left: Decimal, right: Decimal) -> Decimal:
+    with localcontext() as context:
+        context.prec = _add_precision(left, right)
+        return left - right
+
+
+def _subtract_nonnegative(left: Decimal, right: Decimal) -> Decimal:
+    result = _subtract(left, right)
+    if result < 0:
+        return Decimal(0)
+    return result
+
+
 def _requested_limit_capital(attempt: ExecutionAttemptReadView) -> Decimal:
     action = attempt.action
     if action.bookmaker_id != "betfair":

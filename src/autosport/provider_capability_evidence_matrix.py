@@ -311,7 +311,7 @@ class ProviderCapabilityEvidenceMatrix:
         as_of = _time(self.as_of, "as_of")
         if _time(self.profile.observed_at, "profile.observed_at") > as_of:
             raise ProviderCapabilityEvidenceMatrixError("as_of predates profile")
-        if _time(self.integration.observed_at, "integration.observeded_at") > as_of:
+        if _time(self.integration.observed_at, "integration.observed_at") > as_of:
             raise ProviderCapabilityEvidenceMatrixError("as_of predates integration")
         if type(self.facts) is not tuple:
             raise ProviderCapabilityEvidenceMatrixError("facts must be tuple")

@@ -117,7 +117,7 @@ def test_windows_package_blob_writer_closes_raw_temp_descriptor_when_fdopen_fail
     with pytest.raises(OSError, match="injected fdopen failure"):
         package_windows._write_exact_git_blob(
             tmp_path,
-            "47d05ff6403c8e6c98102f9fd8e6edc1a17bd44f",
+            "47d05ff6403c8e6c3cf635ea6eb9263738432773",
             destination,
         )
 

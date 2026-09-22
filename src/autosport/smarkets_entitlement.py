@@ -41,7 +41,7 @@ class SmarketsPurpose(str, Enum):
     REDISTRIBUTION = "redistribution"
 
 
-_PROVIDER_PROHIBITED_PURPOSES = frozenset({SmarketsPurpose.BENCHMARKING})
+_PROVIDER_PROHIBITED_PURPOSES = frozenset({SmarketsPurpose.BENCHMARKING, SmarketsPurpose.RESEARCH})
 
 
 def _text(v: object, name: str) -> str:

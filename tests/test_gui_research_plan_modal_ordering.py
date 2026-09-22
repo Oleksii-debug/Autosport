@@ -116,3 +116,24 @@ def test_replay_configuration_status_precedes_blocking_modal() -> None:
     assert app.status.value == text("ui.status.replay.configuration_rejected")
     showerror.assert_called_once()
 
+
+def test_replay_dataset_required_status_precedes_blocking_modal() -> None:
+    app = object.__new__(AutosportApp)
+    app.dataset_worker = SimpleNamespace(busy=False)
+    app.dataset_path = None
+    app.status = _Value()
+
+    expected = text("ui.info.replay.dataset_required")
+
+    def assert_persistent_status_before_modal(*_args: object) -> None:
+        assert app.status.value == expected
+
+    with patch(
+        "autosport.gui.messagebox.showinfo",
+        side_effect=assert_persistent_status_before_modal,
+    ) as showinfo:
+        AutosportApp.run_dataset(app)
+
+    assert app.status.value == expected
+    showinfo.assert_called_once_with(text("ui.dialog.title"), expected)
+

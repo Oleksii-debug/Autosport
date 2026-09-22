@@ -527,3 +527,42 @@ def test_descriptor_subclass_cannot_rebind_verified_bytes_to_registered_member(
             shards=(forged,),
         )
 
+def test_authority_lookup_cannot_rebind_verified_descriptor_object(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    committed_payload = b"AAAA"
+    replacement_payload = b"BBBB"
+    path = tmp_path / "s.bin"
+    path.write_bytes(committed_payload)
+
+    committed = _descriptor(0, "s0", "s.bin", committed_payload)
+    committed_manifest = verify_shard_files(tmp_path, (committed,))
+    authority, _ = _canonical_authority(tmp_path, committed_manifest)
+
+    path.write_bytes(replacement_payload)
+    candidate = _descriptor(0, "s0", "s.bin", replacement_payload)
+    canonical_record = DatasetSnapshotLineageAuthority.record
+
+    def _mutating_record(
+        self: DatasetSnapshotLineageAuthority,
+        snapshot_id: str,
+    ) -> object:
+        result = canonical_record(self, snapshot_id)
+        object.__setattr__(candidate, "content_sha256", committed.content_sha256)
+        return result
+
+    monkeypatch.setattr(
+        DatasetSnapshotLineageAuthority,
+        "record",
+        _mutating_record,
+    )
+
+    with pytest.raises(DatasetShardManifestError, match="commitments"):
+        verify_registered_dataset_shards(
+            authority,
+            snapshot_id="snapshot-1",
+            shard_root=tmp_path,
+            shards=(candidate,),
+        )
+

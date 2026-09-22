@@ -241,16 +241,17 @@ class RewardCorrectionLedger:
                 for d in self._deps(a):
                     known=arts.get((d.authority_family,d.evidence_id))
                     if known is not None and known!=d: raise RewardCorrectionError("registered dependency digest mismatch")
-            prior={}; owner={}
+            prior={}; seen_rewards=set()
             for r in self._connection.execute("SELECT * FROM corrections ORDER BY action_id,transition_id,generation"):
                 a=self._from_row(r); key=(a.action_id,a.transition_id); p=prior.get(key)
+                sup_key=tuple(a.superseded_reward.payload()); new_key=tuple(a.corrected_reward.payload())
                 if p is None:
                     if a.generation!=1 or a.predecessor_correction_id is not None: raise RewardCorrectionError("reward correction chain does not start at generation 1")
+                    if sup_key in seen_rewards: raise RewardCorrectionError("reward correction reuses durable reward identity across lineages")
+                    seen_rewards.add(sup_key)
                 elif a.generation!=p.generation+1 or a.predecessor_correction_id!=p.correction_id or a.superseded_reward!=p.corrected_reward or _time("current",a.corrected_available_at)<_time("prior",p.corrected_available_at): raise RewardCorrectionError("reward correction chain integrity mismatch")
-                for reward in (a.superseded_reward,a.corrected_reward):
-                    rk=reward.payload(); old=owner.get(tuple(rk))
-                    if old is not None and old!=key: raise RewardCorrectionError("reward correction branches across durable lineages")
-                    owner[tuple(rk)]=key
+                if new_key in seen_rewards: raise RewardCorrectionError("reward correction reuses durable reward identity")
+                seen_rewards.add(new_key)
                 if self._invalidated(a.correction_id)!=self._closure(a.superseded_reward): raise RewardCorrectionError("reward correction invalidation closure mismatch")
                 prior[key]=a
             if self._connection.execute("SELECT 1 FROM invalidations i LEFT JOIN corrections c ON c.correction_id=i.correction_id WHERE c.correction_id IS NULL LIMIT 1").fetchone(): raise RewardCorrectionError("orphan correction invalidation evidence")

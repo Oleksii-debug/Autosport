@@ -53,6 +53,18 @@ class ProviderPayoutCapSourceKind(str, Enum):
     VERSIONED_PROVIDER_RULE = "VERSIONED_PROVIDER_RULE"
 
 
+class ProviderPayoutCapRuleKind(str, Enum):
+    """Economic rule category kept distinct from the rule's numeric amount."""
+
+    PAYOUT_OR_RETURN_CAP = "PAYOUT_OR_RETURN_CAP"
+    ORDER_STAKE_MAX = "ORDER_STAKE_MAX"
+    TURNOVER_THRESHOLD = "TURNOVER_THRESHOLD"
+    SPENDING_LIMIT = "SPENDING_LIMIT"
+    WITHDRAWAL_LIMIT = "WITHDRAWAL_LIMIT"
+    DEPOSIT_LIMIT = "DEPOSIT_LIMIT"
+    API_QUOTA = "API_QUOTA"
+
+
 class ProviderPayoutCapAssessmentState(str, Enum):
     """Structural arithmetic result, never execution authority."""
 
@@ -77,12 +89,14 @@ class ProviderPayoutCapEvidence:
     """
 
     provider_id: str
+    service_scope: str
     account_id: str
     adapter_id: str
     jurisdiction: str
     currency: str
     scope_kind: ProviderPayoutCapScope
     cap_measure: ProviderPayoutCapMeasure
+    rule_kind: ProviderPayoutCapRuleKind
     maximum_amount: Decimal
     scope_binding_sha256: str
     settlement_rule_sha256: str
@@ -100,6 +114,7 @@ class ProviderPayoutCapEvidence:
     def __post_init__(self) -> None:
         for name in (
             "provider_id",
+            "service_scope",
             "account_id",
             "adapter_id",
             "jurisdiction",
@@ -116,6 +131,14 @@ class ProviderPayoutCapEvidence:
         if type(self.cap_measure) is not ProviderPayoutCapMeasure:
             raise ProviderPayoutCapError(
                 "cap_measure must be exact ProviderPayoutCapMeasure"
+            )
+        if type(self.rule_kind) is not ProviderPayoutCapRuleKind:
+            raise ProviderPayoutCapError(
+                "rule_kind must be exact ProviderPayoutCapRuleKind"
+            )
+        if self.rule_kind is not ProviderPayoutCapRuleKind.PAYOUT_OR_RETURN_CAP:
+            raise ProviderPayoutCapError(
+                "payout-cap evidence rejects non-payout economic rule kind"
             )
         if type(self.source_kind) is not ProviderPayoutCapSourceKind:
             raise ProviderPayoutCapError(
@@ -190,8 +213,10 @@ class ProviderPayoutCapAssessment:
     candidate_amount: Decimal
     maximum_amount: Decimal
     effective_headroom: Decimal | None
+    service_scope: str
     cap_measure: ProviderPayoutCapMeasure
     scope_kind: ProviderPayoutCapScope
+    rule_kind: ProviderPayoutCapRuleKind
     evidence_sha256: str
     reason: str
     execution_authority: bool = False
@@ -207,6 +232,7 @@ class ProviderPayoutCapAssessment:
             _nonnegative_decimal(
                 self.effective_headroom, "effective_headroom"
             )
+        _text(self.service_scope, "service_scope")
         if type(self.cap_measure) is not ProviderPayoutCapMeasure:
             raise ProviderPayoutCapError(
                 "cap_measure must be exact ProviderPayoutCapMeasure"
@@ -214,6 +240,14 @@ class ProviderPayoutCapAssessment:
         if type(self.scope_kind) is not ProviderPayoutCapScope:
             raise ProviderPayoutCapError(
                 "scope_kind must be exact ProviderPayoutCapScope"
+            )
+        if type(self.rule_kind) is not ProviderPayoutCapRuleKind:
+            raise ProviderPayoutCapError(
+                "rule_kind must be exact ProviderPayoutCapRuleKind"
+            )
+        if self.rule_kind is not ProviderPayoutCapRuleKind.PAYOUT_OR_RETURN_CAP:
+            raise ProviderPayoutCapError(
+                "assessment rejects non-payout economic rule kind"
             )
         _sha256(self.evidence_sha256, "evidence_sha256")
         _text(self.reason, "reason")
@@ -245,12 +279,14 @@ def _install_structural_authority() -> None:
         *,
         as_of: datetime,
         provider_id: str,
+        service_scope: str,
         account_id: str,
         adapter_id: str,
         jurisdiction: str,
         currency: str,
         scope_kind: ProviderPayoutCapScope,
         cap_measure: ProviderPayoutCapMeasure,
+        rule_kind: ProviderPayoutCapRuleKind,
         scope_binding_sha256: str,
         settlement_rule_sha256: str,
         action_binding_sha256: str | None,
@@ -263,6 +299,7 @@ def _install_structural_authority() -> None:
         current = _utc(as_of, "as_of")
         expected_text = {
             "provider_id": provider_id,
+            "service_scope": service_scope,
             "account_id": account_id,
             "adapter_id": adapter_id,
             "jurisdiction": jurisdiction,
@@ -286,6 +323,17 @@ def _install_structural_authority() -> None:
             )
         if evidence.cap_measure is not cap_measure:
             raise ProviderPayoutCapError("cap_measure mismatch")
+
+        if type(rule_kind) is not ProviderPayoutCapRuleKind:
+            raise ProviderPayoutCapError(
+                "expected rule_kind must be exact ProviderPayoutCapRuleKind"
+            )
+        if evidence.rule_kind is not rule_kind:
+            raise ProviderPayoutCapError("rule_kind mismatch")
+        if rule_kind is not ProviderPayoutCapRuleKind.PAYOUT_OR_RETURN_CAP:
+            raise ProviderPayoutCapError(
+                "payout-cap verification rejects non-payout economic rule kind"
+            )
 
         _sha256(scope_binding_sha256, "expected scope_binding_sha256")
         if evidence.scope_binding_sha256 != scope_binding_sha256:
@@ -320,12 +368,14 @@ def _install_structural_authority() -> None:
         *,
         as_of: datetime,
         provider_id: str,
+        service_scope: str,
         account_id: str,
         adapter_id: str,
         jurisdiction: str,
         currency: str,
         scope_kind: ProviderPayoutCapScope,
         cap_measure: ProviderPayoutCapMeasure,
+        rule_kind: ProviderPayoutCapRuleKind,
         scope_binding_sha256: str,
         settlement_rule_sha256: str,
         action_binding_sha256: str | None = None,
@@ -334,12 +384,14 @@ def _install_structural_authority() -> None:
             evidence,
             as_of=as_of,
             provider_id=provider_id,
+            service_scope=service_scope,
             account_id=account_id,
             adapter_id=adapter_id,
             jurisdiction=jurisdiction,
             currency=currency,
             scope_kind=scope_kind,
             cap_measure=cap_measure,
+            rule_kind=rule_kind,
             scope_binding_sha256=scope_binding_sha256,
             settlement_rule_sha256=settlement_rule_sha256,
             action_binding_sha256=action_binding_sha256,
@@ -380,12 +432,14 @@ def _install_structural_authority() -> None:
         *,
         as_of: datetime,
         provider_id: str,
+        service_scope: str,
         account_id: str,
         adapter_id: str,
         jurisdiction: str,
         currency: str,
         scope_kind: ProviderPayoutCapScope,
         cap_measure: ProviderPayoutCapMeasure,
+        rule_kind: ProviderPayoutCapRuleKind,
         scope_binding_sha256: str,
         settlement_rule_sha256: str,
         action_binding_sha256: str | None = None,
@@ -394,12 +448,14 @@ def _install_structural_authority() -> None:
             evidence,
             as_of=as_of,
             provider_id=provider_id,
+            service_scope=service_scope,
             account_id=account_id,
             adapter_id=adapter_id,
             jurisdiction=jurisdiction,
             currency=currency,
             scope_kind=scope_kind,
             cap_measure=cap_measure,
+            rule_kind=rule_kind,
             scope_binding_sha256=scope_binding_sha256,
             settlement_rule_sha256=settlement_rule_sha256,
             action_binding_sha256=action_binding_sha256,
@@ -466,8 +522,10 @@ def assess_provider_payout_cap(
             candidate_amount=candidate,
             maximum_amount=evidence.maximum_amount,
             effective_headroom=None,
+            service_scope=evidence.service_scope,
             cap_measure=evidence.cap_measure,
             scope_kind=evidence.scope_kind,
+            rule_kind=evidence.rule_kind,
             evidence_sha256=evidence.evidence_sha256,
             reason="cumulative_scope_current_headroom_unproven",
         )
@@ -486,8 +544,10 @@ def assess_provider_payout_cap(
         candidate_amount=candidate,
         maximum_amount=evidence.maximum_amount,
         effective_headroom=effective_headroom,
+        service_scope=evidence.service_scope,
         cap_measure=evidence.cap_measure,
         scope_kind=evidence.scope_kind,
+        rule_kind=evidence.rule_kind,
         evidence_sha256=evidence.evidence_sha256,
         reason=reason,
     )
@@ -495,14 +555,16 @@ def assess_provider_payout_cap(
 
 def _fingerprint(evidence: ProviderPayoutCapEvidence) -> str:
     payload = {
-        "schema": "autosport.provider-payout-cap-evidence-v1",
+        "schema": "autosport.provider-payout-cap-evidence-v2",
         "provider_id": evidence.provider_id,
+        "service_scope": evidence.service_scope,
         "account_id": evidence.account_id,
         "adapter_id": evidence.adapter_id,
         "jurisdiction": evidence.jurisdiction,
         "currency": evidence.currency,
         "scope_kind": evidence.scope_kind.value,
         "cap_measure": evidence.cap_measure.value,
+        "rule_kind": evidence.rule_kind.value,
         "maximum_amount": _decimal_text(evidence.maximum_amount),
         "scope_binding_sha256": evidence.scope_binding_sha256,
         "settlement_rule_sha256": evidence.settlement_rule_sha256,

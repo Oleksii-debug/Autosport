@@ -149,17 +149,28 @@ def _read_exact_registry_state(registry: ScientificRegistry) -> dict[str, Any]:
         raise ValueError("risk-of-ruin registry instance read authority was rebound")
 
     def _require_live_bindings() -> None:
+        # Generic get() is not used for resolution, but a rebound public read
+        # surface is still evidence that this registry object is not the exact
+        # supported authority shape.  _read itself is intentionally NOT compared
+        # here: other canonical product modules may install the verified
+        # process-wide reader after this module imports.  We invoke the captured
+        # implementation directly, so such later dispatch changes cannot retarget
+        # this verifier or make its behavior test-order dependent.
         if (
             ScientificRegistry.get is not _SCIENTIFIC_REGISTRY_GET
-            or ScientificRegistry._read is not _SCIENTIFIC_REGISTRY_READ
             or ScientificRegistry._validate_entry is not _SCIENTIFIC_REGISTRY_VALIDATE_ENTRY
         ):
             raise ValueError("risk-of-ruin registry executable read authority was rebound")
 
     _require_live_bindings()
     state = _SCIENTIFIC_REGISTRY_READ(registry)
-    # Recheck after the read so a concurrent class-level rebind cannot be silently
-    # accepted as a stable authority generation.
+    # Revalidate every returned envelope through the captured validator rather
+    # than trusting any dynamically-dispatched validation used inside _read.
+    records = state.get("records")
+    if type(records) is not list:
+        raise ValueError("risk-of-ruin registry records must be a list")
+    for raw in records:
+        _SCIENTIFIC_REGISTRY_VALIDATE_ENTRY(raw)
     _require_live_bindings()
     return state
 

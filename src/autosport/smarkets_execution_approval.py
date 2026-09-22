@@ -18,6 +18,7 @@ from datetime import datetime
 import hashlib
 import json
 from pathlib import Path
+from threading import Lock
 from typing import Final
 
 from .paths import default_workspace
@@ -36,6 +37,8 @@ from .supervised_execution import (
 
 _CONFIRMATION_FILENAME: Final = "supervised-confirmation.jsonl"
 _SUPERVISED_REVIEW_PAYLOAD_DOMAIN: Final = "autosport.supervised-review-payload.v1"
+_CANONICAL_PATH_LOCK: Final = Lock()
+_CANONICAL_CONFIRMATION_PATH: Path | None = None
 
 
 class SmarketsExecutionApprovalError(RuntimeError):
@@ -43,9 +46,23 @@ class SmarketsExecutionApprovalError(RuntimeError):
 
 
 def canonical_supervised_confirmation_path() -> Path:
-    """Return the one product workspace path consumed by this approval boundary."""
+    """Resolve and freeze this process' product-configured confirmation path.
 
-    return default_workspace() / _CONFIRMATION_FILENAME
+    AUTOSPORT_WORKSPACE is a startup/operator configuration input. Once this
+    financial authority has observed the resolved workspace, changing that input
+    in-process cannot switch the trust root to another confirmation journal.
+    """
+
+    global _CANONICAL_CONFIRMATION_PATH
+    resolved = default_workspace() / _CONFIRMATION_FILENAME
+    with _CANONICAL_PATH_LOCK:
+        if _CANONICAL_CONFIRMATION_PATH is None:
+            _CANONICAL_CONFIRMATION_PATH = resolved
+        elif _CANONICAL_CONFIRMATION_PATH != resolved:
+            raise SmarketsExecutionApprovalError(
+                "canonical Autosport workspace changed after approval authority initialization"
+            )
+        return _CANONICAL_CONFIRMATION_PATH
 
 
 def _open_confirmation_authority() -> SupervisedConfirmationAuthority:

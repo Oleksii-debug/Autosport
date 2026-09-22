@@ -247,9 +247,16 @@ def _structural_result_fingerprint(
 
 def verify_human_nvda_acceptance_structural_result(
     result: object,
+    *,
+    expected_artifact_sha256: str,
+    expected_source_sha: str,
 ) -> NvdaHumanAcceptanceStructuralResult:
-    """Verify live validator issuance before treating a structural result as authority."""
+    """Verify live issuance and bind it to the consumer's exact artifact/source."""
 
+    expected_artifact = _require_sha256(
+        "expected_artifact_sha256", expected_artifact_sha256
+    )
+    expected_source = _require_git_commit_sha("expected_source_sha", expected_source_sha)
     if type(result) is not NvdaHumanAcceptanceStructuralResult:
         raise NvdaHumanAcceptanceError(
             "structural result must be the exact canonical result type"
@@ -263,6 +270,14 @@ def verify_human_nvda_acceptance_structural_result(
     if fingerprint != issued[1]:
         raise NvdaHumanAcceptanceError(
             "structural result payload changed after validator issuance"
+        )
+    if result.artifact_sha256 != expected_artifact:
+        raise NvdaHumanAcceptanceError(
+            "structural result does not match the expected artifact"
+        )
+    if result.source_sha != expected_source:
+        raise NvdaHumanAcceptanceError(
+            "structural result does not match the expected source"
         )
     return result
 

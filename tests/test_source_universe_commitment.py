@@ -166,6 +166,7 @@ class SourceUniverseCommitmentTests(unittest.TestCase):
 
             commitment = build_source_universe_commitment(
                 service.delta_store,
+                expected_store_path=service.delta_store.path,
                 source_id="source-x",
                 start_cycle_seq=1,
                 end_cycle_seq=2,

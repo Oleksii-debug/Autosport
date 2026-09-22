@@ -46,7 +46,9 @@ class ProductOperatorController:
         self._lock = RLock()
         # Validate canonical state at attachment time without creating a second local
         # lifecycle authority. Durable RUNNING/PAUSED/STOPPED remains the only truth.
-        self._state_value(self._runtime.status())
+        initial_status = self._runtime.status()
+        self._state_value(initial_status)
+        self._last_canonical_status = initial_status
         self._closed = False
         self._controller_tick_count = 0
 
@@ -68,9 +70,14 @@ class ProductOperatorController:
             raise ProductOperatorError("canonical product runtime returned an invalid state")
         return value
 
+    def _remember_status(self, status: ContinuousSessionStatus) -> str:
+        state = self._state_value(status)
+        self._last_canonical_status = status
+        return state
+
     def _canonical_status(self) -> tuple[ContinuousSessionStatus, str]:
         status = self._runtime.status()
-        return status, self._state_value(status)
+        return status, self._remember_status(status)
 
     def start(self) -> ContinuousSessionStatus:
         """Start or resume the canonical runtime exactly once for this running phase."""
@@ -93,7 +100,7 @@ class ProductOperatorController:
                 except Exception:
                     pass
                 raise
-            self._state_value(status)
+            self._remember_status(status)
             return status
 
     def tick(self) -> ContinuousTickResult:
@@ -118,17 +125,28 @@ class ProductOperatorController:
             if state == self._STOPPED:
                 return status
             status = self._runtime.stop(normalized_reason)
-            self._state_value(status)
+            self._remember_status(status)
             return status
 
     def status(self) -> ProductOperatorSnapshot:
-        """Return controller state plus the canonical runtime's durable status."""
+        """Return controller state plus the latest canonical runtime status.
+
+        Once the controller is closed, the underlying runtime has relinquished its
+        workspace authority and may reject all further status reads. CLOSED therefore
+        exposes only the last status successfully observed while runtime authority was
+        still live; it is presentation history, not a second durable lifecycle state.
+        """
 
         with self._lock:
+            if self._closed:
+                return ProductOperatorSnapshot(
+                    state=self._CLOSED,
+                    controller_tick_count=self._controller_tick_count,
+                    canonical_status=self._last_canonical_status,
+                )
             canonical_status, canonical_state = self._canonical_status()
-            state = self._CLOSED if self._closed else canonical_state
             return ProductOperatorSnapshot(
-                state=state,
+                state=canonical_state,
                 controller_tick_count=self._controller_tick_count,
                 canonical_status=canonical_status,
             )
@@ -138,11 +156,27 @@ class ProductOperatorController:
 
         Callers that want a durable operator STOP must call :meth:`stop` explicitly.
         Keeping close separate preserves truthful crash/error recovery semantics while
-        still making cleanup idempotent.
+        still making cleanup idempotent. A best-effort final canonical status refresh
+        is retained only for CLOSED presentation; close itself is never blocked by an
+        unreadable recovery state.
         """
 
         with self._lock:
             if self._closed:
                 return
-            self._runtime.close()
+            try:
+                self._canonical_status()
+            except Exception:
+                # Cleanup must remain available even when canonical lifecycle status is
+                # already fail-closed (for example RECOVERY_REQUIRED). The previously
+                # validated status remains the only CLOSED presentation snapshot.
+                pass
+            try:
+                self._runtime.close()
+            except BaseException:
+                # Runtime close is an authority-revoking transition. After it has been
+                # attempted, never let this controller resurrect positive operations if
+                # a lower-level resource teardown reports a failure.
+                self._closed = True
+                raise
             self._closed = True

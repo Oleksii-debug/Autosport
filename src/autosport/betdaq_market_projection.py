@@ -300,6 +300,8 @@ def project_betdaq_get_prices(
     markets = response.markets
     if type(markets) is not tuple:
         raise BetdaqProjectionError("response markets must be a tuple")
+    if any(not isinstance(market, BetdaqMarketPrices) for market in markets):
+        raise BetdaqProjectionError("response contains invalid market evidence")
     market_ids = [market.market_id for market in markets]
     if len(set(market_ids)) != len(market_ids):
         raise BetdaqProjectionError("response contains duplicate market_id")
@@ -319,8 +321,6 @@ def project_betdaq_get_prices(
     source_ts = _provider_source_ts(response)
     quotes: list[ProviderQuote] = []
     for market in markets:
-        if not isinstance(market, BetdaqMarketPrices):
-            raise BetdaqProjectionError("response contains invalid market evidence")
         context = market_context[market.market_id]
         if type(market.selections) is not tuple:
             raise BetdaqProjectionError("market selections must be a tuple")

@@ -1143,6 +1143,8 @@ class PersistentLiveDecisionLoop:
             and self._progress.phase == _PHASE_COMMITTED
             and self._progress.gate == _GATE_NORMAL
             and self._progress.market_state_sha256 == current_market_sha
+            and self._progress.decision_context_sha256
+            == self._decision_context_sha256()
             and self._progress.registered_input_ids == registered_input_ids
             and not batch_affected
             and not batch.full_refresh_required

@@ -51,8 +51,6 @@ def _decode_json_object(payload: bytes, label: str) -> dict[str, object]:
 
 
 def _canonical_json_bytes(payload: dict[str, object]) -> bytes:
-    # Keep one JSON authority for release evidence. In particular this preserves the
-    # repository's indentation, UTF-8, key ordering, finite-number and newline rules.
     return canonical_release._canonical_json_bytes(payload)
 
 
@@ -103,7 +101,9 @@ def _validate_manifest(
     if manifest_payload is None:
         raise ValueError(f"{label} is missing PACKAGE_MANIFEST.json")
     manifest = _decode_json_object(manifest_payload, "PACKAGE_MANIFEST.json")
-    if manifest.get("schema_version") != 1 or not isinstance(manifest.get("files"), dict):
+    if manifest.get("schema_version") != 1 or not isinstance(
+        manifest.get("files"), dict
+    ):
         raise ValueError("PACKAGE_MANIFEST.json schema is invalid")
 
     raw_files = manifest["files"]
@@ -186,9 +186,6 @@ def _load_stage_neutral_members(payload: bytes) -> dict[str, bytes]:
 
 
 def _require_canonical_container(payload: bytes) -> None:
-    # The canonical writer should make these checks tautological in an untampered run,
-    # but validating one immutable snapshot closes metadata/path drift between
-    # publication and PASS evidence.
     try:
         with io.BytesIO(payload) as snapshot:
             with zipfile.ZipFile(snapshot, "r") as archive:
@@ -237,13 +234,19 @@ def _transform_members(
     raw_manifest_files = manifest.get("files")
     if not isinstance(raw_manifest_files, dict):
         raise ValueError("PACKAGE_MANIFEST.json files map is invalid")
-    manifest_files = {str(key): str(value) for key, value in raw_manifest_files.items()}
-    manifest_files["BUILD_INFO.json"] = _sha256_bytes(transformed["BUILD_INFO.json"])
+    manifest_files = {
+        str(key): str(value) for key, value in raw_manifest_files.items()
+    }
+    manifest_files["BUILD_INFO.json"] = _sha256_bytes(
+        transformed["BUILD_INFO.json"]
+    )
     transformed_manifest: dict[str, object] = {
         "schema_version": 1,
         "files": manifest_files,
     }
-    transformed["PACKAGE_MANIFEST.json"] = _canonical_json_bytes(transformed_manifest)
+    transformed["PACKAGE_MANIFEST.json"] = _canonical_json_bytes(
+        transformed_manifest
+    )
 
     sums = {
         relative: _sha256_bytes(payload)
@@ -270,8 +273,19 @@ def _verify_stage_neutral_output(
     *,
     expected_source_sha: str,
     expected_members: dict[str, bytes],
+    expected_writer_sha: str,
 ) -> dict[str, object]:
+    writer_sha = _require_sha256(
+        expected_writer_sha,
+        field="stage-neutral writer package_sha256",
+    )
     authored_bytes = package_zip.read_bytes()
+    authored_sha = _sha256_bytes(authored_bytes)
+    if authored_sha != writer_sha:
+        raise ValueError(
+            "stage-neutral release package changed after canonical publication"
+        )
+
     _require_canonical_container(authored_bytes)
     observed = _load_stage_neutral_members(authored_bytes)
     if observed != expected_members:
@@ -288,7 +302,9 @@ def _verify_stage_neutral_output(
         raise ValueError("stage-neutral BUILD_INFO.json version drifted")
     _require_false_truth_labels(build_info)
     if build_info.get("whole_product_complete") is not False:
-        raise ValueError("stage-neutral BUILD_INFO.json must preserve whole_product_complete=false")
+        raise ValueError(
+            "stage-neutral BUILD_INFO.json must preserve whole_product_complete=false"
+        )
     if observed["BUILD_INFO.json"] != _canonical_json_bytes(build_info):
         raise ValueError("stage-neutral BUILD_INFO.json canonical JSON drifted")
 
@@ -299,7 +315,6 @@ def _verify_stage_neutral_output(
     if observed["PACKAGE_MANIFEST.json"] != _canonical_json_bytes(manifest):
         raise ValueError("stage-neutral PACKAGE_MANIFEST.json canonical JSON drifted")
 
-    digest = _sha256_bytes(authored_bytes)
     return {
         "status": "PASS",
         "source_sha": expected_source_sha,
@@ -307,7 +322,7 @@ def _verify_stage_neutral_output(
         "archive_name": STAGE_NEUTRAL_ARCHIVE_NAME,
         "package_prefix": STAGE_NEUTRAL_PREFIX,
         "build_version": STAGE_NEUTRAL_BUILD_VERSION,
-        "package_sha256": digest,
+        "package_sha256": authored_sha,
         "file_count": len(observed),
         "real_money_execution": False,
         "human_tested": False,
@@ -322,13 +337,7 @@ def repackage_stage_neutral_windows_release(
     *,
     expected_source_sha: str,
 ) -> dict[str, object]:
-    """Convert the canonically verified legacy Windows ZIP to stage-neutral identity.
-
-    This is a narrow transition authority. It never upgrades product truth: the legacy
-    input must first pass the existing deep release verifier for the exact source SHA.
-    The transformation changes only the archive namespace and stage/version metadata,
-    then recomputes the manifest and checksum evidence affected by that metadata.
-    """
+    """Convert the canonically verified legacy Windows ZIP to stage-neutral identity."""
 
     legacy_package = Path(legacy_package_zip)
     output = Path(output_zip)
@@ -369,12 +378,13 @@ def repackage_stage_neutral_windows_release(
         for relative, payload in transformed.items()
     }
     output.parent.mkdir(parents=True, exist_ok=True)
-    canonical_release._write_canonical_zip(output, archive_members)
+    writer_sha = canonical_release._write_canonical_zip(output, archive_members)
 
     evidence = _verify_stage_neutral_output(
         output,
         expected_source_sha=expected_source_sha,
         expected_members=transformed,
+        expected_writer_sha=writer_sha,
     )
     evidence["legacy_package_sha256"] = legacy_snapshot_sha
     return evidence
@@ -387,7 +397,10 @@ def _write_evidence(path: Path, evidence: dict[str, object]) -> None:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
-        description="Convert a verified legacy Autosport Windows release ZIP to stage-neutral identity."
+        description=(
+            "Convert a verified legacy Autosport Windows release ZIP "
+            "to stage-neutral identity."
+        )
     )
     parser.add_argument("--input", required=True, type=Path)
     parser.add_argument("--output", required=True, type=Path)

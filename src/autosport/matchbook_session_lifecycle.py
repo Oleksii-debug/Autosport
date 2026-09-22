@@ -247,6 +247,7 @@ class MatchbookSessionLifecycle:
                 )
             self._require_current_runtime_generation(self._generation_id)
             self._observe_clock(monotonic_ns)
+            self._last_observation_monotonic_ns = monotonic_ns
             ticket = SessionReadGenerationTicket(
                 self._next_read_ticket_id,
                 self._generation_id,
@@ -282,6 +283,7 @@ class MatchbookSessionLifecycle:
                 )
             self._require_current_runtime_generation(ticket.generation_id)
             self._observe_clock(monotonic_ns)
+            self._last_observation_monotonic_ns = monotonic_ns
             self._issued_read_tickets.pop(ticket.ticket_id, None)
             return ticket.generation_id
 

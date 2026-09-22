@@ -58,6 +58,92 @@ def _issue(monkeypatch, tmp_path: Path):
     return bound, approval, store, issued
 
 
+def test_generic_issuance_survives_unavailable_betfair_price_bound_without_authority_upgrade(
+    monkeypatch, tmp_path: Path
+) -> None:
+    import autosport.supervised_plan_issuance as module
+
+    bound, approval, _goal = _bound(_profile())
+    store = _store(monkeypatch, tmp_path, bound)
+
+    def unproven_price_bound(*, bound, action_id):
+        raise BetfairStandardLimitPriceBoundError(
+            "provider-specific price-bound proof is unavailable"
+        )
+
+    monkeypatch.setattr(
+        module,
+        "resolve_betfair_standard_limit_price_bound",
+        unproven_price_bound,
+    )
+
+    issued = store.issue(bound=bound, approval=approval)
+    restarted = SupervisedPlanIssuanceStore(
+        store.workspace,
+        authority_root=store.authority_root,
+    )
+    loaded = restarted.load(bound.execution_plan.plan_id)
+
+    assert issued.provider_requests == ()
+    assert loaded.provider_requests == ()
+
+    # Later software/provider knowledge may prove the Betfair request shape, but
+    # an old generic issuance must not retroactively acquire positive #735
+    # authority that was absent at issuance time.
+    action = bound.execution_plan.actions[0]
+    ledger = RealExecutionLedger(tmp_path / "execution-ledger.jsonl")
+    ledger.reserve_plan(bound.execution_plan)
+    ledger.bind_supervised_approval(
+        plan_id=bound.execution_plan.plan_id,
+        approval_id=approval.ledger_identity,
+        approval_fingerprint=approval.fingerprint,
+        approved_at=approval.approved_at,
+        evidence_sha256=approval.evidence_sha256,
+    )
+    evidence = resolve_betfair_standard_limit_price_bound(
+        bound=bound,
+        action_id=action.action_id,
+    )
+
+    with pytest.raises(
+        BetfairStandardLimitPriceBoundError,
+        match="not durably proven at plan issuance",
+    ):
+        verify_product_betfair_standard_limit_price_bound(
+            evidence=evidence,
+            ledger=ledger,
+            issuance_store=restarted,
+            execution_plan_id=bound.execution_plan.plan_id,
+            action_id=action.action_id,
+        )
+
+
+def test_non_betfair_action_does_not_invoke_betfair_price_bound_resolver(
+    monkeypatch,
+) -> None:
+    import autosport.supervised_plan_issuance as module
+
+    action = SimpleNamespace(
+        action_id="future-provider-action",
+        bookmaker_id="future-provider",
+        account_id="acct-future",
+    )
+    bound = SimpleNamespace(
+        execution_plan=SimpleNamespace(actions=(action,))
+    )
+
+    def forbidden_resolver(*, bound, action_id):
+        raise AssertionError("Betfair resolver must not gate non-Betfair issuance")
+
+    monkeypatch.setattr(
+        module,
+        "resolve_betfair_standard_limit_price_bound",
+        forbidden_resolver,
+    )
+
+    assert module._provider_request_payloads(bound) == []
+
+
 def test_product_issuance_survives_restart_with_exact_provider_request_identity(
     monkeypatch, tmp_path: Path
 ) -> None:

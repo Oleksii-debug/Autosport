@@ -789,7 +789,7 @@ class MatchbookReadOnlyProvider:
                         metadata: dict[str, Any] = {
                             "provider": "matchbook",
                             "provider_origin_verified": provider_origin_verified,
-                            "raw_payload_bound_to_response": (
+                            "parsed_payload_bound_to_raw_response": (
                                 provider_origin_verified
                                 and body_sha256 is not None
                                 and body_size_bytes is not None

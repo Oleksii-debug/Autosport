@@ -158,7 +158,7 @@ class OutcomeRevisionProductAvailabilityTests(unittest.TestCase):
                 run_id="exact-reimport",
                 market="market-second",
                 results="results-second",
-                accepted_at=self.t3,
+                accepted_at=self.t0,
             )
 
             resolved = self._resolve(registry, self.t1)

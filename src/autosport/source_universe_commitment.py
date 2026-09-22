@@ -170,12 +170,17 @@ def build_source_universe_commitment(
             "end_cycle_seq cannot precede start_cycle_seq"
         )
 
-    evidence = _CANONICAL_COLLECTOR_CYCLE_EVIDENCE(
-        store,
-        source_id=source_id,
-        start_cycle_seq=start_cycle_seq,
-        end_cycle_seq=end_cycle_seq,
-    )
+    try:
+        evidence = _CANONICAL_COLLECTOR_CYCLE_EVIDENCE(
+            store,
+            source_id=source_id,
+            start_cycle_seq=start_cycle_seq,
+            end_cycle_seq=end_cycle_seq,
+        )
+    except ValueError as exc:
+        raise SourceUniverseCommitmentError(
+            "canonical collector store evidence is unavailable"
+        ) from exc
     expected_sequences = tuple(range(start_cycle_seq, end_cycle_seq + 1))
     observed_sequences = tuple(item["cycle_seq"] for item in evidence)
     if observed_sequences != expected_sequences:

@@ -123,7 +123,7 @@ def test_injected_transport_cannot_mint_provider_origin_from_caller_digest() -> 
     assert batch.quotes
     for quote in batch.quotes:
         assert quote.metadata["provider_origin_verified"] is False
-        assert quote.metadata["raw_payload_bound_to_response"] is False
+        assert quote.metadata["parsed_payload_bound_to_raw_response"] is False
         assert quote.metadata["response_sha256"] == BODY_SHA
         assert quote.metadata["response_size_bytes"] == injected_size
 
@@ -167,7 +167,7 @@ def test_default_https_transport_binds_exact_raw_digest_and_size(monkeypatch) ->
     assert batch.quotes
     for quote in batch.quotes:
         assert quote.metadata["provider_origin_verified"] is True
-        assert quote.metadata["raw_payload_bound_to_response"] is True
+        assert quote.metadata["parsed_payload_bound_to_raw_response"] is True
         assert quote.metadata["response_sha256"] == expected_digest
         assert quote.metadata["response_size_bytes"] == len(raw)
         assert "secret-session-token" not in repr(quote.metadata)

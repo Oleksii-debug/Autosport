@@ -6,6 +6,7 @@ import math
 import time
 from collections.abc import Mapping
 from dataclasses import dataclass
+from datetime import datetime
 from decimal import Decimal, InvalidOperation
 from typing import Any, Callable
 from urllib.error import HTTPError, URLError
@@ -58,6 +59,7 @@ class MatchbookHttpJsonResponse:
     status_code: int
     headers: Mapping[str, str]
     body_sha256: str | None = None
+    body_size_bytes: int | None = None
 
 
 Transport = Callable[[str, Mapping[str, str], float], MatchbookHttpJsonResponse]
@@ -123,6 +125,7 @@ def _default_transport(
                 status_code=int(response.status),
                 headers=dict(response.headers.items()),
                 body_sha256=hashlib.sha256(raw).hexdigest(),
+                body_size_bytes=len(raw),
             )
     except HTTPError as exc:
         retry_after = _parse_retry_after(
@@ -169,6 +172,34 @@ def _session_token(value: object) -> str:
         raise ValueError("session_token must be a non-empty trimmed string")
     if any(ch in value for ch in "\r\n\x00"):
         raise ValueError("session_token contains forbidden control characters")
+    return value
+
+
+def _observation_timestamp(value: object) -> str:
+    if not isinstance(value, str) or not value or value != value.strip():
+        raise MatchbookPayloadError(
+            "observation clock must return a non-empty trimmed ISO-8601 timestamp"
+        )
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise MatchbookPayloadError(
+            "observation clock must return a valid ISO-8601 timestamp"
+        ) from exc
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        raise MatchbookPayloadError(
+            "observation clock timestamp must be timezone-aware"
+        )
+    return value
+
+
+def _optional_body_size(value: object) -> int | None:
+    if value is None:
+        return None
+    if type(value) is not int or value <= 0:
+        raise MatchbookPayloadError(
+            "response body_size_bytes must be a positive non-boolean integer"
+        )
     return value
 
 
@@ -431,6 +462,7 @@ class MatchbookReadOnlyProvider:
             max_backoff_seconds, field="max_backoff_seconds", positive=False
         )
         self.transport = transport
+        self._provider_origin_verified = transport is _default_transport
         self.clock = clock
         self.sleeper = sleeper
         if sequence_allocator is None or not callable(sequence_allocator):
@@ -464,15 +496,24 @@ class MatchbookReadOnlyProvider:
         max_items = _positive_int(max_items, field="max_items")
         if self._pending_quotes is None:
             response = self._request(self._url())
-            observed_ts = self.clock()
-            sequence = self._allocate_sequence()
+            observed_ts = _observation_timestamp(self.clock())
             body_sha256 = _optional_sha256(response.body_sha256)
+            body_size_bytes = _optional_body_size(response.body_size_bytes)
+            if self._provider_origin_verified and (
+                body_sha256 is None or body_size_bytes is None
+            ):
+                raise MatchbookPayloadError(
+                    "fixed-origin transport must bind raw response digest and byte count"
+                )
+            sequence = self._allocate_sequence()
             quotes = self._materialize_quotes(
                 response.payload,
                 observed_ts=observed_ts,
                 sequence=sequence,
                 http_status=response.status_code,
                 body_sha256=body_sha256,
+                body_size_bytes=body_size_bytes,
+                provider_origin_verified=self._provider_origin_verified,
             )
             self._pending_quotes = quotes
             self._pending_offset = 0
@@ -593,6 +634,8 @@ class MatchbookReadOnlyProvider:
         sequence: int,
         http_status: int,
         body_sha256: str | None,
+        body_size_bytes: int | None,
+        provider_origin_verified: bool,
     ) -> tuple[ProviderQuote, ...]:
         if not isinstance(payload, dict):
             raise MatchbookPayloadError("Matchbook events response must be an object")
@@ -681,6 +724,12 @@ class MatchbookReadOnlyProvider:
                         seen.add(identity)
                         metadata: dict[str, Any] = {
                             "provider": "matchbook",
+                            "provider_origin_verified": provider_origin_verified,
+                            "raw_payload_bound_to_response": (
+                                provider_origin_verified
+                                and body_sha256 is not None
+                                and body_size_bytes is not None
+                            ),
                             "native_event_id": event_id,
                             "native_market_id": market_id,
                             "native_runner_id": runner_id,
@@ -709,6 +758,8 @@ class MatchbookReadOnlyProvider:
                         }
                         if body_sha256 is not None:
                             metadata["response_sha256"] = body_sha256
+                        if body_size_bytes is not None:
+                            metadata["response_size_bytes"] = body_size_bytes
                         output.append(
                             ProviderQuote(
                                 provider_event_id=event_id,

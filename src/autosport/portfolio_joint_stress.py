@@ -79,6 +79,11 @@ def _timestamp(value: object, field_name: str) -> str:
     return raw
 
 
+def _parsed_timestamp(value: object, field_name: str) -> datetime:
+    raw = _timestamp(value, field_name)
+    return datetime.fromisoformat(raw.replace("Z", "+00:00"))
+
+
 def _finite_decimal(value: object, field_name: str) -> Decimal:
     if type(value) is not Decimal or not value.is_finite():
         raise ValueError(f"{field_name} must be a finite exact Decimal")
@@ -133,6 +138,7 @@ class JointDependenceRelation:
     grade: JointDependenceGrade
     reason: str
     evidence_sha256: str | None = None
+    evidence_available_at: str | None = None
     empirical_coefficient: Decimal | None = None
 
     def __post_init__(self) -> None:
@@ -151,12 +157,17 @@ class JointDependenceRelation:
         _text(self.reason, "dependence reason")
 
         if self.grade is JointDependenceGrade.UNKNOWN_DEPENDENCE:
-            if self.evidence_sha256 is not None or self.empirical_coefficient is not None:
+            if (
+                self.evidence_sha256 is not None
+                or self.evidence_available_at is not None
+                or self.empirical_coefficient is not None
+            ):
                 raise ValueError(
                     "unknown dependence must not carry fabricated evidence or coefficient"
                 )
         elif self.grade is JointDependenceGrade.EMPIRICAL_DEPENDENCE:
             _sha256_text(self.evidence_sha256, "empirical evidence_sha256")
+            _timestamp(self.evidence_available_at, "empirical evidence_available_at")
             coefficient = _finite_decimal(
                 self.empirical_coefficient,
                 "empirical_coefficient",
@@ -165,6 +176,7 @@ class JointDependenceRelation:
                 raise ValueError("empirical_coefficient must be between -1 and 1")
         else:
             _sha256_text(self.evidence_sha256, "stress evidence_sha256")
+            _timestamp(self.evidence_available_at, "stress evidence_available_at")
             if self.empirical_coefficient is not None:
                 raise ValueError("stress assumptions must not masquerade as empirical correlation")
 
@@ -179,6 +191,7 @@ class JointDependenceRelation:
                 "grade": self.grade.value,
                 "reason": self.reason,
                 "evidence_sha256": self.evidence_sha256,
+                "evidence_available_at": self.evidence_available_at,
                 "empirical_coefficient": (
                     None
                     if self.empirical_coefficient is None
@@ -200,6 +213,7 @@ class JointStressScenario:
     scenario_id: str
     settlements: tuple[tuple[str, str], ...]
     relation_ids: tuple[str, ...]
+    committed_at: str
     assumption_sha256: str
     reason: str
 
@@ -230,6 +244,7 @@ class JointStressScenario:
         if len(canonical_relations) != len(set(canonical_relations)):
             raise ValueError("stress scenario relation_ids must be unique")
         object.__setattr__(self, "relation_ids", canonical_relations)
+        _timestamp(self.committed_at, "stress scenario committed_at")
         _sha256_text(self.assumption_sha256, "assumption_sha256")
         _text(self.reason, "stress scenario reason")
 
@@ -245,6 +260,7 @@ class JointStressScenario:
                     for quote_key, result in self.settlements
                 ],
                 "relation_ids": list(self.relation_ids),
+                "committed_at": self.committed_at,
                 "assumption_sha256": self.assumption_sha256,
                 "reason": self.reason,
             }
@@ -264,7 +280,7 @@ class JointStressProtocol:
     def __post_init__(self) -> None:
         _text(self.protocol_id, "protocol_id")
         _text(self.protocol_version, "protocol_version")
-        _timestamp(self.causal_cutoff, "causal_cutoff")
+        cutoff = _parsed_timestamp(self.causal_cutoff, "causal_cutoff")
 
         if type(self.relations) is not tuple:
             raise ValueError("relations must be a tuple")
@@ -275,6 +291,17 @@ class JointStressProtocol:
         if len(relation_ids) != len(set(relation_ids)):
             raise ValueError("relation_id values must be unique")
         object.__setattr__(self, "relations", relations)
+        for relation in relations:
+            if relation.evidence_available_at is None:
+                continue
+            available = _parsed_timestamp(
+                relation.evidence_available_at,
+                "relation evidence_available_at",
+            )
+            if available > cutoff:
+                raise ValueError(
+                    "dependence evidence cannot be available after causal_cutoff"
+                )
 
         if type(self.scenarios) is not tuple or not self.scenarios:
             raise ValueError("scenarios must be a non-empty tuple")
@@ -285,6 +312,15 @@ class JointStressProtocol:
         if len(scenario_ids) != len(set(scenario_ids)):
             raise ValueError("scenario_id values must be unique")
         object.__setattr__(self, "scenarios", scenarios)
+        for scenario in scenarios:
+            committed = _parsed_timestamp(
+                scenario.committed_at,
+                "stress scenario committed_at",
+            )
+            if committed > cutoff:
+                raise ValueError(
+                    "stress scenario must be committed no later than causal_cutoff"
+                )
 
         known_relations = set(relation_ids)
         referenced: set[str] = set()
@@ -420,26 +456,53 @@ class JointStressResult:
             raise ValueError("result ticket_ids must be a non-empty tuple")
         if self.ticket_ids != tuple(sorted(self.ticket_ids)):
             raise ValueError("result ticket_ids must be sorted")
+        if len(self.ticket_ids) != len(set(self.ticket_ids)):
+            raise ValueError("result ticket_ids must be unique")
         if type(self.quote_keys) is not tuple or not self.quote_keys:
             raise ValueError("result quote_keys must be a non-empty tuple")
         if self.quote_keys != tuple(sorted(self.quote_keys)):
             raise ValueError("result quote_keys must be sorted")
-        if type(self.structural_groups) is not tuple:
-            raise ValueError("result structural_groups must be a tuple")
+        if len(self.quote_keys) != len(set(self.quote_keys)):
+            raise ValueError("result quote_keys must be unique")
+        if type(self.structural_groups) is not tuple or any(
+            type(group) is not StructuralDependencyGroup
+            for group in self.structural_groups
+        ):
+            raise ValueError(
+                "result structural_groups must contain exact StructuralDependencyGroup values"
+            )
         if type(self.evaluations) is not tuple or not self.evaluations:
             raise ValueError("result evaluations must be a non-empty tuple")
-        if tuple(item.scenario_id for item in self.evaluations) != tuple(
-            sorted(item.scenario_id for item in self.evaluations)
+        if any(
+            type(item) is not JointScenarioEvaluation
+            for item in self.evaluations
         ):
+            raise ValueError(
+                "result evaluations must contain exact JointScenarioEvaluation values"
+            )
+        evaluation_ids = tuple(item.scenario_id for item in self.evaluations)
+        if evaluation_ids != tuple(sorted(evaluation_ids)):
             raise ValueError("result evaluations must be sorted by scenario_id")
+        if len(evaluation_ids) != len(set(evaluation_ids)):
+            raise ValueError("result scenario evaluations must be unique")
         if type(self.unresolved_relation_ids) is not tuple:
             raise ValueError("result unresolved_relation_ids must be a tuple")
         if self.unresolved_relation_ids != tuple(sorted(self.unresolved_relation_ids)):
             raise ValueError("result unresolved_relation_ids must be sorted")
+        if len(self.unresolved_relation_ids) != len(set(self.unresolved_relation_ids)):
+            raise ValueError("result unresolved_relation_ids must be unique")
         _finite_decimal(self.worst_observed_profit, "worst_observed_profit")
         _finite_decimal(self.best_observed_profit, "best_observed_profit")
         if self.worst_observed_profit > self.best_observed_profit:
             raise ValueError("worst_observed_profit cannot exceed best_observed_profit")
+        evaluation_profits = tuple(item.profit for item in self.evaluations)
+        if (
+            self.worst_observed_profit != min(evaluation_profits)
+            or self.best_observed_profit != max(evaluation_profits)
+        ):
+            raise ValueError(
+                "result extrema must exactly match scenario evaluation profits"
+            )
 
     @property
     def diversification_credit_authorized(self) -> bool:

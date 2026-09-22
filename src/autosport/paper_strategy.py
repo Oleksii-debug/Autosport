@@ -371,6 +371,13 @@ class PaperValueAgent:
             if not risk.allowed:
                 return
 
+        if event.exchange_side == "lay":
+            context.notes.append(
+                "paper-value material action withheld: canonical #623 paper "
+                "execution bridge is BACK-only for LAY"
+            )
+            return
+
         prepared = runtime.prepare_paper_value_action(
             event=event,
             stake=chosen_stake,

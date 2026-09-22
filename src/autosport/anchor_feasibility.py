@@ -10,6 +10,9 @@ from fractions import Fraction
 from typing import Iterable
 
 
+_FIXED_MINIMUM_REVIEW_DAYS = Decimal("14")
+
+
 class AnchorFeasibilityError(ValueError):
     """Raised when feasibility evidence is malformed or causally ambiguous."""
 
@@ -93,6 +96,55 @@ class AnchorObservation:
 
 
 @dataclass(frozen=True, slots=True)
+class AnchorWindowClosure:
+    """Structural close evidence for one exact frozen acquisition window.
+
+    This type does not prove provider/collector origin by itself.  It makes the
+    completeness dependency explicit and hash-bound so a later product-owned
+    source-universe authority can be mechanically re-resolved rather than
+    inferring completeness from an omitted caller list.
+    """
+
+    scope: AnchorScope
+    window_start: datetime
+    window_end: datetime
+    first_sequence: int
+    last_sequence: int
+    closed_at: datetime
+    source_universe_sha256: str
+    closure_evidence_sha256: str
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.scope, AnchorScope):
+            raise AnchorFeasibilityError("closure scope must be AnchorScope")
+        start = _utc_timestamp(self.window_start, "closure.window_start")
+        end = _utc_timestamp(self.window_end, "closure.window_end")
+        closed_at = _utc_timestamp(self.closed_at, "closure.closed_at")
+        if end <= start:
+            raise AnchorFeasibilityError(
+                "closure window_end must be after window_start"
+            )
+        if closed_at < end:
+            raise AnchorFeasibilityError(
+                "closure cannot predate the frozen window end"
+            )
+        if type(self.first_sequence) is not int or self.first_sequence <= 0:
+            raise AnchorFeasibilityError(
+                "closure first_sequence must be a positive int"
+            )
+        if type(self.last_sequence) is not int or self.last_sequence <= 0:
+            raise AnchorFeasibilityError(
+                "closure last_sequence must be a positive int"
+            )
+        if self.last_sequence < self.first_sequence:
+            raise AnchorFeasibilityError(
+                "closure last_sequence cannot precede first_sequence"
+            )
+        _sha256_hex(self.source_universe_sha256, "source_universe_sha256")
+        _sha256_hex(self.closure_evidence_sha256, "closure_evidence_sha256")
+
+
+@dataclass(frozen=True, slots=True)
 class AnchorFeasibilityReport:
     scope: AnchorScope
     window_start: datetime
@@ -127,7 +179,8 @@ def evaluate_anchor_feasibility(
     window_end: datetime,
     review_as_of: datetime,
     observations: Iterable[AnchorObservation],
-    minimum_review_days: Decimal = Decimal("14"),
+    minimum_review_days: Decimal = _FIXED_MINIMUM_REVIEW_DAYS,
+    window_closure: AnchorWindowClosure | None = None,
 ) -> AnchorFeasibilityReport:
     """Evaluate one frozen sport/league/market/provider/currency feasibility window.
 
@@ -146,6 +199,10 @@ def evaluate_anchor_feasibility(
     if as_of < start:
         raise AnchorFeasibilityError("review_as_of cannot precede window_start")
     min_days = _nonnegative_decimal(minimum_review_days, "minimum_review_days")
+    if min_days != _FIXED_MINIMUM_REVIEW_DAYS:
+        raise AnchorFeasibilityError(
+            "minimum_review_days is fixed at 14 and cannot be relaxed by callers"
+        )
 
     rows = tuple(observations)
     if not rows:
@@ -176,6 +233,10 @@ def evaluate_anchor_feasibility(
         observed_at = _utc_timestamp(row.observed_at, "observed_at")
         if not (start <= observed_at <= end):
             raise AnchorFeasibilityError("observation falls outside frozen review window")
+        if observed_at > as_of:
+            raise AnchorFeasibilityError(
+                "observation is not causally available at review_as_of"
+            )
         if previous_time is not None and observed_at < previous_time:
             raise AnchorFeasibilityError("observation timestamp rollback detected")
         previous_time = observed_at
@@ -198,6 +259,38 @@ def evaluate_anchor_feasibility(
             )
 
         canonical_rows.append(_canonical_observation(row))
+
+    closure_complete = False
+    if window_closure is not None:
+        if not isinstance(window_closure, AnchorWindowClosure):
+            raise AnchorFeasibilityError(
+                "window_closure must be AnchorWindowClosure"
+            )
+        if window_closure.scope != scope:
+            raise AnchorFeasibilityError("window closure scope drift detected")
+        closure_start = _utc_timestamp(
+            window_closure.window_start, "closure.window_start"
+        )
+        closure_end = _utc_timestamp(
+            window_closure.window_end, "closure.window_end"
+        )
+        if closure_start != start or closure_end != end:
+            raise AnchorFeasibilityError(
+                "window closure does not bind the exact frozen review window"
+            )
+        closed_at = _utc_timestamp(window_closure.closed_at, "closure.closed_at")
+        if closed_at > as_of:
+            raise AnchorFeasibilityError(
+                "window closure is not causally available at review_as_of"
+            )
+        if (
+            window_closure.first_sequence != 1
+            or window_closure.last_sequence != rows[-1].sequence
+        ):
+            raise AnchorFeasibilityError(
+                "window closure sequence range does not match supplied observations"
+            )
+        closure_complete = True
 
     distinct_event_count = len(event_reaction_slack)
     # Multiple quote/update rows for one event never increase recurrence. For
@@ -223,7 +316,11 @@ def evaluate_anchor_feasibility(
     else:
         cost_per_observed = None
 
-    terminal_complete = state_counts[AcquisitionState.PENDING] == 0 and as_of >= end
+    terminal_complete = (
+        closure_complete
+        and state_counts[AcquisitionState.PENDING] == 0
+        and as_of >= end
+    )
     window_delta = end - start
     window_microseconds = (
         (window_delta.days * 86_400 + window_delta.seconds) * 1_000_000
@@ -258,6 +355,11 @@ def evaluate_anchor_feasibility(
         "review_as_of": _iso_utc(as_of),
         "minimum_review_days": _canonical_decimal(min_days),
         "observations": canonical_rows,
+        "window_closure": (
+            None
+            if window_closure is None
+            else _canonical_window_closure(window_closure)
+        ),
     }
     evidence_sha256 = hashlib.sha256(
         json.dumps(
@@ -393,6 +495,27 @@ def _canonical_decimal(value: Decimal) -> tuple[int, str, int]:
 
 def _iso_utc(value: datetime) -> str:
     return value.astimezone(timezone.utc).isoformat(timespec="microseconds")
+
+
+def _canonical_window_closure(
+    closure: AnchorWindowClosure,
+) -> dict[str, object]:
+    return {
+        "scope": {
+            "sport": closure.scope.sport,
+            "league": closure.scope.league,
+            "market": closure.scope.market,
+            "provider": closure.scope.provider,
+            "currency": closure.scope.currency,
+        },
+        "window_start": _iso_utc(closure.window_start),
+        "window_end": _iso_utc(closure.window_end),
+        "first_sequence": closure.first_sequence,
+        "last_sequence": closure.last_sequence,
+        "closed_at": _iso_utc(closure.closed_at),
+        "source_universe_sha256": closure.source_universe_sha256,
+        "closure_evidence_sha256": closure.closure_evidence_sha256,
+    }
 
 
 def _canonical_observation(row: AnchorObservation) -> dict[str, object]:

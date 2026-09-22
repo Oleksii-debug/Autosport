@@ -46,6 +46,7 @@ def _payload(
     echoed_price: object | None = None,
     bet_id: str | None = None,
     order_status: str | None = None,
+    include_placed_date: bool = True,
     handicap: object = 0,
     persistence_type: str = "LAPSE",
     response_id: object = 1,
@@ -77,9 +78,10 @@ def _payload(
                 "persistenceType": persistence_type,
             },
         },
-        "placedDate": OBSERVED_AT,
         "averagePriceMatched": average_price_matched,
     }
+    if include_placed_date:
+        report["placedDate"] = OBSERVED_AT
     if include_size_matched:
         report["sizeMatched"] = size_matched
     if bet_id is not None:
@@ -174,6 +176,60 @@ def test_processed_with_errors_without_terminal_command_rejection_is_unknown() -
     report = _parse(payload, action)
 
     assert report.status == "PROCESSED_WITH_ERRORS"
+    assert _report_outcome(report, action) is PlaceOrdersOutcome.UNKNOWN
+
+
+def test_success_with_bet_id_without_placed_date_is_ambiguous() -> None:
+    action = _action()
+    payload = _payload(
+        action,
+        execution_status="SUCCESS",
+        instruction_status="SUCCESS",
+        include_size_matched=True,
+        size_matched=action.requested_stake,
+        average_price_matched=action.requested_odds,
+        bet_id="bet-sync-missing-placed-date",
+        include_placed_date=False,
+    )
+
+    with pytest.raises(BetfairPlaceOrdersAmbiguous, match="placedDate"):
+        _parse(payload, action)
+
+
+def test_terminal_rejection_with_bet_id_without_placed_date_is_ambiguous() -> None:
+    action = _action()
+    payload = _payload(
+        action,
+        execution_status="FAILURE",
+        instruction_status="FAILURE",
+        include_size_matched=True,
+        size_matched=0,
+        average_price_matched=0,
+        bet_id="bet-rejected-missing-placed-date",
+        order_status="EXECUTION_COMPLETE",
+        execution_error_code="BET_ACTION_ERROR",
+        include_placed_date=False,
+    )
+
+    with pytest.raises(BetfairPlaceOrdersAmbiguous, match="placedDate"):
+        _parse(payload, action)
+
+
+def test_missing_placed_date_without_bet_id_remains_nonterminal_unknown() -> None:
+    action = _action()
+    payload = _payload(
+        action,
+        execution_status="SUCCESS",
+        instruction_status="SUCCESS",
+        include_size_matched=True,
+        size_matched=0,
+        average_price_matched=0,
+        include_placed_date=False,
+    )
+
+    report = _parse(payload, action)
+    assert report.instruction.bet_id is None
+    assert report.instruction.placed_date is None
     assert _report_outcome(report, action) is PlaceOrdersOutcome.UNKNOWN
 
 

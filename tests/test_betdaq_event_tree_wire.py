@@ -270,6 +270,31 @@ def test_unknown_numeric_status_is_preserved_not_relabelled() -> None:
     assert response.event_classifiers[0].markets[0].status_code == 32767
 
 
+def test_place_payout_uses_xml_schema_decimal_lexical_grammar() -> None:
+    for value in ("5E-1", "5e-1", "0_5", "0.5_0"):
+        with pytest.raises(BetdaqSoapProtocolError, match="XML Schema decimal"):
+            parse_get_event_subtree_no_selections_response(
+                _response().replace(
+                    'PlacePayout="0.5000"',
+                    f'PlacePayout="{value}"',
+                )
+            )
+
+    for value, expected in (
+        ("+0.5000", Decimal("0.5000")),
+        (".5", Decimal("0.5")),
+        ("0.", Decimal("0")),
+        ("000.5000", Decimal("0.5000")),
+    ):
+        response = parse_get_event_subtree_no_selections_response(
+            _response().replace(
+                'PlacePayout="0.5000"',
+                f'PlacePayout="{value}"',
+            )
+        )
+        assert response.event_classifiers[0].children[0].markets[0].place_payout == expected
+
+
 def test_nonfinite_or_negative_place_payout_fails_closed() -> None:
     with pytest.raises(BetdaqSoapProtocolError, match="finite"):
         parse_get_event_subtree_no_selections_response(

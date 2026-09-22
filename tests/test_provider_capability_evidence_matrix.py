@@ -125,25 +125,23 @@ def test_supported_profile_alone_stays_unproven_and_never_authorizes_execution()
     assert m.real_money_execution is False
 
 
-def test_authenticated_read_is_exact_and_does_not_imply_write():
+def test_generic_issuer_cannot_mint_current_read_authority():
     p = profile()
     i = integration(p)
-    f = evidence(p, BookmakerCapability.BALANCE_READ, ProviderCapabilityTruthGrade.AUTHENTICATED_READ_PROVEN, i=i)
-    m = build_provider_capability_evidence_matrix(
-        p, i, environment="production", application_mode="live-key-readonly",
-        matrix_version=1, as_of=T3, matrix_ref="m", evidence=(f,)
-    )
-    assert m.qualifies(
-        BookmakerCapability.BALANCE_READ,
-        accepted_grades=frozenset({ProviderCapabilityTruthGrade.AUTHENTICATED_READ_PROVEN}),
-        at_time=T3,
-    )
-    assert not m.qualifies(
-        BookmakerCapability.PLACE_BET,
-        accepted_grades=frozenset({ProviderCapabilityTruthGrade.WRITE_PERMISSION_PROVEN}),
-        at_time=T3,
-    )
-
+    for grade in (
+        ProviderCapabilityTruthGrade.AUTHENTICATED_READ_PROVEN,
+        ProviderCapabilityTruthGrade.OBSERVED_OPERATIONAL,
+    ):
+        with pytest.raises(
+            ProviderCapabilityEvidenceMatrixError,
+            match="sealed upstream provider verification",
+        ):
+            evidence(
+                p,
+                BookmakerCapability.BALANCE_READ,
+                grade,
+                i=i,
+            )
 
 def test_read_and_write_grade_categories_cannot_be_swapped():
     p = profile()
@@ -173,7 +171,7 @@ def test_expired_evidence_does_not_renew_on_later_matrix_rebuild():
     f = evidence(
         p,
         BookmakerCapability.BALANCE_READ,
-        ProviderCapabilityTruthGrade.AUTHENTICATED_READ_PROVEN,
+        ProviderCapabilityTruthGrade.CONFIGURED,
         i=i,
         expires=T3,
     )
@@ -183,7 +181,7 @@ def test_expired_evidence_does_not_renew_on_later_matrix_rebuild():
     )
     assert not m.qualifies(
         BookmakerCapability.BALANCE_READ,
-        accepted_grades=frozenset({ProviderCapabilityTruthGrade.AUTHENTICATED_READ_PROVEN}),
+        accepted_grades=frozenset({ProviderCapabilityTruthGrade.CONFIGURED}),
         at_time=T4,
     )
 
@@ -243,7 +241,7 @@ def test_revoked_never_qualifies_even_if_caller_lists_revoked_as_accepted():
 
 def test_evidence_cannot_transfer_to_other_account_or_adapter_version():
     p1 = profile()
-    f = evidence(p1, BookmakerCapability.BALANCE_READ, ProviderCapabilityTruthGrade.AUTHENTICATED_READ_PROVEN)
+    f = evidence(p1, BookmakerCapability.BALANCE_READ, ProviderCapabilityTruthGrade.CONFIGURED)
     p2 = profile(account="acct-b", adapter_version="2")
     with pytest.raises(ProviderCapabilityEvidenceMatrixError, match="profile binding mismatch"):
         matrix(p=p2, facts=(f,))
@@ -254,7 +252,7 @@ def test_caller_constructed_or_copied_positive_fact_cannot_mint_matrix_authority
     issued = evidence(
         p,
         BookmakerCapability.BALANCE_READ,
-        ProviderCapabilityTruthGrade.AUTHENTICATED_READ_PROVEN,
+        ProviderCapabilityTruthGrade.CONFIGURED,
     )
     direct = ProviderCapabilityEvidence(**{
         field.name: getattr(issued, field.name)
@@ -273,18 +271,18 @@ def test_pickle_replay_cannot_recreate_positive_qualification_authority():
     issued = evidence(
         p,
         BookmakerCapability.BALANCE_READ,
-        ProviderCapabilityTruthGrade.AUTHENTICATED_READ_PROVEN,
+        ProviderCapabilityTruthGrade.CONFIGURED,
     )
     original = matrix(p=p, facts=(issued,))
     replayed = pickle.loads(pickle.dumps(original))
     assert original.qualifies(
         BookmakerCapability.BALANCE_READ,
-        accepted_grades=frozenset({ProviderCapabilityTruthGrade.AUTHENTICATED_READ_PROVEN}),
+        accepted_grades=frozenset({ProviderCapabilityTruthGrade.CONFIGURED}),
         at_time=T3,
     )
     assert not replayed.qualifies(
         BookmakerCapability.BALANCE_READ,
-        accepted_grades=frozenset({ProviderCapabilityTruthGrade.AUTHENTICATED_READ_PROVEN}),
+        accepted_grades=frozenset({ProviderCapabilityTruthGrade.CONFIGURED}),
         at_time=T3,
     )
 
@@ -297,7 +295,7 @@ def test_matrix_is_complete_and_builder_rejects_duplicate_capability():
     with pytest.raises(ProviderCapabilityEvidenceMatrixError, match="every capability"):
         replace(m, facts=m.facts[:-1])
     p = profile()
-    f = evidence(p, BookmakerCapability.BALANCE_READ, ProviderCapabilityTruthGrade.AUTHENTICATED_READ_PROVEN)
+    f = evidence(p, BookmakerCapability.BALANCE_READ, ProviderCapabilityTruthGrade.CONFIGURED)
     with pytest.raises(ProviderCapabilityEvidenceMatrixError, match="duplicate capability"):
         matrix(p=p, facts=(f, f))
 
@@ -307,7 +305,7 @@ def test_future_fact_and_noncanonical_scopes_fail_closed():
     future = evidence(
         p,
         BookmakerCapability.BALANCE_READ,
-        ProviderCapabilityTruthGrade.AUTHENTICATED_READ_PROVEN,
+        ProviderCapabilityTruthGrade.CONFIGURED,
         observed=T4,
         expires="2026-09-22T00:05:00+00:00",
     )
@@ -364,8 +362,8 @@ def test_documentation_can_be_recorded_without_account_permission_but_never_mint
 
 def test_matrix_digest_is_order_independent_for_supplied_evidence():
     p = profile()
-    a = evidence(p, BookmakerCapability.BALANCE_READ, ProviderCapabilityTruthGrade.AUTHENTICATED_READ_PROVEN)
-    b = evidence(p, BookmakerCapability.LIVE_QUOTES_READ, ProviderCapabilityTruthGrade.OBSERVED_OPERATIONAL)
+    a = evidence(p, BookmakerCapability.BALANCE_READ, ProviderCapabilityTruthGrade.CONFIGURED)
+    b = evidence(p, BookmakerCapability.LIVE_QUOTES_READ, ProviderCapabilityTruthGrade.DECLARED_DOCUMENTED)
     left = matrix(p=p, facts=(a, b))
     right = matrix(p=p, facts=(b, a))
     assert left.to_canonical_dict() == right.to_canonical_dict()

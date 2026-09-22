@@ -41,6 +41,7 @@ def _market(*, market_id: int = 9001, event_id: int = 101, status: int = 2) -> s
         IsCurrentlyInRunning="false"
         InRunningDelaySeconds="5"
         EventClassifierId="{event_id}"
+        RaceGrade="Grade 1"
         PlacePayout="0.5000">
         <Selections xsi:nil="true" />
       </Markets>
@@ -120,6 +121,7 @@ def test_subtree_preserves_provider_native_hierarchy_and_market_metadata() -> No
     assert fixture.markets[0].is_currently_in_running is False
     assert fixture.markets[0].in_running_delay_seconds == 5
     assert fixture.markets[0].start_time_text == "2026-09-23T12:00:00Z"
+    assert fixture.markets[0].race_grade == "Grade 1"
     assert fixture.markets[0].place_payout == Decimal("0.5000")
 
 

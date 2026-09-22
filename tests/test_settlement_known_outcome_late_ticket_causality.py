@@ -1,72 +1,98 @@
+import tempfile
 import unittest
 from decimal import Decimal
+from pathlib import Path
 
+from autosport.continuous_session import (
+    ContinuousSessionCoordinator,
+    ContinuousSessionError,
+    SettlementResolution,
+)
 from autosport.domain import TicketLeg, TicketStatus
 from autosport.paper import PaperBook
-from autosport.settlement import SettlementEngine
 
 
-class SettlementKnownOutcomeLateTicketCausalityTests(unittest.TestCase):
+class ContinuousSettlementTicketCausalityTests(unittest.TestCase):
     @staticmethod
-    def _leg() -> TicketLeg:
-        return TicketLeg("event-1", "winner", "alice", Decimal("2"))
+    def _coordinator(root: Path) -> ContinuousSessionCoordinator:
+        coordinator = object.__new__(ContinuousSessionCoordinator)
+        coordinator.workspace = root
+        coordinator.paper_book_path = root / "paper_book.json"
+        coordinator.initial_bankroll = "100"
+        return coordinator
 
-    def test_preexisting_ticket_can_settle_when_outcome_arrives(self) -> None:
-        book = PaperBook("100")
-        leg = self._leg()
-        ticket = book.open_ticket(
-            [leg],
-            "10",
-            placed_at="2026-09-22T07:00:00+00:00",
+    @staticmethod
+    def _resolution(leg: TicketLeg, *, available_at: str) -> SettlementResolution:
+        return SettlementResolution(
+            event_identity="provider-a:event-1",
+            settlement_ref="provider-result:1",
+            quote_outcomes={leg.quote_key: "win"},
+            evidence_id="outcome-1",
+            evidence_sha256="0" * 64,
+            available_at=available_at,
         )
-        settlement = SettlementEngine()
 
-        settlement.record({leg.quote_key: "win"})
+    def test_outcome_available_after_ticket_placement_can_settle(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            book = PaperBook("100")
+            leg = TicketLeg("event-1", "winner", "alice", Decimal("2"))
+            ticket = book.open_ticket(
+                [leg],
+                "10",
+                placed_at="2026-09-22T07:00:00+00:00",
+            )
+            book.save(root / "paper_book.json")
+            coordinator = self._coordinator(root)
+            resolution = self._resolution(
+                leg,
+                available_at="2026-09-22T07:01:00+00:00",
+            )
 
-        self.assertEqual(settlement.settle_ready(book), [ticket.ticket_id])
-        self.assertIs(ticket.status, TicketStatus.WON)
-        self.assertEqual(ticket.payout, Decimal("20"))
-        self.assertEqual(book.balance, Decimal("110"))
+            settled, _evidence_ids = coordinator._settle(resolutions=(resolution,))
 
-    def test_settled_outcome_cannot_settle_ticket_opened_after_outcome_was_known(self) -> None:
-        book = PaperBook("100")
-        leg = self._leg()
-        first = book.open_ticket(
-            [leg],
-            "10",
-            placed_at="2026-09-22T07:00:00+00:00",
-        )
-        settlement = SettlementEngine()
-        settlement.record({leg.quote_key: "win"})
-        self.assertEqual(settlement.settle_ready(book), [first.ticket_id])
-        self.assertIs(first.status, TicketStatus.WON)
+            self.assertEqual(settled, (ticket.ticket_id,))
+            settled_book = PaperBook.load(root / "paper_book.json")
+            self.assertIs(settled_book.tickets[ticket.ticket_id].status, TicketStatus.WON)
+            self.assertEqual(settled_book.balance, Decimal("110"))
 
-        late = book.open_ticket(
-            [leg],
-            "10",
-            placed_at="2026-09-22T07:01:00+00:00",
-        )
-        balance_before = book.balance
-        lifecycle_before = list(book._lifecycle)
+    def test_outcome_available_before_ticket_placement_cannot_settle_ticket(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            book = PaperBook("100")
+            leg = TicketLeg("event-1", "winner", "alice", Decimal("2"))
+            ticket = book.open_ticket(
+                [leg],
+                "10",
+                placed_at="2026-09-22T07:01:00+00:00",
+            )
+            book.save(root / "paper_book.json")
+            coordinator = self._coordinator(root)
+            resolution = self._resolution(
+                leg,
+                available_at="2026-09-22T07:00:00+00:00",
+            )
+            balance_before = book.balance
+            lifecycle_before = list(book._lifecycle)
 
-        try:
-            settled = settlement.settle_ready(book)
-        except ValueError:
-            self.assertEqual(book.balance, balance_before)
-            self.assertIs(late.status, TicketStatus.OPEN)
-            self.assertEqual(late.payout, Decimal("0"))
-            self.assertEqual(book._lifecycle, lifecycle_before)
-            return
+            try:
+                settled, _evidence_ids = coordinator._settle(resolutions=(resolution,))
+            except (ContinuousSessionError, ValueError):
+                after = PaperBook.load(root / "paper_book.json")
+                self.assertEqual(after.balance, balance_before)
+                self.assertIs(after.tickets[ticket.ticket_id].status, TicketStatus.OPEN)
+                self.assertEqual(after._lifecycle, lifecycle_before)
+                return
 
-        self.assertEqual(
-            settled,
-            [],
-            "already-known settlement truth must not authorize a later PAPER ticket",
-        )
-        self.assertEqual(book.balance, balance_before)
-        self.assertIs(late.status, TicketStatus.OPEN)
-        self.assertEqual(late.payout, Decimal("0"))
-        self.assertEqual(book._lifecycle, lifecycle_before)
+            self.assertEqual(
+                settled,
+                (),
+                "settlement evidence that predates ticket placement must not settle the ticket",
+            )
+            after = PaperBook.load(root / "paper_book.json")
+            self.assertEqual(after.balance, balance_before)
+            self.assertIs(after.tickets[ticket.ticket_id].status, TicketStatus.OPEN)
+            self.assertEqual(after._lifecycle, lifecycle_before)
 
 
 if __name__ == "__main__":

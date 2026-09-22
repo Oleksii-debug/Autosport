@@ -13,6 +13,22 @@ _ROOT = Path(__file__).resolve().parents[1]
 class _IdleWorker:
     busy = False
 
+    def poll(self):
+        return None
+
+
+class _QueuedProductWorker:
+    busy = False
+
+    def __init__(self, messages: list[object]) -> None:
+        self.messages = list(messages)
+
+    def poll(self):
+        return self.messages.pop(0) if self.messages else None
+
+    def request_stop(self, reason: str = "operator_stop") -> bool:
+        return False
+
 
 class _FakeProductWorker:
     def __init__(self) -> None:
@@ -153,6 +169,44 @@ def test_partial_runtime_start_is_compensated_and_error_detail_is_not_projected(
     assert messages[0].kind == "ERROR"
     assert messages[0].error_type == "RuntimeError"
     assert "provider-secret" not in repr(messages[0])
+
+
+def test_terminal_product_message_is_drained_before_start_can_reenable(
+    tmp_path: Path,
+) -> None:
+    controller = _bare_controller(tmp_path)
+    started = type(
+        "Started",
+        (),
+        {
+            "kind": "STARTED",
+            "status": type("Status", (), {"source_id": "source-1", "cycles_completed": 0})(),
+            "tick": None,
+            "stop_reason": None,
+            "error_type": None,
+        },
+    )()
+    stopped = type(
+        "Stopped",
+        (),
+        {
+            "kind": "STOPPED",
+            "status": type("Status", (), {"source_id": "source-1", "cycles_completed": 1})(),
+            "tick": None,
+            "stop_reason": "operator_stop",
+            "error_type": None,
+        },
+    )()
+    controller.product_worker = _QueuedProductWorker([started, stopped])
+    controller._refresh_owner_projection = lambda: None
+    refreshed: list[bool] = []
+    controller._refresh_economic_projection = lambda: refreshed.append(True)
+
+    controller._poll_workers()
+
+    assert controller.product_worker.poll() is None
+    assert "операторська зупинка" in controller.product_runtime_status
+    assert refreshed == [True]
 
 
 def test_visible_exception_projection_never_contains_raw_detail() -> None:

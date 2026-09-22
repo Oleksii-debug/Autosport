@@ -162,6 +162,7 @@ def validate_pe32plus_amd64(data: bytes, policy: PEPolicy = PEPolicy()) -> PEInf
     image_base = _u64(data, opt + 24, "ImageBase")
     section_alignment = _u32(data, opt + 32, "SectionAlignment")
     file_alignment = _u32(data, opt + 36, "FileAlignment")
+    win32_version_value = _u32(data, opt + 52, "Win32VersionValue")
     size_of_image = _u32(data, opt + 56, "SizeOfImage")
     size_of_headers = _u32(data, opt + 60, "SizeOfHeaders")
     subsystem = _u16(data, opt + 68, "Subsystem")
@@ -177,6 +178,8 @@ def validate_pe32plus_amd64(data: bytes, policy: PEPolicy = PEPolicy()) -> PEInf
         _fail("system image is not an application executable")
     if subsystem not in policy.allowed_subsystems:
         _fail(f"unsupported subsystem: {subsystem}")
+    if win32_version_value != 0:
+        _fail("Win32VersionValue must be zero")
     if loader_flags != 0:
         _fail("LoaderFlags must be zero")
     if image_base == 0 or image_base % 0x10000 != 0:
@@ -211,19 +214,26 @@ def validate_pe32plus_amd64(data: bytes, policy: PEPolicy = PEPolicy()) -> PEInf
     min_headers = section_table + table_size
     if size_of_headers < min_headers:
         _fail("SizeOfHeaders does not cover section table")
+    expected_size_of_headers = (
+        (min_headers + file_alignment - 1) // file_alignment * file_alignment
+    )
+    if size_of_headers != expected_size_of_headers:
+        _fail("SizeOfHeaders does not match rounded header extent")
 
     sections: list[PESection] = []
     raw_ranges: list[tuple[int, int, str]] = []
     virtual_ranges: list[tuple[int, int, str]] = []
     previous_va = -1
+    previous_virtual_end = -1
     previous_raw_pointer = -1
 
     for index in range(section_count):
         off = section_table + index * _SECTION_HEADER_SIZE
         raw_name = data[off : off + 8].split(b"\0", 1)[0]
-        # Section names are identifiers for diagnostics, not a release-security
-        # boundary. Preserve arbitrary bytes without rejecting an otherwise valid image.
-        name = raw_name.decode("ascii", errors="backslashreplace") or f"section#{index + 1}"
+        try:
+            name = raw_name.decode("utf-8") or f"section#{index + 1}"
+        except UnicodeDecodeError:
+            _fail(f"section#{index + 1} name is not valid UTF-8")
 
         virtual_size = _u32(data, off + 8, f"{name}.VirtualSize")
         virtual_address = _u32(data, off + 12, f"{name}.VirtualAddress")
@@ -237,6 +247,14 @@ def validate_pe32plus_amd64(data: bytes, policy: PEPolicy = PEPolicy()) -> PEInf
             _fail(f"{name} virtual address misaligned")
         if virtual_address <= previous_va:
             _fail("section virtual addresses are not strictly ascending")
+        if previous_virtual_end >= 0:
+            expected_va = (
+                (previous_virtual_end + section_alignment - 1)
+                // section_alignment
+                * section_alignment
+            )
+            if virtual_address != expected_va:
+                _fail("section virtual addresses are not adjacent")
         previous_va = virtual_address
 
         if raw_size:
@@ -263,6 +281,7 @@ def validate_pe32plus_amd64(data: bytes, policy: PEPolicy = PEPolicy()) -> PEInf
         if virtual_end < virtual_address or virtual_end > size_of_image:
             _fail(f"{name} virtual span exceeds SizeOfImage")
         virtual_ranges.append((virtual_address, virtual_end, name))
+        previous_virtual_end = virtual_end
 
         if policy.forbid_write_execute_sections:
             executable = bool(sec_chars & 0x20000000)
@@ -317,6 +336,22 @@ def validate_pe32plus_amd64(data: bytes, policy: PEPolicy = PEPolicy()) -> PEInf
             directory_base + index * 8 + 4,
             f"DataDirectory[{index}].Size",
         )
+        if index in {7, 15}:  # reserved data-directory entries
+            if addr != 0 or size != 0:
+                _fail(f"DataDirectory[{index}] is reserved and must be zero")
+            continue
+        if index == 8:  # Global Ptr: RVA may be nonzero, Size must be zero
+            if size != 0:
+                _fail("Global Ptr data-directory size must be zero")
+            if addr == 0:
+                continue
+            mapped = addr < size_of_headers or any(
+                section.virtual_address <= addr < section.virtual_end
+                for section in sections
+            )
+            if not mapped:
+                _fail("Global Ptr data-directory RVA is not mapped")
+            continue
         if addr == 0 and size == 0:
             continue
         if addr == 0 or size == 0:

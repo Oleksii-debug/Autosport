@@ -666,3 +666,37 @@ def test_segment_budget_requires_positive_exact_integers(
             max_segments=max_segments,  # type: ignore[arg-type]
             max_canonical_bytes=max_canonical_bytes,  # type: ignore[arg-type]
         )
+
+def test_change_message_request_id_is_preserved_through_typed_state_result() -> None:
+    raw = _image()
+    raw["id"] = 42
+    frame = decode_market_change_message(raw)
+    assert frame.request_id == 42
+
+    result = BetfairMarketStreamState().apply(frame)
+    assert result.request_id == 42
+
+
+@pytest.mark.parametrize("request_id", [-(2**31), 0, 2**31 - 1])
+def test_change_message_request_id_accepts_exact_signed_int32_boundaries(
+    request_id: int,
+) -> None:
+    raw = _image()
+    raw["id"] = request_id
+    assert decode_market_change_message(raw).request_id == request_id
+
+
+@pytest.mark.parametrize("request_id", [True, "42", 42.0, -(2**31) - 1, 2**31])
+def test_change_message_request_id_rejects_non_int32_values(request_id: object) -> None:
+    raw = _image()
+    raw["id"] = request_id
+    with pytest.raises(ValueError, match="id must be a signed int32 or null"):
+        decode_market_change_message(raw)
+
+
+def test_missing_change_message_request_id_remains_explicitly_unproven() -> None:
+    frame = decode_market_change_message(_image())
+    assert frame.request_id is None
+    result = BetfairMarketStreamState().apply(frame)
+    assert result.request_id is None
+

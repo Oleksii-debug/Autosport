@@ -564,7 +564,48 @@ class IssuedRiskOfRuinResult:
 
     @classmethod
     def from_payload(cls, payload: Mapping[str, object]) -> "IssuedRiskOfRuinResult":
-        if payload.get("schema") != _SCHEMA or payload.get("result_version") != 1:
+        expected_fields = {
+            "schema",
+            "result_version",
+            "workspace_instance_id",
+            "result_id",
+            "request_sha256",
+            "target_kind",
+            "bankroll_id",
+            "currency",
+            "base_portfolio_sha256",
+            "capital_state_sha256",
+            "target_sha256",
+            "evaluated_stakes",
+            "research_protocol_sha256",
+            "reproducibility_bundle_sha256",
+            "dataset_snapshot_id",
+            "dataset_manifest_sha256",
+            "observation_manifest_sha256",
+            "causal_cutoff",
+            "evaluated_at",
+            "issued_at",
+            "evidence_class",
+            "method_id",
+            "evaluator_source_sha256",
+            "stopping_rule",
+            "independence_contract",
+            "confidence_level",
+            "ruin_threshold",
+            "independent_units",
+            "ruin_count",
+            "upper_bound",
+            "producer_identity",
+            "real_money_execution_authority",
+        }
+        if set(payload) != expected_fields:
+            raise RiskOfRuinIssuanceError("risk-of-ruin result fields mismatch")
+        result_version = payload.get("result_version")
+        if (
+            payload.get("schema") != _SCHEMA
+            or type(result_version) is not int
+            or result_version != 1
+        ):
             raise RiskOfRuinIssuanceError("unsupported risk-of-ruin result schema")
         try:
             result = cls(
@@ -767,9 +808,18 @@ def _validate_journal(
 ) -> tuple[dict[str, object], ...]:
     if type(state) is not dict:
         raise RiskOfRuinIssuanceError("risk-of-ruin journal must be an object")
+    if set(state) != {
+        "schema",
+        "schema_version",
+        "workspace_instance_id",
+        "records",
+    }:
+        raise RiskOfRuinIssuanceError("risk-of-ruin journal fields mismatch")
+    schema_version = state.get("schema_version")
     if (
         state.get("schema") != _JOURNAL_SCHEMA
-        or state.get("schema_version") != 1
+        or type(schema_version) is not int
+        or schema_version != 1
         or state.get("workspace_instance_id") != workspace_instance_id
     ):
         raise RiskOfRuinIssuanceError("risk-of-ruin journal identity mismatch")

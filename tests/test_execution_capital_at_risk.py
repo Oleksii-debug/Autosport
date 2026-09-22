@@ -10,6 +10,7 @@ from autosport.execution_capital_at_risk import (
     ExecutionCapitalAtRiskError,
     ExecutionCapitalAtRiskStale,
     ExecutionCapitalAtRiskUnsupported,
+    _lay_liability,
     resolve_execution_capital_at_risk,
 )
 from autosport.real_execution_ledger import (
@@ -392,3 +393,26 @@ def test_exact_arithmetic_and_identity_ignore_ambient_decimal_precision(
 
     assert low_precision.confirmed_open_capital == high_precision.confirmed_open_capital
     assert low_precision.evidence_sha256 == high_precision.evidence_sha256
+
+
+
+def test_lay_liability_preserves_exact_unit_across_large_exponent_gap() -> None:
+    odds = Decimal("1E+100")
+    with localcontext() as context:
+        context.prec = 5
+        actual = _lay_liability(Decimal("1"), odds)
+
+    with localcontext() as context:
+        context.prec = 120
+        expected = odds - Decimal(1)
+
+    assert actual == expected
+    assert actual != odds
+
+
+def test_extreme_decimal_scale_fails_closed_instead_of_rounding() -> None:
+    with pytest.raises(
+        ExecutionCapitalAtRiskUnsupported,
+        match="scale exceeds exact risk-arithmetic bound",
+    ):
+        _lay_liability(Decimal("1"), Decimal("1E+5000"))

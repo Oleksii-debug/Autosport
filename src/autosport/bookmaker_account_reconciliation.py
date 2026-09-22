@@ -621,6 +621,28 @@ class BookmakerAccountReconciliationStore:
                 "account reconciliation store cannot mix venue/account/adapter identity"
             )
 
+    @staticmethod
+    def _require_nested_evidence_after(
+        snapshot: BookmakerAccountSnapshot,
+        previous_snapshot_at: datetime,
+    ) -> None:
+        evidence: list[tuple[str, str]] = []
+        if snapshot.balance is not None:
+            evidence.append(("balance", snapshot.balance.observed_at))
+        evidence.extend(
+            ("open position", observation.observed_at)
+            for observation in snapshot.open_positions
+        )
+        evidence.extend(
+            ("settled position", observation.observed_at)
+            for observation in snapshot.settled_positions
+        )
+        for label, observed_at in evidence:
+            if _time(observed_at, f"{label}.observed_at") <= previous_snapshot_at:
+                raise AccountReconciliationIntegrityError(
+                    f"{label} evidence must be newer than the previous account snapshot"
+                )
+
     @classmethod
     def _reconcile(
         cls, history: tuple[BookmakerAccountSnapshot, ...] | list[BookmakerAccountSnapshot]
@@ -640,10 +662,12 @@ class BookmakerAccountReconciliationStore:
         for snapshot in history:
             cls._require_same_account(first, snapshot)
             current_at = _time(snapshot.observed_at, "snapshot.observed_at")
-            if previous_at is not None and current_at <= previous_at:
-                raise AccountReconciliationIntegrityError(
-                    "persisted account snapshot history must be strictly chronological"
-                )
+            if previous_at is not None:
+                if current_at <= previous_at:
+                    raise AccountReconciliationIntegrityError(
+                        "persisted account snapshot history must be strictly chronological"
+                    )
+                cls._require_nested_evidence_after(snapshot, previous_at)
             previous_at = current_at
             balance_delta = None
 

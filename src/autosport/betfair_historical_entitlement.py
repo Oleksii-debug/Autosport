@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from datetime import date, datetime, timezone
 from hashlib import sha256
 import json
-from typing import Callable, Mapping
+from typing import Mapping
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote, urljoin, urlsplit
 from urllib.request import HTTPRedirectHandler, Request, build_opener
@@ -325,7 +325,6 @@ class BetfairHistoricalEntitlementClient:
         account_identity: BetfairAuthenticatedAccountIdentity,
         *,
         timeout_seconds: float = 30.0,
-        clock: Callable[[], datetime] | None = None,
     ) -> None:
         if type(client) is not BetfairReadOnlyClient:
             raise BetfairHistoricalEntitlementError(
@@ -349,7 +348,6 @@ class BetfairHistoricalEntitlementClient:
         ):
             raise BetfairHistoricalEntitlementError("timeout_seconds must be positive")
         self._timeout = float(timeout_seconds)
-        self._clock = clock or (lambda: datetime.now(timezone.utc))
         self._issued: dict[tuple[str, int], tuple[object, str]] = {}
 
     def get_entitlement_snapshot(self) -> HistoricalEntitlementSnapshot:
@@ -527,10 +525,7 @@ class BetfairHistoricalEntitlementClient:
             raise BetfairHistoricalEntitlementError("listing binds another snapshot")
 
     def _now(self) -> str:
-        value = self._clock()
-        if not isinstance(value, datetime) or value.tzinfo is None or value.utcoffset() is None:
-            raise BetfairHistoricalEntitlementError("clock must return timezone-aware datetime")
-        return value.isoformat()
+        return datetime.now(timezone.utc).isoformat()
 
 
 def _package(value: object, index: int) -> PurchasedHistoricalPackage:

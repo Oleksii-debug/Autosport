@@ -287,3 +287,55 @@ def test_observation_requires_utc_and_lowercase_sha256() -> None:
             ),
             raw_response_sha256="A" * 64,
         )
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    (
+        ("event_id", 1 << 63),
+        ("market_id", 1 << 63),
+        ("runner_id", 1 << 63),
+    ),
+)
+def test_provider_wire_integer_domains_fail_closed(
+    field: str,
+    value: int,
+) -> None:
+    with pytest.raises(
+        MatchbookPriceQueryError,
+        match="documented Matchbook integer domain",
+    ):
+        _query(**{field: value})
+
+    assert getattr(_query(**{field: (1 << 63) - 1}), field) == (1 << 63) - 1
+
+
+def test_provider_wire_depth_domain_fails_closed() -> None:
+    with pytest.raises(
+        MatchbookPriceQueryError,
+        match="documented Matchbook integer domain",
+    ):
+        _query(depth=1 << 31)
+
+    assert _query(depth=(1 << 31) - 1).depth == (1 << 31) - 1
+
+
+@pytest.mark.parametrize(
+    "minimum_liquidity",
+    (
+        Decimal("1e309"),
+        Decimal("1e-10000"),
+    ),
+)
+def test_minimum_liquidity_stays_inside_provider_double_domain(
+    minimum_liquidity: Decimal,
+) -> None:
+    with pytest.raises(
+        MatchbookPriceQueryError,
+        match="documented Matchbook double domain",
+    ):
+        _query(minimum_liquidity=minimum_liquidity)
+
+    assert _query(
+        minimum_liquidity=Decimal("1.5e-323")
+    ).minimum_liquidity == Decimal("1.5e-323")

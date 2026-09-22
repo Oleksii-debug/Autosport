@@ -800,12 +800,12 @@ def _validate_journal(
 
 
 class ProductRiskOfRuinEvaluator:
-    """Estimator journal reader with fail-closed positive issuance.
+    """Estimator with fail-closed positive issuance and durable-read quarantine.
 
-    The durable journal mechanics remain available for strict resolution of
-    compatible records. New issuance is intentionally unavailable until an
-    independent product-owned input authority can re-resolve the exact observation
-    population, dataset/provenance and IID/dependence contract.
+    The legacy journal remains parseable as non-authoritative audit history, but
+    no durable record is product-issued while the canonical positive producer is
+    missing. Both issuance and positive re-resolution therefore remain closed
+    until product-owned observation/provenance and IID/dependence authority exists.
     """
 
     def __init__(
@@ -899,14 +899,11 @@ class ProductRiskOfRuinEvaluator:
         )
 
     def resolve(self, result_id: str) -> IssuedRiskOfRuinResult:
-        wanted = _sha256(result_id, "result_id")
-        with WorkspaceEconomicLock(self.workspace):
-            _, records = self._read_state_under_lock()
-            for raw in records:
-                result = IssuedRiskOfRuinResult.from_payload(raw["result"])
-                if result.result_id == wanted:
-                    return result
-        raise RiskOfRuinIssuanceError("risk-of-ruin result is not product-issued")
+        _sha256(result_id, "result_id")
+        raise RiskOfRuinIssuanceError(
+            "product-issued risk-of-ruin resolution is unavailable; "
+            "pre-authority journal records are quarantined as audit history"
+        )
 
     def verify(self, result: IssuedRiskOfRuinResult) -> bool:
         if type(result) is not IssuedRiskOfRuinResult:

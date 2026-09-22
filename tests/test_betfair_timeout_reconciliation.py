@@ -1024,6 +1024,7 @@ def test_definitive_absence_anchor_lifetime_follows_live_authority_evidence(
 
     assert anchor_key not in timeout_resolution._timeout_elapsed_visibility_anchors
 
+
 def test_public_timeout_authority_rejects_horizon_rebind(
     tmp_path, monkeypatch
 ) -> None:
@@ -1102,4 +1103,57 @@ def test_provider_evidence_assertion_rejects_fingerprint_rebind(
         match="provider evidence authority binding changed",
     ):
         provider_evidence.assert_verified_provider_evidence_authoritative(direct)
+
+def test_provider_verifier_rejects_transitive_helper_rebind(
+    tmp_path, monkeypatch
+) -> None:
+    _, action, provider_ref, _ = _ledger_with_timeout(tmp_path, monkeypatch)
+    assert provider_ref is not None
+    profile = _profile()
+    capture = _empty_provider_capture(action, provider_ref)
+
+    monkeypatch.setattr(
+        provider_evidence,
+        "_complete_current_pages",
+        lambda pages: ((), "0" * 64, capture.observed_at),
+    )
+    with pytest.raises(
+        ProviderEvidenceError,
+        match="provider evidence executable authority changed",
+    ):
+        provider_evidence.verify_betfair_provider_state(
+            action,
+            profile,
+            expected_profile_sha256=profile.profile_id,
+            readback=capture,
+            expected_provider_order_ref=provider_ref,
+        )
+
+
+def test_timeout_authority_rejects_same_function_code_mutation(
+    tmp_path, monkeypatch
+) -> None:
+    ledger, action, provider_ref, _ = _ledger_with_timeout(tmp_path, monkeypatch)
+    assert provider_ref is not None
+    profile = _profile()
+    capture = _empty_provider_capture(action, provider_ref)
+    helper = timeout_resolution._absence_capture_floor
+
+    def forged_floor(readback):
+        del readback
+        return "2099-01-01T00:00:00+00:00"
+
+    monkeypatch.setattr(helper, "__code__", forged_floor.__code__)
+    with pytest.raises(
+        timeout_resolution.BetfairTimeoutResolutionError,
+        match="timeout resolver executable code changed",
+    ):
+        timeout_resolution.resolve_betfair_timeout_provider_state(
+            ledger,
+            action,
+            profile,
+            attempt_id="attempt-1",
+            expected_profile_sha256=profile.profile_id,
+            readback=capture,
+        )
 

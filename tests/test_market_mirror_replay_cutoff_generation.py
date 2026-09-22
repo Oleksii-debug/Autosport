@@ -5,8 +5,11 @@ from decimal import Decimal
 from pathlib import Path
 import sqlite3
 import tempfile
+import threading
 import unittest
+from unittest.mock import patch
 
+import autosport.storage as storage_module
 from autosport.domain import MarketEvent
 from autosport.market_mirror import MarketMirror
 from autosport.storage import SQLiteMarketStore
@@ -181,6 +184,91 @@ class MarketMirrorReplayCutoffGenerationTests(unittest.TestCase):
                 self.assertEqual(later.events[0].decimal_odds, Decimal("3.00"))
             finally:
                 store.close()
+
+    def test_replay_decode_does_not_hold_sqlite_writer_transaction(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "market.db"
+            first = SQLiteMarketStore(path)
+            second = SQLiteMarketStore(path)
+            replay_errors: list[BaseException] = []
+            writer_errors: list[BaseException] = []
+            decode_entered = threading.Event()
+            release_decode = threading.Event()
+            writer_done = threading.Event()
+            try:
+                first.append(
+                    self.event(
+                        sequence=1,
+                        odds="2.00",
+                        observed_ts="2026-09-16T19:00:00+00:00",
+                    )
+                )
+                # Issue the durable cutoff before the concurrency check. The
+                # second resolution should need no writer transaction at all.
+                self.replay(first)
+                original_decoder = storage_module._event_from_history_row
+
+                def blocking_decoder(row):
+                    decode_entered.set()
+                    if not release_decode.wait(timeout=10):
+                        raise RuntimeError("test decoder release timeout")
+                    return original_decoder(row)
+
+                def resolve_existing_cutoff() -> None:
+                    try:
+                        self.replay(first)
+                    except BaseException as exc:  # pragma: no cover - thread handoff
+                        replay_errors.append(exc)
+
+                def append_from_second_connection() -> None:
+                    try:
+                        second.append(
+                            self.event(
+                                sequence=2,
+                                odds="2.10",
+                                observed_ts="2026-09-16T19:00:02+00:00",
+                            )
+                        )
+                    except BaseException as exc:  # pragma: no cover - thread handoff
+                        writer_errors.append(exc)
+                    finally:
+                        writer_done.set()
+
+                with patch.object(
+                    storage_module,
+                    "_event_from_history_row",
+                    side_effect=blocking_decoder,
+                ):
+                    replay_thread = threading.Thread(target=resolve_existing_cutoff)
+                    replay_thread.start()
+                    self.assertTrue(
+                        decode_entered.wait(timeout=10),
+                        "replay never reached history decoding",
+                    )
+
+                    writer_thread = threading.Thread(
+                        target=append_from_second_connection
+                    )
+                    writer_thread.start()
+                    try:
+                        self.assertTrue(
+                            writer_done.wait(timeout=3),
+                            "replay decoding held a SQLite writer transaction",
+                        )
+                    finally:
+                        release_decode.set()
+                    writer_thread.join(timeout=10)
+                    replay_thread.join(timeout=10)
+
+                self.assertFalse(writer_thread.is_alive())
+                self.assertFalse(replay_thread.is_alive())
+                self.assertEqual(writer_errors, [])
+                self.assertEqual(replay_errors, [])
+                self.assertEqual(len(first.events()), 2)
+            finally:
+                release_decode.set()
+                second.close()
+                first.close()
 
     def test_duplicate_provider_sequence_preserves_first_append_generation(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

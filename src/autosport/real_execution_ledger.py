@@ -486,6 +486,51 @@ class RealExecutionLedger:
             ) from exc
         self._path_durable = True
 
+    def _acquire_posix_ledger_lock(self) -> int | None:
+        """Serialize writers on the stable ledger inode when POSIX flock exists."""
+
+        if os.name == "nt":
+            return None
+
+        import fcntl
+
+        try:
+            data_fd = os.open(self.path, os.O_CREAT | os.O_RDWR, 0o600)
+        except OSError as exc:
+            raise ExecutionLedgerIntegrityError(
+                "execution ledger writer lock could not open ledger inode"
+            ) from exc
+        try:
+            fcntl.flock(data_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as exc:
+            os.close(data_fd)
+            raise ExecutionLedgerBusyError(
+                "ledger inode is already held by another writer"
+            ) from exc
+        except OSError as exc:
+            os.close(data_fd)
+            raise ExecutionLedgerIntegrityError(
+                "execution ledger writer lock failed"
+            ) from exc
+
+        try:
+            descriptor_stat = os.fstat(data_fd)
+            path_stat = os.stat(self.path)
+        except OSError as exc:
+            os.close(data_fd)
+            raise ExecutionLedgerIntegrityError(
+                "execution ledger path identity could not be verified"
+            ) from exc
+        if (descriptor_stat.st_dev, descriptor_stat.st_ino) != (
+            path_stat.st_dev,
+            path_stat.st_ino,
+        ):
+            os.close(data_fd)
+            raise ExecutionLedgerIntegrityError(
+                "execution ledger path changed while acquiring writer lock"
+            )
+        return data_fd
+
     def _mutate(self, operation: Callable[[], _T]) -> _T:
         with self._thread_lock:
             try:
@@ -496,9 +541,14 @@ class RealExecutionLedger:
                 raise ExecutionLedgerBusyError(
                     "writer lock exists; fail closed until writer/crash ownership is resolved"
                 ) from exc
+
+            data_fd: int | None = None
             try:
+                data_fd = self._acquire_posix_ledger_lock()
                 return operation()
             finally:
+                if data_fd is not None:
+                    os.close(data_fd)
                 os.close(fd)
                 try:
                     self._lock_path.unlink()
@@ -2092,13 +2142,26 @@ class RealExecutionLedger:
         action_id: str,
         attempt_id: str,
         reserved_at: str | None = None,
+        expected_snapshot_sha256: str | None = None,
     ) -> ExecutionAttempt:
         _text(attempt_id, "attempt_id")
+        if expected_snapshot_sha256 is not None:
+            _sha256_text(
+                expected_snapshot_sha256,
+                "expected_snapshot_sha256",
+            )
         reserved_at = reserved_at or _now()
         _timestamp(reserved_at, "reserved_at")
 
         def operation() -> ExecutionAttempt:
-            events = self._events()
+            if expected_snapshot_sha256 is None:
+                events = self._events()
+                current_snapshot_sha256 = None
+            else:
+                self._ensure_existing_path_durable()
+                raw = self.path.read_bytes() if self.path.exists() else b""
+                events = self._parse(raw)
+                current_snapshot_sha256 = hashlib.sha256(raw).hexdigest()
             plan_event, action = self._action_payload(
                 events, plan_id, action_id
             )
@@ -2110,6 +2173,8 @@ class RealExecutionLedger:
                     "action": action,
                 }
             )
+            # Exact durable redelivery is identity resolution, not a new admission.
+            # It must therefore win over both stale-snapshot and stale-plan fences.
             prior_events = self._attempt_events(events, attempt_id)
             if prior_events:
                 prior = prior_events[0]
@@ -2127,6 +2192,13 @@ class RealExecutionLedger:
                     action_id,
                     fingerprint,
                     prior["payload"]["reserved_at"],
+                )
+            if (
+                expected_snapshot_sha256 is not None
+                and current_snapshot_sha256 != expected_snapshot_sha256
+            ):
+                raise ExecutionStateError(
+                    "execution ledger snapshot changed; recompute admission"
                 )
             if self._stale(events, plan_id):
                 raise ExecutionStateError(

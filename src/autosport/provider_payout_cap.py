@@ -238,7 +238,7 @@ class ProviderPayoutCapAssessment:
 
 
 def _install_structural_authority() -> None:
-    sealed: dict[int, tuple[ProviderPayoutCapEvidence, str]] = {}
+    sealed: dict[int, tuple[ref[ProviderPayoutCapEvidence], str]] = {}
 
     def _validate_scope_and_time(
         evidence: ProviderPayoutCapEvidence,
@@ -344,7 +344,18 @@ def _install_structural_authority() -> None:
             settlement_rule_sha256=settlement_rule_sha256,
             action_binding_sha256=action_binding_sha256,
         )
-        sealed[id(evidence)] = (evidence, fingerprint)
+        identity = id(evidence)
+
+        def _drop_seal(
+            dead_ref: ref[ProviderPayoutCapEvidence],
+            *,
+            identity: int = identity,
+        ) -> None:
+            current = sealed.get(identity)
+            if current is not None and current[0] is dead_ref:
+                sealed.pop(identity, None)
+
+        sealed[identity] = (ref(evidence, _drop_seal), fingerprint)
         return evidence
 
     def assert_provider_payout_cap_structure_sealed(
@@ -355,7 +366,7 @@ def _install_structural_authority() -> None:
                 "evidence must be exact ProviderPayoutCapEvidence"
             )
         record = sealed.get(id(evidence))
-        if record is None or record[0] is not evidence:
+        if record is None or record[0]() is not evidence:
             raise ProviderPayoutCapError(
                 "payout-cap evidence lacks structural seal"
             )

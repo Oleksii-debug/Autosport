@@ -72,8 +72,7 @@ class MarketDescriptor:
 class ScopeIdentity:
     provider: str
     account_id_hash: str
-    currency: str
-    as_of_utc: str
+    evidence_not_before_utc: str
     include_settled_bets: bool
     include_bsp_bets: bool
     net_of_commission: bool
@@ -81,16 +80,26 @@ class ScopeIdentity:
     def __post_init__(self) -> None:
         if not isinstance(self.provider, str) or self.provider.strip().upper() != "BETFAIR":
             raise BetfairPnlCoverageError("provider-specific coverage requires BETFAIR")
-        if not isinstance(self.account_id_hash, str) or not self.account_id_hash.strip():
-            raise BetfairPnlCoverageError("account_id_hash must be non-empty")
-        if not isinstance(self.currency, str) or not self.currency.strip():
-            raise BetfairPnlCoverageError("currency must be non-empty")
+        if (
+            not isinstance(self.account_id_hash, str)
+            or len(self.account_id_hash) != 64
+            or any(character not in "0123456789abcdef" for character in self.account_id_hash)
+        ):
+            raise BetfairPnlCoverageError(
+                "account_id_hash must be lowercase 64-character SHA-256"
+            )
         try:
-            parsed = datetime.fromisoformat(self.as_of_utc.replace("Z", "+00:00"))
+            parsed = datetime.fromisoformat(
+                self.evidence_not_before_utc.replace("Z", "+00:00")
+            )
         except (AttributeError, ValueError) as exc:
-            raise BetfairPnlCoverageError("as_of_utc must be ISO-8601 UTC") from exc
+            raise BetfairPnlCoverageError(
+                "evidence_not_before_utc must be ISO-8601 UTC"
+            ) from exc
         if parsed.tzinfo is None or parsed.utcoffset() != timezone.utc.utcoffset(parsed):
-            raise BetfairPnlCoverageError("as_of_utc must carry an explicit UTC offset")
+            raise BetfairPnlCoverageError(
+                "evidence_not_before_utc must carry an explicit UTC offset"
+            )
         for name in ("include_settled_bets", "include_bsp_bets", "net_of_commission"):
             if type(getattr(self, name)) is not bool:
                 raise BetfairPnlCoverageError(f"{name} must be boolean")
@@ -110,9 +119,8 @@ class ScopeIdentity:
         ]
         return {
             "provider": "BETFAIR",
-            "account_id_hash": self.account_id_hash.strip(),
-            "currency": self.currency.strip().upper(),
-            "as_of_utc": self.as_of_utc,
+            "account_id_hash": self.account_id_hash,
+            "evidence_not_before_utc": self.evidence_not_before_utc,
             "include_settled_bets": self.include_settled_bets,
             "include_bsp_bets": self.include_bsp_bets,
             "net_of_commission": self.net_of_commission,
@@ -168,6 +176,25 @@ def build_open_market_batches(markets: Sequence[MarketDescriptor]) -> tuple[tupl
     )
 
 
+def _validate_evidence_identity_and_time(
+    *,
+    account_id_hash: str,
+    observed_at: str,
+    scope: ScopeIdentity,
+    field: str,
+) -> None:
+    if account_id_hash != scope.account_id_hash:
+        raise BetfairPnlCoverageError(f"{field} account identity mismatch")
+    observed = datetime.fromisoformat(observed_at.replace("Z", "+00:00"))
+    threshold = datetime.fromisoformat(
+        scope.evidence_not_before_utc.replace("Z", "+00:00")
+    )
+    if observed < threshold:
+        raise BetfairPnlCoverageError(
+            f"{field} predates the evidence_not_before_utc freshness fence"
+        )
+
+
 def _validate_open_evidence(
     expected_batches: Sequence[Sequence[str]],
     batches: Sequence[BetfairMarketPnlCoverageBatch],
@@ -186,6 +213,12 @@ def _validate_open_evidence(
             raise BetfairPnlCoverageError(
                 "open evidence was not issued by canonical BetfairReadOnlyClient"
             ) from exc
+        _validate_evidence_identity_and_time(
+            account_id_hash=batch.account_id_hash,
+            observed_at=batch.evidence.observed_at,
+            scope=scope,
+            field=f"open batch {index}",
+        )
         if batch.requested_market_ids != expected_tuple:
             raise BetfairPnlCoverageError(f"open batch {index} request partition mismatch")
         if set(batch.returned_market_ids) != set(expected_tuple):
@@ -205,6 +238,7 @@ def _validate_open_evidence(
 def _validate_closed_evidence(
     closed_market_ids: Sequence[str],
     pages: Sequence[BetfairClearedMarketPnlCoveragePage],
+    scope: ScopeIdentity,
 ) -> None:
     expected = set(closed_market_ids)
     if not expected:
@@ -227,6 +261,12 @@ def _validate_closed_evidence(
             raise BetfairPnlCoverageError(
                 "closed evidence was not issued by canonical BetfairReadOnlyClient"
             ) from exc
+        _validate_evidence_identity_and_time(
+            account_id_hash=page.account_id_hash,
+            observed_at=page.evidence.observed_at,
+            scope=scope,
+            field=f"closed page {index}",
+        )
         if terminal_seen:
             raise BetfairPnlCoverageError("closed page appears after terminal page")
         if tuple(sorted(page.requested_market_ids)) != expected_request:
@@ -263,6 +303,7 @@ def _evidence_digest(
         "scope_digest": scope_digest,
         "open_batches": [
             {
+                "account_id_hash": batch.account_id_hash,
                 "requested_market_ids": list(batch.requested_market_ids),
                 "returned_market_ids": list(batch.returned_market_ids),
                 "include_settled_bets": batch.include_settled_bets,
@@ -275,6 +316,7 @@ def _evidence_digest(
         ],
         "closed_pages": [
             {
+                "account_id_hash": page.account_id_hash,
                 "requested_market_ids": list(page.requested_market_ids),
                 "returned_market_ids": list(page.returned_market_ids),
                 "from_record": page.from_record,
@@ -327,7 +369,7 @@ def build_coverage_witness(
     )
 
     _validate_open_evidence(build_open_market_batches(canonical_markets), open_batches, scope)
-    _validate_closed_evidence(closed_ids, closed_pages)
+    _validate_closed_evidence(closed_ids, closed_pages, scope)
 
     return CoverageWitness(
         scope_digest=scope_digest,

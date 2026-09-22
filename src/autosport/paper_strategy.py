@@ -115,12 +115,7 @@ class PaperValueAgent:
         ):
             return False
         leg = ticket.legs[0]
-        return (
-            leg.event_id == event.event_id
-            and leg.market_id == event.market_id
-            and leg.selection_id == event.selection_id
-            and leg.locked_odds == event.decimal_odds
-        )
+        return leg.quote_key == event.quote_key and leg.locked_odds == event.decimal_odds
 
     def _derive_goal_stake(
         self,
@@ -345,6 +340,7 @@ class PaperValueAgent:
             event.selection_id,
             event.decimal_odds,
             sport=event.sport,
+            exchange_side=event.exchange_side,
         )
         proposal_context = None
         if goal is not None:

@@ -733,9 +733,91 @@ def test_generation_factory_cannot_reuse_raw_session_token_as_audit_identity() -
         generation_factory=lambda: raw_token,
     )
 
-    with pytest.raises(MatchbookAuthenticationUnavailable) as exc_info:
+    with pytest.raises(SessionLifecycleError) as exc_info:
         transport.read(path="/edge/rest/events")
 
     assert raw_token not in str(exc_info.value)
     assert transport.generation_id is None
     assert lifecycle.state is SessionState.COLD
+
+
+def test_concurrent_local_generation_failure_is_not_laundered_as_provider_outage() -> None:
+    started = Event()
+    release = Event()
+    login_lock = Lock()
+    login_calls = 0
+    raw_token = "local-generation-collision-token"
+
+    def login() -> MatchbookLoginResponse:
+        nonlocal login_calls
+        with login_lock:
+            login_calls += 1
+        started.set()
+        assert release.wait(timeout=2.0)
+        return MatchbookLoginResponse(200, raw_token)
+
+    transport, lifecycle, _, _ = build_transport(
+        login=login,
+        read=lambda token, path: MatchbookReadResponse(200, {"ok": True}),
+        generation_factory=lambda: raw_token,
+    )
+    results: list[object] = []
+    errors: list[BaseException] = []
+
+    first = run_in_thread(
+        lambda: transport.read(path="/edge/rest/events"),
+        results=results,
+        errors=errors,
+    )
+    assert started.wait(timeout=1.0)
+    second = run_in_thread(
+        lambda: transport.read(path="/edge/rest/account/balance"),
+        results=results,
+        errors=errors,
+    )
+    with transport._condition:
+        assert transport._login_waiters.get(1) == 1
+
+    release.set()
+    first.join(timeout=2.0)
+    second.join(timeout=2.0)
+
+    assert results == []
+    assert login_calls == 1
+    assert len(errors) == 2
+    assert all(isinstance(error, SessionLifecycleError) for error in errors)
+    assert all(not isinstance(error, ProviderUnavailableError) for error in errors)
+    assert all(raw_token not in str(error) for error in errors)
+    assert lifecycle.state is SessionState.COLD
+    assert transport.generation_id is None
+
+
+def test_per_request_clock_regression_is_lifecycle_failure_and_rotates_before_reuse() -> None:
+    login = LoginFactory()
+    values = iter([100, 200, 199, 300, 301, 302])
+
+    def clock() -> int:
+        return next(values)
+
+    lifecycle = MatchbookSessionLifecycle()
+    transport = MatchbookReadOnlySessionTransport(
+        lifecycle=lifecycle,
+        login=login,
+        read=lambda token, path: MatchbookReadResponse(200, token),
+        clock_ns=clock,
+        generation_factory=GenerationFactory(),
+    )
+
+    with pytest.raises(SessionLifecycleError, match="clock regressed") as exc_info:
+        transport.read(path="/edge/rest/events")
+
+    assert not isinstance(exc_info.value, ProviderUnavailableError)
+    assert transport.generation_id is None
+    assert lifecycle.state is SessionState.ACTIVE
+    assert len(lifecycle._issued_read_tickets) == 1
+
+    second = transport.read(path="/edge/rest/events")
+    assert second.payload == "token-2"
+    assert second.generation_id == "gen-2"
+    assert login.calls == 2
+    assert lifecycle._issued_read_tickets == {}

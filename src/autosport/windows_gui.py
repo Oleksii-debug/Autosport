@@ -19,7 +19,11 @@ WINDOWS_BANKROLL_AUTOMATION_ID = 205
 def _safe_exception_detail(exc: BaseException) -> str:
     """Render a caught failure through the canonical operator-redaction boundary."""
 
-    return safe_exception_text(exc)
+    unavailable_detail = text(
+        "ui.error.exception.message_unavailable",
+        exception_type="",
+    ).removeprefix(": ")
+    return safe_exception_text(exc, unavailable_detail=unavailable_detail)
 
 
 class WindowsAutosportApp(AutosportApp):

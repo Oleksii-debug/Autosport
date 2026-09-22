@@ -347,3 +347,57 @@ def test_unknown_wire_attributes_fail_closed_instead_of_aliasing_modeled_evidenc
     with pytest.raises(BetdaqSoapProtocolError, match="unexpected attribute"):
         parse_list_selections_changed_since_response(return_status_extra)
 
+def test_current_sequence_enforces_xsd_long_lexical_and_width() -> None:
+    max_long = 2**63 - 1
+    response = parse_get_current_selection_sequence_number_response(
+        _current(max_long)
+    )
+    assert response.selection_sequence_number == max_long
+
+    for invalid in (str(2**63), "1_234"):
+        payload = _current().replace(
+            'SelectionSequenceNumber="1234"',
+            f'SelectionSequenceNumber="{invalid}"',
+        )
+        with pytest.raises(BetdaqSoapProtocolError, match="XML Schema"):
+            parse_get_current_selection_sequence_number_response(payload)
+
+
+@pytest.mark.parametrize(
+    "row",
+    (
+        _selection(selection_id=2**63),
+        _selection(market_id=2**63),
+        _selection(sequence=2**63),
+        _selection().replace('DisplayOrder="3"', f'DisplayOrder="{2**31}"'),
+        _selection().replace('DisplayOrder="3"', f'DisplayOrder="{-2**31 - 1}"'),
+        _selection().replace('Status="2"', 'Status="32768"'),
+        _selection().replace('ResetCount="4"', 'ResetCount="32768"'),
+        _selection().replace('Status="2"', 'Status="2_0"'),
+    ),
+)
+def test_changed_selection_rejects_out_of_xsd_integer_domain(row: str) -> None:
+    with pytest.raises(BetdaqSoapProtocolError, match="XML Schema"):
+        parse_list_selections_changed_since_response(_changed(row))
+
+
+def test_changed_selection_accepts_exact_xsd_integer_boundaries() -> None:
+    max_long = 2**63 - 1
+    row = _selection(
+        selection_id=max_long,
+        market_id=max_long,
+        sequence=max_long,
+    )
+    row = row.replace('DisplayOrder="3"', f'DisplayOrder="{2**31 - 1}"')
+    row = row.replace('Status="2"', 'Status="32767"')
+    row = row.replace('ResetCount="4"', 'ResetCount="32767"')
+
+    response = parse_list_selections_changed_since_response(_changed(row))
+    item = response.selections[0]
+    assert item.selection_id == max_long
+    assert item.market_id == max_long
+    assert item.selection_sequence_number == max_long
+    assert item.display_order == 2**31 - 1
+    assert item.status_code == 32767
+    assert item.reset_count == 32767
+

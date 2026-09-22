@@ -30,6 +30,14 @@ from .betdaq_readonly_market_wire import (
 _MAX_SELECTION_ROWS = 100_000
 _MAX_SETTLEMENT_ROWS = 1_000
 
+_XSD_SHORT_MIN = -(2**15)
+_XSD_SHORT_MAX = 2**15 - 1
+_XSD_INT_MIN = -(2**31)
+_XSD_INT_MAX = 2**31 - 1
+_XSD_LONG_MIN = -(2**63)
+_XSD_LONG_MAX = 2**63 - 1
+_XSD_INTEGER_LEXICAL = re.compile(r"\A[+-]?[0-9]+\Z")
+
 _RETURN_STATUS_ATTRIBUTES = frozenset({"Code", "Description", "CallId"})
 _CURRENT_SEQUENCE_RESULT_ATTRIBUTES = frozenset({"SelectionSequenceNumber"})
 _CHANGED_RESULT_ATTRIBUTES = frozenset()
@@ -138,6 +146,25 @@ def _wire_timestamp(value: str, field: str) -> BetdaqWireTimestamp:
         text=raw,
         timezone_present=parsed.tzinfo is not None and parsed.utcoffset() is not None,
     )
+
+
+def _xsd_integer(
+    value: str,
+    field: str,
+    *,
+    minimum: int,
+    maximum: int,
+) -> int:
+    if _XSD_INTEGER_LEXICAL.fullmatch(value) is None:
+        raise BetdaqSoapProtocolError(
+            f"{field} must use the XML Schema integer lexical form"
+        )
+    parsed = _integer(value, field)
+    if parsed < minimum or parsed > maximum:
+        raise BetdaqSoapProtocolError(
+            f"{field} must be within XML Schema range [{minimum}, {maximum}]"
+        )
+    return parsed
 
 
 def _reject_unknown_attributes(
@@ -297,44 +324,51 @@ def _parse_changed_selection(element: ET.Element) -> BetdaqChangedSelection:
         settlement_rows.append(_parse_settlement_information(child))
 
     return BetdaqChangedSelection(
-        selection_id=_integer(
+        selection_id=_xsd_integer(
             _required_attr(element, "Id"),
             "selection Id",
             minimum=0,
+            maximum=_XSD_LONG_MAX,
         ),
         name=_safe_text(_required_attr(element, "Name"), "selection Name"),
-        display_order=_integer(
+        display_order=_xsd_integer(
             _required_attr(element, "DisplayOrder"),
             "selection DisplayOrder",
+            minimum=_XSD_INT_MIN,
+            maximum=_XSD_INT_MAX,
         ),
         is_hidden=_boolean(
             _required_attr(element, "IsHidden"),
             "selection IsHidden",
         ),
-        status_code=_integer(
+        status_code=_xsd_integer(
             _required_attr(element, "Status"),
             "selection Status",
             minimum=0,
+            maximum=_XSD_SHORT_MAX,
         ),
-        reset_count=_integer(
+        reset_count=_xsd_integer(
             _required_attr(element, "ResetCount"),
             "selection ResetCount",
             minimum=0,
+            maximum=_XSD_SHORT_MAX,
         ),
         withdrawal_factor=_decimal(
             _required_attr(element, "WithdrawalFactor"),
             "selection WithdrawalFactor",
             nonnegative=True,
         ),
-        market_id=_integer(
+        market_id=_xsd_integer(
             _required_attr(element, "MarketId"),
             "selection MarketId",
             minimum=0,
+            maximum=_XSD_LONG_MAX,
         ),
-        selection_sequence_number=_integer(
+        selection_sequence_number=_xsd_integer(
             _required_attr(element, "SelectionSequenceNumber"),
             "selection SelectionSequenceNumber",
             minimum=0,
+            maximum=_XSD_LONG_MAX,
         ),
         cancel_orders_time=_wire_timestamp(
             _required_attr(element, "CancelOrdersTime"),
@@ -372,10 +406,11 @@ def parse_get_current_selection_sequence_number_response(
         )
 
     return BetdaqCurrentSelectionSequenceWireResponse(
-        selection_sequence_number=_integer(
+        selection_sequence_number=_xsd_integer(
             _required_attr(result, "SelectionSequenceNumber"),
             "SelectionSequenceNumber",
             minimum=0,
+            maximum=_XSD_LONG_MAX,
         ),
         return_status_present=return_status_present,
         return_code=return_code,

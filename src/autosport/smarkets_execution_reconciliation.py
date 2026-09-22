@@ -387,7 +387,18 @@ def verify_smarkets_order_readback(
                 f"Smarkets profile lacks supported {capability.value}"
             )
 
-    authority.assert_action_scope(action, as_of=readback.observed_at)
+    action_time = _timestamp(action.quote_observed_at, "action.quote_observed_at")
+    profile_time = _timestamp(profile.observed_at, "profile.observed_at")
+    readback_time = _timestamp(readback.observed_at, "readback.observed_at")
+    if profile_time > action_time:
+        raise SmarketsReconciliationError(
+            "Smarkets capability profile was not causally available at action time"
+        )
+    authority.assert_action_scope(action, as_of=action.quote_observed_at)
+    if readback_time < action_time:
+        raise SmarketsReconciliationError(
+            "provider readback cannot predate the execution action evidence"
+        )
     if readback.provider_order_id != expected_order_id:
         raise SmarketsReconciliationError(
             "provider readback order id does not match durable submission identity"

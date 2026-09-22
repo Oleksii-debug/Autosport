@@ -25,10 +25,12 @@ from .collector_sqlite_bounded_storage import (
     CollectorStorageBudgetError,
     install_collector_storage_budget,
 )
+from .collector_storage_recovery_guard import install_collector_storage_recovery_guard
 
 # Keep the exact canonical class identity required by retention/desktop guards while
-# installing the optional native SQLite allocation ceiling in place.
+# installing the native allocation ceiling and restart recovery fence in place.
 install_collector_storage_budget(CollectorDeltaStore)
+install_collector_storage_recovery_guard(CollectorDeltaStore)
 
 from .collector_retention import (
     CollectorCompactionResult,

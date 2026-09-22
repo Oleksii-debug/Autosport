@@ -73,7 +73,7 @@ jobs:
 
           $buildInfo = Get-Content $buildInfoPath -Raw | ConvertFrom-Json
           if ([string]$buildInfo.source_sha -ne [string]$env:AUTOSPORT_SOURCE_SHA) { throw 'Independent package BUILD_INFO source_sha mismatch' }
-          if ($buildInfo.real_money_execution -ne $false -or $buildInfo.human_tested -ne $false -or $buildInfo.nvda_verified -ne $false -or $buildInfo.v1_ready -ne $false) {
+          if ($buildInfo.real_money_execution -ne $false -or $buildInfo.human_tested -ne $false -or $buildInfo.nvda_verified -ne $false -or $buildInfo.v1_ready -ne $false -or $buildInfo.whole_product_complete -ne $false) {
             throw 'Independent package extraction violated prehuman truth labels'
           }
           $packagedExeSha = (Get-FileHash -LiteralPath $packagedExe -Algorithm SHA256).Hash.ToLowerInvariant()

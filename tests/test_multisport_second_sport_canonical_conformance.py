@@ -2,9 +2,11 @@ from __future__ import annotations
 
 from decimal import Decimal
 
-from autosport.domain import MarketEvent, TicketLeg
+from autosport.domain import MarketEvent, PaperTicket, TicketLeg
 from autosport.market_mirror import MarketMirror, MirrorUpdate
+from autosport.portfolio import PortfolioEngine
 from autosport.replay import ReplayEngine
+from autosport.scenario_search import PortfolioDependencyIndex
 
 
 T0 = "2026-09-22T12:00:00+00:00"
@@ -29,6 +31,23 @@ def _event(
         competition_id="fixture-competition",
         market_semantics_id="fixture-regulation-result",
         provider_source_class="fixture-only",
+    )
+
+
+def _football_legs() -> tuple[TicketLeg, ...]:
+    return tuple(
+        TicketLeg(
+            event_id="football-fixture-event",
+            market_id="football-fixture-regulation-result",
+            selection_id=selection_id,
+            locked_odds=Decimal(odds),
+            sport="association_football",
+        )
+        for selection_id, odds in (
+            ("home", "2.10"),
+            ("draw", "3.20"),
+            ("away", "3.40"),
+        )
     )
 
 
@@ -85,20 +104,7 @@ def test_replay_dataset_identity_and_callbacks_remain_sport_bound() -> None:
 
 def test_three_way_second_sport_fixture_has_three_distinct_canonical_leg_identities() -> None:
     # Engineering conformance only: no provider settlement/economic claim.
-    legs = tuple(
-        TicketLeg(
-            event_id="football-fixture-event",
-            market_id="football-fixture-regulation-result",
-            selection_id=selection_id,
-            locked_odds=Decimal(odds),
-            sport="association_football",
-        )
-        for selection_id, odds in (
-            ("home", "2.10"),
-            ("draw", "3.20"),
-            ("away", "3.40"),
-        )
-    )
+    legs = _football_legs()
 
     assert len({leg.quote_key for leg in legs}) == 3
     assert all(leg.sport == "association_football" for leg in legs)
@@ -111,3 +117,39 @@ def test_three_way_second_sport_fixture_has_three_distinct_canonical_leg_identit
         sport="table_tennis",
     )
     assert table_tennis_alias_attempt.quote_key != legs[0].quote_key
+
+
+def test_three_way_second_sport_routes_through_canonical_portfolio_math() -> None:
+    legs = _football_legs()
+    tickets = [
+        PaperTicket(
+            ticket_id=f"football:{leg.selection_id}",
+            stake=Decimal("10"),
+            legs=(leg,),
+            placed_at=T0,
+        )
+        for leg in legs
+    ]
+
+    dependency_index = PortfolioDependencyIndex(tickets)
+    for ticket, leg in zip(tickets, legs):
+        assert dependency_index.affected_by({leg.quote_key}) == {ticket.ticket_id}
+
+    profits = {
+        leg.selection_id: PortfolioEngine.scenario_profit(tickets, {leg.quote_key})
+        for leg in legs
+    }
+    assert profits == {
+        "home": Decimal("-9.00"),
+        "draw": Decimal("2.00"),
+        "away": Decimal("4.00"),
+    }
+
+    table_tennis_alias = TicketLeg(
+        event_id=legs[0].event_id,
+        market_id=legs[0].market_id,
+        selection_id=legs[0].selection_id,
+        locked_odds=legs[0].locked_odds,
+        sport="table_tennis",
+    )
+    assert dependency_index.affected_by({table_tennis_alias.quote_key}) == set()

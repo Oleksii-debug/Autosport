@@ -714,3 +714,28 @@ def test_early_cost_debit_contributes_to_drawdown_before_later_wager_profit():
     assert summary.drawdown_guard_passed is False
     assert summary.positive_authority_verified is False
 
+def test_executed_cost_requires_explicit_gross_wager_pnl():
+    obs = observation(0)
+    with pytest.raises(
+        ForwardEconomicEvidenceError,
+        match="requires explicit wager P&L",
+    ):
+        ResolvedPolicyOutcome(
+            policy_id="challenger",
+            sequence=obs.sequence,
+            universe_event_sha256=obs.universe_event_sha256,
+            decision_sha256=obs.challenger_decision_sha256,
+            decision_committed_at=T0 + timedelta(minutes=2),
+            side=BetSide.BACK,
+            accepted_odds=Decimal("2"),
+            accepted_stake=Decimal("10"),
+            net_pnl_currency=Decimal("-11"),
+            execution_evidence_sha256=SHA_C,
+            execution_accepted_at=T0 + timedelta(minutes=3),
+            settlement_evidence_sha256=SHA_D,
+            settlement_available_at=T0 + timedelta(hours=1),
+            economic_cost_currency=Decimal("1"),
+            economic_cost_evidence_sha256=SHA_A,
+            economic_cost_available_at=T0 + timedelta(hours=2),
+        )
+

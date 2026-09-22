@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
+import os
 import sqlite3
 import tempfile
 import threading
@@ -12,11 +13,31 @@ from unittest.mock import patch
 import autosport.storage as storage_module
 from autosport.domain import MarketEvent
 from autosport.market_mirror import MarketMirror
+from autosport.monotonic_workspace_authority import (
+    MonotonicAuthorityRollbackError,
+    MonotonicWorkspaceAuthority,
+)
 from autosport.storage import SQLiteMarketStore
 
 
 class MarketMirrorReplayCutoffGenerationTests(unittest.TestCase):
     CUTOFF = datetime(2026, 9, 16, 19, 0, 1, tzinfo=timezone.utc)
+
+    def setUp(self) -> None:
+        self._authority_directory = tempfile.TemporaryDirectory()
+        self._authority_env = patch.dict(
+            os.environ,
+            {
+                "AUTOSPORT_MONOTONIC_AUTHORITY_ROOT": str(
+                    Path(self._authority_directory.name) / "machine-authority"
+                )
+            },
+        )
+        self._authority_env.start()
+
+    def tearDown(self) -> None:
+        self._authority_env.stop()
+        self._authority_directory.cleanup()
 
     @staticmethod
     def event(
@@ -646,6 +667,190 @@ class MarketMirrorReplayCutoffGenerationTests(unittest.TestCase):
                 "immutable cutoff triggers mismatch",
             ):
                 SQLiteMarketStore(path)
+
+
+    def test_preinserted_cutoff_without_independent_issuance_fails_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "market.db"
+            store = SQLiteMarketStore(path)
+            try:
+                store.append(
+                    self.event(
+                        sequence=1,
+                        odds="2.00",
+                        observed_ts="2026-09-16T19:00:00+00:00",
+                    )
+                )
+                store.append(
+                    self.event(
+                        sequence=2,
+                        odds="2.10",
+                        observed_ts="2026-09-16T19:00:00.500000+00:00",
+                    )
+                )
+                canonical = storage_module._canonical_replay_cutoff(
+                    self.CUTOFF.isoformat()
+                )
+                cutoff_id = storage_module._replay_cutoff_id(canonical)
+                store.connection.execute(
+                    """INSERT INTO market_replay_cutoffs
+                       (cutoff_id, as_of, max_append_generation)
+                       VALUES (?, ?, ?)""",
+                    (cutoff_id, canonical, 1),
+                )
+                store.connection.commit()
+
+                with self.assertRaisesRegex(
+                    MonotonicAuthorityRollbackError,
+                    "workspace has state but independent authority history is missing",
+                ):
+                    self.replay(store)
+            finally:
+                store.close()
+
+            reopened = SQLiteMarketStore(path)
+            try:
+                with self.assertRaises(MonotonicAuthorityRollbackError):
+                    self.replay(reopened)
+            finally:
+                reopened.close()
+
+    def test_coherent_generation_swap_after_cutoff_is_rejected_by_corpus_binding(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "market.db"
+            store = SQLiteMarketStore(path)
+            try:
+                first = self.event(
+                    sequence=1,
+                    odds="2.00",
+                    observed_ts="2026-09-16T19:00:00+00:00",
+                )
+                second = self.event(
+                    sequence=2,
+                    odds="9.99",
+                    observed_ts="2026-09-16T18:59:59+00:00",
+                    ingest_ts="2026-09-16T18:59:59+00:00",
+                )
+                store.append(first)
+                expected = self.semantic_events(self.replay(store))
+                store.append(second)
+
+                # Simulate a coherent same-DB DDL-capable rewrite: remove the guards,
+                # change which event belongs to frozen generation 1, then restore the
+                # exact canonical trigger SQL before replay validation runs.
+                store.connection.execute(
+                    "DROP TRIGGER market_event_commit_order_no_delete"
+                )
+                store.connection.execute(
+                    "DROP TRIGGER market_event_commit_order_no_update"
+                )
+                store.connection.execute(
+                    """UPDATE market_event_commit_order
+                       SET append_generation = CASE append_generation
+                           WHEN 1 THEN 2
+                           WHEN 2 THEN 1
+                           ELSE append_generation
+                       END"""
+                )
+                for trigger_sql in (
+                    storage_module._COMMIT_ORDER_IMMUTABILITY_TRIGGERS.values()
+                ):
+                    store.connection.execute(trigger_sql)
+                store.connection.commit()
+
+                with self.assertRaisesRegex(
+                    MonotonicAuthorityRollbackError,
+                    "lacks unique independent product issuance authority",
+                ):
+                    self.replay(store)
+                self.assertNotEqual(
+                    store.connection.execute(
+                        """SELECT dedupe_key
+                           FROM market_event_commit_order
+                           WHERE append_generation=1"""
+                    ).fetchone(),
+                    (first.dedupe_key,),
+                )
+                self.assertEqual(len(expected), 1)
+            finally:
+                store.close()
+
+    def test_cutoff_issuance_recovers_after_sqlite_commit_before_authority_commit(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = SQLiteMarketStore(Path(directory) / "market.db")
+            try:
+                store.append(
+                    self.event(
+                        sequence=1,
+                        odds="2.00",
+                        observed_ts="2026-09-16T19:00:00+00:00",
+                    )
+                )
+                original_commit = MonotonicWorkspaceAuthority.commit
+                calls = 0
+
+                def fail_first_commit(authority, **kwargs):
+                    nonlocal calls
+                    calls += 1
+                    if calls == 1:
+                        raise RuntimeError("simulated post-SQLite authority commit crash")
+                    return original_commit(authority, **kwargs)
+
+                with patch.object(
+                    MonotonicWorkspaceAuthority,
+                    "commit",
+                    new=fail_first_commit,
+                ):
+                    with self.assertRaisesRegex(
+                        RuntimeError,
+                        "simulated post-SQLite authority commit crash",
+                    ):
+                        self.replay(store)
+
+                self.assertEqual(
+                    store.connection.execute(
+                        "SELECT COUNT(*) FROM market_replay_cutoffs"
+                    ).fetchone(),
+                    (1,),
+                )
+                recovered = self.replay(store)
+                self.assertEqual(len(recovered.events), 1)
+                self.assertEqual(recovered.events[0].sequence, 1)
+            finally:
+                store.close()
+
+    def test_direct_cutoff_insert_after_authority_history_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = SQLiteMarketStore(Path(directory) / "market.db")
+            try:
+                store.append(
+                    self.event(
+                        sequence=1,
+                        odds="2.00",
+                        observed_ts="2026-09-16T19:00:00+00:00",
+                    )
+                )
+                self.replay(store)
+
+                forged_as_of = (
+                    self.CUTOFF + timedelta(microseconds=1)
+                ).astimezone(timezone.utc).isoformat()
+                forged_id = storage_module._replay_cutoff_id(forged_as_of)
+                store.connection.execute(
+                    """INSERT INTO market_replay_cutoffs
+                       (cutoff_id, as_of, max_append_generation)
+                       VALUES (?, ?, ?)""",
+                    (forged_id, forged_as_of, 1),
+                )
+                store.connection.commit()
+
+                with self.assertRaisesRegex(
+                    MonotonicAuthorityRollbackError,
+                    "workspace state is missing, rolled back, or unproven",
+                ):
+                    self.replay(store)
+            finally:
+                store.close()
 
 
 if __name__ == "__main__":

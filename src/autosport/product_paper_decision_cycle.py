@@ -379,6 +379,18 @@ class ProductPaperDecisionCycle:
             commit_fence=self.runtime.decision_commit_fence,
         )
         try:
+            restored_input_ids = tuple(loop.dependencies.input_ids)
+            configured_input_ids = tuple(
+                sorted(decision_input.input_id for decision_input in self.inputs)
+            )
+            if (
+                restored_input_ids
+                and tuple(sorted(restored_input_ids)) != configured_input_ids
+            ):
+                raise ProductPaperDecisionCycleError(
+                    "configured PAPER decision inputs conflict with durable "
+                    "dependency registry"
+                )
             for decision_input in self.inputs:
                 decision_input.register(loop)
             result = loop.run_cycle()

@@ -223,7 +223,7 @@ class BetfairLiveCapitalAtRiskEvidence:
         return _digest(
             {
                 "schema": "autosport.betfair_live_capital_at_risk",
-                "schema_version": 1,
+                "schema_version": 2,
                 "truth": self.truth.value,
                 "reason": self.reason.value,
                 "capital_at_risk": (

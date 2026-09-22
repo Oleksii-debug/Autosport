@@ -20,8 +20,17 @@ def policy_payload() -> dict:
             ".gitattributes",
             ".github/protected-tree-policy.json",
             "pyproject.toml",
+            "scripts/build_windows.ps1",
+            "scripts/build_windows_candidate.ps1",
+            "scripts/evidence_export_package_smoke.ps1",
+            "scripts/external_uia_audit.ps1",
+            "scripts/nvda_evidence_package_smoke.ps1",
+            "scripts/package_windows.py",
+            "scripts/packaged_executable_authority.ps1",
             "scripts/verify_protected_tree_gate.py",
             "scripts/verify_source_checkout.py",
+            "scripts/walk_forward_origin_package_smoke.ps1",
+            "scripts/walk_forward_package_smoke.ps1",
             "src/autosport/integration_protected_tree.py",
             "tests/test_integration_protected_tree.py",
             "tests/test_protected_tree_gate_runner.py",
@@ -42,6 +51,8 @@ class ProtectedTreeGateRunnerTests(unittest.TestCase):
         )
         self.assertTrue(policy.protects(".github/workflows/ci.yml"))
         self.assertTrue(policy.protects("scripts/verify_protected_tree_gate.py"))
+        self.assertTrue(policy.protects("scripts/build_windows_candidate.ps1"))
+        self.assertTrue(policy.protects("scripts/package_windows.py"))
 
     def test_duplicate_policy_key_fails_closed(self) -> None:
         raw = b'{"schema_version":1,"schema_version":1}'

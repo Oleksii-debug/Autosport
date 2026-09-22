@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import shutil
 
 import pytest
@@ -66,7 +67,7 @@ def test_publication_is_durable_but_not_causal_or_iid_authority(
 ) -> None:
     receipt, *_ = _publish(tmp_path, monkeypatch)
 
-    assert receipt.publication_proven is True
+    assert not hasattr(receipt, "publication_proven")
     assert receipt.causal_precommit_proven is False
     assert receipt.member_run_ancestry_proven is False
     assert receipt.historical_outcome_unavailability_proven is False
@@ -123,7 +124,6 @@ def test_restart_recovers_published_state_after_crash_before_commit(
         authority_root=authority_root,
     )
 
-    assert recovered.publication_proven is True
     assert recovered.authority_generation == 1
 
 
@@ -133,12 +133,7 @@ def test_local_state_deletion_after_commit_is_detected_as_rollback(
     receipt, workspace, registry, authority_root, resolved = _publish(
         tmp_path, monkeypatch
     )
-    state = (
-        workspace
-        / ".risk-authority"
-        / "fixed-n-membership-publications"
-        / f"{receipt.membership_sha256}.json"
-    )
+    state = workspace / f".risk-fixed-n-membership-{receipt.membership_sha256}.json"
     state.unlink()
 
     with pytest.raises(
@@ -160,12 +155,7 @@ def test_state_tamper_cannot_be_reinterpreted_as_same_receipt(
     receipt, workspace, registry, authority_root, resolved = _publish(
         tmp_path, monkeypatch
     )
-    state = (
-        workspace
-        / ".risk-authority"
-        / "fixed-n-membership-publications"
-        / f"{receipt.membership_sha256}.json"
-    )
+    state = workspace / f".risk-fixed-n-membership-{receipt.membership_sha256}.json"
     raw = json.loads(state.read_text(encoding="utf-8"))
     raw["membership"]["planned_run_ids"] = ["run-001"]
     state.write_text(
@@ -192,18 +182,36 @@ def test_semantically_equal_but_noncanonical_state_bytes_fail_closed(
     receipt, workspace, registry, authority_root, resolved = _publish(
         tmp_path, monkeypatch
     )
-    state = (
-        workspace
-        / ".risk-authority"
-        / "fixed-n-membership-publications"
-        / f"{receipt.membership_sha256}.json"
-    )
+    state = workspace / f".risk-fixed-n-membership-{receipt.membership_sha256}.json"
     raw = json.loads(state.read_text(encoding="utf-8"))
     state.write_text(json.dumps(raw, sort_keys=True), encoding="utf-8")
 
     with pytest.raises(
         publication.RiskMembershipPublicationError,
         match="not canonically serialized",
+    ):
+        publication.publish_fixed_n_membership_structure(
+            registry,
+            workspace=workspace,
+            research_protocol_id=resolved.research_protocol_id,
+            dataset_snapshot_id=resolved.dataset_snapshot_id,
+            authority_root=authority_root,
+        )
+
+
+@pytest.mark.skipif(os.name == "nt", reason="symlink creation may require Windows privilege")
+def test_state_symlink_substitution_fails_closed(tmp_path, monkeypatch) -> None:
+    receipt, workspace, registry, authority_root, resolved = _publish(
+        tmp_path, monkeypatch
+    )
+    state = workspace / f".risk-fixed-n-membership-{receipt.membership_sha256}.json"
+    target = workspace / "moved-state.json"
+    state.rename(target)
+    state.symlink_to(target.name)
+
+    with pytest.raises(
+        publication.RiskMembershipPublicationError,
+        match="must be one regular file",
     ):
         publication.publish_fixed_n_membership_structure(
             registry,
@@ -243,7 +251,6 @@ def test_missing_machine_history_cannot_adopt_existing_local_receipt(
     receipt, workspace, registry, authority_root, resolved = _publish(
         tmp_path, monkeypatch
     )
-    assert receipt.publication_proven is True
 
     shutil.rmtree(authority_root)
 

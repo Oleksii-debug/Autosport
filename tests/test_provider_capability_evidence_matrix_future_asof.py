@@ -53,6 +53,8 @@ def test_matrix_cannot_qualify_capability_after_its_own_as_of_cutoff() -> None:
         grade=ProviderCapabilityTruthGrade.AUTHENTICATED_READ_PROVEN,
         profile_id=profile.profile_id,
         integration_evidence_id=integration.evidence_id,
+        environment="production",
+        application_mode="live-key-readonly",
         observed_at=T2,
         expires_at=T4,
         evidence_ref="evidence://balance/read",

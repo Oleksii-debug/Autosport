@@ -330,6 +330,24 @@ class ProductPaperDecisionCycleTests(unittest.TestCase):
             self.assertEqual(len(_FakeLoop.instances), 1)
             self.assertTrue(_FakeLoop.instances[0].closed)
 
+    def test_concurrent_tick_fails_closed_before_runtime_mutation(self) -> None:
+        with tempfile.TemporaryDirectory() as directory, self._patch_dependencies():
+            workspace = Path(directory)
+            runtime = _FakeRuntime(workspace)
+            cycle = self._cycle(workspace, runtime)
+            self.assertTrue(cycle._cycle_lock.acquire(blocking=False))
+            try:
+                with self.assertRaisesRegex(
+                    ProductPaperDecisionCycleError,
+                    "product cycle in progress",
+                ):
+                    cycle.tick()
+            finally:
+                cycle._cycle_lock.release()
+
+            self.assertEqual(runtime.log, [])
+            self.assertFalse((workspace / "paper_book.json").exists())
+
     def test_non_running_product_runtime_fails_before_product_tick(self) -> None:
         with tempfile.TemporaryDirectory() as directory, self._patch_dependencies():
             workspace = Path(directory)

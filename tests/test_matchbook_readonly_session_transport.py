@@ -20,6 +20,7 @@ from autosport.matchbook_session_lifecycle import (
     MatchbookSessionLifecycle,
     SessionState,
 )
+from autosport.providers import ProviderUnavailableError
 
 
 class TickClock:
@@ -660,3 +661,11 @@ def test_logout_while_read_is_inflight_fences_late_predecessor_response() -> Non
     assert results == []
     assert len(errors) == 1
     assert isinstance(errors[0], MatchbookStaleGenerationResponse)
+
+
+def test_transport_failures_reuse_canonical_provider_unavailability_boundary() -> None:
+    assert issubclass(MatchbookSessionTransportError, ProviderUnavailableError)
+    assert issubclass(MatchbookAuthenticationUnavailable, ProviderUnavailableError)
+    assert issubclass(MatchbookReadUnavailable, ProviderUnavailableError)
+    assert issubclass(MatchbookReadForbidden, ProviderUnavailableError)
+    assert issubclass(MatchbookStaleGenerationResponse, ProviderUnavailableError)

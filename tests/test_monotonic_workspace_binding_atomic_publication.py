@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import threading
 from pathlib import Path
 
@@ -99,3 +100,32 @@ def test_existing_complete_binding_cannot_be_overwritten(
 
     assert json.loads(target.read_text(encoding="utf-8")) == first
     assert list(tmp_path.glob(f".{target.name}.*.tmp")) == []
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows-only write-through publication contract")
+def test_windows_publication_uses_write_through_move(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    target = tmp_path / "binding.json"
+    payload = {"workspace_instance_id": "windows-winner", "schema_version": 1}
+    calls: list[tuple[Path, Path]] = []
+    original = workspace_binding._replace_windows_write_through
+
+    def recording_replace(source: Path, destination: Path) -> None:
+        calls.append((source, destination))
+        original(source, destination)
+
+    monkeypatch.setattr(
+        workspace_binding,
+        "_replace_windows_write_through",
+        recording_replace,
+    )
+
+    _publish(target, payload)
+
+    assert len(calls) == 1
+    staged, destination = calls[0]
+    assert destination == target
+    assert not staged.exists()
+    assert json.loads(target.read_text(encoding="utf-8")) == payload
+

@@ -92,7 +92,11 @@ def _instant(value: object, name: str) -> datetime:
 
 
 def _decimal(value: object, name: str) -> Decimal:
-    if not isinstance(value, Decimal) or isinstance(value, bool) or not value.is_finite():
+    # Decimal is a caller-facing authority boundary.  Decimal subclasses may
+    # override is_finite(), as_tuple() and __format__(), so accepting them would
+    # let virtual methods bypass the pre-materialization resource fence or make
+    # canonical text/hash output depend on mutable caller state.
+    if type(value) is not Decimal or not value.is_finite():
         raise RiskOfRuinEvaluationError(f"{name} must be a finite exact Decimal")
     return value
 

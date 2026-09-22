@@ -821,3 +821,51 @@ def test_per_request_clock_regression_is_lifecycle_failure_and_rotates_before_re
     assert second.generation_id == "gen-2"
     assert login.calls == 2
     assert lifecycle._issued_read_tickets == {}
+
+
+def test_generation_rotation_between_session_lookup_and_ticket_capture_sends_no_request() -> None:
+    class RotateBeforeCaptureLifecycle(MatchbookSessionLifecycle):
+        def __init__(self) -> None:
+            super().__init__()
+            self.rotated = False
+
+        def capture_read_generation(self, *, monotonic_ns: int):
+            if not self.rotated:
+                self.rotated = True
+                self.record_login_200(
+                    generation_id="external-gen",
+                    monotonic_ns=monotonic_ns,
+                )
+            return super().capture_read_generation(monotonic_ns=monotonic_ns)
+
+    lifecycle = RotateBeforeCaptureLifecycle()
+    login = LoginFactory()
+    read_calls: list[tuple[str, str]] = []
+
+    def read(token: str, path: str) -> MatchbookReadResponse:
+        read_calls.append((token, path))
+        return MatchbookReadResponse(200, {"ok": True})
+
+    transport, _, _, _ = build_transport(
+        lifecycle=lifecycle,
+        login=login,
+        read=read,
+    )
+
+    with pytest.raises(
+        MatchbookAuthenticationUnavailable,
+        match="changed before read dispatch",
+    ):
+        transport.read(path="/edge/rest/events")
+
+    assert read_calls == []
+    assert transport.generation_id is None
+    assert lifecycle.generation_id == "external-gen"
+    assert lifecycle.state is SessionState.ACTIVE
+    assert lifecycle._issued_read_tickets == {}
+
+    recovered = transport.read(path="/edge/rest/events")
+    assert recovered.generation_id == "gen-2"
+    assert recovered.payload == {"ok": True}
+    assert read_calls == [("token-2", "/edge/rest/events")]
+    assert lifecycle._issued_read_tickets == {}

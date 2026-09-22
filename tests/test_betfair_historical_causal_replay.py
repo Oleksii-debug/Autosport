@@ -228,6 +228,38 @@ class BetfairHistoricalCausalReplayTests(unittest.TestCase):
         with self.assertRaisesRegex(BetfairHistoricalReplayError, "non-finite"):
             replay_betfair_historical_until(nonfinite, _source(nonfinite), cutoff_pt_ms=200)
 
+    def test_finite_syntax_exponent_overflow_fails_closed_recursively(self) -> None:
+        nested_object = (
+            b'{"op":"mcm","pt":100,"mc":[],"metrics":{"edge":1e9999}}\n'
+        )
+        with self.assertRaisesRegex(BetfairHistoricalReplayError, "non-finite JSON number"):
+            replay_betfair_historical_until(
+                nested_object,
+                _source(nested_object),
+                cutoff_pt_ms=100,
+            )
+
+        nested_array = (
+            b'{"op":"mcm","pt":100,"mc":[],"metrics":[0,-1e9999]}\n'
+        )
+        with self.assertRaisesRegex(BetfairHistoricalReplayError, "non-finite JSON number"):
+            replay_betfair_historical_until(
+                nested_array,
+                _source(nested_array),
+                cutoff_pt_ms=100,
+            )
+
+    def test_finite_scientific_notation_remains_valid(self) -> None:
+        raw = b'{"op":"mcm","pt":100,"mc":[],"metric":1.25e2}\n'
+        record = replay_betfair_historical_until(
+            raw,
+            _source(raw),
+            cutoff_pt_ms=100,
+        ).records[0]
+        self.assertEqual(record.payload()["metric"], 125.0)
+        self.assertNotIn("Infinity", record.payload_json)
+        self.assertNotIn("NaN", record.payload_json)
+
     def test_non_mcm_lines_do_not_gain_replay_authority(self) -> None:
         raw = _raw(
             {"op": "connection", "connectionId": "abc"},

@@ -8,7 +8,11 @@ import tk_uia
 
 from .gui import AUTOMATION_IDS
 from .integrity import atomic_write_json
-from .windows_gui import WINDOWS_BANKROLL_AUTOMATION_ID, WindowsAutosportApp
+from .windows_gui import (
+    WINDOWS_BANKROLL_AUTOMATION_ID,
+    WINDOWS_EMERGENCY_STOP_AUTOMATION_ID,
+    WindowsAutosportApp,
+)
 from .windows_layout import WINDOWS_SHELL_AUTOMATION_IDS
 from .windows_manual_calculation import WORKBENCH_AUTOMATION_IDS, show_manual_calculation_workbench
 
@@ -27,6 +31,7 @@ _REQUIRED_PATTERNS = {
     AUTOMATION_IDS["live_quotes"]: set(),
     AUTOMATION_IDS["evaluation"]: set(),
     WINDOWS_BANKROLL_AUTOMATION_ID: {"VALUE"},
+    WINDOWS_EMERGENCY_STOP_AUTOMATION_ID: {"INVOKE"},
     WINDOWS_SHELL_AUTOMATION_IDS["navigation"]: {"VALUE"},
     WINDOWS_SHELL_AUTOMATION_IDS["state"]: {"VALUE"},
     WINDOWS_SHELL_AUTOMATION_IDS["open"]: {"INVOKE"},
@@ -57,6 +62,7 @@ _EXPECTED_ROLES = {
     AUTOMATION_IDS["live_quotes"]: "LIST",
     AUTOMATION_IDS["evaluation"]: "LIST",
     WINDOWS_BANKROLL_AUTOMATION_ID: "TEXT",
+    WINDOWS_EMERGENCY_STOP_AUTOMATION_ID: "PUSH_BUTTON",
     WINDOWS_SHELL_AUTOMATION_IDS["navigation"]: "COMBO_BOX",
     WINDOWS_SHELL_AUTOMATION_IDS["state"]: "TEXT",
     WINDOWS_SHELL_AUTOMATION_IDS["open"]: "PUSH_BUTTON",

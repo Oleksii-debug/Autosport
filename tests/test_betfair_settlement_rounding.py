@@ -6,7 +6,9 @@ from decimal import Decimal, localcontext
 import pytest
 
 from autosport.betfair_settlement_rounding import (
+    BetfairOrdinarySettlementProjection,
     BetfairSettlementRoundingError,
+    MonetaryUncertaintyInterval,
     ThresholdDisposition,
     classify_strictly_above_threshold,
     continuous_after_commission,
@@ -145,6 +147,29 @@ def test_threshold_classification_requires_whole_interval_on_one_side() -> None:
         classify_strictly_above_threshold(crossing, Decimal("0"))
         is ThresholdDisposition.INDETERMINATE
     )
+
+
+def test_direct_projection_construction_cannot_forge_model_values() -> None:
+    with pytest.raises(BetfairSettlementRoundingError):
+        BetfairOrdinarySettlementProjection(
+            gross_unrounded=Decimal("0.005"),
+            commission_rate=Decimal("0.05"),
+            gross_posted_model=Decimal("0.01"),
+            commission_posted_model=Decimal("0.00"),
+            net_posted_model=Decimal("99.00"),
+            continuous_net=Decimal("0.00475"),
+            absolute_model_delta=Decimal("0.00525"),
+        )
+
+
+def test_direct_uncertainty_interval_cannot_forge_threshold_bounds() -> None:
+    with pytest.raises(BetfairSettlementRoundingError):
+        MonetaryUncertaintyInterval(
+            center=Decimal("0"),
+            epsilon=Decimal("0.01"),
+            lower=Decimal("1"),
+            upper=Decimal("2"),
+        )
 
 
 def test_zero_epsilon_can_decide_exactly_without_claiming_provider_origin() -> None:

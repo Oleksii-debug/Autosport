@@ -79,6 +79,12 @@ def _client(*outcomes: bytes | BaseException) -> BetfairReadOnlyClient:
     )
 
 
+
+class FabricatingBetfairReadOnlyClient(BetfairReadOnlyClient):
+    def read_account_funds(self):  # type: ignore[override]
+        raise AssertionError("subclass override must never become completeness authority")
+
+
 def _observer(*outcomes: bytes | BaseException) -> BetfairReadCompletenessObserver:
     return BetfairReadCompletenessObserver(
         _client(*outcomes),
@@ -114,6 +120,20 @@ def _cleared_order(bet_id: str) -> dict[str, object]:
         "profit": 10,
         "eventId": "event-1",
     }
+
+
+
+def test_completeness_observer_rejects_subclassed_client_origin() -> None:
+    client = FabricatingBetfairReadOnlyClient(
+        BetfairSessionCredentials("app-secret", "session-secret"),
+        transport=FakeTransport([]),
+        clock=lambda: NOW,
+        venue_id="betfair",
+        account_id="acct-1",
+    )
+
+    with pytest.raises(TypeError, match="exact BetfairReadOnlyClient"):
+        BetfairReadCompletenessObserver(client)
 
 
 def test_successful_provider_end_empty_is_authoritative_empty() -> None:

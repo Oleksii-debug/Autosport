@@ -197,6 +197,7 @@ class SmarketsEntitlementDecision:
     entitled: bool
     reason: str
     purpose: SmarketsPurpose
+    account_scope: str
     event_id: str
     market_id: str
     observation_sha256: str
@@ -208,7 +209,8 @@ class SmarketsEntitlementDecision:
     def __post_init__(self) -> None:
         if type(self.entitled) is not bool or type(self.purpose) is not SmarketsPurpose:
             raise SmarketsEntitlementError("invalid entitlement decision")
-        _text(self.reason, "reason"); _text(self.event_id, "event_id"); _text(self.market_id, "market_id")
+        _text(self.reason, "reason"); _text(self.account_scope, "account_scope")
+        _text(self.event_id, "event_id"); _text(self.market_id, "market_id")
         _sha(self.observation_sha256, "observation_sha256"); _text(self.rate_policy_ref, "rate_policy_ref")
         _posint(self.max_requests_per_window, "max_requests_per_window"); _posint(self.rate_window_seconds, "rate_window_seconds")
         if self.execution_authorized is not False:
@@ -288,20 +290,13 @@ def issue_smarkets_entitlement_observation(*, account_scope: str, approval_ref: 
         raise SmarketsEntitlementError("approval_state must be exact SmarketsApprovalState")
     if type(approved_purposes) is not tuple or any(type(x) is not SmarketsPurpose for x in approved_purposes):
         raise SmarketsEntitlementError("approved_purposes must contain exact SmarketsPurpose values")
-    purposes = tuple(sorted(set(approved_purposes), key=lambda x: x.value)); _purposes(purposes)
+    purposes = _purposes(approved_purposes)
     prohibited = _PROVIDER_PROHIBITED_PURPOSES.intersection(purposes)
     if prohibited:
         names = ",".join(sorted(item.value for item in prohibited))
         raise SmarketsEntitlementError(f"provider terms prohibit purpose under schema v1: {names}")
-    if type(allowed_event_ids) is not tuple:
-        raise SmarketsEntitlementError("allowed_event_ids must be tuple")
-    if type(allowed_market_ids) is not tuple:
-        raise SmarketsEntitlementError("allowed_market_ids must be tuple")
-    if any(type(x) is not str for x in allowed_event_ids):
-        raise SmarketsEntitlementError("allowed_event_ids must contain strings")
-    if any(type(x) is not str for x in allowed_market_ids):
-        raise SmarketsEntitlementError("allowed_market_ids must contain strings")
-    events = tuple(sorted(set(allowed_event_ids))); markets = tuple(sorted(set(allowed_market_ids)))
+    events = _texts(allowed_event_ids, "allowed_event_ids")
+    markets = _texts(allowed_market_ids, "allowed_market_ids")
     rate_policy_ref = _text(rate_policy_ref, "rate_policy_ref")
     _posint(max_requests_per_window, "max_requests_per_window"); _posint(rate_window_seconds, "rate_window_seconds")
     observed = _dt(_utc(observed_at, "observed_at")); source = _sha(source_document_sha256, "source_document_sha256")
@@ -333,19 +328,22 @@ def _valid_issued_entitlement(v: SmarketsEntitlementObservation) -> bool:
     return _issued(_ISSUED_ENT, v) == current == v.evidence_sha256
 
 
-def evaluate_smarkets_entitlement(observation: SmarketsEntitlementObservation, *, purpose: SmarketsPurpose,
-    event_id: str, market_id: str, as_of: datetime, max_age_seconds: int
+def evaluate_smarkets_entitlement(observation: SmarketsEntitlementObservation, *, account_scope: str,
+    purpose: SmarketsPurpose, event_id: str, market_id: str, as_of: datetime, max_age_seconds: int
 ) -> SmarketsEntitlementDecision:
     if type(observation) is not SmarketsEntitlementObservation:
         raise SmarketsEntitlementError("observation must be exact SmarketsEntitlementObservation")
     if type(purpose) is not SmarketsPurpose:
         raise SmarketsEntitlementError("purpose must be exact SmarketsPurpose")
+    account_scope = _text(account_scope, "account_scope")
     event_id = _text(event_id, "event_id"); market_id = _text(market_id, "market_id")
     as_of = _utc(as_of, "as_of"); _posint(max_age_seconds, "max_age_seconds")
     def out(ok: bool, reason: str) -> SmarketsEntitlementDecision:
-        return SmarketsEntitlementDecision(ok, reason, purpose, event_id, market_id, observation.evidence_sha256,
-            observation.rate_policy_ref, observation.max_requests_per_window, observation.rate_window_seconds)
+        return SmarketsEntitlementDecision(ok, reason, purpose, observation.account_scope, event_id, market_id,
+            observation.evidence_sha256, observation.rate_policy_ref, observation.max_requests_per_window,
+            observation.rate_window_seconds)
     if not _valid_issued_entitlement(observation): return out(False, "UNISSUED_OR_MUTATED_EVIDENCE")
+    if observation.account_scope != account_scope: return out(False, "ACCOUNT_SCOPE_MISMATCH")
     observed = _dt_text(observation.observed_at, "observed_at")
     if observed > as_of: return out(False, "FUTURE_EVIDENCE")
     if (as_of - observed).total_seconds() > max_age_seconds: return out(False, "STALE_EVIDENCE")
@@ -379,8 +377,8 @@ def resolve_smarkets_entitlement(observations: tuple[SmarketsEntitlementObservat
     if not candidates:
         raise SmarketsEntitlementError("no entitlement observation visible for account scope")
     latest = max(candidates, key=lambda x: _dt_text(x.observed_at, "observed_at"))
-    return evaluate_smarkets_entitlement(latest, purpose=purpose, event_id=event_id, market_id=market_id,
-        as_of=as_of, max_age_seconds=max_age_seconds)
+    return evaluate_smarkets_entitlement(latest, account_scope=account_scope, purpose=purpose,
+        event_id=event_id, market_id=market_id, as_of=as_of, max_age_seconds=max_age_seconds)
 
 
 def issue_smarkets_setup_cost_observation(*, amount: Decimal, currency: str, billing_trigger: str,

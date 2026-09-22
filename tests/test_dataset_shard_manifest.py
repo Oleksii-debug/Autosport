@@ -329,6 +329,26 @@ def test_durable_payload_roundtrip_is_strict_and_order_independent() -> None:
         DatasetShardDescriptor.from_payload(schema_bad)
 
 
+def test_sha256_text_must_be_canonical_lowercase() -> None:
+    with pytest.raises(ValueError, match="canonical lowercase SHA-256"):
+        DatasetShardDescriptor(
+            ordinal=0,
+            shard_id="s0",
+            relative_path="s.bin",
+            byte_size=1,
+            content_sha256="A" * 64,
+            event_start_utc="2026-09-01T00:00:00Z",
+            event_end_utc="2026-09-01T00:59:59Z",
+        )
+
+    descriptor = _descriptor(0, "s0", "s.bin", b"x")
+    raw = descriptor.payload()
+    raw["content_sha256"] = raw["content_sha256"].upper()
+
+    with pytest.raises(ValueError, match="canonical lowercase SHA-256"):
+        DatasetShardDescriptor.from_payload(raw)
+
+
 def test_matching_manifest_rejects_shard_ending_after_causal_cutoff(
     tmp_path: Path,
 ) -> None:

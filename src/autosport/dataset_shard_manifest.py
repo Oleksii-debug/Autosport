@@ -40,9 +40,15 @@ def _text(value: object, name: str) -> str:
 
 
 def _sha256(value: object, name: str) -> str:
-    text = _text(value, name).lower()
-    if len(text) != 64 or any(char not in _HEX for char in text):
-        raise ValueError(f"{name} must be a canonical SHA-256 hex string")
+    text = _text(value, name)
+    if (
+        len(text) != 64
+        or text != text.lower()
+        or any(char not in _HEX for char in text)
+    ):
+        raise ValueError(
+            f"{name} must be a canonical lowercase SHA-256 hex string"
+        )
     return text
 
 

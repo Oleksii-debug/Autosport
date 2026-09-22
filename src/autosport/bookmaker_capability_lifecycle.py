@@ -319,16 +319,37 @@ class CapabilityEvidenceJournal:
         evidence_id = evidence.evidence_id
         if evidence_id in self._evidence:
             return evidence_id
+        same_scope: list[tuple[str, CapabilityEvidence]] = []
         for other_id, other in self._evidence.items():
             if (
                 other.capability is evidence.capability
                 and _scope_key(other.scope) == _scope_key(evidence.scope)
-                and other.committed_at == evidence.committed_at
-                and other_id != evidence_id
             ):
+                same_scope.append((other_id, other))
+                if (
+                    other.committed_at == evidence.committed_at
+                    and other_id != evidence_id
+                ):
+                    raise CapabilityEvidenceError(
+                        "conflicting evidence at the same commit timestamp"
+                    )
+
+        latest: tuple[str, CapabilityEvidence] | None = None
+        if same_scope:
+            latest = max(
+                same_scope,
+                key=lambda item: (
+                    _time(item[1].committed_at, "committed_at"),
+                    item[0],
+                ),
+            )
+            if evidence.predecessor_id != latest[0]:
                 raise CapabilityEvidenceError(
-                    "conflicting evidence at the same commit timestamp"
+                    "successor evidence must link the exact latest predecessor"
                 )
+        elif evidence.predecessor_id is not None:
+            raise CapabilityEvidenceError("first evidence cannot declare a predecessor")
+
         if evidence.predecessor_id is not None:
             predecessor = self._evidence.get(evidence.predecessor_id)
             if predecessor is None:

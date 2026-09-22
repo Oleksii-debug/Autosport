@@ -10,6 +10,7 @@ from urllib.request import Request
 
 import pytest
 
+import autosport.betfair_historical_entitlement as historical_module
 from autosport.betfair_account_identity import (
     build_betfair_authenticated_client,
     resolve_betfair_authenticated_account_identity,
@@ -25,6 +26,7 @@ from autosport.betfair_historical_entitlement import (
     BetfairHistoricalEntitlementError,
     HistoricalDownloadFilter,
     HistoricalEntitlementSnapshot,
+    HistoricalProviderOriginWitness,
     UrllibBetfairHistoricalTransport,
     _SameOriginRedirectHandler,
 )
@@ -190,6 +192,84 @@ def test_structural_purchase_listing_download_binding_stays_non_authoritative(
         match="provider acquisition provenance is not mechanically proven",
     ):
         historical.require_authoritative_download(evidence, raw)
+
+
+def test_structural_synthetic_transport_cannot_issue_provider_origin_witness(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _, historical, _, _, evidence, raw = _acquire(monkeypatch)
+
+    with pytest.raises(
+        BetfairHistoricalEntitlementError,
+        match="did not traverse the canonical Historical Data provider-origin transport chain",
+    ):
+        historical.issue_provider_origin_witness(evidence, raw)
+
+
+def test_caller_constructed_provider_origin_witness_is_not_authoritative(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _, _, _, _, evidence, _ = _acquire(monkeypatch)
+    forged = HistoricalProviderOriginWitness(
+        session_context_id=evidence.session_context_id,
+        entitlement_snapshot_sha256=evidence.entitlement_snapshot_sha256,
+        listing_sha256=evidence.listing_sha256,
+        download_file_identity_sha256=evidence.file_identity_sha256,
+        provider_path=evidence.provider_path,
+        retrieved_at=evidence.retrieved_at,
+        raw_sha256=evidence.raw_sha256,
+        byte_length=evidence.byte_length,
+        transport_contract_sha256="0" * 64,
+    )
+
+    assert forged.provider_origin_verified is False
+    assert forged.usage_rights_verified is False
+    assert forged.rights_revalidation_required is True
+    with pytest.raises(
+        BetfairHistoricalEntitlementError,
+        match="was not issued by the canonical client",
+    ):
+        forged.assert_authoritative()
+
+
+def test_fresh_builtin_transport_has_canonical_executable_surface() -> None:
+    transport = UrllibBetfairHistoricalTransport()
+
+    assert historical_module._canonical_historical_network_transport(transport) is True
+
+
+def test_instance_method_shadow_revokes_canonical_transport_origin() -> None:
+    transport = UrllibBetfairHistoricalTransport()
+    transport.post_json = lambda *args, **kwargs: b"[]"  # type: ignore[method-assign]
+
+    assert historical_module._canonical_historical_network_transport(transport) is False
+
+
+def test_class_method_rebind_revokes_canonical_transport_origin(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    transport = UrllibBetfairHistoricalTransport()
+    monkeypatch.setattr(
+        UrllibBetfairHistoricalTransport,
+        "get_file",
+        lambda self, url, *, ssoid, timeout_seconds: RAW_A,
+    )
+
+    assert historical_module._canonical_historical_network_transport(transport) is False
+
+
+def test_opener_replacement_revokes_canonical_transport_origin() -> None:
+    transport = UrllibBetfairHistoricalTransport()
+    transport._opener = object()
+
+    assert historical_module._canonical_historical_network_transport(transport) is False
+
+
+def test_opener_handler_mutation_revokes_canonical_transport_origin() -> None:
+    transport = UrllibBetfairHistoricalTransport()
+    transport._opener.handlers.pop()
+
+    assert historical_module._canonical_historical_network_transport(transport) is False
 
 
 def test_caller_constructed_snapshot_cannot_authorize_listing(

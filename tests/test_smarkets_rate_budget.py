@@ -9,6 +9,7 @@ import pytest
 from autosport.smarkets_rate_budget import (
     SmarketsAccountRateBudget,
     SmarketsRateBudgetError,
+    SmarketsRateBudgetFailure,
     SmarketsRateBudgetObservation,
 )
 
@@ -239,6 +240,135 @@ def test_parallel_store_instances_never_double_spend_one_slot(tmp_path: Path) ->
     assert all(not d.request_budget_available for d in decisions if not d.request_budget_available)
     assert len(decisions) + len(errors) == 8
 
+
+
+def test_exact_reservation_response_correlation_releases_only_that_pending_slot(tmp_path: Path) -> None:
+    budget = store(tmp_path / "budget.sqlite3")
+    reset = T0 + timedelta(seconds=60)
+    budget.record_observation(obs(limit=5, remaining=4, reset_at=reset))
+    reserved = budget.reserve_request(account_id="acct-1", session_generation="s1", now=T0)
+    assert reserved.reservation_id is not None
+
+    budget.record_observation(
+        obs(
+            limit=5,
+            remaining=3,
+            observed_at=T0 + timedelta(seconds=1),
+            reset_at=reset,
+        ),
+        reservation_id=reserved.reservation_id,
+    )
+    next_decision = budget.reserve_request(
+        account_id="acct-1", session_generation="s2", now=T0 + timedelta(seconds=1)
+    )
+    assert next_decision.request_budget_available
+    assert next_decision.effective_remaining_before == 3
+
+
+def test_uncorrelated_new_observation_cannot_clear_pending_reservation(tmp_path: Path) -> None:
+    budget = store(tmp_path / "budget.sqlite3")
+    reset = T0 + timedelta(seconds=60)
+    budget.record_observation(obs(limit=5, remaining=4, reset_at=reset))
+    reserved = budget.reserve_request(account_id="acct-1", session_generation="pending", now=T0)
+    assert reserved.reservation_id is not None
+
+    budget.record_observation(
+        obs(
+            limit=5,
+            remaining=3,
+            observed_at=T0 + timedelta(seconds=1),
+            reset_at=reset,
+        )
+    )
+    next_decision = budget.reserve_request(
+        account_id="acct-1", session_generation="other", now=T0 + timedelta(seconds=1)
+    )
+    assert next_decision.request_budget_available
+    assert next_decision.effective_remaining_before == 2
+
+
+def test_provider_limit_change_inside_window_fails_closed(tmp_path: Path) -> None:
+    budget = store(tmp_path / "budget.sqlite3")
+    reset = T0 + timedelta(seconds=60)
+    budget.record_observation(obs(limit=1200, remaining=900, reset_at=reset))
+    with pytest.raises(SmarketsRateBudgetError, match="limit changed"):
+        budget.record_observation(
+            obs(
+                limit=600,
+                remaining=500,
+                observed_at=T0 + timedelta(seconds=1),
+                reset_at=reset,
+            )
+        )
+
+
+def test_unknown_or_replayed_completion_token_cannot_release_budget(tmp_path: Path) -> None:
+    budget = store(tmp_path / "budget.sqlite3")
+    reset = T0 + timedelta(seconds=60)
+    budget.record_observation(obs(limit=5, remaining=4, reset_at=reset))
+    with pytest.raises(SmarketsRateBudgetError, match="unknown"):
+        budget.record_observation(
+            obs(
+                limit=5,
+                remaining=3,
+                observed_at=T0 + timedelta(seconds=1),
+                reset_at=reset,
+            ),
+            reservation_id="0" * 64,
+        )
+
+
+def test_malformed_429_can_be_persisted_as_fail_closed_block(tmp_path: Path) -> None:
+    budget = store(tmp_path / "budget.sqlite3")
+    budget.record_observation(obs(remaining=50))
+    budget.record_failure(
+        account_id="acct-1",
+        observed_at=T0 + timedelta(seconds=1),
+        failure=SmarketsRateBudgetFailure.RATE_LIMITED_UNKNOWN_RESET,
+    )
+    blocked = budget.reserve_request(
+        account_id="acct-1", session_generation="new-login", now=T0 + timedelta(seconds=1)
+    )
+    assert not blocked.request_budget_available
+    assert blocked.reason == "blocked_rate_limited_unknown_reset"
+
+    # Session churn cannot clear the block.  Only a strictly newer valid
+    # provider-budget observation does.
+    budget.record_observation(
+        obs(
+            remaining=49,
+            observed_at=T0 + timedelta(seconds=2),
+            reset_at=T0 + timedelta(seconds=60),
+        )
+    )
+    assert budget.reserve_request(
+        account_id="acct-1", session_generation="another-login", now=T0 + timedelta(seconds=2)
+    ).request_budget_available
+
+
+def test_transport_failure_without_rate_headers_blocks_even_before_first_observation(tmp_path: Path) -> None:
+    budget = store(tmp_path / "budget.sqlite3")
+    budget.record_failure(
+        account_id="acct-1",
+        observed_at=T0,
+        failure=SmarketsRateBudgetFailure.TRANSPORT_AMBIGUOUS,
+    )
+    blocked = budget.reserve_request(account_id="acct-1", session_generation="s", now=T0)
+    assert not blocked.request_budget_available
+    assert blocked.reason == "blocked_transport_ambiguous"
+
+
+def test_stale_failure_cannot_override_newer_valid_budget_observation(tmp_path: Path) -> None:
+    budget = store(tmp_path / "budget.sqlite3")
+    budget.record_observation(
+        obs(observed_at=T0 + timedelta(seconds=2), reset_at=T0 + timedelta(seconds=60))
+    )
+    with pytest.raises(SmarketsRateBudgetError, match="predates"):
+        budget.record_failure(
+            account_id="acct-1",
+            observed_at=T0 + timedelta(seconds=1),
+            failure=SmarketsRateBudgetFailure.SERVER_ERROR,
+        )
 
 def test_decision_never_mints_higher_authority(tmp_path: Path) -> None:
     budget = store(tmp_path / "budget.sqlite3")

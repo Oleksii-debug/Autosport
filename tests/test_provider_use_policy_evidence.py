@@ -490,3 +490,81 @@ def test_error_messages_do_not_echo_secret_like_bad_reference() -> None:
             purposes=(ProviderUsePurpose.REDISTRIBUTION,),
         )
     assert "VERY-SECRET-VALUE" not in str(exc.value)
+
+
+def test_reviewer_decision_is_hash_bound_into_policy_identity() -> None:
+    reviewer_decision = ProviderUsePurposeDecision(
+        purpose=ProviderUsePurpose.MODEL_TRAINING,
+        status=ProviderUsePolicyStatus.ALLOWED_BY_DOCUMENTED_POLICY,
+        source_section_ref="section:ambiguous",
+        basis=ProviderUseDecisionBasis.REVIEWER_DECISION,
+        reviewer_decision_ref="review:legal-42",
+        reviewer_decision_sha256=_sha("review-artifact"),
+    )
+    decisions = tuple(
+        reviewer_decision if decision.purpose is ProviderUsePurpose.MODEL_TRAINING else decision
+        for decision in _decisions()
+    )
+    policy = _policy(decisions=decisions)
+
+    result = evaluate_provider_use(
+        policy=policy,
+        request=_request(ProviderUsePurpose.MODEL_TRAINING),
+    )
+
+    assert result.authorized is True
+    assert "reviewer_decision_sha256" in policy.to_payload()["decisions"][4]
+    changed = ProviderUsePurposeDecision(
+        purpose=ProviderUsePurpose.MODEL_TRAINING,
+        status=ProviderUsePolicyStatus.ALLOWED_BY_DOCUMENTED_POLICY,
+        source_section_ref="section:ambiguous",
+        basis=ProviderUseDecisionBasis.REVIEWER_DECISION,
+        reviewer_decision_ref="review:legal-42",
+        reviewer_decision_sha256=_sha("different-review-artifact"),
+    )
+    changed_decisions = tuple(
+        changed if decision.purpose is ProviderUsePurpose.MODEL_TRAINING else decision
+        for decision in _decisions()
+    )
+    assert _policy(decisions=changed_decisions).evidence_id != policy.evidence_id
+
+
+def test_reviewer_reference_without_review_artifact_digest_fails_closed() -> None:
+    with pytest.raises(ProviderUsePolicyError, match="reviewer_decision_sha256"):
+        ProviderUsePurposeDecision(
+            purpose=ProviderUsePurpose.MODEL_TRAINING,
+            status=ProviderUsePolicyStatus.ALLOWED_BY_DOCUMENTED_POLICY,
+            source_section_ref="section:ambiguous",
+            basis=ProviderUseDecisionBasis.REVIEWER_DECISION,
+            reviewer_decision_ref="review:legal-42",
+        )
+
+
+def test_review_due_boundary_is_exclusive() -> None:
+    policy = _policy(review_due="2026-09-23T00:00:00Z")
+    result = evaluate_provider_use(
+        policy=policy,
+        request=_request(
+            ProviderUsePurpose.INTERNAL_ANALYSIS,
+            use_at="2026-09-23T00:00:00Z",
+        ),
+    )
+    assert result.state is ProviderUseAuthorizationState.POLICY_REVIEW_EXPIRED
+
+
+def test_written_permission_valid_until_boundary_is_exclusive() -> None:
+    policy = _policy()
+    permission = _permission(
+        policy,
+        valid_from="2026-09-22T06:00:00Z",
+        valid_until="2026-09-23T00:00:00Z",
+    )
+    result = evaluate_provider_use(
+        policy=policy,
+        request=_request(
+            ProviderUsePurpose.REDISTRIBUTION,
+            use_at="2026-09-23T00:00:00Z",
+        ),
+        written_permission=permission,
+    )
+    assert result.state is ProviderUseAuthorizationState.WRITTEN_PERMISSION_EXPIRED

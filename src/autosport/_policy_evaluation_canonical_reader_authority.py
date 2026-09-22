@@ -3,7 +3,8 @@
 The ProductPolicyEvaluation issuer already captures the concrete ScientificRegistry and
 FactoryArtifactStore surfaces. FactoryArtifactStore._stable_snapshot delegates one
 level lower to RunTransaction._read_canonical_file_snapshot, so that transitive
-executable must be frozen as part of the same product-owned read authority.
+executable and its direct authority-bearing runtime dependencies must be frozen as
+part of the same product-owned read authority.
 """
 
 from __future__ import annotations
@@ -37,6 +38,26 @@ def _build_require_store_guard():
     reader_globals = vars_builtin(run_transaction_module)
     canonical_reader_code = marshal_dumps(canonical_reader.__code__)
 
+    sealed_reader_globals = {
+        name: reader_globals[name]
+        for name in (
+            "VerifiedFileSnapshot",
+            "RunTransactionError",
+            "hashlib",
+            "os",
+            "stat",
+        )
+    }
+    reader_hashlib = sealed_reader_globals["hashlib"]
+    reader_os = sealed_reader_globals["os"]
+    reader_stat = sealed_reader_globals["stat"]
+    reader_sha256 = reader_hashlib.sha256
+    reader_os_stat = reader_os.stat
+    reader_os_fstat = reader_os.fstat
+    reader_os_path = reader_os.path
+    reader_sameopenfile = reader_os_path.sameopenfile
+    reader_isreg = reader_stat.S_ISREG
+
     def raise_rebound() -> None:
         raise issuance_error_type(
             "FactoryArtifactStore executable authority was rebound"
@@ -62,6 +83,19 @@ def _build_require_store_guard():
             or candidate.__qualname__ != reader_qualname
             or candidate.__globals__ is not reader_globals
             or marshal_dumps(candidate.__code__) != canonical_reader_code
+        ):
+            raise_rebound()
+
+        for name, expected in sealed_reader_globals.items():
+            if reader_globals.get(name) is not expected:
+                raise_rebound()
+        if (
+            reader_hashlib.sha256 is not reader_sha256
+            or reader_os.stat is not reader_os_stat
+            or reader_os.fstat is not reader_os_fstat
+            or reader_os.path is not reader_os_path
+            or reader_os_path.sameopenfile is not reader_sameopenfile
+            or reader_stat.S_ISREG is not reader_isreg
         ):
             raise_rebound()
         return candidate

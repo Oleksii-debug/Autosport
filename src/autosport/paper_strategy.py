@@ -240,7 +240,13 @@ class PaperValueAgent:
         if parse_iso_timestamp(forecast.as_of_ts) > parse_iso_timestamp(event.observed_ts):
             return
         estimate = paper_value(event.quote_key, forecast.probability, event.decimal_odds)
-        if estimate.expected_profit_per_unit < self.minimum_edge:
+        expected_profit_per_unit = estimate.expected_profit_per_unit
+        if event.exchange_side == "lay":
+            # paper_value is the canonical BACK value p*O - 1. For a LAY quote
+            # the economic unit is one unit of lay stake: EV = 1 - p*O,
+            # exactly the negative of the BACK value before commission.
+            expected_profit_per_unit = -expected_profit_per_unit
+        if expected_profit_per_unit < self.minimum_edge:
             return
 
         # PaperValueAgent may decide/propose, but it no longer owns fill truth.
@@ -325,7 +331,7 @@ class PaperValueAgent:
                 if goal is None
                 else self._derive_goal_stake(
                     context,
-                    estimate.expected_profit_per_unit,
+                    expected_profit_per_unit,
                 )
             )
             if chosen_stake is None:
@@ -381,7 +387,7 @@ class PaperValueAgent:
                     "quote_key": event.quote_key,
                     "forecast_model": forecast.model_id,
                     "probability": str(forecast.probability),
-                    "expected_profit_per_unit": str(estimate.expected_profit_per_unit),
+                    "expected_profit_per_unit": str(expected_profit_per_unit),
                     "stake": str(chosen_stake),
                     "requested_stake": str(chosen_stake),
                     "material_action_id": material_action_id,

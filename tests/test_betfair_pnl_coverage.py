@@ -107,15 +107,16 @@ def open_batch(
     include_settled_bets: bool = False,
     include_bsp_bets: bool = False,
     net_of_commission: bool = False,
-    payload_hash: str = "b" * 64,
 ) -> BetfairMarketPnlCoverageBatch:
-    return BetfairMarketPnlCoverageBatch(
-        requested,
-        requested if returned is None else returned,
-        include_settled_bets,
-        include_bsp_bets,
-        net_of_commission,
-        BetfairEvidence(FIXED_NOW.isoformat(), payload_hash),
+    returned_ids = requested if returned is None else returned
+    client, _ = client_for(
+        response([{"marketId": market_id} for market_id in returned_ids], 1)
+    )
+    return client.read_market_profit_and_loss_coverage(
+        market_ids=requested,
+        include_settled_bets=include_settled_bets,
+        include_bsp_bets=include_bsp_bets,
+        net_of_commission=net_of_commission,
     )
 
 
@@ -126,15 +127,23 @@ def closed_page(
     from_record: int = 0,
     record_count: int = 1000,
     more_available: bool = False,
-    payload_hash: str = "c" * 64,
 ) -> BetfairClearedMarketPnlCoveragePage:
-    return BetfairClearedMarketPnlCoveragePage(
-        requested,
-        returned,
-        from_record,
-        record_count,
-        more_available,
-        BetfairEvidence(FIXED_NOW.isoformat(), payload_hash),
+    client, _ = client_for(
+        response(
+            {
+                "clearedOrders": [
+                    {"marketId": market_id}
+                    for market_id in returned
+                ],
+                "moreAvailable": more_available,
+            },
+            1,
+        )
+    )
+    return client.read_cleared_market_profit_and_loss_coverage_page(
+        market_ids=requested,
+        from_record=from_record,
+        record_count=record_count,
     )
 
 
@@ -369,6 +378,43 @@ def test_open_pnl_view_flags_are_bound_to_scope() -> None:
                 open_batch(("1.open",), net_of_commission=True),
             ),
             closed_pages=(),
+        )
+
+
+def test_directly_constructed_dto_cannot_mint_provider_authority() -> None:
+    markets = (market("1.open"),)
+    forged = BetfairMarketPnlCoverageBatch(
+        ("1.open",),
+        ("1.open",),
+        False,
+        False,
+        False,
+        EVIDENCE,
+    )
+
+    with pytest.raises(BetfairPnlCoverageError, match="not issued by canonical"):
+        build_coverage_witness(
+            scope=scope(),
+            markets=markets,
+            open_batches=(forged,),
+            closed_pages=(),
+        )
+
+    closed_markets = (market("1.closed", status=MarketStatus.CLOSED),)
+    forged_closed = BetfairClearedMarketPnlCoveragePage(
+        ("1.closed",),
+        ("1.closed",),
+        0,
+        1000,
+        False,
+        EVIDENCE,
+    )
+    with pytest.raises(BetfairPnlCoverageError, match="not issued by canonical"):
+        build_coverage_witness(
+            scope=scope(),
+            markets=closed_markets,
+            open_batches=(),
+            closed_pages=(forged_closed,),
         )
 
 

@@ -14,6 +14,7 @@ def _bare_controller() -> AutosportWebController:
     controller._closing = False
     controller.status = "stable product status"
     controller.last_error = ""
+    controller._bridge_validation_error = ""
     controller.log = []
     controller.manual_result = "prior"
     controller.manual_status = "ready"
@@ -91,7 +92,7 @@ def test_bridge_validation_rejection_survives_immediate_state_refresh_projection
     }
     # app.js immediately refreshes state after dispatch. state()["last_error"]
     # projects this same field, so the alert cannot disappear in that same cycle.
-    assert controller.last_error == expected_message
+    assert controller._bridge_validation_error == expected_message
 
     # Bridge validation is presentation state only: no domain status/log event is
     # manufactured merely to keep an accessibility alert discoverable.
@@ -125,7 +126,7 @@ def test_conflicting_request_id_persists_rejection_without_reexecuting_action() 
         "status": "rejected",
         "message": "Повторний ідентифікатор належить іншій команді.",
     }
-    assert controller.last_error == collision["message"]
+    assert controller._bridge_validation_error == collision["message"]
 
     # The conflicting replay is not a second command execution and does not
     # manufacture a second domain/log event.
@@ -147,3 +148,46 @@ def test_exact_request_replay_remains_idempotent_and_does_not_add_log_events() -
 
     assert second == first
     assert controller.log == first_log
+
+
+def test_worker_domain_status_cannot_erase_latched_bridge_rejection() -> None:
+    controller = _bare_controller()
+    rejection = controller.dispatch(
+        {
+            "request_id": "unknown-action",
+            "action_id": "not.a.real.action",
+            "payload": {},
+        }
+    )
+    assert rejection["status"] == "rejected"
+
+    # Simulate an unrelated background worker success between dispatch() and the
+    # frontend's immediate get_state() refresh. Ordinary domain success may clear
+    # last_error, but it must not erase the bridge-validation presentation latch.
+    controller._ok("background worker completed")
+
+    assert controller.last_error == ""
+    assert controller._bridge_validation_error == rejection["message"]
+
+
+def test_next_valid_bridge_command_acknowledges_and_clears_validation_latch() -> None:
+    controller = _bare_controller()
+    rejected = controller.dispatch(
+        {
+            "request_id": "bad",
+            "action_id": "unknown.action",
+            "payload": {},
+        }
+    )
+    assert controller._bridge_validation_error == rejected["message"]
+
+    completed = controller.dispatch(
+        {
+            "request_id": "good",
+            "action_id": "manual.clear",
+            "payload": {},
+        }
+    )
+
+    assert completed["status"] == "completed"
+    assert controller._bridge_validation_error == ""

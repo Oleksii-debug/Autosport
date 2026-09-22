@@ -224,7 +224,7 @@ def _reserved_ledger(tmp: str, bound: BoundSupervisedExecutionPlan) -> RealExecu
     return ledger
 
 
-def test_authenticated_market_book_receipt_can_issue_racy_positive_depth() -> None:
+def test_authenticated_market_book_receipt_cannot_bypass_provider_limit_authority() -> None:
     transport = MarketBookTransport()
     receipt, canonical_source = _synthetic_authoritative_receipt(transport)
     decision_at = datetime.now(timezone.utc)
@@ -240,22 +240,17 @@ def test_authenticated_market_book_receipt_can_issue_racy_positive_depth() -> No
             max_snapshot_age=timedelta(seconds=2),
         )
 
-    assert result.state is FeasibilityState.SNAPSHOT_DEPTH_SUFFICIENT_BUT_RACY
-    assert result.sufficient is True
+    # Canonical provider depth plus matching adapter/profile identity is not
+    # provider/account/currency/market standard-LIMIT admissibility authority.
+    # Keep the real displayed-depth observation, but do not mint positive
+    # executable-feasibility truth until that separate authority is composed.
+    assert result.state is FeasibilityState.UNKNOWN_UNPROVEN
+    assert result.sufficient is False
     assert result.displayed_acceptable_depth == Decimal("15")
-    assert result.reasons == ()
+    assert "LIMIT_AUTHORITY_REJECTED" in result.reasons
     assert len(result.evidence_digest) == 64
     assert len(result.liquidity_overlap_key) == 64
     assert transport.calls
-
-    # Authority is process-local issuance over the exact result object/content.
-    # Structurally identical copies or durable reconstruction remain descriptive.
-    assert replace(result).sufficient is False
-    assert pickle.loads(pickle.dumps(result)).sufficient is False
-
-    object.__setattr__(result, "snapshot_id", result.snapshot_id + "-tampered")
-    assert result.sufficient is False
-
 
 def test_forged_structurally_equal_receipt_cannot_issue_positive_truth() -> None:
     receipt, canonical_source = _synthetic_authoritative_receipt(

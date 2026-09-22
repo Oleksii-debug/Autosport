@@ -259,11 +259,38 @@ class ProductPaperDecisionCycle:
 
     def _load_current_book(self) -> PaperBook:
         path = self.workspace / "paper_book.json"
+        execution_path = self.workspace / "paper-execution.jsonl"
+        execution_anchor_path = execution_path.with_name(
+            execution_path.name + ".anchor.json"
+        )
+        execution_writer_lock_path = execution_path.with_name(
+            execution_path.name + ".writer.lock"
+        )
         initial_bankroll = self._initial_bankroll()
         with WorkspaceEconomicLock(self.workspace):
             if path.exists():
                 book = PaperBook.load(path)
             else:
+                if execution_writer_lock_path.exists():
+                    raise ProductPaperDecisionCycleError(
+                        "missing durable PaperBook cannot be recreated while PAPER "
+                        "execution ownership is unresolved"
+                    )
+                if execution_path.exists() or execution_anchor_path.exists():
+                    try:
+                        prior_execution_events = PaperExecutionLedger(
+                            execution_path
+                        ).events()
+                    except Exception as exc:
+                        raise ProductPaperDecisionCycleError(
+                            "missing durable PaperBook cannot be recreated because "
+                            "PAPER execution history cannot be verified"
+                        ) from exc
+                    if prior_execution_events:
+                        raise ProductPaperDecisionCycleError(
+                            "missing durable PaperBook conflicts with existing PAPER "
+                            "execution history; recovery is required"
+                        )
                 book = PaperBook(initial_bankroll)
                 book.save(path)
         if book.initial_bankroll != initial_bankroll:

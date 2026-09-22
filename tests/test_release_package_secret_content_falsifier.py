@@ -224,7 +224,12 @@ class ReleasePackageSecretContentFalsifierTests(unittest.TestCase):
     def test_extended_high_confidence_key_families_are_rejected(self) -> None:
         keys = (
             b"api_hash",
+            b"x-api-key",
+            b"x_auth_token",
             b"oauth_secret",
+            b"oauth_access_token",
+            b"oauth_refresh_token",
+            b"oauth2_access_token",
             b"consumer_secret",
             b"session_id",
             b"bot_token",

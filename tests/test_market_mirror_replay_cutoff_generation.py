@@ -407,7 +407,7 @@ class MarketMirrorReplayCutoffGenerationTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 SQLiteMarketStore(path)
 
-    def test_missing_commit_generation_fails_closed(self) -> None:
+    def test_commit_generation_delete_is_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             store = SQLiteMarketStore(Path(directory) / "market.db")
             try:
@@ -417,16 +417,83 @@ class MarketMirrorReplayCutoffGenerationTests(unittest.TestCase):
                     observed_ts="2026-09-16T19:00:00+00:00",
                 )
                 store.append(event)
-                store.connection.execute(
-                    "DELETE FROM market_event_commit_order WHERE dedupe_key=?",
-                    (event.dedupe_key,),
-                )
-                store.connection.commit()
 
-                with self.assertRaises(ValueError):
-                    self.replay(store)
+                with self.assertRaisesRegex(
+                    sqlite3.IntegrityError,
+                    "market event append-generation rows are immutable",
+                ):
+                    store.connection.execute(
+                        "DELETE FROM market_event_commit_order WHERE dedupe_key=?",
+                        (event.dedupe_key,),
+                    )
+                store.connection.rollback()
+
+                self.assertEqual(
+                    store.connection.execute(
+                        "SELECT COUNT(*) FROM market_event_commit_order"
+                    ).fetchone(),
+                    (1,),
+                )
             finally:
                 store.close()
+
+    def test_append_generation_swap_is_rejected_and_frozen_replay_survives_restart(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "market.db"
+            store = SQLiteMarketStore(path)
+            try:
+                first = self.event(
+                    sequence=1,
+                    odds="2.00",
+                    observed_ts="2026-09-16T19:00:00+00:00",
+                )
+                second = self.event(
+                    sequence=2,
+                    odds="9.99",
+                    observed_ts="2026-09-16T18:59:59+00:00",
+                    ingest_ts="2026-09-16T18:59:59+00:00",
+                )
+                self.assertTrue(store.append(first))
+                expected = self.semantic_events(self.replay(store))
+                self.assertTrue(store.append(second))
+
+                self.assertEqual(
+                    store.connection.execute(
+                        "SELECT append_generation FROM market_event_commit_order "
+                        "ORDER BY append_generation"
+                    ).fetchall(),
+                    [(1,), (2,)],
+                )
+
+                # Without append-generation immutability this single statement leaves
+                # the table unique and contiguous while swapping which event belongs
+                # to the already-frozen generation-1 decision corpus.
+                with self.assertRaisesRegex(
+                    sqlite3.IntegrityError,
+                    "market event append-generation rows are immutable",
+                ):
+                    store.connection.execute(
+                        """UPDATE market_event_commit_order
+                           SET append_generation = CASE append_generation
+                               WHEN 1 THEN 2
+                               WHEN 2 THEN 1
+                               ELSE append_generation
+                           END"""
+                    )
+                store.connection.rollback()
+
+                self.assertEqual(self.semantic_events(self.replay(store)), expected)
+            finally:
+                store.close()
+
+            reopened = SQLiteMarketStore(path)
+            try:
+                self.assertEqual(
+                    self.semantic_events(self.replay(reopened)),
+                    expected,
+                )
+            finally:
+                reopened.close()
 
     def test_valid_range_cutoff_rollback_is_rejected_and_survives_restart(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

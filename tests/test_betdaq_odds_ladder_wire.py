@@ -156,6 +156,18 @@ def test_price_lexeme_must_be_trimmed_and_representation_nonempty() -> None:
         )
 
 
+def test_unknown_ladder_attribute_cannot_alias_content_identity() -> None:
+    with pytest.raises(BetdaqSoapProtocolError, match="exactly price and representation"):
+        parse_get_odds_ladder_response(
+            _response(
+                entries=(
+                    '<Ladder price="2.00" representation="Evens" '
+                    'futureSemanticField="provider-value" />'
+                )
+            )
+        )
+
+
 def test_wrong_namespace_extra_payload_and_child_content_fail_closed() -> None:
     with pytest.raises(BetdaqSoapProtocolError, match="Response"):
         parse_get_odds_ladder_response(_response().replace(API, API.lower()))

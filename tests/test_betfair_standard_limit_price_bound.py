@@ -26,7 +26,7 @@ def _evidence():
     return bound, action, evidence
 
 
-def test_standard_back_limit_issues_only_conservative_price_floor() -> None:
+def test_standard_back_limit_stays_unproven_while_matchme_applicability_is_unknown() -> None:
     bound, action, evidence = _evidence()
 
     assert evidence.execution_plan_id == bound.execution_plan.plan_id
@@ -38,17 +38,17 @@ def test_standard_back_limit_issues_only_conservative_price_floor() -> None:
     assert evidence.side == "BACK"
     assert evidence.price_floor_odds == Decimal("2.00")
     assert evidence.requested_stake == action.requested_stake
-    assert evidence.status is (
-        BetfairStandardLimitPriceBoundStatus.PROVIDER_BOUND_ZERO_ADVERSE_PRICE_DETERIORATION
-    )
-    assert evidence.zero_adverse_price_deterioration is True
+    assert evidence.status is BetfairStandardLimitPriceBoundStatus.UNKNOWN_MATCHME_APPLICABILITY
+    assert evidence.matchme_applicability_proven is False
+    assert evidence.zero_adverse_price_deterioration is False
     assert evidence.execution_feasibility_proven is False
     assert evidence.realized_price_exact is False
 
     payload = evidence.to_dict()
     assert payload["price_floor_odds"] == ExecutionAction.to_dict(action)["requested_odds"]
     assert payload["requested_stake"] == ExecutionAction.to_dict(action)["requested_stake"]
-    assert payload["zero_adverse_price_deterioration"] is True
+    assert payload["matchme_applicability_proven"] is False
+    assert payload["zero_adverse_price_deterioration"] is False
     assert payload["execution_feasibility_proven"] is False
     assert payload["realized_price_exact"] is False
     assert len(payload["instruction_sha256"]) == 64
@@ -259,5 +259,8 @@ def test_bound_quote_is_unexpired_at_decision_and_realized_price_is_not_backfill
 
     assert action.quote_observed_at < bound.execution_plan.created_at < action.expires_at
     assert evidence.price_floor_odds == action.requested_odds
+    assert evidence.status is BetfairStandardLimitPriceBoundStatus.UNKNOWN_MATCHME_APPLICABILITY
+    assert evidence.matchme_applicability_proven is False
+    assert evidence.zero_adverse_price_deterioration is False
     assert evidence.realized_price_exact is False
     assert "accepted_odds" not in evidence.to_dict()

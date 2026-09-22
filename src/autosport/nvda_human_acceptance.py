@@ -66,9 +66,9 @@ class NvdaHumanAcceptanceError(ValueError):
     """Raised when a human NVDA transcript fails the structural evidence gate."""
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True, slots=True, init=False)
 class NvdaHumanAcceptanceStructuralResult:
-    """Non-promoting result from structural transcript validation only."""
+    """Validator-issued, non-promoting structural transcript result."""
 
     transcript_sha256: str
     status: str = field(default=STATUS_STRUCTURALLY_COMPLETE, init=False)
@@ -78,8 +78,26 @@ class NvdaHumanAcceptanceStructuralResult:
     real_money_execution: bool = field(default=False, init=False)
     whole_product_complete: bool = field(default=False, init=False)
 
-    def __post_init__(self) -> None:
-        _require_sha256("transcript_sha256", self.transcript_sha256)
+    def __init__(self, transcript_sha256: str) -> None:
+        _require_sha256("transcript_sha256", transcript_sha256)
+        raise NvdaHumanAcceptanceError(
+            "NvdaHumanAcceptanceStructuralResult is validator-issued only"
+        )
+
+
+def _issue_structural_result(
+    *, transcript_sha256: str
+) -> NvdaHumanAcceptanceStructuralResult:
+    digest = _require_sha256("transcript_sha256", transcript_sha256)
+    result = object.__new__(NvdaHumanAcceptanceStructuralResult)
+    object.__setattr__(result, "transcript_sha256", digest)
+    object.__setattr__(result, "status", STATUS_STRUCTURALLY_COMPLETE)
+    object.__setattr__(result, "human_tested", False)
+    object.__setattr__(result, "nvda_verified", False)
+    object.__setattr__(result, "manual_truth_promotion_required", True)
+    object.__setattr__(result, "real_money_execution", False)
+    object.__setattr__(result, "whole_product_complete", False)
+    return result
 
 
 def _require_exact_dict(name: str, value: object) -> dict[str, Any]:
@@ -226,7 +244,7 @@ def validate_human_nvda_acceptance_transcript(
     for expected_id, journey in zip(REQUIRED_JOURNEY_IDS, journeys, strict=True):
         _validate_journey(journey, expected_id=expected_id)
 
-    return NvdaHumanAcceptanceStructuralResult(
+    return _issue_structural_result(
         transcript_sha256=_canonical_sha256(frozen),
     )
 

@@ -15,12 +15,14 @@ WEBVIEW2_CLIENT_GUID = "{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}"
 WEBVIEW2_HKCU_SUBKEY = (
     rf"Software\Microsoft\EdgeUpdate\Clients\{WEBVIEW2_CLIENT_GUID}"
 )
-WEBVIEW2_HKLM_64_SUBKEY = (
-    rf"SOFTWARE\WOW6432Node\Microsoft\EdgeUpdate\Clients\{WEBVIEW2_CLIENT_GUID}"
-)
-WEBVIEW2_HKLM_32_SUBKEY = (
+WEBVIEW2_HKLM_SUBKEY = (
     rf"SOFTWARE\Microsoft\EdgeUpdate\Clients\{WEBVIEW2_CLIENT_GUID}"
 )
+# Backward-compatible aliases for callers/tests that distinguish OS bitness. On
+# 64-bit Windows the 32-bit EdgeUpdate registration is selected by registry-view
+# flags, never by spelling the reserved physical WOW6432Node path directly.
+WEBVIEW2_HKLM_64_SUBKEY = WEBVIEW2_HKLM_SUBKEY
+WEBVIEW2_HKLM_32_SUBKEY = WEBVIEW2_HKLM_SUBKEY
 MICROSOFT_WEBVIEW2_DISTRIBUTION_DOC = (
     "https://learn.microsoft.com/microsoft-edge/webview2/concepts/distribution"
 )

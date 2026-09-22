@@ -1116,8 +1116,18 @@ def launch_windows_shell(
         )
 
     api = bridge or AutosportWebBridge()
+    required_renderer = "edgechromium"
+    renderer_observed = False
+
+    def verify_initialized_renderer(renderer: object) -> bool:
+        nonlocal renderer_observed
+        if type(renderer) is not str or renderer != required_renderer:
+            return False
+        renderer_observed = True
+        return True
+
     try:
-        webview.create_window(
+        window = webview.create_window(
             title or text("ui.app.title"),
             str(asset),
             js_api=api,
@@ -1127,7 +1137,15 @@ def launch_windows_shell(
             text_select=True,
             zoomable=True,
         )
-        webview.start(gui="edgechromium")
+        window.events.initialized += verify_initialized_renderer
+        webview.start(gui=required_renderer)
+        if not renderer_observed:
+            raise WindowsWebViewUnavailable(
+                "The Autosport semantic shell started without an observed "
+                "EdgeChromium/WebView2 renderer witness"
+            )
+    except WindowsWebViewUnavailable:
+        raise
     except Exception as exc:
         raise WindowsWebViewUnavailable(
             "Microsoft Edge WebView2 could not start the Autosport semantic shell"

@@ -134,11 +134,18 @@ def redact_operator_text(
 
     secrets = _secret_values(extra_secret_values)
     if secrets:
-        # Never re-redact the placeholder itself, even when a configured secret
-        # happens to be a substring of the literal REDACTED marker.
+        # A real configured secret may itself contain the placeholder literal.
+        # Redact those exact values before protecting already-redacted output.
+        marker_secrets = tuple(secret for secret in secrets if REDACTED in secret)
+        for secret in marker_secrets:
+            rendered = rendered.replace(secret, REDACTED)
+
+        # Never re-redact the placeholder itself, even when another configured
+        # secret happens to be a substring of the literal REDACTED marker.
+        ordinary_secrets = tuple(secret for secret in secrets if REDACTED not in secret)
         parts = rendered.split(REDACTED)
         for index, part in enumerate(parts):
-            for secret in secrets:
+            for secret in ordinary_secrets:
                 part = part.replace(secret, REDACTED)
             parts[index] = part
         rendered = REDACTED.join(parts)

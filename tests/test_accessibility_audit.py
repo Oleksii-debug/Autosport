@@ -1,3 +1,4 @@
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -257,6 +258,41 @@ class AccessibilityAuditTests(unittest.TestCase):
         report = self._summarize(SimpleNamespace(**{**description.__dict__, "widgets": tuple(widgets)}))
         self.assertEqual(report["status"], "FAIL")
         self.assertTrue(any("list rows are not exposed" in item for item in report["failures"]))
+
+    def test_failure_artifact_uses_shared_secret_redaction_boundary(self):
+        class ProviderOpaqueMarker804Error(RuntimeError):
+            pass
+
+        secret_bearer = "BearerSecret804Token"
+        secret_key = "ApiKeySecret804Value"
+        error = ProviderOpaqueMarker804Error(
+            f"Authorization: Bearer {secret_bearer}; "
+            f"api_key={secret_key}; ordinary=market-open"
+        )
+
+        with tempfile.TemporaryDirectory() as directory:
+            destination = Path(directory) / "accessibility.json"
+            with patch.object(
+                accessibility_audit,
+                "WindowsAutosportApp",
+                side_effect=error,
+            ):
+                result = accessibility_audit.run_accessibility_audit(destination)
+
+            self.assertEqual(result, 1)
+            report = json.loads(destination.read_text(encoding="utf-8"))
+            self.assertEqual(report["status"], "FAIL")
+            self.assertFalse(report["human_tested"])
+            self.assertFalse(report["nvda_verified"])
+            self.assertFalse(report["real_money_execution"])
+
+            failure = report["failures"][0]
+            self.assertTrue(failure.startswith("RuntimeError:"))
+            self.assertIn("[REDACTED]", failure)
+            self.assertIn("ordinary=market-open", failure)
+            self.assertNotIn(secret_bearer, failure)
+            self.assertNotIn(secret_key, failure)
+            self.assertNotIn("ProviderOpaqueMarker804Error", failure)
 
     def test_machine_evidence_publication_failure_preserves_existing_file(self):
         class _AuditApp:

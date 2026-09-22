@@ -422,3 +422,27 @@ def test_response_echo_accepts_equivalent_integral_numeric_wire_values() -> None
     assert report.instruction.bet_id == "bet-123"
     assert _report_outcome(report, action) is PlaceOrdersOutcome.ACCEPTED
 
+
+
+
+@pytest.mark.parametrize("size_matched", (2, 5))
+def test_matched_back_price_below_requested_limit_is_ambiguous(
+    size_matched: int,
+) -> None:
+    action = _action()
+    payload = _payload(
+        action,
+        execution_status="SUCCESS",
+        instruction_status="SUCCESS",
+        include_size_matched=True,
+        size_matched=size_matched,
+        average_price_matched=1.99,
+        bet_id="bet-worse-price",
+        order_status="EXECUTION_COMPLETE",
+    )
+
+    with pytest.raises(
+        BetfairPlaceOrdersAmbiguous,
+        match="matched BACK price is worse than requested limit",
+    ):
+        _parse(payload, action)

@@ -123,3 +123,66 @@ def test_digest_deterministic_and_no_network_write_api():
     import autosport.matchbook_catalog_evidence as m
     exported = " ".join(m.__all__).lower()
     assert "urlopen" not in exported and "login" not in exported and "place_order" not in exported
+
+
+def test_request_subclass_cannot_enter_canonical_evidence():
+    class ForgedRequest(MatchbookCatalogRequest):
+        @property
+        def scope_sha256(self):
+            return "0" * 64
+
+    forged = ForgedRequest(CatalogResource.EVENTS, per_page=2)
+    with pytest.raises(MatchbookCatalogEvidenceError):
+        parse_matchbook_catalog_page(
+            forged,
+            raw("events", [{"id": 1}]),
+            observed_at="2026-09-22T20:00:00Z",
+        )
+
+    entity = MatchbookCatalogEntity(CatalogResource.EVENTS, "1")
+    with pytest.raises(MatchbookCatalogEvidenceError):
+        MatchbookCatalogPageEvidence(
+            forged,
+            "2026-09-22T20:00:00Z",
+            "0" * 64,
+            2,
+            (entity,),
+        )
+
+
+def test_entity_subclass_cannot_enter_canonical_page_evidence():
+    class ForgedEntity(MatchbookCatalogEntity):
+        pass
+
+    request = MatchbookCatalogRequest(CatalogResource.EVENTS, per_page=2)
+    forged = ForgedEntity(CatalogResource.EVENTS, "1")
+    with pytest.raises(MatchbookCatalogEvidenceError):
+        MatchbookCatalogPageEvidence(
+            request,
+            "2026-09-22T20:00:00Z",
+            "0" * 64,
+            2,
+            (forged,),
+        )
+
+
+def test_page_subclass_cannot_override_digest_during_composition():
+    class ForgedPage(MatchbookCatalogPageEvidence):
+        @property
+        def page_sha256(self):
+            return "0" * 64
+
+    page = parse_matchbook_catalog_page(
+        req(0),
+        raw("events", [{"id": 1}, {"id": 2}]),
+        observed_at="2026-09-22T20:00:00Z",
+    )
+    forged = ForgedPage(
+        page.request,
+        page.observed_at,
+        page.raw_response_sha256,
+        page.raw_response_size_bytes,
+        page.entities,
+    )
+    with pytest.raises(MatchbookCatalogEvidenceError):
+        compose_matchbook_catalog_observation((forged,))

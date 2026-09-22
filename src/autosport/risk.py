@@ -330,6 +330,15 @@ class ProposedTicketRiskContext:
             raise ValueError(
                 "proposed ticket quote evidence must cover every proposed leg exactly once"
             )
+        if quote_keys:
+            quotes_by_key = {quote.quote_key: quote for quote in self.quotes}
+            for leg in self.legs:
+                quote = quotes_by_key[leg.quote_key]
+                if leg.market_semantics_id != quote.market_semantics_id:
+                    raise ValueError(
+                        "proposed ticket market semantics must exactly match "
+                        "canonical quote evidence"
+                    )
 
         if type(self.provider_accounts) is not tuple:
             raise ValueError("provider_accounts must be a canonical tuple")

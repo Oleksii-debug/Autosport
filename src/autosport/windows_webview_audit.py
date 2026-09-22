@@ -18,7 +18,7 @@ _REQUIRED_CONTROLS = {
     "107": "button",
     "108": "button",
     "109": "button",
-    "201": "ul",
+    "201": "table",
     "202": "textarea",
     "203": "ul",
     "204": "ul",
@@ -58,9 +58,14 @@ _REQUIRED_CONTROLS = {
     "334": "textarea",
     "335": "button",
     "336": "button",
+    "product-runtime-start": "button",
+    "product-runtime-stop": "button",
+    "product-runtime-status": "input",
 }
-_READONLY_CONTROLS = {"202", "205", "302", "306", "334"}
-_LIST_CONTROLS = {"201", "203", "204", "304", "307"}
+_READONLY_CONTROLS = {"202", "205", "302", "306", "334", "product-runtime-status"}
+_LIST_CONTROLS = {"203", "204", "304", "307"}
+_TABLE_CONTROLS = {"201"}
+_DYNAMICALLY_DISABLED_CONTROLS = {"product-runtime-stop"}
 _REQUIRED_LANDMARKS = {"header", "nav", "main"}
 _REQUIRED_SHORTCUT_MARKERS = (
     'event.key === "F2"',
@@ -80,6 +85,9 @@ _REQUIRED_BRIDGE_MARKERS = (
     'window.addEventListener("pywebviewready"',
     'globalThis.pywebview.api.get_state()',
     'globalThis.pywebview.api.dispatch({',
+    'dispatch("product_runtime.start")',
+    'dispatch("product_runtime.stop")',
+    'renderSingleColumnTable(byId("tickets-table-body"), state.tickets)',
 )
 
 
@@ -193,6 +201,13 @@ def inspect_semantic_shell() -> dict[str, Any]:
             failures.append(f"id={automation_id}: required readonly semantic state missing")
         if automation_id in _LIST_CONTROLS and attrs.get("tabindex") != "0":
             failures.append(f"id={automation_id}: evidence list is not keyboard focusable")
+        if automation_id in _TABLE_CONTROLS and attrs.get("tabindex") != "0":
+            failures.append(f"id={automation_id}: evidence table is not keyboard focusable")
+
+    if '<caption>Паперові квитки і результати</caption>' not in html:
+        failures.append("id=201: semantic tickets table is missing its caption")
+    if '<th scope="col">' not in html:
+        failures.append("id=201: semantic tickets table is missing a scoped column header")
 
     try:
         javascript = script.read_text(encoding="utf-8")
@@ -205,6 +220,13 @@ def inspect_semantic_shell() -> dict[str, Any]:
     for marker in _REQUIRED_BRIDGE_MARKERS:
         if marker not in javascript:
             failures.append(f"bridge marker missing: {marker}")
+    if "String(error)" in javascript:
+        failures.append("raw JavaScript bridge exception text must not reach accessible output")
+    if (
+        'byId("product-runtime-stop").disabled = productRuntime.can_stop !== true'
+        not in javascript
+    ):
+        failures.append("runtime STOP dynamic enabled-state projection is missing")
 
     return {
         "status": "PASS" if not failures else "FAIL",
@@ -255,12 +277,30 @@ def inspect_keyboard_contract() -> dict[str, Any]:
         and "disabled" not in attrs
         and attrs.get("tabindex") != "-1"
     }
-    missing_focusable = sorted(set(_REQUIRED_CONTROLS) - focusable_ids)
+    missing_focusable = sorted(
+        set(_REQUIRED_CONTROLS)
+        - _DYNAMICALLY_DISABLED_CONTROLS
+        - focusable_ids
+    )
     if missing_focusable:
         failures.append(
             "critical controls missing from native/tab-focusable contract: "
             + ", ".join(missing_focusable)
         )
+    for automation_id in _DYNAMICALLY_DISABLED_CONTROLS:
+        element = parser.elements.get(automation_id)
+        if element is None:
+            continue
+        tag, attrs = element
+        if tag != "button" or "disabled" not in attrs:
+            failures.append(
+                f"id={automation_id}: expected initial disabled native button state"
+            )
+    if (
+        'byId("product-runtime-stop").disabled = productRuntime.can_stop !== true'
+        not in javascript
+    ):
+        failures.append("runtime STOP cannot be proven keyboard-actionable when running")
     if parser.positive_tabindex:
         failures.append("positive tabindex would override native DOM order")
 

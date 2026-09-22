@@ -54,6 +54,7 @@ class BetfairStatementPaginationEvidence:
     pagination_complete: bool
     provider_origin_verified: bool
     same_authenticated_session_proven: bool
+    acquisition_owned_traversal_proven: bool
     coherent_snapshot_proven: bool
     stable_account_identity_proven: bool
     temporal_finality_attested: bool
@@ -118,6 +119,10 @@ class BetfairStatementPaginationEvidence:
                 self.same_authenticated_session_proven,
                 "same_authenticated_session_proven",
             ),
+            (
+                self.acquisition_owned_traversal_proven,
+                "acquisition_owned_traversal_proven",
+            ),
             (self.coherent_snapshot_proven, "coherent_snapshot_proven"),
             (self.stable_account_identity_proven, "stable_account_identity_proven"),
             (self.temporal_finality_attested, "temporal_finality_attested"),
@@ -132,6 +137,10 @@ class BetfairStatementPaginationEvidence:
         if not self.same_authenticated_session_proven:
             raise BetfairStatementCompletenessError(
                 "issued evidence requires one authenticated session traversal"
+            )
+        if not self.acquisition_owned_traversal_proven:
+            raise BetfairStatementCompletenessError(
+                "issued evidence requires one product-owned pagination acquisition"
             )
         if self.coherent_snapshot_proven:
             raise BetfairStatementCompletenessError(
@@ -342,6 +351,7 @@ def _derive_from_verified_pages(
         "pagination_complete": True,
         "provider_origin_verified": True,
         "same_authenticated_session_proven": True,
+        "acquisition_owned_traversal_proven": True,
         "coherent_snapshot_proven": False,
         "stable_account_identity_proven": False,
         "temporal_finality_attested": False,
@@ -419,6 +429,7 @@ def _payload(value: BetfairStatementPaginationEvidence) -> dict[str, object]:
                 "pagination_complete",
                 "provider_origin_verified",
                 "same_authenticated_session_proven",
+                "acquisition_owned_traversal_proven",
                 "coherent_snapshot_proven",
                 "stable_account_identity_proven",
                 "temporal_finality_attested",

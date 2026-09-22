@@ -54,14 +54,22 @@ def _path_digest(root: Path, path: Path) -> str:
     return _digest_text(relative)
 
 
+_PERCENT_HEX = re.compile(r"%[0-9A-F]{2}")
+
+
+def _lower_percent_hex(value: str) -> str:
+    return _PERCENT_HEX.sub(lambda match: match.group(0).lower(), value)
+
+
 def _encoded_needles(canary: str) -> tuple[tuple[bytes, tuple[str, ...]], ...]:
     raw = canary.encode("utf-8")
+    percent_encoded = quote_from_bytes(raw, safe="")
     variants = (
         ("utf-8", raw),
         ("utf-16le", canary.encode("utf-16le")),
         ("utf-16be", canary.encode("utf-16be")),
-        ("url-percent-utf8-upper", quote_from_bytes(raw, safe="").encode("ascii")),
-        ("url-percent-utf8-lower", quote_from_bytes(raw, safe="").lower().encode("ascii")),
+        ("url-percent-utf8-upper", percent_encoded.encode("ascii")),
+        ("url-percent-utf8-lower", _lower_percent_hex(percent_encoded).encode("ascii")),
     )
     by_bytes: dict[bytes, list[str]] = {}
     for label, needle in variants:

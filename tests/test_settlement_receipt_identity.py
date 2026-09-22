@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import tempfile
 import unittest
+from unittest.mock import patch
 from decimal import Decimal
 from pathlib import Path
 
@@ -252,6 +253,90 @@ class SettlementReceiptIdentityTests(unittest.TestCase):
             self.assertEqual(evidence_ids, ("receipt-alias",))
             self.assertIs(reopened.tickets[ticket.ticket_id].status, TicketStatus.WON)
             self.assertEqual(reopened.balance, Decimal("110"))
+
+    def test_private_settlement_snapshot_survives_original_mutation_on_lock_entry(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            book_path = root / "paper_book.json"
+            book = PaperBook("100")
+            leg = TicketLeg(
+                event_id="event-1",
+                market_id="winner",
+                selection_id="home",
+                locked_odds=Decimal("2.00"),
+                sport="table_tennis",
+            )
+            ticket = book.open_ticket(
+                (leg,),
+                Decimal("10"),
+                placed_at="2026-09-21T08:39:00+00:00",
+            )
+            book.save(book_path)
+
+            resolution = SettlementResolution(
+                event_identity="provider-a:event-1",
+                settlement_ref="provider-result:lock-toctou",
+                quote_outcomes={leg.quote_key: "win"},
+                evidence_id="receipt-lock-toctou",
+                evidence_sha256="f" * 64,
+                available_at=_AT,
+            )
+            resolution.validate(as_of=_AT)
+
+            coordinator = ContinuousSessionCoordinator.__new__(
+                ContinuousSessionCoordinator
+            )
+            coordinator.workspace = root
+            coordinator.paper_book_path = book_path
+            coordinator.initial_bankroll = "100"
+
+            class MutatingEconomicLock:
+                def __init__(self, _workspace) -> None:
+                    pass
+
+                def __enter__(self):
+                    resolution.quote_outcomes[leg.quote_key] = "loss"
+                    return self
+
+                def __exit__(self, exc_type, exc, traceback) -> bool:
+                    return False
+
+            with patch(
+                "autosport.continuous_session.WorkspaceEconomicLock",
+                MutatingEconomicLock,
+            ):
+                settled, evidence_ids = coordinator._settle(
+                    resolutions=(resolution,)
+                )
+
+            reopened = PaperBook.load(book_path)
+            self.assertEqual(settled, (ticket.ticket_id,))
+            self.assertEqual(evidence_ids, ("receipt-lock-toctou",))
+            self.assertIs(
+                reopened.tickets[ticket.ticket_id].status,
+                TicketStatus.WON,
+            )
+            self.assertEqual(reopened.balance, Decimal("110"))
+            self.assertEqual(
+                resolution.quote_outcomes[leg.quote_key],
+                "loss",
+            )
+
+    def test_canonical_snapshot_is_detached_from_retained_resolution_object(self) -> None:
+        resolution = _resolution(outcome="win")
+        resolution.validate(as_of=_AT)
+
+        (snapshot,) = ContinuousSessionCoordinator._settlement_handoff_snapshot(
+            (resolution,)
+        )
+        resolution.quote_outcomes["receipt-quote-1"] = "loss"
+
+        snapshot.validate(as_of=_AT)
+        self.assertEqual(snapshot.quote_outcomes["receipt-quote-1"], "win")
+        self.assertEqual(resolution.quote_outcomes["receipt-quote-1"], "loss")
+
 
     def test_settlement_rejects_post_validation_outcome_mutation_before_book_write(
         self,

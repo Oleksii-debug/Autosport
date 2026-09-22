@@ -517,7 +517,27 @@ def _reject_later_contradictory_drift(
 
         if scope_values != decision_scope:
             continue
-        if observation_end <= evidence_end:
+
+        finding_available = _instant(
+            finding.available_at,
+            "later DriftFinding.available_at",
+        )
+        decision_available = _instant(
+            decision.available_at,
+            "decision.available_at",
+        )
+        published_after_decision = registry.causal_precedes(
+            decision.record_type,
+            decision.record_id,
+            "DriftFinding",
+            candidate.record_id,
+        )
+        is_later_evidence = (
+            observation_end > evidence_end
+            or finding_available > decision_available
+            or published_after_decision
+        )
+        if not is_later_evidence:
             continue
         if state is DriftState.DRIFT_DETECTED:
             raise ChampionEligibilityError(

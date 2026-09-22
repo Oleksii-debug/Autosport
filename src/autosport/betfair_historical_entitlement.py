@@ -430,6 +430,10 @@ class BetfairHistoricalEntitlementClient:
             timeout_seconds=self._timeout,
         )
         self._require_context()
+        if len(payload) < 4 or payload[:3] != b"BZh" or payload[3:4] not in b"123456789":
+            raise BetfairHistoricalEntitlementError(
+                "DownloadFile response is not a canonical bzip2 historical payload"
+            )
         value = HistoricalDownloadedFile(
             self._identity.session_context_id,
             snapshot.snapshot_sha256,

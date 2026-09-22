@@ -526,7 +526,7 @@ class TheOddsApiReferenceProvider:
                     bookmaker.get("title"),
                     field="bookmaker.title",
                 )
-                bookmaker_last_update = _timestamp(
+                bookmaker_last_update = _optional_timestamp(
                     bookmaker.get("last_update"),
                     field="bookmaker.last_update",
                 )
@@ -554,6 +554,10 @@ class TheOddsApiReferenceProvider:
                         field="market.last_update",
                     )
                     source_ts = market_last_update or bookmaker_last_update
+                    if source_ts is None:
+                        raise TheOddsApiPayloadError(
+                            "market requires provider last_update timestamp"
+                        )
                     if (
                         returned_snapshot is not None
                         and _timestamp_instant(source_ts)

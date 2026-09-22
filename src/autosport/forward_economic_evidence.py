@@ -781,8 +781,10 @@ class ForwardEconomicEvidenceAccumulator:
         if outcome.decision_sha256 != decision_sha256:
             raise ForwardEconomicEvidenceError("resolved decision digest mismatch")
         protocol = self._validated_protocol()
-        if outcome.decision_committed_at < protocol.frozen_at:
-            raise ForwardEconomicEvidenceError("decision predates frozen prospective protocol")
+        if outcome.decision_committed_at <= protocol.frozen_at:
+            raise ForwardEconomicEvidenceError(
+                "decision must causally follow frozen prospective protocol"
+            )
         if protocol.currency_code is None:
             if (
                 outcome.currency_code is not None

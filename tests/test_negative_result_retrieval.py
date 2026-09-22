@@ -2,17 +2,33 @@ from __future__ import annotations
 
 import pytest
 
-from test_scientific_registry_index import SHA_A, SHA_B, SHA_C, T2, T3, _seed_registry
+from test_scientific_registry_index import (
+    SHA_A,
+    SHA_B,
+    SHA_C,
+    SHA_D,
+    T0,
+    T1,
+    T2,
+    T3,
+    _frozen_promotion_rule_text,
+    _payload_sha,
+    _seed_registry,
+)
 
 from autosport.monotonic_workspace_authority import MonotonicAuthorityRollbackError
 from autosport.negative_result_retrieval import search_negative_results
 from autosport.scientific_registry import (
     EvaluationBundleRef,
     ExperimentRecord,
+    Hypothesis,
     Postmortem,
     ResearchOutcome,
+    ResearchProtocol,
+    ResearchQuestion,
     ScientificRegistry,
 )
+from autosport.strategy_experiment import ScientificProtocolBinding
 
 
 def _with_postmortem(tmp_path):
@@ -223,6 +239,72 @@ def test_self_consistent_unknown_experiment_outcome_tamper_fails_closed_at_regis
         match="missing, rolled back, or unproven",
     ):
         ScientificRegistry(path)
+
+
+def test_backfilled_question_hypothesis_protocol_lineage_fails_closed(tmp_path):
+    path = tmp_path / "scientific_registry.json"
+    registry = ScientificRegistry.initialize_pristine(path)
+
+    question = ResearchQuestion("late-question", "Late lineage question", SHA_A, T0)
+    hypothesis = Hypothesis(
+        "late-hypothesis",
+        "late-question",
+        "Late candidate improves the primary metric.",
+        "primary > champion",
+        "primary <= champion",
+        "roi",
+        ("drawdown",),
+        T0,
+    )
+    binding = ScientificProtocolBinding(
+        research_protocol_id="late-protocol",
+        research_question_id=question.question_id,
+        research_question_sha256=_payload_sha(question),
+        hypothesis_id=hypothesis.hypothesis_id,
+        hypothesis_sha256=_payload_sha(hypothesis),
+        inclusion_criteria="frozen",
+        exclusion_criteria="invalid provenance",
+        lawful_source_requirements="lawful fixture",
+        causal_cutoff=T1,
+        evaluation_design="walk-forward holdout",
+        feature_set_version="v1",
+        uncertainty_method="bootstrap intervals",
+        multiple_comparison_control="single frozen primary metric",
+        robustness_checks=("time split",),
+        random_seed_policy="fixed",
+        stopping_rule="one final evaluation",
+        promotion_rule=_frozen_promotion_rule_text(),
+        expected_artifacts=("evaluation bundle",),
+        code_config_sha256=SHA_B,
+        frozen_at_utc=T0,
+    )
+    protocol = ResearchProtocol(binding, SHA_C, SHA_D, SHA_A, T0)
+    experiment = ExperimentRecord(
+        "experiment-before-lineage",
+        "late-protocol",
+        "dataset-late",
+        "features-late",
+        "strategy-late",
+        "eval-late",
+        17,
+        SHA_B,
+        ResearchOutcome.NULL,
+        T2,
+        completed_at=T2,
+        notes="retroactive-lineage-marker",
+    )
+
+    registry.append(experiment)
+    registry.append(question)
+    registry.append(hypothesis)
+    registry.append(protocol)
+
+    with pytest.raises(RuntimeError, match="lineage does not causally precede experiment"):
+        search_negative_results(
+            registry,
+            "retroactive-lineage-marker",
+            as_of=T3,
+        )
 
 
 def test_postmortem_must_causally_follow_referenced_experiment(tmp_path):

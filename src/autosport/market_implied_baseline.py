@@ -285,6 +285,10 @@ def build_market_implied_baseline_evidence(
         ) from exc
 
     identity = outcome_authority.identity
+    # Replay the complete decision-visible canonical market before applying the
+    # asserted outcome roster.  Filtering by outcome_authority.selection_ids first
+    # would let an incomplete/caller-minted roster erase a real selection that is
+    # already present in durable market history.
     snapshot = MarketMirror.replay_view_from_store(
         store,
         as_of=decision_cutoff,
@@ -293,14 +297,17 @@ def build_market_implied_baseline_evidence(
         sports=identity.sport,
         event_ids=identity.event_id,
         market_ids=identity.market_id,
-        selection_ids=outcome_authority.selection_ids,
     )
     by_selection = {event.selection_id: event for event in snapshot.events}
     if len(by_selection) != len(snapshot.events):
         raise MarketImpliedBaselineError("decision-visible snapshot has duplicate selections")
+    if any(event.market_type is not identity.market_type for event in snapshot.events):
+        raise MarketImpliedBaselineError(
+            "decision-visible market identity contradicts verified outcome authority"
+        )
     if tuple(sorted(by_selection)) != outcome_authority.selection_ids:
         raise MarketImpliedBaselineError(
-            "complete fresh open quote set is unavailable for verified outcome roster"
+            "complete fresh open quote set is unavailable or contradicts verified outcome roster"
         )
     events = tuple(by_selection[selection] for selection in outcome_authority.selection_ids)
     for event in events:

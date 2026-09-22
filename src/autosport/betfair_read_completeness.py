@@ -121,6 +121,14 @@ class BetfairReadCompletenessWitness:
         if issued != self._fingerprint():
             raise BetfairReadOnlyError("Betfair completeness witness was not issued by the observer")
 
+    def assert_authoritative_for(self, *, venue_id: str, account_id: str) -> None:
+        """Require positive completeness for the exact configured client scope."""
+        self.assert_authoritative()
+        if self.venue_id != _text(venue_id, "expected venue_id"):
+            raise BetfairReadOnlyError("Betfair completeness venue scope mismatch")
+        if self.account_id != _text(account_id, "expected account_id"):
+            raise BetfairReadOnlyError("Betfair completeness account scope mismatch")
+
     def _fingerprint(self) -> str:
         return sha256(
             repr(

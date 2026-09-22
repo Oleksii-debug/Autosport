@@ -28,20 +28,22 @@ class BetfairMarketDefinitionRunnerIdTypeIntegrityTests(unittest.TestCase):
             observed_at="2026-09-18T15:00:01Z",
         )
 
-    def test_valid_canonical_string_runner_ids_remain_supported(self) -> None:
+    def test_valid_canonical_string_runner_ids_reach_origin_fence(self) -> None:
         assessment = self._assess(("away", "home"))
-        self.assertEqual(assessment.status, OutcomeAuthorityStatus.PROVEN_EXHAUSTIVE)
-        self.assertIsNotNone(assessment.authority)
-        assert assessment.authority is not None
-        self.assertEqual(assessment.authority.selection_ids, ("away", "home"))
-
-    def test_exact_positive_signed_64_bit_integer_ids_are_normalized(self) -> None:
-        assessment = self._assess((17, 9223372036854775807))
-        self.assertEqual(assessment.status, OutcomeAuthorityStatus.PROVEN_EXHAUSTIVE)
-        assert assessment.authority is not None
+        self.assertEqual(assessment.status, OutcomeAuthorityStatus.REFUSED)
+        self.assertIsNone(assessment.authority)
         self.assertEqual(
-            assessment.authority.selection_ids,
-            ("17", "9223372036854775807"),
+            assessment.refusal_reason,
+            "betfair_market_definition_provider_origin_unverified",
+        )
+
+    def test_exact_positive_signed_64_bit_integer_ids_reach_origin_fence(self) -> None:
+        assessment = self._assess((17, 9223372036854775807))
+        self.assertEqual(assessment.status, OutcomeAuthorityStatus.REFUSED)
+        self.assertIsNone(assessment.authority)
+        self.assertEqual(
+            assessment.refusal_reason,
+            "betfair_market_definition_provider_origin_unverified",
         )
 
     def test_noncanonical_wire_types_fail_before_identity_coercion(self) -> None:

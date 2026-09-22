@@ -39,6 +39,7 @@ class OrderStatus(str, Enum):
     PARTIALLY_FILLED = "PARTIALLY_FILLED"
     FILLED = "FILLED"
     CANCELED = "CANCELED"
+    REPLACED = "REPLACED"
     REJECTED = "REJECTED"
     UNKNOWN = "UNKNOWN"
 
@@ -222,6 +223,12 @@ class WorkingOrder:
         if f + l != q:
             raise ProphetXReplaceError(
                 "order_quantity must equal cumulative_filled + leaves_quantity"
+            )
+        if self.status is OrderStatus.NEW and f != 0:
+            raise ProphetXReplaceError("NEW working evidence cannot already contain fills")
+        if self.status is OrderStatus.PARTIALLY_FILLED and (f <= 0 or l <= 0):
+            raise ProphetXReplaceError(
+                "PARTIALLY_FILLED working evidence requires filled and open quantity"
             )
         avg = self.average_fill_price
         if f == 0 and avg is not None:
@@ -539,6 +546,12 @@ def reconcile(
         request.original_cl_ord_id,
     ):
         raise ProphetXReplaceConflict("working-order identity mismatch")
+    request_dt = datetime.fromisoformat(request.requested_at.replace("Z", "+00:00"))
+    working_dt = datetime.fromisoformat(working.observed_at.replace("Z", "+00:00"))
+    if working_dt > request_dt:
+        raise ProphetXReplaceError(
+            "working-order evidence must be available no later than the replace request"
+        )
 
     by_id: dict[str, Evidence] = {}
     by_seq: dict[int, Evidence] = {}
@@ -664,8 +677,12 @@ def reconcile(
                 raise ProphetXReplaceConflict(
                     "incompatible terminal replace evidence"
                 )
+            if oq >= working.order_quantity:
+                raise ProphetXReplaceConflict(
+                    "old order became fully filled before provider replacement"
+                )
             outcome = ReplaceOutcome.REPLACED
-            status = OrderStatus.CANCELED
+            status = OrderStatus.REPLACED
             active_id = request.replace_cl_ord_id
             active_price = request.new_price
             ro = request.new_quantity

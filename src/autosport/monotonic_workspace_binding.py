@@ -189,25 +189,45 @@ def _native_machine_state_base() -> Path:
                     0x91,
                 ),
             )
-            raw_path = ctypes.c_void_p()
-            get_known_folder_path = ctypes.windll.shell32.SHGetKnownFolderPath
-            get_known_folder_path.argtypes = (
-                ctypes.POINTER(_Guid),
-                ctypes.c_uint32,
-                ctypes.c_void_p,
-                ctypes.POINTER(ctypes.c_void_p),
-            )
-            get_known_folder_path.restype = ctypes.c_long
-            free_task_memory = ctypes.windll.ole32.CoTaskMemFree
+            ole32 = ctypes.windll.ole32
+            co_initialize = ole32.CoInitializeEx
+            co_initialize.argtypes = (ctypes.c_void_p, ctypes.c_uint32)
+            co_initialize.restype = ctypes.c_long
+            co_uninitialize = ole32.CoUninitialize
+            co_uninitialize.argtypes = ()
+            co_uninitialize.restype = None
+            free_task_memory = ole32.CoTaskMemFree
             free_task_memory.argtypes = (ctypes.c_void_p,)
             free_task_memory.restype = None
-            status = get_known_folder_path(
-                ctypes.byref(folder_id_local_app_data),
-                0,
-                None,
-                ctypes.byref(raw_path),
-            )
+
+            # Known Folders requires COM on the calling thread. S_OK and S_FALSE
+            # both acquire a reference that must be balanced. RPC_E_CHANGED_MODE
+            # means COM is already initialized with another apartment model, so
+            # the thread is usable but this call must not uninitialize it.
+            com_status = co_initialize(None, 0x2)  # COINIT_APARTMENTTHREADED
+            com_status_u32 = com_status & 0xFFFFFFFF
+            com_owned = com_status in (0, 1)
+            if not com_owned and com_status_u32 != 0x80010106:
+                raise WorkspaceBindingIntegrityError(
+                    "COM initialization failed for Windows Known Folder lookup"
+                )
+
+            raw_path = ctypes.c_void_p()
             try:
+                get_known_folder_path = ctypes.windll.shell32.SHGetKnownFolderPath
+                get_known_folder_path.argtypes = (
+                    ctypes.POINTER(_Guid),
+                    ctypes.c_uint32,
+                    ctypes.c_void_p,
+                    ctypes.POINTER(ctypes.c_void_p),
+                )
+                get_known_folder_path.restype = ctypes.c_long
+                status = get_known_folder_path(
+                    ctypes.byref(folder_id_local_app_data),
+                    0,
+                    None,
+                    ctypes.byref(raw_path),
+                )
                 if status != 0 or raw_path.value is None:
                     raise WorkspaceBindingIntegrityError(
                         "Windows Local AppData Known Folder lookup failed"
@@ -216,6 +236,8 @@ def _native_machine_state_base() -> Path:
             finally:
                 if raw_path.value is not None:
                     free_task_memory(raw_path)
+                if com_owned:
+                    co_uninitialize()
         except WorkspaceBindingIntegrityError:
             raise
         except (AttributeError, OSError, TypeError, ValueError) as exc:

@@ -110,6 +110,7 @@ class CollectorServiceSource(Protocol):
 class CollectorServiceConfig:
     max_items: int = 250
     poll_interval_seconds: float = 30.0
+    evaluation_slot_count: int | None = None
     retry_attempts: int = 3
     initial_backoff_seconds: float = 1.0
     max_backoff_seconds: float = 30.0
@@ -125,6 +126,14 @@ class CollectorServiceConfig:
         ):
             raise ValueError(
                 f"max_items must be in 1..{_MAX_DELTA_PAGE_ITEMS}"
+            )
+        if self.evaluation_slot_count is not None and (
+            isinstance(self.evaluation_slot_count, bool)
+            or not isinstance(self.evaluation_slot_count, int)
+            or self.evaluation_slot_count <= 0
+        ):
+            raise ValueError(
+                "evaluation_slot_count must be a positive integer or None"
             )
         if (
             isinstance(self.retry_attempts, bool)
@@ -852,6 +861,14 @@ class HeadlessCollectorService:
                 stream_epoch=schedule_stream_epoch,
                 anchor_at=schedule_anchor,
                 interval_seconds=self.config.poll_interval_seconds,
+                evaluation_start_slot_ordinal=(
+                    0 if self.config.evaluation_slot_count is not None else None
+                ),
+                evaluation_end_slot_ordinal=(
+                    self.config.evaluation_slot_count - 1
+                    if self.config.evaluation_slot_count is not None
+                    else None
+                ),
             )
         except (TypeError, ValueError) as exc:
             raise CollectorServiceError(
@@ -967,6 +984,14 @@ def _parser() -> argparse.ArgumentParser:
         help="Explicitly resume this durable run_id after a persisted STOP.",
     )
     parser.add_argument("--max-cycles", type=int)
+    parser.add_argument(
+        "--evaluation-slots",
+        type=int,
+        help=(
+            "Prospectively freeze the finite scientific evaluation window for "
+            "this durable run. This is separate from per-invocation --max-cycles."
+        ),
+    )
     parser.add_argument("--max-items", type=int, default=250)
     parser.add_argument("--poll-seconds", type=float, default=30.0)
     parser.add_argument("--retry-attempts", type=int, default=3)
@@ -1007,6 +1032,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             config=CollectorServiceConfig(
                 max_items=args.max_items,
                 poll_interval_seconds=args.poll_seconds,
+                evaluation_slot_count=args.evaluation_slots,
                 retry_attempts=args.retry_attempts,
                 initial_backoff_seconds=args.initial_backoff_seconds,
                 max_backoff_seconds=args.max_backoff_seconds,

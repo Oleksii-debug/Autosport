@@ -311,18 +311,19 @@ class ProviderCapabilityEvidenceMatrix:
         as_of = _time(self.as_of, "as_of")
         if _time(self.profile.observed_at, "profile.observed_at") > as_of:
             raise ProviderCapabilityEvidenceMatrixError("as_of predates profile")
-        if _time(self.integration.observed_at, "integration.observed_at") > as_of:
+        if _time(self.integration.observed_at, "integration.observeded_at") > as_of:
             raise ProviderCapabilityEvidenceMatrixError("as_of predates integration")
         if type(self.facts) is not tuple:
             raise ProviderCapabilityEvidenceMatrixError("facts must be tuple")
+        for fact in self.facts:
+            if type(fact) is not ProviderCapabilityEvidence:
+                raise ProviderCapabilityEvidenceMatrixError("facts must be exact evidence")
         expected = tuple(sorted(BookmakerCapability, key=lambda item: item.value))
         if tuple(f.capability for f in self.facts) != expected:
             raise ProviderCapabilityEvidenceMatrixError(
                 "facts must contain every capability once in canonical order"
             )
         for fact in self.facts:
-            if type(fact) is not ProviderCapabilityEvidence:
-                raise ProviderCapabilityEvidenceMatrixError("facts must be exact evidence")
             if (
                 fact.grade is not ProviderCapabilityTruthGrade.UNKNOWN_UNPROVEN
                 and not _is_product_issued(fact)
@@ -376,6 +377,11 @@ class ProviderCapabilityEvidenceMatrix:
         if any(type(grade) is not ProviderCapabilityTruthGrade for grade in accepted_grades):
             raise ProviderCapabilityEvidenceMatrixError("accepted_grades must be exact enums")
         fact = self.fact_for(capability)
+        if (
+            fact.grade is not ProviderCapabilityTruthGrade.UNKNOWN_UNPROVEN
+            and not _is_product_issued(fact)
+        ):
+            return False
         if fact.grade is ProviderCapabilityTruthGrade.REVOKED_OR_UNAVAILABLE:
             return False
         return fact.grade in accepted_grades and fact.is_current(at_time)

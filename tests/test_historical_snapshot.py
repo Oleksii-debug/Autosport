@@ -2,11 +2,12 @@ from __future__ import annotations
 
 import json
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
-from autosport.historical_snapshot import capture_historical_snapshot
+from autosport.historical_snapshot import _atomic_write_jsonl, capture_historical_snapshot
 from autosport.parlayapi_provider import (
     HttpJsonResponse,
     ParlayApiTableTennisProvider,
@@ -160,6 +161,54 @@ class HistoricalSnapshotTests(unittest.TestCase):
                     requested_at="2026-09-12T10:03:00Z",
                     output_path=Path(temp) / "market.jsonl",
                 )
+
+    def test_atomic_writer_uses_isolated_temp_files_for_concurrent_publication(self) -> None:
+        rows_a = [
+            {"writer": "a", "index": 1},
+            {"writer": "a", "index": 2},
+        ]
+        rows_b = [
+            {"writer": "b", "index": 1},
+            {"writer": "b", "index": 2},
+        ]
+        barrier = threading.Barrier(2)
+        errors: list[BaseException] = []
+        errors_lock = threading.Lock()
+
+        def synchronized_rows(rows: list[dict[str, object]]):
+            barrier.wait()
+            yield from rows
+
+        def publish(path: Path, rows: list[dict[str, object]]) -> None:
+            try:
+                _atomic_write_jsonl(path, synchronized_rows(rows))
+            except BaseException as exc:
+                with errors_lock:
+                    errors.append(exc)
+
+        with tempfile.TemporaryDirectory() as temp:
+            market_path = Path(temp) / "market.jsonl"
+            threads = [
+                threading.Thread(target=publish, args=(market_path, rows_a)),
+                threading.Thread(target=publish, args=(market_path, rows_b)),
+            ]
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join(timeout=5)
+
+            self.assertTrue(all(not thread.is_alive() for thread in threads))
+            self.assertEqual(errors, [])
+            published = [
+                json.loads(line)
+                for line in market_path.read_text(encoding="utf-8").splitlines()
+            ]
+            self.assertIn(published, (rows_a, rows_b))
+            self.assertEqual(
+                list(Path(temp).glob(f".{market_path.name}.*.tmp")),
+                [],
+            )
+            self.assertFalse(market_path.with_name(market_path.name + ".tmp").exists())
 
     def test_empty_snapshot_is_machine_visible_but_not_coverage_verified(self) -> None:
         payload = _payload()

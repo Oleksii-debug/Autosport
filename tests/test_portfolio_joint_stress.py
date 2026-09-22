@@ -69,6 +69,7 @@ def scenario(
             for item, outcome in zip(tickets, outcomes, strict=True)
         ),
         relation_ids=relation_ids,
+        committed_at=NOW,
         assumption_sha256=assumption_sha256,
         reason="precommitted adverse joint state",
     )
@@ -125,6 +126,7 @@ def test_same_underlying_quote_across_providers_concentrates_loss() -> None:
         scenario_id="shared-loss",
         settlements=((tickets[0].legs[0].quote_key, "loss"),),
         relation_ids=(),
+        committed_at=NOW,
         assumption_sha256=A,
         reason="same underlying outcome loses",
     )
@@ -153,6 +155,7 @@ def test_pairwise_zero_empirical_relation_cannot_erase_joint_tail_loss() -> None
         grade=JointDependenceGrade.EMPIRICAL_DEPENDENCE,
         reason="pairwise coefficient alone does not prove mutual independence",
         evidence_sha256=B,
+        evidence_available_at=NOW,
         empirical_coefficient=Decimal("0"),
     )
     stress = scenario(
@@ -222,6 +225,7 @@ def test_structural_dependency_is_derived_not_overridden_by_low_empirical_value(
         grade=JointDependenceGrade.EMPIRICAL_DEPENDENCE,
         reason="historical estimate is descriptive only",
         evidence_sha256=B,
+        evidence_available_at=NOW,
         empirical_coefficient=Decimal("-0.9"),
     )
     stress = scenario(
@@ -281,6 +285,7 @@ def test_parlay_overlap_is_mechanically_visible_as_shared_event() -> None:
             (parlay.legs[1].quote_key, "win"),
         ),
         relation_ids=(),
+        committed_at=NOW,
         assumption_sha256=A,
         reason="shared leg loses",
     )
@@ -305,6 +310,7 @@ def test_every_scenario_must_cover_exact_quote_set() -> None:
         scenario_id="incomplete",
         settlements=((tickets[0].legs[0].quote_key, "loss"),),
         relation_ids=(),
+        committed_at=NOW,
         assumption_sha256=A,
         reason="missing one quote",
     )
@@ -324,6 +330,7 @@ def test_extra_scenario_quote_is_rejected() -> None:
             ("soccer|other|market|selection", "loss"),
         ),
         relation_ids=(),
+        committed_at=NOW,
         assumption_sha256=A,
         reason="extra unrelated quote",
     )
@@ -373,6 +380,7 @@ def test_ticket_and_protocol_input_permutation_preserve_result_identity() -> Non
         grade=JointDependenceGrade.EMPIRICAL_DEPENDENCE,
         reason="descriptive second moment",
         evidence_sha256=B,
+        evidence_available_at=NOW,
         empirical_coefficient=Decimal("0"),
     )
     unknown = JointDependenceRelation(
@@ -456,6 +464,7 @@ def test_empirical_coefficient_must_be_finite_and_bounded(bad: Decimal) -> None:
             grade=JointDependenceGrade.EMPIRICAL_DEPENDENCE,
             reason="invalid coefficient",
             evidence_sha256=B,
+            evidence_available_at=NOW,
             empirical_coefficient=bad,
         )
 
@@ -468,6 +477,7 @@ def test_unknown_dependence_cannot_carry_fabricated_coefficient_or_evidence() ->
             grade=JointDependenceGrade.UNKNOWN_DEPENDENCE,
             reason="unknown",
             evidence_sha256=A,
+            evidence_available_at=NOW,
             empirical_coefficient=Decimal("0"),
         )
 
@@ -480,6 +490,7 @@ def test_stress_assumption_cannot_masquerade_as_empirical_correlation() -> None:
             grade=JointDependenceGrade.STRESS_ASSUMPTION,
             reason="adverse scenario family",
             evidence_sha256=A,
+            evidence_available_at=NOW,
             empirical_coefficient=Decimal("0"),
         )
 
@@ -495,6 +506,7 @@ def test_protocol_rejects_unexercised_empirical_relation() -> None:
         grade=JointDependenceGrade.EMPIRICAL_DEPENDENCE,
         reason="must be exercised",
         evidence_sha256=B,
+        evidence_available_at=NOW,
         empirical_coefficient=Decimal("0.1"),
     )
     stress = scenario("loss", tickets, ("loss", "loss"), relation_ids=())
@@ -536,3 +548,59 @@ def test_machine_stress_result_never_expands_external_permission() -> None:
     assert result.risk_reduction_authorized is False
     assert result.financial_permission_expansion_authorized is False
     assert result.exact_terminal_authority is False
+
+def test_empirical_evidence_after_causal_cutoff_is_rejected() -> None:
+    tickets = (
+        ticket("t-1", "s-1", market_id="m-1"),
+        ticket("t-2", "s-2", market_id="m-2"),
+    )
+    relation = JointDependenceRelation(
+        relation_id="future-evidence",
+        member_ticket_ids=("t-1", "t-2"),
+        grade=JointDependenceGrade.EMPIRICAL_DEPENDENCE,
+        reason="must not leak future evidence",
+        evidence_sha256=B,
+        evidence_available_at="2026-09-22T12:00:01+00:00",
+        empirical_coefficient=Decimal("0"),
+    )
+    stress = scenario(
+        "loss",
+        tickets,
+        ("loss", "loss"),
+        relation_ids=(relation.relation_id,),
+    )
+
+    with pytest.raises(ValueError, match="after causal_cutoff"):
+        JointStressProtocol(
+            protocol_id="future-leak",
+            protocol_version="1",
+            causal_cutoff=NOW,
+            relations=(relation,),
+            scenarios=(stress,),
+        )
+
+
+def test_scenario_committed_after_causal_cutoff_is_rejected() -> None:
+    tickets = (ticket("t-1", "s-1"),)
+    stress = replace(
+        scenario("late", tickets, ("loss",)),
+        committed_at="2026-09-22T12:00:01+00:00",
+    )
+
+    with pytest.raises(ValueError, match="committed no later"):
+        JointStressProtocol(
+            protocol_id="late-scenario",
+            protocol_version="1",
+            causal_cutoff=NOW,
+            relations=(),
+            scenarios=(stress,),
+        )
+
+
+def test_result_extrema_cannot_be_rewritten_via_dataclass_replace() -> None:
+    tickets = (ticket("t-1", "s-1"),)
+    result = evaluate_joint_stress(tickets=tickets, protocol=protocol(tickets=tickets))
+
+    with pytest.raises(ValueError, match="extrema must exactly match"):
+        replace(result, worst_observed_profit=Decimal("0"))
+

@@ -15,6 +15,7 @@ WSSE_NS: Final = "http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-wssecu
 WSU_NS: Final = "http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-wssecurity-utility-1.0.xsd"
 _MAX_XML_BYTES: Final = 4 * 1024 * 1024
 _MAX_TEXT: Final = 512
+_RC016_MARKET_NEITHER_SUSPENDED_NOR_ACTIVE: Final = 16
 
 
 class BetdaqWireError(ValueError):
@@ -95,6 +96,14 @@ class BetdaqMarketPrices:
 
 
 @dataclass(frozen=True, slots=True)
+class BetdaqUnavailableMarket:
+    """One requested market that BETDAQ explicitly marked unavailable via RC016."""
+
+    market_id: int
+    return_code: int
+
+
+@dataclass(frozen=True, slots=True)
 class BetdaqGetPricesWireResponse:
     return_code: int
     return_description: str
@@ -102,6 +111,7 @@ class BetdaqGetPricesWireResponse:
     provider_created_at: datetime | None
     provider_created_at_text: str | None
     markets: tuple[BetdaqMarketPrices, ...]
+    unavailable_markets: tuple[BetdaqUnavailableMarket, ...]
 
 
 def _tag(namespace: str, local: str) -> str:
@@ -353,10 +363,24 @@ def _parse_selection(element: ET.Element) -> BetdaqSelectionPrices:
     )
 
 
-def _parse_market(element: ET.Element) -> BetdaqMarketPrices:
+def _parse_market(element: ET.Element) -> BetdaqMarketPrices | BetdaqUnavailableMarket:
     return_code_raw = _optional_attr(element, "ReturnCode")
     if return_code_raw is not None:
         return_code = _integer(return_code_raw, "MarketPrices ReturnCode")
+        if return_code == _RC016_MARKET_NEITHER_SUSPENDED_NOR_ACTIVE:
+            market_id = _integer(
+                _required_attr(element, "Id"),
+                "RC016 market Id",
+                minimum=0,
+            )
+            if list(element):
+                raise BetdaqSoapProtocolError(
+                    "RC016 unavailable market must not carry price children"
+                )
+            return BetdaqUnavailableMarket(
+                market_id=market_id,
+                return_code=return_code,
+            )
         if return_code != 0:
             market_hint = _optional_attr(element, "Id")
             scope = (
@@ -516,6 +540,7 @@ def parse_get_prices_response(
         )
 
     markets: list[BetdaqMarketPrices] = []
+    unavailable_markets: list[BetdaqUnavailableMarket] = []
     seen_market_ids: set[int] = set()
     for child in list(result):
         if child is return_status:
@@ -530,7 +555,10 @@ def parse_get_prices_response(
                 "duplicate market Id in one GetPrices response"
             )
         seen_market_ids.add(market.market_id)
-        markets.append(market)
+        if isinstance(market, BetdaqUnavailableMarket):
+            unavailable_markets.append(market)
+        else:
+            markets.append(market)
 
     return BetdaqGetPricesWireResponse(
         return_code=return_code,
@@ -539,4 +567,5 @@ def parse_get_prices_response(
         provider_created_at=provider_created_at,
         provider_created_at_text=provider_created_at_text,
         markets=tuple(markets),
+        unavailable_markets=tuple(unavailable_markets),
     )

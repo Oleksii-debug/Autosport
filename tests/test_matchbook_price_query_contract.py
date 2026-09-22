@@ -1,0 +1,289 @@
+from __future__ import annotations
+
+from dataclasses import replace
+from datetime import datetime, timezone
+from decimal import Decimal
+
+import pytest
+
+from autosport.matchbook_price_query_contract import (
+    MatchbookExchangeType,
+    MatchbookOddsType,
+    MatchbookPriceMode,
+    MatchbookPriceObservationEvidence,
+    MatchbookPriceQueryContract,
+    MatchbookPriceQueryError,
+    MatchbookPriceRepresentation,
+    MatchbookPriceSide,
+)
+
+
+def _query(**changes: object) -> MatchbookPriceQueryContract:
+    values: dict[str, object] = {
+        "event_id": 101,
+        "market_id": 202,
+        "runner_id": 303,
+        "exchange_type": MatchbookExchangeType.BACK_LAY,
+        "odds_type": MatchbookOddsType.DECIMAL,
+        "currency": "EUR",
+        "side": MatchbookPriceSide.BOTH,
+        "depth": 5,
+        "price_mode": MatchbookPriceMode.EXPANDED,
+        "minimum_liquidity": Decimal("2.50"),
+        "exclude_mirrored_prices": True,
+    }
+    values.update(changes)
+    return MatchbookPriceQueryContract(**values)  # type: ignore[arg-type]
+
+
+def test_exact_get_prices_contract_projects_every_material_query_semantic() -> None:
+    query = _query()
+    assert (
+        query.request_path
+        == "/edge/rest/events/101/markets/202/runners/303/prices"
+    )
+    assert query.query_params() == (
+        ("exchange-type", "back-lay"),
+        ("odds-type", "DECIMAL"),
+        ("depth", "5"),
+        ("currency", "EUR"),
+        ("minimum-liquidity", "2.5"),
+        ("price-mode", "expanded"),
+        ("exclude-mirrored-prices", "true"),
+    )
+    assert query.to_dict()["side_scope"] == "both"
+    assert query.provider_defaults_used is False
+
+
+def test_every_material_semantic_changes_request_identity() -> None:
+    base = _query()
+    variants = (
+        replace(base, event_id=102),
+        replace(base, market_id=203),
+        replace(base, runner_id=304),
+        replace(base, odds_type=MatchbookOddsType.US),
+        replace(base, currency="GBP"),
+        replace(base, side=MatchbookPriceSide.BACK),
+        replace(base, depth=6),
+        replace(
+            base,
+            price_mode=MatchbookPriceMode.AGGREGATED,
+        ),
+        replace(
+            base,
+            minimum_liquidity=Decimal("3"),
+        ),
+        replace(base, exclude_mirrored_prices=False),
+        replace(
+            base,
+            exchange_type=MatchbookExchangeType.BINARY,
+            side=MatchbookPriceSide.WIN,
+        ),
+    )
+    assert (
+        len(
+            {
+                base.contract_sha256,
+                *(item.contract_sha256 for item in variants),
+            }
+        )
+        == 12
+    )
+
+
+def test_both_sides_are_explicit_even_when_provider_omits_side_param() -> None:
+    both = _query(side=MatchbookPriceSide.BOTH)
+    back = _query(side=MatchbookPriceSide.BACK)
+    assert all(
+        name != "side" for name, _ in both.query_params()
+    )
+    assert ("side", "back") in back.query_params()
+    assert both.to_dict()["side_scope"] == "both"
+    assert both.omitted_side_absence_proven is False
+    assert both.contract_sha256 != back.contract_sha256
+
+
+def test_side_must_match_exchange_type() -> None:
+    with pytest.raises(
+        MatchbookPriceQueryError, match="incompatible"
+    ):
+        _query(side=MatchbookPriceSide.WIN)
+    with pytest.raises(
+        MatchbookPriceQueryError, match="incompatible"
+    ):
+        _query(
+            exchange_type=MatchbookExchangeType.BINARY,
+            side=MatchbookPriceSide.BACK,
+        )
+
+
+def test_aggregated_display_cannot_alias_expanded_price_levels() -> None:
+    expanded = _query(
+        price_mode=MatchbookPriceMode.EXPANDED
+    )
+    aggregated = _query(
+        price_mode=MatchbookPriceMode.AGGREGATED
+    )
+    assert (
+        expanded.provider_price_representation
+        is MatchbookPriceRepresentation.EXPANDED_LEVELS
+    )
+    assert (
+        aggregated.provider_price_representation
+        is MatchbookPriceRepresentation.AGGREGATED_DISPLAY
+    )
+    assert (
+        expanded.contract_sha256
+        != aggregated.contract_sha256
+    )
+
+
+def test_depth_and_minimum_liquidity_never_prove_absent_market_liquidity() -> None:
+    shallow = _query(
+        depth=1,
+        minimum_liquidity=Decimal("100"),
+    )
+    deep = _query(
+        depth=20,
+        minimum_liquidity=Decimal("0"),
+    )
+    assert shallow.absence_beyond_depth_proven is False
+    assert deep.absence_beyond_depth_proven is False
+    assert shallow.execution_liquidity_reserved is False
+    assert deep.execution_liquidity_reserved is False
+    assert (
+        shallow.contract_sha256
+        != deep.contract_sha256
+    )
+
+
+def test_currency_is_identity_bearing_for_available_amount() -> None:
+    eur = _query(currency="EUR")
+    usd = _query(currency="USD")
+    assert eur.contract_sha256 != usd.contract_sha256
+    assert ("currency", "EUR") in eur.query_params()
+    assert ("currency", "USD") in usd.query_params()
+
+
+def test_contract_round_trip_is_canonical_and_tamper_evident() -> None:
+    query = _query()
+    raw = query.to_dict()
+    assert (
+        MatchbookPriceQueryContract.from_dict(raw)
+        == query
+    )
+    tampered = dict(raw)
+    tampered["depth"] = 4
+    with pytest.raises(
+        MatchbookPriceQueryError, match="canonical"
+    ):
+        MatchbookPriceQueryContract.from_dict(tampered)
+
+
+def test_observation_binds_query_response_and_time_without_minting_authority() -> None:
+    query = _query()
+    evidence = MatchbookPriceObservationEvidence(
+        query=query,
+        observed_at=datetime(
+            2026, 9, 22, 7, 15, tzinfo=timezone.utc
+        ),
+        raw_response_sha256="a" * 64,
+    )
+    raw = evidence.to_dict()
+    assert (
+        raw["query_contract_sha256"]
+        == query.contract_sha256
+    )
+    assert raw["raw_response_sha256"] == "a" * 64
+    assert raw["provider_origin_proven"] is False
+    assert (
+        raw["provider_authentication_proven"] is False
+    )
+    assert raw["execution_liquidity_reserved"] is False
+    assert raw["grants_execution_authority"] is False
+    assert raw["grants_real_money_authority"] is False
+    assert (
+        MatchbookPriceObservationEvidence.from_dict(raw)
+        == evidence
+    )
+
+
+def test_observation_identity_changes_with_response_time_or_query() -> None:
+    evidence = MatchbookPriceObservationEvidence(
+        query=_query(),
+        observed_at=datetime(
+            2026, 9, 22, 7, 15, tzinfo=timezone.utc
+        ),
+        raw_response_sha256="a" * 64,
+    )
+    changed_response = replace(
+        evidence, raw_response_sha256="b" * 64
+    )
+    changed_time = replace(
+        evidence,
+        observed_at=datetime(
+            2026, 9, 22, 7, 16, tzinfo=timezone.utc
+        ),
+    )
+    changed_query = replace(
+        evidence, query=_query(depth=6)
+    )
+    assert (
+        len(
+            {
+                evidence.evidence_id,
+                changed_response.evidence_id,
+                changed_time.evidence_id,
+                changed_query.evidence_id,
+            }
+        )
+        == 4
+    )
+
+
+def test_invalid_or_implicit_semantics_fail_closed() -> None:
+    with pytest.raises(MatchbookPriceQueryError):
+        _query(event_id=True)
+    with pytest.raises(MatchbookPriceQueryError):
+        _query(depth=0)
+    with pytest.raises(MatchbookPriceQueryError):
+        _query(currency="JPY")
+    with pytest.raises(MatchbookPriceQueryError):
+        _query(minimum_liquidity=2.0)
+    with pytest.raises(MatchbookPriceQueryError):
+        _query(
+            minimum_liquidity=Decimal("NaN")
+        )
+    with pytest.raises(MatchbookPriceQueryError):
+        _query(exclude_mirrored_prices=1)
+
+
+def test_observation_requires_utc_and_lowercase_sha256() -> None:
+    query = _query()
+    with pytest.raises(
+        MatchbookPriceQueryError,
+        match="timezone-aware",
+    ):
+        MatchbookPriceObservationEvidence(
+            query=query,
+            observed_at=datetime(
+                2026, 9, 22, 7, 15
+            ),
+            raw_response_sha256="a" * 64,
+        )
+    with pytest.raises(
+        MatchbookPriceQueryError,
+        match="lowercase SHA-256",
+    ):
+        MatchbookPriceObservationEvidence(
+            query=query,
+            observed_at=datetime(
+                2026,
+                9,
+                22,
+                7,
+                15,
+                tzinfo=timezone.utc,
+            ),
+            raw_response_sha256="A" * 64,
+        )

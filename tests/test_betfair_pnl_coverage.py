@@ -465,7 +465,7 @@ def test_witness_cannot_be_replayed_into_another_account_scope() -> None:
         closed_pages=(),
     )
 
-    with pytest.raises(BetfairPnlCoverageError, match="canonical rebuilt proof"):
+    with pytest.raises(BetfairPnlCoverageError, match="account identity mismatch"):
         verify_coverage_witness(
             witness=witness,
             scope=scope(account_id_hash=sha256(b"acct-b").hexdigest()),

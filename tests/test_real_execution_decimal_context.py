@@ -119,6 +119,53 @@ class RealExecutionDecimalContextTests(unittest.TestCase):
             "10",
         )
 
+    def test_binary_float_and_bool_action_ingress_fails_closed(self) -> None:
+        action = _plan().actions[0]
+
+        for field, value in (
+            ("requested_odds", 0.3 - 0.2),
+            ("requested_stake", 1.25),
+            ("requested_odds", True),
+            ("requested_stake", False),
+        ):
+            with self.subTest(field=field, value=value):
+                with self.assertRaisesRegex(
+                    ValueError, rf"{field} must be a finite Decimal"
+                ):
+                    replace(action, **{field: value})
+
+    def test_binary_float_acknowledgement_ingress_fails_closed(self) -> None:
+        acknowledgement = ExternalAcknowledgement(
+            attempt_id="attempt-decimal-ingress",
+            external_receipt_id="receipt-decimal-ingress",
+            status=AcknowledgementStatus.PARTIAL,
+            acknowledged_at="2026-09-21T20:00:03+00:00",
+            accepted_odds=Decimal("2.5"),
+            accepted_stake=Decimal("10"),
+        )
+
+        for field, value in (
+            ("accepted_odds", 2.5),
+            ("accepted_stake", 0.3 - 0.2),
+            ("accepted_odds", True),
+            ("accepted_stake", False),
+        ):
+            with self.subTest(field=field, value=value):
+                with self.assertRaisesRegex(
+                    ValueError, rf"{field} must be a finite Decimal"
+                ):
+                    replace(acknowledgement, **{field: value})
+
+    def test_declared_decimal_input_types_remain_supported(self) -> None:
+        action = replace(
+            _plan().actions[0],
+            requested_odds="2.5000",
+            requested_stake=10,
+        )
+
+        self.assertEqual(action.to_dict()["requested_odds"], "2.5")
+        self.assertEqual(action.to_dict()["requested_stake"], "10")
+
     def test_low_precision_persistence_reopens_idempotently_at_high_precision(self) -> None:
         plan = _plan()
 

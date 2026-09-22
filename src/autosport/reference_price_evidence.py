@@ -149,6 +149,7 @@ class ReferencePriceProtocol:
     max_age_seconds: int
     max_skew_seconds: int
     minimum_sources: int
+    eligible_price_source_ids: tuple[str, ...] | None = None
     aggregation_method: str = "median_decimal_odds.v1"
     protocol_id: str = field(init=False)
 
@@ -172,6 +173,28 @@ class ReferencePriceProtocol:
         source_ids = tuple(sorted(source_ids))
         object.__setattr__(self, "eligible_source_ids", source_ids)
 
+        price_source_values = self.eligible_price_source_ids
+        if price_source_values is None:
+            price_source_values = source_ids
+        if type(price_source_values) is not tuple or not price_source_values:
+            raise ReferencePriceEvidenceError(
+                "eligible_price_source_ids must be a non-empty exact tuple"
+            )
+        price_source_ids = tuple(
+            _text(source_id, "eligible price source_id")
+            for source_id in price_source_values
+        )
+        if len(set(price_source_ids)) != len(price_source_ids):
+            raise ReferencePriceEvidenceError(
+                "eligible_price_source_ids must be unique"
+            )
+        price_source_ids = tuple(sorted(price_source_ids))
+        object.__setattr__(
+            self,
+            "eligible_price_source_ids",
+            price_source_ids,
+        )
+
         target = _text(self.target_source_id, "target_source_id")
         if type(self.target_inclusion_policy) is not ReferenceTargetInclusionPolicy:
             raise ReferencePriceEvidenceError(
@@ -180,7 +203,7 @@ class ReferencePriceProtocol:
         if (
             self.target_inclusion_policy
             is ReferenceTargetInclusionPolicy.EXCLUDE
-            and target in source_ids
+            and target in price_source_ids
         ):
             raise ReferencePriceEvidenceError(
                 "excluded target_source_id cannot appear in eligible_source_ids"
@@ -188,7 +211,7 @@ class ReferencePriceProtocol:
         if (
             self.target_inclusion_policy
             is ReferenceTargetInclusionPolicy.INCLUDE
-            and target not in source_ids
+            and target not in price_source_ids
         ):
             raise ReferencePriceEvidenceError(
                 "included target_source_id must appear in eligible_source_ids"
@@ -213,9 +236,9 @@ class ReferencePriceProtocol:
             raise ReferencePriceEvidenceError(
                 "minimum_sources must be at least 2"
             )
-        if minimum > len(source_ids):
+        if minimum > len(price_source_ids):
             raise ReferencePriceEvidenceError(
-                "minimum_sources cannot exceed eligible source universe"
+                "minimum_sources cannot exceed eligible independent price-source universe"
             )
         method = _text(self.aggregation_method, "aggregation_method")
         if method != "median_decimal_odds.v1":
@@ -240,6 +263,7 @@ class ReferencePriceProtocol:
             "schema": "autosport.reference_price_protocol",
             "schema_version": 1,
             "eligible_source_ids": list(self.eligible_source_ids),
+            "eligible_price_source_ids": list(self.eligible_price_source_ids),
             "target_source_id": self.target_source_id,
             "target_inclusion_policy": self.target_inclusion_policy.value,
             "price_semantics": self.price_semantics,
@@ -271,6 +295,10 @@ class ReferenceObservation:
             raise ReferencePriceEvidenceError(
                 "reference observation requires authoritative provider source_ts"
             )
+        _text(
+            event.metadata.get("bookmaker_key"),
+            "reference observation metadata.bookmaker_key",
+        )
 
     @classmethod
     def from_event(cls, event: MarketEvent) -> "ReferenceObservation":
@@ -291,6 +319,13 @@ class ReferenceObservation:
     @property
     def source_id(self) -> str:
         return self.market_event().source_id
+
+    @property
+    def price_source_id(self) -> str:
+        return _text(
+            self.market_event().metadata.get("bookmaker_key"),
+            "reference observation metadata.bookmaker_key",
+        )
 
     @property
     def sequence(self) -> int:
@@ -326,6 +361,7 @@ class ReferenceObservation:
     def to_dict(self) -> dict[str, object]:
         return {
             "source_id": self.source_id,
+            "price_source_id": self.price_source_id,
             "event_sha256": self.event_sha256,
             "event_canonical_json": self.event_canonical_json,
             "sequence": self.sequence,
@@ -351,7 +387,9 @@ class ReferencePriceEvidence:
     decision_ts: str
     observations: tuple[ReferenceObservation, ...]
     evidence_id: str = field(init=False)
-    median_decimal_odds: Decimal = field(init=False)
+    median_decimal_odds: Decimal | None = field(init=False)
+    lower_median_decimal_odds: Decimal = field(init=False)
+    upper_median_decimal_odds: Decimal = field(init=False)
     min_decimal_odds: Decimal = field(init=False)
     max_decimal_odds: Decimal = field(init=False)
     executable_quote_verified: bool = field(default=False, init=False)
@@ -364,6 +402,10 @@ class ReferencePriceEvidence:
     @property
     def source_ids(self) -> tuple[str, ...]:
         return tuple(item.source_id for item in self.observations)
+
+    @property
+    def price_source_ids(self) -> tuple[str, ...]:
+        return tuple(item.price_source_id for item in self.observations)
 
     @property
     def protocol_id(self) -> str:
@@ -392,18 +434,18 @@ class ReferencePriceEvidence:
         return payload
 
 
-def _median(values: tuple[Decimal, ...]) -> Decimal:
+def _median_band(values: tuple[Decimal, ...]) -> tuple[Decimal, Decimal]:
     ordered = tuple(sorted(values))
     midpoint = len(ordered) // 2
     if len(ordered) % 2:
-        return ordered[midpoint]
-    return (ordered[midpoint - 1] + ordered[midpoint]) / Decimal(2)
+        return ordered[midpoint], ordered[midpoint]
+    return ordered[midpoint - 1], ordered[midpoint]
 
 
 def _evidence_identity_payload(evidence: ReferencePriceEvidence) -> dict[str, object]:
     return {
         "schema": "autosport.reference_price_evidence",
-        "schema_version": 3,
+        "schema_version": 4,
         "protocol": evidence.protocol.to_dict(),
         "sport": evidence.sport,
         "event_id": evidence.event_id,
@@ -413,7 +455,13 @@ def _evidence_identity_payload(evidence: ReferencePriceEvidence) -> dict[str, ob
         "market_semantics_id": evidence.market_semantics_id,
         "decision_ts": evidence.decision_ts,
         "observations": [item.to_dict() for item in evidence.observations],
-        "median_decimal_odds": str(evidence.median_decimal_odds),
+        "median_decimal_odds": (
+            None
+            if evidence.median_decimal_odds is None
+            else str(evidence.median_decimal_odds)
+        ),
+        "lower_median_decimal_odds": str(evidence.lower_median_decimal_odds),
+        "upper_median_decimal_odds": str(evidence.upper_median_decimal_odds),
         "min_decimal_odds": str(evidence.min_decimal_odds),
         "max_decimal_odds": str(evidence.max_decimal_odds),
         "executable_quote_verified": False,
@@ -474,6 +522,7 @@ def _validate_reference_price_evidence(evidence: ReferencePriceEvidence) -> None
         evidence.market_semantics_id,
     )
     source_ids: set[str] = set()
+    price_source_ids: set[str] = set()
     source_times: list[datetime] = []
     ingest_times: list[datetime] = []
     odds: list[Decimal] = []
@@ -496,11 +545,14 @@ def _validate_reference_price_evidence(evidence: ReferencePriceEvidence) -> None
             raise ReferencePriceEvidenceError(
                 "reference observations require exact open market status"
             )
-        if event.source_id in source_ids:
-            raise ReferencePriceEvidenceError(
-                "reference observations require distinct source_id values"
-            )
         source_ids.add(event.source_id)
+        price_source_id = observation.price_source_id
+        if price_source_id in price_source_ids:
+            raise ReferencePriceEvidenceError(
+                "reference observations require distinct independent price source_ids; "
+                "the same bookmaker/source-of-price cannot gain multiple consensus votes"
+            )
+        price_source_ids.add(price_source_id)
         semantics = event.metadata.get("price_semantics")
         if type(semantics) is not str or not semantics or semantics.strip() != semantics:
             raise ReferencePriceEvidenceError(
@@ -553,12 +605,20 @@ def _validate_reference_price_evidence(evidence: ReferencePriceEvidence) -> None
         missing = tuple(sorted(expected_source_ids - source_ids))
         unexpected = tuple(sorted(source_ids - expected_source_ids))
         raise ReferencePriceEvidenceError(
-            "reference observations must exactly cover frozen eligible source "
+            "reference observations must exactly cover frozen eligible transport-source "
             f"universe; missing={missing!r}; unexpected={unexpected!r}"
         )
-    if len(source_ids) < minimum:
+    expected_price_source_ids = set(evidence.protocol.eligible_price_source_ids)
+    if price_source_ids != expected_price_source_ids:
+        missing = tuple(sorted(expected_price_source_ids - price_source_ids))
+        unexpected = tuple(sorted(price_source_ids - expected_price_source_ids))
         raise ReferencePriceEvidenceError(
-            "reference-price evidence has insufficient distinct sources"
+            "reference observations must exactly cover frozen eligible independent "
+            f"price-source universe; missing={missing!r}; unexpected={unexpected!r}"
+        )
+    if len(price_source_ids) < minimum:
+        raise ReferencePriceEvidenceError(
+            "reference-price evidence has insufficient distinct independent price sources"
         )
     if (max(source_times) - min(source_times)).total_seconds() > max_skew:
         raise ReferencePriceEvidenceError(
@@ -570,7 +630,14 @@ def _validate_reference_price_evidence(evidence: ReferencePriceEvidence) -> None
         )
 
     values = tuple(odds)
-    object.__setattr__(evidence, "median_decimal_odds", _median(values))
+    lower_median, upper_median = _median_band(values)
+    object.__setattr__(evidence, "lower_median_decimal_odds", lower_median)
+    object.__setattr__(evidence, "upper_median_decimal_odds", upper_median)
+    object.__setattr__(
+        evidence,
+        "median_decimal_odds",
+        lower_median if lower_median == upper_median else None,
+    )
     object.__setattr__(evidence, "min_decimal_odds", min(values))
     object.__setattr__(evidence, "max_decimal_odds", max(values))
     object.__setattr__(

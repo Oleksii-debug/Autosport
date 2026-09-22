@@ -14,6 +14,9 @@ from autosport.betfair_account_readonly import (
 from autosport.betfair_provider_billing_inputs import (
     read_betfair_provider_billing_inputs,
 )
+from autosport.provider_billing_row_attribution import (
+    resolve_provider_billing_row_attribution,
+)
 
 
 class _Clock:
@@ -209,3 +212,19 @@ def test_transaction_charge_signal_is_bound_into_billing_evidence_identity() -> 
             observation,
             statement=tampered_statement,
         )
+
+
+def test_transaction_charge_signal_does_not_mint_intent_allocation() -> None:
+    observation = _read(_statement_row())
+    evidence = resolve_provider_billing_row_attribution(observation, "0")
+
+    assert evidence.attribution_state == "UNPROVEN"
+    assert evidence.missing_authorities == (
+        "AUTOSPORT_ACTIVITY_NUMERATOR",
+        "PROVIDER_WINDOW_TOTAL_DENOMINATOR",
+        "COST_APPLICABILITY",
+        "ALLOCATION_RULE",
+    )
+    assert evidence.source_evidence_sha256 == observation.evidence_sha256
+    assert not hasattr(evidence, "allocated_amount")
+    assert not hasattr(evidence, "allocation_fraction")

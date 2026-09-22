@@ -71,6 +71,18 @@ def _canonical_text(name: str, value: object) -> str:
     return value
 
 
+def _canonical_betfair_runner_id(name: str, value: object) -> str:
+    """Validate Betfair runner identity before canonical text normalization."""
+
+    if type(value) is str:
+        return _canonical_text(name, value)
+    if type(value) is int:
+        if value <= 0 or value > 0x7FFFFFFFFFFFFFFF:
+            raise ValueError(f"{name} integer must be a positive signed-64-bit value")
+        return str(value)
+    raise ValueError(f"{name} must be a canonical string or signed-64-bit integer")
+
+
 def _canonical_timestamp(name: str, value: object) -> tuple[str, datetime]:
     raw = _canonical_text(name, value)
     try:
@@ -742,9 +754,9 @@ def assess_betfair_historical_market_definition_authority(
                 f"marketDefinition.runners[{index}] requires id"
             )
         selection_ids.append(
-            _canonical_text(
+            _canonical_betfair_runner_id(
                 f"marketDefinition.runners[{index}].id",
-                str(runner["id"]),
+                runner["id"],
             )
         )
     if len(selection_ids) != len(set(selection_ids)):

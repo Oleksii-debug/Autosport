@@ -21,6 +21,7 @@ from .outcome_trust import (
     OutcomeLineageTrustError,
     TrustedOutcomeRevision,
     assert_compatible_outcome_lineages,
+    assert_outcome_availability_not_downgraded,
     bind_outcome_lineage_availability,
     outcome_lineage_binding_from_payload,
     outcome_lineage_payload,
@@ -1785,6 +1786,10 @@ class RunRegistry:
                     )
                 try:
                     assert_compatible_outcome_lineages(trusted, durable)
+                    assert_outcome_availability_not_downgraded(
+                        trusted,
+                        durable,
+                    )
                 except OutcomeLineageTrustError as exc:
                     raise ValueError(
                         "run registry conflicts with lineage trust preserved by durable run summary"
@@ -1819,6 +1824,10 @@ class RunRegistry:
                         "run registry outcome lineage lacks registry-level trust binding"
                     )
                 assert_compatible_outcome_lineages(durable_trust, lineage)
+                assert_outcome_availability_not_downgraded(
+                    durable_trust,
+                    lineage,
+                )
                 if len(lineage.revisions) > len(durable_trust.revisions):
                     raise ValueError(
                         "run registry outcome lineage exceeds registry-level trust history"

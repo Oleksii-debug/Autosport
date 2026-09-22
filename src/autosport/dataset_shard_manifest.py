@@ -378,6 +378,19 @@ def _verify_descriptor_bytes(
     return payload
 
 
+def _resolve_shard_root(shard_root: str | Path) -> Path:
+    lexical_root = Path(shard_root).expanduser()
+    if lexical_root.is_symlink():
+        raise DatasetShardManifestError("shard_root itself must not be a symlink")
+    try:
+        root = lexical_root.resolve(strict=True)
+    except (FileNotFoundError, RuntimeError) as exc:
+        raise DatasetShardManifestError("shard_root must be an existing directory") from exc
+    if not root.is_dir():
+        raise DatasetShardManifestError("shard_root must be an existing directory")
+    return root
+
+
 def verify_shard_files(
     shard_root: str | Path,
     shards: Iterable[DatasetShardDescriptor],
@@ -388,15 +401,7 @@ def verify_shard_files(
     comes only from composition with DatasetSnapshotLineageAuthority.
     """
 
-    lexical_root = Path(shard_root).expanduser()
-    if lexical_root.is_symlink():
-        raise DatasetShardManifestError("shard_root itself must not be a symlink")
-    try:
-        root = lexical_root.resolve(strict=True)
-    except (FileNotFoundError, RuntimeError) as exc:
-        raise DatasetShardManifestError("shard_root must be an existing directory") from exc
-    if not root.is_dir():
-        raise DatasetShardManifestError("shard_root must be an existing directory")
+    root = _resolve_shard_root(shard_root)
     manifest = canonical_shard_manifest(shards)
     for descriptor in manifest.shards:
         _verify_descriptor_bytes(root, descriptor)
@@ -487,7 +492,7 @@ def read_registered_shard_bytes(
     descriptor = next((item for item in manifest.shards if item.shard_id == wanted), None)
     if descriptor is None:
         raise DatasetShardManifestError(f"unknown shard_id: {wanted}")
-    root = Path(shard_root).expanduser().resolve(strict=True)
+    root = _resolve_shard_root(shard_root)
     payload = _verify_descriptor_bytes(root, descriptor, capture_bytes=True)
     assert payload is not None
     return payload

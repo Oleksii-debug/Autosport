@@ -668,9 +668,84 @@ def test_rest_transport_state_is_closed_contract():
     with pytest.raises(ProphetXCancelError):
         rest(state="timeout")
     assert (
-        rest(state=RestTransportState.HTTP_200_UNQUALIFIED).state
+        rest(
+            http_status=200,
+            state=RestTransportState.HTTP_200_UNQUALIFIED,
+        ).state
         is RestTransportState.HTTP_200_UNQUALIFIED
     )
+
+
+def test_rest_transport_state_must_match_http_status():
+    with pytest.raises(ProphetXCancelError):
+        rest(
+            http_status=200,
+            state=RestTransportState.TIMEOUT_AFTER_POSSIBLE_SEND,
+        )
+    with pytest.raises(ProphetXCancelError):
+        rest(
+            http_status=404,
+            state=RestTransportState.HTTP_200_UNQUALIFIED,
+        )
+    with pytest.raises(ProphetXCancelError):
+        rest(
+            http_status=200,
+            state=RestTransportState.HTTP_404_SAMPLE_AMBIGUOUS,
+        )
+
+
+def test_transport_and_reject_response_cannot_predate_request():
+    with pytest.raises(ProphetXCancelConflict):
+        reconcile_cancel(
+            working(),
+            [
+                rest(
+                    observed_at="2026-09-22T20:00:01Z",
+                )
+            ],
+            request=request(
+                transport=CancelTransport.REST,
+            ),
+        )
+    with pytest.raises(ProphetXCancelConflict):
+        reconcile_cancel(
+            working(),
+            [
+                reject(
+                    transact_time="2026-09-22T20:00:01Z",
+                )
+            ],
+            request=request(),
+        )
+
+
+def test_distinct_duplicate_transport_or_cancel_reject_is_fail_closed():
+    with pytest.raises(ProphetXCancelConflict):
+        reconcile_cancel(
+            working(),
+            [
+                rest(observation_id="r1"),
+                rest(observation_id="r2"),
+            ],
+            request=request(
+                transport=CancelTransport.REST,
+            ),
+        )
+    with pytest.raises(ProphetXCancelConflict):
+        reconcile_cancel(
+            working(),
+            [
+                reject(
+                    reject_id="r1",
+                    seq=11,
+                ),
+                reject(
+                    reject_id="r2",
+                    seq=12,
+                ),
+            ],
+            request=request(),
+        )
 
 
 def test_working_order_state_invariants():

@@ -253,20 +253,25 @@ def test_duplicate_crossing_facts_fail_even_if_both_negative():
         )
 
 
-def test_incoming_only_wiped_requires_resting_readback_and_does_not_invent_pair():
+def test_incoming_only_wiped_requires_canonical_readback_and_does_not_invent_release():
     out = reconcile_wipes(
         incident(),
         baselines(),
         [obs("incoming-1", "strike-new")],
     )
-    assert [e.provider_order_id for e in out.effects] == ["incoming-1"]
-    assert out.required_readback_provider_order_ids == ("rest-1",)
+    assert out.effects == ()
+    assert out.required_readback_provider_order_ids == ("incoming-1", "rest-1")
+    assert out.unverified_observed_provider_order_ids == ("incoming-1",)
+    assert out.unverified_observation_evidence_ids == ("ev-incoming-1",)
     assert out.requires_readback is True
+    assert out.provider_origin_verified is False
+    assert out.economic_release_authority is False
     assert out.cause is WipeCause.WIPED_CAUSE_UNRESOLVED
-    assert out.total_released_quantity == Decimal("10")
+    with pytest.raises(ProphetXSelfMatchError):
+        _ = out.total_released_quantity
 
 
-def test_both_wiped_release_each_order_once():
+def test_both_caller_shaped_wipes_remain_quarantined():
     out = reconcile_wipes(
         incident(),
         baselines(),
@@ -275,13 +280,14 @@ def test_both_wiped_release_each_order_once():
             obs("rest-1", "strike-rest"),
         ],
     )
-    assert {e.provider_order_id for e in out.effects} == {"incoming-1", "rest-1"}
-    assert out.required_readback_provider_order_ids == ()
-    assert out.total_released_quantity == Decimal("20")
-    assert all(e.cause is WipeCause.WIPED_CAUSE_UNRESOLVED for e in out.effects)
+    assert out.effects == ()
+    assert out.required_readback_provider_order_ids == ("incoming-1", "rest-1")
+    assert out.unverified_observed_provider_order_ids == ("incoming-1", "rest-1")
+    assert out.provider_origin_verified is False
+    assert out.economic_release_authority is False
 
 
-def test_partial_fill_then_wipe_releases_only_remainder():
+def test_partial_fill_then_caller_wipe_validates_but_cannot_release_remainder():
     tracked_orders = (
         tracked("incoming-1", "canon-in", "strike-new"),
         tracked(
@@ -299,9 +305,9 @@ def test_partial_fill_then_wipe_releases_only_remainder():
             obs("rest-1", "strike-rest", cumulative_filled="4"),
         ],
     )
-    effect = out.effects[0]
-    assert effect.filled_quantity == Decimal("4")
-    assert effect.released_quantity == Decimal("6")
+    assert out.effects == ()
+    assert out.unverified_observed_provider_order_ids == ("rest-1",)
+    assert out.economic_release_authority is False
 
 
 def test_event_transition_like_wipe_is_not_mislabeled_self_match():
@@ -314,14 +320,15 @@ def test_event_transition_like_wipe_is_not_mislabeled_self_match():
     assert "SELF_MATCH" not in out.cause.value
 
 
-def test_exact_replay_is_idempotent_and_projection_stable_across_restart():
+def test_exact_unverified_replay_is_idempotent_and_projection_stable_across_restart():
     o = obs("incoming-1", "strike-new")
     a = reconcile_wipes(incident(), baselines(), [o])
     b = reconcile_wipes(incident(), baselines(), [o, o])
     c = reconcile_wipes(incident(), baselines(), [o])
     assert a == b == c
     assert a.projection_id == c.projection_id
-    assert a.effects[0].effect_id == c.effects[0].effect_id
+    assert a.effects == ()
+    assert a.unverified_observation_evidence_ids == ("ev-incoming-1",)
 
 
 def test_conflicting_replay_of_same_evidence_id_fails():
@@ -351,12 +358,13 @@ def test_conflicting_terminal_wipe_state_for_same_order_fails():
         )
 
 
-def test_same_terminal_state_with_distinct_evidence_ids_is_not_double_counted():
+def test_same_terminal_state_with_distinct_unverified_evidence_ids_mints_no_release():
     a = obs("incoming-1", "strike-new", evidence_id="ev-1")
     b = obs("incoming-1", "strike-new", evidence_id="ev-2")
     out = reconcile_wipes(incident(), baselines(), [a, b])
-    assert len(out.effects) == 1
-    assert out.total_released_quantity == Decimal("10")
+    assert out.effects == ()
+    assert out.unverified_observation_evidence_ids == ("ev-1", "ev-2")
+    assert out.economic_release_authority is False
 
 
 def test_observation_cannot_reduce_prior_known_fill_or_exceed_quantity():
@@ -435,13 +443,30 @@ def test_separate_accounts_cannot_share_one_incident():
         )
 
 
-def test_full_fill_then_wipe_has_zero_release_not_negative():
+def test_full_fill_then_caller_wipe_still_has_no_release_authority():
     out = reconcile_wipes(
         incident(),
         baselines(),
         [obs("incoming-1", "strike-new", cumulative_filled="10")],
     )
-    assert out.effects[0].released_quantity == Decimal("0")
+    assert out.effects == ()
+    assert out.unverified_observed_provider_order_ids == ("incoming-1",)
+    assert out.economic_release_authority is False
+
+
+def test_direct_construction_copy_and_reconstruction_cannot_mint_release_authority():
+    direct = obs("incoming-1", "strike-new")
+    copied = replace(direct)
+    reconstructed = WipeObservation(**direct.wire)
+
+    for claimed in (direct, copied, reconstructed):
+        out = reconcile_wipes(incident(), baselines(), [claimed])
+        assert out.effects == ()
+        assert out.provider_origin_verified is False
+        assert out.economic_release_authority is False
+        assert out.required_readback_provider_order_ids == ("incoming-1", "rest-1")
+        with pytest.raises(ProphetXSelfMatchError):
+            _ = out.total_released_quantity
 
 
 def test_exact_decimal_ingress_rejects_float_and_bool():

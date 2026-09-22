@@ -489,3 +489,41 @@ def test_read_revalidates_target_after_authority_lookup_to_close_toctou(
             shards=(descriptor,),
             shard_id="s0",
         )
+
+def test_descriptor_subclass_cannot_rebind_verified_bytes_to_registered_member(
+    tmp_path: Path,
+) -> None:
+    committed_payload = b"canonical-member-bytes"
+    replacement_payload = b"different-current-bytes"
+    path = tmp_path / "s.bin"
+    path.write_bytes(committed_payload)
+
+    committed = _descriptor(0, "s0", "s.bin", committed_payload)
+    committed_manifest = verify_shard_files(tmp_path, (committed,))
+    authority, _ = _canonical_authority(tmp_path, committed_manifest)
+
+    path.write_bytes(replacement_payload)
+
+    class _ForgedDescriptor(DatasetShardDescriptor):
+        @property
+        def member_sha256(self) -> str:
+            return committed.member_sha256
+
+    forged = _ForgedDescriptor(
+        ordinal=0,
+        shard_id="s0",
+        relative_path="s.bin",
+        byte_size=len(replacement_payload),
+        content_sha256=_sha(replacement_payload),
+        event_start_utc=committed.event_start_utc,
+        event_end_utc=committed.event_end_utc,
+    )
+
+    with pytest.raises(ValueError, match="exact DatasetShardDescriptor"):
+        verify_registered_dataset_shards(
+            authority,
+            snapshot_id="snapshot-1",
+            shard_root=tmp_path,
+            shards=(forged,),
+        )
+

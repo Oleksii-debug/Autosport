@@ -374,8 +374,8 @@ def consume_smarkets_execution_approval(
     expected_review_sha256 = _sha256(
         expected_review_sha256, "expected_review_sha256"
     )
-    authority = _open_confirmation_authority()
     try:
+        authority = _open_confirmation_authority()
         before = authority.resolve_receipt_binding(
             receipt_id=receipt_id,
             expected_review_sha256=expected_review_sha256,
@@ -426,8 +426,8 @@ def resolve_consumed_smarkets_execution_approval(
     expected_review_sha256 = _sha256(
         expected_review_sha256, "expected_review_sha256"
     )
-    authority = _open_confirmation_authority()
     try:
+        authority = _open_confirmation_authority()
         binding = authority.resolve_receipt_binding(
             receipt_id=receipt_id,
             expected_review_sha256=expected_review_sha256,

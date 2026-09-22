@@ -340,9 +340,11 @@ def _parse_selection(element: ET.Element) -> BetdaqSelectionPrices:
                 "Selections contains an unexpected child element or namespace"
             )
 
-    def reject_duplicate_levels(
+    def validate_provider_order(
         levels: list[BetdaqPriceLevel],
         side: str,
+        *,
+        descending: bool,
     ) -> None:
         seen: set[Decimal] = set()
         for level in levels:
@@ -351,9 +353,14 @@ def _parse_selection(element: ET.Element) -> BetdaqSelectionPrices:
                     f"duplicate {side} price level would double-count liquidity"
                 )
             seen.add(level.price)
+        prices = [level.price for level in levels]
+        if prices != sorted(prices, reverse=descending):
+            raise BetdaqSoapProtocolError(
+                f"{side} price levels violate provider competitiveness order"
+            )
 
-    reject_duplicate_levels(for_prices, "FOR")
-    reject_duplicate_levels(against_prices, "AGAINST")
+    validate_provider_order(for_prices, "FOR", descending=True)
+    validate_provider_order(against_prices, "AGAINST", descending=False)
     return BetdaqSelectionPrices(
         selection_id=selection_id,
         name=name,

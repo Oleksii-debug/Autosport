@@ -437,3 +437,90 @@ def publish_fixed_n_membership_structure(
         raise RiskMembershipPublicationError(
             "fixed-N membership publication failed closed"
         ) from exc
+
+def resolve_fixed_n_membership_publication(
+    registry_path: str | Path,
+    *,
+    workspace: str | Path,
+    research_protocol_id: str,
+    dataset_snapshot_id: str,
+    authority_root: str | Path | None = None,
+) -> RiskMembershipPublicationReceipt:
+    """Re-resolve an already committed receipt without creating publication state.
+
+    A pending PREPARE is deliberately not recovered here.  The publishing path owns
+    crash recovery; authority consumers must never turn verification into issuance.
+    """
+
+    workspace_path, registry = _workspace_and_registry(workspace, registry_path)
+    membership = inspect_fixed_n_risk_membership_structure(
+        registry,
+        research_protocol_id=research_protocol_id,
+        dataset_snapshot_id=dataset_snapshot_id,
+    )
+    membership_payload = _membership_payload(membership)
+    membership_sha256 = _sha256_bytes(_canonical_bytes(membership_payload))
+    state_path = _state_path(workspace_path, membership_sha256)
+    if not _path_exists_nofollow(state_path):
+        raise RiskMembershipPublicationError(
+            "fixed-N membership has no existing publication receipt"
+        )
+
+    authority = MonotonicWorkspaceAuthority(
+        workspace=workspace_path,
+        domain=_AUTHORITY_DOMAIN,
+        key=membership_sha256,
+        authority_root=authority_root,
+    )
+    state_payload: dict[str, object] = {
+        "schema": _SCHEMA,
+        "schema_version": _SCHEMA_VERSION,
+        "workspace_instance_id": authority.workspace_instance_id,
+        "membership_sha256": membership_sha256,
+        "membership": membership_payload,
+    }
+    intended_state_sha256 = _sha256_bytes(_pretty_bytes(state_payload))
+    semantic_binding_sha256 = _binding_sha256(
+        workspace_instance_id=authority.workspace_instance_id,
+        membership_sha256=membership_sha256,
+        state_sha256=intended_state_sha256,
+    )
+
+    try:
+        with durable_path_lock(state_path):
+            observed = _decode_state(state_path, expected=state_payload)
+            history = authority.read_history()
+            if not history:
+                raise RiskMembershipPublicationError(
+                    "publication state exists without monotonic authority history"
+                )
+            if history[-1].phase is AuthorityPhase.PREPARE:
+                raise RiskMembershipPublicationError(
+                    "publication has pending PREPARE; verification cannot recover issuance"
+                )
+            recovery = authority.recover(observed_state_sha256=observed)
+            record = recovery.record
+            if record is None or record.phase is not AuthorityPhase.COMMIT:
+                raise RiskMembershipPublicationError(
+                    "fixed-N membership publication lacks current monotonic COMMIT"
+                )
+            if (
+                record.intended_state_sha256 != intended_state_sha256
+                or record.semantic_binding_sha256 != semantic_binding_sha256
+            ):
+                raise RiskMembershipPublicationError(
+                    "monotonic COMMIT does not bind the exact fixed-N membership"
+                )
+            return _receipt(
+                membership,
+                membership_sha256=membership_sha256,
+                state_sha256=observed,
+                authority=authority,
+                authority_record=record,
+            )
+    except RiskMembershipPublicationError:
+        raise
+    except (MonotonicWorkspaceAuthorityError, OSError, ValueError) as exc:
+        raise RiskMembershipPublicationError(
+            "fixed-N membership publication verification failed closed"
+        ) from exc

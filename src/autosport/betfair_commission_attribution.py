@@ -464,59 +464,35 @@ class MarketCommissionAttribution:
             raise BetfairCommissionAttributionError(
                 "allocated commission must exactly conserve market commission"
             )
+        raise BetfairCommissionAttributionError(
+            "complete market population authority is required before commission allocation"
+        )
 
     @property
     def grants_provider_origin_authority(self) -> bool:
         return False
 
     @property
-    def market_gross_profit(self) -> Decimal:
+    def supplied_gross_profit(self) -> Decimal:
+        """Exact sum of caller-supplied BET rows; not whole-market completeness."""
+
         return _exact_sum(tuple(item.gross_profit for item in self.gross_bets))
 
     @property
+    def market_gross_profit(self) -> Decimal:
+        raise BetfairCommissionAttributionError(
+            "exact market gross requires complete market population authority"
+        )
+
+    @property
     def market_net_profit(self) -> Decimal:
-        return _exact_sum(
-            (
-                self.market_gross_profit,
-                self.market_commission.commission_charge.copy_negate(),
-            )
+        raise BetfairCommissionAttributionError(
+            "exact market net requires complete market population authority"
         )
 
     def per_bet_net(self) -> tuple[BetAttributedNet, ...]:
-        if not self.allocations or self.allocation_policy is None:
-            raise BetfairCommissionAttributionError(
-                "per-bet net requires explicit versioned commission allocation"
-            )
-        gross_by_id = {item.bet_id: item for item in self.gross_bets}
-        allocated_by_id = {item.bet_id: item for item in self.allocations}
-        policy = self.allocation_policy
-        return tuple(
-            _issue_bet_attributed_net(
-                BetAttributedNet(
-                    venue_id=gross_by_id[bet_id].venue_id,
-                    account_id=gross_by_id[bet_id].account_id,
-                    market_id=gross_by_id[bet_id].market_id,
-                    bet_id=bet_id,
-                    gross_profit=gross_by_id[bet_id].gross_profit,
-                    allocated_commission=allocated_by_id[
-                        bet_id
-                    ].allocated_commission,
-                    derived_net_profit=_exact_sum(
-                        (
-                            gross_by_id[bet_id].gross_profit,
-                            allocated_by_id[
-                                bet_id
-                            ].allocated_commission.copy_negate(),
-                        )
-                    ),
-                    attribution_id=self.attribution_id,
-                    allocation_policy_id=policy.policy_id,
-                    allocation_policy_version=policy.policy_version,
-                    allocation_policy_sha256=policy.policy_sha256,
-                    provider_exact=False,
-                )
-            )
-            for bet_id in sorted(gross_by_id)
+        raise BetfairCommissionAttributionError(
+            "per-bet net requires complete market population authority"
         )
 
     @property

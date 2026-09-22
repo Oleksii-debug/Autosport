@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from decimal import Decimal
+import hashlib
 import json
 import unittest
 from unittest.mock import patch
@@ -133,7 +134,7 @@ class ParlayApiWireDecimalExactnessTests(unittest.TestCase):
         )
         self.assertEqual(
             report.response_sha256,
-            __import__("hashlib").sha256(canonical.encode("utf-8")).hexdigest(),
+            hashlib.sha256(canonical.encode("utf-8")).hexdigest(),
         )
 
 

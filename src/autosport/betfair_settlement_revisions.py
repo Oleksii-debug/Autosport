@@ -370,36 +370,47 @@ class BetfairSettlementRevisionStore:
                 pass
 
     def _reload(self) -> None:
-        self._revisions.clear()
-        self._by_bet.clear()
+        previous_revisions = self._revisions
+        previous_by_bet = self._by_bet
+        previous_last_record_sha256 = self._last_record_sha256
+        self._revisions = []
+        self._by_bet = {}
         self._last_record_sha256 = None
-        if not self.path.exists():
-            return
-        previous_hash: str | None = None
         try:
-            with self.path.open("r", encoding="utf-8") as handle:
-                for line_no, line in enumerate(handle, 1):
-                    if not line.endswith("\n"):
-                        raise BetfairSettlementRevisionError("settlement log has partial final record")
-                    record = json.loads(line, object_pairs_hook=_pairs, parse_constant=_nonfinite)
-                    if type(record) is not dict or set(record) != {
-                        "schema", "schema_version", "previous_record_sha256", "revision", "record_sha256"
-                    }:
-                        raise BetfairSettlementRevisionError(f"settlement record {line_no} schema invalid")
-                    if record["schema"] != _SCHEMA or record["schema_version"] != _SCHEMA_VERSION:
-                        raise BetfairSettlementRevisionError(f"settlement record {line_no} schema unsupported")
-                    if record["previous_record_sha256"] != previous_hash:
-                        raise BetfairSettlementRevisionError(f"settlement record {line_no} hash chain broken")
-                    supplied = _sha(record["record_sha256"], "record_sha256")
-                    unsigned = dict(record)
-                    unsigned.pop("record_sha256")
-                    if supplied != _digest(unsigned):
-                        raise BetfairSettlementRevisionError(f"settlement record {line_no} digest mismatch")
-                    self._accept(BetfairSettlementRevision.from_dict(record["revision"]))
-                    previous_hash = supplied
-        except json.JSONDecodeError as exc:
-            raise BetfairSettlementRevisionError("settlement log is invalid JSON") from exc
-        self._last_record_sha256 = previous_hash
+            if not self.path.exists():
+                return
+            previous_hash: str | None = None
+            try:
+                with self.path.open("r", encoding="utf-8") as handle:
+                    for line_no, line in enumerate(handle, 1):
+                        if not line.endswith("\n"):
+                            raise BetfairSettlementRevisionError("settlement log has partial final record")
+                        record = json.loads(line, object_pairs_hook=_pairs, parse_constant=_nonfinite)
+                        if type(record) is not dict or set(record) != {
+                            "schema", "schema_version", "previous_record_sha256", "revision", "record_sha256"
+                        }:
+                            raise BetfairSettlementRevisionError(f"settlement record {line_no} schema invalid")
+                        if record["schema"] != _SCHEMA or record["schema_version"] != _SCHEMA_VERSION:
+                            raise BetfairSettlementRevisionError(f"settlement record {line_no} schema unsupported")
+                        if record["previous_record_sha256"] != previous_hash:
+                            raise BetfairSettlementRevisionError(f"settlement record {line_no} hash chain broken")
+                        supplied = _sha(record["record_sha256"], "record_sha256")
+                        unsigned = dict(record)
+                        unsigned.pop("record_sha256")
+                        if supplied != _digest(unsigned):
+                            raise BetfairSettlementRevisionError(f"settlement record {line_no} digest mismatch")
+                        self._accept(BetfairSettlementRevision.from_dict(record["revision"]))
+                        previous_hash = supplied
+            except json.JSONDecodeError as exc:
+                raise BetfairSettlementRevisionError("settlement log is invalid JSON") from exc
+            self._last_record_sha256 = previous_hash
+        except Exception:
+            # A failed reload must never publish a validated prefix as current truth.
+            # Restore the previously complete in-memory authority atomically.
+            self._revisions = previous_revisions
+            self._by_bet = previous_by_bet
+            self._last_record_sha256 = previous_last_record_sha256
+            raise
 
     def _accept(self, revision: BetfairSettlementRevision) -> None:
         key = (revision.bookmaker_id, revision.account_id, revision.external_bet_id)
@@ -460,6 +471,19 @@ def _match_order(action: ExecutionAction, capture: BetfairExecutionReadbackEnvel
             for order in page.orders:
                 if order.bet_status != status:
                     raise BetfairSettlementRevisionError("cleared row status partition mismatch")
+                if order.customer_order_ref == expected_ref:
+                    if (
+                        order.market_id != action.market_id
+                        or str(order.selection_id) != action.selection_id
+                        or order.side != action.side
+                    ):
+                        raise BetfairSettlementRevisionError(
+                            "cleared row provider order reference identity mismatch"
+                        )
+                    if order.event_id is not None and order.event_id != action.event_id:
+                        raise BetfairSettlementRevisionError("cleared row event mismatch")
+                    matches.append(order)
+                    continue
                 if order.market_id != action.market_id or str(order.selection_id) != action.selection_id or order.side != action.side:
                     continue
                 if order.event_id is not None and order.event_id != action.event_id:

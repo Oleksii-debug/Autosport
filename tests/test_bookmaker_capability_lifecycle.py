@@ -117,11 +117,45 @@ def _resolve(journal, profile, requirement=None, as_of="2026-09-21T10:03:00+00:0
     )
 
 
-def test_exact_authenticated_account_scope_is_current():
+def test_caller_authenticated_account_scope_requires_upstream_authority():
     profile, _, journal = _journal()
     decision = _resolve(journal, profile)
-    assert decision.allowed
+    assert not decision.allowed
+    assert decision.lifecycle is CapabilityLifecycleState.REVALIDATION_REQUIRED
+    assert decision.availability is CapabilityAvailabilityState.UNKNOWN
+    assert "product-owned upstream authority" in decision.reason
+
+
+def test_caller_available_state_cannot_mint_runtime_health_authority():
+    profile = _profile()
+    scope = CapabilityScope("betfair", None, "production")
+    evidence = _evidence(
+        profile,
+        strength=CapabilityEvidenceStrength.DOCUMENTED_ONLY,
+        source=CapabilityEvidenceSource.OFFICIAL_DOCUMENT,
+        scope=scope,
+    )
+    journal = CapabilityEvidenceJournal()
+    journal.publish(evidence)
+    journal.publish_availability(_availability(evidence))
+    requirement = CapabilityRequirement(
+        BookmakerCapability.BALANCE_READ,
+        CapabilityEvidenceStrength.DOCUMENTED_ONLY,
+        scope,
+        "v1",
+        "api-v1",
+        86400,
+        require_available=True,
+    )
+    decision = journal.resolve(
+        requirement,
+        {profile.profile_id: profile},
+        as_of="2026-09-21T10:03:00+00:00",
+    )
+    assert not decision.allowed
     assert decision.lifecycle is CapabilityLifecycleState.CURRENT
+    assert decision.availability is CapabilityAvailabilityState.UNKNOWN
+    assert "not AVAILABLE" in decision.reason
 
 
 def test_documented_place_bet_cannot_satisfy_authenticated_requirement():
@@ -221,9 +255,12 @@ def test_expiry_and_review_boundaries_are_closed():
         review_due_at="2026-09-21T12:00:00+00:00",
     )
     _, _, journal = _journal(profile, expiring)
-    assert _resolve(
+    before_expiry = _resolve(
         journal, profile, as_of="2026-09-21T10:59:59+00:00"
-    ).allowed
+    )
+    assert not before_expiry.allowed
+    assert before_expiry.lifecycle is CapabilityLifecycleState.REVALIDATION_REQUIRED
+    assert "product-owned upstream authority" in before_expiry.reason
     expired = _resolve(journal, profile, as_of="2026-09-21T11:00:00+00:00")
     assert expired.lifecycle is CapabilityLifecycleState.STALE
 
@@ -354,7 +391,9 @@ def test_credential_rotation_revalidation_can_link_predecessor_and_recover():
         {first.profile_id: first, second.profile_id: second},
         as_of="2026-09-21T10:08:00+00:00",
     )
-    assert decision.allowed
+    assert not decision.allowed
+    assert decision.lifecycle is CapabilityLifecycleState.REVALIDATION_REQUIRED
+    assert "product-owned upstream authority" in decision.reason
     assert decision.evidence_id == fresh.evidence_id
 
 def test_successor_must_link_exact_latest_same_scope_predecessor():

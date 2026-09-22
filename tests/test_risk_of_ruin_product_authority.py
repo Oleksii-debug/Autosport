@@ -147,6 +147,75 @@ def _single_evidence(policy: PaperRiskPolicy, book: PaperBook, context: Proposed
     )
 
 
+def test_caller_cannot_mint_single_candidate_risk_of_ruin_authority() -> None:
+    """Freeze #955: public hashes plus a caller bound must not grant authority."""
+
+    policy = _policy()
+    book = PaperBook("100")
+    context = _context(1)
+    portfolio = policy.risk_of_ruin_portfolio_sha256(book)
+    candidate = policy.risk_of_ruin_candidate_sha256(context)
+    assert portfolio is not None and candidate is not None
+
+    caller_minted = RiskOfRuinEvidence(
+        evidence_id="caller-minted-ror",
+        research_protocol_sha256="a" * 64,
+        reproducibility_bundle_sha256="b" * 64,
+        producer_identity="caller-claims-to-be-risk-model",
+        causal_cutoff=CAUSAL_CUTOFF,
+        evaluated_at=EVALUATED_AT,
+        bankroll_id="paper-bankroll",
+        currency="USD",
+        base_portfolio_sha256=portfolio,
+        candidate_sha256=candidate,
+        evaluated_stake=Decimal("1"),
+        upper_bound=Decimal("0"),
+    )
+
+    decision = policy.evaluate(
+        book,
+        Decimal("1"),
+        context=replace(context, risk_of_ruin_evidence=caller_minted),
+    )
+
+    assert not decision.allowed
+
+
+def test_caller_cannot_mint_vector_risk_of_ruin_authority() -> None:
+    """Freeze #955: a caller-authored whole-vector witness is assertion-only."""
+
+    policy = _policy()
+    book = PaperBook("100")
+    contexts = (_context(1), _context(2))
+    portfolio = policy.risk_of_ruin_portfolio_sha256(book)
+    candidate_vector = policy.risk_of_ruin_candidate_vector_sha256(contexts)
+    assert portfolio is not None and candidate_vector is not None
+
+    caller_minted = RiskOfRuinVectorEvidence(
+        evidence_id="caller-minted-vector-ror",
+        research_protocol_sha256="c" * 64,
+        reproducibility_bundle_sha256="d" * 64,
+        producer_identity="caller-claims-to-be-vector-risk-model",
+        causal_cutoff=CAUSAL_CUTOFF,
+        evaluated_at=EVALUATED_AT,
+        bankroll_id="paper-bankroll",
+        currency="USD",
+        base_portfolio_sha256=portfolio,
+        candidate_vector_sha256=candidate_vector,
+        evaluated_stakes=(Decimal("1"), Decimal("1")),
+        upper_bound=Decimal("0"),
+    )
+
+    decision = policy.derive_goal_stake_vector(
+        book,
+        (Decimal("0.01"), Decimal("0.01")),
+        contexts=contexts,
+        risk_of_ruin_vector_evidence=caller_minted,
+    )
+
+    assert decision.action != "STAKE_VECTOR"
+
+
 def test_caller_constructed_single_evidence_fails_closed_without_issuance(tmp_path) -> None:
     registry = _registry(tmp_path)
     policy = _policy(registry.path)

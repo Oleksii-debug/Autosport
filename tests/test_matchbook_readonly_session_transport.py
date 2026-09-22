@@ -723,3 +723,19 @@ def test_provider_error_payload_and_committed_payload_are_not_projected_by_repr(
     )
     assert "hunter2" not in repr(committed)
     assert "raw-token-secret" not in repr(committed)
+
+
+def test_generation_factory_cannot_reuse_raw_session_token_as_audit_identity() -> None:
+    raw_token = "must-never-be-generation-id"
+    transport, lifecycle, _, _ = build_transport(
+        login=lambda: MatchbookLoginResponse(200, raw_token),
+        read=lambda token, path: MatchbookReadResponse(200, {"ok": True}),
+        generation_factory=lambda: raw_token,
+    )
+
+    with pytest.raises(MatchbookAuthenticationUnavailable) as exc_info:
+        transport.read(path="/edge/rest/events")
+
+    assert raw_token not in str(exc_info.value)
+    assert transport.generation_id is None
+    assert lifecycle.state is SessionState.COLD

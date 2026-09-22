@@ -15,6 +15,9 @@ from datetime import datetime, timedelta
 from enum import Enum
 from typing import Final
 
+from .drift_control import DriftControlError, DriftMonitor, DriftState
+from .scientific_registry import ScientificRegistry
+
 
 _SCHEMA: Final = "autosport.model_lifecycle_revision"
 _SCHEMA_VERSION: Final = 1
@@ -266,10 +269,8 @@ def validate_lifecycle_successor(
 ) -> None:
     """Validate one contiguous fail-closed lifecycle history transition."""
 
-    if not isinstance(previous, ModelLifecycleRevision) or not isinstance(
-        candidate, ModelLifecycleRevision
-    ):
-        raise TypeError("lifecycle successor validation requires lifecycle revisions")
+    if type(previous) is not ModelLifecycleRevision or type(candidate) is not ModelLifecycleRevision:
+        raise TypeError("lifecycle successor validation requires exact lifecycle revisions")
     if candidate.model_version_id != previous.model_version_id:
         raise ModelLifecycleError("successor must preserve model_version_id")
     if candidate.model_artifact_sha256 != previous.model_artifact_sha256:
@@ -303,6 +304,30 @@ def validate_lifecycle_successor(
     )
     if candidate_drift_observed < previous_drift_observed:
         raise ModelLifecycleError("successor drift observation cannot move backward")
+
+    _, previous_drift_until = _canonical_utc(
+        "previous.drift_valid_until", previous.drift_valid_until
+    )
+    _, candidate_drift_until = _canonical_utc(
+        "candidate.drift_valid_until", candidate.drift_valid_until
+    )
+    if candidate_drift_observed == previous_drift_observed:
+        if candidate_drift_until > previous_drift_until:
+            raise ModelLifecycleError(
+                "unchanged drift observation cannot extend drift validity"
+            )
+        if candidate.drift_state is not previous.drift_state:
+            raise ModelLifecycleError(
+                "unchanged drift observation cannot relabel drift state"
+            )
+        if candidate.evidence_refs != previous.evidence_refs:
+            raise ModelLifecycleError(
+                "unchanged drift observation cannot replace drift evidence"
+            )
+    elif candidate.evidence_refs == previous.evidence_refs:
+        raise ModelLifecycleError(
+            "new drift observation requires new drift evidence"
+        )
 
     if previous.lifecycle_state is ModelLifecycleState.RETIRED:
         if candidate.lifecycle_state is not ModelLifecycleState.RETIRED:
@@ -342,15 +367,89 @@ class ModelEligibility:
     reasons: tuple[str, ...]
 
 
+def _registry_instant(value: object, name: str) -> datetime:
+    if type(value) is not str or not value:
+        raise ModelLifecycleError(f"{name} must be a registry timestamp")
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise ModelLifecycleError(f"{name} must be ISO-8601") from exc
+    if parsed.tzinfo is None or parsed.utcoffset() != timedelta(0):
+        raise ModelLifecycleError(f"{name} must be UTC")
+    return parsed
+
+
+def _canonical_stable_drift_reasons(
+    revision: ModelLifecycleRevision,
+    *,
+    evaluated_at: str,
+    scientific_registry: ScientificRegistry | None,
+) -> tuple[str, ...]:
+    """Re-resolve the canonical #532 finding before positive STABLE eligibility."""
+
+    if scientific_registry is None:
+        return ("canonical_drift_finding_required",)
+
+    monitor = DriftMonitor(scientific_registry)
+    canonical_findings = []
+    for evidence_ref in revision.evidence_refs:
+        try:
+            finding_entry, _, _ = monitor.require_canonical_finding(
+                evidence_ref,
+                as_of=evaluated_at,
+            )
+        except DriftControlError:
+            continue
+        canonical_findings.append(finding_entry)
+
+    if not canonical_findings:
+        return ("canonical_drift_finding_required",)
+    if len(canonical_findings) != 1:
+        return ("canonical_drift_finding_ambiguous",)
+
+    finding_entry = canonical_findings[0]
+    finding = finding_entry.payload
+    if finding.get("model_version_id") != revision.model_version_id:
+        return ("canonical_drift_model_mismatch",)
+
+    model_entry = scientific_registry.get("ModelVersion", revision.model_version_id)
+    if model_entry is None:
+        return ("canonical_drift_model_missing",)
+    if model_entry.payload.get("artifact_sha256") != revision.model_artifact_sha256:
+        return ("canonical_drift_artifact_mismatch",)
+    if _registry_instant(model_entry.available_at, "ModelVersion.available_at") > _registry_instant(
+        evaluated_at, "evaluated_at"
+    ):
+        return ("canonical_drift_model_not_yet_available",)
+
+    finding_evaluated_at = finding.get("evaluated_at")
+    if _registry_instant(
+        finding_evaluated_at, "DriftFinding.evaluated_at"
+    ) != _canonical_utc("drift_observed_at", revision.drift_observed_at)[1]:
+        return ("canonical_drift_observation_time_mismatch",)
+
+    state = finding.get("state")
+    if state == DriftState.DRIFT_DETECTED.value:
+        return ("canonical_drift_detected",)
+    if state == DriftState.INSUFFICIENT_EVIDENCE.value:
+        return ("canonical_drift_insufficient_evidence",)
+    if state != DriftState.NO_DRIFT.value:
+        return ("canonical_drift_state_invalid",)
+    return ()
+
+
 def evaluate_model_eligibility(
     revision: ModelLifecycleRevision,
     *,
     evaluated_at: str,
+    scientific_registry: ScientificRegistry | None = None,
 ) -> ModelEligibility:
-    """Fail closed at expiry boundaries and on stale/non-stable drift evidence."""
+    """Fail closed at expiry boundaries and require canonical stable-drift truth."""
 
-    if not isinstance(revision, ModelLifecycleRevision):
-        raise TypeError("revision must be a ModelLifecycleRevision")
+    if type(revision) is not ModelLifecycleRevision:
+        raise TypeError("revision must be an exact ModelLifecycleRevision")
+    if scientific_registry is not None and type(scientific_registry) is not ScientificRegistry:
+        raise TypeError("scientific_registry must be an exact ScientificRegistry")
     evaluated_text, evaluated = _canonical_utc("evaluated_at", evaluated_at)
     _, created = _canonical_utc("created_at", revision.created_at)
     _, revision_updated = _canonical_utc("updated_at", revision.updated_at)
@@ -379,6 +478,19 @@ def evaluate_model_eligibility(
         reasons.append("drift_evidence_expired")
     if not revision.evidence_refs:
         reasons.append("missing_lifecycle_evidence")
+
+    if (
+        not reasons
+        and revision.lifecycle_state is ModelLifecycleState.ACTIVE
+        and revision.drift_state is ModelDriftState.STABLE
+    ):
+        reasons.extend(
+            _canonical_stable_drift_reasons(
+                revision,
+                evaluated_at=evaluated_text,
+                scientific_registry=scientific_registry,
+            )
+        )
 
     normalized = _reason_tuple(reasons)
     return ModelEligibility(

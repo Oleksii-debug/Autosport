@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import sqlite3
 import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -39,12 +40,16 @@ from .workspace_lock import WorkspaceEconomicLock
 SCHEMA = "autosport.research_scheduler"
 SCHEMA_VERSION = 3
 _HEX = frozenset("0123456789abcdef")
-_HISTORY_SCHEMA = "autosport.research_scheduler.occurrence_history_chunk"
-_HISTORY_SCHEMA_VERSION = 1
-_HISTORY_CHUNK_SIZE = 256
-_HISTORY_ZERO_SHA256 = "0" * 64
-_HISTORY_FIELDS = frozenset(
-    {"occurrence_history_count", "occurrence_history_tail_sha256"}
+_COLD_HISTORY_SCHEMA = "autosport.research_scheduler.cold_history"
+_COLD_HISTORY_SCHEMA_VERSION = 1
+_COLD_HISTORY_ZERO_SHA256 = "0" * 64
+_COLD_HISTORY_FIELDS = frozenset(
+    {"cold_history_count", "cold_history_tail_sha256"}
+)
+_COLD_HISTORY_OCCURRENCE = "OCCURRENCE"
+_COLD_HISTORY_CURRICULUM_WAKE = "CURRICULUM_WAKE"
+_COLD_HISTORY_KINDS = frozenset(
+    {_COLD_HISTORY_OCCURRENCE, _COLD_HISTORY_CURRICULUM_WAKE}
 )
 
 
@@ -458,7 +463,7 @@ class ResearchScheduler:
             with WorkspaceEconomicLock(self.path.parent):
                 state = self._read()
                 self._validate(state, check_history_tail=False)
-                state = self._prepare_occurrence_history_locked(state)
+                state = self._prepare_cold_history_locked(state)
                 self._validate(state)
         except FileNotFoundError as exc:
             raise ResearchSchedulerError("research scheduler state is missing") from exc
@@ -484,8 +489,8 @@ class ResearchScheduler:
                     "schedules": {},
                     "occurrences": {},
                     "curriculum_wakes": {},
-                    "occurrence_history_count": 0,
-                    "occurrence_history_tail_sha256": _HISTORY_ZERO_SHA256,
+                    "cold_history_count": 0,
+                    "cold_history_tail_sha256": _COLD_HISTORY_ZERO_SHA256,
                 }
                 atomic_write_json(target, {**body, "state_sha256": _digest(body)})
         return cls(target, trigger_sink, source_registry=source_registry)
@@ -507,313 +512,424 @@ class ResearchScheduler:
         atomic_write_json(self.path, {**body, "state_sha256": _digest(body)})
 
     @property
-    def _occurrence_history_dir(self) -> Path:
-        return self.path.with_name(f".{self.path.name}.occurrence-history")
-
-    def _occurrence_history_chunk_path(self, chunk_index: int) -> Path:
-        _nonnegative_int(chunk_index, "occurrence history chunk_index")
-        return self._occurrence_history_dir / f"{chunk_index:08d}.json"
+    def _cold_history_path(self) -> Path:
+        return self.path.with_name(f".{self.path.name}.cold-history.sqlite3")
 
     @staticmethod
-    def _occurrence_history_anchor(
+    def _cold_history_anchor(
         state: dict[str, Any],
     ) -> tuple[int, str] | None:
-        has_count = "occurrence_history_count" in state
-        has_tail = "occurrence_history_tail_sha256" in state
+        has_count = "cold_history_count" in state
+        has_tail = "cold_history_tail_sha256" in state
         if has_count != has_tail:
-            raise ResearchSchedulerError("occurrence history anchor is incomplete")
+            raise ResearchSchedulerError("cold history anchor is incomplete")
         if not has_count:
             return None
         count = _nonnegative_int(
-            state["occurrence_history_count"],
-            "occurrence_history_count",
+            state["cold_history_count"],
+            "cold_history_count",
         )
         tail = _sha(
-            state["occurrence_history_tail_sha256"],
-            "occurrence_history_tail_sha256",
+            state["cold_history_tail_sha256"],
+            "cold_history_tail_sha256",
         )
-        if count == 0 and tail != _HISTORY_ZERO_SHA256:
-            raise ResearchSchedulerError("empty occurrence history has non-empty tail")
-        if count > 0 and tail == _HISTORY_ZERO_SHA256:
-            raise ResearchSchedulerError("non-empty occurrence history has empty tail")
+        if count == 0 and tail != _COLD_HISTORY_ZERO_SHA256:
+            raise ResearchSchedulerError("empty cold history has non-empty tail")
+        if count > 0 and tail == _COLD_HISTORY_ZERO_SHA256:
+            raise ResearchSchedulerError("non-empty cold history has empty tail")
         return count, tail
 
+    def _validate_cold_history_schema(self, connection: sqlite3.Connection) -> None:
+        meta_columns = [
+            row[1]
+            for row in connection.execute(
+                "PRAGMA table_info(cold_history_meta)"
+            ).fetchall()
+        ]
+        history_columns = [
+            row[1]
+            for row in connection.execute(
+                "PRAGMA table_info(cold_history)"
+            ).fetchall()
+        ]
+        if meta_columns != ["key", "value"]:
+            raise ResearchSchedulerError("cold history metadata schema mismatch")
+        if history_columns != [
+            "sequence",
+            "record_kind",
+            "record_id",
+            "previous_entry_sha256",
+            "record_json",
+            "entry_sha256",
+        ]:
+            raise ResearchSchedulerError("cold history table schema mismatch")
+        meta = dict(
+            connection.execute(
+                "SELECT key, value FROM cold_history_meta ORDER BY key"
+            ).fetchall()
+        )
+        if meta != {
+            "schema": _COLD_HISTORY_SCHEMA,
+            "schema_version": str(_COLD_HISTORY_SCHEMA_VERSION),
+        }:
+            raise ResearchSchedulerError("cold history metadata mismatch")
+
+    def _open_cold_history(
+        self,
+        *,
+        create: bool,
+    ) -> sqlite3.Connection | None:
+        path = self._cold_history_path
+        if not path.exists() and not create:
+            return None
+        path.parent.mkdir(parents=True, exist_ok=True)
+        connection: sqlite3.Connection | None = None
+        try:
+            connection = sqlite3.connect(path, timeout=30.0)
+            connection.execute("PRAGMA synchronous = FULL")
+            if create:
+                connection.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS cold_history_meta (
+                        key TEXT PRIMARY KEY,
+                        value TEXT NOT NULL
+                    )
+                    """
+                )
+                connection.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS cold_history (
+                        sequence INTEGER PRIMARY KEY,
+                        record_kind TEXT NOT NULL,
+                        record_id TEXT NOT NULL,
+                        previous_entry_sha256 TEXT NOT NULL,
+                        record_json TEXT NOT NULL,
+                        entry_sha256 TEXT NOT NULL,
+                        UNIQUE(record_kind, record_id)
+                    )
+                    """
+                )
+                expected_meta = {
+                    "schema": _COLD_HISTORY_SCHEMA,
+                    "schema_version": str(_COLD_HISTORY_SCHEMA_VERSION),
+                }
+                for key, value in expected_meta.items():
+                    prior = connection.execute(
+                        "SELECT value FROM cold_history_meta WHERE key = ?",
+                        (key,),
+                    ).fetchone()
+                    if prior is None:
+                        connection.execute(
+                            "INSERT INTO cold_history_meta(key, value) VALUES (?, ?)",
+                            (key, value),
+                        )
+                    elif prior[0] != value:
+                        raise ResearchSchedulerError(
+                            "cold history metadata conflicts with scheduler schema"
+                        )
+                connection.commit()
+            self._validate_cold_history_schema(connection)
+            return connection
+        except ResearchSchedulerError:
+            if connection is not None:
+                connection.close()
+            raise
+        except sqlite3.Error as exc:
+            if connection is not None:
+                connection.close()
+            raise ResearchSchedulerError("cold history database is unreadable") from exc
+
     @staticmethod
-    def _occurrence_history_entry(
+    def _cold_history_entry_sha256(
         *,
         sequence: int,
         previous_entry_sha256: str,
-        occurrence_id: str,
-        occurrence: dict[str, Any],
-    ) -> dict[str, Any]:
+        record_kind: str,
+        record_id: str,
+        record: dict[str, Any],
+    ) -> str:
         body = {
-            "sequence": _positive_int(sequence, "history sequence"),
+            "sequence": _positive_int(sequence, "cold history sequence"),
             "previous_entry_sha256": _sha(
                 previous_entry_sha256,
-                "history previous_entry_sha256",
+                "cold history previous_entry_sha256",
             ),
-            "occurrence_id": _sha(occurrence_id, "history occurrence_id"),
-            "occurrence": occurrence,
+            "record_kind": record_kind,
+            "record_id": _sha(record_id, "cold history record_id"),
+            "record": record,
         }
-        return {**body, "entry_sha256": _digest(body)}
+        if record_kind not in _COLD_HISTORY_KINDS:
+            raise ResearchSchedulerError("cold history record kind is invalid")
+        return _digest(body)
 
-    def _read_occurrence_history_chunk_raw(
+    def _validate_cold_history_record(
         self,
-        chunk_index: int,
-    ) -> dict[str, Any]:
-        path = self._occurrence_history_chunk_path(chunk_index)
-        try:
-            raw = json.loads(path.read_text(encoding="utf-8"))
-        except FileNotFoundError:
-            raise
-        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
-            raise ResearchSchedulerError(
-                "research scheduler occurrence history chunk is unreadable"
-            ) from exc
-        if type(raw) is not dict or set(raw) != {
-            "schema",
-            "schema_version",
-            "chunk_index",
-            "start_sequence",
-            "previous_tail_sha256",
-            "entries",
-            "chunk_sha256",
-        }:
-            raise ResearchSchedulerError("occurrence history chunk fields mismatch")
-        if (
-            raw["schema"] != _HISTORY_SCHEMA
-            or raw["schema_version"] != _HISTORY_SCHEMA_VERSION
-        ):
-            raise ResearchSchedulerError("occurrence history chunk schema mismatch")
-        if raw["chunk_index"] != chunk_index:
-            raise ResearchSchedulerError("occurrence history chunk index mismatch")
-        expected_start = chunk_index * _HISTORY_CHUNK_SIZE + 1
-        if raw["start_sequence"] != expected_start:
-            raise ResearchSchedulerError(
-                "occurrence history chunk start sequence mismatch"
-            )
-        _sha(raw["previous_tail_sha256"], "history previous_tail_sha256")
-        if type(raw["entries"]) is not list or not raw["entries"]:
-            raise ResearchSchedulerError("occurrence history chunk entries are invalid")
-        if len(raw["entries"]) > _HISTORY_CHUNK_SIZE:
-            raise ResearchSchedulerError("occurrence history chunk exceeds bound")
-        body = {key: value for key, value in raw.items() if key != "chunk_sha256"}
-        if _sha(raw["chunk_sha256"], "history chunk_sha256") != _digest(body):
-            raise ResearchSchedulerError("occurrence history chunk digest mismatch")
-        return raw
-
-    def _validate_occurrence_history_entry(
-        self,
-        raw: object,
         *,
-        expected_sequence: int,
-        expected_previous: str,
-        schedules: dict[str, Any],
-    ) -> tuple[str, dict[str, Any], str]:
-        if type(raw) is not dict or set(raw) != {
-            "sequence",
-            "previous_entry_sha256",
-            "occurrence_id",
-            "occurrence",
-            "entry_sha256",
-        }:
-            raise ResearchSchedulerError("occurrence history entry fields mismatch")
-        if _positive_int(raw["sequence"], "history sequence") != expected_sequence:
-            raise ResearchSchedulerError("occurrence history sequence mismatch")
-        previous = _sha(
-            raw["previous_entry_sha256"],
-            "history previous_entry_sha256",
-        )
-        if previous != expected_previous:
-            raise ResearchSchedulerError("occurrence history chain mismatch")
-        occurrence_id = _sha(raw["occurrence_id"], "history occurrence_id")
-        occurrence = raw["occurrence"]
-        self._validate_occurrence(occurrence_id, occurrence, schedules)
-        if occurrence["status"] not in {"ACCEPTED", "SKIPPED"}:
-            raise ResearchSchedulerError(
-                "occurrence history may contain only completed occurrences"
+        record_kind: str,
+        record_id: str,
+        record: object,
+        state: dict[str, Any],
+    ) -> dict[str, Any]:
+        if type(record) is not dict:
+            raise ResearchSchedulerError("cold history record must be an object")
+        if record_kind == _COLD_HISTORY_OCCURRENCE:
+            self._validate_occurrence(
+                record_id,
+                record,
+                state["schedules"],
             )
-        body = {
-            "sequence": raw["sequence"],
-            "previous_entry_sha256": previous,
-            "occurrence_id": occurrence_id,
-            "occurrence": occurrence,
-        }
-        entry_sha256 = _sha(raw["entry_sha256"], "history entry_sha256")
-        if entry_sha256 != _digest(body):
-            raise ResearchSchedulerError("occurrence history entry digest mismatch")
-        return occurrence_id, occurrence, entry_sha256
-
-    def _occurrence_history_chunk_indices(self) -> tuple[int, ...]:
-        directory = self._occurrence_history_dir
-        if not directory.exists():
-            return ()
-        if not directory.is_dir():
-            raise ResearchSchedulerError(
-                "research scheduler occurrence history path is not a directory"
-            )
-        indices: list[int] = []
-        for path in directory.glob("*.json"):
-            stem = path.stem
-            if len(stem) != 8 or not stem.isdigit():
+            if record["status"] not in {"ACCEPTED", "SKIPPED"}:
                 raise ResearchSchedulerError(
-                    "occurrence history chunk filename is invalid"
+                    "cold occurrence history requires completed status"
                 )
-            indices.append(int(stem))
-        indices.sort()
-        if indices and indices != list(range(indices[-1] + 1)):
-            raise ResearchSchedulerError("occurrence history chunk sequence has gaps")
-        return tuple(indices)
+        elif record_kind == _COLD_HISTORY_CURRICULUM_WAKE:
+            self._validate_curriculum_wake(record_id, record)
+            if record["status"] != "ACCEPTED":
+                raise ResearchSchedulerError(
+                    "cold curriculum history requires ACCEPTED status"
+                )
+        else:
+            raise ResearchSchedulerError("cold history record kind is invalid")
+        return record
 
-    def _read_occurrence_history_records(
+    def _validate_cold_history_row(
         self,
-        schedules: dict[str, Any],
+        row: object,
+        *,
+        state: dict[str, Any],
+        expected_sequence: int | None = None,
+        expected_previous: str | None = None,
+    ) -> tuple[str, str, dict[str, Any], str]:
+        if type(row) not in {tuple, list} or len(row) != 6:
+            raise ResearchSchedulerError("cold history row is invalid")
+        sequence, record_kind, record_id, previous, record_json, entry_sha256 = row
+        sequence = _positive_int(sequence, "cold history sequence")
+        if expected_sequence is not None and sequence != expected_sequence:
+            raise ResearchSchedulerError("cold history sequence mismatch")
+        if type(record_kind) is not str or record_kind not in _COLD_HISTORY_KINDS:
+            raise ResearchSchedulerError("cold history record kind is invalid")
+        record_id = _sha(record_id, "cold history record_id")
+        previous = _sha(previous, "cold history previous_entry_sha256")
+        if expected_previous is not None and previous != expected_previous:
+            raise ResearchSchedulerError("cold history chain mismatch")
+        if type(record_json) is not str:
+            raise ResearchSchedulerError("cold history record_json is invalid")
+        try:
+            record = json.loads(record_json)
+        except json.JSONDecodeError as exc:
+            raise ResearchSchedulerError("cold history record_json is invalid") from exc
+        if _canonical_json(record) != record_json:
+            raise ResearchSchedulerError("cold history record_json is not canonical")
+        record = self._validate_cold_history_record(
+            record_kind=record_kind,
+            record_id=record_id,
+            record=record,
+            state=state,
+        )
+        expected_entry_sha256 = self._cold_history_entry_sha256(
+            sequence=sequence,
+            previous_entry_sha256=previous,
+            record_kind=record_kind,
+            record_id=record_id,
+            record=record,
+        )
+        entry_sha256 = _sha(entry_sha256, "cold history entry_sha256")
+        if entry_sha256 != expected_entry_sha256:
+            raise ResearchSchedulerError("cold history entry digest mismatch")
+        return record_kind, record_id, record, entry_sha256
+
+    def _read_cold_history_records(
+        self,
+        state: dict[str, Any],
         *,
         limit: int | None = None,
-    ) -> list[tuple[str, dict[str, Any], str]]:
+    ) -> list[tuple[str, str, dict[str, Any], str]]:
         if limit is not None:
-            _nonnegative_int(limit, "occurrence history read limit")
+            _nonnegative_int(limit, "cold history read limit")
             if limit == 0:
                 return []
-        records: list[tuple[str, dict[str, Any], str]] = []
-        previous = _HISTORY_ZERO_SHA256
-        expected_sequence = 1
-        indices = self._occurrence_history_chunk_indices()
-        seen: set[str] = set()
-        for position, chunk_index in enumerate(indices):
-            chunk = self._read_occurrence_history_chunk_raw(chunk_index)
-            if chunk["previous_tail_sha256"] != previous:
-                raise ResearchSchedulerError(
-                    "occurrence history chunk predecessor mismatch"
+        connection = self._open_cold_history(create=False)
+        if connection is None:
+            return []
+        try:
+            if limit is None:
+                integrity = connection.execute("PRAGMA integrity_check").fetchone()
+                if integrity is None or integrity[0] != "ok":
+                    raise ResearchSchedulerError("cold history database integrity check failed")
+                rows = connection.execute(
+                    """
+                    SELECT sequence, record_kind, record_id,
+                           previous_entry_sha256, record_json, entry_sha256
+                    FROM cold_history
+                    ORDER BY sequence
+                    """
+                ).fetchall()
+            else:
+                rows = connection.execute(
+                    """
+                    SELECT sequence, record_kind, record_id,
+                           previous_entry_sha256, record_json, entry_sha256
+                    FROM cold_history
+                    WHERE sequence <= ?
+                    ORDER BY sequence
+                    """,
+                    (limit,),
+                ).fetchall()
+        except sqlite3.Error as exc:
+            raise ResearchSchedulerError("cold history database read failed") from exc
+        finally:
+            connection.close()
+
+        records: list[tuple[str, str, dict[str, Any], str]] = []
+        previous = _COLD_HISTORY_ZERO_SHA256
+        seen: set[tuple[str, str]] = set()
+        for index, row in enumerate(rows, start=1):
+            record_kind, record_id, record, entry_sha256 = (
+                self._validate_cold_history_row(
+                    row,
+                    state=state,
+                    expected_sequence=index,
+                    expected_previous=previous,
                 )
-            entries = chunk["entries"]
-            if position < len(indices) - 1 and len(entries) != _HISTORY_CHUNK_SIZE:
-                raise ResearchSchedulerError(
-                    "non-final occurrence history chunk is not sealed"
-                )
-            for raw in entries:
-                occurrence_id, occurrence, entry_sha256 = (
-                    self._validate_occurrence_history_entry(
-                        raw,
-                        expected_sequence=expected_sequence,
-                        expected_previous=previous,
-                        schedules=schedules,
-                    )
-                )
-                if occurrence_id in seen:
-                    raise ResearchSchedulerError(
-                        "duplicate occurrence identity in history"
-                    )
-                seen.add(occurrence_id)
-                records.append((occurrence_id, occurrence, entry_sha256))
-                previous = entry_sha256
-                expected_sequence += 1
-                if limit is not None and len(records) == limit:
-                    return records
+            )
+            identity = (record_kind, record_id)
+            if identity in seen:
+                raise ResearchSchedulerError("duplicate cold history identity")
+            seen.add(identity)
+            records.append((record_kind, record_id, record, entry_sha256))
+            previous = entry_sha256
         return records
 
-    def _validate_occurrence_history_tail(self, state: dict[str, Any]) -> None:
-        anchor = self._occurrence_history_anchor(state)
+    def _validate_cold_history_tail(self, state: dict[str, Any]) -> None:
+        anchor = self._cold_history_anchor(state)
         if anchor is None:
             return
         count, tail = anchor
-        if count == 0:
-            if self._occurrence_history_chunk_indices():
-                raise ResearchSchedulerError(
-                    "occurrence history exists beyond empty state anchor"
-                )
-            return
-        chunk_index = (count - 1) // _HISTORY_CHUNK_SIZE
-        expected_entries = ((count - 1) % _HISTORY_CHUNK_SIZE) + 1
+        connection = self._open_cold_history(create=False)
+        if connection is None:
+            if count == 0:
+                return
+            raise ResearchSchedulerError("cold history database is missing")
         try:
-            chunk = self._read_occurrence_history_chunk_raw(chunk_index)
-        except FileNotFoundError as exc:
-            raise ResearchSchedulerError(
-                "occurrence history tail chunk is missing"
-            ) from exc
-        if len(chunk["entries"]) != expected_entries:
-            raise ResearchSchedulerError(
-                "occurrence history tail cardinality mismatches state anchor"
-            )
-        last = chunk["entries"][-1]
-        if type(last) is not dict or set(last) != {
-            "sequence",
-            "previous_entry_sha256",
-            "occurrence_id",
-            "occurrence",
-            "entry_sha256",
-        }:
-            raise ResearchSchedulerError("occurrence history tail entry is invalid")
-        if last["sequence"] != count:
-            raise ResearchSchedulerError("occurrence history tail sequence mismatch")
-        if _sha(last["entry_sha256"], "history tail entry_sha256") != tail:
-            raise ResearchSchedulerError("occurrence history tail digest mismatch")
-        if self._occurrence_history_chunk_path(chunk_index + 1).exists():
-            raise ResearchSchedulerError(
-                "occurrence history extends beyond state anchor"
-            )
+            maximum = connection.execute(
+                "SELECT MAX(sequence) FROM cold_history"
+            ).fetchone()[0]
+            if count == 0:
+                if maximum is not None:
+                    raise ResearchSchedulerError(
+                        "cold history exists beyond empty state anchor"
+                    )
+                return
+            if maximum != count:
+                raise ResearchSchedulerError(
+                    "cold history cardinality mismatches state anchor"
+                )
+            row = connection.execute(
+                """
+                SELECT sequence, record_kind, record_id,
+                       previous_entry_sha256, record_json, entry_sha256
+                FROM cold_history
+                WHERE sequence = ?
+                """,
+                (count,),
+            ).fetchone()
+        except sqlite3.Error as exc:
+            raise ResearchSchedulerError("cold history tail read failed") from exc
+        finally:
+            connection.close()
+        if row is None:
+            raise ResearchSchedulerError("cold history tail row is missing")
+        _, _, _, entry_sha256 = self._validate_cold_history_row(
+            row,
+            state=state,
+            expected_sequence=count,
+        )
+        if entry_sha256 != tail:
+            raise ResearchSchedulerError("cold history tail digest mismatch")
 
-    def _ensure_occurrence_history_anchor_locked(
+    def _ensure_cold_history_anchor_locked(
         self,
         state: dict[str, Any],
     ) -> dict[str, Any]:
-        if self._occurrence_history_anchor(state) is not None:
+        if self._cold_history_anchor(state) is not None:
             return state
-        if self._occurrence_history_chunk_indices():
-            raise ResearchSchedulerError(
-                "legacy scheduler state has detached occurrence history"
-            )
-        state["occurrence_history_count"] = 0
-        state["occurrence_history_tail_sha256"] = _HISTORY_ZERO_SHA256
+        connection = self._open_cold_history(create=False)
+        if connection is not None:
+            try:
+                prior = connection.execute(
+                    "SELECT COUNT(*) FROM cold_history"
+                ).fetchone()[0]
+            except sqlite3.Error as exc:
+                raise ResearchSchedulerError(
+                    "legacy scheduler cold history cannot be inspected"
+                ) from exc
+            finally:
+                connection.close()
+            if prior:
+                raise ResearchSchedulerError(
+                    "legacy scheduler state has detached cold history"
+                )
+        state["cold_history_count"] = 0
+        state["cold_history_tail_sha256"] = _COLD_HISTORY_ZERO_SHA256
         state["state_version"] += 1
         self._write(state)
         migrated = self._read()
         self._validate(migrated, check_history_tail=False)
         return migrated
 
-    def _recover_occurrence_history_locked(
+    @staticmethod
+    def _cold_history_collection(
+        state: dict[str, Any],
+        record_kind: str,
+    ) -> dict[str, Any]:
+        if record_kind == _COLD_HISTORY_OCCURRENCE:
+            return state["occurrences"]
+        if record_kind == _COLD_HISTORY_CURRICULUM_WAKE:
+            return state["curriculum_wakes"]
+        raise ResearchSchedulerError("cold history record kind is invalid")
+
+    def _recover_cold_history_locked(
         self,
         state: dict[str, Any],
     ) -> dict[str, Any]:
-        anchor = self._occurrence_history_anchor(state)
+        anchor = self._cold_history_anchor(state)
         if anchor is None:
-            raise ResearchSchedulerError("occurrence history anchor is missing")
+            raise ResearchSchedulerError("cold history anchor is missing")
         count, tail = anchor
-        records = self._read_occurrence_history_records(state["schedules"])
+        records = self._read_cold_history_records(state)
         if len(records) < count:
-            raise ResearchSchedulerError("occurrence history was truncated")
+            raise ResearchSchedulerError("cold history was truncated")
         if count == 0:
-            if tail != _HISTORY_ZERO_SHA256:
-                raise ResearchSchedulerError("empty occurrence history tail mismatch")
-        elif records[count - 1][2] != tail:
+            if tail != _COLD_HISTORY_ZERO_SHA256:
+                raise ResearchSchedulerError("empty cold history tail mismatch")
+        elif records[count - 1][3] != tail:
             raise ResearchSchedulerError(
-                "occurrence history does not match durable state anchor"
+                "cold history does not match durable state anchor"
             )
 
         changed = False
-        anchored: dict[str, dict[str, Any]] = {}
-        for occurrence_id, occurrence, _ in records[:count]:
-            anchored[occurrence_id] = occurrence
-            hot = state["occurrences"].get(occurrence_id)
+        for record_kind, record_id, record, _ in records[:count]:
+            collection = self._cold_history_collection(state, record_kind)
+            hot = collection.get(record_id)
             if hot is not None:
-                if hot != occurrence:
+                if hot != record:
                     raise ResearchSchedulerError(
-                        "hot occurrence conflicts with archived evidence"
+                        "hot scheduler record conflicts with cold history"
                     )
-                del state["occurrences"][occurrence_id]
+                del collection[record_id]
                 changed = True
 
         if len(records) > count:
-            for occurrence_id, occurrence, _ in records[count:]:
-                hot = state["occurrences"].get(occurrence_id)
-                if hot != occurrence:
+            for record_kind, record_id, record, _ in records[count:]:
+                collection = self._cold_history_collection(state, record_kind)
+                hot = collection.get(record_id)
+                if hot != record:
                     raise ResearchSchedulerError(
-                        "unanchored occurrence history cannot be recovered"
+                        "unanchored cold history cannot be recovered"
                     )
-                del state["occurrences"][occurrence_id]
-                anchored[occurrence_id] = occurrence
-            state["occurrence_history_count"] = len(records)
-            state["occurrence_history_tail_sha256"] = records[-1][2]
+                del collection[record_id]
+            state["cold_history_count"] = len(records)
+            state["cold_history_tail_sha256"] = records[-1][3]
             changed = True
 
         if changed:
@@ -822,157 +938,170 @@ class ResearchScheduler:
             recovered = self._read()
             self._validate(recovered)
             return recovered
-        self._validate_occurrence_history_tail(state)
+        self._validate_cold_history_tail(state)
         return state
 
-    def _append_occurrence_history_batch_locked(
+    def _append_cold_history_locked(
         self,
         state: dict[str, Any],
-        completed: list[tuple[str, dict[str, Any]]],
+        completed: list[tuple[str, str, dict[str, Any]]],
     ) -> None:
         if not completed:
             return
-        anchor = self._occurrence_history_anchor(state)
+        anchor = self._cold_history_anchor(state)
         if anchor is None:
-            raise ResearchSchedulerError("occurrence history anchor is missing")
+            raise ResearchSchedulerError("cold history anchor is missing")
         count, tail = anchor
-        active_chunk_index: int | None = None
-        active_previous_tail: str | None = None
-        active_entries: list[dict[str, Any]] | None = None
+        connection = self._open_cold_history(create=True)
+        assert connection is not None
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            for record_kind, record_id, record in completed:
+                sequence = count + 1
+                record_json = _canonical_json(record)
+                entry_sha256 = self._cold_history_entry_sha256(
+                    sequence=sequence,
+                    previous_entry_sha256=tail,
+                    record_kind=record_kind,
+                    record_id=record_id,
+                    record=record,
+                )
+                connection.execute(
+                    """
+                    INSERT INTO cold_history(
+                        sequence, record_kind, record_id,
+                        previous_entry_sha256, record_json, entry_sha256
+                    ) VALUES (?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        sequence,
+                        record_kind,
+                        record_id,
+                        tail,
+                        record_json,
+                        entry_sha256,
+                    ),
+                )
+                count = sequence
+                tail = entry_sha256
+            connection.commit()
+        except sqlite3.IntegrityError as exc:
+            connection.rollback()
+            raise ResearchSchedulerError("cold history identity conflict") from exc
+        except sqlite3.Error as exc:
+            connection.rollback()
+            raise ResearchSchedulerError("cold history append failed") from exc
+        finally:
+            connection.close()
+        state["cold_history_count"] = count
+        state["cold_history_tail_sha256"] = tail
 
-        def flush_active_chunk() -> None:
-            if (
-                active_chunk_index is None
-                or active_previous_tail is None
-                or active_entries is None
-            ):
-                return
-            body = {
-                "schema": _HISTORY_SCHEMA,
-                "schema_version": _HISTORY_SCHEMA_VERSION,
-                "chunk_index": active_chunk_index,
-                "start_sequence": (
-                    active_chunk_index * _HISTORY_CHUNK_SIZE + 1
-                ),
-                "previous_tail_sha256": active_previous_tail,
-                "entries": active_entries,
-            }
-            self._occurrence_history_dir.mkdir(parents=True, exist_ok=True)
-            atomic_write_json(
-                self._occurrence_history_chunk_path(active_chunk_index),
-                {**body, "chunk_sha256": _digest(body)},
-            )
-
-        for occurrence_id, occurrence in completed:
-            chunk_index = count // _HISTORY_CHUNK_SIZE
-            offset = count % _HISTORY_CHUNK_SIZE
-            if active_chunk_index != chunk_index:
-                flush_active_chunk()
-                active_chunk_index = chunk_index
-                chunk_path = self._occurrence_history_chunk_path(chunk_index)
-                if offset == 0:
-                    if chunk_path.exists():
-                        raise ResearchSchedulerError(
-                            "unanchored occurrence history chunk already exists"
-                        )
-                    active_entries = []
-                    active_previous_tail = tail
-                else:
-                    try:
-                        chunk = self._read_occurrence_history_chunk_raw(
-                            chunk_index
-                        )
-                    except FileNotFoundError as exc:
-                        raise ResearchSchedulerError(
-                            "occurrence history append chunk is missing"
-                        ) from exc
-                    active_entries = list(chunk["entries"])
-                    if len(active_entries) != offset:
-                        raise ResearchSchedulerError(
-                            "occurrence history append offset mismatch"
-                        )
-                    if (
-                        _sha(
-                            active_entries[-1]["entry_sha256"],
-                            "history entry_sha256",
-                        )
-                        != tail
-                    ):
-                        raise ResearchSchedulerError(
-                            "occurrence history append tail mismatch"
-                        )
-                    active_previous_tail = chunk[
-                        "previous_tail_sha256"
-                    ]
-
-            assert active_entries is not None
-            entry = self._occurrence_history_entry(
-                sequence=count + 1,
-                previous_entry_sha256=tail,
-                occurrence_id=occurrence_id,
-                occurrence=occurrence,
-            )
-            active_entries.append(entry)
-            count += 1
-            tail = entry["entry_sha256"]
-            state["occurrence_history_count"] = count
-            state["occurrence_history_tail_sha256"] = tail
-
-        flush_active_chunk()
-
-    def _archive_completed_occurrences_locked(
+    def _archive_completed_cold_history_locked(
         self,
         state: dict[str, Any],
     ) -> dict[str, Any]:
-        completed = sorted(
-            (
-                (occurrence_id, raw)
-                for occurrence_id, raw in state["occurrences"].items()
-                if raw["status"] in {"ACCEPTED", "SKIPPED"}
-            ),
-            key=lambda item: (
-                item[1]["scheduled_for"],
-                item[1]["schedule_id"],
-                item[0],
-            ),
-        )
-        if not completed:
+        ordered: list[tuple[str, str, str, dict[str, Any]]] = []
+        for record_id, raw in state["occurrences"].items():
+            if raw["status"] in {"ACCEPTED", "SKIPPED"}:
+                ordered.append(
+                    (
+                        _timestamp(raw["scheduled_for"], "occurrence.scheduled_for"),
+                        _COLD_HISTORY_OCCURRENCE,
+                        record_id,
+                        raw,
+                    )
+                )
+        for record_id, raw in state["curriculum_wakes"].items():
+            if raw["status"] == "ACCEPTED":
+                ordered.append(
+                    (
+                        _timestamp(raw["as_of"], "curriculum as_of"),
+                        _COLD_HISTORY_CURRICULUM_WAKE,
+                        record_id,
+                        raw,
+                    )
+                )
+        ordered.sort(key=lambda item: (item[0], item[1], item[2]))
+        if not ordered:
             return state
-        for occurrence_id, raw in completed:
-            self._validate_occurrence(
-                occurrence_id,
-                raw,
-                state["schedules"],
+
+        completed = [
+            (record_kind, record_id, record)
+            for _, record_kind, record_id, record in ordered
+        ]
+        for record_kind, record_id, record in completed:
+            self._validate_cold_history_record(
+                record_kind=record_kind,
+                record_id=record_id,
+                record=record,
+                state=state,
             )
-        self._append_occurrence_history_batch_locked(state, completed)
-        for occurrence_id, _ in completed:
-            del state["occurrences"][occurrence_id]
+        self._append_cold_history_locked(state, completed)
+        for record_kind, record_id, _ in completed:
+            del self._cold_history_collection(state, record_kind)[record_id]
         state["state_version"] += 1
         self._write(state)
         archived = self._read()
         self._validate(archived)
         return archived
 
-    def _prepare_occurrence_history_locked(
+    def _prepare_cold_history_locked(
         self,
         state: dict[str, Any],
     ) -> dict[str, Any]:
-        state = self._ensure_occurrence_history_anchor_locked(state)
-        state = self._recover_occurrence_history_locked(state)
-        state = self._archive_completed_occurrences_locked(state)
-        records = self._read_occurrence_history_records(state["schedules"])
-        anchor = self._occurrence_history_anchor(state)
+        state = self._ensure_cold_history_anchor_locked(state)
+        state = self._recover_cold_history_locked(state)
+        state = self._archive_completed_cold_history_locked(state)
+        records = self._read_cold_history_records(state)
+        anchor = self._cold_history_anchor(state)
         assert anchor is not None
         count, tail = anchor
         if len(records) != count:
             raise ResearchSchedulerError(
-                "occurrence history cardinality mismatch after recovery"
+                "cold history cardinality mismatch after recovery"
             )
-        if count and records[-1][2] != tail:
-            raise ResearchSchedulerError(
-                "occurrence history tail mismatch after recovery"
-            )
+        if count and records[-1][3] != tail:
+            raise ResearchSchedulerError("cold history tail mismatch after recovery")
         return state
+
+    def _lookup_cold_history_record(
+        self,
+        state: dict[str, Any],
+        *,
+        record_kind: str,
+        record_id: str,
+    ) -> dict[str, Any] | None:
+        anchor = self._cold_history_anchor(state)
+        if anchor is None:
+            return None
+        count, _ = anchor
+        if count == 0:
+            return None
+        connection = self._open_cold_history(create=False)
+        if connection is None:
+            raise ResearchSchedulerError("cold history database is missing")
+        try:
+            row = connection.execute(
+                """
+                SELECT sequence, record_kind, record_id,
+                       previous_entry_sha256, record_json, entry_sha256
+                FROM cold_history
+                WHERE record_kind = ? AND record_id = ? AND sequence <= ?
+                """,
+                (record_kind, record_id, count),
+            ).fetchone()
+        except sqlite3.Error as exc:
+            raise ResearchSchedulerError("cold history lookup failed") from exc
+        finally:
+            connection.close()
+        if row is None:
+            return None
+        _, _, record, _ = self._validate_cold_history_row(
+            row,
+            state=state,
+            expected_sequence=row[0],
+        )
+        return record
 
     @staticmethod
     def _event_from_payload(raw: object) -> ExternalResearchTrigger:
@@ -1044,9 +1173,9 @@ class ResearchScheduler:
             "state_sha256",
         }
         fields = set(state)
-        if fields != required and fields != required | _HISTORY_FIELDS:
+        if fields != required and fields != required | _COLD_HISTORY_FIELDS:
             raise ResearchSchedulerError("research scheduler state fields mismatch")
-        self._occurrence_history_anchor(state)
+        self._cold_history_anchor(state)
         if state["schema"] != SCHEMA or state["schema_version"] != SCHEMA_VERSION:
             raise ResearchSchedulerError("research scheduler schema mismatch")
         try:
@@ -1101,7 +1230,7 @@ class ResearchScheduler:
         for wake_id, raw in state["curriculum_wakes"].items():
             self._validate_curriculum_wake(wake_id, raw)
         if check_history_tail:
-            self._validate_occurrence_history_tail(state)
+            self._validate_cold_history_tail(state)
 
     def _validate_schedule_authority(self, schedule: ResearchSchedule) -> None:
         if schedule.wake_source is WakeSource.SCHEDULED_QUESTION:
@@ -1440,6 +1569,13 @@ class ResearchScheduler:
             self._validate(state)
             if SchedulerStatus(state["status"]) is SchedulerStatus.STOPPED:
                 raise ResearchSchedulerError("stopped scheduler cannot queue curriculum wake")
+            archived = self._lookup_cold_history_record(
+                state,
+                record_kind=_COLD_HISTORY_CURRICULUM_WAKE,
+                record_id=wake_id,
+            )
+            if archived is not None:
+                raise ResearchSchedulerError("curriculum wake identity conflict")
             prior = state["curriculum_wakes"].get(wake_id)
             if prior is not None:
                 if prior != entry:
@@ -1543,8 +1679,11 @@ class ResearchScheduler:
                 prior["receipt_sha256"] = receipt.trigger_receipt.receipt_sha256
                 state["state_version"] += 1
                 self._write(state)
+                state = self._read()
+                self._validate(state)
             else:
                 raise ResearchSchedulerError("curriculum wake status changed unexpectedly")
+            self._archive_completed_cold_history_locked(state)
         return TickResult(
             TickAction.DELIVERED,
             curriculum_wake_id=wake_id,
@@ -1619,31 +1758,46 @@ class ResearchScheduler:
             state = self._read()
             self._validate(state)
             frozen = json.loads(_canonical_json(state))
-        anchor = self._occurrence_history_anchor(frozen)
+        anchor = self._cold_history_anchor(frozen)
         assert anchor is not None
         count, tail = anchor
-        records = self._read_occurrence_history_records(
-            frozen["schedules"],
+        records = self._read_cold_history_records(
+            frozen,
             limit=count,
         )
         if len(records) < count:
-            raise ResearchSchedulerError("occurrence history was truncated")
-        if count and records[count - 1][2] != tail:
+            raise ResearchSchedulerError("cold history was truncated")
+        if count and records[count - 1][3] != tail:
             raise ResearchSchedulerError(
-                "occurrence history does not match snapshot anchor"
+                "cold history does not match snapshot anchor"
             )
-        merged = {
-            occurrence_id: occurrence
-            for occurrence_id, occurrence, _ in records[:count]
-        }
-        for occurrence_id, occurrence in frozen["occurrences"].items():
-            prior = merged.get(occurrence_id)
-            if prior is not None and prior != occurrence:
+        archived_occurrences: dict[str, Any] = {}
+        archived_wakes: dict[str, Any] = {}
+        for record_kind, record_id, record, _ in records:
+            if record_kind == _COLD_HISTORY_OCCURRENCE:
+                archived_occurrences[record_id] = record
+            elif record_kind == _COLD_HISTORY_CURRICULUM_WAKE:
+                archived_wakes[record_id] = record
+            else:
+                raise ResearchSchedulerError("cold history record kind is invalid")
+
+        for record_id, record in frozen["occurrences"].items():
+            prior = archived_occurrences.get(record_id)
+            if prior is not None and prior != record:
                 raise ResearchSchedulerError(
                     "hot occurrence conflicts with snapshot history"
                 )
-            merged[occurrence_id] = occurrence
-        frozen["occurrences"] = dict(sorted(merged.items()))
+            archived_occurrences[record_id] = record
+        for record_id, record in frozen["curriculum_wakes"].items():
+            prior = archived_wakes.get(record_id)
+            if prior is not None and prior != record:
+                raise ResearchSchedulerError(
+                    "hot curriculum wake conflicts with snapshot history"
+                )
+            archived_wakes[record_id] = record
+
+        frozen["occurrences"] = dict(sorted(archived_occurrences.items()))
+        frozen["curriculum_wakes"] = dict(sorted(archived_wakes.items()))
         body = {
             key: value
             for key, value in frozen.items()
@@ -1757,7 +1911,7 @@ class ResearchScheduler:
                 self._write(state)
                 state = self._read()
                 self._validate(state)
-                self._archive_completed_occurrences_locked(state)
+                self._archive_completed_cold_history_locked(state)
                 return TickResult(
                     TickAction.SKIPPED,
                     schedule_id=schedule_id,
@@ -1818,7 +1972,7 @@ class ResearchScheduler:
                 self._validate(state)
             else:
                 raise ResearchSchedulerError("pending occurrence status changed")
-            self._archive_completed_occurrences_locked(state)
+            self._archive_completed_cold_history_locked(state)
             return TickResult(
                 TickAction.DELIVERED,
                 schedule_id=schedule_id,

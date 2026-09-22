@@ -548,6 +548,22 @@ def _install_betfair_timeout_absence_authority() -> None:
     sealed_kind = BetfairTimeoutResolutionKind
     sealed_absence_type = VerifiedProviderAbsenceEvidence
     sealed_retire_anchor = _retire_timeout_elapsed_visibility_anchor
+    sealed_ledger_descriptors = {
+        "attempt_state": RealExecutionLedger.attempt_state,
+        "verified_snapshot": RealExecutionLedger.verified_snapshot,
+        "provider_order_reference": RealExecutionLedger.provider_order_reference,
+    }
+    sealed_action_descriptors = {
+        "to_dict": ExecutionAction.to_dict,
+    }
+    sealed_ledger_descriptor_codes = {
+        name: getattr(value, "__code__", None)
+        for name, value in sealed_ledger_descriptors.items()
+    }
+    sealed_action_descriptor_codes = {
+        name: getattr(value, "__code__", None)
+        for name, value in sealed_action_descriptors.items()
+    }
     missing = object()
 
     def seal_function_graph(root: object) -> dict[str, tuple[object, object | None]]:
@@ -606,6 +622,26 @@ def _install_betfair_timeout_absence_authority() -> None:
             if module_globals.get(name, missing) is not expected:
                 raise sealed_error(
                     f"timeout resolver authority binding changed: {name}"
+                )
+        for name, expected in sealed_ledger_descriptors.items():
+            current = getattr(RealExecutionLedger, name, missing)
+            if (
+                current is not expected
+                or getattr(current, "__code__", None)
+                is not sealed_ledger_descriptor_codes[name]
+            ):
+                raise sealed_error(
+                    f"timeout ledger authority method changed: {name}"
+                )
+        for name, expected in sealed_action_descriptors.items():
+            current = getattr(ExecutionAction, name, missing)
+            if (
+                current is not expected
+                or getattr(current, "__code__", None)
+                is not sealed_action_descriptor_codes[name]
+            ):
+                raise sealed_error(
+                    f"timeout action authority method changed: {name}"
                 )
 
     def authoritative_resolve(

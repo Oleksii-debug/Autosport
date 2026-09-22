@@ -138,3 +138,38 @@ def test_unlinked_historical_blocked_evidence_does_not_poison_clean_forecast() -
 
     assert verdict.approved is True
     assert verdict.reasons == ()
+
+
+def test_blocked_linked_evidence_rejects_even_when_clean_rows_meet_minimum() -> None:
+    blocked_hash = "1" * 64
+    clean_early_hash = "2" * 64
+    clean_latest_hash = "3" * 64
+    evidence = (
+        _evidence(
+            evidence_id="evidence-blocked-linked",
+            content_sha256=blocked_hash,
+            observed_at="2026-09-22T09:59:00+00:00",
+            quality_flags=("STALE_SOURCE",),
+        ),
+        _evidence(
+            evidence_id="evidence-clean-early",
+            content_sha256=clean_early_hash,
+            observed_at="2026-09-22T10:00:00+00:00",
+        ),
+        _evidence(
+            evidence_id="evidence-clean-latest",
+            content_sha256=clean_latest_hash,
+            observed_at="2026-09-22T10:01:00+00:00",
+        ),
+    )
+
+    verdict = _review(
+        _forecast(blocked_hash, clean_early_hash, clean_latest_hash),
+        evidence,
+    )
+
+    assert verdict.approved is False
+    assert any(
+        "blocked data-quality flags" in reason and "STALE_SOURCE" in reason
+        for reason in verdict.reasons
+    )

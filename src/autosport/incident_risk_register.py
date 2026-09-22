@@ -17,7 +17,7 @@ from typing import Final, Iterable
 
 
 _SCHEMA: Final = "autosport.incident_model_risk_entry"
-_SCHEMA_VERSION: Final = 1
+_SCHEMA_VERSION: Final = 2
 _ENTRY_KEYS: Final = frozenset(
     {
         "schema",
@@ -35,6 +35,7 @@ _ENTRY_KEYS: Final = frozenset(
         "mitigation",
         "residual_risk",
         "affected_components",
+        "occurrence_evidence_refs",
         "evidence_refs",
         "model_version_ids",
         "requires_operator_action",
@@ -184,6 +185,48 @@ def _enum_value(enum_type, name: str, value: object):
     return value
 
 
+def derive_occurrence_entry_id(
+    *,
+    kind: RegisterEntryKind,
+    affected_components: tuple[str, ...],
+    occurrence_evidence_refs: tuple[str, ...],
+    model_version_ids: tuple[str, ...] = (),
+) -> str:
+    """Derive stable occurrence identity from immutable canonical source identities."""
+
+    _enum_value(RegisterEntryKind, "kind", kind)
+    components = _canonical_string_tuple(
+        "affected_components", affected_components
+    )
+    occurrence_refs = _canonical_string_tuple(
+        "occurrence_evidence_refs", occurrence_evidence_refs
+    )
+    models = _canonical_string_tuple("model_version_ids", model_version_ids)
+    if not occurrence_refs:
+        raise IncidentRiskRegisterError(
+            "occurrence identity requires at least one occurrence_evidence_ref"
+        )
+    if kind is RegisterEntryKind.MODEL_RISK and not models:
+        raise IncidentRiskRegisterError(
+            "model-risk occurrence identity requires a model_version_id"
+        )
+    payload = json.dumps(
+        {
+            "schema": "autosport.incident_model_risk_occurrence_identity",
+            "schema_version": 1,
+            "kind": kind.value,
+            "affected_components": list(components),
+            "occurrence_evidence_refs": list(occurrence_refs),
+            "model_version_ids": list(models),
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    ).encode("utf-8")
+    return f"{kind.value}:{hashlib.sha256(payload).hexdigest()}"
+
+
 def _timestamp_sort_key(value: datetime) -> int:
     """Return exact integer microseconds for deterministic UTC ordering."""
 
@@ -216,6 +259,7 @@ class IncidentRiskEntry:
     mitigation: str = ""
     residual_risk: str = ""
     affected_components: tuple[str, ...] = ()
+    occurrence_evidence_refs: tuple[str, ...] = ()
     evidence_refs: tuple[str, ...] = ()
     model_version_ids: tuple[str, ...] = ()
     requires_operator_action: bool = False
@@ -246,6 +290,9 @@ class IncidentRiskEntry:
             maximum_length=4096,
         )
         _canonical_string_tuple("affected_components", self.affected_components)
+        _canonical_string_tuple(
+            "occurrence_evidence_refs", self.occurrence_evidence_refs
+        )
         _canonical_string_tuple("evidence_refs", self.evidence_refs)
         _canonical_string_tuple("model_version_ids", self.model_version_ids)
         if type(self.requires_operator_action) is not bool:
@@ -254,6 +301,24 @@ class IncidentRiskEntry:
         if self.kind is RegisterEntryKind.MODEL_RISK and not self.model_version_ids:
             raise IncidentRiskRegisterError(
                 "model-risk entries require at least one exact model_version_id"
+            )
+        if not self.occurrence_evidence_refs:
+            raise IncidentRiskRegisterError(
+                "entries require at least one immutable occurrence_evidence_ref"
+            )
+        if not set(self.occurrence_evidence_refs).issubset(self.evidence_refs):
+            raise IncidentRiskRegisterError(
+                "occurrence_evidence_refs must be included in evidence_refs"
+            )
+        expected_entry_id = derive_occurrence_entry_id(
+            kind=self.kind,
+            affected_components=self.affected_components,
+            occurrence_evidence_refs=self.occurrence_evidence_refs,
+            model_version_ids=self.model_version_ids,
+        )
+        if self.entry_id != expected_entry_id:
+            raise IncidentRiskRegisterError(
+                "entry_id must equal product-derived occurrence identity"
             )
         if (
             self.evidence_state
@@ -309,6 +374,7 @@ class IncidentRiskEntry:
             "mitigation": self.mitigation,
             "residual_risk": self.residual_risk,
             "affected_components": list(self.affected_components),
+            "occurrence_evidence_refs": list(self.occurrence_evidence_refs),
             "evidence_refs": list(self.evidence_refs),
             "model_version_ids": list(self.model_version_ids),
             "requires_operator_action": self.requires_operator_action,
@@ -356,6 +422,9 @@ class IncidentRiskEntry:
                 mitigation=raw["mitigation"],
                 residual_risk=raw["residual_risk"],
                 affected_components=tuple_field("affected_components"),
+                occurrence_evidence_refs=tuple_field(
+                    "occurrence_evidence_refs"
+                ),
                 evidence_refs=tuple_field("evidence_refs"),
                 model_version_ids=tuple_field("model_version_ids"),
                 requires_operator_action=raw["requires_operator_action"],
@@ -391,6 +460,18 @@ def validate_successor(
         raise IncidentRiskRegisterError("successor must preserve entry_id")
     if candidate.kind is not previous.kind:
         raise IncidentRiskRegisterError("successor must preserve entry kind")
+    if candidate.affected_components != previous.affected_components:
+        raise IncidentRiskRegisterError(
+            "successor must preserve affected_components occurrence identity"
+        )
+    if candidate.occurrence_evidence_refs != previous.occurrence_evidence_refs:
+        raise IncidentRiskRegisterError(
+            "successor must preserve occurrence_evidence_refs"
+        )
+    if candidate.model_version_ids != previous.model_version_ids:
+        raise IncidentRiskRegisterError(
+            "successor must preserve model_version_ids occurrence identity"
+        )
     if candidate.opened_at != previous.opened_at:
         raise IncidentRiskRegisterError("successor must preserve opened_at")
     if candidate.revision != previous.revision + 1:
@@ -443,6 +524,7 @@ class OperatorRiskProjection:
     mitigation: str
     residual_risk: str
     affected_components: tuple[str, ...]
+    occurrence_evidence_refs: tuple[str, ...]
     evidence_refs: tuple[str, ...]
     model_version_ids: tuple[str, ...]
     requires_operator_action: bool
@@ -464,6 +546,7 @@ def operator_projection(entry: IncidentRiskEntry) -> OperatorRiskProjection:
         mitigation=entry.mitigation,
         residual_risk=entry.residual_risk,
         affected_components=entry.affected_components,
+        occurrence_evidence_refs=entry.occurrence_evidence_refs,
         evidence_refs=entry.evidence_refs,
         model_version_ids=entry.model_version_ids,
         requires_operator_action=entry.requires_operator_action,

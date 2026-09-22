@@ -623,6 +623,14 @@ def _evaluate(
         )
     if evidence.strength < requirement.minimum_strength:
         return deny(CapabilityLifecycleState.CURRENT, "evidence strength is too weak")
+    if evidence.strength in {
+        CapabilityEvidenceStrength.DOCUMENTED_ONLY,
+        CapabilityEvidenceStrength.OBSERVED_PUBLIC,
+    }:
+        return deny(
+            CapabilityLifecycleState.UNKNOWN,
+            "document/public observation requires product-owned provenance authority",
+        )
     if evidence.strength >= CapabilityEvidenceStrength.OBSERVED_AUTHENTICATED:
         return deny(
             CapabilityLifecycleState.REVALIDATION_REQUIRED,

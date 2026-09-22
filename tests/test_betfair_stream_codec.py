@@ -10,9 +10,11 @@ from autosport.betfair_stream_codec import (
     BetfairApplyStatus,
     BetfairCrlfJsonDecoder,
     BetfairFrameKind,
+    BetfairMarketChangeSegmentReassembler,
     BetfairMarketStreamState,
     BetfairProviderStreamHealth,
     BetfairQuoteSide,
+    BetfairSegmentBudget,
     decode_market_change_message,
 )
 
@@ -539,3 +541,128 @@ def test_absent_server_timing_metadata_remains_explicitly_unknown() -> None:
     result = BetfairMarketStreamState().apply(frame)
     assert result.conflate_ms is None
     assert result.heartbeat_ms is None
+
+
+def _segmented_market(market_id: str) -> dict:
+    return {"id": market_id, "img": True, "con": False, "rc": []}
+
+
+def test_segment_reassembler_matches_reference_atomic_merge_law() -> None:
+    reassembler = BetfairMarketChangeSegmentReassembler(
+        budget=BetfairSegmentBudget(max_segments=4, max_canonical_bytes=100_000)
+    )
+    start = {
+        "op": "mcm",
+        "segmentType": "SEG_START",
+        "pt": 1,
+        "mc": [_segmented_market("2.000")],
+    }
+    middle = {
+        "op": "mcm",
+        "segmentType": "SEG",
+        "pt": 2,
+        "mc": [_segmented_market("3.000")],
+    }
+    end = _image()
+    end["segmentType"] = "SEG_END"
+
+    assert reassembler.push(start) is None
+    assert reassembler.push(middle) is None
+    completed = reassembler.push(end)
+
+    assert completed is not None
+    assert "segmentType" not in completed
+    assert completed["pt"] == end["pt"]
+    assert [item["id"] for item in completed["mc"]] == ["2.000", "3.000", "1.234"]
+    assert reassembler.pending_segments == 0
+    assert reassembler.pending_canonical_bytes == 0
+
+    frame = decode_market_change_message(completed)
+    assert frame.kind is BetfairFrameKind.SUB_IMAGE
+    assert [market.market_id for market in frame.market_changes] == [
+        "2.000",
+        "3.000",
+        "1.234",
+    ]
+
+
+@pytest.mark.parametrize("segment_type", ["SEG", "SEG_END"])
+def test_segment_reassembler_rejects_middle_or_end_without_start_and_poison_latches(
+    segment_type: str,
+) -> None:
+    reassembler = BetfairMarketChangeSegmentReassembler(
+        budget=BetfairSegmentBudget(max_segments=4, max_canonical_bytes=100_000)
+    )
+    raw = {"op": "mcm", "segmentType": segment_type, "mc": []}
+
+    with pytest.raises(ValueError, match="without SEG_START"):
+        reassembler.push(raw)
+    assert reassembler.failed is True
+    assert reassembler.pending_segments == 0
+    with pytest.raises(ValueError, match="reassembler failed"):
+        reassembler.push(_image())
+
+
+def test_segment_reassembler_rejects_nested_start_and_interleaved_unsegmented_message() -> None:
+    budget = BetfairSegmentBudget(max_segments=4, max_canonical_bytes=100_000)
+
+    nested = BetfairMarketChangeSegmentReassembler(budget=budget)
+    start = {"op": "mcm", "segmentType": "SEG_START", "mc": []}
+    assert nested.push(start) is None
+    with pytest.raises(ValueError, match="SEG_START arrived before prior"):
+        nested.push(start)
+    assert nested.failed is True
+
+    interleaved = BetfairMarketChangeSegmentReassembler(budget=budget)
+    assert interleaved.push(start) is None
+    with pytest.raises(ValueError, match="non-segmented message"):
+        interleaved.push(_image())
+    assert interleaved.failed is True
+
+
+def test_segment_reassembler_enforces_finite_segment_count_and_clears_pending_memory() -> None:
+    reassembler = BetfairMarketChangeSegmentReassembler(
+        budget=BetfairSegmentBudget(max_segments=2, max_canonical_bytes=100_000)
+    )
+    assert reassembler.push(
+        {"op": "mcm", "segmentType": "SEG_START", "mc": [_segmented_market("2.000")]}
+    ) is None
+    assert reassembler.push(
+        {"op": "mcm", "segmentType": "SEG", "mc": [_segmented_market("3.000")]}
+    ) is None
+
+    with pytest.raises(ValueError, match="max_segments"):
+        reassembler.push(
+            {"op": "mcm", "segmentType": "SEG_END", "mc": [_segmented_market("4.000")]}
+        )
+
+    assert reassembler.failed is True
+    assert reassembler.pending_segments == 0
+    assert reassembler.pending_canonical_bytes == 0
+
+
+def test_segment_reassembler_enforces_finite_canonical_byte_budget() -> None:
+    reassembler = BetfairMarketChangeSegmentReassembler(
+        budget=BetfairSegmentBudget(max_segments=10, max_canonical_bytes=1)
+    )
+    with pytest.raises(ValueError, match="max_canonical_bytes"):
+        reassembler.push(
+            {"op": "mcm", "segmentType": "SEG_START", "mc": [_segmented_market("2.000")]}
+        )
+    assert reassembler.failed is True
+    assert reassembler.pending_segments == 0
+    assert reassembler.pending_canonical_bytes == 0
+
+
+@pytest.mark.parametrize(
+    ("max_segments", "max_canonical_bytes"),
+    [(0, 100), (1, 0), (True, 100), (1, True)],
+)
+def test_segment_budget_requires_positive_exact_integers(
+    max_segments: object, max_canonical_bytes: object
+) -> None:
+    with pytest.raises(ValueError):
+        BetfairSegmentBudget(
+            max_segments=max_segments,  # type: ignore[arg-type]
+            max_canonical_bytes=max_canonical_bytes,  # type: ignore[arg-type]
+        )

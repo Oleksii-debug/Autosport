@@ -76,7 +76,11 @@ _BEARER_RE = re.compile(
     r"(?i)\b(?P<scheme>bearer)\s+(?P<value>[A-Za-z0-9._~+/=-]{4,})"
 )
 _KEY_VALUE_RE = re.compile(
-    r"(?i)(?P<prefix>(?P<quote>[\"']?)(?P<key>[A-Za-z0-9_.\\-]+)(?P=quote)\s*[:=]\s*)"
+    r"(?i)(?P<prefix>(?:"
+    r"\"(?P<double_key>(?:\\.|[^\"\\\r\n])*)\"|"
+    r"'(?P<single_key>(?:\\.|[^'\\\r\n])*)'|"
+    r"(?P<bare_key>[A-Za-z0-9_.\\-]+)"
+    r")\s*[:=]\s*)"
     r"(?P<value>\[REDACTED\]|\"(?:\\.|[^\"\\\r\n])*\"|'(?:\\.|[^'\\\r\n])*'|[^\s,;&}\]]+)"
 )
 _KEY_ESCAPE_RE = re.compile(
@@ -208,7 +212,12 @@ def redact_operator_text(
     )
 
     def redact_key_value(match: re.Match[str]) -> str:
-        if not is_sensitive_key(match.group("key")):
+        key = match.group("double_key")
+        if key is None:
+            key = match.group("single_key")
+        if key is None:
+            key = match.group("bare_key")
+        if not is_sensitive_key(key):
             return match.group(0)
         return match.group("prefix") + _redacted_value_literal(match.group("value"))
 

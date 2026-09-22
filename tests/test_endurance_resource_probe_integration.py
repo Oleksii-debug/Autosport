@@ -54,7 +54,15 @@ class EnduranceResourceProbeIntegrationTests(unittest.TestCase):
                         "equal deterministic endurance workloads must leave the same closed-workspace "
                         "file inventory after warmup"
                     ),
-                )
+                ),
+                "workspace_bytes": ResourceLimit(
+                    max_net_growth=0,
+                    max_span=0,
+                    rationale=(
+                        "equal deterministic endurance workloads must leave the same closed-workspace "
+                        "durable byte footprint after warmup"
+                    ),
+                ),
             }
             if all(sample.open_fd_count is not None for sample in samples):
                 limits["open_fd_count"] = ResourceLimit(
@@ -74,6 +82,9 @@ class EnduranceResourceProbeIntegrationTests(unittest.TestCase):
         file_trend = next(item for item in result.trends if item.signal == "workspace_file_count")
         self.assertEqual(file_trend.net_growth, 0)
         self.assertEqual(file_trend.span, 0)
+        byte_trend = next(item for item in result.trends if item.signal == "workspace_bytes")
+        self.assertEqual(byte_trend.net_growth, 0)
+        self.assertEqual(byte_trend.span, 0)
         if "open_fd_count" not in result.unsupported_signals:
             fd_trend = next(item for item in result.trends if item.signal == "open_fd_count")
             self.assertEqual(fd_trend.net_growth, 0)

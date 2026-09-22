@@ -60,17 +60,22 @@ def _digest(payload: Mapping[str, Any]) -> str:
     return hashlib.sha256(_canonical_json(payload).encode("utf-8")).hexdigest()
 
 
+def _utc_instant(value: object, name: str) -> datetime:
+    text = _text(value, name)
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise ValueError(f"{name} must be a valid ISO-8601 timestamp") from exc
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        raise ValueError(f"{name} must include a timezone")
+    return parsed.astimezone(timezone.utc)
+
+
 def _canonical_utc(value: object, name: str) -> str:
     text = _text(value, name)
     if not text.endswith("Z"):
         raise ValueError(f"{name} must be explicit UTC with a Z suffix")
-    try:
-        parsed = datetime.fromisoformat(text[:-1] + "+00:00")
-    except ValueError as exc:
-        raise ValueError(f"{name} must be a valid ISO-8601 UTC timestamp") from exc
-    if parsed.tzinfo is None or parsed.utcoffset() != timezone.utc.utcoffset(parsed):
-        raise ValueError(f"{name} must be UTC")
-    parsed = parsed.astimezone(timezone.utc)
+    parsed = _utc_instant(text, name)
     if parsed.microsecond:
         return parsed.isoformat(timespec="microseconds").replace("+00:00", "Z")
     return parsed.isoformat(timespec="seconds").replace("+00:00", "Z")
@@ -393,6 +398,18 @@ def _require_registered_manifest(
         raise DatasetShardManifestError(
             "verified shard manifest does not match DatasetSnapshot manifest identity"
         )
+    try:
+        causal_cutoff = _utc_instant(record.causal_cutoff, "causal_cutoff")
+    except ValueError as exc:
+        raise DatasetShardManifestError(
+            "canonical DatasetSnapshot causal cutoff is invalid"
+        ) from exc
+    for descriptor in manifest.shards:
+        if _utc_instant(descriptor.event_end_utc, "event_end_utc") > causal_cutoff:
+            raise DatasetShardManifestError(
+                "dataset shard event range exceeds DatasetSnapshot causal cutoff "
+                f"for {descriptor.shard_id}"
+            )
     return record
 
 

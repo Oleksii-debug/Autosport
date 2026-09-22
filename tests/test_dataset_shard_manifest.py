@@ -66,9 +66,16 @@ def _descriptor(
 
 
 class _Record:
-    def __init__(self, members: tuple[str, ...], manifest: str) -> None:
+    def __init__(
+        self,
+        members: tuple[str, ...],
+        manifest: str,
+        *,
+        causal_cutoff: str = "2026-09-01T00:59:59Z",
+    ) -> None:
         self.member_sha256 = members
         self.manifest_sha256 = manifest
+        self.causal_cutoff = causal_cutoff
 
 
 class _Authority:
@@ -276,6 +283,108 @@ def test_durable_payload_roundtrip_is_strict_and_order_independent() -> None:
     schema_bad["schema_version"] = 2
     with pytest.raises(ValueError, match="schema mismatch"):
         DatasetShardDescriptor.from_payload(schema_bad)
+
+
+def test_matching_manifest_rejects_shard_ending_after_causal_cutoff(
+    tmp_path: Path,
+) -> None:
+    payload = b"future"
+    (tmp_path / "future.bin").write_bytes(payload)
+    descriptor = _descriptor(
+        0,
+        "future",
+        "future.bin",
+        payload,
+        end="2026-09-01T01:00:01Z",
+    )
+    manifest = verify_shard_files(tmp_path, (descriptor,))
+    record = _Record(
+        manifest.member_sha256,
+        manifest.membership_manifest_sha256(),
+        causal_cutoff="2026-09-01T01:00:00Z",
+    )
+
+    with pytest.raises(DatasetShardManifestError, match="causal cutoff"):
+        verify_registered_dataset_shards(
+            _Authority(record),
+            snapshot_id="snapshot-1",
+            shard_root=tmp_path,
+            shards=(descriptor,),
+        )
+
+
+def test_read_rejects_future_sibling_even_when_requested_shard_is_causal(
+    tmp_path: Path,
+) -> None:
+    current = b"current"
+    future = b"future"
+    (tmp_path / "current.bin").write_bytes(current)
+    (tmp_path / "future.bin").write_bytes(future)
+    current_descriptor = _descriptor(
+        0,
+        "current",
+        "current.bin",
+        current,
+        end="2026-09-01T01:00:00Z",
+    )
+    future_descriptor = _descriptor(
+        1,
+        "future",
+        "future.bin",
+        future,
+        end="2026-09-01T01:00:01Z",
+    )
+    manifest = verify_shard_files(
+        tmp_path,
+        (current_descriptor, future_descriptor),
+    )
+    record = _Record(
+        manifest.member_sha256,
+        manifest.membership_manifest_sha256(),
+        causal_cutoff="2026-09-01T01:00:00Z",
+    )
+
+    with pytest.raises(DatasetShardManifestError, match="causal cutoff"):
+        read_registered_shard_bytes(
+            _Authority(record),
+            snapshot_id="snapshot-1",
+            shard_root=tmp_path,
+            shards=(current_descriptor, future_descriptor),
+            shard_id="current",
+        )
+
+
+def test_shard_ending_exactly_at_causal_cutoff_is_accepted(tmp_path: Path) -> None:
+    payload = b"boundary"
+    (tmp_path / "boundary.bin").write_bytes(payload)
+    descriptor = _descriptor(
+        0,
+        "boundary",
+        "boundary.bin",
+        payload,
+        end="2026-09-01T01:00:00Z",
+    )
+    manifest = verify_shard_files(tmp_path, (descriptor,))
+    record = _Record(
+        manifest.member_sha256,
+        manifest.membership_manifest_sha256(),
+        causal_cutoff="2026-09-01T01:00:00Z",
+    )
+    authority = _Authority(record)
+
+    assert verify_registered_dataset_shards(
+        authority,
+        snapshot_id="snapshot-1",
+        shard_root=tmp_path,
+        shards=(descriptor,),
+    ) is record
+    assert read_registered_shard_bytes(
+        authority,
+        snapshot_id="snapshot-1",
+        shard_root=tmp_path,
+        shards=(descriptor,),
+        shard_id="boundary",
+    ) == payload
 
 
 def test_read_revalidates_target_after_authority_lookup_to_close_toctou(

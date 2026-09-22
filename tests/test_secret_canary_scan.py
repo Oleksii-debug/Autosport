@@ -77,6 +77,36 @@ def test_url_percent_lowercase_hex_does_not_lowercase_literal_ascii(
     assert report.exit_code == 0
 
 
+def test_detects_mixed_case_url_percent_hex_across_chunks(tmp_path: Path) -> None:
+    encoded = quote(CANARY, safe="")
+    index = 0
+
+    def mixed_hex(match: re.Match[str]) -> str:
+        nonlocal index
+        value = match.group(0).upper() if index % 2 == 0 else match.group(0).lower()
+        index += 1
+        return value
+
+    mixed = re.sub(r"%[0-9A-F]{2}", mixed_hex, encoded)
+    assert mixed != encoded
+    assert mixed != re.sub(
+        r"%[0-9A-F]{2}",
+        lambda match: match.group(0).lower(),
+        encoded,
+    )
+    (tmp_path / "mixed-percent.bin").write_bytes(
+        b"prefix:" + mixed.encode("ascii") + b":suffix"
+    )
+
+    report = scan_secret_canary(tmp_path, CANARY, chunk_size=7)
+
+    assert report.status == "LEAK"
+    assert report.exit_code == 2
+    assert len(report.findings) == 1
+    assert "url-percent-utf8-lower" in report.findings[0].encodings
+    assert CANARY not in repr(report)
+
+
 def test_detects_match_crossing_stream_chunk_boundary(tmp_path: Path) -> None:
     raw = CANARY.encode("utf-8")
     (tmp_path / "boundary.bin").write_bytes(b"x" * 4 + raw + b"tail")

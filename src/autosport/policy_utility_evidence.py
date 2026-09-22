@@ -645,8 +645,8 @@ def _parse_datetime(value: Any, label: str) -> datetime:
 
 
 def _finite_decimal(value: Decimal, label: str) -> None:
-    if not isinstance(value, Decimal) or not value.is_finite():
-        raise PolicyUtilityError(f"{label} must be a finite Decimal")
+    if type(value) is not Decimal or not value.is_finite():
+        raise PolicyUtilityError(f"{label} must be an exact finite Decimal")
 
 
 def _decimal_text(value: Decimal) -> str:

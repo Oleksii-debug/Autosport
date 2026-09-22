@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import unittest
 from decimal import Decimal
+from unittest.mock import patch
 
 from autosport.domain import TicketStatus, TicketLeg
 from autosport.paper import PaperBook
@@ -64,6 +65,58 @@ class PortfolioScenarioSnapshotIntegrityTests(unittest.TestCase):
         self.assertEqual(report.scenario_count, 8)
         self.assertEqual(report.worst_case, Decimal("-10"))
         self.assertEqual(report.best_case, Decimal("10"))
+
+    def test_snapshot_fails_closed_if_settlement_crosses_capture_window(self) -> None:
+        book = PaperBook("100")
+        first_leg = TicketLeg("event-1", "winner", "alice", Decimal("2"))
+        second_leg = TicketLeg("event-2", "winner", "bob", Decimal("2"))
+        first = book.open_ticket(
+            [first_leg],
+            "10",
+            placed_at="2026-09-21T08:00:00+00:00",
+        )
+        second = book.open_ticket(
+            [second_leg],
+            "10",
+            placed_at="2026-09-21T08:00:00+00:00",
+        )
+        canonical_ticket_type = type(first)
+        copies = 0
+
+        def copy_then_settle(*args, **kwargs):
+            nonlocal copies
+            snapshot = canonical_ticket_type(*args, **kwargs)
+            copies += 1
+            if copies == 1:
+                # The unsafe interleaving is deterministic:
+                # first was copied OPEN, then first and second settle before
+                # the second source ticket is inspected.  A naive one-pass
+                # copy would publish {first OPEN, second absent}, a state that
+                # never existed at one instant.
+                book.settle(
+                    first.ticket_id,
+                    {first_leg.quote_key},
+                    settled_at="2026-09-21T08:00:01+00:00",
+                )
+                book.settle(
+                    second.ticket_id,
+                    {second_leg.quote_key},
+                    settled_at="2026-09-21T08:00:02+00:00",
+                )
+            return snapshot
+
+        with patch(
+            "autosport.portfolio.PaperTicket",
+            side_effect=copy_then_settle,
+        ):
+            with self.assertRaisesRegex(
+                ValueError,
+                "portfolio ticket changed during snapshot",
+            ):
+                PortfolioEngine().analyse([first, second])
+
+        self.assertEqual(first.status, TicketStatus.WON)
+        self.assertEqual(second.status, TicketStatus.WON)
 
 
 if __name__ == "__main__":

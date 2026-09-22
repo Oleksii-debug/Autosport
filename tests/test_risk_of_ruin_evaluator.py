@@ -375,6 +375,74 @@ def test_durable_result_parser_rejects_json_type_coercion(
         IssuedRiskOfRuinResult.from_payload(payload)
 
 
+def test_durable_result_parser_rejects_bool_version_and_unknown_fields(
+    tmp_path: Path,
+) -> None:
+    evaluator = _evaluator(tmp_path)
+    request = _request(planned=10)
+    direct = evaluate_risk_of_ruin(
+        request,
+        workspace_instance_id=evaluator.authority.workspace_instance_id,
+        issued_at="2026-01-04T00:00:00+00:00",
+        source_sha256=SHA_F,
+    )
+
+    bool_version = direct.canonical_payload()
+    bool_version["result_version"] = True
+    with pytest.raises(
+        RiskOfRuinIssuanceError,
+        match="unsupported risk-of-ruin result schema",
+    ):
+        IssuedRiskOfRuinResult.from_payload(bool_version)
+
+    unknown_field = direct.canonical_payload()
+    unknown_field["unexpected"] = "ignored-before-fix"
+    with pytest.raises(
+        RiskOfRuinIssuanceError,
+        match="risk-of-ruin result fields mismatch",
+    ):
+        IssuedRiskOfRuinResult.from_payload(unknown_field)
+
+    assert IssuedRiskOfRuinResult.from_payload(direct.canonical_payload()) == direct
+
+
+def test_durable_journal_parser_rejects_bool_version_and_unknown_root_fields(
+    tmp_path: Path,
+) -> None:
+    evaluator = _evaluator(tmp_path)
+    workspace_instance_id = evaluator.authority.workspace_instance_id
+
+    bool_version = evaluator._empty_state()
+    bool_version["schema_version"] = True
+    with pytest.raises(
+        RiskOfRuinIssuanceError,
+        match="risk-of-ruin journal identity mismatch",
+    ):
+        risk_module._validate_journal(
+            bool_version,
+            workspace_instance_id=workspace_instance_id,
+        )
+
+    unknown_field = evaluator._empty_state()
+    unknown_field["unexpected"] = "ignored-before-fix"
+    with pytest.raises(
+        RiskOfRuinIssuanceError,
+        match="risk-of-ruin journal fields mismatch",
+    ):
+        risk_module._validate_journal(
+            unknown_field,
+            workspace_instance_id=workspace_instance_id,
+        )
+
+    assert (
+        risk_module._validate_journal(
+            evaluator._empty_state(),
+            workspace_instance_id=workspace_instance_id,
+        )
+        == ()
+    )
+
+
 def test_durable_result_parser_rejects_noncanonical_stake_text(
     tmp_path: Path,
 ) -> None:

@@ -178,6 +178,16 @@ def inspect_fixed_n_risk_membership_structure(
     registry = ScientificRegistry(registry_path)
     protocol = _entry(registry, "ResearchProtocol", protocol_id)
     dataset = _entry(registry, "DatasetSnapshot", dataset_id)
+    if not registry.causal_precedes(
+        "DatasetSnapshot",
+        dataset_id,
+        "ResearchProtocol",
+        protocol_id,
+    ):
+        raise RiskSamplingMembershipError(
+            "ScientificRegistry append order must prove DatasetSnapshot precedes "
+            "ResearchProtocol"
+        )
 
     protocol_payload = protocol.payload
     dataset_payload = dataset.payload

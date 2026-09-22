@@ -204,6 +204,12 @@ class ProductPaperDecisionCycle:
         input_ids = tuple(item.input_id for item in inputs)
         if len(set(input_ids)) != len(input_ids):
             raise ValueError("inputs must not contain duplicate input_id values")
+        runtime_source_id = runtime.manifest.source_id
+        expected_source_scope = (runtime_source_id,)
+        if any(item.source_ids != expected_source_scope for item in inputs):
+            raise ProductPaperDecisionCycleError(
+                "every PAPER decision input must bind exactly to the canonical runtime source"
+            )
         if bounds is not None and not isinstance(bounds, LiveLoopBounds):
             raise TypeError("bounds must be LiveLoopBounds or None")
         if clock is not None and not callable(clock):

@@ -176,7 +176,7 @@ class HistoricalSnapshotTests(unittest.TestCase):
         errors_lock = threading.Lock()
 
         def synchronized_rows(rows: list[dict[str, object]]):
-            barrier.wait()
+            barrier.wait(timeout=5)
             yield from rows
 
         def publish(path: Path, rows: list[dict[str, object]]) -> None:
@@ -189,8 +189,8 @@ class HistoricalSnapshotTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp:
             market_path = Path(temp) / "market.jsonl"
             threads = [
-                threading.Thread(target=publish, args=(market_path, rows_a)),
-                threading.Thread(target=publish, args=(market_path, rows_b)),
+                threading.Thread(target=publish, args=(market_path, rows_a), daemon=True),
+                threading.Thread(target=publish, args=(market_path, rows_b), daemon=True),
             ]
             for thread in threads:
                 thread.start()

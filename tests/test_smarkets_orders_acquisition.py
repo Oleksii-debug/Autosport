@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from email.message import Message
 from http.client import IncompleteRead
 import pickle
@@ -102,12 +103,60 @@ def test_fixed_origin_get_issues_exact_payload_witness(monkeypatch) -> None:
     assert len(response.requested_read_sizes) >= 2
 
 
+def test_product_received_at_is_distinct_from_provider_date(monkeypatch) -> None:
+    response = _FakeResponse(
+        b'{"orders":[{"id":"o-time"}]}',
+        date="Tue, 22 Sep 2026 10:00:00 GMT",
+    )
+    _install(monkeypatch, response)
+    monkeypatch.setattr(
+        acquisition,
+        "_utc_now",
+        lambda: datetime(2026, 9, 22, 15, 7, 30, tzinfo=timezone.utc),
+    )
+
+    witness = acquire_smarkets_orders_payload("secret-token")
+
+    assert witness.provider_date == "2026-09-22T10:00:00+00:00"
+    assert witness.received_at == "2026-09-22T15:07:30+00:00"
+
+
+def test_received_at_is_captured_only_after_payload_validation(monkeypatch) -> None:
+    response = _FakeResponse(b"not-json")
+    _install(monkeypatch, response)
+    clock_called = False
+
+    def clock() -> datetime:
+        nonlocal clock_called
+        clock_called = True
+        return datetime(2026, 9, 22, 15, 7, 30, tzinfo=timezone.utc)
+
+    monkeypatch.setattr(acquisition, "_utc_now", clock)
+
+    with pytest.raises(SmarketsOrdersAcquisitionError, match="invalid JSON"):
+        acquire_smarkets_orders_payload("secret-token")
+    assert clock_called is False
+
+
+def test_naive_product_receipt_clock_fails_closed(monkeypatch) -> None:
+    _install(monkeypatch, _FakeResponse())
+    monkeypatch.setattr(
+        acquisition,
+        "_utc_now",
+        lambda: datetime(2026, 9, 22, 15, 7, 30),
+    )
+
+    with pytest.raises(SmarketsOrdersAcquisitionError, match="timezone-aware"):
+        acquire_smarkets_orders_payload("secret-token")
+
+
 def test_witness_cannot_be_constructed_by_ordinary_caller() -> None:
     with pytest.raises(TypeError, match="issued only"):
         SmarketsOrdersPayloadWitness(
             endpoint=SMARKETS_ORDERS_ENDPOINT,
             http_status=200,
             provider_date="2026-09-22T14:45:00+00:00",
+            received_at="2026-09-22T14:46:00+00:00",
             content_type="application/json",
             payload_sha256="0" * 64,
             payload_size=2,

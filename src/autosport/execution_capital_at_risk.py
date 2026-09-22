@@ -53,6 +53,64 @@ class AttemptCapitalAtRisk:
     confirmed_released_capital: Decimal
     max_plausible_capital_at_risk: Decimal
 
+    def __post_init__(self) -> None:
+        if type(self.state) is not AttemptState:
+            raise ExecutionCapitalAtRiskError("attempt state must be exact AttemptState")
+        for name in (
+            "attempt_id",
+            "action_id",
+            "bookmaker_id",
+            "account_id",
+            "event_id",
+            "market_id",
+            "selection_id",
+            "side",
+        ):
+            value = getattr(self, name)
+            if type(value) is not str or not value.strip():
+                raise ExecutionCapitalAtRiskError(f"{name} must be non-empty text")
+        if self.bookmaker_id != "betfair" or self.side != "BACK":
+            raise ExecutionCapitalAtRiskUnsupported(
+                "capital-risk attempt supports exact Betfair BACK only"
+            )
+        for name in (
+            "requested_stake",
+            "requested_odds",
+            "requested_capital_at_limit",
+            "confirmed_open_capital",
+            "contingent_unknown_capital",
+            "confirmed_released_capital",
+            "max_plausible_capital_at_risk",
+        ):
+            value = getattr(self, name)
+            if (
+                type(value) is not Decimal
+                or not value.is_finite()
+                or value < 0
+            ):
+                raise ExecutionCapitalAtRiskError(
+                    f"{name} must be exact finite non-negative Decimal"
+                )
+        if self.requested_odds <= 0 or self.requested_stake <= 0:
+            raise ExecutionCapitalAtRiskError(
+                "requested odds/stake must be positive"
+            )
+        if self.requested_capital_at_limit != self.requested_stake:
+            raise ExecutionCapitalAtRiskError(
+                "Betfair BACK requested capital must equal requested stake"
+            )
+        if self.confirmed_released_capital != 0:
+            raise ExecutionCapitalAtRiskError(
+                "conservative floor cannot claim released capital"
+            )
+        if self.max_plausible_capital_at_risk != _add(
+            self.confirmed_open_capital,
+            self.contingent_unknown_capital,
+        ):
+            raise ExecutionCapitalAtRiskError(
+                "attempt maximum must equal confirmed plus contingent capital"
+            )
+
     @property
     def truth(self) -> CapitalRiskTruth:
         return CapitalRiskTruth.CONSERVATIVE_BOUND
@@ -80,6 +138,76 @@ class ExecutionCapitalAtRiskEvidence:
     execution_authority: bool = False
     capital_release_authority: bool = False
     residual_capacity_authority: bool = False
+
+    def __post_init__(self) -> None:
+        if type(self.event_count) is not int or self.event_count < 0:
+            raise ExecutionCapitalAtRiskError(
+                "event_count must be a non-negative integer"
+            )
+        for name in ("snapshot_sha256", "plan_id", "plan_fingerprint"):
+            value = getattr(self, name)
+            if type(value) is not str or not value.strip():
+                raise ExecutionCapitalAtRiskError(f"{name} must be non-empty text")
+        for name in ("snapshot_sha256", "plan_fingerprint", "evidence_sha256"):
+            value = getattr(self, name)
+            if (
+                len(value) != 64
+                or any(char not in "0123456789abcdef" for char in value)
+            ):
+                raise ExecutionCapitalAtRiskError(
+                    f"{name} must be lowercase sha256 text"
+                )
+        if type(self.plan_stale) is not bool:
+            raise ExecutionCapitalAtRiskError("plan_stale must be exact bool")
+        if (
+            self.execution_authority is not False
+            or self.capital_release_authority is not False
+            or self.residual_capacity_authority is not False
+        ):
+            raise ExecutionCapitalAtRiskError(
+                "capital-risk floor cannot grant execution, release, "
+                "or residual-capacity authority"
+            )
+        for name in (
+            "confirmed_open_capital",
+            "contingent_unknown_capital",
+            "confirmed_released_capital",
+            "max_plausible_capital_at_risk",
+        ):
+            value = getattr(self, name)
+            if (
+                type(value) is not Decimal
+                or not value.is_finite()
+                or value < 0
+            ):
+                raise ExecutionCapitalAtRiskError(
+                    f"{name} must be exact finite non-negative Decimal"
+                )
+        expected_confirmed = _sum_capital(
+            tuple(item.confirmed_open_capital for item in self.attempts)
+        )
+        expected_contingent = _sum_capital(
+            tuple(item.contingent_unknown_capital for item in self.attempts)
+        )
+        expected_maximum = _sum_capital(
+            tuple(item.max_plausible_capital_at_risk for item in self.attempts)
+        )
+        if self.confirmed_open_capital != expected_confirmed:
+            raise ExecutionCapitalAtRiskError(
+                "confirmed aggregate does not match attempts"
+            )
+        if self.contingent_unknown_capital != expected_contingent:
+            raise ExecutionCapitalAtRiskError(
+                "contingent aggregate does not match attempts"
+            )
+        if self.confirmed_released_capital != 0:
+            raise ExecutionCapitalAtRiskError(
+                "conservative floor cannot claim released capital"
+            )
+        if self.max_plausible_capital_at_risk != expected_maximum:
+            raise ExecutionCapitalAtRiskError(
+                "maximum aggregate does not match attempts"
+            )
 
     @property
     def truth(self) -> CapitalRiskTruth:

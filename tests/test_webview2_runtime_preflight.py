@@ -152,13 +152,24 @@ def test_one_valid_registration_is_sufficient_even_if_other_registration_is_inva
     assert result.selected_version == "153.0.4234.32"
 
 
-def test_highest_valid_version_is_selected_numerically() -> None:
+def test_machine_registration_precedes_newer_per_user_registration() -> None:
     result = evaluate_webview2_registry_reads(
         _reads(_valid("99.10.2.3"), _valid("100.0.0.1")),
         windows_64bit=True,
         reg_sz_type=REG_SZ,
     )
-    assert result.selected_version == "100.0.0.1"
+    assert result.selected_version == "99.10.2.3"
+
+
+def test_explicit_minimum_fails_closed_when_machine_runtime_shadows_newer_per_user() -> None:
+    result = evaluate_webview2_registry_reads(
+        _reads(_valid("99.10.2.3"), _valid("100.0.0.1")),
+        windows_64bit=True,
+        reg_sz_type=REG_SZ,
+        minimum_version="100.0.0.0",
+    )
+    assert result.status is WebView2RuntimeStatus.BELOW_EXPLICIT_MINIMUM
+    assert result.selected_version == "99.10.2.3"
 
 
 def test_explicit_minimum_equal_to_runtime_is_available() -> None:

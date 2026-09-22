@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import multiprocessing
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -99,6 +101,31 @@ class Source:
         raise AssertionError("no market delta should be resolved")
 
 
+def _crash_at_start_prefix(
+    workspace: str,
+    prefix: int,
+    ready,
+) -> None:
+    runtime = build_autonomous_product_runtime(
+        workspace=Path(workspace),
+        source=Source(),
+        clock=lambda: "2026-09-22T14:05:00+00:00",
+        sleep=lambda _: None,
+        initial_bankroll="100",
+    )
+    runtime.stop("crash_test_precondition")
+    runtime._start_transition_store.begin(
+        collector_was_stopped=True,
+        session_pre_state=SessionState.STOPPED.value,
+    )
+    if prefix >= 1:
+        runtime.collector.resume()
+    if prefix >= 2:
+        runtime.coordinator.resume()
+    ready.set()
+    os._exit(81 + prefix)
+
+
 class Noop:
     authority_active = True
 
@@ -107,6 +134,53 @@ class Noop:
 
     def release(self) -> None:
         self.authority_active = False
+
+
+class TransitionStore:
+    def __init__(self) -> None:
+        self.generation = 0
+        self.phase: str | None = None
+        self.collector_was_stopped: bool | None = None
+        self.session_pre_state: str | None = None
+
+    def pending(self):
+        if self.phase not in {"STARTING", "RECOVERY_REQUIRED"}:
+            return None
+        return {
+            "generation": self.generation,
+            "phase": self.phase,
+            "collector_was_stopped": self.collector_was_stopped,
+            "session_pre_state": self.session_pre_state,
+        }
+
+    def begin(self, *, collector_was_stopped: bool, session_pre_state: str) -> int:
+        if self.pending() is not None:
+            raise ProductCompositionError(
+                "unfinished product START transition requires recovery"
+            )
+        self.generation += 1
+        self.phase = "STARTING"
+        self.collector_was_stopped = collector_was_stopped
+        self.session_pre_state = session_pre_state
+        return self.generation
+
+    def _require_generation(self, generation: int) -> None:
+        if generation != self.generation:
+            raise ProductCompositionError(
+                "durable product START transition generation changed"
+            )
+
+    def mark_completed(self, generation: int) -> None:
+        self._require_generation(generation)
+        self.phase = "COMPLETED"
+
+    def mark_rolled_back(self, generation: int) -> None:
+        self._require_generation(generation)
+        self.phase = "ROLLED_BACK"
+
+    def mark_recovery_required(self, generation: int) -> None:
+        self._require_generation(generation)
+        self.phase = "RECOVERY_REQUIRED"
 
 
 def runtime(stopped: bool, state: SessionState):
@@ -123,6 +197,7 @@ def runtime(stopped: bool, state: SessionState):
         invalidations=object(),
         dependencies=object(),
         _runtime_lease=Noop(),
+        _start_transition_store=TransitionStore(),
     )
     return value, collector, coordinator
 
@@ -298,6 +373,89 @@ class ProductRuntimeLifecycleCoherenceTests(unittest.TestCase):
                 self.assertEqual(restored.status().state, SessionState.STOPPED)
             finally:
                 restored.close()
+
+
+    def test_successful_start_commits_transition_and_repeated_start_is_idempotent(self) -> None:
+        value, collector, coordinator = runtime(True, SessionState.STOPPED)
+        transitions = value._start_transition_store
+
+        self.assertEqual(value.start().state, SessionState.RUNNING)
+        self.assertEqual(transitions.phase, "COMPLETED")
+        self.assertEqual(transitions.generation, 1)
+        self.assertEqual(collector.resume_calls, 1)
+        self.assertEqual(coordinator.resume_calls, 1)
+
+        self.assertEqual(value.start().state, SessionState.RUNNING)
+        self.assertEqual(transitions.generation, 1)
+        self.assertEqual(collector.resume_calls, 1)
+        self.assertEqual(coordinator.resume_calls, 1)
+
+    def test_failed_start_with_failed_compensation_stays_recovery_required(self) -> None:
+        value, collector, coordinator = runtime(True, SessionState.STOPPED)
+        coordinator.resume_error = RuntimeError("resume failed")
+        collector.stop_error = RuntimeError("collector compensation failed")
+
+        with self.assertRaisesRegex(RuntimeError, "resume failed"):
+            value.start()
+
+        transitions = value._start_transition_store
+        self.assertEqual(transitions.phase, "RECOVERY_REQUIRED")
+        for action in (value.status, value.start, value.pause, value.tick):
+            with self.assertRaisesRegex(
+                ProductCompositionError,
+                "START transition requires recovery",
+            ):
+                action()
+
+        collector.stop_error = None
+        self.assertEqual(
+            value.stop("operator_recovery_stop").state,
+            SessionState.STOPPED,
+        )
+        self.assertEqual(transitions.phase, "ROLLED_BACK")
+        self.assertEqual(value.status().state, SessionState.STOPPED)
+
+    def test_restart_recovers_every_durable_start_prefix_to_stopped(self) -> None:
+        context = multiprocessing.get_context("spawn")
+        for prefix in (0, 1, 2):
+            with self.subTest(prefix=prefix), tempfile.TemporaryDirectory() as directory:
+                ready = context.Event()
+                process = context.Process(
+                    target=_crash_at_start_prefix,
+                    args=(directory, prefix, ready),
+                )
+                process.start()
+                self.assertTrue(
+                    ready.wait(20),
+                    f"child did not reach START crash prefix {prefix}",
+                )
+                process.join(20)
+                if process.is_alive():
+                    process.terminate()
+                    process.join(10)
+                    self.fail(f"child did not exit at START crash prefix {prefix}")
+                self.assertEqual(process.exitcode, 81 + prefix)
+
+                restored = build_autonomous_product_runtime(
+                    workspace=Path(directory),
+                    source=Source(),
+                    clock=lambda: "2026-09-22T14:06:00+00:00",
+                    sleep=lambda _: None,
+                    initial_bankroll="100",
+                )
+                try:
+                    self.assertEqual(
+                        restored.status().state,
+                        SessionState.STOPPED,
+                    )
+                    self.assertIsNone(
+                        restored._start_transition_store.pending()
+                    )
+                    self.assertIsNotNone(
+                        restored.collector.status()["stopped_at"]
+                    )
+                finally:
+                    restored.close()
 
 
 

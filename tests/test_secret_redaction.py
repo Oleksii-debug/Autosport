@@ -105,6 +105,26 @@ class SecretRedactionTests(unittest.TestCase):
         )
         self.assertNotIn("BRAVO-SECRET", rendered)
 
+    def test_safe_exception_text_reuses_one_shot_secret_iterable(self) -> None:
+        secret = "Alpha42"
+        dynamic_type = type(
+            "Provider" + secret + "Error",
+            (RuntimeError,),
+            {},
+        )
+        one_shot_secrets = (value for value in (secret,))
+
+        rendered = safe_exception_text(
+            dynamic_type("ordinary detail"),
+            extra_secret_values=one_shot_secrets,
+        )
+
+        self.assertNotIn(secret, rendered)
+        self.assertEqual(
+            rendered,
+            "Provider" + REDACTED + "Error: ordinary detail",
+        )
+
     def test_text_redaction_is_idempotent(self) -> None:
         source = (
             "Authorization: Bearer alpha123 "

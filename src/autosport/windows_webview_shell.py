@@ -985,13 +985,31 @@ class AutosportWebController:
         self.manual_status = text("ui.windows.manual_calculation.status.cleared")
         return self._ok(self.manual_status, focus_id="332")
 
+    def _reject_bridge_command(
+        self,
+        request_id: str,
+        message: str,
+    ) -> dict[str, Any]:
+        """Persist one bounded bridge-validation rejection for stable UI readback.
+
+        Bridge-shape validation occurs before domain action dispatch. These fixed,
+        product-owned messages must survive the frontend's immediate get_state()
+        refresh, but they must not become domain/log events or execute an action.
+        """
+        with self._lock:
+            self.last_error = message
+        return {
+            "request_id": request_id,
+            "status": "rejected",
+            "message": message,
+        }
+
     def dispatch(self, raw: Mapping[str, Any]) -> dict[str, Any]:
         if not isinstance(raw, Mapping):
-            return {
-                "request_id": "invalid",
-                "status": "rejected",
-                "message": "Некоректна команда інтерфейсу.",
-            }
+            return self._reject_bridge_command(
+                "invalid",
+                "Некоректна команда інтерфейсу.",
+            )
         request_id = raw.get("request_id")
         action_id = raw.get("action_id")
         payload = raw.get("payload", {})
@@ -1001,17 +1019,15 @@ class AutosportWebController:
             or request_id.strip() != request_id
             or len(request_id) > 128
         ):
-            return {
-                "request_id": "invalid",
-                "status": "rejected",
-                "message": "Некоректний ідентифікатор команди.",
-            }
+            return self._reject_bridge_command(
+                "invalid",
+                "Некоректний ідентифікатор команди.",
+            )
         if type(action_id) is not str or not isinstance(payload, Mapping):
-            return {
-                "request_id": request_id,
-                "status": "rejected",
-                "message": "Некоректна команда інтерфейсу.",
-            }
+            return self._reject_bridge_command(
+                request_id,
+                "Некоректна команда інтерфейсу.",
+            )
         try:
             command_identity = json.dumps(
                 {"action_id": action_id, "payload": dict(payload)},
@@ -1021,11 +1037,10 @@ class AutosportWebController:
                 allow_nan=False,
             )
         except (TypeError, ValueError):
-            return {
-                "request_id": request_id,
-                "status": "rejected",
-                "message": "Некоректні дані команди інтерфейсу.",
-            }
+            return self._reject_bridge_command(
+                request_id,
+                "Некоректні дані команди інтерфейсу.",
+            )
         handlers = {
             "dataset.select": self._action_dataset_select,
             "strategy.set": self._action_strategy_set,
@@ -1046,21 +1061,19 @@ class AutosportWebController:
         }
         handler = handlers.get(action_id)
         if handler is None:
-            return {
-                "request_id": request_id,
-                "status": "rejected",
-                "message": "Невідома команда інтерфейсу.",
-            }
+            return self._reject_bridge_command(
+                request_id,
+                "Невідома команда інтерфейсу.",
+            )
         with self._lock:
             previous = self._request_results.get(request_id)
             if previous is not None:
                 previous_identity, previous_result = previous
                 if previous_identity != command_identity:
-                    return {
-                        "request_id": request_id,
-                        "status": "rejected",
-                        "message": "Повторний ідентифікатор належить іншій команді.",
-                    }
+                    return self._reject_bridge_command(
+                        request_id,
+                        "Повторний ідентифікатор належить іншій команді.",
+                    )
                 return dict(previous_result)
 
             if self._closing:

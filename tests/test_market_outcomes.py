@@ -1,5 +1,7 @@
 import copy
 import unittest
+
+import autosport.market_outcomes as market_outcomes_module
 from datetime import datetime, timezone
 from decimal import Decimal
 
@@ -47,18 +49,32 @@ class MarketOutcomeAuthorityTests(unittest.TestCase):
         self,
         selection_ids: tuple[str, ...] = ("away", "draw", "home"),
     ) -> MarketSettlementOutcomeAuthority:
-        assessment = assess_betfair_historical_market_definition_authority(
+        """Issue a test-only internal authority without asserting provider origin."""
+
+        identity = MarketOutcomeIdentity(
+            sport="table_tennis",
+            event_id="event-1",
             market_id="match_odds",
-            market_definition=self._market_definition(selection_ids),
-            provider_publish_at="2026-09-18T15:00:00Z",
-            observed_at="2026-09-18T15:00:01Z",
+            source_id=self.SOURCE_ID,
+            market_type=MarketType.WINNER,
         )
-        self.assertEqual(
-            assessment.status,
-            OutcomeAuthorityStatus.PROVEN_EXHAUSTIVE,
-        )
-        self.assertIsNotNone(assessment.authority)
-        return assessment.authority  # type: ignore[return-value]
+        issuance = market_outcomes_module._VERIFIED_AUTHORITY_ISSUANCE.set(True)
+        try:
+            return MarketSettlementOutcomeAuthority(
+                identity=identity,
+                selection_ids=tuple(sorted(selection_ids)),
+                roster_basis=OutcomeRosterBasis.GOVERNED_DATASET_MARKET_DEFINITION,
+                settlement_semantics=SettlementSemantics.CANONICAL_WIN_LOSS_VOID_SUPERSET,
+                source_revision="test-only-governed-dataset-revision",
+                causal_cutoff="2026-09-18T15:00:00Z",
+                observed_at="2026-09-18T15:00:01Z",
+                roster_provenance_sha256="a" * 64,
+                settlement_rules_sha256="b" * 64,
+                verification_protocol_sha256="c" * 64,
+                _verification_token=market_outcomes_module._VERIFIED_AUTHORITY_TOKEN,
+            )
+        finally:
+            market_outcomes_module._VERIFIED_AUTHORITY_ISSUANCE.reset(issuance)
 
     @staticmethod
     def _raw_identity(
@@ -156,6 +172,20 @@ class MarketOutcomeAuthorityTests(unittest.TestCase):
         self.assertEqual(
             assessment.refusal_reason,
             "market_type_has_no_supported_terminal_settlement_semantics",
+        )
+
+    def test_betfair_raw_definition_cannot_mint_provider_origin_authority(self):
+        assessment = assess_betfair_historical_market_definition_authority(
+            market_id="match_odds",
+            market_definition=self._market_definition(),
+            provider_publish_at="2026-09-18T15:00:00Z",
+            observed_at="2026-09-18T15:00:01Z",
+        )
+        self.assertEqual(assessment.status, OutcomeAuthorityStatus.REFUSED)
+        self.assertIsNone(assessment.authority)
+        self.assertEqual(
+            assessment.refusal_reason,
+            "betfair_market_definition_provider_origin_unverified",
         )
 
     def test_betfair_adapter_refuses_non_open_or_unsupported_definition(self):

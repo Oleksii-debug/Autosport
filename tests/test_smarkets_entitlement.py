@@ -94,9 +94,10 @@ def test_unapproved_purpose_fails_closed():
     assert result.reason == "PURPOSE_NOT_APPROVED"
 
 
-def test_provider_prohibited_benchmarking_cannot_be_minted():
+@pytest.mark.parametrize("purpose", [SmarketsPurpose.BENCHMARKING, SmarketsPurpose.RESEARCH])
+def test_provider_prohibited_nontrading_purposes_cannot_be_minted(purpose):
     with pytest.raises(SmarketsEntitlementError, match="provider terms prohibit"):
-        _entitlement(purposes=(SmarketsPurpose.BENCHMARKING,))
+        _entitlement(purposes=(purpose,))
 
 
 def test_account_scope_mismatch_fails_closed_and_decision_binds_source_scope():

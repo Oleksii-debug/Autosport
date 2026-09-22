@@ -34,6 +34,7 @@ from .supervised_provider_evidence import (
     VerifiedProviderAbsenceEvidence,
     VerifiedProviderEffectEvidence,
     VerifiedProviderState,
+    _register_betfair_timeout_absence_authority_assertion,
     verify_betfair_provider_state,
 )
 
@@ -400,7 +401,7 @@ def _durable_timeout_authority(
     return provider_order_ref, recorded_at, snapshot.sha256
 
 
-def resolve_betfair_timeout_provider_state(
+def _resolve_betfair_timeout_provider_state_core(
     ledger: RealExecutionLedger,
     action: ExecutionAction,
     profile: BookmakerCapabilityProfile,
@@ -540,7 +541,71 @@ def _install_betfair_timeout_absence_authority() -> None:
         ],
     ] = {}
     issued_lock = threading.RLock()
-    raw_resolve = resolve_betfair_timeout_provider_state
+    raw_resolve = _resolve_betfair_timeout_provider_state_core
+    raw_resolve_code = raw_resolve.__code__
+    sealed_error = BetfairTimeoutResolutionError
+    sealed_kind = BetfairTimeoutResolutionKind
+    sealed_absence_type = VerifiedProviderAbsenceEvidence
+    sealed_retire_anchor = _retire_timeout_elapsed_visibility_anchor
+    missing = object()
+
+    def seal_function_graph(root: object) -> dict[str, tuple[object, object | None]]:
+        module_globals = globals()
+        sealed: dict[str, tuple[object, object | None]] = {}
+        pending = [root]
+        visited: set[int] = set()
+        while pending:
+            function = pending.pop()
+            if id(function) in visited:
+                continue
+            visited.add(id(function))
+            code = getattr(function, "__code__", None)
+            function_globals = getattr(function, "__globals__", None)
+            if code is None or function_globals is not module_globals:
+                continue
+            for name in code.co_names:
+                if name not in module_globals or name in sealed:
+                    continue
+                value = module_globals[name]
+                value_code = getattr(value, "__code__", None)
+                sealed[name] = (value, value_code)
+                if (
+                    value_code is not None
+                    and getattr(value, "__globals__", None) is module_globals
+                ):
+                    pending.append(value)
+        return sealed
+
+    sealed_resolver_graph = seal_function_graph(raw_resolve)
+    sealed_wrapper_bindings = {
+        "BetfairTimeoutResolutionError": sealed_error,
+        "BetfairTimeoutResolutionKind": sealed_kind,
+        "VerifiedProviderAbsenceEvidence": sealed_absence_type,
+        "_retire_timeout_elapsed_visibility_anchor": sealed_retire_anchor,
+    }
+
+    def assert_executable_authority_intact() -> None:
+        module_globals = globals()
+        if raw_resolve.__code__ is not raw_resolve_code:
+            raise sealed_error("timeout resolver executable code changed")
+        for name, (expected, expected_code) in sealed_resolver_graph.items():
+            current = module_globals.get(name, missing)
+            if current is not expected:
+                raise sealed_error(
+                    f"timeout resolver executable authority changed: {name}"
+                )
+            if (
+                expected_code is not None
+                and getattr(current, "__code__", None) is not expected_code
+            ):
+                raise sealed_error(
+                    f"timeout resolver executable code changed: {name}"
+                )
+        for name, expected in sealed_wrapper_bindings.items():
+            if module_globals.get(name, missing) is not expected:
+                raise sealed_error(
+                    f"timeout resolver authority binding changed: {name}"
+                )
 
     def authoritative_resolve(
         ledger: RealExecutionLedger,
@@ -551,6 +616,7 @@ def _install_betfair_timeout_absence_authority() -> None:
         expected_profile_sha256: str,
         readback: BetfairExecutionReadbackEnvelope,
     ) -> BetfairTimeoutResolution:
+        assert_executable_authority_intact()
         result = raw_resolve(
             ledger,
             action,
@@ -559,10 +625,11 @@ def _install_betfair_timeout_absence_authority() -> None:
             expected_profile_sha256=expected_profile_sha256,
             readback=readback,
         )
+        assert_executable_authority_intact()
         evidence = result.evidence
         if (
-            result.kind is BetfairTimeoutResolutionKind.ABSENT_AFTER_VISIBILITY_HORIZON
-            and isinstance(evidence, VerifiedProviderAbsenceEvidence)
+            result.kind is sealed_kind.ABSENT_AFTER_VISIBILITY_HORIZON
+            and isinstance(evidence, sealed_absence_type)
         ):
             evidence_key = id(evidence)
             anchor_key = (id(ledger), attempt_id)
@@ -592,7 +659,7 @@ def _install_betfair_timeout_absence_authority() -> None:
                         ) in issued.values()
                     ):
                         return
-                    _retire_timeout_elapsed_visibility_anchor(
+                    sealed_retire_anchor(
                         current_ledger,
                         elapsed_attempt_id,
                     )
@@ -608,23 +675,26 @@ def _install_betfair_timeout_absence_authority() -> None:
     def assert_betfair_timeout_absence_authoritative(
         evidence: VerifiedProviderAbsenceEvidence,
     ) -> None:
-        if not isinstance(evidence, VerifiedProviderAbsenceEvidence):
-            raise BetfairTimeoutResolutionError(
-                "timeout absence evidence type is not canonical"
-            )
+        assert_executable_authority_intact()
+        if not isinstance(evidence, sealed_absence_type):
+            raise sealed_error("timeout absence evidence type is not canonical")
         if evidence.provider_order_ref is None:
             return
         with issued_lock:
             record = issued.get(id(evidence))
             if record is None or record[0]() is not evidence:
-                raise BetfairTimeoutResolutionError(
+                raise sealed_error(
                     "provider absence did not pass durable Betfair timeout visibility authority"
                 )
 
+    _register_betfair_timeout_absence_authority_assertion(
+        assert_betfair_timeout_absence_authoritative
+    )
     globals()["resolve_betfair_timeout_provider_state"] = authoritative_resolve
     globals()[
         "assert_betfair_timeout_absence_authoritative"
     ] = assert_betfair_timeout_absence_authoritative
+
 
 _install_betfair_timeout_absence_authority()
 del _install_betfair_timeout_absence_authority

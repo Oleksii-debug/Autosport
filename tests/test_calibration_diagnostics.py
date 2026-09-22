@@ -410,6 +410,48 @@ class CalibrationDiagnosticsTests(unittest.TestCase):
                 bins=2,
             )
 
+    def test_iid_screen_rejects_twelve_aliases_and_accepts_twelve_distinct_clusters(self):
+        records = tuple(
+            self._record(
+                f"cluster-{index}",
+                "0.2" if index % 2 == 0 else "0.8",
+            )
+            for index in range(12)
+        )
+        outcomes = tuple(
+            ForecastOutcomeFact(
+                record.forecast_id,
+                index % 2,
+                "2026-02-20T14:00:00+00:00",
+            )
+            for index, record in enumerate(records)
+        )
+
+        distinct = self._evaluate(
+            records,
+            outcomes,
+            self._window(),
+            bins=4,
+        )
+        self.assertEqual(distinct.count, 12)
+        self.assertEqual(distinct.raw_sample_count, 12)
+        self.assertEqual(distinct.effective_sample_count, 12)
+
+        aliased = tuple(
+            replace(
+                record,
+                quote_key=f"shared-event|market-{index}|selection-{index}",
+            )
+            for index, record in enumerate(records)
+        )
+        with self.assertRaisesRegex(ValueError, "repeated canonical event cluster"):
+            self._evaluate(
+                aliased,
+                outcomes,
+                self._window(),
+                bins=4,
+            )
+
     def test_iid_screen_supports_sport_v2_and_clusters_same_event(self):
         records, outcomes = self._cohort()
         first = replace(

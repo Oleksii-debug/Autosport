@@ -188,8 +188,8 @@ class MatchbookSessionLifecycle:
         generation_id = _validate_generation_id(generation_id)
         http_status = _validate_http_status(http_status)
         monotonic_ns = _validate_monotonic_ns(monotonic_ns)
-        self._observe_clock(monotonic_ns)
         self._require_current_runtime_generation(generation_id)
+        self._observe_clock(monotonic_ns)
 
         if self._state in {SessionState.EXPIRED, SessionState.RESTART_REAUTH_REQUIRED}:
             raise SessionLifecycleError(
@@ -211,8 +211,8 @@ class MatchbookSessionLifecycle:
     ) -> None:
         generation_id = _validate_generation_id(generation_id)
         monotonic_ns = _validate_monotonic_ns(monotonic_ns)
-        self._observe_clock(monotonic_ns)
         self._require_current_runtime_generation(generation_id)
+        self._observe_clock(monotonic_ns)
         if self._state in {SessionState.EXPIRED, SessionState.RESTART_REAUTH_REQUIRED}:
             return
         self._last_observation_monotonic_ns = monotonic_ns
@@ -224,8 +224,8 @@ class MatchbookSessionLifecycle:
     ) -> None:
         generation_id = _validate_generation_id(generation_id)
         monotonic_ns = _validate_monotonic_ns(monotonic_ns)
-        self._observe_clock(monotonic_ns)
         self._require_current_runtime_generation(generation_id)
+        self._observe_clock(monotonic_ns)
         self._last_observation_monotonic_ns = monotonic_ns
         self._last_http_status = 200
         self._state = SessionState.EXPIRED

@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pytest
 
+import autosport.monotonic_workspace_binding as workspace_binding
 from autosport.monotonic_workspace_authority import (
     MonotonicAuthorityConfigurationError,
     MonotonicWorkspaceAuthority,
@@ -37,8 +38,11 @@ def test_same_explicit_instance_id_in_independent_roots_does_not_globally_alias(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     machine_state_home = tmp_path / "stable-machine-state"
-    monkeypatch.setenv("LOCALAPPDATA", str(machine_state_home))
-    monkeypatch.setenv("XDG_STATE_HOME", str(machine_state_home))
+    monkeypatch.setattr(
+        workspace_binding,
+        "_native_machine_state_base",
+        lambda: machine_state_home,
+    )
 
     workspace_a = tmp_path / "workspace-a"
     workspace_b = tmp_path / "workspace-b"

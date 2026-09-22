@@ -9,7 +9,7 @@ derived only from exact provider readback bound to an existing canonical Executi
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from decimal import Decimal, InvalidOperation
 from enum import Enum
 from hashlib import sha256
@@ -482,23 +482,38 @@ def verify_smarkets_order_readback(
 
 @dataclass(frozen=True, slots=True)
 class SmarketsRateLimitEvidence:
+    """Exact 429 evidence using Smarkets' relative X-RateLimit-Reset semantics."""
+
     observed_at: str
-    provider_reset_at: str
+    reset_after_seconds: int
     source_payload_sha256: str
+    http_status: int = 429
+    error_type: str = "RATE_LIMIT_EXCEEDED"
 
     def __post_init__(self) -> None:
-        observed = _timestamp(self.observed_at, "observed_at")
-        reset = _timestamp(self.provider_reset_at, "provider_reset_at")
-        if reset <= observed:
+        _timestamp(self.observed_at, "observed_at")
+        if type(self.reset_after_seconds) is not int or self.reset_after_seconds < 0:
             raise SmarketsReconciliationError(
-                "provider_reset_at must be after observed_at"
+                "reset_after_seconds must be a non-negative non-boolean int"
+            )
+        if type(self.http_status) is not int or self.http_status != 429:
+            raise SmarketsReconciliationError(
+                "Smarkets rate-limit evidence requires HTTP 429"
+            )
+        if self.error_type != "RATE_LIMIT_EXCEEDED":
+            raise SmarketsReconciliationError(
+                "Smarkets rate-limit evidence requires RATE_LIMIT_EXCEEDED"
             )
         _sha256(self.source_payload_sha256, "source_payload_sha256")
 
-    def retry_allowed(self, now: str) -> bool:
-        return _timestamp(now, "now") >= _timestamp(
-            self.provider_reset_at, "provider_reset_at"
+    @property
+    def retry_not_before(self) -> datetime:
+        return _timestamp(self.observed_at, "observed_at") + timedelta(
+            seconds=self.reset_after_seconds
         )
+
+    def retry_allowed(self, now: str) -> bool:
+        return _timestamp(now, "now") >= self.retry_not_before
 
 
 _EFFECT_RECORD_KEYS = {

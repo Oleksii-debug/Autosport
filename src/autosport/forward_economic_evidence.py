@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from copy import deepcopy
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from decimal import Decimal, localcontext
@@ -494,7 +495,8 @@ class ForwardEconomicEvidenceAccumulator:
     def __init__(self, protocol: ForwardEconomicProtocol) -> None:
         if type(protocol) is not ForwardEconomicProtocol:
             raise ForwardEconomicEvidenceError("protocol must be an exact ForwardEconomicProtocol")
-        self.protocol = protocol
+        self._protocol = deepcopy(protocol)
+        self._protocol_sha256 = self._protocol.identity_sha256
         self._steps: list[ForwardEconomicStep] = []
         self._absolute_log_e = Decimal(0)
         self._paired_log_e = Decimal(0)
@@ -503,13 +505,23 @@ class ForwardEconomicEvidenceAccumulator:
         self._challenger_peak = Decimal(0)
         self._challenger_max_drawdown = Decimal(0)
 
+    def _validated_protocol(self) -> ForwardEconomicProtocol:
+        if self._protocol.identity_sha256 != self._protocol_sha256:
+            raise ForwardEconomicEvidenceError("internal protocol snapshot integrity drift")
+        return self._protocol
+
+    @property
+    def protocol(self) -> ForwardEconomicProtocol:
+        return deepcopy(self._validated_protocol())
+
     @property
     def steps(self) -> tuple[ForwardEconomicStep, ...]:
-        return tuple(self._steps)
+        self._validated_protocol()
+        return tuple(deepcopy(step) for step in self._steps)
 
     @property
     def next_sequence(self) -> int:
-        return self.protocol.start_sequence + len(self._steps)
+        return self._validated_protocol().start_sequence + len(self._steps)
 
     def _resolver_authority_sha256(self, resolver: EconomicAuthorityResolver) -> str:
         try:
@@ -671,29 +683,30 @@ class ForwardEconomicEvidenceAccumulator:
             champion_settlement_available_at=champion.settlement_available_at,
         )
 
-        self._steps.append(step)
+        self._steps.append(deepcopy(step))
         self._absolute_log_e = new_absolute_log_e
         self._paired_log_e = new_paired_log_e
         self._challenger_total = new_challenger_total
         self._champion_total = new_champion_total
         self._challenger_peak = new_peak
         self._challenger_max_drawdown = new_max_drawdown
-        return step
+        return deepcopy(step)
 
     def summary(self) -> ForwardEconomicEvidenceSummary:
-        threshold = _log_threshold(self.protocol.challenger_alpha)
-        minimum_events_satisfied = len(self._steps) >= self.protocol.minimum_events
+        protocol = self._validated_protocol()
+        threshold = _log_threshold(protocol.challenger_alpha)
+        minimum_events_satisfied = len(self._steps) >= protocol.minimum_events
         absolute_crossed = self._absolute_log_e >= threshold
         paired_crossed = self._paired_log_e >= threshold
-        drawdown_passed = self._challenger_max_drawdown <= self.protocol.maximum_drawdown_currency
+        drawdown_passed = self._challenger_max_drawdown <= protocol.maximum_drawdown_currency
         evidence_payload = {
             "schema_version": 1,
-            "protocol_sha256": self.protocol.identity_sha256,
+            "protocol_sha256": self._protocol_sha256,
             "steps": [step.to_payload() for step in self._steps],
         }
         evidence_sha256 = _canonical_digest(evidence_payload)
         return ForwardEconomicEvidenceSummary(
-            protocol_sha256=self.protocol.identity_sha256,
+            protocol_sha256=self._protocol_sha256,
             observed_events=len(self._steps),
             next_sequence=self.next_sequence,
             challenger_total_pnl_currency=self._challenger_total,

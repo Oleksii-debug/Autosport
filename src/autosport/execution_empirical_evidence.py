@@ -814,7 +814,7 @@ def build_empirical_execution_evidence(
 POPULATION_SCHEMA_VERSION = 1
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True, slots=True, init=False)
 class EmpiricalExecutionPopulationEvidence:
     """Frozen whole-ledger execution-quality denominator.
 
@@ -1036,6 +1036,27 @@ class EmpiricalExecutionPopulationEvidence:
         return payload
 
 
+def _issue_empirical_execution_population_evidence(
+    *,
+    source_ledger_sha256: str,
+    source_event_count: int,
+    evaluation_protocol_sha256: str,
+    samples: tuple[EmpiricalExecutionEvidence, ...],
+) -> EmpiricalExecutionPopulationEvidence:
+    evidence = object.__new__(EmpiricalExecutionPopulationEvidence)
+    object.__setattr__(evidence, "source_ledger_sha256", source_ledger_sha256)
+    object.__setattr__(evidence, "source_event_count", source_event_count)
+    object.__setattr__(
+        evidence,
+        "evaluation_protocol_sha256",
+        evaluation_protocol_sha256,
+    )
+    object.__setattr__(evidence, "samples", samples)
+    object.__setattr__(evidence, "schema_version", POPULATION_SCHEMA_VERSION)
+    evidence.__post_init__()
+    return evidence
+
+
 def build_empirical_execution_population_evidence(
     ledger: RealExecutionLedger,
     *,
@@ -1092,7 +1113,7 @@ def build_empirical_execution_population_evidence(
             "ledger changed during population projection"
         )
 
-    return EmpiricalExecutionPopulationEvidence(
+    return _issue_empirical_execution_population_evidence(
         source_ledger_sha256=initial_snapshot.sha256,
         source_event_count=initial_snapshot.event_count,
         evaluation_protocol_sha256=protocol_sha256,

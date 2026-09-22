@@ -292,6 +292,7 @@ def test_base_open_ticket_settlement_does_not_double_debit_stake(tmp_path) -> No
     assert len(replay.transitions) == 1
     assert replay.transitions[0].action == "settle"
 
+
 @pytest.mark.parametrize(
     "bankroll",
     ("1E+100000000", "1E-100000000"),

@@ -244,3 +244,24 @@ def test_qualified_failure_without_terminal_order_status_requires_readback() -> 
 
     assert report.instruction.order_status is None
     assert _report_outcome(report, action) is PlaceOrdersOutcome.UNKNOWN
+
+
+
+def test_success_zero_match_with_positive_average_is_ambiguous() -> None:
+    action = _action()
+
+    with pytest.raises(
+        BetfairPlaceOrdersAmbiguous,
+        match="zero matched stake cannot claim positive average price",
+    ):
+        _parse_place_orders_response(
+            _success_payload(
+                size_matched=0,
+                average_price_matched=2,
+            ),
+            request_id=1,
+            request_sha256="a" * 64,
+            action=action,
+            provider_order_ref="b" * 32,
+            observed_at=OBSERVED_AT,
+        )

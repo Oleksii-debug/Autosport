@@ -1,0 +1,395 @@
+"""ProphetX order identity/retry policy over the canonical RealExecutionLedger.
+
+No provider transport or write path exists here. REST duplicate suppression is never
+promoted to replay semantics; FIX redelivery remains a separately qualified profile.
+"""
+
+from __future__ import annotations
+
+import json
+from dataclasses import dataclass
+from datetime import datetime
+from enum import Enum
+from typing import Iterable
+
+from .real_execution_ledger import AttemptState, RealExecutionLedger
+
+PROPHETX_PROVIDER_ID = "prophetx"
+
+
+class ProphetXOrderIdentityError(RuntimeError):
+    pass
+
+
+class ProphetXEvidenceConflict(ProphetXOrderIdentityError):
+    pass
+
+
+class ProphetXTransport(str, Enum):
+    REST_DIRECT_LINK = "REST_DIRECT_LINK"
+    FIX_ORDER_ENTRY = "FIX_ORDER_ENTRY"
+
+
+class ProphetXEnvironment(str, Enum):
+    SANDBOX = "SANDBOX"
+    PRODUCTION = "PRODUCTION"
+
+
+@dataclass(frozen=True, slots=True)
+class ProphetXProfile:
+    bookmaker_profile_version: str
+    environment: ProphetXEnvironment
+    transport: ProphetXTransport
+    production_write_qualified: bool = False
+
+
+PROPHETX_SANDBOX_REST_PROFILE = ProphetXProfile(
+    "prophetx-sandbox-rest-direct-link-v1",
+    ProphetXEnvironment.SANDBOX,
+    ProphetXTransport.REST_DIRECT_LINK,
+)
+PROPHETX_SANDBOX_FIX_PROFILE = ProphetXProfile(
+    "prophetx-sandbox-fix-order-entry-v1",
+    ProphetXEnvironment.SANDBOX,
+    ProphetXTransport.FIX_ORDER_ENTRY,
+)
+PROPHETX_PRODUCTION_REST_PROFILE = ProphetXProfile(
+    "prophetx-production-rest-direct-link-v1",
+    ProphetXEnvironment.PRODUCTION,
+    ProphetXTransport.REST_DIRECT_LINK,
+)
+PROPHETX_PRODUCTION_FIX_PROFILE = ProphetXProfile(
+    "prophetx-production-fix-order-entry-v1",
+    ProphetXEnvironment.PRODUCTION,
+    ProphetXTransport.FIX_ORDER_ENTRY,
+)
+_PROFILE_BY_VERSION = {
+    item.bookmaker_profile_version: item
+    for item in (
+        PROPHETX_SANDBOX_REST_PROFILE,
+        PROPHETX_SANDBOX_FIX_PROFILE,
+        PROPHETX_PRODUCTION_REST_PROFILE,
+        PROPHETX_PRODUCTION_FIX_PROFILE,
+    )
+}
+
+
+@dataclass(frozen=True, slots=True)
+class ProphetXTransportCapabilities:
+    duplicate_suppression_only: bool
+    idempotent_redelivery_identical_economics: bool
+    order_status_by_client_or_provider_id: bool
+    authoritative_readback_by_external_id: bool
+
+
+REST_DIRECT_LINK_CAPABILITIES = ProphetXTransportCapabilities(True, False, False, False)
+FIX_ORDER_ENTRY_CAPABILITIES = ProphetXTransportCapabilities(False, True, True, False)
+
+
+def capabilities_for(transport: ProphetXTransport) -> ProphetXTransportCapabilities:
+    if transport is ProphetXTransport.REST_DIRECT_LINK:
+        return REST_DIRECT_LINK_CAPABILITIES
+    if transport is ProphetXTransport.FIX_ORDER_ENTRY:
+        return FIX_ORDER_ENTRY_CAPABILITIES
+    raise ValueError(f"unsupported ProphetX transport: {transport!r}")
+
+
+@dataclass(frozen=True, slots=True)
+class ProphetXOrderIdentity:
+    attempt_id: str
+    environment: ProphetXEnvironment
+    transport: ProphetXTransport
+    client_order_id: str
+    effect_fingerprint: str
+    production_write_qualified: bool
+
+    def __post_init__(self) -> None:
+        if not self.attempt_id.strip():
+            raise ValueError("attempt_id must be non-empty")
+        if not 1 <= len(self.client_order_id) <= 32:
+            raise ValueError("client_order_id must be 1..32 characters")
+        _sha256(self.effect_fingerprint, "effect_fingerprint")
+
+
+class ProphetXEvidenceKind(str, Enum):
+    ORDER_STATE = "ORDER_STATE"
+    DUPLICATE_REJECTION = "DUPLICATE_REJECTION"
+    WALLET_TRANSACTION = "WALLET_TRANSACTION"
+    FIX_EXECUTION_REPORT = "FIX_EXECUTION_REPORT"
+    FIX_ORDER_STATUS_UNKNOWN = "FIX_ORDER_STATUS_UNKNOWN"
+    FIX_RATE_LIMIT_PREPROCESSING_REJECT = "FIX_RATE_LIMIT_PREPROCESSING_REJECT"
+
+
+@dataclass(frozen=True, slots=True)
+class ProphetXProviderEvidence:
+    evidence_id: str
+    kind: ProphetXEvidenceKind
+    transport: ProphetXTransport
+    observed_at: str
+    client_order_id: str | None = None
+    provider_order_id: str | None = None
+    effect_fingerprint: str | None = None
+
+    def __post_init__(self) -> None:
+        _sha256(self.evidence_id, "evidence_id")
+        _time(self.observed_at, "observed_at")
+        if self.client_order_id is not None and not self.client_order_id.strip():
+            raise ValueError("client_order_id must be non-empty when present")
+        if self.provider_order_id is not None and not self.provider_order_id.strip():
+            raise ValueError("provider_order_id must be non-empty when present")
+        if self.effect_fingerprint is not None:
+            _sha256(self.effect_fingerprint, "effect_fingerprint")
+
+
+class ProphetXReconciliationDisposition(str, Enum):
+    MATCHED_PROVIDER_ORDER_CANDIDATE = "MATCHED_PROVIDER_ORDER_CANDIDATE"
+    PROVIDER_NOT_FOUND_CANDIDATE = "PROVIDER_NOT_FOUND_CANDIDATE"
+    WAIT_EXTERNAL_EVIDENCE = "WAIT_EXTERNAL_EVIDENCE"
+    UNRELATED_PROVIDER_EVIDENCE = "UNRELATED_PROVIDER_EVIDENCE"
+    CONFLICT = "CONFLICT"
+
+
+class ProphetXRetryDisposition(str, Enum):
+    WAIT_EXTERNAL_EVIDENCE = "WAIT_EXTERNAL_EVIDENCE"
+    SAME_CLIENT_ID_REDELIVERY_CANDIDATE = "SAME_CLIENT_ID_REDELIVERY_CANDIDATE"
+    SAME_CLIENT_ID_RETRY_AFTER_BACKOFF_CANDIDATE = (
+        "SAME_CLIENT_ID_RETRY_AFTER_BACKOFF_CANDIDATE"
+    )
+    LOCAL_REJECT_DIFFERENT_ECONOMICS = "LOCAL_REJECT_DIFFERENT_ECONOMICS"
+    PROFILE_UNQUALIFIED = "PROFILE_UNQUALIFIED"
+
+
+@dataclass(frozen=True, slots=True)
+class ProphetXFixExecutionReport:
+    exec_id: str
+    client_order_id: str
+    provider_order_id: str
+    transact_time: str
+    effect_fingerprint: str
+    lifecycle_state: str
+    cumulative_filled_quantity: str
+
+    def __post_init__(self) -> None:
+        for name in (
+            "exec_id",
+            "client_order_id",
+            "provider_order_id",
+            "lifecycle_state",
+            "cumulative_filled_quantity",
+        ):
+            if not isinstance(getattr(self, name), str) or not getattr(self, name).strip():
+                raise ValueError(f"{name} must be non-empty text")
+        _time(self.transact_time, "transact_time")
+        _sha256(self.effect_fingerprint, "effect_fingerprint")
+
+
+def _sha256(value: str, field: str) -> str:
+    if (
+        not isinstance(value, str)
+        or len(value) != 64
+        or any(char not in "0123456789abcdef" for char in value)
+    ):
+        raise ValueError(f"{field} must be lowercase SHA-256 hex")
+    return value
+
+
+def _time(value: str, field: str) -> datetime:
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except (AttributeError, ValueError) as exc:
+        raise ValueError(f"{field} must be timezone-aware ISO-8601 text") from exc
+    if not value.strip() or parsed.tzinfo is None or parsed.utcoffset() is None:
+        raise ValueError(f"{field} must be timezone-aware ISO-8601 text")
+    return parsed
+
+
+def _durable_attempt_facts(
+    ledger: RealExecutionLedger, attempt_id: str
+) -> tuple[ProphetXProfile, str]:
+    """Read profile/effect only from ledger bytes already verified by canonical authority."""
+
+    snapshot = ledger.verified_snapshot()
+    try:
+        events = [
+            json.loads(line)["event"]
+            for line in snapshot.payload.decode("utf-8").splitlines()
+            if line
+        ]
+    except (KeyError, TypeError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ProphetXOrderIdentityError(
+            "verified execution snapshot is incompatible with ProphetX adapter"
+        ) from exc
+
+    attempts = [
+        event
+        for event in events
+        if event.get("attempt_id") == attempt_id
+        and event.get("event_type") == "ATTEMPT_RESERVED"
+    ]
+    if len(attempts) != 1:
+        raise ProphetXOrderIdentityError(
+            "ProphetX identity requires exactly one durable attempt reservation"
+        )
+    attempt = attempts[0]
+    try:
+        effect = _sha256(attempt["payload"]["effect_fingerprint"], "effect_fingerprint")
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ProphetXOrderIdentityError("durable effect fingerprint is invalid") from exc
+
+    plans = [
+        event
+        for event in events
+        if event.get("plan_id") == attempt.get("plan_id")
+        and event.get("event_type") == "PLAN_RESERVED"
+    ]
+    if len(plans) != 1:
+        raise ProphetXOrderIdentityError(
+            "ProphetX identity requires exactly one durable execution plan"
+        )
+    version = plans[0].get("payload", {}).get("plan", {}).get("bookmaker_profile_version")
+    profile = _PROFILE_BY_VERSION.get(version)
+    if profile is None:
+        raise ProphetXOrderIdentityError(
+            "attempt is not durably bound to a qualified ProphetX transport profile"
+        )
+    return profile, effect
+
+
+def bind_before_effect(
+    ledger: RealExecutionLedger, *, attempt_id: str
+) -> ProphetXOrderIdentity:
+    if ledger.attempt_state(attempt_id) is not AttemptState.RESERVED:
+        raise ProphetXOrderIdentityError(
+            "ProphetX client order identity must be bound before external effect"
+        )
+    _durable_attempt_facts(ledger, attempt_id)
+    reference = ledger.bind_provider_order_reference(
+        attempt_id=attempt_id, provider_id=PROPHETX_PROVIDER_ID
+    )
+    return load_identity(ledger, attempt_id=attempt_id, expected_reference=reference)
+
+
+def load_identity(
+    ledger: RealExecutionLedger,
+    *,
+    attempt_id: str,
+    expected_reference: str | None = None,
+) -> ProphetXOrderIdentity:
+    profile, effect = _durable_attempt_facts(ledger, attempt_id)
+    reference = ledger.provider_order_reference(
+        attempt_id=attempt_id, provider_id=PROPHETX_PROVIDER_ID
+    )
+    if reference is None:
+        raise ProphetXOrderIdentityError(
+            "attempt has no durable ProphetX client order identity"
+        )
+    if expected_reference is not None and reference != expected_reference:
+        raise ProphetXEvidenceConflict("durable ProphetX client order identity changed")
+    return ProphetXOrderIdentity(
+        attempt_id,
+        profile.environment,
+        profile.transport,
+        reference,
+        effect,
+        profile.production_write_qualified,
+    )
+
+
+def mark_ambiguous_delivery(
+    ledger: RealExecutionLedger,
+    *,
+    identity: ProphetXOrderIdentity,
+    reason: str,
+    observed_at: str,
+) -> None:
+    if load_identity(ledger, attempt_id=identity.attempt_id) != identity:
+        raise ProphetXEvidenceConflict("ProphetX identity no longer matches durable attempt")
+    ledger.mark_unknown(identity.attempt_id, reason=reason, observed_at=observed_at)
+
+
+def reconciliation_disposition(
+    identity: ProphetXOrderIdentity,
+    evidence: ProphetXProviderEvidence,
+) -> ProphetXReconciliationDisposition:
+    """Return correlation candidates only; never mint #1634/#530 provider truth."""
+
+    if evidence.transport is not identity.transport:
+        return ProphetXReconciliationDisposition.CONFLICT
+    if (
+        evidence.effect_fingerprint is not None
+        and evidence.effect_fingerprint != identity.effect_fingerprint
+    ):
+        return ProphetXReconciliationDisposition.CONFLICT
+    if evidence.client_order_id is None:
+        return ProphetXReconciliationDisposition.WAIT_EXTERNAL_EVIDENCE
+    if evidence.client_order_id != identity.client_order_id:
+        return ProphetXReconciliationDisposition.UNRELATED_PROVIDER_EVIDENCE
+
+    if identity.transport is ProphetXTransport.REST_DIRECT_LINK:
+        if (
+            evidence.kind is ProphetXEvidenceKind.ORDER_STATE
+            and evidence.provider_order_id
+        ):
+            return ProphetXReconciliationDisposition.MATCHED_PROVIDER_ORDER_CANDIDATE
+        return ProphetXReconciliationDisposition.WAIT_EXTERNAL_EVIDENCE
+
+    if evidence.kind is ProphetXEvidenceKind.FIX_ORDER_STATUS_UNKNOWN:
+        return ProphetXReconciliationDisposition.PROVIDER_NOT_FOUND_CANDIDATE
+    if evidence.kind is ProphetXEvidenceKind.FIX_EXECUTION_REPORT:
+        return (
+            ProphetXReconciliationDisposition.MATCHED_PROVIDER_ORDER_CANDIDATE
+            if evidence.provider_order_id
+            else ProphetXReconciliationDisposition.CONFLICT
+        )
+    return ProphetXReconciliationDisposition.WAIT_EXTERNAL_EVIDENCE
+
+
+def retry_disposition(
+    identity: ProphetXOrderIdentity,
+    *,
+    candidate_effect_fingerprint: str,
+    exact_provider_profile_qualified: bool,
+    preprocessing_rate_limit_reject: bool = False,
+) -> ProphetXRetryDisposition:
+    """Return only a candidate policy outcome; canonical authority still gates effects."""
+
+    _sha256(candidate_effect_fingerprint, "candidate_effect_fingerprint")
+    if candidate_effect_fingerprint != identity.effect_fingerprint:
+        return ProphetXRetryDisposition.LOCAL_REJECT_DIFFERENT_ECONOMICS
+    if not exact_provider_profile_qualified:
+        return ProphetXRetryDisposition.PROFILE_UNQUALIFIED
+    if identity.transport is ProphetXTransport.REST_DIRECT_LINK:
+        return ProphetXRetryDisposition.WAIT_EXTERNAL_EVIDENCE
+    if preprocessing_rate_limit_reject:
+        return ProphetXRetryDisposition.SAME_CLIENT_ID_RETRY_AFTER_BACKOFF_CANDIDATE
+    return ProphetXRetryDisposition.SAME_CLIENT_ID_REDELIVERY_CANDIDATE
+
+
+def normalize_fix_execution_reports(
+    identity: ProphetXOrderIdentity,
+    reports: Iterable[ProphetXFixExecutionReport],
+) -> tuple[ProphetXFixExecutionReport, ...]:
+    if identity.transport is not ProphetXTransport.FIX_ORDER_ENTRY:
+        raise ProphetXOrderIdentityError(
+            "FIX execution reports cannot be applied to a REST identity"
+        )
+    by_exec_id: dict[str, ProphetXFixExecutionReport] = {}
+    for report in reports:
+        if report.client_order_id != identity.client_order_id:
+            raise ProphetXEvidenceConflict(
+                "FIX report client order id mismatches durable attempt"
+            )
+        if report.effect_fingerprint != identity.effect_fingerprint:
+            raise ProphetXEvidenceConflict("FIX report economics mismatch durable attempt")
+        prior = by_exec_id.get(report.exec_id)
+        if prior is not None and prior != report:
+            raise ProphetXEvidenceConflict(
+                "same FIX ExecID has conflicting provider evidence"
+            )
+        by_exec_id[report.exec_id] = report
+    return tuple(
+        sorted(
+            by_exec_id.values(),
+            key=lambda report: (_time(report.transact_time, "transact_time"), report.exec_id),
+        )
+    )

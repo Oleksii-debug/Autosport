@@ -175,6 +175,19 @@ class SmarketsExecutionAuthority:
         ):
             if type(getattr(self, name)) is not bool:
                 raise SmarketsReconciliationError(f"{name} must be bool")
+        if self.data_harvesting_approved:
+            raise SmarketsReconciliationError(
+                "Smarkets execution authority cannot approve data harvesting"
+            )
+        if self.benchmarking_approved:
+            raise SmarketsReconciliationError(
+                "Smarkets execution authority cannot approve benchmarking"
+            )
+        if self.redistribution_approved:
+            raise SmarketsReconciliationError(
+                "Smarkets execution authority cannot approve redistribution; "
+                "use product-owned provider entitlement evidence"
+            )
 
     @property
     def authority_id(self) -> str:
@@ -198,15 +211,13 @@ class SmarketsExecutionAuthority:
     def require_purpose(self, purpose: SmarketsDataPurpose) -> None:
         if type(purpose) is not SmarketsDataPurpose:
             raise SmarketsReconciliationError("purpose must be SmarketsDataPurpose")
-        allowed = {
-            SmarketsDataPurpose.EXECUTION: self.execution_approved,
-            SmarketsDataPurpose.DATA_HARVESTING: self.data_harvesting_approved,
-            SmarketsDataPurpose.REDISTRIBUTION: self.redistribution_approved,
-            SmarketsDataPurpose.BENCHMARKING: self.benchmarking_approved,
-        }[purpose]
-        if not allowed:
+        if purpose is not SmarketsDataPurpose.EXECUTION:
             raise SmarketsReconciliationError(
-                f"Smarkets authority does not approve {purpose.value}"
+                f"{purpose.value} is outside Smarkets execution-reconciliation authority"
+            )
+        if not self.execution_approved:
+            raise SmarketsReconciliationError(
+                "Smarkets authority does not approve execution"
             )
 
     def assert_action_scope(self, action: ExecutionAction, *, as_of: str) -> None:

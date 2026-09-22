@@ -675,3 +675,42 @@ def test_cost_authority_and_availability_are_bound_into_evidence_identity():
     assert evidence(SHA_D, T0 + timedelta(hours=1)) != base
     assert evidence(SHA_C, T0 + timedelta(hours=2)) != base
 
+def test_early_cost_debit_contributes_to_drawdown_before_later_wager_profit():
+    acc = ForwardEconomicEvidenceAccumulator(
+        protocol(
+            minimum_events=1,
+            maximum_economic_cost_currency=Decimal("2"),
+            maximum_drawdown_currency=Decimal("0.5"),
+        )
+    )
+    obs = observation(0)
+    challenger = ResolvedPolicyOutcome(
+        policy_id="challenger",
+        sequence=obs.sequence,
+        universe_event_sha256=obs.universe_event_sha256,
+        decision_sha256=obs.challenger_decision_sha256,
+        decision_committed_at=T0 + timedelta(minutes=2),
+        side=BetSide.BACK,
+        accepted_odds=Decimal("2"),
+        accepted_stake=Decimal("10"),
+        net_pnl_currency=Decimal("9"),
+        execution_evidence_sha256=SHA_C,
+        execution_accepted_at=T0 + timedelta(minutes=3),
+        settlement_evidence_sha256=SHA_D,
+        settlement_available_at=T0 + timedelta(hours=1),
+        wager_pnl_currency=Decimal("10"),
+        economic_cost_currency=Decimal("1"),
+        economic_cost_evidence_sha256=SHA_A,
+        economic_cost_available_at=T0 + timedelta(minutes=30),
+    )
+    champion = outcome("champion", obs, side=BetSide.NONE, pnl="0")
+
+    acc.record(obs, resolver_for([(obs, challenger, champion)]))
+    summary = acc.summary()
+
+    assert summary.challenger_total_pnl_currency == Decimal("9")
+    assert summary.challenger_peak_pnl_currency == Decimal("9")
+    assert summary.challenger_max_drawdown_currency == Decimal("1")
+    assert summary.drawdown_guard_passed is False
+    assert summary.positive_authority_verified is False
+

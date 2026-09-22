@@ -13,6 +13,7 @@ import autosport.betfair_account_readonly as betfair_readonly
 from autosport.account_snapshot_acquisition import (
     AccountSnapshotAcquisitionError,
     BetfairAccountSnapshotAcquirer,
+    assert_account_snapshot_acquisition_authoritative,
 )
 from autosport.betfair_account_readonly import (
     BetfairReadOnlyError,
@@ -124,7 +125,8 @@ def test_caller_cannot_swap_canonical_client_or_store_after_initialization(
         acquisition_id="canonical-hidden-state",
     )
     assert len(calls) == 2
-    assert acquired.receipt.source_authority_proven is True
+    assert acquired.receipt.source_authority_proven is False
+    assert acquired.source_authority_proven is True
     acquirer.verify(acquired.snapshot, acquired.receipt)
     assert (
         acquirer.resolve(acquired.receipt.acquisition_id).receipt
@@ -158,7 +160,8 @@ def test_class_level_snapshot_reader_rebinding_cannot_mint_authority(
 
     assert len(calls) == 2
     assert acquired.snapshot.balance is not None
-    assert acquired.receipt.source_authority_proven is True
+    assert acquired.receipt.source_authority_proven is False
+    assert acquired.source_authority_proven is True
 
 
 def test_product_owned_read_persists_restart_verifiable_receipt_without_secrets(
@@ -176,7 +179,8 @@ def test_product_owned_read_persists_restart_verifiable_receipt_without_secrets(
 
     assert acquired.snapshot.balance is not None
     assert acquired.snapshot.balance.available_balance == Decimal("100.1")
-    assert acquired.receipt.source_authority_proven is True
+    assert acquired.receipt.source_authority_proven is False
+    assert acquired.source_authority_proven is True
     assert acquired.receipt.provider_account_identity_proven is False
     assert acquired.receipt.grants_execution_authority is False
     assert acquired.receipt.grants_settlement_authority is False
@@ -189,6 +193,14 @@ def test_product_owned_read_persists_restart_verifiable_receipt_without_secrets(
     resolved = reopened.resolve(acquired.receipt.acquisition_id)
 
     assert resolved == acquired
+    assert resolved.receipt.source_authority_proven is False
+    assert resolved.source_authority_proven is False
+    with pytest.raises(
+        AccountSnapshotAcquisitionError,
+        match="not issued by live canonical provider acquisition",
+    ):
+        assert_account_snapshot_acquisition_authoritative(resolved)
+    assert_account_snapshot_acquisition_authoritative(acquired)
     reopened.verify(resolved.snapshot, resolved.receipt)
 
     persisted = b"".join(

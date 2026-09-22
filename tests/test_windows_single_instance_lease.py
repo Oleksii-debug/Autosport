@@ -77,6 +77,8 @@ def test_two_concurrent_contenders_get_exactly_one_owner(
             outcome = "ACQUIRED"
         except WindowsLaunchLeaseHeldError:
             outcome = "HELD"
+        except Exception as exc:
+            outcome = f"ERROR:{type(exc).__name__}"
         with outcomes_lock:
             outcomes.append(outcome)
 

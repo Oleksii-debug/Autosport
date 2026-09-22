@@ -427,6 +427,147 @@ class BoundedMirrorInvalidationBufferTests(unittest.TestCase):
         )
         self.assertEqual(views["decision-a"].revision, views["decision-b"].revision)
 
+    def test_focused_routed_key_cache_saturation_falls_back_without_partial_truth(self) -> None:
+        mirror = MarketMirror()
+        runtime = BoundedMirrorInvalidationBuffer(mirror)
+        dependencies = FocusedMirrorDependencyIndex(
+            mirror,
+            max_cached_keys_per_input=2,
+        )
+        dependencies.register("decision", source_ids="provider-a")
+
+        for selection in ("selection-a", "selection-b", "selection-c"):
+            runtime.accept_persisted(
+                self.event(
+                    source_id="provider-a",
+                    selection=selection,
+                    sequence=1,
+                )
+            )
+            dependencies.affected_inputs(runtime.drain())
+
+        self.assertEqual(dependencies.max_cached_keys_per_input, 2)
+        self.assertFalse(dependencies.routed_cache_complete("decision"))
+        with self.assertRaisesRegex(RuntimeError, "routed key cache is incomplete"):
+            dependencies.matching_keys("decision")
+        with self.assertRaisesRegex(RuntimeError, "routed key cache is incomplete"):
+            dependencies.all_matching_keys()
+
+        canonical = dependencies.decision_view(
+            "decision",
+            as_of=datetime(2026, 9, 16, 19, 0, 10, tzinfo=timezone.utc),
+            max_age=timedelta(minutes=1),
+        )
+        with patch.object(
+            mirror,
+            "active_view_for_keys",
+            side_effect=AssertionError(
+                "saturated routed cache must not use an incomplete key fast path"
+            ),
+        ):
+            incremental = dependencies.incremental_decision_view(
+                "decision",
+                as_of=datetime(2026, 9, 16, 19, 0, 10, tzinfo=timezone.utc),
+                max_age=timedelta(minutes=1),
+            )
+
+        self.assertEqual(incremental, canonical)
+        self.assertEqual(
+            [event.selection_id for event in incremental.events],
+            ["selection-a", "selection-b", "selection-c"],
+        )
+
+    def test_registration_with_more_matching_keys_than_budget_starts_in_fallback_mode(self) -> None:
+        mirror = MarketMirror()
+        runtime = BoundedMirrorInvalidationBuffer(mirror)
+        for selection in ("selection-a", "selection-b", "selection-c"):
+            runtime.accept_persisted(
+                self.event(
+                    source_id="provider-a",
+                    selection=selection,
+                    sequence=1,
+                )
+            )
+
+        dependencies = FocusedMirrorDependencyIndex(
+            mirror,
+            max_cached_keys_per_input=2,
+        )
+        dependencies.register("decision", source_ids="provider-a")
+
+        self.assertFalse(dependencies.routed_cache_complete("decision"))
+        with self.assertRaisesRegex(RuntimeError, "routed key cache is incomplete"):
+            dependencies.matching_keys("decision")
+        with patch.object(
+            mirror,
+            "active_view_for_keys",
+            side_effect=AssertionError(
+                "registration saturation must use canonical selector fallback"
+            ),
+        ):
+            view = dependencies.incremental_decision_view(
+                "decision",
+                as_of=datetime(2026, 9, 16, 19, 0, 10, tzinfo=timezone.utc),
+                max_age=timedelta(minutes=1),
+            )
+        self.assertEqual(len(view.events), 3)
+
+    def test_revision_resync_that_exceeds_key_budget_switches_to_canonical_fallback(self) -> None:
+        mirror = MarketMirror()
+        runtime = BoundedMirrorInvalidationBuffer(mirror)
+        for selection in ("selection-a", "selection-b"):
+            runtime.accept_persisted(
+                self.event(
+                    source_id="provider-a",
+                    selection=selection,
+                    sequence=1,
+                )
+            )
+        runtime.drain()
+
+        dependencies = FocusedMirrorDependencyIndex(
+            mirror,
+            max_cached_keys_per_input=2,
+        )
+        dependencies.register("decision", source_ids="provider-a")
+        self.assertTrue(dependencies.routed_cache_complete("decision"))
+
+        # Advance canonical truth without routing its invalidation through this index.
+        # The revision mismatch must resync, discover saturation, and fail over to the
+        # selector path rather than publish an older two-key subset as revision 3.
+        mirror.apply(
+            self.event(
+                source_id="provider-a",
+                selection="selection-c",
+                sequence=1,
+            )
+        )
+        view = dependencies.incremental_decision_view(
+            "decision",
+            as_of=datetime(2026, 9, 16, 19, 0, 10, tzinfo=timezone.utc),
+            max_age=timedelta(minutes=1),
+        )
+
+        self.assertFalse(dependencies.routed_cache_complete("decision"))
+        self.assertEqual(view.revision, 3)
+        self.assertEqual(
+            [event.selection_id for event in view.events],
+            ["selection-a", "selection-b", "selection-c"],
+        )
+
+    def test_focused_routed_key_cache_budget_rejects_invalid_values(self) -> None:
+        mirror = MarketMirror()
+        for value in (0, -1, True):
+            with self.subTest(value=value):
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "positive non-boolean integer",
+                ):
+                    FocusedMirrorDependencyIndex(
+                        mirror,
+                        max_cached_keys_per_input=value,
+                    )
+
     def test_focused_dependency_overflow_fails_safe_to_all_registered_inputs(self) -> None:
         mirror = MarketMirror()
         runtime = BoundedMirrorInvalidationBuffer(mirror, max_dirty_keys=1)

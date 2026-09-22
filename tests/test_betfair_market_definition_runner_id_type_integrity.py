@@ -16,6 +16,7 @@ class BetfairMarketDefinitionRunnerIdTypeIntegrityTests(unittest.TestCase):
             "eventTypeId": "2593174",
             "marketType": "MATCH_ODDS",
             "status": "OPEN",
+            "complete": True,
             "runners": [{"id": runner_id} for runner_id in runner_ids],
         }
 

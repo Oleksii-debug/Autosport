@@ -355,11 +355,11 @@ class AutosportApp(tk.Tk):
             plan = ResearchStrategyPlan.from_path(selected)
             validate_strategy_configuration(strategy_id, plan)
         except Exception as exc:
+            self.status.set(text("ui.status.research_plan.validation_failed"))
             messagebox.showerror(
                 text("ui.dialog.title"),
                 text("ui.error.research_plan.rejected", detail=_safe_exception_text(exc)),
             )
-            self.status.set(text("ui.status.research_plan.validation_failed"))
             return
         self.research_plan_path = Path(selected)
         self.research_plan = plan

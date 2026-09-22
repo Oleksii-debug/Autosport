@@ -85,6 +85,18 @@ _FORBIDDEN_TABLE_SQL = re.compile(
 _SQLITE_INTEGER_MIN = -(2**63)
 _SQLITE_INTEGER_MAX = 2**63 - 1
 _REPLAY_CUTOFF_DOMAIN = "autosport.market-replay-cutoff.v1"
+_REPLAY_CUTOFF_IMMUTABILITY_TRIGGERS: Final = {
+    "market_replay_cutoffs_no_delete": """CREATE TRIGGER market_replay_cutoffs_no_delete
+BEFORE DELETE ON market_replay_cutoffs
+BEGIN
+    SELECT RAISE(ABORT, 'market replay cutoff rows are immutable');
+END""",
+    "market_replay_cutoffs_no_update": """CREATE TRIGGER market_replay_cutoffs_no_update
+BEFORE UPDATE ON market_replay_cutoffs
+BEGIN
+    SELECT RAISE(ABORT, 'market replay cutoff rows are immutable');
+END""",
+}
 
 
 def _timezone_aware_instant(value: str, field_name: str) -> datetime:
@@ -413,10 +425,23 @@ def _validate_table_shape(
         raise ValueError(f"{table_name} schema is not canonical: foreign keys are not allowed")
 
     triggers = connection.execute(
-        "SELECT name FROM sqlite_master WHERE type='trigger' AND tbl_name=? ORDER BY name",
+        "SELECT name, sql FROM sqlite_master "
+        "WHERE type='trigger' AND tbl_name=? ORDER BY name",
         (table_name,),
     ).fetchall()
-    if triggers:
+    if table_name == "market_replay_cutoffs":
+        expected_triggers = tuple(sorted(_REPLAY_CUTOFF_IMMUTABILITY_TRIGGERS.items()))
+        actual_triggers = tuple(
+            (name, sql)
+            for name, sql in triggers
+            if isinstance(name, str) and isinstance(sql, str)
+        )
+        if actual_triggers != expected_triggers:
+            raise ValueError(
+                "market_replay_cutoffs schema is not canonical: "
+                "immutable cutoff triggers mismatch"
+            )
+    elif triggers:
         raise ValueError(f"{table_name} schema is not canonical: triggers are not allowed")
 
     index_rows = connection.execute(f"PRAGMA index_list({_quoted_identifier(table_name)})").fetchall()
@@ -669,6 +694,9 @@ class SQLiteMarketStore:
                     max_append_generation INTEGER NOT NULL
                 )"""
             )
+            if initialize_causal_replay:
+                for trigger_sql in _REPLAY_CUTOFF_IMMUTABILITY_TRIGGERS.values():
+                    self.connection.execute(trigger_sql)
             self.connection.execute(
                 """CREATE INDEX IF NOT EXISTS idx_market_event_commit_generation
                    ON market_event_commit_order(append_generation)"""
@@ -701,6 +729,14 @@ class SQLiteMarketStore:
 
     def _validate_causal_replay_state(self) -> None:
         """Fail closed if durable append-generation/cutoff evidence is inconsistent."""
+
+        # Cutoff immutability is part of the durable authority, not an optional
+        # optimization. Revalidate the exact table/trigger contract on every
+        # cutoff resolution so a caller with direct SQLite access cannot drop the
+        # guards, rewrite an already-issued cutoff, and have the running process
+        # silently consume the rolled-back decision corpus.
+        _validate_canonical_table(self.connection, "market_event_commit_order")
+        _validate_canonical_table(self.connection, "market_replay_cutoffs")
 
         missing_commit = self.connection.execute(
             """SELECT 1

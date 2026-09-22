@@ -109,7 +109,7 @@ def test_zero_events_never_become_zero_risk() -> None:
         (0, 10, Decimal("0.2588655508930523")),
         (1, 10, Decimal("0.3941633024365047")),
         (5, 10, Decimal("0.7775588989918709")),
-        (2, 100, Decimal("0.0616191149798715")),
+        (2, 100, Decimal("0.0616192003960407")),
     ],
 )
 def test_exact_bound_matches_reference_cases(

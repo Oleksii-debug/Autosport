@@ -473,6 +473,9 @@ class VerifiedSmarketsOrderEffect:
     action_id: str
     provider_order_id: str
     reference_id: str
+    side: str
+    requested_price_units: int
+    requested_quantity_units: int
     status: AcknowledgementStatus
     accepted_odds: Decimal | None
     accepted_stake: Decimal
@@ -501,6 +504,9 @@ class VerifiedSmarketsOrderEffect:
             "profile_id": self.profile_id,
             "provider_order_id": self.provider_order_id,
             "reference_id": self.reference_id,
+            "requested_price_units": self.requested_price_units,
+            "requested_quantity_units": self.requested_quantity_units,
+            "side": self.side,
             "source_payload_sha256": self.source_payload_sha256,
             "status": self.status.value,
         }
@@ -676,6 +682,9 @@ def verify_smarkets_order_readback(
         action_id=action.action_id,
         provider_order_id=readback.provider_order_id,
         reference_id=readback.reference_id,
+        side=readback.side,
+        requested_price_units=readback.requested_price_units,
+        requested_quantity_units=readback.requested_quantity_units,
         status=status,
         accepted_odds=accepted_odds,
         accepted_stake=accepted_stake,
@@ -739,6 +748,9 @@ _EFFECT_RECORD_KEYS = {
     "profile_id",
     "provider_order_id",
     "reference_id",
+    "requested_price_units",
+    "requested_quantity_units",
+    "side",
     "source_payload_sha256",
     "status",
 }
@@ -746,16 +758,42 @@ _EFFECT_RECORD_KEYS = {
 
 def _validated_effect_record(
     record: object,
-) -> tuple[AcknowledgementStatus, Decimal, Decimal | None, datetime]:
+) -> tuple[
+    AcknowledgementStatus,
+    Decimal,
+    Decimal | None,
+    Decimal,
+    datetime,
+    int,
+    int | None,
+]:
     if type(record) is not dict or set(record) != _EFFECT_RECORD_KEYS:
         raise SmarketsReconciliationError("invalid Smarkets effect record shape")
     _text(record["action_id"], "record.action_id")
     _text(record["provider_order_id"], "record.provider_order_id")
     _text(record["reference_id"], "record.reference_id")
+    side = _text(record["side"], "record.side")
+    if side not in {"buy", "sell"}:
+        raise SmarketsReconciliationError("record.side must be buy or sell")
+    requested_price_units = _provider_uint(
+        record["requested_price_units"],
+        "record.requested_price_units",
+        minimum=1,
+        maximum=_PERCENT_PRICE_SCALE - 1,
+    )
+    requested_quantity_units = _provider_uint(
+        record["requested_quantity_units"],
+        "record.requested_quantity_units",
+        minimum=1,
+    )
     executed_quantity_units = _provider_uint(
         record["executed_quantity_units"],
         "record.executed_quantity_units",
     )
+    if executed_quantity_units > requested_quantity_units:
+        raise SmarketsReconciliationError(
+            "record executed quantity exceeds requested quantity"
+        )
     executed_avg_price_units = record["executed_avg_price_units"]
     if executed_avg_price_units is not None:
         _provider_uint(
@@ -778,6 +816,7 @@ def _validated_effect_record(
         raise SmarketsReconciliationError(
             "record.status must be canonical acknowledgement status"
         ) from exc
+
     stake = _nonnegative_decimal(record["accepted_stake"], "record.accepted_stake")
     liability = _nonnegative_decimal(
         record["accepted_liability"], "record.accepted_liability"
@@ -788,28 +827,60 @@ def _validated_effect_record(
         if odds_raw is None
         else _positive_decimal(odds_raw, "record.accepted_odds")
     )
-    if status is AcknowledgementStatus.REJECTED:
+
+    if executed_quantity_units == 0:
         if (
-            stake != 0
+            status is not AcknowledgementStatus.REJECTED
+            or stake != 0
             or liability != 0
             or odds is not None
-            or executed_quantity_units != 0
             or executed_avg_price_units is not None
         ):
             raise SmarketsReconciliationError(
-                "REJECTED record cannot carry accepted execution economics"
+                "zero-fill record must be a zero-economics REJECTED effect"
             )
-    elif (
-        stake <= 0
-        or liability < 0
-        or odds is None
-        or executed_quantity_units <= 0
-        or executed_avg_price_units is None
-    ):
-        raise SmarketsReconciliationError(
-            "accepted/partial record requires positive execution economics"
+    else:
+        if executed_avg_price_units is None:
+            raise SmarketsReconciliationError(
+                "executed effect record lacks average provider price"
+            )
+        expected_stake = (
+            Decimal(executed_quantity_units)
+            * Decimal(executed_avg_price_units)
+            / _STAKE_SCALE
         )
-    return status, stake, odds, observed
+        expected_odds = _decimal_odds_from_price_units(executed_avg_price_units)
+        payout = Decimal(executed_quantity_units) / Decimal(_QUANTITY_SCALE)
+        expected_liability = (
+            expected_stake if side == "buy" else payout - expected_stake
+        )
+        expected_status = (
+            AcknowledgementStatus.ACCEPTED
+            if executed_quantity_units == requested_quantity_units
+            else AcknowledgementStatus.PARTIAL
+        )
+        if status is not expected_status:
+            raise SmarketsReconciliationError(
+                "record status conflicts with executed provider quantity"
+            )
+        if stake != expected_stake or odds != expected_odds:
+            raise SmarketsReconciliationError(
+                "record accepted stake/odds conflicts with provider fixed-point economics"
+            )
+        if liability != expected_liability:
+            raise SmarketsReconciliationError(
+                "record accepted liability conflicts with provider fixed-point economics"
+            )
+
+    return (
+        status,
+        stake,
+        odds,
+        liability,
+        observed,
+        executed_quantity_units,
+        executed_avg_price_units,
+    )
 
 
 class SmarketsReconciliationJournal:
@@ -894,9 +965,15 @@ class SmarketsReconciliationJournal:
         rows = self._load_rows()
         records = [row["record"] for row in rows]
         effect_record = effect.to_canonical_dict()
-        new_status, new_stake, new_odds, new_observed = _validated_effect_record(
-            effect_record
-        )
+        (
+            new_status,
+            new_stake,
+            new_odds,
+            new_liability,
+            new_observed,
+            new_quantity,
+            new_avg_price,
+        ) = _validated_effect_record(effect_record)
         for record in records:
             if record.get("evidence_id") == effect.evidence_id:
                 if record == effect_record:
@@ -921,33 +998,43 @@ class SmarketsReconciliationJournal:
                 raise SmarketsReconciliationError(
                     "provider_order_id changed durable reference_id"
                 )
-            old_status, old_stake, old_odds, old_observed = _validated_effect_record(
-                record
-            )
+            (
+                old_status,
+                old_stake,
+                old_odds,
+                old_liability,
+                old_observed,
+                old_quantity,
+                old_avg_price,
+            ) = _validated_effect_record(record)
             if new_observed < old_observed:
                 raise SmarketsReconciliationError(
                     "provider order readback time regressed"
                 )
-            if new_stake < old_stake:
+            if new_quantity < old_quantity:
                 raise SmarketsReconciliationError(
-                    "provider order matched stake regressed"
+                    "provider order executed quantity regressed"
                 )
-            if new_stake == old_stake and new_odds != old_odds:
+            if new_quantity == old_quantity and (
+                new_avg_price != old_avg_price
+                or new_stake != old_stake
+                or new_odds != old_odds
+                or new_liability != old_liability
+            ):
                 raise SmarketsReconciliationError(
-                    "provider order average odds changed without a new fill"
+                    "provider economics changed without a new fill"
                 )
             if old_status is AcknowledgementStatus.ACCEPTED and (
                 new_status is not AcknowledgementStatus.ACCEPTED
-                or new_stake != old_stake
-                or new_odds != old_odds
+                or new_quantity != old_quantity
+                or new_avg_price != old_avg_price
             ):
                 raise SmarketsReconciliationError(
                     "fully accepted provider order cannot regress"
                 )
             if old_status is AcknowledgementStatus.REJECTED and (
                 new_status is not AcknowledgementStatus.REJECTED
-                or new_stake != 0
-                or new_odds is not None
+                or new_quantity != 0
             ):
                 raise SmarketsReconciliationError(
                     "rejected provider order cannot later mint a fill"

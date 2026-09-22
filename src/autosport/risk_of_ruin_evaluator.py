@@ -18,7 +18,17 @@ import hashlib
 import json
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from decimal import Decimal, ROUND_CEILING, localcontext
+from decimal import (
+    Decimal,
+    DivisionByZero,
+    InvalidOperation,
+    MAX_EMAX,
+    MIN_EMIN,
+    Overflow,
+    ROUND_CEILING,
+    ROUND_HALF_EVEN,
+    localcontext,
+)
 from enum import StrEnum
 from pathlib import Path
 from typing import Any, Mapping
@@ -476,7 +486,23 @@ def clopper_pearson_upper_bound(
         return Decimal(1)
 
     with localcontext() as context:
+        # This is a scientific arithmetic boundary, not an ambient process-context
+        # boundary.  A caller may legitimately change Decimal precision, rounding,
+        # exponent limits or traps elsewhere in the process; none of those settings
+        # may move an exact confidence endpoint inward.
         context.prec = 70
+        context.rounding = ROUND_HALF_EVEN
+        context.Emin = MIN_EMIN
+        context.Emax = MAX_EMAX
+        context.capitals = 1
+        context.clamp = 0
+        for signal in tuple(context.traps):
+            context.traps[signal] = False
+        context.traps[InvalidOperation] = True
+        context.traps[DivisionByZero] = True
+        context.traps[Overflow] = True
+        context.clear_flags()
+
         alpha = Decimal(1) - confidence
         low = Decimal(0)
         high = Decimal(1)

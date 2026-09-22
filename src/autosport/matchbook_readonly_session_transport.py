@@ -281,14 +281,26 @@ class MatchbookReadOnlySessionTransport:
         self, ticket: SessionReadGenerationTicket
     ) -> None:
         try:
+            commit_ns = self._clock()
+        except MatchbookSessionTransportError:
+            self._clear_matching_live_session(ticket.generation_id)
+            raise
+        try:
             self._lifecycle.authorize_read_response_commit(
                 ticket,
-                monotonic_ns=self._clock(),
+                monotonic_ns=commit_ns,
             )
         except SessionLifecycleError:
             raise MatchbookStaleGenerationResponse(
                 "Matchbook response belongs to a stale session generation"
             ) from None
+
+    def _clear_matching_live_session(self, generation_id: str) -> None:
+        with self._condition:
+            current = self._live_session
+            if current is not None and current.generation_id == generation_id:
+                self._live_session = None
+                self._condition.notify_all()
 
     def _ensure_active_session(self) -> _LiveSession:
         while True:

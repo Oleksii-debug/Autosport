@@ -7,15 +7,6 @@ import json
 
 import pytest
 
-
-@pytest.fixture(autouse=True)
-def _isolated_monotonic_authority(tmp_path, monkeypatch) -> None:
-    authority_root = tmp_path.parent / f"{tmp_path.name}-monotonic-authority"
-    monkeypatch.setenv(
-        "AUTOSPORT_MONOTONIC_AUTHORITY_ROOT",
-        str(authority_root.resolve()),
-    )
-
 from autosport.betfair_account_readonly import BetfairReadOnlyClient, BetfairSessionCredentials
 from autosport.betfair_settlement_revisions import (
     BetfairSettlementBusyError,
@@ -30,6 +21,15 @@ from autosport.real_execution_ledger import (
     RealExecutionLedger,
 )
 
+
+
+@pytest.fixture(autouse=True)
+def _isolated_monotonic_authority(tmp_path, monkeypatch) -> None:
+    authority_root = tmp_path.parent / f"{tmp_path.name}-monotonic-authority"
+    monkeypatch.setenv(
+        "AUTOSPORT_MONOTONIC_AUTHORITY_ROOT",
+        str(authority_root.resolve()),
+    )
 
 class _Clock:
     def __init__(self) -> None:

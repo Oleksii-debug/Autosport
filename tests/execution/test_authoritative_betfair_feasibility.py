@@ -228,6 +228,32 @@ def _reserved_ledger(tmp: str, bound: BoundSupervisedExecutionPlan) -> RealExecu
     return ledger
 
 
+def test_authentic_market_book_receipt_before_bound_quote_fails_closed() -> None:
+    decision_at = datetime.now(timezone.utc)
+    bound = _bound(decision_at)
+    action_quote_observed_at = datetime.fromisoformat(
+        bound.action_for(ACTION_ID).quote_observed_at
+    )
+    receipt, canonical_source = _synthetic_authoritative_receipt(
+        MarketBookTransport(),
+        observed_at=action_quote_observed_at - timedelta(milliseconds=1),
+    )
+
+    with tempfile.TemporaryDirectory() as tmp:
+        with pytest.raises(
+            ValueError,
+            match="market-book depth observation predates durable execution quote",
+        ):
+            assess_authoritative_betfair_execution_feasibility(
+                _reserved_ledger(tmp, bound),
+                bound,
+                receipt,
+                action_id=ACTION_ID,
+                decision_at=decision_at,
+                max_snapshot_age=timedelta(seconds=2),
+            )
+
+
 def test_authenticated_market_book_receipt_cannot_bypass_provider_limit_authority() -> None:
     transport = MarketBookTransport()
     receipt, canonical_source = _synthetic_authoritative_receipt(transport)

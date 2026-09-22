@@ -42,6 +42,8 @@ _SCHEDULE_KEYS = frozenset(
         "stream_epoch",
         "anchor_at",
         "interval_seconds",
+        "evaluation_start_slot_ordinal",
+        "evaluation_end_slot_ordinal",
         "start_slot_ordinal",
         "end_slot_ordinal",
         "expected_slot_count",
@@ -290,7 +292,7 @@ def resolve_scheduled_source_universe(
         start_slot_ordinal=start_slot,
         end_slot_ordinal=end_slot,
     )
-    if schedule["schema_version"] != 2:
+    if schedule["schema_version"] != 3:
         raise ScheduledSourceUniverseError(
             "collector schedule evidence schema_version is unsupported"
         )
@@ -304,6 +306,27 @@ def resolve_scheduled_source_universe(
     ):
         raise ScheduledSourceUniverseError(
             "collector schedule evidence crosses product-expected slot scope"
+        )
+    frozen_start_raw = schedule["evaluation_start_slot_ordinal"]
+    frozen_end_raw = schedule["evaluation_end_slot_ordinal"]
+    if frozen_start_raw is None or frozen_end_raw is None:
+        raise ScheduledSourceUniverseError(
+            "collector schedule lacks prospectively frozen evaluation window"
+        )
+    frozen_start = _ordinal(
+        frozen_start_raw, "evaluation_start_slot_ordinal"
+    )
+    frozen_end = _ordinal(
+        frozen_end_raw, "evaluation_end_slot_ordinal"
+    )
+    if frozen_end < frozen_start:
+        raise ScheduledSourceUniverseError(
+            "collector schedule frozen evaluation window is invalid"
+        )
+    if (start_slot, end_slot) != (frozen_start, frozen_end):
+        raise ScheduledSourceUniverseError(
+            "product-expected slot assertions do not match prospectively "
+            "frozen evaluation window"
         )
 
     schedule_id = _text(schedule["schedule_id"], "schedule_id")

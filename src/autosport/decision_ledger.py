@@ -460,9 +460,15 @@ class JsonlDecisionLedger:
             allow_nan=False,
         )
         candidate_action_id = payload["payload"].get(MATERIAL_ACTION_ID_PAYLOAD_KEY)
-        with durable_path_lock(self.path):
+        try:
+            append_path = self.path.resolve(strict=False)
+        except (OSError, RuntimeError) as exc:
+            raise DecisionLedgerIntegrityError(
+                "Decision Ledger append path cannot be resolved canonically"
+            ) from exc
+        with durable_path_lock(append_path):
             try:
-                existing = self.path.read_bytes()
+                existing = append_path.read_bytes()
             except FileNotFoundError:
                 existing = b""
             except OSError as exc:
@@ -474,7 +480,7 @@ class JsonlDecisionLedger:
                 reserved_decision_id=payload["decision_id"],
                 reserved_material_action_id=candidate_action_id,
             )
-            with self.path.open("a", encoding="utf-8", newline="\n") as handle:
+            with append_path.open("a", encoding="utf-8", newline="\n") as handle:
                 handle.write(envelope + "\n")
                 handle.flush()
                 os.fsync(handle.fileno())

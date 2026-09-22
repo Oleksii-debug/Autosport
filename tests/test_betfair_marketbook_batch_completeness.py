@@ -29,7 +29,9 @@ def test_exact_receipts_for_every_batch_prove_structural_completeness():
     assert proof.status is ReadCompletenessStatus.COMPLETE
     assert proof.pending_batch_ids == ()
     assert proof.missing_receipt_batch_ids == ()
-    assert proof.evidence_payload["provider_observation_complete"] is True
+    assert proof.evidence_payload["structural_response_coverage_complete"] is True
+    assert proof.evidence_payload["provider_observation_authenticated"] is False
+    assert proof.evidence_payload["provider_freshness_proven"] is False
 
 
 def test_empty_or_partial_success_cannot_become_complete_market_truth():
@@ -133,6 +135,14 @@ def test_payload_digest_and_receipt_identity_are_content_sensitive():
     assert a.observed_market_ids == b.observed_market_ids
     assert a.payload_sha256 != b.payload_sha256
     assert a.receipt_id != b.receipt_id
+
+
+def test_nonfinite_provider_payload_fails_closed_before_evidence_hashing():
+    batch = two_batch_plan().batches[0]
+    bad = response(batch.market_ids)
+    bad[0]["totalMatched"] = float("nan")
+    with pytest.raises(MarketBookCompletenessError, match="canonical JSON"):
+        MarketBookBatchReceipt.from_response(batch, bad)
 
 
 def test_completeness_proof_never_grants_dispatch_or_execution_authority():

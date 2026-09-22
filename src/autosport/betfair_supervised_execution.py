@@ -1000,6 +1000,14 @@ def _parse_place_orders_response(
         raise BetfairPlaceOrdersAmbiguous(
             "matched BACK price is worse than requested limit"
         )
+    if (
+        instruction.size_matched > 0
+        and action.side == "LAY"
+        and instruction.average_price_matched > action.requested_odds
+    ):
+        raise BetfairPlaceOrdersAmbiguous(
+            "matched LAY price is worse than requested limit"
+        )
     return BetfairPlaceExecutionReport(
         bookmaker_id=action.bookmaker_id,
         account_id=action.account_id,

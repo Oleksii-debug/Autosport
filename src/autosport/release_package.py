@@ -53,25 +53,25 @@ _SECRET_KEY_PATTERN = (
 )
 _SECRET_ASSIGNMENT_PATTERN = re.compile(
     rb"(?ix)"
-    rb"(?:^|[,{;\\t ])"
-    rb"(?P<keyquote>[\\\"\']?)"
+    rb"(?:^|[,{;\t ])"
+    rb"(?P<keyquote>[\"']?)"
     rb"(?P<key>" + _SECRET_KEY_PATTERN + rb")"
     rb"(?P=keyquote)"
-    rb"[\\t ]*[:=][\\t ]*"
-    rb"(?P<value>\\\"[^\\\"\\r\\n]*\\\"|\'[^\'\\r\\n]*\'|[^\\t \\r\\n,;]+)"
+    rb"[\t ]*[:=][\t ]*"
+    rb"(?P<value>\"[^\"\r\n]*\"|'[^'\r\n]*'|[^\t \r\n,;]+)"
 )
 _SECRET_AUTH_HEADER_PATTERN = re.compile(
-    rb"(?ix)^\\s*authorization\\s*:\\s*(?:bearer|basic)\\s+(?P<value>[^\\t \\r\\n,;]+)\\s*$"
+    rb"(?ix)^\s*authorization\s*:\s*(?:bearer|basic)\s+(?P<value>[^\t \r\n,;]+)\s*$"
 )
 _SECRET_COOKIE_HEADER_PATTERN = re.compile(
-    rb"(?ix)^\\s*(?:cookie|set[._ -]?cookie)\\s*:\\s*(?P<value>[^\\r\\n]+?)\\s*$"
+    rb"(?ix)^\s*(?:cookie|set[._ -]?cookie)\s*:\s*(?P<value>[^\r\n]+?)\s*$"
 )
 _ENV_SECRET_REFERENCE_PATTERN = re.compile(
     rb"(?ix)^(?:"
-    rb"\\$\\{[A-Z_][A-Z0-9_]*\\}|"
+    rb"\$\{[A-Z_][A-Z0-9_]*\}|"
     rb"%[A-Z_][A-Z0-9_]*%|"
-    rb"\\$env:[A-Z_][A-Z0-9_]*|"
-    rb"\\$[A-Z_][A-Z0-9_]*"
+    rb"\$env:[A-Z_][A-Z0-9_]*|"
+    rb"\$[A-Z_][A-Z0-9_]*"
     rb")$"
 )
 _PRIVATE_KEY_PATTERN = re.compile(

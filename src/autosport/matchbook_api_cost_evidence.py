@@ -32,6 +32,7 @@ class BillingCalendarBasis(StrEnum):
 class PolicyAmountTruth(StrEnum):
     CONFIGURED_CALENDAR_ESTIMATE_GBP = "CONFIGURED_CALENDAR_ESTIMATE_GBP"
     REMAINDER_UNRESOLVED = "REMAINDER_UNRESOLVED"
+    USAGE_ORIGIN_UNBOUND = "USAGE_ORIGIN_UNBOUND"
 
 
 class FxTruth(StrEnum):
@@ -45,6 +46,10 @@ class CashTruth(StrEnum):
 
 class MeterContinuityTruth(StrEnum):
     PROCESS_LOCAL_ONLY = "PROCESS_LOCAL_ONLY"
+
+
+class UsageOriginTruth(StrEnum):
+    UNBOUND_PROCESS_LOCAL = "UNBOUND_PROCESS_LOCAL"
 
 
 def _text(value: object, name: str) -> str:
@@ -306,6 +311,10 @@ def _build_runtime_capability():
         first_at = values["first_emitted_at"]
         last_at = values["last_emitted_at"]
         continuity = values["continuity_truth"]
+        origin = values.get(
+            "origin_truth",
+            UsageOriginTruth.UNBOUND_PROCESS_LOCAL,
+        )
         return {
             "schema": _SCHEMA,
             "kind": "usage_snapshot",
@@ -320,6 +329,7 @@ def _build_runtime_capability():
             "rolling_emission_sha256": values["rolling_emission_sha256"],
             "observed_at": _dt(values["observed_at"]),
             "continuity_truth": continuity.value,
+            "origin_truth": origin.value,
         }
 
     def usage_values(snapshot: "MatchbookApiUsageSnapshot") -> dict[str, Any]:
@@ -335,6 +345,7 @@ def _build_runtime_capability():
             "rolling_emission_sha256": snapshot.rolling_emission_sha256,
             "observed_at": snapshot.observed_at,
             "continuity_truth": snapshot.continuity_truth,
+            "origin_truth": snapshot.origin_truth,
         }
 
     @dataclass(frozen=True, slots=True)
@@ -352,6 +363,10 @@ def _build_runtime_capability():
         continuity_truth: MeterContinuityTruth
         evidence_sha256: str
         _capability_proof: bytes = field(repr=False, compare=False)
+        origin_truth: UsageOriginTruth = field(
+            default=UsageOriginTruth.UNBOUND_PROCESS_LOCAL,
+            init=False,
+        )
 
         def __post_init__(self) -> None:
             assert_usage_shape(self)
@@ -378,6 +393,10 @@ def _build_runtime_capability():
         if snapshot.continuity_truth is not MeterContinuityTruth.PROCESS_LOCAL_ONLY:
             raise error_cls(
                 "this seam cannot mint durable request-meter continuity"
+            )
+        if snapshot.origin_truth is not UsageOriginTruth.UNBOUND_PROCESS_LOCAL:
+            raise error_cls(
+                "standalone request meter cannot mint transport-observed usage"
             )
         if type(snapshot.request_count) is not int or snapshot.request_count < 0:
             raise error_cls("request_count must be non-negative integer")
@@ -431,14 +450,14 @@ def _build_runtime_capability():
             raise error_cls("usage evidence digest mismatch")
 
     class MatchbookApiRequestMeter:
-        """O(1) process-local meter for physical Matchbook GET emissions.
+        """O(1) process-local observation meter for Matchbook GET emissions.
 
-        The public object has no count setter.  A transport integration advances
-        it exactly once after each GET crosses the physical send boundary.  A
-        retry is therefore a second emission.  Downstream consumer identities do
-        not enter this authority and cannot multiply one physical request.
+        Calls to record_get_emitted preserve sequence/time/fingerprint evidence,
+        but this public standalone object is not product-owned transport
+        authority. Its snapshots therefore remain UNBOUND_PROCESS_LOCAL even
+        when a caller records plausible physical-emission facts.
 
-        The capability is intentionally process-local.  This packet does not
+        The capability is intentionally process-local. This packet does not
         claim restart continuity or canonical transport integration.
         """
 
@@ -611,6 +630,7 @@ def _build_runtime_capability():
             "meter_continuity_truth": values[
                 "meter_continuity_truth"
             ].value,
+            "usage_origin_truth": values["usage_origin_truth"].value,
         }
 
     def accrual_values(
@@ -632,6 +652,7 @@ def _build_runtime_capability():
             "cash_truth": accrual.cash_truth,
             "allocation_state": accrual.allocation_state,
             "meter_continuity_truth": accrual.meter_continuity_truth,
+            "usage_origin_truth": accrual.usage_origin_truth,
         }
 
     @dataclass(frozen=True, slots=True)
@@ -651,6 +672,7 @@ def _build_runtime_capability():
         cash_truth: CashTruth
         allocation_state: str
         meter_continuity_truth: MeterContinuityTruth
+        usage_origin_truth: UsageOriginTruth
         evidence_sha256: str
         _capability_proof: bytes = field(repr=False, compare=False)
 
@@ -711,22 +733,16 @@ def _build_runtime_capability():
             raise error_cls(
                 "account_currency must be three uppercase ASCII letters"
             )
-        if accrual.remainder_requests:
-            if (
-                accrual.policy_gbp_amount is not None
-                or accrual.amount_truth
-                is not PolicyAmountTruth.REMAINDER_UNRESOLVED
-            ):
-                raise error_cls(
-                    "remainder usage cannot mint prorated policy total"
-                )
-        elif (
-            accrual.policy_gbp_amount != accrual.completed_block_gbp
-            or accrual.amount_truth
-            is not PolicyAmountTruth.CONFIGURED_CALENDAR_ESTIMATE_GBP
+        if accrual.usage_origin_truth is not UsageOriginTruth.UNBOUND_PROCESS_LOCAL:
+            raise error_cls(
+                "this seam cannot mint transport-observed usage authority"
+            )
+        if (
+            accrual.policy_gbp_amount is not None
+            or accrual.amount_truth is not PolicyAmountTruth.USAGE_ORIGIN_UNBOUND
         ):
             raise error_cls(
-                "whole-block configured-calendar estimate is inconsistent"
+                "unbound usage cannot mint a provider API-cost amount"
             )
         if currency == "GBP":
             if (
@@ -779,14 +795,8 @@ def _build_runtime_capability():
         if usage.pricing_policy_sha256 != pricing_policy.policy_sha256:
             raise error_cls("usage belongs to a different pricing policy")
         math = calculate_policy_math(usage.request_count, pricing_policy)
-        if math.remainder_requests:
-            policy_amount = None
-            amount_truth = PolicyAmountTruth.REMAINDER_UNRESOLVED
-        else:
-            policy_amount = math.exact_policy_gbp
-            amount_truth = (
-                PolicyAmountTruth.CONFIGURED_CALENDAR_ESTIMATE_GBP
-            )
+        policy_amount = None
+        amount_truth = PolicyAmountTruth.USAGE_ORIGIN_UNBOUND
         currency = _text(account_currency, "account_currency")
         if (
             len(currency) != 3
@@ -818,6 +828,7 @@ def _build_runtime_capability():
             "cash_truth": CashTruth.UNRECONCILED,
             "allocation_state": "UNALLOCATED_SHARED_PROVIDER_COST",
             "meter_continuity_truth": usage.continuity_truth,
+            "usage_origin_truth": usage.origin_truth,
         }
         payload = accrual_payload(values)
         return MatchbookApiCostAccrual(
@@ -860,6 +871,7 @@ __all__ = [
     "MatchbookPricingPolicySnapshot",
     "MeterContinuityTruth",
     "PolicyAmountTruth",
+    "UsageOriginTruth",
     "calculate_policy_math",
     "configured_billing_period",
     "derive_matchbook_api_cost_accrual",

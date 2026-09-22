@@ -1732,6 +1732,10 @@ def publish_campaign_precommit_manifest(
                 ) from exc
             history = authority.read_history()
         elif local_digest == manifest.manifest_sha256:
+            # A prior writer may have crashed after canonical visibility but before
+            # proving the platform durability/identity barrier. Re-run the exact
+            # idempotent byte writer before upgrading structural PREPARE to COMMIT.
+            write_campaign_precommit_manifest_once(target, manifest)
             loaded = load_campaign_precommit_manifest(target)
             observed_at = _publication_now_text()
             try:

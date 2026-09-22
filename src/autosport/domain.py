@@ -445,12 +445,18 @@ class TicketLeg:
     locked_odds: Decimal
     sport: str | None = None
     exchange_side: str | None = None
+    market_semantics_id: str | None = None
 
     def __post_init__(self) -> None:
         if self.sport is not None:
             _canonical_sport_value(self.sport)
         if self.exchange_side is not None:
             _canonical_exchange_side(self.exchange_side)
+        if self.market_semantics_id is not None:
+            _canonical_semantic_identity(
+                self.market_semantics_id,
+                "market_semantics_id",
+            )
 
     @property
     def quote_key(self) -> str:
@@ -461,6 +467,12 @@ class TicketLeg:
             self.sport,
             self.exchange_side,
         )
+
+    @property
+    def settlement_identity(self) -> tuple[str, str | None]:
+        """Exact quote plus canonical decision-time market-rule identity."""
+
+        return self.quote_key, self.market_semantics_id
 
 
 @dataclass(slots=True)

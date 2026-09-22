@@ -1481,6 +1481,30 @@ class RealExecutionLedgerTests(unittest.TestCase):
             restarted = RealExecutionLedger(path)
             self.assertTrue(restarted.plan_is_stale("p1"))
             self.assertFalse(restarted.can_retry_action(plan_id="p1", action_id="a2"))
+            event_count = restarted.verify_integrity()
+
+            replay = restarted.begin_attempt(
+                plan_id="p1",
+                action_id="a1",
+                attempt_id="t1",
+                reserved_at=RETRY_RESERVED_AT,
+            )
+            self.assertEqual(replay.attempt_id, "t1")
+            self.assertEqual(replay.reserved_at, RESERVED_AT)
+            self.assertEqual(restarted.verify_integrity(), event_count)
+
+            with self.assertRaisesRegex(
+                ExecutionIdentityConflict,
+                "attempt_id reused with different immutable inputs",
+            ):
+                restarted.begin_attempt(
+                    plan_id="p1",
+                    action_id="a2",
+                    attempt_id="t1",
+                    reserved_at=RETRY_RESERVED_AT,
+                )
+            self.assertEqual(restarted.verify_integrity(), event_count)
+
             with self.assertRaisesRegex(ExecutionStateError, "stale"):
                 restarted.begin_attempt(
                     plan_id="p1",
@@ -1488,6 +1512,7 @@ class RealExecutionLedgerTests(unittest.TestCase):
                     attempt_id="t2",
                     reserved_at=RETRY_RESERVED_AT,
                 )
+            self.assertEqual(restarted.verify_integrity(), event_count)
 
     def test_semantic_plan_fingerprint_tamper_detected_even_if_event_hash_recomputed(self):
         with tempfile.TemporaryDirectory() as tmp:

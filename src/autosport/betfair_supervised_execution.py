@@ -981,10 +981,16 @@ def _report_outcome(
 ) -> PlaceOrdersOutcome:
     instruction = report.instruction
     if instruction.status == "FAILURE":
-        # A provider-side failure without a provider order identity is not
-        # authoritative proof that no external effect exists. Keep the
-        # durable attempt UNKNOWN until canonical readback reconciles it.
-        if instruction.bet_id is None:
+        # A terminal REJECTED fact needs the narrow provider rejection shape
+        # that is actually qualified for this synchronous one-instruction seam.
+        # Availability/matcher/regulator failures and unknown/future code
+        # combinations do not prove zero external effect, even if a betId-like
+        # identity is present; keep those UNKNOWN until canonical readback.
+        if (
+            instruction.bet_id is None
+            or report.error_code != "BET_ACTION_ERROR"
+            or instruction.error_code != "BET_TAKEN_OR_LAPSED"
+        ):
             return PlaceOrdersOutcome.UNKNOWN
         return PlaceOrdersOutcome.REJECTED
     if instruction.size_matched == action.requested_stake:

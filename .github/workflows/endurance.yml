@@ -2,6 +2,7 @@ name: Endurance
 
 on:
   pull_request:
+    types: [opened, synchronize, reopened, ready_for_review, converted_to_draft]
     paths:
       - 'src/autosport/endurance.py'
       - 'src/autosport/providers.py'
@@ -46,6 +47,9 @@ concurrency:
 
 jobs:
   endurance:
+    # Draft PRs may touch high-churn runtime/storage paths repeatedly. Keep the
+    # cross-platform endurance evidence for integration-capable heads only.
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     name: endurance (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     timeout-minutes: 20

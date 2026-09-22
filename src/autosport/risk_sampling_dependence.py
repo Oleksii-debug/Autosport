@@ -56,7 +56,7 @@ def _canonical_text(value: object, name: str) -> str:
 
 
 def _sha256(value: object, name: str) -> str:
-    text = _canonical_text(value, name).lower()
+    text = _canonical_text(value, name)
     if len(text) != 64 or any(character not in _HEX for character in text):
         raise RiskSamplingDependenceError(
             f"{name} must be a canonical SHA-256 hex string"

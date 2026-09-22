@@ -1,4 +1,4 @@
-"""Deterministic causal multi-sport capability admission projection.
+"""Deterministic causal multi-sport capability recommendation projection.
 
 This module composes the existing sport-domain fitness authority. It does not
 create provider evidence, economic/risk authority, execution permission, model
@@ -29,9 +29,9 @@ class MultiSportCapabilityError(ValueError):
     """Raised when a multi-sport capability projection is non-canonical."""
 
 
-class CapabilityAdmissionStatus(StrEnum):
-    ADMITTED_BASELINE = "ADMITTED_BASELINE"
-    ADMITTED_SLOW_RESEARCH = "ADMITTED_SLOW_RESEARCH"
+class CapabilityRecommendationStatus(StrEnum):
+    RECOMMEND_BASELINE = "RECOMMEND_BASELINE"
+    RECOMMEND_SLOW_RESEARCH = "RECOMMEND_SLOW_RESEARCH"
     INSUFFICIENT_EVIDENCE = "INSUFFICIENT_EVIDENCE"
     BLOCKED = "BLOCKED"
 
@@ -120,7 +120,7 @@ class SportCapabilityTarget:
 @dataclass(frozen=True, slots=True)
 class SportCapabilityDecision:
     target: SportCapabilityTarget
-    status: CapabilityAdmissionStatus
+    status: CapabilityRecommendationStatus
     observation_id: str | None
     evidence_sha256: str | None
     reason: str
@@ -130,9 +130,9 @@ class SportCapabilityDecision:
             raise MultiSportCapabilityError(
                 "target must be SportCapabilityTarget"
             )
-        if not isinstance(self.status, CapabilityAdmissionStatus):
+        if not isinstance(self.status, CapabilityRecommendationStatus):
             raise MultiSportCapabilityError(
-                "status must be CapabilityAdmissionStatus"
+                "status must be CapabilityRecommendationStatus"
             )
         _text("reason", self.reason)
         if (self.observation_id is None) != (self.evidence_sha256 is None):
@@ -150,10 +150,10 @@ class SportCapabilityDecision:
                 )
 
     @property
-    def admitted(self) -> bool:
+    def recommended(self) -> bool:
         return self.status in {
-            CapabilityAdmissionStatus.ADMITTED_BASELINE,
-            CapabilityAdmissionStatus.ADMITTED_SLOW_RESEARCH,
+            CapabilityRecommendationStatus.RECOMMEND_BASELINE,
+            CapabilityRecommendationStatus.RECOMMEND_SLOW_RESEARCH,
         }
 
     def to_dict(self) -> dict[str, object]:
@@ -203,9 +203,9 @@ class MultiSportCapabilitySnapshot:
         )
 
     @property
-    def admitted_targets(self) -> tuple[SportCapabilityTarget, ...]:
+    def recommended_targets(self) -> tuple[SportCapabilityTarget, ...]:
         return tuple(
-            item.target for item in self.decisions if item.admitted
+            item.target for item in self.decisions if item.recommended
         )
 
     def to_dict(self) -> dict[str, object]:
@@ -218,13 +218,13 @@ class MultiSportCapabilitySnapshot:
 
 _ROUTE_MAP = {
     RouteStatus.ROUTE_BASELINE:
-        CapabilityAdmissionStatus.ADMITTED_BASELINE,
+        CapabilityRecommendationStatus.RECOMMEND_BASELINE,
     RouteStatus.ROUTE_SLOW_RESEARCH:
-        CapabilityAdmissionStatus.ADMITTED_SLOW_RESEARCH,
+        CapabilityRecommendationStatus.RECOMMEND_SLOW_RESEARCH,
     RouteStatus.INSUFFICIENT_EVIDENCE:
-        CapabilityAdmissionStatus.INSUFFICIENT_EVIDENCE,
+        CapabilityRecommendationStatus.INSUFFICIENT_EVIDENCE,
     RouteStatus.DO_NOT_ROUTE:
-        CapabilityAdmissionStatus.BLOCKED,
+        CapabilityRecommendationStatus.BLOCKED,
 }
 
 
@@ -237,12 +237,15 @@ def project_multisport_capability(
     """Project exact requested sport domains from causal fitness evidence.
 
     Only evidence that was both measured and available at as_of participates.
-    For each exact target, the latest causal observation is authoritative.
+    For each exact target, the latest causal observation controls the recommendation.
     Multiple observations at the same latest causal boundary are ambiguous and
-    block admission rather than depending on caller iteration order.
+    block the recommendation rather than depending on caller iteration order.
 
-    The result is capability/routing evidence only. It never authorizes stakes,
-    provider writes, execution, model promotion, or real-money activity.
+    The result is advisory capability/routing recommendation evidence only.
+    Positive recommendation states are not product admission or proof that the
+    caller-supplied observation has product-owned measurement authority. The
+    result never authorizes stakes, provider writes, execution, model promotion,
+    or real-money activity.
     """
 
     boundary = _instant("as_of", as_of)
@@ -294,7 +297,7 @@ def project_multisport_capability(
             decisions.append(
                 SportCapabilityDecision(
                     target=target,
-                    status=CapabilityAdmissionStatus.INSUFFICIENT_EVIDENCE,
+                    status=CapabilityRecommendationStatus.INSUFFICIENT_EVIDENCE,
                     observation_id=None,
                     evidence_sha256=None,
                     reason=(
@@ -329,7 +332,7 @@ def project_multisport_capability(
             decisions.append(
                 SportCapabilityDecision(
                     target=target,
-                    status=CapabilityAdmissionStatus.BLOCKED,
+                    status=CapabilityRecommendationStatus.BLOCKED,
                     observation_id=None,
                     evidence_sha256=None,
                     reason=(

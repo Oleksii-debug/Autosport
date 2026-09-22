@@ -72,19 +72,26 @@ class FocusedMirrorDependencyIndex:
         mirror: MarketMirror,
         *,
         max_cached_keys_per_input: int = 4096,
+        max_cached_keys_total: int = 4096,
     ) -> None:
         if not isinstance(mirror, MarketMirror):
             raise TypeError("mirror must be a MarketMirror")
-        if (
-            isinstance(max_cached_keys_per_input, bool)
-            or not isinstance(max_cached_keys_per_input, int)
-            or max_cached_keys_per_input <= 0
+        for name, value in (
+            ("max_cached_keys_per_input", max_cached_keys_per_input),
+            ("max_cached_keys_total", max_cached_keys_total),
         ):
-            raise ValueError(
-                "max_cached_keys_per_input must be a positive non-boolean integer"
-            )
+            if (
+                isinstance(value, bool)
+                or not isinstance(value, int)
+                or value <= 0
+            ):
+                raise ValueError(
+                    f"{name} must be a positive non-boolean integer"
+                )
         self._mirror = mirror
         self._max_cached_keys_per_input = max_cached_keys_per_input
+        self._max_cached_keys_total = max_cached_keys_total
+        self._cached_key_count = 0
         self._dependencies: dict[str, FocusedMirrorDependency] = {}
         self._matched_keys: dict[str, set[MirrorQuoteKey]] = {}
         self._matched_revisions: dict[str, int] = {}
@@ -111,6 +118,17 @@ class FocusedMirrorDependencyIndex:
     def max_cached_keys_per_input(self) -> int:
         """Maximum exact routed quote identities retained for one dependency."""
         return self._max_cached_keys_per_input
+
+    @property
+    def max_cached_keys_total(self) -> int:
+        """Maximum exact routed quote identities retained across the whole index."""
+        return self._max_cached_keys_total
+
+    @property
+    def cached_key_count(self) -> int:
+        """Current logical resident key count across all complete derived caches."""
+        with self._lock:
+            return self._cached_key_count
 
     def routed_cache_complete(self, input_id: str) -> bool:
         """Report whether one dependency's bounded routed-key cache is complete."""
@@ -150,14 +168,27 @@ class FocusedMirrorDependencyIndex:
         *,
         complete: bool,
         revision: int,
-    ) -> None:
-        """Replace one derived key cache while the dependency-index lock is held."""
-        self._matched_keys[input_id] = keys if complete else set()
+    ) -> bool:
+        """Replace one cache under lock without exceeding the global key budget."""
+        previous = self._matched_keys.get(input_id, set())
+        resident_without_previous = self._cached_key_count - len(previous)
+        candidate = keys if complete else set()
+        if (
+            complete
+            and resident_without_previous + len(candidate)
+            > self._max_cached_keys_total
+        ):
+            complete = False
+            candidate = set()
+
+        self._matched_keys[input_id] = candidate
+        self._cached_key_count = resident_without_previous + len(candidate)
         self._matched_revisions[input_id] = revision
         if complete:
             self._incomplete_keysets.discard(input_id)
         else:
             self._incomplete_keysets.add(input_id)
+        return complete
 
     def register(
         self,
@@ -218,7 +249,8 @@ class FocusedMirrorDependencyIndex:
         normalized_id = self._input_id(input_id)
         with self._lock:
             removed = self._dependencies.pop(normalized_id, None)
-            self._matched_keys.pop(normalized_id, None)
+            removed_keys = self._matched_keys.pop(normalized_id, set())
+            self._cached_key_count -= len(removed_keys)
             self._matched_revisions.pop(normalized_id, None)
             self._incomplete_keysets.discard(normalized_id)
             return removed is not None
@@ -246,23 +278,20 @@ class FocusedMirrorDependencyIndex:
 
         if batch.full_refresh_required:
             captured = self._mirror.view()
-            rebuilt = {
-                dependency.input_id: self._bounded_matching_keys(
-                    captured.events,
-                    dependency,
-                )
-                for dependency in dependencies
-            }
             with self._lock:
                 for dependency in dependencies:
-                    if self._dependencies.get(dependency.input_id) == dependency:
-                        keys, complete = rebuilt[dependency.input_id]
-                        self._replace_cached_keys(
-                            dependency.input_id,
-                            keys,
-                            complete=complete,
-                            revision=captured.revision,
-                        )
+                    if self._dependencies.get(dependency.input_id) != dependency:
+                        continue
+                    keys, complete = self._bounded_matching_keys(
+                        captured.events,
+                        dependency,
+                    )
+                    self._replace_cached_keys(
+                        dependency.input_id,
+                        keys,
+                        complete=complete,
+                        revision=captured.revision,
+                    )
             return tuple(dependency.input_id for dependency in dependencies)
 
         if not dependencies:
@@ -307,15 +336,20 @@ class FocusedMirrorDependencyIndex:
                     key = (event.source_id, event.quote_key)
                     if key in matched:
                         continue
-                    if len(matched) >= self._max_cached_keys_per_input:
+                    if (
+                        len(matched) >= self._max_cached_keys_per_input
+                        or self._cached_key_count >= self._max_cached_keys_total
+                    ):
                         # Do not evict one identity and silently lose selector truth.
                         # Saturation converts this derived cache to explicit fallback
                         # mode; the canonical MarketMirror remains intact.
+                        self._cached_key_count -= len(matched)
                         matched.clear()
                         self._incomplete_keysets.add(dependency.input_id)
                         cache_complete = False
                         continue
                     matched.add(key)
+                    self._cached_key_count += 1
                 if dependency_affected:
                     affected.append(dependency.input_id)
 
@@ -439,14 +473,24 @@ class FocusedMirrorDependencyIndex:
         """Rebuild bounded routed keys, or require canonical selector fallback."""
         for _ in range(4):
             full = self._mirror.view()
-            bounded = {
-                dependency.input_id: self._bounded_matching_keys(
+            keys_by_input: dict[str, frozenset[MirrorQuoteKey]] = {}
+            routed_key_count = 0
+            overflowed = False
+            for dependency in dependencies:
+                keys, complete = self._bounded_matching_keys(
                     full.events,
                     dependency,
                 )
-                for dependency in dependencies
-            }
-            if any(not complete for _, complete in bounded.values()):
+                if (
+                    not complete
+                    or routed_key_count + len(keys) > self._max_cached_keys_total
+                ):
+                    overflowed = True
+                    break
+                keys_by_input[dependency.input_id] = frozenset(keys)
+                routed_key_count += len(keys)
+
+            if overflowed:
                 with self._lock:
                     for dependency in dependencies:
                         if self._dependencies.get(dependency.input_id) != dependency:
@@ -454,20 +498,14 @@ class FocusedMirrorDependencyIndex:
                                 "focused mirror dependency changed during routed resync"
                             )
                     for dependency in dependencies:
-                        input_id = dependency.input_id
-                        keys, complete = bounded[input_id]
                         self._replace_cached_keys(
-                            input_id,
-                            keys,
-                            complete=complete,
+                            dependency.input_id,
+                            set(),
+                            complete=False,
                             revision=full.revision,
                         )
                 return None
 
-            keys_by_input = {
-                input_id: frozenset(keys)
-                for input_id, (keys, _) in bounded.items()
-            }
             union_keys: set[MirrorQuoteKey] = set()
             for keys in keys_by_input.values():
                 union_keys.update(keys)

@@ -161,30 +161,74 @@ def _native_machine_state_base() -> Path:
     """
 
     if os.name == "nt":
-        # CSIDL_LOCAL_APPDATA resolved by the Windows shell is account-owned OS
-        # state, unlike the process LOCALAPPDATA environment variable.
+        # FOLDERID_LocalAppData resolved by the Windows Known Folders API is
+        # account-owned OS state, unlike the process LOCALAPPDATA environment.
         try:
             import ctypes
 
-            buffer = ctypes.create_unicode_buffer(32768)
-            status = ctypes.windll.shell32.SHGetFolderPathW(
-                None,
-                0x001C,  # CSIDL_LOCAL_APPDATA
-                None,
-                0,  # SHGFP_TYPE_CURRENT
-                buffer,
+            class _Guid(ctypes.Structure):
+                _fields_ = (
+                    ("data1", ctypes.c_ulong),
+                    ("data2", ctypes.c_ushort),
+                    ("data3", ctypes.c_ushort),
+                    ("data4", ctypes.c_ubyte * 8),
+                )
+
+            folder_id_local_app_data = _Guid(
+                0xF1B32785,
+                0x6FBA,
+                0x4FCF,
+                (ctypes.c_ubyte * 8)(
+                    0x9D,
+                    0x55,
+                    0x7B,
+                    0x8E,
+                    0x7F,
+                    0x15,
+                    0x70,
+                    0x91,
+                ),
             )
-        except (AttributeError, OSError, ValueError) as exc:
+            raw_path = ctypes.c_void_p()
+            get_known_folder_path = ctypes.windll.shell32.SHGetKnownFolderPath
+            get_known_folder_path.argtypes = (
+                ctypes.POINTER(_Guid),
+                ctypes.c_uint32,
+                ctypes.c_void_p,
+                ctypes.POINTER(ctypes.c_void_p),
+            )
+            get_known_folder_path.restype = ctypes.c_long
+            free_task_memory = ctypes.windll.ole32.CoTaskMemFree
+            free_task_memory.argtypes = (ctypes.c_void_p,)
+            free_task_memory.restype = None
+            status = get_known_folder_path(
+                ctypes.byref(folder_id_local_app_data),
+                0,
+                None,
+                ctypes.byref(raw_path),
+            )
+            try:
+                if status != 0 or raw_path.value is None:
+                    raise WorkspaceBindingIntegrityError(
+                        "Windows Local AppData Known Folder lookup failed"
+                    )
+                native_path = ctypes.wstring_at(raw_path.value)
+            finally:
+                if raw_path.value is not None:
+                    free_task_memory(raw_path)
+        except WorkspaceBindingIntegrityError:
+            raise
+        except (AttributeError, OSError, TypeError, ValueError) as exc:
             raise WorkspaceBindingIntegrityError(
-                "Windows Local AppData could not be resolved through the native shell"
+                "Windows Local AppData could not be resolved through Known Folders"
             ) from exc
-        if status != 0 or not buffer.value:
+        if not native_path:
             raise WorkspaceBindingIntegrityError(
-                "Windows Local AppData native shell lookup failed"
+                "Windows Local AppData Known Folder returned an empty path"
             )
         return _absolute_machine_state_base(
             "native Windows Local AppData",
-            buffer.value,
+            native_path,
         )
 
     try:

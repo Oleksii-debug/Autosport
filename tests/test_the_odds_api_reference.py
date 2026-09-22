@@ -67,6 +67,15 @@ def event_payload(*, sport_key: str = "basketball_nba") -> list[dict]:
     ]
 
 
+def historical_event_payload() -> list[dict]:
+    payload = event_payload()
+    bookmaker = payload[0]["bookmakers"][0]
+    bookmaker["last_update"] = "2026-09-22T00:54:00Z"
+    bookmaker["markets"][0]["last_update"] = "2026-09-22T00:54:30Z"
+    bookmaker["markets"][1]["last_update"] = "2026-09-22T00:54:40Z"
+    return payload
+
+
 def response(payload=None, *, headers=None) -> TheOddsApiHttpJsonResponse:
     return TheOddsApiHttpJsonResponse(
         event_payload() if payload is None else payload,
@@ -149,7 +158,7 @@ def test_historical_snapshot_is_at_or_before_requested_but_acquisition_stays_lat
         "timestamp": "2026-09-22T00:55:00Z",
         "previous_timestamp": "2026-09-22T00:50:00Z",
         "next_timestamp": "2026-09-22T01:00:00Z",
-        "data": event_payload(),
+        "data": historical_event_payload(),
     }
 
     calls = []
@@ -206,7 +215,7 @@ def test_next_timestamp_is_navigation_metadata_not_acquisition_time() -> None:
         "timestamp": "2026-09-22T00:55:00Z",
         "previous_timestamp": "2026-09-22T00:50:00Z",
         "next_timestamp": "2026-09-22T01:05:00Z",
-        "data": event_payload(),
+        "data": historical_event_payload(),
     }
     provider = TheOddsApiReferenceProvider(
         SECRET,
@@ -219,7 +228,7 @@ def test_next_timestamp_is_navigation_metadata_not_acquisition_time() -> None:
     )
     quote = provider.read_batch().quotes[0]
     assert quote.observed_ts == ACQUIRED
-    assert quote.source_ts == "2026-09-22T01:58:30Z"
+    assert quote.source_ts == "2026-09-22T00:54:30Z"
     assert quote.metadata["historical_next_at"] == "2026-09-22T01:05:00Z"
 
 
@@ -425,3 +434,67 @@ def test_unrequested_bookmaker_in_explicit_bookmaker_scope_fails_closed() -> Non
     payload[0]["bookmakers"].append(extra)
     with pytest.raises(TheOddsApiPayloadError, match="bookmaker outside requested scope"):
         current_provider(lambda *_: response(payload)).read_batch()
+
+
+def test_historical_constituent_update_after_returned_snapshot_fails_closed() -> None:
+    payload = historical_event_payload()
+    payload[0]["bookmakers"][0]["markets"][0]["last_update"] = "2026-09-22T00:55:01Z"
+    historical_payload = {
+        "timestamp": "2026-09-22T00:55:00Z",
+        "previous_timestamp": "2026-09-22T00:50:00Z",
+        "next_timestamp": "2026-09-22T01:00:00Z",
+        "data": payload,
+    }
+    provider = TheOddsApiReferenceProvider(
+        SECRET,
+        sport_key="basketball_nba",
+        markets=("h2h", "spreads"),
+        bookmakers=("draftkings",),
+        historical_at="2026-09-22T01:00:00Z",
+        transport=lambda *_: response(historical_payload),
+        clock=lambda: ACQUIRED,
+    )
+    with pytest.raises(
+        TheOddsApiPayloadError,
+        match="constituent update is after returned snapshot",
+    ):
+        provider.read_batch()
+
+
+@pytest.mark.parametrize(
+    ("previous_timestamp", "next_timestamp", "message"),
+    [
+        (
+            "2026-09-22T00:55:00Z",
+            "2026-09-22T01:00:00Z",
+            "previous snapshot must precede",
+        ),
+        (
+            "2026-09-22T00:50:00Z",
+            "2026-09-22T00:55:00Z",
+            "next snapshot must follow",
+        ),
+    ],
+)
+def test_historical_navigation_timestamps_must_bracket_returned_snapshot(
+    previous_timestamp,
+    next_timestamp,
+    message,
+) -> None:
+    historical_payload = {
+        "timestamp": "2026-09-22T00:55:00Z",
+        "previous_timestamp": previous_timestamp,
+        "next_timestamp": next_timestamp,
+        "data": historical_event_payload(),
+    }
+    provider = TheOddsApiReferenceProvider(
+        SECRET,
+        sport_key="basketball_nba",
+        markets=("h2h", "spreads"),
+        bookmakers=("draftkings",),
+        historical_at="2026-09-22T01:00:00Z",
+        transport=lambda *_: response(historical_payload),
+        clock=lambda: ACQUIRED,
+    )
+    with pytest.raises(TheOddsApiPayloadError, match=message):
+        provider.read_batch()

@@ -72,6 +72,57 @@ class SecretRedactionTests(unittest.TestCase):
                 self.assertNotIn(secret, redacted)
 
 
+    def test_multi_parameter_authorization_headers_redact_entire_current_line(self) -> None:
+        cases = (
+            (
+                'Authorization: Digest username="user", realm="exchange", '
+                'nonce="nonce-1", response="digest-secret-804"',
+                "digest-secret-804",
+            ),
+            (
+                "Authorization: AWS4-HMAC-SHA256 "
+                "Credential=AKIAEXAMPLE/20260922/eu/service/aws4_request, "
+                "SignedHeaders=host;x-amz-date, Signature=aws-signature-secret-804",
+                "aws-signature-secret-804",
+            ),
+        )
+
+        for source, secret in cases:
+            with self.subTest(source=source):
+                redacted = redact_operator_text(source)
+                self.assertEqual(redacted, "Authorization: " + REDACTED)
+                self.assertNotIn(secret, redacted)
+
+    def test_multi_parameter_authorization_redaction_stops_at_line_boundary(self) -> None:
+        source = (
+            'Authorization: Digest username="user", response="digest-secret-804"\n'
+            "market=winner region=eu"
+        )
+
+        redacted = redact_operator_text(source)
+
+        self.assertEqual(
+            redacted,
+            "Authorization: " + REDACTED + "\nmarket=winner region=eu",
+        )
+        self.assertNotIn("digest-secret-804", redacted)
+        self.assertIn("market=winner region=eu", redacted)
+
+    def test_safe_exception_text_redacts_multi_parameter_authorization_tail(self) -> None:
+        secret = "digest-exception-secret-804"
+        rendered = safe_exception_text(
+            RuntimeError(
+                'provider failed Authorization: Digest username="user", '
+                'realm="exchange", response="' + secret + '"'
+            )
+        )
+
+        self.assertNotIn(secret, rendered)
+        self.assertEqual(
+            rendered,
+            "RuntimeError: provider failed Authorization: " + REDACTED,
+        )
+
     def test_text_redacts_percent_encoded_sensitive_query_keys(self) -> None:
         source = (
             "https://example.test/path?"

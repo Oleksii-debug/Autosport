@@ -27,7 +27,7 @@ class IncidentRiskRegisterTests(unittest.TestCase):
             "revision": 1,
             "kind": RegisterEntryKind.INCIDENT,
             "severity": RiskSeverity.HIGH,
-            "status": RiskStatus.INVESTIGATING,
+            "status": RiskStatus.OPEN,
             "evidence_state": RiskEvidenceState.PARTIAL,
             "opened_at": cls.OPENED,
             "updated_at": cls.UPDATED,
@@ -56,7 +56,7 @@ class IncidentRiskRegisterTests(unittest.TestCase):
         self.assertEqual(projection.entry_id, entry.entry_id)
         self.assertEqual(projection.kind_key, "ui.risk_register.kind.incident")
         self.assertEqual(projection.severity_key, "ui.risk_register.severity.high")
-        self.assertEqual(projection.status_key, "ui.risk_register.status.investigating")
+        self.assertEqual(projection.status_key, "ui.risk_register.status.open")
         self.assertEqual(projection.evidence_key, "ui.risk_register.evidence.partial")
         self.assertEqual(projection.title, entry.title)
         self.assertEqual(projection.evidence_refs, entry.evidence_refs)
@@ -151,14 +151,14 @@ class IncidentRiskRegisterTests(unittest.TestCase):
             )
         with self.assertRaisesRegex(IncidentRiskRegisterError, "verified evidence"):
             self._entry(
-                status=RiskStatus.CLOSED,
+                status=RiskStatus.RESOLVED,
                 mitigation="Provider recovered and replay was reconciled.",
                 evidence_state=RiskEvidenceState.PARTIAL,
                 requires_operator_action=False,
             )
         with self.assertRaisesRegex(IncidentRiskRegisterError, "cannot require operator action"):
             self._entry(
-                status=RiskStatus.CLOSED,
+                status=RiskStatus.RESOLVED,
                 mitigation="Provider recovered and replay was reconciled.",
                 evidence_state=RiskEvidenceState.VERIFIED,
                 requires_operator_action=True,
@@ -167,13 +167,13 @@ class IncidentRiskRegisterTests(unittest.TestCase):
         closed = self._entry(
             revision=3,
             updated_at="2026-09-21T08:00:00+00:00",
-            status=RiskStatus.CLOSED,
+            status=RiskStatus.RESOLVED,
             mitigation="Provider recovered and replay was reconciled.",
             residual_risk="No unresolved gap remains in the recorded interval.",
             evidence_state=RiskEvidenceState.VERIFIED,
             requires_operator_action=False,
         )
-        self.assertEqual(closed.status, RiskStatus.CLOSED)
+        self.assertEqual(closed.status, RiskStatus.RESOLVED)
 
     def test_open_critical_risk_requires_operator_action(self) -> None:
         with self.assertRaisesRegex(IncidentRiskRegisterError, "must require operator action"):
@@ -223,6 +223,118 @@ class IncidentRiskRegisterTests(unittest.TestCase):
             )
         with self.assertRaisesRegex(IncidentRiskRegisterError, "strictly forward"):
             validate_successor(previous, self._entry(revision=2))
+
+    def test_lifecycle_transitions_are_explicit_and_evidence_bound(self) -> None:
+        opened = self._entry()
+        acknowledged = self._entry(
+            revision=2,
+            updated_at="2026-09-21T07:06:00+00:00",
+            status=RiskStatus.ACKNOWLEDGED,
+        )
+        validate_successor(opened, acknowledged)
+        self.assertEqual(
+            operator_projection(acknowledged).status_key,
+            "ui.risk_register.status.acknowledged",
+        )
+
+        mitigating = self._entry(
+            revision=3,
+            updated_at="2026-09-21T07:07:00+00:00",
+            status=RiskStatus.MITIGATING,
+            mitigation="Keep decisions fail-closed while recovery is verified.",
+        )
+        validate_successor(acknowledged, mitigating)
+
+        with self.assertRaisesRegex(
+            IncidentRiskRegisterError,
+            "lifecycle transition",
+        ):
+            validate_successor(
+                acknowledged,
+                self._entry(
+                    revision=3,
+                    updated_at="2026-09-21T07:07:00+00:00",
+                    status=RiskStatus.OPEN,
+                ),
+            )
+
+        with self.assertRaisesRegex(
+            IncidentRiskRegisterError,
+            "new verified evidence",
+        ):
+            validate_successor(
+                opened,
+                self._entry(
+                    revision=2,
+                    updated_at="2026-09-21T07:06:00+00:00",
+                    status=RiskStatus.RESOLVED,
+                    evidence_state=RiskEvidenceState.VERIFIED,
+                    mitigation="Recovery was reported complete.",
+                    requires_operator_action=False,
+                ),
+            )
+
+        resolved = self._entry(
+            revision=4,
+            updated_at="2026-09-21T07:08:00+00:00",
+            status=RiskStatus.RESOLVED,
+            evidence_state=RiskEvidenceState.VERIFIED,
+            evidence_refs=(
+                "evidence://provider-gap/001",
+                "evidence://resolution/001",
+            ),
+            mitigation="Provider recovery and causal replay were verified.",
+            requires_operator_action=False,
+        )
+        validate_successor(mitigating, resolved)
+
+        with self.assertRaisesRegex(
+            IncidentRiskRegisterError,
+            "new verified evidence",
+        ):
+            validate_successor(
+                resolved,
+                self._entry(
+                    revision=5,
+                    updated_at="2026-09-21T07:09:00+00:00",
+                    status=RiskStatus.OPEN,
+                    evidence_state=RiskEvidenceState.VERIFIED,
+                    evidence_refs=resolved.evidence_refs,
+                    mitigation=resolved.mitigation,
+                    requires_operator_action=True,
+                ),
+            )
+
+        reopened = self._entry(
+            revision=5,
+            updated_at="2026-09-21T07:09:00+00:00",
+            status=RiskStatus.OPEN,
+            evidence_state=RiskEvidenceState.VERIFIED,
+            evidence_refs=(
+                "evidence://provider-gap/001",
+                "evidence://reopen/001",
+                "evidence://resolution/001",
+            ),
+            mitigation=resolved.mitigation,
+            requires_operator_action=True,
+        )
+        validate_successor(resolved, reopened)
+
+        superseded = self._entry(
+            revision=6,
+            updated_at="2026-09-21T07:10:00+00:00",
+            status=RiskStatus.SUPERSEDED,
+            evidence_state=RiskEvidenceState.VERIFIED,
+            evidence_refs=(
+                "evidence://provider-gap/001",
+                "evidence://reopen/001",
+                "evidence://resolution/001",
+                "evidence://supersession/001",
+            ),
+            mitigation="A verified successor occurrence now carries the condition.",
+            requires_operator_action=False,
+        )
+        validate_successor(reopened, superseded)
 
     def test_operator_sort_prioritizes_action_then_severity_then_recency(self) -> None:
         low_action = self._entry(

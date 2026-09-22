@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import io
 import json
 from pathlib import Path, PurePosixPath
 import zipfile
@@ -21,10 +22,22 @@ _REQUIRED_TRUTH_LABELS = (
     "human_tested",
     "nvda_verified",
 )
+_SHA256_LENGTH = 64
+_HEX_CHARS = frozenset("0123456789abcdef")
 
 
 def _sha256_bytes(payload: bytes) -> str:
     return hashlib.sha256(payload).hexdigest()
+
+
+def _require_sha256(value: object, *, field: str) -> str:
+    if (
+        not isinstance(value, str)
+        or len(value) != _SHA256_LENGTH
+        or any(character not in _HEX_CHARS for character in value)
+    ):
+        raise ValueError(f"{field} is not a canonical lowercase SHA-256 digest")
+    return value
 
 
 def _decode_json_object(payload: bytes, label: str) -> dict[str, object]:
@@ -147,36 +160,37 @@ def _validate_sums(members: dict[str, bytes], *, label: str) -> None:
             raise ValueError(f"{label} SHA256SUMS.txt hash mismatch: {relative}")
 
 
-def _load_legacy_members(package_zip: Path) -> dict[str, bytes]:
+def _load_members(payload: bytes, *, prefix: str, label: str) -> dict[str, bytes]:
     try:
-        with zipfile.ZipFile(package_zip, "r") as archive:
-            return _relative_members(
-                archive,
-                prefix=LEGACY_PREFIX,
-                label="legacy release package",
-            )
+        with io.BytesIO(payload) as snapshot:
+            with zipfile.ZipFile(snapshot, "r") as archive:
+                return _relative_members(archive, prefix=prefix, label=label)
     except zipfile.BadZipFile as exc:
-        raise ValueError("legacy release package is not a valid ZIP") from exc
+        raise ValueError(f"{label} is not a valid ZIP") from exc
 
 
-def _load_stage_neutral_members(package_zip: Path) -> dict[str, bytes]:
-    try:
-        with zipfile.ZipFile(package_zip, "r") as archive:
-            return _relative_members(
-                archive,
-                prefix=STAGE_NEUTRAL_PREFIX,
-                label="stage-neutral release package",
-            )
-    except zipfile.BadZipFile as exc:
-        raise ValueError("stage-neutral release package is not a valid ZIP") from exc
+def _load_legacy_members(payload: bytes) -> dict[str, bytes]:
+    return _load_members(
+        payload,
+        prefix=LEGACY_PREFIX,
+        label="legacy release package",
+    )
 
 
-def _require_canonical_container(package_zip: Path) -> None:
+def _load_stage_neutral_members(payload: bytes) -> dict[str, bytes]:
+    return _load_members(
+        payload,
+        prefix=STAGE_NEUTRAL_PREFIX,
+        label="stage-neutral release package",
+    )
+
+
+def _require_canonical_container(payload: bytes) -> None:
     # The canonical writer should make these checks tautological in an untampered run,
-    # but validating the authored bytes closes a path-swap/metadata drift gap between
+    # but validating one immutable snapshot closes metadata/path drift between
     # publication and PASS evidence.
     try:
-        with package_zip.open("rb") as snapshot:
+        with io.BytesIO(payload) as snapshot:
             with zipfile.ZipFile(snapshot, "r") as archive:
                 infos = archive.infolist()
                 canonical_release._require_canonical_zip_metadata(
@@ -257,8 +271,9 @@ def _verify_stage_neutral_output(
     expected_source_sha: str,
     expected_members: dict[str, bytes],
 ) -> dict[str, object]:
-    _require_canonical_container(package_zip)
-    observed = _load_stage_neutral_members(package_zip)
+    authored_bytes = package_zip.read_bytes()
+    _require_canonical_container(authored_bytes)
+    observed = _load_stage_neutral_members(authored_bytes)
     if observed != expected_members:
         raise ValueError("stage-neutral release package payload drifted during write")
     _validate_manifest(observed, label="stage-neutral release package")
@@ -284,7 +299,7 @@ def _verify_stage_neutral_output(
     if observed["PACKAGE_MANIFEST.json"] != _canonical_json_bytes(manifest):
         raise ValueError("stage-neutral PACKAGE_MANIFEST.json canonical JSON drifted")
 
-    digest = hashlib.sha256(package_zip.read_bytes()).hexdigest()
+    digest = _sha256_bytes(authored_bytes)
     return {
         "status": "PASS",
         "source_sha": expected_source_sha,
@@ -334,8 +349,17 @@ def repackage_stage_neutral_windows_release(
     )
     if legacy_verification.get("status") != "PASS":
         raise ValueError("legacy release verifier did not return PASS")
+    verified_legacy_sha = _require_sha256(
+        legacy_verification.get("package_sha256"),
+        field="legacy verifier package_sha256",
+    )
 
-    legacy_members = _load_legacy_members(legacy_package)
+    legacy_snapshot = legacy_package.read_bytes()
+    legacy_snapshot_sha = _sha256_bytes(legacy_snapshot)
+    if legacy_snapshot_sha != verified_legacy_sha:
+        raise ValueError("legacy release package changed after canonical verification")
+
+    legacy_members = _load_legacy_members(legacy_snapshot)
     transformed = _transform_members(
         legacy_members,
         expected_source_sha=expected_source_sha,
@@ -352,9 +376,7 @@ def repackage_stage_neutral_windows_release(
         expected_source_sha=expected_source_sha,
         expected_members=transformed,
     )
-    evidence["legacy_package_sha256"] = hashlib.sha256(
-        legacy_package.read_bytes()
-    ).hexdigest()
+    evidence["legacy_package_sha256"] = legacy_snapshot_sha
     return evidence
 
 

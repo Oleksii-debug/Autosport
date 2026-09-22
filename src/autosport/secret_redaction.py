@@ -66,7 +66,7 @@ _QUERY_PARAM_RE = re.compile(
 _AUTHORIZATION_VALUE_RE = re.compile(
     r"(?i)(?P<prefix>\bauthorization\s*[:=]\s*)"
     r"(?P<value>\[REDACTED\]|\"(?:\\.|[^\"\\\r\n])*\"|'(?:\\.|[^'\\\r\n])*'|"
-    r"bearer\s+[^\s,;&}\]]+|[^\s,;&}\]]+)"
+    r"[A-Za-z][A-Za-z0-9+.-]*\s+[^\s,;&}\]]+|[^\s,;&}\]]+)"
 )
 _BEARER_RE = re.compile(
     r"(?i)\b(?P<scheme>bearer)\s+(?P<value>[A-Za-z0-9._~+/=-]{4,})"

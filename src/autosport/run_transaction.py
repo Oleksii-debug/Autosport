@@ -95,6 +95,7 @@ class RunTransaction:
         self.run_id = _require_portable_run_id(run_id)
         self.root = self.workspace / self.ROOT_NAME / self.run_id
         self.manifest_path = self.root / "manifest.json"
+        self.base_book_snapshot_path = self.root / "paper_book.base.json"
         self.run_ledger_path = self.root / "run-decisions.jsonl"
         self.staged_book_path = self.root / "paper_book.next.json"
         self.staged_ledger_path = self.root / "decisions.next.jsonl"
@@ -115,6 +116,15 @@ class RunTransaction:
         base_decision_ledger_sha256: str,
     ) -> "RunTransaction":
         tx = cls(workspace, run_id)
+        base_book_snapshot = tx._verified_canonical_paper_book_snapshot(
+            tx.workspace / "paper_book.json",
+            "base PaperBook",
+        )
+        if base_book_snapshot.sha256 != base_paper_book_sha256:
+            raise RunTransactionError(
+                "base PaperBook SHA-256 canonical hash is not the expected transaction state"
+            )
+
         tx.root.mkdir(parents=True, exist_ok=False)
         manifest = {
             "schema_version": cls.SCHEMA_VERSION,
@@ -143,6 +153,37 @@ class RunTransaction:
             },
         }
         atomic_write_json(tx.manifest_path, manifest)
+        try:
+            tx._atomic_write_bytes(
+                tx.base_book_snapshot_path,
+                base_book_snapshot.payload,
+            )
+            retained_base = tx._verified_canonical_paper_book_snapshot(
+                tx.base_book_snapshot_path,
+                "retained base PaperBook",
+            )
+            if (
+                retained_base.sha256 != base_book_snapshot.sha256
+                or retained_base.payload != base_book_snapshot.payload
+            ):
+                raise RunTransactionError(
+                    "retained base PaperBook exact snapshot mismatch"
+                )
+        except BaseException as retention_error:
+            # The canonical economic state is still BASE here. Publish an aborted
+            # transaction phase before propagating an ordinary retention failure so
+            # restart recovery never sees a known-failed start as an ambiguous writer.
+            try:
+                manifest["phase"] = "aborted"
+                atomic_write_json(tx.manifest_path, manifest)
+            except BaseException as abort_error:
+                retention_error.add_note(
+                    "RunTransaction could not persist aborted phase after base "
+                    "PaperBook snapshot retention failed: "
+                    f"{type(abort_error).__name__}: {abort_error}"
+                )
+            raise
+
         tx._identity = TransactionIdentity(
             run_id=run_id,
             experiment_key=experiment_key,
@@ -154,6 +195,29 @@ class RunTransaction:
         )
         tx._require_complete_identity_anchor()
         return tx
+
+    def verified_base_paper_book_snapshot(self) -> VerifiedFileSnapshot:
+        """Return the exact immutable PaperBook bytes retained at transaction start.
+
+        Legacy transactions created before this evidence seam have no retained file
+        and therefore fail closed here without affecting their ordinary recovery.
+        """
+
+        manifest = self._read_manifest()
+        expected_hash = self._hash_field(
+            manifest,
+            "base",
+            "paper_book_sha256",
+        )
+        snapshot = self._verified_canonical_paper_book_snapshot(
+            self.base_book_snapshot_path,
+            "retained base PaperBook",
+        )
+        if snapshot.sha256 != expected_hash:
+            raise RunTransactionError(
+                "retained base PaperBook SHA-256 does not match transaction BASE"
+            )
+        return snapshot
 
     def stage_outputs(self, book: PaperBook, canonical_ledger_path: str | Path) -> tuple[str, str]:
         self._require_complete_identity_anchor()

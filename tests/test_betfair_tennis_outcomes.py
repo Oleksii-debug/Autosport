@@ -1,19 +1,27 @@
 from __future__ import annotations
 
 import unittest
+from datetime import datetime, timezone
+from decimal import Decimal
 
 from autosport.betfair_tennis_outcomes import (
     assess_betfair_tennis_historical_market_definition_authority,
 )
+from autosport.domain import TicketLeg
 from autosport.market_outcomes import (
     MarketSettlementOutcomeAuthority,
     OutcomeAuthorityStatus,
     SettlementResult,
     assess_betfair_historical_market_definition_authority,
 )
+from autosport.paper import PaperBook
+from autosport.scenario_search import ScenarioSearchEngine
 
 
 class BetfairTennisOutcomeAuthorityTests(unittest.TestCase):
+    DECISION_AS_OF = datetime(2026, 9, 22, 10, 0, 2, tzinfo=timezone.utc)
+    SOURCE_ID = "betfair_exchange_historical"
+
     @staticmethod
     def _definition(
         *,
@@ -106,6 +114,52 @@ class BetfairTennisOutcomeAuthorityTests(unittest.TestCase):
         self.assertEqual(
             settlement[tennis.identity.quote_key("player-b")],
             "loss",
+        )
+
+    def test_tennis_and_table_tennis_share_generic_scenario_engine_without_alias(self):
+        tennis = self._tennis()
+        table_tennis = self._table_tennis()
+        book = PaperBook("100")
+        tennis_ticket = book.open_ticket(
+            [
+                TicketLeg(
+                    "same-provider-event",
+                    "same-provider-market",
+                    "player-a",
+                    Decimal("2"),
+                    sport="tennis",
+                )
+            ],
+            "10",
+            provider_source_ids=(self.SOURCE_ID,),
+        )
+        table_tennis_ticket = book.open_ticket(
+            [
+                TicketLeg(
+                    "same-provider-event",
+                    "same-provider-market",
+                    "player-a",
+                    Decimal("2"),
+                    sport="table_tennis",
+                )
+            ],
+            "10",
+            provider_source_ids=(self.SOURCE_ID,),
+        )
+
+        report = ScenarioSearchEngine().analyse_authoritative(
+            [tennis_ticket, table_tennis_ticket],
+            [tennis, table_tennis],
+            decision_as_of=self.DECISION_AS_OF,
+        )
+
+        self.assertEqual(report.mode, "authoritative-conservative-enumeration")
+        self.assertTrue(report.outcome_space_exhaustive)
+        self.assertFalse(report.outcome_space_exact)
+        self.assertEqual(report.total_states, 9 * 9)
+        self.assertEqual(
+            set(report.outcome_authority_sha256s),
+            {tennis.authority_sha256, table_tennis.authority_sha256},
         )
 
     def test_wrong_sport_market_or_status_fail_closed(self):

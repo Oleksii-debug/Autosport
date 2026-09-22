@@ -1,5 +1,6 @@
 import hashlib
 import json
+from dataclasses import replace
 
 import pytest
 
@@ -9,6 +10,7 @@ from autosport.champion_eligibility import (
     ChampionEligibilityStatus,
     bind_research_trigger,
     persist_eligibility_decision,
+    require_current_activation_eligibility,
     validate_activation_eligibility,
 )
 from autosport.drift_control import (
@@ -656,3 +658,120 @@ def test_activation_rejects_wrong_exact_lineage(tmp_path):
 
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__]))
+
+
+
+def test_durable_eligibility_payload_round_trips_strictly(tmp_path):
+    _registry, decision = _eligible_scoped_decision(tmp_path)
+
+    assert ChampionEligibilityDecision.from_payload(decision.to_payload()) == decision
+
+    malformed = decision.to_payload()
+    malformed["unexpected"] = True
+    with pytest.raises(
+        ChampionEligibilityError,
+        match="payload fields mismatch",
+    ):
+        ChampionEligibilityDecision.from_payload(malformed)
+
+
+def test_current_activation_eligibility_expires_instead_of_reusing_promotion_history(tmp_path):
+    registry, decision = _eligible_scoped_decision(tmp_path)
+    persist_eligibility_decision(registry, decision)
+
+    resolved = require_current_activation_eligibility(
+        registry,
+        as_of="2026-02-20T00:00:00Z",
+        canonical_strategy_id="strategy-context",
+        expected_strategy_version_id="strategy-1",
+        expected_model_version_id="model-1",
+        expected_environment_sha256=ENV,
+        expected_protocol_id="protocol-1",
+        expected_config_sha256=CONFIG,
+        expected_sport="table_tennis",
+        expected_league="league-a",
+        expected_regime="pre_match",
+        admissible_actions=frozenset({"WAIT"}),
+    )
+    assert resolved == decision
+
+    with pytest.raises(ChampionEligibilityError, match="expired"):
+        require_current_activation_eligibility(
+            registry,
+            as_of="2026-03-01T00:00:00Z",
+            canonical_strategy_id="strategy-context",
+            expected_strategy_version_id="strategy-1",
+            expected_model_version_id="model-1",
+            expected_environment_sha256=ENV,
+            expected_protocol_id="protocol-1",
+            expected_config_sha256=CONFIG,
+            expected_sport="table_tennis",
+            expected_league="league-a",
+            expected_regime="pre_match",
+            admissible_actions=frozenset({"WAIT"}),
+        )
+
+
+def test_current_activation_eligibility_uses_latest_decision_not_older_eligible(tmp_path):
+    registry, eligible = _eligible_scoped_decision(tmp_path)
+    persist_eligibility_decision(registry, eligible)
+    tightened = replace(
+        eligible,
+        status=ChampionEligibilityStatus.WAIT_MORE_EVIDENCE,
+        evaluated_at="2026-02-18T00:00:00Z",
+        valid_until="2026-03-18T00:00:00Z",
+        reason="fresh evidence required",
+        decision_id="",
+    )
+    persist_eligibility_decision(registry, tightened)
+
+    with pytest.raises(
+        ChampionEligibilityError,
+        match="champion eligibility is WAIT_MORE_EVIDENCE",
+    ):
+        require_current_activation_eligibility(
+            registry,
+            as_of="2026-02-20T00:00:00Z",
+            canonical_strategy_id="strategy-context",
+            expected_strategy_version_id="strategy-1",
+            expected_model_version_id="model-1",
+            expected_environment_sha256=ENV,
+            expected_protocol_id="protocol-1",
+            expected_config_sha256=CONFIG,
+            expected_sport="table_tennis",
+            expected_league="league-a",
+            expected_regime="pre_match",
+            admissible_actions=frozenset({"WAIT"}),
+        )
+
+
+def test_current_activation_without_regime_authority_fails_closed_on_multiple_regimes(tmp_path):
+    registry, pre_match = _eligible_scoped_decision(tmp_path)
+    persist_eligibility_decision(registry, pre_match)
+    in_play = replace(
+        pre_match,
+        regime="in_play",
+        evaluated_at="2026-02-18T00:00:00Z",
+        valid_until="2026-03-18T00:00:00Z",
+        decision_id="",
+    )
+    persist_eligibility_decision(registry, in_play)
+
+    with pytest.raises(
+        ChampionEligibilityError,
+        match="regime is ambiguous",
+    ):
+        require_current_activation_eligibility(
+            registry,
+            as_of="2026-02-20T00:00:00Z",
+            canonical_strategy_id="strategy-context",
+            expected_strategy_version_id="strategy-1",
+            expected_model_version_id="model-1",
+            expected_environment_sha256=ENV,
+            expected_protocol_id="protocol-1",
+            expected_config_sha256=CONFIG,
+            expected_sport="table_tennis",
+            expected_league="league-a",
+            expected_regime=None,
+            admissible_actions=frozenset({"WAIT"}),
+        )

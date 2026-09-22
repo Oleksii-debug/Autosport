@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
+from threading import Lock
 from typing import Callable
 
 from .decision_ledger import EconomicDecisionAuthority, JsonlDecisionLedger
@@ -202,6 +203,7 @@ class ProductPaperDecisionCycle:
         self.inputs = inputs
         self.bounds = bounds
         self.clock = clock
+        self._cycle_lock = Lock()
 
     @property
     def workspace(self) -> Path:
@@ -325,19 +327,26 @@ class ProductPaperDecisionCycle:
     def tick(self) -> ProductPaperDecisionTickResult:
         """Run collector/lifecycle/settlement first, then at most one PAPER decision."""
 
-        self._require_running_runtime()
-        product_tick = self.runtime.tick()
-        status = self.runtime.status()
-        skip_reason = self._decision_skip_reason(product_tick, status)
-        if skip_reason is not None:
+        if not self._cycle_lock.acquire(blocking=False):
+            raise ProductPaperDecisionCycleError(
+                "PAPER decision composition already has a product cycle in progress"
+            )
+        try:
+            self._require_running_runtime()
+            product_tick = self.runtime.tick()
+            status = self.runtime.status()
+            skip_reason = self._decision_skip_reason(product_tick, status)
+            if skip_reason is not None:
+                return ProductPaperDecisionTickResult(
+                    product_tick=product_tick,
+                    decision=None,
+                    skipped_reason=skip_reason,
+                )
+            decision = self._run_decision_cycle()
             return ProductPaperDecisionTickResult(
                 product_tick=product_tick,
-                decision=None,
-                skipped_reason=skip_reason,
+                decision=decision,
+                skipped_reason=None,
             )
-        decision = self._run_decision_cycle()
-        return ProductPaperDecisionTickResult(
-            product_tick=product_tick,
-            decision=decision,
-            skipped_reason=None,
-        )
+        finally:
+            self._cycle_lock.release()

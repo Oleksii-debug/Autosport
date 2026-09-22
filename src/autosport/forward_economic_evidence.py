@@ -676,6 +676,7 @@ class ForwardEconomicEvidenceSummary:
     minimum_events_satisfied: bool
     drawdown_guard_passed: bool
     positive_authority_verified: bool
+    conditional_eprocess_verified: bool
     scientific_promotion_gate_passed: bool
     evidence_sha256: str
     promotion_authority: bool = False
@@ -702,6 +703,7 @@ class ForwardEconomicEvidenceSummary:
             "minimum_events_satisfied": self.minimum_events_satisfied,
             "drawdown_guard_passed": self.drawdown_guard_passed,
             "positive_authority_verified": self.positive_authority_verified,
+            "conditional_eprocess_verified": self.conditional_eprocess_verified,
             "scientific_promotion_gate_passed": self.scientific_promotion_gate_passed,
             "evidence_sha256": self.evidence_sha256,
             "promotion_authority": self.promotion_authority,
@@ -1061,6 +1063,15 @@ class ForwardEconomicEvidenceAccumulator:
         # decision -> accepted execution -> terminal settlement -> net-PnL
         # chain from canonical durable/provider authorities.
         positive_authority_verified = False
+
+        # The numerical accumulation uses a frozen lambda and a Hoeffding-style
+        # bounded increment. That becomes an anytime-valid e-process only under
+        # an exact conditional null relative to a prospectively frozen filtration
+        # (including when bounds/actions become known before economic outcomes).
+        # This module does not yet compose a product-owned authority proving those
+        # conditional assumptions, so threshold crossing remains diagnostic only.
+        conditional_eprocess_verified = False
+
         denomination_bound = (
             protocol.currency_code is not None
             and protocol.denomination_authority_sha256 is not None
@@ -1097,8 +1108,10 @@ class ForwardEconomicEvidenceAccumulator:
             minimum_events_satisfied=minimum_events_satisfied,
             drawdown_guard_passed=drawdown_passed,
             positive_authority_verified=positive_authority_verified,
+            conditional_eprocess_verified=conditional_eprocess_verified,
             scientific_promotion_gate_passed=(
                 positive_authority_verified
+                and conditional_eprocess_verified
                 and denomination_bound
                 and all_in_economics_complete
                 and minimum_events_satisfied

@@ -148,10 +148,8 @@ class FamilywiseAlphaRegistry:
             raise ForwardEconomicEvidenceError("alpha allocations must be sorted by challenger_id")
         if len(set(challenger_ids)) != len(challenger_ids):
             raise ForwardEconomicEvidenceError("alpha allocations must have unique challenger_id values")
-        with localcontext() as context:
-            context.prec = _DECIMAL_PRECISION
-            allocated = sum((item.alpha for item in self.allocations), Decimal(0))
-        if allocated > total:
+        allocated = sum((Fraction(item.alpha) for item in self.allocations), Fraction(0))
+        if allocated > Fraction(total):
             raise ForwardEconomicEvidenceError("familywise alpha allocations exceed total_alpha")
 
     def allocation_for(self, challenger_id: str) -> Decimal:

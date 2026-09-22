@@ -555,18 +555,88 @@ class BoundedMirrorInvalidationBufferTests(unittest.TestCase):
             ["selection-a", "selection-b", "selection-c"],
         )
 
+    def test_global_routed_key_budget_switches_only_saturated_dependency_to_fallback(self) -> None:
+        mirror = MarketMirror()
+        runtime = BoundedMirrorInvalidationBuffer(mirror)
+        dependencies = FocusedMirrorDependencyIndex(
+            mirror,
+            max_cached_keys_per_input=2,
+            max_cached_keys_total=3,
+        )
+        dependencies.register(
+            "decision-a",
+            source_ids="provider-a",
+            selection_ids=("a1", "a2"),
+        )
+        dependencies.register(
+            "decision-b",
+            source_ids="provider-a",
+            selection_ids=("b1", "b2"),
+        )
+
+        for selection in ("a1", "a2", "b1", "b2"):
+            runtime.accept_persisted(
+                self.event(
+                    source_id="provider-a",
+                    selection=selection,
+                    sequence=1,
+                )
+            )
+            dependencies.affected_inputs(runtime.drain())
+            self.assertLessEqual(
+                dependencies.cached_key_count,
+                dependencies.max_cached_keys_total,
+            )
+
+        self.assertEqual(dependencies.max_cached_keys_total, 3)
+        self.assertEqual(dependencies.cached_key_count, 2)
+        self.assertTrue(dependencies.routed_cache_complete("decision-a"))
+        self.assertFalse(dependencies.routed_cache_complete("decision-b"))
+        self.assertEqual(
+            dependencies.matching_keys("decision-a"),
+            (
+                ("provider-a", "event-1|market-1|a1"),
+                ("provider-a", "event-1|market-1|a2"),
+            ),
+        )
+
+        canonical_b = dependencies.decision_view(
+            "decision-b",
+            as_of=datetime(2026, 9, 16, 19, 0, 10, tzinfo=timezone.utc),
+            max_age=timedelta(minutes=1),
+        )
+        with patch.object(
+            mirror,
+            "active_view_for_keys",
+            side_effect=AssertionError(
+                "globally saturated dependency must use canonical selector fallback"
+            ),
+        ):
+            incremental_b = dependencies.incremental_decision_view(
+                "decision-b",
+                as_of=datetime(2026, 9, 16, 19, 0, 10, tzinfo=timezone.utc),
+                max_age=timedelta(minutes=1),
+            )
+
+        self.assertEqual(incremental_b, canonical_b)
+        self.assertEqual(
+            [event.selection_id for event in incremental_b.events],
+            ["b1", "b2"],
+        )
+
     def test_focused_routed_key_cache_budget_rejects_invalid_values(self) -> None:
         mirror = MarketMirror()
-        for value in (0, -1, True):
-            with self.subTest(value=value):
-                with self.assertRaisesRegex(
-                    ValueError,
-                    "positive non-boolean integer",
-                ):
-                    FocusedMirrorDependencyIndex(
-                        mirror,
-                        max_cached_keys_per_input=value,
-                    )
+        for field in ("max_cached_keys_per_input", "max_cached_keys_total"):
+            for value in (0, -1, True):
+                with self.subTest(field=field, value=value):
+                    with self.assertRaisesRegex(
+                        ValueError,
+                        "positive non-boolean integer",
+                    ):
+                        FocusedMirrorDependencyIndex(
+                            mirror,
+                            **{field: value},
+                        )
 
     def test_focused_dependency_overflow_fails_safe_to_all_registered_inputs(self) -> None:
         mirror = MarketMirror()

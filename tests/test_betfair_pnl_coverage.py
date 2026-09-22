@@ -257,7 +257,7 @@ def test_complete_mixed_open_and_closed_scope_is_accepted() -> None:
     )
 
     assert_complete(witness, scope=scope(), markets=markets)
-    assert witness.candidate_complete is True
+    assert witness.unsupported_market_ids == ()
     assert witness.open_odds_market_ids == ("1.open",)
     assert witness.closed_market_ids == ("1.closed",)
 
@@ -282,7 +282,7 @@ def test_non_authoritative_open_pnl_states_fail_closed(
         closed_pages=(),
     )
 
-    assert witness.candidate_complete is False
+    assert witness.unsupported_market_ids == ("1.unsupported",)
     with pytest.raises(BetfairPnlCoverageError, match="unsupported markets"):
         assert_complete(witness, scope=scope(), markets=markets)
 

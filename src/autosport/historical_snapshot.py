@@ -46,14 +46,15 @@ class HistoricalSnapshotCapture:
         return self.quote_count > 0
 
 
-def _ordered_publication_paths(output: Path, evidence: Path) -> tuple[Path, Path]:
+def _ordered_publication_lock_paths(output: Path, evidence: Path) -> tuple[Path, Path]:
     keyed_paths: list[tuple[str, Path]] = []
     for path in (output, evidence):
         try:
-            key = os.path.normcase(str(path.resolve(strict=False)))
+            resolved = path.resolve(strict=False)
         except OSError as exc:
             raise ValueError("cannot resolve historical snapshot publication path") from exc
-        keyed_paths.append((key, path))
+        key = os.path.normcase(str(resolved))
+        keyed_paths.append((key, resolved))
 
     if keyed_paths[0][0] == keyed_paths[1][0]:
         raise ValueError("historical snapshot output and evidence paths must be distinct")
@@ -86,7 +87,7 @@ def capture_historical_snapshot(
 
     output = Path(output_path)
     evidence = Path(evidence_path) if evidence_path is not None else output.with_suffix(output.suffix + ".evidence.json")
-    publication_paths = _ordered_publication_paths(output, evidence)
+    publication_lock_paths = _ordered_publication_lock_paths(output, evidence)
 
     requested_dt = _parse_timestamp(requested_at, field="requested_at")
     query = urlencode(
@@ -205,8 +206,8 @@ def capture_historical_snapshot(
         "nvda_verified": False,
     }
     with ExitStack() as publication_locks:
-        for publication_path in publication_paths:
-            publication_locks.enter_context(durable_path_lock(publication_path))
+        for publication_lock_path in publication_lock_paths:
+            publication_locks.enter_context(durable_path_lock(publication_lock_path))
         _atomic_write_jsonl(output, (event.to_dict() for event in events))
         market_sha256 = _sha256(output)
         evidence_payload["market_sha256"] = market_sha256

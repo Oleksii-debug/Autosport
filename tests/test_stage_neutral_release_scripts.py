@@ -16,10 +16,16 @@ def test_materializer_wires_exact_stage_neutral_release_contract() -> None:
     assert "Autosport-V1-windows-x64.zip" in script
     assert "Autosport-windows-x64.zip" in script
     assert "stage-neutral-release-verification.json" in script
-    assert "-m autosport.stage_neutral_release" in script
-    assert "--source-sha $SourceSha" in script
-    assert "Get-Command python -CommandType Application" in script
-    assert "$env:PYTHONPATH = $sourceRoot" in script
+    assert "src/autosport/stage_neutral_release.py" in script
+    assert "src/autosport/release_package.py" in script
+    assert "Get-ExactGitBlobBytes" in script
+    assert "ls-tree $SourceSha" in script
+    assert "cat-file" in script
+    assert "-I -S -B -c $stageNeutralLauncher" in script
+    assert 'types.ModuleType("autosport")' in script
+    assert "spec_from_file_location" in script
+    assert "-m autosport.stage_neutral_release" not in script
+    assert "$env:PYTHONPATH" not in script
     assert "package_sha256" in script
     assert "Get-FileHash" in script
     assert "real_money_execution -ne $false" in script
@@ -28,12 +34,20 @@ def test_materializer_wires_exact_stage_neutral_release_contract() -> None:
     assert "whole_product_complete -ne $false" in script
 
 
-def test_canonical_candidate_build_materializes_stage_neutral_release() -> None:
+def test_canonical_candidate_build_executes_exact_git_materializer() -> None:
     script = _script("build_windows_candidate.ps1")
 
     build_index = script.index("Invoke-WindowsCandidateCoreText")
-    materializer_index = script.index("materialize_stage_neutral_release.ps1")
-    assert build_index < materializer_index
-    assert "^[0-9a-f]{40}$" in script
-    assert "& $materializer -SourceSha $sourceSha" in script
+    materializer_index = script.index("$materializerRepoPath")
+    cat_file_index = script.index("cat-file", materializer_index)
+    scriptblock_index = script.index("[scriptblock]::Create", cat_file_index)
+    invocation_index = script.index("& $materializerScript", scriptblock_index)
+
+    assert build_index < materializer_index < cat_file_index < scriptblock_index < invocation_index
+    assert "scripts/materialize_stage_neutral_release.ps1" in script
+    assert "ls-tree $sourceSha" in script
+    assert "GIT_NO_REPLACE_OBJECTS" in script
+    assert "Stage-neutral release source SHA does not match checkout HEAD" in script
+    assert "-SourceSha $sourceSha -RepoRoot $repoRoot" in script
     assert "build_stage_neutral_windows_candidate.ps1" not in script
+    assert "& $materializer -SourceSha" not in script

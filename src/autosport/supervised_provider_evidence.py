@@ -281,8 +281,8 @@ def _require_bound_profile(
     account_id: str,
     observed_at: str,
 ) -> None:
-    if not isinstance(profile, BookmakerCapabilityProfile):
-        raise ProviderEvidenceError("provider evidence requires canonical capability profile")
+    if type(profile) is not BookmakerCapabilityProfile:
+        raise ProviderEvidenceError("provider evidence requires exact canonical capability profile")
     if (
         profile.venue_id != bookmaker_id
         or profile.account_id != account_id
@@ -314,11 +314,11 @@ def verify_betfair_provider_state(
 ) -> VerifiedProviderState:
     """Derive execution truth only from a client-sealed, action-scoped Betfair capture."""
 
-    if not isinstance(action, ExecutionAction):
-        raise ProviderEvidenceError("action must be canonical ExecutionAction")
-    if not isinstance(readback, BetfairExecutionReadbackEnvelope):
+    if type(action) is not ExecutionAction:
+        raise ProviderEvidenceError("action must be exact canonical ExecutionAction")
+    if type(readback) is not BetfairExecutionReadbackEnvelope:
         raise ProviderEvidenceError(
-            "provider evidence requires canonical action-scoped readback envelope"
+            "provider evidence requires exact canonical action-scoped readback envelope"
         )
     try:
         readback.assert_authoritative()

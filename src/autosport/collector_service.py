@@ -573,6 +573,54 @@ class HeadlessCollectorService:
                 "run explicit pin-aware compaction, then retry"
             ) from exc
 
+    def _append_admitted_deltas(
+        self,
+        deltas: tuple[CollectorDelta, ...],
+    ) -> tuple[bool, ...]:
+        """Commit one already-bounded provider batch as one durable transaction."""
+
+        if not isinstance(deltas, tuple):
+            raise TypeError("deltas must be a tuple")
+        if not deltas:
+            return ()
+
+        expected_stream_epoch: str | None = None
+        for delta in deltas:
+            if not isinstance(delta, CollectorDelta):
+                raise TypeError("deltas must contain CollectorDelta values")
+            delta.validate()
+            if delta.source_id != self._source_id:
+                raise CollectorServiceError(
+                    "collector source returned a delta for another source_id"
+                )
+            if expected_stream_epoch is None:
+                expected_stream_epoch = delta.stream_epoch
+            elif delta.stream_epoch != expected_stream_epoch:
+                raise CollectorServiceError(
+                    "collector source returned a mixed stream_epoch batch"
+                )
+            self._require_source_identity(
+                expected_stream_epoch=delta.stream_epoch
+            )
+
+        activated_at = self.clock()
+        _CollectorServiceState._instant(activated_at, "activated_at")
+        try:
+            changed = self.delta_store._append_batch_with_runtime_stream_epoch(
+                deltas,
+                activated_at=activated_at,
+            )
+        except CollectorStorageBackpressureError as exc:
+            raise CollectorRetentionRequiredError(
+                "RETENTION_REQUIRED: collector native SQLite allocation ceiling was reached; "
+                "run explicit pin-aware compaction, then retry"
+            ) from exc
+        if len(changed) != len(deltas):
+            raise CollectorServiceError(
+                "collector durable batch result cardinality mismatch"
+            )
+        return changed
+
     @property
     def source_id(self) -> str:
         return self._source_id
@@ -686,8 +734,7 @@ class HeadlessCollectorService:
                 )
 
             discovered_event_ids = {item.identity for item in records}
-            committed: list[str] = []
-            duplicates: list[str] = []
+            validated_deltas: list[CollectorDelta] = []
             for delta in raw_deltas:
                 if not isinstance(delta, CollectorDelta):
                     raise TypeError(
@@ -706,11 +753,20 @@ class HeadlessCollectorService:
                     raise CollectorServiceError(
                         "collector delta event is absent from durable event lifecycle"
                     )
-                if self._adapter.submit_committed_delta(delta):
-                    committed.append(delta.delta_id)
-                else:
-                    duplicates.append(delta.delta_id)
-                self._check_storage_budget()
+                validated_deltas.append(delta)
+
+            changed = self._append_admitted_deltas(tuple(validated_deltas))
+            committed = [
+                delta.delta_id
+                for delta, was_committed in zip(validated_deltas, changed)
+                if was_committed
+            ]
+            duplicates = [
+                delta.delta_id
+                for delta, was_committed in zip(validated_deltas, changed)
+                if not was_committed
+            ]
+            self._check_storage_budget()
 
             self._require_source_identity(
                 expected_stream_epoch=cycle_stream_epoch

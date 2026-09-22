@@ -77,6 +77,102 @@ def test_review_confirm_verify_survives_restart(tmp_path):
     assert verified == receipt
 
 
+def test_resolve_receipt_binding_returns_exact_durable_review_provenance(tmp_path):
+    clock = FakeClock()
+    path = tmp_path / "operator-confirmations.jsonl"
+    authority = SupervisedConfirmationAuthority(path, clock=clock)
+    review = _prepare(authority)
+
+    clock.advance(seconds=5)
+    receipt = authority.confirm_review(
+        review_id=review.review_id,
+        expected_review_sha256=review.review_sha256,
+    )
+
+    binding = authority.resolve_receipt_binding(
+        receipt_id=receipt.receipt_id,
+        expected_review_sha256=review.review_sha256,
+    )
+
+    assert binding.receipt == receipt
+    assert binding.review == review
+    assert binding.review.decision_sha256 == DECISION_SHA
+    assert binding.review.approval_evidence_sha256 == APPROVAL_SHA
+    assert binding.review.risk_evidence_sha256 == RISK_SHA
+    assert binding.review.review_payload_sha256 == review.review_payload_sha256
+
+    reopened = SupervisedConfirmationAuthority(path, clock=clock)
+    assert (
+        reopened.resolve_receipt_binding(
+            receipt_id=receipt.receipt_id,
+            expected_review_sha256=review.review_sha256,
+        )
+        == binding
+    )
+
+
+def test_resolve_receipt_binding_consumed_history_is_audit_only(tmp_path):
+    clock = FakeClock()
+    authority = SupervisedConfirmationAuthority(
+        tmp_path / "operator-confirmations.jsonl", clock=clock
+    )
+    review = _prepare(authority)
+    receipt = authority.confirm_review(
+        review_id=review.review_id,
+        expected_review_sha256=review.review_sha256,
+    )
+    consumed = authority.consume_receipt(
+        receipt_id=receipt.receipt_id,
+        expected_review_sha256=review.review_sha256,
+        consumer_key="supervised-plan-issuance:plan-1",
+    )
+
+    with pytest.raises(
+        SupervisedConfirmationConflictError,
+        match="already been consumed",
+    ):
+        authority.resolve_receipt_binding(
+            receipt_id=receipt.receipt_id,
+            expected_review_sha256=review.review_sha256,
+        )
+
+    audit = authority.resolve_receipt_binding(
+        receipt_id=receipt.receipt_id,
+        expected_review_sha256=review.review_sha256,
+        require_unconsumed=False,
+    )
+    assert audit.receipt == consumed
+    assert audit.review == review
+    assert audit.receipt.consumed_by == "supervised-plan-issuance:plan-1"
+
+
+def test_resolve_receipt_binding_enforces_ttl_for_authority_but_not_audit(tmp_path):
+    clock = FakeClock()
+    authority = SupervisedConfirmationAuthority(
+        tmp_path / "operator-confirmations.jsonl", clock=clock
+    )
+    review = _prepare(authority, ttl_seconds=10)
+    receipt = authority.confirm_review(
+        review_id=review.review_id,
+        expected_review_sha256=review.review_sha256,
+    )
+    clock.advance(seconds=10)
+
+    with pytest.raises(SupervisedConfirmationConflictError, match="expired"):
+        authority.resolve_receipt_binding(
+            receipt_id=receipt.receipt_id,
+            expected_review_sha256=review.review_sha256,
+        )
+
+    audit = authority.resolve_receipt_binding(
+        receipt_id=receipt.receipt_id,
+        expected_review_sha256=review.review_sha256,
+        require_unconsumed=False,
+    )
+    assert audit.receipt == receipt
+    assert audit.review == review
+
+
 def test_review_payload_digest_is_product_derived_and_changes_with_displayed_content(tmp_path):
     first = SupervisedConfirmationAuthority(tmp_path / "first.jsonl", clock=FakeClock())
     second = SupervisedConfirmationAuthority(tmp_path / "second.jsonl", clock=FakeClock())

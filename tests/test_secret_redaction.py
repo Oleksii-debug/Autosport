@@ -137,6 +137,39 @@ class SecretRedactionTests(unittest.TestCase):
         self.assertIn("access%5Ftoken=" + REDACTED, redacted)
         self.assertIn("market=match", redacted)
 
+    def test_human_readable_spaced_credential_labels_are_redacted(self) -> None:
+        cases = (
+            ("api key=api-secret-804", "api-secret-804"),
+            ('client secret: "client-secret-804"', "client-secret-804"),
+            ("session token = 'session-secret-804'", "session-secret-804"),
+            ("X API Key=x-api-secret-804", "x-api-secret-804"),
+            ("secret access key=access-secret-804", "access-secret-804"),
+            ("private\tkey=private-secret-804", "private-secret-804"),
+        )
+
+        for source, secret in cases:
+            with self.subTest(source=source):
+                redacted = redact_operator_text(source)
+                self.assertNotIn(secret, redacted)
+                self.assertIn(REDACTED, redacted)
+
+    def test_safe_exception_text_redacts_spaced_credential_label(self) -> None:
+        secret = "spaced-label-exception-secret-804"
+        rendered = safe_exception_text(
+            RuntimeError("provider rejected api key=" + secret + " region=eu")
+        )
+
+        self.assertNotIn(secret, rendered)
+        self.assertEqual(
+            rendered,
+            "RuntimeError: provider rejected api key=" + REDACTED + " region=eu",
+        )
+
+    def test_non_sensitive_spaced_label_is_preserved(self) -> None:
+        source = "market name=winner source status=healthy"
+
+        self.assertEqual(redact_operator_text(source), source)
+
     def test_quoted_sensitive_keys_with_literal_separators_are_redacted(self) -> None:
         cases = (
             ('{"api key":"space-secret-804"}', "space-secret-804", '"api key"'),

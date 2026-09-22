@@ -47,6 +47,8 @@ _FROZEN_REQUEST_CONFIGURATION_FIELDS = frozenset(
         "request_query_sha256",
         "_sealed_request_configuration_state",
         "_request_configuration_sealed",
+        "transport",
+        "_provider_origin_verified",
     }
 )
 
@@ -535,6 +537,8 @@ class MatchbookReadOnlyProvider:
             (type(self.market_view_sha256), self.market_view_sha256),
             (type(self.source_id), self.source_id),
             (type(self.request_query_sha256), self.request_query_sha256),
+            (type(self._provider_origin_verified), self._provider_origin_verified),
+            (self.transport is _default_transport, id(self.transport)),
         )
 
     def _assert_request_configuration_unchanged(self) -> None:
@@ -563,7 +567,12 @@ class MatchbookReadOnlyProvider:
             observed_ts = _observation_timestamp(self.clock())
             body_sha256 = _optional_sha256(response.body_sha256)
             body_size_bytes = _optional_body_size(response.body_size_bytes)
-            if self._provider_origin_verified and (
+            provider_origin_verified = self.transport is _default_transport
+            if provider_origin_verified != self._provider_origin_verified:
+                raise MatchbookPayloadError(
+                    "Matchbook provider-origin transport identity changed after construction"
+                )
+            if provider_origin_verified and (
                 body_sha256 is None or body_size_bytes is None
             ):
                 raise MatchbookPayloadError(
@@ -577,8 +586,11 @@ class MatchbookReadOnlyProvider:
                 http_status=response.status_code,
                 body_sha256=body_sha256,
                 body_size_bytes=body_size_bytes,
-                provider_origin_verified=self._provider_origin_verified,
+                provider_origin_verified=provider_origin_verified,
             )
+            # Do not publish a materialized snapshot if origin-critical transport
+            # state changed while the response was being timed, sequenced, or parsed.
+            self._assert_request_configuration_unchanged()
             self._pending_quotes = quotes
             self._pending_offset = 0
             self._pending_cursor = body_sha256 or observed_ts

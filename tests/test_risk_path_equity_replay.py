@@ -203,7 +203,7 @@ def test_missing_settlement_timestamp_is_noncausal_and_strict_mode_rejects(
     assert relaxed.observed_timestamps_complete is False
     assert relaxed.latest_observed_at == "2026-01-01T10:00:00+00:00"
 
-    with pytest.raises(RiskPathEquityReplayError, match="lacks causal timestamp"):
+    with pytest.raises(RiskPathEquityReplayError, match="lacks observed timestamp"):
         replay_paper_book_equity_path(
             base,
             final,
@@ -260,3 +260,34 @@ def test_replay_is_independent_of_ambient_decimal_context(tmp_path) -> None:
 
     assert replay.minimum_equity == expected_final
     assert replay.final_balance == expected_final
+
+
+def test_base_open_ticket_settlement_does_not_double_debit_stake(tmp_path) -> None:
+    book = PaperBook("100")
+    ticket = book.open_ticket(
+        [_leg()],
+        Decimal("40"),
+        placed_at="2026-01-01T10:00:00+00:00",
+    )
+    assert book.balance == Decimal("60")
+    base = _snapshot(book, tmp_path / "base-open.json")
+
+    book.settle(
+        ticket.ticket_id,
+        {ticket.legs[0].quote_key},
+        settled_at="2026-01-01T11:00:00+00:00",
+    )
+    final = _snapshot(book, tmp_path / "final-settled.json")
+
+    replay = replay_paper_book_equity_path(
+        base,
+        final,
+        expected_changed_ticket_ids=frozenset({ticket.ticket_id}),
+        require_complete_observed_timestamps=True,
+    )
+
+    assert replay.start_balance == Decimal("60")
+    assert replay.minimum_equity == Decimal("60")
+    assert replay.final_balance == Decimal("120")
+    assert len(replay.transitions) == 1
+    assert replay.transitions[0].action == "settle"

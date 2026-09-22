@@ -182,7 +182,7 @@ class SmarketsAccountRateBudget:
         self._initialize()
 
     def _connect(self) -> sqlite3.Connection:
-        connection = sqlite3.connect(str(self._path), timeout=0.0, isolation_level=None)
+        connection = sqlite3.connect(str(self._path), timeout=0.25, isolation_level=None)
         connection.row_factory = sqlite3.Row
         connection.execute('PRAGMA foreign_keys = ON')
         return connection

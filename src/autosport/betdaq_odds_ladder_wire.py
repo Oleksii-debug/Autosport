@@ -178,6 +178,10 @@ def parse_get_odds_ladder_response(
             raise BetdaqSoapProtocolError("BETDAQ odds ladder exceeds entry bound")
         if list(child) or (child.text and child.text.strip()):
             raise BetdaqSoapProtocolError("Ladder entry must not contain child content")
+        if set(child.attrib) != {"price", "representation"}:
+            raise BetdaqSoapProtocolError(
+                "Ladder entry must contain exactly price and representation attributes"
+            )
 
         price_text = _required_attr(child, "price")
         if price_text != price_text.strip():

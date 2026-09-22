@@ -677,11 +677,11 @@ def assess_betfair_historical_market_definition_authority(
     """
 
     market = _canonical_text("market_id", market_id)
-    publish_raw, publish_dt = _canonical_timestamp(
+    _, publish_dt = _canonical_timestamp(
         "provider_publish_at",
         provider_publish_at,
     )
-    observed_raw, observed_dt = _canonical_timestamp("observed_at", observed_at)
+    _, observed_dt = _canonical_timestamp("observed_at", observed_at)
     if publish_dt > observed_dt:
         raise ValueError("provider_publish_at must not be after observed_at")
     if type(market_definition) is not dict:
@@ -770,8 +770,6 @@ def assess_betfair_historical_market_definition_authority(
         )
     if len(selection_ids) != len(set(selection_ids)):
         raise ValueError("marketDefinition.runners contains duplicate selection id")
-    canonical_selections = tuple(sorted(selection_ids))
-
     # Structural validity is necessary but not sufficient for provider truth.
     # betfair_historical_read_once only freezes bytes from a user-supplied file,
     # and historical governance binds rights/retention records; neither authenticates

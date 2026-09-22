@@ -3,6 +3,9 @@ from decimal import Decimal
 
 from autosport.calibration_diagnostics import (
     CalibrationDependenceAssumption,
+    CalibrationPopulationEntry,
+    CalibrationPopulationManifest,
+    evaluate_calibration_coverage,
     evaluate_calibration_diagnostics,
 )
 from autosport.forecasting import (
@@ -48,14 +51,48 @@ class CalibrationDiagnosticsTests(unittest.TestCase):
             "holdout",
         )
 
+    def _manifest(
+        self,
+        records,
+        *,
+        selected_ids=None,
+        source_snapshot_sha256="c" * 64,
+        selection_policy_sha256="d" * 64,
+    ):
+        record_values = tuple(records)
+        selected = (
+            {record.forecast_id for record in record_values}
+            if selected_ids is None
+            else set(selected_ids)
+        )
+        return CalibrationPopulationManifest(
+            window_id=self._window().window_id,
+            source_snapshot_sha256=source_snapshot_sha256,
+            selection_policy_sha256=selection_policy_sha256,
+            entries=tuple(
+                CalibrationPopulationEntry(
+                    forecast_id=record.forecast_id,
+                    forecast_sha256=record.canonical_hash,
+                    selected=record.forecast_id in selected,
+                )
+                for record in record_values
+            ),
+        )
+
     def _evaluate(self, records, outcomes, window=None, **kwargs):
+        record_values = tuple(records)
+        population_manifest = kwargs.pop(
+            "population_manifest",
+            self._manifest(record_values),
+        )
         return evaluate_calibration_diagnostics(
-            records,
+            record_values,
             outcomes,
             window or self._window(),
             dependence_assumption=(
                 CalibrationDependenceAssumption.INDEPENDENT_BERNOULLI
             ),
+            population_manifest=population_manifest,
             **kwargs,
         )
 
@@ -319,6 +356,7 @@ class CalibrationDiagnosticsTests(unittest.TestCase):
                 outcomes,
                 self._window(),
                 bins=5,
+                population_manifest=self._manifest(records),
             )
 
     def test_iid_diagnostic_rejects_repeated_exact_quote_key(self):
@@ -347,6 +385,150 @@ class CalibrationDiagnosticsTests(unittest.TestCase):
                 outcomes[:2],
                 self._window(),
                 bins=2,
+            )
+
+    def test_selective_coverage_binds_full_eligible_denominator(self):
+        records, outcomes = self._cohort()
+        selected_ids = ("f-1", "f-2")
+        full_manifest = self._manifest(records, selected_ids=selected_ids)
+        selective = self._evaluate(
+            records,
+            outcomes,
+            self._window(),
+            bins=5,
+            population_manifest=full_manifest,
+        )
+
+        narrow_records = records[:2]
+        narrow_outcomes = outcomes[:2]
+        narrow = self._evaluate(
+            narrow_records,
+            narrow_outcomes,
+            self._window(),
+            bins=5,
+            population_manifest=self._manifest(narrow_records),
+        )
+
+        self.assertEqual(selective.count, 2)
+        self.assertEqual(selective.coverage.eligible_count, 4)
+        self.assertEqual(selective.coverage.selected_count, 2)
+        self.assertEqual(selective.coverage.resolved_count, 2)
+        self.assertEqual(selective.coverage.pending_outcome_count, 0)
+        self.assertEqual(selective.coverage.missing_forecast_count, 0)
+        self.assertEqual(selective.coverage.selection_coverage, 0.5)
+        self.assertEqual(narrow.coverage.selection_coverage, 1.0)
+        self.assertEqual(selective.cohort_sha256, narrow.cohort_sha256)
+        self.assertNotEqual(
+            selective.population_manifest_sha256,
+            narrow.population_manifest_sha256,
+        )
+        self.assertNotEqual(selective.config_sha256, narrow.config_sha256)
+        self.assertNotEqual(selective.report_sha256, narrow.report_sha256)
+
+    def test_population_manifest_rejects_missing_and_out_of_universe_records(self):
+        records, outcomes = self._cohort()
+        full_manifest = self._manifest(records)
+        with self.assertRaisesRegex(ValueError, "requires forecast records"):
+            self._evaluate(
+                records[:-1],
+                outcomes[:-1],
+                self._window(),
+                bins=5,
+                population_manifest=full_manifest,
+            )
+
+        narrow_manifest = self._manifest(records[:-1])
+        with self.assertRaisesRegex(ValueError, "outside declared population"):
+            self._evaluate(
+                records,
+                outcomes,
+                self._window(),
+                bins=5,
+                population_manifest=narrow_manifest,
+            )
+
+    def test_coverage_projection_keeps_pending_and_empty_selection_explicit(self):
+        records, outcomes = self._cohort()
+        manifest = self._manifest(records, selected_ids=("f-1", "f-2"))
+        coverage = evaluate_calibration_coverage(
+            records,
+            outcomes[:1],
+            self._window(),
+            population_manifest=manifest,
+        )
+        self.assertEqual(coverage.eligible_count, 4)
+        self.assertEqual(coverage.selected_count, 2)
+        self.assertEqual(coverage.forecasted_count, 4)
+        self.assertEqual(coverage.resolved_count, 1)
+        self.assertEqual(coverage.pending_outcome_count, 1)
+        self.assertEqual(coverage.missing_forecast_count, 0)
+        self.assertEqual(coverage.selection_coverage, 0.5)
+        self.assertEqual(coverage.resolution_coverage, 0.5)
+
+        empty_manifest = self._manifest(records, selected_ids=())
+        empty = evaluate_calibration_coverage(
+            records,
+            (),
+            self._window(),
+            population_manifest=empty_manifest,
+        )
+        self.assertEqual(empty.selected_count, 0)
+        self.assertEqual(empty.selection_coverage, 0.0)
+        self.assertEqual(empty.resolution_coverage, 0.0)
+        with self.assertRaisesRegex(ValueError, "selected no forecasts"):
+            self._evaluate(
+                records,
+                (),
+                self._window(),
+                bins=5,
+                population_manifest=empty_manifest,
+            )
+
+    def test_population_manifest_hashes_exact_forecast_bytes_and_is_order_stable(self):
+        records, outcomes = self._cohort()
+        forward_manifest = self._manifest(records, selected_ids=("f-1", "f-3"))
+        reverse_manifest = self._manifest(
+            tuple(reversed(records)),
+            selected_ids=("f-3", "f-1"),
+        )
+        self.assertEqual(
+            forward_manifest.manifest_sha256,
+            reverse_manifest.manifest_sha256,
+        )
+
+        tampered_entry = CalibrationPopulationEntry(
+            forecast_id=records[0].forecast_id,
+            forecast_sha256="e" * 64,
+            selected=True,
+        )
+        tampered_manifest = CalibrationPopulationManifest(
+            window_id=self._window().window_id,
+            source_snapshot_sha256="c" * 64,
+            selection_policy_sha256="d" * 64,
+            entries=(tampered_entry,) + forward_manifest.entries[1:],
+        )
+        with self.assertRaisesRegex(ValueError, "forecast hash mismatch"):
+            self._evaluate(
+                records,
+                outcomes,
+                self._window(),
+                bins=5,
+                population_manifest=tampered_manifest,
+            )
+
+    def test_population_manifest_duplicate_identity_fails_closed(self):
+        record = self._record("dup-pop", "0.5")
+        entry = CalibrationPopulationEntry(
+            forecast_id=record.forecast_id,
+            forecast_sha256=record.canonical_hash,
+            selected=True,
+        )
+        with self.assertRaisesRegex(ValueError, "duplicate forecast_id"):
+            CalibrationPopulationManifest(
+                window_id=self._window().window_id,
+                source_snapshot_sha256="c" * 64,
+                selection_policy_sha256="d" * 64,
+                entries=(entry, entry),
             )
 
     def test_causal_and_training_boundary_checks_are_preserved(self):

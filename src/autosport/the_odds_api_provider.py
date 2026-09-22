@@ -1,13 +1,14 @@
 """Read-only The Odds API v4 adapter with causal multi-sport provenance.
 
-This module only observes market data. It does not expose account, wager, settlement,
-or provider-write operations and cannot confer real-money authority.
+The adapter only observes provider market data. It exposes no account, wager,
+settlement, bankroll, or provider-write operation and cannot confer real-money authority.
 """
 
 from __future__ import annotations
 
 import hashlib
 import json
+import math
 from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
@@ -21,6 +22,7 @@ from .domain import MarketType, utc_now_iso
 from .providers import ProviderBatch, ProviderQuote, ProviderUnavailableError
 
 
+THE_ODDS_API_BASE_URL = "https://api.the-odds-api.com"
 THE_ODDS_API_TERMS_SOURCE_REF = "https://the-odds-api.com/terms-and-conditions.html"
 THE_ODDS_API_DOCS_SOURCE_REF = "https://the-odds-api.com/liveapi/guides/v4/"
 
@@ -68,6 +70,7 @@ class TheOddsApiRequestEvidence:
     @property
     def request_fingerprint(self) -> str:
         payload = {
+            "actual_snapshot_at": self.actual_snapshot_at,
             "bookmakers": list(self.bookmakers),
             "date_format": "iso",
             "endpoint_kind": self.endpoint_kind,
@@ -86,8 +89,8 @@ class TheOddsApiRequestEvidence:
             sort_keys=True,
             separators=(",", ":"),
             ensure_ascii=True,
-        )
-        return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+        ).encode("utf-8")
+        return hashlib.sha256(encoded).hexdigest()
 
     def metadata(self) -> dict[str, Any]:
         return {
@@ -102,6 +105,7 @@ class TheOddsApiRequestEvidence:
             "date_format": "iso",
             "include_sids": self.include_sids,
             "include_bet_limits": self.include_bet_limits,
+            "observed_at": self.observed_at,
             "requested_snapshot_at": self.requested_snapshot_at,
             "actual_snapshot_at": self.actual_snapshot_at,
             "request_fingerprint": self.request_fingerprint,
@@ -171,7 +175,7 @@ def _default_transport(url: str, timeout: float) -> HttpJsonResponse:
     try:
         with urlopen(
             request, timeout=timeout
-        ) as response:  # nosec B310 - fixed HTTPS base URL by default
+        ) as response:  # nosec B310 - adapter pins the canonical HTTPS provider origin
             return HttpJsonResponse(
                 payload=_decode_provider_json(response.read()),
                 status_code=int(response.status),
@@ -185,32 +189,45 @@ def _default_transport(url: str, timeout: float) -> HttpJsonResponse:
         raise TheOddsApiTransportError("The Odds API transport unavailable") from exc
 
 
-def _text(value: object, field: str, *, allow_colon: bool = True) -> str:
+def _plain_text(value: object, field: str) -> str:
     if type(value) is not str or not value or value != value.strip():
-        raise TheOddsApiPayloadError(
-            f"{field} must be a non-empty trimmed string"
-        )
-    if "|" in value:
-        raise TheOddsApiPayloadError(
-            f"{field} must not contain reserved identity delimiter '|'"
-        )
-    if not allow_colon and ":" in value:
-        raise TheOddsApiPayloadError(
-            f"{field} must not contain reserved source-scope delimiter ':'"
-        )
+        raise TheOddsApiPayloadError(f"{field} must be a non-empty trimmed string")
+    try:
+        value.encode("utf-8")
+    except UnicodeEncodeError as exc:
+        raise TheOddsApiPayloadError(f"{field} must be UTF-8 encodable") from exc
     return value
 
 
-def _optional_text(value: object, field: str) -> str | None:
+def _canonical_component(
+    value: object,
+    field: str,
+    *,
+    allow_colon: bool = True,
+) -> str:
+    text = _plain_text(value, field)
+    if "|" in text:
+        raise TheOddsApiPayloadError(
+            f"{field} must not contain reserved identity delimiter '|'"
+        )
+    if not allow_colon and ":" in text:
+        raise TheOddsApiPayloadError(
+            f"{field} must not contain reserved source-scope delimiter ':'"
+        )
+    return text
+
+
+def _optional_provider_text(value: object, field: str) -> str | None:
     if value is None:
         return None
-    return _text(value, field)
+    return _plain_text(value, field)
 
 
 def _sport(value: object, field: str = "sport") -> str:
-    text = _text(value, field)
+    text = _canonical_component(value, field)
     if text != text.lower() or any(
-        c not in "abcdefghijklmnopqrstuvwxyz0123456789_-" for c in text
+        character not in "abcdefghijklmnopqrstuvwxyz0123456789_-"
+        for character in text
     ):
         raise TheOddsApiPayloadError(
             f"{field} must be a lowercase canonical sport key"
@@ -223,13 +240,11 @@ def _sport(value: object, field: str = "sport") -> str:
 
 
 def _timestamp(value: object, field: str) -> str:
-    text = _text(value, field)
+    text = _plain_text(value, field)
     try:
         parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
     except ValueError as exc:
-        raise TheOddsApiPayloadError(
-            f"{field} must be valid ISO-8601"
-        ) from exc
+        raise TheOddsApiPayloadError(f"{field} must be valid ISO-8601") from exc
     if parsed.tzinfo is None or parsed.utcoffset() is None:
         raise TheOddsApiPayloadError(
             f"{field} must be timezone-aware ISO-8601"
@@ -309,8 +324,8 @@ def _identity_digest(*values: object) -> str:
         ensure_ascii=False,
         separators=(",", ":"),
         allow_nan=False,
-    )
-    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
 
 
 def _market_type(market_key: str) -> MarketType:
@@ -338,19 +353,15 @@ class TheOddsApiProvider:
         include_sids: bool = True,
         include_bet_limits: bool = False,
         max_market_age_seconds: int | None = None,
-        base_url: str = "https://api.the-odds-api.com",
+        base_url: str = THE_ODDS_API_BASE_URL,
         timeout_seconds: float = 10.0,
         transport: Transport = _default_transport,
         clock: Clock = utc_now_iso,
     ) -> None:
-        if (
-            type(api_key) is not str
-            or not api_key
-            or api_key != api_key.strip()
-        ):
+        if type(api_key) is not str or not api_key or api_key != api_key.strip():
             raise ValueError("api_key must be a non-empty trimmed string")
         requested_sport = _sport(sport, "sport")
-        self.regions = self._config_values(regions, "regions")
+        self.regions = self._config_values(regions, "regions", allow_empty=True)
         self.bookmakers = self._config_values(
             bookmakers, "bookmakers", allow_empty=True
         )
@@ -375,19 +386,20 @@ class TheOddsApiProvider:
                 "max_market_age_seconds must be a positive non-boolean integer or None"
             )
         if (
-            type(timeout_seconds) not in {int, float}
-            or isinstance(timeout_seconds, bool)
+            isinstance(timeout_seconds, bool)
+            or type(timeout_seconds) not in {int, float}
+            or not math.isfinite(float(timeout_seconds))
             or timeout_seconds <= 0
         ):
-            raise ValueError("timeout_seconds must be positive")
-        if type(base_url) is not str or not base_url.startswith("https://"):
-            raise ValueError("base_url must use https")
+            raise ValueError("timeout_seconds must be a finite positive number")
+        if type(base_url) is not str or base_url.rstrip("/") != THE_ODDS_API_BASE_URL:
+            raise ValueError("base_url must be the canonical The Odds API HTTPS origin")
         self.api_key = api_key
         self.sport = requested_sport
         self.include_sids = include_sids
         self.include_bet_limits = include_bet_limits
         self.max_market_age_seconds = max_market_age_seconds
-        self.base_url = base_url.rstrip("/")
+        self.base_url = THE_ODDS_API_BASE_URL
         self.timeout_seconds = float(timeout_seconds)
         self.transport = transport
         self.clock = clock
@@ -406,11 +418,10 @@ class TheOddsApiProvider:
         allow_colon: bool = True,
     ) -> tuple[str, ...]:
         if isinstance(values, (str, bytes)):
-            raise TypeError(
-                f"{field} must be a sequence of strings, not a scalar"
-            )
+            raise TypeError(f"{field} must be a sequence of strings, not a scalar")
         result = tuple(
-            _text(value, field, allow_colon=allow_colon) for value in values
+            _canonical_component(value, field, allow_colon=allow_colon)
+            for value in values
         )
         if not result and not allow_empty:
             raise ValueError(f"{field} must not be empty")
@@ -424,19 +435,16 @@ class TheOddsApiProvider:
 
     def read_batch(self, max_items: int = 1000) -> ProviderBatch:
         if type(max_items) is not int or max_items <= 0:
-            raise ValueError(
-                "max_items must be a positive non-boolean integer"
-            )
+            raise ValueError("max_items must be a positive non-boolean integer")
         if self._pending_offset >= len(self._pending_quotes):
             observed_at = _timestamp(self.clock(), "observed_at")
             response = self._request(self._current_url())
             evidence = self._request_evidence(
                 "current", observed_at, response.headers
             )
-            quotes = self._parse_current_payload(
+            self._pending_quotes = self._parse_current_payload(
                 response.payload, observed_at, evidence
             )
-            self._pending_quotes = quotes
             self._pending_offset = 0
             self._pending_cursor = evidence.request_fingerprint
             self._last_request_evidence = evidence
@@ -452,9 +460,7 @@ class TheOddsApiProvider:
             flags.append("TRUNCATED_BATCH")
         cursor = self._pending_cursor
         if self._pending_offset >= len(self._pending_quotes):
-            self._pending_quotes = ()
-            self._pending_offset = 0
-            self._pending_cursor = None
+            self._clear_pending_snapshot()
         return ProviderBatch(
             self.source_id,
             quotes,
@@ -469,17 +475,18 @@ class TheOddsApiProvider:
         max_items: int = 100000,
     ) -> TheOddsApiHistoricalSnapshot:
         if type(max_items) is not int or max_items <= 0:
-            raise ValueError(
-                "max_items must be a positive non-boolean integer"
-            )
+            raise ValueError("max_items must be a positive non-boolean integer")
         requested_at = _timestamp(requested_at, "requested_at")
         observed_at = _timestamp(self.clock(), "observed_at")
+        if _datetime(requested_at) > _datetime(observed_at):
+            raise TheOddsApiPayloadError(
+                "historical requested_at cannot be later than local receipt time"
+            )
         response = self._request(self._historical_url(requested_at))
         payload = response.payload
         if not isinstance(payload, dict):
-            raise TheOddsApiPayloadError(
-                "historical response must be an object"
-            )
+            raise TheOddsApiPayloadError("historical response must be an object")
+
         snapshot_at = _timestamp(payload.get("timestamp"), "timestamp")
         if _datetime(snapshot_at) > _datetime(requested_at):
             raise TheOddsApiPayloadError(
@@ -488,20 +495,23 @@ class TheOddsApiProvider:
         previous = payload.get("previous_timestamp")
         next_snapshot = payload.get("next_timestamp")
         previous_at = (
-            None
-            if previous is None
-            else _timestamp(previous, "previous_timestamp")
+            None if previous is None else _timestamp(previous, "previous_timestamp")
         )
         next_at = (
-            None
-            if next_snapshot is None
-            else _timestamp(next_snapshot, "next_timestamp")
+            None if next_snapshot is None else _timestamp(next_snapshot, "next_timestamp")
         )
+        if previous_at is not None and _datetime(previous_at) >= _datetime(snapshot_at):
+            raise TheOddsApiPayloadError(
+                "previous_timestamp must precede historical snapshot timestamp"
+            )
+        if next_at is not None and _datetime(next_at) <= _datetime(snapshot_at):
+            raise TheOddsApiPayloadError(
+                "next_timestamp must follow historical snapshot timestamp"
+            )
+
         events = payload.get("data")
         if not isinstance(events, list):
-            raise TheOddsApiPayloadError(
-                "historical response data must be an event list"
-            )
+            raise TheOddsApiPayloadError("historical response data must be an event list")
         evidence = self._request_evidence(
             "historical",
             observed_at,
@@ -519,14 +529,14 @@ class TheOddsApiProvider:
             raise TheOddsApiPayloadError(
                 "historical snapshot exceeds max_items; refusing partial evidence"
             )
-        flags = ("DYNAMIC_COVERAGE", "HISTORICAL_SNAPSHOT")
+        flags = ["DYNAMIC_COVERAGE", "HISTORICAL_SNAPSHOT"]
         if not quotes:
-            flags = (*flags, "EMPTY_RESPONSE")
+            flags.append("EMPTY_RESPONSE")
         batch = ProviderBatch(
             self.source_id,
             quotes,
             cursor=snapshot_at,
-            quality_flags=flags,
+            quality_flags=tuple(flags),
         )
         self._last_request_evidence = evidence
         return TheOddsApiHistoricalSnapshot(
@@ -538,27 +548,30 @@ class TheOddsApiProvider:
             request_evidence=evidence,
         )
 
+    def _clear_pending_snapshot(self) -> None:
+        self._pending_quotes = ()
+        self._pending_offset = 0
+        self._pending_cursor = None
+
     def _request(self, url: str) -> HttpJsonResponse:
         response = self.transport(url, self.timeout_seconds)
         if type(response) is not HttpJsonResponse:
             raise TypeError("transport must return HttpJsonResponse")
         if response.status_code != 200:
             raise TheOddsApiTransportError(
-                f"The Odds API HTTP {response.status_code}",
-                response.status_code,
+                f"The Odds API HTTP {response.status_code}", response.status_code
             )
         return response
 
     def _current_url(self) -> str:
-        query = urlencode(self._query_items())
-        return f"{self.base_url}/v4/sports/{self.sport}/odds?{query}"
+        return f"{self.base_url}/v4/sports/{self.sport}/odds?{urlencode(self._query_items())}"
 
     def _historical_url(self, requested_at: str) -> str:
         items = self._query_items()
         items.append(("date", requested_at))
-        query = urlencode(items)
         return (
-            f"{self.base_url}/v4/historical/sports/{self.sport}/odds?{query}"
+            f"{self.base_url}/v4/historical/sports/{self.sport}/odds?"
+            f"{urlencode(items)}"
         )
 
     def _query_items(self) -> list[tuple[str, str]]:
@@ -568,10 +581,7 @@ class TheOddsApiProvider:
             ("oddsFormat", "decimal"),
             ("dateFormat", "iso"),
             ("includeSids", "true" if self.include_sids else "false"),
-            (
-                "includeBetLimits",
-                "true" if self.include_bet_limits else "false",
-            ),
+            ("includeBetLimits", "true" if self.include_bet_limits else "false"),
         ]
         if self.bookmakers:
             items.append(("bookmakers", ",".join(self.bookmakers)))
@@ -602,9 +612,7 @@ class TheOddsApiProvider:
             observed_at=observed_at,
             requested_snapshot_at=requested_snapshot_at,
             actual_snapshot_at=actual_snapshot_at,
-            quota_remaining=_quota_header(
-                headers, "x-requests-remaining"
-            ),
+            quota_remaining=_quota_header(headers, "x-requests-remaining"),
             quota_used=_quota_header(headers, "x-requests-used"),
             quota_last=_quota_header(headers, "x-requests-last"),
         )
@@ -616,9 +624,7 @@ class TheOddsApiProvider:
         evidence: TheOddsApiRequestEvidence,
     ) -> tuple[ProviderQuote, ...]:
         if not isinstance(payload, list):
-            raise TheOddsApiPayloadError(
-                "current odds response must be an event list"
-            )
+            raise TheOddsApiPayloadError("current odds response must be an event list")
         return self._parse_events(payload, observed_at, evidence)
 
     def _parse_events(
@@ -656,12 +662,10 @@ class TheOddsApiProvider:
         *,
         historical_snapshot_at: str | None,
     ) -> Iterator[ProviderQuote]:
-        event_id = _text(
+        event_id = _canonical_component(
             event.get("id"), "event.id", allow_colon=False
         )
-        event_sport = _sport(
-            event.get("sport_key"), "event.sport_key"
-        )
+        event_sport = _sport(event.get("sport_key"), "event.sport_key")
         if self.sport != "upcoming" and event_sport != self.sport:
             raise TheOddsApiPayloadError(
                 "event sport_key does not match requested sport"
@@ -671,59 +675,63 @@ class TheOddsApiProvider:
         )
         bookmakers = event.get("bookmakers")
         if not isinstance(bookmakers, list):
-            raise TheOddsApiPayloadError(
-                "event.bookmakers must be a list"
-            )
+            raise TheOddsApiPayloadError("event.bookmakers must be a list")
+
+        causal_reference_at = historical_snapshot_at or observed_at
+        causal_reference_field = (
+            "historical snapshot" if historical_snapshot_at is not None else "local receipt"
+        )
 
         for bookmaker_index, raw_bookmaker in enumerate(bookmakers):
             if not isinstance(raw_bookmaker, dict):
                 raise TheOddsApiPayloadError(
                     f"event.bookmakers[{bookmaker_index}] must be an object"
                 )
-            bookmaker_key = _text(
+            bookmaker_key = _canonical_component(
                 raw_bookmaker.get("key"), "bookmaker.key"
             )
-            bookmaker_event_sid = _optional_text(
+            bookmaker_event_sid = _optional_provider_text(
                 raw_bookmaker.get("sid"), "bookmaker.sid"
             )
             markets = raw_bookmaker.get("markets")
             if not isinstance(markets, list):
-                raise TheOddsApiPayloadError(
-                    "bookmaker.markets must be a list"
-                )
+                raise TheOddsApiPayloadError("bookmaker.markets must be a list")
 
             for market_index, raw_market in enumerate(markets):
                 if not isinstance(raw_market, dict):
                     raise TheOddsApiPayloadError(
                         f"bookmaker.markets[{market_index}] must be an object"
                     )
-                market_key = _text(raw_market.get("key"), "market.key")
-                market_sid = _optional_text(
+                market_key = _canonical_component(
+                    raw_market.get("key"), "market.key"
+                )
+                market_sid = _optional_provider_text(
                     raw_market.get("sid"), "market.sid"
                 )
                 source_ts = _timestamp(
                     raw_market.get("last_update"), "market.last_update"
                 )
-                self._validate_freshness(source_ts, observed_at)
+                self._validate_freshness(
+                    source_ts,
+                    causal_reference_at,
+                    reference_field=causal_reference_field,
+                )
                 outcomes = raw_market.get("outcomes")
                 if not isinstance(outcomes, list):
-                    raise TheOddsApiPayloadError(
-                        "market.outcomes must be a list"
-                    )
+                    raise TheOddsApiPayloadError("market.outcomes must be a list")
 
                 for outcome_index, raw_outcome in enumerate(outcomes):
                     if not isinstance(raw_outcome, dict):
                         raise TheOddsApiPayloadError(
                             f"market.outcomes[{outcome_index}] must be an object"
                         )
-                    outcome_name = _text(
+                    outcome_name = _plain_text(
                         raw_outcome.get("name"), "outcome.name"
                     )
-                    description = _optional_text(
-                        raw_outcome.get("description"),
-                        "outcome.description",
+                    description = _optional_provider_text(
+                        raw_outcome.get("description"), "outcome.description"
                     )
-                    outcome_sid = _optional_text(
+                    outcome_sid = _optional_provider_text(
                         raw_outcome.get("sid"), "outcome.sid"
                     )
                     decimal_odds = _decimal(
@@ -741,25 +749,20 @@ class TheOddsApiProvider:
                         raise TheOddsApiPayloadError(
                             f"{market_key} outcome requires an exact point"
                         )
-                    bet_limit_raw = raw_outcome.get("bet_limit")
-                    bet_limit = None
-                    if bet_limit_raw is not None:
-                        bet_limit = _decimal(
-                            bet_limit_raw,
+                    raw_bet_limit = raw_outcome.get("bet_limit")
+                    bet_limit = (
+                        None
+                        if raw_bet_limit is None
+                        else _decimal(
+                            raw_bet_limit,
                             "outcome.bet_limit",
                             nonnegative=True,
                         )
-
-                    side = (
-                        "lay" if market_key.endswith("_lay") else None
                     )
-                    point_text = (
-                        None if point is None else _decimal_text(point)
-                    )
+                    side = "lay" if market_key.endswith("_lay") else None
+                    point_text = None if point is None else _decimal_text(point)
                     line_identity = (
-                        None
-                        if point is None
-                        else _decimal_text(abs(point))
+                        None if point is None else _decimal_text(abs(point))
                     )
                     exact_identity = (
                         event_id,
@@ -815,9 +818,7 @@ class TheOddsApiProvider:
                         "outcome_sid": outcome_sid,
                         "point": point_text,
                         "bet_limit": (
-                            None
-                            if bet_limit is None
-                            else _decimal_text(bet_limit)
+                            None if bet_limit is None else _decimal_text(bet_limit)
                         ),
                         "exchange_side": side,
                         "commence_time": commence_time,
@@ -834,8 +835,7 @@ class TheOddsApiProvider:
                     yield ProviderQuote(
                         provider_event_id=event_id,
                         provider_market_id=(
-                            f"{bookmaker_key}:{market_key}:"
-                            f"{market_identity[:24]}"
+                            f"{bookmaker_key}:{market_key}:{market_identity[:24]}"
                         ),
                         provider_selection_id=selection_identity,
                         decimal_odds=decimal_odds,
@@ -851,16 +851,18 @@ class TheOddsApiProvider:
     def _validate_freshness(
         self,
         source_ts: str,
-        observed_at: str,
+        reference_at: str,
+        *,
+        reference_field: str,
     ) -> None:
         source = _datetime(source_ts)
-        observed = _datetime(observed_at)
-        if source > observed:
+        reference = _datetime(reference_at)
+        if source > reference:
             raise TheOddsApiPayloadError(
-                "market.last_update cannot be later than local receipt time"
+                f"market.last_update cannot be later than {reference_field} time"
             )
         if self.max_market_age_seconds is not None:
-            age_seconds = (observed - source).total_seconds()
+            age_seconds = (reference - source).total_seconds()
             if age_seconds > self.max_market_age_seconds:
                 raise TheOddsApiPayloadError(
                     "market.last_update is stale for configured freshness bound"

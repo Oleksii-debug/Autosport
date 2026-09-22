@@ -34,7 +34,7 @@ from .betfair_account_readonly import (
 
 
 VENUE_ID = "betfair"
-SOURCE_FAMILY = "betfair.account-funds-precheck.v1"
+SOURCE_FAMILY = "betfair.account-funds-precheck.v2"
 MAX_FUNDS_EVIDENCE_AGE = timedelta(seconds=30)
 _MAX_FUTURE_SKEW = timedelta(seconds=1)
 

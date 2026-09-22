@@ -15,9 +15,7 @@ SOURCE_SHA = "a" * 40
 
 
 def _canonical_json(payload: dict[str, object]) -> bytes:
-    return (json.dumps(payload, sort_keys=True, separators=(",", ":")) + "\n").encode(
-        "utf-8"
-    )
+    return canonical_release._canonical_json_bytes(payload)
 
 
 def _sha256(payload: bytes) -> str:
@@ -72,7 +70,10 @@ def _stub_deep_verifier(monkeypatch: pytest.MonkeyPatch, *, status: str = "PASS"
     def verify(package: Path, *, expected_source_sha: str) -> dict[str, object]:
         assert package.name == stage_release.LEGACY_ARCHIVE_NAME
         assert expected_source_sha == SOURCE_SHA
-        return {"status": status}
+        return {
+            "status": status,
+            "package_sha256": hashlib.sha256(package.read_bytes()).hexdigest(),
+        }
 
     monkeypatch.setattr(canonical_release, "verify_windows_package", verify)
 
@@ -115,14 +116,22 @@ def test_repackage_stage_neutral_release_rewrites_identity_and_evidence(
         assert names
         assert all(name.startswith(stage_release.STAGE_NEUTRAL_PREFIX) for name in names)
         assert not any(stage_release.LEGACY_PREFIX in name for name in names)
-        build_info = json.loads(
-            archive.read(f"{stage_release.STAGE_NEUTRAL_PREFIX}BUILD_INFO.json")
+        build_payload = archive.read(
+            f"{stage_release.STAGE_NEUTRAL_PREFIX}BUILD_INFO.json"
         )
+        build_info = json.loads(build_payload)
         assert build_info["version"] == stage_release.STAGE_NEUTRAL_BUILD_VERSION
         assert build_info["whole_product_complete"] is False
         assert build_info["real_money_execution"] is False
         assert build_info["human_tested"] is False
         assert build_info["nvda_verified"] is False
+        assert build_payload == canonical_release._canonical_json_bytes(build_info)
+
+        manifest_payload = archive.read(
+            f"{stage_release.STAGE_NEUTRAL_PREFIX}PACKAGE_MANIFEST.json"
+        )
+        manifest = json.loads(manifest_payload)
+        assert manifest_payload == canonical_release._canonical_json_bytes(manifest)
 
         relative = {
             name[len(stage_release.STAGE_NEUTRAL_PREFIX) :]: archive.read(name)
@@ -167,6 +176,33 @@ def test_repackage_requires_existing_deep_verifier_pass(
     _write_legacy_package(legacy)
 
     with pytest.raises(ValueError, match="legacy release verifier did not return PASS"):
+        stage_release.repackage_stage_neutral_windows_release(
+            legacy,
+            output,
+            expected_source_sha=SOURCE_SHA,
+        )
+    assert not output.exists()
+
+
+def test_repackage_rejects_verified_snapshot_digest_drift(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    legacy = tmp_path / stage_release.LEGACY_ARCHIVE_NAME
+    output = tmp_path / stage_release.STAGE_NEUTRAL_ARCHIVE_NAME
+    _write_legacy_package(legacy)
+
+    def verify(package: Path, *, expected_source_sha: str) -> dict[str, object]:
+        assert expected_source_sha == SOURCE_SHA
+        assert package == legacy
+        return {
+            "status": "PASS",
+            "package_sha256": "0" * 64,
+        }
+
+    monkeypatch.setattr(canonical_release, "verify_windows_package", verify)
+
+    with pytest.raises(ValueError, match="changed after canonical verification"):
         stage_release.repackage_stage_neutral_windows_release(
             legacy,
             output,
@@ -260,6 +296,8 @@ def test_cli_writes_canonical_evidence(
     stdout_payload = json.loads(capsys.readouterr().out)
     evidence_payload = json.loads(evidence_path.read_text(encoding="utf-8"))
     assert stdout_payload == evidence_payload
-    assert evidence_path.read_bytes().endswith(b"\n")
+    assert evidence_path.read_bytes() == canonical_release._canonical_json_bytes(
+        evidence_payload
+    )
     assert evidence_payload["status"] == "PASS"
     assert evidence_payload["whole_product_complete"] is False

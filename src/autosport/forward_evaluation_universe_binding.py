@@ -25,6 +25,9 @@ from .forward_evidence_completeness import (
 from .provider_evaluation_universe import ProviderEvaluationUniverseStore
 
 
+_CANONICAL_PROVIDER_UNIVERSE_LOAD = ProviderEvaluationUniverseStore.load
+
+
 _DOMAIN = "autosport.forward-evaluation-universe-binding.v1"
 FORWARD_UNIVERSE_RULE_ID = "autosport.provider-evaluation-universe-forward-rule.v1"
 
@@ -188,7 +191,7 @@ def _load_expectations(
             "forward protocol does not precommit the canonical provider evaluation-universe rule"
         )
 
-    ledger = store.load()
+    ledger = _CANONICAL_PROVIDER_UNIVERSE_LOAD(store)
     if ledger is None:
         raise ForwardEvaluationUniverseBindingError(
             "canonical provider evaluation universe is not durably available"

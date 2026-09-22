@@ -59,7 +59,20 @@ def integration(p):
     )
 
 
-def evidence(p, cap, grade, *, i=None, observed=T2, expires=T4, quality=None, sports=(), markets=()):
+def evidence(
+    p,
+    cap,
+    grade,
+    *,
+    i=None,
+    observed=T2,
+    expires=T4,
+    quality=None,
+    sports=(),
+    markets=(),
+    environment="production",
+    application_mode="live-key-readonly",
+):
     i = i or integration(p)
     if grade in {
         ProviderCapabilityTruthGrade.DECLARED_DOCUMENTED,
@@ -74,6 +87,8 @@ def evidence(p, cap, grade, *, i=None, observed=T2, expires=T4, quality=None, sp
         grade=grade,
         profile_id=p.profile_id,
         integration_evidence_id=i.evidence_id,
+        environment=environment,
+        application_mode=application_mode,
         observed_at=observed,
         expires_at=expires,
         evidence_ref=f"evidence://{cap.value}/{grade.value}",

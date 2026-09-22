@@ -49,11 +49,13 @@ def client(*results):
     return value, transport
 
 
-def soap(method, result_attributes="", inner=""):
+def soap(method, result_attributes="", inner="", return_status_code="0"):
     return (
         f'<?xml version="1.0" encoding="utf-8"?>'
         f'<soap:Envelope xmlns:soap="{SOAP}" xmlns="{NS}">'
         f"<soap:Body><{method}Response><{method}Result {result_attributes}>"
+        f'<ReturnStatus Code="{return_status_code}" Description="fixture-status" '
+        f'CallId="fixture-call" />'
         f"{inner}</{method}Result></{method}Response></soap:Body></soap:Envelope>"
     ).encode()
 
@@ -121,6 +123,37 @@ def test_credentials_and_client_repr_do_not_expose_secure_values():
     assert "secret-app" not in value
     c = BetdaqAccountReadOnlyClient(credentials, transport=QueueTransport(), clock=clock)
     assert "secret" not in repr(c)
+
+
+def test_http_200_provider_return_status_failure_never_becomes_success():
+    payload = balance().replace(
+        b'Description="fixture-status"',
+        b'Description="failed with p@ss app-id"',
+    )
+    payload = payload.replace(b'Code="0"', b'Code="17"', 1)
+    c, _ = client(payload)
+
+    with pytest.raises(BetdaqAccountReadOnlyError, match="failure code 17") as exc:
+        c.read_account_balance()
+
+    assert "p@ss" not in str(exc.value)
+    assert "app-id" not in str(exc.value)
+
+
+def test_missing_or_malformed_return_status_fails_closed():
+    success = balance()
+    status = (
+        b'<ReturnStatus Code="0" Description="fixture-status" '
+        b'CallId="fixture-call" />'
+    )
+
+    c, _ = client(success.replace(status, b""))
+    with pytest.raises(BetdaqAccountReadOnlyError, match="exactly one ReturnStatus"):
+        c.read_account_balance()
+
+    c, _ = client(success.replace(b'Code="0"', b'Code="not-an-int"', 1))
+    with pytest.raises(BetdaqAccountReadOnlyError, match="Code must be provider integer"):
+        c.read_account_balance()
 
 
 def test_balance_preserves_decimal_text_without_binary_float():

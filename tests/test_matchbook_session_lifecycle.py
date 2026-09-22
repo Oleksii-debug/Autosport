@@ -123,6 +123,21 @@ def test_restart_requires_new_generation_id_for_fresh_login() -> None:
     assert restored.generation_id == "gen-2"
 
 
+def test_restart_does_not_compare_new_process_clock_to_old_monotonic_epoch() -> None:
+    original = active()
+    original.record_get_session_result(
+        generation_id="gen-1", http_status=200, monotonic_ns=ns(100)
+    )
+    restored = MatchbookSessionLifecycle.from_audit_snapshot(original.audit_snapshot())
+
+    assert restored.session_age_hint_seconds(monotonic_ns=1) is None
+    restored.record_login_200(generation_id="gen-2", monotonic_ns=2)
+
+    assert restored.state is SessionState.ACTIVE
+    assert restored.generation_id == "gen-2"
+    assert restored.session_age_hint_seconds(monotonic_ns=3) == 0.000000001
+
+
 def test_logout_200_terminally_invalidates_generation() -> None:
     lifecycle = active()
 

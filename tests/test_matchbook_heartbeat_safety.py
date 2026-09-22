@@ -266,6 +266,10 @@ def test_heartbeat_expiry_observation_round_trips_durably() -> None:
     loaded = mb.MatchbookHeartbeatCancellationObservation.from_dict(observation.to_dict())
     assert loaded == observation
     assert loaded.heartbeat_expiry_observed is True
+    assert observation.provider_origin_proven is False
+    assert observation.offers_cancelled_proven is False
+    assert loaded.provider_origin_proven is False
+    assert loaded.offers_cancelled_proven is False
 
 
 def test_user_request_is_not_relabelled_as_heartbeat_expiry() -> None:

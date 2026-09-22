@@ -1158,6 +1158,7 @@ def test_timeout_authority_rejects_same_function_code_mutation(
             readback=capture,
         )
 
+
 def test_provider_verifier_rejects_readback_origin_method_rebind(
     tmp_path, monkeypatch
 ) -> None:
@@ -1183,6 +1184,7 @@ def test_provider_verifier_rejects_readback_origin_method_rebind(
             expected_provider_order_ref=provider_ref,
         )
 
+
 def test_timeout_authority_rejects_durable_provider_ref_method_rebind(
     tmp_path, monkeypatch
 ) -> None:
@@ -1204,5 +1206,30 @@ def test_timeout_authority_rejects_durable_provider_ref_method_rebind(
             attempt_id="attempt-1",
             expected_profile_sha256="a" * 64,
             readback=object(),
+        )
+
+def test_provider_verifier_rejects_capability_profile_method_rebind(
+    tmp_path, monkeypatch
+) -> None:
+    _, action, provider_ref, _ = _ledger_with_timeout(tmp_path, monkeypatch)
+    assert provider_ref is not None
+    profile = _profile()
+    capture = _empty_provider_capture(action, provider_ref)
+
+    monkeypatch.setattr(
+        BookmakerCapabilityProfile,
+        "require",
+        lambda self, capability: None,
+    )
+    with pytest.raises(
+        ProviderEvidenceError,
+        match="provider capability profile authority method changed: require",
+    ):
+        provider_evidence.verify_betfair_provider_state(
+            action,
+            profile,
+            expected_profile_sha256=profile.profile_id,
+            readback=capture,
+            expected_provider_order_ref=provider_ref,
         )
 

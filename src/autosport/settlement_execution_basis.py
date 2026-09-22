@@ -282,10 +282,11 @@ def derive_settlement_execution_basis(
         raise SettlementExecutionBasisError(
             "durable acknowledgement status is invalid"
         ) from exc
-    if status not in {
-        AcknowledgementStatus.ACCEPTED,
-        AcknowledgementStatus.PARTIAL,
-    }:
+    if status is AcknowledgementStatus.PARTIAL:
+        raise SettlementExecutionBasisError(
+            "PARTIAL execution requires provider-finalized realization before settlement basis"
+        )
+    if status is not AcknowledgementStatus.ACCEPTED:
         raise SettlementExecutionBasisError(
             "rejected execution has no settlement fill basis"
         )

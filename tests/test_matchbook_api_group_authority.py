@@ -4,7 +4,7 @@ import random
 
 import pytest
 
-from matchbook_api_group_authority import (
+from autosport.matchbook_api_group_authority import (
     ApiGroup,
     AmbiguousEndpointAuthority,
     DEFAULT_ENDPOINT_GROUP_REGISTRY,

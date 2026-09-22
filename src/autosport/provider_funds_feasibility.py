@@ -1,15 +1,15 @@
 """Read-only provider-account funds feasibility from point-in-time balance evidence.
 
 This module deliberately does not create execution, reservation, transfer, bankroll,
-or P&L authority. A positive result means only that a canonical evaluator observed
-a supplied fresh provider-account balance whose available amount covers the caller-
-supplied required-account-cash planning amount.
+or P&L authority. It validates fresh provider-account balance evidence against a
+caller-supplied required-account-cash planning amount.
 
 ProviderFundsAllocation.amount is required account cash, not generic stake,
 liability, payout, notional, or provider order semantics. This module deliberately
 does not prove that the caller supplied the right cash requirement for a wager.
-A provider/order-specific liability authority must establish that separately before
-any execution-capable consumer can use this projection.
+Until a separate product-owned provider/order liability authority is composed,
+balance coverage of that caller assertion remains descriptive UNKNOWN rather than
+positive funds-feasibility authority.
 """
 
 from __future__ import annotations
@@ -281,6 +281,13 @@ class ProviderFundsAssessment:
     def assessment_key(self) -> tuple[str, str, str, str]:
         return (self.venue_id, self.account_id, self.adapter_id, self.currency)
 
+    @property
+    def balance_covers_supplied_cash_assertion(self) -> bool:
+        return (
+            self.available_balance is not None
+            and self.available_balance >= self.requested_amount
+        )
+
 
 @dataclass(frozen=True, slots=True, weakref_slot=True)
 class ProviderFundsFeasibilityReport:
@@ -357,8 +364,15 @@ class ProviderFundsFeasibilityReport:
             for item in self.assessments
         )
 
+    @property
+    def all_balances_cover_supplied_cash_assertions(self) -> bool:
+        return _is_issued_report(self) and all(
+            item.balance_covers_supplied_cash_assertion
+            for item in self.assessments
+        )
+
     def assert_authoritative_projection(self) -> None:
-        """Reject caller-constructed/copied/mutated reports as positive projection authority."""
+        """Reject caller-constructed/copied/mutated reports as projection authority."""
         if not _is_issued_report(self):
             raise ProviderFundsFeasibilityError(
                 "provider-funds report was not issued by canonical evaluator "
@@ -389,7 +403,7 @@ class ProviderFundsFeasibilityReport:
     def report_sha256(self) -> str:
         payload = {
             "schema": "autosport.provider_funds_feasibility",
-            "schema_version": 2,
+            "schema_version": 3,
             "decision_ts": self.decision_ts,
             "max_balance_age_seconds": _decimal_text(
                 self.max_balance_age_seconds
@@ -647,16 +661,17 @@ def assess_provider_funds(
                 currency=currency,
                 requested_amount=amount,
                 state=(
-                    ProviderFundsState.SNAPSHOT_SUFFICIENT_BUT_UNRESERVED
+                    ProviderFundsState.UNKNOWN
                     if sufficient
                     else ProviderFundsState.INSUFFICIENT
                 ),
                 reason=(
-                    "fresh provider snapshot reports enough available balance for "
-                    "the supplied required-account-cash amount; funds are not reserved"
+                    "fresh provider balance covers the caller-supplied required-account-"
+                    "cash assertion, but no product-owned cash-requirement authority is "
+                    "composed; positive funds feasibility remains unknown"
                     if sufficient
-                    else "fresh provider snapshot reports insufficient available "
-                    "balance for the supplied required-account-cash amount"
+                    else "fresh provider snapshot reports insufficient available balance "
+                    "even for the supplied required-account-cash assertion"
                 ),
                 available_balance=balance.available_balance,
                 balance_observation_id=balance.observation_id,

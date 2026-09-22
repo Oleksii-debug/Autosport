@@ -151,6 +151,7 @@ def test_successful_provider_end_empty_is_authoritative_empty() -> None:
     assert result.witness.completeness is (
         BetfairObservationCompleteness.COMPLETE_FOR_DECLARED_QUERY_WINDOW
     )
+    result.witness.assert_issued()
     assert result.witness.authoritative is True
     assert result.authoritative_empty is True
     assert result.assert_complete() == ()
@@ -165,6 +166,7 @@ def test_throttled_read_is_explicit_transient_not_empty() -> None:
     assert result.items == ()
     assert result.witness.completeness is BetfairObservationCompleteness.UNAVAILABLE_TRANSIENT
     assert result.witness.failure_code == "provider_transient"
+    result.witness.assert_issued()
     assert result.authoritative_empty is False
     with pytest.raises(BetfairReadOnlyError, match="not complete"):
         result.assert_complete()
@@ -332,6 +334,28 @@ def test_identical_empty_reads_are_bound_to_distinct_configured_accounts() -> No
             account_id="acct-b",
         )
 
+
+
+def test_caller_constructed_incomplete_witness_is_not_product_issued() -> None:
+    forged = BetfairReadCompletenessWitness(
+        operation="listCurrentOrders",
+        completeness=BetfairObservationCompleteness.UNAVAILABLE_TRANSIENT,
+        venue_id="betfair",
+        account_id="acct-1",
+        adapter_id="betfair-exchange-jsonrpc-readonly",
+        adapter_version="1",
+        query_sha256="a" * 64,
+        attempt_id="b" * 64,
+        started_at=NOW.isoformat(),
+        finished_at=NOW.isoformat(),
+        pages=(),
+        rows_observed=0,
+        failure_code="provider_transient",
+    )
+
+    with pytest.raises(BetfairReadOnlyError, match="not issued"):
+        forged.assert_issued()
+    assert forged.authoritative is False
 
 def test_caller_constructed_complete_witness_is_not_authoritative() -> None:
     forged = BetfairReadCompletenessWitness(

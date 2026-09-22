@@ -669,13 +669,11 @@ def assess_betfair_historical_market_definition_authority(
     provider_publish_at: str,
     observed_at: str,
 ) -> MarketOutcomeAuthorityAssessment:
-    """Derive conservative exhaustive authority from Betfair marketDefinition evidence.
+    """Structurally assess raw Betfair marketDefinition evidence.
 
-    The adapter does not invent Betfair terminal combinations. It derives the exact
-    runner roster from marketDefinition.runners and evaluates the conservative Cartesian
-    superset of the canonical WINNER/LOSER/REMOVED -> win/loss/void result alphabet.
-    Thus every provider terminal assignment representable by the governed importer is
-    covered, while impossible combinations may remain as conservative states.
+    Raw caller bytes and timestamps are assertions, not provider-origin evidence.
+    Validate the supported market shape but refuse positive exhaustive authority
+    until a product-owned Betfair acquisition witness is composed at this boundary.
     """
 
     market = _canonical_text("market_id", market_id)
@@ -774,58 +772,13 @@ def assess_betfair_historical_market_definition_authority(
         raise ValueError("marketDefinition.runners contains duplicate selection id")
     canonical_selections = tuple(sorted(selection_ids))
 
-    definition_payload = {
-        "provider": _BETFAIR_SOURCE_ID,
-        "provider_publish_at": publish_raw,
-        "market_id": market,
-        "market_definition": market_definition,
-    }
-    roster_provenance_sha256 = _sha256_payload(definition_payload)
-    settlement_protocol = {
-        "provider": _BETFAIR_SOURCE_ID,
-        "provider_market_type": _BETFAIR_MATCH_ODDS_TYPE,
-        "canonical_status_map": dict(sorted(_BETFAIR_SETTLEMENT_STATUS_MAP.items())),
-        "terminal_family": SettlementSemantics.CANONICAL_WIN_LOSS_VOID_SUPERSET.value,
-        "terminal_space_exact": False,
-    }
-    settlement_rules_sha256 = _sha256_payload(settlement_protocol)
-    verification_protocol_sha256 = _sha256_payload(
-        {
-            "protocol": "autosport.betfair_historical.market_definition_roster.v1",
-            "event_type_id": _BETFAIR_TABLE_TENNIS_EVENT_TYPE_ID,
-            "market_type": _BETFAIR_MATCH_ODDS_TYPE,
-            "requires_open_status": True,
-            "requires_complete_runner_roster": True,
-            "runner_ids_derived_from": "marketDefinition.runners",
-            "settlement_protocol_sha256": settlement_rules_sha256,
-        }
-    )
-    source_revision = (
-        "betfair-market-definition:"
-        + publish_raw
-        + ":"
-        + roster_provenance_sha256[:16]
-    )
-    issuance = _VERIFIED_AUTHORITY_ISSUANCE.set(True)
-    try:
-        authority = MarketSettlementOutcomeAuthority(
-            identity=identity,
-            selection_ids=canonical_selections,
-            roster_basis=OutcomeRosterBasis.PROVIDER_MARKET_DEFINITION,
-            settlement_semantics=SettlementSemantics.CANONICAL_WIN_LOSS_VOID_SUPERSET,
-            source_revision=source_revision,
-            causal_cutoff=publish_raw,
-            observed_at=observed_raw,
-            roster_provenance_sha256=roster_provenance_sha256,
-            settlement_rules_sha256=settlement_rules_sha256,
-            verification_protocol_sha256=verification_protocol_sha256,
-            _verification_token=_VERIFIED_AUTHORITY_TOKEN,
-        )
-    finally:
-        _VERIFIED_AUTHORITY_ISSUANCE.reset(issuance)
+    # Structural validity is necessary but not sufficient for provider truth.
+    # betfair_historical_read_once only freezes bytes from a user-supplied file,
+    # and historical governance binds rights/retention records; neither authenticates
+    # these exact marketDefinition bytes as Betfair-origin evidence.
     return MarketOutcomeAuthorityAssessment(
         identity=identity,
-        status=OutcomeAuthorityStatus.PROVEN_EXHAUSTIVE,
-        authority=authority,
-        refusal_reason=None,
+        status=OutcomeAuthorityStatus.REFUSED,
+        authority=None,
+        refusal_reason="betfair_market_definition_provider_origin_unverified",
     )

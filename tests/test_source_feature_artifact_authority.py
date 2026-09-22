@@ -166,6 +166,37 @@ def test_first_publication_is_restart_stable_and_idempotent(tmp_path: Path) -> N
     assert first.feature_payload_sha256 == hashlib.sha256(payload).hexdigest()
 
 
+def test_ordinary_caller_cannot_mint_via_direct_materializer(tmp_path: Path) -> None:
+    dataset, feature, provenance, lineage, store, delta, _ = _context(tmp_path)
+    caller_materializer = SourceFeatureArtifactMaterializer(
+        lineage,
+        collector_store=store,
+    )
+
+    with pytest.raises(
+        evidence.PointInTimeEvidenceError,
+        match="HeadlessCollectorService|source runtime",
+    ):
+        caller_materializer.materialize(
+            dataset_snapshot=dataset,
+            feature_set=feature,
+            source_delta_id=delta.delta_id,
+        )
+
+    with pytest.raises(
+        evidence.PointInTimeEvidenceError,
+        match="requires an independent source-owned feature artifact authority",
+    ):
+        evidence.PointInTimeFeatureAuthority.bind(
+            dataset_snapshot=dataset,
+            feature_set=feature,
+            feature_provenance=provenance,
+            lineage_authority=lineage,
+            feature_artifact_authority=caller_materializer.authority,
+            decision_cutoff_utc="2100-01-01T00:00:00Z",
+        )
+
+
 def test_direct_evaluator_publication_is_forbidden(tmp_path: Path) -> None:
     dataset, feature, _, lineage, _, _, payload = _context(tmp_path)
     authority = SourceFeatureArtifactAuthority.for_lineage(lineage)

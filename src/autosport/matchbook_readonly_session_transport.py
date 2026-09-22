@@ -10,6 +10,7 @@ from .matchbook_session_lifecycle import (
     MatchbookSessionLifecycle,
     RequestKind,
     RetryDisposition,
+    SessionClockRollbackError,
     SessionLifecycleError,
     SessionReadGenerationTicket,
 )
@@ -182,7 +183,7 @@ class MatchbookReadOnlySessionTransport:
         self._login_in_progress = False
         self._login_flight_id = 0
         self._login_waiters: dict[int, int] = {}
-        self._failed_login_flights: set[int] = set()
+        self._failed_login_flights: dict[int, str] = {}
 
     @property
     def generation_id(self) -> str | None:
@@ -197,10 +198,13 @@ class MatchbookReadOnlySessionTransport:
 
         while True:
             session = self._ensure_active_session()
+            request_ns = self._clock()
             try:
                 ticket = self._lifecycle.capture_read_generation(
-                    monotonic_ns=self._clock()
+                    monotonic_ns=request_ns
                 )
+            except SessionClockRollbackError:
+                raise
             except SessionLifecycleError:
                 raise MatchbookAuthenticationUnavailable(
                     "Matchbook session is not available for authenticated read"
@@ -321,6 +325,11 @@ class MatchbookReadOnlySessionTransport:
         except SessionLifecycleError:
             self._clear_matching_live_session(ticket.generation_id)
             raise
+        if commit_ns < ticket.issued_monotonic_ns:
+            self._clear_matching_live_session(ticket.generation_id)
+            raise SessionLifecycleError(
+                "Matchbook read response clock regressed before generation commit"
+            )
         try:
             return self._lifecycle.authorize_read_response_commit(
                 ticket,
@@ -360,17 +369,21 @@ class MatchbookReadOnlySessionTransport:
                             and self._login_flight_id == flight_id
                         ):
                             self._condition.wait()
-                        failed = flight_id in self._failed_login_flights
+                        failure_kind = self._failed_login_flights.get(flight_id)
                     finally:
                         remaining = self._login_waiters[flight_id] - 1
                         if remaining:
                             self._login_waiters[flight_id] = remaining
                         else:
                             self._login_waiters.pop(flight_id, None)
-                            self._failed_login_flights.discard(flight_id)
-                    if failed:
+                            self._failed_login_flights.pop(flight_id, None)
+                    if failure_kind == "provider":
                         raise MatchbookAuthenticationUnavailable(
                             "Matchbook login failed for the shared authentication flight"
+                        )
+                    if failure_kind == "lifecycle":
+                        raise SessionLifecycleError(
+                            "Matchbook shared login failed at local session lifecycle"
                         )
                     continue
 
@@ -382,19 +395,19 @@ class MatchbookReadOnlySessionTransport:
         try:
             response = self._login()
         except Exception:
-            self._finish_login_failure(flight_id)
+            self._finish_login_failure(flight_id, failure_kind="provider")
             raise MatchbookAuthenticationUnavailable(
                 "Matchbook login transport failed"
             ) from None
 
         if not isinstance(response, MatchbookLoginResponse):
-            self._finish_login_failure(flight_id)
+            self._finish_login_failure(flight_id, failure_kind="provider")
             raise MatchbookAuthenticationUnavailable(
                 "Matchbook login transport returned an invalid response type"
             )
 
         if response.status_code != 200:
-            self._finish_login_failure(flight_id)
+            self._finish_login_failure(flight_id, failure_kind="provider")
             raise MatchbookAuthenticationUnavailable(
                 f"Matchbook login unavailable with HTTP {response.status_code}"
             )
@@ -404,19 +417,25 @@ class MatchbookReadOnlySessionTransport:
         try:
             generation_id = self._generation_factory()
             if not isinstance(generation_id, str):
-                raise TypeError("generation factory must return str")
+                raise SessionLifecycleError(
+                    "session generation factory must return str"
+                )
             if generation_id == token:
-                raise ValueError(
+                raise SessionLifecycleError(
                     "session generation identity must be independent from raw token"
                 )
+            login_ns = self._clock()
             self._lifecycle.record_login_200(
                 generation_id=generation_id,
-                monotonic_ns=self._clock(),
+                monotonic_ns=login_ns,
             )
+        except SessionLifecycleError:
+            self._finish_login_failure(flight_id, failure_kind="lifecycle")
+            raise
         except Exception:
-            self._finish_login_failure(flight_id)
-            raise MatchbookAuthenticationUnavailable(
-                "Matchbook login could not establish a fresh session generation"
+            self._finish_login_failure(flight_id, failure_kind="lifecycle")
+            raise SessionLifecycleError(
+                "Matchbook session generation factory failed"
             ) from None
 
         live = _LiveSession(generation_id=generation_id, session_token=token)
@@ -426,14 +445,18 @@ class MatchbookReadOnlySessionTransport:
             self._condition.notify_all()
             return live
 
-    def _finish_login_failure(self, flight_id: int) -> None:
+    def _finish_login_failure(
+        self, flight_id: int, *, failure_kind: str
+    ) -> None:
+        if failure_kind not in {"provider", "lifecycle"}:
+            raise ValueError("unknown login failure kind")
         with self._condition:
             if self._login_flight_id != flight_id:
                 raise AssertionError("login flight identity changed unexpectedly")
             self._live_session = None
             self._login_in_progress = False
             if self._login_waiters.get(flight_id, 0):
-                self._failed_login_flights.add(flight_id)
+                self._failed_login_flights[flight_id] = failure_kind
             self._condition.notify_all()
 
     def _invalidate_generation_after_401(self, generation_id: str) -> None:
@@ -442,11 +465,21 @@ class MatchbookReadOnlySessionTransport:
             if current is None or current.generation_id != generation_id:
                 return
             try:
+                observed_ns = self._clock()
+            except SessionLifecycleError:
+                self._live_session = None
+                self._condition.notify_all()
+                raise
+            try:
                 self._lifecycle.record_get_session_result(
                     generation_id=generation_id,
                     http_status=401,
-                    monotonic_ns=self._clock(),
+                    monotonic_ns=observed_ns,
                 )
+            except SessionClockRollbackError:
+                self._live_session = None
+                self._condition.notify_all()
+                raise
             except SessionLifecycleError:
                 # A concurrent lifecycle transition may already have invalidated this
                 # predecessor. Never let stale 401 evidence mutate a successor.
@@ -462,13 +495,23 @@ class MatchbookReadOnlySessionTransport:
             if current is None or current.generation_id != generation_id:
                 return
             try:
+                observed_ns = self._clock()
+            except SessionLifecycleError:
+                self._live_session = None
+                self._condition.notify_all()
+                raise
+            try:
                 self._lifecycle.record_network_failure(
                     generation_id=generation_id,
-                    monotonic_ns=self._clock(),
+                    monotonic_ns=observed_ns,
                 )
+            except SessionClockRollbackError:
+                self._live_session = None
+                self._condition.notify_all()
+                raise
             except SessionLifecycleError:
-                # Clear local token authority regardless. A subsequent login rotates
-                # the lifecycle generation and invalidates any abandoned tickets.
+                # Clear local token authority regardless. A concurrent lifecycle
+                # transition may already have invalidated this predecessor.
                 pass
             self._live_session = None
             self._condition.notify_all()

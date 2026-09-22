@@ -10,6 +10,7 @@ from autosport.incident_risk_register import (
     RiskEvidenceState,
     RiskSeverity,
     RiskStatus,
+    derive_occurrence_entry_id,
     operator_projection,
     operator_sort,
     validate_successor,
@@ -21,9 +22,9 @@ class IncidentRiskRegisterTests(unittest.TestCase):
     UPDATED = "2026-09-21T07:05:00+00:00"
 
     @classmethod
-    def _entry(cls, **overrides) -> IncidentRiskEntry:
+    def _entry(cls, occurrence_tag: str = "001", **overrides) -> IncidentRiskEntry:
+        occurrence_ref = f"evidence://provider-gap/{occurrence_tag}"
         values = {
-            "entry_id": "incident-provider-gap-001",
             "revision": 1,
             "kind": RegisterEntryKind.INCIDENT,
             "severity": RiskSeverity.HIGH,
@@ -36,11 +37,19 @@ class IncidentRiskRegisterTests(unittest.TestCase):
             "mitigation": "",
             "residual_risk": "Decision inputs may remain incomplete until recovery.",
             "affected_components": ("live_ingestion", "market_mirror"),
-            "evidence_refs": ("evidence://provider-gap/001",),
+            "occurrence_evidence_refs": (occurrence_ref,),
+            "evidence_refs": (occurrence_ref,),
             "model_version_ids": (),
             "requires_operator_action": True,
         }
         values.update(overrides)
+        if "entry_id" not in overrides:
+            values["entry_id"] = derive_occurrence_entry_id(
+                kind=values["kind"],
+                affected_components=values["affected_components"],
+                occurrence_evidence_refs=values["occurrence_evidence_refs"],
+                model_version_ids=values["model_version_ids"],
+            )
         return IncidentRiskEntry(**values)
 
     def test_round_trip_fingerprint_and_operator_projection_are_deterministic(self) -> None:
@@ -59,6 +68,10 @@ class IncidentRiskRegisterTests(unittest.TestCase):
         self.assertEqual(projection.status_key, "ui.risk_register.status.open")
         self.assertEqual(projection.evidence_key, "ui.risk_register.evidence.partial")
         self.assertEqual(projection.title, entry.title)
+        self.assertEqual(
+            projection.occurrence_evidence_refs,
+            entry.occurrence_evidence_refs,
+        )
         self.assertEqual(projection.evidence_refs, entry.evidence_refs)
         self.assertTrue(projection.requires_operator_action)
         self.assertEqual(projection.fingerprint_sha256, entry.fingerprint_sha256)
@@ -126,13 +139,53 @@ class IncidentRiskRegisterTests(unittest.TestCase):
             self._entry(affected_components=("market_mirror", "live_ingestion"))
         with self.assertRaisesRegex(IncidentRiskRegisterError, "sorted and unique"):
             self._entry(evidence_refs=("evidence://x", "evidence://x"))
+        with self.assertRaisesRegex(IncidentRiskRegisterError, "sorted and unique"):
+            self._entry(
+                occurrence_evidence_refs=(
+                    "evidence://z",
+                    "evidence://a",
+                ),
+                evidence_refs=("evidence://a", "evidence://z"),
+            )
+
+    def test_occurrence_identity_is_product_derived_and_presentation_independent(self) -> None:
+        first = self._entry()
+        presentation_variant = self._entry(
+            severity=RiskSeverity.MEDIUM,
+            updated_at="2026-09-21T07:06:00+00:00",
+            title="Same occurrence, different operator title",
+            summary="Presentation changes do not mint a new occurrence.",
+        )
+        other_occurrence = self._entry(occurrence_tag="002")
+
+        self.assertEqual(first.entry_id, presentation_variant.entry_id)
+        self.assertNotEqual(first.entry_id, other_occurrence.entry_id)
+        self.assertTrue(first.entry_id.startswith("incident:"))
+
+        with self.assertRaisesRegex(
+            IncidentRiskRegisterError,
+            "product-derived occurrence identity",
+        ):
+            self._entry(entry_id="caller-chosen-id")
+
+        with self.assertRaisesRegex(
+            IncidentRiskRegisterError,
+            "included in evidence_refs",
+        ):
+            self._entry(
+                occurrence_evidence_refs=("evidence://provider-gap/other",),
+            )
+
+        changed_component = self._entry(
+            affected_components=("market_mirror",),
+        )
+        self.assertNotEqual(first.entry_id, changed_component.entry_id)
 
     def test_model_risk_requires_exact_model_identity(self) -> None:
         with self.assertRaisesRegex(IncidentRiskRegisterError, "model_version_id"):
             self._entry(kind=RegisterEntryKind.MODEL_RISK, model_version_ids=())
 
         entry = self._entry(
-            entry_id="model-risk-calibration-001",
             kind=RegisterEntryKind.MODEL_RISK,
             model_version_ids=("model-v17",),
         )
@@ -194,24 +247,26 @@ class IncidentRiskRegisterTests(unittest.TestCase):
         )
         validate_successor(previous, candidate)
 
-        with self.assertRaisesRegex(IncidentRiskRegisterError, "preserve entry_id"):
-            validate_successor(
-                previous,
-                self._entry(
-                    entry_id="other-entry",
-                    revision=2,
-                    updated_at="2026-09-21T07:06:00+00:00",
-                ),
+        with self.assertRaisesRegex(
+            IncidentRiskRegisterError,
+            "product-derived occurrence identity",
+        ):
+            self._entry(
+                entry_id="other-entry",
+                revision=2,
+                updated_at="2026-09-21T07:06:00+00:00",
             )
-        with self.assertRaisesRegex(IncidentRiskRegisterError, "preserve entry kind"):
-            validate_successor(
-                previous,
-                self._entry(
-                    revision=2,
-                    updated_at="2026-09-21T07:06:00+00:00",
-                    kind=RegisterEntryKind.MODEL_RISK,
-                    model_version_ids=("model-v1",),
-                ),
+
+        with self.assertRaisesRegex(
+            IncidentRiskRegisterError,
+            "product-derived occurrence identity",
+        ):
+            self._entry(
+                entry_id=previous.entry_id,
+                revision=2,
+                updated_at="2026-09-21T07:06:00+00:00",
+                kind=RegisterEntryKind.MODEL_RISK,
+                model_version_ids=("model-v1",),
             )
         with self.assertRaisesRegex(IncidentRiskRegisterError, "contiguous"):
             validate_successor(
@@ -338,25 +393,25 @@ class IncidentRiskRegisterTests(unittest.TestCase):
 
     def test_operator_sort_prioritizes_action_then_severity_then_recency(self) -> None:
         low_action = self._entry(
-            entry_id="a",
+            occurrence_tag="a",
             severity=RiskSeverity.LOW,
             requires_operator_action=True,
             updated_at="2026-09-21T07:10:00+00:00",
         )
         critical_action = self._entry(
-            entry_id="b",
+            occurrence_tag="b",
             severity=RiskSeverity.CRITICAL,
             requires_operator_action=True,
             updated_at="2026-09-21T07:06:00+00:00",
         )
         high_no_action = self._entry(
-            entry_id="c",
+            occurrence_tag="c",
             severity=RiskSeverity.HIGH,
             requires_operator_action=False,
             updated_at="2026-09-21T07:20:00+00:00",
         )
         medium_no_action_newer = self._entry(
-            entry_id="d",
+            occurrence_tag="d",
             severity=RiskSeverity.MEDIUM,
             requires_operator_action=False,
             updated_at="2026-09-21T07:30:00+00:00",
@@ -366,8 +421,8 @@ class IncidentRiskRegisterTests(unittest.TestCase):
             (medium_no_action_newer, high_no_action, low_action, critical_action)
         )
         self.assertEqual(
-            tuple(entry.entry_id for entry in ordered),
-            ("b", "a", "c", "d"),
+            ordered,
+            (critical_action, low_action, high_no_action, medium_no_action_newer),
         )
 
     def test_register_contract_has_no_execution_or_release_truth_fields(self) -> None:

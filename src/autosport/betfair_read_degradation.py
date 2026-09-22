@@ -196,7 +196,6 @@ class BetfairReadDegradation:
             "error_code": self.error_code,
             "request_uuid": self.request_uuid,
             "documented_for_api_family": self.documented_for_api_family,
-            "documented_for_operation": self.documented_for_operation,
             "action": self.action.value,
             "automatic_repeat_allowed": self.automatic_repeat_allowed,
             "requires_new_session": self.requires_new_session,

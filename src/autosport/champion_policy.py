@@ -7,6 +7,7 @@ returned policy can choose only from an externally supplied admissible action se
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from typing import Final
 
 from .scientific_registry import PromotionAction, RegistryEntry, ScientificRegistry
@@ -30,6 +31,17 @@ def _text(value: object, name: str) -> str:
         raise ChampionPolicyError(f"{name} must be canonical non-empty text")
     value.encode("utf-8", errors="strict")
     return value
+
+
+def _instant(value: object, name: str) -> datetime:
+    text = _text(value, name)
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise ChampionPolicyError(f"{name} must be ISO-8601") from exc
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        raise ChampionPolicyError(f"{name} must be timezone-aware")
+    return parsed.astimezone(timezone.utc)
 
 
 def _sha256(value: object, name: str) -> str:
@@ -204,6 +216,12 @@ def load_champion_policy(
             if eligibility_as_of is None
             else _text(eligibility_as_of, "eligibility_as_of")
         )
+        if _instant(eligibility_cutoff, "eligibility_as_of") < _instant(
+            as_of, "as_of"
+        ):
+            raise ChampionPolicyError(
+                "eligibility_as_of must not predate policy authority as_of"
+            )
         validate_activation_eligibility(
             registry,
             eligibility_decision,

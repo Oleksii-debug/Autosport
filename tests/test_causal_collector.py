@@ -1114,6 +1114,205 @@ class CollectorDeltaTests(unittest.TestCase):
             self.assertEqual(len(reopened_market.events("e1")), 1)
             reopened_market.close()
 
+    def test_consumer_defers_later_commit_until_hidden_predecessor_is_available(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            collector = CollectorDeltaStore(root / "collector.db")
+            checkpoint_path = root / "desktop.json"
+            first = self.make_delta(
+                delta_id="d1",
+                cursor_position=1,
+                available="2026-01-01T00:00:06+00:00",
+                payload=event_payload(event_id="e1"),
+            )
+            second = self.make_delta(
+                delta_id="d2",
+                cursor_position=2,
+                available="2026-01-01T00:00:04+00:00",
+                payload=event_payload(event_id="e2"),
+            )
+            collector.append(first)
+            collector.append(second)
+
+            applied = []
+
+            def apply_at(timestamp):
+                def apply(current, _event):
+                    applied.append(current.delta_id)
+                    return DesktopApplicationReceipt(
+                        delta_id=current.delta_id,
+                        canonical_event_digest=current.canonical_event_digest,
+                        receipt_id=f"receipt:{current.delta_id}",
+                        applied_at=timestamp,
+                    )
+
+                return apply
+
+            early = DesktopDeltaConsumer(
+                collector,
+                DesktopDeltaCheckpointStore(checkpoint_path),
+                resolve_event=lambda current: (
+                    event_payload(event_id=current.event_id)
+                ),
+                apply_event=apply_at("2026-01-01T00:00:05+00:00"),
+                lookup_application_receipt=lambda _current: None,
+            )
+            self.assertEqual(
+                early.drain(as_of="2026-01-01T00:00:05+00:00"),
+                (),
+            )
+            self.assertEqual(applied, [])
+            early_checkpoint = DesktopDeltaCheckpointStore(checkpoint_path)
+            self.assertFalse(early_checkpoint.has_ack("d1"))
+            self.assertFalse(early_checkpoint.has_ack("d2"))
+            self.assertIsNone(
+                early_checkpoint.stream_checkpoint("source-x", "epoch-1")
+            )
+
+            reopened = DesktopDeltaConsumer(
+                CollectorDeltaStore(root / "collector.db"),
+                DesktopDeltaCheckpointStore(checkpoint_path),
+                resolve_event=lambda current: (
+                    event_payload(event_id=current.event_id)
+                ),
+                apply_event=apply_at("2026-01-01T00:00:06+00:00"),
+                lookup_application_receipt=lambda _current: None,
+            )
+            self.assertEqual(
+                reopened.drain(as_of="2026-01-01T00:00:06+00:00"),
+                ("d1", "d2"),
+            )
+            self.assertEqual(applied, ["d1", "d2"])
+            final_checkpoint = DesktopDeltaCheckpointStore(checkpoint_path)
+            self.assertTrue(final_checkpoint.has_ack("d1"))
+            self.assertTrue(final_checkpoint.has_ack("d2"))
+            stream = final_checkpoint.stream_checkpoint("source-x", "epoch-1")
+            self.assertIsNotNone(stream)
+            self.assertEqual(stream.last_position, 2)
+            self.assertEqual(stream.last_delta_id, "d2")
+
+    def test_hidden_revision_committed_before_later_row_blocks_later_ack(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            collector = CollectorDeltaStore(root / "collector.db")
+            checkpoint_path = root / "desktop.json"
+            first = self.make_delta(
+                delta_id="d1",
+                cursor_position=1,
+                available="2026-01-01T00:00:04+00:00",
+                payload=event_payload(event_id="e1"),
+            )
+            correction = self.make_delta(
+                delta_id="d1r",
+                cursor_position=1,
+                available="2026-01-01T00:00:06+00:00",
+                payload=event_payload(event_id="e1", odds="1.81"),
+                revision_of="d1",
+                revision_number=1,
+            )
+            second = self.make_delta(
+                delta_id="d2",
+                cursor_position=2,
+                available="2026-01-01T00:00:04+00:00",
+                payload=event_payload(event_id="e2"),
+            )
+            collector.append(first)
+            collector.append(correction)
+            collector.append(second)
+            applied = []
+
+            def apply(current, _event):
+                applied.append(current.delta_id)
+                return DesktopApplicationReceipt(
+                    delta_id=current.delta_id,
+                    canonical_event_digest=current.canonical_event_digest,
+                    receipt_id=f"receipt:{current.delta_id}",
+                    applied_at="2026-01-01T00:00:05+00:00",
+                )
+
+            consumer = DesktopDeltaConsumer(
+                collector,
+                DesktopDeltaCheckpointStore(checkpoint_path),
+                resolve_event=lambda current: (
+                    event_payload(
+                        event_id=current.event_id,
+                        odds="1.81" if current.delta_id == "d1r" else "1.80",
+                    )
+                ),
+                apply_event=apply,
+                lookup_application_receipt=lambda _current: None,
+            )
+            self.assertEqual(
+                consumer.drain(as_of="2026-01-01T00:00:05+00:00"),
+                ("d1",),
+            )
+            self.assertEqual(applied, ["d1"])
+            checkpoint = DesktopDeltaCheckpointStore(checkpoint_path)
+            self.assertTrue(checkpoint.has_ack("d1"))
+            self.assertFalse(checkpoint.has_ack("d2"))
+            stream = checkpoint.stream_checkpoint("source-x", "epoch-1")
+            self.assertIsNotNone(stream)
+            self.assertEqual(stream.last_position, 1)
+
+    def test_hidden_revision_committed_after_later_row_does_not_retroactively_block(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            collector = CollectorDeltaStore(root / "collector.db")
+            checkpoint_path = root / "desktop.json"
+            first = self.make_delta(
+                delta_id="d1",
+                cursor_position=1,
+                available="2026-01-01T00:00:04+00:00",
+                payload=event_payload(event_id="e1"),
+            )
+            second = self.make_delta(
+                delta_id="d2",
+                cursor_position=2,
+                available="2026-01-01T00:00:04+00:00",
+                payload=event_payload(event_id="e2"),
+            )
+            correction = self.make_delta(
+                delta_id="d1r",
+                cursor_position=1,
+                available="2026-01-01T00:00:06+00:00",
+                payload=event_payload(event_id="e1", odds="1.81"),
+                revision_of="d1",
+                revision_number=1,
+            )
+            collector.append(first)
+            collector.append(second)
+            collector.append(correction)
+            applied = []
+
+            def apply(current, _event):
+                applied.append(current.delta_id)
+                return DesktopApplicationReceipt(
+                    delta_id=current.delta_id,
+                    canonical_event_digest=current.canonical_event_digest,
+                    receipt_id=f"receipt:{current.delta_id}",
+                    applied_at="2026-01-01T00:00:05+00:00",
+                )
+
+            consumer = DesktopDeltaConsumer(
+                collector,
+                DesktopDeltaCheckpointStore(checkpoint_path),
+                resolve_event=lambda current: event_payload(event_id=current.event_id),
+                apply_event=apply,
+                lookup_application_receipt=lambda _current: None,
+            )
+            self.assertEqual(
+                consumer.drain(as_of="2026-01-01T00:00:05+00:00"),
+                ("d1", "d2"),
+            )
+            self.assertEqual(applied, ["d1", "d2"])
+            checkpoint = DesktopDeltaCheckpointStore(checkpoint_path)
+            self.assertTrue(checkpoint.has_ack("d1"))
+            self.assertTrue(checkpoint.has_ack("d2"))
+            self.assertFalse(checkpoint.has_ack("d1r"))
+            stream = checkpoint.stream_checkpoint("source-x", "epoch-1")
+            self.assertIsNotNone(stream)
+            self.assertEqual(stream.last_position, 2)
+
     def test_crash_before_atomic_replace_preserves_previous_durable_commit(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "collector.json"

@@ -473,6 +473,44 @@ def test_prepare_without_local_append_is_aborted_and_retry_remains_available(
     assert second.provider_status == "VOIDED"
 
 
+def test_concurrent_constructor_cannot_abort_active_monotonic_prepare(
+    tmp_path, monkeypatch
+) -> None:
+    transport = _Transport()
+    ledger, plan, action, client, provider_ref = _accepted_context(tmp_path, transport)
+    path = tmp_path / "settlement.jsonl"
+    store = BetfairSettlementRevisionStore(path)
+    _ingest(store, ledger, plan, action, _capture(client, provider_ref))
+
+    transport.provider_status = "VOIDED"
+    transport.profit = 0
+    transport.settled_date = "2026-09-21T19:30:00+00:00"
+    durable_append = store._append
+
+    def competing_open_then_append(revision) -> None:
+        # ingest already holds the settlement OS writer lock and has published
+        # monotonic PREPARE. A read/startup opener must not recover that PREPARE
+        # against the still-old journal and abort the active writer.
+        with pytest.raises(
+            BetfairSettlementBusyError,
+            match="writer lock is held by another process",
+        ):
+            BetfairSettlementRevisionStore(path)
+        durable_append(revision)
+
+    monkeypatch.setattr(store, "_append", competing_open_then_append)
+    second = _ingest(
+        store, ledger, plan, action, _capture(client, provider_ref)
+    ).revision
+    monkeypatch.undo()
+
+    assert second.revision_number == 2
+    assert second.provider_status == "VOIDED"
+
+    restarted = BetfairSettlementRevisionStore(path)
+    assert restarted.current("betfair", "acct-1", "bet-777") == second
+
+
 def test_local_append_before_monotonic_commit_recovers_exact_intended_tail(
     tmp_path, monkeypatch
 ) -> None:

@@ -464,6 +464,23 @@ def assess_authoritative_betfair_execution_feasibility(
     binding = bound.profile_for(action.bookmaker_id, action.account_id)
     action_digest = _canonical_digest(action.to_dict())
     provider_observed_at = _provider_timestamp(receipt.evidence.observed_at)
+    try:
+        action_quote_observed_at = datetime.fromisoformat(
+            action.quote_observed_at.replace("Z", "+00:00")
+        )
+    except (AttributeError, ValueError) as exc:
+        raise ValueError(
+            "execution action quote_observed_at must be ISO-8601"
+        ) from exc
+    _require_aware(
+        action_quote_observed_at,
+        "execution action quote_observed_at",
+    )
+    action_quote_observed_at = action_quote_observed_at.astimezone(timezone.utc)
+    if provider_observed_at.astimezone(timezone.utc) < action_quote_observed_at:
+        raise ValueError(
+            "market-book depth observation predates durable execution quote"
+        )
     request = ExecutionFeasibilityRequest(
         opportunity_id=bound.intent_id,
         opportunity_digest=bound.intent_sha256,

@@ -8,6 +8,7 @@ import pytest
 from autosport.matchbook_readonly_session_transport import (
     MATCHBOOK_READ_ONLY_PATHS,
     MatchbookAuthenticationUnavailable,
+    MatchbookCommittedRead,
     MatchbookLoginResponse,
     MatchbookReadForbidden,
     MatchbookReadOnlySessionTransport,
@@ -668,3 +669,27 @@ def test_failure_taxonomy_reuses_canonical_provider_and_lifecycle_boundaries() -
     assert issubclass(MatchbookReadForbidden, ProviderUnavailableError)
     assert issubclass(MatchbookStaleGenerationResponse, SessionLifecycleError)
     assert not issubclass(MatchbookStaleGenerationResponse, ProviderUnavailableError)
+
+
+def test_committed_read_keeps_exact_generation_provenance_after_later_rotation() -> None:
+    login = LoginFactory()
+    payload = {"same-provider-payload": True}
+    transport, lifecycle, _, _ = build_transport(
+        read=lambda token, path: MatchbookReadResponse(200, payload),
+        login=login,
+        logout=lambda token: 200,
+    )
+
+    first = transport.read(path="/edge/rest/events")
+    assert isinstance(first, MatchbookCommittedRead)
+    assert first.generation_id == "gen-1"
+    assert first.payload is payload
+
+    transport.logout()
+    second = transport.read(path="/edge/rest/events")
+
+    assert second.generation_id == "gen-2"
+    assert second.payload is payload
+    assert first.generation_id == "gen-1"
+    assert transport.generation_id == "gen-2"
+    assert lifecycle.state is SessionState.ACTIVE

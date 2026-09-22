@@ -307,6 +307,36 @@ def test_backfilled_question_hypothesis_protocol_lineage_fails_closed(tmp_path):
         )
 
 
+def test_postmortem_availability_must_not_precede_experiment_completion(tmp_path):
+    path = tmp_path / "scientific_registry.json"
+    registry = _seed_registry(path)
+
+    registry.append(
+        Postmortem(
+            postmortem_id="postmortem-backdated",
+            experiment_id="experiment-2",
+            classification=ResearchOutcome.NULL,
+            finding="backdated-postmortem-marker",
+            retest_conditions=("NEW_EVALUATION_BUNDLE",),
+            created_at=T0,
+        )
+    )
+
+    assert registry.causal_precedes(
+        "Experiment",
+        "experiment-2",
+        "Postmortem",
+        "postmortem-backdated",
+    )
+
+    with pytest.raises(RuntimeError, match="availability precedes"):
+        search_negative_results(
+            registry,
+            "backdated-postmortem-marker",
+            as_of=T3,
+        )
+
+
 def test_postmortem_must_causally_follow_referenced_experiment(tmp_path):
     path = tmp_path / "scientific_registry.json"
     registry = _seed_registry(path)

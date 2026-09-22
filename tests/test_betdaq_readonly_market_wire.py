@@ -375,3 +375,13 @@ def test_unexpected_child_cannot_leak_partial_success() -> None:
     )
     with pytest.raises(BetdaqSoapProtocolError, match="unexpected child"):
         parse_get_prices_response(payload)
+
+@pytest.mark.parametrize("provider_side", ["ForSidePrices", "AgainstSidePrices"])
+def test_non_nil_price_level_unknown_attributes_fail_closed(provider_side: str) -> None:
+    price_nodes = (
+        f'<{provider_side} Price="2.00" Stake="12.34" '
+        'FutureSemanticField="provider-value" />'
+    )
+    with pytest.raises(BetdaqSoapProtocolError, match="unexpected attribute"):
+        parse_get_prices_response(_response(price_nodes=price_nodes))
+

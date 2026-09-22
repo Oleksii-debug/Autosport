@@ -447,6 +447,7 @@ class ReleasePackageSecretContentFalsifierTests(unittest.TestCase):
         payload = (
             b"sha256=aaaaaaaaaaaaaaaaaghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789bbbbbbbb\n"
             b"url=https://example.invalid/a#fragment\n"
+            b"description=xASIAABCDEFGHIJKLMNOPy\n"
         )
         with tempfile.TemporaryDirectory() as temporary:
             package = self._build_candidate(

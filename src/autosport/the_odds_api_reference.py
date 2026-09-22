@@ -326,7 +326,25 @@ class TheOddsApiReferenceProvider:
             else _timestamp(historical_at, field="historical_at")
         )
         mode = "historical" if self.historical_at is not None else "current"
-        self.source_id = f"the-odds-api:{self.sport_key}:{mode}"
+        scope_payload = {
+            "bookmakers": sorted(self.bookmakers),
+            "historical_at": self.historical_at,
+            "markets": sorted(self.markets),
+            "mode": mode,
+            "regions": sorted(self.regions),
+            "sport_key": self.sport_key,
+        }
+        self.request_scope_sha256 = hashlib.sha256(
+            json.dumps(
+                scope_payload,
+                sort_keys=True,
+                separators=(",", ":"),
+                ensure_ascii=True,
+            ).encode("utf-8")
+        ).hexdigest()
+        self.source_id = (
+            f"the-odds-api:{self.sport_key}:{mode}:{self.request_scope_sha256}"
+        )
         self._pending_quotes: tuple[ProviderQuote, ...] | None = None
         self._pending_offset = 0
         self._pending_cursor: str | None = None
@@ -626,6 +644,7 @@ class TheOddsApiReferenceProvider:
                             "requested_markets": list(self.markets),
                             "requested_regions": list(self.regions),
                             "requested_bookmakers": list(self.bookmakers),
+                            "request_scope_sha256": self.request_scope_sha256,
                             "terms_version": _TERMS_VERSION,
                             "raw_redistribution_authorized": False,
                         }

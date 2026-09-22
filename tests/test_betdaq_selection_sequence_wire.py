@@ -204,10 +204,11 @@ def test_nonfinite_economics_and_malformed_timestamp_fail_closed() -> None:
             _changed(_selection().replace('WithdrawalFactor="0.125"', 'WithdrawalFactor="NaN"'))
         )
 
-    with pytest.raises(BetdaqSoapProtocolError, match="ISO-8601"):
-        parse_list_selections_changed_since_response(
-            _changed(_selection(cancel_time="not-a-time"))
-        )
+    for invalid in ("not-a-time", "2026-09-23"):
+        with pytest.raises(BetdaqSoapProtocolError, match="ISO-8601"):
+            parse_list_selections_changed_since_response(
+                _changed(_selection(cancel_time=invalid))
+            )
 
 
 def test_unknown_numeric_status_is_preserved_as_provider_evidence() -> None:

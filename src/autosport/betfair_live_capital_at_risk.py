@@ -4,6 +4,7 @@ from __future__ import annotations
 import hashlib
 import json
 from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from enum import Enum
 from fractions import Fraction
@@ -54,11 +55,14 @@ class BetfairLiveCapitalAtRiskReason(str, Enum):
     UNSUPPORTED_ACTION_SEMANTICS = "UNSUPPORTED_ACTION_SEMANTICS"
     DURABLE_STATE_CONFLICT = "DURABLE_STATE_CONFLICT"
     ECONOMIC_INCONSISTENCY = "ECONOMIC_INCONSISTENCY"
+    CURRENT_ORDER_NOT_CURRENT = "CURRENT_ORDER_NOT_CURRENT"
     CLEARED_MATCHED_EXPOSURE_UNRESOLVED = "CLEARED_MATCHED_EXPOSURE_UNRESOLVED"
 
 
 _CURRENT_STATUSES = frozenset({"EXECUTABLE", "EXECUTION_COMPLETE"})
 _CLEARED_STATUSES = ("SETTLED", "VOIDED", "LAPSED", "CANCELLED")
+MAX_CURRENT_ORDER_EVIDENCE_AGE = timedelta(seconds=30)
+_MAX_FUTURE_SKEW = timedelta(seconds=1)
 
 
 def _decimal_text(value: Decimal) -> str:
@@ -122,6 +126,43 @@ def _exact_add(left: Decimal, right: Decimal) -> Decimal:
     return _fraction_to_decimal(Fraction(left) + Fraction(right))
 
 
+def _utc_now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def _utc_timestamp(value: datetime, name: str) -> datetime:
+    if not isinstance(value, datetime) or value.tzinfo is None or value.utcoffset() is None:
+        raise BetfairLiveCapitalAtRiskError(f"{name} must be timezone-aware")
+    return value.astimezone(timezone.utc)
+
+
+def _parse_provider_observed_at(value: str) -> datetime:
+    if type(value) is not str or not value or value != value.strip():
+        raise BetfairLiveCapitalAtRiskError(
+            "provider observed_at must be non-empty timestamp text"
+        )
+    text = value[:-1] + "+00:00" if value.endswith("Z") else value
+    try:
+        parsed = datetime.fromisoformat(text)
+    except ValueError as exc:
+        raise BetfairLiveCapitalAtRiskError(
+            "provider observed_at must be ISO-8601 timestamp text"
+        ) from exc
+    return _utc_timestamp(parsed, "provider observed_at")
+
+
+def _current_observation_is_current(
+    observed_at: str,
+    *,
+    checked_at: datetime,
+) -> bool:
+    observed = _parse_provider_observed_at(observed_at)
+    checked = _utc_timestamp(checked_at, "freshness checked_at")
+    if observed > checked + _MAX_FUTURE_SKEW:
+        return False
+    return checked - observed <= MAX_CURRENT_ORDER_EVIDENCE_AGE
+
+
 @dataclass(frozen=True, slots=True, weakref_slot=True)
 class BetfairLiveCapitalAtRiskEvidence:
     truth: BetfairLiveCapitalAtRiskTruth
@@ -134,6 +175,7 @@ class BetfairLiveCapitalAtRiskEvidence:
     provider_order_ref: str
     bet_id: str | None
     readback_observed_at: str
+    provider_row_observed_at: str | None
     readback_request_scope_sha256: str
     readback_evidence_sha256: str
     ledger_snapshot_sha256: str
@@ -150,6 +192,8 @@ class BetfairLiveCapitalAtRiskEvidence:
             raise BetfairLiveCapitalAtRiskError("reason must be exact enum")
         if type(self.attempt_state) is not AttemptState:
             raise BetfairLiveCapitalAtRiskError("attempt_state must be exact enum")
+        if self.provider_row_observed_at is not None:
+            _parse_provider_observed_at(self.provider_row_observed_at)
         if self.truth is BetfairLiveCapitalAtRiskTruth.EXACT:
             if (
                 type(self.capital_at_risk) is not Decimal
@@ -164,6 +208,13 @@ class BetfairLiveCapitalAtRiskEvidence:
                 BetfairLiveCapitalAtRiskReason.CLEARED_TERMINAL,
             }:
                 raise BetfairLiveCapitalAtRiskError("EXACT risk has invalid reason")
+            if (
+                self.reason is BetfairLiveCapitalAtRiskReason.CURRENT_ORDER
+                and self.provider_row_observed_at is None
+            ):
+                raise BetfairLiveCapitalAtRiskError(
+                    "EXACT current-order risk requires provider row observation time"
+                )
         elif self.capital_at_risk is not None:
             raise BetfairLiveCapitalAtRiskError("UNKNOWN risk cannot carry an amount")
 
@@ -187,6 +238,7 @@ class BetfairLiveCapitalAtRiskEvidence:
                 "provider_order_ref": self.provider_order_ref,
                 "bet_id": self.bet_id,
                 "readback_observed_at": self.readback_observed_at,
+                "provider_row_observed_at": self.provider_row_observed_at,
                 "readback_request_scope_sha256": self.readback_request_scope_sha256,
                 "readback_evidence_sha256": self.readback_evidence_sha256,
                 "ledger_snapshot_sha256": self.ledger_snapshot_sha256,
@@ -327,6 +379,7 @@ def resolve_betfair_live_capital_at_risk(
         reason: BetfairLiveCapitalAtRiskReason,
         amount: Decimal | None = None,
         bet_id: str | None = None,
+        provider_row_observed_at: str | None = None,
     ) -> BetfairLiveCapitalAtRiskEvidence:
         try:
             after = ledger.verified_snapshot()
@@ -352,6 +405,7 @@ def resolve_betfair_live_capital_at_risk(
             provider_order_ref=provider_ref,
             bet_id=bet_id,
             readback_observed_at=readback.observed_at,
+            provider_row_observed_at=provider_row_observed_at,
             readback_request_scope_sha256=readback.request_scope_sha256,
             readback_evidence_sha256=readback.evidence_sha256,
             ledger_snapshot_sha256=after.sha256,
@@ -466,6 +520,16 @@ def resolve_betfair_live_capital_at_risk(
                 BetfairLiveCapitalAtRiskReason.DURABLE_STATE_CONFLICT,
                 bet_id=row.bet_id,
             )
+        if not _current_observation_is_current(
+            row.evidence.observed_at,
+            checked_at=_utc_now(),
+        ):
+            return finish(
+                BetfairLiveCapitalAtRiskTruth.UNKNOWN,
+                BetfairLiveCapitalAtRiskReason.CURRENT_ORDER_NOT_CURRENT,
+                bet_id=row.bet_id,
+                provider_row_observed_at=row.evidence.observed_at,
+            )
         if (
             row.status not in _CURRENT_STATUSES
             or row.price is None
@@ -508,6 +572,7 @@ def resolve_betfair_live_capital_at_risk(
             BetfairLiveCapitalAtRiskReason.CURRENT_ORDER,
             reserve.reserve,
             row.bet_id,
+            provider_row_observed_at=row.evidence.observed_at,
         )
 
     cleared_status, row = cleared[0]
@@ -564,6 +629,20 @@ def _install_authority() -> None:
         ):
             raise BetfairLiveCapitalAtRiskError(
                 "live capital-at-risk evidence was not issued by canonical resolver"
+            )
+        if (
+            self.truth is BetfairLiveCapitalAtRiskTruth.EXACT
+            and self.reason is BetfairLiveCapitalAtRiskReason.CURRENT_ORDER
+            and (
+                self.provider_row_observed_at is None
+                or not _current_observation_is_current(
+                    self.provider_row_observed_at,
+                    checked_at=_utc_now(),
+                )
+            )
+        ):
+            raise BetfairLiveCapitalAtRiskError(
+                "live capital-at-risk current-order evidence is no longer current"
             )
 
     globals()["resolve_betfair_live_capital_at_risk"] = authoritative_resolve

@@ -1,9 +1,15 @@
 """Read-only provider-account funds feasibility from point-in-time balance evidence.
 
 This module deliberately does not create execution, reservation, transfer, bankroll,
-or P&L authority.  A positive result means only that the provider reported enough
-available balance in the supplied fresh account snapshot for the exact proposed
-allocation.  The funds are not reserved and may change before any later action.
+or P&L authority. A positive result means only that a canonical evaluator observed
+a supplied fresh provider-account balance whose available amount covers the caller-
+supplied required-account-cash planning amount.
+
+ProviderFundsAllocation.amount is required account cash, not generic stake,
+liability, payout, notional, or provider order semantics. This module deliberately
+does not prove that the caller supplied the right cash requirement for a wager.
+A provider/order-specific liability authority must establish that separately before
+any execution-capable consumer can use this projection.
 """
 
 from __future__ import annotations
@@ -14,6 +20,7 @@ from decimal import Decimal
 from enum import Enum
 from hashlib import sha256
 import json
+from weakref import ref
 
 from .bookmaker_capability import (
     BookmakerAccountSnapshot,
@@ -32,6 +39,12 @@ class ProviderFundsState(str, Enum):
     SNAPSHOT_SUFFICIENT_BUT_UNRESERVED = "snapshot_sufficient_but_unreserved"
     INSUFFICIENT = "insufficient"
     UNKNOWN = "unknown"
+
+
+class ProviderFundsRequirementSemantics(str, Enum):
+    """Meaning of allocation amount inside this provider-neutral planning layer."""
+
+    CALLER_ASSERTED_REQUIRED_ACCOUNT_CASH = "caller_asserted_required_account_cash"
 
 
 def _text(value: object, name: str) -> str:
@@ -75,7 +88,7 @@ def _currency(value: object, name: str) -> str:
 
 
 def _nonnegative_decimal(value: object, name: str) -> Decimal:
-    if not isinstance(value, Decimal) or not value.is_finite() or value < 0:
+    if type(value) is not Decimal or not value.is_finite() or value < 0:
         raise ProviderFundsFeasibilityError(
             f"{name} must be a non-negative finite exact Decimal"
         )
@@ -110,14 +123,14 @@ def _exact_positive_sum(values: tuple[Decimal, ...]) -> Decimal:
     if not values:
         return Decimal("0")
     for value in values:
-        _positive_decimal(value, "allocation amount")
+        _positive_decimal(value, "required_account_cash")
     min_exponent = min(int(value.as_tuple().exponent) for value in values)
     total = 0
     for value in values:
         sign, digits, exponent = value.as_tuple()
         if sign:
             raise ProviderFundsFeasibilityError(
-                "allocation amount must be non-negative"
+                "required_account_cash must be non-negative"
             )
         coefficient = 0
         for digit in digits:
@@ -140,6 +153,9 @@ class ProviderFundsAllocation:
     adapter_id: str
     currency: str
     amount: Decimal
+    requirement_semantics: ProviderFundsRequirementSemantics = (
+        ProviderFundsRequirementSemantics.CALLER_ASSERTED_REQUIRED_ACCOUNT_CASH
+    )
 
     def __post_init__(self) -> None:
         _text(self.allocation_id, "allocation_id")
@@ -147,11 +163,33 @@ class ProviderFundsAllocation:
         _text(self.account_id, "account_id")
         _text(self.adapter_id, "adapter_id")
         _currency(self.currency, "currency")
-        _positive_decimal(self.amount, "amount")
+        _positive_decimal(self.amount, "required_account_cash")
+        if (
+            type(self.requirement_semantics) is not ProviderFundsRequirementSemantics
+            or self.requirement_semantics
+            is not ProviderFundsRequirementSemantics.CALLER_ASSERTED_REQUIRED_ACCOUNT_CASH
+        ):
+            raise ProviderFundsFeasibilityError(
+                "allocation requirement_semantics must be "
+                "CALLER_ASSERTED_REQUIRED_ACCOUNT_CASH"
+            )
 
     @property
     def account_key(self) -> tuple[str, str, str]:
         return (self.venue_id, self.account_id, self.adapter_id)
+
+    @property
+    def assessment_key(self) -> tuple[str, str, str, str]:
+        return (self.venue_id, self.account_id, self.adapter_id, self.currency)
+
+    @property
+    def required_account_cash(self) -> Decimal:
+        return self.amount
+
+    @property
+    def requirement_authority_verified(self) -> bool:
+        """This generic layer never proves provider/order-specific liability semantics."""
+        return False
 
 
 @dataclass(frozen=True, slots=True)
@@ -174,7 +212,7 @@ class ProviderFundsAssessment:
         _text(self.adapter_id, "assessment adapter_id")
         _currency(self.currency, "assessment currency")
         _positive_decimal(self.requested_amount, "assessment requested_amount")
-        if not isinstance(self.state, ProviderFundsState):
+        if type(self.state) is not ProviderFundsState:
             raise ProviderFundsFeasibilityError(
                 "assessment state must be ProviderFundsState"
             )
@@ -189,6 +227,10 @@ class ProviderFundsAssessment:
         if has_evidence and any(value is None for value in evidence_fields):
             raise ProviderFundsFeasibilityError(
                 "balance assessment evidence fields must be present together"
+            )
+        if self.state is not ProviderFundsState.UNKNOWN and not has_evidence:
+            raise ProviderFundsFeasibilityError(
+                "known provider-funds state requires exact balance evidence"
             )
         if self.available_balance is not None:
             _nonnegative_decimal(
@@ -215,13 +257,32 @@ class ProviderFundsAssessment:
                 self.balance_observed_at,
                 "assessment balance_observed_at",
             )
+            if (
+                self.state
+                is ProviderFundsState.SNAPSHOT_SUFFICIENT_BUT_UNRESERVED
+                and self.available_balance < self.requested_amount
+            ):
+                raise ProviderFundsFeasibilityError(
+                    "sufficient assessment contradicts available balance"
+                )
+            if (
+                self.state is ProviderFundsState.INSUFFICIENT
+                and self.available_balance >= self.requested_amount
+            ):
+                raise ProviderFundsFeasibilityError(
+                    "insufficient assessment contradicts available balance"
+                )
 
     @property
     def account_key(self) -> tuple[str, str, str]:
         return (self.venue_id, self.account_id, self.adapter_id)
 
+    @property
+    def assessment_key(self) -> tuple[str, str, str, str]:
+        return (self.venue_id, self.account_id, self.adapter_id, self.currency)
 
-@dataclass(frozen=True, slots=True)
+
+@dataclass(frozen=True, slots=True, weakref_slot=True)
 class ProviderFundsFeasibilityReport:
     decision_ts: str
     max_balance_age_seconds: Decimal
@@ -264,19 +325,45 @@ class ProviderFundsFeasibilityReport:
             raise ProviderFundsFeasibilityError(
                 "assessments must contain exact ProviderFundsAssessment values"
             )
-        keys = tuple(item.account_key for item in self.assessments)
-        if keys != tuple(sorted(keys)) or len(keys) != len(set(keys)):
-            raise ProviderFundsFeasibilityError(
-                "assessments must be sorted and unique by account identity"
+
+        grouped: dict[tuple[str, str, str, str], list[Decimal]] = {}
+        for item in self.allocations:
+            grouped.setdefault(item.assessment_key, []).append(
+                item.required_account_cash
             )
+        expected_keys = tuple(sorted(grouped))
+        assessment_keys = tuple(item.assessment_key for item in self.assessments)
+        if (
+            assessment_keys != expected_keys
+            or len(assessment_keys) != len(set(assessment_keys))
+        ):
+            raise ProviderFundsFeasibilityError(
+                "assessments must exactly cover sorted allocation account/currency groups"
+            )
+        for assessment in self.assessments:
+            expected_amount = _exact_positive_sum(
+                tuple(grouped[assessment.assessment_key])
+            )
+            if assessment.requested_amount != expected_amount:
+                raise ProviderFundsFeasibilityError(
+                    "assessment requested_amount does not match grouped allocation cash"
+                )
 
     @property
     def all_snapshot_sufficient(self) -> bool:
-        return all(
+        return _is_issued_report(self) and all(
             item.state
             is ProviderFundsState.SNAPSHOT_SUFFICIENT_BUT_UNRESERVED
             for item in self.assessments
         )
+
+    def assert_authoritative_projection(self) -> None:
+        """Reject caller-constructed/copied/mutated reports as positive projection authority."""
+        if not _is_issued_report(self):
+            raise ProviderFundsFeasibilityError(
+                "provider-funds report was not issued by canonical evaluator "
+                "or changed after issuance"
+            )
 
     @property
     def provider_write_authorized(self) -> bool:
@@ -291,10 +378,18 @@ class ProviderFundsFeasibilityReport:
         return False
 
     @property
+    def transfer_authorized(self) -> bool:
+        return False
+
+    @property
+    def requirement_authority_verified(self) -> bool:
+        return False
+
+    @property
     def report_sha256(self) -> str:
         payload = {
             "schema": "autosport.provider_funds_feasibility",
-            "schema_version": 1,
+            "schema_version": 2,
             "decision_ts": self.decision_ts,
             "max_balance_age_seconds": _decimal_text(
                 self.max_balance_age_seconds
@@ -302,6 +397,8 @@ class ProviderFundsFeasibilityReport:
             "provider_write_authorized": False,
             "real_money_execution": False,
             "funds_reserved": False,
+            "transfer_authorized": False,
+            "requirement_authority_verified": False,
             "allocations": [
                 {
                     "allocation_id": item.allocation_id,
@@ -309,7 +406,11 @@ class ProviderFundsFeasibilityReport:
                     "account_id": item.account_id,
                     "adapter_id": item.adapter_id,
                     "currency": item.currency,
-                    "amount": _decimal_text(item.amount),
+                    "required_account_cash": _decimal_text(
+                        item.required_account_cash
+                    ),
+                    "requirement_semantics": item.requirement_semantics.value,
+                    "requirement_authority_verified": False,
                 }
                 for item in self.allocations
             ],
@@ -354,7 +455,10 @@ def _validate_snapshot_shape(snapshot: object) -> BookmakerAccountSnapshot:
         raise ProviderFundsFeasibilityError(
             "snapshot profile must be exact BookmakerCapabilityProfile"
         )
-    if any(type(fact) is not BookmakerCapabilityFact for fact in snapshot.profile.facts):
+    if any(
+        type(fact) is not BookmakerCapabilityFact
+        for fact in snapshot.profile.facts
+    ):
         raise ProviderFundsFeasibilityError(
             "snapshot profile facts must be exact BookmakerCapabilityFact values"
         )
@@ -362,7 +466,10 @@ def _validate_snapshot_shape(snapshot: object) -> BookmakerAccountSnapshot:
         raise ProviderFundsFeasibilityError(
             "snapshot observed_capabilities must be an exact frozenset"
         )
-    if snapshot.balance is not None and type(snapshot.balance) is not BookmakerBalanceObservation:
+    if (
+        snapshot.balance is not None
+        and type(snapshot.balance) is not BookmakerBalanceObservation
+    ):
         raise ProviderFundsFeasibilityError(
             "snapshot balance must be exact BookmakerBalanceObservation"
         )
@@ -376,7 +483,7 @@ def assess_provider_funds(
     decision_ts: str,
     max_balance_age_seconds: Decimal,
 ) -> ProviderFundsFeasibilityReport:
-    """Project provider-local balance sufficiency without reserving or moving funds."""
+    """Project supplied required-account-cash against fresh provider balances."""
 
     decision_raw, decision_time = _timestamp(decision_ts, "decision_ts")
     max_age = _nonnegative_decimal(
@@ -399,7 +506,9 @@ def assess_provider_funds(
         raise ProviderFundsFeasibilityError(
             "snapshots must be a canonical tuple"
         )
-    validated_snapshots = tuple(_validate_snapshot_shape(item) for item in snapshots)
+    validated_snapshots = tuple(
+        _validate_snapshot_shape(item) for item in snapshots
+    )
     by_account: dict[tuple[str, str, str], BookmakerAccountSnapshot] = {}
     for snapshot in validated_snapshots:
         key = (
@@ -418,19 +527,13 @@ def assess_provider_funds(
         list[ProviderFundsAllocation],
     ] = {}
     for allocation in allocations:
-        key = (
-            allocation.venue_id,
-            allocation.account_id,
-            allocation.adapter_id,
-            allocation.currency,
-        )
-        grouped.setdefault(key, []).append(allocation)
+        grouped.setdefault(allocation.assessment_key, []).append(allocation)
 
     assessments: list[ProviderFundsAssessment] = []
     for key in sorted(grouped):
         venue_id, account_id, adapter_id, currency = key
         amount = _exact_positive_sum(
-            tuple(item.amount for item in grouped[key])
+            tuple(item.required_account_cash for item in grouped[key])
         )
         snapshot = by_account.get((venue_id, account_id, adapter_id))
         if snapshot is None:
@@ -549,10 +652,11 @@ def assess_provider_funds(
                     else ProviderFundsState.INSUFFICIENT
                 ),
                 reason=(
-                    "fresh provider snapshot reports enough available balance; "
-                    "funds are not reserved"
+                    "fresh provider snapshot reports enough available balance for "
+                    "the supplied required-account-cash amount; funds are not reserved"
                     if sufficient
-                    else "fresh provider snapshot reports insufficient available balance"
+                    else "fresh provider snapshot reports insufficient available "
+                    "balance for the supplied required-account-cash amount"
                 ),
                 available_balance=balance.available_balance,
                 balance_observation_id=balance.observation_id,
@@ -567,3 +671,55 @@ def assess_provider_funds(
         allocations=tuple(sorted(allocations, key=lambda item: item.allocation_id)),
         assessments=tuple(assessments),
     )
+
+
+def _report_fingerprint(report: ProviderFundsFeasibilityReport) -> str:
+    return report.report_sha256
+
+
+def _install_report_issuance_authority() -> None:
+    issued: dict[int, tuple[object, str]] = {}
+    raw_assess = assess_provider_funds
+
+    def issued_assess_provider_funds(
+        allocations: tuple[ProviderFundsAllocation, ...],
+        snapshots: tuple[BookmakerAccountSnapshot, ...],
+        *,
+        decision_ts: str,
+        max_balance_age_seconds: Decimal,
+    ) -> ProviderFundsFeasibilityReport:
+        report = raw_assess(
+            allocations,
+            snapshots,
+            decision_ts=decision_ts,
+            max_balance_age_seconds=max_balance_age_seconds,
+        )
+        key = id(report)
+
+        def forget(_weakref: object, *, report_id: int = key) -> None:
+            issued.pop(report_id, None)
+
+        issued[key] = (
+            ref(report, forget),
+            _report_fingerprint(report),
+        )
+        return report
+
+    def is_issued_report(report: ProviderFundsFeasibilityReport) -> bool:
+        if type(report) is not ProviderFundsFeasibilityReport:
+            return False
+        record = issued.get(id(report))
+        if record is None or record[0]() is not report:
+            return False
+        return record[1] == _report_fingerprint(report)
+
+    globals()["assess_provider_funds"] = issued_assess_provider_funds
+    globals()["_is_issued_report"] = is_issued_report
+
+
+def _is_issued_report(report: ProviderFundsFeasibilityReport) -> bool:
+    return False
+
+
+_install_report_issuance_authority()
+del _install_report_issuance_authority

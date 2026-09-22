@@ -60,7 +60,14 @@ def _decimal_from_coefficient(coefficient: int, exponent: int) -> Decimal:
 
     sign = 1 if coefficient < 0 else 0
     absolute = abs(coefficient)
-    digits = tuple(int(character) for character in str(absolute)) if absolute else (0,)
+    if absolute == 0:
+        digits = (0,)
+    else:
+        reversed_digits: list[int] = []
+        while absolute:
+            absolute, digit = divmod(absolute, 10)
+            reversed_digits.append(digit)
+        digits = tuple(reversed(reversed_digits))
     return Decimal((sign, digits, exponent))
 
 
@@ -117,7 +124,6 @@ def _exact_decimal_divmod_nonnegative(
     scaled_quantum = quantum_coefficient * (10 ** (quantum_exponent - common_exponent))
     quotient, remainder = divmod(scaled_value, scaled_quantum)
     return quotient, _decimal_from_coefficient(remainder, common_exponent)
-
 
 
 @dataclass(frozen=True, slots=True)

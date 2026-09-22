@@ -1138,6 +1138,9 @@ def test_submitted_attempt_reentry_never_resubmits_placeorders() -> None:
         )
         assert ledger.attempt_state(attempt_id) is AttemptState.SUBMITTED
 
+        restarted = RealExecutionLedger(Path(tmp) / "real.jsonl")
+        assert restarted.attempt_state(attempt_id) is AttemptState.SUBMITTED
+
         transport = _Transport(
             lambda request: _response(
                 request,
@@ -1153,7 +1156,7 @@ def test_submitted_attempt_reentry_never_resubmits_placeorders() -> None:
         )
 
         result = execute_betfair_supervised_action(
-            ledger,
+            restarted,
             bound,
             approval,
             action_id=action.action_id,
@@ -1169,13 +1172,13 @@ def test_submitted_attempt_reentry_never_resubmits_placeorders() -> None:
         assert result.evidence_id is None
         assert result.external_receipt_id is None
         assert (
-            ledger.provider_order_reference(
+            restarted.provider_order_reference(
                 attempt_id=attempt_id,
                 provider_id=action.bookmaker_id,
             )
             == provider_ref
         )
-        assert not ledger.can_retry_action(
+        assert not restarted.can_retry_action(
             plan_id=bound.execution_plan.plan_id,
             action_id=action.action_id,
         )

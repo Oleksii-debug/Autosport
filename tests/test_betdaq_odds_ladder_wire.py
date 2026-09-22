@@ -243,6 +243,7 @@ def test_result_and_return_status_unknown_attributes_fail_closed() -> None:
     with pytest.raises(BetdaqSoapProtocolError, match="unexpected attribute"):
         parse_get_odds_ladder_response(return_status_extra)
 
+
 @pytest.mark.parametrize(
     "return_status",
     (

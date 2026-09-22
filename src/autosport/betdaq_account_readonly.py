@@ -698,7 +698,34 @@ def _parse_soap_result(payload: bytes, method: str) -> ET.Element:
         raise BetdaqAccountReadOnlyError(
             f"BETDAQ response is missing exact {method}Result"
         )
+    _require_success_return_status(results[0])
     return results[0]
+
+
+def _require_success_return_status(result: ET.Element) -> None:
+    """Require provider-level success before any method payload can become evidence."""
+
+    statuses = [
+        child
+        for child in result
+        if child.tag == f"{{{_EXTERNAL_NS}}}ReturnStatus"
+    ]
+    if len(statuses) != 1:
+        raise BetdaqAccountReadOnlyError(
+            "BETDAQ result must contain exactly one ReturnStatus"
+        )
+    raw_code = statuses[0].attrib.get("Code")
+    if raw_code is None or _INTEGER_RE.fullmatch(raw_code) is None:
+        raise BetdaqAccountReadOnlyError(
+            "BETDAQ ReturnStatus Code must be provider integer text"
+        )
+    code = int(raw_code)
+    if code != 0:
+        # Description can contain provider/account detail. Keep the public error
+        # classification stable and retain only the documented numeric status code.
+        raise BetdaqAccountReadOnlyError(
+            f"BETDAQ provider ReturnStatus reported failure code {code}"
+        )
 
 
 def _parse_orders(

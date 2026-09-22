@@ -2,12 +2,14 @@ from __future__ import annotations
 
 import tempfile
 import unittest
+from dataclasses import replace
 from decimal import Decimal
 from pathlib import Path
 
 from autosport.paper_execution_reality import (
     EvidenceGrade,
     PaperAttemptOutcome,
+    PaperExecutionIntegrityError,
     PaperExecutionLedger,
     PaperExecutionModelConfig,
     PaperExecutionStateError,
@@ -196,6 +198,113 @@ class PartialMultiLegCapitalAtRiskTests(unittest.TestCase):
                 restarted.recovery_decision,
                 RecoveryDecision.HEDGE_REVIEW_REQUIRED,
             )
+
+    def test_attempt_write_is_bound_to_exact_reserved_action_and_model(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "paper-execution.jsonl"
+            ledger = PaperExecutionLedger(path)
+            current = _plan(
+                _action("a", stake="100.00"),
+                _action("b", stake="25.00"),
+            )
+            model = _config()
+            _reserve(ledger, current, model)
+            canonical = _attempt(
+                plan=current,
+                config=model,
+                sequence=0,
+                outcome=PaperAttemptOutcome.ACCEPTED,
+                execution_stake="100.00",
+            )
+
+            cases = (
+                (
+                    "understated stake",
+                    {
+                        "requested_stake": Decimal("1.00"),
+                        "execution_stake": Decimal("1.00"),
+                    },
+                ),
+                (
+                    "overstated stake",
+                    {
+                        "requested_stake": Decimal("200.00"),
+                        "execution_stake": Decimal("200.00"),
+                    },
+                ),
+                ("decision odds drift", {"decision_odds": Decimal("3.00")}),
+                ("bookmaker drift", {"bookmaker_id": "paper-venue-forged"}),
+                ("account drift", {"account_id": "paper-account-forged"}),
+                ("event drift", {"event_id": "event-forged"}),
+                ("market drift", {"market_id": "market-forged"}),
+                ("selection drift", {"selection_id": "selection-forged"}),
+                ("side drift", {"side": "LAY"}),
+                ("quote drift", {"decision_quote_id": "quote-forged"}),
+                (
+                    "quote observation drift",
+                    {"decision_observed_at": "2026-09-21T11:59:59+00:00"},
+                ),
+                ("model drift", {"model_fingerprint": "forged-model"}),
+            )
+            for label, changes in cases:
+                with self.subTest(label=label):
+                    forged = replace(canonical, **changes)
+                    with self.assertRaisesRegex(
+                        PaperExecutionIntegrityError,
+                        "reserved action/model binding",
+                    ):
+                        ledger.record_attempt(forged)
+
+            restarted = _load(PaperExecutionLedger(path), current, model)
+            self.assertEqual(restarted.attempts, ())
+            self.assertEqual(restarted.worst_case_exposure, Decimal("0"))
+
+    def test_restart_and_completion_reject_prebinding_forged_attempt_economics(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "paper-execution.jsonl"
+            ledger = PaperExecutionLedger(path)
+            current = _plan(
+                _action("a", stake="100.00"),
+                _action("b", stake="25.00"),
+            )
+            model = _config()
+            _reserve(ledger, current, model)
+            canonical = _attempt(
+                plan=current,
+                config=model,
+                sequence=0,
+                outcome=PaperAttemptOutcome.ACCEPTED,
+                execution_stake="100.00",
+            )
+            forged = replace(
+                canonical,
+                requested_stake=Decimal("1.00"),
+                execution_stake=Decimal("1.00"),
+            )
+
+            # Simulate a durable ATTEMPT_RECORDED event produced by the
+            # pre-binding implementation.  The repaired subclass must reject it
+            # both when reconstructing restart truth and before completion can
+            # turn its caller-authored economics into terminal authority.
+            super(PaperExecutionLedger, ledger).record_attempt(forged)
+
+            restarted_ledger = PaperExecutionLedger(path)
+            with self.assertRaisesRegex(
+                PaperExecutionIntegrityError,
+                "reserved action/model binding",
+            ):
+                _load(restarted_ledger, current, model)
+
+            with self.assertRaisesRegex(
+                PaperExecutionIntegrityError,
+                "reserved action/model binding",
+            ):
+                restarted_ledger.complete_run(
+                    run_id=RUN_ID,
+                    pending_action_ids=("b",),
+                    recovery_decision=RecoveryDecision.HEDGE_REVIEW_REQUIRED,
+                    worst_case_exposure=Decimal("1.00"),
+                )
 
     def test_partial_fill_uses_actual_fill_and_rejects_completion_understatement(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

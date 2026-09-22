@@ -23,6 +23,7 @@ from .providers import ProviderBatch, ProviderQuote, ProviderUnavailableError
 
 
 THE_ODDS_API_BASE_URL = "https://api.the-odds-api.com"
+THE_ODDS_API_MAX_RESPONSE_BYTES = 8 * 1024 * 1024
 THE_ODDS_API_TERMS_SOURCE_REF = "https://the-odds-api.com/terms-and-conditions.html"
 THE_ODDS_API_DOCS_SOURCE_REF = "https://the-odds-api.com/liveapi/guides/v4/"
 
@@ -194,6 +195,15 @@ def _canonical_provider_url(url: str) -> None:
         )
 
 
+def _bounded_response_body(response: object) -> bytes:
+    raw_body = response.read(THE_ODDS_API_MAX_RESPONSE_BYTES + 1)
+    if type(raw_body) is not bytes:
+        raise TheOddsApiPayloadError("provider response body must be exact bytes")
+    if len(raw_body) > THE_ODDS_API_MAX_RESPONSE_BYTES:
+        raise TheOddsApiPayloadError("The Odds API response exceeds bounded size")
+    return raw_body
+
+
 def _default_transport(url: str, timeout: float) -> HttpJsonResponse:
     _canonical_provider_url(url)
     request = Request(
@@ -214,7 +224,7 @@ def _default_transport(url: str, timeout: float) -> HttpJsonResponse:
                 raise TheOddsApiTransportError(
                     "The Odds API final URL does not match the canonical request URL"
                 )
-            raw_body = response.read()
+            raw_body = _bounded_response_body(response)
             return HttpJsonResponse(
                 payload=_decode_provider_json(raw_body),
                 status_code=int(response.status),

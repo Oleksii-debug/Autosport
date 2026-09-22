@@ -36,7 +36,6 @@ from .supervised_execution import (
 
 _CONFIRMATION_FILENAME: Final = "supervised-confirmation.jsonl"
 _SUPERVISED_REVIEW_PAYLOAD_DOMAIN: Final = "autosport.supervised-review-payload.v1"
-_WITNESS_SEAL: Final = object()
 
 
 class SmarketsExecutionApprovalError(RuntimeError):
@@ -274,9 +273,15 @@ def _require_confirmation_binding(
         )
 
 
-@dataclass(frozen=True, slots=True, init=False)
-class SmarketsExecutionApprovalWitness:
-    """Sealed product approval evidence for one exact Smarkets execution action."""
+@dataclass(frozen=True, slots=True)
+class SmarketsExecutionApprovalRecord:
+    """Structural result of durable Smarkets approval resolution.
+
+    The record is intentionally caller-constructible. Its type, immutability and
+    evidence_id do not prove product origin. Any authority-bearing consumer must
+    call verify_smarkets_execution_approval() or otherwise re-resolve the exact
+    consumed receipt through the canonical SupervisedConfirmationAuthority.
+    """
 
     execution_plan_id: str
     action_id: str
@@ -297,90 +302,71 @@ class SmarketsExecutionApprovalWitness:
     consumer_key: str
     evidence_id: str
 
-    def __init__(
-        self,
-        *,
-        execution_plan_id: str,
-        action_id: str,
-        bookmaker_id: str,
-        account_id: str,
-        decision_id: str,
-        decision_sha256: str,
-        approval_fingerprint: str,
-        approval_evidence_sha256: str,
-        risk_evidence_sha256: str,
-        review_payload_sha256: str,
-        review_id: str,
-        review_sha256: str,
-        receipt_id: str,
-        receipt_sha256: str,
-        confirmed_at: str,
-        consumed_at: str,
-        consumer_key: str,
-        evidence_id: str,
-        _seal: object | None = None,
-    ) -> None:
-        if _seal is not _WITNESS_SEAL:
-            raise TypeError(
-                "SmarketsExecutionApprovalWitness is issued only by product approval authority"
-            )
-        for name, value in (
-            ("execution_plan_id", execution_plan_id),
-            ("action_id", action_id),
-            ("bookmaker_id", bookmaker_id),
-            ("account_id", account_id),
-            ("decision_id", decision_id),
-            ("review_id", review_id),
-            ("consumer_key", consumer_key),
+    def __post_init__(self) -> None:
+        for name in (
+            "execution_plan_id",
+            "action_id",
+            "bookmaker_id",
+            "account_id",
+            "decision_id",
+            "review_id",
+            "consumer_key",
         ):
-            _text(value, name)
-        for name, value in (
-            ("decision_sha256", decision_sha256),
-            ("approval_fingerprint", approval_fingerprint),
-            ("approval_evidence_sha256", approval_evidence_sha256),
-            ("risk_evidence_sha256", risk_evidence_sha256),
-            ("review_payload_sha256", review_payload_sha256),
-            ("review_sha256", review_sha256),
-            ("receipt_id", receipt_id),
-            ("receipt_sha256", receipt_sha256),
-            ("evidence_id", evidence_id),
+            _text(getattr(self, name), name)
+        for name in (
+            "decision_sha256",
+            "approval_fingerprint",
+            "approval_evidence_sha256",
+            "risk_evidence_sha256",
+            "review_payload_sha256",
+            "review_sha256",
+            "receipt_id",
+            "receipt_sha256",
+            "evidence_id",
         ):
-            _sha256(value, name)
-        _instant(confirmed_at, "confirmed_at")
-        _instant(consumed_at, "consumed_at")
-        object.__setattr__(self, "execution_plan_id", execution_plan_id)
-        object.__setattr__(self, "action_id", action_id)
-        object.__setattr__(self, "bookmaker_id", bookmaker_id)
-        object.__setattr__(self, "account_id", account_id)
-        object.__setattr__(self, "decision_id", decision_id)
-        object.__setattr__(self, "decision_sha256", decision_sha256)
-        object.__setattr__(self, "approval_fingerprint", approval_fingerprint)
-        object.__setattr__(self, "approval_evidence_sha256", approval_evidence_sha256)
-        object.__setattr__(self, "risk_evidence_sha256", risk_evidence_sha256)
-        object.__setattr__(self, "review_payload_sha256", review_payload_sha256)
-        object.__setattr__(self, "review_id", review_id)
-        object.__setattr__(self, "review_sha256", review_sha256)
-        object.__setattr__(self, "receipt_id", receipt_id)
-        object.__setattr__(self, "receipt_sha256", receipt_sha256)
-        object.__setattr__(self, "confirmed_at", confirmed_at)
-        object.__setattr__(self, "consumed_at", consumed_at)
-        object.__setattr__(self, "consumer_key", consumer_key)
-        object.__setattr__(self, "evidence_id", evidence_id)
-
-    def __reduce__(self):
-        raise TypeError(
-            "SmarketsExecutionApprovalWitness is non-serializable; "
-            "re-resolve durable confirmation after restart"
+            _sha256(getattr(self, name), name)
+        _instant(self.confirmed_at, "confirmed_at")
+        _instant(self.consumed_at, "consumed_at")
+        expected = _digest(
+            {
+                "schema": "autosport.smarkets_execution_approval",
+                "schema_version": 1,
+                **self._evidence_material(),
+            }
         )
+        if self.evidence_id != expected:
+            raise SmarketsExecutionApprovalError(
+                "Smarkets execution approval record evidence_id mismatch"
+            )
 
+    def _evidence_material(self) -> dict[str, str]:
+        return {
+            "execution_plan_id": self.execution_plan_id,
+            "action_id": self.action_id,
+            "bookmaker_id": self.bookmaker_id,
+            "account_id": self.account_id,
+            "decision_id": self.decision_id,
+            "decision_sha256": self.decision_sha256,
+            "approval_fingerprint": self.approval_fingerprint,
+            "approval_evidence_sha256": self.approval_evidence_sha256,
+            "risk_evidence_sha256": self.risk_evidence_sha256,
+            "review_payload_sha256": self.review_payload_sha256,
+            "review_id": self.review_id,
+            "review_sha256": self.review_sha256,
+            "receipt_id": self.receipt_id,
+            "receipt_sha256": self.receipt_sha256,
+            "confirmed_at": self.confirmed_at,
+            "consumed_at": self.consumed_at,
+            "consumer_key": self.consumer_key,
+        }
 
-def _issue_witness(
+def _record_from_binding(
     binding: SupervisedConfirmationBinding,
     *,
     bound: BoundSupervisedExecutionPlan,
     approval: SupervisedApproval,
     action: ExecutionAction,
-) -> SmarketsExecutionApprovalWitness:
+) -> SmarketsExecutionApprovalRecord:
     receipt = binding.receipt
     review = binding.review
     if receipt.consumed_by is None or receipt.consumed_at is None:
@@ -416,10 +402,9 @@ def _issue_witness(
         "schema_version": 1,
         **witness_payload,
     }
-    return SmarketsExecutionApprovalWitness(
+    return SmarketsExecutionApprovalRecord(
         **witness_payload,
         evidence_id=_digest(evidence_payload),
-        _seal=_WITNESS_SEAL,
     )
 
 
@@ -430,7 +415,7 @@ def consume_smarkets_execution_approval(
     action_id: str,
     receipt_id: str,
     expected_review_sha256: str,
-) -> SmarketsExecutionApprovalWitness:
+) -> SmarketsExecutionApprovalRecord:
     """Consume one durable operator receipt for one exact Smarkets action.
 
     This is the one-shot transition intended to precede an irreversible provider
@@ -476,7 +461,7 @@ def consume_smarkets_execution_approval(
         approval=approval,
         action=action,
     )
-    return _issue_witness(after, bound=bound, approval=approval, action=action)
+    return _record_from_binding(after, bound=bound, approval=approval, action=action)
 
 
 def resolve_consumed_smarkets_execution_approval(
@@ -486,7 +471,7 @@ def resolve_consumed_smarkets_execution_approval(
     action_id: str,
     receipt_id: str,
     expected_review_sha256: str,
-) -> SmarketsExecutionApprovalWitness:
+) -> SmarketsExecutionApprovalRecord:
     """Re-resolve a previously consumed exact Smarkets approval after restart."""
 
     action = _require_bound_action(bound, approval, action_id)
@@ -511,4 +496,34 @@ def resolve_consumed_smarkets_execution_approval(
         approval=approval,
         action=action,
     )
-    return _issue_witness(binding, bound=bound, approval=approval, action=action)
+    return _record_from_binding(binding, bound=bound, approval=approval, action=action)
+
+
+def verify_smarkets_execution_approval(
+    record: SmarketsExecutionApprovalRecord,
+    bound: BoundSupervisedExecutionPlan,
+    approval: SupervisedApproval,
+) -> SmarketsExecutionApprovalRecord:
+    """Re-resolve durable confirmation and exact-compare a structural record.
+
+    This function is the authority-bearing read boundary for downstream callers.
+    Possession of a SmarketsExecutionApprovalRecord alone never grants execution
+    authority.
+    """
+
+    if type(record) is not SmarketsExecutionApprovalRecord:
+        raise SmarketsExecutionApprovalError(
+            "record must be exact SmarketsExecutionApprovalRecord"
+        )
+    fresh = resolve_consumed_smarkets_execution_approval(
+        bound,
+        approval,
+        action_id=record.action_id,
+        receipt_id=record.receipt_id,
+        expected_review_sha256=record.review_sha256,
+    )
+    if fresh != record:
+        raise SmarketsExecutionApprovalError(
+            "Smarkets execution approval record does not match durable product authority"
+        )
+    return fresh

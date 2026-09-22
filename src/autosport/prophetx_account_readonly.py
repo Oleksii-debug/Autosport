@@ -10,10 +10,11 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from decimal import Decimal
 from hashlib import sha256
+from http.client import HTTPException
 import json
 from typing import Callable, Mapping, Protocol
 from urllib.error import HTTPError, URLError
-from urllib.request import HTTPRedirectHandler, Request, build_opener
+from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_opener
 
 from .bookmaker_capability import (
     BookmakerAccountSnapshot,
@@ -92,7 +93,7 @@ class UrllibProphetXHttpTransport:
         ):
             raise ValueError("max_response_bytes must be a positive integer")
         self._max_response_bytes = max_response_bytes
-        self._opener = build_opener(_RejectRedirectHandler())
+        self._opener = build_opener(ProxyHandler({}), _RejectRedirectHandler())
 
     def get(
         self,
@@ -113,6 +114,21 @@ class UrllibProphetXHttpTransport:
                     raise ProphetXReadOnlyError(
                         "ProphetX response exceeded the size limit"
                     )
+                content_length = response.headers.get("Content-Length")
+                if content_length is not None:
+                    stripped = content_length.strip()
+                    if (
+                        not stripped
+                        or not stripped.isascii()
+                        or not stripped.isdigit()
+                    ):
+                        raise ProphetXReadOnlyError(
+                            "ProphetX response Content-Length is invalid"
+                        )
+                    if int(stripped) != len(body):
+                        raise ProphetXReadOnlyError(
+                            "ProphetX response Content-Length does not match body"
+                        )
                 return ProphetXHttpResponse(
                     status=int(response.getcode()),
                     final_url=str(response.geturl()),
@@ -128,7 +144,7 @@ class UrllibProphetXHttpTransport:
             raise ProphetXReadOnlyError(
                 f"ProphetX HTTP request failed with status {status}"
             ) from None
-        except (URLError, TimeoutError, OSError):
+        except (URLError, TimeoutError, OSError, HTTPException):
             raise ProphetXReadOnlyError("ProphetX network request failed") from None
 
 

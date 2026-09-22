@@ -12,9 +12,11 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Iterable, Sequence
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 SEMANTIC_KEY = "windows.packaged-launch-path-matrix-v1"
 AUTHORITY_FAMILY = "product.windows-packaging.path-compatibility"
+LAUNCH_CWD_POLICY = "UNRELATED_CASE_DIRECTORY"
+WORKSPACE_POLICY = "AUTOSPORT_WORKSPACE_PER_CASE_ABSOLUTE"
 
 SCENARIOS: tuple[tuple[str, str], ...] = (
     ("ascii_control", "01_Autosport_QA"),
@@ -63,6 +65,10 @@ class MatrixReport:
     probe_mode: str
     startup_seconds: float
     timeout_seconds: float
+    launch_cwd_policy: str
+    workspace_policy: str
+    privilege_context: str
+    non_admin_verified: bool
     scenarios: tuple[ScenarioResult, ...]
     matrix_status: str
     real_money_execution: bool = False
@@ -86,6 +92,19 @@ def _sha256_file(path: Path, *, chunk_size: int = 1024 * 1024) -> str:
 def _canonical_json_sha(value: object) -> str:
     payload = json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
     return _sha256_bytes(payload)
+
+
+def detect_privilege_context() -> str:
+    """Classify the machine context without promoting CI to non-admin proof."""
+
+    if os.name != "nt":
+        return "NON_WINDOWS_TEST_CONTEXT"
+    try:
+        import ctypes
+
+        return "ADMINISTRATOR" if bool(ctypes.windll.shell32.IsUserAnAdmin()) else "STANDARD_USER"
+    except Exception:
+        return "UNKNOWN"
 
 
 def _safe_relative_path(path: Path) -> str:
@@ -170,6 +189,7 @@ def probe_process(
     startup_seconds: float,
     timeout_seconds: float,
     capture_output: bool,
+    environment: dict[str, str] | None = None,
 ) -> tuple[bool, bool, int | None, float, str, str | None]:
     if mode not in {"persistent", "exit-zero"}:
         raise MatrixError(f"unsupported probe mode: {mode}")
@@ -194,7 +214,7 @@ def probe_process(
             stdout=stdout_target,
             stderr=subprocess.STDOUT,
             shell=False,
-            env=os.environ.copy(),
+            env=(os.environ.copy() if environment is None else dict(environment)),
         )
         launched = True
         if mode == "persistent":
@@ -274,6 +294,7 @@ def run_matrix(
         raise MatrixError(f"executable does not exist inside artifact root: {rel}")
     original_manifest = tree_manifest(artifact_root)
     artifact_sha = tree_manifest_sha(original_manifest)
+    privilege_context = detect_privilege_context()
 
     results: list[ScenarioResult] = []
     for scenario_name, component in SCENARIOS:
@@ -293,6 +314,11 @@ def run_matrix(
         try:
             copied_sha = copy_tree_verified(artifact_root, package_root, expected_source_sha=artifact_sha)
             copied_equal = copied_sha == artifact_sha
+            launch_cwd = case_root / "launch-cwd"
+            launch_cwd.mkdir(parents=True, exist_ok=False)
+            workspace_root = (case_root / "workspace").resolve()
+            child_environment = os.environ.copy()
+            child_environment["AUTOSPORT_WORKSPACE"] = str(workspace_root)
             executable = package_root / executable_relative_path
             if not executable.is_file():
                 raise MatrixError(f"copied executable missing: {rel}")
@@ -300,12 +326,13 @@ def run_matrix(
             cmd = command_for(executable, rendered_args, launcher)
             launched, stable, exit_code, elapsed, status, error_type = probe_process(
                 cmd,
-                cwd=package_root,
+                cwd=launch_cwd,
                 stdout_path=log_path,
                 mode=mode,
                 startup_seconds=startup_seconds,
                 timeout_seconds=timeout_seconds,
                 capture_output=capture_output,
+                environment=child_environment,
             )
         except Exception as exc:
             error_type = type(exc).__name__
@@ -341,6 +368,10 @@ def run_matrix(
         probe_mode=mode,
         startup_seconds=startup_seconds,
         timeout_seconds=timeout_seconds,
+        launch_cwd_policy=LAUNCH_CWD_POLICY,
+        workspace_policy=WORKSPACE_POLICY,
+        privilege_context=privilege_context,
+        non_admin_verified=privilege_context == "STANDARD_USER",
         scenarios=tuple(results),
         matrix_status=matrix_status,
     )

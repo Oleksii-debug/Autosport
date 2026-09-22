@@ -473,12 +473,11 @@ class TheOddsApiProvider:
         self.timeout_seconds = float(timeout_seconds)
         self.transport = transport
         self.clock = clock
-        self._provider_origin_verified = False
-        self._receipt_clock_verified = False
         self.source_id = f"the-odds-api:{self.sport}"
         self._pending_quotes: tuple[ProviderQuote, ...] = ()
         self._pending_offset = 0
         self._pending_cursor: str | None = None
+        self._pending_quality_flags: tuple[str, ...] = ()
         self._last_request_evidence: TheOddsApiRequestEvidence | None = None
 
     @staticmethod
@@ -509,15 +508,19 @@ class TheOddsApiProvider:
         if type(max_items) is not int or max_items <= 0:
             raise ValueError("max_items must be a positive non-boolean integer")
         if self._pending_offset >= len(self._pending_quotes):
-            response = self._request(self._current_url())
+            response, provider_origin_verified = self._request(
+                self._current_url()
+            )
             clock = self.clock
-            self._receipt_clock_verified = clock is utc_now_iso
+            receipt_clock_verified = clock is utc_now_iso
             observed_at = _timestamp(clock(), "observed_at")
             evidence = self._request_evidence(
                 "current",
                 observed_at,
                 response.headers,
                 response_sha256=response.body_sha256,
+                provider_origin_verified=provider_origin_verified,
+                receipt_clock_verified=receipt_clock_verified,
             )
             self._pending_quotes = self._parse_current_payload(
                 response.payload, observed_at, evidence
@@ -526,13 +529,14 @@ class TheOddsApiProvider:
             self._pending_cursor = (
                 evidence.response_sha256 or evidence.request_fingerprint
             )
+            self._pending_quality_flags = self._provenance_quality_flags(evidence)
             self._last_request_evidence = evidence
 
         start = self._pending_offset
         end = min(start + max_items, len(self._pending_quotes))
         quotes = self._pending_quotes[start:end]
         self._pending_offset = end
-        flags = ["DYNAMIC_COVERAGE", *self._provenance_quality_flags()]
+        flags = ["DYNAMIC_COVERAGE", *self._pending_quality_flags]
         if not quotes and not self._pending_quotes:
             flags.append("EMPTY_RESPONSE")
         if self._pending_offset < len(self._pending_quotes):
@@ -556,9 +560,11 @@ class TheOddsApiProvider:
         if type(max_items) is not int or max_items <= 0:
             raise ValueError("max_items must be a positive non-boolean integer")
         requested_at = _timestamp(requested_at, "requested_at")
-        response = self._request(self._historical_url(requested_at))
+        response, provider_origin_verified = self._request(
+            self._historical_url(requested_at)
+        )
         clock = self.clock
-        self._receipt_clock_verified = clock is utc_now_iso
+        receipt_clock_verified = clock is utc_now_iso
         observed_at = _timestamp(clock(), "observed_at")
         if _datetime(requested_at) > _datetime(observed_at):
             raise TheOddsApiPayloadError(
@@ -598,6 +604,8 @@ class TheOddsApiProvider:
             observed_at,
             response.headers,
             response_sha256=response.body_sha256,
+            provider_origin_verified=provider_origin_verified,
+            receipt_clock_verified=receipt_clock_verified,
             requested_snapshot_at=requested_at,
             actual_snapshot_at=snapshot_at,
         )
@@ -614,7 +622,7 @@ class TheOddsApiProvider:
         flags = [
             "DYNAMIC_COVERAGE",
             "HISTORICAL_SNAPSHOT",
-            *self._provenance_quality_flags(),
+            *self._provenance_quality_flags(evidence),
         ]
         if not quotes:
             flags.append("EMPTY_RESPONSE")
@@ -638,10 +646,11 @@ class TheOddsApiProvider:
         self._pending_quotes = ()
         self._pending_offset = 0
         self._pending_cursor = None
+        self._pending_quality_flags = ()
 
-    def _request(self, url: str) -> HttpJsonResponse:
+    def _request(self, url: str) -> tuple[HttpJsonResponse, bool]:
         transport = self.transport
-        self._provider_origin_verified = transport is _default_transport
+        provider_origin_verified = transport is _default_transport
         response = transport(url, self.timeout_seconds)
         if type(response) is not HttpJsonResponse:
             raise TypeError("transport must return HttpJsonResponse")
@@ -649,7 +658,7 @@ class TheOddsApiProvider:
             raise TheOddsApiTransportError(
                 f"The Odds API HTTP {response.status_code}", response.status_code
             )
-        if self._provider_origin_verified and response.final_url != url:
+        if provider_origin_verified and response.final_url != url:
             raise TheOddsApiTransportError(
                 "The Odds API product transport did not bind the exact final URL"
             )
@@ -657,17 +666,20 @@ class TheOddsApiProvider:
             response.body_sha256,
             "response.body_sha256",
         )
-        if self._provider_origin_verified and body_sha256 is None:
+        if provider_origin_verified and body_sha256 is None:
             raise TheOddsApiPayloadError(
                 "provider-origin-verified response requires exact response SHA-256"
             )
-        return response
+        return response, provider_origin_verified
 
-    def _provenance_quality_flags(self) -> tuple[str, ...]:
+    @staticmethod
+    def _provenance_quality_flags(
+        evidence: TheOddsApiRequestEvidence,
+    ) -> tuple[str, ...]:
         flags: list[str] = []
-        if not self._provider_origin_verified:
+        if not evidence.provider_origin_verified:
             flags.append("UNVERIFIED_PROVIDER_ORIGIN")
-        if not self._receipt_clock_verified:
+        if not evidence.receipt_clock_verified:
             flags.append("UNVERIFIED_RECEIPT_CLOCK")
         return tuple(flags)
 
@@ -706,6 +718,8 @@ class TheOddsApiProvider:
         headers: Mapping[str, str],
         *,
         response_sha256: str | None,
+        provider_origin_verified: bool,
+        receipt_clock_verified: bool,
         requested_snapshot_at: str | None = None,
         actual_snapshot_at: str | None = None,
     ) -> TheOddsApiRequestEvidence:
@@ -719,8 +733,8 @@ class TheOddsApiProvider:
             include_sids=self.include_sids,
             include_bet_limits=self.include_bet_limits,
             observed_at=observed_at,
-            provider_origin_verified=self._provider_origin_verified,
-            receipt_clock_verified=self._receipt_clock_verified,
+            provider_origin_verified=provider_origin_verified,
+            receipt_clock_verified=receipt_clock_verified,
             response_sha256=_optional_sha256(
                 response_sha256,
                 "response.body_sha256",

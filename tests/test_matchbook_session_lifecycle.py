@@ -171,6 +171,41 @@ def test_fresh_login_rotates_generation_and_old_generation_stays_terminal() -> N
     assert lifecycle.state is SessionState.ACTIVE
 
 
+@pytest.mark.parametrize("operation", ["get_session", "network_failure", "logout"])
+def test_stale_generation_timestamp_cannot_clock_fault_current_generation(
+    operation: str,
+) -> None:
+    lifecycle = active()
+    lifecycle.record_login_200(generation_id="gen-2", monotonic_ns=ns(20))
+    before = lifecycle.audit_snapshot()
+
+    with pytest.raises(
+        SessionLifecycleError,
+        match="stale or unknown session generation evidence",
+    ):
+        if operation == "get_session":
+            lifecycle.record_get_session_result(
+                generation_id="gen-1",
+                http_status=200,
+                monotonic_ns=ns(19),
+            )
+        elif operation == "network_failure":
+            lifecycle.record_network_failure(
+                generation_id="gen-1",
+                monotonic_ns=ns(19),
+            )
+        else:
+            lifecycle.record_logout_200(
+                generation_id="gen-1",
+                monotonic_ns=ns(19),
+            )
+
+    assert lifecycle.audit_snapshot() == before
+    assert lifecycle.generation_id == "gen-2"
+    assert lifecycle.state is SessionState.ACTIVE
+    assert lifecycle.is_active is True
+
+
 def test_approximate_six_hour_lifetime_is_only_a_refresh_hint() -> None:
     lifecycle = MatchbookSessionLifecycle()
     lifecycle.record_login_200(generation_id="gen-1", monotonic_ns=0)

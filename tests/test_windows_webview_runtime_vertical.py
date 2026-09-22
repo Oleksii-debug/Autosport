@@ -3,6 +3,7 @@ from __future__ import annotations
 import threading
 from pathlib import Path
 
+from autosport.continuous_session import SessionStoppedError
 from autosport.product_gui_worker import ProductGuiWorker
 from autosport.windows_webview_shell import AutosportWebController, _safe_exception_text
 
@@ -46,6 +47,36 @@ class _FakeProductWorker:
             return False
         self.stop_reasons.append(reason)
         return True
+
+
+class _InterruptibleStopRuntime:
+    def __init__(self) -> None:
+        self.tick_entered = threading.Event()
+        self.stop_signal = threading.Event()
+        self.request_reasons: list[str] = []
+        self.stop_reasons: list[str] = []
+        self.closed = False
+
+    def start(self):
+        return object()
+
+    def request_stop(self, reason: str = "operator_stop") -> None:
+        self.request_reasons.append(reason)
+        self.stop_signal.set()
+
+    def tick(self):
+        self.tick_entered.set()
+        if not self.stop_signal.wait(2.0):
+            raise AssertionError("runtime STOP was not signalled while tick was blocked")
+        raise SessionStoppedError("cooperative runtime stop")
+
+    def stop(self, reason: str = "operator_stop"):
+        self.stop_reasons.append(reason)
+        self.stop_signal.set()
+        return object()
+
+    def close(self) -> None:
+        self.closed = True
 
 
 class _PartialStartRuntime:
@@ -140,6 +171,35 @@ def test_bridge_duplicate_request_id_replays_result_without_second_mutation(
     )
     assert collision["status"] == "rejected"
     assert controller.log == log_after_first
+
+
+def test_worker_stop_interrupts_active_runtime_tick_and_emits_stopped(
+    tmp_path: Path,
+) -> None:
+    runtime = _InterruptibleStopRuntime()
+    worker = ProductGuiWorker(runtime_builder=lambda *_args: runtime)
+
+    assert worker.start(
+        workspace=tmp_path,
+        source_factory="provider.module:factory",
+        poll_seconds=60,
+    )
+    assert runtime.tick_entered.wait(2.0)
+    assert worker.request_stop("operator_stop")
+    assert worker.join(2.0)
+
+    messages = []
+    while True:
+        message = worker.poll()
+        if message is None:
+            break
+        messages.append(message)
+
+    assert runtime.request_reasons == ["operator_stop"]
+    assert runtime.stop_reasons == ["operator_stop"]
+    assert runtime.closed is True
+    assert [message.kind for message in messages] == ["STARTED", "STOPPED"]
+    assert messages[-1].stop_reason == "operator_stop"
 
 
 def test_partial_runtime_start_is_compensated_and_error_detail_is_not_projected(

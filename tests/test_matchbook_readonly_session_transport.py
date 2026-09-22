@@ -963,3 +963,161 @@ def test_query_validation_fails_before_authentication(query: object) -> None:
         transport.read(path="/edge/rest/events", query=query)  # type: ignore[arg-type]
 
     assert login.calls == 0
+
+
+class ExistingMatchbookAdapterError(ProviderUnavailableError):
+    def __init__(
+        self,
+        status_code: int | None,
+        retry_after: float | None = None,
+    ) -> None:
+        super().__init__("existing adapter transport failure")
+        self.status_code = status_code
+        self.retry_after = retry_after
+
+
+def test_raised_429_preserves_throttle_metadata_without_invalidating_session() -> None:
+    login = LoginFactory()
+
+    def read(
+        token: str,
+        path: str,
+        query: tuple[tuple[str, str], ...],
+    ) -> MatchbookReadResponse:
+        raise ExistingMatchbookAdapterError(429, retry_after=37.5)
+
+    transport, lifecycle, _, _ = build_transport(read=read, login=login)
+
+    with pytest.raises(MatchbookReadUnavailable) as exc_info:
+        transport.read(path="/edge/rest/events")
+
+    error = exc_info.value
+    assert error.status_code == 429
+    assert error.retry_after_seconds == 37.5
+    assert login.calls == 1
+    assert transport.generation_id == "gen-1"
+    assert lifecycle.state is SessionState.ACTIVE
+    assert lifecycle._issued_read_tickets == {}
+
+
+def test_raised_401_uses_same_bounded_reauth_state_machine() -> None:
+    login = LoginFactory()
+
+    def read(
+        token: str,
+        path: str,
+        query: tuple[tuple[str, str], ...],
+    ) -> MatchbookReadResponse:
+        if token == "token-1":
+            raise ExistingMatchbookAdapterError(401)
+        return MatchbookReadResponse(200, {"token": token})
+
+    transport, lifecycle, _, _ = build_transport(read=read, login=login)
+
+    committed = transport.read(path="/edge/rest/events")
+
+    assert committed.payload == {"token": "token-2"}
+    assert committed.generation_id == "gen-2"
+    assert login.calls == 2
+    assert lifecycle.state is SessionState.ACTIVE
+
+
+def test_raised_403_is_forbidden_without_relogin() -> None:
+    login = LoginFactory()
+
+    transport, lifecycle, _, _ = build_transport(
+        read=lambda token, path, query: (_ for _ in ()).throw(
+            ExistingMatchbookAdapterError(403)
+        ),
+        login=login,
+    )
+
+    with pytest.raises(MatchbookReadForbidden) as exc_info:
+        transport.read(path="/edge/rest/account/positions")
+
+    assert exc_info.value.status_code == 403
+    assert login.calls == 1
+    assert transport.generation_id == "gen-1"
+    assert lifecycle.state is SessionState.ACTIVE
+
+
+def test_statusless_provider_unavailability_marks_session_unknown() -> None:
+    login = LoginFactory()
+
+    transport, lifecycle, _, _ = build_transport(
+        read=lambda token, path, query: (_ for _ in ()).throw(
+            ExistingMatchbookAdapterError(None)
+        ),
+        login=login,
+    )
+
+    with pytest.raises(MatchbookReadUnavailable) as exc_info:
+        transport.read(path="/edge/rest/events")
+
+    assert exc_info.value.status_code is None
+    assert login.calls == 1
+    assert transport.generation_id is None
+    assert lifecycle.state is SessionState.UNKNOWN
+
+
+def test_concurrent_login_429_propagates_same_structured_failure_to_waiters() -> None:
+    started = Event()
+    release = Event()
+    lock = Lock()
+    calls = 0
+
+    def login() -> MatchbookLoginResponse:
+        nonlocal calls
+        with lock:
+            calls += 1
+        started.set()
+        assert release.wait(timeout=2.0)
+        return MatchbookLoginResponse(
+            429,
+            retry_after_seconds=19.0,
+        )
+
+    transport, lifecycle, _, _ = build_transport(
+        login=login,
+        read=lambda token, path, query: MatchbookReadResponse(200, {"ok": True}),
+    )
+    results: list[object] = []
+    errors: list[BaseException] = []
+
+    first = run_in_thread(
+        lambda: transport.read(path="/edge/rest/events"),
+        results=results,
+        errors=errors,
+    )
+    assert started.wait(timeout=1.0)
+    second = run_in_thread(
+        lambda: transport.read(path="/edge/rest/account/balance"),
+        results=results,
+        errors=errors,
+    )
+    with transport._condition:
+        assert transport._login_waiters.get(1) == 1
+
+    release.set()
+    first.join(timeout=2.0)
+    second.join(timeout=2.0)
+
+    assert results == []
+    assert calls == 1
+    assert len(errors) == 2
+    assert all(isinstance(error, MatchbookAuthenticationUnavailable) for error in errors)
+    assert all(error.status_code == 429 for error in errors)
+    assert all(error.retry_after_seconds == 19.0 for error in errors)
+    assert lifecycle.state is SessionState.COLD
+
+
+@pytest.mark.parametrize(
+    "bad_retry_after",
+    [-1, float("inf"), float("nan"), True, "10"],
+)
+def test_retry_after_metadata_validation_fails_closed(bad_retry_after: object) -> None:
+    with pytest.raises((TypeError, ValueError)):
+        MatchbookReadResponse(
+            429,
+            retry_after_seconds=bad_retry_after,  # type: ignore[arg-type]
+        )

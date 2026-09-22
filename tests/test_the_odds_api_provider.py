@@ -479,6 +479,50 @@ class TheOddsApiProviderTests(unittest.TestCase):
                 timeout_seconds=float("inf"),
             )
 
+    def test_default_transport_bounds_response_before_decode_and_digest(self):
+        seen = {}
+
+        class OversizedResponse:
+            status = 200
+            headers = {}
+
+            def __init__(self, final_url):
+                self.final_url = final_url
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, traceback):
+                return False
+
+            def read(self, size=-1):
+                seen["read_size"] = size
+                return b"x" * size
+
+            def geturl(self):
+                return self.final_url
+
+        class FakeOpener:
+            def open(self, request, timeout):
+                return OversizedResponse(request.full_url)
+
+        url = (
+            "https://api.the-odds-api.com/v4/sports/soccer_epl/odds"
+            "?apiKey=secret&regions=eu&markets=h2h"
+        )
+        with patch.object(
+            odds_api_module,
+            "build_opener",
+            lambda *_: FakeOpener(),
+        ):
+            with self.assertRaisesRegex(TheOddsApiPayloadError, "bounded size"):
+                odds_api_module._default_transport(url, 1.0)
+
+        self.assertEqual(
+            seen["read_size"],
+            odds_api_module.THE_ODDS_API_MAX_RESPONSE_BYTES + 1,
+        )
+
     def test_default_transport_binds_exact_response_digest_into_evidence(self):
         raw_body = (
             b'[{"id":"0123456789abcdef0123456789abcdef",'
@@ -502,7 +546,8 @@ class TheOddsApiProviderTests(unittest.TestCase):
             def __exit__(self, exc_type, exc, traceback):
                 return False
 
-            def read(self):
+            def read(self, size=-1):
+                self.read_size = size
                 return raw_body
 
             def geturl(self):

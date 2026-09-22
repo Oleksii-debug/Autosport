@@ -8,7 +8,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
-from .continuous_session import ContinuousSessionStatus, ContinuousTickResult
+from .continuous_session import (
+    ContinuousSessionStatus,
+    ContinuousTickResult,
+    SessionStoppedError,
+)
 from .product_entrypoint import _validated_source
 from .product_runtime import AutonomousProductRuntime, build_autonomous_product_runtime
 
@@ -89,6 +93,7 @@ class ProductGuiWorker:
         self._lock = threading.Lock()
         self._busy = False
         self._thread: threading.Thread | None = None
+        self._runtime: AutonomousProductRuntime | None = None
         self._stop_event = threading.Event()
         self._stop_reason = "operator_stop"
 
@@ -167,13 +172,22 @@ class ProductGuiWorker:
     def request_stop(self, reason: str = "operator_stop") -> bool:
         if type(reason) is not str or not reason or reason.strip() != reason:
             raise ValueError("stop reason must be a non-empty trimmed string")
+        runtime: AutonomousProductRuntime | None
+        resolved_reason: str
         with self._lock:
             if not self._busy:
                 return False
             if not self._stop_event.is_set():
                 self._stop_reason = reason
                 self._stop_event.set()
-            return True
+            resolved_reason = self._stop_reason
+            runtime = self._runtime
+
+        if runtime is not None:
+            request_runtime_stop = getattr(runtime, "request_stop", None)
+            if callable(request_runtime_stop):
+                request_runtime_stop(resolved_reason)
+        return True
 
     def poll(self) -> ProductGuiMessage | None:
         try:
@@ -226,6 +240,8 @@ class ProductGuiWorker:
         stop_reason: str | None = None
         try:
             runtime = self._runtime_builder(workspace, source_factory, initial_bankroll)
+            with self._lock:
+                self._runtime = runtime
 
             # A STOP requested while construction was in flight must win before START.
             if self._stop_event.is_set():
@@ -238,7 +254,14 @@ class ProductGuiWorker:
                 )
 
                 while not self._stop_event.is_set():
-                    tick = runtime.tick()
+                    try:
+                        tick = runtime.tick()
+                    except SessionStoppedError:
+                        if not self._stop_event.is_set():
+                            raise
+                        break
+                    if self._stop_event.is_set():
+                        break
                     self._messages.put(ProductGuiMessage(kind="TICK", tick=tick))
                     if self._stop_event.wait(poll_seconds):
                         break
@@ -278,4 +301,5 @@ class ProductGuiWorker:
                     )
                 )
             with self._lock:
+                self._runtime = None
                 self._busy = False

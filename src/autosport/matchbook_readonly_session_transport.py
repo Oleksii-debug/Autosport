@@ -11,6 +11,7 @@ from .matchbook_session_lifecycle import (
     SessionLifecycleError,
     SessionReadGenerationTicket,
 )
+from .providers import ProviderUnavailableError
 
 MATCHBOOK_READ_ONLY_PATHS = frozenset(
     {
@@ -27,7 +28,7 @@ MATCHBOOK_READ_ONLY_PATHS = frozenset(
 )
 
 
-class MatchbookSessionTransportError(RuntimeError):
+class MatchbookSessionTransportError(ProviderUnavailableError):
     """Secret-safe failure at the shared authenticated read transport boundary."""
 
 

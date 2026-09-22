@@ -103,6 +103,8 @@ def _default_transport(
         },
         method="GET",
     )
+    http_status: int | None = None
+    transport_failed = False
     try:
         with urlopen(request, timeout=timeout_seconds) as response:  # nosec B310 - fixed HTTPS host/path
             raw = response.read()
@@ -113,14 +115,18 @@ def _default_transport(
                 body_sha256=hashlib.sha256(raw).hexdigest(),
             )
     except HTTPError as exc:
-        raise TheOddsApiTransportError(
-            f"The Odds API HTTP {int(exc.code)}",
-            status_code=int(exc.code),
-        ) from None
+        http_status = int(exc.code)
     except (URLError, TimeoutError, OSError):
+        transport_failed = True
+
+    if http_status is not None:
         raise TheOddsApiTransportError(
-            "The Odds API transport unavailable"
-        ) from None
+            f"The Odds API HTTP {http_status}",
+            status_code=http_status,
+        )
+    if transport_failed:
+        raise TheOddsApiTransportError("The Odds API transport unavailable")
+    raise AssertionError("unreachable transport outcome")
 
 
 def _api_key(value: object) -> str:

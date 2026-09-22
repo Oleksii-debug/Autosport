@@ -26,12 +26,22 @@ from pathlib import Path
 from typing import Iterable, Sequence
 
 from .integrity import durable_path_lock
+from .monotonic_workspace_authority import (
+    AuthorityPhase,
+    MonotonicWorkspaceAuthority,
+    MonotonicWorkspaceAuthorityError,
+)
 
 SCHEMA_VERSION = 1
 REPLACE_ORDERS_METHOD = "SportsAPING/v1.0/replaceOrders"
 _PROVIDER_ID = "betfair"
 _MAX_INSTRUCTIONS = 60
 _ZERO_SHA256 = "0" * 64
+_MONOTONIC_DOMAIN = "provider-execution-replace-saga"
+_MONOTONIC_KEY = "betfair-replace-saga-journal-v1"
+_MONOTONIC_BINDING_SCHEMA = "autosport.betfair_replace_saga.monotonic_binding"
+_MONOTONIC_STATE_SCHEMA = "autosport.betfair_replace_saga.monotonic_state"
+_MONOTONIC_TX_SCHEMA = "autosport.betfair_replace_saga.monotonic_tx"
 
 
 class BetfairReplaceSagaError(RuntimeError):
@@ -852,6 +862,75 @@ class BetfairReplaceSagaStore:
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
 
+    def _absolute_path(self) -> Path:
+        return Path(os.path.realpath(os.path.abspath(os.fspath(self.path))))
+
+    def _monotonic_path_identity(self) -> str:
+        return os.path.normcase(self._absolute_path().name)
+
+    def _monotonic_authority(self) -> MonotonicWorkspaceAuthority:
+        absolute = self._absolute_path()
+        return MonotonicWorkspaceAuthority(
+            workspace=absolute.parent,
+            domain=_MONOTONIC_DOMAIN,
+            key=_MONOTONIC_KEY,
+        )
+
+    def _monotonic_binding(self) -> str:
+        return _digest(
+            {
+                "schema": _MONOTONIC_BINDING_SCHEMA,
+                "schema_version": 1,
+                "provider_id": _PROVIDER_ID,
+                "journal_schema_version": SCHEMA_VERSION,
+                "journal_path_identity": self._monotonic_path_identity(),
+            }
+        )
+
+    def _monotonic_state_digest(self, raw: bytes) -> str | None:
+        if not raw:
+            return None
+        return _digest(
+            {
+                "schema": _MONOTONIC_STATE_SCHEMA,
+                "schema_version": 1,
+                "provider_id": _PROVIDER_ID,
+                "journal_path_identity": self._monotonic_path_identity(),
+                "journal_size": len(raw),
+                "journal_sha256": hashlib.sha256(raw).hexdigest(),
+            }
+        )
+
+    @staticmethod
+    def _raise_monotonic_error(exc: MonotonicWorkspaceAuthorityError) -> None:
+        raise BetfairReplaceSagaIntegrityError(
+            f"replace journal monotonic authority rejected local state: {exc}"
+        ) from exc
+
+    def _ensure_monotonic_current(self, raw: bytes) -> None:
+        observed = self._monotonic_state_digest(raw)
+        binding = self._monotonic_binding()
+        try:
+            authority = self._monotonic_authority()
+            history = authority.read_history()
+            if history and history[-1].phase is AuthorityPhase.PREPARE:
+                pending = history[-1]
+                if pending.semantic_binding_sha256 != binding:
+                    raise BetfairReplaceSagaIntegrityError(
+                        "replace journal has a pending transaction for a different path binding"
+                    )
+                authority.recover(
+                    observed_state_sha256=observed,
+                    tx_id=pending.tx_id,
+                    semantic_binding_sha256=binding,
+                )
+            else:
+                authority.recover(observed_state_sha256=observed)
+        except BetfairReplaceSagaError:
+            raise
+        except MonotonicWorkspaceAuthorityError as exc:
+            self._raise_monotonic_error(exc)
+
     @staticmethod
     def _validate_event(event: object, *, line: int | None = None) -> dict[str, object]:
         where = f" at line {line}" if line is not None else ""
@@ -930,11 +1009,18 @@ class BetfairReplaceSagaStore:
         return events
 
     def _events(self) -> list[dict[str, object]]:
-        if not self.path.exists():
-            return []
-        return self._parse(self.path.read_bytes())
+        raw = self.path.read_bytes() if self.path.exists() else b""
+        events = self._parse(raw)
+        self._ensure_monotonic_current(raw)
+        return events
 
-    def _append(self, kind: EventType, saga_id: str, payload: dict[str, object], recorded_at: str) -> None:
+    def _append(
+        self,
+        kind: EventType,
+        saga_id: str,
+        payload: dict[str, object],
+        recorded_at: str,
+    ) -> None:
         events = self._events()
         previous = _digest(events[-1]) if events else _ZERO_SHA256
         event = {
@@ -947,10 +1033,49 @@ class BetfairReplaceSagaStore:
             "payload": payload,
         }
         self._validate_event(event)
-        envelope = _canonical({"sha256": _digest(event), "event": event}) + "\n"
+        envelope = (
+            _canonical({"sha256": _digest(event), "event": event}) + "\n"
+        ).encode("utf-8")
+
+        current_raw = self.path.read_bytes() if self.path.exists() else b""
+        if self._parse(current_raw) != events:
+            raise BetfairReplaceSagaIntegrityError(
+                "replace journal changed during a locked append"
+            )
+        observed_state = self._monotonic_state_digest(current_raw)
+        intended_raw = current_raw + envelope
+        intended_state = self._monotonic_state_digest(intended_raw)
+        assert intended_state is not None
+        binding = self._monotonic_binding()
         path_existed = self.path.exists()
+
         try:
-            with self.path.open("a", encoding="utf-8", newline="\n") as handle:
+            authority = self._monotonic_authority()
+            history = authority.read_history()
+            authority_tip = None if not history else history[-1].record_sha256
+            tx_id = _digest(
+                {
+                    "schema": _MONOTONIC_TX_SCHEMA,
+                    "schema_version": 1,
+                    "provider_id": _PROVIDER_ID,
+                    "journal_path_identity": self._monotonic_path_identity(),
+                    "observed_state_sha256": observed_state,
+                    "intended_state_sha256": intended_state,
+                    "event_sha256": _digest(event),
+                    "authority_tip_sha256": authority_tip,
+                }
+            )
+            authority.prepare(
+                tx_id=tx_id,
+                observed_state_sha256=observed_state,
+                intended_state_sha256=intended_state,
+                semantic_binding_sha256=binding,
+            )
+        except MonotonicWorkspaceAuthorityError as exc:
+            self._raise_monotonic_error(exc)
+
+        try:
+            with self.path.open("ab") as handle:
                 handle.write(envelope)
                 handle.flush()
                 os.fsync(handle.fileno())
@@ -965,6 +1090,25 @@ class BetfairReplaceSagaStore:
             raise BetfairReplaceSagaIntegrityError(
                 "replace journal durability barrier failed"
             ) from exc
+
+        published_raw = self.path.read_bytes()
+        if published_raw != intended_raw:
+            raise BetfairReplaceSagaIntegrityError(
+                "replace journal publication differs from monotonic PREPARE"
+            )
+        published_state = self._monotonic_state_digest(published_raw)
+        if published_state != intended_state:
+            raise BetfairReplaceSagaIntegrityError(
+                "replace journal state digest differs from monotonic PREPARE"
+            )
+        try:
+            authority.commit(
+                tx_id=tx_id,
+                observed_state_sha256=intended_state,
+                semantic_binding_sha256=binding,
+            )
+        except MonotonicWorkspaceAuthorityError as exc:
+            self._raise_monotonic_error(exc)
 
     @staticmethod
     def _saga_events(events: Sequence[dict[str, object]], saga_id: str) -> list[dict[str, object]]:
@@ -1224,7 +1368,7 @@ class BetfairReplaceSagaStore:
     def prepare(self, intent: ReplaceIntent) -> ReplaceSagaSnapshot:
         if type(intent) is not ReplaceIntent:
             raise TypeError("intent must be exact ReplaceIntent")
-        with durable_path_lock(self.path):
+        with durable_path_lock(self._absolute_path()):
             events = self._events()
             existing = self._saga_events(events, intent.saga_id)
             if existing:
@@ -1235,12 +1379,12 @@ class BetfairReplaceSagaStore:
                     )
                 return self._snapshot_from_events(events, intent.saga_id)
             self._append(EventType.PREPARED, intent.saga_id, {"intent": intent.to_dict()}, intent.prepared_at)
-            return self.snapshot(intent.saga_id)
+            return self._snapshot_locked(intent.saga_id)
 
     def mark_submitted(self, saga_id: str, *, submitted_at: str) -> ReplaceSagaSnapshot:
         saga = _text(saga_id, "saga_id")
         canonical_time = _timestamp(submitted_at, "submitted_at")
-        with durable_path_lock(self.path):
+        with durable_path_lock(self._absolute_path()):
             events = self._events()
             intent = self._intent_from_events(events, saga)
             existing = [e for e in self._saga_events(events, saga) if e["event_type"] == EventType.SUBMITTED.value]
@@ -1257,13 +1401,13 @@ class BetfairReplaceSagaStore:
             if _time(canonical_time) < _time(intent.prepared_at):
                 raise BetfairReplaceSagaStateError("submitted_at precedes prepared_at")
             self._append(EventType.SUBMITTED, saga, payload, canonical_time)
-            return self.snapshot(saga)
+            return self._snapshot_locked(saga)
 
     def mark_unknown(self, saga_id: str, *, reason: str, observed_at: str) -> ReplaceSagaSnapshot:
         saga = _text(saga_id, "saga_id")
         reason_text = _text(reason, "reason")
         canonical_time = _timestamp(observed_at, "observed_at")
-        with durable_path_lock(self.path):
+        with durable_path_lock(self._absolute_path()):
             events = self._events()
             intent = self._intent_from_events(events, saga)
             facts = self._facts(events, saga)
@@ -1288,13 +1432,13 @@ class BetfairReplaceSagaStore:
                     "replace saga already has different uncertainty evidence"
                 )
             self._append(EventType.UNKNOWN, saga, payload, canonical_time)
-            return self.snapshot(saga)
+            return self._snapshot_locked(saga)
 
     def record_provider_result(self, saga_id: str, evidence: ReplaceProviderEvidence) -> ReplaceSagaSnapshot:
         saga = _text(saga_id, "saga_id")
         if type(evidence) is not ReplaceProviderEvidence:
             raise TypeError("evidence must be exact ReplaceProviderEvidence")
-        with durable_path_lock(self.path):
+        with durable_path_lock(self._absolute_path()):
             events = self._events()
             intent = self._intent_from_events(events, saga)
             facts = self._facts(events, saga)
@@ -1317,7 +1461,7 @@ class BetfairReplaceSagaStore:
                     "replace saga already has different provider result evidence"
                 )
             self._append(EventType.PROVIDER_RESULT, saga, payload, evidence.observed_at)
-            return self.snapshot(saga)
+            return self._snapshot_locked(saga)
 
     def record_reconciliation(
         self,
@@ -1327,7 +1471,7 @@ class BetfairReplaceSagaStore:
         saga = _text(saga_id, "saga_id")
         if type(evidence) is not ReplaceReconciliationEvidence:
             raise TypeError("evidence must be exact ReplaceReconciliationEvidence")
-        with durable_path_lock(self.path):
+        with durable_path_lock(self._absolute_path()):
             events = self._events()
             intent = self._intent_from_events(events, saga)
             facts = self._facts(events, saga)
@@ -1363,7 +1507,7 @@ class BetfairReplaceSagaStore:
                 {"evidence": evidence.to_dict()},
                 evidence.observed_at,
             )
-            return self.snapshot(saga)
+            return self._snapshot_locked(saga)
 
     def _snapshot_from_events(self, events: list[dict[str, object]], saga_id: str) -> ReplaceSagaSnapshot:
         intent = self._intent_from_events(events, saga_id)
@@ -1379,12 +1523,17 @@ class BetfairReplaceSagaStore:
             journal_sha256=hashlib.sha256(raw).hexdigest(),
         )
 
-    def snapshot(self, saga_id: str) -> ReplaceSagaSnapshot:
-        saga = _text(saga_id, "saga_id")
+    def _snapshot_locked(self, saga: str) -> ReplaceSagaSnapshot:
         events = self._events()
         if not self._saga_events(events, saga):
             raise KeyError(saga)
         return self._snapshot_from_events(events, saga)
 
+    def snapshot(self, saga_id: str) -> ReplaceSagaSnapshot:
+        saga = _text(saga_id, "saga_id")
+        with durable_path_lock(self._absolute_path()):
+            return self._snapshot_locked(saga)
+
     def verify_integrity(self) -> int:
-        return len(self._events())
+        with durable_path_lock(self._absolute_path()):
+            return len(self._events())

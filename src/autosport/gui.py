@@ -146,12 +146,17 @@ class AutosportApp(tk.Tk):
         self.update_idletasks()
         self._configure_accessibility()
         if self._startup_economic_error is not None:
-            # Recovery is the only action that can restore economic authority after
-            # fail-closed startup. Put keyboard focus on that already-accessible
-            # canonical action only for this startup state; ordinary ready startup
-            # keeps the existing focus policy unchanged.
-            self.repair_button.focus_set()
+            # Tk focus requests made before the window enters its first mapped/idle
+            # turn are not reliable evidence of the eventual keyboard focus target.
+            # Defer the canonical recovery focus until that boundary, after UIA
+            # metadata is configured, while leaving ordinary startup untouched.
+            self.after_idle(self._focus_recovery_action)
         self.protocol("WM_DELETE_WINDOW", self.close_app)
+
+    def _focus_recovery_action(self) -> None:
+        if self._startup_economic_error is None:
+            return
+        self.repair_button.focus_set()
 
     def _build(self) -> None:
         frame = ttk.Frame(self, padding=16)

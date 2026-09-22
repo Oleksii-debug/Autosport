@@ -25,7 +25,6 @@ class ProviderDegradationError(ValueError):
 
 
 class ProviderDegradationReason(str, Enum):
-    CAPABILITY_UNSUPPORTED = "capability_unsupported"
     TRANSIENT_PROVIDER_FAILURE = "transient_provider_failure"
     STALE_DATA = "stale_data"
     MALFORMED_EVIDENCE = "malformed_evidence"
@@ -46,7 +45,6 @@ class ProviderRecoveryClass(str, Enum):
 
 
 _RECOVERY_CLASS = {
-    ProviderDegradationReason.CAPABILITY_UNSUPPORTED: ProviderRecoveryClass.NO_AUTOMATIC_RETRY,
     ProviderDegradationReason.TRANSIENT_PROVIDER_FAILURE: ProviderRecoveryClass.RETRY_WITH_BACKOFF,
     ProviderDegradationReason.STALE_DATA: ProviderRecoveryClass.REFRESH_EVIDENCE,
     ProviderDegradationReason.MALFORMED_EVIDENCE: ProviderRecoveryClass.OPERATOR_REVIEW,

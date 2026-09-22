@@ -10,6 +10,7 @@ import pytest
 from autosport.betfair_standard_limit_price_bound import (
     BetfairStandardLimitPriceBoundError,
     BetfairStandardLimitPriceBoundEvidence,
+    BetfairStandardLimitPriceBoundStatus,
     resolve_betfair_standard_limit_price_bound,
 )
 from autosport.betfair_standard_limit_price_bound_product_verifier import (
@@ -266,6 +267,9 @@ def test_product_verifier_reloads_issuance_instead_of_accepting_caller_bound(
 
     assert verified is not evidence
     assert verified.evidence_id == evidence.evidence_id
+    assert verified.status is BetfairStandardLimitPriceBoundStatus.UNKNOWN_MATCHME_APPLICABILITY
+    assert verified.matchme_applicability_proven is False
+    assert verified.zero_adverse_price_deterioration is False
 
 
 def test_product_verifier_rejects_unissued_plan_identity(

@@ -268,6 +268,10 @@ class MatchbookSessionLifecycle:
     def _require_current_runtime_generation(self, generation_id: str) -> None:
         if self._generation_id is None or generation_id != self._generation_id:
             raise SessionLifecycleError("stale or unknown session generation evidence")
+        if self._state is SessionState.EXPIRED:
+            raise SessionLifecycleError(
+                "terminal session generation evidence cannot mutate lifecycle"
+            )
         if self._restart_requires_reauth:
             raise SessionLifecycleError(
                 "restart requires a fresh login generation before provider validation"

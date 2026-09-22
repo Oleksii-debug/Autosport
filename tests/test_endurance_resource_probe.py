@@ -87,6 +87,11 @@ class EnduranceResourceProbeTests(unittest.TestCase):
         self.assertEqual(memory.span, 2)
         self.assertEqual(memory.slope_per_work_unit, "0")
         payload = result.to_dict()
+        self.assertEqual(payload["baseline_checkpoint"], "checkpoint-1")
+        self.assertEqual(payload["final_checkpoint"], "checkpoint-4")
+        self.assertEqual(len(payload["samples"]), 5)
+        self.assertEqual(payload["samples"][0]["checkpoint"], "checkpoint-0")
+        self.assertEqual(payload["samples"][-1]["checkpoint"], "checkpoint-4")
         self.assertEqual(
             payload["declared_limits"]["traced_memory_bytes"]["rationale"],
             "synthetic post-warmup memory plateau",

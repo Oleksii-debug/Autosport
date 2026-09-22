@@ -96,22 +96,28 @@ class ResourceTrend:
 class ResourceQualification:
     status: str
     warmup_samples: int
+    baseline_checkpoint: str
+    final_checkpoint: str
     failures: tuple[str, ...]
     unsupported_signals: tuple[str, ...]
     unbounded_observed_signals: tuple[str, ...]
     declared_limits: tuple[tuple[str, ResourceLimit], ...]
+    samples: tuple[ResourceSample, ...]
     trends: tuple[ResourceTrend, ...]
 
     def to_dict(self) -> dict[str, object]:
         return {
             "status": self.status,
             "warmup_samples": self.warmup_samples,
+            "baseline_checkpoint": self.baseline_checkpoint,
+            "final_checkpoint": self.final_checkpoint,
             "failures": list(self.failures),
             "unsupported_signals": list(self.unsupported_signals),
             "unbounded_observed_signals": list(self.unbounded_observed_signals),
             "declared_limits": {
                 signal: limit.to_dict() for signal, limit in self.declared_limits
             },
+            "samples": [sample.to_dict() for sample in self.samples],
             "trends": [trend.to_dict() for trend in self.trends],
         }
 
@@ -211,9 +217,10 @@ def qualify_resource_samples(
 
     A caller must declare at least one bound before this function can return PASS. Signals
     that are unavailable on the current platform remain UNKNOWN and fail closed when the
-    caller requires a bound for them. Observed-but-unbounded signals and the exact declared
-    limits/rationales are included in the result so a partial qualification cannot be
-    misread as a whole-process leak-free claim.
+    caller requires a bound for them. Observed-but-unbounded signals, the immutable raw
+    checkpoint series, and the exact declared limits/rationales are included in the result
+    so a partial qualification cannot be misread as a whole-process leak-free claim and
+    aggregate trends can be independently recomputed from primary observations.
     """
 
     if type(warmup_samples) is not int or warmup_samples < 0:
@@ -234,7 +241,8 @@ def qualify_resource_samples(
         if not isinstance(limit, ResourceLimit):
             raise TypeError(f"limit for {name} must be ResourceLimit")
 
-    window = samples[warmup_samples:]
+    immutable_samples = tuple(samples)
+    window = immutable_samples[warmup_samples:]
     trends: list[ResourceTrend] = []
     failures: list[str] = []
     unsupported: list[str] = []
@@ -269,9 +277,12 @@ def qualify_resource_samples(
     return ResourceQualification(
         status=status,
         warmup_samples=warmup_samples,
+        baseline_checkpoint=window[0].checkpoint,
+        final_checkpoint=window[-1].checkpoint,
         failures=tuple(failures),
         unsupported_signals=tuple(unsupported),
         unbounded_observed_signals=tuple(unbounded),
         declared_limits=tuple(sorted(limits.items())),
+        samples=immutable_samples,
         trends=tuple(trends),
     )

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import replace
 from hashlib import sha256
+import json
 
 import pytest
 
@@ -368,3 +369,77 @@ def test_injected_clock_is_always_test_only() -> None:
     assert witness.clock_source == TEST_CLOCK_SOURCE
     assert witness.clock_is_product_default is False
     assert witness.elapsed_ns == 10
+
+
+def test_issued_witness_revalidation_rejects_in_place_mutation() -> None:
+    measurement = _measure(
+        clock=FakeClock(10, 12),
+        operation=lambda: b"A",
+        request=b"R",
+    )
+    witness = measurement.witness
+    assert witness is not None
+    witness.assert_authoritative()
+
+    object.__setattr__(witness, "elapsed_ns", 999)
+
+    with pytest.raises(
+        TransportTimingEvidenceError,
+        match="changed after canonical issuance",
+    ):
+        witness.assert_authoritative()
+    with pytest.raises(
+        TransportTimingEvidenceError,
+        match="changed after canonical issuance",
+    ):
+        _ = measurement.timing_available
+    with pytest.raises(
+        TransportTimingEvidenceError,
+        match="changed after canonical issuance",
+    ):
+        replace(measurement)
+
+
+def test_recomputed_digest_cannot_reseal_mutated_issued_witness() -> None:
+    measurement = _measure(
+        clock=FakeClock(20, 25),
+        operation=lambda: b"response",
+        request=b"request",
+    )
+    witness = measurement.witness
+    assert witness is not None
+
+    object.__setattr__(witness, "elapsed_ns", 777)
+    forged_payload = witness.to_dict(include_evidence_sha256=False)
+    forged_digest = sha256(
+        json.dumps(
+            forged_payload,
+            ensure_ascii=True,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        ).encode("utf-8")
+    ).hexdigest()
+    object.__setattr__(witness, "evidence_sha256", forged_digest)
+
+    with pytest.raises(
+        TransportTimingEvidenceError,
+        match="changed after canonical issuance",
+    ):
+        witness.assert_authoritative()
+
+
+def test_unmodified_issued_witness_remains_authoritative_through_measurement_use() -> None:
+    measurement = _measure(
+        clock=FakeClock(30, 44),
+        operation=lambda: b"ok",
+    )
+    witness = measurement.witness
+    assert witness is not None
+
+    witness.assert_authoritative()
+    assert measurement.timing_available is True
+    response, unpacked = measurement
+    assert response == b"ok"
+    assert unpacked is witness
+    witness.assert_authoritative()

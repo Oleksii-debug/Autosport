@@ -141,7 +141,8 @@ def test_recorded_step_cannot_rebind_positive_evidence_after_publication() -> No
     assert record_return is not None
 
     before = accumulator.summary()
-    assert before.scientific_promotion_gate_passed is True
+    assert before.positive_authority_verified is False
+    assert before.scientific_promotion_gate_passed is False
     assert (
         accumulator.steps[-1].challenger_settlement_evidence_sha256
         == SETTLEMENT_SHA
@@ -185,4 +186,5 @@ def test_recorded_step_cannot_rebind_positive_evidence_after_publication() -> No
         == SETTLEMENT_SHA
     )
     assert after.evidence_sha256 == before.evidence_sha256
-    assert after.scientific_promotion_gate_passed is True
+    assert after.positive_authority_verified is False
+    assert after.scientific_promotion_gate_passed is False

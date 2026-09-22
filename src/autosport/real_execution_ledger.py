@@ -101,10 +101,17 @@ def _timestamp(value: str, name: str) -> datetime:
 
 
 def _decimal(value: Decimal | str | int, name: str) -> Decimal:
-    try:
-        parsed = value if isinstance(value, Decimal) else Decimal(str(value))
-    except (InvalidOperation, ValueError) as exc:
-        raise ValueError(f"{name} must be a finite Decimal") from exc
+    if isinstance(value, Decimal):
+        parsed = value
+    elif type(value) is str:
+        try:
+            parsed = Decimal(value)
+        except (InvalidOperation, ValueError) as exc:
+            raise ValueError(f"{name} must be a finite Decimal") from exc
+    elif type(value) is int:
+        parsed = Decimal(value)
+    else:
+        raise ValueError(f"{name} must be a finite Decimal")
     if not parsed.is_finite() or parsed <= 0:
         raise ValueError(f"{name} must be finite and > 0")
     return parsed

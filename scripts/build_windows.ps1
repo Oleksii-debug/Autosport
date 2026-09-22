@@ -1077,6 +1077,7 @@ if ($buildInfo.real_money_execution -ne $false) { throw 'Fresh extraction must p
 if ($buildInfo.human_tested -ne $false) { throw 'Machine build must not claim HUMAN_TESTED' }
 if ($buildInfo.nvda_verified -ne $false) { throw 'Machine build must not claim NVDA_VERIFIED' }
 if ($buildInfo.v1_ready -ne $false) { throw 'Machine build must not claim V1_READY' }
+if ($buildInfo.whole_product_complete -ne $false) { throw 'Machine build must not claim WHOLE_PRODUCT_COMPLETE' }
 if ($buildInfo.portable_historical_data_tools -ne $true) { throw 'Fresh extraction does not bind portable historical data tools' }
 $extractedExeSha = (Get-FileHash -LiteralPath $extractedExe -Algorithm SHA256).Hash.ToLowerInvariant()
 $extractedDataExeSha = (Get-FileHash -LiteralPath $extractedDataExe -Algorithm SHA256).Hash.ToLowerInvariant()
@@ -1187,6 +1188,7 @@ $freshEvidence = [ordered]@{
   human_tested = $false
   nvda_verified = $false
   v1_ready = $false
+  whole_product_complete = $false
 }
 $freshEvidence | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath (Join-Path $PWD 'dist/fresh-extraction-verification.json') -Encoding utf8
 Remove-Item -LiteralPath $sourceVerifier -Force -ErrorAction SilentlyContinue

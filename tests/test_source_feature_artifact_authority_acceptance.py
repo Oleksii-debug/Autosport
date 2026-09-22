@@ -11,6 +11,8 @@ from autosport import _dataset_snapshot_lineage_publication_trust_root as lineag
 from autosport import dataset_snapshot_lineage as lineage_module
 from autosport import point_in_time_evidence as evidence
 from autosport.causal_collector import CollectorDelta, CollectorDeltaStore
+from autosport.collector_service import HeadlessCollectorService
+from autosport.event_lifecycle import ContinuousEventLifecycle
 from autosport.dataset_snapshot_lineage import (
     DatasetSnapshotLineageAuthority,
     membership_manifest_sha256,
@@ -131,12 +133,36 @@ def _context(tmp_path: Path):
     return snapshot, feature_set, provenance, lineage, store, delta, payload
 
 
+class _FeatureSource:
+    def __init__(self, source_id: str, stream_epoch: str) -> None:
+        self.source_id = source_id
+        self.stream_epoch = stream_epoch
+
+    def fetch_catalog_page(self, *_args, **_kwargs):
+        raise AssertionError("feature materialization test must not fetch provider catalog")
+
+    def fetch_deltas(self, *_args, **_kwargs):
+        raise AssertionError("feature materialization test must not fetch provider deltas")
+
+
 def _materializer(
     lineage: DatasetSnapshotLineageAuthority,
     store: CollectorDeltaStore,
 ) -> SourceFeatureArtifactMaterializer:
-    return SourceFeatureArtifactMaterializer(lineage, collector_store=store)
-
+    deltas = store._all()
+    assert deltas
+    source = _FeatureSource(deltas[0].source_id, deltas[0].stream_epoch)
+    service = HeadlessCollectorService(
+        delta_store=store,
+        lifecycle=ContinuousEventLifecycle(
+            lineage.path.with_name("source-feature-test-catalog.json")
+        ),
+        source=source,
+        state_path=lineage.path.with_name("source-feature-test-service-state.json"),
+        run_id="source-feature-materialization-test",
+        clock=lambda: "2026-09-20T10:04:00Z",
+    )
+    return service.source_feature_materializer(lineage_authority=lineage)
 
 def _append_child_snapshot(
     *,

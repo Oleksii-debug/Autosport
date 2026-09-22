@@ -101,6 +101,12 @@ def _safe_exception_text(exc: BaseException) -> str:
     return f"{name}: {detail}" if detail else name
 
 
+def _operator_safe_worker_error_detail(code: str) -> str:
+    """Render product-owned worker failure copy without deriving it from raw diagnostics."""
+
+    return text("ui.error.exception.message_unavailable", exception_type=code)
+
+
 class AutosportApp(tk.Tk):
     def __init__(self) -> None:
         super().__init__()
@@ -550,7 +556,10 @@ class AutosportApp(tk.Tk):
         self._pending_dataset_path = None
         self._set_replay_controls_busy(False)
         if message.error is not None:
-            message_text = text("ui.error.dataset.rejected", detail=message.error)
+            message_text = text(
+                "ui.error.dataset.rejected",
+                detail=_operator_safe_worker_error_detail("DATASET_VALIDATION_FAILURE"),
+            )
             self.status.set(text("ui.status.dataset.validation_failed"))
             self._append_log(message_text)
             messagebox.showerror(text("ui.dialog.title"), message_text)
@@ -632,7 +641,10 @@ class AutosportApp(tk.Tk):
             return
         self.live_refresh_button.state(["!disabled"])
         if message.error is not None:
-            message_text = text("ui.error.live.snapshot", detail=message.error)
+            message_text = text(
+                "ui.error.live.snapshot",
+                detail=_operator_safe_worker_error_detail("LIVE_OBSERVATION_FAILURE"),
+            )
             self.live_status.set(message_text)
             self.status.set(text("ui.status.live.failed"))
             self._append_log(message_text)
@@ -978,7 +990,10 @@ class AutosportApp(tk.Tk):
         if message.error is not None:
             self._recovery_required_workspaces.add(active_workspace)
             self._hide_uncertain_economic_state(text("ui.status.replay.error_ticket"))
-            message_text = text("ui.error.replay.worker", detail=message.error)
+            message_text = text(
+                "ui.error.replay.worker",
+                detail=_operator_safe_worker_error_detail("REPLAY_WORKER_FAILURE"),
+            )
             self._append_log(message_text)
             self._set_evaluation_lines([text("ui.evaluation.replay_failed")])
             self.status.set(text("ui.status.replay.failed_recovery"))

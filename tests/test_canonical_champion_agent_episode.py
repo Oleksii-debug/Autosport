@@ -96,6 +96,7 @@ def test_initialize_routes_resolver_inputs_into_actual_agent_boundary(tmp_path) 
     semantic_inputs = _semantic_inputs()
     market_store = object()
     runtime_store = object()
+    eligibility = object()
     expected = object()
 
     with patch(
@@ -109,6 +110,7 @@ def test_initialize_routes_resolver_inputs_into_actual_agent_boundary(tmp_path) 
             identity=deployment,
             training_identity=training,
             activation_binding=binding,
+            eligibility_decision=eligibility,
             semantic_inputs=semantic_inputs,
             market_store=market_store,
             runtime_authority_store=runtime_store,
@@ -128,6 +130,7 @@ def test_initialize_routes_resolver_inputs_into_actual_agent_boundary(tmp_path) 
     kwargs = initialize.call_args.kwargs
     assert kwargs["training_identity"] == training
     assert kwargs["activation_binding"] == binding
+    assert kwargs["eligibility_decision"] is eligibility
     assert kwargs["semantic_inputs"] == semantic_inputs
     assert kwargs["market_store"] is market_store
     assert kwargs["runtime_authority_store"] is runtime_store
@@ -141,6 +144,7 @@ def test_resume_routes_resolver_inputs_into_actual_agent_boundary(tmp_path) -> N
     semantic_inputs = _semantic_inputs()
     market_store = object()
     runtime_store = object()
+    eligibility = object()
     expected = object()
 
     with patch(
@@ -156,6 +160,7 @@ def test_resume_routes_resolver_inputs_into_actual_agent_boundary(tmp_path) -> N
             object(),
             identity=deployment,
             checkpoint=checkpoint,
+            eligibility_decision=eligibility,
             as_of=T2,
             canonical_strategy_id="strategy-v1",
             config_sha256=CONFIG_SHA,
@@ -169,6 +174,7 @@ def test_resume_routes_resolver_inputs_into_actual_agent_boundary(tmp_path) -> N
     assert actual is expected
     resume.assert_called_once()
     kwargs = resume.call_args.kwargs
+    assert kwargs["eligibility_decision"] is eligibility
     assert kwargs["semantic_inputs"] == semantic_inputs
     assert kwargs["market_store"] is market_store
     assert kwargs["runtime_authority_store"] is runtime_store

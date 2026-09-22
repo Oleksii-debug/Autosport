@@ -920,6 +920,49 @@ def test_matched_price_below_exact_back_limit_fails_closed() -> None:
         )
 
 
+def test_raw_numeric_matched_price_preserves_sub_float_precision() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        profile, bound, approval, ledger, action, goal_store = _prepared(tmp)
+        provider_price = "1.9999999999999999"
+        assert action.requested_odds == Decimal("2.00")
+        assert Decimal(provider_price) < action.requested_odds
+        assert float(provider_price) == float(action.requested_odds)
+
+        def raw_numeric_response(request: dict[str, object]) -> bytes:
+            payload = _response(
+                request,
+                matched=action.requested_stake,
+                average=provider_price,
+            ).decode("utf-8")
+            quoted = f'"averagePriceMatched": "{provider_price}"'
+            numeric = f'"averagePriceMatched": {provider_price}'
+            assert quoted in payload
+            return payload.replace(quoted, numeric, 1).encode("utf-8")
+
+        transport = _Transport(raw_numeric_response)
+        client = _enabled_client(profile, transport, store=goal_store)
+
+        result = execute_betfair_supervised_action(
+            ledger,
+            bound,
+            approval,
+            action_id=action.action_id,
+            attempt_id="attempt-raw-numeric-worse-price",
+            profile=profile,
+            client=client,
+            clock=lambda: SUBMITTED_AT,
+        )
+
+        assert result.outcome is PlaceOrdersOutcome.UNKNOWN
+        assert result.attempt_state is AttemptState.UNKNOWN
+        assert result.evidence_id is None
+        assert result.external_receipt_id is None
+        assert not ledger.can_retry_action(
+            plan_id=bound.execution_plan.plan_id,
+            action_id=action.action_id,
+        )
+
+
 def test_processed_with_errors_single_success_maps_partial_exactly() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         profile, bound, approval, ledger, action, goal_store = _prepared(tmp)

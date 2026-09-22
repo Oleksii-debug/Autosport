@@ -223,30 +223,44 @@ def _bound_payload(bound: BoundSupervisedExecutionPlan) -> dict[str, object]:
     }
 
 
+def _provider_request_payload(
+    bound: BoundSupervisedExecutionPlan,
+    action: ExecutionAction,
+) -> dict[str, object] | None:
+    """Return issuance-time positive request identity when canonically provable.
+
+    Generic supervised-plan issuance is provider-neutral.  A Betfair-specific
+    prospective price-bound proof is optional evidence attached to an action,
+    not a prerequisite for issuing unrelated/unsupported provider actions.
+    """
+
+    if action.bookmaker_id != "betfair":
+        return None
+    try:
+        evidence = resolve_betfair_standard_limit_price_bound(
+            bound=bound,
+            action_id=action.action_id,
+        )
+    except (BetfairStandardLimitPriceBoundError, SupervisedExecutionError):
+        return None
+    return {
+        "action_id": action.action_id,
+        "bookmaker_id": action.bookmaker_id,
+        "account_id": action.account_id,
+        "instruction_sha256": evidence.instruction_sha256,
+        "write_adapter_id": evidence.write_adapter_id,
+        "write_adapter_version": evidence.write_adapter_version,
+    }
+
+
 def _provider_request_payloads(
     bound: BoundSupervisedExecutionPlan,
 ) -> list[dict[str, object]]:
     requests: list[dict[str, object]] = []
     for action in bound.execution_plan.actions:
-        try:
-            evidence = resolve_betfair_standard_limit_price_bound(
-                bound=bound,
-                action_id=action.action_id,
-            )
-        except (BetfairStandardLimitPriceBoundError, SupervisedExecutionError) as exc:
-            raise SupervisedPlanIssuanceError(
-                "provider request projection could not be resolved fail-before-I/O"
-            ) from exc
-        requests.append(
-            {
-                "action_id": action.action_id,
-                "bookmaker_id": action.bookmaker_id,
-                "account_id": action.account_id,
-                "instruction_sha256": evidence.instruction_sha256,
-                "write_adapter_id": evidence.write_adapter_id,
-                "write_adapter_version": evidence.write_adapter_version,
-            }
-        )
+        request = _provider_request_payload(bound, action)
+        if request is not None:
+            requests.append(request)
     return requests
 
 
@@ -551,24 +565,55 @@ class SupervisedPlanIssuanceStore:
                     "durable owner authority identity changed inside issuance"
                 )
             requests_raw = issuance["provider_requests"]
-            if type(requests_raw) is not list or len(requests_raw) != len(
-                bound.execution_plan.actions
+            if (
+                type(requests_raw) is not list
+                or len(requests_raw) > len(bound.execution_plan.actions)
             ):
                 raise SupervisedPlanIssuanceError(
-                    "provider request identity vector is incomplete"
+                    "provider request identity vector is invalid"
                 )
+            actions_by_id = {
+                action.action_id: action
+                for action in bound.execution_plan.actions
+            }
             requests: list[dict[str, object]] = []
+            seen_request_actions: set[str] = set()
             for item in requests_raw:
                 request = _exact_keys(
                     "provider request identity", item, _PROVIDER_REQUEST_KEYS
                 )
-                _sha(request["instruction_sha256"], "instruction_sha256")
-                requests.append(dict(request))
-            fresh_requests = _provider_request_payloads(bound)
-            if requests != fresh_requests:
-                raise SupervisedPlanIssuanceError(
-                    "durable provider request identity no longer matches canonical adapter"
+                action_id = _text(request["action_id"], "provider request action_id")
+                bookmaker_id = _text(
+                    request["bookmaker_id"],
+                    "provider request bookmaker_id",
                 )
+                account_id = _text(
+                    request["account_id"],
+                    "provider request account_id",
+                )
+                _sha(request["instruction_sha256"], "instruction_sha256")
+                _text(request["write_adapter_id"], "write_adapter_id")
+                _text(request["write_adapter_version"], "write_adapter_version")
+                if action_id in seen_request_actions:
+                    raise SupervisedPlanIssuanceError(
+                        "provider request identity action is duplicated"
+                    )
+                seen_request_actions.add(action_id)
+                action = actions_by_id.get(action_id)
+                if (
+                    action is None
+                    or action.bookmaker_id != bookmaker_id
+                    or action.account_id != account_id
+                ):
+                    raise SupervisedPlanIssuanceError(
+                        "provider request identity does not own a durable action"
+                    )
+                fresh_request = _provider_request_payload(bound, action)
+                if fresh_request is None or dict(request) != fresh_request:
+                    raise SupervisedPlanIssuanceError(
+                        "durable provider request identity no longer matches canonical adapter"
+                    )
+                requests.append(dict(request))
             return IssuedSupervisedPlan(
                 bound=bound,
                 approval=approval,

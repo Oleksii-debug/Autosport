@@ -490,8 +490,14 @@ class AutosportWebController:
             else:
                 self._ok(text("ui.status.evidence_export.complete"))
 
-        product_message = self.product_worker.poll()
-        if product_message is not None:
+        # Drain the current product queue before deriving actionability in state().
+        # ProductGuiWorker publishes the terminal message immediately before clearing
+        # busy; consuming only one message could therefore re-enable START while a
+        # STOPPED/ERROR truth was still queued behind earlier STARTED/TICK messages.
+        while True:
+            product_message = self.product_worker.poll()
+            if product_message is None:
+                break
             if product_message.kind == "STARTED" and product_message.status is not None:
                 self.product_runtime_status = (
                     "Тривала PAPER-робота активна: "

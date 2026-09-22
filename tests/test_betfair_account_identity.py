@@ -12,6 +12,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 
+from autosport import betfair_account_readonly as _readonly
 from autosport.betfair_account_identity import (
     IDENTITY_SCOPE,
     BetfairAccountIdentityError,
@@ -47,38 +48,48 @@ def _install_details_transport(
 ) -> None:
     response_result = result or _details_result()
 
-    def post(
-        self: UrllibBetfairHttpTransport,
-        url: str,
-        *,
-        headers: dict[str, str],
-        body: bytes,
-        timeout_seconds: float,
-    ) -> bytes:
-        assert url == ACCOUNT_JSON_RPC_ENDPOINT
-        assert timeout_seconds > 0
-        request = json.loads(body.decode("utf-8"))
-        assert request["method"] == "AccountAPING/v1.0/getAccountDetails"
-        assert request["params"] == {}
-        assert headers["X-Application"]
-        assert headers["X-Authentication"]
+    class Response:
+        def __init__(self, payload: bytes) -> None:
+            self._payload = payload
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, traceback):
+            return False
+
+        def read(self, limit: int) -> bytes:
+            assert limit >= len(self._payload)
+            return self._payload
+
+    def urlopen(request, timeout: float):
+        assert request.full_url == ACCOUNT_JSON_RPC_ENDPOINT
+        assert timeout > 0
+        assert request.data is not None
+        decoded_request = json.loads(request.data.decode("utf-8"))
+        assert decoded_request["method"] == "AccountAPING/v1.0/getAccountDetails"
+        assert decoded_request["params"] == {}
+        headers = {key.lower(): value for key, value in request.header_items()}
+        assert headers["x-application"]
+        assert headers["x-authentication"]
         if error_message is not None:
             payload = {
                 "jsonrpc": "2.0",
-                "id": request["id"],
+                "id": decoded_request["id"],
                 "error": {"code": -32099, "message": error_message},
             }
         else:
             payload = {
                 "jsonrpc": "2.0",
-                "id": request["id"],
+                "id": decoded_request["id"],
                 "result": response_result,
             }
-        return json.dumps(
+        raw = json.dumps(
             payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True
         ).encode("utf-8")
+        return Response(raw)
 
-    monkeypatch.setattr(UrllibBetfairHttpTransport, "post", post)
+    monkeypatch.setattr(_readonly, "urlopen", urlopen)
 
 
 def _client(
@@ -425,7 +436,7 @@ def test_concurrent_resolution_reuses_one_exact_context_id(
     with ThreadPoolExecutor(max_workers=8) as pool:
         values = list(
             pool.map(
-                lambda _: resolve_betfair_account_identity(client),
+                lambda _: resolve_betfair_authenticated_account_identity(client),
                 range(32),
             )
         )
@@ -435,3 +446,60 @@ def test_concurrent_resolution_reuses_one_exact_context_id(
         is_authoritative_betfair_account_identity(value, client=client)
         for value in values
     )
+
+
+def test_factory_rejects_class_level_transport_method_replacement(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    original_post = UrllibBetfairHttpTransport.post
+
+    def replacement(self, url, *, headers, body, timeout_seconds):
+        return original_post(
+            self,
+            url,
+            headers=headers,
+            body=body,
+            timeout_seconds=timeout_seconds,
+        )
+
+    monkeypatch.setattr(UrllibBetfairHttpTransport, "post", replacement)
+
+    with pytest.raises(BetfairAccountIdentityError, match="invalid origin"):
+        _client()
+
+
+def test_class_level_transport_method_replacement_revokes_issued_identity(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _install_details_transport(monkeypatch)
+    client = _client()
+    value = resolve_betfair_authenticated_account_identity(client)
+    assert is_authoritative_betfair_account_identity(value, client=client)
+
+    original_post = UrllibBetfairHttpTransport.post
+
+    def replacement(self, url, *, headers, body, timeout_seconds):
+        return original_post(
+            self,
+            url,
+            headers=headers,
+            body=body,
+            timeout_seconds=timeout_seconds,
+        )
+
+    monkeypatch.setattr(UrllibBetfairHttpTransport, "post", replacement)
+
+    assert not is_authoritative_betfair_account_identity(value, client=client)
+
+
+def test_instance_level_transport_method_replacement_revokes_issued_identity(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _install_details_transport(monkeypatch)
+    client = _client()
+    value = resolve_betfair_authenticated_account_identity(client)
+    assert is_authoritative_betfair_account_identity(value, client=client)
+
+    client._transport.post = lambda *args, **kwargs: b"{}"
+
+    assert not is_authoritative_betfair_account_identity(value, client=client)

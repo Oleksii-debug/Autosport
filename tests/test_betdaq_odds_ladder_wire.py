@@ -225,3 +225,21 @@ def test_dtd_and_multiple_body_payloads_are_rejected() -> None:
     )
     with pytest.raises(BetdaqSoapProtocolError, match="exactly one"):
         parse_get_odds_ladder_response(payload)
+
+def test_result_and_return_status_unknown_attributes_fail_closed() -> None:
+    result_extra = _response().replace(
+        "<GetOddsLadderResult>",
+        '<GetOddsLadderResult FutureSemanticField="provider-value">',
+    )
+    with pytest.raises(BetdaqSoapProtocolError, match="unexpected attribute"):
+        parse_get_odds_ladder_response(result_extra)
+
+    return_status_extra = _response(
+        return_status=(
+            '<ReturnStatus Code="0" Description="Success" CallId="x1" '
+            'FutureSemanticField="provider-value" />'
+        )
+    )
+    with pytest.raises(BetdaqSoapProtocolError, match="unexpected attribute"):
+        parse_get_odds_ladder_response(return_status_extra)
+

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 import time
 import uuid
 from collections.abc import Callable
@@ -34,6 +35,21 @@ MATCHBOOK_READ_ONLY_PATHS = frozenset(
 class MatchbookSessionTransportError(ProviderUnavailableError):
     """Secret-safe failure at the shared authenticated read transport boundary."""
 
+    def __init__(
+        self,
+        message: str,
+        *,
+        status_code: int | None = None,
+        retry_after_seconds: float | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.status_code = (
+            None if status_code is None else _validate_status(status_code)
+        )
+        self.retry_after_seconds = _validate_retry_after_seconds(
+            retry_after_seconds
+        )
+
 
 class MatchbookAuthenticationUnavailable(MatchbookSessionTransportError):
     pass
@@ -55,9 +71,11 @@ class MatchbookStaleGenerationResponse(SessionLifecycleError):
 class MatchbookLoginResponse:
     status_code: int
     session_token: str | None = field(default=None, repr=False)
+    retry_after_seconds: float | None = None
 
     def __post_init__(self) -> None:
         _validate_status(self.status_code)
+        _validate_retry_after_seconds(self.retry_after_seconds)
         if self.status_code == 200:
             _validate_session_token(self.session_token)
         elif self.session_token is not None:
@@ -68,9 +86,11 @@ class MatchbookLoginResponse:
 class MatchbookReadResponse:
     status_code: int
     payload: object = field(default=None, repr=False)
+    retry_after_seconds: float | None = None
 
     def __post_init__(self) -> None:
         _validate_status(self.status_code)
+        _validate_retry_after_seconds(self.retry_after_seconds)
 
 
 @dataclass(frozen=True, slots=True)
@@ -99,6 +119,24 @@ class _LiveSession:
     session_token: str = field(repr=False)
 
 
+@dataclass(frozen=True, slots=True)
+class _LoginFailure:
+    kind: str
+    status_code: int | None = None
+    retry_after_seconds: float | None = None
+
+    def __post_init__(self) -> None:
+        if self.kind not in {"provider", "lifecycle"}:
+            raise ValueError("unknown login failure kind")
+        if self.status_code is not None:
+            _validate_status(self.status_code)
+        _validate_retry_after_seconds(self.retry_after_seconds)
+        if self.kind == "lifecycle" and (
+            self.status_code is not None or self.retry_after_seconds is not None
+        ):
+            raise ValueError("lifecycle login failure cannot carry provider metadata")
+
+
 QueryPairs = tuple[tuple[str, str], ...]
 LoginCallable = Callable[[], MatchbookLoginResponse]
 ReadCallable = Callable[[str, str, QueryPairs], MatchbookReadResponse]
@@ -113,6 +151,17 @@ def _validate_status(value: object) -> int:
     if value < 100 or value > 599:
         raise ValueError("HTTP status must be between 100 and 599")
     return value
+
+
+def _validate_retry_after_seconds(value: object) -> float | None:
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise TypeError("retry_after_seconds must be a finite non-negative number")
+    result = float(value)
+    if not math.isfinite(result) or result < 0:
+        raise ValueError("retry_after_seconds must be a finite non-negative number")
+    return result
 
 
 def _validate_session_token(value: object) -> str:
@@ -213,7 +262,7 @@ class MatchbookReadOnlySessionTransport:
         self._login_in_progress = False
         self._login_flight_id = 0
         self._login_waiters: dict[int, int] = {}
-        self._failed_login_flights: dict[int, str] = {}
+        self._failed_login_flights: dict[int, _LoginFailure] = {}
 
     @property
     def generation_id(self) -> str | None:
@@ -309,11 +358,15 @@ class MatchbookReadOnlySessionTransport:
             self._authorize_response_ticket(ticket)
             if status == 403:
                 raise MatchbookReadForbidden(
-                    "Matchbook endpoint is forbidden for the authenticated account"
+                    "Matchbook endpoint is forbidden for the authenticated account",
+                    status_code=403,
+                    retry_after_seconds=response.retry_after_seconds,
                 )
 
             raise MatchbookReadUnavailable(
-                f"Matchbook read unavailable with HTTP {status}"
+                f"Matchbook read unavailable with HTTP {status}",
+                status_code=status,
+                retry_after_seconds=response.retry_after_seconds,
             )
 
     def logout(self) -> None:
@@ -336,7 +389,8 @@ class MatchbookReadOnlySessionTransport:
 
         if status != 200:
             raise MatchbookSessionTransportError(
-                f"Matchbook logout unavailable with HTTP {status}"
+                f"Matchbook logout unavailable with HTTP {status}",
+                status_code=status,
             )
 
         with self._condition:
@@ -426,7 +480,7 @@ class MatchbookReadOnlySessionTransport:
                             and self._login_flight_id == flight_id
                         ):
                             self._condition.wait()
-                        failure_kind = self._failed_login_flights.get(flight_id)
+                        failure = self._failed_login_flights.get(flight_id)
                     finally:
                         remaining = self._login_waiters[flight_id] - 1
                         if remaining:
@@ -434,11 +488,13 @@ class MatchbookReadOnlySessionTransport:
                         else:
                             self._login_waiters.pop(flight_id, None)
                             self._failed_login_flights.pop(flight_id, None)
-                    if failure_kind == "provider":
+                    if failure is not None and failure.kind == "provider":
                         raise MatchbookAuthenticationUnavailable(
-                            "Matchbook login failed for the shared authentication flight"
+                            "Matchbook login failed for the shared authentication flight",
+                            status_code=failure.status_code,
+                            retry_after_seconds=failure.retry_after_seconds,
                         )
-                    if failure_kind == "lifecycle":
+                    if failure is not None and failure.kind == "lifecycle":
                         raise SessionLifecycleError(
                             "Matchbook shared login failed at local session lifecycle"
                         )
@@ -452,21 +508,34 @@ class MatchbookReadOnlySessionTransport:
         try:
             response = self._login()
         except Exception:
-            self._finish_login_failure(flight_id, failure_kind="provider")
+            self._finish_login_failure(
+                flight_id,
+                failure=_LoginFailure("provider"),
+            )
             raise MatchbookAuthenticationUnavailable(
                 "Matchbook login transport failed"
             ) from None
 
         if not isinstance(response, MatchbookLoginResponse):
-            self._finish_login_failure(flight_id, failure_kind="provider")
+            self._finish_login_failure(
+                flight_id,
+                failure=_LoginFailure("provider"),
+            )
             raise MatchbookAuthenticationUnavailable(
                 "Matchbook login transport returned an invalid response type"
             )
 
         if response.status_code != 200:
-            self._finish_login_failure(flight_id, failure_kind="provider")
+            failure = _LoginFailure(
+                "provider",
+                status_code=response.status_code,
+                retry_after_seconds=response.retry_after_seconds,
+            )
+            self._finish_login_failure(flight_id, failure=failure)
             raise MatchbookAuthenticationUnavailable(
-                f"Matchbook login unavailable with HTTP {response.status_code}"
+                f"Matchbook login unavailable with HTTP {response.status_code}",
+                status_code=response.status_code,
+                retry_after_seconds=response.retry_after_seconds,
             )
 
         token = response.session_token
@@ -487,10 +556,16 @@ class MatchbookReadOnlySessionTransport:
                 monotonic_ns=login_ns,
             )
         except SessionLifecycleError:
-            self._finish_login_failure(flight_id, failure_kind="lifecycle")
+            self._finish_login_failure(
+                flight_id,
+                failure=_LoginFailure("lifecycle"),
+            )
             raise
         except Exception:
-            self._finish_login_failure(flight_id, failure_kind="lifecycle")
+            self._finish_login_failure(
+                flight_id,
+                failure=_LoginFailure("lifecycle"),
+            )
             raise SessionLifecycleError(
                 "Matchbook session generation factory failed"
             ) from None
@@ -503,17 +578,20 @@ class MatchbookReadOnlySessionTransport:
             return live
 
     def _finish_login_failure(
-        self, flight_id: int, *, failure_kind: str
+        self,
+        flight_id: int,
+        *,
+        failure: _LoginFailure,
     ) -> None:
-        if failure_kind not in {"provider", "lifecycle"}:
-            raise ValueError("unknown login failure kind")
+        if not isinstance(failure, _LoginFailure):
+            raise TypeError("failure must be _LoginFailure")
         with self._condition:
             if self._login_flight_id != flight_id:
                 raise AssertionError("login flight identity changed unexpectedly")
             self._live_session = None
             self._login_in_progress = False
             if self._login_waiters.get(flight_id, 0):
-                self._failed_login_flights[flight_id] = failure_kind
+                self._failed_login_flights[flight_id] = failure
             self._condition.notify_all()
 
     def _invalidate_generation_after_401(self, generation_id: str) -> None:

@@ -200,7 +200,7 @@ def _resolve(
         "_timeout_elapsed_visibility_ready",
         lambda ledger, attempt_id, capture_started_monotonic_ns: elapsed_visibility_ready,
     )
-    result = timeout_resolution.resolve_betfair_timeout_provider_state(
+    result = timeout_resolution._resolve_betfair_timeout_provider_state_core(
         ledger,
         action,
         object(),
@@ -568,17 +568,18 @@ def test_direct_generic_bound_absence_is_not_timeout_authoritative(
         "_timeout_elapsed_visibility_ready",
         lambda ledger, attempt_id, capture_started_monotonic_ns: True,
     )
-    resolved = timeout_resolution.resolve_betfair_timeout_provider_state(
-        ledger,
-        action,
-        profile,
-        attempt_id="attempt-1",
-        expected_profile_sha256=profile.profile_id,
-        readback=capture,
-    )
-    assert resolved.kind is timeout_resolution.BetfairTimeoutResolutionKind.ABSENT_AFTER_VISIBILITY_HORIZON
-    assert isinstance(resolved.evidence, VerifiedProviderAbsenceEvidence)
-    provider_evidence.assert_verified_provider_evidence_authoritative(resolved.evidence)
+    with pytest.raises(
+        timeout_resolution.BetfairTimeoutResolutionError,
+        match="timeout resolver executable authority changed",
+    ):
+        timeout_resolution.resolve_betfair_timeout_provider_state(
+            ledger,
+            action,
+            profile,
+            attempt_id="attempt-1",
+            expected_profile_sha256=profile.profile_id,
+            readback=capture,
+        )
 
 
 def test_bound_absence_not_issued_by_timeout_resolver_is_rejected() -> None:
@@ -675,7 +676,7 @@ def test_noncanonical_unknown_reason_cannot_mint_timeout_authority(
         timeout_resolution.BetfairTimeoutResolutionError,
         match="not a canonical ambiguous Betfair",
     ):
-        timeout_resolution.resolve_betfair_timeout_provider_state(
+        timeout_resolution._resolve_betfair_timeout_provider_state_core(
             ledger,
             action,
             object(),
@@ -1022,4 +1023,83 @@ def test_definitive_absence_anchor_lifetime_follows_live_authority_evidence(
     gc.collect()
 
     assert anchor_key not in timeout_resolution._timeout_elapsed_visibility_anchors
+
+def test_public_timeout_authority_rejects_horizon_rebind(
+    tmp_path, monkeypatch
+) -> None:
+    ledger, action, provider_ref, _ = _ledger_with_timeout(tmp_path, monkeypatch)
+    assert provider_ref is not None
+    profile = _profile()
+    capture = _empty_provider_capture(action, provider_ref)
+
+    monkeypatch.setattr(
+        timeout_resolution,
+        "BETFAIR_TIMEOUT_VISIBILITY_HORIZON_SECONDS",
+        0,
+    )
+    with pytest.raises(
+        timeout_resolution.BetfairTimeoutResolutionError,
+        match="timeout resolver executable authority changed",
+    ):
+        timeout_resolution.resolve_betfair_timeout_provider_state(
+            ledger,
+            action,
+            profile,
+            attempt_id="attempt-1",
+            expected_profile_sha256=profile.profile_id,
+            readback=capture,
+        )
+
+
+def test_provider_absence_assertion_does_not_trust_rebound_timeout_symbol(
+    tmp_path, monkeypatch
+) -> None:
+    _, action, provider_ref, _ = _ledger_with_timeout(tmp_path, monkeypatch)
+    assert provider_ref is not None
+    profile = _profile()
+    capture = _empty_provider_capture(action, provider_ref)
+    direct = provider_evidence.verify_betfair_provider_state(
+        action,
+        profile,
+        expected_profile_sha256=profile.profile_id,
+        readback=capture,
+        expected_provider_order_ref=provider_ref,
+    )
+    assert isinstance(direct, VerifiedProviderAbsenceEvidence)
+
+    monkeypatch.setattr(
+        timeout_resolution,
+        "assert_betfair_timeout_absence_authoritative",
+        lambda evidence: None,
+    )
+    with pytest.raises(ProviderEvidenceError, match="timeout-horizon authority"):
+        provider_evidence.assert_verified_provider_evidence_authoritative(direct)
+
+
+def test_provider_evidence_assertion_rejects_fingerprint_rebind(
+    tmp_path, monkeypatch
+) -> None:
+    _, action, provider_ref, _ = _ledger_with_timeout(tmp_path, monkeypatch)
+    assert provider_ref is not None
+    profile = _profile()
+    capture = _empty_provider_capture(action, provider_ref)
+    direct = provider_evidence.verify_betfair_provider_state(
+        action,
+        profile,
+        expected_profile_sha256=profile.profile_id,
+        readback=capture,
+        expected_provider_order_ref=provider_ref,
+    )
+    assert isinstance(direct, VerifiedProviderAbsenceEvidence)
+
+    monkeypatch.setattr(
+        provider_evidence,
+        "_verified_provider_evidence_fingerprint",
+        lambda evidence: "0" * 64,
+    )
+    with pytest.raises(
+        ProviderEvidenceError,
+        match="provider evidence authority binding changed",
+    ):
+        provider_evidence.assert_verified_provider_evidence_authoritative(direct)
 

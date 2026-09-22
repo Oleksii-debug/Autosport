@@ -15,7 +15,7 @@ from .real_execution_ledger import (
     RealExecutionLedger,
 )
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 TIMING_STATUS_UNKNOWN = "UNKNOWN"
 TIMING_REASON_NO_MONOTONIC_WITNESS = "NO_MONOTONIC_WITNESS"
@@ -23,6 +23,10 @@ TIMING_REASON_NO_MONOTONIC_WITNESS = "NO_MONOTONIC_WITNESS"
 SLIPPAGE_STATUS_KNOWN = "KNOWN"
 SLIPPAGE_STATUS_UNKNOWN = "UNKNOWN"
 SLIPPAGE_STATUS_NOT_APPLICABLE = "NOT_APPLICABLE"
+
+PROVIDER_OUTCOME_UNVERIFIED_ACK = "UNVERIFIED_ACK_PROVENANCE"
+PROVIDER_OUTCOME_UNVERIFIED_ABSENCE = "UNVERIFIED_ABSENCE_AUTHORITY"
+PROVIDER_OUTCOME_NOT_APPLICABLE = "NOT_APPLICABLE_UNRESOLVED"
 
 _EMPIRICAL_EVIDENCE_ISSUANCE_TOKEN = object()
 
@@ -189,6 +193,8 @@ class EmpiricalExecutionEvidence:
     attempt_id: str
     attempt_state: str
     terminal: bool
+    provider_outcome_verified: bool
+    provider_outcome_verification_reason: str
 
     bookmaker_id: str
     account_id: str
@@ -262,6 +268,7 @@ class EmpiricalExecutionEvidence:
             "quote_observed_at",
             "reserved_at",
             "attempt_state",
+            "provider_outcome_verification_reason",
             "slippage_status",
             "causal_timing_status",
             "causal_timing_reason",
@@ -279,8 +286,14 @@ class EmpiricalExecutionEvidence:
 
         if type(self.source_event_count) is not int or self.source_event_count < 1:
             raise EmpiricalExecutionEvidenceError("source_event_count must be positive int")
-        if type(self.terminal) is not bool or type(self.right_censored) is not bool:
-            raise EmpiricalExecutionEvidenceError("terminal/censor flags must be bool")
+        if (
+            type(self.terminal) is not bool
+            or type(self.right_censored) is not bool
+            or type(self.provider_outcome_verified) is not bool
+        ):
+            raise EmpiricalExecutionEvidenceError(
+                "terminal/censor/provider-outcome flags must be bool"
+            )
         if (
             self.reconciliation_external_effect_found is not None
             and type(self.reconciliation_external_effect_found) is not bool
@@ -319,6 +332,24 @@ class EmpiricalExecutionEvidence:
         expected_terminal = state in _TERMINAL_STATES
         if self.terminal is not expected_terminal:
             raise EmpiricalExecutionEvidenceError("terminal flag mismatches attempt_state")
+
+        if state in _ACK_TERMINAL_STATES:
+            expected_provider_outcome_reason = PROVIDER_OUTCOME_UNVERIFIED_ACK
+        elif state is AttemptState.RECONCILED_NOT_FOUND:
+            expected_provider_outcome_reason = PROVIDER_OUTCOME_UNVERIFIED_ABSENCE
+        else:
+            expected_provider_outcome_reason = PROVIDER_OUTCOME_NOT_APPLICABLE
+        if self.provider_outcome_verified:
+            raise EmpiricalExecutionEvidenceError(
+                "current ledger projection cannot verify provider outcome provenance"
+            )
+        if (
+            self.provider_outcome_verification_reason
+            != expected_provider_outcome_reason
+        ):
+            raise EmpiricalExecutionEvidenceError(
+                "provider outcome verification reason mismatches durable attempt state"
+            )
 
         if expected_terminal:
             if self.right_censored:
@@ -524,7 +555,11 @@ class EmpiricalExecutionEvidence:
             "action_id": self.action_id,
             "attempt_id": self.attempt_id,
             "attempt_state": self.attempt_state,
-            "terminal": self.terminal,
+            "ledger_terminal": self.terminal,
+            "provider_outcome_verified": self.provider_outcome_verified,
+            "provider_outcome_verification_reason": (
+                self.provider_outcome_verification_reason
+            ),
             "bookmaker_id": self.bookmaker_id,
             "account_id": self.account_id,
             "event_id": self.event_id,
@@ -796,6 +831,13 @@ def build_empirical_execution_evidence(
     )
     censor_cutoff_event_count = snapshot.event_count if right_censored else None
 
+    if state in _ACK_TERMINAL_STATES:
+        provider_outcome_verification_reason = PROVIDER_OUTCOME_UNVERIFIED_ACK
+    elif state is AttemptState.RECONCILED_NOT_FOUND:
+        provider_outcome_verification_reason = PROVIDER_OUTCOME_UNVERIFIED_ABSENCE
+    else:
+        provider_outcome_verification_reason = PROVIDER_OUTCOME_NOT_APPLICABLE
+
     evidence = EmpiricalExecutionEvidence(
         source_ledger_sha256=snapshot.sha256,
         source_event_count=snapshot.event_count,
@@ -805,6 +847,8 @@ def build_empirical_execution_evidence(
         attempt_id=attempt,
         attempt_state=state.value,
         terminal=terminal,
+        provider_outcome_verified=False,
+        provider_outcome_verification_reason=provider_outcome_verification_reason,
         bookmaker_id=_text(action.get("bookmaker_id"), "bookmaker_id"),
         account_id=_text(action.get("account_id"), "account_id"),
         event_id=_text(action.get("event_id"), "event_id"),
@@ -866,7 +910,7 @@ def build_empirical_execution_evidence(
     return evidence
 
 
-POPULATION_SCHEMA_VERSION = 1
+POPULATION_SCHEMA_VERSION = 2
 
 
 @dataclass(frozen=True, slots=True, weakref_slot=True, init=False)
@@ -891,8 +935,13 @@ class EmpiricalExecutionPopulationEvidence:
     total_attempts: int = field(init=False)
     state_counts: tuple[tuple[str, int], ...] = field(init=False)
     terminal_count: int = field(init=False)
+    provider_verified_terminal_count: int = field(init=False)
+    unverified_ledger_terminal_count: int = field(init=False)
     right_censored_count: int = field(init=False)
     provider_evidence_count: int = field(init=False)
+    provider_outcome_unverified_ack_count: int = field(init=False)
+    provider_outcome_unverified_absence_count: int = field(init=False)
+    provider_outcome_not_applicable_count: int = field(init=False)
     slippage_known_count: int = field(init=False)
     slippage_unknown_count: int = field(init=False)
     slippage_not_applicable_count: int = field(init=False)
@@ -957,6 +1006,13 @@ class EmpiricalExecutionPopulationEvidence:
             )
 
         terminal_count = sum(sample.terminal for sample in self.samples)
+        provider_verified_terminal_count = sum(
+            sample.terminal and sample.provider_outcome_verified
+            for sample in self.samples
+        )
+        unverified_ledger_terminal_count = (
+            terminal_count - provider_verified_terminal_count
+        )
         right_censored_count = sum(sample.right_censored for sample in self.samples)
         if terminal_count + right_censored_count != total:
             raise EmpiricalExecutionEvidenceError(
@@ -966,6 +1022,30 @@ class EmpiricalExecutionPopulationEvidence:
         provider_evidence_count = sum(
             sample.provider_evidence_id is not None for sample in self.samples
         )
+        provider_outcome_unverified_ack_count = sum(
+            sample.provider_outcome_verification_reason
+            == PROVIDER_OUTCOME_UNVERIFIED_ACK
+            for sample in self.samples
+        )
+        provider_outcome_unverified_absence_count = sum(
+            sample.provider_outcome_verification_reason
+            == PROVIDER_OUTCOME_UNVERIFIED_ABSENCE
+            for sample in self.samples
+        )
+        provider_outcome_not_applicable_count = sum(
+            sample.provider_outcome_verification_reason
+            == PROVIDER_OUTCOME_NOT_APPLICABLE
+            for sample in self.samples
+        )
+        if (
+            provider_outcome_unverified_ack_count
+            + provider_outcome_unverified_absence_count
+            + provider_outcome_not_applicable_count
+            != total
+        ):
+            raise EmpiricalExecutionEvidenceError(
+                "population provider-outcome qualification does not cover denominator"
+            )
         slippage_known_count = sum(
             sample.slippage_status == SLIPPAGE_STATUS_KNOWN for sample in self.samples
         )
@@ -1002,8 +1082,33 @@ class EmpiricalExecutionPopulationEvidence:
         object.__setattr__(self, "total_attempts", total)
         object.__setattr__(self, "state_counts", counts)
         object.__setattr__(self, "terminal_count", terminal_count)
+        object.__setattr__(
+            self,
+            "provider_verified_terminal_count",
+            provider_verified_terminal_count,
+        )
+        object.__setattr__(
+            self,
+            "unverified_ledger_terminal_count",
+            unverified_ledger_terminal_count,
+        )
         object.__setattr__(self, "right_censored_count", right_censored_count)
         object.__setattr__(self, "provider_evidence_count", provider_evidence_count)
+        object.__setattr__(
+            self,
+            "provider_outcome_unverified_ack_count",
+            provider_outcome_unverified_ack_count,
+        )
+        object.__setattr__(
+            self,
+            "provider_outcome_unverified_absence_count",
+            provider_outcome_unverified_absence_count,
+        )
+        object.__setattr__(
+            self,
+            "provider_outcome_not_applicable_count",
+            provider_outcome_not_applicable_count,
+        )
         object.__setattr__(self, "slippage_known_count", slippage_known_count)
         object.__setattr__(self, "slippage_unknown_count", slippage_unknown_count)
         object.__setattr__(
@@ -1089,9 +1194,23 @@ class EmpiricalExecutionPopulationEvidence:
                 state: self._rate(count, self.total_attempts)
                 for state, count in self.state_counts
             },
-            "terminal_count": self.terminal_count,
-            "terminal_rate": self._rate(
+            "ledger_terminal_count": self.terminal_count,
+            "ledger_terminal_rate": self._rate(
                 self.terminal_count,
+                self.total_attempts,
+            ),
+            "provider_verified_terminal_count": (
+                self.provider_verified_terminal_count
+            ),
+            "provider_verified_terminal_rate": self._rate(
+                self.provider_verified_terminal_count,
+                self.total_attempts,
+            ),
+            "unverified_ledger_terminal_count": (
+                self.unverified_ledger_terminal_count
+            ),
+            "unverified_ledger_terminal_rate": self._rate(
+                self.unverified_ledger_terminal_count,
                 self.total_attempts,
             ),
             "right_censored_count": self.right_censored_count,
@@ -1104,6 +1223,17 @@ class EmpiricalExecutionPopulationEvidence:
                 self.provider_evidence_count,
                 self.total_attempts,
             ),
+            "provider_outcome_verification_counts": {
+                PROVIDER_OUTCOME_UNVERIFIED_ACK: (
+                    self.provider_outcome_unverified_ack_count
+                ),
+                PROVIDER_OUTCOME_UNVERIFIED_ABSENCE: (
+                    self.provider_outcome_unverified_absence_count
+                ),
+                PROVIDER_OUTCOME_NOT_APPLICABLE: (
+                    self.provider_outcome_not_applicable_count
+                ),
+            },
             "slippage_status_counts": {
                 SLIPPAGE_STATUS_KNOWN: self.slippage_known_count,
                 SLIPPAGE_STATUS_UNKNOWN: self.slippage_unknown_count,

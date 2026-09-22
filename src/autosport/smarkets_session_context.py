@@ -259,6 +259,7 @@ class SmarketsSessionAuthenticatedRead:
     endpoint: str
     http_status: int
     provider_date: str
+    content_type: str
     product_available_at: str
     payload_sha256: str
     payload_size: int
@@ -274,6 +275,7 @@ class SmarketsSessionAuthenticatedRead:
         endpoint: str,
         http_status: int,
         provider_date: str,
+        content_type: str,
         product_available_at: str,
         payload_sha256: str,
         payload_size: int,
@@ -291,6 +293,7 @@ class SmarketsSessionAuthenticatedRead:
         object.__setattr__(self, "endpoint", endpoint)
         object.__setattr__(self, "http_status", http_status)
         object.__setattr__(self, "provider_date", provider_date)
+        object.__setattr__(self, "content_type", content_type)
         object.__setattr__(self, "product_available_at", product_available_at)
         object.__setattr__(self, "payload_sha256", payload_sha256)
         object.__setattr__(self, "payload_size", payload_size)
@@ -489,7 +492,7 @@ class SmarketsAuthenticatedSession:
                     raise SmarketsSessionContextError(
                         "Smarkets account activity response lacks headers"
                     )
-                _content_type(headers.get("Content-Type"))
+                content_type = _content_type(headers.get("Content-Type"))
                 provider_date = _provider_date(headers.get("Date"))
                 try:
                     raw = orders_acquisition._read_complete_body(response)
@@ -522,6 +525,7 @@ class SmarketsAuthenticatedSession:
             self._account_witness.provider_account_id,
             SMARKETS_ACCOUNT_ACTIVITY_ENDPOINT,
             provider_date,
+            content_type,
             available_at,
             payload_sha256,
             str(len(raw)),
@@ -533,6 +537,7 @@ class SmarketsAuthenticatedSession:
             endpoint=SMARKETS_ACCOUNT_ACTIVITY_ENDPOINT,
             http_status=200,
             provider_date=provider_date,
+            content_type=content_type,
             product_available_at=available_at,
             payload_sha256=payload_sha256,
             payload_size=len(raw),

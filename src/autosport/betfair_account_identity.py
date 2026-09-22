@@ -175,6 +175,8 @@ def _make_account_identity_authority():
     canonical_observed_at = client_type._observed_at
     canonical_network_post = transport_type.post
     canonical_urlopen = _urllib_request.urlopen
+    canonical_identity_init = identity_type.__init__
+    canonical_identity_post_init = identity_type.__post_init__
 
     lock = RLock()
     canonical_client_origins: WeakKeyDictionary = WeakKeyDictionary()
@@ -250,6 +252,12 @@ def _make_account_identity_authority():
                 "account identity cannot be verified as canonical JSON"
             ) from exc
         return sha256_fn(encoded).hexdigest()
+
+    def identity_class_is_current() -> bool:
+        return (
+            identity_type.__init__ is canonical_identity_init
+            and identity_type.__post_init__ is canonical_identity_post_init
+        )
 
     def client_class_dispatch_is_current() -> bool:
         return (
@@ -471,18 +479,38 @@ def _make_account_identity_authority():
                 "authenticated client/session context changed during account-details acquisition"
             )
 
+        expected_currency = validate_currency(details.currency_code)
+        expected_details_sha256 = validate_sha256(
+            details.evidence.source_payload_sha256,
+            "account_details_sha256",
+        )
+        expected_observed_at = validate_timestamp(details.evidence.observed_at)
+        if not identity_class_is_current():
+            raise identity_error_type(
+                "authenticated account identity implementation changed"
+            )
         value = identity_type(
             venue_id=venue_id,
             mode=personal_mode,
             identity_scope=identity_scope,
             session_context_id=context.session_context_id,
-            currency_code=validate_currency(details.currency_code),
-            account_details_sha256=validate_sha256(
-                details.evidence.source_payload_sha256,
-                "account_details_sha256",
-            ),
-            observed_at=validate_timestamp(details.evidence.observed_at),
+            currency_code=expected_currency,
+            account_details_sha256=expected_details_sha256,
+            observed_at=expected_observed_at,
         )
+        if (
+            not identity_class_is_current()
+            or value.venue_id != venue_id
+            or value.mode is not personal_mode
+            or value.identity_scope != identity_scope
+            or value.session_context_id != context.session_context_id
+            or value.currency_code != expected_currency
+            or value.account_details_sha256 != expected_details_sha256
+            or value.observed_at != expected_observed_at
+        ):
+            raise identity_error_type(
+                "authenticated account identity construction was altered"
+            )
         remember_issued(value, client, context)
         return value
 
@@ -491,7 +519,7 @@ def _make_account_identity_authority():
         *,
         client: BetfairReadOnlyClient | None = None,
     ) -> bool:
-        if type(value) is not identity_type:
+        if type(value) is not identity_type or not identity_class_is_current():
             return False
         with lock:
             record = issued.get(id(value))

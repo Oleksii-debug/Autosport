@@ -90,7 +90,7 @@ _GITHUB_TOKEN_PATTERN = re.compile(
     rb"(?<![A-Za-z0-9_])(?:gh[pousr]_[A-Za-z0-9_]{20,}|github_pat_[A-Za-z0-9_]{20,})(?![A-Za-z0-9_])"
 )
 _AWS_ACCESS_KEY_PATTERN = re.compile(
-    rb"(?<![A-Z0-9])(?:AKIA|ASIA)[0-9A-Z]{16}(?![A-Z0-9])"
+    rb"(?<![A-Za-z0-9_])(?:AKIA|ASIA)[0-9A-Z]{16}(?![A-Za-z0-9_])"
 )
 _YAML_SECRET_BLOCK_PATTERN = re.compile(
     rb"(?ix)^"

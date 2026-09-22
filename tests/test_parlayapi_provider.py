@@ -1,7 +1,10 @@
 import tempfile
+import threading
 import unittest
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
+from autosport import parlayapi_provider as parlayapi_provider_module
 from autosport.domain import MarketType
 from autosport.ingestion import IngestionEngine
 from autosport.market_bus import MarketEventBus
@@ -91,6 +94,85 @@ class ParlayApiProviderTests(unittest.TestCase):
         error = ProviderTransportError("provider transport unavailable")
         self.assertIsInstance(error, ProviderUnavailableError)
         self.assertIsInstance(error, RuntimeError)
+
+    def test_default_transport_rejects_redirects_before_api_key_forwarding(self):
+        for redirect_code in (301, 302, 303, 307, 308):
+            with self.subTest(redirect_code=redirect_code):
+                sink_api_keys: list[str | None] = []
+                source_api_keys: list[str | None] = []
+
+                class SinkHandler(BaseHTTPRequestHandler):
+                    def do_GET(self):
+                        sink_api_keys.append(self.headers.get("X-API-Key"))
+                        self.send_response(200)
+                        self.end_headers()
+                        self.wfile.write(b"[]")
+
+                    def log_message(self, format, *args):  # noqa: A002
+                        del format, args
+
+                sink = ThreadingHTTPServer(("127.0.0.1", 0), SinkHandler)
+                sink_thread = threading.Thread(target=sink.serve_forever, daemon=True)
+                sink_thread.start()
+                sink_url = f"http://127.0.0.1:{sink.server_port}/credential-sink"
+
+                class SourceHandler(BaseHTTPRequestHandler):
+                    def do_GET(self):
+                        source_api_keys.append(self.headers.get("X-API-Key"))
+                        self.send_response(redirect_code)
+                        self.send_header("Location", sink_url)
+                        self.end_headers()
+
+                    def log_message(self, format, *args):  # noqa: A002
+                        del format, args
+
+                source = ThreadingHTTPServer(("127.0.0.1", 0), SourceHandler)
+                source_thread = threading.Thread(target=source.serve_forever, daemon=True)
+                source_thread.start()
+                try:
+                    with self.assertRaises(ProviderTransportError) as raised:
+                        parlayapi_provider_module._default_transport(
+                            f"http://127.0.0.1:{source.server_port}/start",
+                            {"X-API-Key": "dummy-secret"},
+                            1.0,
+                        )
+                    self.assertEqual(raised.exception.status_code, redirect_code)
+                    self.assertEqual(source_api_keys, ["dummy-secret"])
+                    self.assertEqual(sink_api_keys, [])
+                finally:
+                    source.shutdown()
+                    sink.shutdown()
+                    source.server_close()
+                    sink.server_close()
+                    source_thread.join(timeout=2)
+                    sink_thread.join(timeout=2)
+
+    def test_default_transport_preserves_direct_json_success(self):
+        class DirectHandler(BaseHTTPRequestHandler):
+            def do_GET(self):
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(b"[]")
+
+            def log_message(self, format, *args):  # noqa: A002
+                del format, args
+
+        server = ThreadingHTTPServer(("127.0.0.1", 0), DirectHandler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            response = parlayapi_provider_module._default_transport(
+                f"http://127.0.0.1:{server.server_port}/direct",
+                {"X-API-Key": "dummy-secret"},
+                1.0,
+            )
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(response.payload, [])
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=2)
 
     def test_authenticated_snapshot_maps_to_typed_provider_quotes_without_key_in_url(self):
         calls = []

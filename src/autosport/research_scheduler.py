@@ -825,66 +825,100 @@ class ResearchScheduler:
         self._validate_occurrence_history_tail(state)
         return state
 
-    def _append_occurrence_history_locked(
+    def _append_occurrence_history_batch_locked(
         self,
         state: dict[str, Any],
-        occurrence_id: str,
-        occurrence: dict[str, Any],
+        completed: list[tuple[str, dict[str, Any]]],
     ) -> None:
+        if not completed:
+            return
         anchor = self._occurrence_history_anchor(state)
         if anchor is None:
             raise ResearchSchedulerError("occurrence history anchor is missing")
         count, tail = anchor
-        chunk_index = count // _HISTORY_CHUNK_SIZE
-        offset = count % _HISTORY_CHUNK_SIZE
-        chunk_path = self._occurrence_history_chunk_path(chunk_index)
-        if offset == 0:
-            if chunk_path.exists():
-                raise ResearchSchedulerError(
-                    "unanchored occurrence history chunk already exists"
-                )
-            entries: list[dict[str, Any]] = []
-            previous_tail = tail
-        else:
-            try:
-                chunk = self._read_occurrence_history_chunk_raw(chunk_index)
-            except FileNotFoundError as exc:
-                raise ResearchSchedulerError(
-                    "occurrence history append chunk is missing"
-                ) from exc
-            entries = list(chunk["entries"])
-            if len(entries) != offset:
-                raise ResearchSchedulerError(
-                    "occurrence history append offset mismatch"
-                )
-            if _sha(entries[-1]["entry_sha256"], "history entry_sha256") != tail:
-                raise ResearchSchedulerError(
-                    "occurrence history append tail mismatch"
-                )
-            previous_tail = chunk["previous_tail_sha256"]
+        active_chunk_index: int | None = None
+        active_previous_tail: str | None = None
+        active_entries: list[dict[str, Any]] | None = None
 
-        entry = self._occurrence_history_entry(
-            sequence=count + 1,
-            previous_entry_sha256=tail,
-            occurrence_id=occurrence_id,
-            occurrence=occurrence,
-        )
-        entries.append(entry)
-        body = {
-            "schema": _HISTORY_SCHEMA,
-            "schema_version": _HISTORY_SCHEMA_VERSION,
-            "chunk_index": chunk_index,
-            "start_sequence": chunk_index * _HISTORY_CHUNK_SIZE + 1,
-            "previous_tail_sha256": previous_tail,
-            "entries": entries,
-        }
-        self._occurrence_history_dir.mkdir(parents=True, exist_ok=True)
-        atomic_write_json(
-            chunk_path,
-            {**body, "chunk_sha256": _digest(body)},
-        )
-        state["occurrence_history_count"] = count + 1
-        state["occurrence_history_tail_sha256"] = entry["entry_sha256"]
+        def flush_active_chunk() -> None:
+            if (
+                active_chunk_index is None
+                or active_previous_tail is None
+                or active_entries is None
+            ):
+                return
+            body = {
+                "schema": _HISTORY_SCHEMA,
+                "schema_version": _HISTORY_SCHEMA_VERSION,
+                "chunk_index": active_chunk_index,
+                "start_sequence": (
+                    active_chunk_index * _HISTORY_CHUNK_SIZE + 1
+                ),
+                "previous_tail_sha256": active_previous_tail,
+                "entries": active_entries,
+            }
+            self._occurrence_history_dir.mkdir(parents=True, exist_ok=True)
+            atomic_write_json(
+                self._occurrence_history_chunk_path(active_chunk_index),
+                {**body, "chunk_sha256": _digest(body)},
+            )
+
+        for occurrence_id, occurrence in completed:
+            chunk_index = count // _HISTORY_CHUNK_SIZE
+            offset = count % _HISTORY_CHUNK_SIZE
+            if active_chunk_index != chunk_index:
+                flush_active_chunk()
+                active_chunk_index = chunk_index
+                chunk_path = self._occurrence_history_chunk_path(chunk_index)
+                if offset == 0:
+                    if chunk_path.exists():
+                        raise ResearchSchedulerError(
+                            "unanchored occurrence history chunk already exists"
+                        )
+                    active_entries = []
+                    active_previous_tail = tail
+                else:
+                    try:
+                        chunk = self._read_occurrence_history_chunk_raw(
+                            chunk_index
+                        )
+                    except FileNotFoundError as exc:
+                        raise ResearchSchedulerError(
+                            "occurrence history append chunk is missing"
+                        ) from exc
+                    active_entries = list(chunk["entries"])
+                    if len(active_entries) != offset:
+                        raise ResearchSchedulerError(
+                            "occurrence history append offset mismatch"
+                        )
+                    if (
+                        _sha(
+                            active_entries[-1]["entry_sha256"],
+                            "history entry_sha256",
+                        )
+                        != tail
+                    ):
+                        raise ResearchSchedulerError(
+                            "occurrence history append tail mismatch"
+                        )
+                    active_previous_tail = chunk[
+                        "previous_tail_sha256"
+                    ]
+
+            assert active_entries is not None
+            entry = self._occurrence_history_entry(
+                sequence=count + 1,
+                previous_entry_sha256=tail,
+                occurrence_id=occurrence_id,
+                occurrence=occurrence,
+            )
+            active_entries.append(entry)
+            count += 1
+            tail = entry["entry_sha256"]
+            state["occurrence_history_count"] = count
+            state["occurrence_history_tail_sha256"] = tail
+
+        flush_active_chunk()
 
     def _archive_completed_occurrences_locked(
         self,
@@ -910,11 +944,8 @@ class ResearchScheduler:
                 raw,
                 state["schedules"],
             )
-            self._append_occurrence_history_locked(
-                state,
-                occurrence_id,
-                raw,
-            )
+        self._append_occurrence_history_batch_locked(state, completed)
+        for occurrence_id, _ in completed:
             del state["occurrences"][occurrence_id]
         state["state_version"] += 1
         self._write(state)

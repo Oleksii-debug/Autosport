@@ -458,6 +458,21 @@ class TheOddsApiReferenceProvider:
                 payload.get("next_timestamp"),
                 field="historical.next_timestamp",
             )
+            returned_instant = _timestamp_instant(returned_snapshot)
+            if (
+                previous_snapshot is not None
+                and _timestamp_instant(previous_snapshot) >= returned_instant
+            ):
+                raise TheOddsApiPayloadError(
+                    "historical previous snapshot must precede returned snapshot"
+                )
+            if (
+                next_snapshot is not None
+                and _timestamp_instant(next_snapshot) <= returned_instant
+            ):
+                raise TheOddsApiPayloadError(
+                    "historical next snapshot must follow returned snapshot"
+                )
             events = payload.get("data")
             if not isinstance(events, list):
                 raise TheOddsApiPayloadError("historical data must be a list")
@@ -531,6 +546,14 @@ class TheOddsApiReferenceProvider:
                         field="market.last_update",
                     )
                     source_ts = market_last_update or bookmaker_last_update
+                    if (
+                        returned_snapshot is not None
+                        and _timestamp_instant(source_ts)
+                        > _timestamp_instant(returned_snapshot)
+                    ):
+                        raise TheOddsApiPayloadError(
+                            "historical constituent update is after returned snapshot"
+                        )
                     outcomes = market.get("outcomes")
                     if not isinstance(outcomes, list):
                         raise TheOddsApiPayloadError(

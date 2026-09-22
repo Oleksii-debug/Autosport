@@ -280,34 +280,33 @@ def test_query_that_excluded_commission_cannot_mint_commission_absence() -> None
         derive_commission_cash_evidence(window)
 
 
-def test_mixed_currencies_remain_separate_and_are_never_fx_nettted() -> None:
-    evidence = derive_commission_cash_evidence(
-        _window(
-            [
-                _row(
-                    1,
-                    when="2026-09-21T10:00:00Z",
-                    kind="Commission",
-                    debit="-2",
-                    balance="98",
-                    currency="GBP",
-                ),
-                _row(
-                    2,
-                    when="2026-09-21T10:01:00Z",
-                    kind="Commission",
-                    debit="-3",
-                    balance="95",
-                    currency="EUR",
-                ),
-            ]
-        )
+def test_mixed_currency_wallet_window_fails_closed_before_fx_or_netting() -> None:
+    window = _window(
+        [
+            _row(
+                1,
+                when="2026-09-21T10:00:00Z",
+                kind="Commission",
+                debit="-2",
+                balance="98",
+                currency="GBP",
+            ),
+            _row(
+                2,
+                when="2026-09-21T10:01:00Z",
+                kind="Commission",
+                debit="-3",
+                balance="95",
+                currency="EUR",
+            ),
+        ]
     )
 
-    assert [(item.currency, item.amount) for item in evidence.amounts_by_currency] == [
-        ("EUR", Decimal("-3")),
-        ("GBP", Decimal("-2")),
-    ]
+    with pytest.raises(
+        MatchbookCommissionEvidenceError,
+        match="mixes currencies",
+    ):
+        derive_commission_cash_evidence(window)
 
 
 def test_gross_positive_result_stays_net_unresolved_without_attribution() -> None:

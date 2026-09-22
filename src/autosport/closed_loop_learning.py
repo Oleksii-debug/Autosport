@@ -200,6 +200,7 @@ def bind_challenger_artifact(
         raise ClosedLoopBindingError(
             "ScientificRegistry does not match ResearchSupervisor authority"
         )
+    registry = supervisor.scientific_registry
     if not isinstance(spec, FactoryCandidateSpec):
         raise TypeError("spec must be FactoryCandidateSpec")
     if not isinstance(staged, StagedFactoryEvaluation):

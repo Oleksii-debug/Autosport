@@ -211,6 +211,86 @@ class OutcomeRevisionProductAvailabilityTests(unittest.TestCase):
             ):
                 self._resolve(registry, "2026-01-01T10:00:00")
 
+    def test_registry_trust_cannot_strip_availability_preserved_by_run(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            registry = RunRegistry.initialize_pristine(Path(tmp) / "run_registry.json")
+            self._accept(
+                registry,
+                self._binding("r1"),
+                run_id="durable-availability",
+                market="market-durable",
+                results="results-durable",
+                accepted_at=self.t1,
+            )
+
+            state = json.loads(registry.path.read_text(encoding="utf-8"))
+            trust_revision = state["outcome_lineage_trust"][0]["revisions"][0]
+            self.assertEqual(
+                trust_revision.pop("first_available_at"),
+                "2026-01-01T10:00:00.000000Z",
+            )
+            registry.path.write_text(
+                json.dumps(state, sort_keys=True),
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(
+                ValueError,
+                "conflicting outcome lineage evidence",
+            ):
+                RunRegistry(registry.path)
+
+    def test_legacy_unstamped_trust_migrates_without_backdating(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            registry = RunRegistry.initialize_pristine(Path(tmp) / "run_registry.json")
+            self._accept(
+                registry,
+                self._binding("r1"),
+                run_id="legacy-origin",
+                market="market-origin",
+                results="results-origin",
+                accepted_at=self.t1,
+            )
+
+            state = json.loads(registry.path.read_text(encoding="utf-8"))
+            for revision in state["outcome_lineage_trust"][0]["revisions"]:
+                revision.pop("first_available_at", None)
+            for item in state["runs"].values():
+                lineage = item.get("outcome_lineage")
+                if lineage is not None:
+                    for revision in lineage["revisions"]:
+                        revision.pop("first_available_at", None)
+            registry.path.write_text(
+                json.dumps(state, sort_keys=True),
+                encoding="utf-8",
+            )
+
+            reopened = RunRegistry(registry.path)
+            self.assertIsNone(self._resolve(reopened, self.t1))
+            self.assertIsNone(self._resolve(reopened, self.t_mid))
+
+            self._accept(
+                reopened,
+                self._binding("r1", "r2"),
+                run_id="post-migration-extension",
+                market="market-extension",
+                results="results-extension",
+                accepted_at=self.t2,
+            )
+
+            self.assertIsNone(self._resolve(reopened, self.t_mid))
+            resolved = self._resolve(reopened, self.t2)
+            self.assertIsNotNone(resolved)
+            self.assertEqual(resolved.revision, 2)
+            migrated = json.loads(reopened.path.read_text(encoding="utf-8"))
+            self.assertEqual(
+                {
+                    revision["first_available_at"]
+                    for revision in migrated["outcome_lineage_trust"][0]["revisions"]
+                },
+                {"2026-01-01T11:00:00.000000Z"},
+            )
+
     def test_clock_rollback_cannot_backdate_new_correction(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             registry = RunRegistry.initialize_pristine(Path(tmp) / "run_registry.json")

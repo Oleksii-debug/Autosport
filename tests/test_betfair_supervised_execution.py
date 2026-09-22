@@ -1272,6 +1272,112 @@ def test_foreign_empty_provider_order_ref_cannot_release_retry() -> None:
         )
 
 
+def test_not_found_consumer_rejects_rebound_authority_dispatch(
+    monkeypatch,
+) -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        profile, bound, approval, ledger, action, goal_store = _prepared(tmp)
+        timeout_client = _enabled_client(
+            profile, _TimeoutTransport(), store=goal_store
+        )
+        result = execute_betfair_supervised_action(
+            ledger,
+            bound,
+            approval,
+            action_id=action.action_id,
+            attempt_id="attempt-consumer-dispatch",
+            profile=profile,
+            client=timeout_client,
+            clock=lambda: SUBMITTED_AT,
+        )
+        assert result.attempt_state is AttemptState.UNKNOWN
+        owned_ref = ledger.provider_order_reference(
+            attempt_id="attempt-consumer-dispatch",
+            provider_id="betfair",
+        )
+        assert owned_ref is not None
+        foreign_ref = "d" * 32
+        assert foreign_ref != owned_ref
+
+        transport = _ReadbackTransport(
+            provider_order_ref=foreign_ref,
+            action=action,
+        )
+        client = BetfairReadOnlyClient(
+            BetfairSessionCredentials("app-key", "session-token"),
+            transport=transport,
+            clock=lambda: datetime.fromisoformat(READBACK_AT),
+            venue_id="betfair",
+            account_id="acct-1",
+        )
+        envelope = client.read_execution_readback(
+            action_id=action.action_id,
+            provider_order_ref=foreign_ref,
+            market_id=action.market_id,
+        )
+        foreign_absence = verify_betfair_provider_state(
+            action,
+            profile,
+            expected_profile_sha256=profile.profile_id,
+            readback=envelope,
+        )
+        assert foreign_absence.provider_order_ref == foreign_ref
+
+        with monkeypatch.context() as local:
+            local.setattr(
+                "autosport.supervised_execution."
+                "assert_verified_provider_evidence_authoritative",
+                lambda evidence: None,
+            )
+            with pytest.raises(
+                SupervisedExecutionError,
+                match=(
+                    "provider not-found executable authority changed: "
+                    "assert_verified_provider_evidence_authoritative"
+                ),
+            ):
+                reconcile_provider_not_found(
+                    ledger,
+                    bound,
+                    attempt_id="attempt-consumer-dispatch",
+                    readback=foreign_absence,
+                )
+
+        assert (
+            ledger.attempt_state("attempt-consumer-dispatch")
+            is AttemptState.UNKNOWN
+        )
+
+        with monkeypatch.context() as local:
+            local.setattr(
+                RealExecutionLedger,
+                "provider_order_reference",
+                lambda self, *, attempt_id, provider_id: foreign_ref,
+            )
+            with pytest.raises(
+                SupervisedExecutionError,
+                match=(
+                    "provider not-found authority method changed: "
+                    "RealExecutionLedger.provider_order_reference"
+                ),
+            ):
+                reconcile_provider_not_found(
+                    ledger,
+                    bound,
+                    attempt_id="attempt-consumer-dispatch",
+                    readback=foreign_absence,
+                )
+
+        assert (
+            ledger.attempt_state("attempt-consumer-dispatch")
+            is AttemptState.UNKNOWN
+        )
+        assert not ledger.can_retry_action(
+            plan_id=bound.execution_plan.plan_id,
+            action_id=action.action_id,
+        )
+
+
 def test_unmatched_success_is_unknown_until_readback() -> None:
     with tempfile.TemporaryDirectory() as tmp:
         profile, bound, approval, ledger, action, goal_store = _prepared(tmp)

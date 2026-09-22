@@ -128,6 +128,7 @@ def render_arguments(arguments: Sequence[str], *, case_root: Path, package_root:
     replacements = {
         "{CASE_ROOT}": str(case_root),
         "{PACKAGE_ROOT}": str(package_root),
+        "{WORKSPACE_ROOT}": str(case_root / "workspace"),
     }
     rendered: list[str] = []
     for arg in arguments:
@@ -331,7 +332,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--artifact-root", required=True, type=Path)
     parser.add_argument("--executable-relative-path", required=True, type=Path)
     parser.add_argument("--output-dir", required=True, type=Path)
-    parser.add_argument("--argument", action="append", default=[], help="Application argument. Tokens {CASE_ROOT} and {PACKAGE_ROOT} are expanded per case. Repeat as needed.")
+    parser.add_argument("--argument", action="append", default=[], help="Application argument. Tokens {CASE_ROOT}, {PACKAGE_ROOT}, and {WORKSPACE_ROOT} are expanded per case. Repeat as needed.")
     parser.add_argument("--launcher", action="append", default=[], help="Optional launcher prefix, intended for test/dev use. Omit for the packaged .exe.")
     parser.add_argument("--mode", choices=("persistent", "exit-zero"), default="persistent")
     parser.add_argument("--startup-seconds", type=float, default=5.0)

@@ -71,6 +71,7 @@ def _service(
     clock: _Clock,
     source: _EmptySource,
     interval_seconds: float = 10,
+    evaluation_slot_count: int | None = None,
 ) -> HeadlessCollectorService:
     return HeadlessCollectorService(
         delta_store=CollectorDeltaStore(Path(root) / "collector.db"),
@@ -80,6 +81,7 @@ def _service(
         run_id="run-1",
         config=CollectorServiceConfig(
             poll_interval_seconds=interval_seconds,
+            evaluation_slot_count=evaluation_slot_count,
             retry_attempts=1,
             initial_backoff_seconds=1,
             max_backoff_seconds=1,
@@ -173,7 +175,7 @@ class ProspectiveCollectorScheduleTests(unittest.TestCase):
                 evidence["anchor_at"],
                 "2026-01-01T00:00:00+00:00",
             )
-            self.assertEqual(evidence["schema_version"], 2)
+            self.assertEqual(evidence["schema_version"], 3)
             self.assertEqual(evidence["stream_epoch"], "epoch-1")
             self.assertEqual(
                 evidence["slots"][1]["due_at"],
@@ -185,6 +187,91 @@ class ProspectiveCollectorScheduleTests(unittest.TestCase):
             )
             self.assertTrue(evidence["slots"][1]["started_late"])
             self.assertEqual(restart_clock.sleeps, [])
+
+    def test_frozen_evaluation_window_survives_restart_while_max_cycles_is_per_run(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            first_clock = _Clock("2026-01-01T00:00:00+00:00")
+            first = _service(
+                tmp,
+                clock=first_clock,
+                source=_EmptySource(first_clock, [0], start_position=1),
+                evaluation_slot_count=2,
+            )
+            first_result = first.run(max_cycles=1)
+            self.assertEqual(first_result.cycles_executed, 1)
+
+            before_restart = first.delta_store.collector_schedule_evidence(
+                source_id="source-x",
+                run_id="run-1",
+                start_slot_ordinal=0,
+                end_slot_ordinal=1,
+            )
+            self.assertEqual(before_restart["evaluation_start_slot_ordinal"], 0)
+            self.assertEqual(before_restart["evaluation_end_slot_ordinal"], 1)
+            self.assertEqual(before_restart["bound_start_count"], 1)
+            self.assertEqual(before_restart["missing_start_count"], 1)
+
+            restart_clock = _Clock("2026-01-01T00:00:15+00:00")
+            reopened = _service(
+                tmp,
+                clock=restart_clock,
+                source=_EmptySource(restart_clock, [0], start_position=2),
+                evaluation_slot_count=2,
+            )
+            reopened.resume()
+            second_result = reopened.run(max_cycles=1)
+            self.assertEqual(second_result.cycles_executed, 1)
+
+            after_restart = reopened.delta_store.collector_schedule_evidence(
+                source_id="source-x",
+                run_id="run-1",
+                start_slot_ordinal=0,
+                end_slot_ordinal=1,
+            )
+            self.assertEqual(after_restart["evaluation_start_slot_ordinal"], 0)
+            self.assertEqual(after_restart["evaluation_end_slot_ordinal"], 1)
+            self.assertEqual(after_restart["bound_start_count"], 2)
+            self.assertEqual(after_restart["missing_start_count"], 0)
+            self.assertEqual(
+                tuple(slot["cycle_seq"] for slot in after_restart["slots"]),
+                (1, 2),
+            )
+
+    def test_frozen_evaluation_window_cannot_be_rebound_after_outcome(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            first_clock = _Clock("2026-01-01T00:00:00+00:00")
+            first = _service(
+                tmp,
+                clock=first_clock,
+                source=_EmptySource(first_clock, [0], start_position=1),
+                evaluation_slot_count=2,
+            )
+            first.run(max_cycles=1)
+
+            restart_clock = _Clock("2026-01-01T00:00:15+00:00")
+            reopened = _service(
+                tmp,
+                clock=restart_clock,
+                source=_EmptySource(restart_clock, [0], start_position=2),
+                evaluation_slot_count=1,
+            )
+            reopened.resume()
+            with self.assertRaisesRegex(
+                CollectorServiceError,
+                "prospective collector schedule authority",
+            ):
+                reopened.run(max_cycles=1)
+
+            evidence = reopened.delta_store.collector_schedule_evidence(
+                source_id="source-x",
+                run_id="run-1",
+                start_slot_ordinal=0,
+                end_slot_ordinal=1,
+            )
+            self.assertEqual(evidence["evaluation_start_slot_ordinal"], 0)
+            self.assertEqual(evidence["evaluation_end_slot_ordinal"], 1)
+            self.assertEqual(evidence["bound_start_count"], 1)
+            self.assertEqual(evidence["missing_start_count"], 1)
 
     def test_restart_rejects_stream_epoch_rebind_after_zero_result(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

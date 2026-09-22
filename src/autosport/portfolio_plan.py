@@ -1508,14 +1508,18 @@ class PortfolioPlan:
                 raise ValueError("positive portfolio action requires bound dependency graph")
             if self.economic_goal_contract_sha256 is None:
                 raise ValueError("positive portfolio action requires economic-goal identity")
-            if (
-                sum(stake > 0 for stake in self.stakes) > 1
-                and self.terminal_economics is None
-            ):
-                raise ValueError(
-                    "joint-positive portfolio action requires separate verified terminal "
-                    "economics; empirical dependency evidence cannot authorize completeness"
-                )
+            if sum(stake > 0 for stake in self.stakes) > 1:
+                proof = self.terminal_economics
+                if (
+                    proof is None
+                    or not proof.outcome_authority_sha256s
+                    or not proof.outcome_space_exhaustive
+                ):
+                    raise ValueError(
+                        "joint-positive portfolio action requires separate verified "
+                        "authoritative exhaustive terminal economics; empirical dependency "
+                        "evidence cannot authorize completeness"
+                    )
             outcome_independent_positive = any(
                 stake > 0
                 and StrategyClass(opportunity_class)

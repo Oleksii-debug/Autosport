@@ -5,6 +5,8 @@ from decimal import Decimal
 
 import pytest
 
+import autosport.betfair_stream_codec as stream_codec
+
 from autosport.betfair_stream_codec import (
     BETFAIR_STREAM_SOURCE_ID,
     BetfairApplyStatus,
@@ -700,3 +702,71 @@ def test_missing_change_message_request_id_remains_explicitly_unproven() -> None
     result = BetfairMarketStreamState().apply(frame)
     assert result.request_id is None
 
+
+
+class _FindTrackingBuffer(bytearray):
+    def __init__(self) -> None:
+        super().__init__()
+        self.find_starts: list[int] = []
+
+    def find(
+        self,
+        sub: bytes | bytearray,
+        start: int = 0,
+        end: int | None = None,
+    ) -> int:
+        self.find_starts.append(start)
+        if end is None:
+            return super().find(sub, start)
+        return super().find(sub, start, end)
+
+
+def test_crlf_decoder_fragment_search_reuses_validated_prefix() -> None:
+    decoder = BetfairCrlfJsonDecoder()
+    tracking = _FindTrackingBuffer()
+    decoder._buffer = tracking
+
+    payload = b'{"op":"mcm","pt":1,"clk":"' + (b"x" * 4096)
+    for value in payload:
+        assert decoder.feed(bytes([value])) == ()
+
+    assert tracking.find_starts[0] == 0
+    assert tracking.find_starts[-1] >= len(payload) - 2
+    assert tracking.find_starts[-1] > 4000
+
+
+def test_crlf_decoder_accepts_exact_max_frame_when_crlf_is_split() -> None:
+    frame = b'{"op":"mcm","pt":1,"clk":"a","mc":[]}'
+    decoder = BetfairCrlfJsonDecoder(max_frame_bytes=len(frame))
+
+    assert decoder.feed(frame + b"\r") == ()
+    decoded = decoder.feed(b"\n")
+
+    assert decoded == ({"op": "mcm", "pt": 1, "clk": "a", "mc": []},)
+    decoder.finish()
+
+
+def test_crlf_decoder_rejects_payload_beyond_max_before_delimiter_and_latches() -> None:
+    decoder = BetfairCrlfJsonDecoder(max_frame_bytes=8)
+
+    with pytest.raises(ValueError, match="maximum size"):
+        decoder.feed(b"123456789")
+
+    with pytest.raises(ValueError, match="decoder failed"):
+        decoder.feed(b"\r\n")
+
+
+def test_crlf_decoder_maps_json_recursion_error_to_failed_latch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    decoder = BetfairCrlfJsonDecoder()
+
+    def _raise_recursion(*args: object, **kwargs: object) -> object:
+        raise RecursionError("synthetic JSON nesting overflow")
+
+    monkeypatch.setattr(stream_codec.json, "loads", _raise_recursion)
+    with pytest.raises(ValueError, match="strict UTF-8 JSON"):
+        decoder.feed(b'{"op":"mcm","pt":1,"clk":"a","mc":[]}\r\n')
+
+    with pytest.raises(ValueError, match="decoder failed"):
+        decoder.feed(b'{"op":"mcm","pt":2,"clk":"b","mc":[]}\r\n')

@@ -111,16 +111,22 @@ class BetfairCrlfJsonDecoder:
         if not chunk:
             return ()
         try:
+            prior_buffer_len = len(self._buffer)
             self._buffer.extend(chunk)
-            if len(self._buffer) > self._max and b"\r\n" not in self._buffer:
-                raise ValueError("Betfair stream frame exceeds configured maximum size")
             decoded: list[dict[str, Any]] = []
+            # A successful prior feed cannot leave a complete CRLF delimiter in
+            # the buffer. Search only the newly appended suffix, retaining one
+            # byte of overlap so a CR/LF pair split across transport reads is
+            # still found. This keeps highly fragmented input linear instead of
+            # rescanning the complete accumulated frame on every feed().
+            search_start = max(0, prior_buffer_len - 1)
             while True:
-                end = self._buffer.find(b"\r\n")
+                end = self._buffer.find(b"\r\n", search_start)
                 if end < 0:
                     break
                 frame = bytes(self._buffer[:end])
                 del self._buffer[: end + 2]
+                search_start = 0
                 if not frame:
                     raise ValueError("empty Betfair stream frame is not allowed")
                 if len(frame) > self._max:
@@ -134,7 +140,12 @@ class BetfairCrlfJsonDecoder:
                         parse_constant=_reject_constant,
                         object_pairs_hook=_strict_object,
                     )
-                except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
+                except (
+                    UnicodeDecodeError,
+                    json.JSONDecodeError,
+                    ValueError,
+                    RecursionError,
+                ) as exc:
                     raise ValueError(
                         "Betfair stream frame must be strict UTF-8 JSON"
                     ) from exc
@@ -142,7 +153,14 @@ class BetfairCrlfJsonDecoder:
                     raise ValueError("Betfair stream frame must contain a JSON object")
                 decoded.append(raw)
             if len(self._buffer) > self._max:
-                raise ValueError("Betfair stream frame exceeds configured maximum size")
+                # max_frame_bytes bounds frame payload bytes, not the CRLF
+                # delimiter. A terminal CR may therefore be retained one byte
+                # beyond the payload limit until the next transport read.
+                if not (
+                    len(self._buffer) == self._max + 1
+                    and self._buffer[-1] == 0x0D
+                ):
+                    raise ValueError("Betfair stream frame exceeds configured maximum size")
             return tuple(decoded)
         except ValueError:
             self._failed = True

@@ -442,6 +442,19 @@ def test_persisted_forged_summary_or_digest_cannot_mint_completeness() -> None:
         assert_complete(forged_summary, scope=scope(), markets=markets)
 
 
+def test_provider_issued_batch_cannot_be_rebound_to_another_account() -> None:
+    markets = (market("1.open"),)
+    batch = open_batch(("1.open",))
+
+    with pytest.raises(BetfairPnlCoverageError, match="account identity mismatch"):
+        build_coverage_witness(
+            scope=scope(account_id_hash=sha256(b"acct-b").hexdigest()),
+            markets=markets,
+            open_batches=(batch,),
+            closed_pages=(),
+        )
+
+
 def test_witness_cannot_be_replayed_into_another_account_scope() -> None:
     markets = (market("1.open"),)
     original_scope = scope(account_id_hash=sha256(b"acct-a").hexdigest())

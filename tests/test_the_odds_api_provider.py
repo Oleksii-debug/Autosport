@@ -532,24 +532,29 @@ class TheOddsApiProviderTests(unittest.TestCase):
         self.assertEqual(batch.cursor, expected)
         self.assertEqual(batch.quotes[0].decimal_odds, Decimal("2.10"))
 
-    def test_provider_origin_verified_response_without_digest_fails_closed(self):
+    def test_post_construction_seam_swap_cannot_retain_verified_authority(self):
+        digest = "a" * 64
         provider = TheOddsApiProvider(
             "secret",
             sport="soccer_epl",
-            clock=lambda: "2026-09-22T14:00:00+00:00",
         )
         provider.transport = lambda url, timeout: HttpJsonResponse(
             [event()],
             200,
             {},
             final_url=url,
+            body_sha256=digest,
         )
+        provider.clock = lambda: "2026-09-22T14:00:00+00:00"
 
-        with self.assertRaisesRegex(
-            TheOddsApiPayloadError,
-            "requires exact response SHA-256",
-        ):
-            provider.read_batch()
+        batch = provider.read_batch()
+        request = batch.quotes[0].metadata["request"]
+
+        self.assertFalse(request["provider_origin_verified"])
+        self.assertFalse(request["receipt_clock_verified"])
+        self.assertIn("UNVERIFIED_PROVIDER_ORIGIN", batch.quality_flags)
+        self.assertIn("UNVERIFIED_RECEIPT_CLOCK", batch.quality_flags)
+        self.assertEqual(request["response_sha256"], digest)
 
     def test_response_rejects_event_outside_explicit_event_ids_scope(self):
         provider = TheOddsApiProvider(

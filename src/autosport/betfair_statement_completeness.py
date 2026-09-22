@@ -25,7 +25,7 @@ from .betfair_provider_billing_inputs import (
     BetfairProviderBillingInputsObservation,
 )
 from .betfair_provider_billing_inputs_authority import (
-    validate_betfair_provider_billing_inputs_observation,
+    validate_betfair_provider_billing_inputs_traversal,
 )
 
 _SCHEMA = "autosport.betfair_statement_pagination_completeness"
@@ -53,6 +53,7 @@ class BetfairStatementPaginationEvidence:
     last_observed_at: str
     pagination_complete: bool
     provider_origin_verified: bool
+    same_authenticated_session_proven: bool
     coherent_snapshot_proven: bool
     stable_account_identity_proven: bool
     temporal_finality_attested: bool
@@ -113,6 +114,10 @@ class BetfairStatementPaginationEvidence:
         for value, field in (
             (self.pagination_complete, "pagination_complete"),
             (self.provider_origin_verified, "provider_origin_verified"),
+            (
+                self.same_authenticated_session_proven,
+                "same_authenticated_session_proven",
+            ),
             (self.coherent_snapshot_proven, "coherent_snapshot_proven"),
             (self.stable_account_identity_proven, "stable_account_identity_proven"),
             (self.temporal_finality_attested, "temporal_finality_attested"),
@@ -123,6 +128,10 @@ class BetfairStatementPaginationEvidence:
         if not self.pagination_complete or not self.provider_origin_verified:
             raise BetfairStatementCompletenessError(
                 "issued evidence requires verified terminal pagination"
+            )
+        if not self.same_authenticated_session_proven:
+            raise BetfairStatementCompletenessError(
+                "issued evidence requires one authenticated session traversal"
             )
         if self.coherent_snapshot_proven:
             raise BetfairStatementCompletenessError(
@@ -158,7 +167,7 @@ class _IssuedRecord:
 
 
 def _build_authority():
-    source_validator = validate_betfair_provider_billing_inputs_observation
+    traversal_validator = validate_betfair_provider_billing_inputs_traversal
     source_cls = BetfairProviderBillingInputsObservation
     evidence_cls = BetfairStatementPaginationEvidence
     issued: dict[int, _IssuedRecord] = {}
@@ -170,24 +179,22 @@ def _build_authority():
             raise BetfairStatementCompletenessError(
                 "pages must be a non-empty exact tuple"
             )
-        verified: list[BetfairProviderBillingInputsObservation] = []
         for page in pages:
             if type(page) is not source_cls:
                 raise BetfairStatementCompletenessError(
                     "pages must contain exact canonical provider-billing observations"
                 )
-            try:
-                accepted = source_validator(page)
-            except (BetfairReadOnlyError, TypeError, ValueError) as exc:
-                raise BetfairStatementCompletenessError(
-                    "statement page lacks canonical provider issuance"
-                ) from exc
-            if accepted is not page:
-                raise BetfairStatementCompletenessError(
-                    "statement page validator returned a different observation"
-                )
-            verified.append(page)
-        evidence = _derive_from_verified_pages(tuple(verified))
+        try:
+            accepted_pages = traversal_validator(pages)
+        except (BetfairReadOnlyError, TypeError, ValueError) as exc:
+            raise BetfairStatementCompletenessError(
+                "statement pages lack one canonical authenticated-session traversal"
+            ) from exc
+        if accepted_pages is not pages:
+            raise BetfairStatementCompletenessError(
+                "statement traversal validator returned a different tuple"
+            )
+        evidence = _derive_from_verified_pages(pages)
         identity = id(evidence)
 
         def discard(
@@ -334,6 +341,7 @@ def _derive_from_verified_pages(
         "last_observed_at": pages[-1].statement.statement_evidence.observed_at,
         "pagination_complete": True,
         "provider_origin_verified": True,
+        "same_authenticated_session_proven": True,
         "coherent_snapshot_proven": False,
         "stable_account_identity_proven": False,
         "temporal_finality_attested": False,
@@ -410,6 +418,7 @@ def _payload(value: BetfairStatementPaginationEvidence) -> dict[str, object]:
                 "last_observed_at",
                 "pagination_complete",
                 "provider_origin_verified",
+                "same_authenticated_session_proven",
                 "coherent_snapshot_proven",
                 "stable_account_identity_proven",
                 "temporal_finality_attested",

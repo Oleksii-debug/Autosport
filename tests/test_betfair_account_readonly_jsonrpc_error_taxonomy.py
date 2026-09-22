@@ -25,6 +25,28 @@ class FakeTransport:
         return self.payload
 
 
+class CorrelatedErrorTransport:
+    def post(self, url: str, *, headers, body: bytes, timeout_seconds: float) -> bytes:
+        request = json.loads(body.decode("utf-8"))
+        return json.dumps(
+            {
+                "jsonrpc": "2.0",
+                "error": {
+                    "code": -32099,
+                    "message": "ANGX-0007",
+                    "data": {
+                        "AccountAPINGException": {
+                            "errorCode": "INVALID_APP_KEY",
+                            "errorDetails": "provider detail must stay out of evidence identity",
+                        }
+                    },
+                },
+                "id": request["id"],
+            },
+            separators=(",", ":"),
+        ).encode("utf-8")
+
+
 def _error_payload(*, data: object | None, code: int = -32099, message: str = "ANGX-0007") -> bytes:
     error: dict[str, object] = {"code": code, "message": message}
     if data is not None:
@@ -327,3 +349,74 @@ def test_missing_jsonrpc_code_cannot_mint_provider_semantics() -> None:
 
     assert raised.value.json_rpc_code is None
     assert raised.value.provider_error_code is None
+
+@pytest.mark.parametrize("bad_message", [None, "", "   ", 17, True])
+def test_malformed_or_missing_jsonrpc_error_message_cannot_mint_provider_semantics(
+    bad_message: object,
+) -> None:
+    error = {
+        "code": -32099,
+        "data": {
+            "exceptionname": "APINGException",
+            "APINGException": {"errorCode": "TOO_MANY_REQUESTS"},
+        },
+    }
+    if bad_message is not None:
+        error["message"] = bad_message
+    payload = json.dumps(
+        {"jsonrpc": "2.0", "error": error, "id": 1},
+        separators=(",", ":"),
+    ).encode("utf-8")
+    client = _client(payload)
+
+    with pytest.raises(BetfairReadOnlyError, match="malformed error") as raised:
+        client.read_current_orders_page()
+
+    assert raised.value.json_rpc_code is None
+    assert raised.value.provider_error_code is None
+    assert raised.value.rpc_error_evidence_sha256 is None
+
+
+def test_transport_error_evidence_binds_exact_correlated_request_identity() -> None:
+    client = BetfairReadOnlyClient(
+        BetfairSessionCredentials("app-secret", "session-secret"),
+        transport=CorrelatedErrorTransport(),
+        clock=lambda: FIXED_NOW,
+    )
+
+    captured = []
+    for _ in range(2):
+        with pytest.raises(BetfairReadOnlyError) as raised:
+            client.read_account_funds()
+        captured.append(raised.value)
+
+    first, second = captured
+    assert first.request_id == 1
+    assert second.request_id == 2
+    assert first.operation == "AccountAPING/v1.0/getAccountFunds"
+    assert second.operation == first.operation
+    assert first.json_rpc_code == -32099
+    assert second.json_rpc_code == -32099
+    assert first.provider_error_code == "INVALID_APP_KEY"
+    assert second.provider_error_code == "INVALID_APP_KEY"
+    assert first.response_payload_sha256 != second.response_payload_sha256
+    assert first.rpc_error_evidence_sha256 is not None
+    assert second.rpc_error_evidence_sha256 is not None
+    assert first.rpc_error_evidence_sha256 != second.rpc_error_evidence_sha256
+    assert "provider detail" not in first.rpc_error_evidence_sha256
+    assert "app-secret" not in str(first)
+    assert "session-secret" not in str(first)
+
+
+def test_rpc_error_evidence_requires_complete_transport_correlation_metadata() -> None:
+    uncorrelated = BetfairReadOnlyError(
+        "synthetic",
+        json_rpc_code=-32099,
+        provider_error_code="INVALID_APP_KEY",
+    )
+
+    assert uncorrelated.request_id is None
+    assert uncorrelated.operation is None
+    assert uncorrelated.response_payload_sha256 is None
+    assert uncorrelated.rpc_error_evidence_sha256 is None
+

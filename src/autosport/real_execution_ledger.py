@@ -416,6 +416,55 @@ class VerifiedExecutionLedgerSnapshot:
     event_count: int
 
 
+@dataclass(frozen=True, slots=True)
+class ProviderEvidenceBindingView:
+    """Immutable provider-evidence fact derived from a verified ledger snapshot."""
+
+    evidence_id: str
+    observed_at: str
+    source: str
+    acknowledgement_sha256: str | None = None
+
+    def __post_init__(self) -> None:
+        _sha256_text(self.evidence_id, "evidence_id")
+        _timestamp(self.observed_at, "observed_at")
+        _text(self.source, "source")
+        if self.acknowledgement_sha256 is not None:
+            _sha256_text(
+                self.acknowledgement_sha256,
+                "acknowledgement_sha256",
+            )
+
+
+@dataclass(frozen=True, slots=True)
+class ExecutionAttemptReadView:
+    """Typed immutable view of one attempt from one verified ledger snapshot."""
+
+    attempt: ExecutionAttempt
+    action: ExecutionAction
+    state: AttemptState
+    submitted_at: str | None
+    unknown_reason: str | None
+    unknown_observed_at: str | None
+    provider_order_ref: str | None
+    provider_evidence: ProviderEvidenceBindingView | None
+    acknowledgement: ExternalAcknowledgement | None
+    found_reconciliations: tuple[ExternalEffectReconciliation, ...]
+    not_found_reconciliation: ReconciliationSnapshot | None
+
+
+@dataclass(frozen=True, slots=True)
+class VerifiedExecutionPlanView:
+    """Plan/attempt facts tied to the exact immutable ledger bytes they came from."""
+
+    snapshot_sha256: str
+    event_count: int
+    plan: ExecutionPlan
+    plan_fingerprint: str
+    stale: bool
+    attempts: tuple[ExecutionAttemptReadView, ...]
+
+
 class RealExecutionLedger:
     """Durable execution facts only; deliberately contains no provider write capability."""
 
@@ -2365,6 +2414,173 @@ class RealExecutionLedger:
         events = self._parse(raw)
         return VerifiedExecutionLedgerSnapshot(
             raw, hashlib.sha256(raw).hexdigest(), len(events)
+        )
+
+    def verified_execution_view(self, plan_id: str) -> VerifiedExecutionPlanView:
+        """Return typed execution facts from one already-verified ledger snapshot.
+
+        The view is a read model only. It does not authorize execution, retry,
+        acknowledgement, reconciliation or risk capacity. Consumers that act
+        on the view must bind subsequent mutation to snapshot_sha256 through
+        the canonical writer/admission authority.
+        """
+
+        _text(plan_id, "plan_id")
+        snapshot = self.verified_snapshot()
+        # Parse the captured bytes, never a second filesystem read, so every
+        # returned fact is mechanically tied to snapshot.sha256/event_count.
+        events = self._parse(snapshot.payload)
+        plan_event = self._plan_event(events, plan_id)
+        if plan_event is None:
+            raise KeyError(plan_id)
+        plan = self._plan_from_dict(plan_event["payload"]["plan"])
+        actions = {action.action_id: action for action in plan.actions}
+
+        attempts: list[ExecutionAttemptReadView] = []
+        for reserved in events:
+            if (
+                reserved["plan_id"] != plan_id
+                or reserved["event_type"] != EventType.ATTEMPT_RESERVED.value
+            ):
+                continue
+            attempt_id = reserved["attempt_id"]
+            action_id = reserved["action_id"]
+            if not isinstance(attempt_id, str) or not isinstance(action_id, str):
+                raise ExecutionLedgerIntegrityError(
+                    "reserved attempt identity is invalid"
+                )
+            action = actions.get(action_id)
+            if action is None:
+                raise ExecutionLedgerIntegrityError(
+                    "reserved attempt references missing plan action"
+                )
+            attempt_events = self._attempt_events(events, attempt_id)
+            state = self._state(attempt_events)
+            if state is None:
+                raise ExecutionLedgerIntegrityError(
+                    "reserved attempt has no state"
+                )
+
+            submitted = [
+                event
+                for event in attempt_events
+                if event["event_type"] == EventType.ATTEMPT_SUBMITTED.value
+            ]
+            unknown = [
+                event
+                for event in attempt_events
+                if event["event_type"] == EventType.ATTEMPT_UNKNOWN.value
+            ]
+            provider_refs = [
+                event
+                for event in attempt_events
+                if event["event_type"]
+                == EventType.PROVIDER_ORDER_REFERENCE_BOUND.value
+            ]
+            provider_evidence_events = [
+                event
+                for event in attempt_events
+                if event["event_type"] == EventType.PROVIDER_EVIDENCE_BOUND.value
+            ]
+            acknowledgements = [
+                event
+                for event in attempt_events
+                if event["event_type"] == EventType.EXTERNAL_ACKNOWLEDGEMENT.value
+            ]
+            found_events = [
+                event
+                for event in attempt_events
+                if event["event_type"] == EventType.RECONCILED_FOUND.value
+            ]
+            not_found_events = [
+                event
+                for event in attempt_events
+                if event["event_type"] == EventType.RECONCILED_NOT_FOUND.value
+            ]
+            for name, matches in (
+                ("submission", submitted),
+                ("UNKNOWN transition", unknown),
+                ("provider order reference", provider_refs),
+                ("provider evidence", provider_evidence_events),
+                ("external acknowledgement", acknowledgements),
+                ("not-found reconciliation", not_found_events),
+            ):
+                if len(matches) > 1:
+                    raise ExecutionLedgerIntegrityError(
+                        f"attempt has multiple {name} facts"
+                    )
+
+            submitted_at = (
+                submitted[0]["payload"]["submitted_at"] if submitted else None
+            )
+            unknown_reason = unknown[0]["payload"]["reason"] if unknown else None
+            unknown_observed_at = (
+                unknown[0]["payload"]["observed_at"] if unknown else None
+            )
+            provider_order_ref = (
+                provider_refs[0]["payload"]["provider_order_ref"]
+                if provider_refs
+                else None
+            )
+            provider_evidence = None
+            if provider_evidence_events:
+                payload = provider_evidence_events[0]["payload"]
+                provider_evidence = ProviderEvidenceBindingView(
+                    evidence_id=payload["evidence_id"],
+                    observed_at=payload["observed_at"],
+                    source=payload["source"],
+                    acknowledgement_sha256=payload.get(
+                        "acknowledgement_sha256"
+                    ),
+                )
+            acknowledgement = (
+                self._acknowledgement_from_dict(
+                    acknowledgements[0]["payload"]
+                )
+                if acknowledgements
+                else None
+            )
+            found_reconciliations = tuple(
+                self._found_reconciliation_from_dict(event["payload"])
+                for event in found_events
+            )
+            not_found_reconciliation = (
+                self._reconciliation_snapshot_from_dict(
+                    not_found_events[0]["payload"]
+                )
+                if not_found_events
+                else None
+            )
+            attempt = ExecutionAttempt(
+                attempt_id=attempt_id,
+                plan_id=plan_id,
+                action_id=action_id,
+                effect_fingerprint=reserved["payload"]["effect_fingerprint"],
+                reserved_at=reserved["payload"]["reserved_at"],
+            )
+            attempts.append(
+                ExecutionAttemptReadView(
+                    attempt=attempt,
+                    action=action,
+                    state=state,
+                    submitted_at=submitted_at,
+                    unknown_reason=unknown_reason,
+                    unknown_observed_at=unknown_observed_at,
+                    provider_order_ref=provider_order_ref,
+                    provider_evidence=provider_evidence,
+                    acknowledgement=acknowledgement,
+                    found_reconciliations=found_reconciliations,
+                    not_found_reconciliation=not_found_reconciliation,
+                )
+            )
+
+        return VerifiedExecutionPlanView(
+            snapshot_sha256=snapshot.sha256,
+            event_count=snapshot.event_count,
+            plan=plan,
+            plan_fingerprint=plan_event["payload"]["plan_fingerprint"],
+            stale=self._stale(events, plan_id),
+            attempts=tuple(attempts),
         )
 
     def verify_integrity(self) -> int:

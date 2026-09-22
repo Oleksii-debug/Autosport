@@ -16,6 +16,19 @@ PRODUCT_CLI_UK_UA = MappingProxyType(
         "product.cli.help": "Показати цю довідку та завершити роботу.",
         "product.cli.usage_prefix": "використання: ",
         "product.cli.options_heading": "Параметри:",
+        "product.cli.workspace.metavar": "ШЛЯХ",
+        "product.cli.source_factory.metavar": "МОДУЛЬ:ФУНКЦІЯ",
+        "product.cli.bankroll.metavar": "СУМА",
+        "product.cli.max_cycles.metavar": "N",
+        "product.cli.poll_seconds.metavar": "СЕКУНДИ",
+        "product.cli.error.prefix": "помилка:",
+        "product.cli.error.required": "Потрібні обов'язкові аргументи: {arguments}.",
+        "product.cli.error.invalid_number": (
+            "Некоректне числове значення для {option}: {value}."
+        ),
+        "product.cli.error.unrecognized": "Нерозпізнані аргументи: {arguments}.",
+        "product.cli.error.missing_value": "Для параметра {option} потрібне одне значення.",
+        "product.cli.error.generic": "Некоректні аргументи командного рядка.",
         "product.cli.workspace.help": (
             "Робочий каталог канонічного продукту. Якщо не вказано, використовується "
             "канонічний каталог даних користувача Autosport."

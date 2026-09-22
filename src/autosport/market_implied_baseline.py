@@ -318,7 +318,7 @@ def build_market_implied_baseline_evidence(
                 "canonical durable market identity contradicts verified outcome authority"
             )
         causally_known_selections.add(event.selection_id)
-    if tuple(sorted(causally_known_selections)) != outcome_authority.selection_ids:
+    if causally_known_selections.difference(outcome_authority.selection_ids):
         raise MarketImpliedBaselineError(
             "canonical durable market history contradicts verified outcome roster"
         )

@@ -86,6 +86,16 @@ def test_auth_and_rate_limit_open_immediately(outcome: ProviderHealthOutcome) ->
     assert state.consecutive_operational_failures == 0
 
 
+def test_open_state_is_not_downgraded_by_later_operational_failure() -> None:
+    authority = ProviderHealthAuthority()
+    healthy(authority)
+    opened = authority.apply(event(2, ProviderHealthOutcome.AUTH_FAILURE))
+    assert opened.status is ProviderHealthStatus.OPEN
+    later = authority.apply(event(3, ProviderHealthOutcome.TIMEOUT))
+    assert later.status is ProviderHealthStatus.OPEN
+    assert later.consecutive_operational_failures == 1
+
+
 def test_recovery_requires_configured_consecutive_successes() -> None:
     authority = ProviderHealthAuthority(ProviderHealthPolicy(consecutive_successes_to_recover=3))
     healthy(authority)

@@ -82,6 +82,14 @@ class TrustedProtectedTreePolicy:
             raise ProtectedTreeGateError(
                 "protected_prefixes must not contain duplicates"
             )
+        if not (
+            self.protected_paths
+            or self.protected_prefixes
+            or self.immutable_policy_paths
+        ):
+            raise ProtectedTreeGateError(
+                "trusted protected-tree policy must protect at least one path or prefix"
+            )
 
         effective_immutable = set(self.immutable_policy_paths)
         if effective_immutable.intersection(self.content_change_allowlist):
@@ -143,6 +151,10 @@ def verify_base_trusted_protected_tree(
     expected_protected = {
         path: entry for path, entry in base.items() if policy.protects(path)
     }
+    if not expected_protected:
+        raise ProtectedTreeGateError(
+            "trusted protected-tree policy selects no paths from trusted base"
+        )
 
     declared_missing_from_base = sorted(
         path

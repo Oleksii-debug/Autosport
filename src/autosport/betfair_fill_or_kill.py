@@ -1,0 +1,365 @@
+from __future__ import annotations
+
+import hashlib
+import json
+from dataclasses import dataclass
+from decimal import Decimal, InvalidOperation
+from enum import Enum
+from typing import Mapping
+
+
+_ORDER_TYPE = "LIMIT"
+_SIDE = "BACK"
+_PERSISTENCE = "LAPSE"
+_TIME_IN_FORCE = "FILL_OR_KILL"
+_HEX = frozenset("0123456789abcdef")
+
+
+class BetfairFillOrKillError(RuntimeError):
+    """Raised when bounded Betfair FILL_OR_KILL semantics are not proven structurally."""
+
+
+class FillOrKillStructuralOutcome(str, Enum):
+    KILLED_ZERO = "KILLED_ZERO"
+    FULLY_MATCHED = "FULLY_MATCHED"
+    MINIMUM_MATCHED_REMAINDER_CANCELLED = "MINIMUM_MATCHED_REMAINDER_CANCELLED"
+
+
+def _text(value: object, name: str) -> str:
+    if type(value) is not str or not value or value != value.strip() or "\x00" in value:
+        raise BetfairFillOrKillError(f"{name} must be non-empty canonical text")
+    try:
+        value.encode("utf-8")
+    except UnicodeEncodeError as exc:
+        raise BetfairFillOrKillError(f"{name} must be valid UTF-8 text") from exc
+    return value
+
+
+def _sha256(value: object, name: str) -> str:
+    raw = _text(value, name).lower()
+    if len(raw) != 64 or any(ch not in _HEX for ch in raw):
+        raise BetfairFillOrKillError(f"{name} must be canonical SHA-256 hex")
+    return raw
+
+
+def _positive_decimal(value: object, name: str) -> Decimal:
+    if isinstance(value, bool) or isinstance(value, float):
+        raise BetfairFillOrKillError(f"{name} must not use bool/float coercion")
+    if type(value) not in {Decimal, str, int}:
+        raise BetfairFillOrKillError(
+            f"{name} must be exact Decimal, canonical decimal text, or int"
+        )
+    if type(value) is str and (not value or value != value.strip()):
+        raise BetfairFillOrKillError(f"{name} must be canonical decimal text")
+    try:
+        parsed = value if type(value) is Decimal else Decimal(str(value))
+    except (InvalidOperation, ValueError) as exc:
+        raise BetfairFillOrKillError(f"{name} must be a finite decimal") from exc
+    if not parsed.is_finite() or parsed <= 0:
+        raise BetfairFillOrKillError(f"{name} must be finite and > 0")
+    return parsed
+
+
+def _nonnegative_decimal(value: object, name: str) -> Decimal:
+    if isinstance(value, bool) or isinstance(value, float):
+        raise BetfairFillOrKillError(f"{name} must not use bool/float coercion")
+    if type(value) not in {Decimal, str, int}:
+        raise BetfairFillOrKillError(
+            f"{name} must be exact Decimal, canonical decimal text, or int"
+        )
+    if type(value) is str and (not value or value != value.strip()):
+        raise BetfairFillOrKillError(f"{name} must be canonical decimal text")
+    try:
+        parsed = value if type(value) is Decimal else Decimal(str(value))
+    except (InvalidOperation, ValueError) as exc:
+        raise BetfairFillOrKillError(f"{name} must be a finite decimal") from exc
+    if not parsed.is_finite() or parsed < 0:
+        raise BetfairFillOrKillError(f"{name} must be finite and >= 0")
+    return parsed
+
+
+def _decimal_text(value: Decimal) -> str:
+    if type(value) is not Decimal or not value.is_finite():
+        raise BetfairFillOrKillError("internal decimal must be exact finite Decimal")
+    text = format(value, "f")
+    if "." in text:
+        text = text.rstrip("0").rstrip(".")
+    return "0" if text in {"-0", ""} else text
+
+
+def _positive_selection(value: object) -> str:
+    raw = _text(value, "selection_id")
+    if not raw.isascii() or not raw.isdigit() or raw.startswith("0"):
+        raise BetfairFillOrKillError(
+            "selection_id must be canonical positive integer text"
+        )
+    if int(raw) <= 0:
+        raise BetfairFillOrKillError(
+            "selection_id must be canonical positive integer text"
+        )
+    return raw
+
+
+def _canonical_json(value: object) -> bytes:
+    try:
+        return json.dumps(
+            value,
+            ensure_ascii=True,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        ).encode("utf-8")
+    except (TypeError, ValueError, UnicodeEncodeError) as exc:
+        raise BetfairFillOrKillError("value is not canonical JSON") from exc
+
+
+def _digest(value: object) -> str:
+    return hashlib.sha256(_canonical_json(value)).hexdigest()
+
+
+@dataclass(frozen=True, slots=True)
+class BetfairFillOrKillRequest:
+    """A bounded BACK/LIMIT/FOK request projection, with no provider-write capability."""
+
+    market_id: str
+    selection_id: str
+    requested_size: Decimal | str | int
+    limit_price: Decimal | str | int
+    min_fill_size: Decimal | str | int | None = None
+    side: str = _SIDE
+    order_type: str = _ORDER_TYPE
+    persistence_type: str = _PERSISTENCE
+    time_in_force: str = _TIME_IN_FORCE
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "market_id", _text(self.market_id, "market_id"))
+        object.__setattr__(self, "selection_id", _positive_selection(self.selection_id))
+        if self.side != _SIDE:
+            raise BetfairFillOrKillError(
+                "bounded FOK contract currently supports BACK only"
+            )
+        if self.order_type != _ORDER_TYPE:
+            raise BetfairFillOrKillError("FOK request must use LIMIT order_type")
+        if self.persistence_type != _PERSISTENCE:
+            raise BetfairFillOrKillError(
+                "bounded FOK contract requires LAPSE persistence"
+            )
+        if self.time_in_force != _TIME_IN_FORCE:
+            raise BetfairFillOrKillError(
+                "FOK request must use time_in_force=FILL_OR_KILL"
+            )
+
+        size = _positive_decimal(self.requested_size, "requested_size")
+        price = _positive_decimal(self.limit_price, "limit_price")
+        if price <= 1:
+            raise BetfairFillOrKillError("limit_price must be > 1")
+        object.__setattr__(self, "requested_size", size)
+        object.__setattr__(self, "limit_price", price)
+
+        if self.min_fill_size is not None:
+            minimum = _positive_decimal(self.min_fill_size, "min_fill_size")
+            if minimum > size:
+                raise BetfairFillOrKillError(
+                    "min_fill_size cannot exceed requested_size"
+                )
+            object.__setattr__(self, "min_fill_size", minimum)
+
+    @property
+    def provider_instruction(self) -> Mapping[str, object]:
+        limit_order: dict[str, object] = {
+            "size": _decimal_text(self.requested_size),
+            "price": _decimal_text(self.limit_price),
+            "persistenceType": _PERSISTENCE,
+            "timeInForce": _TIME_IN_FORCE,
+        }
+        if self.min_fill_size is not None:
+            limit_order["minFillSize"] = _decimal_text(self.min_fill_size)
+        return {
+            "selectionId": int(self.selection_id),
+            "handicap": 0,
+            "side": _SIDE,
+            "orderType": _ORDER_TYPE,
+            "limitOrder": limit_order,
+        }
+
+    @property
+    def request_projection_sha256(self) -> str:
+        return _digest(
+            {
+                "schema": "autosport.betfair_fill_or_kill_request",
+                "schema_version": 1,
+                "marketId": self.market_id,
+                "instruction": self.provider_instruction,
+            }
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class BetfairFillOrKillImmediateReport:
+    """Exact immediate response assertions; provider origin is not implied."""
+
+    request_projection_sha256: str
+    response_sha256: str
+    top_status: str
+    instruction_status: str
+    size_matched: Decimal | str | int
+    average_price_matched: Decimal | str | int
+    bet_id: str | None = None
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "request_projection_sha256",
+            _sha256(self.request_projection_sha256, "request_projection_sha256"),
+        )
+        object.__setattr__(
+            self,
+            "response_sha256",
+            _sha256(self.response_sha256, "response_sha256"),
+        )
+        if self.top_status != "SUCCESS" or self.instruction_status != "SUCCESS":
+            raise BetfairFillOrKillError(
+                "bounded FOK structural classification requires exact SUCCESS/SUCCESS report"
+            )
+        matched = _nonnegative_decimal(self.size_matched, "size_matched")
+        vwap = _nonnegative_decimal(
+            self.average_price_matched,
+            "average_price_matched",
+        )
+        if matched == 0 and vwap != 0:
+            raise BetfairFillOrKillError(
+                "zero matched size cannot claim a positive matched VWAP"
+            )
+        if matched > 0 and vwap <= 0:
+            raise BetfairFillOrKillError(
+                "positive matched size requires positive matched VWAP"
+            )
+        object.__setattr__(self, "size_matched", matched)
+        object.__setattr__(self, "average_price_matched", vwap)
+        if self.bet_id is not None:
+            object.__setattr__(self, "bet_id", _text(self.bet_id, "bet_id"))
+
+
+@dataclass(frozen=True, slots=True)
+class BetfairFillOrKillStructuralEvidence:
+    """Structural FOK semantics only; this object grants no execution authority."""
+
+    request_projection_sha256: str
+    response_sha256: str
+    outcome: FillOrKillStructuralOutcome
+    requested_size: Decimal
+    min_fill_size: Decimal | None
+    size_matched: Decimal
+    matched_vwap: Decimal
+    unmatched_remainder: Decimal
+    unmatched_remainder_terminal_by_fok_contract: bool
+    aggregate_vwap_limit_satisfied: bool
+    per_fragment_price_floor_proven: bool = False
+    provider_origin_verified: bool = False
+    grants_execution_authority: bool = False
+    grants_real_money_authority: bool = False
+
+    @property
+    def evidence_id(self) -> str:
+        return _digest(
+            {
+                "schema": "autosport.betfair_fill_or_kill_structural_evidence",
+                "schema_version": 1,
+                "request_projection_sha256": self.request_projection_sha256,
+                "response_sha256": self.response_sha256,
+                "outcome": self.outcome.value,
+                "requested_size": _decimal_text(self.requested_size),
+                "min_fill_size": (
+                    None
+                    if self.min_fill_size is None
+                    else _decimal_text(self.min_fill_size)
+                ),
+                "size_matched": _decimal_text(self.size_matched),
+                "matched_vwap": _decimal_text(self.matched_vwap),
+                "unmatched_remainder": _decimal_text(self.unmatched_remainder),
+                "unmatched_remainder_terminal_by_fok_contract": (
+                    self.unmatched_remainder_terminal_by_fok_contract
+                ),
+                "aggregate_vwap_limit_satisfied": self.aggregate_vwap_limit_satisfied,
+                "per_fragment_price_floor_proven": self.per_fragment_price_floor_proven,
+                "provider_origin_verified": self.provider_origin_verified,
+                "grants_execution_authority": self.grants_execution_authority,
+                "grants_real_money_authority": self.grants_real_money_authority,
+            }
+        )
+
+
+def inspect_betfair_fill_or_kill_lifecycle(
+    request: BetfairFillOrKillRequest,
+    report: BetfairFillOrKillImmediateReport,
+) -> BetfairFillOrKillStructuralEvidence:
+    """Classify exact documented FOK response semantics without minting provider authority."""
+
+    if type(request) is not BetfairFillOrKillRequest:
+        raise BetfairFillOrKillError(
+            "request must be an exact BetfairFillOrKillRequest"
+        )
+    if type(report) is not BetfairFillOrKillImmediateReport:
+        raise BetfairFillOrKillError(
+            "report must be an exact BetfairFillOrKillImmediateReport"
+        )
+    if report.request_projection_sha256 != request.request_projection_sha256:
+        raise BetfairFillOrKillError(
+            "immediate report does not bind the exact FOK request projection"
+        )
+    if report.size_matched > request.requested_size:
+        raise BetfairFillOrKillError(
+            "provider report cannot match more than requested_size"
+        )
+
+    if report.size_matched == 0:
+        outcome = FillOrKillStructuralOutcome.KILLED_ZERO
+        aggregate_vwap_satisfied = True
+    else:
+        if report.average_price_matched < request.limit_price:
+            raise BetfairFillOrKillError(
+                "matched FOK VWAP is below the BACK limit-price floor"
+            )
+        aggregate_vwap_satisfied = True
+        if request.min_fill_size is None:
+            if report.size_matched != request.requested_size:
+                raise BetfairFillOrKillError(
+                    "FOK without min_fill_size must fully match or match zero"
+                )
+            outcome = FillOrKillStructuralOutcome.FULLY_MATCHED
+        else:
+            if report.size_matched < request.min_fill_size:
+                raise BetfairFillOrKillError(
+                    "positive FOK match is below the declared min_fill_size"
+                )
+            outcome = (
+                FillOrKillStructuralOutcome.FULLY_MATCHED
+                if report.size_matched == request.requested_size
+                else FillOrKillStructuralOutcome.MINIMUM_MATCHED_REMAINDER_CANCELLED
+            )
+
+    remainder = request.requested_size - report.size_matched
+    return BetfairFillOrKillStructuralEvidence(
+        request_projection_sha256=request.request_projection_sha256,
+        response_sha256=report.response_sha256,
+        outcome=outcome,
+        requested_size=request.requested_size,
+        min_fill_size=request.min_fill_size,
+        size_matched=report.size_matched,
+        matched_vwap=report.average_price_matched,
+        unmatched_remainder=remainder,
+        unmatched_remainder_terminal_by_fok_contract=True,
+        aggregate_vwap_limit_satisfied=aggregate_vwap_satisfied,
+    )
+
+
+def resolve_betfair_fill_or_kill_lifecycle(
+    request: BetfairFillOrKillRequest,
+    report: BetfairFillOrKillImmediateReport,
+) -> BetfairFillOrKillStructuralEvidence:
+    """Fail closed until canonical product request/provider-response origin is composed."""
+
+    inspect_betfair_fill_or_kill_lifecycle(request, report)
+    raise BetfairFillOrKillError(
+        "FOK structural assertions lack canonical product-issued request and provider-origin authority"
+    )

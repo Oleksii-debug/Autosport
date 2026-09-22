@@ -1034,14 +1034,16 @@ class PaperSettlementLearningBridge:
         settlement_bundle_sha256: str,
         outcome: Outcome,
         reward: RewardEvidence,
+        revealed_at: str,
         reference: object,
         allow_missing_legacy: bool = False,
     ) -> RewardEvidence:
+        canonical_revealed_at = _instant_id(revealed_at, "reward available_at")
         expected_outcome, expected_reward = cls._paper_observed_evidence(
             binding,
             ticket,
             bundle_sha256=settlement_bundle_sha256,
-            revealed_at=reward.available_at,
+            revealed_at=canonical_revealed_at,
         )
         if outcome != expected_outcome or reward != expected_reward:
             raise PaperSettlementLearningBridgeError(
@@ -1188,7 +1190,11 @@ class PaperSettlementLearningBridge:
         observation, action = self._bound_observation_action(binding)
         self._decision_matches(decision, ticket, action, observation)
 
-        resolutions = self._outbox_resolutions(outbox)
+        intent = binding.get("settlement_intent")
+        if intent is not None:
+            resolutions = self._intent_resolutions(intent)
+        else:
+            resolutions = self._outbox_resolutions(outbox)
         rebuilt = self._bundle(ticket, resolutions, at=as_of)
         if rebuilt is None:
             raise PaperSettlementLearningBridgeError(
@@ -1196,16 +1202,33 @@ class PaperSettlementLearningBridge:
             )
         bundle, known = rebuilt
         bundle_sha = _digest(bundle)
+        canonical_known = dict(sorted(known.items()))
+        if intent is not None and (
+            intent.get("settlement_evidence") != bundle
+            or intent.get("settlement_bundle_sha256") != bundle_sha
+            or intent.get("known_quote_outcomes") != canonical_known
+        ):
+            raise PaperSettlementLearningBridgeError(
+                "durable pre-settlement intent differs from current PAPER settlement truth"
+            )
         if (
             bundle != outbox.get("settlement_evidence")
             or bundle_sha != outbox.get("settlement_bundle_sha256")
-            or dict(sorted(known.items())) != outbox.get("known_quote_outcomes")
+            or canonical_known != outbox.get("known_quote_outcomes")
             or ticket.status.value != outbox.get("ticket_status")
             or str(ticket.payout) != outbox.get("ticket_payout")
         ):
+            if intent is not None:
+                raise PaperSettlementLearningBridgeError(
+                    "durable learner outbox settlement evidence differs from pre-settlement intent"
+                )
             raise PaperSettlementLearningBridgeError(
                 "durable learner outbox differs from current PAPER settlement truth"
             )
+        revealed_at = max(
+            (item["available_at"] for item in bundle),
+            key=lambda value: _instant(value, "settlement available_at"),
+        )
 
         outcome, reward, transition, checkpoint = self._outbox_objects(outbox)
         verified_reward = self._verify_observed_reward_reference(
@@ -1214,15 +1237,19 @@ class PaperSettlementLearningBridge:
             settlement_bundle_sha256=bundle_sha,
             outcome=outcome,
             reward=reward,
+            revealed_at=revealed_at,
             reference=outbox.get("observed_reward_reference"),
             allow_missing_legacy=True,
         )
         if (
             reward != verified_reward
+            or outcome.revealed_at != revealed_at
+            or verified_reward.available_at != revealed_at
+            or transition.resolved_at != revealed_at
             or outbox.get("net_reward") != str(verified_reward.reward)
         ):
             raise PaperSettlementLearningBridgeError(
-                "durable learner outbox reward differs from source-resolved reward"
+                "durable learner outbox reward chronology differs from source-resolved settlement truth"
             )
         return outcome, verified_reward, transition, checkpoint
 
@@ -1418,6 +1445,7 @@ class PaperSettlementLearningBridge:
             settlement_bundle_sha256=bundle_sha,
             outcome=outcome,
             reward=reward,
+            revealed_at=revealed_at,
             reference=observed_reward_reference,
         )
         baseline = _checkpoint(binding["baseline_checkpoint"])

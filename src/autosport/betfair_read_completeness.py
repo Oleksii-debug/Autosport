@@ -126,6 +126,7 @@ class BetfairReadCompletenessWitness:
                 f"Betfair read is not complete: {self.completeness.value}"
             )
         self.assert_issued()
+
     def assert_authoritative_for(self, *, venue_id: str, account_id: str) -> None:
         """Require positive completeness for the exact configured client scope."""
         self.assert_authoritative()

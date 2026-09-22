@@ -159,12 +159,21 @@ def _is_64bit_windows() -> bool:
     return sys.maxsize > 2**32
 
 
-def _registry_targets(*, windows_64bit: bool) -> tuple[tuple[str, str], ...]:
-    hklm = WEBVIEW2_HKLM_64_SUBKEY if windows_64bit else WEBVIEW2_HKLM_32_SUBKEY
-    return (("HKLM", hklm), ("HKCU", WEBVIEW2_HKCU_SUBKEY))
+def _registry_targets(
+    *, windows_64bit: bool
+) -> tuple[tuple[str, str, bool], ...]:
+    return (
+        ("HKLM", WEBVIEW2_HKLM_SUBKEY, windows_64bit),
+        ("HKCU", WEBVIEW2_HKCU_SUBKEY, False),
+    )
 
 
-def _read_registry_pv(hive: str, subkey: str) -> RegistryRead:
+def _read_registry_pv(
+    hive: str,
+    subkey: str,
+    *,
+    wow64_32_view: bool = False,
+) -> RegistryRead:
     """Read Microsoft's documented pv value without requiring elevated access."""
 
     try:
@@ -176,8 +185,15 @@ def _read_registry_pv(hive: str, subkey: str) -> RegistryRead:
         "HKLM": winreg.HKEY_LOCAL_MACHINE,
         "HKCU": winreg.HKEY_CURRENT_USER,
     }[hive]
+    access = winreg.KEY_READ
+    if wow64_32_view:
+        wow64_32key = getattr(winreg, "KEY_WOW64_32KEY", None)
+        if type(wow64_32key) is not int:
+            return RegistryRead(False, False, error_type="RegistryViewUnavailable")
+        access |= wow64_32key
+
     try:
-        key = winreg.OpenKey(root, subkey, 0, winreg.KEY_READ)
+        key = winreg.OpenKey(root, subkey, 0, access)
     except FileNotFoundError:
         return RegistryRead(False, False)
     except OSError as exc:
@@ -281,16 +297,21 @@ def evaluate_webview2_registry_reads(
         for hive, subkey, read in reads
     )
     # Preserve the documented installed-Runtime resolution precedence: machine-level
-    # registration is considered before per-user registration.  Choosing the highest
-    # visible pv would be fail-open when a lower machine Runtime shadows a newer
-    # per-user Runtime and an explicit release minimum is in force.
-    valid_versions = [
-        item.version
-        for item in observations
-        if item.status is RegistryObservationStatus.VALID and item.version is not None
-    ]
-    if valid_versions:
-        selected = valid_versions[0]
+    # registration is considered before per-user registration.  A read ERROR on a
+    # higher-precedence target is not equivalent to MISSING/INVALID: it leaves the
+    # actually selected Runtime unknown, so a later VALID target cannot prove
+    # availability or an explicit minimum.
+    selected: str | None = None
+    blocked_by_error = False
+    for item in observations:
+        if item.status is RegistryObservationStatus.ERROR:
+            blocked_by_error = True
+            break
+        if item.status is RegistryObservationStatus.VALID:
+            selected = item.version
+            break
+
+    if selected is not None:
         selected_tuple = _parse_version(selected, allow_zero=False)
         status = (
             WebView2RuntimeStatus.BELOW_EXPLICIT_MINIMUM
@@ -305,7 +326,7 @@ def evaluate_webview2_registry_reads(
             observations=observations,
         )
 
-    if any(
+    if blocked_by_error or any(
         item.status in {RegistryObservationStatus.INVALID, RegistryObservationStatus.ERROR}
         for item in observations
     ):
@@ -341,8 +362,18 @@ def probe_webview2_runtime(
 
     windows_64bit = _is_64bit_windows()
     reads = tuple(
-        (hive, subkey, _read_registry_pv(hive, subkey))
-        for hive, subkey in _registry_targets(windows_64bit=windows_64bit)
+        (
+            hive,
+            subkey,
+            _read_registry_pv(
+                hive,
+                subkey,
+                wow64_32_view=wow64_32_view,
+            ),
+        )
+        for hive, subkey, wow64_32_view in _registry_targets(
+            windows_64bit=windows_64bit
+        )
     )
     return evaluate_webview2_registry_reads(
         reads,

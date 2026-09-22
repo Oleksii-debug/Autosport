@@ -68,6 +68,10 @@ class _SignalStopRequest:
     def __call__(self) -> bool:
         return self._event.is_set()
 
+    def wait(self, timeout: float) -> bool:
+        """Wait for canonical signal STOP without masking SIGINT/SIGTERM."""
+        return self._event.wait(timeout)
+
     def handle(self, signum: int, _frame: object) -> None:
         self._signal_number = signum
         self._event.set()
@@ -625,7 +629,12 @@ class HeadlessCollectorService:
                 jittered = delay * (
                     1 + self.config.jitter_fraction * float(random_value)
                 )
-                self.sleep(min(self.config.max_backoff_seconds, jittered))
+                backoff = min(self.config.max_backoff_seconds, jittered)
+                if isinstance(self.stop_requested, _SignalStopRequest):
+                    self.stop_requested.wait(backoff)
+                    self._stop_if_requested()
+                else:
+                    self.sleep(backoff)
                 delay = min(self.config.max_backoff_seconds, delay * 2)
         raise AssertionError("unreachable retry loop")
 

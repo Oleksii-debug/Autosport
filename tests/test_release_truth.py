@@ -51,25 +51,53 @@ def test_machine_green_does_not_infer_human_or_nvda_truth() -> None:
     assert audit.proves_whole_product_complete is False
 
 
-def test_explicit_human_and_nvda_evidence_can_complete_handoff_evidence() -> None:
+def test_caller_evidence_refs_cannot_complete_human_or_nvda_handoff() -> None:
     audit = audit_release_truth(
         audit_input(
             machine_proofs=complete_machine_proofs(),
             claims=ReleaseTruthClaims(
                 human_tested=True,
-                human_test_evidence_ref="artifact://human-windows-walkthrough",
+                human_test_evidence_ref="artifact://caller-created-human-label",
                 nvda_verified=True,
-                nvda_evidence_ref="artifact://nvda-session",
+                nvda_evidence_ref="artifact://caller-created-nvda-label",
             ),
         )
     )
 
     assert audit.machine_evidence_complete
-    assert audit.physical_acceptance_evidence_complete
-    assert audit.release_handoff_evidence_complete
-    assert audit.truth_claims_evidence_safe
-    assert audit.real_money_execution is False
+    assert audit.human_tested is False
+    assert audit.nvda_verified is False
+    assert audit.physical_acceptance_evidence_complete is False
+    assert audit.release_handoff_evidence_complete is False
+    assert audit.truth_claims_evidence_safe is False
+    assert [item.claim for item in audit.truth_claim_problems] == [
+        "HUMAN_TESTED",
+        "NVDA_VERIFIED",
+    ]
     assert audit.proves_whole_product_complete is False
+
+
+def test_caller_real_money_ref_cannot_make_positive_truth_evidence_safe() -> None:
+    audit = audit_release_truth(
+        audit_input(
+            machine_proofs=complete_machine_proofs(),
+            claims=ReleaseTruthClaims(
+                real_money_execution=True,
+                real_money_evidence_ref="artifact://caller-created-real-money-label",
+            ),
+        )
+    )
+
+    assert audit.real_money_execution is False
+    assert audit.truth_claims_evidence_safe is False
+    assert [(item.claim, item.reason) for item in audit.truth_claim_problems] == [
+        (
+            "REAL_MONEY_EXECUTION",
+            "positive real-money execution truth requires independently verified "
+            "product-issued execution evidence; evidence reference text alone "
+            "is not authority",
+        )
+    ]
 
 
 def test_positive_manual_or_real_money_claims_without_evidence_fail_closed() -> None:
@@ -118,13 +146,16 @@ def test_whole_product_complete_remains_outside_audit_authority() -> None:
         )
     )
 
-    assert audit.release_handoff_evidence_complete
+    assert audit.release_handoff_evidence_complete is False
+    assert audit.human_tested is False
+    assert audit.nvda_verified is False
+    assert audit.real_money_execution is False
     assert audit.whole_product_complete_claimed
-    assert [(item.claim, item.reason) for item in audit.truth_claim_problems] == [
-        (
-            "WHOLE_PRODUCT_COMPLETE",
-            "whole-product completion is outside release-truth audit authority",
-        )
+    assert [item.claim for item in audit.truth_claim_problems] == [
+        "HUMAN_TESTED",
+        "NVDA_VERIFIED",
+        "REAL_MONEY_EXECUTION",
+        "WHOLE_PRODUCT_COMPLETE",
     ]
     assert audit.truth_claims_evidence_safe is False
     assert audit.proves_whole_product_complete is False

@@ -943,6 +943,13 @@ def _parse_place_orders_response(
             "placeOrders report matched stake exceeds requested stake"
         )
     if (
+        instruction.size_matched == 0
+        and instruction.average_price_matched != 0
+    ):
+        raise BetfairPlaceOrdersAmbiguous(
+            "zero matched stake cannot claim positive average price"
+        )
+    if (
         instruction.order_status == "EXECUTABLE"
         and instruction.size_matched == action.requested_stake
     ):

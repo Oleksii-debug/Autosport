@@ -99,7 +99,7 @@ def _assert_untrusted_not_found_is_not_laundered(
 
     assert not (
         evidence.attempt_state == AttemptState.RECONCILED_NOT_FOUND.value
-        and evidence.terminal
+        and evidence.ledger_terminal
     ), (
         "caller-minted provider NOT_FOUND must not become terminal empirical "
         "no-effect truth merely because the unsafe ledger event was durable"

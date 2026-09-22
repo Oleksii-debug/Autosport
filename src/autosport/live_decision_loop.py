@@ -1519,6 +1519,9 @@ class PersistentLiveDecisionLoop:
             _canonical_json_sha256(event.to_dict())
             for event in snapshot.events
         )
+        decision_snapshot_sha256 = _canonical_json_sha256(
+            [event.to_dict() for event in snapshot.events]
+        )
         provenance = self.intent_provenance
         for intent in produced:
             if intent.strategy_id != provenance.strategy_version_id:
@@ -1533,6 +1536,12 @@ class PersistentLiveDecisionLoop:
                 raise LiveDecisionProgressError(
                     "live intent model identity does not match registered StrategyVersion"
                 )
+            for quote in intent.opportunity.quotes:
+                if quote.market_snapshot_hash != decision_snapshot_sha256:
+                    raise LiveDecisionProgressError(
+                        "live intent snapshot identity does not match the "
+                        "decision-visible snapshot"
+                    )
             for quote_event in intent.risk_context.quotes:
                 quote_sha256 = _canonical_json_sha256(quote_event.to_dict())
                 if quote_sha256 not in visible_event_sha256s:

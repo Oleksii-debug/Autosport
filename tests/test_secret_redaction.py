@@ -108,21 +108,21 @@ class SecretRedactionTests(unittest.TestCase):
     def test_safe_exception_text_reuses_one_shot_secret_iterable(self) -> None:
         secret = "Alpha42"
         dynamic_type = type(
-            "Provider" + secret + "Error",
+            "ProviderRuntimeFailure",
             (RuntimeError,),
             {},
         )
         one_shot_secrets = (value for value in (secret,))
 
         rendered = safe_exception_text(
-            dynamic_type("ordinary detail"),
+            dynamic_type("ordinary detail " + secret),
             extra_secret_values=one_shot_secrets,
         )
 
         self.assertNotIn(secret, rendered)
         self.assertEqual(
             rendered,
-            "Provider" + REDACTED + "Error: ordinary detail",
+            "RuntimeError: ordinary detail " + REDACTED,
         )
 
     def test_known_secret_containing_redacted_marker_is_fully_redacted(self) -> None:
@@ -312,6 +312,35 @@ class SecretRedactionTests(unittest.TestCase):
 
         self.assertEqual(rendered, "ValueError: ordinary detail")
 
+    def test_marker_free_custom_type_name_falls_back_to_builtin_parent(self) -> None:
+        custom_type = type(
+            "OpaqueFailureA1B2C3D4",
+            (RuntimeError,),
+            {},
+        )
+
+        rendered = safe_exception_text(custom_type("ordinary detail"))
+
+        self.assertEqual(rendered, "RuntimeError: ordinary detail")
+        self.assertNotIn("OpaqueFailureA1B2C3D4", rendered)
+
+    def test_custom_direct_baseexception_type_falls_back_to_baseexception(self) -> None:
+        custom_type = type(
+            "OpaqueRootFailure",
+            (BaseException,),
+            {},
+        )
+
+        rendered = safe_exception_text(custom_type("ordinary detail"))
+
+        self.assertEqual(rendered, "BaseException: ordinary detail")
+        self.assertNotIn("OpaqueRootFailure", rendered)
+
+    def test_builtin_exception_type_name_is_preserved(self) -> None:
+        rendered = safe_exception_text(FileNotFoundError("missing"))
+
+        self.assertEqual(rendered, "FileNotFoundError: missing")
+
     def test_hostile_exception_string_still_terminalizes_without_secret(self) -> None:
         class HostileRenderedString(str):
             def __format__(self, spec: str) -> str:
@@ -322,7 +351,7 @@ class SecretRedactionTests(unittest.TestCase):
                 return HostileRenderedString("token=hidden-token-123")
 
         rendered = safe_exception_text(HostileError())
-        self.assertEqual(rendered, "HostileError: token=" + REDACTED)
+        self.assertEqual(rendered, "BaseException: token=" + REDACTED)
 
 
 if __name__ == "__main__":

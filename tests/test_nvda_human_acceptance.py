@@ -1,6 +1,8 @@
 from __future__ import annotations
 
-from copy import deepcopy
+from copy import copy, deepcopy
+from dataclasses import replace
+import pickle
 
 import pytest
 
@@ -12,6 +14,7 @@ from autosport.nvda_human_acceptance import (
     NvdaHumanAcceptanceStructuralResult,
     build_manual_nvda_transcript_template,
     validate_human_nvda_acceptance_transcript,
+    verify_human_nvda_acceptance_structural_result,
 )
 
 ARTIFACT_SHA = "a" * 64
@@ -68,6 +71,92 @@ def test_valid_transcript_is_structural_only_and_never_promotes_truth() -> None:
     assert result.manual_truth_promotion_required is True
     assert result.real_money_execution is False
     assert result.whole_product_complete is False
+
+
+def test_validator_issued_result_is_live_structural_authority() -> None:
+    transcript = _valid_transcript()
+    result = _validate(transcript)
+
+    assert verify_human_nvda_acceptance_structural_result(result) is result
+    assert result.artifact_sha256 == ARTIFACT_SHA
+    assert result.source_sha == SOURCE_SHA
+    assert result.windows_version == transcript["windows_version"]
+    assert result.nvda_version == transcript["nvda_version"]
+    assert result.evidence_origin == HUMAN_NVDA_ORIGIN
+    assert len(result.human_tester_attestation_sha256) == 64
+    assert len(result.journey_content_sha256) == 64
+
+
+def test_shallow_and_deep_copies_do_not_inherit_live_issuance() -> None:
+    result = _validate(_valid_transcript())
+
+    for copied in (copy(result), deepcopy(result)):
+        assert copied == result
+        assert copied is not result
+        with pytest.raises(
+            NvdaHumanAcceptanceError,
+            match="not a live validator-issued authority",
+        ):
+            verify_human_nvda_acceptance_structural_result(copied)
+
+
+def test_pickle_reconstruction_does_not_inherit_live_issuance() -> None:
+    result = _validate(_valid_transcript())
+
+    reconstructed = pickle.loads(pickle.dumps(result))
+    assert reconstructed == result
+    assert reconstructed is not result
+    with pytest.raises(
+        NvdaHumanAcceptanceError,
+        match="not a live validator-issued authority",
+    ):
+        verify_human_nvda_acceptance_structural_result(reconstructed)
+
+
+def test_dataclass_replace_cannot_mint_successor_authority() -> None:
+    result = _validate(_valid_transcript())
+
+    with pytest.raises((TypeError, NvdaHumanAcceptanceError)):
+        replace(result, transcript_sha256="c" * 64)
+
+
+def test_same_object_payload_mutation_invalidates_live_issuance() -> None:
+    result = _validate(_valid_transcript())
+    object.__setattr__(result, "source_sha", "c" * 40)
+
+    with pytest.raises(
+        NvdaHumanAcceptanceError,
+        match="payload changed after validator issuance",
+    ):
+        verify_human_nvda_acceptance_structural_result(result)
+
+
+def test_unregistered_object_new_forgery_is_not_structural_authority() -> None:
+    issued = _validate(_valid_transcript())
+    forged = object.__new__(NvdaHumanAcceptanceStructuralResult)
+    for field_name in (
+        "transcript_sha256",
+        "artifact_sha256",
+        "source_sha",
+        "windows_version",
+        "nvda_version",
+        "evidence_origin",
+        "human_tester_attestation_sha256",
+        "journey_content_sha256",
+        "status",
+        "human_tested",
+        "nvda_verified",
+        "manual_truth_promotion_required",
+        "real_money_execution",
+        "whole_product_complete",
+    ):
+        object.__setattr__(forged, field_name, getattr(issued, field_name))
+
+    with pytest.raises(
+        NvdaHumanAcceptanceError,
+        match="not a live validator-issued authority",
+    ):
+        verify_human_nvda_acceptance_structural_result(forged)
 
 
 def test_generated_template_is_intentionally_invalid() -> None:

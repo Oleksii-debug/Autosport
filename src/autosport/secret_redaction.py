@@ -72,13 +72,35 @@ _BEARER_RE = re.compile(
     r"(?i)\b(?P<scheme>bearer)\s+(?P<value>[A-Za-z0-9._~+/=-]{4,})"
 )
 _KEY_VALUE_RE = re.compile(
-    r"(?i)(?P<prefix>(?P<quote>[\"']?)(?P<key>[A-Za-z0-9_.-]+)(?P=quote)\s*[:=]\s*)"
+    r"(?i)(?P<prefix>(?P<quote>[\"']?)(?P<key>[A-Za-z0-9_.\\-]+)(?P=quote)\s*[:=]\s*)"
     r"(?P<value>\[REDACTED\]|\"(?:\\.|[^\"\\\r\n])*\"|'(?:\\.|[^'\\\r\n])*'|[^\s,;&}\]]+)"
+)
+_KEY_ESCAPE_RE = re.compile(
+    r"\\(?:(?P<u16>u[0-9A-Fa-f]{4})|"
+    r"(?P<u32>U[0-9A-Fa-f]{8})|(?P<x8>x[0-9A-Fa-f]{2}))"
 )
 
 
+def _decode_escaped_key_for_classification(value: str) -> str:
+    """Decode bounded escapes only for sensitive-key classification.
+
+    Operator text keeps its original spelling. This closes serialized JSON/
+    Python-repr credential-key bypasses without interpreting arbitrary values.
+    """
+
+    def replace(match: re.Match[str]) -> str:
+        token = match.group("u16") or match.group("u32") or match.group("x8")
+        try:
+            return chr(int(token[1:], 16))
+        except ValueError:
+            return match.group(0)
+
+    return _KEY_ESCAPE_RE.sub(replace, value)
+
+
 def _normalized_key(value: str) -> str:
-    return re.sub(r"[^a-z0-9]", "", value.casefold())
+    decoded = _decode_escaped_key_for_classification(value)
+    return re.sub(r"[^a-z0-9]", "", decoded.casefold())
 
 
 def is_sensitive_key(key: object) -> bool:

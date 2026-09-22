@@ -775,3 +775,50 @@ def test_working_order_state_invariants():
             leaves_quantity="10",
             average_fill_price=None,
         )
+
+def test_structural_cancel_projection_is_explicitly_non_authoritative():
+    p = reconcile_cancel(
+        working(),
+        [canceled()],
+        request=request(),
+    )
+
+    # The structural reducer may calculate the candidate release, but caller-shaped
+    # DTOs are not canonical ProphetX provider-origin evidence.
+    assert p.released_quantity == Decimal("10")
+    assert p.provider_origin_authoritative is False
+    assert p.exposure_release_authorized is False
+    with pytest.raises(ProphetXCancelError, match="provider-origin authority"):
+        p.assert_provider_origin_authoritative()
+
+    wire = p.wire()
+    assert wire["provider_origin_authority"] == "STRUCTURAL_ONLY_UNVERIFIED_PROVIDER_ORIGIN"
+    assert wire["provider_origin_authoritative"] is False
+    assert wire["exposure_release_authorized"] is False
+
+    restored = decode_checkpoint(encode_checkpoint(p))
+    assert restored.released_quantity == Decimal("10")
+    assert restored.provider_origin_authoritative is False
+    assert restored.exposure_release_authorized is False
+
+
+def test_checkpoint_cannot_launder_structural_projection_into_provider_authority():
+    import autosport.prophetx_cancel_reconciliation as cancel_module
+
+    p = reconcile_cancel(
+        working(),
+        [canceled()],
+        request=request(),
+    )
+    obj = json.loads(encode_checkpoint(p))
+    obj["payload"]["provider_origin_authority"] = "PROVIDER_AUTHORITATIVE"
+    obj["payload"]["provider_origin_authoritative"] = True
+    obj["payload"]["exposure_release_authorized"] = True
+
+    # Recompute the public deterministic cache digest to prove the digest itself is
+    # not an authority boundary. The decoder must reject the semantic elevation.
+    obj["payload_sha256"] = cancel_module._digest(obj["payload"])
+    forged = cancel_module._canon(obj)
+    with pytest.raises(ProphetXCancelConflict, match="checkpoint payload mismatch"):
+        decode_checkpoint(forged)
+

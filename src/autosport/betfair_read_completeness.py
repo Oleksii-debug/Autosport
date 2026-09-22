@@ -20,6 +20,8 @@ from typing import Callable
 import weakref
 
 from .betfair_account_readonly import (
+    ADAPTER_ID,
+    ADAPTER_VERSION,
     BetfairAccountDetailsObservation,
     BetfairAccountFundsObservation,
     BetfairClearedOrderObservation,
@@ -44,6 +46,10 @@ class BetfairObservationCompleteness(str, Enum):
 class BetfairReadCompletenessWitness:
     operation: str
     completeness: BetfairObservationCompleteness
+    venue_id: str
+    account_id: str
+    adapter_id: str
+    adapter_version: str
     query_sha256: str
     attempt_id: str
     started_at: str
@@ -54,6 +60,10 @@ class BetfairReadCompletenessWitness:
 
     def __post_init__(self) -> None:
         _text(self.operation, "operation")
+        _text(self.venue_id, "venue_id")
+        _text(self.account_id, "account_id")
+        if self.adapter_id != ADAPTER_ID or self.adapter_version != ADAPTER_VERSION:
+            raise BetfairReadOnlyError("completeness witness adapter identity mismatch")
         _sha(self.query_sha256, "query_sha256")
         _sha(self.attempt_id, "attempt_id")
         _time(self.started_at, "started_at")
@@ -117,6 +127,10 @@ class BetfairReadCompletenessWitness:
                 (
                     self.operation,
                     self.completeness.value,
+                    self.venue_id,
+                    self.account_id,
+                    self.adapter_id,
+                    self.adapter_version,
                     self.query_sha256,
                     self.attempt_id,
                     self.started_at,
@@ -256,6 +270,8 @@ class BetfairReadCompletenessObserver:
         if type(client) is not BetfairReadOnlyClient:
             raise TypeError("client must be exact BetfairReadOnlyClient")
         self._client = client
+        self._venue_id = _text(getattr(client, "_venue_id", None), "client venue_id")
+        self._account_id = _text(getattr(client, "_account_id", None), "client account_id")
         self._clock = clock or (lambda: datetime.now(timezone.utc))
         self._attempt_lock = Lock()
         self._attempt_sequence = 0
@@ -543,6 +559,10 @@ class BetfairReadCompletenessObserver:
             BetfairReadCompletenessWitness(
                 operation,
                 completeness,
+                self._venue_id,
+                self._account_id,
+                ADAPTER_ID,
+                ADAPTER_VERSION,
                 query_sha,
                 attempt_id,
                 started,
@@ -555,7 +575,16 @@ class BetfairReadCompletenessObserver:
 
     def _start(self, query: dict[str, object]) -> tuple[str, str, str]:
         started = self._now()
-        query_sha = _canonical_sha(query)
+        query_sha = _canonical_sha(
+            {
+                "schema": "autosport.betfair_read_query_scope.v2",
+                "venue_id": self._venue_id,
+                "account_id": self._account_id,
+                "adapter_id": ADAPTER_ID,
+                "adapter_version": ADAPTER_VERSION,
+                "query": query,
+            }
+        )
         with self._attempt_lock:
             self._attempt_sequence += 1
             sequence = self._attempt_sequence

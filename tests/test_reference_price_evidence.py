@@ -214,6 +214,7 @@ class ReferencePriceEvidenceTests(unittest.TestCase):
                     self.event("provider-a", "2.10", sequence=2),
                 ),
                 eligible_source_ids=("provider-a", "provider-b"),
+                eligible_price_source_ids=("provider-a", "provider-b"),
             )
 
     def test_same_bookmaker_through_two_aggregators_cannot_double_count(self) -> None:

@@ -1,16 +1,9 @@
 """Fail-closed evidence matrix for bookmaker/provider capability truth.
 
-This module composes the existing bookmaker capability profile and integration-channel
-contracts without widening either contract into execution permission.
-
-Evidence levels are UNKNOWN, DOCUMENTED, ACCOUNT_OBSERVED, MARKET_OBSERVED,
-PAPER_OR_SHADOW_PROVEN, EXECUTION_OBSERVED, and RECONCILED.
-
-Only DOCUMENTED has a product issuer in this module. Higher levels are represented so
-provider-specific authorities can integrate later, but caller-constructed rows at those
-levels remain non-authoritative and evaluate to UNKNOWN. An official endpoint, a
-SUPPORTED capability profile, or governance evidence therefore cannot mint account,
-live, write, reconciliation, or real-money authority.
+The matrix composes existing capability-profile and integration-channel evidence without
+widening either into execution permission. Only DOCUMENTED has a product issuer here.
+Higher-level rows are representable for future typed issuers, but caller construction or
+copying never creates product authority. Nothing in this module authorizes execution.
 """
 
 from __future__ import annotations
@@ -81,7 +74,6 @@ _SOURCE_LEVEL = {
     CapabilityEvidenceSource.RECONCILIATION:
         CapabilityEvidenceLevel.RECONCILED,
 }
-
 _WRITE_CAPABILITIES = frozenset(
     {
         BookmakerCapability.PLACE_BET,
@@ -89,7 +81,6 @@ _WRITE_CAPABILITIES = frozenset(
         BookmakerCapability.CANCEL_BET,
     }
 )
-
 _READ_ONLY_SOURCES = frozenset(
     {
         CapabilityEvidenceSource.AUTHENTICATED_ACCOUNT_READ,
@@ -99,12 +90,7 @@ _READ_ONLY_SOURCES = frozenset(
 
 
 def _text(value: object, field: str) -> str:
-    if (
-        type(value) is not str
-        or not value
-        or value != value.strip()
-        or "\x00" in value
-    ):
+    if type(value) is not str or not value or value != value.strip() or "\x00" in value:
         raise BookmakerCapabilityEvidenceError(
             f"{field} must be canonical non-empty text"
         )
@@ -118,9 +104,7 @@ def _text(value: object, field: str) -> str:
 
 
 def _optional_text(value: object, field: str) -> str | None:
-    if value is None:
-        return None
-    return _text(value, field)
+    return None if value is None else _text(value, field)
 
 
 def _sha(value: object, field: str) -> str:
@@ -137,9 +121,7 @@ def _instant(value: object, field: str) -> datetime:
     try:
         parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
     except ValueError as exc:
-        raise BookmakerCapabilityEvidenceError(
-            f"{field} must be ISO-8601"
-        ) from exc
+        raise BookmakerCapabilityEvidenceError(f"{field} must be ISO-8601") from exc
     if parsed.tzinfo is None or parsed.utcoffset() is None:
         raise BookmakerCapabilityEvidenceError(
             f"{field} must include a timezone"
@@ -152,9 +134,7 @@ def _canonical_instant(value: object, field: str) -> str:
 
 
 def _optional_instant(value: object, field: str) -> str | None:
-    if value is None:
-        return None
-    return _canonical_instant(value, field)
+    return None if value is None else _canonical_instant(value, field)
 
 
 def _https_url(value: object, field: str) -> str:
@@ -190,7 +170,7 @@ def _vocabulary(value: object) -> tuple[str, ...]:
 
 @dataclass(frozen=True, slots=True, weakref_slot=True)
 class BookmakerCapabilityEvidenceCell:
-    """One exact evidence row. Construction alone never grants product authority."""
+    """One exact evidence row. Shape validation is not product issuance."""
 
     provider_id: str
     account_id: str
@@ -280,16 +260,12 @@ class BookmakerCapabilityEvidenceCell:
             )
 
         observed = _instant(self.observed_at, "observed_at")
-        expiry = _instant(
-            self.expires_or_revalidate_at,
-            "expires_or_revalidate_at",
-        )
+        expiry = _instant(self.expires_or_revalidate_at, "expires_or_revalidate_at")
         if expiry <= observed:
             raise BookmakerCapabilityEvidenceError(
                 "expires_or_revalidate_at must be later than observed_at"
             )
         _sha(self.evidence_artifact_sha256, "evidence_artifact_sha256")
-
         for field in (
             "sport_scope",
             "market_scope",
@@ -329,17 +305,20 @@ class BookmakerCapabilityEvidenceCell:
                 raise BookmakerCapabilityEvidenceError(
                     "DOCUMENTED evidence requires official documentation"
                 )
-        elif self.evidence_level >= CapabilityEvidenceLevel.ACCOUNT_OBSERVED:
-            if self.auth_mode is None:
-                raise BookmakerCapabilityEvidenceError(
-                    "account-or-higher evidence requires explicit auth_mode"
-                )
-
-        if self.evidence_level >= CapabilityEvidenceLevel.MARKET_OBSERVED:
-            if self.sport_scope is None or self.market_scope is None:
-                raise BookmakerCapabilityEvidenceError(
-                    "market-or-higher evidence requires exact sport_scope and market_scope"
-                )
+        elif (
+            self.evidence_level >= CapabilityEvidenceLevel.ACCOUNT_OBSERVED
+            and self.auth_mode is None
+        ):
+            raise BookmakerCapabilityEvidenceError(
+                "account-or-higher evidence requires explicit auth_mode"
+            )
+        if (
+            self.evidence_level >= CapabilityEvidenceLevel.MARKET_OBSERVED
+            and (self.sport_scope is None or self.market_scope is None)
+        ):
+            raise BookmakerCapabilityEvidenceError(
+                "market-or-higher evidence requires exact sport_scope and market_scope"
+            )
         if self.evidence_level >= CapabilityEvidenceLevel.EXECUTION_OBSERVED:
             if self.direction is not CapabilityDirection.WRITE:
                 raise BookmakerCapabilityEvidenceError(
@@ -349,11 +328,13 @@ class BookmakerCapabilityEvidenceCell:
                 raise BookmakerCapabilityEvidenceError(
                     "execution evidence requires idempotency/customer-ref semantics"
                 )
-        if self.evidence_level is CapabilityEvidenceLevel.RECONCILED:
-            if self.settlement_revision_semantics is None:
-                raise BookmakerCapabilityEvidenceError(
-                    "reconciled evidence requires settlement/revision semantics"
-                )
+        if (
+            self.evidence_level is CapabilityEvidenceLevel.RECONCILED
+            and self.settlement_revision_semantics is None
+        ):
+            raise BookmakerCapabilityEvidenceError(
+                "reconciled evidence requires settlement/revision semantics"
+            )
         if type(self.schema_version) is not int or self.schema_version != _SCHEMA_VERSION:
             raise BookmakerCapabilityEvidenceError(
                 f"schema_version must be exactly {_SCHEMA_VERSION}"
@@ -361,14 +342,14 @@ class BookmakerCapabilityEvidenceCell:
 
     @property
     def evidence_id(self) -> str:
-        encoded = json.dumps(
+        payload = json.dumps(
             self.to_canonical_dict(),
             sort_keys=True,
             separators=(",", ":"),
             ensure_ascii=True,
             allow_nan=False,
         ).encode("utf-8")
-        return sha256(encoded).hexdigest()
+        return sha256(payload).hexdigest()
 
     @property
     def execution_authorized(self) -> bool:
@@ -493,8 +474,6 @@ def _issued_record(value: object) -> _IssuedEvidence | None:
 
 
 def is_product_issued_capability_evidence(value: object) -> bool:
-    """Return whether this exact immutable object has product issuance."""
-
     return _issued_record(value) is not None
 
 
@@ -523,7 +502,7 @@ def issue_documented_capability_evidence(
     idempotency_semantics: str | None = None,
     settlement_revision_semantics: str | None = None,
 ) -> BookmakerCapabilityEvidenceCell:
-    """Issue L1 from an exact profile and exact integration binding only."""
+    """Issue L1 from exact profile/integration evidence without causal backdating."""
 
     if type(profile) is not BookmakerCapabilityProfile:
         raise BookmakerCapabilityEvidenceError(
@@ -537,6 +516,16 @@ def issue_documented_capability_evidence(
     if type(capability) is not BookmakerCapability:
         raise BookmakerCapabilityEvidenceError(
             "capability must be exact BookmakerCapability"
+        )
+
+    issued_at = _instant(observed_at, "observed_at")
+    if issued_at < _instant(profile.observed_at, "profile.observed_at"):
+        raise BookmakerCapabilityEvidenceError(
+            "evidence observed_at cannot predate the bound capability profile"
+        )
+    if issued_at < _instant(integration.observed_at, "integration.observed_at"):
+        raise BookmakerCapabilityEvidenceError(
+            "evidence observed_at cannot predate the bound integration evidence"
         )
 
     cell = BookmakerCapabilityEvidenceCell(
@@ -582,8 +571,6 @@ def evaluate_bookmaker_capability_evidence(
     *,
     as_of: str,
 ) -> BookmakerCapabilityEvidenceEvaluation:
-    """Evaluate one row without causal backdating or stale authority."""
-
     if type(value) is not BookmakerCapabilityEvidenceCell:
         raise BookmakerCapabilityEvidenceError(
             "value must be exact BookmakerCapabilityEvidenceCell"
@@ -617,7 +604,7 @@ def evaluate_bookmaker_capability_evidence(
 
 @dataclass(frozen=True, slots=True)
 class BookmakerCapabilityEvidenceMatrix:
-    """Immutable collection with exact-scope lookup and no cross-scope widening."""
+    """Immutable exact-scope lookup; neighbouring evidence is never widened."""
 
     cells: tuple[BookmakerCapabilityEvidenceCell, ...]
 
@@ -649,8 +636,6 @@ class BookmakerCapabilityEvidenceMatrix:
         sport_scope: str | None = None,
         market_scope: str | None = None,
     ) -> BookmakerCapabilityEvidenceEvaluation | None:
-        """Return strongest current evidence only for the exact requested scope."""
-
         _text(provider_id, "provider_id")
         _text(account_id, "account_id")
         _text(adapter_id, "adapter_id")

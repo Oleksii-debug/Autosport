@@ -66,10 +66,80 @@ def _decimal(value: object, name: str) -> Decimal:
     return result
 
 
+def _decimal_parts(value: Decimal) -> tuple[int, int]:
+    """Return exact signed coefficient/exponent without consulting Decimal context."""
+
+    if not value.is_finite():
+        raise ParticipantStrengthError("decimal must be finite")
+    parts = value.as_tuple()
+    coefficient = 0
+    for digit in parts.digits:
+        coefficient = coefficient * 10 + digit
+    if parts.sign:
+        coefficient = -coefficient
+    return coefficient, int(parts.exponent)
+
+
+def _decimal_from_parts(coefficient: int, exponent: int) -> Decimal:
+    """Build one exact Decimal from an integer coefficient and base-10 exponent."""
+
+    sign = 1 if coefficient < 0 else 0
+    digits = tuple(int(ch) for ch in str(abs(coefficient)))
+    return Decimal((sign, digits, exponent))
+
+
+def _exact_decimal_add(left: Decimal, right: Decimal) -> Decimal:
+    """Add finite Decimals exactly without ambient precision or rounding."""
+
+    left_coefficient, left_exponent = _decimal_parts(left)
+    right_coefficient, right_exponent = _decimal_parts(right)
+    exponent = min(left_exponent, right_exponent)
+    coefficient = (
+        left_coefficient * (10 ** (left_exponent - exponent))
+        + right_coefficient * (10 ** (right_exponent - exponent))
+    )
+    return _decimal_from_parts(coefficient, exponent)
+
+
+def _exact_decimal_subtract(left: Decimal, right: Decimal) -> Decimal:
+    """Subtract finite Decimals exactly without ambient precision or rounding."""
+
+    right_coefficient, right_exponent = _decimal_parts(right)
+    return _exact_decimal_add(
+        left,
+        _decimal_from_parts(-right_coefficient, right_exponent),
+    )
+
+
+def _exact_decimal_half(value: Decimal) -> Decimal:
+    """Divide one finite Decimal by two exactly without ambient Decimal context."""
+
+    coefficient, exponent = _decimal_parts(value)
+    if coefficient % 2 == 0:
+        return _decimal_from_parts(coefficient // 2, exponent)
+    return _decimal_from_parts(coefficient * 5, exponent - 1)
+
+
+def _exact_decimal_bin_index(probability: Decimal, bin_count: int) -> int:
+    """Floor probability*bin_count exactly without ambient Decimal context."""
+
+    coefficient, exponent = _decimal_parts(probability)
+    if coefficient < 0:
+        raise ParticipantStrengthError("probability must not be negative")
+    scaled = coefficient * bin_count
+    if exponent >= 0:
+        index = scaled * (10 ** exponent)
+    else:
+        index = scaled // (10 ** (-exponent))
+    return min(bin_count - 1, max(0, index))
+
+
 def _decimal_text(value: Decimal) -> str:
     if not value.is_finite():
         raise ParticipantStrengthError("decimal must be finite")
-    text = format(value.normalize(), "f")
+    text = format(value, "f")
+    if "." in text:
+        text = text.rstrip("0").rstrip(".")
     return "0" if text in ("", "-0") else text
 
 
@@ -88,7 +158,7 @@ def _baseline_probability(feature: object) -> Decimal:
     value = _decimal(feature, "rating difference")
     if value < -1 or value > 1:
         raise ParticipantStrengthError("rating difference must be between -1 and 1")
-    probability = (Decimal(1) + value) / Decimal(2)
+    probability = _exact_decimal_half(_exact_decimal_add(Decimal(1), value))
     return min(Decimal(1), max(Decimal(0), probability))
 
 
@@ -189,8 +259,9 @@ class StrengthSnapshotPair:
 
     @property
     def feature(self) -> Decimal:
-        return _decimal(self.subject.rating, "subject rating") - _decimal(
-            self.opponent.rating, "opponent rating"
+        return _exact_decimal_subtract(
+            _decimal(self.subject.rating, "subject rating"),
+            _decimal(self.opponent.rating, "opponent rating"),
         )
 
     @property
@@ -404,8 +475,7 @@ class HistogramCalibratedStrengthModel:
         return _digest(self.to_payload(include_identity=False))
 
     def _bin_index(self, probability: Decimal) -> int:
-        index = int(probability * Decimal(self.bin_count))
-        return min(self.bin_count - 1, max(0, index))
+        return _exact_decimal_bin_index(probability, self.bin_count)
 
     def predict_feature(self, feature: object, *, decision_at: str) -> float:
         if _instant(self.training_cutoff, "training_cutoff") > _instant(
@@ -531,12 +601,13 @@ class HistogramCalibratedStrengthFactory:
         raw_sums = [Decimal(0)] * self.bin_count
         for point in eligible:
             raw = _baseline_probability(point.feature)
-            index = min(
-                self.bin_count - 1, int(raw * Decimal(self.bin_count))
-            )
+            index = _exact_decimal_bin_index(raw, self.bin_count)
             counts[index] += 1
-            successes[index] += _decimal(point.target, "training target")
-            raw_sums[index] += raw
+            successes[index] = _exact_decimal_add(
+                successes[index],
+                _decimal(point.target, "training target"),
+            )
+            raw_sums[index] = _exact_decimal_add(raw_sums[index], raw)
 
         prior_weight = _decimal(self.prior_weight, "prior_weight")
         probabilities: list[str | None] = []

@@ -197,18 +197,42 @@ class RunTransaction:
         return tx
 
     def verified_base_paper_book_snapshot(self) -> VerifiedFileSnapshot:
-        """Return the exact immutable PaperBook bytes retained at transaction start.
+        """Return exact BASE bytes after re-resolving the canonical run identity.
 
-        Legacy transactions created before this evidence seam have no retained file
-        and therefore fail closed here without affecting their ordinary recovery.
+        The retained file is evidence for one already-registered run, not a
+        standalone authority. Legacy transactions without the retained file or
+        transaction-aware registry BASE hashes fail closed only at this accessor.
         """
 
         manifest = self._read_manifest()
-        expected_hash = self._hash_field(
-            manifest,
-            "base",
-            "paper_book_sha256",
-        )
+        experiment_key = manifest.get("experiment_key")
+        if not isinstance(experiment_key, str) or not experiment_key:
+            raise RunTransactionError(
+                "retained base PaperBook lacks transaction experiment identity"
+            )
+        try:
+            from .run_registry import RunRegistry
+
+            registry_item = RunRegistry(
+                self.workspace / "run_registry.json"
+            ).get(experiment_key)
+            identity = self._identity_from_registry(
+                registry_item,
+                experiment_key,
+            )
+            self._validate_manifest_identity(manifest, identity)
+        except RunTransactionError:
+            raise
+        except Exception as exc:
+            raise RunTransactionError(
+                "retained base PaperBook cannot validate canonical registry identity"
+            ) from exc
+
+        expected_hash = identity.base_paper_book_sha256
+        if expected_hash is None:
+            raise RunTransactionError(
+                "retained base PaperBook lacks transaction-aware registry BASE identity"
+            )
         snapshot = self._verified_canonical_paper_book_snapshot(
             self.base_book_snapshot_path,
             "retained base PaperBook",

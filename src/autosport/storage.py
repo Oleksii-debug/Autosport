@@ -639,45 +639,65 @@ class SQLiteMarketStore:
         else:
             self._create_current_quotes()
 
-        commit_order_state = _schema_object(
-            self.connection, "market_event_commit_order"
-        )
-        replay_cutoff_state = _schema_object(
-            self.connection, "market_replay_cutoffs"
-        )
-        if (commit_order_state is None) != (replay_cutoff_state is None):
-            raise ValueError(
-                "causal replay schema is incomplete: commit order/cutoff tables disagree"
+        # The causal companion schema and baseline backfill are one crash-atomic
+        # migration. A hard failure cannot leave both tables durable but empty and
+        # thereby strand pre-v1 history without commit-generation witnesses.
+        self.connection.execute("BEGIN IMMEDIATE")
+        try:
+            commit_order_state = _schema_object(
+                self.connection, "market_event_commit_order"
             )
-        initialize_causal_replay = commit_order_state is None
-        self.connection.execute(
-            """CREATE TABLE IF NOT EXISTS market_event_commit_order (
-                dedupe_key TEXT PRIMARY KEY,
-                append_generation INTEGER NOT NULL
-            )"""
-        )
-        self.connection.execute(
-            """CREATE TABLE IF NOT EXISTS market_replay_cutoffs (
-                cutoff_id TEXT PRIMARY KEY,
-                as_of TEXT NOT NULL,
-                max_append_generation INTEGER NOT NULL
-            )"""
-        )
-        if initialize_causal_replay:
-            # Existing pre-v1 history predates product-owned append-generation
-            # evidence. Keep it as one coarse generation-0 baseline rather than
-            # inventing a false relative commit chronology from event timestamps.
+            replay_cutoff_state = _schema_object(
+                self.connection, "market_replay_cutoffs"
+            )
+            if (commit_order_state is None) != (replay_cutoff_state is None):
+                raise ValueError(
+                    "causal replay schema is incomplete: "
+                    "commit order/cutoff tables disagree"
+                )
+            initialize_causal_replay = commit_order_state is None
             self.connection.execute(
-                """INSERT INTO market_event_commit_order
-                   (dedupe_key, append_generation)
-                   SELECT dedupe_key, 0 FROM market_events"""
+                """CREATE TABLE IF NOT EXISTS market_event_commit_order (
+                    dedupe_key TEXT PRIMARY KEY,
+                    append_generation INTEGER NOT NULL
+                )"""
             )
+            self.connection.execute(
+                """CREATE TABLE IF NOT EXISTS market_replay_cutoffs (
+                    cutoff_id TEXT PRIMARY KEY,
+                    as_of TEXT NOT NULL,
+                    max_append_generation INTEGER NOT NULL
+                )"""
+            )
+            self.connection.execute(
+                """CREATE INDEX IF NOT EXISTS idx_market_event_commit_generation
+                   ON market_event_commit_order(append_generation)"""
+            )
+            if _canonical_index_terms(
+                self.connection, "idx_market_event_commit_generation"
+            ) != ("append_generation",):
+                raise ValueError(
+                    "market event append-generation index is not canonical"
+                )
+            if initialize_causal_replay:
+                # Existing pre-v1 history predates product-owned append-generation
+                # evidence. Keep it as one coarse generation-0 baseline rather than
+                # inventing false relative commit chronology from event timestamps.
+                self.connection.execute(
+                    """INSERT INTO market_event_commit_order
+                       (dedupe_key, append_generation)
+                       SELECT dedupe_key, 0 FROM market_events"""
+                )
 
-        for table_name in _EXPECTED_TABLE_XINFO:
-            _validate_canonical_table(self.connection, table_name)
-        _ensure_canonical_secondary_indexes(self.connection)
-        self._validate_causal_replay_state()
-        self.connection.commit()
+            for table_name in _EXPECTED_TABLE_XINFO:
+                _validate_canonical_table(self.connection, table_name)
+            _ensure_canonical_secondary_indexes(self.connection)
+            self._validate_causal_replay_state()
+        except Exception:
+            self.connection.rollback()
+            raise
+        else:
+            self.connection.commit()
 
     def _validate_causal_replay_state(self) -> None:
         """Fail closed if durable append-generation/cutoff evidence is inconsistent."""

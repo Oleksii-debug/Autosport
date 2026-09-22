@@ -312,3 +312,24 @@ def test_top_of_book_depth_is_explicit_and_never_relabelled_full_ladder():
     assert "FULL_MARKET_SCOPE" in batch.quality_flags
     assert "TOP_OF_BOOK_ONLY" in batch.quality_flags
     assert "FULL_SNAPSHOT" not in batch.quality_flags
+
+
+def test_injected_transport_never_claims_provider_origin_and_custom_clock_is_flagged():
+    p=provider(Transport([response()]))
+    batch=p.read_batch()
+    ev=p.last_request_evidence
+    assert ev.provider_origin_verified is False
+    assert ev.receipt_clock_verified is False
+    assert "UNVERIFIED_PROVIDER_ORIGIN" in batch.quality_flags
+    assert "UNVERIFIED_RECEIPT_CLOCK" in batch.quality_flags
+
+
+def test_default_product_clock_is_not_marked_unverified_but_origin_still_is():
+    # Construction is enough to prove the identity-based clock authority contract;
+    # live wall-clock XML is deliberately not fabricated in this deterministic test.
+    p=BetdaqReadOnlyProvider(
+        transport=Transport([response()]),
+        market_bindings=[BetdaqMarketBinding(9001,"event-77","football")],
+        threshold_amount=Decimal("1"),
+    )
+    assert p._receipt_clock_verified is True

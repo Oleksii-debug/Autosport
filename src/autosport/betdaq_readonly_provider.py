@@ -121,6 +121,8 @@ class BetdaqSnapshotEvidence:
     aggregate_sha256: str
     quote_source_timestamp_available: bool = False
     live_entitlement_verified: bool = False
+    provider_origin_verified: bool = False
+    receipt_clock_verified: bool = False
 
 
 Clock = Callable[[], str]
@@ -225,6 +227,7 @@ class BetdaqReadOnlyProvider:
         self.max_attempts = max_attempts
         self.max_message_age_seconds = max_message_age_seconds
         self.clock = clock
+        self._receipt_clock_verified = clock is utc_now_iso
         self.request_id_factory = request_id_factory
         self._next_id = 1
         self._pending: tuple[ProviderQuote, ...] = ()
@@ -386,10 +389,19 @@ class BetdaqReadOnlyProvider:
             "FULL_MARKET_SCOPE",
             "TOP_OF_BOOK_ONLY",
             "LIVE_ENTITLEMENT_UNVERIFIED",
+            "UNVERIFIED_PROVIDER_ORIGIN",
         ]
+        if not self._receipt_clock_verified:
+            flags.append("UNVERIFIED_RECEIPT_CLOCK")
         if missing_message_time:
             flags.append("MESSAGE_TIMESTAMP_UNAVAILABLE")
-        snapshot_evidence = BetdaqSnapshotEvidence(observed_text, tuple(evidence), cursor)
+        snapshot_evidence = BetdaqSnapshotEvidence(
+            observed_text,
+            tuple(evidence),
+            cursor,
+            provider_origin_verified=False,
+            receipt_clock_verified=self._receipt_clock_verified,
+        )
         self._pending = tuple(quotes)
         self._offset = 0
         self._cursor = cursor

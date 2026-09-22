@@ -13,6 +13,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 
+from autosport import betfair_account_identity as _identity
 from autosport import betfair_account_readonly as _readonly
 from autosport.betfair_account_identity import (
     IDENTITY_SCOPE,
@@ -205,6 +206,44 @@ def test_configured_account_label_cannot_mint_or_alias_provider_identity(
     assert a.session_context_id != b.session_context_id
     assert "same-caller-label" not in repr(a)
     assert "same-caller-label" not in a.identity_id
+
+
+def test_module_helper_rebinding_cannot_weaken_k07_identity_integrity(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _install_details_transport(
+        monkeypatch,
+        result=_details_result(currency_code="EUR"),
+    )
+    client = _client()
+
+    # These names remain public implementation helpers for the DTO, but K07's
+    # authority closure must have pinned its own validation primitives already.
+    monkeypatch.setattr(_identity, "_currency_code", lambda _value: "GBP")
+    monkeypatch.setattr(
+        _identity,
+        "_sha256_hex",
+        lambda _value, _field: "0" * 64,
+    )
+    monkeypatch.setattr(
+        _identity,
+        "_canonical_timestamp",
+        lambda _value: "1900-01-01T00:00:00+00:00",
+    )
+
+    value = resolve_betfair_authenticated_account_identity(client)
+
+    assert value.currency_code == "EUR"
+    assert value.account_details_sha256 != "0" * 64
+    assert value.observed_at != "1900-01-01T00:00:00+00:00"
+    assert is_authoritative_betfair_account_identity(value, client=client)
+
+    # Authority integrity must not depend on the public identity_id property's
+    # module-global canonical-json helper after issuance.
+    monkeypatch.setattr(_identity, "_canonical_json", lambda _value: b"forged")
+    object.__setattr__(value, "currency_code", "GBP")
+
+    assert not is_authoritative_betfair_account_identity(value, client=client)
 
 
 def test_personal_developer_identity_never_claims_cross_session_stability(

@@ -73,6 +73,8 @@ Transport = Callable[[str, Mapping[str, str], float], HttpJsonResponse]
 Clock = Callable[[], str]
 Sleeper = Callable[[float], None]
 
+_PARLAY_API_BASE_URL = "https://parlay-api.com"
+
 
 def _finite_runtime_float(value: object, *, field: str, allow_zero: bool) -> float:
     if isinstance(value, bool) or not isinstance(value, (int, float)):
@@ -192,13 +194,16 @@ class ParlayApiTableTennisProvider:
         )
         if not regions or not markets:
             raise ValueError("regions and markets must not be empty")
-        if not base_url.startswith("https://"):
-            raise ValueError("provider base_url must use https")
+        if base_url.rstrip("/") != _PARLAY_API_BASE_URL:
+            raise ValueError(
+                "provider base_url must be the canonical ParlayAPI origin "
+                f"{_PARLAY_API_BASE_URL}"
+            )
         self.api_key = api_key
         self.public_preview = public_preview
         self.regions = regions
         self.markets = markets
-        self.base_url = base_url.rstrip("/")
+        self.base_url = _PARLAY_API_BASE_URL
         self.timeout_seconds = timeout_seconds
         self.max_attempts = max_attempts
         self.max_backoff_seconds = max_backoff_seconds

@@ -528,3 +528,50 @@ def test_default_transport_detaches_secret_bearing_http_error_context(
     assert excinfo.value.__cause__ is None
     assert excinfo.value.__context__ is None
     assert SECRET not in str(excinfo.value)
+
+def test_deprecated_bookmaker_last_update_is_optional_when_market_timestamp_exists() -> None:
+    payload = event_payload()
+    bookmaker = payload[0]["bookmakers"][0]
+    bookmaker.pop("last_update")
+
+    provider = TheOddsApiReferenceProvider(
+        api_key=SECRET,
+        sport_key="basketball_nba",
+        markets=("h2h", "spreads"),
+        bookmakers=("draftkings",),
+        transport=lambda *_: response(payload),
+        clock=lambda: ACQUIRED,
+    )
+    batch = provider.poll(None)
+
+    assert batch.quotes
+    assert {quote.source_ts for quote in batch.quotes} == {
+        "2026-09-22T01:58:30Z",
+        "2026-09-22T01:58:40Z",
+    }
+    assert all(
+        quote.metadata["bookmaker_last_update"] is None for quote in batch.quotes
+    )
+
+
+def test_market_without_any_provider_last_update_fails_closed() -> None:
+    payload = event_payload()
+    bookmaker = payload[0]["bookmakers"][0]
+    bookmaker.pop("last_update")
+    bookmaker["markets"][0].pop("last_update")
+
+    provider = TheOddsApiReferenceProvider(
+        api_key=SECRET,
+        sport_key="basketball_nba",
+        markets=("h2h", "spreads"),
+        bookmakers=("draftkings",),
+        transport=lambda *_: response(payload),
+        clock=lambda: ACQUIRED,
+    )
+
+    with pytest.raises(
+        TheOddsApiPayloadError,
+        match="requires provider last_update timestamp",
+    ):
+        provider.poll(None)
+

@@ -211,6 +211,11 @@ class MatchbookReadOnlySessionTransport:
                 ) from None
 
             if ticket.generation_id != session.generation_id:
+                self._retire_ticket_without_provider_evidence(
+                    ticket,
+                    monotonic_ns=request_ns,
+                )
+                self._clear_matching_live_session(session.generation_id)
                 raise MatchbookAuthenticationUnavailable(
                     "Matchbook session generation changed before read dispatch"
                 )
@@ -346,6 +351,22 @@ class MatchbookReadOnlySessionTransport:
             if current is not None and current.generation_id == generation_id:
                 self._live_session = None
                 self._condition.notify_all()
+
+    def _retire_ticket_without_provider_evidence(
+        self,
+        ticket: SessionReadGenerationTicket,
+        *,
+        monotonic_ns: int,
+    ) -> None:
+        try:
+            self._lifecycle.authorize_read_response_commit(
+                ticket,
+                monotonic_ns=monotonic_ns,
+            )
+        except SessionLifecycleError:
+            # The ticket may already have been invalidated by the concurrent
+            # generation transition. Either way no provider request was sent.
+            pass
 
     def _ensure_active_session(self) -> _LiveSession:
         while True:

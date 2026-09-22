@@ -90,6 +90,13 @@ _WRITE_CAPABILITIES = frozenset(
     }
 )
 
+_READ_ONLY_SOURCES = frozenset(
+    {
+        CapabilityEvidenceSource.AUTHENTICATED_ACCOUNT_READ,
+        CapabilityEvidenceSource.LIVE_MARKET_READ,
+    }
+)
+
 
 def _text(value: object, field: str) -> str:
     if (
@@ -263,6 +270,13 @@ class BookmakerCapabilityEvidenceCell:
         ):
             raise BookmakerCapabilityEvidenceError(
                 "capability and READ/WRITE direction disagree"
+            )
+        if (
+            self.source_kind in _READ_ONLY_SOURCES
+            and self.direction is not CapabilityDirection.READ
+        ):
+            raise BookmakerCapabilityEvidenceError(
+                "read evidence source cannot substantiate a WRITE operation"
             )
 
         observed = _instant(self.observed_at, "observed_at")
@@ -448,9 +462,18 @@ def _register_issued(
     *,
     maximum_level: CapabilityEvidenceLevel,
 ) -> BookmakerCapabilityEvidenceCell:
+    identifier = id(value)
+
+    def cleanup(dead_ref: ReferenceType[BookmakerCapabilityEvidenceCell]) -> None:
+        with _ISSUED_LOCK:
+            current = _ISSUED.get(identifier)
+            if current is not None and current.value_ref is dead_ref:
+                _ISSUED.pop(identifier, None)
+
+    value_ref = ref(value, cleanup)
     with _ISSUED_LOCK:
-        _ISSUED[id(value)] = _IssuedEvidence(
-            value_ref=ref(value),
+        _ISSUED[identifier] = _IssuedEvidence(
+            value_ref=value_ref,
             evidence_id=value.evidence_id,
             maximum_level=maximum_level,
         )

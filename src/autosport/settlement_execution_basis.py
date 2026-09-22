@@ -9,11 +9,72 @@ from .real_execution_ledger import (
     AcknowledgementStatus,
     EventType,
     RealExecutionLedger,
+    VerifiedExecutionLedgerSnapshot,
+)
+
+
+# Positive settlement-basis provenance must traverse the exact durable-ledger
+# implementation imported with this adapter.  RealExecutionLedger is intentionally
+# a normal mutable Python object, so an exact-type check alone does not prevent a
+# caller from shadowing verified_snapshot/_parse on one instance or rebinding the
+# class methods used transitively by verified_snapshot().  Freeze the complete
+# class surface once and reject runtime executable/data-descriptor replacement
+# before reading any authority-bearing bytes.
+_REAL_EXECUTION_LEDGER_CLASS_SURFACE = dict(RealExecutionLedger.__dict__)
+_REAL_EXECUTION_LEDGER_VERIFIED_SNAPSHOT = (
+    _REAL_EXECUTION_LEDGER_CLASS_SURFACE["verified_snapshot"]
+)
+_REAL_EXECUTION_LEDGER_INSTANCE_FIELDS = frozenset(
+    {"path", "_lock_path", "_thread_lock", "_path_durable"}
 )
 
 
 class SettlementExecutionBasisError(RuntimeError):
     """Raised when durable execution truth cannot support a settlement fill basis."""
+
+
+def _canonical_verified_snapshot(
+    ledger: RealExecutionLedger,
+) -> VerifiedExecutionLedgerSnapshot:
+    """Read only through the captured, unshadowed durable-ledger authority."""
+
+    if type(ledger) is not RealExecutionLedger:
+        raise TypeError("ledger must be exact RealExecutionLedger")
+
+    try:
+        instance_state = vars(ledger)
+    except TypeError as exc:  # pragma: no cover - exact class currently has __dict__
+        raise SettlementExecutionBasisError(
+            "execution ledger instance authority is unavailable"
+        ) from exc
+    if set(instance_state) != _REAL_EXECUTION_LEDGER_INSTANCE_FIELDS:
+        raise SettlementExecutionBasisError(
+            "execution ledger instance read authority was rebound"
+        )
+
+    current_surface = RealExecutionLedger.__dict__
+    if set(current_surface) != set(_REAL_EXECUTION_LEDGER_CLASS_SURFACE) or any(
+        current_surface[name] is not original
+        for name, original in _REAL_EXECUTION_LEDGER_CLASS_SURFACE.items()
+    ):
+        raise SettlementExecutionBasisError(
+            "execution ledger executable read authority was rebound"
+        )
+
+    snapshot = _REAL_EXECUTION_LEDGER_VERIFIED_SNAPSHOT(ledger)
+    if type(snapshot) is not VerifiedExecutionLedgerSnapshot:
+        raise SettlementExecutionBasisError(
+            "canonical execution ledger returned unexpected snapshot type"
+        )
+    if snapshot.sha256 != hashlib.sha256(snapshot.payload).hexdigest():
+        raise SettlementExecutionBasisError(
+            "canonical execution ledger snapshot digest mismatch"
+        )
+    if snapshot.event_count != len(snapshot.payload.splitlines()):
+        raise SettlementExecutionBasisError(
+            "canonical execution ledger snapshot event count mismatch"
+        )
+    return snapshot
 
 
 def _text(value: object, field: str) -> str:
@@ -127,7 +188,7 @@ def derive_settlement_execution_basis(
         raise TypeError("ledger must be exact RealExecutionLedger")
     target_attempt = _text(attempt_id, "attempt_id")
 
-    snapshot = ledger.verified_snapshot()
+    snapshot = _canonical_verified_snapshot(ledger)
     records: list[tuple[str, dict[str, object]]] = []
     for raw_line in snapshot.payload.splitlines():
         try:

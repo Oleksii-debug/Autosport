@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import sys
+import types
 from unittest.mock import patch
 
 import pytest
@@ -15,6 +16,7 @@ from autosport.webview2_runtime_preflight import (
     RegistryRead,
     WebView2RuntimeStatus,
     _is_64bit_windows,
+    _read_registry_pv,
     _registry_targets,
     evaluate_webview2_registry_reads,
     main,
@@ -37,6 +39,93 @@ def _valid(version: str) -> RegistryRead:
 def _missing() -> RegistryRead:
     return RegistryRead(False, False)
 
+
+
+class _FakeRegistryKey:
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb) -> bool:
+        return False
+
+
+def test_live_registry_adapter_uses_read_only_open_and_returns_reg_sz() -> None:
+    fake = types.ModuleType("winreg")
+    fake.HKEY_LOCAL_MACHINE = object()
+    fake.HKEY_CURRENT_USER = object()
+    fake.KEY_READ = 0x20019
+    fake.REG_SZ = 1
+    key = _FakeRegistryKey()
+    calls: list[tuple[object, str, int, int]] = []
+
+    def open_key(root, subkey, reserved, access):
+        calls.append((root, subkey, reserved, access))
+        return key
+
+    def query_value_ex(opened, name):
+        assert opened is key
+        assert name == "pv"
+        return "153.0.4234.32", fake.REG_SZ
+
+    fake.OpenKey = open_key
+    fake.QueryValueEx = query_value_ex
+    with patch.dict(sys.modules, {"winreg": fake}):
+        result = _read_registry_pv("HKLM", WEBVIEW2_HKLM_64_SUBKEY)
+
+    assert result == RegistryRead(
+        True, True, value="153.0.4234.32", value_type=fake.REG_SZ
+    )
+    assert calls == [
+        (fake.HKEY_LOCAL_MACHINE, WEBVIEW2_HKLM_64_SUBKEY, 0, fake.KEY_READ)
+    ]
+
+
+def test_live_registry_adapter_distinguishes_missing_key_and_missing_pv() -> None:
+    fake = types.ModuleType("winreg")
+    fake.HKEY_LOCAL_MACHINE = object()
+    fake.HKEY_CURRENT_USER = object()
+    fake.KEY_READ = 0x20019
+    fake.REG_SZ = 1
+
+    def missing_key(*_args):
+        raise FileNotFoundError("not present")
+
+    fake.OpenKey = missing_key
+    fake.QueryValueEx = lambda *_args: (_ for _ in ()).throw(AssertionError("unreachable"))
+    with patch.dict(sys.modules, {"winreg": fake}):
+        assert _read_registry_pv("HKCU", WEBVIEW2_HKCU_SUBKEY) == RegistryRead(
+            False, False
+        )
+
+    key = _FakeRegistryKey()
+    fake.OpenKey = lambda *_args: key
+
+    def missing_pv(*_args):
+        raise FileNotFoundError("pv missing")
+
+    fake.QueryValueEx = missing_pv
+    with patch.dict(sys.modules, {"winreg": fake}):
+        assert _read_registry_pv("HKCU", WEBVIEW2_HKCU_SUBKEY) == RegistryRead(
+            True, False
+        )
+
+
+def test_live_registry_adapter_fails_closed_on_read_error_without_detail() -> None:
+    fake = types.ModuleType("winreg")
+    fake.HKEY_LOCAL_MACHINE = object()
+    fake.HKEY_CURRENT_USER = object()
+    fake.KEY_READ = 0x20019
+    fake.REG_SZ = 1
+
+    def denied(*_args):
+        raise PermissionError("secret-bearing operating-system detail")
+
+    fake.OpenKey = denied
+    fake.QueryValueEx = lambda *_args: (_ for _ in ()).throw(AssertionError("unreachable"))
+    with patch.dict(sys.modules, {"winreg": fake}):
+        result = _read_registry_pv("HKLM", WEBVIEW2_HKLM_64_SUBKEY)
+    assert result.error_type == "PermissionError"
+    assert "secret-bearing" not in repr(result)
 
 def test_guid_matches_documented_evergreen_runtime_client() -> None:
     assert WEBVIEW2_CLIENT_GUID == "{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}"

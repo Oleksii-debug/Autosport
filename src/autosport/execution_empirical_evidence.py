@@ -192,7 +192,7 @@ class EmpiricalExecutionEvidence:
     action_id: str
     attempt_id: str
     attempt_state: str
-    terminal: bool
+    ledger_terminal: bool
     provider_outcome_verified: bool
     provider_outcome_verification_reason: str
 
@@ -287,7 +287,7 @@ class EmpiricalExecutionEvidence:
         if type(self.source_event_count) is not int or self.source_event_count < 1:
             raise EmpiricalExecutionEvidenceError("source_event_count must be positive int")
         if (
-            type(self.terminal) is not bool
+            type(self.ledger_terminal) is not bool
             or type(self.right_censored) is not bool
             or type(self.provider_outcome_verified) is not bool
         ):
@@ -330,8 +330,10 @@ class EmpiricalExecutionEvidence:
             raise EmpiricalExecutionEvidenceError("attempt_state must be canonical") from exc
 
         expected_terminal = state in _TERMINAL_STATES
-        if self.terminal is not expected_terminal:
-            raise EmpiricalExecutionEvidenceError("terminal flag mismatches attempt_state")
+        if self.ledger_terminal is not expected_terminal:
+            raise EmpiricalExecutionEvidenceError(
+                "ledger_terminal flag mismatches attempt_state"
+            )
 
         if state in _ACK_TERMINAL_STATES:
             expected_provider_outcome_reason = PROVIDER_OUTCOME_UNVERIFIED_ACK
@@ -555,7 +557,7 @@ class EmpiricalExecutionEvidence:
             "action_id": self.action_id,
             "attempt_id": self.attempt_id,
             "attempt_state": self.attempt_state,
-            "ledger_terminal": self.terminal,
+            "ledger_terminal": self.ledger_terminal,
             "provider_outcome_verified": self.provider_outcome_verified,
             "provider_outcome_verification_reason": (
                 self.provider_outcome_verification_reason
@@ -698,7 +700,7 @@ def build_empirical_execution_evidence(
     ]
     provider_event = provider_events[-1] if provider_events else None
 
-    terminal = state in _TERMINAL_STATES
+    ledger_terminal = state in _TERMINAL_STATES
     if state in _ACK_TERMINAL_STATES:
         if acknowledgement_event is None:
             raise EmpiricalExecutionEvidenceUnavailable(
@@ -846,7 +848,7 @@ def build_empirical_execution_evidence(
         action_id=action_id,
         attempt_id=attempt,
         attempt_state=state.value,
-        terminal=terminal,
+        ledger_terminal=ledger_terminal,
         provider_outcome_verified=False,
         provider_outcome_verification_reason=provider_outcome_verification_reason,
         bookmaker_id=_text(action.get("bookmaker_id"), "bookmaker_id"),
@@ -934,7 +936,7 @@ class EmpiricalExecutionPopulationEvidence:
 
     total_attempts: int = field(init=False)
     state_counts: tuple[tuple[str, int], ...] = field(init=False)
-    terminal_count: int = field(init=False)
+    ledger_terminal_count: int = field(init=False)
     provider_verified_terminal_count: int = field(init=False)
     unverified_ledger_terminal_count: int = field(init=False)
     right_censored_count: int = field(init=False)
@@ -1005,16 +1007,18 @@ class EmpiricalExecutionPopulationEvidence:
                 "population state counts do not cover denominator"
             )
 
-        terminal_count = sum(sample.terminal for sample in self.samples)
+        ledger_terminal_count = sum(
+            sample.ledger_terminal for sample in self.samples
+        )
         provider_verified_terminal_count = sum(
-            sample.terminal and sample.provider_outcome_verified
+            sample.ledger_terminal and sample.provider_outcome_verified
             for sample in self.samples
         )
         unverified_ledger_terminal_count = (
-            terminal_count - provider_verified_terminal_count
+            ledger_terminal_count - provider_verified_terminal_count
         )
         right_censored_count = sum(sample.right_censored for sample in self.samples)
-        if terminal_count + right_censored_count != total:
+        if ledger_terminal_count + right_censored_count != total:
             raise EmpiricalExecutionEvidenceError(
                 "population terminal/censor counts do not cover denominator"
             )
@@ -1081,7 +1085,11 @@ class EmpiricalExecutionPopulationEvidence:
 
         object.__setattr__(self, "total_attempts", total)
         object.__setattr__(self, "state_counts", counts)
-        object.__setattr__(self, "terminal_count", terminal_count)
+        object.__setattr__(
+            self,
+            "ledger_terminal_count",
+            ledger_terminal_count,
+        )
         object.__setattr__(
             self,
             "provider_verified_terminal_count",
@@ -1194,9 +1202,9 @@ class EmpiricalExecutionPopulationEvidence:
                 state: self._rate(count, self.total_attempts)
                 for state, count in self.state_counts
             },
-            "ledger_terminal_count": self.terminal_count,
+            "ledger_terminal_count": self.ledger_terminal_count,
             "ledger_terminal_rate": self._rate(
-                self.terminal_count,
+                self.ledger_terminal_count,
                 self.total_attempts,
             ),
             "provider_verified_terminal_count": (

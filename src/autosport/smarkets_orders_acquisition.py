@@ -11,6 +11,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from email.utils import parsedate_to_datetime
 from hashlib import sha256
+from http.client import IncompleteRead
 import json
 import ssl
 from typing import Any, Final
@@ -25,6 +26,7 @@ from urllib.request import (
 
 SMARKETS_ORDERS_ENDPOINT: Final = "https://api.smarkets.com/v3/orders/"
 _MAX_RESPONSE_BYTES: Final = 8 * 1024 * 1024
+_READ_CHUNK_BYTES: Final = 64 * 1024
 _DEFAULT_TIMEOUT_SECONDS: Final = 10.0
 _ORIGIN_SEAL: Final = object()
 
@@ -99,6 +101,110 @@ def _content_type(value: object) -> str:
     if media_type != "application/json":
         raise SmarketsOrdersAcquisitionError("Smarkets orders response is not application/json")
     return value.strip()
+
+
+def _declared_content_length(headers: object) -> int | None:
+    get_all = getattr(headers, "get_all", None)
+    if callable(get_all):
+        values = get_all("Content-Length", [])
+    else:
+        get = getattr(headers, "get", None)
+        value = get("Content-Length") if callable(get) else None
+        values = [] if value is None else [value]
+
+    if not values:
+        return None
+    if len(values) != 1:
+        raise SmarketsOrdersAcquisitionError(
+            "Smarkets orders response has ambiguous Content-Length"
+        )
+
+    value = values[0]
+    if type(value) is not str:
+        raise SmarketsOrdersAcquisitionError(
+            "Smarkets orders response Content-Length is invalid"
+        )
+    normalized = value.strip()
+    if not normalized or not normalized.isascii() or not normalized.isdigit():
+        raise SmarketsOrdersAcquisitionError(
+            "Smarkets orders response Content-Length is invalid"
+        )
+
+    length = int(normalized)
+    if length > _MAX_RESPONSE_BYTES:
+        raise SmarketsOrdersAcquisitionError("Smarkets orders payload exceeds byte limit")
+    return length
+
+
+def _read_complete_body(response: object) -> bytes:
+    headers = getattr(response, "headers", None)
+    if headers is None:
+        raise SmarketsOrdersAcquisitionError("Smarkets orders response lacks headers")
+    declared_length = _declared_content_length(headers)
+    chunks: list[bytes] = []
+    total = 0
+
+    try:
+        if declared_length is not None:
+            remaining = declared_length
+            while remaining:
+                chunk = response.read(min(_READ_CHUNK_BYTES, remaining))
+                if type(chunk) is not bytes:
+                    raise SmarketsOrdersAcquisitionError(
+                        "Smarkets orders response body is not bytes"
+                    )
+                if not chunk:
+                    raise SmarketsOrdersAcquisitionError(
+                        "Smarkets orders response body ended before Content-Length"
+                    )
+                if len(chunk) > remaining:
+                    raise SmarketsOrdersAcquisitionError(
+                        "Smarkets orders response exceeds declared Content-Length"
+                    )
+                chunks.append(chunk)
+                total += len(chunk)
+                remaining -= len(chunk)
+
+            extra = response.read(1)
+            if type(extra) is not bytes:
+                raise SmarketsOrdersAcquisitionError(
+                    "Smarkets orders response body is not bytes"
+                )
+            if extra:
+                raise SmarketsOrdersAcquisitionError(
+                    "Smarkets orders response exceeds declared Content-Length"
+                )
+        else:
+            while True:
+                budget = _MAX_RESPONSE_BYTES + 1 - total
+                if budget <= 0:
+                    raise SmarketsOrdersAcquisitionError(
+                        "Smarkets orders payload exceeds byte limit"
+                    )
+                chunk = response.read(min(_READ_CHUNK_BYTES, budget))
+                if type(chunk) is not bytes:
+                    raise SmarketsOrdersAcquisitionError(
+                        "Smarkets orders response body is not bytes"
+                    )
+                if not chunk:
+                    break
+                chunks.append(chunk)
+                total += len(chunk)
+                if total > _MAX_RESPONSE_BYTES:
+                    raise SmarketsOrdersAcquisitionError(
+                        "Smarkets orders payload exceeds byte limit"
+                    )
+    except IncompleteRead as exc:
+        raise SmarketsOrdersAcquisitionError(
+            "Smarkets orders response body is incomplete"
+        ) from exc
+
+    raw = b"".join(chunks)
+    if declared_length is not None and len(raw) != declared_length:
+        raise SmarketsOrdersAcquisitionError(
+            "Smarkets orders response body length does not match Content-Length"
+        )
+    return raw
 
 
 def _open_orders_request(request: Request, timeout: float):
@@ -210,7 +316,7 @@ def acquire_smarkets_orders_payload(
                 )
             content_type = _content_type(response.headers.get("Content-Type"))
             provider_date = _provider_date(response.headers.get("Date"))
-            raw = response.read(_MAX_RESPONSE_BYTES + 1)
+            raw = _read_complete_body(response)
     except SmarketsOrdersAcquisitionError:
         raise
     except HTTPError as exc:

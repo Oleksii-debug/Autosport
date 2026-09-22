@@ -376,6 +376,9 @@ class ProviderCapabilityEvidenceMatrix:
             )
         if any(type(grade) is not ProviderCapabilityTruthGrade for grade in accepted_grades):
             raise ProviderCapabilityEvidenceMatrixError("accepted_grades must be exact enums")
+        requested_at = _time(at_time, "at_time")
+        if requested_at > _time(self.as_of, "as_of"):
+            return False
         fact = self.fact_for(capability)
         if (
             fact.grade is not ProviderCapabilityTruthGrade.UNKNOWN_UNPROVEN

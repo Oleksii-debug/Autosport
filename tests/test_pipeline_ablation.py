@@ -13,12 +13,69 @@ from autosport.pipeline_ablation import (
     MetricDirection,
     MetricSemantics,
     PipelineComponent,
-    evaluate_pipeline_ablation,
+    ResolvedAblationAuthority,
+    evaluate_pipeline_ablation as _evaluate_pipeline_ablation,
 )
 
 
 def h(char: str) -> str:
     return char * 64
+
+
+class _TestAuthorityResolver:
+    def __init__(self, values: dict[tuple[str, str], ResolvedAblationAuthority]) -> None:
+        self.values = values
+
+    def resolve(self, authority_sha256: str, evidence_sha256: str) -> ResolvedAblationAuthority | None:
+        return self.values.get((authority_sha256, evidence_sha256))
+
+
+def _authority_reference(observation: AblationObservation) -> tuple[IdentifiabilityTier, str]:
+    values = (
+        (IdentifiabilityTier.FACTUAL_MECHANICAL, observation.factual_evidence_sha256),
+        (IdentifiabilityTier.FROZEN_REPLAY_COUNTERFACTUAL, observation.replay_authority_sha256),
+        (IdentifiabilityTier.SIMULATED_COUNTERFACTUAL, observation.simulator_sha256),
+        (IdentifiabilityTier.FORWARD_RANDOMIZED_OR_PAIRED, observation.assignment_evidence_sha256),
+    )
+    present = tuple((kind, value) for kind, value in values if value is not None)
+    if len(present) != 1:
+        raise AssertionError("test observation must have exactly one authority")
+    return present[0]
+
+
+def _resolver_for(
+    protocol: AblationProtocol,
+    observations: tuple[AblationObservation, ...],
+) -> _TestAuthorityResolver:
+    values: dict[tuple[str, str], ResolvedAblationAuthority] = {}
+    for observation in observations:
+        if observation.metric_value is None:
+            continue
+        tier, authority_sha256 = _authority_reference(observation)
+        values[(authority_sha256, observation.evidence_sha256)] = ResolvedAblationAuthority(
+            authority_sha256=authority_sha256,
+            evidence_sha256=observation.evidence_sha256,
+            identifiability_tier=tier,
+            scope_id=protocol.scope_id,
+            dataset_manifest_sha256=protocol.dataset_manifest_sha256,
+            holdout_access_sha256=protocol.holdout_access_sha256,
+            causal_cutoff=protocol.causal_cutoff,
+            available_at=observation.evidence_available_at,
+            execution_receipt_sha256=observation.execution_receipt_sha256,
+            assumptions=observation.assumptions if tier is IdentifiabilityTier.SIMULATED_COUNTERFACTUAL else (),
+        )
+    return _TestAuthorityResolver(values)
+
+
+def evaluate_pipeline_ablation(
+    protocol: AblationProtocol,
+    observations: tuple[AblationObservation, ...],
+):
+    return _evaluate_pipeline_ablation(
+        protocol,
+        observations,
+        authority_resolver=_resolver_for(protocol, observations),
+    )
 
 
 class PipelineAblationTests(unittest.TestCase):
@@ -384,6 +441,123 @@ class PipelineAblationTests(unittest.TestCase):
             evidence.findings[0].identifiability_tier,
             IdentifiabilityTier.FROZEN_REPLAY_COUNTERFACTUAL,
         )
+
+
+    def test_raw_observation_cannot_self_mint_positive_identifiability(self):
+        observation = self.obs((), "1", authority="replay", evidence_char="1")
+        self.assertEqual(observation.identifiability_tier, IdentifiabilityTier.NOT_IDENTIFIABLE)
+        self.assertEqual(
+            observation.authority_kind,
+            IdentifiabilityTier.FROZEN_REPLAY_COUNTERFACTUAL,
+        )
+
+    def test_unresolved_authority_digests_cannot_mint_scientific_credit(self):
+        cases = (
+            (
+                self.protocol(PipelineComponent.MODEL),
+                (
+                    self.obs((), "0", authority="replay", evidence_char="1"),
+                    self.obs((PipelineComponent.MODEL,), "1", authority="replay", evidence_char="2"),
+                ),
+            ),
+            (
+                self.protocol(PipelineComponent.EXECUTION, claim_kind=ClaimKind.EXECUTION),
+                (
+                    self.obs((), "0", authority="factual", evidence_char="1", receipt=True),
+                    self.obs((PipelineComponent.EXECUTION,), "1", authority="factual", evidence_char="2", receipt=True),
+                ),
+            ),
+            (
+                self.protocol(PipelineComponent.MODEL),
+                (
+                    self.obs((), "0", authority="forward", evidence_char="1"),
+                    self.obs((PipelineComponent.MODEL,), "1", authority="forward", evidence_char="2"),
+                ),
+            ),
+            (
+                self.protocol(PipelineComponent.MODEL),
+                (
+                    self.obs((), "0", authority="simulated", evidence_char="1"),
+                    self.obs((PipelineComponent.MODEL,), "1", authority="simulated", evidence_char="2"),
+                ),
+            ),
+        )
+        for protocol, observations in cases:
+            with self.subTest(kind=observations[0].authority_kind):
+                with self.assertRaisesRegex(ValueError, "re-resolution"):
+                    _evaluate_pipeline_ablation(protocol, observations)
+
+    def test_resolver_must_bind_exact_frozen_scientific_context(self):
+        protocol = self.protocol(PipelineComponent.MODEL)
+        observations = (
+            self.obs((), "0", authority="replay", evidence_char="1"),
+            self.obs((PipelineComponent.MODEL,), "1", authority="replay", evidence_char="2"),
+        )
+        baseline = _resolver_for(protocol, observations)
+        first = observations[0]
+        key = (first.replay_authority_sha256, first.evidence_sha256)
+        resolved = baseline.values[key]
+        corruptions = (
+            replace(
+                resolved,
+                identifiability_tier=IdentifiabilityTier.SIMULATED_COUNTERFACTUAL,
+                assumptions=("different-assumption",),
+            ),
+            replace(resolved, evidence_sha256=h("9")),
+            replace(resolved, scope_id="other-scope"),
+            replace(resolved, dataset_manifest_sha256=h("9")),
+            replace(resolved, holdout_access_sha256=h("9")),
+            replace(resolved, causal_cutoff="2026-09-19T00:00:00Z"),
+            replace(resolved, available_at="2026-09-21T11:30:00Z"),
+        )
+        for corrupted in corruptions:
+            values = dict(baseline.values)
+            values[key] = corrupted
+            with self.subTest(corrupted=corrupted):
+                with self.assertRaises(ValueError):
+                    _evaluate_pipeline_ablation(
+                        protocol,
+                        observations,
+                        authority_resolver=_TestAuthorityResolver(values),
+                    )
+
+    def test_resolver_binds_execution_receipt_and_simulator_assumptions(self):
+        execution_protocol = self.protocol(
+            PipelineComponent.EXECUTION,
+            claim_kind=ClaimKind.EXECUTION,
+        )
+        execution_observations = (
+            self.obs((), "0", authority="factual", evidence_char="1", receipt=True),
+            self.obs((PipelineComponent.EXECUTION,), "1", authority="factual", evidence_char="2", receipt=True),
+        )
+        execution_resolver = _resolver_for(execution_protocol, execution_observations)
+        first = execution_observations[0]
+        key = (first.factual_evidence_sha256, first.evidence_sha256)
+        values = dict(execution_resolver.values)
+        values[key] = replace(values[key], execution_receipt_sha256=h("9"))
+        with self.assertRaisesRegex(ValueError, "execution receipt"):
+            _evaluate_pipeline_ablation(
+                execution_protocol,
+                execution_observations,
+                authority_resolver=_TestAuthorityResolver(values),
+            )
+
+        simulation_protocol = self.protocol(PipelineComponent.MODEL)
+        simulation_observations = (
+            self.obs((), "0", authority="simulated", evidence_char="1"),
+            self.obs((PipelineComponent.MODEL,), "1", authority="simulated", evidence_char="2"),
+        )
+        simulation_resolver = _resolver_for(simulation_protocol, simulation_observations)
+        first = simulation_observations[0]
+        key = (first.simulator_sha256, first.evidence_sha256)
+        values = dict(simulation_resolver.values)
+        values[key] = replace(values[key], assumptions=("different-assumption",))
+        with self.assertRaisesRegex(ValueError, "simulator assumptions"):
+            _evaluate_pipeline_ablation(
+                simulation_protocol,
+                simulation_observations,
+                authority_resolver=_TestAuthorityResolver(values),
+            )
 
 
 if __name__ == "__main__":
